@@ -7,11 +7,21 @@ from collections.abc import Callable
 
 from dashboard.backend.domain.credits.models import LLMSettlementResult
 from dashboard.backend.domain.credits.service import CreditsService
+from dashboard.backend.domain.credits.repository_common import (
+    CreditAccountRestrictedStoreError,
+)
 from dashboard.backend.domain.analytics import instrumentation as analytics_instrumentation
 from dashboard.backend.domain.model_providers.models import ProviderRecord
+from dashboard.backend.domain.model_providers.execution_catalog import (
+    UnsupportedExecutionModel,
+)
+from dashboard.backend.domain.model_providers.repository_common import (
+    ProviderNotFoundError,
+)
 from dashboard.backend.domain.model_providers.service import (
     ModelProviderService,
     ResolvedCredential,
+    CredentialResolutionError,
 )
 from dashboard.backend.infrastructure.llm.execution.adapters.base import (
     AdapterResponse,
@@ -103,38 +113,13 @@ class LLMExecutionService:
     def execute(self, request: LLMExecutionRequest) -> LLMExecutionResult:
         """Run exactly one requested model call with its selected payment lane."""
         try:
-            provider = self._resolve_provider(request.provider_id)
-            credential = self._resolve_credential(request)
-            pricing_snapshot = self.pricing_snapshot_factory(
-                request.model_id, request.provider_id
-            )
-            self._validate_pricing_snapshot(request, pricing_snapshot)
-            adapter = self._resolve_adapter(provider)
-
-            if request.billing_mode is BillingMode.BYOK:
-                response = self._complete(adapter, request, credential, provider)
-                usage = self._result_usage(response)
-                billing = self._build_evidence(
-                    request=request,
-                    usage=usage,
-                    provider_cost_usd=response.provider_cost_usd,
-                    pricing_snapshot=pricing_snapshot,
-                )
-                result = self._result(
-                    request=request,
-                    credential=credential,
-                    usage=usage,
-                    billing=billing,
-                    text=response.text,
-                    finish_reason=response.finish_reason,
-                )
+            if request.billing_mode is BillingMode.PLATFORM_CREDITS:
+                result = self._execute_with_platform_failover(request)
             else:
-                result = self._execute_platform(
-                    request=request,
-                    provider=provider,
-                    credential=credential,
-                    adapter=adapter,
-                    pricing_snapshot=pricing_snapshot,
+                result = self._execute_once(
+                    request,
+                    attempt_index=0,
+                    requested_provider_id=request.provider_id,
                 )
             self._emit_model_usage(request, result)
             return result
@@ -168,7 +153,9 @@ class LLMExecutionService:
             ExecutionErrorCategory.CREDENTIAL_INVALID: "credential_invalid",
             ExecutionErrorCategory.PROVIDER_UNAVAILABLE: "provider_unavailable",
             ExecutionErrorCategory.PROVIDER_TIMEOUT: "provider_timeout",
+            ExecutionErrorCategory.PROVIDER_QUOTA_EXHAUSTED: "provider_quota_exhausted",
             ExecutionErrorCategory.BILLING_FAILED: "credits_unavailable",
+            ExecutionErrorCategory.ACCOUNT_RESTRICTED: "account_restricted",
         }.get(category, "internal_error")
 
     @staticmethod
@@ -189,7 +176,7 @@ class LLMExecutionService:
             source_record_type="run",
             source_record_id=request.run_id,
             correlation_id=request.run_id,
-            provider_id=request.provider_id,
+            provider_id=result.provider_id,
             model_id=request.model_id,
             billing_mode=request.billing_mode.value,
             outcome="succeeded",
@@ -234,17 +221,33 @@ class LLMExecutionService:
         credential: ResolvedCredential,
         adapter: ProviderExecutionAdapter,
         pricing_snapshot: PricingSnapshot,
+        attempt_index: int,
+        requested_provider_id: str,
     ) -> LLMExecutionResult:
         reservation_id: str | None = None
         try:
             reserved_micro = _reservation_ceiling_micro(request, pricing_snapshot)
             if reserved_micro > 0:
-                reservation = self.credits.reserve_llm_credits(
-                    user_id=request.user_id,
-                    run_id=request.run_id,
-                    call_index=request.call_index,
-                    amount_micro=reserved_micro,
-                )
+                try:
+                    reservation = self.credits.reserve_llm_credits(
+                        user_id=request.user_id,
+                        run_id=request.run_id,
+                        call_index=request.call_index,
+                        attempt_index=attempt_index,
+                        provider_id=request.provider_id,
+                        amount_micro=reserved_micro,
+                    )
+                except CreditAccountRestrictedStoreError as exc:
+                    try:
+                        balance = self.credits.get_balance(request.user_id)
+                        reason = balance.restriction_reason
+                        outstanding_micro = balance.outstanding_credits_micro
+                    except Exception:  # noqa: BLE001 - keep the safe fallback
+                        reason = None
+                        outstanding_micro = 0
+                    raise LLMExecutionError.account_restricted(
+                        reason, outstanding_micro
+                    ) from exc
                 reservation_id = reservation.reservation_id
                 self._platform_runs.add(request.run_id)
                 if reservation.status != "open":
@@ -265,16 +268,15 @@ class LLMExecutionService:
 
             if reservation_id is not None:
                 actual_micro = billing.provider_cost_credits_micro
+                settlement = self._settle(
+                    reservation_id, billing, actual_micro=actual_micro
+                )
                 billing = billing.model_copy(
                     update={
-                        "debited_credits_micro": min(actual_micro, reserved_micro),
-                        "outstanding_credits_micro": max(
-                            actual_micro - reserved_micro,
-                            0,
-                        ),
+                        "debited_credits_micro": settlement.settled_micro,
+                        "outstanding_credits_micro": settlement.outstanding_micro,
                     }
                 )
-                self._settle(reservation_id, billing, actual_micro=actual_micro)
             elif billing.provider_cost_credits_micro > 0:
                 # A zero-priced snapshot must not become a paid call after the
                 # fact; there is no held balance from which to settle it.
@@ -287,6 +289,7 @@ class LLMExecutionService:
                 billing=billing,
                 text=response.text,
                 finish_reason=response.finish_reason,
+                requested_provider_id=requested_provider_id,
             )
         except LLMExecutionError as exc:
             self._release_after_failure(reservation_id, exc.category)
@@ -296,6 +299,93 @@ class LLMExecutionService:
                 reservation_id, ExecutionErrorCategory.BILLING_FAILED
             )
             raise LLMExecutionError(ExecutionErrorCategory.BILLING_FAILED) from exc
+
+    def _execute_once(
+        self,
+        request: LLMExecutionRequest,
+        *,
+        attempt_index: int,
+        requested_provider_id: str,
+    ) -> LLMExecutionResult:
+        """Execute one provider attempt, including its own billing lifecycle."""
+
+        provider = self._resolve_provider(request.provider_id)
+        credential = self._resolve_credential(request)
+        pricing_snapshot = self.pricing_snapshot_factory(
+            request.model_id, request.provider_id
+        )
+        self._validate_pricing_snapshot(request, pricing_snapshot)
+        adapter = self._resolve_adapter(provider)
+
+        if request.billing_mode is BillingMode.BYOK:
+            response = self._complete(adapter, request, credential, provider)
+            usage = self._result_usage(response)
+            billing = self._build_evidence(
+                request=request,
+                usage=usage,
+                provider_cost_usd=response.provider_cost_usd,
+                pricing_snapshot=pricing_snapshot,
+            )
+            return self._result(
+                request=request,
+                credential=credential,
+                usage=usage,
+                billing=billing,
+                text=response.text,
+                finish_reason=response.finish_reason,
+                requested_provider_id=requested_provider_id,
+            )
+
+        return self._execute_platform(
+            request=request,
+            provider=provider,
+            credential=credential,
+            adapter=adapter,
+            pricing_snapshot=pricing_snapshot,
+            attempt_index=attempt_index,
+            requested_provider_id=requested_provider_id,
+        )
+
+    def _execute_with_platform_failover(
+        self,
+        request: LLMExecutionRequest,
+    ) -> LLMExecutionResult:
+        """Apply the one-way OpenRouter quota failover policy."""
+
+        try:
+            return self._execute_once(
+                request,
+                attempt_index=0,
+                requested_provider_id=request.provider_id,
+            )
+        except LLMExecutionError as primary_error:
+            if (
+                request.provider_id != "openrouter"
+                or primary_error.category
+                is not ExecutionErrorCategory.PROVIDER_QUOTA_EXHAUSTED
+            ):
+                raise
+
+            try:
+                self.providers.preflight_execution_model(
+                    "commonstack", request.model_id
+                )
+                self.providers.preflight_platform_credential("commonstack")
+            except (
+                ProviderNotFoundError,
+                CredentialResolutionError,
+                UnsupportedExecutionModel,
+            ):
+                raise primary_error
+
+            fallback_request = request.model_copy(
+                update={"provider_id": "commonstack"}
+            )
+            return self._execute_once(
+                fallback_request,
+                attempt_index=1,
+                requested_provider_id=request.provider_id,
+            )
 
     def _resolve_provider(self, provider_id: str) -> ProviderRecord:
         store = getattr(self.providers, "store", None)
@@ -396,7 +486,7 @@ class LLMExecutionService:
         billing: BillingEvidence,
         *,
         actual_micro: int,
-    ) -> None:
+    ) -> LLMSettlementResult:
         try:
             settlement = self.credits.settle_llm_credits(
                 reservation_id,
@@ -407,11 +497,10 @@ class LLMExecutionService:
             raise LLMExecutionError(ExecutionErrorCategory.BILLING_FAILED) from exc
         if (
             settlement.status != "settled"
-            or settlement.settled_micro != billing.debited_credits_micro
             or settlement.actual_micro != actual_micro
-            or settlement.outstanding_micro != billing.outstanding_credits_micro
         ):
             raise LLMExecutionError(ExecutionErrorCategory.BILLING_FAILED)
+        return settlement
 
     def _release_after_failure(
         self,
@@ -437,11 +526,13 @@ class LLMExecutionService:
         billing: BillingEvidence,
         text: str,
         finish_reason: str | None = None,
+        requested_provider_id: str | None = None,
     ) -> LLMExecutionResult:
         try:
             return LLMExecutionResult(
                 text=text,
                 provider_id=request.provider_id,
+                requested_provider_id=requested_provider_id,
                 model_id=request.model_id,
                 credential_id=credential.credential_id,
                 credential_key_last_four=credential.key_last_four,

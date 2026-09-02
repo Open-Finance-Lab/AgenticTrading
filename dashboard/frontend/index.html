@@ -212,6 +212,9 @@
             <span>Password</span>
             <input id="landingAuthPassword" type="password" autocomplete="new-password" required minlength="8">
           </label>
+          <p id="landingAuthForgot" class="landing-auth-switch" hidden>
+            <a class="landing-auth-link" href="/app?auth=reset">Forgot password?</a>
+          </p>
           <p id="landingAuthError" class="landing-auth-error" hidden></p>
           <button id="landingAuthSubmit" class="landing-auth-submit" type="submit">Create account</button>
         </form>
@@ -260,6 +263,10 @@
             passwordInput.autocomplete = authMode === 'signup' ? 'new-password' : 'current-password';
           }
           if (displayNameField) displayNameField.hidden = authMode !== 'signup';
+          // No reset UI here: the reset flow lives in /app only, so this stays
+          // a plain deep link, shown in login mode where "I forgot" happens.
+          var forgotEl = document.getElementById('landingAuthForgot');
+          if (forgotEl) forgotEl.hidden = authMode !== 'login';
           if (displayNameInput) {
             displayNameInput.required = authMode === 'signup';
             if (authMode !== 'signup') displayNameInput.value = '';

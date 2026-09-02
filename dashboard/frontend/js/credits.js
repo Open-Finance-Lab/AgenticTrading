@@ -510,14 +510,22 @@
     element('creditsBalance').textContent = `${formatCredits(balance.display_credits)} Credits`;
     const accountStatus = element('creditsAccountStatus');
     const restricted = balance.account_status !== 'active';
-    if (restricted) {
-      setStatus(accountStatus, 'Purchases are paused while this account is under review.', 'error');
+    const reason = balance.restriction_reason;
+    const outstandingMicro = Number(balance.outstanding_credits_micro || 0);
+    if (reason === 'llm_overage') {
+      setStatus(
+        accountStatus,
+        `Model usage exceeded the reserved amount. Add at least ${window.CreditFormat.formatCreditsMicro(outstandingMicro)} Credits to restore access.`,
+        'error',
+      );
+    } else if (restricted) {
+      setStatus(accountStatus, 'Purchases are paused for a payment refund review. Contact an administrator to restore access.', 'error');
     } else if (!balance.billing_available) {
       setStatus(accountStatus, 'Stripe Test Mode is not configured on this server.', 'error');
     } else {
       setStatus(accountStatus, 'Available for metered ATL model runs. BYOK runs use your provider account and do not deduct ATL Credits.', 'success');
     }
-    setPurchaseEnabled(!restricted && balance.billing_available);
+    setPurchaseEnabled((!restricted || reason === 'llm_overage') && balance.billing_available);
   }
 
   function renderLedger(items) {

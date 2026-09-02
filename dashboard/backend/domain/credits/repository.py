@@ -31,6 +31,40 @@ from dashboard.backend.domain.credits.repository_common import (
     _utcnow_iso,
     _validate_amount_pair,
 )
+from dashboard.backend.domain.model_providers.repository_common import (
+    validate_provider_id,
+)
+
+
+_SETTLEMENT_OUTCOME_EVIDENCE_KEYS = {
+    "debited_credits_micro",
+    "outstanding_credits_micro",
+}
+
+
+def _evidence_json(evidence: dict[str, Any]) -> str:
+    return json.dumps(
+        evidence,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+        allow_nan=False,
+    )
+
+
+def _evidence_identity_json(evidence_json: str) -> str:
+    try:
+        payload = json.loads(evidence_json)
+    except (TypeError, ValueError):
+        return evidence_json
+    if not isinstance(payload, dict):
+        return evidence_json
+    payload = {
+        key: value
+        for key, value in payload.items()
+        if key not in _SETTLEMENT_OUTCOME_EVIDENCE_KEYS
+    }
+    return _evidence_json(payload)
 
 
 _CREDIT_LEDGER_DDL = """
@@ -118,12 +152,16 @@ CREATE TABLE IF NOT EXISTS credit_llm_reservations (
     user_id INTEGER NOT NULL,
     run_id TEXT NOT NULL CHECK (length(trim(run_id)) > 0),
     call_index INTEGER NOT NULL CHECK (call_index >= 0),
+    provider_id TEXT,
+    attempt_index INTEGER NOT NULL DEFAULT 0 CHECK (attempt_index >= 0),
     reserved_micro INTEGER NOT NULL CHECK (reserved_micro > 0),
     reserved_grant_micro INTEGER NOT NULL CHECK (reserved_grant_micro >= 0),
     reserved_purchased_micro INTEGER NOT NULL CHECK (reserved_purchased_micro >= 0),
     settled_micro INTEGER NOT NULL DEFAULT 0 CHECK (settled_micro >= 0),
     actual_micro INTEGER NOT NULL DEFAULT 0 CHECK (actual_micro >= 0),
     outstanding_micro INTEGER NOT NULL DEFAULT 0 CHECK (outstanding_micro >= 0),
+    outstanding_recovered_micro INTEGER NOT NULL DEFAULT 0
+        CHECK (outstanding_recovered_micro >= 0),
     status TEXT NOT NULL DEFAULT 'open'
         CHECK (status IN ('open', 'settled', 'released')),
     operation_key TEXT NOT NULL UNIQUE CHECK (length(trim(operation_key)) > 0),
@@ -134,8 +172,7 @@ CREATE TABLE IF NOT EXISTS credit_llm_reservations (
     updated_at TEXT NOT NULL,
     FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
     CHECK (reserved_micro = reserved_grant_micro + reserved_purchased_micro),
-    CHECK (settled_micro <= reserved_micro),
-    UNIQUE (user_id, run_id, call_index)
+    UNIQUE (user_id, run_id, call_index, attempt_index)
 )
 """
 
@@ -283,6 +320,10 @@ class CreditsStore:
                     user_id INTEGER PRIMARY KEY,
                     status TEXT NOT NULL DEFAULT 'active'
                         CHECK (status IN ('active', 'restricted')),
+                    restriction_reason TEXT
+                        CHECK (restriction_reason IN (
+                            'llm_overage', 'refund_reconciliation'
+                        ) OR restriction_reason IS NULL),
                     created_at TEXT NOT NULL,
                     FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
                 );
@@ -470,6 +511,27 @@ class CreditsStore:
                 "ADD COLUMN outstanding_micro INTEGER NOT NULL DEFAULT 0 "
                 "CHECK (outstanding_micro >= 0)"
             )
+        if "outstanding_recovered_micro" not in reservation_columns:
+            conn.execute(
+                "ALTER TABLE credit_llm_reservations "
+                "ADD COLUMN outstanding_recovered_micro INTEGER NOT NULL DEFAULT 0 "
+                "CHECK (outstanding_recovered_micro >= 0)"
+            )
+        if "provider_id" not in reservation_columns:
+            conn.execute(
+                "ALTER TABLE credit_llm_reservations ADD COLUMN provider_id TEXT"
+            )
+        if "attempt_index" not in reservation_columns:
+            conn.execute(
+                "ALTER TABLE credit_llm_reservations "
+                "ADD COLUMN attempt_index INTEGER NOT NULL DEFAULT 0 "
+                "CHECK (attempt_index >= 0)"
+            )
+        account_columns = cls._table_columns(conn, "credit_accounts")
+        if "restriction_reason" not in account_columns:
+            conn.execute(
+                "ALTER TABLE credit_accounts ADD COLUMN restriction_reason TEXT"
+            )
         conn.execute(
             """
             UPDATE credit_llm_reservations
@@ -477,6 +539,7 @@ class CreditsStore:
             WHERE status = 'settled' AND actual_micro = 0
             """
         )
+        cls._migrate_llm_reservation_constraint_in_transaction(conn)
         conn.execute(_LLM_USAGE_LEDGER_DDL)
         conn.execute(
             """
@@ -487,7 +550,7 @@ class CreditsStore:
         conn.execute(
             """
             CREATE INDEX IF NOT EXISTS idx_credit_llm_reservations_run_status
-            ON credit_llm_reservations(run_id, status, call_index)
+            ON credit_llm_reservations(run_id, status, call_index, attempt_index)
             """
         )
         conn.execute(
@@ -496,6 +559,83 @@ class CreditsStore:
             ON credit_llm_usage_entries(user_id, id DESC)
             """
         )
+
+    @classmethod
+    def _migrate_llm_reservation_constraint_in_transaction(
+        cls, conn: sqlite3.Connection
+    ) -> None:
+        """Rebuild legacy SQLite reservations that capped settled debits."""
+
+        # Some maintenance/CLI entry points instantiate the Credits store
+        # before the account database has created its users table. The legacy
+        # table can remain in place safely; the migration will run on the next
+        # normal application initialization once its parent table exists.
+        if not cls._table_columns(conn, "users"):
+            return
+
+        reservation_columns = cls._table_columns(conn, "credit_llm_reservations")
+        row = conn.execute(
+            "SELECT sql FROM sqlite_master "
+            "WHERE type = 'table' AND name = 'credit_llm_reservations'"
+        ).fetchone()
+        table_sql = "".join(str(row["sql"] or "").lower().split()) if row else ""
+        needs_rebuild = (
+            "provider_id" not in reservation_columns
+            or "attempt_index" not in reservation_columns
+            or "unique(user_id,run_id,call_index)" in table_sql
+            or "settled_micro<=reserved_micro" in table_sql
+        )
+        if not needs_rebuild:
+            return
+
+        usage_exists = bool(cls._table_columns(conn, "credit_llm_usage_entries"))
+        if usage_exists:
+            conn.execute(
+                "CREATE TABLE credit_llm_usage_entries_migration_backup AS "
+                "SELECT * FROM credit_llm_usage_entries"
+            )
+            conn.execute("DROP TABLE credit_llm_usage_entries")
+
+        conn.execute(
+            "ALTER TABLE credit_llm_reservations "
+            "RENAME TO credit_llm_reservations_migration_legacy"
+        )
+        conn.execute(_LLM_RESERVATION_DDL)
+        columns = (
+            "reservation_id, user_id, run_id, call_index, provider_id, "
+            "attempt_index, reserved_micro, reserved_grant_micro, "
+            "reserved_purchased_micro, settled_micro, actual_micro, "
+            "outstanding_micro, outstanding_recovered_micro, status, operation_key, "
+            "request_digest, evidence_json, failure_reason, created_at, updated_at"
+        )
+        provider_expression = "provider_id" if "provider_id" in reservation_columns else "NULL"
+        attempt_expression = "attempt_index" if "attempt_index" in reservation_columns else "0"
+        select_columns = (
+            "reservation_id, user_id, run_id, call_index, "
+            f"{provider_expression}, {attempt_expression}, reserved_micro, "
+            "reserved_grant_micro, reserved_purchased_micro, settled_micro, "
+            "actual_micro, outstanding_micro, outstanding_recovered_micro, status, "
+            "operation_key, request_digest, evidence_json, failure_reason, "
+            "created_at, updated_at"
+        )
+        conn.execute(
+            f"INSERT INTO credit_llm_reservations ({columns}) "
+            f"SELECT {select_columns} FROM credit_llm_reservations_migration_legacy"
+        )
+        conn.execute("DROP TABLE credit_llm_reservations_migration_legacy")
+
+        if usage_exists:
+            conn.execute(_LLM_USAGE_LEDGER_DDL)
+            usage_columns = (
+                "id, user_id, reservation_id, run_id, call_index, bucket, "
+                "amount_micro, operation_key, evidence_json, created_at"
+            )
+            conn.execute(
+                f"INSERT INTO credit_llm_usage_entries ({usage_columns}) "
+                f"SELECT {usage_columns} "
+                "FROM credit_llm_usage_entries_migration_backup"
+            )
+            conn.execute("DROP TABLE credit_llm_usage_entries_migration_backup")
 
     @classmethod
     def _create_grant_pool_schema_in_transaction(
@@ -641,6 +781,37 @@ class CreditsStore:
                 "SELECT * FROM credit_accounts WHERE user_id = ?", (user_id,)
             ).fetchone()
             return dict(row)
+
+    def get_account_billing_state(self, user_id: int) -> dict[str, Any]:
+        _positive_integer(user_id, "user_id")
+        with self._get_connection() as conn:
+            self._begin(conn)
+            self._ensure_account_in_transaction(conn, user_id)
+            account = conn.execute(
+                "SELECT status, restriction_reason FROM credit_accounts WHERE user_id = ?",
+                (user_id,),
+            ).fetchone()
+            outstanding = conn.execute(
+                """
+                SELECT COALESCE(SUM(
+                    MAX(outstanding_micro - outstanding_recovered_micro, 0)
+                ), 0) AS outstanding_micro
+                FROM credit_llm_reservations
+                WHERE user_id = ? AND status = 'settled'
+                """,
+                (user_id,),
+            ).fetchone()
+            reason = account["restriction_reason"]
+            if account["status"] == "restricted" and reason not in {
+                "llm_overage",
+                "refund_reconciliation",
+            }:
+                reason = "refund_reconciliation"
+            return {
+                "account_status": account["status"],
+                "restriction_reason": reason,
+                "outstanding_credits_micro": int(outstanding["outstanding_micro"]),
+            }
 
     @staticmethod
     def _balance_projection_in_transaction(
@@ -926,7 +1097,7 @@ class CreditsStore:
             """
             SELECT id, bucket, amount_micro
             FROM credit_llm_usage_entries
-            WHERE reservation_id = ?
+            WHERE reservation_id = ? AND operation_key NOT LIKE '%:recovery:%'
             ORDER BY id
             """,
             (reservation["reservation_id"],),
@@ -943,8 +1114,11 @@ class CreditsStore:
         )
         row = dict(reservation)
         row.update(
-            released_micro=(
-                int(row["reserved_micro"]) - int(row["settled_micro"])
+            released_micro=max(
+                int(row["reserved_micro"]) - int(row["settled_micro"]), 0
+            ),
+            outstanding_recovered_micro=int(
+                row["outstanding_recovered_micro"] or 0
             ),
             grant_debited_micro=grant_debited,
             purchased_debited_micro=purchased_debited,
@@ -959,6 +1133,8 @@ class CreditsStore:
         user_id: int,
         run_id: str,
         call_index: int,
+        attempt_index: int,
+        provider_id: str,
         reserved_micro: int,
         operation_key: str,
         request_digest: str,
@@ -977,16 +1153,20 @@ class CreditsStore:
         _positive_integer(reserved_micro, "reserved_micro")
         if isinstance(call_index, bool) or not isinstance(call_index, int) or call_index < 0:
             raise ValueError("call_index must be a non-negative integer")
+        if isinstance(attempt_index, bool) or not isinstance(attempt_index, int) or attempt_index < 0:
+            raise ValueError("attempt_index must be a non-negative integer")
+        provider_id = validate_provider_id(provider_id)
 
         with self._get_connection() as conn:
             self._begin(conn)
+            self._migrate_llm_reservation_constraint_in_transaction(conn)
             existing = conn.execute(
                 """
                 SELECT * FROM credit_llm_reservations
                 WHERE reservation_id = ? OR operation_key = ?
-                   OR (user_id = ? AND run_id = ? AND call_index = ?)
+                   OR (user_id = ? AND run_id = ? AND call_index = ? AND attempt_index = ?)
                 """,
-                (reservation_id, operation_key, user_id, run_id, call_index),
+                (reservation_id, operation_key, user_id, run_id, call_index, attempt_index),
             ).fetchone()
             if existing:
                 if (
@@ -994,6 +1174,8 @@ class CreditsStore:
                     or int(existing["user_id"]) != user_id
                     or existing["run_id"] != run_id
                     or int(existing["call_index"]) != call_index
+                    or int(existing["attempt_index"]) != attempt_index
+                    or existing["provider_id"] != provider_id
                     or int(existing["reserved_micro"]) != reserved_micro
                     or existing["operation_key"] != operation_key
                     or existing["request_digest"] != request_digest
@@ -1022,18 +1204,21 @@ class CreditsStore:
             conn.execute(
                 """
                 INSERT INTO credit_llm_reservations (
-                    reservation_id, user_id, run_id, call_index,
+                    reservation_id, user_id, run_id, call_index, provider_id,
+                    attempt_index,
                     reserved_micro, reserved_grant_micro,
                     reserved_purchased_micro, settled_micro, status,
                     operation_key, request_digest, created_at, updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, 0, 'open', ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 'open', ?, ?, ?, ?)
                 """,
                 (
                     reservation_id,
                     user_id,
                     run_id,
                     call_index,
+                    provider_id,
+                    attempt_index,
                     reserved_micro,
                     reserved_grant,
                     reserved_purchased,
@@ -1065,15 +1250,10 @@ class CreditsStore:
             or actual_micro < 0
         ):
             raise ValueError("actual_micro must be a non-negative integer")
-        evidence_json = json.dumps(
-            evidence,
-            sort_keys=True,
-            separators=(",", ":"),
-            ensure_ascii=True,
-            allow_nan=False,
-        )
+        evidence_json = _evidence_json(evidence)
         with self._get_connection() as conn:
             self._begin(conn)
+            self._migrate_llm_reservation_constraint_in_transaction(conn)
             reservation = conn.execute(
                 "SELECT * FROM credit_llm_reservations WHERE reservation_id = ?",
                 (reservation_id,),
@@ -1083,7 +1263,10 @@ class CreditsStore:
             if reservation["status"] == "settled":
                 if (
                     int(reservation["actual_micro"]) != actual_micro
-                    or reservation["evidence_json"] != evidence_json
+                    or _evidence_identity_json(
+                        str(reservation["evidence_json"] or "")
+                    )
+                    != _evidence_identity_json(evidence_json)
                 ):
                     raise LLMReservationConflictError(
                         "settlement replay has different input"
@@ -1096,16 +1279,39 @@ class CreditsStore:
                     "released reservation cannot be settled"
                 )
             reserved_micro = int(reservation["reserved_micro"])
-            debit_micro = min(actual_micro, reserved_micro)
+            excess_micro = max(actual_micro - reserved_micro, 0)
+            supplementary_grant = 0
+            supplementary_purchased = 0
+            if excess_micro > 0:
+                projection = self._balance_projection_in_transaction(
+                    conn, int(reservation["user_id"])
+                )
+                supplementary_grant = min(
+                    excess_micro,
+                    max(int(projection["grant_available_micro"]), 0),
+                )
+                supplementary_purchased = min(
+                    excess_micro - supplementary_grant,
+                    max(int(projection["purchased_available_micro"]), 0),
+                )
+            supplementary_micro = supplementary_grant + supplementary_purchased
+            debit_micro = min(actual_micro, reserved_micro) + supplementary_micro
             outstanding_micro = actual_micro - debit_micro
             grant_debit = min(
-                debit_micro, int(reservation["reserved_grant_micro"])
+                min(actual_micro, reserved_micro),
+                int(reservation["reserved_grant_micro"]),
             )
-            purchased_debit = debit_micro - grant_debit
+            purchased_debit = min(actual_micro, reserved_micro) - grant_debit
             now = _utcnow_iso()
-            for bucket, amount in (
-                ("grant", grant_debit),
-                ("purchased", purchased_debit),
+            evidence_payload = dict(evidence)
+            evidence_payload["debited_credits_micro"] = debit_micro
+            evidence_payload["outstanding_credits_micro"] = outstanding_micro
+            settled_evidence_json = _evidence_json(evidence_payload)
+            for bucket, amount, suffix in (
+                ("grant", grant_debit, "grant"),
+                ("purchased", purchased_debit, "purchased"),
+                ("grant", supplementary_grant, "overage:grant"),
+                ("purchased", supplementary_purchased, "overage:purchased"),
             ):
                 if amount <= 0:
                     continue
@@ -1125,8 +1331,8 @@ class CreditsStore:
                         reservation["call_index"],
                         bucket,
                         -amount,
-                        f"{reservation['operation_key']}:{bucket}",
-                        evidence_json,
+                        f"{reservation['operation_key']}:{suffix}",
+                        settled_evidence_json,
                         now,
                     ),
                 )
@@ -1142,14 +1348,18 @@ class CreditsStore:
                     debit_micro,
                     actual_micro,
                     outstanding_micro,
-                    evidence_json,
+                    settled_evidence_json,
                     now,
                     reservation_id,
                 ),
             )
             if outstanding_micro > 0:
                 conn.execute(
-                    "UPDATE credit_accounts SET status = 'restricted' WHERE user_id = ?",
+                    """
+                    UPDATE credit_accounts
+                    SET status = 'restricted', restriction_reason = 'llm_overage'
+                    WHERE user_id = ? AND status <> 'restricted'
+                    """,
                     (reservation["user_id"],),
                 )
             settled = conn.execute(
@@ -1157,6 +1367,213 @@ class CreditsStore:
                 (reservation_id,),
             ).fetchone()
             return self._llm_reservation_result_in_transaction(conn, settled)
+
+    def recover_llm_overage(
+        self, user_id: int, *, source_operation_key: str
+    ) -> dict[str, Any]:
+        """Apply newly available Credits to an LLM overage atomically."""
+        _positive_integer(user_id, "user_id")
+        source_operation_key = _required_text(
+            source_operation_key, "source_operation_key", max_length=200
+        )
+        with self._get_connection() as conn:
+            self._begin(conn)
+            return self._recover_llm_overage_in_transaction(
+                conn, user_id, source_operation_key=source_operation_key
+            )
+
+    @staticmethod
+    def _recovery_result_for_source_operation_in_transaction(
+        conn: sqlite3.Connection,
+        user_id: int,
+        *,
+        source_operation_key: str,
+    ) -> dict[str, Any] | None:
+        rows = conn.execute(
+            "SELECT amount_micro, evidence_json FROM credit_llm_usage_entries "
+            "WHERE user_id = ?",
+            (user_id,),
+        ).fetchall()
+        recovered = 0
+        for row in rows:
+            try:
+                evidence = json.loads(row["evidence_json"])
+            except (TypeError, ValueError):
+                continue
+            if not isinstance(evidence, dict):
+                continue
+            if evidence.get("recovery_source") == source_operation_key:
+                recovered += max(-int(row["amount_micro"]), 0)
+        if recovered <= 0:
+            return None
+
+        account = conn.execute(
+            "SELECT status, restriction_reason FROM credit_accounts WHERE user_id = ?",
+            (user_id,),
+        ).fetchone()
+        remaining = conn.execute(
+            """
+            SELECT COALESCE(SUM(
+                MAX(outstanding_micro - outstanding_recovered_micro, 0)
+            ), 0) AS outstanding_micro
+            FROM credit_llm_reservations
+            WHERE user_id = ? AND status = 'settled'
+            """,
+            (user_id,),
+        ).fetchone()
+        reason = account["restriction_reason"]
+        if account["status"] == "restricted" and reason not in {
+            "llm_overage",
+            "refund_reconciliation",
+        }:
+            reason = "refund_reconciliation"
+        return {
+            "recovered_micro": recovered,
+            "outstanding_micro": int(remaining["outstanding_micro"]),
+            "account_status": account["status"],
+            "restriction_reason": reason,
+        }
+
+    @staticmethod
+    def _recover_llm_overage_in_transaction(
+        conn: sqlite3.Connection,
+        user_id: int,
+        *,
+        source_operation_key: str,
+    ) -> dict[str, Any]:
+        CreditsStore._ensure_account_in_transaction(conn, user_id)
+        previous = CreditsStore._recovery_result_for_source_operation_in_transaction(
+            conn, user_id, source_operation_key=source_operation_key
+        )
+        if previous is not None:
+            return previous
+        account = conn.execute(
+            "SELECT status, restriction_reason FROM credit_accounts WHERE user_id = ?",
+            (user_id,),
+        ).fetchone()
+        reason = account["restriction_reason"]
+        if account["status"] != "restricted" or reason != "llm_overage":
+            return {
+                "recovered_micro": 0,
+                "outstanding_micro": 0,
+                "account_status": account["status"],
+                "restriction_reason": reason,
+            }
+
+        projection = CreditsStore._balance_projection_in_transaction(conn, user_id)
+        grant_available = max(int(projection["grant_available_micro"]), 0)
+        purchased_available = max(int(projection["purchased_available_micro"]), 0)
+        remaining_funds = grant_available + purchased_available
+        recovered_total = 0
+        reservations = conn.execute(
+            """
+            SELECT * FROM credit_llm_reservations
+            WHERE user_id = ? AND status = 'settled'
+              AND outstanding_micro > outstanding_recovered_micro
+            ORDER BY created_at, reservation_id
+            """,
+            (user_id,),
+        ).fetchall()
+        for reservation in reservations:
+            debt = max(
+                int(reservation["outstanding_micro"])
+                - int(reservation["outstanding_recovered_micro"]),
+                0,
+            )
+            amount = min(debt, remaining_funds)
+            if amount <= 0:
+                break
+            grant_debit = min(amount, grant_available)
+            purchased_debit = amount - grant_debit
+            evidence_json = json.dumps(
+                {
+                    "recovery_source": source_operation_key,
+                    "reservation_id": reservation["reservation_id"],
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=True,
+            )
+            for bucket, debit in (
+                ("grant", grant_debit),
+                ("purchased", purchased_debit),
+            ):
+                if debit <= 0:
+                    continue
+                operation_key = (
+                    f"{reservation['operation_key']}:recovery:"
+                    f"{source_operation_key}:{bucket}"
+                )
+                existing = conn.execute(
+                    "SELECT amount_micro FROM credit_llm_usage_entries WHERE operation_key = ?",
+                    (operation_key,),
+                ).fetchone()
+                if existing is None:
+                    conn.execute(
+                        """
+                        INSERT INTO credit_llm_usage_entries (
+                            user_id, reservation_id, run_id, call_index,
+                            bucket, amount_micro, operation_key,
+                            evidence_json, created_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            user_id,
+                            reservation["reservation_id"],
+                            reservation["run_id"],
+                            reservation["call_index"],
+                            bucket,
+                            -debit,
+                            operation_key,
+                            evidence_json,
+                            _utcnow_iso(),
+                        ),
+                    )
+            conn.execute(
+                """
+                UPDATE credit_llm_reservations
+                SET outstanding_recovered_micro =
+                    outstanding_recovered_micro + ?, updated_at = ?
+                WHERE reservation_id = ?
+                """,
+                (amount, _utcnow_iso(), reservation["reservation_id"]),
+            )
+            grant_available -= grant_debit
+            purchased_available -= purchased_debit
+            remaining_funds -= amount
+            recovered_total += amount
+
+        remaining = conn.execute(
+            """
+            SELECT COALESCE(SUM(
+                MAX(outstanding_micro - outstanding_recovered_micro, 0)
+            ), 0) AS outstanding_micro
+            FROM credit_llm_reservations
+            WHERE user_id = ? AND status = 'settled'
+            """,
+            (user_id,),
+        ).fetchone()
+        outstanding = int(remaining["outstanding_micro"])
+        if outstanding == 0:
+            conn.execute(
+                """
+                UPDATE credit_accounts
+                SET status = 'active', restriction_reason = NULL
+                WHERE user_id = ? AND status = 'restricted'
+                  AND restriction_reason = 'llm_overage'
+                """,
+                (user_id,),
+            )
+            account_status = "active"
+            reason = None
+        else:
+            account_status = "restricted"
+        return {
+            "recovered_micro": recovered_total,
+            "outstanding_micro": outstanding,
+            "account_status": account_status,
+            "restriction_reason": reason,
+        }
 
     def release_llm_credits(
         self,
@@ -1221,7 +1638,7 @@ class CreditsStore:
             rows = conn.execute(
                 """
                 SELECT * FROM credit_llm_reservations
-                WHERE run_id = ? ORDER BY call_index
+                WHERE run_id = ? ORDER BY call_index, attempt_index, reservation_id
                 """,
                 (run_id,),
             ).fetchall()
@@ -1652,9 +2069,13 @@ class CreditsStore:
                 """,
                 (payment_intent_id, checkout_session_id, now, now, order_id),
             )
+            recovery = self._recover_llm_overage_in_transaction(
+                conn, order["user_id"], source_operation_key=operation_key
+            )
             return {
                 "outcome": "processed",
                 "balance_micro": self._balance_in_transaction(conn, order["user_id"]),
+                **recovery,
             }
 
     @staticmethod
@@ -1714,14 +2135,25 @@ class CreditsStore:
             ).fetchone()
             return _dict(row)
 
-    def restrict_account(self, user_id: int) -> dict[str, Any]:
+    def restrict_account(
+        self,
+        user_id: int,
+        *,
+        reason: str = "refund_reconciliation",
+    ) -> dict[str, Any]:
         _positive_integer(user_id, "user_id")
+        if reason not in {"llm_overage", "refund_reconciliation"}:
+            raise ValueError("invalid account restriction reason")
         with self._get_connection() as conn:
             self._begin(conn)
             self._ensure_account_in_transaction(conn, user_id)
             conn.execute(
-                "UPDATE credit_accounts SET status = 'restricted' WHERE user_id = ?",
-                (user_id,),
+                """
+                UPDATE credit_accounts
+                SET status = 'restricted', restriction_reason = ?
+                WHERE user_id = ?
+                """,
+                (reason, user_id),
             )
             row = conn.execute(
                 "SELECT * FROM credit_accounts WHERE user_id = ?", (user_id,)
@@ -1743,7 +2175,7 @@ class CreditsStore:
             self._begin(conn)
             self._ensure_account_in_transaction(conn, user_id)
             conn.execute(
-                "UPDATE credit_accounts SET status = 'active' WHERE user_id = ?",
+                "UPDATE credit_accounts SET status = 'active', restriction_reason = NULL WHERE user_id = ?",
                 (user_id,),
             )
             row = conn.execute(
@@ -1824,7 +2256,7 @@ class CreditsStore:
                            COUNT(DISTINCT call_index) AS model_call_count,
                            NULL AS evidence_json
                     FROM credit_llm_usage_entries
-                    WHERE user_id = ?
+                    WHERE user_id = ? AND operation_key NOT LIKE '%:recovery:%'
                     GROUP BY user_id, run_id
                 ),
                 promotion_activity AS (
@@ -1879,6 +2311,7 @@ class CreditsStore:
                     SELECT DISTINCT run_id, evidence_json
                     FROM credit_llm_usage_entries
                     WHERE user_id = ? AND run_id IN ({placeholders})
+                      AND operation_key NOT LIKE '%:recovery:%'
                     """,
                     [user_id, *run_ids],
                 ).fetchall()
@@ -2668,7 +3101,14 @@ class CreditsStore:
                     raise IdempotencyConflictError(
                         "Grant idempotency key conflicts with an existing operation"
                     )
-                return self._grant_mutation_result_in_transaction(conn, existing)
+                result = self._grant_mutation_result_in_transaction(conn, existing)
+                if operation_type == "assign":
+                    recovery = self._recovery_result_for_source_operation_in_transaction(
+                        conn, int(user_id), source_operation_key=operation_id
+                    )
+                    if recovery is not None:
+                        result["recovery"] = recovery
+                return result
 
             pool_balance = self._pool_balance_in_transaction(conn, pool_id)
             if operation_type in {"reduce", "assign"} and pool_balance < amount_micro:
@@ -2681,12 +3121,15 @@ class CreditsStore:
             if operation_type == "assign":
                 self._ensure_account_in_transaction(conn, int(user_id))
                 account = conn.execute(
-                    "SELECT status FROM credit_accounts WHERE user_id = ?",
+                    "SELECT status, restriction_reason FROM credit_accounts WHERE user_id = ?",
                     (user_id,),
                 ).fetchone()
-                if account["status"] == "restricted":
+                if (
+                    account["status"] == "restricted"
+                    and account["restriction_reason"] != "llm_overage"
+                ):
                     raise CreditAccountRestrictedStoreError(
-                        "restricted credit account cannot receive Grant Credits"
+                        "refund-review credit account requires administrator review"
                     )
                 user_entry_id = self._insert_user_grant_entry_in_transaction(
                     conn,
@@ -2746,7 +3189,16 @@ class CreditsStore:
                 "SELECT * FROM credit_grant_pool_ledger_entries WHERE id = ?",
                 (pool_entry_id,),
             ).fetchone()
-            return self._grant_mutation_result_in_transaction(conn, pool_entry)
+            if operation_type == "assign":
+                recovery = self._recover_llm_overage_in_transaction(
+                    conn, int(user_id), source_operation_key=operation_id
+                )
+            else:
+                recovery = {}
+            result = self._grant_mutation_result_in_transaction(conn, pool_entry)
+            if recovery.get("recovered_micro", 0) > 0:
+                result["recovery"] = recovery
+            return result
 
     def fund_grant_pool(self, **kwargs: Any) -> dict[str, Any]:
         return self._grant_mutation(operation_type="fund", **kwargs)

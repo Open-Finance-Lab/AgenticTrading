@@ -16,7 +16,10 @@ from dashboard.backend.domain.credits.models import (
     format_credits,
 )
 from dashboard.backend.domain.credits.repository import CreditsStore, OrderConflictError
-from dashboard.backend.domain.credits.service import CreditsService
+from dashboard.backend.domain.credits.service import (
+    AccountRestrictedError,
+    CreditsService,
+)
 from dashboard.backend.domain.credits.stripe_gateway import (
     CheckoutSessionResult,
     InvalidWebhookSignatureError,
@@ -178,6 +181,52 @@ def _refund_event(
     )
 
 
+def test_checkout_pays_model_overage_and_restores_account(tmp_path):
+    service, gateway = _service(tmp_path)
+    first = _checkout(service, cents=110)
+    _pay(service, gateway, first)
+    reservation = service.reserve_llm_credits(
+        user_id=1,
+        run_id="service-overage",
+        call_index=0,
+        provider_id="openrouter",
+        attempt_index=0,
+        amount_micro=1_000_000,
+    )
+    service.settle_llm_credits(
+        reservation.reservation_id,
+        actual_micro=1_250_000,
+        evidence={"provider_id": "openrouter", "model_id": "qwen/qwen3"},
+    )
+    blocked = service.get_balance(1)
+    assert blocked.account_status == "restricted"
+    assert blocked.restriction_reason == "llm_overage"
+    assert blocked.outstanding_credits_micro == 150_000
+
+    recovery = _checkout(
+        service,
+        cents=50,
+        request_id=UUID("22222222-2222-4222-8222-222222222222"),
+    )
+    gateway.event = _checkout_event(recovery, event_id="evt_recovery_paid")
+    paid = service.handle_webhook(b"recovery", "valid")
+
+    assert paid.outcome == "processed"
+    assert paid.recovered_micro == 150_000
+    restored = service.get_balance(1)
+    assert restored.account_status == "active"
+    assert restored.restriction_reason is None
+    assert restored.outstanding_credits_micro == 0
+
+
+def test_refund_review_account_stays_blocked_from_checkout(tmp_path):
+    service, _gateway = _service(tmp_path)
+    service.store.restrict_account(1, reason="refund_reconciliation")
+
+    with pytest.raises(AccountRestrictedError, match="payment refund review"):
+        _checkout(service)
+
+
 @pytest.mark.parametrize(
     ("package_id", "cents"),
     [("usd_0_50", 50), ("usd_1", 100), ("usd_2", 200), ("usd_5", 500)],
@@ -248,6 +297,8 @@ def test_balance_format_is_exact_and_not_float_based(tmp_path):
         "spending_enabled": False,
         "account_status": "active",
         "billing_available": True,
+        "restriction_reason": None,
+        "outstanding_credits_micro": 0,
     }
     assert format_credits(10_000_001) == "10.000001"
     assert format_credits(-4_000_000) == "-4.000000"

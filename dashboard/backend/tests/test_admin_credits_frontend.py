@@ -76,6 +76,14 @@ def test_admin_grant_client_uses_server_api_and_never_persists_secrets():
     assert "innerHTML" not in ADMIN_JS
 
 
+def test_admin_grant_console_surfaces_restrictions_and_refund_reinstate_only():
+    assert ">Status</th>" in APP_HTML
+    assert "restriction_reason" in ADMIN_JS
+    assert "outstanding_credits_micro" in ADMIN_JS
+    assert "reason !== 'llm_overage'" in ADMIN_JS
+    assert "/api/admin/credits/accounts/${Number(user.id)}/reinstate" in ADMIN_JS
+
+
 def test_admin_grant_client_defaults_to_short_user_pages():
     assert "ADMIN_CREDITS_USERS_PAGE_SIZE = 25" in ADMIN_JS
     assert "usersLimit: ADMIN_CREDITS_USERS_PAGE_SIZE" in ADMIN_JS

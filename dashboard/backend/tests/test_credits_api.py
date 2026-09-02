@@ -218,6 +218,8 @@ def test_credit_activity_exposes_safe_aggregated_backtest_usage(billing_api):
             user_id=1,
             run_id="run-api-usage",
             call_index=call_index,
+            provider_id="openrouter",
+            attempt_index=0,
             reserved_micro=amount,
             operation_key=f"api-usage-reserve-{call_index}",
             request_digest=str(call_index).ljust(64, "f"),

@@ -16,6 +16,9 @@ from dashboard.backend.domain.credits.repository_common import (
     CreditAccountRestrictedStoreError,
     LLMReservationConflictError,
 )
+from dashboard.backend.domain.model_providers.repository_common import (
+    ModelProviderStoreError,
+)
 
 
 def _store(tmp_path) -> CreditsStore:
@@ -107,6 +110,8 @@ def _settle_activity_call(
         user_id=user_id,
         run_id=run_id,
         call_index=call_index,
+        provider_id=provider_id,
+        attempt_index=0,
         reserved_micro=actual_micro,
         operation_key=f"reserve:{reservation_id}",
         request_digest=f"{user_id}{call_index}".ljust(64, "a")[:64],
@@ -150,15 +155,197 @@ def test_schema_is_created_and_new_account_balance_is_zero(tmp_path):
     }.issubset(tables)
 
 
+def test_sqlite_migrates_legacy_reservation_settlement_constraint(tmp_path):
+    path = tmp_path / "legacy-credits.db"
+    with sqlite3.connect(path) as conn:
+        conn.execute(
+            """
+            CREATE TABLE credit_llm_reservations (
+                reservation_id TEXT PRIMARY KEY,
+                user_id INTEGER NOT NULL,
+                run_id TEXT NOT NULL,
+                call_index INTEGER NOT NULL,
+                reserved_micro INTEGER NOT NULL,
+                reserved_grant_micro INTEGER NOT NULL,
+                reserved_purchased_micro INTEGER NOT NULL,
+                settled_micro INTEGER NOT NULL DEFAULT 0,
+                actual_micro INTEGER NOT NULL DEFAULT 0,
+                outstanding_micro INTEGER NOT NULL DEFAULT 0,
+                outstanding_recovered_micro INTEGER NOT NULL DEFAULT 0,
+                status TEXT NOT NULL DEFAULT 'open',
+                operation_key TEXT NOT NULL UNIQUE,
+                request_digest TEXT NOT NULL,
+                evidence_json TEXT,
+                failure_reason TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                CHECK (reserved_micro = reserved_grant_micro + reserved_purchased_micro),
+                CHECK (settled_micro <= reserved_micro),
+                UNIQUE (user_id, run_id, call_index),
+                FOREIGN KEY (user_id) REFERENCES users(id)
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE credit_llm_usage_entries (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                reservation_id TEXT NOT NULL,
+                run_id TEXT NOT NULL,
+                call_index INTEGER NOT NULL,
+                bucket TEXT NOT NULL,
+                amount_micro INTEGER NOT NULL,
+                operation_key TEXT NOT NULL UNIQUE,
+                evidence_json TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (reservation_id) REFERENCES credit_llm_reservations(reservation_id)
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO credit_llm_reservations (
+                reservation_id, user_id, run_id, call_index, reserved_micro,
+                reserved_grant_micro, reserved_purchased_micro, operation_key,
+                request_digest, created_at, updated_at
+            ) VALUES ('legacy-reservation', 1, 'legacy-run', 0, 1000, 1000, 0,
+                      'legacy-operation', 'a', '2026-08-01', '2026-08-01')
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO credit_llm_usage_entries (
+                user_id, reservation_id, run_id, call_index, bucket,
+                amount_micro, operation_key, evidence_json, created_at
+            ) VALUES (1, 'legacy-reservation', 'legacy-run', 0, 'grant',
+                      -100, 'legacy-usage', '{}', '2026-08-01')
+            """
+        )
+
+    # The Credits store can initialize before UserStore creates its parent
+    # table. The first pass must not fail or mark the migration complete.
+    store = CreditsStore(path)
+
+    with sqlite3.connect(path) as conn:
+        conn.execute(
+            """
+            CREATE TABLE users (
+                id INTEGER PRIMARY KEY,
+                email TEXT NOT NULL UNIQUE,
+                display_name TEXT NOT NULL,
+                password_hash TEXT NOT NULL,
+                role TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            "INSERT INTO users VALUES (1, 'legacy@example.com', 'Legacy', 'unused', 'user', '2026-08-01')"
+        )
+    settled = store.settle_llm_credits(
+        "legacy-reservation",
+        actual_micro=1_200,
+        evidence={"provider_id": "openrouter", "model_id": "qwen/qwen3"},
+    )
+
+    with store._get_connection() as conn:
+        schema = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE name = 'credit_llm_reservations'"
+        ).fetchone()[0]
+        row = conn.execute(
+            "SELECT reserved_micro, operation_key, attempt_index, provider_id "
+            "FROM credit_llm_reservations"
+        ).fetchone()
+        usage = conn.execute(
+            "SELECT operation_key, amount_micro FROM credit_llm_usage_entries"
+        ).fetchone()
+
+    assert "settled_micro <= reserved_micro" not in "".join(schema.lower().split())
+    assert tuple(row) == (1000, "legacy-operation", 0, None)
+    assert tuple(usage) == ("legacy-usage", -100)
+    assert settled["settled_micro"] == 1000
+    assert settled["outstanding_micro"] == 200
+
+
+def test_provider_attempts_have_independent_reservations_for_one_logical_call(
+    tmp_path,
+):
+    store = _store(tmp_path)
+    _pending_order(store, amount_usd_cents=100, credits_micro=1_000_000)
+    _pay_order(store, amount_usd_cents=100)
+
+    primary = store.reserve_llm_credits(
+        reservation_id="attempt-primary",
+        user_id=1,
+        run_id="attempt-run",
+        call_index=3,
+        attempt_index=0,
+        provider_id="openrouter",
+        reserved_micro=100_000,
+        operation_key="attempt-primary-operation",
+        request_digest="a" * 64,
+    )
+    store.release_llm_credits(
+        primary["reservation_id"], reason="provider_quota_exhausted"
+    )
+    fallback = store.reserve_llm_credits(
+        reservation_id="attempt-fallback",
+        user_id=1,
+        run_id="attempt-run",
+        call_index=3,
+        attempt_index=1,
+        provider_id="commonstack",
+        reserved_micro=100_000,
+        operation_key="attempt-fallback-operation",
+        request_digest="b" * 64,
+    )
+
+    assert primary["attempt_index"] == 0
+    assert primary["provider_id"] == "openrouter"
+    assert fallback["attempt_index"] == 1
+    assert fallback["provider_id"] == "commonstack"
+
+
+def test_reservation_attempt_identity_is_validated_and_idempotent(tmp_path):
+    store = _store(tmp_path)
+    _pending_order(store, amount_usd_cents=100, credits_micro=1_000_000)
+    _pay_order(store, amount_usd_cents=100)
+    payload = {
+        "reservation_id": "attempt-validation",
+        "user_id": 1,
+        "run_id": "attempt-validation-run",
+        "call_index": 0,
+        "attempt_index": 0,
+        "provider_id": "openrouter",
+        "reserved_micro": 100_000,
+        "operation_key": "attempt-validation-operation",
+        "request_digest": "v" * 64,
+    }
+    store.reserve_llm_credits(**payload)
+    assert store.reserve_llm_credits(**payload)["attempt_index"] == 0
+
+    with pytest.raises(ValueError, match="attempt_index"):
+        store.reserve_llm_credits(**{**payload, "attempt_index": -1})
+    with pytest.raises(ModelProviderStoreError, match="provider id"):
+        store.reserve_llm_credits(**{**payload, "provider_id": " "})
+    with pytest.raises(LLMReservationConflictError, match="different input"):
+        store.reserve_llm_credits(**{**payload, "provider_id": "commonstack"})
+    with pytest.raises(LLMReservationConflictError, match="different input"):
+        store.reserve_llm_credits(**{**payload, "attempt_index": 1})
+
+
 def test_llm_overage_debits_the_hold_and_restricts_the_account(tmp_path):
     store = _store(tmp_path)
-    _pending_order(store)
-    _pay_order(store)
+    _pending_order(store, amount_usd_cents=110, credits_micro=1_100_000)
+    _pay_order(store, amount_usd_cents=110)
     reservation = store.reserve_llm_credits(
         reservation_id="llm-res-overage",
         user_id=1,
         run_id="run-overage",
         call_index=0,
+        provider_id="openrouter",
+        attempt_index=0,
         reserved_micro=1_000_000,
         operation_key="llm-reserve-overage",
         request_digest="a" * 64,
@@ -179,11 +366,19 @@ def test_llm_overage_debits_the_hold_and_restricts_the_account(tmp_path):
 
     assert settled["status"] == "settled"
     assert settled["actual_micro"] == 1_250_000
-    assert settled["settled_micro"] == 1_000_000
-    assert settled["outstanding_micro"] == 250_000
+    assert settled["settled_micro"] == 1_100_000
+    assert settled["outstanding_micro"] == 150_000
+    assert settled["outstanding_recovered_micro"] == 0
     assert settled["released_micro"] == 0
-    assert store.get_balance_micro(1) == 9_000_000
+    assert settled["grant_debited_micro"] == 0
+    assert settled["purchased_debited_micro"] == 1_100_000
+    assert store.get_balance_micro(1) == 0
     assert store.ensure_account(1)["status"] == "restricted"
+    assert store.get_account_billing_state(1) == {
+        "account_status": "restricted",
+        "restriction_reason": "llm_overage",
+        "outstanding_credits_micro": 150_000,
+    }
     assert store.settle_llm_credits(
         reservation["reservation_id"],
         actual_micro=1_250_000,
@@ -202,10 +397,189 @@ def test_llm_overage_debits_the_hold_and_restricts_the_account(tmp_path):
             user_id=1,
             run_id="run-blocked",
             call_index=0,
+            provider_id="openrouter",
+            attempt_index=0,
             reserved_micro=1,
             operation_key="llm-reserve-blocked",
             request_digest="b" * 64,
         )
+
+
+def test_llm_overage_uses_unreserved_grant_before_restricting(tmp_path):
+    store = _store(tmp_path)
+    store.fund_grant_pool(
+        pool_id="default",
+        amount_micro=2_000_000,
+        operation_id="fund-covered-overage",
+        idempotency_key="fund-covered-overage",
+        request_digest="f" * 64,
+        actor_user_id=2,
+        source="test",
+        reason="Fund covered overage.",
+    )
+    store.assign_grant(
+        user_id=1,
+        pool_id="default",
+        amount_micro=2_000_000,
+        operation_id="assign-covered-overage",
+        idempotency_key="assign-covered-overage",
+        request_digest="g" * 64,
+        actor_user_id=2,
+        source="test",
+        reason="Assign covered overage.",
+    )
+    reservation = store.reserve_llm_credits(
+        reservation_id="llm-res-covered-overage",
+        user_id=1,
+        run_id="run-covered-overage",
+        call_index=0,
+        provider_id="openrouter",
+        attempt_index=0,
+        reserved_micro=1_000_000,
+        operation_key="llm-reserve-covered-overage",
+        request_digest="h" * 64,
+    )
+
+    settled = store.settle_llm_credits(
+        reservation["reservation_id"],
+        actual_micro=1_250_000,
+        evidence={
+            "provider_id": "openrouter",
+            "model_id": "qwen/qwen3",
+            "debited_credits_micro": 1_000_000,
+            "outstanding_credits_micro": 250_000,
+        },
+    )
+
+    assert settled["settled_micro"] == 1_250_000
+    assert settled["outstanding_micro"] == 0
+    assert settled["released_micro"] == 0
+    assert settled["grant_debited_micro"] == 1_250_000
+    assert settled["purchased_debited_micro"] == 0
+    assert store.get_balance_micro(1) == 750_000
+    assert store.get_account_billing_state(1) == {
+        "account_status": "active",
+        "restriction_reason": None,
+        "outstanding_credits_micro": 0,
+    }
+
+
+def test_llm_overage_does_not_spend_another_open_reservation(tmp_path):
+    store = _store(tmp_path)
+    _pending_order(store, amount_usd_cents=200, credits_micro=2_000_000)
+    _pay_order(store, amount_usd_cents=200)
+    current = store.reserve_llm_credits(
+        reservation_id="llm-res-current",
+        user_id=1,
+        run_id="run-current",
+        call_index=0,
+        provider_id="openrouter",
+        attempt_index=0,
+        reserved_micro=1_000_000,
+        operation_key="llm-reserve-current",
+        request_digest="i" * 64,
+    )
+    protected = store.reserve_llm_credits(
+        reservation_id="llm-res-protected",
+        user_id=1,
+        run_id="run-protected",
+        call_index=0,
+        provider_id="openrouter",
+        attempt_index=0,
+        reserved_micro=500_000,
+        operation_key="llm-reserve-protected",
+        request_digest="j" * 64,
+    )
+
+    settled = store.settle_llm_credits(
+        current["reservation_id"],
+        actual_micro=1_750_000,
+        evidence={"provider_id": "openrouter", "model_id": "qwen/qwen3"},
+    )
+
+    assert settled["settled_micro"] == 1_500_000
+    assert settled["outstanding_micro"] == 250_000
+    assert store.get_balance_projection(1)["total_available_micro"] == 0
+    with store._get_connection() as conn:
+        row = conn.execute(
+            "SELECT status, reserved_micro FROM credit_llm_reservations "
+            "WHERE reservation_id = ?",
+            (protected["reservation_id"],),
+        ).fetchone()
+    assert tuple(row) == ("open", 500_000)
+
+
+def test_grant_recovers_llm_overage_and_reinstates_account(tmp_path):
+    store = _store(tmp_path)
+    _pending_order(store, amount_usd_cents=110, credits_micro=1_100_000)
+    _pay_order(store, amount_usd_cents=110)
+    reservation = store.reserve_llm_credits(
+        reservation_id="llm-res-recover",
+        user_id=1,
+        run_id="run-recover",
+        call_index=0,
+        provider_id="openrouter",
+        attempt_index=0,
+        reserved_micro=1_000_000,
+        operation_key="llm-reserve-recover",
+        request_digest="c" * 64,
+    )
+    store.settle_llm_credits(
+        reservation["reservation_id"],
+        actual_micro=1_250_000,
+        evidence={"provider_id": "openrouter", "model_id": "qwen/qwen3"},
+    )
+    store.fund_grant_pool(
+        pool_id="default",
+        amount_micro=250_000,
+        operation_id="fund-recovery",
+        idempotency_key="fund-recovery",
+        request_digest="d" * 64,
+        actor_user_id=2,
+        source="test",
+        reason="Fund recovery.",
+    )
+    assigned = store.assign_grant(
+        pool_id="default",
+        user_id=1,
+        amount_micro=250_000,
+        operation_id="assign-recovery",
+        idempotency_key="assign-recovery",
+        request_digest="e" * 64,
+        actor_user_id=2,
+        source="test",
+        reason="Recover overage.",
+    )
+
+    assert assigned["recovery"] == {
+        "recovered_micro": 150_000,
+        "outstanding_micro": 0,
+        "account_status": "active",
+        "restriction_reason": None,
+    }
+    replayed = store.assign_grant(
+        user_id=1,
+        pool_id="default",
+        amount_micro=250_000,
+        operation_id="assign-recovery",
+        idempotency_key="assign-recovery",
+        request_digest="e" * 64,
+        actor_user_id=2,
+        source="test",
+        reason="Recover overage.",
+    )
+    assert replayed == assigned
+    assert store.get_account_billing_state(1) == {
+        "account_status": "active",
+        "restriction_reason": None,
+        "outstanding_credits_micro": 0,
+    }
+    with store._get_connection() as conn:
+        row = conn.execute(
+            "SELECT outstanding_recovered_micro FROM credit_llm_reservations WHERE reservation_id = ?",
+            (reservation["reservation_id"],),
+        ).fetchone()
+        assert row["outstanding_recovered_micro"] == 150_000
 
 
 @pytest.mark.parametrize(
@@ -518,8 +892,8 @@ def test_activity_summarizes_mixed_and_malformed_evidence(tmp_path):
         run_id="run-mixed",
         call_index=1,
         actual_micro=200,
-        provider_id="openai",
-        model_id="model-b",
+        provider_id="commonstack",
+        model_id="model-a",
     )
     _settle_activity_call(
         store,
@@ -538,9 +912,9 @@ def test_activity_summarizes_mixed_and_malformed_evidence(tmp_path):
     unknown = next(item for item in items if item.get("run_id") == "run-unknown")
 
     assert mixed["provider_id"] is None
-    assert mixed["model_id"] is None
+    assert mixed["model_id"] == "model-a"
     assert mixed["provider_mixed"] is True
-    assert mixed["model_mixed"] is True
+    assert mixed["model_mixed"] is False
     assert unknown["amount_micro"] == -300
     assert unknown["provider_id"] is None
     assert unknown["model_id"] is None
@@ -605,6 +979,8 @@ def test_activity_omits_released_run_without_settled_usage(tmp_path):
         user_id=1,
         run_id="run-released-without-charge",
         call_index=0,
+        provider_id="openrouter",
+        attempt_index=0,
         reserved_micro=1_000,
         operation_key="activity-released-reserve",
         request_digest="r" * 64,

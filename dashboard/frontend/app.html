@@ -284,10 +284,23 @@
                     <span>Display name</span>
                     <input id="authDisplayName" type="text" autocomplete="name">
                 </label>
-                <label class="auth-field">
+                <label id="authPasswordField" class="auth-field">
                     <span>Password</span>
                     <input id="authPassword" type="password" autocomplete="current-password" required minlength="8">
                 </label>
+                <p class="auth-switch"><button type="button" id="authForgotPasswordBtn" class="auth-link-btn">Forgot password?</button></p>
+                <div id="resetCodeStep" hidden>
+                    <p id="resetSentCopy" class="auth-modal-subtitle"></p>
+                    <label class="auth-field">
+                        <span>Reset code</span>
+                        <input id="resetCodeInput" type="text" maxlength="6" autocomplete="one-time-code">
+                    </label>
+                    <label class="auth-field">
+                        <span>New password</span>
+                        <input id="resetNewPassword" type="password" autocomplete="new-password" minlength="8">
+                    </label>
+                    <ul id="resetPasswordHints" class="password-policy-hints" hidden></ul>
+                </div>
                 <p id="authError" class="auth-error" hidden></p>
                 <button id="authSubmitBtn" class="auth-submit" type="submit">Sign in</button>
             </form>
@@ -2311,8 +2324,8 @@
                 </form>
                 <div class="admin-credits-table-wrap">
                     <table class="admin-credits-users-table" aria-label="Grant Credits user allocation">
-                        <thead><tr><th scope="col">Account</th><th scope="col">Role</th><th scope="col">Grant</th><th scope="col">Purchased</th><th scope="col">Total</th><th scope="col">Amount</th><th scope="col"><span class="sr-only">Actions</span></th></tr></thead>
-                        <tbody id="adminCreditsUsersBody"><tr><td colspan="7" class="admin-empty">Search for an account to allocate Grant Credits.</td></tr></tbody>
+                        <thead><tr><th scope="col">Account</th><th scope="col">Role</th><th scope="col">Status</th><th scope="col">Grant</th><th scope="col">Purchased</th><th scope="col">Total</th><th scope="col">Amount</th><th scope="col"><span class="sr-only">Actions</span></th></tr></thead>
+                        <tbody id="adminCreditsUsersBody"><tr><td colspan="8" class="admin-empty">Search for an account to allocate Grant Credits.</td></tr></tbody>
                     </table>
                 </div>
                 <div class="admin-credits-pager" aria-label="Account pages">

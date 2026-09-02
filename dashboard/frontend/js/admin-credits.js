@@ -192,7 +192,7 @@
     if (!state.users.length) {
       const row = document.createElement('tr');
       const cell = textNode('td', 'admin-empty', 'No matching accounts.');
-      cell.colSpan = 7;
+      cell.colSpan = 8;
       row.appendChild(cell);
       body.appendChild(row);
       return;
@@ -226,6 +226,17 @@
         roleSelect.addEventListener('change', () => mutateUserRole(user, roleSelect));
         roleCell.appendChild(roleSelect);
       }
+      const statusCell = document.createElement('td');
+      const status = balance.account_status || 'active';
+      const reason = balance.restriction_reason;
+      const outstanding = Number(balance.outstanding_credits_micro || 0);
+      statusCell.appendChild(textNode('strong', status === 'active' ? 'admin-status-active' : 'admin-status-restricted', status));
+      if (status !== 'active') {
+        const detail = reason === 'llm_overage'
+          ? `Owes ${formatCreditsMicro(outstanding)} Credits`
+          : 'Refund review';
+        statusCell.appendChild(textNode('span', 'admin-credits-status-detail', detail));
+      }
       const amountCell = document.createElement('td');
       const amount = document.createElement('input');
       amount.type = 'text';
@@ -250,10 +261,18 @@
       reclaim.disabled = Number(balance.grant_available_micro || 0) <= 0;
       reclaim.addEventListener('click', () => mutateUserGrant(user, 'reclaim', amount));
       actions.append(assign, reclaim);
+      if (status !== 'active' && reason !== 'llm_overage') {
+        const reinstate = textNode('button', 'credits-key-action', 'Reinstate');
+        reinstate.type = 'button';
+        reinstate.title = `Reinstate ${userName(user)}`;
+        reinstate.addEventListener('click', () => reinstateUser(user));
+        actions.appendChild(reinstate);
+      }
 
       row.append(
         account,
         roleCell,
+        statusCell,
         textNode('td', 'admin-credits-number', formatCredits(balance.display_grant_credits)),
         textNode('td', 'admin-credits-number', formatCredits(balance.display_purchased_credits)),
         textNode('td', 'admin-credits-number', formatCredits(balance.display_total_credits)),
@@ -262,6 +281,18 @@
       );
       body.appendChild(row);
     });
+  }
+
+  async function reinstateUser(user) {
+    if (!window.confirm(`Reinstate ${userName(user)} after refund review?`)) return;
+    try {
+      setStatus('Restoring account access…', 'pending');
+      await request(`/api/admin/credits/accounts/${Number(user.id)}/reinstate`, { method: 'POST' });
+      setStatus(`${userName(user)} is active again.`, 'success');
+      await refresh();
+    } catch (error) {
+      if (!handleAccessLost(error)) setStatus(error.message || 'Account could not be reinstated.', 'error');
+    }
   }
 
   async function loadUsers({ offset = state.usersOffset } = {}) {

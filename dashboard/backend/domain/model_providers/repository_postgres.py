@@ -211,7 +211,7 @@ class PostgresModelProviderStore:
                             provider_id, display_name, adapter_type, approved_base_url,
                             capabilities_json, byok_enabled, platform_enabled,
                             status, created_at, updated_at
-                        ) VALUES (%s, %s, %s, %s, %s, TRUE, %s, 'enabled', %s, %s)
+                        ) VALUES (%s, %s, %s, %s, %s, %s, %s, 'enabled', %s, %s)
                         ON CONFLICT (provider_id) DO NOTHING
                         """,
                         (
@@ -220,6 +220,7 @@ class PostgresModelProviderStore:
                             item["adapter_type"],
                             item["approved_base_url"],
                             serialize_capabilities(item["capabilities"]),
+                            bool(item.get("byok_enabled", True)),
                             bool(item.get("platform_enabled", False)),
                             now,
                             now,

@@ -36,9 +36,11 @@ class _FakeBlock:
 
 
 class _FakeResponse:
-    def __init__(self, text, usage=None):
-        self.content = [_FakeBlock(text)]
+    def __init__(self, text, usage=None, stop_reason=None):
+        # ``text=None`` models a reply with no text block (thinking only).
+        self.content = [] if text is None else [_FakeBlock(text)]
         self.usage = usage
+        self.stop_reason = stop_reason
 
 
 class _FakeMessages:
@@ -55,6 +57,25 @@ class _FakeClient:
     def __init__(self, response):
         self.captured = {}
         self.messages = _FakeMessages(response, self.captured)
+
+
+class _QueuedMessages:
+    def __init__(self, responses, calls):
+        self._responses = list(responses)
+        self._calls = calls
+
+    def create(self, **kwargs):
+        self._calls.append(kwargs)
+        assert self._responses, "LLM called more times than responses were queued"
+        return self._responses.pop(0)
+
+
+class _SequenceClient:
+    """One queued response per call, in order; ``calls`` holds each request."""
+
+    def __init__(self, *responses):
+        self.calls = []
+        self.messages = _QueuedMessages(responses, self.calls)
 
 
 # ---------------------------------------------------------------------------
@@ -418,6 +439,142 @@ def test_portfolio_final_no_text_retry_preserves_reasoning_and_increases_budget(
     assert captured[-1]["max_tokens"] == (
         portfolio_manager_module.RECOVERY_MAX_OUTPUT_TOKENS
     )
+
+
+# ---------------------------------------------------------------------------
+# Truncation recovery on the non-pipeline path (the leaderboard llm_agent
+# route). A reply cut at the output ceiling gets ONE retry with reasoning
+# preserved and max_tokens=RECOVERY_MAX_OUTPUT_TOKENS — the same single budget
+# the pipeline path spends — so one over-long reasoning burst does not silently
+# cost an H6 decision while billing in full.
+# ---------------------------------------------------------------------------
+
+# A decision envelope cut mid-string: parseable by nobody, but clearly the
+# start of a decision (>= 64 chars, names "actions", every delimiter open).
+_TRUNCATED_DECISION = (
+    '{"actions": [{"symbol": "AAPL", "action": "buy", "confidence": 0.9, '
+    '"reasoning": "RSI oversold with MACD turning up; entering a starter'
+)
+_COMPLETE_DECISION = json.dumps({"actions": [
+    {"symbol": "AAPL", "action": "buy", "confidence": 0.9,
+     "reasoning": "strong", "position_size": 10},
+]})
+
+
+def test_reply_stopped_at_output_ceiling_is_retried_with_recovery_budget():
+    client = _SequenceClient(
+        _FakeResponse(_TRUNCATED_DECISION, usage=_FakeUsage(10, 300),
+                      stop_reason="max_tokens"),
+        _FakeResponse(_COMPLETE_DECISION, usage=_FakeUsage(11, 40)),
+    )
+    pm = bha.PortfolioManager(100000)
+    out = pm.make_trading_decision_with_llm(_portfolio_state(), client)
+
+    assert [call["max_tokens"] for call in client.calls] == [
+        harness.DEFAULT_MAX_OUTPUT_TOKENS,
+        portfolio_manager_module.RECOVERY_MAX_OUTPUT_TOKENS,
+    ]
+    assert [(a["symbol"], a["action"], a["shares"]) for a in out["actions"]] == [
+        ("AAPL", "buy", 10),
+    ]
+    assert pm.llm_calls == 2
+    assert (pm.input_tokens, pm.output_tokens) == (21, 340)
+    assert pm.llm_decisions == 1
+
+
+def test_structurally_truncated_reply_is_retried_without_a_provider_signal():
+    # No stop_reason and usage well under the ceiling: only the structural scan
+    # can see this one, so the fixture pins it independently of the exact
+    # signal (a ceiling-count fixture would pass with the scan deleted).
+    client = _SequenceClient(
+        _FakeResponse(_TRUNCATED_DECISION, usage=_FakeUsage(10, 300)),
+        _FakeResponse(_COMPLETE_DECISION, usage=_FakeUsage(11, 40)),
+    )
+    pm = bha.PortfolioManager(100000)
+    pm.make_trading_decision_with_llm(_portfolio_state(), client)
+
+    assert len(client.calls) == 2
+    assert client.calls[1]["max_tokens"] == (
+        portfolio_manager_module.RECOVERY_MAX_OUTPUT_TOKENS
+    )
+    assert pm.llm_decisions == 1
+
+
+def test_truncated_reply_gets_exactly_one_recovery_attempt():
+    # Recovery is the same request with a bigger budget; a second truncated
+    # reply has nothing different left to ask for, so the step ends as it
+    # would have without the retry: billed twice, no decision.
+    client = _SequenceClient(
+        _FakeResponse(_TRUNCATED_DECISION, usage=_FakeUsage(10, 300),
+                      stop_reason="max_tokens"),
+        _FakeResponse(_TRUNCATED_DECISION, usage=_FakeUsage(10, 300),
+                      stop_reason="max_tokens"),
+        # Must never be requested: a third call would turn this into a decision.
+        _FakeResponse(_COMPLETE_DECISION, usage=_FakeUsage(1, 1)),
+    )
+    pm = bha.PortfolioManager(100000)
+    out = pm.make_trading_decision_with_llm(_portfolio_state(), client)
+
+    assert out == {"actions": []}
+    assert len(client.calls) == 2
+    assert pm.llm_calls == 2
+    assert pm.llm_decisions == 0
+
+
+def test_recovery_reply_with_no_text_block_keeps_the_first_outcome():
+    # A reasoning model can spend the whole recovery budget on thinking. That
+    # is an unusable reply, not a fault: the step ends as the first attempt
+    # left it (empty actions) instead of raising into the rule-based fallback,
+    # which for this state would be a 20-share buy the model never made.
+    client = _SequenceClient(
+        _FakeResponse(_TRUNCATED_DECISION, usage=_FakeUsage(10, 300),
+                      stop_reason="max_tokens"),
+        _FakeResponse(None, usage=_FakeUsage(10, 4000)),
+    )
+    pm = bha.PortfolioManager(100000)
+    out = pm.make_trading_decision_with_llm(_portfolio_state(), client)
+
+    assert out == {"actions": []}
+    assert pm.llm_calls == 2
+    assert pm.llm_decisions == 0
+
+
+def test_truncation_after_the_final_rescue_call_is_not_retried_again():
+    # The rescue call that ends a run of no-text replies already spends the
+    # recovery budget; a truncated rescue reply must not buy a sixth call.
+    no_text = [_FakeResponse(None, usage=_FakeUsage(10, 50)) for _ in range(4)]
+    client = _SequenceClient(
+        *no_text,
+        _FakeResponse(_TRUNCATED_DECISION, usage=_FakeUsage(10, 4096),
+                      stop_reason="max_tokens"),
+        # Must never be requested.
+        _FakeResponse(_COMPLETE_DECISION, usage=_FakeUsage(1, 1)),
+    )
+    pm = bha.PortfolioManager(100000)
+    out = pm.make_trading_decision_with_llm(_portfolio_state(), client)
+
+    assert out == {"actions": []}
+    assert len(client.calls) == 5
+    assert client.calls[-1]["max_tokens"] == (
+        portfolio_manager_module.RECOVERY_MAX_OUTPUT_TOKENS
+    )
+    assert pm.llm_calls == 5
+
+
+def test_strict_llm_recovers_a_truncated_reply_before_spending_a_strike():
+    client = _SequenceClient(
+        _FakeResponse(_TRUNCATED_DECISION, usage=_FakeUsage(10, 300),
+                      stop_reason="max_tokens"),
+        _FakeResponse(_COMPLETE_DECISION, usage=_FakeUsage(11, 40)),
+    )
+    pm = bha.PortfolioManager(100000)
+    out = pm.make_trading_decision_with_llm(
+        _portfolio_state(), client, strict_llm=True
+    )
+
+    assert [a["symbol"] for a in out["actions"]] == ["AAPL"]
+    assert pm.strict_llm_fallbacks == 0
+    assert pm.llm_decisions == 1
 
 
 def test_no_json_response_returns_empty_actions():

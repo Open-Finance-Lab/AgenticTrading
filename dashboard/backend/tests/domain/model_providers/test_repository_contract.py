@@ -10,6 +10,12 @@ from cryptography.fernet import Fernet
 from dashboard.backend.domain.brokers import repository as broker_repository
 from dashboard.backend.domain.brokers.repository import _encrypt
 from dashboard.backend.domain.model_providers.repository import ModelProviderStore
+from dashboard.backend.domain.model_providers.execution_catalog import (
+    UnsupportedExecutionModel,
+    list_execution_model_routes,
+    resolve_execution_model_route,
+)
+from dashboard.backend.domain.model_providers.models import ProviderRecord
 from dashboard.backend.domain.model_providers.repository_common import CredentialConflictError
 
 
@@ -80,6 +86,36 @@ def test_seed_initialization_does_not_overwrite_admin_configuration(store_factor
 
 def test_seeded_openrouter_is_platform_enabled(store):
     assert store.get_provider("openrouter")["platform_enabled"] is True
+
+
+def test_seeded_commonstack_is_platform_only_with_verified_model_allowlist(store):
+    provider = store.get_provider("commonstack")
+
+    assert provider["adapter_type"] == "openai_compatible"
+    assert provider["approved_base_url"] == "https://api.commonstack.ai/v1"
+    assert provider["byok_enabled"] is False
+    assert provider["platform_enabled"] is True
+    assert provider["capabilities"].model_allowlist == (
+        "openai/gpt-5.5",
+        "google/gemini-3.1-pro-preview",
+        "anthropic/claude-sonnet-4-6",
+        "deepseek/deepseek-v4-pro",
+        "qwen/qwen3.7-plus",
+    )
+
+
+def test_commonstack_routes_only_the_verified_catalog_models(store):
+    provider = ProviderRecord.model_validate(store.get_provider("commonstack"))
+
+    assert [route.catalog_id for route in list_execution_model_routes(provider)] == [
+        "anthropic/claude-sonnet-4-6",
+        "openai/gpt-5.5",
+        "google/gemini-3.1-pro-preview",
+        "deepseek/deepseek-v4-pro",
+        "qwen/qwen3.7-plus",
+    ]
+    with pytest.raises(UnsupportedExecutionModel):
+        resolve_execution_model_route(provider, "anthropic/claude-haiku-4-5")
 
 
 def test_legacy_openrouter_platform_flag_migrates_when_environment_key_exists(

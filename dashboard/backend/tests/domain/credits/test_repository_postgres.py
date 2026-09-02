@@ -21,6 +21,7 @@ from dashboard.backend.domain.credits.repository_common import (
     GrantPoolInsufficientError,
     GrantReclaimExceedsAvailableError,
     IdempotencyConflictError,
+    LLMReservationConflictError,
 )
 from dashboard.backend.tests._postgres_testing import require_local_postgres_url
 from dashboard.backend.tests.domain.credits.test_grant_repository_contract import (
@@ -56,6 +57,47 @@ def test_postgres_schema_declares_the_welcome_promotion_ledger():
     assert "operation_id TEXT NOT NULL UNIQUE" in ddl
     assert "idempotency_key TEXT NOT NULL UNIQUE" in ddl
     assert "UNIQUE (campaign_key, user_id)" in ddl
+
+
+def test_postgres_schema_allows_settlement_overage_and_migrates_legacy_check():
+    assert "settled_micro <= reserved_micro" not in pg_module.CREDITS_POSTGRES_DDL
+    assert (
+        "pg_get_constraintdef(oid)"
+        in pg_module.CREDITS_POSTGRES_GRANT_MIGRATION_DDL
+    )
+    assert "legacy_constraint" in pg_module.CREDITS_POSTGRES_GRANT_MIGRATION_DDL
+    assert (
+        "DROP CONSTRAINT IF EXISTS credit_llm_reservations_settled_micro_check"
+        in pg_module.CREDITS_POSTGRES_GRANT_MIGRATION_DDL
+    )
+    assert (
+        "credit_llm_reservations_settled_micro_nonnegative_check"
+        in pg_module.CREDITS_POSTGRES_GRANT_MIGRATION_DDL
+    )
+
+
+def test_postgres_schema_tracks_provider_attempt_identity():
+    assert "provider_id TEXT" in pg_module.CREDITS_POSTGRES_DDL
+    assert "attempt_index INTEGER NOT NULL DEFAULT 0" in pg_module.CREDITS_POSTGRES_DDL
+    assert (
+        "credit_llm_reservations_logical_attempt_key"
+        in pg_module.CREDITS_POSTGRES_DDL
+    )
+    assert "ARRAY['user_id', 'run_id', 'call_index']::name[]" in (
+        pg_module.CREDITS_POSTGRES_GRANT_MIGRATION_DDL
+    )
+
+
+def test_postgres_provider_attempt_index_is_created_after_its_column():
+    base_ddl = pg_module.CREDITS_POSTGRES_DDL
+    migration_ddl = pg_module.CREDITS_POSTGRES_GRANT_MIGRATION_DDL
+
+    assert "idx_credit_llm_reservations_run_status" not in base_ddl
+    add_column = migration_ddl.index(
+        "ADD COLUMN IF NOT EXISTS attempt_index INTEGER NOT NULL DEFAULT 0"
+    )
+    create_index = migration_ddl.index("idx_credit_llm_reservations_run_status")
+    assert add_column < create_index
 
 
 def test_build_credits_store_picks_postgres_from_users_url(monkeypatch, capsys):
@@ -180,6 +222,26 @@ CREATE TABLE stripe_webhook_events (
     outcome TEXT NOT NULL,
     reason TEXT,
     created_at TEXT NOT NULL
+);
+
+CREATE TABLE credit_llm_reservations (
+    reservation_id TEXT PRIMARY KEY,
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    run_id TEXT NOT NULL,
+    call_index INTEGER NOT NULL,
+    reserved_micro BIGINT NOT NULL,
+    reserved_grant_micro BIGINT NOT NULL,
+    reserved_purchased_micro BIGINT NOT NULL,
+    settled_micro BIGINT NOT NULL DEFAULT 0,
+    status TEXT NOT NULL DEFAULT 'open',
+    operation_key TEXT NOT NULL UNIQUE,
+    request_digest TEXT NOT NULL,
+    evidence_json TEXT,
+    failure_reason TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    CHECK (reserved_micro = reserved_grant_micro + reserved_purchased_micro),
+    UNIQUE (user_id, run_id, call_index)
 );
 
 CREATE TABLE credit_ledger_entries (
@@ -404,7 +466,13 @@ def _pending_order(
     )
 
 
-def _pay_order(store, *, order_id: str = "ord_10", event_id: str = "evt_paid"):
+def _pay_order(
+    store,
+    *,
+    order_id: str = "ord_10",
+    event_id: str = "evt_paid",
+    cents: int = 1000,
+):
     return store.settle_paid_checkout(
         event_id=event_id,
         event_type="checkout.session.completed",
@@ -415,7 +483,7 @@ def _pay_order(store, *, order_id: str = "ord_10", event_id: str = "evt_paid"):
         checkout_session_id=f"cs_test_{order_id}",
         payment_intent_id=f"pi_test_{order_id}",
         currency="usd",
-        amount_usd_cents=1000,
+        amount_usd_cents=cents,
     )
 
 
@@ -430,6 +498,176 @@ def _grant_args(operation: str, *, amount_micro: int) -> dict[str, object]:
         "source": "postgres_contract",
         "reason": f"Postgres contract operation {operation}.",
     }
+
+
+@pg_only
+def test_postgres_llm_overage_uses_unreserved_balance(pg_credits_store):
+    store = pg_credits_store
+    _pending_order(store, cents=110)
+    _pay_order(store, cents=110)
+    reservation = store.reserve_llm_credits(
+        reservation_id="pg-partial-overage",
+        user_id=1,
+        run_id="pg-partial-overage-run",
+        call_index=0,
+        provider_id="openrouter",
+        attempt_index=0,
+        reserved_micro=1_000_000,
+        operation_key="pg-partial-overage-operation",
+        request_digest="p" * 64,
+    )
+
+    settled = store.settle_llm_credits(
+        reservation["reservation_id"],
+        actual_micro=1_250_000,
+        evidence={"provider_id": "openrouter", "model_id": "qwen/qwen3"},
+    )
+
+    assert settled["settled_micro"] == 1_100_000
+    assert settled["outstanding_micro"] == 150_000
+    assert settled["purchased_debited_micro"] == 1_100_000
+    assert store.get_account_billing_state(1)["account_status"] == "restricted"
+
+
+@pg_only
+def test_postgres_migration_drops_legacy_unnamed_settlement_ceiling(pg_credits_store):
+    store = pg_credits_store
+    with psycopg.connect(store.database_url) as conn:
+        conn.execute(
+            "ALTER TABLE credit_llm_reservations "
+            "ADD CHECK (settled_micro <= reserved_micro)"
+        )
+
+    pg_module.PostgresCreditsStore(store.database_url)
+
+    with psycopg.connect(store.database_url, row_factory=dict_row) as conn:
+        constraints = conn.execute(
+            """
+            SELECT pg_get_constraintdef(oid) AS definition
+            FROM pg_constraint
+            WHERE conrelid = 'credit_llm_reservations'::regclass
+              AND contype = 'c'
+            """
+        ).fetchall()
+
+    assert not any(
+        "settled_micro <= reserved_micro" in str(row["definition"])
+        for row in constraints
+    )
+
+    with psycopg.connect(store.database_url) as conn:
+        conn.execute(
+            """
+            INSERT INTO credit_llm_reservations (
+                reservation_id, user_id, run_id, call_index, reserved_micro,
+                reserved_grant_micro, reserved_purchased_micro, settled_micro,
+                actual_micro, outstanding_micro, outstanding_recovered_micro,
+                status, operation_key, request_digest, created_at, updated_at
+            ) VALUES (
+                'pg-migrated-overage-reservation', 1, 'pg-migrated-overage-run', 0,
+                1000000, 1000000, 0, 0, 0, 0, 0, 'open',
+                'pg-migrated-overage-operation', repeat('m', 64),
+                '2026-09-01T00:00:00+00:00', '2026-09-01T00:00:00+00:00'
+            )
+            """
+        )
+        conn.execute(
+            """
+            UPDATE credit_llm_reservations
+            SET settled_micro = 1100000,
+                actual_micro = 1100000,
+                status = 'settled'
+            WHERE reservation_id = 'pg-migrated-overage-reservation'
+            """
+        )
+        settled = conn.execute(
+            """
+            SELECT settled_micro, actual_micro, outstanding_micro
+            FROM credit_llm_reservations
+            WHERE reservation_id = 'pg-migrated-overage-reservation'
+            """
+        ).fetchone()
+
+    assert int(settled[0]) == 1_100_000
+    assert int(settled[1]) == 1_100_000
+    assert int(settled[2]) == 0
+
+
+@pg_only
+def test_postgres_llm_overage_uses_grant_before_restricting(pg_credits_store):
+    store = pg_credits_store
+    store.fund_grant_pool(**_grant_args("covered_fund", amount_micro=2_000_000))
+    store.assign_grant(
+        user_id=1,
+        **_grant_args("covered_assign", amount_micro=2_000_000),
+    )
+    reservation = store.reserve_llm_credits(
+        reservation_id="pg-covered-overage",
+        user_id=1,
+        run_id="pg-covered-overage-run",
+        call_index=0,
+        provider_id="openrouter",
+        attempt_index=0,
+        reserved_micro=1_000_000,
+        operation_key="pg-covered-overage-operation",
+        request_digest="q" * 64,
+    )
+
+    settled = store.settle_llm_credits(
+        reservation["reservation_id"],
+        actual_micro=1_250_000,
+        evidence={"provider_id": "openrouter", "model_id": "qwen/qwen3"},
+    )
+
+    assert settled["settled_micro"] == 1_250_000
+    assert settled["outstanding_micro"] == 0
+    assert settled["grant_debited_micro"] == 1_250_000
+    assert store.get_account_billing_state(1)["account_status"] == "active"
+
+
+@pg_only
+def test_postgres_provider_attempts_share_logical_call_after_release(pg_credits_store):
+    store = pg_credits_store
+    _pending_order(store, cents=100)
+    _pay_order(store, cents=100)
+    primary = store.reserve_llm_credits(
+        reservation_id="pg-attempt-primary",
+        user_id=1,
+        run_id="pg-attempt-run",
+        call_index=4,
+        attempt_index=0,
+        provider_id="openrouter",
+        reserved_micro=100_000,
+        operation_key="pg-attempt-primary-operation",
+        request_digest="a" * 64,
+    )
+    store.release_llm_credits(primary["reservation_id"], reason="provider_quota_exhausted")
+    fallback = store.reserve_llm_credits(
+        reservation_id="pg-attempt-fallback",
+        user_id=1,
+        run_id="pg-attempt-run",
+        call_index=4,
+        attempt_index=1,
+        provider_id="commonstack",
+        reserved_micro=100_000,
+        operation_key="pg-attempt-fallback-operation",
+        request_digest="c" * 64,
+    )
+    assert fallback["attempt_index"] == 1
+    assert fallback["provider_id"] == "commonstack"
+
+    with pytest.raises(LLMReservationConflictError):
+        store.reserve_llm_credits(
+            reservation_id="pg-attempt-fallback",
+            user_id=1,
+            run_id="pg-attempt-run",
+            call_index=4,
+            attempt_index=1,
+            provider_id="openrouter",
+            reserved_micro=100_000,
+            operation_key="pg-attempt-fallback-operation",
+            request_digest="c" * 64,
+        )
 
 
 @pg_only
@@ -515,6 +753,8 @@ def test_postgres_activity_aggregates_calls_before_pagination(pg_credits_store):
             user_id=1,
             run_id="run-pg-activity",
             call_index=call_index,
+            provider_id="openrouter",
+            attempt_index=0,
             reserved_micro=amount,
             operation_key=f"reserve:{reservation_id}",
             request_digest=str(call_index).ljust(64, "b"),
@@ -834,6 +1074,67 @@ def test_postgres_migration_preserves_legacy_stripe_ledger(pg_legacy_credits_url
     assert reopened_pool_entries["count"] == 0
 
 
+@pg_only
+def test_postgres_migration_adds_attempt_index_before_dependent_index(
+    pg_legacy_credits_url,
+):
+    with psycopg.connect(pg_legacy_credits_url) as conn:
+        conn.execute(
+            """
+            INSERT INTO credit_llm_reservations (
+                reservation_id, user_id, run_id, call_index,
+                reserved_micro, reserved_grant_micro, reserved_purchased_micro,
+                operation_key, request_digest, created_at, updated_at
+            ) VALUES (
+                'legacy-reservation', 1, 'legacy-run', 0,
+                100, 100, 0, 'legacy-operation', 'legacy-digest',
+                '2026-08-01T00:00:00+00:00', '2026-08-01T00:00:00+00:00'
+            )
+            """
+        )
+
+    db_pool._reset_for_tests()
+    pg_module.PostgresCreditsStore(pg_legacy_credits_url)
+
+    with psycopg.connect(pg_legacy_credits_url, row_factory=dict_row) as conn:
+        columns = {
+            row["column_name"]
+            for row in conn.execute(
+                """
+                SELECT column_name
+                FROM information_schema.columns
+                WHERE table_schema = current_schema()
+                  AND table_name = 'credit_llm_reservations'
+                """
+            )
+        }
+        reservation = conn.execute(
+            """
+            SELECT attempt_index, provider_id
+            FROM credit_llm_reservations
+            WHERE reservation_id = 'legacy-reservation'
+            """
+        ).fetchone()
+        index_names = {
+            row["indexname"]
+            for row in conn.execute(
+                """
+                SELECT indexname
+                FROM pg_indexes
+                WHERE schemaname = current_schema()
+                  AND tablename = 'credit_llm_reservations'
+                """
+            )
+        }
+
+    assert {"attempt_index", "provider_id"} <= columns
+    assert reservation == {"attempt_index": 0, "provider_id": None}
+    assert "idx_credit_llm_reservations_run_status" in index_names
+
+    db_pool._reset_for_tests()
+    pg_module.PostgresCreditsStore(pg_legacy_credits_url)
+
+
 def _remove_postgres_grant_pool_snapshots(database_url: str) -> None:
     with psycopg.connect(database_url) as conn:
         conn.execute(
@@ -1057,7 +1358,14 @@ def test_purchase_and_duplicate_webhooks_post_once(pg_credits_store):
     duplicate_event = _pay_order(store)
     second_event = _pay_order(store, event_id="evt_paid_retry")
 
-    assert first == {"outcome": "processed", "balance_micro": 10_000_000}
+    assert first == {
+        "outcome": "processed",
+        "balance_micro": 10_000_000,
+        "recovered_micro": 0,
+        "outstanding_micro": 0,
+        "account_status": "active",
+        "restriction_reason": None,
+    }
     assert duplicate_event == {
         "outcome": "duplicate",
         "balance_micro": 10_000_000,

@@ -58,7 +58,8 @@ CREATE TABLE IF NOT EXISTS analytics_events (
     error_category TEXT CHECK (
         error_category IS NULL OR error_category IN (
             'credential_invalid', 'credential_missing', 'provider_timeout',
-            'provider_unavailable', 'credits_unavailable',
+            'provider_unavailable', 'provider_quota_exhausted',
+            'credits_unavailable',
             'model_not_allowed', 'internal_error'
         )
     ),
@@ -166,6 +167,24 @@ class PostgresAnalyticsStore:
         with self._get_connection() as conn:
             with conn.cursor() as cur:
                 cur.execute(ANALYTICS_POSTGRES_DDL)
+                cur.execute(
+                    "ALTER TABLE analytics_events "
+                    "DROP CONSTRAINT IF EXISTS analytics_events_error_category_check"
+                )
+                cur.execute(
+                    """
+                    ALTER TABLE analytics_events
+                    ADD CONSTRAINT analytics_events_error_category_check
+                    CHECK (
+                        error_category IS NULL OR error_category IN (
+                            'credential_invalid', 'credential_missing',
+                            'provider_timeout', 'provider_unavailable',
+                            'provider_quota_exhausted', 'credits_unavailable',
+                            'model_not_allowed', 'internal_error'
+                        )
+                    )
+                    """
+                )
 
     @staticmethod
     def _select_event(cur, field: str, value: str | None):

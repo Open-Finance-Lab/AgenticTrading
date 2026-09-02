@@ -27,6 +27,40 @@ from dashboard.backend.domain.credits.repository_common import (
     _utcnow_iso,
     _validate_amount_pair,
 )
+from dashboard.backend.domain.model_providers.repository_common import (
+    validate_provider_id,
+)
+
+
+_SETTLEMENT_OUTCOME_EVIDENCE_KEYS = {
+    "debited_credits_micro",
+    "outstanding_credits_micro",
+}
+
+
+def _evidence_json(evidence: dict[str, Any]) -> str:
+    return json.dumps(
+        evidence,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+        allow_nan=False,
+    )
+
+
+def _evidence_identity_json(evidence_json: str) -> str:
+    try:
+        payload = json.loads(evidence_json)
+    except (TypeError, ValueError):
+        return evidence_json
+    if not isinstance(payload, dict):
+        return evidence_json
+    payload = {
+        key: value
+        for key, value in payload.items()
+        if key not in _SETTLEMENT_OUTCOME_EVIDENCE_KEYS
+    }
+    return _evidence_json(payload)
 
 
 # Kept as literal DDL so the SQLite/Postgres parity guard can compare the
@@ -36,6 +70,9 @@ CREATE TABLE IF NOT EXISTS credit_accounts (
     user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
     status TEXT NOT NULL DEFAULT 'active'
         CHECK (status IN ('active', 'restricted')),
+    restriction_reason TEXT
+        CHECK (restriction_reason IN ('llm_overage', 'refund_reconciliation')
+               OR restriction_reason IS NULL),
     created_at TEXT NOT NULL
 );
 
@@ -249,12 +286,16 @@ CREATE TABLE IF NOT EXISTS credit_llm_reservations (
     user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     run_id TEXT NOT NULL CHECK (length(trim(run_id)) > 0),
     call_index INTEGER NOT NULL CHECK (call_index >= 0),
+    provider_id TEXT,
+    attempt_index INTEGER NOT NULL DEFAULT 0 CHECK (attempt_index >= 0),
     reserved_micro BIGINT NOT NULL CHECK (reserved_micro > 0),
     reserved_grant_micro BIGINT NOT NULL CHECK (reserved_grant_micro >= 0),
     reserved_purchased_micro BIGINT NOT NULL CHECK (reserved_purchased_micro >= 0),
     settled_micro BIGINT NOT NULL DEFAULT 0 CHECK (settled_micro >= 0),
     actual_micro BIGINT NOT NULL DEFAULT 0 CHECK (actual_micro >= 0),
     outstanding_micro BIGINT NOT NULL DEFAULT 0 CHECK (outstanding_micro >= 0),
+    outstanding_recovered_micro BIGINT NOT NULL DEFAULT 0
+        CHECK (outstanding_recovered_micro >= 0),
     status TEXT NOT NULL DEFAULT 'open'
         CHECK (status IN ('open', 'settled', 'released')),
     operation_key TEXT NOT NULL UNIQUE CHECK (length(trim(operation_key)) > 0),
@@ -264,15 +305,12 @@ CREATE TABLE IF NOT EXISTS credit_llm_reservations (
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
     CHECK (reserved_micro = reserved_grant_micro + reserved_purchased_micro),
-    CHECK (settled_micro <= reserved_micro),
-    UNIQUE (user_id, run_id, call_index)
+    CONSTRAINT credit_llm_reservations_logical_attempt_key
+        UNIQUE (user_id, run_id, call_index, attempt_index)
 );
 
 CREATE INDEX IF NOT EXISTS idx_credit_llm_reservations_user_status
 ON credit_llm_reservations(user_id, status, created_at);
-
-CREATE INDEX IF NOT EXISTS idx_credit_llm_reservations_run_status
-ON credit_llm_reservations(run_id, status, call_index);
 
 CREATE TABLE IF NOT EXISTS credit_llm_usage_entries (
     id BIGSERIAL PRIMARY KEY,
@@ -317,9 +355,78 @@ ALTER TABLE credit_llm_reservations
 ADD COLUMN IF NOT EXISTS actual_micro BIGINT NOT NULL DEFAULT 0;
 ALTER TABLE credit_llm_reservations
 ADD COLUMN IF NOT EXISTS outstanding_micro BIGINT NOT NULL DEFAULT 0;
+ALTER TABLE credit_llm_reservations
+ADD COLUMN IF NOT EXISTS outstanding_recovered_micro BIGINT NOT NULL DEFAULT 0;
+ALTER TABLE credit_llm_reservations
+ADD COLUMN IF NOT EXISTS provider_id TEXT;
+ALTER TABLE credit_llm_reservations
+ADD COLUMN IF NOT EXISTS attempt_index INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE credit_llm_reservations
+DROP CONSTRAINT IF EXISTS credit_llm_reservations_attempt_index_check;
+ALTER TABLE credit_llm_reservations
+ADD CONSTRAINT credit_llm_reservations_attempt_index_check
+CHECK (attempt_index >= 0);
+CREATE INDEX IF NOT EXISTS idx_credit_llm_reservations_run_status
+ON credit_llm_reservations(run_id, status, call_index, attempt_index);
+ALTER TABLE credit_accounts
+ADD COLUMN IF NOT EXISTS restriction_reason TEXT;
 UPDATE credit_llm_reservations
 SET actual_micro = settled_micro
 WHERE status = 'settled' AND actual_micro = 0;
+DO $$
+DECLARE
+    legacy_constraint TEXT;
+BEGIN
+    FOR legacy_constraint IN
+        SELECT conname
+        FROM pg_constraint
+        WHERE conrelid = 'credit_llm_reservations'::regclass
+          AND contype = 'c'
+          AND pg_get_constraintdef(oid) ~* 'settled_micro\\s*<=\\s*reserved_micro'
+    LOOP
+        EXECUTE format(
+            'ALTER TABLE credit_llm_reservations DROP CONSTRAINT %I',
+            legacy_constraint
+        );
+    END LOOP;
+END
+$$;
+ALTER TABLE credit_llm_reservations
+DROP CONSTRAINT IF EXISTS credit_llm_reservations_settled_micro_check;
+ALTER TABLE credit_llm_reservations
+DROP CONSTRAINT IF EXISTS credit_llm_reservations_settled_micro_nonnegative_check;
+ALTER TABLE credit_llm_reservations
+ADD CONSTRAINT credit_llm_reservations_settled_micro_nonnegative_check
+CHECK (settled_micro >= 0);
+DO $$
+DECLARE
+    legacy_constraint TEXT;
+BEGIN
+    FOR legacy_constraint IN
+        SELECT con.conname
+        FROM pg_constraint AS con
+        WHERE con.conrelid = 'credit_llm_reservations'::regclass
+          AND con.contype = 'u'
+          AND (
+              SELECT array_agg(att.attname ORDER BY key.ord)
+              FROM unnest(con.conkey) WITH ORDINALITY AS key(attnum, ord)
+              JOIN pg_attribute AS att
+                ON att.attrelid = con.conrelid
+               AND att.attnum = key.attnum
+          ) = ARRAY['user_id', 'run_id', 'call_index']::name[]
+    LOOP
+        EXECUTE format(
+            'ALTER TABLE credit_llm_reservations DROP CONSTRAINT %I',
+            legacy_constraint
+        );
+    END LOOP;
+END
+$$;
+ALTER TABLE credit_llm_reservations
+DROP CONSTRAINT IF EXISTS credit_llm_reservations_logical_attempt_key;
+ALTER TABLE credit_llm_reservations
+ADD CONSTRAINT credit_llm_reservations_logical_attempt_key
+UNIQUE (user_id, run_id, call_index, attempt_index);
 
 ALTER TABLE credit_grant_pool_ledger_entries
 ADD COLUMN IF NOT EXISTS pool_name_snapshot TEXT;
@@ -527,6 +634,41 @@ class PostgresCreditsStore:
                     "SELECT * FROM credit_accounts WHERE user_id = %s", (user_id,)
                 )
                 return dict(cur.fetchone())
+
+    def get_account_billing_state(self, user_id: int) -> dict[str, Any]:
+        _positive_integer(user_id, "user_id")
+        with self._get_connection() as conn:
+            with conn.cursor() as cur:
+                self._ensure_account_in_transaction(cur, user_id)
+                cur.execute(
+                    "SELECT status, restriction_reason FROM credit_accounts WHERE user_id = %s",
+                    (user_id,),
+                )
+                account = cur.fetchone()
+                cur.execute(
+                    """
+                    SELECT COALESCE(SUM(
+                        GREATEST(outstanding_micro - outstanding_recovered_micro, 0)
+                    ), 0) AS outstanding_micro
+                    FROM credit_llm_reservations
+                    WHERE user_id = %s AND status = 'settled'
+                    """,
+                    (user_id,),
+                )
+                outstanding = cur.fetchone()
+                reason = account["restriction_reason"]
+                if account["status"] == "restricted" and reason not in {
+                    "llm_overage",
+                    "refund_reconciliation",
+                }:
+                    reason = "refund_reconciliation"
+                return {
+                    "account_status": account["status"],
+                    "restriction_reason": reason,
+                    "outstanding_credits_micro": int(
+                        outstanding["outstanding_micro"]
+                    ),
+                }
 
     def get_balance_projection(self, user_id: int) -> dict[str, int]:
         _positive_integer(user_id, "user_id")
@@ -739,14 +881,20 @@ class PostgresCreditsStore:
             """
             SELECT id, bucket, amount_micro
             FROM credit_llm_usage_entries
-            WHERE reservation_id = %s ORDER BY id
+            WHERE reservation_id = %s AND operation_key NOT LIKE '%%:recovery:%%'
+            ORDER BY id
             """,
             (reservation["reservation_id"],),
         )
         entries = cur.fetchall()
         row = dict(reservation)
         row.update(
-            released_micro=int(row["reserved_micro"]) - int(row["settled_micro"]),
+            released_micro=max(
+                int(row["reserved_micro"]) - int(row["settled_micro"]), 0
+            ),
+            outstanding_recovered_micro=int(
+                row.get("outstanding_recovered_micro") or 0
+            ),
             grant_debited_micro=sum(-int(e["amount_micro"]) for e in entries if e["bucket"] == "grant"),
             purchased_debited_micro=sum(-int(e["amount_micro"]) for e in entries if e["bucket"] == "purchased"),
             ledger_entry_ids=tuple(int(e["id"]) for e in entries),
@@ -754,7 +902,8 @@ class PostgresCreditsStore:
         return row
 
     def reserve_llm_credits(self, *, reservation_id: str, user_id: int, run_id: str,
-                            call_index: int, reserved_micro: int,
+                            call_index: int, attempt_index: int, provider_id: str,
+                            reserved_micro: int,
                             operation_key: str, request_digest: str) -> dict[str, Any]:
         reservation_id = _required_text(reservation_id, "reservation_id", max_length=160)
         run_id = _required_text(run_id, "run_id", max_length=128)
@@ -762,8 +911,11 @@ class PostgresCreditsStore:
         request_digest = _required_text(request_digest, "request_digest", max_length=128)
         _positive_integer(user_id, "user_id")
         _positive_integer(reserved_micro, "reserved_micro")
+        provider_id = validate_provider_id(provider_id)
         if not isinstance(call_index, int) or isinstance(call_index, bool) or call_index < 0:
             raise ValueError("call_index must be a non-negative integer")
+        if not isinstance(attempt_index, int) or isinstance(attempt_index, bool) or attempt_index < 0:
+            raise ValueError("attempt_index must be a non-negative integer")
         with self._get_connection() as conn:
             with conn.cursor() as cur:
                 self._ensure_account_in_transaction(cur, user_id)
@@ -772,8 +924,8 @@ class PostgresCreditsStore:
                     (operation_key,),
                 )
                 cur.execute(
-                    "SELECT * FROM credit_llm_reservations WHERE reservation_id = %s OR operation_key = %s OR (user_id = %s AND run_id = %s AND call_index = %s) FOR UPDATE",
-                    (reservation_id, operation_key, user_id, run_id, call_index),
+                    "SELECT * FROM credit_llm_reservations WHERE reservation_id = %s OR operation_key = %s OR (user_id = %s AND run_id = %s AND call_index = %s AND attempt_index = %s) FOR UPDATE",
+                    (reservation_id, operation_key, user_id, run_id, call_index, attempt_index),
                 )
                 existing = cur.fetchone()
                 if existing:
@@ -781,14 +933,21 @@ class PostgresCreditsStore:
                             or int(existing["user_id"]) != user_id
                             or existing["run_id"] != run_id
                             or int(existing["call_index"]) != call_index
+                            or int(existing["attempt_index"]) != attempt_index
+                            or existing["provider_id"] != provider_id
                             or int(existing["reserved_micro"]) != reserved_micro
                             or existing["operation_key"] != operation_key or existing["request_digest"] != request_digest):
                         raise LLMReservationConflictError("reservation key already represents different input")
                     return dict(existing)
-                cur.execute("SELECT status FROM credit_accounts WHERE user_id = %s FOR UPDATE", (user_id,))
+                cur.execute("SELECT status, restriction_reason FROM credit_accounts WHERE user_id = %s FOR UPDATE", (user_id,))
                 account = cur.fetchone()
                 if account["status"] == "restricted":
-                    raise CreditAccountRestrictedStoreError("restricted credit account cannot reserve model usage")
+                    detail = (
+                        "refund-review credit account requires administrator review"
+                        if account.get("restriction_reason") != "llm_overage"
+                        else "credit account has an unpaid model-usage overage"
+                    )
+                    raise CreditAccountRestrictedStoreError(detail)
                 projection = self._balance_projection_in_transaction(cur, user_id)
                 if projection["total_available_micro"] < reserved_micro:
                     raise InsufficientCreditsError("insufficient available Credits")
@@ -798,14 +957,16 @@ class PostgresCreditsStore:
                 cur.execute(
                     """
                     INSERT INTO credit_llm_reservations (
-                        reservation_id, user_id, run_id, call_index,
+                        reservation_id, user_id, run_id, call_index, provider_id,
+                        attempt_index,
                         reserved_micro, reserved_grant_micro, reserved_purchased_micro,
                         operation_key, request_digest, created_at, updated_at
-                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     RETURNING *
                     """,
-                    (reservation_id, user_id, run_id, call_index, reserved_micro,
-                     reserved_grant, reserved_purchased, operation_key, request_digest, now, now),
+                    (reservation_id, user_id, run_id, call_index, provider_id,
+                     attempt_index, reserved_micro, reserved_grant, reserved_purchased,
+                     operation_key, request_digest, now, now),
                 )
                 return dict(cur.fetchone())
 
@@ -814,26 +975,75 @@ class PostgresCreditsStore:
         reservation_id = _required_text(reservation_id, "reservation_id", max_length=160)
         if not isinstance(actual_micro, int) or isinstance(actual_micro, bool) or actual_micro < 0:
             raise ValueError("actual_micro must be a non-negative integer")
-        evidence_json = json.dumps(evidence, sort_keys=True, separators=(",", ":"), ensure_ascii=True, allow_nan=False)
+        evidence_json = _evidence_json(evidence)
         with self._get_connection() as conn:
             with conn.cursor() as cur:
-                cur.execute("SELECT * FROM credit_llm_reservations WHERE reservation_id = %s FOR UPDATE", (reservation_id,))
+                cur.execute(
+                    "SELECT user_id FROM credit_llm_reservations "
+                    "WHERE reservation_id = %s",
+                    (reservation_id,),
+                )
+                owner = cur.fetchone()
+                if not owner:
+                    raise LLMReservationConflictError("reservation was not found")
+                self._ensure_account_in_transaction(cur, int(owner["user_id"]))
+                cur.execute(
+                    "SELECT status FROM credit_accounts WHERE user_id = %s FOR UPDATE",
+                    (owner["user_id"],),
+                )
+                cur.execute(
+                    "SELECT * FROM credit_llm_reservations "
+                    "WHERE reservation_id = %s FOR UPDATE",
+                    (reservation_id,),
+                )
                 reservation = cur.fetchone()
                 if not reservation:
                     raise LLMReservationConflictError("reservation was not found")
                 if reservation["status"] == "settled":
-                    if int(reservation["actual_micro"]) != actual_micro or reservation["evidence_json"] != evidence_json:
+                    if (
+                        int(reservation["actual_micro"]) != actual_micro
+                        or _evidence_identity_json(
+                            str(reservation["evidence_json"] or "")
+                        )
+                        != _evidence_identity_json(evidence_json)
+                    ):
                         raise LLMReservationConflictError("settlement replay has different input")
                     return self._llm_reservation_result(cur, reservation)
                 if reservation["status"] != "open":
                     raise LLMReservationConflictError("released reservation cannot be settled")
                 reserved_micro = int(reservation["reserved_micro"])
-                debit_micro = min(actual_micro, reserved_micro)
+                excess_micro = max(actual_micro - reserved_micro, 0)
+                supplementary_grant = 0
+                supplementary_purchased = 0
+                if excess_micro > 0:
+                    projection = self._balance_projection_in_transaction(
+                        cur, int(reservation["user_id"])
+                    )
+                    supplementary_grant = min(
+                        excess_micro,
+                        max(int(projection["grant_available_micro"]), 0),
+                    )
+                    supplementary_purchased = min(
+                        excess_micro - supplementary_grant,
+                        max(int(projection["purchased_available_micro"]), 0),
+                    )
+                supplementary_micro = supplementary_grant + supplementary_purchased
+                debit_micro = min(actual_micro, reserved_micro) + supplementary_micro
                 outstanding_micro = actual_micro - debit_micro
-                grant_debit = min(debit_micro, int(reservation["reserved_grant_micro"]))
-                purchased_debit = debit_micro - grant_debit
+                hold_debit = min(actual_micro, reserved_micro)
+                grant_debit = min(hold_debit, int(reservation["reserved_grant_micro"]))
+                purchased_debit = hold_debit - grant_debit
                 now = _utcnow_iso()
-                for bucket, amount in (("grant", grant_debit), ("purchased", purchased_debit)):
+                evidence_payload = dict(evidence)
+                evidence_payload["debited_credits_micro"] = debit_micro
+                evidence_payload["outstanding_credits_micro"] = outstanding_micro
+                settled_evidence_json = _evidence_json(evidence_payload)
+                for bucket, amount, suffix in (
+                    ("grant", grant_debit, "grant"),
+                    ("purchased", purchased_debit, "purchased"),
+                    ("grant", supplementary_grant, "overage:grant"),
+                    ("purchased", supplementary_purchased, "overage:purchased"),
+                ):
                     if amount <= 0:
                         continue
                     cur.execute(
@@ -844,19 +1054,229 @@ class PostgresCreditsStore:
                         ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
                         """,
                         (reservation["user_id"], reservation_id, reservation["run_id"], reservation["call_index"], bucket,
-                         -amount, f"{reservation['operation_key']}:{bucket}", evidence_json, now),
+                         -amount, f"{reservation['operation_key']}:{suffix}", settled_evidence_json, now),
                     )
                 cur.execute(
                     "UPDATE credit_llm_reservations SET settled_micro = %s, actual_micro = %s, outstanding_micro = %s, status = 'settled', evidence_json = %s, failure_reason = NULL, updated_at = %s WHERE reservation_id = %s RETURNING *",
-                    (debit_micro, actual_micro, outstanding_micro, evidence_json, now, reservation_id),
+                    (debit_micro, actual_micro, outstanding_micro, settled_evidence_json, now, reservation_id),
                 )
                 settled = cur.fetchone()
                 if outstanding_micro > 0:
                     cur.execute(
-                        "UPDATE credit_accounts SET status = 'restricted' WHERE user_id = %s",
+                        """
+                        UPDATE credit_accounts
+                        SET status = 'restricted', restriction_reason = 'llm_overage'
+                        WHERE user_id = %s AND status <> 'restricted'
+                        """,
                         (reservation["user_id"],),
                     )
                 return self._llm_reservation_result(cur, settled)
+
+    def recover_llm_overage(
+        self, user_id: int, *, source_operation_key: str
+    ) -> dict[str, Any]:
+        _positive_integer(user_id, "user_id")
+        source_operation_key = _required_text(
+            source_operation_key, "source_operation_key", max_length=200
+        )
+        with self._get_connection() as conn:
+            with conn.cursor() as cur:
+                return self._recover_llm_overage_in_transaction(
+                    cur, user_id, source_operation_key=source_operation_key
+                )
+
+    @staticmethod
+    def _recovery_result_for_source_operation_in_transaction(
+        cur, user_id: int, *, source_operation_key: str
+    ) -> dict[str, Any] | None:
+        cur.execute(
+            "SELECT amount_micro, evidence_json FROM credit_llm_usage_entries "
+            "WHERE user_id = %s",
+            (user_id,),
+        )
+        recovered = 0
+        for row in cur.fetchall():
+            try:
+                evidence = json.loads(row["evidence_json"])
+            except (TypeError, ValueError):
+                continue
+            if not isinstance(evidence, dict):
+                continue
+            if evidence.get("recovery_source") == source_operation_key:
+                recovered += max(-int(row["amount_micro"]), 0)
+        if recovered <= 0:
+            return None
+
+        cur.execute(
+            "SELECT status, restriction_reason FROM credit_accounts WHERE user_id = %s",
+            (user_id,),
+        )
+        account = cur.fetchone()
+        cur.execute(
+            """
+            SELECT COALESCE(SUM(
+                GREATEST(outstanding_micro - outstanding_recovered_micro, 0)
+            ), 0) AS outstanding_micro
+            FROM credit_llm_reservations
+            WHERE user_id = %s AND status = 'settled'
+            """,
+            (user_id,),
+        )
+        remaining = cur.fetchone()
+        reason = account["restriction_reason"]
+        if account["status"] == "restricted" and reason not in {
+            "llm_overage",
+            "refund_reconciliation",
+        }:
+            reason = "refund_reconciliation"
+        return {
+            "recovered_micro": recovered,
+            "outstanding_micro": int(remaining["outstanding_micro"]),
+            "account_status": account["status"],
+            "restriction_reason": reason,
+        }
+
+    @staticmethod
+    def _recover_llm_overage_in_transaction(
+        cur, user_id: int, *, source_operation_key: str
+    ) -> dict[str, Any]:
+        PostgresCreditsStore._ensure_account_in_transaction(cur, user_id)
+        cur.execute(
+            "SELECT status, restriction_reason FROM credit_accounts WHERE user_id = %s FOR UPDATE",
+            (user_id,),
+        )
+        account = cur.fetchone()
+        previous = PostgresCreditsStore._recovery_result_for_source_operation_in_transaction(
+            cur, user_id, source_operation_key=source_operation_key
+        )
+        if previous is not None:
+            return previous
+        reason = account["restriction_reason"]
+        if account["status"] != "restricted" or reason != "llm_overage":
+            return {
+                "recovered_micro": 0,
+                "outstanding_micro": 0,
+                "account_status": account["status"],
+                "restriction_reason": reason,
+            }
+        projection = PostgresCreditsStore._balance_projection_in_transaction(
+            cur, user_id
+        )
+        grant_available = max(int(projection["grant_available_micro"]), 0)
+        purchased_available = max(int(projection["purchased_available_micro"]), 0)
+        remaining_funds = grant_available + purchased_available
+        recovered_total = 0
+        cur.execute(
+            """
+            SELECT * FROM credit_llm_reservations
+            WHERE user_id = %s AND status = 'settled'
+              AND outstanding_micro > outstanding_recovered_micro
+            ORDER BY created_at, reservation_id
+            FOR UPDATE
+            """,
+            (user_id,),
+        )
+        reservations = cur.fetchall()
+        for reservation in reservations:
+            debt = max(
+                int(reservation["outstanding_micro"])
+                - int(reservation["outstanding_recovered_micro"]),
+                0,
+            )
+            amount = min(debt, remaining_funds)
+            if amount <= 0:
+                break
+            grant_debit = min(amount, grant_available)
+            purchased_debit = amount - grant_debit
+            evidence_json = json.dumps(
+                {
+                    "recovery_source": source_operation_key,
+                    "reservation_id": reservation["reservation_id"],
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=True,
+            )
+            for bucket, debit in (
+                ("grant", grant_debit),
+                ("purchased", purchased_debit),
+            ):
+                if debit <= 0:
+                    continue
+                operation_key = (
+                    f"{reservation['operation_key']}:recovery:"
+                    f"{source_operation_key}:{bucket}"
+                )
+                cur.execute(
+                    "SELECT amount_micro FROM credit_llm_usage_entries WHERE operation_key = %s",
+                    (operation_key,),
+                )
+                if cur.fetchone() is None:
+                    cur.execute(
+                        """
+                        INSERT INTO credit_llm_usage_entries (
+                            user_id, reservation_id, run_id, call_index,
+                            bucket, amount_micro, operation_key,
+                            evidence_json, created_at
+                        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        """,
+                        (
+                            user_id,
+                            reservation["reservation_id"],
+                            reservation["run_id"],
+                            reservation["call_index"],
+                            bucket,
+                            -debit,
+                            operation_key,
+                            evidence_json,
+                            _utcnow_iso(),
+                        ),
+                    )
+            cur.execute(
+                """
+                UPDATE credit_llm_reservations
+                SET outstanding_recovered_micro =
+                    outstanding_recovered_micro + %s, updated_at = %s
+                WHERE reservation_id = %s
+                """,
+                (amount, _utcnow_iso(), reservation["reservation_id"]),
+            )
+            grant_available -= grant_debit
+            purchased_available -= purchased_debit
+            remaining_funds -= amount
+            recovered_total += amount
+
+        cur.execute(
+            """
+            SELECT COALESCE(SUM(
+                GREATEST(outstanding_micro - outstanding_recovered_micro, 0)
+            ), 0) AS outstanding_micro
+            FROM credit_llm_reservations
+            WHERE user_id = %s AND status = 'settled'
+            """,
+            (user_id,),
+        )
+        outstanding = int(cur.fetchone()["outstanding_micro"])
+        if outstanding == 0:
+            cur.execute(
+                """
+                UPDATE credit_accounts
+                SET status = 'active', restriction_reason = NULL
+                WHERE user_id = %s AND status = 'restricted'
+                  AND restriction_reason = 'llm_overage'
+                """,
+                (user_id,),
+            )
+            account_status = "active"
+            reason = None
+        else:
+            account_status = "restricted"
+        return {
+            "recovered_micro": recovered_total,
+            "outstanding_micro": outstanding,
+            "account_status": account_status,
+            "restriction_reason": reason,
+        }
 
     def release_llm_credits(self, reservation_id: str, *, reason: str) -> dict[str, Any]:
         reservation_id = _required_text(reservation_id, "reservation_id", max_length=160)
@@ -878,7 +1298,7 @@ class PostgresCreditsStore:
         with self._get_connection() as conn:
             with conn.cursor() as cur:
                 cur.execute("UPDATE credit_llm_reservations SET status = 'released', failure_reason = %s, updated_at = %s WHERE run_id = %s AND status = 'open'", (reason, _utcnow_iso(), run_id))
-                cur.execute("SELECT * FROM credit_llm_reservations WHERE run_id = %s ORDER BY call_index", (run_id,))
+                cur.execute("SELECT * FROM credit_llm_reservations WHERE run_id = %s ORDER BY call_index, attempt_index, reservation_id", (run_id,))
                 return [self._llm_reservation_result(cur, row) for row in cur.fetchall()]
 
     def create_or_get_order(
@@ -1357,11 +1777,15 @@ class PostgresCreditsStore:
                     """,
                     (payment_intent_id, checkout_session_id, now, now, order_id),
                 )
+                recovery = self._recover_llm_overage_in_transaction(
+                    cur, order["user_id"], source_operation_key=operation_key
+                )
                 return {
                     "outcome": "processed",
                     "balance_micro": self._balance_in_transaction(
                         cur, order["user_id"]
                     ),
+                    **recovery,
                 }
 
     @staticmethod
@@ -1411,8 +1835,8 @@ class PostgresCreditsStore:
                         AS grant_usage_micro,
                     COALESCE(SUM(CASE WHEN bucket = 'purchased' THEN amount_micro ELSE 0 END), 0)
                         AS purchased_usage_micro
-                FROM credit_llm_usage_entries
-                WHERE user_id = %s
+                    FROM credit_llm_usage_entries
+                    WHERE user_id = %s
                 """,
                 (user_id,),
             )
@@ -1508,18 +1932,26 @@ class PostgresCreditsStore:
                 row = cur.fetchone()
                 return dict(row) if row else None
 
-    def restrict_account(self, user_id: int) -> dict[str, Any]:
+    def restrict_account(
+        self,
+        user_id: int,
+        *,
+        reason: str = "refund_reconciliation",
+    ) -> dict[str, Any]:
         _positive_integer(user_id, "user_id")
+        if reason not in {"llm_overage", "refund_reconciliation"}:
+            raise ValueError("invalid account restriction reason")
         with self._get_connection() as conn:
             with conn.cursor() as cur:
                 self._ensure_account_in_transaction(cur, user_id)
                 cur.execute(
                     """
-                    UPDATE credit_accounts SET status = 'restricted'
+                    UPDATE credit_accounts
+                    SET status = 'restricted', restriction_reason = %s
                     WHERE user_id = %s
                     RETURNING *
                     """,
-                    (user_id,),
+                    (reason, user_id),
                 )
                 return dict(cur.fetchone())
 
@@ -1531,7 +1963,7 @@ class PostgresCreditsStore:
                 self._ensure_account_in_transaction(cur, user_id)
                 cur.execute(
                     """
-                    UPDATE credit_accounts SET status = 'active'
+                    UPDATE credit_accounts SET status = 'active', restriction_reason = NULL
                     WHERE user_id = %s
                     RETURNING *
                     """,
@@ -1619,6 +2051,7 @@ class PostgresCreditsStore:
                                NULL::TEXT AS evidence_json
                         FROM credit_llm_usage_entries
                         WHERE user_id = %s
+                          AND operation_key NOT LIKE '%%:recovery:%%'
                         GROUP BY user_id, run_id
                     ),
                     promotion_activity AS (
@@ -1675,6 +2108,7 @@ class PostgresCreditsStore:
                         SELECT DISTINCT run_id, evidence_json
                         FROM credit_llm_usage_entries
                         WHERE user_id = %s AND run_id = ANY(%s)
+                          AND operation_key NOT LIKE '%%:recovery:%%'
                         """,
                         (user_id, run_ids),
                     )
@@ -2518,7 +2952,7 @@ class PostgresCreditsStore:
                     self._ensure_account_in_transaction(cur, int(user_id))
                     cur.execute(
                         """
-                        SELECT status FROM credit_accounts
+                        SELECT status, restriction_reason FROM credit_accounts
                         WHERE user_id = %s FOR UPDATE
                         """,
                         (user_id,),
@@ -2560,7 +2994,14 @@ class PostgresCreditsStore:
                         raise IdempotencyConflictError(
                             "Grant idempotency key conflicts with an existing operation"
                         )
-                    return self._grant_mutation_result_in_transaction(cur, existing)
+                    result = self._grant_mutation_result_in_transaction(cur, existing)
+                    if operation_type == "assign":
+                        recovery = self._recovery_result_for_source_operation_in_transaction(
+                            cur, int(user_id), source_operation_key=operation_id
+                        )
+                        if recovery is not None:
+                            result["recovery"] = recovery
+                    return result
 
                 pool_balance = self._pool_balance_in_transaction(cur, pool_id)
                 if (
@@ -2574,9 +3015,12 @@ class PostgresCreditsStore:
                 user_entry_id = None
                 created_at = _utcnow_iso()
                 if operation_type == "assign":
-                    if account["status"] == "restricted":
+                    if (
+                        account["status"] == "restricted"
+                        and account["restriction_reason"] != "llm_overage"
+                    ):
                         raise CreditAccountRestrictedStoreError(
-                            "restricted credit account cannot receive Grant Credits"
+                            "refund-review credit account requires administrator review"
                         )
                     user_entry_id = self._insert_user_grant_entry_in_transaction(
                         cur,
@@ -2639,7 +3083,16 @@ class PostgresCreditsStore:
                     (pool_entry_id,),
                 )
                 pool_entry = cur.fetchone()
-                return self._grant_mutation_result_in_transaction(cur, pool_entry)
+                if operation_type == "assign":
+                    recovery = self._recover_llm_overage_in_transaction(
+                        cur, int(user_id), source_operation_key=operation_id
+                    )
+                else:
+                    recovery = {}
+                result = self._grant_mutation_result_in_transaction(cur, pool_entry)
+                if recovery.get("recovered_micro", 0) > 0:
+                    result["recovery"] = recovery
+                return result
 
     def fund_grant_pool(self, **kwargs: Any) -> dict[str, Any]:
         return self._grant_mutation(operation_type="fund", **kwargs)

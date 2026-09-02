@@ -424,6 +424,19 @@ def test_platform_resolver_uses_openrouter_environment_key_when_store_is_empty(
     assert resolved.secret == "sk-or-env-test-abcd"
 
 
+def test_commonstack_platform_credential_uses_explicit_environment_mapping(
+    tmp_path, monkeypatch
+):
+    service, _store = _service(tmp_path, FakeAdapter())
+    monkeypatch.setenv("COMMONSTACK_API_KEY", "cs-fake-environment-abcd")
+
+    resolved = service.resolve_platform_credential("commonstack")
+
+    assert resolved.provider_id == "commonstack"
+    assert resolved.key_last_four == "abcd"
+    assert resolved.secret == "cs-fake-environment-abcd"
+
+
 def test_verified_stored_platform_credential_precedes_environment_key(
     tmp_path, monkeypatch
 ):
@@ -440,6 +453,40 @@ def test_verified_stored_platform_credential_precedes_environment_key(
 
     assert resolved.key_last_four == "wxyz"
     assert resolved.secret == "sk-or-stored-test-wxyz"
+
+
+def test_verified_stored_commonstack_credential_precedes_environment_key(
+    tmp_path, monkeypatch
+):
+    service, store = _service(tmp_path, FakeAdapter())
+    store.upsert_platform_credential(
+        provider_id="commonstack",
+        secret="cs-fake-stored-test-wxyz",
+        status="verified",
+    )
+    monkeypatch.setenv("COMMONSTACK_API_KEY", "cs-fake-environment-abcd")
+
+    resolved = service.resolve_platform_credential("commonstack")
+
+    assert resolved.key_last_four == "wxyz"
+    assert resolved.secret == "cs-fake-stored-test-wxyz"
+
+
+def test_execution_options_keep_openrouter_ahead_of_commonstack(
+    tmp_path, monkeypatch
+):
+    service, _store = _service(tmp_path, FakeAdapter())
+    monkeypatch.setenv("OPENROUTER_API_KEY", "or-fake-options-abcd")
+    monkeypatch.setenv("COMMONSTACK_API_KEY", "cs-fake-options-wxyz")
+
+    provider_ids = [
+        option.provider_id
+        for option in service.list_execution_options(7)
+        if option.platform_credits_available
+    ]
+
+    assert provider_ids.index("openrouter") < provider_ids.index("commonstack")
+    assert "cs-fake-options-wxyz" not in repr(service.list_execution_options(7))
 
 
 def test_environment_fallback_is_provider_specific_and_fails_closed(

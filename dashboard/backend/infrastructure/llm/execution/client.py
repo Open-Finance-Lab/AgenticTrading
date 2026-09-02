@@ -152,18 +152,25 @@ class AnthropicCompatibleExecutionClient:
         if not self._completed_results:
             return None
 
-        expected_identity = (
-            self.handoff.billing_mode,
-            self.handoff.provider_id,
-            self.handoff.model_id,
-        )
         for result in self._completed_results:
             if (
                 result.billing.billing_source,
-                result.provider_id,
                 result.model_id,
-            ) != expected_identity:
+            ) != (self.handoff.billing_mode, self.handoff.model_id):
                 raise RuntimeError("inconsistent LLM execution identity")
+
+        requested_provider_ids = {
+            result.requested_provider_id or self.handoff.provider_id
+            for result in self._completed_results
+        }
+        if requested_provider_ids != {self.handoff.provider_id}:
+            raise RuntimeError("inconsistent requested LLM provider identity")
+
+        provider_ids = tuple(
+            dict.fromkeys(result.provider_id for result in self._completed_results)
+        )
+        provider_mixed = len(provider_ids) > 1
+        provider_id = "mixed" if provider_mixed else provider_ids[0]
 
         first = self._completed_results[0]
 
@@ -171,9 +178,13 @@ class AnthropicCompatibleExecutionClient:
             result.billing.pricing_snapshot for result in self._completed_results
         ]
         pricing_snapshot = (
-            snapshots[0]
-            if all(snapshot == snapshots[0] for snapshot in snapshots[1:])
-            else None
+            None
+            if provider_mixed
+            else (
+                snapshots[0]
+                if all(snapshot == snapshots[0] for snapshot in snapshots[1:])
+                else None
+            )
         )
 
         usage_available = all(
@@ -193,6 +204,16 @@ class AnthropicCompatibleExecutionClient:
         credential_last_fours = {
             result.credential_key_last_four for result in self._completed_results
         }
+        credential_id = (
+            None
+            if provider_mixed or len(credential_ids) != 1
+            else credential_ids.pop()
+        )
+        credential_key_last_four = (
+            None
+            if provider_mixed or len(credential_last_fours) != 1
+            else credential_last_fours.pop()
+        )
 
         if not usage_available:
             outcome = "unavailable"
@@ -205,14 +226,13 @@ class AnthropicCompatibleExecutionClient:
 
         return LLMRunEvidence(
             billing_mode=self.handoff.billing_mode,
-            provider_id=first.provider_id,
+            provider_id=provider_id,
+            requested_provider_id=self.handoff.provider_id,
+            provider_ids=provider_ids,
+            provider_mixed=provider_mixed,
             model_id=first.model_id,
-            credential_id=(credential_ids.pop() if len(credential_ids) == 1 else None),
-            credential_key_last_four=(
-                credential_last_fours.pop()
-                if len(credential_last_fours) == 1
-                else None
-            ),
+            credential_id=credential_id,
+            credential_key_last_four=credential_key_last_four,
             call_count=len(self._completed_results),
             input_tokens=sum(
                 result.usage.input_tokens for result in self._completed_results
