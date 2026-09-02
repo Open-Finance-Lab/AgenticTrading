@@ -236,10 +236,6 @@ class ModelProviderService:
         for provider_id in (preferred, "openrouter", "commonstack"):
             if provider_id and provider_id not in ordered_ids:
                 ordered_ids.append(provider_id)
-        for provider_id in providers:
-            if provider_id not in ordered_ids:
-                ordered_ids.append(provider_id)
-
         candidates: list[str] = []
         for provider_id in ordered_ids:
             provider = providers.get(provider_id)

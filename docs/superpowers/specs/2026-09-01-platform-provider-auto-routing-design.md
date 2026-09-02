@@ -19,7 +19,7 @@ When a user runs an LLM backtest with `Use ATL Credits`, the UI exposes only the
 
 ## Architecture
 
-The browser continues to load `/api/credits/execution-options`, but treats platform providers as one ATL Credits inventory. It sends `billing_mode=platform_credits`, `model`, and no user-selected provider. The route resolves the first compatible enabled platform credential in preferred order (`openrouter`, then `commonstack`) and signs that choice into the handoff. The execution service retries the same catalog model through the next candidate when the first attempt returns a failover-safe category; each attempt owns an independent reservation and settlement lifecycle.
+The browser continues to load `/api/credits/execution-options`, but treats OpenRouter and CommonStack platform models as one ATL Credits inventory. It sends `billing_mode=platform_credits`, `model`, and no user-selected provider. The route resolves the first compatible enabled platform credential in preferred order (`openrouter`, then `commonstack`) and signs that choice into the handoff. The execution service retries the same catalog model through the next candidate when the first attempt returns a failover-safe category; each attempt owns an independent reservation and settlement lifecycle.
 
 The signed handoff carries the ordered provider candidates so the worker can make the same decision without trusting client input. Existing BYOK handoffs remain single-provider. A fallback result uses the original requested provider in `requested_provider_id` and the successful provider in `provider_id`, preserving analytics and run evidence.
 

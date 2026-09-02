@@ -12,7 +12,7 @@
 
 ## Global Constraints
 
-- Platform order is `openrouter` then `commonstack`.
+- Automatic ATL Credits candidates are limited to `openrouter` then `commonstack`.
 - Only `credential_missing`, `credential_invalid`, `provider_unavailable`, `provider_timeout`, and `provider_quota_exhausted` may trigger provider failover.
 - Never fail over ATL account restrictions, response validation, usage-unavailable, or billing failures.
 - BYOK remains explicit-provider and never uses platform fallback.
