@@ -28,8 +28,11 @@ from dashboard.backend.users import (
     CREDITS_SPEND_POSTGRES,
     EMAIL_CHANGE_TTL_MINUTES,
     ENTITLEMENTS_UPSERT_POSTGRES,
+    PASSWORD_RESET_MAX_ATTEMPTS,
+    PASSWORD_RESET_TTL_MINUTES,
     USER_COUNTS_SQL,
     VALID_ROLES,
+    _expiry_iso,
     _utcnow,
     _utcnow_iso,
     admin_user_rows_to_payloads,
@@ -180,6 +183,26 @@ class PostgresUserStore:
                     """
                     CREATE INDEX IF NOT EXISTS idx_email_change_requests_user_id
                     ON email_change_requests(user_id)
+                    """
+                )
+                cur.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS password_reset_requests (
+                        id SERIAL PRIMARY KEY,
+                        user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                        code_hash TEXT NOT NULL,
+                        attempts INTEGER NOT NULL DEFAULT 0,
+                        created_at TEXT NOT NULL,
+                        expires_at TEXT NOT NULL,
+                        used_at TEXT,
+                        cancelled_at TEXT
+                    )
+                    """
+                )
+                cur.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS idx_password_reset_requests_user_id
+                    ON password_reset_requests(user_id)
                     """
                 )
                 cur.execute(
@@ -437,11 +460,7 @@ class PostgresUserStore:
         return public_user(row)
 
     def _email_change_expiry(self) -> str:
-        return (
-            (_utcnow() + timedelta(minutes=EMAIL_CHANGE_TTL_MINUTES))
-            .replace(microsecond=0)
-            .isoformat()
-        )
+        return _expiry_iso(EMAIL_CHANGE_TTL_MINUTES)
 
     def create_email_change_request(
         self, user_id: int, new_email: str, code_hash: str
@@ -593,6 +612,140 @@ class PostgresUserStore:
                 cur.execute(
                     """
                     SELECT created_at FROM email_change_requests
+                    WHERE user_id = %s AND created_at >= %s
+                    ORDER BY created_at ASC
+                    """,
+                    (user_id, since),
+                )
+                rows = cur.fetchall()
+        return [str(row["created_at"]) for row in rows]
+
+    def _password_reset_expiry(self) -> str:
+        return _expiry_iso(PASSWORD_RESET_TTL_MINUTES)
+
+    def create_password_reset_request(
+        self, user_id: int, code_hash: str
+    ) -> Dict[str, Any]:
+        """Supersede any in-flight reset request with a fresh one.
+
+        Cancel + insert in one transaction (the connection context manager),
+        for the same racing-creates reason as the SQLite twin.
+        """
+        with self._get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE password_reset_requests SET cancelled_at = %s
+                    WHERE user_id = %s AND used_at IS NULL AND cancelled_at IS NULL
+                    """,
+                    (_utcnow_iso(), user_id),
+                )
+                cur.execute(
+                    """
+                    INSERT INTO password_reset_requests
+                        (user_id, code_hash, created_at, expires_at)
+                    VALUES (%s, %s, %s, %s)
+                    RETURNING *
+                    """,
+                    (user_id, code_hash, _utcnow_iso(), self._password_reset_expiry()),
+                )
+                row = cur.fetchone()
+        return dict(row)
+
+    def get_active_password_reset(self, user_id: int) -> Optional[Dict[str, Any]]:
+        """The user's in-flight reset, or None if absent, used, cancelled, or expired."""
+        with self._get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT * FROM password_reset_requests
+                    WHERE user_id = %s AND used_at IS NULL AND cancelled_at IS NULL
+                    ORDER BY id DESC LIMIT 1
+                    """,
+                    (user_id,),
+                )
+                row = cur.fetchone()
+        if not row or is_expired(row["expires_at"]):
+            return None
+        return dict(row)
+
+    def record_password_reset_attempt(self, request_id: int) -> int:
+        """Count one wrong code; cancel at the cap (see the SQLite twin).
+
+        Same single conditional UPDATE, so the 5-attempt guarantee holds under
+        concurrency here too.
+        """
+        with self._get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE password_reset_requests
+                    SET attempts = attempts + 1,
+                        cancelled_at = CASE
+                            WHEN attempts + 1 >= %s THEN %s ELSE NULL
+                        END
+                    WHERE id = %s AND used_at IS NULL AND cancelled_at IS NULL
+                        AND attempts < %s
+                    RETURNING attempts
+                    """,
+                    (
+                        PASSWORD_RESET_MAX_ATTEMPTS,
+                        _utcnow_iso(),
+                        request_id,
+                        PASSWORD_RESET_MAX_ATTEMPTS,
+                    ),
+                )
+                row = cur.fetchone()
+        if not row:
+            return PASSWORD_RESET_MAX_ATTEMPTS
+        return int(row["attempts"])
+
+    def mark_password_reset_used(self, request_id: int) -> bool:
+        """Consume the code: the CAS only one concurrent redeem can win."""
+        with self._get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE password_reset_requests SET used_at = %s
+                    WHERE id = %s AND used_at IS NULL AND cancelled_at IS NULL
+                    """,
+                    (_utcnow_iso(), request_id),
+                )
+                return cur.rowcount == 1
+
+    def cancel_password_reset(self, user_id: int) -> None:
+        """Deactivate without deleting, scoped to still-active rows."""
+        with self._get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE password_reset_requests SET cancelled_at = %s
+                    WHERE user_id = %s AND used_at IS NULL AND cancelled_at IS NULL
+                    """,
+                    (_utcnow_iso(), user_id),
+                )
+
+    def last_password_reset_request_at(self, user_id: int) -> Optional[str]:
+        """Status-blind cooldown read (see the SQLite twin)."""
+        with self._get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT created_at FROM password_reset_requests
+                    WHERE user_id = %s ORDER BY id DESC LIMIT 1
+                    """,
+                    (user_id,),
+                )
+                row = cur.fetchone()
+        return str(row["created_at"]) if row else None
+
+    def password_reset_request_times_since(self, user_id: int, since: str) -> List[str]:
+        """created_at of every request at or after `since`, oldest first."""
+        with self._get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT created_at FROM password_reset_requests
                     WHERE user_id = %s AND created_at >= %s
                     ORDER BY created_at ASC
                     """,

@@ -64,6 +64,20 @@ EMAIL_CHANGE_MAX_ATTEMPTS = 5
 EMAIL_CHANGE_COOLDOWN_SECONDS = 60
 EMAIL_CHANGE_MAX_REQUESTS_PER_DAY = 3
 EMAIL_CHANGE_MIN_INTERVAL_DAYS = 7
+# Password-reset flow (#187). Same code machinery as email-change, but the
+# requester is anonymous, so the cooldown and daily cap are the durable
+# backstop behind api/auth.py's in-process limiters (which reset on redeploy).
+PASSWORD_RESET_TTL_MINUTES = 15
+PASSWORD_RESET_MAX_ATTEMPTS = 5
+PASSWORD_RESET_COOLDOWN_SECONDS = 300
+PASSWORD_RESET_MAX_REQUESTS_PER_DAY = 5
+
+
+def _expiry_iso(minutes: int) -> str:
+    """Shared expiry stamp for the emailed-code request writers (email change
+    and password reset); microseconds dropped so the stored form stays
+    fixed-width for the string-comparison window reads."""
+    return (_utcnow() + timedelta(minutes=minutes)).replace(microsecond=0).isoformat()
 
 
 def _utcnow() -> datetime:
@@ -763,6 +777,30 @@ class UserStore:
         )
         cursor.execute(
             """
+            CREATE TABLE IF NOT EXISTS password_reset_requests (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                code_hash TEXT NOT NULL,
+                attempts INTEGER NOT NULL DEFAULT 0,
+                created_at TIMESTAMP NOT NULL,
+                expires_at TIMESTAMP NOT NULL,
+                used_at TIMESTAMP,
+                cancelled_at TIMESTAMP,
+                -- Declared but not enforced on SQLite; the Postgres twin does
+                -- enforce it. Same trade-off, same reasons, as the
+                -- email_change_requests FK note above.
+                FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+            )
+            """
+        )
+        cursor.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_password_reset_requests_user_id
+            ON password_reset_requests(user_id)
+            """
+        )
+        cursor.execute(
+            """
             CREATE TABLE IF NOT EXISTS user_entitlements (
                 user_id INTEGER PRIMARY KEY,
                 max_concurrent_backtests INTEGER NOT NULL DEFAULT 1,
@@ -1056,11 +1094,7 @@ class UserStore:
         return public_user(row)
 
     def _email_change_expiry(self) -> str:
-        return (
-            (_utcnow() + timedelta(minutes=EMAIL_CHANGE_TTL_MINUTES))
-            .replace(microsecond=0)
-            .isoformat()
-        )
+        return _expiry_iso(EMAIL_CHANGE_TTL_MINUTES)
 
     def create_email_change_request(
         self, user_id: int, new_email: str, code_hash: str
@@ -1262,6 +1296,186 @@ class UserStore:
         cursor.execute(
             """
             SELECT created_at FROM email_change_requests
+            WHERE user_id = ? AND created_at >= ?
+            ORDER BY created_at ASC
+            """,
+            (user_id, since),
+        )
+        rows = cursor.fetchall()
+        conn.close()
+        return [str(row["created_at"]) for row in rows]
+
+    def _password_reset_expiry(self) -> str:
+        return _expiry_iso(PASSWORD_RESET_TTL_MINUTES)
+
+    def create_password_reset_request(
+        self, user_id: int, code_hash: str
+    ) -> Dict[str, Any]:
+        """Supersede any in-flight reset request with a fresh one.
+
+        Cancel + insert ride one transaction on one connection, so two racing
+        creates cannot leave the earlier-delivered code alive: last write wins
+        cleanly, and the loser's code fails as "no active row". Supersede, not
+        DELETE -- the append-only log is what the cooldown and daily cap read.
+        """
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            UPDATE password_reset_requests SET cancelled_at = ?
+            WHERE user_id = ? AND used_at IS NULL AND cancelled_at IS NULL
+            """,
+            (_utcnow_iso(), user_id),
+        )
+        cursor.execute(
+            """
+            INSERT INTO password_reset_requests
+                (user_id, code_hash, created_at, expires_at)
+            VALUES (?, ?, ?, ?)
+            """,
+            (user_id, code_hash, _utcnow_iso(), self._password_reset_expiry()),
+        )
+        conn.commit()
+        request_id = cursor.lastrowid
+        cursor.execute(
+            "SELECT * FROM password_reset_requests WHERE id = ?", (request_id,)
+        )
+        row = cursor.fetchone()
+        conn.close()
+        return dict(row)
+
+    def get_active_password_reset(self, user_id: int) -> Optional[Dict[str, Any]]:
+        """The user's in-flight reset, or None if absent, used, cancelled, or expired.
+
+        Expiry lives here, not in the route, mirroring get_active_email_change.
+        """
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT * FROM password_reset_requests
+            WHERE user_id = ? AND used_at IS NULL AND cancelled_at IS NULL
+            ORDER BY id DESC LIMIT 1
+            """,
+            (user_id,),
+        )
+        row = cursor.fetchone()
+        conn.close()
+        if not row or is_expired(row["expires_at"]):
+            return None
+        return dict(row)
+
+    def record_password_reset_attempt(self, request_id: int) -> int:
+        """Count one wrong code; cancel the request when the cap is reached.
+
+        One conditional UPDATE, not read-then-write: the 5-attempt cap is
+        stated as a guarantee, so it must hold under a concurrent burst. The
+        ``attempts < cap`` predicate and the cancelling CASE evaluate under the
+        row lock the UPDATE takes, so no interleaving can push attempts past
+        the cap or leave a capped row active. Returns the attempt count after
+        this call; a row that is already inactive (capped, used, or cancelled
+        by a concurrent caller) reports the cap.
+        """
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            UPDATE password_reset_requests
+            SET attempts = attempts + 1,
+                cancelled_at = CASE
+                    WHEN attempts + 1 >= ? THEN ? ELSE NULL
+                END
+            WHERE id = ? AND used_at IS NULL AND cancelled_at IS NULL
+                AND attempts < ?
+            """,
+            (
+                PASSWORD_RESET_MAX_ATTEMPTS,
+                _utcnow_iso(),
+                request_id,
+                PASSWORD_RESET_MAX_ATTEMPTS,
+            ),
+        )
+        counted = cursor.rowcount == 1
+        conn.commit()
+        if not counted:
+            conn.close()
+            return PASSWORD_RESET_MAX_ATTEMPTS
+        cursor.execute(
+            "SELECT attempts FROM password_reset_requests WHERE id = ?",
+            (request_id,),
+        )
+        row = cursor.fetchone()
+        conn.close()
+        if not row:
+            raise ValueError("password_reset_request_not_found")
+        return int(row["attempts"])
+
+    def mark_password_reset_used(self, request_id: int) -> bool:
+        """Consume the code: a compare-and-swap only one caller can win.
+
+        Acting on rowcount is what makes redemption single-use under
+        concurrency -- the loser of two simultaneous redeems sees False and
+        reports the generic failure instead of also resetting the password.
+        """
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            UPDATE password_reset_requests SET used_at = ?
+            WHERE id = ? AND used_at IS NULL AND cancelled_at IS NULL
+            """,
+            (_utcnow_iso(), request_id),
+        )
+        won = cursor.rowcount == 1
+        conn.commit()
+        conn.close()
+        return won
+
+    def cancel_password_reset(self, user_id: int) -> None:
+        """Deactivate without deleting, scoped to still-active rows.
+
+        Same shape as cancel_email_change: the row must survive for the
+        status-blind cooldown reads, and an already-used row keeps its used_at.
+        """
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            UPDATE password_reset_requests SET cancelled_at = ?
+            WHERE user_id = ? AND used_at IS NULL AND cancelled_at IS NULL
+            """,
+            (_utcnow_iso(), user_id),
+        )
+        conn.commit()
+        conn.close()
+
+    def last_password_reset_request_at(self, user_id: int) -> Optional[str]:
+        """Status-blind: cancelled/used rows still gate the cooldown, so
+        cancelling can never be used to mint codes faster."""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT created_at FROM password_reset_requests
+            WHERE user_id = ? ORDER BY id DESC LIMIT 1
+            """,
+            (user_id,),
+        )
+        row = cursor.fetchone()
+        conn.close()
+        return str(row["created_at"]) if row else None
+
+    def password_reset_request_times_since(self, user_id: int, since: str) -> List[str]:
+        """created_at of every request at or after `since`, oldest first.
+
+        String comparison over the fixed-width ISO-8601 form both twins write;
+        see email_change_request_times_since for why that is sound.
+        """
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT created_at FROM password_reset_requests
             WHERE user_id = ? AND created_at >= ?
             ORDER BY created_at ASC
             """,

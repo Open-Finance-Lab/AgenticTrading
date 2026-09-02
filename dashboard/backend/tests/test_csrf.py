@@ -362,3 +362,44 @@ def test_analytics_ingestion_requires_csrf_for_cookie_session(
     assert blocked.status_code == 403
     assert "CSRF" in blocked.json()["detail"]
     assert allowed.status_code == 202, allowed.text
+
+
+def test_password_reset_routes_are_reachable_with_a_stale_session_cookie(csrf_client):
+    """Same lockout class as login/signup: an unauthenticated browser POST a
+    visitor with a dead session cookie (and no CSRF cookie) must still be able
+    to make. Reaching the route's own logic -- a 503 for unconfigured Brevo, a
+    400 for a bad code -- proves the CSRF gate stepped aside; a 403 here is
+    the lockout."""
+    _signup(csrf_client, email="stale-reset@example.com")
+    csrf_client.cookies.delete(csrf_cookie_name())
+
+    forgot = csrf_client.post(
+        "/api/auth/forgot-password",
+        json={"email": "stale-reset@example.com"},
+        headers={"Origin": "http://testserver"},
+    )
+    # Brevo is unconfigured in tests, so the route itself answers 503 -- the
+    # point is that it answered, not the CSRF middleware.
+    assert forgot.status_code == 503, forgot.text
+
+    reset = csrf_client.post(
+        "/api/auth/reset-password",
+        json={
+            "email": "stale-reset@example.com",
+            "code": "ABC234",
+            "new_password": "fresh-sturdy-pw-3",
+        },
+        headers={"Origin": "http://testserver"},
+    )
+    assert reset.status_code == 400, reset.text
+    assert "CSRF" not in str(reset.json().get("detail", ""))
+
+
+def test_password_reset_routes_still_reject_a_disallowed_origin(csrf_client):
+    blocked = csrf_client.post(
+        "/api/auth/forgot-password",
+        json={"email": "stale-reset@example.com"},
+        headers={"Origin": "https://evil.example"},
+    )
+    assert blocked.status_code == 403
+    assert "Cross-origin" in blocked.json()["detail"]

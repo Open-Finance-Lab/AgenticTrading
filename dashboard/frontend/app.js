@@ -3249,6 +3249,20 @@ const AuthAPI = {
     return this.request('/api/auth/email-change', { method: 'DELETE' });
   },
 
+  requestPasswordReset(email) {
+    return this.request('/api/auth/forgot-password', {
+      method: 'POST',
+      body: JSON.stringify({ email }),
+    });
+  },
+
+  resetPassword(email, code, newPassword) {
+    return this.request('/api/auth/reset-password', {
+      method: 'POST',
+      body: JSON.stringify({ email, code, new_password: newPassword }),
+    });
+  },
+
   discordStart() {
     return this.request('/api/auth/discord/start', { method: 'POST' });
   },
@@ -3337,6 +3351,8 @@ function clearAuthState() {
   // half-finished change. Reset here -- every sign-out path (logout button,
   // missing token, expired session) funnels through clearAuthState.
   resetEmailChangeForm();
+  // Same closure hazard for the login modal's password-reset stage.
+  resetPasswordResetForm();
   updateAuthUI();
 }
 
@@ -3964,6 +3980,21 @@ function renderEmailChangeState(state) {
 // clearAuthState() firing before init (e.g. token expiry on page load).
 let resetEmailChangeForm = () => {};
 
+// Same pattern for the login modal's password-reset flow: rebound by
+// initAuthUI(), called from clearAuthState() so a second user on the same tab
+// never resumes a half-finished reset, and from setAuthMode() so any mode
+// switch restarts the flow at stage 1.
+let resetPasswordResetForm = () => {};
+
+// Masks the user's OWN typed input for the stage-2 reassurance copy. Masking
+// stored account data pre-submission would be an enumeration oracle; masking
+// their own input is pure reassurance and never touches the server.
+function maskEmailForDisplay(email) {
+  const [local = '', domain = ''] = String(email).split('@');
+  const keep = local.length <= 3 ? 1 : 3;
+  return `${local.slice(0, keep)}•••@${domain}`;
+}
+
 function initEmailChangeForm() {
   const form = document.getElementById('accountEmailForm');
   if (!form) return;
@@ -4213,19 +4244,36 @@ function setAuthMode(mode) {
   const displayNameField = document.getElementById('authDisplayNameField');
   const displayNameInput = document.getElementById('authDisplayName');
 
-  if (title) title.textContent = mode === 'signup' ? 'Sign up' : 'Sign in';
-  if (subtitle) {
-    subtitle.textContent = 'Optional — backtest and paper trading work without an account.';
+  const passwordField = document.getElementById('authPasswordField');
+  const forgotBtn = document.getElementById('authForgotPasswordBtn');
+
+  if (title) {
+    title.textContent = mode === 'signup' ? 'Sign up' : mode === 'reset' ? 'Reset password' : 'Sign in';
   }
-  if (submitBtn) submitBtn.textContent = mode === 'signup' ? 'Create account' : 'Sign in';
+  if (subtitle) {
+    subtitle.textContent = mode === 'reset'
+      ? "Enter your account email and we'll send a 6-character reset code."
+      : 'Optional — backtest and paper trading work without an account.';
+  }
+  if (submitBtn) {
+    submitBtn.textContent = mode === 'signup' ? 'Create account' : mode === 'reset' ? 'Send code' : 'Sign in';
+  }
   if (switchBtn) {
     switchBtn.textContent = mode === 'signup'
       ? 'Already have an account? Sign in'
-      : 'Need an account? Sign up';
+      : mode === 'reset'
+        ? 'Back to sign in'
+        : 'Need an account? Sign up';
   }
   if (passwordInput) {
     passwordInput.autocomplete = mode === 'signup' ? 'new-password' : 'current-password';
+    // required must drop with the field: a hidden required input fails native
+    // form validation silently, so stage-1 submits would no-op forever.
+    passwordInput.required = mode !== 'reset';
+    if (mode === 'reset') passwordInput.value = '';
   }
+  if (passwordField) passwordField.hidden = mode === 'reset';
+  if (forgotBtn) forgotBtn.hidden = mode !== 'login';
   if (displayNameField) {
     displayNameField.hidden = mode !== 'signup';
   }
@@ -4237,6 +4285,9 @@ function setAuthMode(mode) {
   }
   if (errorEl) errorEl.hidden = true;
   renderPolicyHints(document.getElementById('authPasswordHints'), []);
+  // Any mode switch restarts the reset flow at stage 1 (closure state must
+  // not survive leaving and re-entering reset mode).
+  resetPasswordResetForm();
   updateAuthUI();
 }
 
@@ -4251,7 +4302,7 @@ function openAuthModal(mode = 'login') {
 function openAuthFromUrl() {
   const params = new URLSearchParams(window.location.search);
   const auth = (params.get('auth') || '').toLowerCase();
-  if (auth !== 'login' && auth !== 'signup') return;
+  if (auth !== 'login' && auth !== 'signup' && auth !== 'reset') return;
 
   // Already signed in — stay on the dashboard, no modal.
   if (isSignedIn()) {
@@ -4262,7 +4313,7 @@ function openAuthFromUrl() {
     return;
   }
 
-  openAuthModal(auth === 'signup' ? 'signup' : 'login');
+  openAuthModal(auth === 'signup' ? 'signup' : auth === 'reset' ? 'reset' : 'login');
   params.delete('auth');
   const clean = params.toString();
   const next = `${window.location.pathname}${clean ? `?${clean}` : ''}${window.location.hash}`;
@@ -4564,7 +4615,39 @@ function initAuthUI(options = {}) {
   closeBtn?.addEventListener('click', closeAuthModal);
   backdrop?.addEventListener('click', closeAuthModal);
   switchBtn?.addEventListener('click', () => {
-    setAuthMode(authMode === 'signup' ? 'login' : 'signup');
+    // In reset mode the button reads "Back to sign in", so both non-login
+    // modes route back to login; login still toggles to signup.
+    setAuthMode(authMode === 'signup' || authMode === 'reset' ? 'login' : 'signup');
+  });
+
+  // Password-reset mode: two stages in one form, stage held in a closure
+  // (the email-change pattern).
+  let resetStage = 1;
+  const resetCodeStep = document.getElementById('resetCodeStep');
+  const resetSentCopy = document.getElementById('resetSentCopy');
+  const resetCodeInput = document.getElementById('resetCodeInput');
+  const resetNewPassword = document.getElementById('resetNewPassword');
+  const resetHints = document.getElementById('resetPasswordHints');
+
+  resetPasswordResetForm = () => {
+    resetStage = 1;
+    if (resetCodeStep) resetCodeStep.hidden = true;
+    if (resetSentCopy) resetSentCopy.textContent = '';
+    if (resetCodeInput) resetCodeInput.value = '';
+    if (resetNewPassword) resetNewPassword.value = '';
+    renderPolicyHints(resetHints, []);
+  };
+
+  document.getElementById('authForgotPasswordBtn')?.addEventListener('click', () => {
+    setAuthMode('reset');
+  });
+
+  // The existing #authPassword hint listener is hard-gated to signup mode;
+  // the reset flow's new-password field gets its own listener instead of
+  // widening that gate.
+  resetNewPassword?.addEventListener('input', () => {
+    const email = document.getElementById('authEmail')?.value || '';
+    renderPolicyHints(resetHints, localPasswordViolations(resetNewPassword.value, email));
   });
 
   document.getElementById('authPassword')?.addEventListener('input', (event) => {
@@ -4587,6 +4670,54 @@ function initAuthUI(options = {}) {
     const password = document.getElementById('authPassword')?.value;
     const errorEl = document.getElementById('authError');
     const submitBtn = document.getElementById('authSubmitBtn');
+
+    if (authMode === 'reset') {
+      // Before the shared email/password guard below (reset mode has no
+      // password field, so that guard would silently no-op stage 1) and fully
+      // separate from the login/signup success path — none of the signed-in
+      // bookkeeping may run for a reset.
+      if (!email) return;
+      submitBtn.disabled = true;
+      if (errorEl) errorEl.hidden = true;
+      try {
+        if (resetStage === 1) {
+          await AuthAPI.requestPasswordReset(email);
+          resetStage = 2;
+          if (resetSentCopy) {
+            // textContent, never innerHTML: the address is user-typed.
+            resetSentCopy.textContent = `We sent a 6-character code to ${maskEmailForDisplay(email)} — it expires in 15 minutes. Check your spam folder too.`;
+          }
+          if (resetCodeStep) resetCodeStep.hidden = false;
+          submitBtn.textContent = 'Reset password';
+          resetCodeInput?.focus();
+        } else {
+          const code = (resetCodeInput?.value || '').trim();
+          const newPassword = resetNewPassword?.value || '';
+          if (!code || !newPassword) {
+            if (errorEl) {
+              errorEl.textContent = 'Enter the 6-character code and a new password.';
+              errorEl.hidden = false;
+            }
+            return;
+          }
+          await AuthAPI.resetPassword(email, code, newPassword);
+          showAppToast('Password reset. Sign in with your new password.');
+          setAuthMode('login');
+          // setAuthMode reset the stage closure; re-prefill the email so the
+          // user signs straight in with the password they just set.
+          const emailInput = document.getElementById('authEmail');
+          if (emailInput) emailInput.value = email;
+        }
+      } catch (error) {
+        if (errorEl) {
+          errorEl.textContent = error.message;
+          errorEl.hidden = false;
+        }
+      } finally {
+        submitBtn.disabled = false;
+      }
+      return;
+    }
 
     if (!email || !password) {
       return;

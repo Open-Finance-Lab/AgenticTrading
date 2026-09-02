@@ -10,7 +10,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Optional
 from urllib.parse import urlencode
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Request
+from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException, Request
 from fastapi.responses import JSONResponse, RedirectResponse
 from pydantic import BaseModel, Field, field_validator
 
@@ -49,6 +49,12 @@ router = APIRouter(prefix="/auth", tags=["auth"])
 # Generic copy for failed logins — never reveal whether the email is registered.
 LOGIN_FAILURE_DETAIL = "Invalid email or password."
 RATE_LIMIT_DETAIL = "Too many login attempts; please try again later."
+# One constant for every reset-password failure branch (unknown email, no
+# active request, wrong code, lost CAS), mirroring LOGIN_FAILURE_DETAIL's
+# role: distinct copy per branch would be an account/state oracle.
+RESET_FAILURE_DETAIL = "Invalid or expired code."
+FORGOT_RATE_LIMIT_DETAIL = "Too many reset requests. Please wait before trying again."
+RESET_RATE_LIMIT_DETAIL = "Too many attempts. Please wait before trying again."
 
 
 def _env_int(name: str, default: int, *, minimum: int = 0) -> int:
@@ -103,6 +109,19 @@ _LOGIN_IP_LIMITER = _build_limiter("AUTH_LOGIN_IP", 60, 900)
 _LOGIN_EMAIL_LIMITER = _build_limiter("AUTH_LOGIN_EMAIL", 10, 900)
 _SIGNUP_IP_LIMITER = _build_limiter("AUTH_SIGNUP_IP", 60, 3600)
 _SIGNUP_EMAIL_LIMITER = _build_limiter("AUTH_SIGNUP_EMAIL", 5, 3600)
+# forgot-password: both keys are existence-blind (the email key is the *typed*
+# normalized address), so a 429 reveals nothing about accounts. The global
+# limiter is the shared-Brevo-quota bound: an anonymous caller iterating known
+# addresses is the one genuinely new drain surface this flow opens, and
+# 10/hour caps the worst case under the provider's free-tier daily allowance.
+_FORGOT_IP_LIMITER = _build_limiter("AUTH_FORGOT_IP", 30, 3600)
+_FORGOT_EMAIL_LIMITER = _build_limiter("AUTH_FORGOT_EMAIL", 5, 3600)
+_FORGOT_GLOBAL_LIMITER = _build_limiter("AUTH_FORGOT_GLOBAL", 10, 3600)
+# reset-password mirrors login's check/record/allow split: the per-email
+# budget is the one keyed on the account under attack, so it is the control
+# that actually bounds code guessing.
+_RESET_IP_LIMITER = _build_limiter("AUTH_RESET_IP", 30, 900)
+_RESET_EMAIL_LIMITER = _build_limiter("AUTH_RESET_EMAIL", 10, 900)
 
 
 # Leading run of characters a hostname may contain. Anchored and non-greedy
@@ -224,6 +243,29 @@ class EmailChangeRequest(BaseModel):
 
 class EmailChangeVerifyRequest(BaseModel):
     code: str = Field(min_length=1, max_length=32)
+
+
+class ForgotPasswordRequest(BaseModel):
+    email: str = Field(min_length=3, max_length=254)
+
+    @field_validator("email")
+    @classmethod
+    def validate_email(cls, value: str) -> str:
+        # A malformed address 422s here on both reset routes. Deliberate,
+        # accepted exception to response uniformity: the 422 is shape-keyed,
+        # not account-keyed -- a malformed address cannot have an account.
+        return _normalize_email(value)
+
+
+class ResetPasswordRequest(BaseModel):
+    email: str = Field(min_length=3, max_length=254)
+    code: str = Field(min_length=1, max_length=16)
+    new_password: str = Field(min_length=1, max_length=128)
+
+    @field_validator("email")
+    @classmethod
+    def validate_email(cls, value: str) -> str:
+        return _normalize_email(value)
 
 
 AVATAR_MAX_DECODED_BYTES = 100 * 1024
@@ -607,26 +649,32 @@ def change_password(
     # make a retry hit "Current password is incorrect". So swallow + surface via
     # print() (logger output is invisible under the deployed config) and still
     # return ok. Revocation is defence-in-depth, not a hard guarantee.
-    try:
-        users_module.user_store.delete_other_sessions(
+    _d7_cleanup(
+        "change-password",
+        current_user["id"],
+        "other-session revocation",
+        lambda: users_module.user_store.delete_other_sessions(
             current_user["id"], keep_token=_session_token(request, authorization)
-        )
-    except Exception as exc:  # noqa: BLE001 -- password change already committed
-        print(
-            f"WARNING: change-password committed for user {current_user['id']} but "
-            f"other-session revocation failed: {exc!r}"
-        )
+        ),
+    )
     # D7: a user changing their password may be reacting to a compromise, so an
     # attacker's in-flight email change dies with it. Best-effort and next to
     # the session revocation above, so the whole "invalidate what the old
     # password could reach" policy sits in one place.
-    try:
-        users_module.user_store.cancel_email_change(current_user["id"])
-    except Exception as exc:  # noqa: BLE001 -- password change already committed
-        print(
-            f"WARNING: change-password committed for user {current_user['id']} but "
-            f"cancelling the pending email change failed: {exc!r}"
-        )
+    _d7_cleanup(
+        "change-password",
+        current_user["id"],
+        "cancelling the pending email change",
+        lambda: users_module.user_store.cancel_email_change(current_user["id"]),
+    )
+    # Same D7 symmetry for the reset flow: a code already mailed out must not
+    # survive the password it would replace being changed by its real owner.
+    _d7_cleanup(
+        "change-password",
+        current_user["id"],
+        "cancelling the pending password reset",
+        lambda: users_module.user_store.cancel_password_reset(current_user["id"]),
+    )
     return {"status": "ok"}
 
 
@@ -773,12 +821,9 @@ def _authorize_email_change(store, current_user: dict, payload: EmailChangeReque
     #    drain the platform's shared daily provider quota in a couple of hours,
     #    half of it aimed at a third party from our sending domain. This is what
     #    closes that; the window frees as the oldest request in it ages out.
-    window = timedelta(days=1)
-    recent = store.email_change_request_times_since(
-        user_id, format_stored_timestamp(datetime.now(timezone.utc) - window)
-    )
+    recent = store.email_change_request_times_since(user_id, _daily_window_start())
     if len(recent) >= users_module.EMAIL_CHANGE_MAX_REQUESTS_PER_DAY:
-        remaining = window.total_seconds() - _seconds_since(recent[0])
+        remaining = _DAILY_CAP_WINDOW.total_seconds() - _seconds_since(recent[0])
         raise _too_soon(
             "Too many email-change requests today. "
             f"Try again in {_humanize_wait(remaining)}.",
@@ -926,16 +971,250 @@ async def verify_email_change(
     # change, so other sessions end -- but the durable write already landed, so a
     # revocation failure is a WARNING, not a 500. ERROR is reserved for the mail
     # failures above, where the user genuinely gets nothing.
-    try:
-        store.delete_other_sessions(
+    _d7_cleanup(
+        "email change",
+        current_user["id"],
+        "other-session revocation",
+        lambda: store.delete_other_sessions(
             current_user["id"], keep_token=_session_token(request, authorization)
-        )
-    except Exception as exc:  # noqa: BLE001 -- email change already committed
-        print(
-            f"WARNING: email change committed for user {current_user['id']} but "
-            f"other-session revocation failed: {exc!r}"
-        )
+        ),
+    )
+    # A reset code was mailed to the *old* address; it must not survive the
+    # address changing (D7 symmetry with change-password above).
+    _d7_cleanup(
+        "email change",
+        current_user["id"],
+        "cancelling the pending password reset",
+        lambda: store.cancel_password_reset(current_user["id"]),
+    )
     return {"status": "ok", "user": user}
+
+
+def _d7_cleanup(action: str, user_id, step: str, fn) -> None:
+    """One D7 best-effort invalidation, after a committed credential change.
+
+    The durable write already landed, so a failure here surfaces as a WARNING
+    print (logger output is invisible under the deployed config) and never as
+    a 500 that would misreport the committed change to the client.
+    """
+    try:
+        fn()
+    except Exception as exc:  # noqa: BLE001 -- the credential change already committed
+        print(f"WARNING: {action} committed for user {user_id} but {step} failed: {exc!r}")
+
+
+_DAILY_CAP_WINDOW = timedelta(days=1)
+
+
+def _daily_window_start() -> str:
+    """Stored-format start of the rolling daily request-cap window."""
+    return format_stored_timestamp(datetime.now(timezone.utc) - _DAILY_CAP_WINDOW)
+
+
+def _password_reset_body(code: str) -> str:
+    """Sent to the account's own address; the requester may be an attacker,
+    so the closing line has to be safe for the innocent-recipient case."""
+    return (
+        "Someone requested a password reset for the Agentic Trading Lab "
+        "account belonging to this address.\n\n"
+        f"Your reset code: {code}\n\n"
+        "Enter it on the password reset screen along with your new password. "
+        f"The code expires in {users_module.PASSWORD_RESET_TTL_MINUTES} "
+        "minutes and can be used once.\n\n"
+        "If you didn't request this, you can ignore this email -- your "
+        "password has not been changed."
+    )
+
+
+async def _deliver_password_reset_code(email: str) -> None:
+    """Everything account-shaped about forgot-password, after the response.
+
+    Runs as a BackgroundTasks task so the route's status *and latency* are
+    uniform for every caller -- the verify_password_for_account lesson applied
+    to the email send. Store calls hop to a worker thread; the send is a real
+    coroutine and is awaited directly. Every skip prints a reason, because a
+    silent 200 is the only thing the caller ever sees.
+    """
+    store = users_module.user_store
+    domain = _email_domain(email)
+    user = await asyncio.to_thread(store.get_user_by_email, email)
+    if not user:
+        print(f"auth.reset_skipped reason=unknown domain={domain}")
+        return
+    user_id = int(user["id"])
+
+    # Durable cooldown + daily cap, enforced silently (an inline 429 keyed on
+    # account state would be an enumeration oracle). Both reads are
+    # status-blind, so cancelling a request never resets the clock. The
+    # check-then-act here is accepted as racy: the inline per-email limiter is
+    # the hard bound on issuance cadence, these are the backstop that survives
+    # a redeploy.
+    last_at = await asyncio.to_thread(store.last_password_reset_request_at, user_id)
+    if last_at and _seconds_since(last_at) < users_module.PASSWORD_RESET_COOLDOWN_SECONDS:
+        print(f"auth.reset_skipped reason=cooldown domain={domain}")
+        return
+    recent = await asyncio.to_thread(
+        store.password_reset_request_times_since, user_id, _daily_window_start()
+    )
+    if len(recent) >= users_module.PASSWORD_RESET_MAX_REQUESTS_PER_DAY:
+        print(f"auth.reset_skipped reason=daily_cap domain={domain}")
+        return
+
+    # Server-wide send budget, charged immediately before the send: bounds an
+    # anonymous caller draining the shared Brevo quota through known accounts.
+    if not _FORGOT_GLOBAL_LIMITER.allow("global"):
+        print(f"WARNING: auth.reset_skipped reason=global_cap domain={domain}")
+        return
+
+    code = generate_code()
+    # Send BEFORE persisting (the email-change invariant): a failed send
+    # persists nothing, so the user's retry is not cooldown-blocked.
+    sent = await email_sender.send_email(
+        to=str(user["email"]),
+        subject="Your Agentic Trading Lab password reset code",
+        text_body=_password_reset_body(code),
+    )
+    if not sent:
+        print(
+            f"ERROR: password reset code send failed domain={domain}; "
+            "nothing was persisted"
+        )
+        return
+    await asyncio.to_thread(
+        store.create_password_reset_request, user_id, hash_code(code)
+    )
+    print(f"auth.reset_requested domain={domain}")
+
+
+async def _deliver_password_reset_code_task(email: str) -> None:
+    """Failure boundary for the background task.
+
+    It runs after the 200 already went out, so an uncaught store/send error
+    would otherwise vanish with no log line at all (the daily-leaderboard
+    background refresh wraps its body the same way). ERROR, not a skip line:
+    the caller was told ok and got nothing.
+    """
+    try:
+        await _deliver_password_reset_code(email)
+    except Exception as exc:  # noqa: BLE001 -- post-response; print is the only sink
+        print(
+            "ERROR: password reset delivery failed "
+            f"domain={_email_domain(email)}: {exc!r}"
+        )
+
+
+@router.post("/forgot-password")
+async def forgot_password(
+    payload: ForgotPasswordRequest, request: Request, background_tasks: BackgroundTasks
+):
+    # allow() on both keys for every accepted request -- there is no
+    # success/failure split to exempt, and both keys are existence-blind.
+    ip_key = f"forgot:{client_key(request)}"
+    if not _FORGOT_IP_LIMITER.allow(ip_key):
+        raise _auth_rate_limited(_FORGOT_IP_LIMITER, ip_key, FORGOT_RATE_LIMIT_DETAIL)
+    email_key = f"forgot:email:{payload.email}"
+    if not _FORGOT_EMAIL_LIMITER.allow(email_key):
+        raise _auth_rate_limited(
+            _FORGOT_EMAIL_LIMITER, email_key, FORGOT_RATE_LIMIT_DETAIL
+        )
+
+    # Before any account lookup, identically for every caller: this is
+    # config-shaped information, not account-shaped, and it keeps a
+    # Brevo-unconfigured deploy fail-visible instead of silently 200ing.
+    # email_configured() has no side effects, so the route prints its own line.
+    if not email_sender.email_configured():
+        print(
+            "ERROR: password reset requested but BREVO_API_KEY / "
+            "ACCOUNT_EMAIL_FROM are not set -- returning 503"
+        )
+        raise HTTPException(
+            status_code=503,
+            detail="Could not send the confirmation email. Please try again later.",
+        )
+
+    # Immediate generic 200 for everyone else; all real work happens after the
+    # response so neither the body nor the latency says whether an account
+    # exists. (TestClient runs background tasks before returning, so tests
+    # stay deterministic.)
+    background_tasks.add_task(_deliver_password_reset_code_task, payload.email)
+    return {"status": "ok"}
+
+
+@router.post("/reset-password")
+def reset_password(payload: ResetPasswordRequest, request: Request):
+    # Plain def, like change_password: store I/O plus one bcrypt hash inside
+    # update_password, no await. Pinned in BLOCKING_IO_HANDLERS.
+    ip_key = f"reset:{client_key(request)}"
+    if not _RESET_IP_LIMITER.check(ip_key):
+        raise _auth_rate_limited(_RESET_IP_LIMITER, ip_key, RESET_RATE_LIMIT_DETAIL)
+
+    store = users_module.user_store
+    email_key = f"reset:email:{payload.email}"
+
+    def _failure() -> HTTPException:
+        # Built and returned, never raised here (a raise-helper trips
+        # py/mixed-returns). Charges both budgets on every failure outcome:
+        # record() on the IP limiter, allow() on the per-email one -- allow()
+        # is what makes the per-email budget actually enforce, so a hammered
+        # address starts answering 429 on subsequent attempts.
+        _RESET_IP_LIMITER.record(ip_key)
+        if not _RESET_EMAIL_LIMITER.allow(email_key):
+            return _auth_rate_limited(
+                _RESET_EMAIL_LIMITER, email_key, RESET_RATE_LIMIT_DETAIL
+            )
+        return HTTPException(status_code=400, detail=RESET_FAILURE_DETAIL)
+
+    # Unknown email and "no active row" are one uniform failure; expiry is not
+    # a separate branch because the store folds it into "no active row".
+    user = store.get_user_by_email(payload.email)
+    if not user:
+        raise _failure()
+    row = store.get_active_password_reset(int(user["id"]))
+    if not row:
+        raise _failure()
+
+    if not hmac.compare_digest(hash_code(payload.code), str(row["code_hash"])):
+        # The store cancels the request in SQL when this attempt reaches the
+        # cap; the response is the same generic 400 either way.
+        store.record_password_reset_attempt(int(row["id"]))
+        raise _failure()
+
+    # Policy only after the code passes: the request row is untouched, so the
+    # user resubmits the same still-valid code with a better password. Only a
+    # caller who already presented the correct code can tell this 400 from the
+    # generic one -- i.e. someone who has already won; it leaks nothing.
+    violations = validate_new_password(payload.new_password, str(user["email"]))
+    if violations:
+        raise HTTPException(status_code=400, detail=" ".join(violations))
+
+    # Consume the code FIRST (atomic CAS; a losing concurrent redeem gets the
+    # generic 400), then write the password. A crash between the two burns a
+    # code -- the user re-requests -- instead of leaving a live code after a
+    # state change.
+    if not store.mark_password_reset_used(int(row["id"])):
+        raise _failure()
+    store.update_password(int(user["id"]), payload.new_password)
+
+    # Best-effort compromise response (D7), after the durable write: ALL
+    # sessions die (there is no session to keep -- the caller proved an inbox,
+    # not a login), and a pending email change dies with them. Failures are
+    # WARNINGs, never a 500 that would misreport a committed change.
+    _d7_cleanup(
+        "password reset",
+        user["id"],
+        "session revocation",
+        lambda: store.delete_other_sessions(int(user["id"]), keep_token=None),
+    )
+    _d7_cleanup(
+        "password reset",
+        user["id"],
+        "cancelling the pending email change",
+        lambda: store.cancel_email_change(int(user["id"])),
+    )
+    print(f"auth.reset_completed domain={_email_domain(payload.email)}")
+    # No auto-login: minting a session for an email-only proof would skip the
+    # fresh-password check login performs.
+    return {"status": "ok"}
 
 
 def _store_avatar(user_id: int, value: Optional[str]) -> dict:

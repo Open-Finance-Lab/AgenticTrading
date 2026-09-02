@@ -61,6 +61,7 @@ BLOCKING_IO_HANDLERS = {
     ("dashboard.backend.api.auth", "logout"),
     ("dashboard.backend.api.auth", "logout_all"),
     ("dashboard.backend.api.auth", "change_password"),
+    ("dashboard.backend.api.auth", "reset_password"),
     ("dashboard.backend.api.auth", "update_display_name"),
     ("dashboard.backend.api.auth", "get_email_change"),
     ("dashboard.backend.api.auth", "cancel_email_change"),
