@@ -8,7 +8,7 @@ disk-less Render free-tier host where that file resets on every deploy --
 silently deleting every account (see CLAUDE.md gotchas).
 """
 
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 import psycopg
