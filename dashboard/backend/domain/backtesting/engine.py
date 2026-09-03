@@ -23,6 +23,9 @@ from dashboard.backend.database import db
 import dashboard.backend.infrastructure.llm.token_cost as token_cost
 from dashboard.backend.baseline_generator import generate_baselines
 from dashboard.backend.infrastructure.llm.validator import DJIA_30, TOP_10_STOCKS as TOP_10
+from dashboard.backend.infrastructure.market_data.strategy_universe import (
+    resolve_strategy_universe, validate_selection,
+)
 from dashboard.backend.domain.backtesting.constants import INITIAL_CAPITAL
 from dashboard.backend.domain.backtesting.currency import (
     CurrencyContext,
@@ -164,6 +167,9 @@ class HourlyBacktester:
         runtime_type: str = DEFAULT_RUNTIME_TYPE,
         runtime_config: Optional[Dict] = None,
         execution_client: Any = None,
+        stock_pool: Optional[str] = None,
+        pool_mode: Optional[str] = None,
+        universe_selection: Optional[Dict] = None,
     ):
         # Validate and swap dates if they're in the wrong order
         from datetime import datetime as dt_parser
@@ -244,8 +250,21 @@ class HourlyBacktester:
         )
         if self.runtime_type != PIPELINE_RUNTIME_TYPE:
             self.strict_llm = False
+        self.universe_selection = None
+        if stock_pool is not None or pool_mode is not None or universe_selection is not None:
+            if data_source == IFIND_ASHARE or symbols is not None:
+                raise ValueError("stock_pool requires a US source and cannot be combined with symbols")
+            if universe_selection is not None:
+                if stock_pool is not None or pool_mode is not None:
+                    raise ValueError("Use a frozen universe selection or stock_pool, not both")
+                self.universe_selection = validate_selection(universe_selection)
+            else:
+                if stock_pool is None:
+                    raise ValueError("pool_mode requires stock_pool")
+                self.universe_selection = resolve_strategy_universe(stock_pool, pool_mode or "top30")
+            self.symbols = list(self.universe_selection["symbols"])
         # iFinD is backend-owned; US providers can use the selected run assets.
-        if data_source == IFIND_ASHARE:
+        elif data_source == IFIND_ASHARE:
             self.symbols = self.profile.symbols
         elif symbols:
             cleaned = []
@@ -719,6 +738,8 @@ class HourlyBacktester:
             "reporting_currency": profile.reporting_currency,
             "lot_size": profile.lot_size,
         }
+        if getattr(self, "universe_selection", None) is not None:
+            metadata["universe_selection"] = dict(self.universe_selection)
         if profile.transaction_cost_profile is not None:
             metadata["transaction_cost_profile"] = (
                 profile.transaction_cost_profile.to_metadata()
@@ -893,6 +914,9 @@ class HourlyBacktester:
             "native_currency": self.profile.native_currency,
             "reporting_currency": self.profile.reporting_currency,
         }
+        if getattr(self, "universe_selection", None) is not None:
+            result["stock_pool"] = self.universe_selection["stock_pool"]
+            result["pool_mode"] = self.universe_selection["pool_mode"]
         if self.profile.lot_size > 1:
             # Conditional for the same reason `settlement` below is: this dict
             # is serialized straight into the LLM prompt, so an unconditional

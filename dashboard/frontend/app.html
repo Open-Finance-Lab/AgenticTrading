@@ -358,7 +358,7 @@
 
                 <div class="control-group">
                     <label>Asset Universe</label>
-                    <p class="control-helper">Choose the universe of assets your agent is allowed to trade.</p>
+                    <p class="control-helper">Choose the assets this agent can trade in this backtest.</p>
                     <div id="ifindAshareUniverse" class="ifind-universe-panel" hidden>
                         <select
                             id="ifindAshareUniverseSelect"
@@ -379,18 +379,23 @@
                         <button class="universe-tab" data-tab="custom" type="button">Custom</button>
                     </div>
                     <div id="builtinTab" class="universe-content active">
-                        <div class="preset-cards">
-                            <div class="preset-card selected" id="djiaCard">
-                                <div class="preset-name">DJIA 30</div>
-                                <div class="preset-desc">30 blue-chip companies</div>
-                                <button class="preset-btn" type="button">Selected</button>
-                            </div>
-                            <div class="preset-card" id="mag7Card">
-                                <div class="preset-name">Magnificent 7</div>
-                                <div class="preset-desc">7 major tech companies</div>
-                                <button class="preset-btn" type="button">Select</button>
-                            </div>
-                        </div>
+                        <label class="sr-only" for="backtestUniverseSelect">Stock category for this backtest</label>
+                        <select id="backtestUniverseSelect" class="control-select" aria-describedby="backtestUniverseDescription">
+                            <option value="djia">DJIA 30 · 30 stocks</option>
+                            <option value="mag7">Magnificent 7 · 7 stocks</option>
+                            <option value="ordinary" disabled>Ordinary stocks · 30 stocks, 11 sectors</option>
+                            <option value="fund" disabled>Funds &amp; ETFs · 30 across asset classes</option>
+                            <option value="all" disabled>Stocks &amp; funds · 15 stocks + 15 funds</option>
+                        </select>
+                        <p id="backtestUniverseDescription" class="control-helper" aria-live="polite">30 blue-chip companies in the Dow Jones Industrial Average.</p>
+                        <p id="backtestUniverseLoadError" class="control-helper" hidden>
+                            Additional stock categories could not be loaded.
+                            <button id="backtestUniverseRetry" class="run-backtest-edit-link" type="button">Retry</button>
+                        </p>
+                        <details id="backtestUniversePreview" class="universe-roster">
+                            <summary id="backtestUniversePreviewSummary">View 30 selected assets</summary>
+                            <div id="backtestUniverseGroups" class="universe-roster-groups"></div>
+                        </details>
                     </div>
                     <div id="customTab" class="universe-content">
                         <div class="custom-universe">

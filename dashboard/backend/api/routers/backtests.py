@@ -102,6 +102,9 @@ from dashboard.backend.domain.backtesting.constants import (
     resolve_initial_capital,
 )
 from dashboard.backend.infrastructure.llm.validator import DJIA_30
+from dashboard.backend.infrastructure.market_data.strategy_universe import (
+    PoolMode, StockPool, UniverseConfigurationError, resolve_strategy_universe,
+)
 from dashboard.backend.equity_plot import (
     align_equity,
     build_backtest_chart_data,
@@ -260,6 +263,7 @@ class RunMetadata(BaseModel):
     decision_source: Optional[str] = None
     benchmark: Optional[str] = None
     symbols: Optional[List[str]] = None
+    universe_selection: Optional[Dict[str, Any]] = None
     native_currency: Optional[str] = None
     reporting_currency: Optional[str] = None
     native_initial_capital: Optional[float] = None
@@ -346,6 +350,7 @@ def _run_metadata_response(run: Dict[str, Any]) -> RunMetadata:
             "decision_source",
             "benchmark",
             "symbols",
+            "universe_selection",
             "native_currency",
             "reporting_currency",
             "native_initial_capital",
@@ -890,6 +895,7 @@ def run_backtest_background(
     runtime_config: Optional[Dict[str, Any]] = None,
     financial_datasets_api_key: Optional[str] = None,
     execution_handoff_payload: Optional[str] = None,
+    universe_selection: Optional[Dict[str, Any]] = None,
 ):
     """Run backtest in background thread.
 
@@ -901,6 +907,7 @@ def run_backtest_background(
     strategy_prompt_path = None
     pipeline_path = None
     runtime_config_path = None
+    universe_selection_path = None
     progress_file = None
     # Bound so finally can always finalize even if minting the id fails early.
     resolved_live_run_id = live_run_id
@@ -1028,7 +1035,15 @@ def run_backtest_background(
         # Simulation capital is independent of the agent's portfolio sleeve.
         cmd += ["--initial-capital", str(resolve_initial_capital(initial_capital))]
 
-        if assets:
+        if universe_selection is not None:
+            fd, universe_selection_path = tempfile.mkstemp(
+                prefix="strategy_universe_", suffix=".json"
+            )
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump(universe_selection, f)
+            cmd += ["--universe-selection-file", universe_selection_path]
+            print(f"   Assets: {len(universe_selection['symbols'])} selected", flush=True)
+        elif assets:
             cmd += ["--assets", ",".join(assets)]
             print(f"   Assets: {', '.join(assets)}", flush=True)
 
@@ -1152,6 +1167,13 @@ def run_backtest_background(
                 # Best-effort cleanup of a temp file the run no longer needs;
                 # the OS reclaims it regardless, and failing here would mask
                 # the backtest's own outcome.
+                pass
+        if universe_selection_path:
+            try:
+                os.remove(universe_selection_path)
+            except OSError:
+                # This is best-effort cleanup after the worker has finished;
+                # failing here must not replace the backtest's own outcome.
                 pass
         print("✋ Backtest background thread finished", flush=True)
 
@@ -1361,6 +1383,8 @@ class BacktestRunRequest(BaseModel):
     initial_capital: Optional[float] = None
     # Tradeable universe for this run. Accepts a list or a comma-separated string.
     assets: Optional[Any] = None
+    stock_pool: Optional[StockPool] = None
+    pool_mode: Optional[PoolMode] = None
 
 
 # /backtest/run spends real operator LLM credits per trading hour of the run, on
@@ -1648,6 +1672,8 @@ def run_backtest_endpoint(
     decision_source: Optional[Literal["rule_based", "llm"]] = None,
     assets: Optional[str] = None,
     body: Optional[BacktestRunRequest] = None,
+    stock_pool: Optional[StockPool] = None,
+    pool_mode: Optional[PoolMode] = None,
 ):
     """
     Trigger backtest in background (non-blocking).
@@ -1686,6 +1712,25 @@ def run_backtest_endpoint(
             provider_id = body.provider_id
         if body.assets is not None:
             raw_assets = body.assets
+        if body.stock_pool is not None:
+            stock_pool = body.stock_pool
+        if body.pool_mode is not None:
+            pool_mode = body.pool_mode
+
+    universe_selection = None
+    if stock_pool is not None or pool_mode is not None:
+        if stock_pool is None:
+            raise HTTPException(status_code=422, detail="pool_mode requires stock_pool")
+        if raw_assets is not None:
+            raise HTTPException(status_code=422, detail="stock_pool cannot be combined with assets")
+        if data_source == IFIND_ASHARE:
+            raise HTTPException(status_code=422, detail="stock_pool requires a US market-data source")
+        try:
+            universe_selection = resolve_strategy_universe(stock_pool, pool_mode or "top30")
+        except UniverseConfigurationError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     try:
         runtime_type, runtime_config = _resolve_backtest_runtime(agent_id)
@@ -1719,9 +1764,11 @@ def run_backtest_endpoint(
     else:
         financial_datasets_api_key = None
     selected_assets = (
-        list(profile.symbols)
-        if data_source == IFIND_ASHARE
-        else _normalize_backtest_assets(raw_assets)
+        list(universe_selection["symbols"]) if universe_selection is not None else (
+            list(profile.symbols)
+            if data_source == IFIND_ASHARE
+            else _normalize_backtest_assets(raw_assets)
+        )
     )
 
     if initial_capital is not None:
@@ -1924,6 +1971,7 @@ def run_backtest_endpoint(
                 "data_source": data_source,
                 "universe": profile.universe,
                 "assets": selected_assets,
+                "universe_selection": universe_selection,
             },
         )
 
@@ -1980,6 +2028,7 @@ def run_backtest_endpoint(
             "assets": selected_assets,
             "decision_source": resolved_decision_source,
             "execution_handoff_payload": execution_handoff_payload,
+            **({"universe_selection": universe_selection} if universe_selection is not None else {}),
         },
         daemon=True
     )
@@ -2017,6 +2066,8 @@ def run_backtest_endpoint(
     }
     if runtime_type != PIPELINE_RUNTIME_TYPE:
         response["runtime_type"] = runtime_type
+    if universe_selection is not None:
+        response["universe_selection"] = universe_selection
     if ignored_llm_fields:
         # Say what a rule-based run threw away. Dropping LLM-only fields is
         # correct, doing it invisibly is not: the caller otherwise cannot tell

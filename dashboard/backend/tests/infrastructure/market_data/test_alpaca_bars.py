@@ -94,6 +94,21 @@ def fake_alpaca(monkeypatch):
 
 # --- compatibility / identity ----------------------------------------------
 
+
+def test_full_catalog_batches_every_symbol_without_a_thirty_name_limit(fake_alpaca, monkeypatch):
+    monkeypatch.setenv("ALPACA_API_KEY", "test-key")
+    monkeypatch.setenv("ALPACA_SECRET_KEY", "test-secret")
+    symbols = [f"S{i:03}" for i in range(235)]
+    fake_alpaca["df"] = _bars_df({
+        symbol: [("2026-01-02T15:00:00Z", 10, 11, 9, 10, 100)] for symbol in symbols
+    })
+    loader = AlpacaDataLoader()
+    result = loader.fetch_bars(symbols, "2026-01-01", "2026-01-03")
+    requests = fake_alpaca["requests"]
+    assert [len(request.symbol_or_symbols) for request in requests] == [100, 100, 35]
+    assert [symbol for request in requests for symbol in request.symbol_or_symbols] == symbols
+    assert set(result) == set(symbols)
+
 def test_old_script_exports_class():
     assert hasattr(bha, "AlpacaDataLoader")
 

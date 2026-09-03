@@ -437,6 +437,13 @@ class AlpacaDataLoader:
         Returns:
             {symbol: DataFrame with timestamp, open, high, low, close, volume}
         """
+        # A full catalog can contain thousands of tickers. Bound URL length and
+        # response size per request while preserving every selected symbol.
+        if len(symbols) > 100:
+            data = {}
+            for offset in range(0, len(symbols), 100):
+                data.update(self.fetch_bars(symbols[offset:offset + 100], start, end))
+            return data
         if not self.client:
             print("⚠️ Alpaca not configured — skipping bar fetch")
             self.last_fetch = None
