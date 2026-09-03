@@ -38,6 +38,7 @@ from dashboard.backend.domain.backtesting.metrics import (
     calculate_max_drawdown,
     calculate_sharpe,
 )
+from dashboard.backend.infrastructure.market_data.frequency import timeframe_minutes
 from dashboard.backend.domain.backtesting.portfolio_manager import PortfolioManager
 from dashboard.backend.infrastructure.market_data.alpaca_bars import AlpacaDataLoader
 from dashboard.backend.infrastructure.market_data.profiles import (
@@ -260,6 +261,9 @@ class ExternalBacktestSession:
         # A-share run silently execute with US same-day settlement — no error,
         # no log, just wrong fills.
         self.profile = get_market_profile(ALPACA)
+        self.source_timeframe = self.profile.source_timeframe
+        self.decision_timeframe = self.profile.decision_timeframe
+        self.intraday_mode = False
         self.manager = PortfolioManager(
             initial_capital=self.initial_capital,
             t_plus_one_enabled=self.profile.t_plus_one_enabled,
@@ -267,6 +271,11 @@ class ExternalBacktestSession:
         self.all_data: Dict[str, pd.DataFrame] = {}
         self.timestamps: List[Any] = []
         self.price_cache: Dict[str, Dict[Any, float]] = {}
+        self.source_data: Dict[str, pd.DataFrame] = {}
+        self.source_timestamps: List[Any] = []
+        self.source_price_cache: Dict[str, Dict[Any, float]] = {}
+        self.execution_timestamps: List[Any] = []
+        self._valuation_cursor = 0
 
         self.step_opened_at: Optional[datetime] = None
         # Stamped by sweep_terminal_sessions() the first time it sees this
@@ -299,6 +308,8 @@ class ExternalBacktestSession:
         dataset = market_data_store.get_dataset(
             DJIA_30, self.start_date, self.end_date,
             loader_factory=AlpacaDataLoader,
+            source_timeframe=self.profile.source_timeframe,
+            decision_timeframe=self.profile.decision_timeframe,
         )
         self.adopt_dataset(dataset)
 
@@ -317,6 +328,26 @@ class ExternalBacktestSession:
         self.timestamps = dataset.timestamps
         self.price_cache = dataset.price_cache
         self.total_steps = dataset.total_steps
+        self.source_data = getattr(dataset, "source_data", self.all_data)
+        self.source_timestamps = list(
+            getattr(dataset, "source_timestamps", self.timestamps)
+        )
+        self.source_price_cache = getattr(
+            dataset, "source_price_cache", self.price_cache
+        )
+        self.execution_timestamps = list(
+            getattr(dataset, "execution_timestamps", self.timestamps)
+        )
+        self.source_timeframe = getattr(
+            dataset, "source_timeframe", self.profile.timeframe
+        )
+        self.decision_timeframe = getattr(
+            dataset, "decision_timeframe", self.profile.timeframe
+        )
+        self.intraday_mode = timeframe_minutes(self.source_timeframe) < timeframe_minutes(
+            self.decision_timeframe
+        )
+        self._valuation_cursor = 0
 
         with self._step_lock:
             if self.status in TERMINAL_STATUSES:
@@ -326,13 +357,50 @@ class ExternalBacktestSession:
 
     def _market_data_at(self, timestamp) -> Dict[str, pd.Series]:
         market_data = {}
-        for symbol in DJIA_30:
+        symbols = self.symbols or list(self.all_data)
+        for symbol in symbols:
             if symbol not in self.all_data:
                 continue
             df = self.all_data[symbol]
             if timestamp in df.index:
                 market_data[symbol] = df.loc[timestamp]
         return market_data
+
+    def _source_market_data_at(self, timestamp) -> Dict[str, pd.Series]:
+        """Return source-resolution bars used for fills and valuation."""
+        source_data = self.source_data or self.all_data
+        symbols = self.symbols or list(source_data)
+        return {
+            symbol: source_data[symbol].loc[timestamp]
+            for symbol in symbols
+            if symbol in source_data and timestamp in source_data[symbol].index
+        }
+
+    def _effective_source_timestamps(self) -> List[Any]:
+        return list(self.source_timestamps or self.timestamps)
+
+    def _effective_source_price_cache(self) -> Dict[str, Dict[Any, float]]:
+        return self.source_price_cache or self.price_cache
+
+    def _effective_execution_timestamps(self) -> List[Any]:
+        if len(self.execution_timestamps) == self.total_steps:
+            return self.execution_timestamps
+        return list(self.timestamps)
+
+    def _value_through(self, target_timestamp=None) -> None:
+        """Mark the portfolio on each source bar through the given timestamp."""
+        source_timestamps = self._effective_source_timestamps()
+        source_price_cache = self._effective_source_price_cache()
+        while self._valuation_cursor < len(source_timestamps):
+            timestamp = source_timestamps[self._valuation_cursor]
+            if target_timestamp is not None and timestamp > target_timestamp:
+                break
+            self.manager.update_equity(
+                self._source_market_data_at(timestamp),
+                source_price_cache,
+                timestamp,
+            )
+            self._valuation_cursor += 1
 
     def _open_current_step(self) -> None:
         self.step_opened_at = _utcnow()
@@ -640,7 +708,13 @@ class ExternalBacktestSession:
             # agent_runs.metadata).
             self.timeout_holds += 1
         timestamp = self.timestamps[self.step_index]
-        market_data = self._market_data_at(timestamp)
+        execution_timestamp = self._effective_execution_timestamps()[self.step_index]
+        execution_market_data = self._source_market_data_at(execution_timestamp)
+        execution_prices = {
+            symbol: row["open"]
+            for symbol, row in execution_market_data.items()
+            if "open" in row
+        }
 
         self.last_executed = []
         for action in executable:
@@ -651,8 +725,18 @@ class ExternalBacktestSession:
                 "reason": action.get("reason"),
             })
 
-        self.manager.execute_actions(executable, market_data, timestamp)
-        self.manager.update_equity(market_data, self.price_cache, timestamp)
+        self.manager.execute_actions(
+            executable,
+            execution_market_data,
+            execution_timestamp,
+            fallback_prices={
+                symbol: values[execution_timestamp]
+                for symbol, values in self._effective_source_price_cache().items()
+                if execution_timestamp in values
+            },
+            execution_prices=execution_prices if self.intraday_mode else None,
+        )
+        self._value_through(execution_timestamp)
 
         self.decision_log.append({
             "step_index": self.step_index,
@@ -668,6 +752,7 @@ class ExternalBacktestSession:
 
         self.step_index += 1
         if self.step_index >= self.total_steps:
+            self._value_through()
             self._finalize()
         else:
             self.status = "waiting_decision"
@@ -701,7 +786,14 @@ class ExternalBacktestSession:
             initial_equity=initial_eq,
             final_equity=final_eq,
             total_return=total_return,
-            sharpe_ratio=calculate_sharpe(equity_curve),
+            sharpe_ratio=calculate_sharpe(
+                equity_curve,
+                periods_per_year=(
+                    252 * 6.5 * (60 / timeframe_minutes(self.source_timeframe))
+                    if self.intraday_mode
+                    else None
+                ),
+            ),
             max_drawdown=calculate_max_drawdown(equity_curve),
             num_trades=len(self.manager.trades),
             llm_model=self.model_name,
@@ -712,6 +804,27 @@ class ExternalBacktestSession:
             metadata={
                 "decision_timeout_seconds": DECISION_TIMEOUT_SECONDS,
                 "timeout_holds": self.timeout_holds,
+                "frequency_contract": {
+                    "source_timeframe": self.source_timeframe,
+                    "decision_timeframe": self.decision_timeframe,
+                    "decision_frequency": "1h",
+                    "execution_timeframe": self.source_timeframe
+                    if self.intraday_mode
+                    else self.decision_timeframe,
+                    "valuation_frequency": self.source_timeframe
+                    if self.intraday_mode
+                    else self.decision_timeframe,
+                    "aggregation": (
+                        "session_anchored_completed_bars"
+                        if self.intraday_mode
+                        else "none"
+                    ),
+                    "fill_policy": (
+                        "next_source_bar_open"
+                        if self.intraday_mode
+                        else "decision_bar_close"
+                    ),
+                },
             },
         )
         db.insert_equity_points(self.run_id, equity_curve)
@@ -1105,7 +1218,13 @@ def start_backtest(
     # thread at all: attach it and open step 0 synchronously. Miss or
     # build-in-flight falls through to the loader thread exactly as before
     # (get_dataset inside the thread blocks/dedupes there).
-    dataset = market_data_store.peek(DJIA_30, start_date, end_date)
+    dataset = market_data_store.peek(
+        DJIA_30,
+        start_date,
+        end_date,
+        source_timeframe=session.profile.source_timeframe,
+        decision_timeframe=session.profile.decision_timeframe,
+    )
     if dataset is not None:
         session.adopt_dataset(dataset)
     else:

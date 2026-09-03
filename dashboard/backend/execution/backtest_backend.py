@@ -87,7 +87,12 @@ class BacktestBackend(ExecutionBackend):
         # Fast path (runs under the shared create lock — peek only, never
         # get_dataset): a resident dataset skips the loader thread entirely.
         dataset = ext.market_data_store.peek(
-            DJIA_30, self.session.start_date, self.session.end_date)
+            DJIA_30,
+            self.session.start_date,
+            self.session.end_date,
+            source_timeframe=self.session.profile.source_timeframe,
+            decision_timeframe=self.session.profile.decision_timeframe,
+        )
         if dataset is not None:
             self.session.adopt_dataset(dataset)
             # Mirror the background loader's post-load row transition, with the
