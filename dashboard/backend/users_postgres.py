@@ -8,7 +8,7 @@ disk-less Render free-tier host where that file resets on every deploy --
 silently deleting every account (see CLAUDE.md gotchas).
 """
 
-from datetime import timedelta
+from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 import psycopg
@@ -28,8 +28,8 @@ from dashboard.backend.users import (
     CREDITS_SPEND_POSTGRES,
     EMAIL_CHANGE_TTL_MINUTES,
     ENTITLEMENTS_UPSERT_POSTGRES,
-    PASSWORD_RESET_MAX_ATTEMPTS,
-    PASSWORD_RESET_TTL_MINUTES,
+    RESET_CODE_MAX_ATTEMPTS,
+    RESET_CODE_TTL_MINUTES,
     USER_COUNTS_SQL,
     VALID_ROLES,
     _expiry_iso,
@@ -621,16 +621,20 @@ class PostgresUserStore:
         return [str(row["created_at"]) for row in rows]
 
     def _password_reset_expiry(self) -> str:
-        return _expiry_iso(PASSWORD_RESET_TTL_MINUTES)
+        return _expiry_iso(RESET_CODE_TTL_MINUTES)
 
     def create_password_reset_request(
-        self, user_id: int, code_hash: str
+        self, user_id: int, code_hash: str, requested_at: Optional[datetime] = None
     ) -> Dict[str, Any]:
         """Supersede any in-flight reset request with a fresh one.
 
-        Cancel + insert in one transaction (the connection context manager),
-        for the same racing-creates reason as the SQLite twin.
+        ``requested_at`` is the route's arrival instant, stored as created_at
+        (see the SQLite twin). Cancel + insert in one transaction (the
+        connection context manager), for the same racing-creates reason.
         """
+        created_at = (
+            _utcnow_iso() if requested_at is None else format_stored_timestamp(requested_at)
+        )
         with self._get_connection() as conn:
             with conn.cursor() as cur:
                 cur.execute(
@@ -647,7 +651,7 @@ class PostgresUserStore:
                     VALUES (%s, %s, %s, %s)
                     RETURNING *
                     """,
-                    (user_id, code_hash, _utcnow_iso(), self._password_reset_expiry()),
+                    (user_id, code_hash, created_at, self._password_reset_expiry()),
                 )
                 row = cur.fetchone()
         return dict(row)
@@ -689,15 +693,15 @@ class PostgresUserStore:
                     RETURNING attempts
                     """,
                     (
-                        PASSWORD_RESET_MAX_ATTEMPTS,
+                        RESET_CODE_MAX_ATTEMPTS,
                         _utcnow_iso(),
                         request_id,
-                        PASSWORD_RESET_MAX_ATTEMPTS,
+                        RESET_CODE_MAX_ATTEMPTS,
                     ),
                 )
                 row = cur.fetchone()
         if not row:
-            return PASSWORD_RESET_MAX_ATTEMPTS
+            return RESET_CODE_MAX_ATTEMPTS
         return int(row["attempts"])
 
     def mark_password_reset_used(self, request_id: int) -> bool:

@@ -633,6 +633,19 @@ a.header-brand:hover .title-section h1 {
     text-decoration: underline;
 }
 
+/* The reset flow's Resend button while its countdown runs: still readable
+   (the label is the countdown), no longer a link. */
+.auth-link-btn:disabled {
+    color: var(--text-muted);
+    cursor: default;
+    text-decoration: none;
+}
+
+.auth-resend {
+    margin: 2px 0 10px;
+    text-align: left;
+}
+
 .mode-toggle {
     display: flex;
     gap: 4px;
