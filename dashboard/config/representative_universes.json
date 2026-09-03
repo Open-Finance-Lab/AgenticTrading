@@ -1,0 +1,773 @@
+{
+  "schema_version": 1,
+  "version": "representative-2026-09-03-v1",
+  "snapshot_asof": "2026-09-03",
+  "selection_policy": "Curated coverage across sectors and asset classes; not ranked by return or market capitalization.",
+  "source_catalog_sha256": "67bb97f9bfc7f22e3d23c3314dc628fca99e0a1729864106cef46d3350aab6c2",
+  "sources": [
+    {
+      "title": "GICS sector framework",
+      "url": "https://www.spglobal.com/spdji/en/landing/topic/gics/"
+    },
+    {
+      "title": "State Street sector ETF suite",
+      "url": "https://www.ssga.com/us/en/intermediary/capabilities/equities/sector-investing/select-sector-etfs"
+    },
+    {
+      "title": "iShares fund directory",
+      "url": "https://www.ishares.com/us/products/etf-investments"
+    }
+  ],
+  "presets": {
+    "ordinary": {
+      "name": "Ordinary Stocks 30",
+      "description": "30 stocks across 11 sectors.",
+      "groups": [
+        {
+          "name": "Technology",
+          "symbols": [
+            "AAPL",
+            "MSFT",
+            "NVDA",
+            "AMD"
+          ]
+        },
+        {
+          "name": "Communication services",
+          "symbols": [
+            "GOOGL",
+            "META",
+            "VZ"
+          ]
+        },
+        {
+          "name": "Consumer discretionary",
+          "symbols": [
+            "AMZN",
+            "HD",
+            "MCD"
+          ]
+        },
+        {
+          "name": "Consumer staples",
+          "symbols": [
+            "WMT",
+            "PG",
+            "KO"
+          ]
+        },
+        {
+          "name": "Health care",
+          "symbols": [
+            "JNJ",
+            "UNH",
+            "ABBV"
+          ]
+        },
+        {
+          "name": "Financials",
+          "symbols": [
+            "JPM",
+            "BRK.B",
+            "V"
+          ]
+        },
+        {
+          "name": "Industrials",
+          "symbols": [
+            "CAT",
+            "UNP",
+            "HON"
+          ]
+        },
+        {
+          "name": "Energy",
+          "symbols": [
+            "XOM",
+            "CVX"
+          ]
+        },
+        {
+          "name": "Utilities",
+          "symbols": [
+            "NEE",
+            "DUK"
+          ]
+        },
+        {
+          "name": "Real estate",
+          "symbols": [
+            "PLD",
+            "AMT"
+          ]
+        },
+        {
+          "name": "Materials",
+          "symbols": [
+            "LIN",
+            "FCX"
+          ]
+        }
+      ]
+    },
+    "fund": {
+      "name": "Funds & ETFs 30",
+      "description": "30 funds across major asset classes.",
+      "groups": [
+        {
+          "name": "US equity markets",
+          "symbols": [
+            "SPY",
+            "QQQ",
+            "IWM",
+            "VTI"
+          ]
+        },
+        {
+          "name": "US sectors",
+          "symbols": [
+            "XLK",
+            "XLF",
+            "XLV",
+            "XLY",
+            "XLP",
+            "XLE",
+            "XLI",
+            "XLB",
+            "XLU",
+            "XLRE",
+            "XLC"
+          ]
+        },
+        {
+          "name": "International equity",
+          "symbols": [
+            "VEA",
+            "VWO",
+            "VXUS",
+            "EWJ"
+          ]
+        },
+        {
+          "name": "Bonds",
+          "symbols": [
+            "BND",
+            "AGG",
+            "TLT",
+            "IEF",
+            "SHY",
+            "TIP",
+            "LQD",
+            "HYG"
+          ]
+        },
+        {
+          "name": "Gold, silver and real estate",
+          "symbols": [
+            "GLD",
+            "SLV",
+            "VNQ"
+          ]
+        }
+      ]
+    },
+    "all": {
+      "name": "Stocks & Funds 30",
+      "description": "15 stocks and 15 funds.",
+      "groups": [
+        {
+          "name": "Stocks across 11 sectors",
+          "symbols": [
+            "AAPL",
+            "MSFT",
+            "GOOGL",
+            "AMZN",
+            "WMT",
+            "JNJ",
+            "JPM",
+            "CAT",
+            "XOM",
+            "NEE",
+            "PLD",
+            "LIN",
+            "VZ",
+            "KO",
+            "CVX"
+          ]
+        },
+        {
+          "name": "US and international equity funds",
+          "symbols": [
+            "VTI",
+            "QQQ",
+            "IWM",
+            "VEA",
+            "VWO",
+            "EWJ"
+          ]
+        },
+        {
+          "name": "Bond funds",
+          "symbols": [
+            "BND",
+            "TLT",
+            "IEF",
+            "TIP",
+            "LQD",
+            "HYG"
+          ]
+        },
+        {
+          "name": "Gold, silver and real estate funds",
+          "symbols": [
+            "GLD",
+            "SLV",
+            "VNQ"
+          ]
+        }
+      ]
+    }
+  },
+  "securities": [
+    {
+      "symbol": "AAPL",
+      "name": "Apple Inc. Common Stock",
+      "classification": "ordinary_share",
+      "exchange": "NASDAQ",
+      "status": "active",
+      "tradable": "True",
+      "snapshot_asof": "2026-09-03"
+    },
+    {
+      "symbol": "ABBV",
+      "name": "ABBVIE INC.",
+      "classification": "ordinary_share",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": "True",
+      "snapshot_asof": "2026-09-03"
+    },
+    {
+      "symbol": "AGG",
+      "name": "iShares Core U.S. Aggregate Bond ETF",
+      "classification": "etp",
+      "exchange": "ARCA",
+      "status": "active",
+      "tradable": "True",
+      "snapshot_asof": "2026-09-03"
+    },
+    {
+      "symbol": "AMD",
+      "name": "Advanced Micro Devices, Inc. Common Stock",
+      "classification": "ordinary_share",
+      "exchange": "NASDAQ",
+      "status": "active",
+      "tradable": "True",
+      "snapshot_asof": "2026-09-03"
+    },
+    {
+      "symbol": "AMT",
+      "name": "American Tower Corporation",
+      "classification": "ordinary_share",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": "True",
+      "snapshot_asof": "2026-09-03"
+    },
+    {
+      "symbol": "AMZN",
+      "name": "Amazon.com, Inc. Common Stock",
+      "classification": "ordinary_share",
+      "exchange": "NASDAQ",
+      "status": "active",
+      "tradable": "True",
+      "snapshot_asof": "2026-09-03"
+    },
+    {
+      "symbol": "BND",
+      "name": "Vanguard Total Bond Market ETF",
+      "classification": "etp",
+      "exchange": "NASDAQ",
+      "status": "active",
+      "tradable": "True",
+      "snapshot_asof": "2026-09-03"
+    },
+    {
+      "symbol": "BRK.B",
+      "name": "BERKSHIRE HATHAWAY Class B",
+      "classification": "ordinary_share",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": "True",
+      "snapshot_asof": "2026-09-03"
+    },
+    {
+      "symbol": "CAT",
+      "name": "Caterpillar Inc.",
+      "classification": "ordinary_share",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": "True",
+      "snapshot_asof": "2026-09-03"
+    },
+    {
+      "symbol": "CVX",
+      "name": "Chevron Corporation",
+      "classification": "ordinary_share",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": "True",
+      "snapshot_asof": "2026-09-03"
+    },
+    {
+      "symbol": "DUK",
+      "name": "Duke Energy Corporation",
+      "classification": "ordinary_share",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": "True",
+      "snapshot_asof": "2026-09-03"
+    },
+    {
+      "symbol": "EWJ",
+      "name": "iShares MSCI Japan ETF",
+      "classification": "etp",
+      "exchange": "ARCA",
+      "status": "active",
+      "tradable": "True",
+      "snapshot_asof": "2026-09-03"
+    },
+    {
+      "symbol": "FCX",
+      "name": "Freeport-McMoran Inc.",
+      "classification": "ordinary_share",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": "True",
+      "snapshot_asof": "2026-09-03"
+    },
+    {
+      "symbol": "GLD",
+      "name": "SPDR Gold Trust, SPDR Gold Shares",
+      "classification": "etp",
+      "exchange": "ARCA",
+      "status": "active",
+      "tradable": "True",
+      "snapshot_asof": "2026-09-03"
+    },
+    {
+      "symbol": "GOOGL",
+      "name": "Alphabet Inc. Class A Common Stock",
+      "classification": "ordinary_share",
+      "exchange": "NASDAQ",
+      "status": "active",
+      "tradable": "True",
+      "snapshot_asof": "2026-09-03"
+    },
+    {
+      "symbol": "HD",
+      "name": "Home Depot, Inc.",
+      "classification": "ordinary_share",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": "True",
+      "snapshot_asof": "2026-09-03"
+    },
+    {
+      "symbol": "HON",
+      "name": "Honeywell International Inc. Common Stock",
+      "classification": "ordinary_share",
+      "exchange": "NASDAQ",
+      "status": "active",
+      "tradable": "True",
+      "snapshot_asof": "2026-09-03"
+    },
+    {
+      "symbol": "HYG",
+      "name": "iShares iBoxx $ High Yield Corporate Bond ETF",
+      "classification": "etp",
+      "exchange": "ARCA",
+      "status": "active",
+      "tradable": "True",
+      "snapshot_asof": "2026-09-03"
+    },
+    {
+      "symbol": "IEF",
+      "name": "iShares 7-10 Year Treasury Bond ETF",
+      "classification": "etp",
+      "exchange": "NASDAQ",
+      "status": "active",
+      "tradable": "True",
+      "snapshot_asof": "2026-09-03"
+    },
+    {
+      "symbol": "IWM",
+      "name": "iShares Russell 2000 ETF",
+      "classification": "etp",
+      "exchange": "ARCA",
+      "status": "active",
+      "tradable": "True",
+      "snapshot_asof": "2026-09-03"
+    },
+    {
+      "symbol": "JNJ",
+      "name": "Johnson & Johnson",
+      "classification": "ordinary_share",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": "True",
+      "snapshot_asof": "2026-09-03"
+    },
+    {
+      "symbol": "JPM",
+      "name": "JPMorgan Chase & Co.",
+      "classification": "ordinary_share",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": "True",
+      "snapshot_asof": "2026-09-03"
+    },
+    {
+      "symbol": "KO",
+      "name": "Coca-Cola Company",
+      "classification": "ordinary_share",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": "True",
+      "snapshot_asof": "2026-09-03"
+    },
+    {
+      "symbol": "LIN",
+      "name": "Linde plc Ordinary Shares",
+      "classification": "ordinary_share",
+      "exchange": "NASDAQ",
+      "status": "active",
+      "tradable": "True",
+      "snapshot_asof": "2026-09-03"
+    },
+    {
+      "symbol": "LQD",
+      "name": "iShares iBoxx $ Investment Grade Corporate Bond ETF",
+      "classification": "etp",
+      "exchange": "ARCA",
+      "status": "active",
+      "tradable": "True",
+      "snapshot_asof": "2026-09-03"
+    },
+    {
+      "symbol": "MCD",
+      "name": "McDonald's Corporation",
+      "classification": "ordinary_share",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": "True",
+      "snapshot_asof": "2026-09-03"
+    },
+    {
+      "symbol": "META",
+      "name": "Meta Platforms, Inc. Class A Common Stock",
+      "classification": "ordinary_share",
+      "exchange": "NASDAQ",
+      "status": "active",
+      "tradable": "True",
+      "snapshot_asof": "2026-09-03"
+    },
+    {
+      "symbol": "MSFT",
+      "name": "Microsoft Corporation Common Stock",
+      "classification": "ordinary_share",
+      "exchange": "NASDAQ",
+      "status": "active",
+      "tradable": "True",
+      "snapshot_asof": "2026-09-03"
+    },
+    {
+      "symbol": "NEE",
+      "name": "NextEra Energy, Inc.",
+      "classification": "ordinary_share",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": "True",
+      "snapshot_asof": "2026-09-03"
+    },
+    {
+      "symbol": "NVDA",
+      "name": "NVIDIA Corporation Common Stock",
+      "classification": "ordinary_share",
+      "exchange": "NASDAQ",
+      "status": "active",
+      "tradable": "True",
+      "snapshot_asof": "2026-09-03"
+    },
+    {
+      "symbol": "PG",
+      "name": "Procter & Gamble Company",
+      "classification": "ordinary_share",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": "True",
+      "snapshot_asof": "2026-09-03"
+    },
+    {
+      "symbol": "PLD",
+      "name": "PROLOGIS, INC.",
+      "classification": "ordinary_share",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": "True",
+      "snapshot_asof": "2026-09-03"
+    },
+    {
+      "symbol": "QQQ",
+      "name": "Invesco QQQ Trust, Series 1",
+      "classification": "etp",
+      "exchange": "NASDAQ",
+      "status": "active",
+      "tradable": "True",
+      "snapshot_asof": "2026-09-03"
+    },
+    {
+      "symbol": "SHY",
+      "name": "iShares 1-3 Year Treasury Bond ETF",
+      "classification": "etp",
+      "exchange": "NASDAQ",
+      "status": "active",
+      "tradable": "True",
+      "snapshot_asof": "2026-09-03"
+    },
+    {
+      "symbol": "SLV",
+      "name": "iShares Silver Trust",
+      "classification": "etp",
+      "exchange": "ARCA",
+      "status": "active",
+      "tradable": "True",
+      "snapshot_asof": "2026-09-03"
+    },
+    {
+      "symbol": "SPY",
+      "name": "State Street SPDR S&P 500 ETF Trust",
+      "classification": "etp",
+      "exchange": "ARCA",
+      "status": "active",
+      "tradable": "True",
+      "snapshot_asof": "2026-09-03"
+    },
+    {
+      "symbol": "TIP",
+      "name": "iShares TIPS Bond ETF",
+      "classification": "etp",
+      "exchange": "ARCA",
+      "status": "active",
+      "tradable": "True",
+      "snapshot_asof": "2026-09-03"
+    },
+    {
+      "symbol": "TLT",
+      "name": "iShares 20 Year Treasury Bond ETF",
+      "classification": "etp",
+      "exchange": "NASDAQ",
+      "status": "active",
+      "tradable": "True",
+      "snapshot_asof": "2026-09-03"
+    },
+    {
+      "symbol": "UNH",
+      "name": "UNITEDHEALTH GROUP INCORPORATED (Delaware)",
+      "classification": "ordinary_share",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": "True",
+      "snapshot_asof": "2026-09-03"
+    },
+    {
+      "symbol": "UNP",
+      "name": "Union Pacific Corp.",
+      "classification": "ordinary_share",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": "True",
+      "snapshot_asof": "2026-09-03"
+    },
+    {
+      "symbol": "V",
+      "name": "VISA Inc.",
+      "classification": "ordinary_share",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": "True",
+      "snapshot_asof": "2026-09-03"
+    },
+    {
+      "symbol": "VEA",
+      "name": "Vanguard FTSE Developed Markets ETF",
+      "classification": "etp",
+      "exchange": "ARCA",
+      "status": "active",
+      "tradable": "True",
+      "snapshot_asof": "2026-09-03"
+    },
+    {
+      "symbol": "VNQ",
+      "name": "Vanguard Real Estate ETF",
+      "classification": "etp",
+      "exchange": "ARCA",
+      "status": "active",
+      "tradable": "True",
+      "snapshot_asof": "2026-09-03"
+    },
+    {
+      "symbol": "VTI",
+      "name": "Vanguard Morningstar Total Stock Market ETF",
+      "classification": "etp",
+      "exchange": "ARCA",
+      "status": "active",
+      "tradable": "True",
+      "snapshot_asof": "2026-09-03"
+    },
+    {
+      "symbol": "VWO",
+      "name": "Vanguard FTSE Emerging Markets ETF",
+      "classification": "etp",
+      "exchange": "ARCA",
+      "status": "active",
+      "tradable": "True",
+      "snapshot_asof": "2026-09-03"
+    },
+    {
+      "symbol": "VXUS",
+      "name": "Vanguard STAR Funds Vanguard Total International Stock ETF",
+      "classification": "etp",
+      "exchange": "NASDAQ",
+      "status": "active",
+      "tradable": "True",
+      "snapshot_asof": "2026-09-03"
+    },
+    {
+      "symbol": "VZ",
+      "name": "Verizon Communications",
+      "classification": "ordinary_share",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": "True",
+      "snapshot_asof": "2026-09-03"
+    },
+    {
+      "symbol": "WMT",
+      "name": "Walmart Inc. Common Stock",
+      "classification": "ordinary_share",
+      "exchange": "NASDAQ",
+      "status": "active",
+      "tradable": "True",
+      "snapshot_asof": "2026-09-03"
+    },
+    {
+      "symbol": "XLB",
+      "name": "State Street Materials Select Sector SPDR ETF",
+      "classification": "etp",
+      "exchange": "ARCA",
+      "status": "active",
+      "tradable": "True",
+      "snapshot_asof": "2026-09-03"
+    },
+    {
+      "symbol": "XLC",
+      "name": "State Street Communication Services Select Sector SPDR ETF",
+      "classification": "etp",
+      "exchange": "ARCA",
+      "status": "active",
+      "tradable": "True",
+      "snapshot_asof": "2026-09-03"
+    },
+    {
+      "symbol": "XLE",
+      "name": "State Street Energy Select Sector SPDR ETF",
+      "classification": "etp",
+      "exchange": "ARCA",
+      "status": "active",
+      "tradable": "True",
+      "snapshot_asof": "2026-09-03"
+    },
+    {
+      "symbol": "XLF",
+      "name": "State Street Financial Select Sector SPDR ETF",
+      "classification": "etp",
+      "exchange": "ARCA",
+      "status": "active",
+      "tradable": "True",
+      "snapshot_asof": "2026-09-03"
+    },
+    {
+      "symbol": "XLI",
+      "name": "State Street Industrial Select Sector SPDR ETF",
+      "classification": "etp",
+      "exchange": "ARCA",
+      "status": "active",
+      "tradable": "True",
+      "snapshot_asof": "2026-09-03"
+    },
+    {
+      "symbol": "XLK",
+      "name": "State Street Technology Select Sector SPDR ETF",
+      "classification": "etp",
+      "exchange": "ARCA",
+      "status": "active",
+      "tradable": "True",
+      "snapshot_asof": "2026-09-03"
+    },
+    {
+      "symbol": "XLP",
+      "name": "State Street Consumer Staples Select Sector SPDR ETF",
+      "classification": "etp",
+      "exchange": "ARCA",
+      "status": "active",
+      "tradable": "True",
+      "snapshot_asof": "2026-09-03"
+    },
+    {
+      "symbol": "XLRE",
+      "name": "State Street Real Estate Select Sector SPDR ETF",
+      "classification": "etp",
+      "exchange": "ARCA",
+      "status": "active",
+      "tradable": "True",
+      "snapshot_asof": "2026-09-03"
+    },
+    {
+      "symbol": "XLU",
+      "name": "State Street Utilities Select Sector SPDR ETF",
+      "classification": "etp",
+      "exchange": "ARCA",
+      "status": "active",
+      "tradable": "True",
+      "snapshot_asof": "2026-09-03"
+    },
+    {
+      "symbol": "XLV",
+      "name": "State Street Health Care Select Sector SPDR ETF",
+      "classification": "etp",
+      "exchange": "ARCA",
+      "status": "active",
+      "tradable": "True",
+      "snapshot_asof": "2026-09-03"
+    },
+    {
+      "symbol": "XLY",
+      "name": "State Street Consumer Discretionary Select Sector SPDR ETF",
+      "classification": "etp",
+      "exchange": "ARCA",
+      "status": "active",
+      "tradable": "True",
+      "snapshot_asof": "2026-09-03"
+    },
+    {
+      "symbol": "XOM",
+      "name": "ExxonMobil Holdings Corporation",
+      "classification": "ordinary_share",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": "True",
+      "snapshot_asof": "2026-09-03"
+    }
+  ]
+}

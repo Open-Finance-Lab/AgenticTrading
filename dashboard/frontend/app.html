@@ -13,7 +13,7 @@
          because every API call is a CORS request. -->
     <link rel="preconnect" href="https://agentictrading.onrender.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="styles.css?v=130">
+    <link rel="stylesheet" href="styles.css?v=131">
     <!-- defer: ~200KB that was render-blocking. Deferred scripts execute in
          document order (this one first, the body-end ones after), all before
          DOMContentLoaded, so Chart is defined before any chart renders. -->
@@ -357,7 +357,7 @@
 
                 <div class="control-group">
                     <label>Asset Universe</label>
-                    <p class="control-helper">Choose the universe of assets your agent is allowed to trade.</p>
+                    <p class="control-helper">Choose the assets this agent can trade in this backtest.</p>
                     <div id="ifindAshareUniverse" class="ifind-universe-panel" hidden>
                         <select
                             id="ifindAshareUniverseSelect"
@@ -378,18 +378,23 @@
                         <button class="universe-tab" data-tab="custom" type="button">Custom</button>
                     </div>
                     <div id="builtinTab" class="universe-content active">
-                        <div class="preset-cards">
-                            <div class="preset-card selected" id="djiaCard">
-                                <div class="preset-name">DJIA 30</div>
-                                <div class="preset-desc">30 blue-chip companies</div>
-                                <button class="preset-btn" type="button">Selected</button>
-                            </div>
-                            <div class="preset-card" id="mag7Card">
-                                <div class="preset-name">Magnificent 7</div>
-                                <div class="preset-desc">7 major tech companies</div>
-                                <button class="preset-btn" type="button">Select</button>
-                            </div>
-                        </div>
+                        <label class="sr-only" for="backtestUniverseSelect">Stock category for this backtest</label>
+                        <select id="backtestUniverseSelect" class="control-select" aria-describedby="backtestUniverseDescription">
+                            <option value="djia">DJIA 30 · 30 stocks</option>
+                            <option value="mag7">Magnificent 7 · 7 stocks</option>
+                            <option value="ordinary" disabled>Ordinary stocks · 30 stocks, 11 sectors</option>
+                            <option value="fund" disabled>Funds &amp; ETFs · 30 across asset classes</option>
+                            <option value="all" disabled>Stocks &amp; funds · 15 stocks + 15 funds</option>
+                        </select>
+                        <p id="backtestUniverseDescription" class="control-helper" aria-live="polite">30 blue-chip companies in the Dow Jones Industrial Average.</p>
+                        <p id="backtestUniverseLoadError" class="control-helper" hidden>
+                            Additional stock categories could not be loaded.
+                            <button id="backtestUniverseRetry" class="run-backtest-edit-link" type="button">Retry</button>
+                        </p>
+                        <details id="backtestUniversePreview" class="universe-roster">
+                            <summary id="backtestUniversePreviewSummary">View 30 selected assets</summary>
+                            <div id="backtestUniverseGroups" class="universe-roster-groups"></div>
+                        </details>
                     </div>
                     <div id="customTab" class="universe-content">
                         <div class="custom-universe">
@@ -2493,7 +2498,7 @@
     <script src="market-events/MarketEventFeed.js" defer></script>
     <script src="js/portfolio.js?v=17" defer></script>
     <script src="js/backtest-comparison.js?v=1" defer></script>
-    <script src="app.js?v=125" defer></script>
+    <script src="app.js?v=126" defer></script>
     <script src="js/analytics.js?v=1" defer></script>
     <script src="js/agent-editor.js?v=30" defer></script>
     <script src="js/credit-format.js?v=1" defer></script>

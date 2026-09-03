@@ -721,7 +721,7 @@ def create_safe_prompt(
     allowed_symbols: Optional[List[str]] = None,
 ) -> str:
     """Create a safe prompt for LLM trading decision."""
-    return SAFE_TRADING_PROMPT.format(
+    return _pool_prompt_template(SAFE_TRADING_PROMPT, market_snapshot).format(
         market_snapshot=json.dumps(market_snapshot, indent=2),
         valid_symbols=_format_valid_symbols(allowed_symbols),
     )
@@ -742,7 +742,7 @@ def create_custom_prompt(
     user wrote. Only the fixed scaffold is formatted, so user braces are safe.
     """
     strategy = (strategy_prompt or "").strip()
-    contract = CUSTOM_STRATEGY_OUTPUT_CONTRACT.format(
+    contract = _pool_prompt_template(CUSTOM_STRATEGY_OUTPUT_CONTRACT, market_snapshot).format(
         market_snapshot=json.dumps(market_snapshot, indent=2),
         valid_symbols=_format_valid_symbols(allowed_symbols),
     )
@@ -774,8 +774,26 @@ def create_prompt(
             market_snapshot, custom_prompt, allowed_symbols=allowed_symbols
         )
     if mode == "buy_and_hold":
+        if (market_snapshot.get("market") or {}).get("stock_pool"):
+            return create_custom_prompt(
+                market_snapshot,
+                "Buy and hold up to 10 securities from the selected universe. "
+                "Choose from top_signals using the provided indicators. On the "
+                "first hour, divide available cash equally across your chosen "
+                "valid symbols with a current price. "
+                "Buy whole shares within that cash budget; skip allocations too "
+                "small for one share. Subsequently hold existing positions; never sell.",
+                allowed_symbols=allowed_symbols,
+            )
         return BUY_AND_HOLD_PROMPT.format(
             market_snapshot=json.dumps(market_snapshot, indent=2),
             valid_symbols=_format_valid_symbols(allowed_symbols),
         )
     return create_safe_prompt(market_snapshot, allowed_symbols=allowed_symbols)
+
+
+def _pool_prompt_template(template: str, market_snapshot: Dict[str, Any]) -> str:
+    """Keep legacy prompts stable; named pools must not claim to be Dow-only."""
+    if (market_snapshot.get("market") or {}).get("stock_pool"):
+        return template.replace("DJIA", "selected-universe")
+    return template

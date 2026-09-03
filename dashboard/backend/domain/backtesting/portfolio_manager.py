@@ -339,8 +339,10 @@ class PortfolioManager:
             # Add market signals to snapshot
             signals = portfolio_state["market_signals"]
             
-            # For buy-and-hold mode, offer the full selected universe
-            if mode == "buy_and_hold":
+            # Named pools can contain thousands of securities: rank the whole
+            # pool before creating the model's signal shortlist in either mode.
+            # Legacy buy-and-hold retains its complete signal snapshot.
+            if mode == "buy_and_hold" and not (market_context or {}).get("stock_pool"):
                 symbols_to_include = [s for s in self.allowed_symbols if s in signals]
             else:
                 # For safe_trading, rank by trend/momentum (NOT RSI extremity).

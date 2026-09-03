@@ -5270,9 +5270,12 @@ document.addEventListener('DOMContentLoaded', async () => {
         tab.addEventListener('click', (e) => handleUniverseTabSwitch(e.target));
     });
 
-    // Setup preset cards
-    document.getElementById('djiaCard')?.addEventListener('click', () => selectPreset('djia'));
-    document.getElementById('mag7Card')?.addEventListener('click', () => selectPreset('mag7'));
+    document.getElementById('backtestUniverseSelect')?.addEventListener(
+        'change', (event) => selectPreset(event.target.value),
+    );
+    document.getElementById('backtestUniverseRetry')?.addEventListener(
+        'click', () => loadRepresentativeStockPools(),
+    );
 
     // Setup custom universe builder
     setupAssetSearch();
@@ -5935,6 +5938,7 @@ function updateTimePeriod(btn) {
 const ASSET_UNIVERSES = {
     djia: {
         name: 'DJIA 30',
+        description: '30 blue-chip companies in the Dow Jones Industrial Average.',
         // Canonical Dow-30 — must mirror backend validator.DJIA_30
         // (pinned by dashboard/backend/tests/test_djia30_universe.py).
         assets: ['AAPL', 'AMGN', 'AMZN', 'AXP', 'BA', 'CAT', 'CRM', 'CSCO', 'CVX', 'DIS',
@@ -5943,6 +5947,7 @@ const ASSET_UNIVERSES = {
     },
     mag7: {
         name: 'Magnificent 7',
+        description: '7 major technology and consumer platform companies.',
         assets: ['AAPL', 'MSFT', 'GOOGL', 'AMZN', 'NVDA', 'TSLA', 'META']
     }
 };
@@ -6150,6 +6155,91 @@ const POPULAR_STOCKS = {
 };
 
 let selectedUniverse = 'djia'; // Default
+let representativePoolsPromise = null;
+
+async function loadRepresentativeStockPools() {
+    if (representativePoolsPromise) return representativePoolsPromise;
+    const error = document.getElementById('backtestUniverseLoadError');
+    if (error) error.hidden = true;
+    representativePoolsPromise = (async () => {
+        try {
+            const data = await API.get(`${API_BASE}/config/stock-pools`);
+            const presets = data?.representative_presets;
+            const resolved = {};
+            for (const pool of ['ordinary', 'fund', 'all']) {
+                const preset = presets?.find((item) => item.stock_pool === pool);
+                if (preset?.pool_mode !== 'representative30'
+                    || !Array.isArray(preset.symbols) || preset.symbols.length !== 30
+                    || new Set(preset.symbols).size !== 30
+                    || !preset.symbols.every((symbol) => typeof symbol === 'string' && /^[A-Z][A-Z0-9.]{0,9}$/.test(symbol))) {
+                    throw new Error('Invalid representative stock pool');
+                }
+                resolved[pool] = {
+                    name: preset.name,
+                    description: preset.description,
+                    assets: [...preset.symbols],
+                    groups: preset.groups,
+                    stockPool: pool,
+                    poolMode: 'representative30',
+                };
+            }
+            Object.assign(ASSET_UNIVERSES, resolved);
+            const select = document.getElementById('backtestUniverseSelect');
+            for (const option of Array.from(select?.options || [])) {
+                if (resolved[option.value]) option.disabled = false;
+            }
+            renderSelectedUniversePreview();
+            return true;
+        } catch (loadError) {
+            if (error) error.hidden = false;
+            console.warn('Could not load representative stock pools:', loadError.message);
+            return false;
+        }
+    })();
+    const loaded = await representativePoolsPromise;
+    if (!loaded) representativePoolsPromise = null;
+    return loaded;
+}
+
+function renderSelectedUniversePreview() {
+    const preset = ASSET_UNIVERSES[selectedUniverse];
+    if (!preset) return;
+    const select = document.getElementById('backtestUniverseSelect');
+    if (select) select.value = selectedUniverse;
+    const description = document.getElementById('backtestUniverseDescription');
+    if (description) description.textContent = preset.description || '';
+    const summary = document.getElementById('backtestUniversePreviewSummary');
+    if (summary) summary.textContent = `View ${preset.assets.length} selected assets`;
+    const container = document.getElementById('backtestUniverseGroups');
+    if (!container) return;
+    container.replaceChildren();
+    const groups = preset.groups || [{ name: 'Selected assets', symbols: preset.assets }];
+    for (const group of groups) {
+        const section = document.createElement('div');
+        const heading = document.createElement('p');
+        heading.className = 'universe-roster-heading';
+        heading.textContent = group.name;
+        section.appendChild(heading);
+        const chips = document.createElement('div');
+        chips.className = 'universe-roster-symbols';
+        for (const symbol of group.symbols) {
+            const chip = document.createElement('span');
+            chip.textContent = symbol;
+            chips.appendChild(chip);
+        }
+        section.appendChild(chips);
+        container.appendChild(section);
+    }
+}
+
+function getSelectedStockPoolRequest() {
+    if (document.getElementById('marketDataSourceSelect')?.value === IFIND_ASHARE_SOURCE
+        || !document.getElementById('builtinTab')?.classList.contains('active')) return null;
+    const preset = ASSET_UNIVERSES[selectedUniverse];
+    return preset?.stockPool
+        ? { stock_pool: preset.stockPool, pool_mode: 'representative30' }
+        : null;
+}
 
 function handleUniverseTabSwitch(tab) {
     const tabName = tab.dataset.tab;
@@ -6184,24 +6274,7 @@ function selectPreset(preset) {
     }
 
     selectedUniverse = preset;
-
-    const djiaCard = document.getElementById('djiaCard');
-    const mag7Card = document.getElementById('mag7Card');
-    if (!djiaCard || !mag7Card) return;
-
-    djiaCard.classList.remove('selected');
-    mag7Card.classList.remove('selected');
-
-    if (preset === 'djia') {
-        djiaCard.classList.add('selected');
-        djiaCard.querySelector('.preset-btn').textContent = 'Selected';
-        mag7Card.querySelector('.preset-btn').textContent = 'Select';
-    } else if (preset === 'mag7') {
-        mag7Card.classList.add('selected');
-        mag7Card.querySelector('.preset-btn').textContent = 'Selected';
-        djiaCard.querySelector('.preset-btn').textContent = 'Select';
-    }
-
+    renderSelectedUniversePreview();
     const universeData = ASSET_UNIVERSES[preset];
     console.log(`✅ Selected preset: ${universeData.name}`);
     notifyAssetUniverseChanged();
@@ -8085,6 +8158,8 @@ function renderBacktestRunConfig(
     const start = cfg?.startDate || run?.start_date;
     const end = cfg?.endDate || run?.end_date;
     const universe = cfg?.universeLabel
+        || run?.universe_selection?.name
+        || metadata.universe_selection?.name
         || ifindProfile?.name
         || describeUniverseFromAssets(runSymbols)
         || universeKey
@@ -8335,7 +8410,10 @@ async function openRunBacktestModal(agent) {
 
     const modal = document.getElementById('runBacktestModal');
     if (modal) modal.hidden = false;
-    await loadRunBacktestExecutionOptions(agent);
+    await Promise.all([
+        loadRunBacktestExecutionOptions(agent),
+        loadRepresentativeStockPools(),
+    ]);
     if (runBacktestModalAgent?.agent_id !== agent.agent_id) return;
     if (submit) submit.textContent = '▶ Run Backtest';
     syncBacktestModelFieldMode();
@@ -8400,6 +8478,7 @@ async function runBacktest() {
     }
 
     const assets = getSelectedAssets();
+    const stockPoolRequest = getSelectedStockPoolRequest();
     const modelSelect = document.getElementById('modelSelect');
     const marketDataSourceSelect = document.getElementById('marketDataSourceSelect');
     const dataSource = marketDataSourceSelect?.value || 'alpaca';
@@ -8579,6 +8658,13 @@ async function runBacktest() {
             // Body is authoritative; query `assets` kept for older callers/logs.
             assets: [...assets],
         };
+        if (stockPoolRequest) {
+            // The backend resolves and freezes the roster shown in the picker.
+            // Explicit assets and category selection are mutually exclusive.
+            params.delete('assets');
+            delete payload.assets;
+            Object.assign(payload, stockPoolRequest);
+        }
         params.set('decision_source', decisionSource);
         payload.decision_source = decisionSource;
         if (isIFind) {
