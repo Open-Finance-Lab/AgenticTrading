@@ -49,11 +49,9 @@
 **Files:**
 - Create: `dashboard/backend/domain/analytics/lifecycle.py`
 - Create: `dashboard/backend/tests/domain/analytics/test_lifecycle.py`
-- Modify: `dashboard/backend/domain/analytics/metrics.py`
-- Modify: `dashboard/backend/tests/domain/analytics/test_metrics.py`
 
 **Interfaces:**
-- Consumes: `AnalyticsEventRecord` from `dashboard.backend.domain.analytics.models`.
+- Consumes: `AnalyticsEventRecord` from `dashboard.backend.domain.analytics.models`; the legacy `metrics.is_meaningful_event()` remains unchanged for `/overview` and five-state compatibility.
 - Produces: `LifecycleInputs`, `LifecycleResult`, `OperationalResult`, `CommercialTier`, `is_lifecycle_activity(event)`, `calculate_lifecycle(inputs, as_of)`, `calculate_operational_state(signals, as_of)`, `commercial_tier(net_purchased_micro)`, and `activation_cohort_week(activated_at)`.
 
 - [ ] **Step 1: Write failing lifecycle boundary and activity-allowlist tests**
@@ -80,7 +78,7 @@ def test_passive_or_admin_events_are_not_lifecycle_activity(event_name):
 
 - [ ] **Step 2: Run the focused tests and verify missing imports fail**
 
-Run: `pytest -q dashboard/backend/tests/domain/analytics/test_lifecycle.py dashboard/backend/tests/domain/analytics/test_metrics.py`
+Run: `pytest -q dashboard/backend/tests/domain/analytics/test_lifecycle.py`
 
 Expected: FAIL during collection because `dashboard.backend.domain.analytics.lifecycle` does not exist.
 
@@ -185,12 +183,12 @@ def test_inactive_reason_distinguishes_activation_history():
 
 - [ ] **Step 5: Run domain tests and commit**
 
-Run: `pytest -q dashboard/backend/tests/domain/analytics/test_lifecycle.py dashboard/backend/tests/domain/analytics/test_metrics.py`
+Run: `pytest -q dashboard/backend/tests/domain/analytics/test_lifecycle.py dashboard/backend/tests/domain/analytics/test_metrics.py dashboard/backend/tests/domain/analytics/test_states.py`
 
 Expected: PASS.
 
 ```bash
-git add dashboard/backend/domain/analytics/lifecycle.py dashboard/backend/domain/analytics/metrics.py dashboard/backend/tests/domain/analytics/test_lifecycle.py dashboard/backend/tests/domain/analytics/test_metrics.py
+git add dashboard/backend/domain/analytics/lifecycle.py dashboard/backend/tests/domain/analytics/test_lifecycle.py
 git commit -m "feat: define user value analytics rules"
 ```
 
