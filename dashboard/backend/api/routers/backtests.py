@@ -1172,6 +1172,8 @@ def run_backtest_background(
             try:
                 os.remove(universe_selection_path)
             except OSError:
+                # This is best-effort cleanup after the worker has finished;
+                # failing here must not replace the backtest's own outcome.
                 pass
         print("✋ Backtest background thread finished", flush=True)
 
