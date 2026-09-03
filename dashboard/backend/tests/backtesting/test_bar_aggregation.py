@@ -3,7 +3,10 @@ from datetime import datetime
 import pandas as pd
 import pytz
 
-from dashboard.backend.domain.backtesting.bar_aggregation import aggregate_bars
+from dashboard.backend.domain.backtesting.bar_aggregation import (
+    aggregate_bars,
+    summarize_aggregation_quality,
+)
 
 
 def _bars(timestamps):
@@ -102,3 +105,104 @@ def test_missing_source_bar_is_visible_in_quality_columns():
     assert result.iloc[0]["expected_source_bars"] == 12
     assert bool(result.iloc[0]["is_complete"]) is False
     assert bool(result.iloc[0]["has_gap"]) is True
+
+
+def test_duplicate_cannot_hide_a_missing_source_slot():
+    eastern = pytz.timezone("US/Eastern")
+    timestamps = list(
+        pd.date_range(
+            eastern.localize(datetime(2026, 3, 2, 9, 30)),
+            eastern.localize(datetime(2026, 3, 2, 10, 25)),
+            freq="5min",
+        )
+    )
+    timestamps.remove(eastern.localize(datetime(2026, 3, 2, 9, 45)))
+    timestamps.append(eastern.localize(datetime(2026, 3, 2, 9, 40)))
+
+    result = aggregate_bars(
+        _bars(timestamps),
+        source_timeframe="5m",
+        decision_timeframe="60m",
+        market="US",
+        timezone="US/Eastern",
+    )
+
+    assert result.iloc[0]["source_bar_count"] == 12
+    assert result.iloc[0]["missing_source_bars"] == 1
+    assert result.iloc[0]["duplicate_source_bars"] == 1
+    assert bool(result.iloc[0]["is_complete"]) is False
+
+
+def test_off_grid_or_invalid_source_bar_makes_bucket_incomplete():
+    eastern = pytz.timezone("US/Eastern")
+    timestamps = list(
+        pd.date_range(
+            eastern.localize(datetime(2026, 3, 2, 9, 30)),
+            eastern.localize(datetime(2026, 3, 2, 10, 25)),
+            freq="5min",
+        )
+    )
+    timestamps[3] = eastern.localize(datetime(2026, 3, 2, 9, 47))
+    bars = _bars(timestamps)
+    bars.loc[timestamps[5], "close"] = float("nan")
+
+    result = aggregate_bars(
+        bars,
+        source_timeframe="5m",
+        decision_timeframe="60m",
+        market="US",
+        timezone="US/Eastern",
+    )
+
+    assert result.iloc[0]["missing_source_bars"] == 1
+    assert result.iloc[0]["off_grid_source_bars"] == 1
+    assert result.iloc[0]["invalid_source_bars"] == 1
+    assert bool(result.iloc[0]["is_complete"]) is False
+
+
+def test_decision_bar_does_not_include_source_bar_at_its_right_edge():
+    eastern = pytz.timezone("US/Eastern")
+    timestamps = pd.date_range(
+        eastern.localize(datetime(2026, 3, 2, 9, 30)),
+        eastern.localize(datetime(2026, 3, 2, 10, 30)),
+        freq="5min",
+    )
+    bars = _bars(timestamps)
+    bars.loc[timestamps[-1], ["open", "high", "low", "close"]] = 10_000
+
+    result = aggregate_bars(
+        bars,
+        source_timeframe="5m",
+        decision_timeframe="60m",
+        market="US",
+        timezone="US/Eastern",
+    )
+
+    first_decision = result.loc[pd.Timestamp("2026-03-02 15:30:00", tz="UTC")]
+    assert first_decision["close"] == 111
+    assert first_decision["high"] == 112
+
+
+def test_quality_summary_counts_usable_and_rejected_buckets():
+    eastern = pytz.timezone("US/Eastern")
+    timestamps = pd.date_range(
+        eastern.localize(datetime(2026, 3, 2, 9, 30)),
+        eastern.localize(datetime(2026, 3, 2, 11, 25)),
+        freq="5min",
+    ).delete(15)
+    aggregated = aggregate_bars(
+        _bars(timestamps),
+        source_timeframe="5m",
+        decision_timeframe="60m",
+        market="US",
+        timezone="US/Eastern",
+    )
+
+    summary = summarize_aggregation_quality({"AAPL": aggregated})
+
+    assert summary["policy"] == "drop_incomplete_decision_bars"
+    assert summary["total_decision_bars"] == 2
+    assert summary["usable_decision_bars"] == 1
+    assert summary["dropped_decision_bars"] == 1
+    assert summary["missing_source_bars"] == 1
+    assert summary["symbols"]["AAPL"]["dropped_decision_bars"] == 1

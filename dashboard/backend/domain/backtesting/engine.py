@@ -19,6 +19,7 @@ import json
 import uuid
 from bisect import bisect_left
 from datetime import date, datetime, time
+from math import ceil
 from typing import Any, Dict, List, Optional, Tuple
 
 from dashboard.backend.database import db
@@ -36,6 +37,7 @@ from dashboard.backend.domain.backtesting.currency import (
 from dashboard.backend.domain.backtesting.features import TechnicalIndicators
 from dashboard.backend.domain.backtesting.bar_aggregation import (
     aggregate_bars_by_symbol,
+    summarize_aggregation_quality,
 )
 from dashboard.backend.domain.backtesting.metrics import (
     calculate_sharpe,
@@ -254,6 +256,7 @@ class HourlyBacktester:
         )
         self.intraday_mode = False
         self.source_data = {}
+        self.data_quality = {}
         self.currency_context: CurrencyContext | None = None
         self.native_initial_capital = self.initial_capital
         if self.profile.native_currency == self.profile.reporting_currency:
@@ -655,20 +658,21 @@ class HourlyBacktester:
                 f"   Aggregating {actual_source_timeframe} source bars into "
                 f"{self.decision_timeframe} decision bars..."
             )
-            self.all_data = aggregate_bars_by_symbol(
+            aggregated_data = aggregate_bars_by_symbol(
                 self.source_data,
                 source_timeframe=actual_source_timeframe,
                 decision_timeframe=self.decision_timeframe,
                 market=self.profile.market,
                 timezone=self.profile.timezone,
             )
+            self.data_quality = summarize_aggregation_quality(aggregated_data)
             self.all_data = {
                 symbol: (
                     frame.loc[frame["is_complete"]].copy()
                     if "is_complete" in frame.columns
                     else frame
                 )
-                for symbol, frame in self.all_data.items()
+                for symbol, frame in aggregated_data.items()
                 if not frame.empty
             }
             if not self.all_data:
@@ -845,6 +849,9 @@ class HourlyBacktester:
                 "aggregation": "session_anchored_completed_bars",
                 "fill_policy": "next_source_bar_open",
             }
+            metadata["market_data_quality"] = dict(
+                getattr(self, "data_quality", {})
+            )
         if getattr(self, "universe_selection", None) is not None:
             metadata["universe_selection"] = dict(self.universe_selection)
         if profile.transaction_cost_profile is not None:
@@ -1218,14 +1225,14 @@ class HourlyBacktester:
         all_timestamps = self._timestamps_for_data(self.all_data)
         
         # Filter: only keep hours with real data for 80%+ of symbols
-        min_required = int(len(self.all_data) * 0.8)
+        min_required = max(1, ceil(len(self.all_data) * 0.8))
         filtered = []
         for ts in all_timestamps:
             real_data_count = sum(1 for df in self.all_data.values() if ts in df.index)
             if real_data_count >= min_required:
                 filtered.append(ts)
         
-        all_timestamps = filtered if filtered else all_timestamps
+        all_timestamps = filtered
         
         all_timestamps = self._market_hours_only(all_timestamps)
         prior_market_dates = (
@@ -1264,7 +1271,10 @@ class HourlyBacktester:
                 source_index = bisect_left(same_day_sources, timestamp)
                 next_source_timestamp = (
                     same_day_sources[source_index]
-                    if source_index < len(same_day_sources)
+                    if (
+                        source_index < len(same_day_sources)
+                        and same_day_sources[source_index] == timestamp
+                    )
                     else None
                 )
                 # The final partial session bucket (e.g. 15:30–16:00 ET) has

@@ -22,6 +22,25 @@ Phase 2 已接入 `HourlyBacktester` 和 API 的 `ExternalBacktestSession`：Alp
 `source_bar_count`、`expected_source_bars`、`is_complete`、`has_gap` 等质量字段。
 最后一个没有下一根源 bar 的收盘桶不进入可执行决策。
 
+## Phase 3：正确性硬化与审计
+
+Phase 3 将分钟链路的数据质量和无未来数据约束固化为可测试契约：
+
+- 小时 bar 使用左闭右开区间。例如 10:30 决策只包含 09:30–10:25 的
+  5 分钟 bar；10:30 的源 bar 只可作为该决策的成交 bar。
+- 完整性按预期的 5 分钟时间槽逐一校验，而非只比较行数。缺失、重复、
+  非 5 分钟网格时间戳和无效 OHLCV 都会使该小时 bar 失效。
+- 失效小时 bar 不进入 agent 决策集。多标的决策时点必须覆盖至少 80% 的
+  标的，门槛向上取整；没有时点达标时不再回退到稀疏时间轴。
+- 成交必须精确命中小时决策边界处的源 bar。该标的缺少这根 bar 时保持
+  未成交，不会延迟到后续 5 分钟 bar 补成交。
+- `market_data_quality` 随回测结果写入元数据，记录可用/丢弃小时 bar 数，
+  以及缺失、重复、错位和无效源 bar 数；网页版决策审计同时记录
+  `timestamp` 与 `execution_timestamp`。
+
+质量统计以“标的 × 决策 bar”为计数单位。同一小时若 30 个标的均有数据，
+会计为 30 个 decision bars。
+
 ## 代码契约
 
 `dashboard/backend/infrastructure/market_data/frequency.py` 提供：

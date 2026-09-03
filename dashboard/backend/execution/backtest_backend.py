@@ -86,12 +86,26 @@ class BacktestBackend(ExecutionBackend):
     def start_background_load(self) -> None:
         # Fast path (runs under the shared create lock — peek only, never
         # get_dataset): a resident dataset skips the loader thread entirely.
+        # Prefer the session's effective clocks. Compatibility fakes and older
+        # adapters may expose neither these attributes nor ``profile``; their
+        # historical contract is the all-hourly default.
+        profile = getattr(self.session, "profile", None)
+        source_timeframe = getattr(
+            self.session,
+            "source_timeframe",
+            getattr(profile, "source_timeframe", "60m"),
+        )
+        decision_timeframe = getattr(
+            self.session,
+            "decision_timeframe",
+            getattr(profile, "decision_timeframe", "60m"),
+        )
         dataset = ext.market_data_store.peek(
             DJIA_30,
             self.session.start_date,
             self.session.end_date,
-            source_timeframe=self.session.profile.source_timeframe,
-            decision_timeframe=self.session.profile.decision_timeframe,
+            source_timeframe=source_timeframe,
+            decision_timeframe=decision_timeframe,
         )
         if dataset is not None:
             self.session.adopt_dataset(dataset)

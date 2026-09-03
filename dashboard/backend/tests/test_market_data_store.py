@@ -3,6 +3,7 @@ cache, LRU eviction (T1 of the 2026-07-24 agent-scale spec)."""
 
 import threading
 import time
+from datetime import datetime
 
 import numpy as np
 import pandas as pd
@@ -221,3 +222,64 @@ def test_completed_leader_is_not_self_evicted_under_cap(monkeypatch):
     # entry it had just built.
     assert mds.peek(SYMS, *slow) is not None
     assert mds.peek(SYMS, *fast) is None
+
+
+def test_timestamp_quorum_rounds_up_to_a_real_eighty_percent():
+    timestamp = pd.Timestamp("2026-04-15 14:30:00+00:00")
+    frame = pd.DataFrame(
+        {"close": [100.0]},
+        index=pd.DatetimeIndex([timestamp]),
+    )
+    bars = {
+        "A": frame.copy(),
+        "B": frame.copy(),
+        "C": frame.iloc[0:0].copy(),
+    }
+
+    assert mds._build_trading_timestamps(bars) == []
+
+
+def test_minute_dataset_exposes_dropped_bucket_quality():
+    eastern = "US/Eastern"
+    timestamps = pd.date_range(
+        pd.Timestamp(datetime(2026, 4, 15, 9, 30), tz=eastern),
+        pd.Timestamp(datetime(2026, 4, 15, 11, 25), tz=eastern),
+        freq="5min",
+    ).delete(15)
+    prices = np.arange(len(timestamps), dtype=float) + 100
+    bars = {
+        "AAPL": pd.DataFrame(
+            {
+                "open": prices,
+                "high": prices + 1,
+                "low": prices - 1,
+                "close": prices,
+                "volume": 1000.0,
+            },
+            index=timestamps,
+        )
+    }
+
+    class _MinuteLoader:
+        source_timeframe = "60m"
+
+        def configure_source_timeframe(self, value):
+            self.source_timeframe = value
+
+        def fetch_bars(self, symbols, start, end):
+            return bars
+
+    dataset = mds.get_dataset(
+        ["AAPL"],
+        "2026-04-15",
+        "2026-04-15",
+        loader_factory=_MinuteLoader,
+        source_timeframe="5m",
+        decision_timeframe="60m",
+    )
+
+    assert dataset.total_steps == 1
+    assert dataset.data_quality["total_decision_bars"] == 2
+    assert dataset.data_quality["usable_decision_bars"] == 1
+    assert dataset.data_quality["dropped_decision_bars"] == 1
+    assert dataset.data_quality["missing_source_bars"] == 1

@@ -275,6 +275,7 @@ class ExternalBacktestSession:
         self.source_timestamps: List[Any] = []
         self.source_price_cache: Dict[str, Dict[Any, float]] = {}
         self.execution_timestamps: List[Any] = []
+        self.data_quality: Dict[str, Any] = {}
         self._valuation_cursor = 0
 
         self.step_opened_at: Optional[datetime] = None
@@ -338,6 +339,7 @@ class ExternalBacktestSession:
         self.execution_timestamps = list(
             getattr(dataset, "execution_timestamps", self.timestamps)
         )
+        self.data_quality = dict(getattr(dataset, "data_quality", {}) or {})
         self.source_timeframe = getattr(
             dataset, "source_timeframe", self.profile.timeframe
         )
@@ -716,15 +718,7 @@ class ExternalBacktestSession:
             if "open" in row
         }
 
-        self.last_executed = []
-        for action in executable:
-            self.last_executed.append({
-                "symbol": action.get("symbol"),
-                "action": action.get("action"),
-                "shares": action.get("shares"),
-                "reason": action.get("reason"),
-            })
-
+        trades_before_execution = len(self.manager.trades)
         self.manager.execute_actions(
             executable,
             execution_market_data,
@@ -736,6 +730,15 @@ class ExternalBacktestSession:
             },
             execution_prices=execution_prices if self.intraday_mode else None,
         )
+        self.last_executed = [
+            {
+                "symbol": trade.get("symbol"),
+                "action": str(trade.get("side", "")).lower(),
+                "shares": trade.get("shares"),
+                "reason": trade.get("reason"),
+            }
+            for trade in self.manager.trades[trades_before_execution:]
+        ]
         self._value_through(execution_timestamp)
 
         self.decision_log.append({
@@ -743,9 +746,12 @@ class ExternalBacktestSession:
             "timestamp": timestamp.isoformat()
             if hasattr(timestamp, "isoformat")
             else str(timestamp),
+            "execution_timestamp": execution_timestamp.isoformat()
+            if hasattr(execution_timestamp, "isoformat")
+            else str(execution_timestamp),
             "decision_source": decision_source,
             "actions_submitted": raw_actions or [],
-            "actions_executed": len(executable),
+            "actions_executed": len(self.last_executed),
             "context_ref": self.context_ref_by_step.get(self.step_index),
         })
         self.last_decision_source = decision_source
@@ -825,6 +831,11 @@ class ExternalBacktestSession:
                         else "decision_bar_close"
                     ),
                 },
+                **(
+                    {"market_data_quality": self.data_quality}
+                    if self.intraday_mode
+                    else {}
+                ),
             },
         )
         db.insert_equity_points(self.run_id, equity_curve)

@@ -120,3 +120,8 @@ def test_minute_source_keeps_hourly_decisions_and_5m_execution(monkeypatch):
     assert frequency["source_timeframe"] == "5m"
     assert frequency["decision_frequency"] == "1h"
     assert frequency["fill_policy"] == "next_source_bar_open"
+    quality = fake_db.runs[0]["metadata"]["market_data_quality"]
+    assert quality["policy"] == "drop_incomplete_decision_bars"
+    assert quality["total_decision_bars"] == 70
+    assert quality["usable_decision_bars"] == 70
+    assert quality["dropped_decision_bars"] == 0

@@ -61,6 +61,9 @@ def test_external_session_serves_hourly_bars_but_fills_and_values_on_5m():
     assert session.source_timeframe == "5m"
     assert session.intraday_mode is True
     assert session.total_steps == 6
+    assert session.data_quality["total_decision_bars"] == 7
+    assert session.data_quality["usable_decision_bars"] == 7
+    assert session.data_quality["dropped_decision_bars"] == 0
     assert session.get_current_step()["timestamp"] == "2026-04-15T14:30:00+00:00"
     assert session.protocol_bars(session.timestamps[0])["AAPL"]["close"] == pytest.approx(100.11)
 
@@ -83,5 +86,60 @@ def test_external_session_serves_hourly_bars_but_fills_and_values_on_5m():
         datetime(2026, 4, 15, 14, 30), tz="UTC"
     )
     assert session.manager.trades[0]["price"] == pytest.approx(100.37)
+    decision_audit = session.get_decisions()[0]
+    assert decision_audit["timestamp"] == "2026-04-15T14:30:00+00:00"
+    assert decision_audit["execution_timestamp"] == "2026-04-15T14:30:00+00:00"
+    assert decision_audit["actions_executed"] == 1
     # 09:30 through 10:30 ET inclusive: 13 five-minute valuation points.
     assert len(session.manager.equity_history) == 13
+
+
+def test_external_session_does_not_report_fill_without_next_symbol_bar(monkeypatch):
+    class _MissingExecutionBarLoader(_MinuteLoader):
+        def fetch_bars(self, symbols, start, end):
+            bars = _minute_bars(symbols, start, end)
+            execution_timestamp = pd.Timestamp("2026-04-15 14:30:00+00:00")
+            bars["AAPL"] = bars["AAPL"].drop(execution_timestamp)
+            return bars
+
+    monkeypatch.setattr(ebs, "AlpacaDataLoader", _MissingExecutionBarLoader)
+    monkeypatch.setattr(ebs, "DJIA_30", ["AAPL", "MSFT"])
+    session = ebs.ExternalBacktestSession(
+        backtest_id="bt-missing-fill",
+        session_id="sess-missing-fill",
+        agent_name="agent-missing-fill",
+        model_name="test-model",
+        start_date="2026-04-15",
+        end_date="2026-04-15",
+        symbols=["AAPL", "MSFT"],
+    )
+    session.load_market_data()
+    assert session.timestamps[0] == pd.Timestamp("2026-04-15 14:30:00+00:00")
+    assert session.execution_timestamps[0] == pd.Timestamp(
+        "2026-04-15 14:30:00+00:00"
+    )
+    assert "AAPL" not in session._source_market_data_at(
+        session.execution_timestamps[0]
+    )
+
+    result = session.submit_decisions(
+        {
+            "actions": [
+                {
+                    "symbol": "AAPL",
+                    "action": "buy",
+                    "confidence": 1.0,
+                    "reasoning": "missing execution bar",
+                    "position_size": 1,
+                }
+            ]
+        }
+    )
+
+    assert result["accepted"] is True
+    assert result["executed_count"] == 0
+    assert result["executed"] == []
+    assert session.manager.trades == []
+    audit = session.get_decisions()[0]
+    assert audit["actions_executed"] == 0
+    assert audit["execution_timestamp"] == "2026-04-15T14:30:00+00:00"

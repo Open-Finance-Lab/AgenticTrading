@@ -25,6 +25,7 @@ import threading
 import time
 from bisect import bisect_left
 from collections import OrderedDict
+from math import ceil
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import pandas as pd
@@ -33,6 +34,7 @@ import pytz
 from dashboard.backend.domain.backtesting.features import TechnicalIndicators
 from dashboard.backend.domain.backtesting.bar_aggregation import (
     aggregate_bars_by_symbol,
+    summarize_aggregation_quality,
 )
 from dashboard.backend.infrastructure.market_data.alpaca_bars import AlpacaDataLoader
 from dashboard.backend.infrastructure.market_data.frequency import (
@@ -63,6 +65,7 @@ class MarketDataset:
         "key", "all_data", "timestamps", "price_cache", "total_steps",
         "source_data", "source_timestamps", "source_price_cache",
         "execution_timestamps", "source_timeframe", "decision_timeframe",
+        "data_quality",
     )
 
     def __init__(self, key: Tuple, all_data: Dict[str, pd.DataFrame],
@@ -72,7 +75,8 @@ class MarketDataset:
                  source_price_cache: Optional[Dict[str, Dict[Any, float]]] = None,
                  execution_timestamps: Optional[List[Any]] = None,
                  source_timeframe: str = "60m",
-                 decision_timeframe: str = "60m"):
+                 decision_timeframe: str = "60m",
+                 data_quality: Optional[Dict[str, Any]] = None):
         self.key = key
         self.all_data = all_data
         self.timestamps = timestamps
@@ -94,6 +98,7 @@ class MarketDataset:
         )
         self.source_timeframe = source_timeframe
         self.decision_timeframe = decision_timeframe
+        self.data_quality = data_quality or {}
 
 
 class _Entry:
@@ -246,17 +251,19 @@ def _build_dataset(
     source_data = loader.fetch_bars(list(symbols), start_date, end_date)
     if not source_data:
         raise RuntimeError("No market data returned from Alpaca")
+    data_quality: Dict[str, Any] = {}
     if timeframe_minutes(actual_source) < timeframe_minutes(requested_decision):
-        all_data = aggregate_bars_by_symbol(
+        aggregated_data = aggregate_bars_by_symbol(
             source_data,
             source_timeframe=actual_source,
             decision_timeframe=requested_decision,
             market="US",
             timezone="US/Eastern",
         )
+        data_quality = summarize_aggregation_quality(aggregated_data)
         all_data = {
             symbol: frame.loc[frame["is_complete"]].copy()
-            for symbol, frame in all_data.items()
+            for symbol, frame in aggregated_data.items()
             if not frame.empty
         }
     else:
@@ -269,7 +276,10 @@ def _build_dataset(
     if not timestamps:
         raise RuntimeError("No trading hours in the selected date range")
     price_cache = _build_price_cache(all_data, timestamps)
-    source_timestamps = _build_trading_timestamps(source_data)
+    source_timestamps = _build_trading_timestamps(
+        source_data,
+        min_symbol_coverage=0.0,
+    )
     source_price_cache = _build_price_cache(source_data, source_timestamps)
     execution_timestamps = _build_execution_timestamps(
         timestamps,
@@ -299,6 +309,7 @@ def _build_dataset(
         execution_timestamps=execution_timestamps,
         source_timeframe=actual_source,
         decision_timeframe=requested_decision,
+        data_quality=data_quality,
     )
     mb = sum(float(df.memory_usage(deep=True).sum()) for df in all_data.values()) / 1e6
     print(f"📊 market-data dataset built: {key[1]}→{key[2]} "
@@ -320,7 +331,7 @@ def _build_execution_timestamps(
     *,
     timezone: str,
 ) -> List[Any]:
-    """Map each completed decision bar to the next same-session source bar."""
+    """Map a decision close to the source bar opening at that exact boundary."""
     source_by_day: Dict[str, List[Any]] = {}
     for timestamp in source_timestamps:
         source_by_day.setdefault(_market_day_key(timestamp, timezone), []).append(
@@ -330,24 +341,33 @@ def _build_execution_timestamps(
     for timestamp in decision_timestamps:
         same_day = source_by_day.get(_market_day_key(timestamp, timezone), [])
         index = bisect_left(same_day, timestamp)
-        result.append(same_day[index] if index < len(same_day) else None)
+        exact_match = (
+            same_day[index]
+            if index < len(same_day) and same_day[index] == timestamp
+            else None
+        )
+        result.append(exact_match)
     return result
 
 
-def _build_trading_timestamps(all_data: Dict[str, pd.DataFrame]) -> List[Any]:
-    """Moved verbatim from ExternalBacktestSession._build_trading_timestamps."""
+def _build_trading_timestamps(
+    all_data: Dict[str, pd.DataFrame],
+    *,
+    min_symbol_coverage: float = 0.8,
+) -> List[Any]:
+    """Return in-session timestamps meeting the requested symbol coverage."""
     all_timestamps: set = set()
     for df in all_data.values():
         all_timestamps.update(df.index)
     ordered = sorted(all_timestamps)
 
-    min_required = int(len(all_data) * 0.8)
+    min_required = max(1, ceil(len(all_data) * min_symbol_coverage))
     filtered = []
     for ts in ordered:
         real_count = sum(1 for df in all_data.values() if ts in df.index)
         if real_count >= min_required:
             filtered.append(ts)
-    ordered = filtered if filtered else ordered
+    ordered = filtered
 
     market_hours = []
     for ts in ordered:

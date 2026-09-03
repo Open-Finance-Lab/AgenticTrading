@@ -14,8 +14,9 @@ and some markets have a lunch break.
 from __future__ import annotations
 
 from datetime import time
-from typing import Dict, Iterable, Mapping
+from typing import Any, Dict, Iterable, Mapping
 
+import numpy as np
 import pandas as pd
 
 from dashboard.backend.infrastructure.market_data.frequency import (
@@ -26,6 +27,14 @@ from dashboard.backend.infrastructure.market_data.frequency import (
 
 class BarAggregationError(ValueError):
     """Raised when source bars cannot be safely aggregated."""
+
+
+_QUALITY_COUNT_COLUMNS = (
+    "missing_source_bars",
+    "duplicate_source_bars",
+    "off_grid_source_bars",
+    "invalid_source_bars",
+)
 
 
 def _session_windows(market: str) -> tuple[tuple[time, time], ...]:
@@ -97,8 +106,8 @@ def aggregate_bars(
             "aggregation requires source_timeframe to be finer than "
             "decision_timeframe"
         )
-    required = {"open", "high", "low", "close", "volume"}
-    missing = sorted(required.difference(frame.columns))
+    required = ("open", "high", "low", "close", "volume")
+    missing = sorted(set(required).difference(frame.columns))
     if missing:
         raise BarAggregationError(
             f"source bars are missing required columns: {', '.join(missing)}"
@@ -135,6 +144,30 @@ def aggregate_bars(
         expected = int(
             (bucket_end - bucket_start).total_seconds() // (source_minutes * 60)
         )
+        expected_index = pd.date_range(
+            bucket_start,
+            periods=expected,
+            freq=f"{source_minutes}min",
+        )
+        actual_index = pd.DatetimeIndex(group.index)
+        unique_actual_index = actual_index.unique()
+        missing_source_bars = len(expected_index.difference(unique_actual_index))
+        duplicate_source_bars = len(actual_index) - len(unique_actual_index)
+        off_grid_source_bars = len(unique_actual_index.difference(expected_index))
+        required_values = group.loc[:, list(required)].apply(
+            pd.to_numeric, errors="coerce"
+        )
+        invalid_source_bars = int(
+            (~np.isfinite(required_values.to_numpy(dtype=float)).all(axis=1)).sum()
+        )
+        is_complete = not any(
+            (
+                missing_source_bars,
+                duplicate_source_bars,
+                off_grid_source_bars,
+                invalid_source_bars,
+            )
+        )
         volume = float(pd.to_numeric(group["volume"], errors="coerce").fillna(0).sum())
         close = float(group["close"].iloc[-1])
         record = {
@@ -146,8 +179,12 @@ def aggregate_bars(
             "volume": volume,
             "source_bar_count": int(len(group)),
             "expected_source_bars": expected,
-            "is_complete": bool(len(group) == expected),
-            "has_gap": bool(len(group) != expected),
+            "missing_source_bars": int(missing_source_bars),
+            "duplicate_source_bars": int(duplicate_source_bars),
+            "off_grid_source_bars": int(off_grid_source_bars),
+            "invalid_source_bars": invalid_source_bars,
+            "is_complete": is_complete,
+            "has_gap": not is_complete,
         }
         if "trade_count" in group.columns:
             record["trade_count"] = float(
@@ -195,3 +232,48 @@ def aggregate_bars_by_symbol(
         )
         for symbol, frame in bars_by_symbol.items()
     }
+
+
+def summarize_aggregation_quality(
+    bars_by_symbol: Mapping[str, pd.DataFrame],
+) -> Dict[str, Any]:
+    """Return a JSON-safe audit summary before incomplete bars are dropped.
+
+    Counts are symbol-bar counts: the same decision timestamp contributes once
+    for each symbol.  Keeping this summary before filtering makes a completed
+    run distinguishable from one that silently lost source observations.
+    """
+
+    summary: Dict[str, Any] = {
+        "policy": "drop_incomplete_decision_bars",
+        "decision_timestamp_min_symbol_coverage": 0.8,
+        "total_decision_bars": 0,
+        "usable_decision_bars": 0,
+        "dropped_decision_bars": 0,
+        **{column: 0 for column in _QUALITY_COUNT_COLUMNS},
+        "symbols": {},
+    }
+    for symbol, frame in bars_by_symbol.items():
+        total = int(len(frame))
+        if "is_complete" in frame.columns:
+            usable = int(frame["is_complete"].fillna(False).astype(bool).sum())
+        else:
+            usable = total
+        symbol_summary: Dict[str, Any] = {
+            "total_decision_bars": total,
+            "usable_decision_bars": usable,
+            "dropped_decision_bars": total - usable,
+        }
+        for column in _QUALITY_COUNT_COLUMNS:
+            value = (
+                int(pd.to_numeric(frame[column], errors="coerce").fillna(0).sum())
+                if column in frame.columns
+                else 0
+            )
+            symbol_summary[column] = value
+            summary[column] += value
+        summary["symbols"][symbol] = symbol_summary
+        summary["total_decision_bars"] += total
+        summary["usable_decision_bars"] += usable
+        summary["dropped_decision_bars"] += total - usable
+    return summary
