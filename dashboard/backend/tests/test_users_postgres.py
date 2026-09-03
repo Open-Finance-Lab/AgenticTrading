@@ -775,6 +775,13 @@ def test_password_reset_request_lifecycle_postgres(temp_postgres_store):
     )
     assert len(store.password_reset_request_times_since(user["id"], day)) == 2
 
+    # The route hands the store its arrival time; the row carries it verbatim.
+    arrived = users_module._utcnow() - timedelta(seconds=25)
+    stamped = store.create_password_reset_request(
+        user["id"], hash_code("C"), requested_at=arrived
+    )
+    assert stamped["created_at"] == users_module.format_stored_timestamp(arrived)
+
     store.cancel_password_reset(user["id"])
     with store._get_connection() as conn:
         with conn.cursor() as cur:

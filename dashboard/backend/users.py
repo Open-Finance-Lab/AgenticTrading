@@ -68,18 +68,18 @@ EMAIL_CHANGE_MIN_INTERVAL_DAYS = 7
 # requester is anonymous, so these caps are the durable backstop behind
 # api/auth.py's in-process limiters (which reset on redeploy). The policy the
 # resend button advertises -- 60 s between codes, one send plus five resends
-# an hour, then an hour's wait -- is enforced VISIBLY by those limiters; the
-# numbers here only bite silently, across a restart.
+# an hour, then an hour's wait, twelve a day -- is enforced VISIBLY by those
+# limiters; the numbers here only bite silently, across a restart.
 #
-# COOLDOWN is deliberately SHORTER than the visible 60 s gate. The limiter
-# stamps a request on arrival and the browser counts from the response, but
-# a row here is stamped only after the Brevo send returns -- so a durable
-# window equal to the visible one ends a send-latency later than the countdown
-# the user just sat through, and their first click after it would be swallowed
-# as a silent skip. See api/auth.py::_BACKSTOP_SKEW_SECONDS.
+# COOLDOWN is deliberately SHORTER than the visible 60 s gate. A row is
+# stamped with the request's ARRIVAL time (the route hands it to
+# create_password_reset_request), the same instant the limiter stamps -- but
+# on a different clock, and the browser counts from the response. The
+# allowance keeps the visible gate the one that decides; see
+# api/auth.py::_BACKSTOP_SKEW_SECONDS.
 #
-# PER_DAY is a mail-bomb bound on the victim's inbox, not the user-facing
-# limit: it must clear a full hour's worth or "wait an hour" would be false.
+# PER_DAY is a mail-bomb bound on the victim's inbox: it must clear two full
+# hours' worth, or "wait an hour, then six more" would be false.
 RESET_CODE_TTL_MINUTES = 15
 RESET_CODE_MAX_ATTEMPTS = 5
 RESET_CODE_COOLDOWN_SECONDS = 40
@@ -1323,15 +1323,24 @@ class UserStore:
         return _expiry_iso(RESET_CODE_TTL_MINUTES)
 
     def create_password_reset_request(
-        self, user_id: int, code_hash: str
+        self, user_id: int, code_hash: str, requested_at: Optional[datetime] = None
     ) -> Dict[str, Any]:
         """Supersede any in-flight reset request with a fresh one.
+
+        ``requested_at`` is the instant the request ARRIVED at the route; the
+        row carries it as created_at so the durable cooldown and caps measure
+        arrival-to-arrival, exactly as the in-process gates do, however long
+        the store or the send took in between. expires_at stays anchored on
+        the write, so a slow store cannot shrink the code's lifetime.
 
         Cancel + insert ride one transaction on one connection, so two racing
         creates cannot leave the earlier-delivered code alive: last write wins
         cleanly, and the loser's code fails as "no active row". Supersede, not
-        DELETE -- the append-only log is what the cooldown and daily cap read.
+        DELETE -- the append-only log is what the cooldown and caps read.
         """
+        created_at = (
+            _utcnow_iso() if requested_at is None else format_stored_timestamp(requested_at)
+        )
         conn = self._get_connection()
         cursor = conn.cursor()
         cursor.execute(
@@ -1347,7 +1356,7 @@ class UserStore:
                 (user_id, code_hash, created_at, expires_at)
             VALUES (?, ?, ?, ?)
             """,
-            (user_id, code_hash, _utcnow_iso(), self._password_reset_expiry()),
+            (user_id, code_hash, created_at, self._password_reset_expiry()),
         )
         conn.commit()
         request_id = cursor.lastrowid

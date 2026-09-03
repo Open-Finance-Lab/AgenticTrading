@@ -75,7 +75,7 @@ def test_cache_bust_version_was_bumped():
     # Parsed >= rather than ==, per the convention in
     # test_frontend_account_page.py::test_cache_bust_versions_were_bumped.
     app_version = int(re.search(r"app\.js\?v=(\d+)", APP_HTML).group(1))
-    assert app_version >= 126
+    assert app_version >= 127
 
 
 # --- Resend code -------------------------------------------------------------
@@ -95,7 +95,7 @@ def test_resend_button_lives_inside_the_code_step():
 
 def test_stage_one_success_starts_the_resend_countdown():
     init = fn_body("function initAuthUI")
-    advance = init.index("resetStage = 2")
+    advance = init.index("resetEmail = email")
     assert "startResendCountdown(" in init[advance : advance + 900]
 
 
@@ -135,16 +135,23 @@ def test_stage_one_429_still_opens_the_code_step():
     # refused by the cooldown -- but the code already mailed is still valid,
     # so the user must get the code input, not a dead stage 1.
     init = fn_body("function initAuthUI")
-    stage1 = init.index("if (resetStage === 1)")
+    stage1 = init.index("if (!resetEmail)")
     catch = init.index("} catch (error) {", stage1)
     shared_guard = init.index("if (!email || !password)", catch)
     catch_block = init[catch:shared_guard]
     assert "error.status === 429" in catch_block
+    # ...only for a refusal keyed on the ADDRESS. The client budget refuses
+    # with the same status and copy for an address nothing was ever sent to,
+    # and a fake "code already requested" step for it is a lie with a locked
+    # field under it.
+    assert "error.rateLimitScope === 'address'" in catch_block
     assert "enterCodeStep(" in catch_block
     assert "error.retryAfter" in catch_block
-    # The helper is the single owner of "we are on stage 2 now".
-    assert "resetStage = 2" in fn_body("function initAuthUI")
-    assert init.count("resetStage = 2") == 1
+    # The helper is the single owner of "we are on stage 2 now" -- and that
+    # state has one variable: the address the code went to. A separate stage
+    # flag was a second copy of the same fact.
+    assert init.count("resetEmail = email") == 1
+    assert "resetStage" not in init
 
 
 def test_stale_reset_responses_are_dropped_after_a_mode_switch():
@@ -163,3 +170,5 @@ def test_auth_api_exposes_retry_after():
     request = fn_body("async request(path, options = {})")
     assert "retry-after" in request
     assert "error.retryAfter" in request
+    assert "x-ratelimit-scope" in request
+    assert "error.rateLimitScope" in request

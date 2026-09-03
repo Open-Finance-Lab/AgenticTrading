@@ -301,6 +301,28 @@ def test_create_password_reset_request_leaves_exactly_one_active_row(store, user
     assert rows[1]["cancelled_at"] is None
 
 
+def test_create_password_reset_request_stamps_the_arrival_it_is_handed(store, user):
+    """created_at is the instant the request ARRIVED, passed in by the route:
+    the durable windows compare it against the next arrival, exactly as the
+    in-process gate does, so store latency can no longer push a row's window
+    behind the gate's. expires_at stays anchored on the write."""
+    from dashboard.backend.users import RESET_CODE_TTL_MINUTES
+
+    arrived = _utcnow() - timedelta(seconds=25)
+
+    row = store.create_password_reset_request(
+        user["id"], hash_code("A"), requested_at=arrived
+    )
+
+    assert row["created_at"] == format_stored_timestamp(arrived)
+    assert parse_stored_timestamp(row["expires_at"]) >= _utcnow() + timedelta(
+        minutes=RESET_CODE_TTL_MINUTES - 1
+    )
+    # Absent, the write is stamped now, as before.
+    later = store.create_password_reset_request(user["id"], hash_code("B"))
+    assert later["created_at"] >= format_stored_timestamp(_utcnow() - timedelta(seconds=2))
+
+
 def test_get_active_password_reset_folds_expiry_into_no_active_row(store, user):
     row = store.create_password_reset_request(user["id"], hash_code("A"))
     _backdate_password_reset(store, row["id"], expires_at=_ago(minutes=1))
