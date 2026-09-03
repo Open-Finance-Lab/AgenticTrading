@@ -197,6 +197,23 @@ def build_final_metrics(run: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     {} for a missing row."""
     if not run:
         return {}
+    metadata = run.get("metadata")
+    if not isinstance(metadata, dict):
+        metadata = {}
+    frequency_contract = metadata.get("frequency_contract")
+    if isinstance(frequency_contract, dict):
+        frequency_contract = dict(frequency_contract)
+    else:
+        frequency_contract = None
+    market_data_quality = metadata.get("market_data_quality")
+    if isinstance(market_data_quality, dict):
+        market_data_quality = {
+            key: value
+            for key, value in market_data_quality.items()
+            if key != "symbols"
+        }
+    else:
+        market_data_quality = None
     return {
         "total_return": run.get("total_return"),
         "sharpe_ratio": run.get("sharpe_ratio"),
@@ -207,8 +224,9 @@ def build_final_metrics(run: Optional[Dict[str, Any]]) -> Dict[str, Any]:
         "input_tokens": run.get("input_tokens"),
         "output_tokens": run.get("output_tokens"),
         "est_cost_usd": run.get("est_cost_usd"),
-        "timeout_holds": (run.get("metadata") or {}).get("timeout_holds")
-        if isinstance(run.get("metadata"), dict) else None,
+        "timeout_holds": metadata.get("timeout_holds"),
+        "frequency_contract": frequency_contract,
+        "market_data_quality": market_data_quality,
     }
 
 

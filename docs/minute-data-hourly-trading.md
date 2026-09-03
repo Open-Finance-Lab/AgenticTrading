@@ -41,6 +41,24 @@ Phase 3 将分钟链路的数据质量和无未来数据约束固化为可测试
 质量统计以“标的 × 决策 bar”为计数单位。同一小时若 30 个标的均有数据，
 会计为 30 个 decision bars。
 
+## Phase 4：API 可观测性
+
+Phase 4 保持唯一、固定的成交规则 `next_source_bar_open`，不增加成交策略
+配置项。回测详情 API 和外部 Agent 的完成结果会返回：
+
+- `frequency_contract`：5m 源数据、60m 决策 bar、1h 决策、5m 成交与估值；
+- `market_data_quality`：聚合后的可用、丢弃及异常计数。
+
+数据库仍保留逐标的质量明细；列表 API 仅返回有界的汇总字段，避免运行列表
+随股票池大小无限膨胀。
+
+## Phase 5：网页展示与产品契约
+
+网页版回测在运行前和完成后均明确显示 Alpaca 5m 源数据与小时级决策。
+高级详情展示固定成交时点、估值频率和数据质量摘要；历史旧回测缺少新元数据时
+保持原有显示，不伪造分钟级来源。独立策略页面的旧 “Alpaca hourly bars”
+文案同步更新。
+
 ## 代码契约
 
 `dashboard/backend/infrastructure/market_data/frequency.py` 提供：

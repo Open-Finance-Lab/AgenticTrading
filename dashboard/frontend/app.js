@@ -3008,9 +3008,18 @@ function renderBacktestDataSourceBadge(run) {
 
   const isSimulation = run.data_source === 'vnpy_simulation';
   const isIFind = run.data_source === 'ifind_ashare';
+  const frequency = run.frequency_contract;
+  const sourceTimeframe = frequency?.source_timeframe;
+  const decisionCadence = frequency?.decision_frequency === '1h'
+    ? 'hourly'
+    : frequency?.decision_frequency;
   badge.textContent = isIFind
     ? 'iFinD China A-Shares · 60m'
-    : (isSimulation ? 'vn.py simulated data' : 'Alpaca data');
+    : (isSimulation
+      ? 'vn.py simulated data'
+      : (sourceTimeframe && decisionCadence
+        ? `Alpaca · ${sourceTimeframe} source · ${decisionCadence} decisions`
+        : 'Alpaca data'));
   badge.className = `data-source-badge ${isIFind ? 'is-ifind' : (isSimulation ? 'is-simulated' : 'is-alpaca')}`;
   badge.hidden = false;
 }
@@ -8227,6 +8236,39 @@ function formatTransactionCostTotals(totals) {
     ].filter(Boolean).join(' · ');
 }
 
+function formatBacktestFrequencyContract(contract) {
+    if (!contract || typeof contract !== 'object') return null;
+    const source = contract.source_timeframe;
+    const decision = contract.decision_frequency || contract.decision_timeframe;
+    const execution = contract.execution_timeframe;
+    const valuation = contract.valuation_frequency;
+    if (!source || !decision || !execution || !valuation) return null;
+    const fill = contract.fill_policy === 'next_source_bar_open'
+        ? `next ${execution} open fills`
+        : `${execution} execution`;
+    return `${source} source · ${decision} decisions · ${fill} · ${valuation} valuation`;
+}
+
+function formatBacktestMarketDataQuality(quality) {
+    if (!quality || typeof quality !== 'object') return null;
+    const total = Number(quality.total_decision_bars);
+    const usable = Number(quality.usable_decision_bars);
+    if (!Number.isFinite(total) || !Number.isFinite(usable)) return null;
+    const dropped = Number(quality.dropped_decision_bars || 0);
+    const parts = [`${usable}/${total} usable`];
+    parts.push(dropped > 0 ? `${dropped} dropped` : 'no drops');
+    for (const [field, label] of [
+        ['missing_source_bars', 'missing'],
+        ['duplicate_source_bars', 'duplicate'],
+        ['off_grid_source_bars', 'off-grid'],
+        ['invalid_source_bars', 'invalid'],
+    ]) {
+        const count = Number(quality[field] || 0);
+        if (count > 0) parts.push(`${count} ${label}`);
+    }
+    return parts.join(' · ');
+}
+
 function renderBacktestRunConfig(
     run,
     {
@@ -8253,6 +8295,15 @@ function renderBacktestRunConfig(
     const metadata = run?.metadata && typeof run.metadata === 'object'
         ? run.metadata
         : {};
+    const frequencyContract = run?.frequency_contract
+        || metadata.frequency_contract
+        || cfg?.frequencyContract
+        || null;
+    const marketDataQuality = run?.market_data_quality
+        || metadata.market_data_quality
+        || null;
+    const frequencyLabel = formatBacktestFrequencyContract(frequencyContract);
+    const dataQualityLabel = formatBacktestMarketDataQuality(marketDataQuality);
     const llmExecution = run?.llm_execution && typeof run.llm_execution === 'object'
         ? run.llm_execution
         : (metadata.llm_execution && typeof metadata.llm_execution === 'object'
@@ -8319,7 +8370,11 @@ function renderBacktestRunConfig(
         || '—';
     const symbolCount = cfg?.symbolCount
         ?? (Array.isArray(runSymbols) ? runSymbols.length : null);
-    const timeframe = cfg?.timeframe || metadata.timeframe || run?.timeframe || '60m';
+    const timeframe = frequencyContract?.decision_timeframe
+        || cfg?.timeframe
+        || metadata.timeframe
+        || run?.timeframe
+        || '60m';
     const decisionSource = cfg?.decisionSource
         || metadata.decision_source
         || run?.decision_source
@@ -8435,6 +8490,16 @@ function renderBacktestRunConfig(
         Number.isFinite(Number(symbolCount)) ? String(symbolCount) : '—',
     );
     setBacktestConfigText('backtestConfigTimeframe', timeframe);
+    const frequencyRow = document.getElementById('backtestConfigFrequencyRow');
+    const dataQualityRow = document.getElementById('backtestConfigDataQualityRow');
+    if (frequencyRow) frequencyRow.hidden = !frequencyLabel;
+    if (dataQualityRow) dataQualityRow.hidden = !dataQualityLabel;
+    if (frequencyLabel) {
+        setBacktestConfigText('backtestConfigFrequency', frequencyLabel);
+    }
+    if (dataQualityLabel) {
+        setBacktestConfigText('backtestConfigDataQuality', dataQualityLabel);
+    }
     setBacktestConfigText(
         'backtestConfigDecisionSource',
         decisionSourceLabel,
@@ -8744,6 +8809,17 @@ async function runBacktest() {
         universeKey: selectedIFindUniverse,
         symbolCount: assets.length,
         timeframe: isIFind ? IFIND_ASHARE_TIMEFRAME : '60m',
+        frequencyContract: isIFind || isSimulation
+            ? null
+            : {
+                source_timeframe: '5m',
+                decision_timeframe: '60m',
+                decision_frequency: '1h',
+                execution_timeframe: '5m',
+                valuation_frequency: '5m',
+                aggregation: 'session_anchored_completed_bars',
+                fill_policy: 'next_source_bar_open',
+            },
         decisionSource,
         billingMode: isRuleBasedDecision ? null : selectedBillingMode,
         providerId: isRuleBasedDecision || selectedBillingMode === 'platform_credits'
@@ -8751,7 +8827,7 @@ async function runBacktest() {
             : selectedProviderId,
         marketDataLabel: isIFind
             ? 'iFinD A-Share'
-            : (isSimulation ? 'vn.py Simulation' : 'Alpaca'),
+            : (isSimulation ? 'vn.py Simulation' : 'Alpaca · 5m source'),
         dataSource,
         startedAt: new Date().toISOString(),
     };
@@ -8760,6 +8836,7 @@ async function runBacktest() {
     renderBacktestDataSourceBadge({
         data_source: dataSource,
         timeframe: isIFind ? IFIND_ASHARE_TIMEFRAME : null,
+        frequency_contract: launchConfigBase.frequencyContract,
     });
 
     // Pin live view BEFORE navigateToPage → showPlaygroundPanel → loadData(),

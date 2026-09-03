@@ -569,6 +569,46 @@ def test_run_metadata_response_keeps_new_fields_optional_for_legacy_runs():
     assert response.order_events_count is None
     assert response.order_events_truncated is None
     assert response.llm_execution is None
+    assert response.frequency_contract is None
+    assert response.market_data_quality is None
+
+
+def test_run_metadata_response_exposes_minute_data_contract_and_quality():
+    response = bt._run_metadata_response(
+        _run_record(
+            {
+                "data_source": "alpaca",
+                "frequency_contract": {
+                    "source_timeframe": "5m",
+                    "decision_timeframe": "60m",
+                    "decision_frequency": "1h",
+                    "execution_timeframe": "5m",
+                    "valuation_frequency": "5m",
+                    "aggregation": "session_anchored_completed_bars",
+                    "fill_policy": "next_source_bar_open",
+                },
+                "market_data_quality": {
+                    "policy": "drop_incomplete_decision_bars",
+                    "decision_timestamp_min_symbol_coverage": 0.8,
+                    "total_decision_bars": 210,
+                    "usable_decision_bars": 207,
+                    "dropped_decision_bars": 3,
+                    "missing_source_bars": 2,
+                    "duplicate_source_bars": 1,
+                    "off_grid_source_bars": 0,
+                    "invalid_source_bars": 0,
+                    "symbols": {"AAPL": {"dropped_decision_bars": 3}},
+                },
+            }
+        )
+    )
+
+    assert response.frequency_contract["source_timeframe"] == "5m"
+    assert response.frequency_contract["decision_frequency"] == "1h"
+    assert response.frequency_contract["fill_policy"] == "next_source_bar_open"
+    assert response.market_data_quality["usable_decision_bars"] == 207
+    assert response.market_data_quality["dropped_decision_bars"] == 3
+    assert "symbols" not in response.market_data_quality
 
 
 def test_run_metadata_response_exposes_sanitized_llm_execution_evidence():

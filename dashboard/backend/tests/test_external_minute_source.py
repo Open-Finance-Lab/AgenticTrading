@@ -143,3 +143,37 @@ def test_external_session_does_not_report_fill_without_next_symbol_bar(monkeypat
     audit = session.get_decisions()[0]
     assert audit["actions_executed"] == 0
     assert audit["execution_timestamp"] == "2026-04-15T14:30:00+00:00"
+
+
+def test_final_metrics_expose_minute_contract_without_symbol_quality_details():
+    metrics = ebs.build_final_metrics(
+        {
+            "total_return": 0.1,
+            "metadata": {
+                "frequency_contract": {
+                    "source_timeframe": "5m",
+                    "decision_timeframe": "60m",
+                    "decision_frequency": "1h",
+                    "execution_timeframe": "5m",
+                    "valuation_frequency": "5m",
+                    "aggregation": "session_anchored_completed_bars",
+                    "fill_policy": "next_source_bar_open",
+                },
+                "market_data_quality": {
+                    "policy": "drop_incomplete_decision_bars",
+                    "total_decision_bars": 70,
+                    "usable_decision_bars": 69,
+                    "dropped_decision_bars": 1,
+                    "missing_source_bars": 1,
+                    "duplicate_source_bars": 0,
+                    "off_grid_source_bars": 0,
+                    "invalid_source_bars": 0,
+                    "symbols": {"AAPL": {"dropped_decision_bars": 1}},
+                },
+            },
+        }
+    )
+
+    assert metrics["frequency_contract"]["source_timeframe"] == "5m"
+    assert metrics["market_data_quality"]["dropped_decision_bars"] == 1
+    assert "symbols" not in metrics["market_data_quality"]
