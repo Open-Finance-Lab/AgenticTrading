@@ -10,10 +10,15 @@ Phase 0/1 固定四个时间概念，避免把数据频率误当成策略频率�
 | `execution_timeframe` | `5m` | 后续成交模拟使用的 bar 周期 |
 | `valuation_frequency` | `5m` | 后续组合盯市使用的周期 |
 
-本阶段只完成契约和数据层能力，不改变现有 `HourlyBacktester` 的执行循环。
-现有回测仍默认读取 `60m`，避免在 5 分钟聚合器接入前把每根 5 分钟 bar
-误当作一次策略决策。Phase 2 完成 5m→60m 聚合后，再由回测引擎显式传入
-profile 的 `source_timeframe`。
+Phase 2 已接入 `HourlyBacktester`：Alpaca 回测会显式请求 profile 的 `5m`
+源数据，按交易时段聚合成已完成的 `60m` 决策 bar。策略/LLM 仍每小时调用
+一次；成交使用对应下一根源 bar 的开盘价，组合估值按每根 `5m` bar 更新。
+非 Alpaca provider 和旧的小时级注入 loader 仍保持原有路径。
+
+聚合器位于 `dashboard/backend/domain/backtesting/bar_aggregation.py`，使用
+美股 09:30 和 A 股早午盘边界切桶，不跨越午休；聚合结果保留
+`source_bar_count`、`expected_source_bars`、`is_complete`、`has_gap` 等质量字段。
+最后一个没有下一根源 bar 的收盘桶不进入可执行决策。
 
 ## 代码契约
 

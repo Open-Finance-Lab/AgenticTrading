@@ -826,6 +826,7 @@ class PortfolioManager:
         market_data: Dict,
         timestamp: datetime,
         fallback_prices: Optional[Dict] = None,
+        execution_prices: Optional[Dict] = None,
     ):
         """Execute trading decisions."""
         trades_before = len(self.trades)
@@ -857,6 +858,7 @@ class PortfolioManager:
             transaction_cost_profile=self.transaction_cost_profile,
             market_rules=market_rules,
             fallback_prices=fallback_prices,
+            execution_prices=execution_prices,
         )
         for trade in self.trades[trades_before:]:
             for field in self.transaction_cost_totals:

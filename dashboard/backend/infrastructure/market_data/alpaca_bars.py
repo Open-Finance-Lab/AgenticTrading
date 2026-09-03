@@ -452,7 +452,24 @@ class AlpacaDataLoader:
         for symbol in symbols:
             if symbol in bars.df.index.get_level_values(0):
                 df = bars.df.xs(symbol).reset_index()
-                df = df[["timestamp", "open", "high", "low", "close", "volume"]].copy()
+                columns = [
+                    "timestamp",
+                    "open",
+                    "high",
+                    "low",
+                    "close",
+                    "volume",
+                ]
+                # Alpaca includes these fields for stock bars. Keep them when
+                # present so the domain aggregator can calculate volume-aware
+                # VWAP, while retaining the historical OHLCV shape for test
+                # doubles and older SDK responses.
+                optional_columns = [
+                    column
+                    for column in ("trade_count", "vwap")
+                    if column in df.columns
+                ]
+                df = df[columns + optional_columns].copy()
                 df["timestamp"] = pd.to_datetime(df["timestamp"])
                 df.set_index("timestamp", inplace=True)
                 data[symbol] = df.sort_index()
