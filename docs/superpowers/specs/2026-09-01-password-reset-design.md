@@ -132,8 +132,8 @@ The background task (`async`; store calls wrapped in `asyncio.to_thread`,
 2. **DB-backed cooldown and daily cap**, enforced silently (still 200 —
    an inline 429 keyed on account state would be an enumeration oracle):
    skip (with `reason=cooldown` / `reason=daily_cap`) if the account's latest
-   request row is younger than `PASSWORD_RESET_COOLDOWN_SECONDS`, or if
-   `PASSWORD_RESET_MAX_REQUESTS_PER_DAY` rows exist in the trailing 24h.
+   request row is younger than `RESET_CODE_COOLDOWN_SECONDS`, or if
+   `RESET_CODE_MAX_REQUESTS_PER_DAY` rows exist in the trailing 24h.
    Reads are **status-blind** (cancelled/used rows still count), exactly like
    `last_email_change_request_at` — so a cross-flow cancellation does *not*
    reset the cooldown clock, and cancelling can never be used to mint codes
@@ -187,7 +187,7 @@ Order:
 3. Code compare: `hmac.compare_digest(hash_code(payload.code),
    row["code_hash"])` — mismatch → `record_password_reset_attempt(row_id)`,
    an **atomic conditional increment** whose return value tells the route the
-   cap was hit (reaching `PASSWORD_RESET_MAX_ATTEMPTS` cancels the request —
+   cap was hit (reaching `RESET_CODE_MAX_ATTEMPTS` cancels the request —
    email-change precedent, but enforced in SQL so a concurrent burst cannot
    exceed the budget); same generic 400.
 4. Only after the code passes: `validate_new_password(new_password, email)` —
@@ -236,7 +236,7 @@ New append-only table `password_reset_requests` in **both**
 | `code_hash` | TEXT NOT NULL | `verification_codes.hash_code` output; raw code never stored |
 | `attempts` | INTEGER NOT NULL DEFAULT 0 | |
 | `created_at` | timestamp | store-native format |
-| `expires_at` | timestamp | `created_at` + `PASSWORD_RESET_TTL_MINUTES` |
+| `expires_at` | timestamp | `created_at` + `RESET_CODE_TTL_MINUTES` |
 | `used_at` | timestamp NULL | set on successful reset |
 | `cancelled_at` | timestamp NULL | set by cancel paths; rows are never deleted |
 
@@ -276,10 +276,10 @@ DB caps suffice — they are the durable backstop, not the enforcement).
 ### Constants (in `users.py`, beside the email-change block)
 
 ```python
-PASSWORD_RESET_TTL_MINUTES = 15
-PASSWORD_RESET_MAX_ATTEMPTS = 5
-PASSWORD_RESET_COOLDOWN_SECONDS = 300   # July spec's one-request-per-5-minutes
-PASSWORD_RESET_MAX_REQUESTS_PER_DAY = 5
+RESET_CODE_TTL_MINUTES = 15
+RESET_CODE_MAX_ATTEMPTS = 5
+RESET_CODE_COOLDOWN_SECONDS = 300   # July spec's one-request-per-5-minutes
+RESET_CODE_MAX_REQUESTS_PER_DAY = 5
 ```
 
 ### Email copy
@@ -296,7 +296,7 @@ Follow the `_email_change_*_body` f-string style; plain text.
   Your reset code: {code}
 
   Enter it on the password reset screen along with your new password. The
-  code expires in {PASSWORD_RESET_TTL_MINUTES} minutes and can be used once.
+  code expires in {RESET_CODE_TTL_MINUTES} minutes and can be used once.
 
   If you didn't request this, you can ignore this email — your password has
   not been changed.
@@ -476,3 +476,216 @@ Frontend source-shape (`test_frontend_account_page.py` idioms —
 - `docs/source/lab/accounts.rst`: add a "Reset your password" section after
   "Sign in and out" (link location, code delivery/expiry, spam-folder note,
   all-sessions sign-out effect).
+
+## Amendment — 2026-09-02: "Resend code", and the policy behind it
+
+Supersedes the "No resend code affordance in v1" non-goal above. Requested after
+the first prod test of the flow: a user waiting on a code has no way back but
+"Back to sign in" → "Forgot password?", and the shipped 5-minute cooldown made
+that a five-minute wait with nothing on screen saying so.
+
+*Revised 2026-09-03 after the PR #440 review (15 findings): the row is stamped
+with the request's arrival and the send deadline is gone; the daily cap is
+visible; the gates are ordered longest-window-first and nothing is charged on
+a refusal or a 503; each 429 names its scope; the shared send budget clears
+five accounts' allowance. The text below describes the revised design.*
+
+### Policy (user-facing)
+
+- **60 seconds** between one code and the next.
+- **One send plus five resends an hour** per address, then **an hour's wait**
+  (the sixth code's hour, rolling).
+- **Twelve a day** per address — two full hours' worth, so "wait an hour,
+  then six more" is true; the thirteenth waits for the day.
+- All three are **visible**: a click inside the minute answers 429
+  `FORGOT_COOLDOWN_DETAIL` ("Please wait a minute before requesting another
+  code."), the seventh request in an hour and the thirteenth in a day answer
+  429 `FORGOT_RATE_LIMIT_DETAIL` — each with `Retry-After`, which the browser
+  counts down on the button. When two gates are closed at once the 429 is the
+  one with the **longer** wait (gates are checked longest window first): a
+  cooldown `Retry-After` of 30 s that lines up a click the hour then refuses
+  is a header that lied.
+- Every forgot-password 429 carries `X-RateLimit-Scope: address | client`
+  (exposed through CORS). The client budget refuses with the same status and
+  copy as the hourly cap for an address nothing was ever sent to, and the
+  browser's "a code was already requested" step is only true of the former.
+- The interpretation of "max retry of 5 times" is five *resends*; if it was
+  meant as five sends total, `RESET_CODE_MAX_REQUESTS_PER_HOUR` (which also
+  sets `_FORGOT_EMAIL_LIMITER`'s default) is the one constant to change.
+
+### Backend
+- Constants renamed `PASSWORD_RESET_*` → `RESET_CODE_*` (all five, both store twins): CodeQL's `py/clear-text-logging-sensitive-data` classifies a *source* by identifier name, so the new startup lines that print these counts were flagged as logging a password (alerts #1287–#1292 on the merge ref; the repo's `_BOOTSTRAP_MIN_LENGTH` precedent). They are durations and counts; the name now says so.
+
+- `_FORGOT_COOLDOWN_LIMITER = _build_limiter("AUTH_FORGOT_COOLDOWN", 1, 60)`
+  and `_FORGOT_DAILY_LIMITER = _build_limiter("AUTH_FORGOT_DAILY",
+  RESET_CODE_MAX_REQUESTS_PER_DAY, 86400)`, keyed on the typed normalized
+  address like `_FORGOT_EMAIL_LIMITER` — so they are existence-blind and their
+  429s say nothing about accounts
+  (`test_forgot_password_cooldown_429_is_existence_blind`).
+- **Gate order in `forgot_password`** (the review's ordering findings): the
+  `email_configured()` 503 first — config-shaped, so decided before anything
+  is charged and an outage burns nobody's budget
+  (`test_forgot_password_503_spends_no_budget`); then the daily, hourly and
+  cooldown gates **checked** longest window first, so the 429 carries the
+  longer wait (`…hourly_429_wins_when_both_gates_are_closed`); then the client
+  budget `allow()`ed — charged only for a request the address gates let
+  through, so one user retrying inside the minute from a shared address does
+  not burn the office's hour (`…cooldown_refusal_does_not_charge_the_client_budget`);
+  then the hourly and daily caps `allow()`ed (atomic: the last free slot goes
+  to exactly one of N simultaneous clicks; the loser gets the 429 its check
+  would have) and the cooldown `record()`ed. A click refused anywhere spends
+  nothing (`…cooldown_refusal_does_not_charge_the_hourly_budget`,
+  `…hourly_refusal_does_not_arm_the_cooldown`). Each refusal is built by
+  `_forgot_refused(limiter, key, detail, scope)`, which adds
+  `X-RateLimit-Scope` (`test_forgot_password_429_names_its_scope`).
+- `_FORGOT_EMAIL_LIMITER`'s default is now
+  `RESET_CODE_MAX_REQUESTS_PER_HOUR` (6) rather than a literal, so the
+  visible gate and the durable backstop cannot drift apart; the daily limiter
+  reads `RESET_CODE_MAX_REQUESTS_PER_DAY` (12) the same way.
+- The shared send budget is a pair: `_FORGOT_GLOBAL_LIMITER` at
+  `5 × RESET_CODE_MAX_REQUESTS_PER_HOUR` (30) an hour — two honest users
+  each using the advertised six could exhaust the old 10 between them, and
+  every later request that hour was a 200 that mailed nothing — and
+  `_FORGOT_GLOBAL_DAILY_LIMITER` at 240 a day, which is what keeps the worst
+  case under Brevo's free-tier allowance (300) with room for the email-change
+  flow. `AUTH_FORGOT_GLOBAL_MAX` / `AUTH_FORGOT_GLOBAL_DAILY_MAX` for a paid
+  plan. Pinned in `test_forgot_limiter_defaults_match_the_advertised_resend_policy`.
+- The 200 body becomes `{"status": "ok", "resend_after_seconds": <cooldown
+  window>}` — config-shaped and identical for every caller, so the
+  enumeration-blindness test keeps comparing bodies byte-for-byte. The number's
+  owner is the limiter's window (`AUTH_FORGOT_COOLDOWN_WINDOW_SECONDS`), not the
+  `users.py` constant, because the limiter is the gate the browser actually
+  hits. `AUTH_FORGOT_COOLDOWN_MAX=0` does not remove the cooldown, it makes it
+  silent (the durable backstop still skips); the body keeps reporting the window.
+  `_check_forgot_policy_coherence()` prints a `WARNING` at startup for each
+  `AUTH_FORGOT_*` override that sets a visible gate looser than its durable
+  backstop (cooldown max ≠ 1, cooldown window below durable + skew, hourly or
+  daily max above the durable cap or 0, hourly or daily window below the
+  durable window + skew) — the `_env_int` fail-visible convention; nothing is
+  clamped.
+- Durable backstops (`users.py`), which only bite silently and only across a
+  restart: `RESET_CODE_COOLDOWN_SECONDS` 300 → **40**,
+  new `RESET_CODE_MAX_REQUESTS_PER_HOUR = 6` (rolling hour, skewed — next
+  section; skip reason `hourly_cap`), `RESET_CODE_MAX_REQUESTS_PER_DAY`
+  5 → **12** (rolling day, skewed likewise; skip reason `daily_cap`). The
+  daily cap is a mail-bomb bound on the victim's inbox (two full hourly
+  windows); it must clear a full hour's worth or "wait an hour" would be false
+  — and it *had* to move, because at 5 the sixth request after the hour would
+  have been a **silent** daily-cap skip, the worst outcome available.
+  Trade-off accepted: the per-victim bound rises from 5/day to 12/day; the
+  Brevo-quota worst case is bounded by the global daily budget above. One
+  status-blind read (`password_reset_request_times_since` over the skewed
+  day) serves all three checks — the day contains the hour contains the
+  minute — so a cold store costs one round-trip, not three
+  (`test_forgot_password_delivery_reads_the_request_log_once`).
+
+### Two clocks (`_BACKSTOP_SKEW_SECONDS = 20`)
+
+The in-process limiters stamp a request on **arrival** (monotonic clock). The
+route captures the same instant on the wall clock (`requested_at = _utcnow()`)
+and hands it to the background task, which measures every durable window from
+it and passes it to `create_password_reset_request(…, requested_at=…)` as the
+row's `created_at` — **not** the instant the row is written, which comes a
+lookup, a read and the Brevo send later, seconds on a cold Neon compute
+(`test_forgot_password_row_is_stamped_at_arrival_not_after_the_send`;
+`expires_at` stays anchored on the write, so a slow store cannot shrink the
+code's lifetime). The browser's countdown starts at the **response**, later
+still. The earlier design stamped the row after the send returned and bounded
+the send with a 10 s `asyncio.wait_for` to keep that latency inside the skew;
+the review showed the deadline could cancel a send Brevo had already accepted
+(httpx's timeout is per phase, so connect + write can complete before the
+outer deadline trips) and leave a mailed code with no row behind it, while the
+un-deadlined store hops it did not cover could exceed the skew on their own.
+With arrival stamping there is no send latency to cover and no deadline. What
+the allowance still covers is the two clocks disagreeing: the durable cooldown
+is 40 s against the visible 60, `_RESET_HOURLY_CAP_WINDOW` is `1h − 20 s` and
+`_RESET_DAILY_CAP_WINDOW` is `1d − 20 s`, so in a single process the visible
+gate always decides; the backstops only bite across a restart, where the
+limiters are empty anyway. Pinned by
+`test_forgot_limiter_defaults_match_the_advertised_resend_policy`,
+`…durable_cooldown_sits_inside_the_visible_gate`, the ageing-out step of
+`…requests_are_capped_per_hour`, and `…daily_cap_is_visible` (twelve mails go
+out before the visible 429; the backstop never bites first).
+
+### Frontend
+
+- `#resetResendBtn` (`type="button"`, `.auth-link-btn`) inside `#resetCodeStep`
+  under the code input. Disabled with the label `Resend code (59s)` /
+  `Resend code (12 min)` / `Resend code (22 h)` while a countdown runs
+  (`formatResendCountdown`: seconds under a minute, whole minutes under an
+  hour, whole hours above, rounded to the *nearest* unit — ceiling read
+  "2 min" at 61 s and "60s" a second later; the label never reads "0" and
+  never rises as time falls — executed under node by
+  `test_frontend_resend_countdown.py`).
+- The countdown starts on the stage-1 send and on every resend, from the
+  server's `resend_after_seconds`; a 429 restarts it from `error.retryAfter`,
+  which `AuthAPI.request` now lifts from the `Retry-After` header (exposed
+  cross-origin already; the Vercel frontend is same-origin via rewrites anyway).
+- `resetEmail` — the address stage 1 submitted — is what the resend and the
+  stage-2 submit send; `#authEmail` is overwritten with it and made `readOnly`
+  on stage-1 success (an edit made in flight must not survive as the displayed
+  address), and unlocked by `resetPasswordResetForm`, which every exit path
+  already funnels through (mode switch, close, logout, deep link). This also
+  closes the post-merge finding "editable stage-2 email mismatches the
+  (email, code) pair". It is also the whole of the stage state: empty means
+  stage 1, set means the code step is open (the separate `resetStage` flag
+  was a second copy of the same fact and is gone).
+- **A stage-1 submit refused with an address-scoped 429** (a reload, a second
+  tab, the `?auth=reset` deep link inside the minute or the hour) still opens
+  the code step — copy "A code was already requested for … — enter it below
+  if you have it, or resend when the timer ends", countdown from
+  `Retry-After`. The refusal cancelled nothing, so the code already in the
+  inbox is valid; before this a refused resubmit left the user on a dead
+  stage 1 with no code input. A **client-scoped** 429 (`X-RateLimit-Scope:
+  client`, lifted by `AuthAPI.request` as `error.rateLimitScope`) stays a
+  plain error: it says nothing about the address, and opening the step for it
+  told a first-time address a code was out and locked the field under it.
+- **Stale continuations are dropped.** `resetGeneration` is bumped by
+  `resetPasswordResetForm`; every `await` in the flow captures it first and
+  bails if it moved, so a response landing after "Back to sign in" cannot lock
+  the login email field, repaint the login error, or restart a countdown on a
+  hidden button. (The stage-2 success toast still shows — the reset did
+  happen — only the mode switch and prefill are skipped.)
+- Resend success clears `#authError` so a stale 429 banner never sits beside
+  fresh "sent" copy; the copy is "We sent a new code to …", the same claim
+  stage 1 already makes.
+- The email-change form (`initEmailChangeForm`, the flow this one was modelled
+  on) gets the same generation guard (`emailChangeGeneration`, bumped by its
+  `reset()`), and Cancel is disabled while a submit is in flight: a verify
+  response landing after a logout or a mid-flight cancel used to redraw a
+  code box for a request that was gone
+  (`test_stale_email_change_responses_are_dropped_after_a_reset`). The
+  server-side half of that race — `advance_email_change` updates by id
+  without checking `cancelled_at` — is pre-existing and not touched here.
+- Cache busters: `app.js?v=127`, `styles.css?v=131` (the four exact-match
+  guards were bumped in the same commit).
+
+### Accepted gaps (added)
+
+- **After a restart, the caps are silent.** The in-process limiters are empty,
+  so the first requests after a redeploy answer 200 + "sent" and the durable
+  hourly/daily caps skip silently. Extension of the already-accepted daily-cap
+  behaviour; the resend button makes it more reachable, not different. A
+  synchronous durable check would need an account lookup before the 200 (a
+  timing and enumeration oracle), so it stays as is.
+- **A failed send still spends the minute.** The in-process cooldown is charged
+  on arrival; send-before-persist still keeps the *durable* cooldown clear, so a
+  provider failure costs the user 60 s of countdown, not five minutes.
+- **Global-budget enumeration (pre-existing).** The global limiters are
+  charged only for known accounts (unknown returns before the charge). With
+  five accounts of their own an attacker can fill 29 of the 30 hourly slots,
+  request a candidate address, then a thirtieth self-request: their own mail
+  arrives iff the candidate is unregistered — one bit per hour. Charging
+  before the lookup would let junk addresses drain the budget instead (a
+  DoS), so the trade-off stands; the shorter cooldown makes the filler sends
+  faster but not the bit rate. Mitigation if it ever matters: a second global
+  limiter keyed on the typed address regardless of existence.
+- **The global budgets are still silent.** A known account's request past 30
+  in the hour or 240 in the day is a 200 that mails nothing, with a server
+  `WARNING`. Making it visible needs the account lookup before the 200 (an
+  enumeration oracle), so it stays silent; the numbers are sized so honest
+  traffic does not reach it.
+- **"We sent …" is a claim the server never verifies** (six 200-paths send
+  nothing). Unchanged from v1 and enumeration-safe by construction; hedged copy
+  ("If an account exists for …") is a copy decision for the user-facing docs
+  round, not this change.
