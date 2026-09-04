@@ -17,6 +17,7 @@ from dashboard.backend.domain.analytics import instrumentation
 from dashboard.backend.domain.analytics.query_service import (
     AnalyticsQueryService,
     get_analytics_query_service,
+    get_value_analytics_query_service,
 )
 from dashboard.backend.domain.analytics.repository import AnalyticsStore
 from dashboard.backend.domain.analytics.service import (
@@ -26,7 +27,11 @@ from dashboard.backend.domain.analytics.service import (
 from dashboard.backend.domain.analytics.states import (
     AnalyticsStateStore,
     recalculate_user_snapshot,
+    recalculate_user_snapshots,
 )
+from dashboard.backend.domain.analytics.value_repository import ValueAnalyticsStore
+from dashboard.backend.domain.analytics.value_queries import ValueAnalyticsQueryService
+from dashboard.backend.domain.credits.repository import CreditsStore
 from dashboard.backend.domain.runs import service as run_service
 from dashboard.backend.domain.runs.repository import RunStore
 from dashboard.backend.tests._v2_fakes import FakeBackend
@@ -207,6 +212,16 @@ def test_synthetic_acceptance_scenario_has_no_real_credentials(monkeypatch):
         event_service = AnalyticsService(store)
         query_service = AnalyticsQueryService(store=store, user_store=users)
         state_store = AnalyticsStateStore(store)
+        value_store = ValueAnalyticsStore(
+            analytics_base=store,
+            credits_base=CreditsStore(path),
+        )
+        value_query_service = ValueAnalyticsQueryService(
+            store=store,
+            user_store=users,
+            value_store=value_store,
+            legacy_service=query_service,
+        )
         now = datetime.now(timezone.utc).replace(microsecond=0)
 
         monkeypatch.setattr(users_module, "user_store", users)
@@ -218,13 +233,17 @@ def test_synthetic_acceptance_scenario_has_no_real_credentials(monkeypatch):
         monkeypatch.setattr(
             instrumentation,
             "_snapshot_recalculator",
-            lambda user_id: recalculate_user_snapshot(
+            lambda user_id: recalculate_user_snapshots(
                 user_id,
                 now=now,
-                store=state_store,
+                state_store=state_store,
+                value_store=value_store,
             ),
         )
         app.dependency_overrides[get_analytics_query_service] = lambda: query_service
+        app.dependency_overrides[get_value_analytics_query_service] = (
+            lambda: value_query_service
+        )
         app.dependency_overrides[get_analytics_service] = lambda: event_service
 
         instrumentation.emit_account_event(
@@ -325,6 +344,7 @@ def test_synthetic_acceptance_scenario_has_no_real_credentials(monkeypatch):
                 )
         finally:
             app.dependency_overrides.pop(get_analytics_query_service, None)
+            app.dependency_overrides.pop(get_value_analytics_query_service, None)
             app.dependency_overrides.pop(get_analytics_service, None)
 
         assert overview_response.status_code == 200, overview_response.text

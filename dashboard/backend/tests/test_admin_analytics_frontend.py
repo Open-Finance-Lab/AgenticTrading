@@ -6,8 +6,14 @@ from pathlib import Path
 from dashboard.backend.domain.analytics.query_service import (
     AnalyticsActivityPage,
     AnalyticsOverview,
-    AnalyticsUserProfile,
-    PaginatedUsers,
+)
+from dashboard.backend.domain.analytics.value_queries import (
+    CommercialAnalyticsResponse,
+    LifecycleAnalyticsResponse,
+    OperationalAnalyticsResponse,
+    PaginatedValueUsers,
+    RetentionAnalyticsResponse,
+    ValueUserProfile,
 )
 from dashboard.backend.tests._frontend_source import APP_HTML, APP_JS, STYLES
 
@@ -49,9 +55,13 @@ def test_safe_fixtures_have_no_prohibited_response_fields():
         assert prohibited.isdisjoint(set(walk_keys(payload))), path.name
 
 
-def test_fixtures_match_committed_pr2_shapes():
+def test_fixtures_match_committed_analytics_shapes():
     overview = load_fixture("overview.json")
     partial = load_fixture("overview_partial_error.json")
+    lifecycle = load_fixture("lifecycle.json")
+    retention = load_fixture("retention.json")
+    commercial = load_fixture("commercial.json")
+    operational = load_fixture("operational.json")
     users = load_fixture("users.json")
     profile = load_fixture("user_detail.json")
     assert {"daily_active_users", "availability", "last_updated"} <= overview.keys()
@@ -60,16 +70,24 @@ def test_fixtures_match_committed_pr2_shapes():
         "error_code": "temporarily_unavailable",
     }
     assert partial["availability"]["snapshot"]["available"] is True
+    assert {"headline", "segment_counts", "weekly_segments", "transitions"} <= lifecycle.keys()
+    assert {"cohorts", "summary_week_1", "summary_week_2", "summary_week_4"} <= retention.keys()
+    assert {"tier_counts", "selected_period", "current_balances"} <= commercial.keys()
+    assert {"operational_state_counts", "top_failure_categories"} <= operational.keys()
     assert {"items", "total", "limit", "offset"} == users.keys()
-    assert "state" in profile and "activation_milestones" in profile
+    assert {"state", "activation_milestones", "lifecycle", "operational", "commercial"} <= profile.keys()
     assert "next_cursor" in load_fixture("activity_timeline.json")
 
 
-def test_fixtures_validate_against_committed_pr2_models():
+def test_fixtures_validate_against_committed_analytics_models():
     AnalyticsOverview.model_validate(load_fixture("overview.json"))
     AnalyticsOverview.model_validate(load_fixture("overview_partial_error.json"))
-    PaginatedUsers.model_validate(load_fixture("users.json"))
-    AnalyticsUserProfile.model_validate(load_fixture("user_detail.json"))
+    LifecycleAnalyticsResponse.model_validate(load_fixture("lifecycle.json"))
+    RetentionAnalyticsResponse.model_validate(load_fixture("retention.json"))
+    CommercialAnalyticsResponse.model_validate(load_fixture("commercial.json"))
+    OperationalAnalyticsResponse.model_validate(load_fixture("operational.json"))
+    PaginatedValueUsers.model_validate(load_fixture("users.json"))
+    ValueUserProfile.model_validate(load_fixture("user_detail.json"))
     for name in (
         "activity_timeline.json",
         "activity_runs.json",

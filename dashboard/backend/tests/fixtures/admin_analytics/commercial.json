@@ -1,0 +1,29 @@
+{
+  "as_of": "2026-09-03T12:00:00Z",
+  "tier_counts": {
+    "unpaid": 20,
+    "starter": 6,
+    "invested": 4,
+    "high_value": 3
+  },
+  "lifetime_net_purchased_micro": 73500000,
+  "selected_period": {
+    "purchased_micro": 12000000,
+    "refunded_micro": 1000000,
+    "consumed_micro": 4800000,
+    "admin_grant_activity_micro": 3000000,
+    "platform_model_cost_micro_usd": 2400000
+  },
+  "current_balances": {
+    "grant_available_micro": 9500000,
+    "purchased_available_micro": 8200000,
+    "total_available_micro": 17700000
+  },
+  "availability": {
+    "available": true,
+    "stale": false,
+    "status": "ready",
+    "coverage_start": null,
+    "coverage_end": null
+  }
+}

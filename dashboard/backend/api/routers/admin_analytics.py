@@ -16,13 +16,22 @@ from dashboard.backend.domain.analytics.query_service import (
     AnalyticsOverview,
     AnalyticsQueryService,
     AnalyticsUserFilters,
-    AnalyticsUserProfile,
-    PaginatedUsers,
     get_analytics_query_service,
+    get_value_analytics_query_service,
 )
 from dashboard.backend.domain.analytics.service import (
     AnalyticsService,
     get_analytics_service,
+)
+from dashboard.backend.domain.analytics.value_queries import (
+    CommercialAnalyticsResponse,
+    LifecycleAnalyticsResponse,
+    OperationalAnalyticsResponse,
+    PaginatedValueUsers,
+    RetentionAnalyticsResponse,
+    UserValueFilters,
+    ValueAnalyticsQueryService,
+    ValueUserProfile,
 )
 
 
@@ -42,6 +51,10 @@ _USER_STATES = {"blocked", "needs_attention", "dormant", "onboarding", "active"}
 _USER_SORTS = {"last_activity", "joined_at", "recent_runs", "recent_failures"}
 _SORT_ORDERS = {"asc", "desc"}
 _ACTIVITY_SECTIONS = {"timeline", "runs", "usage", "sessions"}
+_LIFECYCLE_SEGMENTS = {"new", "onboarding", "growing", "core", "at_risk", "dormant"}
+_OPERATIONAL_STATES = {"blocked", "needs_attention", "healthy"}
+_COMMERCIAL_TIERS = {"unpaid", "starter", "invested", "high_value"}
+_MAX_VALUE_RANGE_DAYS = 180
 
 
 def _invalid_query() -> Never:
@@ -149,6 +162,126 @@ def _overview_filters(request: Request) -> AnalyticsMetricFilters:
         )
     except (ValidationError, ValueError):
         _invalid_query()
+
+
+def _value_range_from_values(values: dict[str, str]) -> tuple[date, date, bool]:
+    today = datetime.now(timezone.utc).date()
+    from_date = _parse_date(values["from"]) if "from" in values else None
+    to_date = _parse_date(values["to"]) if "to" in values else None
+    if from_date is not None and to_date is not None and to_date < from_date:
+        _invalid_query()
+    try:
+        end = (to_date or today) + timedelta(days=1)
+        start = from_date or end - timedelta(days=30)
+    except OverflowError:
+        _invalid_query()
+    if end <= start or (end - start).days > _MAX_VALUE_RANGE_DAYS:
+        _invalid_query()
+    include_internal = (
+        _parse_bool(values["include_internal"])
+        if "include_internal" in values
+        else False
+    )
+    return start, end, include_internal
+
+
+def _value_range(
+    request: Request,
+    *,
+    additional: set[str] | None = None,
+) -> tuple[date, date, bool, dict[str, str]]:
+    values = _query_values(
+        request,
+        {"from", "to", "include_internal"} | (additional or set()),
+    )
+    start, end, include_internal = _value_range_from_values(values)
+    return start, end, include_internal, values
+
+
+def _profile_range(request: Request) -> tuple[date, date]:
+    values = _query_values(request, {"from", "to"})
+    start, end, _include_internal = _value_range_from_values(values)
+    return start, end
+
+
+def _value_user_filters(request: Request) -> tuple[UserValueFilters, int, int]:
+    values = _query_values(
+        request,
+        {
+            "q",
+            "status",
+            "lifecycle_segment",
+            "operational_state",
+            "commercial_tier",
+            "activated",
+            "last_meaningful_activity_from",
+            "last_meaningful_activity_to",
+            "priority",
+            "limit",
+            "offset",
+            "include_internal",
+        },
+    )
+    query = values.get("q")
+    if query is not None and len(query) > 100:
+        _invalid_query()
+    lifecycle_segment = values.get("lifecycle_segment")
+    if lifecycle_segment is not None and lifecycle_segment not in _LIFECYCLE_SEGMENTS:
+        _invalid_query()
+    operational_state = values.get("operational_state")
+    if operational_state is not None and operational_state not in _OPERATIONAL_STATES:
+        _invalid_query()
+    tier = values.get("commercial_tier")
+    if tier is not None and tier not in _COMMERCIAL_TIERS:
+        _invalid_query()
+    legacy_status = values.get("status")
+    if legacy_status is not None and legacy_status not in _USER_STATES:
+        _invalid_query()
+
+    from_date = (
+        _parse_date(values["last_meaningful_activity_from"])
+        if "last_meaningful_activity_from" in values
+        else None
+    )
+    to_date = (
+        _parse_date(values["last_meaningful_activity_to"])
+        if "last_meaningful_activity_to" in values
+        else None
+    )
+    if from_date is not None and to_date is not None and to_date < from_date:
+        _invalid_query()
+    try:
+        filters = UserValueFilters(
+            q=query,
+            lifecycle_segment=lifecycle_segment,
+            operational_state=operational_state,
+            commercial_tier=tier,
+            activated=(
+                _parse_bool(values["activated"]) if "activated" in values else None
+            ),
+            last_meaningful_activity_from=(
+                _utc_midnight(from_date) if from_date is not None else None
+            ),
+            last_meaningful_activity_to=(
+                _exclusive_date_end(to_date) - timedelta(microseconds=1)
+                if to_date is not None
+                else None
+            ),
+            priority=(
+                _parse_bool(values["priority"]) if "priority" in values else False
+            ),
+            legacy_status=legacy_status,
+            include_internal=(
+                _parse_bool(values["include_internal"])
+                if "include_internal" in values
+                else False
+            ),
+        )
+    except (ValidationError, ValueError):
+        _invalid_query()
+    limit = _parse_integer(values.get("limit", "50"), minimum=1, maximum=100)
+    offset = _parse_integer(values.get("offset", "0"), minimum=0)
+    return filters, limit, offset
 
 
 def _user_filters(request: Request) -> tuple[AnalyticsUserFilters, int, int]:
@@ -268,30 +401,115 @@ def get_overview(
         _raise_service_error(exc)
 
 
-@router.get("/users", response_model=PaginatedUsers)
+@router.get("/lifecycle", response_model=LifecycleAnalyticsResponse)
+def get_lifecycle(
+    request: Request,
+    service: ValueAnalyticsQueryService = Depends(get_value_analytics_query_service),
+):
+    start, end, include_internal, _values = _value_range(request)
+    try:
+        return service.get_lifecycle(
+            start=start,
+            end=end,
+            include_internal=include_internal,
+        )
+    except Exception as exc:
+        _raise_service_error(exc)
+
+
+@router.get("/retention", response_model=RetentionAnalyticsResponse)
+def get_retention(
+    request: Request,
+    service: ValueAnalyticsQueryService = Depends(get_value_analytics_query_service),
+):
+    start, end, include_internal, _values = _value_range(request)
+    try:
+        return service.get_retention(
+            start=start,
+            end=end,
+            include_internal=include_internal,
+        )
+    except Exception as exc:
+        _raise_service_error(exc)
+
+
+@router.get("/commercial", response_model=CommercialAnalyticsResponse)
+def get_commercial(
+    request: Request,
+    service: ValueAnalyticsQueryService = Depends(get_value_analytics_query_service),
+):
+    start, end, include_internal, _values = _value_range(request)
+    try:
+        return service.get_commercial(
+            start=start,
+            end=end,
+            include_internal=include_internal,
+        )
+    except Exception as exc:
+        _raise_service_error(exc)
+
+
+@router.get("/operational", response_model=OperationalAnalyticsResponse)
+def get_operational(
+    request: Request,
+    service: ValueAnalyticsQueryService = Depends(get_value_analytics_query_service),
+):
+    start, end, include_internal, values = _value_range(
+        request,
+        additional={"billing_mode", "provider", "model"},
+    )
+    billing_mode = values.get("billing_mode")
+    if billing_mode not in {None, "byok", "platform_credits"}:
+        _invalid_query()
+    provider_id = values.get("provider")
+    if provider_id is not None and not _PROVIDER_ID_PATTERN.fullmatch(provider_id):
+        _invalid_query()
+    model_id = values.get("model")
+    if model_id is not None and not _MODEL_ID_PATTERN.fullmatch(model_id):
+        _invalid_query()
+    try:
+        return service.get_operational(
+            start=start,
+            end=end,
+            include_internal=include_internal,
+            billing_mode=billing_mode,
+            provider_id=provider_id,
+            model_id=model_id,
+        )
+    except Exception as exc:
+        _raise_service_error(exc)
+
+
+@router.get("/users", response_model=PaginatedValueUsers)
 def list_users(
     request: Request,
-    service: AnalyticsQueryService = Depends(get_analytics_query_service),
+    service: ValueAnalyticsQueryService = Depends(get_value_analytics_query_service),
 ):
-    filters, limit, offset = _user_filters(request)
+    filters, limit, offset = _value_user_filters(request)
     try:
         return service.list_users(filters=filters, limit=limit, offset=offset)
     except Exception as exc:
         _raise_service_error(exc)
 
 
-@router.get("/users/{user_id}", response_model=AnalyticsUserProfile)
+@router.get("/users/{user_id}", response_model=ValueUserProfile)
 def get_user_profile(
     user_id: str,
     request: Request,
     admin: dict = Depends(require_admin),
-    query_service: AnalyticsQueryService = Depends(get_analytics_query_service),
+    query_service: ValueAnalyticsQueryService = Depends(
+        get_value_analytics_query_service
+    ),
     analytics_service: AnalyticsService = Depends(get_analytics_service),
 ):
-    _query_values(request, set())
+    start, end = _profile_range(request)
     subject_user_id = _parse_user_id(user_id)
     try:
-        profile = query_service.get_user_profile(user_id=subject_user_id)
+        profile = query_service.get_user_profile(
+            user_id=subject_user_id,
+            start=start,
+            end=end,
+        )
     except Exception as exc:
         _raise_service_error(exc)
     _record_access(

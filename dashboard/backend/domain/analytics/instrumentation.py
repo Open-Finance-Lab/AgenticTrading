@@ -68,9 +68,13 @@ def _recalculate_snapshot(user_id: int, event_name: str) -> None:
         return
     callback = _snapshot_recalculator
     if callback is None:
-        from .states import recalculate_user_snapshot
+        # Keep the legacy compatibility snapshot and the value-analytics
+        # projection in sync after every authoritative event.  The combined
+        # recalculator writes both projections atomically when they share the
+        # same analytics store.
+        from .states import recalculate_user_snapshots
 
-        callback = recalculate_user_snapshot
+        callback = recalculate_user_snapshots
     callback(user_id)
 
 
