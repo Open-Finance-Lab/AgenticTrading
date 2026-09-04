@@ -234,7 +234,17 @@
   function formatTimestamp(value, fallback = '—') {
     if (!value) return fallback;
     const date = new Date(value);
-    return Number.isFinite(date.getTime()) ? date.toLocaleString() : fallback;
+    return Number.isFinite(date.getTime())
+      ? new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short' }).format(date)
+      : fallback;
+  }
+
+  function formatDateOnly(value, fallback = '—') {
+    if (!value) return fallback;
+    const date = new Date(`${value}T00:00:00Z`);
+    return Number.isFinite(date.getTime())
+      ? new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeZone: 'UTC' }).format(date)
+      : fallback;
   }
 
   function makeTime(value, fallback = '—') {
@@ -694,7 +704,7 @@
       head.appendChild(textNode('span', '', `${numberOrDash(transition.users)} user${Number(transition.users) === 1 ? '' : 's'}`));
       item.appendChild(head);
       const quality = transition.data_quality === 'partial' ? ' · Incomplete data' : '';
-      item.appendChild(textNode('p', '', `${transition.period_start} – ${transition.period_end}${quality}`));
+      item.appendChild(textNode('p', '', `${formatDateOnly(transition.period_start)} – ${formatDateOnly(transition.period_end)}${quality}`));
       target.appendChild(item);
     });
     if (!target.children.length) {
@@ -711,8 +721,8 @@
     renderSignalBadge('adminAnalyticsProfileCommercial', 'commercial', commercial.commercial_tier, COMMERCIAL_LABELS);
     const facts = element('adminAnalyticsProfileValueFacts');
     clearChildren(facts);
-    appendDefinition(facts, 'Selected period', `${profile.selected_period_start || '—'} – ${profile.selected_period_end || '—'}`);
-    appendDefinition(facts, 'Activated', lifecycle.activated_at ? new Date(lifecycle.activated_at).toLocaleString() : 'Not activated');
+    appendDefinition(facts, 'Selected period', `${formatDateOnly(profile.selected_period_start)} – ${formatDateOnly(profile.selected_period_end)}`);
+    appendDefinition(facts, 'Activated', formatTimestamp(lifecycle.activated_at, 'Not activated'));
     appendDefinition(facts, 'Active days (30d)', numberOrDash(lifecycle.active_days_30d));
     appendDefinition(facts, 'Successful backtests (30d)', numberOrDash(lifecycle.successful_backtests_30d));
     appendDefinition(facts, 'Inactive UTC days', numberOrDash(lifecycle.inactive_days));

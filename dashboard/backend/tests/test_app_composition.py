@@ -68,6 +68,10 @@ EXPECTED_ANALYTICS_ROUTES = {
 }
 EXPECTED_ADMIN_ANALYTICS_ROUTES = {
     ("GET", "/admin/analytics/overview", "get_overview"),
+    ("GET", "/admin/analytics/lifecycle", "get_lifecycle"),
+    ("GET", "/admin/analytics/retention", "get_retention"),
+    ("GET", "/admin/analytics/commercial", "get_commercial"),
+    ("GET", "/admin/analytics/operational", "get_operational"),
     ("GET", "/admin/analytics/users", "list_users"),
     ("GET", "/admin/analytics/users/{user_id}", "get_user_profile"),
     (
@@ -136,6 +140,10 @@ EXPECTED_FULL_CONTRACT = {
     ("GET", "/api/admin/users/{user_id}"),
     ("PATCH", "/api/admin/users/{user_id}"),
     ("GET", "/api/admin/analytics/overview"),
+    ("GET", "/api/admin/analytics/lifecycle"),
+    ("GET", "/api/admin/analytics/retention"),
+    ("GET", "/api/admin/analytics/commercial"),
+    ("GET", "/api/admin/analytics/operational"),
     ("GET", "/api/admin/analytics/users"),
     ("GET", "/api/admin/analytics/users/{user_id}"),
     ("GET", "/api/admin/analytics/users/{user_id}/activity"),

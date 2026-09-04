@@ -76,6 +76,7 @@
       query: '',
       profile: '',
     },
+    openDisclosures: new Set(),
     sections: {
       lifecycle: { loaded: false, data: null, error: null, stale: false },
       users: { loaded: false, data: null, error: null, stale: false },
@@ -165,6 +166,11 @@
     state.userFilters.commercial = Object.hasOwn(COMMERCIAL_LABELS, commercial) ? commercial : '';
     state.userFilters.query = params.get('analyticsUserQuery') || '';
     state.userFilters.profile = params.get(URL_KEYS.profile) || params.get(URL_KEYS.user) || '';
+    state.openDisclosures = new Set(
+      String(params.get('analyticsPanel') || '')
+        .split(',')
+        .filter((name) => ['retention', 'commercial', 'operational'].includes(name))
+    );
   }
 
   function setOrDelete(params, key, value) {
@@ -183,6 +189,7 @@
     setOrDelete(url.searchParams, URL_KEYS.commercial, state.userFilters.commercial);
     setOrDelete(url.searchParams, 'analyticsUserQuery', state.userFilters.query);
     setOrDelete(url.searchParams, URL_KEYS.profile, state.userFilters.profile);
+    setOrDelete(url.searchParams, 'analyticsPanel', [...state.openDisclosures].sort().join(','));
     window.history.replaceState(window.history.state, '', url);
   }
 
@@ -227,12 +234,14 @@
 
   function number(value) {
     const parsed = Number(value);
-    return Number.isFinite(parsed) ? parsed.toLocaleString() : '—';
+    return Number.isFinite(parsed) ? new Intl.NumberFormat().format(parsed) : '—';
   }
 
   function percent(value) {
     const parsed = Number(value);
-    return Number.isFinite(parsed) ? `${Math.round(parsed * 100)}%` : 'Not mature';
+    return Number.isFinite(parsed)
+      ? new Intl.NumberFormat(undefined, { style: 'percent', maximumFractionDigits: 0 }).format(parsed)
+      : 'Not mature';
   }
 
   function credits(value) {
@@ -240,12 +249,23 @@
       return window.CreditFormat.formatCreditsMicro(value);
     }
     const parsed = Number(value);
-    return Number.isFinite(parsed) ? `${(parsed / 1000000).toFixed(6)} Credits` : '—';
+    return Number.isFinite(parsed)
+      ? `${new Intl.NumberFormat(undefined, { minimumFractionDigits: 6, maximumFractionDigits: 6 }).format(parsed / 1000000)} Credits`
+      : '—';
   }
 
   function dollarsFromMicro(value) {
     const parsed = Number(value);
-    return Number.isFinite(parsed) ? `$${(parsed / 1000000).toFixed(2)}` : '—';
+    return Number.isFinite(parsed)
+      ? new Intl.NumberFormat(undefined, { style: 'currency', currency: 'USD' }).format(parsed / 1000000)
+      : '—';
+  }
+
+  function formatDate(value) {
+    const parsed = new Date(`${value}T00:00:00Z`);
+    return Number.isFinite(parsed.getTime())
+      ? new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeZone: 'UTC' }).format(parsed)
+      : '—';
   }
 
   function metricCard(label, value, detail) {
@@ -297,7 +317,7 @@
     const history = payload.availability?.history;
     const coverage = element('adminLifecycleCoverage');
     coverage.textContent = history?.coverage_start && history?.coverage_end
-      ? `${history.coverage_start} – ${history.coverage_end}`
+      ? `${formatDate(history.coverage_start)} – ${formatDate(history.coverage_end)}`
       : 'Current snapshot';
   }
 
@@ -306,7 +326,7 @@
     clear(body);
     series.forEach((week) => {
       const row = document.createElement('tr');
-      row.appendChild(node('th', '', week.week_start));
+      row.appendChild(node('th', '', formatDate(week.week_start)));
       row.firstChild.scope = 'row';
       LIFECYCLE_SEGMENTS.forEach((segment) => {
         row.appendChild(node('td', '', number(week.segment_counts?.[segment] || 0)));
@@ -333,7 +353,7 @@
     state.movementChart = new window.Chart(canvas, {
       type: 'line',
       data: {
-        labels: rows.map((week) => week.week_start),
+        labels: rows.map((week) => formatDate(week.week_start)),
         datasets: LIFECYCLE_SEGMENTS.map((segment) => ({
           label: LIFECYCLE_LABELS[segment],
           data: rows.map((week) => Number(week.segment_counts?.[segment] || 0)),
@@ -483,7 +503,7 @@
     (payload.cohorts || []).forEach((cohort) => {
       const row = document.createElement('tr');
       [
-        cohort.cohort_week,
+        formatDate(cohort.cohort_week),
         number(cohort.activated_users),
         percent(cohort.week_1?.rate),
         percent(cohort.week_2?.rate),
@@ -640,6 +660,17 @@
     return loadSection(name, { keepStaleData: true });
   }
 
+  function syncDisclosureControls({ load = true } = {}) {
+    document.querySelectorAll('[data-admin-value-disclosure]').forEach((button) => {
+      const name = button.dataset.adminValueDisclosure;
+      const expanded = state.openDisclosures.has(name);
+      button.setAttribute('aria-expanded', expanded ? 'true' : 'false');
+      const panel = sectionPanel(name);
+      if (panel) panel.hidden = !expanded;
+      if (expanded && load) ensureDisclosureLoaded(name);
+    });
+  }
+
   function fetchLifecycle() {
     return request(`${API_ENDPOINTS.lifecycle}?${rangeParams()}`);
   }
@@ -763,6 +794,7 @@
       } catch (validationError) {
         error.textContent = validationError.message;
         error.hidden = false;
+        error.focus();
       }
     });
     element('adminAnalyticsValueRefresh')?.addEventListener('click', refresh);
@@ -778,11 +810,10 @@
     document.querySelectorAll('[data-admin-value-disclosure]').forEach((button) => {
       button.addEventListener('click', () => {
         const name = button.dataset.adminValueDisclosure;
-        const panel = sectionPanel(name);
-        const expanded = button.getAttribute('aria-expanded') === 'true';
-        button.setAttribute('aria-expanded', expanded ? 'false' : 'true');
-        panel.hidden = expanded;
-        if (!expanded) ensureDisclosureLoaded(name);
+        if (state.openDisclosures.has(name)) state.openDisclosures.delete(name);
+        else state.openDisclosures.add(name);
+        writeUrlState();
+        syncDisclosureControls();
       });
     });
     document.querySelectorAll('[data-admin-value-retry]').forEach((button) => {
@@ -803,6 +834,7 @@
       if (new URL(window.location.href).searchParams.get('adminTab') !== 'analytics') return;
       readUrlState();
       setControls();
+      syncDisclosureControls();
       refreshPrimary();
     });
   }
@@ -820,6 +852,7 @@
       readUrlState();
       setControls();
       bindEvents();
+      syncDisclosureControls();
     }
     const tab = new URL(window.location.href).searchParams.get('adminTab') || 'analytics';
     state.active = tab === 'analytics';

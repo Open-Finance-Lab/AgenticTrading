@@ -3332,6 +3332,7 @@ a.header-brand:hover .title-section h1 {
     max-height: min(760px, calc(100vh - 28px));
     padding: 20px;
     overflow: auto;
+    overscroll-behavior: contain;
     border: 1px solid rgba(103, 232, 249, 0.24);
     border-radius: 8px;
     background:
@@ -3339,6 +3340,29 @@ a.header-brand:hover .title-section h1 {
         var(--bg-card);
     color: var(--text-primary);
     box-shadow: 0 28px 80px rgba(0, 0, 0, 0.58);
+}
+
+.admin-value-overview button,
+.admin-value-dialog button,
+.admin-rail button {
+    touch-action: manipulation;
+    -webkit-tap-highlight-color: rgba(103, 232, 249, 0.12);
+}
+
+.admin-value-overview h3,
+.admin-value-overview h4,
+.admin-value-dialog h2,
+.admin-value-dialog h3 {
+    text-wrap: balance;
+    scroll-margin-top: 88px;
+}
+
+.admin-value-headline strong,
+.admin-value-metric-card strong,
+.admin-priority-value,
+.admin-value-table td,
+.admin-value-table th {
+    font-variant-numeric: tabular-nums;
 }
 
 .admin-value-dialog::backdrop {
@@ -12060,6 +12084,15 @@ body.agent-editor-open {
     clip: rect(0, 0, 0, 0);
     white-space: nowrap;
     border: 0;
+}
+
+/* A visually-hidden table keeps its semantic table role for assistive
+   technology, but the table layout algorithm can still honour the intrinsic
+   width of its cells and create horizontal overflow. Switch only these hidden
+   tables to block layout so the clipped accessibility mirror cannot widen a
+   narrow viewport. */
+table.sr-only {
+    display: block;
 }
 
 .credits-view {

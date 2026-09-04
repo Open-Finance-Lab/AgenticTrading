@@ -8,6 +8,7 @@ from dashboard.backend.tests._frontend_source import APP_HTML, STYLES
 ROOT = Path(__file__).resolve().parents[2]
 VALUE_JS_PATH = ROOT / "frontend" / "js" / "admin-analytics-value.js"
 PROFILE_JS_PATH = ROOT / "frontend" / "js" / "admin-analytics.js"
+FIXTURE_DIR = Path(__file__).resolve().parent / "fixtures" / "admin_analytics"
 
 
 def value_source() -> str:
@@ -52,6 +53,7 @@ def test_value_filters_are_deep_linkable():
         "analyticsProfile",
     ):
         assert key in source
+    assert "analyticsPanel" in source
     assert "history.replaceState" in source
 
 
@@ -139,3 +141,57 @@ def test_profile_keeps_full_sections_and_renders_value_axes():
         "adminAnalyticsLifecycleTransitions",
     ):
         assert f'id="{element_id}"' in APP_HTML
+
+
+def test_value_fixtures_and_client_exclude_sensitive_fields():
+    fixtures = "\n".join(
+        path.read_text(encoding="utf-8") for path in sorted(FIXTURE_DIR.glob("*.json"))
+    )
+    combined = f"{value_source()}\n{fixtures}"
+    for prohibited in (
+        "api_key",
+        "password",
+        "network_hash",
+        "raw_user_agent",
+        "provider_response_body",
+        "credential_ciphertext",
+        "strategy_content",
+        "prompt_text",
+    ):
+        assert prohibited not in combined
+
+
+def test_one_failed_section_does_not_blank_other_sections():
+    source = value_source()
+    assert "Promise.allSettled" in source
+    assert "applySettledSection" in source
+    assert "keepStaleData: true" in source
+    assert "section.stale" in source
+
+
+def test_charts_disclosures_and_controls_have_semantic_state():
+    assert 'aria-describedby="adminLifecycleMovementTable"' in APP_HTML
+    table_start = APP_HTML.index('id="adminLifecycleMovementTable"')
+    assert 'class="sr-only"' in APP_HTML[table_start - 80 : table_start + 120]
+    assert 'aria-expanded="false"' in APP_HTML
+    for control_id in (
+        "adminValueStart",
+        "adminValueEnd",
+        "adminPriorityQuery",
+        "adminOperationalProvider",
+        "adminOperationalModel",
+    ):
+        start = APP_HTML.index(f'id="{control_id}"')
+        fragment = APP_HTML[start : start + 220]
+        assert "name=" in fragment
+        assert "autocomplete=" in fragment
+
+
+def test_value_formatting_uses_intl_and_dialogs_bound_scroll():
+    source = value_source()
+    assert "Intl.NumberFormat" in source
+    assert "Intl.DateTimeFormat" in source
+    assert "toFixed(" not in source
+    assert "overscroll-behavior: contain" in STYLES
+    assert "touch-action: manipulation" in STYLES
+    assert "table.sr-only" in STYLES

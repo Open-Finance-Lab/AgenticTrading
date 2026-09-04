@@ -99,7 +99,7 @@ def test_admin_grant_console_has_responsive_operation_and_audit_styles():
     assert ".admin-credits-summary" in STYLES
     assert ".admin-credits-users-table" in STYLES
     assert ".admin-credits-activity-table" in STYLES
-    assert ".admin-tabs" in STYLES
+    assert ".admin-rail" in STYLES
     assert ".admin-credits-pool-ring" in STYLES
     assert ".admin-credits-pool-legend" in STYLES
     assert "@media (max-width: 600px)" in STYLES
@@ -126,4 +126,4 @@ def test_admin_tabs_have_four_tabs_in_usage_order_and_legacy_alias():
 
 def test_admin_visual_assets_use_fresh_cache_versions():
     assert 'js/admin-credits.js?v=6' in APP_HTML
-    assert 'js/admin-tabs.js?v=3' in APP_HTML
+    assert 'js/admin-tabs.js?v=4' in APP_HTML

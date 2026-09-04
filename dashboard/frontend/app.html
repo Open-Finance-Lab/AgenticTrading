@@ -13,7 +13,7 @@
          because every API call is a CORS request. -->
     <link rel="preconnect" href="https://agentictrading.onrender.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="styles.css?v=133">
+    <link rel="stylesheet" href="styles.css?v=135">
     <!-- defer: ~200KB that was render-blocking. Deferred scripts execute in
          document order (this one first, the body-end ones after), all before
          DOMContentLoaded, so Chart is defined before any chart renders. -->
@@ -2128,11 +2128,11 @@
                     </header>
 
                     <form id="adminAnalyticsValueFilters" class="admin-value-filters" aria-label="User value date filters">
-                        <label for="adminValueStart"><span>From</span><input id="adminValueStart" type="date" required></label>
-                        <label for="adminValueEnd"><span>To</span><input id="adminValueEnd" type="date" required></label>
-                        <label class="admin-value-check" for="adminValueInternal"><input id="adminValueInternal" type="checkbox"><span>Include internal accounts</span></label>
+                        <label for="adminValueStart"><span>From</span><input id="adminValueStart" name="from" type="date" autocomplete="off" required></label>
+                        <label for="adminValueEnd"><span>To</span><input id="adminValueEnd" name="to" type="date" autocomplete="off" required></label>
+                        <label class="admin-value-check" for="adminValueInternal"><input id="adminValueInternal" name="include_internal" type="checkbox"><span>Include internal accounts</span></label>
                         <button class="auth-btn auth-btn-secondary" type="submit">Apply range</button>
-                        <p id="adminValueFilterError" class="auth-error" role="alert" hidden></p>
+                        <p id="adminValueFilterError" class="auth-error" role="alert" tabindex="-1" hidden></p>
                     </form>
 
                     <div id="adminAnalyticsHeadline" class="admin-value-headline" aria-busy="true">
@@ -2169,10 +2169,10 @@
                             <span id="adminPriorityUsersRange" class="admin-value-coverage" aria-live="polite"></span>
                         </div>
                         <form id="adminPriorityFilters" class="admin-priority-filters" role="search">
-                            <label for="adminPriorityQuery"><span>Search</span><input id="adminPriorityQuery" type="search" maxlength="100" autocomplete="off" placeholder="Name or email"></label>
-                            <label for="adminPriorityLifecycle"><span>Lifecycle</span><select id="adminPriorityLifecycle"><option value="">All lifecycle stages</option><option value="new">New</option><option value="onboarding">Onboarding</option><option value="growing">Growing</option><option value="core">Core</option><option value="at_risk">At risk</option><option value="dormant">Dormant</option></select></label>
-                            <label for="adminPriorityOperational"><span>Operational</span><select id="adminPriorityOperational"><option value="">All operational states</option><option value="blocked">Blocked</option><option value="needs_attention">Needs attention</option><option value="healthy">Healthy</option></select></label>
-                            <label for="adminPriorityCommercial"><span>Commercial</span><select id="adminPriorityCommercial"><option value="">All commercial tiers</option><option value="unpaid">Unpaid</option><option value="starter">Starter</option><option value="invested">Invested</option><option value="high_value">High value</option></select></label>
+                            <label for="adminPriorityQuery"><span>Search</span><input id="adminPriorityQuery" name="q" type="search" maxlength="100" autocomplete="off" spellcheck="false" placeholder="Name or email…"></label>
+                            <label for="adminPriorityLifecycle"><span>Lifecycle</span><select id="adminPriorityLifecycle" class="filter-select" name="lifecycle_segment"><option value="">All lifecycle stages</option><option value="new">New</option><option value="onboarding">Onboarding</option><option value="growing">Growing</option><option value="core">Core</option><option value="at_risk">At risk</option><option value="dormant">Dormant</option></select></label>
+                            <label for="adminPriorityOperational"><span>Operational</span><select id="adminPriorityOperational" class="filter-select" name="operational_state"><option value="">All operational states</option><option value="blocked">Blocked</option><option value="needs_attention">Needs attention</option><option value="healthy">Healthy</option></select></label>
+                            <label for="adminPriorityCommercial"><span>Commercial</span><select id="adminPriorityCommercial" class="filter-select" name="commercial_tier"><option value="">All commercial tiers</option><option value="unpaid">Unpaid</option><option value="starter">Starter</option><option value="invested">Invested</option><option value="high_value">High value</option></select></label>
                             <button class="auth-btn auth-btn-secondary" type="submit">Filter users</button>
                         </form>
                         <p id="adminPriorityStatus" class="credits-status" role="status" aria-live="polite"></p>
@@ -2197,9 +2197,9 @@
                             <button class="admin-value-disclosure-toggle" type="button" data-admin-value-disclosure="operational" aria-expanded="false" aria-controls="adminOperationalPanel"><span><small>Execution health</small><strong>Operational health</strong></span><svg aria-hidden="true"><use href="#icon-chevron-down"/></svg></button>
                             <div id="adminOperationalPanel" class="admin-value-disclosure-panel" data-admin-value-panel="operational" hidden>
                                 <form id="adminOperationalFilters" class="admin-operational-filters" aria-label="Operational analytics filters">
-                                    <label for="adminOperationalBilling"><span>Billing</span><select id="adminOperationalBilling"><option value="">All billing modes</option><option value="byok">BYOK</option><option value="platform_credits">Platform Credits</option></select></label>
-                                    <label for="adminOperationalProvider"><span>Provider ID</span><input id="adminOperationalProvider" type="text" maxlength="64" autocomplete="off" placeholder="All providers"></label>
-                                    <label for="adminOperationalModel"><span>Model ID</span><input id="adminOperationalModel" type="text" maxlength="256" autocomplete="off" placeholder="All models"></label>
+                                    <label for="adminOperationalBilling"><span>Billing</span><select id="adminOperationalBilling" class="filter-select" name="billing_mode"><option value="">All billing modes</option><option value="byok">BYOK</option><option value="platform_credits">Platform Credits</option></select></label>
+                                    <label for="adminOperationalProvider"><span>Provider ID</span><input id="adminOperationalProvider" name="provider" type="text" maxlength="64" autocomplete="off" spellcheck="false" placeholder="e.g. openrouter…"></label>
+                                    <label for="adminOperationalModel"><span>Model ID</span><input id="adminOperationalModel" name="model" type="text" maxlength="256" autocomplete="off" spellcheck="false" placeholder="e.g. openai/gpt-5…"></label>
                                     <button class="auth-btn auth-btn-secondary" type="submit">Apply</button>
                                 </form>
                                 <p data-admin-value-status role="status" aria-live="polite"></p><p data-admin-value-error class="auth-error" role="alert" hidden></p><button class="credits-key-action" data-admin-value-retry type="button" hidden>Retry section</button><div data-admin-value-content></div>
@@ -2636,8 +2636,8 @@
     <script src="js/credits.js?v=8" defer></script>
     <script src="js/admin-model-providers.js?v=1" defer></script>
     <script src="js/admin-credits.js?v=6" defer></script>
-    <script src="js/admin-analytics.js?v=4" defer></script>
-    <script src="js/admin-analytics-value.js?v=2" defer></script>
+    <script src="js/admin-analytics.js?v=5" defer></script>
+    <script src="js/admin-analytics-value.js?v=3" defer></script>
     <script src="js/admin-tabs.js?v=4" defer></script>
     <script src="js/leaderboard.js?v=32" defer></script>
     <script src="home-page.js?v=50" defer></script>
