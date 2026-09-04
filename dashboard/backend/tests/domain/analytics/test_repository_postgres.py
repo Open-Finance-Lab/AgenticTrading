@@ -5,6 +5,7 @@ from __future__ import annotations
 import inspect
 import os
 import uuid
+from datetime import timedelta
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import psycopg
@@ -17,6 +18,11 @@ from dashboard.backend.domain.analytics import repository_postgres as pg_module
 from dashboard.backend.domain.analytics.repository_postgres import (
     PostgresAnalyticsStore,
 )
+from dashboard.backend.domain.analytics.value_repository import (
+    ProjectionJob,
+    UserLifecycleDailySnapshot,
+    ValueAnalyticsStore,
+)
 from dashboard.backend.tests._postgres_testing import require_local_postgres_url
 from dashboard.backend.tests.domain.analytics.test_repository_contract import (
     assert_cursor_contract,
@@ -25,6 +31,14 @@ from dashboard.backend.tests.domain.analytics.test_repository_contract import (
     assert_source_event_idempotency_contract,
     assert_subject_and_access_contract,
     assert_error_category_contract,
+)
+from dashboard.backend.tests.domain.analytics.test_value_repository import (
+    NOW,
+    SyntheticAgentStore,
+    SyntheticCreditsStore,
+    SyntheticProviderStore,
+    SyntheticRunStore,
+    _value_snapshot,
 )
 
 
@@ -150,6 +164,25 @@ def test_public_repository_methods_match():
     )
 
 
+def test_postgres_ddl_declares_user_value_projection_storage():
+    ddl = pg_module.ANALYTICS_POSTGRES_DDL
+    assert "CREATE TABLE IF NOT EXISTS user_lifecycle_daily_snapshots" in ddl
+    assert "CREATE TABLE IF NOT EXISTS analytics_projection_jobs" in ddl
+    for column in (
+        "lifecycle_segment",
+        "operational_state",
+        "activated_at",
+        "last_meaningful_activity_at",
+        "inactive_days",
+        "active_days_30d",
+        "successful_backtests_30d",
+    ):
+        assert column in ddl or f'"{column}"' in ddl
+    assert "ADD COLUMN IF NOT EXISTS" in inspect.getsource(
+        PostgresAnalyticsStore._init_schema
+    )
+
+
 @pg_only
 def test_postgres_runs_shared_event_contracts(postgres_contract_store):
     store, _admin_id, user_id = postgres_contract_store
@@ -174,3 +207,46 @@ def test_postgres_runs_shared_subject_and_access_contract(postgres_contract_stor
 def test_postgres_runs_pr2_query_contract(postgres_contract_store):
     store, _admin_id, user_id = postgres_contract_store
     assert_pr2_query_contract(store, user_id)
+
+
+@pg_only
+def test_postgres_user_value_projection_round_trip(
+    postgres_contract_store,
+    tmp_path,
+):
+    analytics, _admin_id, user_id = postgres_contract_store
+    value_store = ValueAnalyticsStore(
+        analytics,
+        SyntheticCreditsStore(tmp_path / "postgres-value-credits.db"),
+        provider_base=SyntheticProviderStore({}, []),
+        agent_base=SyntheticAgentStore(),
+        run_base=SyntheticRunStore({}),
+    )
+    snapshot = _value_snapshot(user_id)
+    daily = UserLifecycleDailySnapshot(
+        snapshot_date=NOW.date(),
+        user_id=user_id,
+        lifecycle_segment="core",
+        lifecycle_reason_code="core_repeated_value",
+        data_quality="complete",
+        calculated_at=NOW,
+    )
+    job = ProjectionJob(
+        job_name="postgres-lifecycle-backfill",
+        window_start=NOW.date(),
+        window_end=NOW.date(),
+        status="complete",
+        updated_at=NOW,
+    )
+
+    value_store.upsert_current_snapshot(snapshot)
+    value_store.upsert_daily_snapshot(daily)
+    value_store.save_projection_job(job)
+
+    assert value_store.get_current_snapshot(user_id) == snapshot
+    assert value_store.list_daily_snapshots(
+        start=NOW.date(),
+        end=NOW.date() + timedelta(days=1),
+        user_ids=[user_id],
+    ) == [daily]
+    assert value_store.get_projection_job(job.job_name) == job
