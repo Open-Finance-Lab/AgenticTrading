@@ -7,7 +7,14 @@ returned dataframe shape are unchanged.
 """
 
 import pandas as pd
-import pandas_ta as ta
+
+try:
+    import pandas_ta as ta
+except ImportError as exc:
+    raise ImportError(
+        "pandas-ta is required for technical indicators; "
+        "install the project dependencies from requirements.txt"
+    ) from exc
 
 
 class TechnicalIndicators:
