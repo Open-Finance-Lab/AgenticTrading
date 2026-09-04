@@ -95,6 +95,28 @@ def decision_frequency_minutes(value: str) -> int:
     return {"1h": 60}[normalize_decision_frequency(value)]
 
 
+def verify_source_timeframe(
+    requested: str,
+    reported: str,
+    *,
+    evidence: str,
+) -> str:
+    """Return the reported canonical timeframe or fail on provider drift.
+
+    A run must not be labelled as minute-sourced when a provider ignored the
+    requested resolution. ``evidence`` names the runtime signal in the error
+    (for example ``configured`` or ``fetch``); it is not user configuration.
+    """
+    expected = normalize_bar_timeframe(requested)
+    actual = normalize_bar_timeframe(reported)
+    if actual != expected:
+        raise FrequencyConfigError(
+            f"{evidence} source timeframe mismatch: requested {expected}, "
+            f"reported {actual}"
+        )
+    return actual
+
+
 @dataclass(frozen=True)
 class TradingFrequency:
     """Validated frequency contract for one market profile.
@@ -151,3 +173,40 @@ class TradingFrequency:
             "execution_timeframe": self.execution_timeframe,
             "valuation_frequency": self.valuation_frequency,
         }
+
+
+def build_verified_intraday_contract(
+    *,
+    source_timeframe: str,
+    decision_timeframe: str,
+    decision_frequency: str,
+) -> dict[str, str]:
+    """Build the fixed runtime contract for finer-source hourly backtests.
+
+    Execution and valuation deliberately inherit the source resolution. The
+    aggregation and fill policy are constants, not strategy options. Returning
+    ``verification_status=verified`` attests that these invariants were checked
+    from the runtime's effective timeframes before result persistence.
+    """
+    source = normalize_bar_timeframe(source_timeframe)
+    decision = normalize_bar_timeframe(decision_timeframe)
+    if timeframe_minutes(source) >= timeframe_minutes(decision):
+        raise FrequencyConfigError(
+            "Verified intraday contracts require source_timeframe to be finer "
+            "than decision_timeframe"
+        )
+    contract = TradingFrequency(
+        source_timeframe=source,
+        decision_timeframe=decision,
+        decision_frequency=decision_frequency,
+        execution_timeframe=source,
+        valuation_frequency=source,
+    ).to_metadata()
+    contract.update(
+        {
+            "aggregation": "session_anchored_completed_bars",
+            "fill_policy": "next_source_bar_open",
+            "verification_status": "verified",
+        }
+    )
+    return contract

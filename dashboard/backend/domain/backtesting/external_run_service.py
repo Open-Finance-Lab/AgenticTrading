@@ -38,9 +38,15 @@ from dashboard.backend.domain.backtesting.metrics import (
     calculate_max_drawdown,
     calculate_sharpe,
 )
-from dashboard.backend.infrastructure.market_data.frequency import timeframe_minutes
+from dashboard.backend.infrastructure.market_data.frequency import (
+    build_verified_intraday_contract,
+    timeframe_minutes,
+)
 from dashboard.backend.domain.backtesting.portfolio_manager import PortfolioManager
-from dashboard.backend.infrastructure.market_data.alpaca_bars import AlpacaDataLoader
+from dashboard.backend.infrastructure.market_data.alpaca_bars import (
+    AlpacaDataLoader,
+    feed_provenance,
+)
 from dashboard.backend.infrastructure.market_data.profiles import (
     ALPACA,
     get_market_profile,
@@ -227,6 +233,9 @@ def build_final_metrics(run: Optional[Dict[str, Any]]) -> Dict[str, Any]:
         "timeout_holds": metadata.get("timeout_holds"),
         "frequency_contract": frequency_contract,
         "market_data_quality": market_data_quality,
+        "market_data_feed": metadata.get("market_data_feed"),
+        "sip_fallback_to_iex": metadata.get("sip_fallback_to_iex"),
+        "end_clamped": metadata.get("end_clamped"),
     }
 
 
@@ -294,6 +303,8 @@ class ExternalBacktestSession:
         self.source_price_cache: Dict[str, Dict[Any, float]] = {}
         self.execution_timestamps: List[Any] = []
         self.data_quality: Dict[str, Any] = {}
+        self.frequency_contract: Optional[Dict[str, str]] = None
+        self.market_data_provenance: Dict[str, Any] = {}
         self._valuation_cursor = 0
 
         self.step_opened_at: Optional[datetime] = None
@@ -367,6 +378,23 @@ class ExternalBacktestSession:
         self.intraday_mode = timeframe_minutes(self.source_timeframe) < timeframe_minutes(
             self.decision_timeframe
         )
+        self.market_data_provenance = feed_provenance(self.source_data) or {}
+        if self.intraday_mode:
+            self.frequency_contract = build_verified_intraday_contract(
+                source_timeframe=self.source_timeframe,
+                decision_timeframe=self.decision_timeframe,
+                decision_frequency=self.profile.decision_frequency,
+            )
+        else:
+            self.frequency_contract = {
+                "source_timeframe": self.source_timeframe,
+                "decision_timeframe": self.decision_timeframe,
+                "decision_frequency": self.profile.decision_frequency,
+                "execution_timeframe": self.decision_timeframe,
+                "valuation_frequency": self.decision_timeframe,
+                "aggregation": "none",
+                "fill_policy": "decision_bar_close",
+            }
         self._valuation_cursor = 0
 
         with self._step_lock:
@@ -828,32 +856,13 @@ class ExternalBacktestSession:
             metadata={
                 "decision_timeout_seconds": DECISION_TIMEOUT_SECONDS,
                 "timeout_holds": self.timeout_holds,
-                "frequency_contract": {
-                    "source_timeframe": self.source_timeframe,
-                    "decision_timeframe": self.decision_timeframe,
-                    "decision_frequency": "1h",
-                    "execution_timeframe": self.source_timeframe
-                    if self.intraday_mode
-                    else self.decision_timeframe,
-                    "valuation_frequency": self.source_timeframe
-                    if self.intraday_mode
-                    else self.decision_timeframe,
-                    "aggregation": (
-                        "session_anchored_completed_bars"
-                        if self.intraday_mode
-                        else "none"
-                    ),
-                    "fill_policy": (
-                        "next_source_bar_open"
-                        if self.intraday_mode
-                        else "decision_bar_close"
-                    ),
-                },
+                "frequency_contract": dict(self.frequency_contract or {}),
                 **(
                     {"market_data_quality": self.data_quality}
                     if self.intraday_mode
                     else {}
                 ),
+                **self.market_data_provenance,
             },
         )
         db.insert_equity_points(self.run_id, equity_curve)

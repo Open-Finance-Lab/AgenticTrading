@@ -239,15 +239,26 @@ def feed_provenance(bars: Dict[str, pd.DataFrame]) -> Optional[Dict[str, Any]]:
     priced from Yahoo, which never touches Alpaca) so callers can tell "not
     applicable" from "IEX fallback".
     """
+    feeds = set()
+    sip_fallback_to_iex = False
+    end_clamped = False
     for frame in bars.values():
         attrs = getattr(frame, "attrs", None) or {}
         if FRAME_ATTR_FEED in attrs:
-            return {
-                "market_data_feed": attrs.get(FRAME_ATTR_FEED),
-                "sip_fallback_to_iex": bool(attrs.get(FRAME_ATTR_SIP_FALLBACK)),
-                "end_clamped": bool(attrs.get(FRAME_ATTR_END_CLAMPED)),
-            }
-    return None
+            feed = str(attrs.get(FRAME_ATTR_FEED) or "").strip().lower()
+            if feed:
+                feeds.add(feed)
+            sip_fallback_to_iex = sip_fallback_to_iex or bool(
+                attrs.get(FRAME_ATTR_SIP_FALLBACK)
+            )
+            end_clamped = end_clamped or bool(attrs.get(FRAME_ATTR_END_CLAMPED))
+    if not feeds:
+        return None
+    return {
+        "market_data_feed": next(iter(feeds)) if len(feeds) == 1 else "mixed",
+        "sip_fallback_to_iex": sip_fallback_to_iex,
+        "end_clamped": end_clamped,
+    }
 
 
 def _apply_default_timeout(client: Any) -> None:

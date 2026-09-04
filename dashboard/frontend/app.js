@@ -8246,7 +8246,10 @@ function formatBacktestFrequencyContract(contract) {
     const fill = contract.fill_policy === 'next_source_bar_open'
         ? `next ${execution} open fills`
         : `${execution} execution`;
-    return `${source} source · ${decision} decisions · ${fill} · ${valuation} valuation`;
+    const verification = contract.verification_status === 'verified'
+        ? ' · verified'
+        : '';
+    return `${source} source · ${decision} decisions · ${fill} · ${valuation} valuation${verification}`;
 }
 
 function formatBacktestMarketDataQuality(quality) {
@@ -8266,6 +8269,16 @@ function formatBacktestMarketDataQuality(quality) {
         const count = Number(quality[field] || 0);
         if (count > 0) parts.push(`${count} ${label}`);
     }
+    return parts.join(' · ');
+}
+
+function formatBacktestMarketDataProvenance(provenance) {
+    if (!provenance || typeof provenance !== 'object') return null;
+    const feed = String(provenance.market_data_feed || '').trim().toUpperCase();
+    if (!feed) return null;
+    const parts = [`Alpaca ${feed}`];
+    if (provenance.sip_fallback_to_iex) parts.push('SIP fallback');
+    if (provenance.end_clamped) parts.push('end clamped');
     return parts.join(' · ');
 }
 
@@ -8304,6 +8317,11 @@ function renderBacktestRunConfig(
         || null;
     const frequencyLabel = formatBacktestFrequencyContract(frequencyContract);
     const dataQualityLabel = formatBacktestMarketDataQuality(marketDataQuality);
+    const provenanceLabel = formatBacktestMarketDataProvenance({
+        market_data_feed: run?.market_data_feed ?? metadata.market_data_feed,
+        sip_fallback_to_iex: run?.sip_fallback_to_iex ?? metadata.sip_fallback_to_iex,
+        end_clamped: run?.end_clamped ?? metadata.end_clamped,
+    });
     const llmExecution = run?.llm_execution && typeof run.llm_execution === 'object'
         ? run.llm_execution
         : (metadata.llm_execution && typeof metadata.llm_execution === 'object'
@@ -8492,13 +8510,18 @@ function renderBacktestRunConfig(
     setBacktestConfigText('backtestConfigTimeframe', timeframe);
     const frequencyRow = document.getElementById('backtestConfigFrequencyRow');
     const dataQualityRow = document.getElementById('backtestConfigDataQualityRow');
+    const provenanceRow = document.getElementById('backtestConfigProvenanceRow');
     if (frequencyRow) frequencyRow.hidden = !frequencyLabel;
     if (dataQualityRow) dataQualityRow.hidden = !dataQualityLabel;
+    if (provenanceRow) provenanceRow.hidden = !provenanceLabel;
     if (frequencyLabel) {
         setBacktestConfigText('backtestConfigFrequency', frequencyLabel);
     }
     if (dataQualityLabel) {
         setBacktestConfigText('backtestConfigDataQuality', dataQualityLabel);
+    }
+    if (provenanceLabel) {
+        setBacktestConfigText('backtestConfigProvenance', provenanceLabel);
     }
     setBacktestConfigText(
         'backtestConfigDecisionSource',

@@ -40,6 +40,7 @@ from dashboard.backend.infrastructure.market_data.alpaca_bars import AlpacaDataL
 from dashboard.backend.infrastructure.market_data.frequency import (
     normalize_bar_timeframe,
     timeframe_minutes,
+    verify_source_timeframe,
 )
 
 # Read once at import (tests monkeypatch the module constant). Entry count, not
@@ -245,12 +246,27 @@ def _build_dataset(
     configure = getattr(loader, "configure_source_timeframe", None)
     if callable(configure):
         configure(requested_source)
-    actual_source = normalize_bar_timeframe(
-        getattr(loader, "source_timeframe", "60m")
-    )
+    configured_source = getattr(loader, "source_timeframe", None)
+    if configured_source is None:
+        # Legacy test doubles and old hourly loaders have no runtime evidence;
+        # preserve their historical 60m behavior without attesting it as 5m.
+        actual_source = "60m"
+    else:
+        actual_source = verify_source_timeframe(
+            requested_source,
+            configured_source,
+            evidence="configured",
+        )
     source_data = loader.fetch_bars(list(symbols), start_date, end_date)
     if not source_data:
         raise RuntimeError("No market data returned from Alpaca")
+    fetch_evidence = getattr(loader, "last_fetch", None)
+    if isinstance(fetch_evidence, dict) and fetch_evidence.get("source_timeframe"):
+        actual_source = verify_source_timeframe(
+            requested_source,
+            fetch_evidence["source_timeframe"],
+            evidence="fetch",
+        )
     data_quality: Dict[str, Any] = {}
     if timeframe_minutes(actual_source) < timeframe_minutes(requested_decision):
         aggregated_data = aggregate_bars_by_symbol(

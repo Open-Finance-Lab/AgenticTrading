@@ -304,6 +304,9 @@ class RunMetadata(BaseModel):
     t1_deferred_shares: Optional[float] = None
     frequency_contract: Optional[Dict[str, Any]] = None
     market_data_quality: Optional[Dict[str, Any]] = None
+    market_data_feed: Optional[str] = None
+    sip_fallback_to_iex: Optional[bool] = None
+    end_clamped: Optional[bool] = None
 
 
 class EquityCurve(BaseModel):
@@ -378,6 +381,9 @@ def _run_metadata_response(run: Dict[str, Any]) -> RunMetadata:
             "llm_execution",
             "frequency_contract",
             "market_data_quality",
+            "market_data_feed",
+            "sip_fallback_to_iex",
+            "end_clamped",
         ):
             if field in metadata:
                 if field == "llm_execution" and isinstance(metadata[field], dict):
@@ -405,6 +411,7 @@ def _run_metadata_response(run: Dict[str, Any]) -> RunMetadata:
                             "valuation_frequency",
                             "aggregation",
                             "fill_policy",
+                            "verification_status",
                         )
                         if name in metadata[field]
                     }

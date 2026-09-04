@@ -5,6 +5,11 @@ import pytest
 
 import dashboard.backend.domain.backtesting.external_run_service as ebs
 from dashboard.backend.domain.backtesting import market_data_store as mds
+from dashboard.backend.infrastructure.market_data.alpaca_bars import (
+    FRAME_ATTR_END_CLAMPED,
+    FRAME_ATTR_FEED,
+    FRAME_ATTR_SIP_FALLBACK,
+)
 
 
 def _minute_bars(symbols, start, end):
@@ -24,7 +29,12 @@ def _minute_bars(symbols, start, end):
         },
         index=timestamps,
     )
-    return {symbol: frame.copy() for symbol in symbols}
+    frames = {symbol: frame.copy() for symbol in symbols}
+    for symbol_frame in frames.values():
+        symbol_frame.attrs[FRAME_ATTR_FEED] = "iex"
+        symbol_frame.attrs[FRAME_ATTR_SIP_FALLBACK] = True
+        symbol_frame.attrs[FRAME_ATTR_END_CLAMPED] = False
+    return frames
 
 
 class _MinuteLoader:
@@ -64,6 +74,12 @@ def test_external_session_serves_hourly_bars_but_fills_and_values_on_5m():
     assert session.data_quality["total_decision_bars"] == 7
     assert session.data_quality["usable_decision_bars"] == 7
     assert session.data_quality["dropped_decision_bars"] == 0
+    assert session.frequency_contract["verification_status"] == "verified"
+    assert session.market_data_provenance == {
+        "market_data_feed": "iex",
+        "sip_fallback_to_iex": True,
+        "end_clamped": False,
+    }
     assert session.get_current_step()["timestamp"] == "2026-04-15T14:30:00+00:00"
     assert session.protocol_bars(session.timestamps[0])["AAPL"]["close"] == pytest.approx(100.11)
 
@@ -158,6 +174,7 @@ def test_final_metrics_expose_minute_contract_without_symbol_quality_details():
                     "valuation_frequency": "5m",
                     "aggregation": "session_anchored_completed_bars",
                     "fill_policy": "next_source_bar_open",
+                    "verification_status": "verified",
                 },
                 "market_data_quality": {
                     "policy": "drop_incomplete_decision_bars",
@@ -170,10 +187,17 @@ def test_final_metrics_expose_minute_contract_without_symbol_quality_details():
                     "invalid_source_bars": 0,
                     "symbols": {"AAPL": {"dropped_decision_bars": 1}},
                 },
+                "market_data_feed": "iex",
+                "sip_fallback_to_iex": True,
+                "end_clamped": False,
             },
         }
     )
 
     assert metrics["frequency_contract"]["source_timeframe"] == "5m"
+    assert metrics["frequency_contract"]["verification_status"] == "verified"
     assert metrics["market_data_quality"]["dropped_decision_bars"] == 1
     assert "symbols" not in metrics["market_data_quality"]
+    assert metrics["market_data_feed"] == "iex"
+    assert metrics["sip_fallback_to_iex"] is True
+    assert metrics["end_clamped"] is False

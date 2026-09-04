@@ -19,6 +19,7 @@ def _run_formatters(expression: str):
         [
             fn_body("function formatBacktestFrequencyContract("),
             fn_body("function formatBacktestMarketDataQuality("),
+            fn_body("function formatBacktestMarketDataProvenance("),
             f"console.log(JSON.stringify({expression}));",
         ]
     )
@@ -60,6 +61,8 @@ def test_backtest_details_have_frequency_and_quality_rows():
     assert 'id="backtestConfigFrequency"' in APP_HTML
     assert 'id="backtestConfigDataQualityRow"' in APP_HTML
     assert 'id="backtestConfigDataQuality"' in APP_HTML
+    assert 'id="backtestConfigProvenanceRow"' in APP_HTML
+    assert 'id="backtestConfigProvenance"' in APP_HTML
 
 
 def test_minute_frequency_formatter_states_fixed_execution_policy():
@@ -86,6 +89,25 @@ def test_quality_formatter_reports_dropped_and_problem_counts():
     assert value == "207/210 usable · 3 dropped · 2 missing · 1 duplicate"
 
 
+def test_verified_contract_and_iex_fallback_are_visible():
+    frequency = _run_formatters(
+        "formatBacktestFrequencyContract({"
+        "source_timeframe:'5m',decision_timeframe:'60m',"
+        "decision_frequency:'1h',execution_timeframe:'5m',"
+        "valuation_frequency:'5m',fill_policy:'next_source_bar_open',"
+        "verification_status:'verified'"
+        "})"
+    )
+    provenance = _run_formatters(
+        "formatBacktestMarketDataProvenance({"
+        "market_data_feed:'iex',sip_fallback_to_iex:true,end_clamped:true"
+        "})"
+    )
+
+    assert frequency.endswith(" · verified")
+    assert provenance == "Alpaca IEX · SIP fallback · end clamped"
+
+
 def test_alpaca_badge_and_strategy_page_describe_minute_source_hourly_decisions():
     badge = _render_data_source_badge(
         {
@@ -101,6 +123,7 @@ def test_alpaca_badge_and_strategy_page_describe_minute_source_hourly_decisions(
     assert badge["hidden"] is False
     assert "run?.frequency_contract" in render
     assert "run?.market_data_quality" in render
+    assert "run?.market_data_feed" in render
 
     strategy_source = (FRONTEND / "strategy.html").read_text(encoding="utf-8")
     assert "Alpaca 5-minute data + hourly decisions + hosted model" in strategy_source

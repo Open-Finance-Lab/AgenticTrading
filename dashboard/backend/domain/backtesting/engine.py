@@ -56,7 +56,10 @@ from dashboard.backend.domain.agents.runtime import (
     normalize_runtime_type,
 )
 from dashboard.backend.infrastructure.ai_hedge_fund.adapter import AiHedgeFundRuntime
-from dashboard.backend.infrastructure.market_data.alpaca_bars import MarketDataUnavailableError
+from dashboard.backend.infrastructure.market_data.alpaca_bars import (
+    MarketDataUnavailableError,
+    feed_provenance,
+)
 from dashboard.backend.infrastructure.market_data.ifind_client import IFindClientError
 from dashboard.backend.infrastructure.market_data.ifind_fx import (
     IFindFxError,
@@ -68,8 +71,11 @@ from dashboard.backend.infrastructure.market_data.provider import (
     create_market_data_provider,
 )
 from dashboard.backend.infrastructure.market_data.frequency import (
+    FrequencyConfigError,
+    build_verified_intraday_contract,
     normalize_bar_timeframe,
     timeframe_minutes,
+    verify_source_timeframe,
 )
 from dashboard.backend.infrastructure.market_data.profiles import (
     IFIND_ASHARE,
@@ -257,6 +263,8 @@ class HourlyBacktester:
         self.intraday_mode = False
         self.source_data = {}
         self.data_quality = {}
+        self.frequency_contract = None
+        self.market_data_provenance = {}
         self.currency_context: CurrencyContext | None = None
         self.native_initial_capital = self.initial_capital
         if self.profile.native_currency == self.profile.reporting_currency:
@@ -641,10 +649,32 @@ class HourlyBacktester:
                 self.profile.timeframe
             )
         else:
-            actual_source_timeframe = normalize_bar_timeframe(
-                configured_source_timeframe
-            )
+            try:
+                actual_source_timeframe = verify_source_timeframe(
+                    self.requested_source_timeframe,
+                    configured_source_timeframe,
+                    evidence="configured",
+                )
+            except FrequencyConfigError as exc:
+                raise MarketDataUnavailableError(
+                    f"Market data frequency contract failed: {exc}"
+                ) from exc
+        fetch_evidence = getattr(self.data_loader, "last_fetch", None)
+        if isinstance(fetch_evidence, dict) and fetch_evidence.get(
+            "source_timeframe"
+        ):
+            try:
+                actual_source_timeframe = verify_source_timeframe(
+                    self.requested_source_timeframe,
+                    fetch_evidence["source_timeframe"],
+                    evidence="fetch",
+                )
+            except FrequencyConfigError as exc:
+                raise MarketDataUnavailableError(
+                    f"Market data frequency contract failed: {exc}"
+                ) from exc
         self.source_timeframe = actual_source_timeframe
+        self.market_data_provenance = feed_provenance(self.source_data) or {}
         self.intraday_mode = timeframe_minutes(actual_source_timeframe) < timeframe_minutes(
             self.decision_timeframe
         )
@@ -654,6 +684,11 @@ class HourlyBacktester:
             # profile's 5m target, metadata must describe the effective clocks.
             self.execution_timeframe = actual_source_timeframe
             self.valuation_frequency = actual_source_timeframe
+            self.frequency_contract = build_verified_intraday_contract(
+                source_timeframe=actual_source_timeframe,
+                decision_timeframe=self.decision_timeframe,
+                decision_frequency=self.profile.decision_frequency,
+            )
             print(
                 f"   Aggregating {actual_source_timeframe} source bars into "
                 f"{self.decision_timeframe} decision bars..."
@@ -838,17 +873,18 @@ class HourlyBacktester:
             "native_currency": profile.native_currency,
             "reporting_currency": profile.reporting_currency,
             "lot_size": profile.lot_size,
+            **dict(getattr(self, "market_data_provenance", {}) or {}),
         }
         if getattr(self, "intraday_mode", False):
-            metadata["frequency_contract"] = {
-                "source_timeframe": self.source_timeframe,
-                "decision_timeframe": self.decision_timeframe,
-                "decision_frequency": profile.decision_frequency,
-                "execution_timeframe": self.execution_timeframe,
-                "valuation_frequency": self.valuation_frequency,
-                "aggregation": "session_anchored_completed_bars",
-                "fill_policy": "next_source_bar_open",
-            }
+            frequency_contract = getattr(self, "frequency_contract", None)
+            metadata["frequency_contract"] = dict(
+                frequency_contract
+                or build_verified_intraday_contract(
+                    source_timeframe=self.source_timeframe,
+                    decision_timeframe=self.decision_timeframe,
+                    decision_frequency=profile.decision_frequency,
+                )
+            )
             metadata["market_data_quality"] = dict(
                 getattr(self, "data_quality", {})
             )

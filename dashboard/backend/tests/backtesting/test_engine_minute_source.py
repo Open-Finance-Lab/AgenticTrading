@@ -2,9 +2,16 @@ from datetime import datetime, timedelta
 
 import pandas as pd
 import pytz
+import pytest
 
 from dashboard.backend.domain.backtesting.engine import HourlyBacktester
 from dashboard.backend.domain.backtesting import engine as engine_mod
+from dashboard.backend.infrastructure.market_data.alpaca_bars import (
+    FRAME_ATTR_END_CLAMPED,
+    FRAME_ATTR_FEED,
+    FRAME_ATTR_SIP_FALLBACK,
+    MarketDataUnavailableError,
+)
 
 
 class _MinuteLoader:
@@ -54,18 +61,20 @@ def _make_minute_bars():
         day += timedelta(days=1)
     timestamps = timestamps[: 10 * 78]
     prices = [100 + index * 0.01 for index in range(len(timestamps))]
-    return {
-        "AAPL": pd.DataFrame(
-            {
-                "open": [price + 0.25 for price in prices],
-                "high": [price + 0.5 for price in prices],
-                "low": [price - 0.5 for price in prices],
-                "close": prices,
-                "volume": [1000] * len(prices),
-            },
-            index=pd.DatetimeIndex(timestamps),
-        )
-    }
+    frame = pd.DataFrame(
+        {
+            "open": [price + 0.25 for price in prices],
+            "high": [price + 0.5 for price in prices],
+            "low": [price - 0.5 for price in prices],
+            "close": prices,
+            "volume": [1000] * len(prices),
+        },
+        index=pd.DatetimeIndex(timestamps),
+    )
+    frame.attrs[FRAME_ATTR_FEED] = "sip"
+    frame.attrs[FRAME_ATTR_SIP_FALLBACK] = False
+    frame.attrs[FRAME_ATTR_END_CLAMPED] = True
+    return {"AAPL": frame}
 
 
 def test_minute_source_keeps_hourly_decisions_and_5m_execution(monkeypatch):
@@ -120,8 +129,42 @@ def test_minute_source_keeps_hourly_decisions_and_5m_execution(monkeypatch):
     assert frequency["source_timeframe"] == "5m"
     assert frequency["decision_frequency"] == "1h"
     assert frequency["fill_policy"] == "next_source_bar_open"
+    assert frequency["verification_status"] == "verified"
     quality = fake_db.runs[0]["metadata"]["market_data_quality"]
     assert quality["policy"] == "drop_incomplete_decision_bars"
     assert quality["total_decision_bars"] == 70
     assert quality["usable_decision_bars"] == 70
     assert quality["dropped_decision_bars"] == 0
+    metadata = fake_db.runs[0]["metadata"]
+    assert metadata["market_data_feed"] == "sip"
+    assert metadata["sip_fallback_to_iex"] is False
+    assert metadata["end_clamped"] is True
+
+
+def test_direct_engine_rejects_provider_frequency_drift(monkeypatch):
+    class _IgnoringLoader(_MinuteLoader):
+        def __init__(self, bars):
+            super().__init__(bars)
+            self.source_timeframe = "60m"
+
+        def configure_source_timeframe(self, value):
+            pass
+
+    loader = _IgnoringLoader(_make_minute_bars())
+
+    def factory(data_source="alpaca", universe=None, *, source_timeframe=None):
+        return loader
+
+    monkeypatch.setattr(engine_mod, "create_market_data_provider", factory)
+    backtester = HourlyBacktester(
+        "2026-03-02",
+        "2026-03-13",
+        use_llm=False,
+        symbols=["AAPL"],
+    )
+
+    with pytest.raises(
+        MarketDataUnavailableError,
+        match="configured source timeframe mismatch: requested 5m, reported 60m",
+    ):
+        backtester.load_data()

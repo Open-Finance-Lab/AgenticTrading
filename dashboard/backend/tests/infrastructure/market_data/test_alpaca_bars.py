@@ -12,6 +12,7 @@ import pytest
 from alpaca.data.timeframe import TimeFrame
 
 from dashboard.backend.infrastructure.market_data.alpaca_bars import (
+    FRAME_ATTR_END_CLAMPED,
     FRAME_ATTR_FEED,
     FRAME_ATTR_SIP_FALLBACK,
     AlpacaDataLoader,
@@ -331,6 +332,23 @@ def test_feed_provenance_reads_frame_stamps(fake_alpaca):
     # Nothing to attribute when no Alpaca frame was involved.
     assert feed_provenance({}) is None
     assert feed_provenance({"AAPL": pd.DataFrame()}) is None
+
+
+def test_feed_provenance_marks_mixed_batched_results_conservatively():
+    sip = pd.DataFrame()
+    sip.attrs[FRAME_ATTR_FEED] = "sip"
+    sip.attrs[FRAME_ATTR_SIP_FALLBACK] = False
+    sip.attrs[FRAME_ATTR_END_CLAMPED] = True
+    iex = pd.DataFrame()
+    iex.attrs[FRAME_ATTR_FEED] = "iex"
+    iex.attrs[FRAME_ATTR_SIP_FALLBACK] = True
+    iex.attrs[FRAME_ATTR_END_CLAMPED] = False
+
+    assert feed_provenance({"AAPL": sip, "MSFT": iex}) == {
+        "market_data_feed": "mixed",
+        "sip_fallback_to_iex": True,
+        "end_clamped": True,
+    }
 
 
 def test_clamped_fetch_is_marked_in_provenance(fake_alpaca, monkeypatch):

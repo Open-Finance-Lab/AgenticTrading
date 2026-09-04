@@ -10,6 +10,7 @@ import pandas as pd
 import pytest
 
 from dashboard.backend.domain.backtesting import market_data_store as mds
+from dashboard.backend.infrastructure.market_data.frequency import FrequencyConfigError
 
 
 def _synth_bars(symbols=("AAPL", "MSFT"), start="2026-04-15", end="2026-04-16"):
@@ -283,3 +284,52 @@ def test_minute_dataset_exposes_dropped_bucket_quality():
     assert dataset.data_quality["usable_decision_bars"] == 1
     assert dataset.data_quality["dropped_decision_bars"] == 1
     assert dataset.data_quality["missing_source_bars"] == 1
+
+
+def test_minute_dataset_rejects_loader_that_ignores_requested_timeframe():
+    class _IgnoringLoader:
+        source_timeframe = "60m"
+
+        def configure_source_timeframe(self, value):
+            pass
+
+        def fetch_bars(self, symbols, start, end):
+            pytest.fail("frequency drift must fail before fetching")
+
+    with pytest.raises(
+        FrequencyConfigError,
+        match="configured source timeframe mismatch: requested 5m, reported 60m",
+    ):
+        mds.get_dataset(
+            ["AAPL"],
+            "2026-04-15",
+            "2026-04-15",
+            loader_factory=_IgnoringLoader,
+            source_timeframe="5m",
+            decision_timeframe="60m",
+        )
+
+
+def test_minute_dataset_rejects_fetch_evidence_with_wrong_timeframe():
+    class _MisreportingLoader:
+        source_timeframe = "60m"
+
+        def configure_source_timeframe(self, value):
+            self.source_timeframe = value
+
+        def fetch_bars(self, symbols, start, end):
+            self.last_fetch = {"source_timeframe": "60m"}
+            return _synth_bars(symbols, start, end)
+
+    with pytest.raises(
+        FrequencyConfigError,
+        match="fetch source timeframe mismatch: requested 5m, reported 60m",
+    ):
+        mds.get_dataset(
+            ["AAPL"],
+            "2026-04-15",
+            "2026-04-15",
+            loader_factory=_MisreportingLoader,
+            source_timeframe="5m",
+            decision_timeframe="60m",
+        )

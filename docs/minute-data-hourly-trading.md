@@ -59,6 +59,19 @@ Phase 4 保持唯一、固定的成交规则 `next_source_bar_open`，不增加�
 保持原有显示，不伪造分钟级来源。独立策略页面的旧 “Alpaca hourly bars”
 文案同步更新。
 
+## Phase 6：运行时认证与数据来源
+
+Phase 6 在实际数据完成加载后认证频率契约。若 provider 的配置或 fetch
+证据报告了不同于请求值的源周期，回测立即失败并返回明确的 frequency
+contract 错误，不会把小时数据标成分钟数据继续执行。通过认证的分钟回测在
+`frequency_contract.verification_status` 中记录 `verified`；固定成交规则仍为
+`next_source_bar_open`，不存在用户可配置入口。
+
+Alpaca frame 上的来源标记也随运行持久化并经 API 展示：实际 feed（SIP 或
+IEX）、是否由 SIP 降级到 IEX，以及请求结束时间是否因实时数据权限被截断。
+网页在回测高级详情中显示这些来源信息，使频率正确但 tape 不同的运行也不会
+被误认为完全等价。
+
 ## 代码契约
 
 `dashboard/backend/infrastructure/market_data/frequency.py` 提供：

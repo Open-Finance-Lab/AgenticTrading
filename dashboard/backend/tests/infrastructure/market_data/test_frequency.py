@@ -7,8 +7,10 @@ import pytest
 from dashboard.backend.infrastructure.market_data.frequency import (
     FrequencyConfigError,
     TradingFrequency,
+    build_verified_intraday_contract,
     normalize_bar_timeframe,
     normalize_decision_frequency,
+    verify_source_timeframe,
 )
 from dashboard.backend.infrastructure.market_data.profiles import (
     ALPACA,
@@ -59,6 +61,37 @@ def test_frequency_contract_rejects_mismatched_decision_cadence():
             decision_timeframe="5m",
             decision_frequency="1h",
         )
+
+
+def test_runtime_contract_attests_fixed_intraday_execution_policy():
+    assert build_verified_intraday_contract(
+        source_timeframe="5m",
+        decision_timeframe="60m",
+        decision_frequency="1h",
+    ) == {
+        "source_timeframe": "5m",
+        "decision_timeframe": "60m",
+        "decision_frequency": "1h",
+        "execution_timeframe": "5m",
+        "valuation_frequency": "5m",
+        "aggregation": "session_anchored_completed_bars",
+        "fill_policy": "next_source_bar_open",
+        "verification_status": "verified",
+    }
+
+
+def test_runtime_contract_rejects_non_intraday_source():
+    with pytest.raises(FrequencyConfigError, match="finer"):
+        build_verified_intraday_contract(
+            source_timeframe="60m",
+            decision_timeframe="60m",
+            decision_frequency="1h",
+        )
+
+
+def test_source_timeframe_verification_rejects_provider_drift():
+    with pytest.raises(FrequencyConfigError, match="requested 5m.*reported 60m"):
+        verify_source_timeframe("5m", "60m", evidence="provider")
 
 
 def test_alpaca_profile_records_minute_source_and_hourly_decisions():
