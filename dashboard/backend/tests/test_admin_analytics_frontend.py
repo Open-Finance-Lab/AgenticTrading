@@ -109,7 +109,7 @@ def test_admin_analytics_surface_and_module_exist():
     assert 'id="adminPanelAnalytics"' in APP_HTML
     assert 'id="adminAnalyticsOverview"' in APP_HTML
     assert 'id="adminAnalyticsProfile"' in APP_HTML
-    assert 'js/admin-analytics.js?v=5' in APP_HTML
+    assert 'js/admin-analytics.js?v=6' in APP_HTML
     assert ANALYTICS_JS_PATH.exists()
     assert ".admin-analytics-overview" in STYLES
     assert ".admin-analytics-profile" in STYLES
@@ -225,10 +225,10 @@ def test_app_lifecycle_and_cache_versions_are_wired():
     assert "window.AdminAnalytics.refresh()" in APP_JS
     assert "window.AdminAnalyticsValue.syncAuth(user)" in APP_JS
     assert "window.AdminAnalyticsValue.onEnter()" in APP_JS
-    assert 'styles.css?v=135' in APP_HTML
+    assert 'styles.css?v=136' in APP_HTML
     assert 'app.js?v=128' in APP_HTML
-    assert 'js/admin-analytics.js?v=5' in APP_HTML
-    assert 'js/admin-analytics-value.js?v=3' in APP_HTML
+    assert 'js/admin-analytics.js?v=6' in APP_HTML
+    assert 'js/admin-analytics-value.js?v=4' in APP_HTML
     assert 'js/admin-tabs.js?v=4' in APP_HTML
 
 

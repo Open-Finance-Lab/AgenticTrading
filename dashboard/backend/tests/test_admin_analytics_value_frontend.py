@@ -190,6 +190,18 @@ def test_charts_disclosures_and_controls_have_semantic_state():
         assert "autocomplete=" in fragment
 
 
+def test_movement_ranges_and_profile_navigation_are_discoverable():
+    source = value_source()
+    for movement_range in ("5d", "1w", "1m", "1y"):
+        assert f'data-movement-range="{movement_range}"' in APP_HTML
+    assert "analyticsMovementRange" in source
+    assert "movement_granularity" in source
+    assert "admin-priority-profile-link" in source
+    assert "admin-help-btn" in APP_HTML
+    assert 'aria-label="How segments work"' in APP_HTML
+    assert 'id="adminAnalyticsProfileBreadcrumbParent"' in APP_HTML
+
+
 def test_value_formatting_uses_intl_and_dialogs_bound_scroll():
     source = value_source()
     assert "Intl.NumberFormat" in source

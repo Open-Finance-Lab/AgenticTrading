@@ -66,7 +66,7 @@
       status: 'all',
       sort: 'recent_failures',
     },
-    profile: { userId: null, detail: null, section: 'overview', sections: {} },
+    profile: { userId: null, detail: null, section: 'overview', sections: {}, parentUrl: null, parentScrollY: 0 },
     trendChart: null,
   };
 
@@ -173,6 +173,12 @@
     else url.searchParams.set(key, String(value));
   }
 
+  function analyticsParentUrl() {
+    const url = new URL(window.location.href);
+    ['analyticsUser', 'analyticsProfile', 'analyticsSection'].forEach((key) => url.searchParams.delete(key));
+    return `${url.pathname}${url.search}${url.hash}`;
+  }
+
   function replaceAnalyticsUrl({ userId = state.profile.userId, section = state.profile.section } = {}) {
     const filters = activeFilters();
     if (!filters) return;
@@ -191,6 +197,27 @@
     if (userId) url.searchParams.set('analyticsSection', section || 'overview');
     else url.searchParams.delete('analyticsSection');
     window.history.replaceState(window.history.state, '', url);
+  }
+
+  function pushProfileUrl() {
+    const filters = activeFilters();
+    if (!filters) return;
+    const url = new URL(window.location.href);
+    url.searchParams.set('adminTab', 'analytics');
+    url.searchParams.set('analyticsStart', filters.start);
+    url.searchParams.set('analyticsEnd', filters.end);
+    url.searchParams.set('analyticsBilling', filters.billingMode);
+    setOptionalParam(url, 'analyticsProvider', filters.provider);
+    setOptionalParam(url, 'analyticsModel', filters.model);
+    if (filters.includeInternal) url.searchParams.set('analyticsInternal', 'true');
+    else url.searchParams.delete('analyticsInternal');
+    setOptionalParam(url, 'analyticsUser', state.profile.userId);
+    setOptionalParam(url, 'analyticsProfile', state.profile.userId);
+    url.searchParams.set('analyticsSection', state.profile.section || 'overview');
+    window.history.pushState({ ...(window.history.state || {}), analyticsProfileEntry: true }, '', url);
+    const parent = state.profile.parentUrl || analyticsParentUrl();
+    const breadcrumb = element('adminAnalyticsProfileBreadcrumbParent');
+    if (breadcrumb) breadcrumb.href = parent;
   }
 
   async function handleAccessLost(error) {
@@ -764,6 +791,7 @@
   function renderProfile(profile) {
     state.profile.detail = profile;
     setProfileText('adminAnalyticsProfileTitle', profile.display_name || profile.email || `User #${profile.user_id}`);
+    setProfileText('adminAnalyticsProfileBreadcrumbCurrent', profile.display_name || profile.email || `User #${profile.user_id}`);
     setProfileText('adminAnalyticsProfileEmail', profile.email);
     setProfileText('adminAnalyticsProfileUserId', profile.user_id);
     setProfileTime('adminAnalyticsProfileJoined', profile.joined_at);
@@ -819,8 +847,9 @@
     return /^\d+$/.test(String(value || '')) && Number(value) > 0;
   }
 
-  function openProfile(userId, { section = 'overview', focus = true } = {}) {
+  function openProfile(userId, { section = 'overview', focus = true, history = true } = {}) {
     if (!validUserId(userId)) return;
+    const parentUrl = `${window.location.pathname}${window.location.search}${window.location.hash}`;
     state.userRequestSeq += 1;
     state.profile.userId = String(userId);
     state.profile.detail = null;
@@ -831,21 +860,36 @@
     element('adminAnalyticsProfileError').hidden = true;
     setProfileText('adminAnalyticsProfileTitle', 'Loading user analytics');
     setProfileText('adminAnalyticsProfileEmail', '—');
-    selectProfileSection(state.profile.section, { focus: false, load: false });
-    replaceAnalyticsUrl();
+    setProfileText('adminAnalyticsProfileBreadcrumbCurrent', 'User analytics profile');
+    selectProfileSection(state.profile.section, { focus: false, load: false, updateUrl: false });
+    if (history) {
+      state.profile.parentScrollY = window.scrollY;
+      state.profile.parentUrl = parentUrl;
+      pushProfileUrl();
+    } else {
+      state.profile.parentUrl = analyticsParentUrl();
+      replaceAnalyticsUrl();
+    }
     if (focus) element('adminAnalyticsProfileTitle')?.focus();
     loadProfile(state.profile.userId);
   }
 
-  function closeProfile({ focus = true } = {}) {
+  function closeProfile({ focus = true, history = true } = {}) {
+    if (history && window.history.state?.analyticsProfileEntry && window.history.length > 1) {
+      window.history.back();
+      return;
+    }
+    const parentScrollY = state.profile.parentScrollY;
     state.userRequestSeq += 1;
     state.profile.userId = null;
     state.profile.detail = null;
     state.profile.section = 'overview';
+    state.profile.parentUrl = null;
     resetProfileSections();
     element('adminAnalyticsProfile').hidden = true;
     element('adminAnalyticsOverview').hidden = false;
     replaceAnalyticsUrl({ userId: null, section: 'overview' });
+    if (Number.isFinite(parentScrollY)) window.scrollTo({ top: parentScrollY, behavior: 'auto' });
     if (focus) element('adminPriorityUsersTitle')?.focus();
   }
 
@@ -853,7 +897,7 @@
     return document.querySelector(`[data-analytics-section-panel="${section}"]`);
   }
 
-  function selectProfileSection(value, { focus = false, load = true } = {}) {
+  function selectProfileSection(value, { focus = false, load = true, updateUrl = true } = {}) {
     const section = PROFILE_SECTIONS.includes(value) ? value : 'overview';
     state.profile.section = section;
     document.querySelectorAll('[data-analytics-section-tab]').forEach((button) => {
@@ -866,7 +910,7 @@
     document.querySelectorAll('[data-analytics-section-panel]').forEach((panel) => {
       panel.hidden = panel.dataset.analyticsSectionPanel !== section;
     });
-    replaceAnalyticsUrl();
+    if (updateUrl) replaceAnalyticsUrl();
     if (load && section !== 'overview' && !state.profile.sections[section]?.loaded) {
       loadProfileSection(section, { append: false });
     }
@@ -1033,8 +1077,8 @@
     const params = new URLSearchParams(window.location.search);
     const userId = params.get('analyticsUser');
     const section = params.get('analyticsSection') || 'overview';
-    if (validUserId(userId)) openProfile(userId, { section, focus: false });
-    else if (state.profile.userId) closeProfile({ focus: false });
+    if (validUserId(userId)) openProfile(userId, { section, focus: false, history: false });
+    else if (state.profile.userId) closeProfile({ focus: false, history: false });
   }
 
   function bindEvents() {
@@ -1072,6 +1116,12 @@
       if (button) openProfile(button.dataset.analyticsUserId);
     });
     element('adminAnalyticsProfileBack')?.addEventListener('click', () => closeProfile());
+    element('adminAnalyticsProfileBreadcrumbParent')?.addEventListener('click', (event) => {
+      if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+      if (!state.profile.userId) return;
+      event.preventDefault();
+      closeProfile();
+    });
     document.querySelectorAll('[data-analytics-section-tab]').forEach((button) => {
       button.addEventListener('click', () => selectProfileSection(button.dataset.analyticsSectionTab));
       button.addEventListener('keydown', (event) => {
@@ -1100,7 +1150,7 @@
       event.preventDefault();
       const user = state.profile.detail;
       if (!user) return;
-      closeProfile({ focus: false });
+      closeProfile({ focus: false, history: false });
       window.AdminTabs?.openAccountManagement({ userId: user.user_id, email: user.email });
     });
     document.addEventListener('admin:tabchange', (event) => {

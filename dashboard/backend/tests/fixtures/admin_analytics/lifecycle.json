@@ -40,6 +40,34 @@
       "data_quality": "partial"
     }
   ],
+  "movement_range": "5d",
+  "movement_granularity": "day",
+  "movement_segments": [
+    {
+      "period_start": "2026-08-30",
+      "segment_counts": {
+        "new": 3,
+        "onboarding": 6,
+        "growing": 7,
+        "core": 8,
+        "at_risk": 5,
+        "dormant": 4
+      },
+      "data_quality": "complete"
+    },
+    {
+      "period_start": "2026-08-31",
+      "segment_counts": {
+        "new": 3,
+        "onboarding": 6,
+        "growing": 7,
+        "core": 8,
+        "at_risk": 5,
+        "dormant": 4
+      },
+      "data_quality": "partial"
+    }
+  ],
   "transitions": [
     {
       "from_segment": "growing",

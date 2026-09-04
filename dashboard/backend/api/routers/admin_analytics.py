@@ -54,6 +54,7 @@ _ACTIVITY_SECTIONS = {"timeline", "runs", "usage", "sessions"}
 _LIFECYCLE_SEGMENTS = {"new", "onboarding", "growing", "core", "at_risk", "dormant"}
 _OPERATIONAL_STATES = {"blocked", "needs_attention", "healthy"}
 _COMMERCIAL_TIERS = {"unpaid", "starter", "invested", "high_value"}
+_LIFECYCLE_MOVEMENT_RANGES = {"5d", "1w", "1m", "1y"}
 _MAX_VALUE_RANGE_DAYS = 180
 
 
@@ -406,12 +407,19 @@ def get_lifecycle(
     request: Request,
     service: ValueAnalyticsQueryService = Depends(get_value_analytics_query_service),
 ):
-    start, end, include_internal, _values = _value_range(request)
+    start, end, include_internal, values = _value_range(
+        request,
+        additional={"movement_range"},
+    )
+    movement_range = values.get("movement_range", "5d")
+    if movement_range not in _LIFECYCLE_MOVEMENT_RANGES:
+        _invalid_query()
     try:
         return service.get_lifecycle(
             start=start,
             end=end,
             include_internal=include_internal,
+            movement_range=movement_range,
         )
     except Exception as exc:
         _raise_service_error(exc)

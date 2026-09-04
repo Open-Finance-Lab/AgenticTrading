@@ -54,6 +54,12 @@ _COMMERCIAL_TIERS: tuple[CommercialTier, ...] = (
     "high_value",
 )
 _TIER_RANK = {tier: rank for rank, tier in enumerate(_COMMERCIAL_TIERS)}
+_MOVEMENT_WINDOWS: dict[str, tuple[int, Literal["day", "week", "month"]]] = {
+    "5d": (5, "day"),
+    "1w": (7, "day"),
+    "1m": (31, "week"),
+    "1y": (365, "month"),
+}
 _PRIORITY_RANK = {
     "blocked": 0,
     "needs_attention": 1,
@@ -75,6 +81,14 @@ def _day_start(value: date) -> datetime:
 
 def _week_start(value: date) -> date:
     return value - timedelta(days=value.weekday())
+
+
+def _period_start(value: date, granularity: Literal["day", "week", "month"]) -> date:
+    if granularity == "day":
+        return value
+    if granularity == "week":
+        return _week_start(value)
+    return value.replace(day=1)
 
 
 def _parse_timestamp(value: object) -> datetime:
@@ -123,6 +137,16 @@ class WeeklyLifecycleCount(BaseModel):
     data_quality: Literal["complete", "partial"]
 
 
+class LifecycleMovementPoint(BaseModel):
+    """A display-safe lifecycle snapshot at the selected chart granularity."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    period_start: date
+    segment_counts: dict[LifecycleSegment, int]
+    data_quality: Literal["complete", "partial"]
+
+
 class LifecycleTransition(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -141,6 +165,9 @@ class LifecycleAnalyticsResponse(BaseModel):
     headline: LifecycleHeadline
     segment_counts: dict[LifecycleSegment, int]
     weekly_segments: Sequence[WeeklyLifecycleCount]
+    movement_range: Literal["5d", "1w", "1m", "1y"] = "5d"
+    movement_granularity: Literal["day", "week", "month"] = "day"
+    movement_segments: Sequence[LifecycleMovementPoint] = Field(default_factory=tuple)
     transitions: Sequence[LifecycleTransition]
     availability: dict[str, SectionAvailability]
 
@@ -452,19 +479,31 @@ class ValueAnalyticsQueryService:
         start: date,
         end: date,
         use_anonymous_rollups: bool,
+        movement_start: date | None = None,
+        movement_range: str = "5d",
     ) -> tuple[
-        list[WeeklyLifecycleCount], list[LifecycleTransition], SectionAvailability
+        list[WeeklyLifecycleCount],
+        list[LifecycleMovementPoint],
+        list[LifecycleTransition],
+        SectionAvailability,
     ]:
+        if movement_range not in _MOVEMENT_WINDOWS:
+            raise ValueError("unsupported lifecycle movement range")
+        window_days, granularity = _MOVEMENT_WINDOWS[movement_range]
+        selected_movement_start = movement_start or end - timedelta(days=window_days)
+        if selected_movement_start >= end:
+            raise ValueError("lifecycle movement range is empty")
+        history_start = min(start, selected_movement_start)
         rows = self._daily(
             user_ids,
-            start=start - timedelta(days=1),
+            start=history_start - timedelta(days=1),
             end=end,
         )
         by_date: dict[date, list[UserLifecycleDailySnapshot]] = defaultdict(list)
         for row in rows:
             by_date[row.snapshot_date].append(row)
         rollups = (
-            self.query_store.rollups.list_rollups(start=start, end=end)
+            self.query_store.rollups.list_rollups(start=history_start, end=end)
             if use_anonymous_rollups
             else []
         )
@@ -481,7 +520,7 @@ class ValueAnalyticsQueryService:
 
         daily_counts: dict[date, dict[LifecycleSegment, int]] = {}
         daily_quality: dict[date, str] = {}
-        direct_dates = {day for day in by_date if start <= day < end}
+        direct_dates = {day for day in by_date if history_start <= day < end}
         for day in direct_dates:
             counts = Counter(row.lifecycle_segment for row in by_date[day])
             daily_counts[day] = {
@@ -503,12 +542,29 @@ class ValueAnalyticsQueryService:
         weekly: list[WeeklyLifecycleCount] = []
         by_week: dict[date, list[date]] = defaultdict(list)
         for day in daily_counts:
+            if not start <= day < end:
+                continue
             by_week[_week_start(day)].append(day)
         for week, dates in sorted(by_week.items()):
             latest = max(dates)
             weekly.append(
                 WeeklyLifecycleCount(
                     week_start=week,
+                    segment_counts=daily_counts[latest],
+                    data_quality=daily_quality[latest],
+                )
+            )
+
+        movement: list[LifecycleMovementPoint] = []
+        by_period: dict[date, list[date]] = defaultdict(list)
+        for day in daily_counts:
+            if selected_movement_start <= day < end:
+                by_period[_period_start(day, granularity)].append(day)
+        for period, dates in sorted(by_period.items()):
+            latest = max(dates)
+            movement.append(
+                LifecycleMovementPoint(
+                    period_start=period,
                     segment_counts=daily_counts[latest],
                     data_quality=daily_quality[latest],
                 )
@@ -564,14 +620,18 @@ class ValueAnalyticsQueryService:
                 status="building",
             )
         else:
-            partial = any(value == "partial" for value in daily_quality.values())
+            partial = (
+                any(value == "partial" for value in daily_quality.values())
+                or coverage[0] > history_start
+                or coverage[-1] < end - timedelta(days=1)
+            )
             availability = SectionAvailability(
                 available=True,
                 status="partial" if partial else "ready",
                 coverage_start=coverage[0],
                 coverage_end=coverage[-1],
             )
-        return weekly, transitions, availability
+        return weekly, movement, transitions, availability
 
     def get_lifecycle(
         self,
@@ -579,9 +639,14 @@ class ValueAnalyticsQueryService:
         start: date,
         end: date,
         include_internal: bool = False,
+        movement_range: str = "5d",
         now: datetime | None = None,
     ) -> LifecycleAnalyticsResponse:
         start, end = _validate_dates(start, end)
+        if movement_range not in _MOVEMENT_WINDOWS:
+            raise ValueError("unsupported lifecycle movement range")
+        window_days, _granularity = _MOVEMENT_WINDOWS[movement_range]
+        movement_start = end - timedelta(days=window_days)
         current_time = _utc(now or datetime.now(UTC), "now")
         users = self._eligible_users(include_internal=include_internal)
         current = self._current(users)
@@ -611,14 +676,16 @@ class ValueAnalyticsQueryService:
                 status="unavailable",
             )
         try:
-            weekly, transitions, history_availability = self._history(
+            weekly, movement, transitions, history_availability = self._history(
                 self._ids(users),
                 start=start,
                 end=end,
                 use_anonymous_rollups=not include_internal,
+                movement_start=movement_start,
+                movement_range=movement_range,
             )
         except Exception:
-            weekly, transitions = [], []
+            weekly, movement, transitions = [], [], []
             history_availability = SectionAvailability(
                 available=False,
                 status="unavailable",
@@ -636,6 +703,9 @@ class ValueAnalyticsQueryService:
             ),
             segment_counts=segment_counts,
             weekly_segments=weekly,
+            movement_range=movement_range,
+            movement_granularity=_MOVEMENT_WINDOWS[movement_range][1],
+            movement_segments=movement,
             transitions=transitions,
             availability=availability,
         )
@@ -1046,7 +1116,7 @@ class ValueAnalyticsQueryService:
             start=_day_start(start),
             end=_day_start(end),
         )
-        _weekly, transitions, _availability = self._history(
+        _weekly, _movement, transitions, _availability = self._history(
             [subject_id],
             start=start,
             end=end,
@@ -1069,6 +1139,7 @@ __all__ = [
     "CommercialPeriodSummary",
     "LifecycleAnalyticsResponse",
     "LifecycleHeadline",
+    "LifecycleMovementPoint",
     "LifecycleTransition",
     "OperationalAnalyticsResponse",
     "PaginatedValueUsers",

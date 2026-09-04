@@ -303,6 +303,33 @@ def test_date_filter_changes_history_not_current_lifecycle_identity():
     assert short.weekly_segments != long.weekly_segments
 
 
+@pytest.mark.parametrize(
+    ("movement_range", "granularity", "expected_max_points"),
+    [("5d", "day", 5), ("1w", "day", 7), ("1m", "week", 5), ("1y", "month", 12)],
+)
+def test_lifecycle_movement_returns_selected_range_and_granularity(
+    movement_range, granularity, expected_max_points
+):
+    snapshots = {1: _snapshot(1)}
+    daily = [
+        _daily(1, date(2025, 10, 1) + timedelta(days=offset), "core")
+        for offset in range(365)
+    ]
+    service, _value_store, _legacy = _service(snapshots=snapshots, daily=daily)
+
+    response = service.get_lifecycle(
+        start=date(2026, 4, 5),
+        end=date(2026, 10, 1),
+        movement_range=movement_range,
+        now=datetime(2026, 10, 1, 12, tzinfo=UTC),
+    )
+
+    assert response.movement_range == movement_range
+    assert response.movement_granularity == granularity
+    assert 0 < len(response.movement_segments) <= expected_max_points
+    assert all(point.period_start for point in response.movement_segments)
+
+
 def test_retention_uses_nulls_for_immature_cells_and_weighted_mature_summary():
     first_week = date(2026, 7, 6)
     second_week = date(2026, 7, 13)
