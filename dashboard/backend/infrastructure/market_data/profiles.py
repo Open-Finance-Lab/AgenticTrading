@@ -6,6 +6,11 @@ from dataclasses import dataclass
 import math
 
 from dashboard.backend.infrastructure.llm.validator import DJIA_30
+from dashboard.backend.infrastructure.market_data.frequency import (
+    TradingFrequency,
+    normalize_bar_timeframe,
+    normalize_decision_frequency,
+)
 
 
 ALPACA = "alpaca"
@@ -137,6 +142,44 @@ class MarketProfile:
     t_plus_one_enabled: bool
     lot_size: int = 1
     transaction_cost_profile: TransactionCostProfile | None = None
+    # ``timeframe`` remains the backward-compatible decision-bar field.  The
+    # fields below make the source, decision, execution and valuation clocks
+    # explicit for minute-data work without breaking existing callers.
+    source_timeframe: str = "60m"
+    decision_frequency: str = "1h"
+    execution_timeframe: str = "60m"
+    valuation_frequency: str = "60m"
+
+    def __post_init__(self) -> None:
+        decision_timeframe = normalize_bar_timeframe(self.timeframe)
+        contract = TradingFrequency(
+            source_timeframe=self.source_timeframe,
+            decision_timeframe=decision_timeframe,
+            decision_frequency=self.decision_frequency,
+            execution_timeframe=self.execution_timeframe,
+            valuation_frequency=self.valuation_frequency,
+        )
+        object.__setattr__(self, "timeframe", decision_timeframe)
+        object.__setattr__(self, "source_timeframe", contract.source_timeframe)
+        object.__setattr__(self, "decision_frequency", normalize_decision_frequency(contract.decision_frequency))
+        object.__setattr__(self, "execution_timeframe", contract.execution_timeframe)
+        object.__setattr__(self, "valuation_frequency", contract.valuation_frequency)
+
+    @property
+    def decision_timeframe(self) -> str:
+        """Canonical name for the legacy ``timeframe`` decision-bar field."""
+        return self.timeframe
+
+    @property
+    def frequency_contract(self) -> TradingFrequency:
+        """Return the validated frequency contract for this profile."""
+        return TradingFrequency(
+            source_timeframe=self.source_timeframe,
+            decision_timeframe=self.decision_timeframe,
+            decision_frequency=self.decision_frequency,
+            execution_timeframe=self.execution_timeframe,
+            valuation_frequency=self.valuation_frequency,
+        )
 
     @property
     def decision_source(self) -> str:
@@ -169,6 +212,9 @@ _MARKET_PROFILES = {
         native_currency="USD",
         reporting_currency="USD",
         t_plus_one_enabled=False,
+        source_timeframe="5m",
+        execution_timeframe="5m",
+        valuation_frequency="5m",
     ),
     (VNPY_SIMULATION, "djia_30"): MarketProfile(
         data_source=VNPY_SIMULATION,

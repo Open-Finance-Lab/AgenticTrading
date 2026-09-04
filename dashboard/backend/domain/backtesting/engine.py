@@ -14,9 +14,12 @@ Baseline methods and result assembly intentionally remain here for now; they can
 be extracted in a later phase.
 """
 
+import inspect
 import json
 import uuid
+from bisect import bisect_left
 from datetime import date, datetime, time
+from math import ceil
 from typing import Any, Dict, List, Optional, Tuple
 
 from dashboard.backend.database import db
@@ -32,6 +35,10 @@ from dashboard.backend.domain.backtesting.currency import (
     CurrencyContextError,
 )
 from dashboard.backend.domain.backtesting.features import TechnicalIndicators
+from dashboard.backend.domain.backtesting.bar_aggregation import (
+    aggregate_bars_by_symbol,
+    summarize_aggregation_quality,
+)
 from dashboard.backend.domain.backtesting.metrics import (
     calculate_sharpe,
     calculate_max_drawdown,
@@ -49,7 +56,10 @@ from dashboard.backend.domain.agents.runtime import (
     normalize_runtime_type,
 )
 from dashboard.backend.infrastructure.ai_hedge_fund.adapter import AiHedgeFundRuntime
-from dashboard.backend.infrastructure.market_data.alpaca_bars import MarketDataUnavailableError
+from dashboard.backend.infrastructure.market_data.alpaca_bars import (
+    MarketDataUnavailableError,
+    feed_provenance,
+)
 from dashboard.backend.infrastructure.market_data.ifind_client import IFindClientError
 from dashboard.backend.infrastructure.market_data.ifind_fx import (
     IFindFxError,
@@ -59,6 +69,13 @@ from dashboard.backend.domain.backtesting.market_rules import MarketRuleDataErro
 from dashboard.backend.infrastructure.market_data.provider import (
     ALPACA,
     create_market_data_provider,
+)
+from dashboard.backend.infrastructure.market_data.frequency import (
+    FrequencyConfigError,
+    build_verified_intraday_contract,
+    normalize_bar_timeframe,
+    timeframe_minutes,
+    verify_source_timeframe,
 )
 from dashboard.backend.infrastructure.market_data.profiles import (
     IFIND_ASHARE,
@@ -170,6 +187,7 @@ class HourlyBacktester:
         stock_pool: Optional[str] = None,
         pool_mode: Optional[str] = None,
         universe_selection: Optional[Dict] = None,
+        source_timeframe: Optional[str] = None,
     ):
         # Validate and swap dates if they're in the wrong order
         from datetime import datetime as dt_parser
@@ -227,6 +245,26 @@ class HourlyBacktester:
         # run metadata so a partially-degraded run is legible after the fact.
         self.runtime_step_failures: List[str] = []
         self.profile = get_market_profile(data_source, universe)
+        self.requested_source_timeframe = normalize_bar_timeframe(
+            source_timeframe
+            if source_timeframe is not None
+            else getattr(self.profile, "source_timeframe", self.profile.timeframe)
+        )
+        self.source_timeframe = self.requested_source_timeframe
+        self.decision_timeframe = getattr(
+            self.profile, "decision_timeframe", self.profile.timeframe
+        )
+        self.execution_timeframe = getattr(
+            self.profile, "execution_timeframe", self.profile.timeframe
+        )
+        self.valuation_frequency = getattr(
+            self.profile, "valuation_frequency", self.profile.timeframe
+        )
+        self.intraday_mode = False
+        self.source_data = {}
+        self.data_quality = {}
+        self.frequency_contract = None
+        self.market_data_provenance = {}
         self.currency_context: CurrencyContext | None = None
         self.native_initial_capital = self.initial_capital
         if self.profile.native_currency == self.profile.reporting_currency:
@@ -322,10 +360,27 @@ class HourlyBacktester:
             else:
                 print(f"✅ LLM initialized (model={self.model})")
 
-        self.data_loader = create_market_data_provider(
-            data_source,
-            self.profile.universe,
-        )
+        self.data_loader = self._create_market_data_provider()
+
+    def _create_market_data_provider(self):
+        """Create the selected provider without breaking legacy test doubles."""
+        factory = create_market_data_provider
+        try:
+            parameters = inspect.signature(factory).parameters.values()
+            accepts_source_timeframe = any(
+                parameter.name == "source_timeframe"
+                or parameter.kind == inspect.Parameter.VAR_KEYWORD
+                for parameter in parameters
+            )
+        except (TypeError, ValueError):
+            accepts_source_timeframe = False
+        if accepts_source_timeframe:
+            return factory(
+                self.data_source,
+                self.profile.universe,
+                source_timeframe=self.requested_source_timeframe,
+            )
+        return factory(self.data_source, self.profile.universe)
     
     def _serialize_trades(self, trades: List[Dict]) -> List[Dict]:
         serialized = []
@@ -561,7 +616,7 @@ class HourlyBacktester:
             print(f"   ⚠️  Could not write live progress: {exc}")
     
     def load_data(self):
-        """Fetch hourly data from the selected normalized provider."""
+        """Fetch source bars and build the strategy's decision-bar dataset."""
         # Keep the error path usable for legacy callers that construct an
         # instance with ``__new__`` (or inject a loader) before initialization.
         symbols = getattr(self, "symbols", ())
@@ -569,10 +624,10 @@ class HourlyBacktester:
             f"   Universe: {len(symbols)} symbols ({', '.join(symbols[:8])}"
             f"{'…' if len(symbols) > 8 else ''})"
         )
-        self.all_data = self.data_loader.fetch_bars(
+        self.source_data = self.data_loader.fetch_bars(
             symbols, self.start_date, self.end_date
         )
-        if not self.all_data:
+        if not self.source_data:
             # Raise, don't sys.exit(1): this runs inside server threads
             # (external runs, algo service) where SystemExit evades
             # `except Exception` and strands the run (the B0 class).
@@ -581,6 +636,87 @@ class HourlyBacktester:
                 f"No {self.data_source} market data available for "
                 f"{self.start_date}..{self.end_date}"
             )
+
+        configured_source_timeframe = getattr(
+            self.data_loader, "source_timeframe", None
+        )
+        if configured_source_timeframe is None:
+            # A provider replacement that predates the frequency contract is
+            # assumed to return its historical profile resolution. This keeps
+            # injected hourly loaders from being accidentally aggregated as if
+            # they had honoured the new optional factory argument.
+            actual_source_timeframe = normalize_bar_timeframe(
+                self.profile.timeframe
+            )
+        else:
+            try:
+                actual_source_timeframe = verify_source_timeframe(
+                    self.requested_source_timeframe,
+                    configured_source_timeframe,
+                    evidence="configured",
+                )
+            except FrequencyConfigError as exc:
+                raise MarketDataUnavailableError(
+                    f"Market data frequency contract failed: {exc}"
+                ) from exc
+        fetch_evidence = getattr(self.data_loader, "last_fetch", None)
+        if isinstance(fetch_evidence, dict) and fetch_evidence.get(
+            "source_timeframe"
+        ):
+            try:
+                actual_source_timeframe = verify_source_timeframe(
+                    self.requested_source_timeframe,
+                    fetch_evidence["source_timeframe"],
+                    evidence="fetch",
+                )
+            except FrequencyConfigError as exc:
+                raise MarketDataUnavailableError(
+                    f"Market data frequency contract failed: {exc}"
+                ) from exc
+        self.source_timeframe = actual_source_timeframe
+        self.market_data_provenance = feed_provenance(self.source_data) or {}
+        self.intraday_mode = timeframe_minutes(actual_source_timeframe) < timeframe_minutes(
+            self.decision_timeframe
+        )
+        if self.intraday_mode:
+            # This Phase 2 engine uses the fetched source bar for both fill and
+            # valuation. If a caller explicitly selects 1m instead of the
+            # profile's 5m target, metadata must describe the effective clocks.
+            self.execution_timeframe = actual_source_timeframe
+            self.valuation_frequency = actual_source_timeframe
+            self.frequency_contract = build_verified_intraday_contract(
+                source_timeframe=actual_source_timeframe,
+                decision_timeframe=self.decision_timeframe,
+                decision_frequency=self.profile.decision_frequency,
+            )
+            print(
+                f"   Aggregating {actual_source_timeframe} source bars into "
+                f"{self.decision_timeframe} decision bars..."
+            )
+            aggregated_data = aggregate_bars_by_symbol(
+                self.source_data,
+                source_timeframe=actual_source_timeframe,
+                decision_timeframe=self.decision_timeframe,
+                market=self.profile.market,
+                timezone=self.profile.timezone,
+            )
+            self.data_quality = summarize_aggregation_quality(aggregated_data)
+            self.all_data = {
+                symbol: (
+                    frame.loc[frame["is_complete"]].copy()
+                    if "is_complete" in frame.columns
+                    else frame
+                )
+                for symbol, frame in aggregated_data.items()
+                if not frame.empty
+            }
+            if not self.all_data:
+                raise MarketDataUnavailableError(
+                    "Source bars were fetched, but no completed decision bars "
+                    "could be built"
+                )
+        else:
+            self.all_data = self.source_data
         if self.data_source == IFIND_ASHARE:
             self._ifind_common_start = self._validate_ifind_loaded_data()
             self._initialize_ifind_market_rules()
@@ -737,7 +873,21 @@ class HourlyBacktester:
             "native_currency": profile.native_currency,
             "reporting_currency": profile.reporting_currency,
             "lot_size": profile.lot_size,
+            **dict(getattr(self, "market_data_provenance", {}) or {}),
         }
+        if getattr(self, "intraday_mode", False):
+            frequency_contract = getattr(self, "frequency_contract", None)
+            metadata["frequency_contract"] = dict(
+                frequency_contract
+                or build_verified_intraday_contract(
+                    source_timeframe=self.source_timeframe,
+                    decision_timeframe=self.decision_timeframe,
+                    decision_frequency=profile.decision_frequency,
+                )
+            )
+            metadata["market_data_quality"] = dict(
+                getattr(self, "data_quality", {})
+            )
         if getattr(self, "universe_selection", None) is not None:
             metadata["universe_selection"] = dict(self.universe_selection)
         if profile.transaction_cost_profile is not None:
@@ -961,7 +1111,11 @@ class HourlyBacktester:
         market_tz = pytz.timezone(profile.timezone)
         kept = []
         for timestamp in timestamps:
-            local = timestamp.astimezone(market_tz)
+            local = (
+                market_tz.localize(timestamp)
+                if timestamp.tzinfo is None
+                else timestamp.astimezone(market_tz)
+            )
             local_time = local.time()
             if profile.market == "CN":
                 is_market_hours = (
@@ -977,6 +1131,18 @@ class HourlyBacktester:
             if is_market_hours:
                 kept.append(timestamp)
         return kept
+
+    def _market_day_key(self, timestamp) -> str:
+        """Return a trading-day key in the market's local timezone."""
+        import pytz
+
+        market_tz = pytz.timezone(self._effective_profile().timezone)
+        local = (
+            market_tz.localize(timestamp)
+            if timestamp.tzinfo is None
+            else timestamp.astimezone(market_tz)
+        )
+        return local.date().isoformat()
 
     def _run_daily_post_trade(
         self,
@@ -1022,8 +1188,53 @@ class HourlyBacktester:
             self.prompt_adaptations.append(record)
         self.pipeline = recombine_pipeline(patched, post_trade_steps)
 
+    @staticmethod
+    def _timestamps_for_data(data: Dict[str, Any]) -> List[datetime]:
+        timestamps = set()
+        for frame in data.values():
+            timestamps.update(frame.index)
+        return sorted(timestamps)
+
+    @staticmethod
+    def _market_data_at(
+        data: Dict[str, Any], symbols: List[str], timestamp: datetime
+    ) -> Dict[str, Any]:
+        return {
+            symbol: data[symbol].loc[timestamp]
+            for symbol in symbols
+            if symbol in data and timestamp in data[symbol].index
+        }
+
+    @staticmethod
+    def _forward_filled_price_cache(
+        data: Dict[str, Any], timestamps: List[datetime]
+    ) -> Dict[str, Dict[datetime, Any]]:
+        cache: Dict[str, Dict[datetime, Any]] = {}
+        for symbol, frame in data.items():
+            prices: Dict[datetime, Any] = {}
+            last_price = None
+            for timestamp in timestamps:
+                if timestamp in frame.index:
+                    last_price = frame.loc[timestamp, "close"]
+                if last_price is not None:
+                    prices[timestamp] = last_price
+            cache[symbol] = prices
+        return cache
+
+    def _annualization_periods(self) -> float | None:
+        """Return the Sharpe sampling factor for the curve this run emits."""
+        if not getattr(self, "intraday_mode", False):
+            return None
+        minutes = timeframe_minutes(self.source_timeframe)
+        return 252 * 6.5 * (60 / minutes)
+
     def run_agent_backtest(self) -> Tuple[str, List[Dict]]:
-        """Run backtest with agent making hourly decisions."""
+        """Run a backtest with hourly strategy decisions.
+
+        When a finer source dataset is configured, the strategy still receives
+        one completed hourly bar per step while fills and mark-to-market use
+        the finer source timeline.
+        """
         print("🤖 Running Agent backtest (hourly decisions)...\n")
         
         # Track LLM usage for results metadata
@@ -1046,21 +1257,18 @@ class HourlyBacktester:
                 "once per trading day\n"
             )
         
-        # Get all timestamps
-        all_timestamps = set()
-        for df in self.all_data.values():
-            all_timestamps.update(df.index)
-        all_timestamps = sorted(all_timestamps)
+        # Decision timestamps come from the completed decision-bar dataset.
+        all_timestamps = self._timestamps_for_data(self.all_data)
         
         # Filter: only keep hours with real data for 80%+ of symbols
-        min_required = int(len(self.all_data) * 0.8)
+        min_required = max(1, ceil(len(self.all_data) * 0.8))
         filtered = []
         for ts in all_timestamps:
             real_data_count = sum(1 for df in self.all_data.values() if ts in df.index)
             if real_data_count >= min_required:
                 filtered.append(ts)
         
-        all_timestamps = filtered if filtered else all_timestamps
+        all_timestamps = filtered
         
         all_timestamps = self._market_hours_only(all_timestamps)
         prior_market_dates = (
@@ -1080,9 +1288,50 @@ class HourlyBacktester:
                 f"failed step(s) before aborting\n"
             )
 
+        raw_timestamps = all_timestamps
+        execution_plan = {timestamp: timestamp for timestamp in all_timestamps}
+        if self.intraday_mode:
+            raw_timestamps = self._market_hours_only(
+                self._timestamps_for_data(self.source_data)
+            )
+            raw_by_market_day: Dict[str, List[Any]] = {}
+            for source_timestamp in raw_timestamps:
+                raw_by_market_day.setdefault(
+                    self._market_day_key(source_timestamp), []
+                ).append(source_timestamp)
+            execution_plan = {}
+            for timestamp in all_timestamps:
+                same_day_sources = raw_by_market_day.get(
+                    self._market_day_key(timestamp), []
+                )
+                source_index = bisect_left(same_day_sources, timestamp)
+                next_source_timestamp = (
+                    same_day_sources[source_index]
+                    if (
+                        source_index < len(same_day_sources)
+                        and same_day_sources[source_index] == timestamp
+                    )
+                    else None
+                )
+                # The final partial session bucket (e.g. 15:30–16:00 ET) has
+                # no following source bar at 16:00 and cannot be executed.
+                if next_source_timestamp is not None:
+                    execution_plan[timestamp] = next_source_timestamp
+            all_timestamps = [
+                timestamp
+                for timestamp in all_timestamps
+                if timestamp in execution_plan
+            ]
+
         print(
-            f"   Trading {len(all_timestamps)} bars during "
-            f"{self.profile.market} {self.profile.timeframe} sessions...\n"
+            f"   Trading {len(all_timestamps)} hourly decision bars during "
+            f"{self.profile.market} {self.profile.timeframe} sessions"
+            + (
+                f"; executing/valuing on {self.source_timeframe} bars"
+                if self.intraday_mode
+                else ""
+            )
+            + "...\n"
         )
         total_steps = len(all_timestamps)
         # Declare the run length so a strict-LLM run can absorb a small number
@@ -1095,22 +1344,20 @@ class HourlyBacktester:
                 f"{manager.strict_llm_fallback_budget()} unusable response(s)\n"
             )
 
-        # Build forward-filled price cache to handle missing hourly data
+        # Build separate decision and valuation caches. In minute mode the
+        # strategy sees hourly prices while portfolio valuation sees every
+        # source bar.
         print("   Pre-computing forward-filled price cache...")
-        price_cache = {}
-        for symbol, df in self.all_data.items():
-            price_cache[symbol] = {}
-            last_price = None
-            
-            for timestamp in all_timestamps:
-                if timestamp in df.index:
-                    last_price = df.loc[timestamp, "close"]
-                    price_cache[symbol][timestamp] = last_price
-                else:
-                    # Fallback (shouldn't happen with daily data)
-                    if last_price is not None:
-                        price_cache[symbol][timestamp] = last_price
-        
+        price_cache = self._forward_filled_price_cache(
+            self.all_data, all_timestamps
+        )
+        valuation_price_cache = (
+            self._forward_filled_price_cache(self.source_data, raw_timestamps)
+            if self.intraday_mode
+            else price_cache
+        )
+        valuation_cursor = 0
+
         print("   ✅ Cache ready\n")
 
         day_episode: Dict = {
@@ -1131,15 +1378,10 @@ class HourlyBacktester:
                     "latest_step_outputs": [],
                 }
 
-            # Get market data for this hour (real data when available)
-            market_data = {}
-            for symbol in self.symbols:
-                if symbol not in self.all_data:
-                    continue
-                df = self.all_data[symbol]
-                if timestamp not in df.index:
-                    continue
-                market_data[symbol] = df.loc[timestamp]
+            # Decision signals always use the completed hourly bar.
+            market_data = self._market_data_at(
+                self.all_data, self.symbols, timestamp
+            )
             
             # Get portfolio state (uses real data for signals, forward-fill for valuation)
             state = manager.get_portfolio_state(market_data, price_cache, timestamp)
@@ -1217,31 +1459,78 @@ class HourlyBacktester:
                     decision = {"actions": []}
                 runtime_invoked = self.runtime_dispatcher.calls > runtime_calls_before
             
+            # In minute mode, execute at the next source bar's open. The
+            # decision bar closes at ``timestamp``; the source bar opening at
+            # that same instant is the first non-look-ahead fill opportunity.
+            execution_timestamp = execution_plan[timestamp]
+            execution_market_data = market_data
+            execution_fallback_prices = {
+                symbol: values[execution_timestamp]
+                for symbol, values in valuation_price_cache.items()
+                if execution_timestamp in values
+            }
+            execution_prices = None
+            if self.intraday_mode:
+                execution_market_data = self._market_data_at(
+                    self.source_data,
+                    self.symbols,
+                    execution_timestamp,
+                )
+                execution_prices = {
+                    symbol: row["open"]
+                    for symbol, row in execution_market_data.items()
+                    if "open" in row
+                }
+
             # Execute trades (only if real data available)
             trades_before_execution = len(manager.trades)
-            fallback_prices = {
-                symbol: values[timestamp]
-                for symbol, values in price_cache.items()
-                if timestamp in values
-            }
             manager.execute_actions(
                 decision["actions"],
-                market_data,
-                timestamp,
-                fallback_prices=fallback_prices,
+                execution_market_data,
+                execution_timestamp,
+                fallback_prices=execution_fallback_prices,
+                execution_prices=execution_prices,
             )
             if runtime_invoked:
                 self.runtime_dispatcher.record_latest_execution(
                     len(manager.trades) - trades_before_execution
                 )
             
-            # Update equity (uses forward-filled prices for smooth valuation)
-            manager.update_equity(market_data, price_cache, timestamp)
-            manager.equity_history[-1] = (
-                self._require_currency_context().reporting_equity_record(
-                    manager.equity_history[-1]
+            # Update equity. The minute path emits one mark for every source
+            # bar through the fill, while the legacy path emits one hourly mark.
+            if self.intraday_mode:
+                while (
+                    valuation_cursor < len(raw_timestamps)
+                    and raw_timestamps[valuation_cursor] <= execution_timestamp
+                ):
+                    valuation_timestamp = raw_timestamps[valuation_cursor]
+                    valuation_market_data = self._market_data_at(
+                        self.source_data,
+                        self.symbols,
+                        valuation_timestamp,
+                    )
+                    manager.update_equity(
+                        valuation_market_data,
+                        valuation_price_cache,
+                        valuation_timestamp,
+                    )
+                    manager.equity_history[-1] = (
+                        self._require_currency_context().reporting_equity_record(
+                            manager.equity_history[-1]
+                        )
+                    )
+                    valuation_cursor += 1
+            else:
+                manager.update_equity(
+                    execution_market_data,
+                    price_cache,
+                    execution_timestamp,
                 )
-            )
+                manager.equity_history[-1] = (
+                    self._require_currency_context().reporting_equity_record(
+                        manager.equity_history[-1]
+                    )
+                )
             self._publish_live_progress(i + 1, total_steps, manager)
 
             if post_trade_steps and is_last_bar_of_trading_day(all_timestamps, i):
@@ -1255,7 +1544,29 @@ class HourlyBacktester:
             if (i + 1) % 100 == 0:
                 equity = manager.equity_history[-1]["equity"]
                 pct_return = ((equity - self.initial_capital) / self.initial_capital) * 100
-                print(f"   Hour {i+1}/{len(all_timestamps)}: Equity ${equity:,.0f} ({pct_return:+.1f}%)")
+                print(f"   Decision {i+1}/{len(all_timestamps)}: Equity ${equity:,.0f} ({pct_return:+.1f}%)")
+
+        if self.intraday_mode:
+            # Mark any remaining source bars after the final decision/fill so
+            # the curve closes at the end of the requested market window.
+            while valuation_cursor < len(raw_timestamps):
+                valuation_timestamp = raw_timestamps[valuation_cursor]
+                valuation_market_data = self._market_data_at(
+                    self.source_data,
+                    self.symbols,
+                    valuation_timestamp,
+                )
+                manager.update_equity(
+                    valuation_market_data,
+                    valuation_price_cache,
+                    valuation_timestamp,
+                )
+                manager.equity_history[-1] = (
+                    self._require_currency_context().reporting_equity_record(
+                        manager.equity_history[-1]
+                    )
+                )
+                valuation_cursor += 1
         
         equity_curve = manager.get_equity_curve()
         
@@ -1327,7 +1638,9 @@ class HourlyBacktester:
             initial_equity=initial_eq,
             final_equity=final_eq,
             total_return=total_return,
-            sharpe_ratio=self._calc_sharpe(equity_curve),
+            sharpe_ratio=self._calc_sharpe(
+                equity_curve, periods_per_year=self._annualization_periods()
+            ),
             max_drawdown=self._calc_max_dd(equity_curve),
             num_trades=len(manager.trades),
             llm_model=llm_model,  # Track which model was used
@@ -1464,6 +1777,14 @@ class HourlyBacktester:
             if not bars:
                 print("   ⚠️  No DJIA bars available; skipping index baseline")
                 return None, []
+            if self.intraday_mode:
+                bars = aggregate_bars_by_symbol(
+                    bars,
+                    source_timeframe=self.source_timeframe,
+                    decision_timeframe=self.decision_timeframe,
+                    market=self.profile.market,
+                    timezone=self.profile.timezone,
+                )
 
         _, equity_history = generate_baselines(
             bars_by_symbol=bars,
@@ -1510,14 +1831,16 @@ class HourlyBacktester:
         return run_id, equity_history
     
     @staticmethod
-    def _calc_sharpe(equity_curve: List[Dict]) -> float:
-        """Annualized hourly Sharpe ratio.
+    def _calc_sharpe(
+        equity_curve: List[Dict], periods_per_year: Optional[float] = None
+    ) -> float:
+        """Annualized Sharpe ratio for the curve's sampling frequency.
 
         Delegates to dashboard.backend.domain.backtesting.metrics.calculate_sharpe;
-        inputs, outputs, edge cases, and the hourly annualization factor are
-        unchanged.
+        Omitting ``periods_per_year`` preserves the historical hourly factor;
+        minute-valued runs pass the finer sampling factor explicitly.
         """
-        return calculate_sharpe(equity_curve)
+        return calculate_sharpe(equity_curve, periods_per_year=periods_per_year)
 
     @staticmethod
     def _calc_max_dd(equity_curve: List[Dict]) -> float:

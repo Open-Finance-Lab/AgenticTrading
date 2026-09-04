@@ -151,7 +151,7 @@
       runBtn.disabled = true;
       metricsEl.hidden = true;
       statusEl.className = "status";
-      statusEl.textContent = "Submitting backtest (Alpaca hourly bars + hosted model)…";
+      statusEl.textContent = "Submitting backtest (Alpaca 5-minute data + hourly decisions + hosted model)…";
 
       const headers = { "Content-Type": "application/json", "X-Session-Id": sessionId() };
       try {

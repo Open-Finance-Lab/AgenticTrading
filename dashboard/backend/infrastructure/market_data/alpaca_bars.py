@@ -25,6 +25,9 @@ from typing import Any, Dict, List, Optional, Union
 import pandas as pd
 
 from dashboard.backend.paths import CREDENTIALS_DIR
+from dashboard.backend.infrastructure.market_data.frequency import (
+    normalize_bar_timeframe,
+)
 
 # Basic plan may query SIP historical bars, but not the most recent window.
 # Docs: https://docs.alpaca.markets/docs/market-data-faq
@@ -236,15 +239,26 @@ def feed_provenance(bars: Dict[str, pd.DataFrame]) -> Optional[Dict[str, Any]]:
     priced from Yahoo, which never touches Alpaca) so callers can tell "not
     applicable" from "IEX fallback".
     """
+    feeds = set()
+    sip_fallback_to_iex = False
+    end_clamped = False
     for frame in bars.values():
         attrs = getattr(frame, "attrs", None) or {}
         if FRAME_ATTR_FEED in attrs:
-            return {
-                "market_data_feed": attrs.get(FRAME_ATTR_FEED),
-                "sip_fallback_to_iex": bool(attrs.get(FRAME_ATTR_SIP_FALLBACK)),
-                "end_clamped": bool(attrs.get(FRAME_ATTR_END_CLAMPED)),
-            }
-    return None
+            feed = str(attrs.get(FRAME_ATTR_FEED) or "").strip().lower()
+            if feed:
+                feeds.add(feed)
+            sip_fallback_to_iex = sip_fallback_to_iex or bool(
+                attrs.get(FRAME_ATTR_SIP_FALLBACK)
+            )
+            end_clamped = end_clamped or bool(attrs.get(FRAME_ATTR_END_CLAMPED))
+    if not feeds:
+        return None
+    return {
+        "market_data_feed": next(iter(feeds)) if len(feeds) == 1 else "mixed",
+        "sip_fallback_to_iex": sip_fallback_to_iex,
+        "end_clamped": end_clamped,
+    }
 
 
 def _apply_default_timeout(client: Any) -> None:
@@ -282,10 +296,22 @@ def _apply_default_timeout(client: Any) -> None:
 
 
 class AlpacaDataLoader:
-    """Fetches historical hourly bars from Alpaca API."""
+    """Fetches historical bars from Alpaca API at a configured resolution.
 
-    def __init__(self, api_key: Optional[str] = None, secret_key: Optional[str] = None):
-        """Initialize with Alpaca credentials."""
+    ``60m`` remains the constructor default for backward compatibility with
+    the existing hourly backtest and baseline callers.  Minute-data callers
+    can pass ``source_timeframe="5m"`` or call
+    :meth:`configure_source_timeframe` before fetching.
+    """
+
+    def __init__(
+        self,
+        api_key: Optional[str] = None,
+        secret_key: Optional[str] = None,
+        source_timeframe: str = "60m",
+    ):
+        """Initialize with Alpaca credentials and a source bar timeframe."""
+        self.configure_source_timeframe(source_timeframe)
         if not api_key or not secret_key:
             creds = self._load_credentials()
             api_key = creds.get("api_key")
@@ -299,12 +325,13 @@ class AlpacaDataLoader:
             from alpaca.data.enums import DataFeed
             from alpaca.data.historical import StockHistoricalDataClient
             from alpaca.data.requests import StockBarsRequest
-            from alpaca.data.timeframe import TimeFrame
+            from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
 
             self.client = StockHistoricalDataClient(self.api_key, self.secret_key)
             _apply_default_timeout(self.client)
             self.StockBarsRequest = StockBarsRequest
             self.TimeFrame = TimeFrame
+            self.TimeFrameUnit = TimeFrameUnit
             self.DataFeed = DataFeed
             self.last_fetch: Optional[Dict[str, Any]] = None
             print("✅ Alpaca credentials loaded")
@@ -314,6 +341,25 @@ class AlpacaDataLoader:
             raise MarketDataUnavailableError(
                 "alpaca-py is not installed (pip install alpaca-py)"
             ) from e
+
+    def configure_source_timeframe(self, source_timeframe: str) -> None:
+        """Set the source resolution used by the next ``fetch_bars`` call."""
+        self.source_timeframe = normalize_bar_timeframe(source_timeframe)
+
+    def _alpaca_timeframe(self):
+        """Translate the canonical application timeframe to alpaca-py."""
+        if self.source_timeframe == "1m":
+            return self.TimeFrame.Minute
+        if self.source_timeframe == "5m":
+            return self.TimeFrame(5, self.TimeFrameUnit.Minute)
+        if self.source_timeframe == "60m":
+            return self.TimeFrame.Hour
+        # ``configure_source_timeframe`` validates this field.  Keep the
+        # guard explicit so a malformed test double cannot silently request a
+        # different resolution from the provider.
+        raise ValueError(
+            f"Unsupported Alpaca source timeframe: {self.source_timeframe!r}"
+        )
 
     def _resolve_data_feed(self):
         return resolve_alpaca_data_feed(self.DataFeed)
@@ -366,6 +412,7 @@ class AlpacaDataLoader:
     ) -> None:
         self.last_fetch = {
             "feed": getattr(feed, "value", str(feed)),
+            "source_timeframe": self.source_timeframe,
             "requested_end": requested_end,
             "effective_end": effective_end,
             "sip_fallback_to_iex": sip_fallback_to_iex,
@@ -416,18 +463,37 @@ class AlpacaDataLoader:
         for symbol in symbols:
             if symbol in bars.df.index.get_level_values(0):
                 df = bars.df.xs(symbol).reset_index()
-                df = df[["timestamp", "open", "high", "low", "close", "volume"]].copy()
+                columns = [
+                    "timestamp",
+                    "open",
+                    "high",
+                    "low",
+                    "close",
+                    "volume",
+                ]
+                # Alpaca includes these fields for stock bars. Keep them when
+                # present so the domain aggregator can calculate volume-aware
+                # VWAP, while retaining the historical OHLCV shape for test
+                # doubles and older SDK responses.
+                optional_columns = [
+                    column
+                    for column in ("trade_count", "vwap")
+                    if column in df.columns
+                ]
+                df = df[columns + optional_columns].copy()
                 df["timestamp"] = pd.to_datetime(df["timestamp"])
                 df.set_index("timestamp", inplace=True)
                 data[symbol] = df.sort_index()
-                print(f"  ✅ {symbol}: {len(df)} hourly bars")
+                print(
+                    f"  ✅ {symbol}: {len(df)} {self.source_timeframe} bars"
+                )
             else:
                 print(f"  ⚠️  {symbol}: No data available")
         return data
 
     def fetch_bars(self, symbols: List[str], start: str, end: str) -> Dict[str, pd.DataFrame]:
         """
-        Fetch hourly OHLCV data from Alpaca API.
+        Fetch OHLCV data from Alpaca API at ``source_timeframe``.
 
         Args:
             symbols: List of stock symbols
@@ -451,15 +517,16 @@ class AlpacaDataLoader:
 
         print(f"\n📊 Fetching {len(symbols)} symbols from {start} to {end}...")
         feed = self._resolve_data_feed()
+        alpaca_timeframe = self._alpaca_timeframe()
         effective_end, end_clamped = self._effective_end(end, feed, start)
         print(
-            f"   Timeframe: Hourly (1h) feed={feed.value} "
+            f"   Timeframe: {self.source_timeframe} feed={feed.value} "
             f"end={effective_end} with forward-filled price cache\n"
         )
 
         request = self.StockBarsRequest(
             symbol_or_symbols=symbols,
-            timeframe=self.TimeFrame.Hour,
+            timeframe=alpaca_timeframe,
             start=start,
             end=effective_end,
             feed=feed,
@@ -501,7 +568,7 @@ class AlpacaDataLoader:
                 try:
                     retry = self.StockBarsRequest(
                         symbol_or_symbols=symbols,
-                        timeframe=self.TimeFrame.Hour,
+                        timeframe=alpaca_timeframe,
                         start=start,
                         end=end,
                         feed=self.DataFeed.IEX,

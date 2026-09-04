@@ -486,7 +486,10 @@ def main():
         print("⚙️  Using rule-based logic for trading decisions\n")
     
     # Step 1: Load data
-    print(f"1️⃣ Loading historical hourly data from {args.data_source}...")
+    print(
+        f"1️⃣ Loading historical source data from {args.data_source} "
+        f"(decisions remain hourly)..."
+    )
     backtester.load_data()
     
     # Step 2: Calculate indicators

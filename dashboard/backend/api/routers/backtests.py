@@ -302,6 +302,11 @@ class RunMetadata(BaseModel):
     # same reason as above — the records live on the detail endpoint.
     t1_deferred_events: Optional[int] = None
     t1_deferred_shares: Optional[float] = None
+    frequency_contract: Optional[Dict[str, Any]] = None
+    market_data_quality: Optional[Dict[str, Any]] = None
+    market_data_feed: Optional[str] = None
+    sip_fallback_to_iex: Optional[bool] = None
+    end_clamped: Optional[bool] = None
 
 
 class EquityCurve(BaseModel):
@@ -374,6 +379,11 @@ def _run_metadata_response(run: Dict[str, Any]) -> RunMetadata:
             "t1_deferred_events",
             "t1_deferred_shares",
             "llm_execution",
+            "frequency_contract",
+            "market_data_quality",
+            "market_data_feed",
+            "sip_fallback_to_iex",
+            "end_clamped",
         ):
             if field in metadata:
                 if field == "llm_execution" and isinstance(metadata[field], dict):
@@ -388,6 +398,43 @@ def _run_metadata_response(run: Dict[str, Any]) -> RunMetadata:
                         ).model_dump(mode="json")
                     except Exception:  # noqa: BLE001 - legacy/malformed metadata
                         continue
+                elif field == "frequency_contract" and isinstance(
+                    metadata[field], dict
+                ):
+                    payload[field] = {
+                        name: metadata[field][name]
+                        for name in (
+                            "source_timeframe",
+                            "decision_timeframe",
+                            "decision_frequency",
+                            "execution_timeframe",
+                            "valuation_frequency",
+                            "aggregation",
+                            "fill_policy",
+                            "verification_status",
+                        )
+                        if name in metadata[field]
+                    }
+                elif field == "market_data_quality" and isinstance(
+                    metadata[field], dict
+                ):
+                    # Per-symbol detail remains in the owned run record. List
+                    # routes only need bounded aggregate counts for the UI.
+                    payload[field] = {
+                        name: metadata[field][name]
+                        for name in (
+                            "policy",
+                            "decision_timestamp_min_symbol_coverage",
+                            "total_decision_bars",
+                            "usable_decision_bars",
+                            "dropped_decision_bars",
+                            "missing_source_bars",
+                            "duplicate_source_bars",
+                            "off_grid_source_bars",
+                            "invalid_source_bars",
+                        )
+                        if name in metadata[field]
+                    }
                 else:
                     payload[field] = metadata[field]
     return RunMetadata(**payload)

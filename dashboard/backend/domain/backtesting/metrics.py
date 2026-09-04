@@ -9,22 +9,23 @@ the hourly annualization assumptions are identical to the original methods; the
 legacy methods now delegate here.
 """
 
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 import numpy as np
 
 
-def calculate_sharpe(equity_curve: List[Dict]) -> float:
+def calculate_sharpe(
+    equity_curve: List[Dict], periods_per_year: Optional[float] = None
+) -> float:
     """
     Calculate Sharpe ratio from hourly equity curve.
 
     Formula:
         sharpe = (mean(returns) / std(returns)) * sqrt(periods_per_year)
 
-    Data is HOURLY, so annualization factor = sqrt(252 * 6.5):
-        - 252 = trading days per year
-        - 6.5 = trading hours per day (9:30 AM - 4:00 PM ET)
-        - Total: sqrt(1638) ≈ 40.47
+    ``periods_per_year`` defaults to the legacy hourly assumption.  A 5-minute
+    valuation curve can pass ``252 * 6.5 * 12`` without changing the historical
+    hourly behavior.
 
     Returns: float
         Annualized Sharpe ratio. Returns 0 if insufficient data or zero volatility.
@@ -38,8 +39,10 @@ def calculate_sharpe(equity_curve: List[Dict]) -> float:
     if len(returns) == 0 or np.std(returns) == 0:
         return 0
 
-    # Annualize for hourly data: sqrt(252 trading days * 6.5 hours/day)
-    annualization_factor = np.sqrt(252 * 6.5)
+    periods_per_year = 252 * 6.5 if periods_per_year is None else periods_per_year
+    if periods_per_year <= 0:
+        raise ValueError("periods_per_year must be positive")
+    annualization_factor = np.sqrt(periods_per_year)
     return (np.mean(returns) / np.std(returns)) * annualization_factor
 
 
