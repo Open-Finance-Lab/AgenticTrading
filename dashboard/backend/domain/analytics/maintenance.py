@@ -15,6 +15,7 @@ class AnalyticsMaintenanceReport(BaseModel):
     rollup_days: tuple[date, ...]
     rollup_rebuilt: bool = False
     repaired_snapshots: int = Field(default=0, ge=0)
+    repaired_value_snapshots: int = Field(default=0, ge=0)
     failures: int = Field(default=0, ge=0)
 
 
@@ -43,8 +44,9 @@ def run_analytics_maintenance(
     snapshot_limit: int = 100,
     rebuild_rollup: Any | None = None,
     repair_snapshots: Any | None = None,
+    repair_value_snapshots: Any | None = None,
 ) -> AnalyticsMaintenanceReport:
-    """Rebuild yesterday once per process and repair one bounded snapshot batch."""
+    """Rebuild yesterday and repair bounded dual-axis and legacy batches."""
 
     global _last_rollup_day
     current = _current_utc(now)
@@ -63,6 +65,10 @@ def run_analytics_maintenance(
         from .states import repair_stale_snapshots
 
         repair_snapshots = repair_stale_snapshots
+    if repair_value_snapshots is None:
+        from .states import repair_stale_value_snapshots
+
+        repair_value_snapshots = repair_stale_value_snapshots
 
     with _guard_lock:
         should_rebuild = _last_rollup_day != completed_day
@@ -91,6 +97,21 @@ def run_analytics_maintenance(
                 f"category={type(exc).__name__[:80]}"
             )
 
+    repaired_values = 0
+    try:
+        repaired_values = int(
+            repair_value_snapshots(
+                now=current,
+                limit=page_size,
+            )
+        )
+    except Exception as exc:
+        failures += 1
+        print(
+            "WARNING: analytics.value_snapshot_maintenance_failed "
+            f"category={type(exc).__name__[:80]}"
+        )
+
     repaired = 0
     try:
         repaired = int(
@@ -110,6 +131,7 @@ def run_analytics_maintenance(
         rollup_days=(completed_day,),
         rollup_rebuilt=rebuilt,
         repaired_snapshots=max(0, repaired),
+        repaired_value_snapshots=max(0, repaired_values),
         failures=failures,
     )
 
