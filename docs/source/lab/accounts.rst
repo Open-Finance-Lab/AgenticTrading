@@ -62,10 +62,10 @@ A few things worth knowing:
 - The confirmation looks the same whether or not the address belongs to an
   account, so no code arriving usually means a typo in the address — or an
   account under a different email.
-- **Need another code?** Go back to sign-in and start over from **Forgot
-  password?**. One account is sent at most one code every 5 minutes and five
-  per day; asking again sooner looks like a success but sends nothing, so wait
-  out the five minutes.
+- **Need another code?** Click **Resend code** under the code field. It
+  unlocks a minute after each code, and one address gets six codes an hour
+  (one send plus five resends) and twelve a day; past either limit the button
+  shows how long to wait rather than sending nothing.
 - A successful reset **signs you out of all devices** and cancels any
   :ref:`email change <accounts-change-email>` you had in progress. There is no
   automatic sign-in — you sign in fresh with the new password.

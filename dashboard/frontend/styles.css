@@ -633,6 +633,19 @@ a.header-brand:hover .title-section h1 {
     text-decoration: underline;
 }
 
+/* The reset flow's Resend button while its countdown runs: still readable
+   (the label is the countdown), no longer a link. */
+.auth-link-btn:disabled {
+    color: var(--text-muted);
+    cursor: default;
+    text-decoration: none;
+}
+
+.auth-resend {
+    margin: 2px 0 10px;
+    text-align: left;
+}
+
 .mode-toggle {
     display: flex;
     gap: 4px;
@@ -6133,6 +6146,7 @@ a.header-brand:hover .title-section h1 {
     width: min(560px, calc(100vw - 32px));
     max-height: calc(100vh - 48px);
     overflow: auto;
+    scroll-padding-bottom: 64px;
     /* Column layout so the submit button can be pinned to the bottom below. */
     display: flex;
     flex-direction: column;
@@ -6251,6 +6265,51 @@ a.header-brand:hover .title-section h1 {
 
 .run-backtest-modal .preset-cards {
     margin-top: 10px;
+}
+
+.run-backtest-modal #backtestUniverseSelect {
+    margin-top: 10px;
+}
+
+.universe-roster {
+    margin-top: 8px;
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    padding: 10px 12px;
+    font-size: 12px;
+}
+
+.universe-roster summary {
+    cursor: pointer;
+    color: var(--text-secondary);
+}
+
+.universe-roster-groups {
+    display: grid;
+    gap: 10px;
+    max-height: 230px;
+    overflow-y: auto;
+    margin-top: 12px;
+}
+
+.universe-roster-heading {
+    margin: 0 0 6px;
+    color: var(--text-secondary);
+    font-size: 11px;
+}
+
+.universe-roster-symbols {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 5px;
+}
+
+.universe-roster-symbols span {
+    border-radius: 4px;
+    padding: 3px 6px;
+    background: var(--bg-secondary);
+    color: var(--text-primary);
+    font-size: 11px;
 }
 
 .backtest-run-progress-head {

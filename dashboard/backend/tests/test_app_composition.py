@@ -32,6 +32,7 @@ EXPECTED_MARKET_ROUTES = {("GET", "/ticker", "get_ticker")}
 EXPECTED_CONFIG_ROUTES = {
     ("GET", "/config/defaults", "get_defaults"),
     ("GET", "/config/features", "get_features"),
+    ("GET", "/config/stock-pools", "get_stock_pools"),
 }
 # ``/admin/clear`` is absent on purpose: an unauthenticated DELETE that called
 # db.clear_all() became unrecoverable once AGENT_RUNS_DATABASE_URL made run
@@ -251,6 +252,7 @@ EXPECTED_FULL_CONTRACT = {
     ("GET", "/compare"),
     ("GET", "/config/defaults"),
     ("GET", "/config/features"),
+    ("GET", "/config/stock-pools"),
     ("GET", "/health"),
     ("GET", "/favicon.ico"),
     ("GET", "/favicon.svg"),

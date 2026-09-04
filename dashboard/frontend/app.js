@@ -3008,9 +3008,18 @@ function renderBacktestDataSourceBadge(run) {
 
   const isSimulation = run.data_source === 'vnpy_simulation';
   const isIFind = run.data_source === 'ifind_ashare';
+  const frequency = run.frequency_contract;
+  const sourceTimeframe = frequency?.source_timeframe;
+  const decisionCadence = frequency?.decision_frequency === '1h'
+    ? 'hourly'
+    : frequency?.decision_frequency;
   badge.textContent = isIFind
     ? 'iFinD China A-Shares · 60m'
-    : (isSimulation ? 'vn.py simulated data' : 'Alpaca data');
+    : (isSimulation
+      ? 'vn.py simulated data'
+      : (sourceTimeframe && decisionCadence
+        ? `Alpaca · ${sourceTimeframe} source · ${decisionCadence} decisions`
+        : 'Alpaca data'));
   badge.className = `data-source-badge ${isIFind ? 'is-ifind' : (isSimulation ? 'is-simulated' : 'is-alpaca')}`;
   badge.hidden = false;
 }
@@ -3167,6 +3176,15 @@ const AuthAPI = {
       // The admin console reads the same field for 403: a refusal there means
       // the cached role is stale, not that the request was malformed.
       error.status = response.status;
+      // A 429 says how long in Retry-After (seconds); the reset flow's resend
+      // countdown runs off that number rather than guessing.
+      const retryAfter = Number(response.headers.get('retry-after'));
+      if (Number.isFinite(retryAfter) && retryAfter > 0) error.retryAfter = retryAfter;
+      // ...and which key refused. A forgot-password 429 keyed on the address
+      // means a code may already be out for it; one keyed on the client says
+      // nothing about the address. Same status, same copy -- only this tells.
+      const scope = response.headers.get('x-ratelimit-scope');
+      if (scope) error.rateLimitScope = scope;
       throw error;
     }
 
@@ -3995,6 +4013,21 @@ function maskEmailForDisplay(email) {
   return `${local.slice(0, keep)}•••@${domain}`;
 }
 
+// Label for the resend button's countdown: seconds under a minute, whole
+// minutes under an hour, whole hours above (the daily 429's Retry-After can
+// be 86400, and "Resend code (86400s)" is not a label anyone should read).
+// Rounded to the NEAREST unit, not ceiled: ceiling read "2 min" at 61 s and
+// "60s" a second later, doubling the apparent wait at the moment a waiting
+// user is watching the button. Never "0" (seconds are exact, and the button
+// is still disabled while this shows), and never rising as time falls --
+// both pinned under node by test_frontend_resend_countdown.py.
+function formatResendCountdown(seconds) {
+  const s = Math.max(1, Math.ceil(Number(seconds) || 0));
+  if (s < 60) return `${s}s`;
+  if (s < 3600) return `${Math.round(s / 60)} min`;
+  return `${Math.round(s / 3600)} h`;
+}
+
 function initEmailChangeForm() {
   const form = document.getElementById('accountEmailForm');
   if (!form) return;
@@ -4003,6 +4036,11 @@ function initEmailChangeForm() {
   const codeInput = document.getElementById('emailChangeCodeInput');
   const cancelBtn = document.getElementById('emailChangeCancelBtn');
   let stage = null;
+  // Bumped by reset(). Every continuation in this form captures it first and
+  // bails if it moved: a verify response landing after a logout, or after
+  // Cancel tore the request down, must not redraw a code box for a request
+  // that is gone (the password-reset flow's resetGeneration, applied here).
+  let emailChangeGeneration = 0;
 
   const showError = (message) => {
     if (errorEl) {
@@ -4012,6 +4050,7 @@ function initEmailChangeForm() {
   };
 
   const reset = () => {
+    emailChangeGeneration += 1;
     stage = null;
     form.reset();
     if (errorEl) errorEl.hidden = true;
@@ -4026,6 +4065,10 @@ function initEmailChangeForm() {
     if (errorEl) errorEl.hidden = true;
     if (successEl) successEl.hidden = true;
     if (submitBtn) submitBtn.disabled = true;
+    // Cancel too: a cancel racing an in-flight verify is the one way to
+    // reach the stale-continuation case from a single tab.
+    if (cancelBtn) cancelBtn.disabled = true;
+    const gen = emailChangeGeneration;
     try {
       if (!stage) {
         const newEmail = (document.getElementById('newEmailInput')?.value || '').trim();
@@ -4038,6 +4081,7 @@ function initEmailChangeForm() {
           return;
         }
         const state = await AuthAPI.requestEmailChange(password, newEmail);
+        if (gen !== emailChangeGeneration) return;
         stage = state.stage;
         renderEmailChangeState({ pending: true, ...state });
         const pwInput = document.getElementById('emailChangePasswordInput');
@@ -4049,6 +4093,7 @@ function initEmailChangeForm() {
           return;
         }
         const data = await AuthAPI.verifyEmailChange(code);
+        if (gen !== emailChangeGeneration) return;
         if (data.status === 'ok') {
           applyUpdatedUser(data.user);   // cascades into updateAuthUI() -> updateAccountPage()
           reset();
@@ -4061,6 +4106,7 @@ function initEmailChangeForm() {
         }
       }
     } catch (error) {
+      if (gen !== emailChangeGeneration) return;
       showError(error.message);
       // A failed verify can mean the server tore the whole request down --
       // it cancels on the 5th wrong code and on a commit-time 409. The client
@@ -4069,6 +4115,7 @@ function initEmailChangeForm() {
       if (stage) {
         try {
           const state = await AuthAPI.emailChangeStatus();
+          if (gen !== emailChangeGeneration) return;
           stage = state.pending ? state.stage : null;
           // Clear the code only when the request is actually gone. On a
           // stage-two send failure the backend deliberately leaves stage 'old'
@@ -4082,24 +4129,30 @@ function initEmailChangeForm() {
       }
     } finally {
       if (submitBtn) submitBtn.disabled = false;
+      if (cancelBtn) cancelBtn.disabled = false;
     }
   });
 
   cancelBtn?.addEventListener('click', async () => {
     if (errorEl) errorEl.hidden = true;
+    const gen = emailChangeGeneration;
     try {
       await AuthAPI.cancelEmailChange();
     } catch (error) {
+      if (gen !== emailChangeGeneration) return;
       showError(error.message);
       return;
     }
+    if (gen !== emailChangeGeneration) return;
     reset();
   });
 
   // Re-entering the page mid-flow must not strand the user on the idle form.
   if (getStoredAuthUser()) {
+    const gen = emailChangeGeneration;
     AuthAPI.emailChangeStatus()
       .then((state) => {
+        if (gen !== emailChangeGeneration) return;
         stage = state.pending ? state.stage : null;
         renderEmailChangeState(state);
       })
@@ -4624,26 +4677,122 @@ function initAuthUI(options = {}) {
     setAuthMode(authMode === 'signup' || authMode === 'reset' ? 'login' : 'signup');
   });
 
-  // Password-reset mode: two stages in one form, stage held in a closure
-  // (the email-change pattern).
-  let resetStage = 1;
+  // Password-reset mode: two stages in one form, held in a closure (the
+  // email-change pattern). The address stage 1 actually submitted is the
+  // whole of that state: empty until the code step opens, and then the
+  // value the code was mailed for, so the resend and the stage-2 submit key
+  // on it, never on the live input -- which is locked for the rest of the
+  // flow (below). A separate stage flag was a second copy of the same fact.
+  let resetEmail = '';
+  let resendTimer = null;
+  // Bumped by resetPasswordResetForm. Every await in this flow captures it
+  // first and bails if it moved: a response landing after "Back to sign in"
+  // must not lock the login email field or repaint the login error.
+  let resetGeneration = 0;
   const resetCodeStep = document.getElementById('resetCodeStep');
   const resetSentCopy = document.getElementById('resetSentCopy');
   const resetCodeInput = document.getElementById('resetCodeInput');
   const resetNewPassword = document.getElementById('resetNewPassword');
   const resetHints = document.getElementById('resetPasswordHints');
+  const resetResendBtn = document.getElementById('resetResendBtn');
+  const emailInput = document.getElementById('authEmail');
+
+  const stopResendCountdown = () => {
+    if (resendTimer) clearInterval(resendTimer);
+    resendTimer = null;
+    if (resetResendBtn) {
+      resetResendBtn.disabled = false;
+      resetResendBtn.textContent = 'Resend code';
+    }
+  };
+
+  // Disable Resend for `seconds`, ticking the label down. The number is the
+  // server's (resend_after_seconds on a send, Retry-After on a 429), so the
+  // button re-enables when the gate actually reopens rather than on a guess.
+  const startResendCountdown = (seconds) => {
+    stopResendCountdown();
+    if (!resetResendBtn) return;
+    let remaining = Math.max(1, Math.ceil(Number(seconds) || 0));
+    const tick = () => {
+      if (remaining <= 0) {
+        stopResendCountdown();
+        return;
+      }
+      resetResendBtn.disabled = true;
+      resetResendBtn.textContent = `Resend code (${formatResendCountdown(remaining)})`;
+      remaining -= 1;
+    };
+    tick();
+    resendTimer = setInterval(tick, 1000);
+  };
+
+  // Stage 2 has one owner: the code step opens here, whether a code was just
+  // sent or the server said one already is out (a 429 inside the minute).
+  const enterCodeStep = (email, copy, seconds) => {
+    resetEmail = email;
+    // Lock the field to the address the code went for. An edit made while the
+    // request was in flight must not survive as the shown address: resend and
+    // stage 2 both use resetEmail.
+    if (emailInput) {
+      emailInput.value = resetEmail;
+      emailInput.readOnly = true;
+    }
+    // textContent, never innerHTML: the address is user-typed.
+    if (resetSentCopy) resetSentCopy.textContent = copy;
+    if (resetCodeStep) resetCodeStep.hidden = false;
+    const submitBtn = document.getElementById('authSubmitBtn');
+    if (submitBtn) submitBtn.textContent = 'Reset password';
+    startResendCountdown(seconds);
+    resetCodeInput?.focus();
+  };
 
   resetPasswordResetForm = () => {
-    resetStage = 1;
+    resetGeneration += 1;
+    resetEmail = '';
+    stopResendCountdown();
     if (resetCodeStep) resetCodeStep.hidden = true;
     if (resetSentCopy) resetSentCopy.textContent = '';
     if (resetCodeInput) resetCodeInput.value = '';
     if (resetNewPassword) resetNewPassword.value = '';
+    if (emailInput) emailInput.readOnly = false;
     renderPolicyHints(resetHints, []);
   };
 
   document.getElementById('authForgotPasswordBtn')?.addEventListener('click', () => {
     setAuthMode('reset');
+  });
+
+  resetResendBtn?.addEventListener('click', async () => {
+    if (!resetEmail) return;
+    const errorEl = document.getElementById('authError');
+    const gen = resetGeneration;
+    resetResendBtn.disabled = true;
+    try {
+      const data = await AuthAPI.requestPasswordReset(resetEmail);
+      if (gen !== resetGeneration) return;
+      // A stale rate-limit banner must not sit beside fresh "sent" copy.
+      if (errorEl) errorEl.hidden = true;
+      if (resetSentCopy) {
+        resetSentCopy.textContent = `We sent a new code to ${maskEmailForDisplay(resetEmail)} — it expires in 15 minutes. Check your spam folder too.`;
+      }
+      if (resetCodeInput) resetCodeInput.value = '';
+      startResendCountdown(data?.resend_after_seconds || 60);
+      resetCodeInput?.focus();
+    } catch (error) {
+      // The form was reset meanwhile; it already re-enabled the button.
+      if (gen !== resetGeneration) return;
+      if (errorEl) {
+        errorEl.textContent = error.message;
+        errorEl.hidden = false;
+      }
+      if (error.status === 429) {
+        // The server said how long: the minute's cooldown, or the hour after
+        // the sixth code. Count it down rather than letting the user hammer.
+        startResendCountdown(error.retryAfter || 60);
+      } else {
+        resetResendBtn.disabled = false;
+      }
+    }
   });
 
   // The existing #authPassword hint listener is hard-gated to signup mode;
@@ -4683,17 +4832,16 @@ function initAuthUI(options = {}) {
       if (!email) return;
       submitBtn.disabled = true;
       if (errorEl) errorEl.hidden = true;
+      const gen = resetGeneration;
       try {
-        if (resetStage === 1) {
-          await AuthAPI.requestPasswordReset(email);
-          resetStage = 2;
-          if (resetSentCopy) {
-            // textContent, never innerHTML: the address is user-typed.
-            resetSentCopy.textContent = `We sent a 6-character code to ${maskEmailForDisplay(email)} — it expires in 15 minutes. Check your spam folder too.`;
-          }
-          if (resetCodeStep) resetCodeStep.hidden = false;
-          submitBtn.textContent = 'Reset password';
-          resetCodeInput?.focus();
+        if (!resetEmail) {
+          const data = await AuthAPI.requestPasswordReset(email);
+          if (gen !== resetGeneration) return;
+          enterCodeStep(
+            email,
+            `We sent a 6-character code to ${maskEmailForDisplay(email)} — it expires in 15 minutes. Check your spam folder too.`,
+            data?.resend_after_seconds || 60,
+          );
         } else {
           const code = (resetCodeInput?.value || '').trim();
           const newPassword = resetNewPassword?.value || '';
@@ -4704,15 +4852,29 @@ function initAuthUI(options = {}) {
             }
             return;
           }
-          await AuthAPI.resetPassword(email, code, newPassword);
+          const doneEmail = resetEmail;
+          await AuthAPI.resetPassword(resetEmail, code, newPassword);
           showAppToast('Password reset. Sign in with your new password.');
+          if (gen !== resetGeneration) return;
           setAuthMode('login');
           // setAuthMode reset the stage closure; re-prefill the email so the
           // user signs straight in with the password they just set.
-          const emailInput = document.getElementById('authEmail');
-          if (emailInput) emailInput.value = email;
+          if (emailInput) emailInput.value = doneEmail;
         }
       } catch (error) {
+        if (gen !== resetGeneration) return;
+        if (!resetEmail && error.status === 429 && error.rateLimitScope === 'address') {
+          // Refused on the ADDRESS inside the minute (a reload, a second tab,
+          // the deep link) or the hour: the code already mailed is still
+          // valid, so open the code step instead of stranding the user on a
+          // dead stage 1. A refusal on the client budget says nothing about
+          // the address and stays a plain error.
+          enterCodeStep(
+            email,
+            `A code was already requested for ${maskEmailForDisplay(email)} — enter it below if you have it, or resend when the timer ends.`,
+            error.retryAfter || 60,
+          );
+        }
         if (errorEl) {
           errorEl.textContent = error.message;
           errorEl.hidden = false;
@@ -5274,9 +5436,12 @@ document.addEventListener('DOMContentLoaded', async () => {
         tab.addEventListener('click', (e) => handleUniverseTabSwitch(e.target));
     });
 
-    // Setup preset cards
-    document.getElementById('djiaCard')?.addEventListener('click', () => selectPreset('djia'));
-    document.getElementById('mag7Card')?.addEventListener('click', () => selectPreset('mag7'));
+    document.getElementById('backtestUniverseSelect')?.addEventListener(
+        'change', (event) => selectPreset(event.target.value),
+    );
+    document.getElementById('backtestUniverseRetry')?.addEventListener(
+        'click', () => loadRepresentativeStockPools(),
+    );
 
     // Setup custom universe builder
     setupAssetSearch();
@@ -5939,6 +6104,7 @@ function updateTimePeriod(btn) {
 const ASSET_UNIVERSES = {
     djia: {
         name: 'DJIA 30',
+        description: '30 blue-chip companies in the Dow Jones Industrial Average.',
         // Canonical Dow-30 — must mirror backend validator.DJIA_30
         // (pinned by dashboard/backend/tests/test_djia30_universe.py).
         assets: ['AAPL', 'AMGN', 'AMZN', 'AXP', 'BA', 'CAT', 'CRM', 'CSCO', 'CVX', 'DIS',
@@ -5947,6 +6113,7 @@ const ASSET_UNIVERSES = {
     },
     mag7: {
         name: 'Magnificent 7',
+        description: '7 major technology and consumer platform companies.',
         assets: ['AAPL', 'MSFT', 'GOOGL', 'AMZN', 'NVDA', 'TSLA', 'META']
     }
 };
@@ -6154,6 +6321,91 @@ const POPULAR_STOCKS = {
 };
 
 let selectedUniverse = 'djia'; // Default
+let representativePoolsPromise = null;
+
+async function loadRepresentativeStockPools() {
+    if (representativePoolsPromise) return representativePoolsPromise;
+    const error = document.getElementById('backtestUniverseLoadError');
+    if (error) error.hidden = true;
+    representativePoolsPromise = (async () => {
+        try {
+            const data = await API.get(`${API_BASE}/config/stock-pools`);
+            const presets = data?.representative_presets;
+            const resolved = {};
+            for (const pool of ['ordinary', 'fund', 'all']) {
+                const preset = presets?.find((item) => item.stock_pool === pool);
+                if (preset?.pool_mode !== 'representative30'
+                    || !Array.isArray(preset.symbols) || preset.symbols.length !== 30
+                    || new Set(preset.symbols).size !== 30
+                    || !preset.symbols.every((symbol) => typeof symbol === 'string' && /^[A-Z][A-Z0-9.]{0,9}$/.test(symbol))) {
+                    throw new Error('Invalid representative stock pool');
+                }
+                resolved[pool] = {
+                    name: preset.name,
+                    description: preset.description,
+                    assets: [...preset.symbols],
+                    groups: preset.groups,
+                    stockPool: pool,
+                    poolMode: 'representative30',
+                };
+            }
+            Object.assign(ASSET_UNIVERSES, resolved);
+            const select = document.getElementById('backtestUniverseSelect');
+            for (const option of Array.from(select?.options || [])) {
+                if (resolved[option.value]) option.disabled = false;
+            }
+            renderSelectedUniversePreview();
+            return true;
+        } catch (loadError) {
+            if (error) error.hidden = false;
+            console.warn('Could not load representative stock pools:', loadError.message);
+            return false;
+        }
+    })();
+    const loaded = await representativePoolsPromise;
+    if (!loaded) representativePoolsPromise = null;
+    return loaded;
+}
+
+function renderSelectedUniversePreview() {
+    const preset = ASSET_UNIVERSES[selectedUniverse];
+    if (!preset) return;
+    const select = document.getElementById('backtestUniverseSelect');
+    if (select) select.value = selectedUniverse;
+    const description = document.getElementById('backtestUniverseDescription');
+    if (description) description.textContent = preset.description || '';
+    const summary = document.getElementById('backtestUniversePreviewSummary');
+    if (summary) summary.textContent = `View ${preset.assets.length} selected assets`;
+    const container = document.getElementById('backtestUniverseGroups');
+    if (!container) return;
+    container.replaceChildren();
+    const groups = preset.groups || [{ name: 'Selected assets', symbols: preset.assets }];
+    for (const group of groups) {
+        const section = document.createElement('div');
+        const heading = document.createElement('p');
+        heading.className = 'universe-roster-heading';
+        heading.textContent = group.name;
+        section.appendChild(heading);
+        const chips = document.createElement('div');
+        chips.className = 'universe-roster-symbols';
+        for (const symbol of group.symbols) {
+            const chip = document.createElement('span');
+            chip.textContent = symbol;
+            chips.appendChild(chip);
+        }
+        section.appendChild(chips);
+        container.appendChild(section);
+    }
+}
+
+function getSelectedStockPoolRequest() {
+    if (document.getElementById('marketDataSourceSelect')?.value === IFIND_ASHARE_SOURCE
+        || !document.getElementById('builtinTab')?.classList.contains('active')) return null;
+    const preset = ASSET_UNIVERSES[selectedUniverse];
+    return preset?.stockPool
+        ? { stock_pool: preset.stockPool, pool_mode: 'representative30' }
+        : null;
+}
 
 function handleUniverseTabSwitch(tab) {
     const tabName = tab.dataset.tab;
@@ -6188,24 +6440,7 @@ function selectPreset(preset) {
     }
 
     selectedUniverse = preset;
-
-    const djiaCard = document.getElementById('djiaCard');
-    const mag7Card = document.getElementById('mag7Card');
-    if (!djiaCard || !mag7Card) return;
-
-    djiaCard.classList.remove('selected');
-    mag7Card.classList.remove('selected');
-
-    if (preset === 'djia') {
-        djiaCard.classList.add('selected');
-        djiaCard.querySelector('.preset-btn').textContent = 'Selected';
-        mag7Card.querySelector('.preset-btn').textContent = 'Select';
-    } else if (preset === 'mag7') {
-        mag7Card.classList.add('selected');
-        mag7Card.querySelector('.preset-btn').textContent = 'Selected';
-        djiaCard.querySelector('.preset-btn').textContent = 'Select';
-    }
-
+    renderSelectedUniversePreview();
     const universeData = ASSET_UNIVERSES[preset];
     console.log(`✅ Selected preset: ${universeData.name}`);
     notifyAssetUniverseChanged();
@@ -8005,6 +8240,52 @@ function formatTransactionCostTotals(totals) {
     ].filter(Boolean).join(' · ');
 }
 
+function formatBacktestFrequencyContract(contract) {
+    if (!contract || typeof contract !== 'object') return null;
+    const source = contract.source_timeframe;
+    const decision = contract.decision_frequency || contract.decision_timeframe;
+    const execution = contract.execution_timeframe;
+    const valuation = contract.valuation_frequency;
+    if (!source || !decision || !execution || !valuation) return null;
+    const fill = contract.fill_policy === 'next_source_bar_open'
+        ? `next ${execution} open fills`
+        : `${execution} execution`;
+    const verification = contract.verification_status === 'verified'
+        ? ' · verified'
+        : '';
+    return `${source} source · ${decision} decisions · ${fill} · ${valuation} valuation${verification}`;
+}
+
+function formatBacktestMarketDataQuality(quality) {
+    if (!quality || typeof quality !== 'object') return null;
+    const total = Number(quality.total_decision_bars);
+    const usable = Number(quality.usable_decision_bars);
+    if (!Number.isFinite(total) || !Number.isFinite(usable)) return null;
+    const dropped = Number(quality.dropped_decision_bars || 0);
+    const parts = [`${usable}/${total} usable`];
+    parts.push(dropped > 0 ? `${dropped} dropped` : 'no drops');
+    for (const [field, label] of [
+        ['missing_source_bars', 'missing'],
+        ['duplicate_source_bars', 'duplicate'],
+        ['off_grid_source_bars', 'off-grid'],
+        ['invalid_source_bars', 'invalid'],
+    ]) {
+        const count = Number(quality[field] || 0);
+        if (count > 0) parts.push(`${count} ${label}`);
+    }
+    return parts.join(' · ');
+}
+
+function formatBacktestMarketDataProvenance(provenance) {
+    if (!provenance || typeof provenance !== 'object') return null;
+    const feed = String(provenance.market_data_feed || '').trim().toUpperCase();
+    if (!feed) return null;
+    const parts = [`Alpaca ${feed}`];
+    if (provenance.sip_fallback_to_iex) parts.push('SIP fallback');
+    if (provenance.end_clamped) parts.push('end clamped');
+    return parts.join(' · ');
+}
+
 function renderBacktestRunConfig(
     run,
     {
@@ -8031,6 +8312,20 @@ function renderBacktestRunConfig(
     const metadata = run?.metadata && typeof run.metadata === 'object'
         ? run.metadata
         : {};
+    const frequencyContract = run?.frequency_contract
+        || metadata.frequency_contract
+        || cfg?.frequencyContract
+        || null;
+    const marketDataQuality = run?.market_data_quality
+        || metadata.market_data_quality
+        || null;
+    const frequencyLabel = formatBacktestFrequencyContract(frequencyContract);
+    const dataQualityLabel = formatBacktestMarketDataQuality(marketDataQuality);
+    const provenanceLabel = formatBacktestMarketDataProvenance({
+        market_data_feed: run?.market_data_feed ?? metadata.market_data_feed,
+        sip_fallback_to_iex: run?.sip_fallback_to_iex ?? metadata.sip_fallback_to_iex,
+        end_clamped: run?.end_clamped ?? metadata.end_clamped,
+    });
     const llmExecution = run?.llm_execution && typeof run.llm_execution === 'object'
         ? run.llm_execution
         : (metadata.llm_execution && typeof metadata.llm_execution === 'object'
@@ -8089,13 +8384,19 @@ function renderBacktestRunConfig(
     const start = cfg?.startDate || run?.start_date;
     const end = cfg?.endDate || run?.end_date;
     const universe = cfg?.universeLabel
+        || run?.universe_selection?.name
+        || metadata.universe_selection?.name
         || ifindProfile?.name
         || describeUniverseFromAssets(runSymbols)
         || universeKey
         || '—';
     const symbolCount = cfg?.symbolCount
         ?? (Array.isArray(runSymbols) ? runSymbols.length : null);
-    const timeframe = cfg?.timeframe || metadata.timeframe || run?.timeframe || '60m';
+    const timeframe = frequencyContract?.decision_timeframe
+        || cfg?.timeframe
+        || metadata.timeframe
+        || run?.timeframe
+        || '60m';
     const decisionSource = cfg?.decisionSource
         || metadata.decision_source
         || run?.decision_source
@@ -8211,6 +8512,21 @@ function renderBacktestRunConfig(
         Number.isFinite(Number(symbolCount)) ? String(symbolCount) : '—',
     );
     setBacktestConfigText('backtestConfigTimeframe', timeframe);
+    const frequencyRow = document.getElementById('backtestConfigFrequencyRow');
+    const dataQualityRow = document.getElementById('backtestConfigDataQualityRow');
+    const provenanceRow = document.getElementById('backtestConfigProvenanceRow');
+    if (frequencyRow) frequencyRow.hidden = !frequencyLabel;
+    if (dataQualityRow) dataQualityRow.hidden = !dataQualityLabel;
+    if (provenanceRow) provenanceRow.hidden = !provenanceLabel;
+    if (frequencyLabel) {
+        setBacktestConfigText('backtestConfigFrequency', frequencyLabel);
+    }
+    if (dataQualityLabel) {
+        setBacktestConfigText('backtestConfigDataQuality', dataQualityLabel);
+    }
+    if (provenanceLabel) {
+        setBacktestConfigText('backtestConfigProvenance', provenanceLabel);
+    }
     setBacktestConfigText(
         'backtestConfigDecisionSource',
         decisionSourceLabel,
@@ -8339,7 +8655,10 @@ async function openRunBacktestModal(agent) {
 
     const modal = document.getElementById('runBacktestModal');
     if (modal) modal.hidden = false;
-    await loadRunBacktestExecutionOptions(agent);
+    await Promise.all([
+        loadRunBacktestExecutionOptions(agent),
+        loadRepresentativeStockPools(),
+    ]);
     if (runBacktestModalAgent?.agent_id !== agent.agent_id) return;
     if (submit) submit.textContent = '▶ Run Backtest';
     syncBacktestModelFieldMode();
@@ -8404,6 +8723,7 @@ async function runBacktest() {
     }
 
     const assets = getSelectedAssets();
+    const stockPoolRequest = getSelectedStockPoolRequest();
     const modelSelect = document.getElementById('modelSelect');
     const marketDataSourceSelect = document.getElementById('marketDataSourceSelect');
     const dataSource = marketDataSourceSelect?.value || 'alpaca';
@@ -8516,6 +8836,17 @@ async function runBacktest() {
         universeKey: selectedIFindUniverse,
         symbolCount: assets.length,
         timeframe: isIFind ? IFIND_ASHARE_TIMEFRAME : '60m',
+        frequencyContract: isIFind || isSimulation
+            ? null
+            : {
+                source_timeframe: '5m',
+                decision_timeframe: '60m',
+                decision_frequency: '1h',
+                execution_timeframe: '5m',
+                valuation_frequency: '5m',
+                aggregation: 'session_anchored_completed_bars',
+                fill_policy: 'next_source_bar_open',
+            },
         decisionSource,
         billingMode: isRuleBasedDecision ? null : selectedBillingMode,
         providerId: isRuleBasedDecision || selectedBillingMode === 'platform_credits'
@@ -8523,7 +8854,7 @@ async function runBacktest() {
             : selectedProviderId,
         marketDataLabel: isIFind
             ? 'iFinD A-Share'
-            : (isSimulation ? 'vn.py Simulation' : 'Alpaca'),
+            : (isSimulation ? 'vn.py Simulation' : 'Alpaca · 5m source'),
         dataSource,
         startedAt: new Date().toISOString(),
     };
@@ -8532,6 +8863,7 @@ async function runBacktest() {
     renderBacktestDataSourceBadge({
         data_source: dataSource,
         timeframe: isIFind ? IFIND_ASHARE_TIMEFRAME : null,
+        frequency_contract: launchConfigBase.frequencyContract,
     });
 
     // Pin live view BEFORE navigateToPage → showPlaygroundPanel → loadData(),
@@ -8583,6 +8915,13 @@ async function runBacktest() {
             // Body is authoritative; query `assets` kept for older callers/logs.
             assets: [...assets],
         };
+        if (stockPoolRequest) {
+            // The backend resolves and freezes the roster shown in the picker.
+            // Explicit assets and category selection are mutually exclusive.
+            params.delete('assets');
+            delete payload.assets;
+            Object.assign(payload, stockPoolRequest);
+        }
         params.set('decision_source', decisionSource);
         payload.decision_source = decisionSource;
         if (isIFind) {

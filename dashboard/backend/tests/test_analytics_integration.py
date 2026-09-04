@@ -300,7 +300,9 @@ def test_synthetic_acceptance_scenario_has_no_real_credentials(monkeypatch):
             event_name="backtest_completed",
             user_id=subject["id"],
             run_id="synthetic-platform-run",
-            occurred_at=now - timedelta(hours=1),
+            # Current-day metrics read raw events before daily rollups exist.
+            # Keeping this flow on ``now`` avoids a UTC-midnight-only failure.
+            occurred_at=now,
         )
         instrumentation.emit_resource_event(
             event_name="model_usage_recorded",
@@ -317,7 +319,7 @@ def test_synthetic_acceptance_scenario_has_no_real_credentials(monkeypatch):
                 "output_tokens": 40,
                 "cost_micro_usd": 420_000,
             },
-            occurred_at=now - timedelta(minutes=59),
+            occurred_at=now,
         )
         instrumentation.emit_resource_event(
             event_name="credits_settled",
@@ -327,7 +329,7 @@ def test_synthetic_acceptance_scenario_has_no_real_credentials(monkeypatch):
             correlation_id="synthetic-platform-run",
             billing_mode="platform_credits",
             properties={"amount_micro": 420, "bucket": "grant"},
-            occurred_at=now - timedelta(minutes=58),
+            occurred_at=now,
         )
 
         token = users.create_session(admin["id"])

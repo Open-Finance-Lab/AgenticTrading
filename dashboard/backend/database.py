@@ -294,7 +294,7 @@ class BacktestDatabase:
             
             # Add session_id if missing
             if 'session_id' not in columns:
-                print("🔄 Migrating: Adding session_id to agent_runs...")
+                print("Migrating: Adding session_id to agent_runs...")
                 cursor.execute("""
                     ALTER TABLE agent_runs 
                     ADD COLUMN session_id TEXT DEFAULT 'legacy-demo-session'
@@ -309,39 +309,39 @@ class BacktestDatabase:
                     ON agent_runs(session_id, mode)
                 """)
                 conn.commit()
-                print("✅ Added session_id to agent_runs")
+                print("Added session_id to agent_runs")
             
             # Add llm_model if missing (tracks which LLM was used)
             if 'llm_model' not in columns:
-                print("🔄 Migrating: Adding llm_model to agent_runs...")
+                print("Migrating: Adding llm_model to agent_runs...")
                 cursor.execute("""
                     ALTER TABLE agent_runs 
                     ADD COLUMN llm_model TEXT DEFAULT 'rule-based'
                 """)
                 cursor.execute("UPDATE agent_runs SET llm_model = 'rule-based' WHERE llm_model IS NULL")
                 conn.commit()
-                print("✅ Added llm_model to agent_runs")
+                print("Added llm_model to agent_runs")
 
             cursor.execute("PRAGMA table_info(agent_runs)")
             columns = [row[1] for row in cursor.fetchall()]
 
             if 'baseline_djia_run_id' not in columns:
-                print("🔄 Migrating: Adding baseline_djia_run_id to agent_runs...")
+                print("Migrating: Adding baseline_djia_run_id to agent_runs...")
                 cursor.execute("""
                     ALTER TABLE agent_runs
                     ADD COLUMN baseline_djia_run_id TEXT
                 """)
                 conn.commit()
-                print("✅ Added baseline_djia_run_id to agent_runs")
+                print("Added baseline_djia_run_id to agent_runs")
 
             if 'baseline_buyhold_run_id' not in columns:
-                print("🔄 Migrating: Adding baseline_buyhold_run_id to agent_runs...")
+                print("Migrating: Adding baseline_buyhold_run_id to agent_runs...")
                 cursor.execute("""
                     ALTER TABLE agent_runs
                     ADD COLUMN baseline_buyhold_run_id TEXT
                 """)
                 conn.commit()
-                print("✅ Added baseline_buyhold_run_id to agent_runs")
+                print("Added baseline_buyhold_run_id to agent_runs")
 
             # Token usage / cost tracking columns + the JSON config snapshot
             # (metadata records env-dependent knobs like the effective
@@ -365,27 +365,27 @@ class BacktestDatabase:
             ]
             for col_name, add_column_sql in token_columns:
                 if col_name not in columns:
-                    print(f"🔄 Migrating: Adding {col_name} to agent_runs...")
+                    print(f"Migrating: Adding {col_name} to agent_runs...")
                     cursor.execute(add_column_sql)
                     conn.commit()
-                    print(f"✅ Added {col_name} to agent_runs")
+                    print(f"Added {col_name} to agent_runs")
             
             if 'session_id' in columns and 'llm_model' in columns:
-                print("✅ Schema up-to-date (session_id, llm_model exist)")
+                print("Schema up-to-date (session_id, llm_model exist)")
 
             cursor.execute("PRAGMA table_info(backtest_decisions)")
             dec_cols = {row[1] for row in cursor.fetchall()}
             if dec_cols and "context_ref" not in dec_cols:
-                print("🔄 Migrating: Adding context_ref to backtest_decisions...")
+                print("Migrating: Adding context_ref to backtest_decisions...")
                 cursor.execute("ALTER TABLE backtest_decisions ADD COLUMN context_ref TEXT")
                 conn.commit()
-                print("✅ Added context_ref to backtest_decisions")
+                print("Added context_ref to backtest_decisions")
 
             if dec_cols and "actions_trace_ref" not in dec_cols:
-                print("🔄 Migrating: Adding actions_trace_ref to backtest_decisions...")
+                print("Migrating: Adding actions_trace_ref to backtest_decisions...")
                 cursor.execute("ALTER TABLE backtest_decisions ADD COLUMN actions_trace_ref TEXT")
                 conn.commit()
-                print("✅ Added actions_trace_ref to backtest_decisions")
+                print("Added actions_trace_ref to backtest_decisions")
 
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS idempotency_keys (
@@ -411,7 +411,7 @@ class BacktestDatabase:
             conn.commit()
         
         except Exception as e:
-            print(f"⚠️ Migration warning: {e}")
+            print(f"Migration warning: {e}")
         
         finally:
             conn.close()
@@ -425,7 +425,7 @@ class BacktestDatabase:
             conn.commit()
             conn.close()
         except Exception as e:
-            print(f"⚠️ Trades migration retry warning: {e}")
+            print(f"Trades migration retry warning: {e}")
 
     @staticmethod
     def _has_equity_timeseries_unique_index(cursor) -> bool:
@@ -471,7 +471,7 @@ class BacktestDatabase:
             except sqlite3.OperationalError as exc:
                 last_error = exc
                 if attempt < self._UNIQUENESS_MIGRATION_ATTEMPTS:
-                    print(f"⚠️ equity_timeseries uniqueness migration retry: {exc}")
+                    print(f"equity_timeseries uniqueness migration retry: {exc}")
             except sqlite3.Error as exc:
                 raise RuntimeError(
                     "equity_timeseries unique constraint migration failed"
@@ -479,7 +479,7 @@ class BacktestDatabase:
             finally:
                 conn.close()
 
-        print(f"⚠️ equity_timeseries uniqueness migration deferred: {last_error}")
+        print(f"equity_timeseries uniqueness migration deferred: {last_error}")
 
     def _apply_equity_timeseries_uniqueness(self, conn, cursor) -> None:
         """Dedup to the newest point per (run_id, timestamp), then protect it.
@@ -523,7 +523,7 @@ class BacktestDatabase:
         if needed.issubset(columns) and "shares" not in columns:
             return
 
-        print("🔄 Migrating: upgrading trades table schema...")
+        print("Migrating: upgrading trades table schema...")
         # Literal SQL, not f-string assembly -- see the note on token_columns.
         additions = [
             ("quantity", "ALTER TABLE trades ADD COLUMN quantity INTEGER"),
@@ -542,7 +542,7 @@ class BacktestDatabase:
         if "total_value" in columns:
             cursor.execute("UPDATE trades SET value = total_value WHERE value IS NULL")
 
-        print("✅ trades table migrated (quantity, side, value, reason)")
+        print("trades table migrated (quantity, side, value, reason)")
 
     @staticmethod
     def _migrate_currency_audit_schema(cursor) -> None:

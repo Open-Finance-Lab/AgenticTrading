@@ -165,6 +165,27 @@ def test_logging_out_resets_the_email_change_form():
     assert "resetEmailChangeForm = reset" in js
 
 
+def test_stale_email_change_responses_are_dropped_after_a_reset():
+    """initEmailChangeForm keeps `stage` in a closure and its handlers await
+    the server. A response landing after reset() -- a logout, or Cancel
+    clicked while a verify is in flight -- must not resurrect the code box
+    for a request that is gone: every await captures a generation counter
+    that reset() bumps, and bails if it moved (the password-reset flow's
+    resetGeneration, applied to its twin). Cancel is also disabled while a
+    submit is in flight, so the single-tab race cannot start at all."""
+    from dashboard.backend.tests._frontend_source import fn_body
+
+    init = fn_body("function initEmailChangeForm")
+    start = init.index("const reset = () => {")
+    body = init[start : init.index("};", start)]
+    assert "emailChangeGeneration += 1" in body
+    # requestEmailChange, verifyEmailChange, the status re-read in the catch,
+    # the initial status load, cancel: five continuations, five checks.
+    assert init.count("gen !== emailChangeGeneration") >= 5
+    submit = init.index("form.addEventListener('submit'")
+    assert "cancelBtn.disabled = true" in init[submit:]
+
+
 def test_active_agent_is_only_cleared_on_a_real_sign_out():
     """A transient /api/auth/me failure must not cost the agent selection.
 

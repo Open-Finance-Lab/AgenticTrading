@@ -125,9 +125,11 @@ app.add_middleware(
     allow_headers=["content-type", "authorization", "x-session-id", "x-browser-id", "x-api-key", "x-csrf-token", "accept"],
     # x-ratelimit-*/retry-after: the v2 spec promises these to agent clients;
     # browsers strip headers absent from Access-Control-Expose-Headers.
+    # x-ratelimit-scope: a forgot-password 429 says whether the address or the
+    # client was refused, and the login modal's code step reads it.
     expose_headers=["content-type", "cache-control", "etag", "x-session-id",
                     "x-ratelimit-limit", "x-ratelimit-remaining",
-                    "x-ratelimit-reset", "retry-after"],
+                    "x-ratelimit-reset", "x-ratelimit-scope", "retry-after"],
     max_age=3600,
 )
 

@@ -9,6 +9,7 @@ from typing import Protocol
 import pandas as pd
 
 from .alpaca_bars import AlpacaDataLoader
+from .frequency import normalize_bar_timeframe
 from .profiles import ALPACA, IFIND_ASHARE, VNPY_SIMULATION
 
 
@@ -18,7 +19,7 @@ _TRUTHY = {"1", "true", "yes", "on"}
 
 
 class MarketDataProvider(Protocol):
-    """Normalized hourly market-data input consumed by backtests."""
+    """Normalized market-data input consumed by backtests."""
 
     def fetch_bars(
         self,
@@ -97,20 +98,48 @@ def ensure_market_data_source_available(data_source: str) -> None:
 def create_market_data_provider(
     data_source: str = ALPACA,
     universe: str | None = None,
+    *,
+    source_timeframe: str | None = None,
 ) -> MarketDataProvider:
-    """Create a provider while keeping optional vn.py imports isolated."""
+    """Create a provider while keeping optional imports isolated.
+
+    ``source_timeframe`` is intentionally explicit.  Omitting it preserves
+    the legacy behavior of requesting the profile's decision timeframe, so an
+    existing hourly backtest cannot accidentally start making decisions on
+    every minute bar.  Phase 2 will pass ``profile.source_timeframe`` after
+    the minute-to-decision-bar aggregation path is connected.
+    """
     from .profiles import get_market_profile
 
     profile = get_market_profile(data_source, universe)
     ensure_market_data_source_available(data_source)
+    requested_timeframe = normalize_bar_timeframe(
+        profile.timeframe if source_timeframe is None else source_timeframe
+    )
 
     if data_source == ALPACA:
-        return AlpacaDataLoader()
+        loader = AlpacaDataLoader()
+        # Configure after construction to keep compatibility with lightweight
+        # test doubles and legacy integrations that replace AlpacaDataLoader
+        # with a zero-argument class.
+        configure_market_data_provider(loader, requested_timeframe)
+        return loader
 
     if data_source == IFIND_ASHARE:
+        if requested_timeframe != profile.timeframe:
+            raise ValueError(
+                "iFinD A-share provider currently supports only its profile "
+                f"timeframe {profile.timeframe!r}"
+            )
         from .ifind_ashare import IFindAshareProvider
 
         return IFindAshareProvider(profile=profile)
+
+    if requested_timeframe != profile.timeframe:
+        raise ValueError(
+            "vn.py simulation provider currently supports only its profile "
+            f"timeframe {profile.timeframe!r}"
+        )
 
     try:
         from .vnpy_simulation import VnpySimulationProvider
@@ -123,3 +152,28 @@ def create_market_data_provider(
         raise
 
     return VnpySimulationProvider()
+
+
+def configure_market_data_provider(
+    provider: MarketDataProvider,
+    source_timeframe: str,
+) -> MarketDataProvider:
+    """Configure a provider's source timeframe when it supports the feature.
+
+    This small compatibility boundary lets the factory configure the real
+    Alpaca loader without requiring every existing injected provider or test
+    double to change its constructor signature.
+    """
+    canonical = normalize_bar_timeframe(source_timeframe)
+    configure = getattr(provider, "configure_source_timeframe", None)
+    if callable(configure):
+        configure(canonical)
+    else:
+        # A replacement provider may not expose the optional capability. Keep
+        # the attribute visible for diagnostics while leaving its own fetch
+        # implementation untouched.
+        try:
+            setattr(provider, "source_timeframe", canonical)
+        except (AttributeError, TypeError):
+            pass
+    return provider

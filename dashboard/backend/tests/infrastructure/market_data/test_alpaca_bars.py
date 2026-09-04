@@ -12,6 +12,7 @@ import pytest
 from alpaca.data.timeframe import TimeFrame
 
 from dashboard.backend.infrastructure.market_data.alpaca_bars import (
+    FRAME_ATTR_END_CLAMPED,
     FRAME_ATTR_FEED,
     FRAME_ATTR_SIP_FALLBACK,
     AlpacaDataLoader,
@@ -93,6 +94,21 @@ def fake_alpaca(monkeypatch):
 
 
 # --- compatibility / identity ----------------------------------------------
+
+
+def test_full_catalog_batches_every_symbol_without_a_thirty_name_limit(fake_alpaca, monkeypatch):
+    monkeypatch.setenv("ALPACA_API_KEY", "test-key")
+    monkeypatch.setenv("ALPACA_SECRET_KEY", "test-secret")
+    symbols = [f"S{i:03}" for i in range(235)]
+    fake_alpaca["df"] = _bars_df({
+        symbol: [("2026-01-02T15:00:00Z", 10, 11, 9, 10, 100)] for symbol in symbols
+    })
+    loader = AlpacaDataLoader()
+    result = loader.fetch_bars(symbols, "2026-01-01", "2026-01-03")
+    requests = fake_alpaca["requests"]
+    assert [len(request.symbol_or_symbols) for request in requests] == [100, 100, 35]
+    assert [symbol for request in requests for symbol in request.symbol_or_symbols] == symbols
+    assert set(result) == set(symbols)
 
 def test_old_script_exports_class():
     assert hasattr(bha, "AlpacaDataLoader")
@@ -316,6 +332,23 @@ def test_feed_provenance_reads_frame_stamps(fake_alpaca):
     # Nothing to attribute when no Alpaca frame was involved.
     assert feed_provenance({}) is None
     assert feed_provenance({"AAPL": pd.DataFrame()}) is None
+
+
+def test_feed_provenance_marks_mixed_batched_results_conservatively():
+    sip = pd.DataFrame()
+    sip.attrs[FRAME_ATTR_FEED] = "sip"
+    sip.attrs[FRAME_ATTR_SIP_FALLBACK] = False
+    sip.attrs[FRAME_ATTR_END_CLAMPED] = True
+    iex = pd.DataFrame()
+    iex.attrs[FRAME_ATTR_FEED] = "iex"
+    iex.attrs[FRAME_ATTR_SIP_FALLBACK] = True
+    iex.attrs[FRAME_ATTR_END_CLAMPED] = False
+
+    assert feed_provenance({"AAPL": sip, "MSFT": iex}) == {
+        "market_data_feed": "mixed",
+        "sip_fallback_to_iex": True,
+        "end_clamped": True,
+    }
 
 
 def test_clamped_fetch_is_marked_in_provenance(fake_alpaca, monkeypatch):

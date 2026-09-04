@@ -34,10 +34,11 @@ from dashboard.backend.infrastructure.market_data.alpaca_bars import (
 
 try:
     import pandas as pd
-except ImportError:
-    import subprocess
-    subprocess.check_call(["pip", "install", "pandas"])
-    import pandas as pd
+except ImportError as exc:
+    raise ImportError(
+        "pandas is required for baseline generation; "
+        "install the project dependencies from requirements.txt"
+    ) from exc
 
 
 def _market_hours_only(timestamps, market_timezone: str):
