@@ -56,6 +56,7 @@ from dashboard.backend.infrastructure.llm.backtest_harness import (
 )
 from dashboard.backend.infrastructure.llm.pipeline_runner import (
     RECOVERY_MAX_OUTPUT_TOKENS,
+    escalate_ceiling_on_retry,
     response_text_or_none,
     run_pipeline_decision,
     truncation_reason,
@@ -488,34 +489,55 @@ class PortfolioManager:
                 # different left to ask for.
                 recovery_spent = False
                 output_delta = 0
+                # An empty reply is what a reply looks like when reasoning ran
+                # out the output ceiling before any text was emitted, so
+                # re-asking at the same ceiling asks for the same failure.
+                # ``pipeline_runner`` already escalates on its first retry;
+                # this makes the single-prompt loop agree instead of spending
+                # four calls first. The FIRST request is untouched either way.
+                escalate = escalate_ceiling_on_retry()
                 for attempt in range(no_text_retries + 1):
                     if attempt == no_text_retries:
                         # Final rescue: preserve the provider's reasoning mode,
                         # but give the model more room for reasoning plus JSON.
+                        attempt_max_tokens = RECOVERY_MAX_OUTPUT_TOKENS
                         print(
                             "   ⚠️  Final rescue call with reasoning preserved "
                             f"and max_tokens={RECOVERY_MAX_OUTPUT_TOKENS}"
                         )
                         recovery_spent = True
-                        response = _request_trading_decision(
-                            llm_client,
-                            prompt=prompt,
-                            model=model,
-                            max_tokens=RECOVERY_MAX_OUTPUT_TOKENS,
-                            temperature=temperature,
-                            market_context=market_context,
-                        )
                     else:
-                        response = _request_trading_decision(
-                            llm_client,
-                            prompt=prompt,
-                            model=model,
-                            temperature=temperature,
-                            market_context=market_context,
+                        attempt_max_tokens = (
+                            RECOVERY_MAX_OUTPUT_TOKENS
+                            if (escalate and attempt > 0)
+                            else None
                         )
+                        if attempt_max_tokens is not None and attempt == 1:
+                            print(
+                                "   ⚠️  Retrying with reasoning preserved and "
+                                f"max_tokens={RECOVERY_MAX_OUTPUT_TOKENS}"
+                            )
+                    # Passed only when it is actually being raised, so an
+                    # unescalated attempt is the identical call it is today --
+                    # same kwargs, not merely the same resolved value.
+                    extra = ({"max_tokens": attempt_max_tokens}
+                             if attempt_max_tokens is not None else {})
+                    response = _request_trading_decision(
+                        llm_client,
+                        prompt=prompt,
+                        model=model,
+                        temperature=temperature,
+                        market_context=market_context,
+                        **extra,
+                    )
                     output_delta = self._record_llm_usage(response)
                     try:
                         llm_response = _extract_response_text(response)
+                        # A reply already obtained at the recovery ceiling has
+                        # nothing different left to ask for, so the post-parse
+                        # truncation retry below must not repeat it.
+                        if attempt_max_tokens == RECOVERY_MAX_OUTPUT_TOKENS:
+                            recovery_spent = True
                         break
                     except AttributeError as extract_err:
                         if "No text content" not in str(extract_err):

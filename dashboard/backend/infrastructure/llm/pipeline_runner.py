@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import copy
 import json
+import os
 import re
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -47,6 +48,22 @@ beyond the episode context."""
 # for both reasoning tokens and the final JSON. This is intentionally scoped to
 # retries so reasoning stays enabled without doubling every successful call.
 RECOVERY_MAX_OUTPUT_TOKENS = max(DEFAULT_MAX_OUTPUT_TOKENS, 4096)
+
+
+def escalate_ceiling_on_retry() -> bool:
+    """Whether a retry after an empty reply should raise the output ceiling.
+
+    This module already does it unconditionally: an empty pipeline response is
+    retried once at ``RECOVERY_MAX_OUTPUT_TOKENS`` rather than at the ceiling
+    that just failed. The single-prompt loop in ``portfolio_manager`` does not
+    -- it retries four times at the failing ceiling and only then raises it --
+    so the same failure costs four extra billed calls there and one here.
+
+    Off by default; ``LLM_ESCALATE_CEILING_ON_RETRY=1`` makes the two paths
+    agree.
+    """
+    raw = os.getenv("LLM_ESCALATE_CEILING_ON_RETRY", "").strip().lower()
+    return raw in ("1", "true", "yes", "on")
 
 
 def is_post_trade_step(step: Any) -> bool:
