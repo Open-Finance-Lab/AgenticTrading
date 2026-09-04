@@ -131,6 +131,9 @@ def test_profile_keeps_full_sections_and_renders_value_axes():
     assert "profile.operational" in source
     assert "profile.commercial" in source
     assert "recent_lifecycle_transitions" in source
+    assert "activeFilters" in source
+    assert "formatExclusiveDateOnly" in source
+    assert "getRange" in value_source()
     for element_id in (
         "adminAnalyticsProfileLifecycle",
         "adminAnalyticsProfileOperational",
@@ -191,6 +194,8 @@ def test_value_formatting_uses_intl_and_dialogs_bound_scroll():
     source = value_source()
     assert "Intl.NumberFormat" in source
     assert "Intl.DateTimeFormat" in source
+    assert "value == null" in source
+    assert "Not mature" in source
     assert "toFixed(" not in source
     assert "overscroll-behavior: contain" in STYLES
     assert "touch-action: manipulation" in STYLES

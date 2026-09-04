@@ -238,6 +238,7 @@
   }
 
   function percent(value) {
+    if (value == null || value === '') return 'Not mature';
     const parsed = Number(value);
     return Number.isFinite(parsed)
       ? new Intl.NumberFormat(undefined, { style: 'percent', maximumFractionDigits: 0 }).format(parsed)
@@ -879,7 +880,11 @@
     }
   }
 
-  window.AdminAnalyticsValue = { onEnter, refresh, syncAuth, applyUserFilters };
+  function getRange() {
+    return state.range ? { ...state.range } : null;
+  }
+
+  window.AdminAnalyticsValue = { onEnter, refresh, syncAuth, applyUserFilters, getRange };
   document.addEventListener('DOMContentLoaded', () => {
     if (document.documentElement.dataset.navPage === 'admin') onEnter();
   });

@@ -176,6 +176,35 @@ def test_stored_event_recalculates_snapshot_best_effort(monkeypatch):
     assert users == [7]
 
 
+def test_projecting_service_is_not_recalculated_by_instrumentation(monkeypatch):
+    class ProjectingService:
+        project_snapshots = True
+
+        def try_record_server_event(self, **kwargs):
+            return AppendEventResult.model_construct(event=None, created=True)
+
+    users = []
+    monkeypatch.setattr(
+        instrumentation,
+        "get_analytics_service",
+        lambda: ProjectingService(),
+    )
+    monkeypatch.setattr(
+        instrumentation,
+        "_snapshot_recalculator",
+        lambda user_id: users.append(user_id),
+    )
+
+    instrumentation.emit_agent_event(
+        event_name="agent_created",
+        user_id=7,
+        agent_id="agent-1",
+        occurred_at=NOW,
+    )
+
+    assert users == []
+
+
 def test_snapshot_failure_never_escapes_or_logs_exception_text(
     monkeypatch,
     capsys,

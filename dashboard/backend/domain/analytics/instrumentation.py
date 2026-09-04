@@ -130,8 +130,9 @@ def _emit(*, allowed_names: set[str], group: str, **kwargs: Any) -> None:
             source_record_id=source_record_id,
             version=version,
         )
-        result = get_analytics_service().try_record_server_event(**kwargs)
-        if result is not None:
+        service = get_analytics_service()
+        result = service.try_record_server_event(**kwargs)
+        if result is not None and not getattr(service, "project_snapshots", False):
             _recalculate_snapshot(int(kwargs["user_id"]), str(event_name))
     except Exception as exc:
         _safe_warning(exc)

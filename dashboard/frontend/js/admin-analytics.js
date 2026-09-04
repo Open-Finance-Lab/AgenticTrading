@@ -132,6 +132,15 @@
     };
   }
 
+  function activeFilters() {
+    const filters = state.filters || readUrlFilters();
+    const valueRange = window.AdminAnalyticsValue?.getRange?.();
+    if (!valueRange || !validDate(valueRange.start) || !validDate(valueRange.end)) {
+      return filters;
+    }
+    return { ...filters, start: valueRange.start, end: valueRange.end };
+  }
+
   function setFilterControls(filters) {
     element('adminAnalyticsStart').value = filters.start;
     element('adminAnalyticsEnd').value = filters.end;
@@ -165,15 +174,17 @@
   }
 
   function replaceAnalyticsUrl({ userId = state.profile.userId, section = state.profile.section } = {}) {
-    if (!state.filters) return;
+    const filters = activeFilters();
+    if (!filters) return;
+    state.filters = filters;
     const url = new URL(window.location.href);
     url.searchParams.set('adminTab', 'analytics');
-    url.searchParams.set('analyticsStart', state.filters.start);
-    url.searchParams.set('analyticsEnd', state.filters.end);
-    url.searchParams.set('analyticsBilling', state.filters.billingMode);
-    setOptionalParam(url, 'analyticsProvider', state.filters.provider);
-    setOptionalParam(url, 'analyticsModel', state.filters.model);
-    if (state.filters.includeInternal) url.searchParams.set('analyticsInternal', 'true');
+    url.searchParams.set('analyticsStart', filters.start);
+    url.searchParams.set('analyticsEnd', filters.end);
+    url.searchParams.set('analyticsBilling', filters.billingMode);
+    setOptionalParam(url, 'analyticsProvider', filters.provider);
+    setOptionalParam(url, 'analyticsModel', filters.model);
+    if (filters.includeInternal) url.searchParams.set('analyticsInternal', 'true');
     else url.searchParams.delete('analyticsInternal');
     setOptionalParam(url, 'analyticsUser', userId);
     setOptionalParam(url, 'analyticsProfile', userId);
@@ -245,6 +256,14 @@
     return Number.isFinite(date.getTime())
       ? new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeZone: 'UTC' }).format(date)
       : fallback;
+  }
+
+  function formatExclusiveDateOnly(value, fallback = '—') {
+    if (!value) return fallback;
+    const date = new Date(`${value}T00:00:00Z`);
+    if (!Number.isFinite(date.getTime())) return fallback;
+    date.setUTCDate(date.getUTCDate() - 1);
+    return new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeZone: 'UTC' }).format(date);
   }
 
   function makeTime(value, fallback = '—') {
@@ -704,7 +723,7 @@
       head.appendChild(textNode('span', '', `${numberOrDash(transition.users)} user${Number(transition.users) === 1 ? '' : 's'}`));
       item.appendChild(head);
       const quality = transition.data_quality === 'partial' ? ' · Incomplete data' : '';
-      item.appendChild(textNode('p', '', `${formatDateOnly(transition.period_start)} – ${formatDateOnly(transition.period_end)}${quality}`));
+      item.appendChild(textNode('p', '', `${formatDateOnly(transition.period_start)} – ${formatExclusiveDateOnly(transition.period_end)}${quality}`));
       target.appendChild(item);
     });
     if (!target.children.length) {
@@ -721,7 +740,7 @@
     renderSignalBadge('adminAnalyticsProfileCommercial', 'commercial', commercial.commercial_tier, COMMERCIAL_LABELS);
     const facts = element('adminAnalyticsProfileValueFacts');
     clearChildren(facts);
-    appendDefinition(facts, 'Selected period', `${formatDateOnly(profile.selected_period_start)} – ${formatDateOnly(profile.selected_period_end)}`);
+    appendDefinition(facts, 'Selected period', `${formatDateOnly(profile.selected_period_start)} – ${formatExclusiveDateOnly(profile.selected_period_end)}`);
     appendDefinition(facts, 'Activated', formatTimestamp(lifecycle.activated_at, 'Not activated'));
     appendDefinition(facts, 'Active days (30d)', numberOrDash(lifecycle.active_days_30d));
     appendDefinition(facts, 'Successful backtests (30d)', numberOrDash(lifecycle.successful_backtests_30d));
@@ -775,9 +794,11 @@
   async function loadProfile(userId) {
     const requestSeq = ++state.userRequestSeq;
     try {
+      const filters = activeFilters();
+      state.filters = filters;
       const params = new URLSearchParams();
-      if (state.filters?.start) params.set('from', state.filters.start);
-      if (state.filters?.end) params.set('to', state.filters.end);
+      if (filters?.start) params.set('from', filters.start);
+      if (filters?.end) params.set('to', filters.end);
       const profile = await request(`/api/admin/analytics/users/${encodeURIComponent(String(userId))}?${params}`);
       if (requestSeq !== state.userRequestSeq || String(state.profile.userId) !== String(userId)) return;
       element('adminAnalyticsProfileError').hidden = true;
