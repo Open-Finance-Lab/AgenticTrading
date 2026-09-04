@@ -412,13 +412,64 @@ def test_djia_baseline_schema(monkeypatch):
     monkeypatch.setattr(engine_mod, "generate_baselines", lambda **kw: ([], fake_curve))
 
     bt = HourlyBacktester("2026-03-01", "2026-04-01", use_llm=False)
-    bt.all_data = {"AAPL": pd.DataFrame()}
+    bt.symbols = list(engine_mod.DJIA_30)
+    bt.all_data = {symbol: pd.DataFrame() for symbol in engine_mod.DJIA_30}
     run_id, history = bt.run_djia_baseline()
 
     assert run_id.startswith("djia_index_")
     assert history == fake_curve
     assert fake_db.runs[0]["agent_name"] == "DJIA"
     assert fake_db.runs[0]["num_trades"] == 0
+
+
+def test_djia_baseline_drops_incomplete_decision_bars(monkeypatch):
+    monkeypatch.setattr(engine_mod, "create_market_data_provider", _fake_provider_factory)
+    fake_db = _FakeDB()
+    monkeypatch.setattr(engine_mod, "db", fake_db)
+
+    eastern = pytz.timezone("US/Eastern")
+    timestamps = pd.date_range(
+        eastern.localize(datetime(2026, 3, 2, 9, 30)),
+        eastern.localize(datetime(2026, 3, 2, 10, 25)),
+        freq="5min",
+    ).delete(3)
+    source_frame = pd.DataFrame(
+        {
+            "open": range(100, 111),
+            "high": range(101, 112),
+            "low": range(99, 110),
+            "close": range(100, 111),
+            "volume": [10] * len(timestamps),
+        },
+        index=timestamps,
+    )
+    _FakeLoader.bars = {symbol: source_frame for symbol in engine_mod.DJIA_30}
+
+    captured = {}
+
+    def fake_generate_baselines(**kwargs):
+        captured["bars"] = kwargs["bars_by_symbol"]
+        return [], [
+            {
+                "timestamp": "2026-03-02T10:00:00",
+                "equity": 100000.0,
+                "cash": 0.0,
+                "positions_value": 100000.0,
+            }
+        ]
+
+    monkeypatch.setattr(engine_mod, "generate_baselines", fake_generate_baselines)
+
+    bt = HourlyBacktester("2026-03-01", "2026-04-01", use_llm=False)
+    bt.all_data = {"AAPL": pd.DataFrame()}
+    bt.intraday_mode = True
+    bt.source_timeframe = "5m"
+    bt.decision_timeframe = "60m"
+    run_id, _history = bt.run_djia_baseline()
+
+    assert run_id.startswith("djia_index_")
+    assert captured["bars"]
+    assert all(frame.empty for frame in captured["bars"].values())
 
 
 def test_baselines_empty_data(monkeypatch):
