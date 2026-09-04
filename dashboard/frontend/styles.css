@@ -3327,6 +3327,125 @@ a.header-brand:hover .title-section h1 {
     }
 }
 
+.admin-value-dialog {
+    width: min(680px, calc(100vw - 28px));
+    max-height: min(760px, calc(100vh - 28px));
+    padding: 20px;
+    overflow: auto;
+    border: 1px solid rgba(103, 232, 249, 0.24);
+    border-radius: 8px;
+    background:
+        radial-gradient(circle at 100% 0, rgba(103, 232, 249, 0.08), transparent 34%),
+        var(--bg-card);
+    color: var(--text-primary);
+    box-shadow: 0 28px 80px rgba(0, 0, 0, 0.58);
+}
+
+.admin-value-dialog::backdrop {
+    background: rgba(2, 6, 23, 0.76);
+    backdrop-filter: blur(4px);
+}
+
+.admin-value-dialog-head {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 16px;
+}
+
+.admin-value-dialog-head h2 {
+    margin: 3px 0 0;
+    font-size: 20px;
+}
+
+.admin-value-dialog-intro {
+    margin: 10px 0 16px;
+    color: var(--text-secondary);
+    font-size: 12px;
+    line-height: 1.6;
+}
+
+.admin-value-rules-list {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 0 18px;
+    margin: 0 0 18px;
+}
+
+.admin-value-rules-list > div {
+    padding: 10px 0;
+    border-top: 1px solid rgba(148, 163, 184, 0.14);
+}
+
+.admin-value-rules-list dt {
+    color: var(--text-primary);
+    font-size: 12px;
+    font-weight: 700;
+}
+
+.admin-value-rules-list dd {
+    margin: 5px 0 0;
+    color: var(--text-secondary);
+    font-size: 11px;
+    line-height: 1.55;
+}
+
+.admin-profile-evidence-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 12px;
+}
+
+.admin-profile-evidence-grid > div,
+.admin-profile-evidence-grid > section {
+    min-width: 0;
+    padding: 13px;
+    border-left: 2px solid rgba(103, 232, 249, 0.5);
+    background: rgba(103, 232, 249, 0.045);
+}
+
+.admin-profile-evidence-grid h3,
+.admin-profile-evidence-grid h4 {
+    margin: 0 0 8px;
+    color: var(--text-primary);
+    font-size: 12px;
+}
+
+.admin-profile-evidence-grid p,
+.admin-profile-evidence-grid ul {
+    margin: 7px 0 0;
+    color: var(--text-secondary);
+    font-size: 11px;
+    line-height: 1.55;
+}
+
+.admin-profile-evidence-grid ul {
+    padding-left: 18px;
+}
+
+.admin-value-dialog-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+    margin-top: 18px;
+}
+
+.admin-value-dialog :focus-visible {
+    outline: 2px solid #67e8f9;
+    outline-offset: 2px;
+}
+
+@media (max-width: 600px) {
+    .admin-value-rules-list,
+    .admin-profile-evidence-grid {
+        grid-template-columns: 1fr;
+    }
+
+    .admin-value-dialog-actions {
+        display: grid;
+    }
+}
+
 /* Final Backtest feed overrides stay scoped so legacy decision-table rules
    cannot reintroduce a wide table or page-level overflow. */
 .playground-backtest-panel .trading-log-card {

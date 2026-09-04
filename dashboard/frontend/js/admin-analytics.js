@@ -21,6 +21,16 @@
     onboarding: 'Onboarding',
     active: 'Active',
   };
+  const LIFECYCLE_LABELS = {
+    new: 'New', onboarding: 'Onboarding', growing: 'Growing',
+    core: 'Core', at_risk: 'At risk', dormant: 'Dormant',
+  };
+  const OPERATIONAL_LABELS = {
+    blocked: 'Blocked', needs_attention: 'Needs attention', healthy: 'Healthy',
+  };
+  const COMMERCIAL_LABELS = {
+    unpaid: 'Unpaid', starter: 'Starter', invested: 'Invested', high_value: 'High value',
+  };
   const EVENT_LABELS = {
     account_signed_up: 'Account signed up',
     credential_verified: 'Credential verified',
@@ -166,6 +176,7 @@
     if (state.filters.includeInternal) url.searchParams.set('analyticsInternal', 'true');
     else url.searchParams.delete('analyticsInternal');
     setOptionalParam(url, 'analyticsUser', userId);
+    setOptionalParam(url, 'analyticsProfile', userId);
     if (userId) url.searchParams.set('analyticsSection', section || 'overview');
     else url.searchParams.delete('analyticsSection');
     window.history.replaceState(window.history.state, '', url);
@@ -652,6 +663,75 @@
     if (!list.children.length) list.appendChild(textNode('li', 'admin-analytics-empty-row', 'No recent footprint events.'));
   }
 
+  function renderSignalBadge(targetId, kind, value, labels) {
+    const target = element(targetId);
+    clearChildren(target);
+    target.appendChild(textNode(
+      'span',
+      `admin-value-badge is-${kind}-${value}`,
+      labels[value] || humanizeIdentifier(value)
+    ));
+  }
+
+  function renderFactEvidence(targetId, values, fallback) {
+    const target = element(targetId);
+    clearChildren(target);
+    (values || []).forEach((value) => target.appendChild(textNode('li', '', value)));
+    if (!target.children.length) target.appendChild(textNode('li', 'admin-analytics-empty-row', fallback));
+  }
+
+  function renderLifecycleTransitions(transitions) {
+    const target = element('adminAnalyticsLifecycleTransitions');
+    clearChildren(target);
+    (transitions || []).forEach((transition) => {
+      const item = document.createElement('li');
+      const head = document.createElement('div');
+      head.appendChild(textNode(
+        'strong',
+        '',
+        `${LIFECYCLE_LABELS[transition.from_segment] || humanizeIdentifier(transition.from_segment)} → ${LIFECYCLE_LABELS[transition.to_segment] || humanizeIdentifier(transition.to_segment)}`
+      ));
+      head.appendChild(textNode('span', '', `${numberOrDash(transition.users)} user${Number(transition.users) === 1 ? '' : 's'}`));
+      item.appendChild(head);
+      const quality = transition.data_quality === 'partial' ? ' · Incomplete data' : '';
+      item.appendChild(textNode('p', '', `${transition.period_start} – ${transition.period_end}${quality}`));
+      target.appendChild(item);
+    });
+    if (!target.children.length) {
+      target.appendChild(textNode('li', 'admin-analytics-empty-row', 'No lifecycle transitions in this range.'));
+    }
+  }
+
+  function renderValueProfile(profile) {
+    const lifecycle = profile.lifecycle || {};
+    const operational = profile.operational || {};
+    const commercial = profile.commercial || {};
+    renderSignalBadge('adminAnalyticsProfileLifecycle', 'lifecycle', lifecycle.segment, LIFECYCLE_LABELS);
+    renderSignalBadge('adminAnalyticsProfileOperational', 'operational', operational.state, OPERATIONAL_LABELS);
+    renderSignalBadge('adminAnalyticsProfileCommercial', 'commercial', commercial.commercial_tier, COMMERCIAL_LABELS);
+    const facts = element('adminAnalyticsProfileValueFacts');
+    clearChildren(facts);
+    appendDefinition(facts, 'Selected period', `${profile.selected_period_start || '—'} – ${profile.selected_period_end || '—'}`);
+    appendDefinition(facts, 'Activated', lifecycle.activated_at ? new Date(lifecycle.activated_at).toLocaleString() : 'Not activated');
+    appendDefinition(facts, 'Active days (30d)', numberOrDash(lifecycle.active_days_30d));
+    appendDefinition(facts, 'Successful backtests (30d)', numberOrDash(lifecycle.successful_backtests_30d));
+    appendDefinition(facts, 'Inactive UTC days', numberOrDash(lifecycle.inactive_days));
+    appendDefinition(facts, 'Lifetime net purchased', formatCreditsMicro(commercial.lifetime_net_purchased_micro));
+    appendDefinition(facts, 'Consumed in period', formatCreditsMicro(commercial.consumed_micro));
+    appendDefinition(facts, 'Available balance', formatCreditsMicro(commercial.total_available_micro));
+    renderFactEvidence(
+      'adminAnalyticsLifecycleEvidence',
+      lifecycle.evidence,
+      'No lifecycle evidence is available.'
+    );
+    renderFactEvidence(
+      'adminAnalyticsOperationalEvidence',
+      operational.evidence,
+      'No operational evidence is available.'
+    );
+    renderLifecycleTransitions(profile.recent_lifecycle_transitions);
+  }
+
   function renderProfile(profile) {
     state.profile.detail = profile;
     setProfileText('adminAnalyticsProfileTitle', profile.display_name || profile.email || `User #${profile.user_id}`);
@@ -662,7 +742,10 @@
     const stateTarget = element('adminAnalyticsProfileState');
     clearChildren(stateTarget);
     stateTarget.appendChild(textNode('span', `admin-analytics-state-badge is-${profile.state?.status}`, STATE_LABELS[profile.state?.status] || humanizeIdentifier(profile.state?.status)));
-    setProfileText('adminAnalyticsProfileReason', profile.state?.human_readable_reason);
+    setProfileText(
+      'adminAnalyticsProfileReason',
+      profile.operational?.state === 'healthy' ? profile.lifecycle?.reason : profile.operational?.reason
+    );
     setProfileText('adminAnalyticsProfileBilling', profile.primary_billing_lane ? humanizeIdentifier(profile.primary_billing_lane) : null);
     setProfileText('adminAnalyticsProfileProvider', profile.default_provider);
     setProfileText('adminAnalyticsProfileRegion', profile.country_code, 'Unknown');
@@ -673,6 +756,7 @@
     renderRunSummary(profile);
     renderUsageSummary(profile);
     renderFootprint(profile);
+    renderValueProfile(profile);
     const overviewPanel = document.querySelector('[data-analytics-section-panel="overview"]');
     const status = overviewPanel?.querySelector('[data-section-status]');
     if (status) status.textContent = '';
@@ -681,7 +765,10 @@
   async function loadProfile(userId) {
     const requestSeq = ++state.userRequestSeq;
     try {
-      const profile = await request(`/api/admin/analytics/users/${encodeURIComponent(String(userId))}`);
+      const params = new URLSearchParams();
+      if (state.filters?.start) params.set('from', state.filters.start);
+      if (state.filters?.end) params.set('to', state.filters.end);
+      const profile = await request(`/api/admin/analytics/users/${encodeURIComponent(String(userId))}?${params}`);
       if (requestSeq !== state.userRequestSeq || String(state.profile.userId) !== String(userId)) return;
       element('adminAnalyticsProfileError').hidden = true;
       renderProfile(profile);
@@ -728,7 +815,7 @@
     element('adminAnalyticsProfile').hidden = true;
     element('adminAnalyticsOverview').hidden = false;
     replaceAnalyticsUrl({ userId: null, section: 'overview' });
-    if (focus) element('adminAnalyticsAttentionHeading')?.focus();
+    if (focus) element('adminPriorityUsersTitle')?.focus();
   }
 
   function sectionPanel(section) {

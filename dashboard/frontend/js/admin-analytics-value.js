@@ -33,6 +33,19 @@
     invested: 'Invested',
     high_value: 'High value',
   });
+  const LIFECYCLE_RULES = Object.freeze({
+    new: 'Account is 0–6 UTC days old and has no successful backtest.',
+    onboarding: 'No successful backtest yet; the account is no longer New and is not inactive.',
+    growing: 'Activated and active in the last 7 UTC days, below the Core repeat-value threshold.',
+    core: 'At least 3 active days and 3 successful backtests in 30 UTC days, active in the last 7 days.',
+    at_risk: 'Last meaningful activity was 8–29 UTC days ago.',
+    dormant: 'Last meaningful activity was at least 30 UTC days ago.',
+  });
+  const OPERATIONAL_RULES = Object.freeze({
+    blocked: 'A current issue prevents a core action, such as an unavailable billing lane.',
+    needs_attention: 'A supported issue needs operator review but may not block every action.',
+    healthy: 'No supported current blocker or attention condition matched.',
+  });
   const CHART_COLORS = Object.freeze({
     new: '#94a3b8',
     onboarding: '#38bdf8',
@@ -48,6 +61,7 @@
     user: 'analyticsUser',
     profile: 'analyticsProfile',
   });
+  const returnFocus = new Map();
 
   const state = {
     initialized: false,
@@ -70,6 +84,7 @@
       operational: { loaded: false, data: null, error: null, stale: false },
     },
     movementChart: null,
+    evidenceUser: null,
   };
 
   function element(id) {
@@ -86,6 +101,27 @@
   function clear(target) {
     if (!target) return;
     while (target.firstChild) target.removeChild(target.firstChild);
+  }
+
+  function openDialog(dialog, opener) {
+    if (!dialog || typeof dialog.showModal !== 'function') return;
+    returnFocus.set(dialog.id, opener || document.activeElement);
+    dialog.showModal();
+    dialog.querySelector('[data-dialog-initial-focus]')?.focus();
+  }
+
+  function closeDialog(dialog) {
+    if (!dialog?.open) return;
+    dialog.close();
+    const opener = returnFocus.get(dialog.id);
+    returnFocus.delete(dialog.id);
+    if (opener?.isConnected) opener.focus();
+  }
+
+  function appendEvidence(target, evidence, fallback) {
+    clear(target);
+    (evidence || []).forEach((fact) => target.appendChild(node('li', '', fact)));
+    if (!target.children.length) target.appendChild(node('li', 'admin-value-empty', fallback));
   }
 
   function request(path) {
@@ -332,8 +368,58 @@
     element('adminValuePrimaryStatus').textContent = incomplete ? 'Incomplete data · available sections remain current.' : '';
   }
 
-  function badge(kind, value, labels) {
-    return node('span', `admin-value-badge is-${kind}-${value}`, labels[value] || String(value || 'Unknown'));
+  function badge(kind, value, labels, rules) {
+    const target = node('span', `admin-value-badge is-${kind}-${value}`, labels[value] || String(value || 'Unknown'));
+    if (rules?.[value]) {
+      target.title = rules[value];
+      target.setAttribute('aria-label', `${target.textContent}: ${rules[value]}`);
+    }
+    return target;
+  }
+
+  function renderRulesDialog() {
+    const list = element('adminAnalyticsRulesList');
+    clear(list);
+    LIFECYCLE_SEGMENTS.forEach((segment) => {
+      const wrapper = document.createElement('div');
+      wrapper.appendChild(node('dt', '', LIFECYCLE_LABELS[segment]));
+      wrapper.appendChild(node('dd', '', LIFECYCLE_RULES[segment]));
+      list.appendChild(wrapper);
+    });
+    Object.keys(OPERATIONAL_LABELS).forEach((status) => {
+      const wrapper = document.createElement('div');
+      wrapper.appendChild(node('dt', '', OPERATIONAL_LABELS[status]));
+      wrapper.appendChild(node('dd', '', OPERATIONAL_RULES[status]));
+      list.appendChild(wrapper);
+    });
+  }
+
+  function renderEvidenceDialog(user) {
+    state.evidenceUser = user;
+    element('adminAnalyticsEvidenceTitle').textContent = user.display_name || user.email || `User #${user.user_id}`;
+    element('adminAnalyticsEvidenceEmail').textContent = user.email || `User #${user.user_id}`;
+    const signals = element('adminAnalyticsEvidenceSignals');
+    clear(signals);
+    signals.appendChild(badge('lifecycle', user.lifecycle?.segment, LIFECYCLE_LABELS, LIFECYCLE_RULES));
+    signals.appendChild(badge('operational', user.operational?.state, OPERATIONAL_LABELS, OPERATIONAL_RULES));
+    signals.appendChild(badge('commercial', user.commercial_tier, COMMERCIAL_LABELS));
+    element('adminAnalyticsEvidenceLifecycleReason').textContent = user.lifecycle?.reason || 'No lifecycle reason is available.';
+    element('adminAnalyticsEvidenceOperationalReason').textContent = user.operational?.reason || 'No operational reason is available.';
+    appendEvidence(
+      element('adminAnalyticsEvidenceLifecycle'),
+      user.lifecycle?.evidence,
+      'No lifecycle evidence is available.'
+    );
+    appendEvidence(
+      element('adminAnalyticsEvidenceOperational'),
+      user.operational?.evidence,
+      'No operational evidence is available.'
+    );
+  }
+
+  function openEvidenceDialog(user, opener) {
+    renderEvidenceDialog(user);
+    openDialog(element('adminAnalyticsEvidenceDialog'), opener);
   }
 
   function renderUsers(payload) {
@@ -347,16 +433,17 @@
       identity.appendChild(node('span', '', user.email || `User #${user.user_id}`));
       row.appendChild(identity);
       const signals = node('div', 'admin-priority-signals');
-      signals.appendChild(badge('lifecycle', user.lifecycle?.segment, LIFECYCLE_LABELS));
-      signals.appendChild(badge('operational', user.operational?.state, OPERATIONAL_LABELS));
+      signals.appendChild(badge('lifecycle', user.lifecycle?.segment, LIFECYCLE_LABELS, LIFECYCLE_RULES));
+      signals.appendChild(badge('operational', user.operational?.state, OPERATIONAL_LABELS, OPERATIONAL_RULES));
       signals.appendChild(badge('commercial', user.commercial_tier, COMMERCIAL_LABELS));
       row.appendChild(signals);
       row.appendChild(node('p', 'admin-priority-reason', user.operational?.state === 'healthy' ? user.lifecycle?.reason : user.operational?.reason));
       row.appendChild(node('span', 'admin-priority-value', credits(user.lifetime_net_purchased_micro)));
-      const open = node('button', 'credits-key-action', 'Open profile');
+      const open = node('button', 'credits-key-action', 'Review evidence');
       open.type = 'button';
       open.dataset.userId = String(user.user_id);
-      open.addEventListener('click', () => window.AdminAnalytics?.openProfile(user.user_id));
+      open.setAttribute('aria-haspopup', 'dialog');
+      open.addEventListener('click', () => openEvidenceDialog(user, open));
       row.appendChild(open);
       target.appendChild(row);
     });
@@ -624,6 +711,43 @@
   }
 
   function bindEvents() {
+    element('adminAnalyticsRulesOpen')?.addEventListener('click', (event) => {
+      renderRulesDialog();
+      openDialog(element('adminAnalyticsRulesDialog'), event.currentTarget);
+    });
+    document.querySelectorAll('.admin-value-dialog').forEach((dialog) => {
+      dialog.querySelectorAll('[data-admin-value-dialog-close]').forEach((button) => {
+        button.addEventListener('click', () => closeDialog(dialog));
+      });
+      dialog.addEventListener('cancel', (event) => {
+        event.preventDefault();
+        closeDialog(dialog);
+      });
+      dialog.addEventListener('keydown', (event) => {
+        if (event.key !== 'Escape') return;
+        event.preventDefault();
+        closeDialog(dialog);
+      });
+      dialog.addEventListener('click', (event) => {
+        if (event.target === dialog) closeDialog(dialog);
+      });
+    });
+    element('adminAnalyticsEvidenceProfile')?.addEventListener('click', () => {
+      const user = state.evidenceUser;
+      if (!user) return;
+      closeDialog(element('adminAnalyticsEvidenceDialog'));
+      state.userFilters.profile = String(user.user_id);
+      writeUrlState();
+      window.AdminAnalytics?.openProfile(user.user_id);
+    });
+    element('adminAnalyticsEvidenceAccount')?.addEventListener('click', () => {
+      const user = state.evidenceUser;
+      if (!user) return;
+      closeDialog(element('adminAnalyticsEvidenceDialog'));
+      state.userFilters.profile = '';
+      writeUrlState();
+      window.AdminTabs?.openAccountManagement({ userId: user.user_id, email: user.email });
+    });
     element('adminAnalyticsValueFilters')?.addEventListener('submit', (event) => {
       event.preventDefault();
       const error = element('adminValueFilterError');

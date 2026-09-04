@@ -13,7 +13,7 @@
          because every API call is a CORS request. -->
     <link rel="preconnect" href="https://agentictrading.onrender.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="styles.css?v=132">
+    <link rel="stylesheet" href="styles.css?v=133">
     <!-- defer: ~200KB that was render-blocking. Deferred scripts execute in
          document order (this one first, the body-end ones after), all before
          DOMContentLoaded, so Chart is defined before any chart renders. -->
@@ -2310,7 +2310,10 @@
                             <div><dt>User ID</dt><dd id="adminAnalyticsProfileUserId">—</dd></div>
                             <div><dt>Joined</dt><dd id="adminAnalyticsProfileJoined">—</dd></div>
                             <div><dt>Last meaningful activity</dt><dd id="adminAnalyticsProfileLastActivity">—</dd></div>
-                            <div><dt>State</dt><dd id="adminAnalyticsProfileState">—</dd></div>
+                            <div><dt>Lifecycle</dt><dd id="adminAnalyticsProfileLifecycle">—</dd></div>
+                            <div><dt>Operational</dt><dd id="adminAnalyticsProfileOperational">—</dd></div>
+                            <div><dt>Commercial</dt><dd id="adminAnalyticsProfileCommercial">—</dd></div>
+                            <div><dt>Legacy status</dt><dd id="adminAnalyticsProfileState">—</dd></div>
                             <div><dt>Reason</dt><dd id="adminAnalyticsProfileReason">—</dd></div>
                             <div><dt>Primary billing lane</dt><dd id="adminAnalyticsProfileBilling">—</dd></div>
                             <div><dt>Default provider</dt><dd id="adminAnalyticsProfileProvider">—</dd></div>
@@ -2332,6 +2335,12 @@
                         <section id="adminAnalyticsSectionOverview" class="admin-analytics-profile-panel" data-analytics-section-panel="overview" role="tabpanel" aria-labelledby="adminAnalyticsProfileTabOverview">
                             <p data-section-status role="status" aria-live="polite">Loading profile overview…</p><p data-section-error role="alert" hidden></p>
                             <div id="adminAnalyticsProfileOverviewContent" class="admin-analytics-profile-overview">
+                                <section class="admin-profile-value-summary"><h4>User value summary</h4><dl id="adminAnalyticsProfileValueFacts" class="admin-analytics-summary-grid"></dl></section>
+                                <section class="admin-profile-evidence-grid">
+                                    <div><h4>Lifecycle evidence</h4><ul id="adminAnalyticsLifecycleEvidence"></ul></div>
+                                    <div><h4>Operational evidence</h4><ul id="adminAnalyticsOperationalEvidence"></ul></div>
+                                </section>
+                                <section><h4>Recent lifecycle movement</h4><ol id="adminAnalyticsLifecycleTransitions" class="admin-analytics-timeline"></ol></section>
                                 <section><h4>Activation milestones</h4><ol id="adminAnalyticsMilestones"></ol></section>
                                 <section><h4>Run summary</h4><dl id="adminAnalyticsRunSummary" class="admin-analytics-summary-grid"></dl></section>
                                 <section><h4>Billing and usage</h4><div class="admin-analytics-profile-usage"><dl id="adminAnalyticsUsageSummary"></dl><ul id="adminAnalyticsBillingMix"></ul></div></section>
@@ -2537,6 +2546,33 @@
         </div>
     </div>
 
+    <dialog id="adminAnalyticsRulesDialog" class="admin-value-dialog" aria-labelledby="adminAnalyticsRulesTitle">
+        <div class="admin-value-dialog-head">
+            <div><p class="credits-section-kicker">Reference</p><h2 id="adminAnalyticsRulesTitle">How segments work</h2></div>
+            <button class="credits-icon-btn" data-admin-value-dialog-close type="button" aria-label="Close segment rules" title="Close"><svg aria-hidden="true"><use href="#icon-x"/></svg></button>
+        </div>
+        <p class="admin-value-dialog-intro">Lifecycle describes product maturity. Operational state separately describes whether a current issue needs action.</p>
+        <dl id="adminAnalyticsRulesList" class="admin-value-rules-list"></dl>
+        <button class="auth-btn auth-btn-secondary" data-admin-value-dialog-close data-dialog-initial-focus type="button">Close</button>
+    </dialog>
+
+    <dialog id="adminAnalyticsEvidenceDialog" class="admin-value-dialog" aria-labelledby="adminAnalyticsEvidenceTitle">
+        <div class="admin-value-dialog-head">
+            <div><p class="credits-section-kicker">User evidence</p><h2 id="adminAnalyticsEvidenceTitle">Priority user</h2></div>
+            <button class="credits-icon-btn" data-admin-value-dialog-close type="button" aria-label="Close user evidence" title="Close"><svg aria-hidden="true"><use href="#icon-x"/></svg></button>
+        </div>
+        <p id="adminAnalyticsEvidenceEmail" class="admin-value-dialog-intro"></p>
+        <div id="adminAnalyticsEvidenceSignals" class="admin-priority-signals"></div>
+        <div class="admin-profile-evidence-grid">
+            <section><h3>Lifecycle evidence</h3><p id="adminAnalyticsEvidenceLifecycleReason"></p><ul id="adminAnalyticsEvidenceLifecycle"></ul></section>
+            <section><h3>Operational evidence</h3><p id="adminAnalyticsEvidenceOperationalReason"></p><ul id="adminAnalyticsEvidenceOperational"></ul></section>
+        </div>
+        <div class="admin-value-dialog-actions">
+            <button id="adminAnalyticsEvidenceAccount" class="auth-btn auth-btn-secondary" type="button">Open account management</button>
+            <button id="adminAnalyticsEvidenceProfile" class="auth-btn auth-btn-primary" data-dialog-initial-focus type="button">Open full analytics profile</button>
+        </div>
+    </dialog>
+
     <dialog id="adminGrantReasonDialog" class="credits-refund-dialog admin-grant-reason-dialog" aria-labelledby="adminGrantReasonTitle">
         <form id="adminGrantReasonForm">
             <div class="credits-refund-head">
@@ -2600,8 +2636,8 @@
     <script src="js/credits.js?v=8" defer></script>
     <script src="js/admin-model-providers.js?v=1" defer></script>
     <script src="js/admin-credits.js?v=6" defer></script>
-    <script src="js/admin-analytics.js?v=3" defer></script>
-    <script src="js/admin-analytics-value.js?v=1" defer></script>
+    <script src="js/admin-analytics.js?v=4" defer></script>
+    <script src="js/admin-analytics-value.js?v=2" defer></script>
     <script src="js/admin-tabs.js?v=4" defer></script>
     <script src="js/leaderboard.js?v=32" defer></script>
     <script src="home-page.js?v=50" defer></script>
