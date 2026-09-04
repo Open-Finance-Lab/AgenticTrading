@@ -6,7 +6,7 @@ import json
 from collections import Counter, defaultdict
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import TYPE_CHECKING, Any, Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -30,10 +30,6 @@ from .states import (
     UserAnalyticsSnapshot,
     calculate_user_state,
 )
-
-if TYPE_CHECKING:
-    from .value_queries import ValueAnalyticsQueryService
-
 
 ActivitySection = Literal["timeline", "runs", "usage", "sessions"]
 _USER_STATES = {"blocked", "needs_attention", "dormant", "onboarding", "active"}
