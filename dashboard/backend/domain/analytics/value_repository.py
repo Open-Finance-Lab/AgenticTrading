@@ -19,11 +19,17 @@ from .lifecycle import (
     commercial_tier,
 )
 from .repository import analytics_store
-from .repository_common import positive_user_id, utc_iso
+from .repository_common import positive_limit, positive_user_id, utc_iso
 
 
 MAX_USER_BATCH = 500
 RUN_SAFE_DEADLINE = timedelta(minutes=60)
+LIFECYCLE_SEGMENTS = frozenset(
+    {"new", "onboarding", "growing", "core", "at_risk", "dormant"}
+)
+LIFECYCLE_ROLLUP_METRICS = frozenset(
+    {"lifecycle_segment_count", "lifecycle_transition"}
+)
 _ACTIVE_RUN_STATUSES = frozenset({"created", "loading", "running"})
 _TERMINAL_RUN_STATUSES = frozenset(
     {"completed", "failed", "cancelled", "closed", "timed_out"}
@@ -464,6 +470,192 @@ class ValueAnalyticsStore:
             )
             for row in rows
         ]
+
+    def replace_lifecycle_rollups(
+        self,
+        day: date,
+        rows: Sequence[Any],
+        *,
+        replace_transitions: bool = True,
+    ) -> None:
+        """Replace only lifecycle aggregates, preserving other daily metrics."""
+
+        values = list(rows)
+        columns = (
+            "rollup_date",
+            "metric_name",
+            "event_name",
+            "billing_mode",
+            "provider_id",
+            "model_id",
+            "outcome",
+            "error_category",
+            "user_state",
+            "value_count",
+            "value_sum_micro",
+            "updated_at",
+        )
+        payloads = []
+        for row in values:
+            if (
+                row.rollup_date != day
+                or row.metric_name not in LIFECYCLE_ROLLUP_METRICS
+            ):
+                raise ValueError("invalid lifecycle rollup row")
+            if row.metric_name == "lifecycle_segment_count":
+                valid_dimensions = (
+                    not row.event_name and row.user_state in LIFECYCLE_SEGMENTS
+                )
+            else:
+                valid_dimensions = (
+                    replace_transitions
+                    and row.event_name in LIFECYCLE_SEGMENTS
+                    and row.user_state in LIFECYCLE_SEGMENTS
+                    and row.event_name != row.user_state
+                )
+            unused_dimensions = (
+                row.billing_mode,
+                row.provider_id,
+                row.model_id,
+                row.error_category,
+            )
+            if (
+                not valid_dimensions
+                or any(unused_dimensions)
+                or row.outcome not in {"complete", "partial"}
+                or row.value_sum_micro != 0
+            ):
+                raise ValueError("invalid lifecycle rollup dimensions")
+            payloads.append(
+                (
+                    row.rollup_date.isoformat(),
+                    row.metric_name,
+                    row.event_name,
+                    row.billing_mode,
+                    row.provider_id,
+                    row.model_id,
+                    row.outcome,
+                    row.error_category,
+                    row.user_state,
+                    row.value_count,
+                    row.value_sum_micro,
+                    utc_iso(row.updated_at),
+                )
+            )
+        placeholders = ", ".join(["%s" if self.is_postgres else "?"] * len(columns))
+        metrics = ["lifecycle_segment_count"]
+        if replace_transitions:
+            metrics.append("lifecycle_transition")
+        metric_placeholders = ", ".join(
+            ["%s" if self.is_postgres else "?"] * len(metrics)
+        )
+        with self._analytics_connection() as conn:
+            if self.is_postgres:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        f"""
+                        DELETE FROM analytics_daily_rollups
+                        WHERE rollup_date = %s
+                          AND metric_name IN ({metric_placeholders})
+                        """,
+                        (day.isoformat(), *metrics),
+                    )
+                    if payloads:
+                        cur.executemany(
+                            f"""
+                            INSERT INTO analytics_daily_rollups ({', '.join(columns)})
+                            VALUES ({placeholders})
+                            """,
+                            payloads,
+                        )
+            else:
+                conn.execute(
+                    f"""
+                    DELETE FROM analytics_daily_rollups
+                    WHERE rollup_date = ?
+                      AND metric_name IN ({metric_placeholders})
+                    """,
+                    (day.isoformat(), *metrics),
+                )
+                if payloads:
+                    conn.executemany(
+                        f"""
+                        INSERT INTO analytics_daily_rollups ({', '.join(columns)})
+                        VALUES ({placeholders})
+                        """,
+                        payloads,
+                    )
+
+    def list_expiring_daily_dates(
+        self,
+        *,
+        before: date,
+        limit: int,
+    ) -> list[date]:
+        if not isinstance(before, date) or isinstance(before, datetime):
+            raise ValueError("before must be a date")
+        page_size = positive_limit(limit, maximum=1000)
+        placeholder = "%s" if self.is_postgres else "?"
+        sql = f"""
+            SELECT DISTINCT snapshot_date
+            FROM user_lifecycle_daily_snapshots
+            WHERE snapshot_date < {placeholder}
+            ORDER BY snapshot_date
+            LIMIT {placeholder}
+        """
+        with self._analytics_connection() as conn:
+            if self.is_postgres:
+                with conn.cursor() as cur:
+                    cur.execute(sql, (before.isoformat(), page_size))
+                    rows = cur.fetchall()
+            else:
+                rows = conn.execute(sql, (before.isoformat(), page_size)).fetchall()
+        return [
+            date.fromisoformat(str(_row_value(row, "snapshot_date"))) for row in rows
+        ]
+
+    def delete_daily_snapshots_for_date(self, day: date) -> int:
+        if not isinstance(day, date) or isinstance(day, datetime):
+            raise ValueError("day must be a date")
+        with self._analytics_connection() as conn:
+            if self.is_postgres:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        DELETE FROM user_lifecycle_daily_snapshots
+                        WHERE snapshot_date = %s
+                        RETURNING user_id
+                        """,
+                        (day.isoformat(),),
+                    )
+                    return len(cur.fetchall())
+            cursor = conn.execute(
+                """
+                DELETE FROM user_lifecycle_daily_snapshots
+                WHERE snapshot_date = ?
+                """,
+                (day.isoformat(),),
+            )
+            return max(0, int(cursor.rowcount))
+
+    def has_daily_before(self, before: date) -> bool:
+        if not isinstance(before, date) or isinstance(before, datetime):
+            raise ValueError("before must be a date")
+        placeholder = "%s" if self.is_postgres else "?"
+        sql = f"""
+            SELECT 1
+            FROM user_lifecycle_daily_snapshots
+            WHERE snapshot_date < {placeholder}
+            LIMIT 1
+        """
+        with self._analytics_connection() as conn:
+            if self.is_postgres:
+                with conn.cursor() as cur:
+                    cur.execute(sql, (before.isoformat(),))
+                    row = cur.fetchone()
+            else:
+                row = conn.execute(sql, (before.isoformat(),)).fetchone()
+        return row is not None
 
     @staticmethod
     def _fetchall(conn: Any, postgres: bool, sql: str, params: Sequence[Any]):

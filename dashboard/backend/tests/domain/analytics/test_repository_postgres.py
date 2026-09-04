@@ -18,6 +18,7 @@ from dashboard.backend.domain.analytics import repository_postgres as pg_module
 from dashboard.backend.domain.analytics.repository_postgres import (
     PostgresAnalyticsStore,
 )
+from dashboard.backend.domain.analytics.rollups import AnalyticsRollupStore, DailyRollup
 from dashboard.backend.domain.analytics.value_repository import (
     ProjectionJob,
     UserLifecycleDailySnapshot,
@@ -250,3 +251,28 @@ def test_postgres_user_value_projection_round_trip(
         user_ids=[user_id],
     ) == [daily]
     assert value_store.get_projection_job(job.job_name) == job
+
+    value_store.replace_lifecycle_rollups(
+        NOW.date(),
+        [
+            DailyRollup(
+                rollup_date=NOW.date(),
+                metric_name="lifecycle_segment_count",
+                outcome="complete",
+                user_state="core",
+                value_count=1,
+                updated_at=NOW,
+            )
+        ],
+    )
+    lifecycle_rollups = AnalyticsRollupStore(analytics).list_rollups(
+        start=NOW.date(),
+        end=NOW.date() + timedelta(days=1),
+    )
+    assert lifecycle_rollups[0].metric_name == "lifecycle_segment_count"
+    assert value_store.list_expiring_daily_dates(
+        before=NOW.date() + timedelta(days=1),
+        limit=10,
+    ) == [NOW.date()]
+    assert value_store.delete_daily_snapshots_for_date(NOW.date()) == 1
+    assert value_store.has_daily_before(NOW.date() + timedelta(days=1)) is False

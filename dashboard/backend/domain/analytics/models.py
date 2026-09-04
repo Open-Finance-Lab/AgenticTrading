@@ -388,8 +388,10 @@ class RetentionResult(BaseModel):
 
     raw_events_deleted: int = Field(default=0, ge=0)
     access_rows_deleted: int = Field(default=0, ge=0)
+    lifecycle_rows_deleted: int = Field(default=0, ge=0)
     has_more_raw_events: bool = False
     has_more_access_rows: bool = False
+    has_more_lifecycle_rows: bool = False
 
 
 class RequestAnalyticsContext(BaseModel):

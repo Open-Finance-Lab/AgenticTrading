@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from collections import Counter, defaultdict
 from datetime import date, datetime, time, timedelta, timezone
-from typing import Any, Iterable, Mapping
+from typing import Any, Iterable, Mapping, Sequence
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -16,6 +16,11 @@ from .metrics import calculate_overview_metrics
 from .models import AnalyticsEventRecord
 from .repository import _row_to_event, analytics_store
 from .repository_common import utc_iso
+from .value_repository import (
+    LIFECYCLE_ROLLUP_METRICS,
+    UserLifecycleDailySnapshot,
+    ValueAnalyticsStore,
+)
 
 
 class DailyRollup(BaseModel):
@@ -127,8 +132,12 @@ class AnalyticsRollupStore:
             with self.base_store._get_connection() as conn:
                 with conn.cursor() as cur:
                     cur.execute(
-                        "DELETE FROM analytics_daily_rollups WHERE rollup_date = %s",
-                        (day.isoformat(),),
+                        """
+                        DELETE FROM analytics_daily_rollups
+                        WHERE rollup_date = %s
+                          AND metric_name NOT IN (%s, %s)
+                        """,
+                        (day.isoformat(), *sorted(LIFECYCLE_ROLLUP_METRICS)),
                     )
                     if payloads:
                         cur.executemany(
@@ -140,8 +149,12 @@ class AnalyticsRollupStore:
             placeholders = ", ".join("?" for _ in columns)
             with self.base_store._get_connection() as conn:
                 conn.execute(
-                    "DELETE FROM analytics_daily_rollups WHERE rollup_date = ?",
-                    (day.isoformat(),),
+                    """
+                    DELETE FROM analytics_daily_rollups
+                    WHERE rollup_date = ?
+                      AND metric_name NOT IN (?, ?)
+                    """,
+                    (day.isoformat(), *sorted(LIFECYCLE_ROLLUP_METRICS)),
                 )
                 if payloads:
                     conn.executemany(
@@ -449,9 +462,85 @@ def rollup_current_day(
     return calculate_overview_metrics(events, start=start, end=current)
 
 
+def _snapshot_quality(rows: Sequence[UserLifecycleDailySnapshot]) -> str:
+    return (
+        "partial" if any(row.data_quality == "partial" for row in rows) else "complete"
+    )
+
+
+def rollup_lifecycle_day(
+    day: date,
+    *,
+    store: ValueAnalyticsStore,
+) -> tuple[DailyRollup, ...]:
+    """Persist anonymous lifecycle counts and changed-segment transitions."""
+
+    current = store.list_daily_snapshots(
+        start=day,
+        end=day + timedelta(days=1),
+    )
+    previous = store.list_daily_snapshots(
+        start=day - timedelta(days=1),
+        end=day,
+    )
+    updated_at = _day_start(day + timedelta(days=1))
+    rows: list[DailyRollup] = []
+    by_segment: dict[str, list[UserLifecycleDailySnapshot]] = defaultdict(list)
+    for snapshot in current:
+        by_segment[snapshot.lifecycle_segment].append(snapshot)
+    for segment, snapshots in sorted(by_segment.items()):
+        rows.append(
+            _row(
+                day,
+                "lifecycle_segment_count",
+                count=len(snapshots),
+                user_state=segment,
+                outcome=_snapshot_quality(snapshots),
+                updated_at=updated_at,
+            )
+        )
+
+    previous_by_user = {snapshot.user_id: snapshot for snapshot in previous}
+    transition_snapshots: dict[tuple[str, str], list[UserLifecycleDailySnapshot]] = (
+        defaultdict(list)
+    )
+    transition_quality: dict[tuple[str, str], list[UserLifecycleDailySnapshot]] = (
+        defaultdict(list)
+    )
+    for snapshot in current:
+        prior = previous_by_user.get(snapshot.user_id)
+        if prior is None or prior.lifecycle_segment == snapshot.lifecycle_segment:
+            continue
+        key = (prior.lifecycle_segment, snapshot.lifecycle_segment)
+        transition_snapshots[key].append(snapshot)
+        transition_quality[key].extend((prior, snapshot))
+    for (from_segment, to_segment), snapshots in sorted(transition_snapshots.items()):
+        rows.append(
+            _row(
+                day,
+                "lifecycle_transition",
+                count=len(snapshots),
+                event_name=from_segment,
+                user_state=to_segment,
+                outcome=_snapshot_quality(
+                    transition_quality[(from_segment, to_segment)]
+                ),
+                updated_at=updated_at,
+            )
+        )
+    rows.sort(key=lambda row: (row.metric_name, row.event_name, row.user_state))
+    store.replace_lifecycle_rollups(
+        day,
+        rows,
+        replace_transitions=bool(previous),
+    )
+    return tuple(rows)
+
+
 __all__ = [
     "AnalyticsRollupStore",
     "DailyRollup",
     "rollup_current_day",
     "rollup_day",
+    "rollup_lifecycle_day",
 ]

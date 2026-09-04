@@ -8,6 +8,8 @@ from datetime import datetime, timedelta, timezone
 
 from .models import RetentionResult
 from .repository import analytics_store
+from .rollups import rollup_lifecycle_day
+from .value_repository import ValueAnalyticsStore
 
 
 RAW_EVENT_RETENTION_DAYS = 180
@@ -28,6 +30,7 @@ class AnalyticsRetentionService:
         self,
         *,
         store,
+        value_store: ValueAnalyticsStore | None = None,
         batch_size: int = RETENTION_BATCH_SIZE,
         max_batches: int = MAX_BATCHES_PER_RUN,
     ) -> None:
@@ -44,6 +47,7 @@ class AnalyticsRetentionService:
         ):
             raise ValueError("max_batches must be a positive integer")
         self.store = store
+        self.value_store = value_store
         self.batch_size = batch_size
         self.max_batches = max_batches
 
@@ -58,6 +62,8 @@ class AnalyticsRetentionService:
         access_deleted = 0
         has_more_raw = False
         has_more_access = False
+        lifecycle_deleted = 0
+        has_more_lifecycle = False
 
         for _batch in range(self.max_batches):
             result = self.store.delete_expired(
@@ -72,11 +78,43 @@ class AnalyticsRetentionService:
             if not has_more_raw and not has_more_access:
                 break
 
+        if self.value_store is not None:
+            lifecycle_before = current.date() - timedelta(days=RAW_EVENT_RETENTION_DAYS)
+            expiring_days = self.value_store.list_expiring_daily_dates(
+                before=lifecycle_before,
+                limit=min(self.batch_size, self.max_batches),
+            )
+            # Aggregate every selected day before deleting any of them so
+            # adjacent-day transitions remain available throughout the batch.
+            for day in expiring_days:
+                rollup_lifecycle_day(day, store=self.value_store)
+            expiring_set = set(expiring_days)
+            for boundary_day in sorted(
+                {
+                    day + timedelta(days=1)
+                    for day in expiring_days
+                    if day + timedelta(days=1) not in expiring_set
+                }
+            ):
+                boundary_rows = self.value_store.list_daily_snapshots(
+                    start=boundary_day,
+                    end=boundary_day + timedelta(days=1),
+                )
+                if boundary_rows:
+                    rollup_lifecycle_day(boundary_day, store=self.value_store)
+            for day in expiring_days:
+                lifecycle_deleted += self.value_store.delete_daily_snapshots_for_date(
+                    day
+                )
+            has_more_lifecycle = self.value_store.has_daily_before(lifecycle_before)
+
         return RetentionResult(
             raw_events_deleted=raw_deleted,
             access_rows_deleted=access_deleted,
+            lifecycle_rows_deleted=lifecycle_deleted,
             has_more_raw_events=has_more_raw,
             has_more_access_rows=has_more_access,
+            has_more_lifecycle_rows=has_more_lifecycle,
         )
 
 
@@ -118,7 +156,11 @@ class AnalyticsRetentionCoordinator:
                 )
                 return None
             self.consecutive_failures = 0
-            if result.has_more_raw_events or result.has_more_access_rows:
+            if (
+                result.has_more_raw_events
+                or result.has_more_access_rows
+                or result.has_more_lifecycle_rows
+            ):
                 self._next_run_at = now + min(
                     self.interval_seconds, RETENTION_BACKLOG_RETRY_SECONDS
                 )
@@ -127,7 +169,16 @@ class AnalyticsRetentionCoordinator:
             self._lock.release()
 
 
-analytics_retention_service = AnalyticsRetentionService(store=analytics_store)
+analytics_retention_service = AnalyticsRetentionService(
+    store=analytics_store,
+    value_store=ValueAnalyticsStore(
+        analytics_store,
+        credits_base=object(),
+        provider_base=object(),
+        agent_base=object(),
+        run_base=object(),
+    ),
+)
 analytics_retention_coordinator = AnalyticsRetentionCoordinator(
     service=analytics_retention_service,
 )

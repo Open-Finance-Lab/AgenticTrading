@@ -16,6 +16,10 @@ class AnalyticsMaintenanceReport(BaseModel):
     rollup_rebuilt: bool = False
     repaired_snapshots: int = Field(default=0, ge=0)
     repaired_value_snapshots: int = Field(default=0, ge=0)
+    backfilled_lifecycle_users: int = Field(default=0, ge=0)
+    backfilled_lifecycle_rows: int = Field(default=0, ge=0)
+    lifecycle_backfill_complete: bool = False
+    lifecycle_backfill_failures: int = Field(default=0, ge=0)
     failures: int = Field(default=0, ge=0)
 
 
@@ -45,6 +49,7 @@ def run_analytics_maintenance(
     rebuild_rollup: Any | None = None,
     repair_snapshots: Any | None = None,
     repair_value_snapshots: Any | None = None,
+    backfill_lifecycle: Any | None = None,
 ) -> AnalyticsMaintenanceReport:
     """Rebuild yesterday and repair bounded dual-axis and legacy batches."""
 
@@ -69,6 +74,10 @@ def run_analytics_maintenance(
         from .states import repair_stale_value_snapshots
 
         repair_value_snapshots = repair_stale_value_snapshots
+    if backfill_lifecycle is None:
+        from .lifecycle_backfill import run_lifecycle_backfill_batch
+
+        backfill_lifecycle = run_lifecycle_backfill_batch
 
     with _guard_lock:
         should_rebuild = _last_rollup_day != completed_day
@@ -127,11 +136,35 @@ def run_analytics_maintenance(
             f"category={type(exc).__name__[:80]}"
         )
 
+    backfilled_users = 0
+    backfilled_rows = 0
+    backfill_complete = False
+    backfill_failures = 0
+    try:
+        backfill_report = backfill_lifecycle(
+            now=current,
+            batch_size=page_size,
+        )
+        backfilled_users = max(0, int(backfill_report.processed_users))
+        backfilled_rows = max(0, int(backfill_report.written_rows))
+        backfill_complete = bool(backfill_report.complete)
+    except Exception as exc:
+        failures += 1
+        backfill_failures = 1
+        print(
+            "WARNING: analytics.lifecycle_backfill_failed "
+            f"category={type(exc).__name__[:80]}"
+        )
+
     return AnalyticsMaintenanceReport(
         rollup_days=(completed_day,),
         rollup_rebuilt=rebuilt,
         repaired_snapshots=max(0, repaired),
         repaired_value_snapshots=max(0, repaired_values),
+        backfilled_lifecycle_users=backfilled_users,
+        backfilled_lifecycle_rows=backfilled_rows,
+        lifecycle_backfill_complete=backfill_complete,
+        lifecycle_backfill_failures=backfill_failures,
         failures=failures,
     )
 
