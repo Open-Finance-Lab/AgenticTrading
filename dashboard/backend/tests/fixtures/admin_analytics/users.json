@@ -5,12 +5,28 @@
       "display_name": "Synthetic Ada",
       "email": "ada.synthetic@example.test",
       "joined_at": "2026-07-01T09:00:00Z",
-      "status": "needs_attention",
-      "reason_code": "three_failed_runs_24h",
-      "human_readable_reason": "Three consecutive runs failed in the last 24 hours.",
-      "last_meaningful_activity": "2026-08-26T11:20:00Z",
-      "recent_runs": 6,
-      "recent_failures": 3,
+      "lifecycle": {
+        "segment": "at_risk",
+        "reason_code": "at_risk_previously_activated",
+        "reason": "The user previously activated and has been inactive for 8 to 29 UTC days.",
+        "evidence": ["last meaningful activity 12 days ago"],
+        "activated_at": "2026-07-02T10:00:00Z",
+        "last_meaningful_activity_at": "2026-08-22T11:20:00Z",
+        "inactive_days": 12,
+        "active_days_30d": 2,
+        "successful_backtests_30d": 2,
+        "calculated_at": "2026-09-03T12:00:00Z"
+      },
+      "operational": {
+        "state": "healthy",
+        "reason_code": "no_supported_issue",
+        "reason": "No supported current operational issue was detected.",
+        "evidence": ["All supported operational checks passed."],
+        "calculated_at": "2026-09-03T12:00:00Z"
+      },
+      "commercial_tier": "invested",
+      "lifetime_net_purchased_micro": 7000000,
+      "priority_group": "healthy_at_risk",
       "profile_path": "/admin/analytics/users/101"
     },
     {
@@ -18,12 +34,28 @@
       "display_name": "<Synthetic & Grace>",
       "email": "grace.synthetic@example.test",
       "joined_at": "2026-08-12T15:30:00Z",
-      "status": "blocked",
-      "reason_code": "credential_invalid",
-      "human_readable_reason": "The default provider credential could not be verified.",
-      "last_meaningful_activity": null,
-      "recent_runs": 2,
-      "recent_failures": 2,
+      "lifecycle": {
+        "segment": "onboarding",
+        "reason_code": "onboarding_no_successful_backtest",
+        "reason": "The account has not completed a successful backtest.",
+        "evidence": ["no successful backtest recorded"],
+        "activated_at": null,
+        "last_meaningful_activity_at": "2026-09-01T08:00:00Z",
+        "inactive_days": 2,
+        "active_days_30d": 1,
+        "successful_backtests_30d": 0,
+        "calculated_at": "2026-09-03T12:00:00Z"
+      },
+      "operational": {
+        "state": "blocked",
+        "reason_code": "account_restricted",
+        "reason": "The Credits account is restricted from model spending.",
+        "evidence": ["Credits account restriction is unresolved."],
+        "calculated_at": "2026-09-03T12:00:00Z"
+      },
+      "commercial_tier": "unpaid",
+      "lifetime_net_purchased_micro": 0,
+      "priority_group": "blocked",
       "profile_path": "/admin/analytics/users/102"
     }
   ],

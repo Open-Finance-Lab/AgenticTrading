@@ -122,7 +122,43 @@ CREATE TABLE IF NOT EXISTS user_analytics_snapshots (
         CHECK (length(human_readable_reason) BETWEEN 1 AND 500),
     evidence_event_ids_json TEXT NOT NULL DEFAULT '[]'
         CHECK (length(evidence_event_ids_json) <= 4096),
-    calculated_at TEXT NOT NULL
+    calculated_at TEXT NOT NULL,
+    lifecycle_segment TEXT,
+    lifecycle_reason_code TEXT,
+    lifecycle_reason TEXT,
+    lifecycle_evidence_json TEXT NOT NULL DEFAULT '[]',
+    operational_state TEXT,
+    operational_reason_code TEXT,
+    operational_reason TEXT,
+    operational_evidence_json TEXT NOT NULL DEFAULT '[]',
+    activated_at TEXT,
+    last_meaningful_activity_at TEXT,
+    inactive_days INTEGER NOT NULL DEFAULT 0,
+    active_days_30d INTEGER NOT NULL DEFAULT 0,
+    successful_backtests_30d INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS user_lifecycle_daily_snapshots (
+    snapshot_date TEXT NOT NULL CHECK (length(snapshot_date) = 10),
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    lifecycle_segment TEXT NOT NULL,
+    lifecycle_reason_code TEXT NOT NULL,
+    data_quality TEXT NOT NULL CHECK (data_quality IN ('complete', 'partial')),
+    calculated_at TEXT NOT NULL,
+    PRIMARY KEY (snapshot_date, user_id)
+);
+CREATE INDEX IF NOT EXISTS idx_lifecycle_daily_segment
+    ON user_lifecycle_daily_snapshots(snapshot_date, lifecycle_segment);
+CREATE INDEX IF NOT EXISTS idx_lifecycle_daily_user
+    ON user_lifecycle_daily_snapshots(user_id, snapshot_date DESC);
+
+CREATE TABLE IF NOT EXISTS analytics_projection_jobs (
+    job_name TEXT PRIMARY KEY,
+    window_start TEXT NOT NULL,
+    window_end TEXT NOT NULL,
+    cursor TEXT,
+    status TEXT NOT NULL CHECK (status IN ('pending', 'running', 'complete')),
+    updated_at TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS analytics_subject_settings (
@@ -171,6 +207,25 @@ class PostgresAnalyticsStore:
                     "ALTER TABLE analytics_events "
                     "DROP CONSTRAINT IF EXISTS analytics_events_error_category_check"
                 )
+                for column, definition in {
+                    "lifecycle_segment": "TEXT",
+                    "lifecycle_reason_code": "TEXT",
+                    "lifecycle_reason": "TEXT",
+                    "lifecycle_evidence_json": "TEXT NOT NULL DEFAULT '[]'",
+                    "operational_state": "TEXT",
+                    "operational_reason_code": "TEXT",
+                    "operational_reason": "TEXT",
+                    "operational_evidence_json": "TEXT NOT NULL DEFAULT '[]'",
+                    "activated_at": "TEXT",
+                    "last_meaningful_activity_at": "TEXT",
+                    "inactive_days": "INTEGER NOT NULL DEFAULT 0",
+                    "active_days_30d": "INTEGER NOT NULL DEFAULT 0",
+                    "successful_backtests_30d": "INTEGER NOT NULL DEFAULT 0",
+                }.items():
+                    cur.execute(
+                        "ALTER TABLE user_analytics_snapshots "
+                        f"ADD COLUMN IF NOT EXISTS {column} {definition}"
+                    )
                 cur.execute(
                     """
                     ALTER TABLE analytics_events

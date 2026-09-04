@@ -35,8 +35,46 @@ def _required_source_event_id(value: object) -> str:
 class AnalyticsService:
     """Normalize trusted identities and safe event metadata before storage."""
 
-    def __init__(self, store):
+    def __init__(
+        self,
+        store,
+        *,
+        state_store=None,
+        value_store=None,
+        project_snapshots: bool = False,
+    ):
+        if not isinstance(project_snapshots, bool):
+            raise TypeError("project_snapshots must be a boolean")
+        if project_snapshots and (state_store is None or value_store is None):
+            raise ValueError("snapshot stores are required when projection is enabled")
         self.store = store
+        self.state_store = state_store
+        self.value_store = value_store
+        self.project_snapshots = project_snapshots
+
+    def _try_recalculate_snapshots(
+        self,
+        *,
+        user_id: int,
+        event_name: str,
+        now: datetime,
+    ) -> None:
+        if not self.project_snapshots:
+            return
+        try:
+            from .states import recalculate_user_snapshots
+
+            recalculate_user_snapshots(
+                user_id,
+                now=now,
+                state_store=self.state_store,
+                value_store=self.value_store,
+            )
+        except Exception as exc:
+            print(
+                "WARNING: analytics.value_projection_failed "
+                f"event={event_name} category={type(exc).__name__[:80]}"
+            )
 
     def accept_frontend_event(
         self,
@@ -128,7 +166,20 @@ class AnalyticsService:
             error_category=error_category,
             properties=properties or {},
         )
-        return self.store.append_event(event)
+        result = self.store.append_event(event)
+        from .lifecycle import is_lifecycle_activity
+
+        projection_relevant = is_lifecycle_activity(event) or event_name in {
+            "account_signed_up",
+            "safe_error_recorded",
+        }
+        if result.created and projection_relevant:
+            self._try_recalculate_snapshots(
+                user_id=subject_id,
+                event_name=event_name,
+                now=received,
+            )
+        return result
 
     def try_record_server_event(self, **kwargs) -> AppendEventResult | None:
         try:
@@ -181,7 +232,20 @@ class AnalyticsService:
         )
 
 
-analytics_service = AnalyticsService(store=analytics_store)
+def _build_analytics_service() -> AnalyticsService:
+    from .states import AnalyticsStateStore
+    from .value_repository import ValueAnalyticsStore
+
+    state_store = AnalyticsStateStore(analytics_store)
+    return AnalyticsService(
+        store=analytics_store,
+        state_store=state_store,
+        value_store=ValueAnalyticsStore(analytics_store),
+        project_snapshots=True,
+    )
+
+
+analytics_service = _build_analytics_service()
 
 
 def get_analytics_service() -> AnalyticsService:

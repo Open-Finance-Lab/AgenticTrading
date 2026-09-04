@@ -1,18 +1,30 @@
-"""Explainable five-state Analytics snapshots and bounded repair logic."""
+"""Legacy and dual-axis Analytics snapshots with bounded repair logic."""
 
 from __future__ import annotations
 
 import json
-from datetime import datetime, timedelta, timezone
-from typing import Any, Callable
+from datetime import datetime, time, timedelta, timezone
+from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from .lifecycle import (
+    LifecycleInputs,
+    OperationalSignals,
+    calculate_lifecycle,
+    calculate_operational_state,
+    is_lifecycle_activity,
+)
 from .metrics import is_meaningful_event
 from .models import AnalyticsEventRecord
 from .repository import analytics_store
 from .repository_common import positive_limit, positive_user_id, utc_iso
 from .rollups import AnalyticsRollupStore
+from .value_repository import (
+    UserLifecycleDailySnapshot,
+    UserValueSnapshot,
+    ValueAnalyticsStore,
+)
 
 
 _REASONS = {
@@ -147,6 +159,89 @@ class AnalyticsStateStore:
                 )
         return snapshot
 
+    def upsert_combined_snapshot(
+        self,
+        legacy: UserAnalyticsSnapshot,
+        value: UserValueSnapshot,
+    ) -> tuple[UserAnalyticsSnapshot, UserValueSnapshot]:
+        """Persist compatibility and dual-axis fields in one database statement."""
+
+        if legacy.user_id != value.user_id:
+            raise ValueError("snapshot user IDs must match")
+        if legacy.calculated_at != value.calculated_at:
+            raise ValueError("snapshot calculation times must match")
+
+        def evidence(items: Any) -> str:
+            return json.dumps(list(items), separators=(",", ":"), ensure_ascii=True)
+
+        payload = (
+            legacy.user_id,
+            legacy.status,
+            legacy.reason_code,
+            legacy.human_readable_reason,
+            evidence(legacy.evidence_event_ids),
+            value.lifecycle_segment,
+            value.lifecycle_reason_code,
+            value.lifecycle_reason,
+            evidence(value.lifecycle_evidence),
+            value.operational_state,
+            value.operational_reason_code,
+            value.operational_reason,
+            evidence(value.operational_evidence),
+            utc_iso(value.activated_at) if value.activated_at else None,
+            (
+                utc_iso(value.last_meaningful_activity_at)
+                if value.last_meaningful_activity_at
+                else None
+            ),
+            value.inactive_days,
+            value.active_days_30d,
+            value.successful_backtests_30d,
+            utc_iso(value.calculated_at),
+        )
+        columns = """
+            user_id, status, reason_code, human_readable_reason,
+            evidence_event_ids_json, lifecycle_segment, lifecycle_reason_code,
+            lifecycle_reason, lifecycle_evidence_json, operational_state,
+            operational_reason_code, operational_reason,
+            operational_evidence_json, activated_at,
+            last_meaningful_activity_at, inactive_days, active_days_30d,
+            successful_backtests_30d, calculated_at
+        """
+        updates = """
+            status=excluded.status,
+            reason_code=excluded.reason_code,
+            human_readable_reason=excluded.human_readable_reason,
+            evidence_event_ids_json=excluded.evidence_event_ids_json,
+            lifecycle_segment=excluded.lifecycle_segment,
+            lifecycle_reason_code=excluded.lifecycle_reason_code,
+            lifecycle_reason=excluded.lifecycle_reason,
+            lifecycle_evidence_json=excluded.lifecycle_evidence_json,
+            operational_state=excluded.operational_state,
+            operational_reason_code=excluded.operational_reason_code,
+            operational_reason=excluded.operational_reason,
+            operational_evidence_json=excluded.operational_evidence_json,
+            activated_at=excluded.activated_at,
+            last_meaningful_activity_at=excluded.last_meaningful_activity_at,
+            inactive_days=excluded.inactive_days,
+            active_days_30d=excluded.active_days_30d,
+            successful_backtests_30d=excluded.successful_backtests_30d,
+            calculated_at=excluded.calculated_at
+        """
+        placeholders = ", ".join(["%s" if self.is_postgres else "?"] * len(payload))
+        sql = f"""
+            INSERT INTO user_analytics_snapshots ({columns})
+            VALUES ({placeholders})
+            ON CONFLICT(user_id) DO UPDATE SET {updates}
+        """
+        with self.base_store._get_connection() as conn:
+            if self.is_postgres:
+                with conn.cursor() as cur:
+                    cur.execute(sql, payload)
+            else:
+                conn.execute(sql, payload)
+        return legacy, value
+
     def get_snapshot(self, user_id: int) -> UserAnalyticsSnapshot | None:
         subject_id = positive_user_id(user_id)
         if self.is_postgres:
@@ -170,25 +265,47 @@ class AnalyticsStateStore:
             status=str(row["status"]),
             reason_code=str(row["reason_code"]),
             human_readable_reason=str(row["human_readable_reason"]),
-            evidence_event_ids=list(
-                json.loads(str(row["evidence_event_ids_json"]))
-            ),
+            evidence_event_ids=list(json.loads(str(row["evidence_event_ids_json"]))),
             calculated_at=_parse_timestamp(row["calculated_at"]),
         )
 
     def list_stale_user_ids(
         self,
         *,
-        before: datetime,
+        before: datetime | None = None,
+        now: datetime | None = None,
         limit: int,
+        include_time_transitions: bool = False,
     ) -> list[int]:
         page_size = positive_limit(limit)
-        cutoff = utc_iso(before)
+        if before is None and now is None:
+            raise ValueError("before or now is required")
+        current = _require_utc(now, "now") if now is not None else None
+        stale_before = before or (current - timedelta(minutes=15))
+        cutoff = utc_iso(_require_utc(stale_before, "before"))
+        transition_sql = ""
+        transition_params: list[str] = []
+        if include_time_transitions:
+            if current is None:
+                raise ValueError("now is required for time transitions")
+            day_start = datetime.combine(current.date(), time.min, tzinfo=timezone.utc)
+            placeholder = "%s" if self.is_postgres else "?"
+            transition_sql = f"""
+                OR snapshots.lifecycle_segment IS NULL
+                OR snapshots.calculated_at < {placeholder}
+                OR NOT EXISTS (
+                    SELECT 1
+                    FROM user_lifecycle_daily_snapshots AS daily
+                    WHERE daily.user_id = users.id
+                      AND daily.snapshot_date = {placeholder}
+                )
+            """
+            transition_params = [utc_iso(day_start), current.date().isoformat()]
         if self.is_postgres:
             with self.base_store._get_connection() as conn:
                 with conn.cursor() as cur:
                     cur.execute(
-                        """
+                        f"""
                         SELECT users.id
                         FROM users
                         LEFT JOIN user_analytics_snapshots AS snapshots
@@ -197,17 +314,21 @@ class AnalyticsStateStore:
                           ON settings.user_id = users.id
                         WHERE users.role <> 'admin'
                           AND COALESCE(settings.excluded, FALSE) = FALSE
-                          AND (snapshots.user_id IS NULL OR snapshots.calculated_at < %s)
+                          AND (
+                              snapshots.user_id IS NULL
+                              OR snapshots.calculated_at < %s
+                              {transition_sql}
+                          )
                         ORDER BY users.id
                         LIMIT %s
                         """,
-                        (cutoff, page_size),
+                        (cutoff, *transition_params, page_size),
                     )
                     rows = cur.fetchall()
         else:
             with self.base_store._get_connection() as conn:
                 rows = conn.execute(
-                    """
+                    f"""
                     SELECT users.id
                     FROM users
                     LEFT JOIN user_analytics_snapshots AS snapshots
@@ -216,11 +337,15 @@ class AnalyticsStateStore:
                       ON settings.user_id = users.id
                     WHERE users.role <> 'admin'
                       AND COALESCE(settings.excluded, 0) = 0
-                      AND (snapshots.user_id IS NULL OR snapshots.calculated_at < ?)
+                      AND (
+                          snapshots.user_id IS NULL
+                          OR snapshots.calculated_at < ?
+                          {transition_sql}
+                      )
                     ORDER BY users.id
                     LIMIT ?
                     """,
-                    (cutoff, page_size),
+                    (cutoff, *transition_params, page_size),
                 ).fetchall()
         return [int(row["id"]) for row in rows]
 
@@ -309,8 +434,7 @@ def calculate_user_state(
         attempted_core
         and blocker is not None
         and (
-            latest_resolver is None
-            or blocker.occurred_at > latest_resolver.occurred_at
+            latest_resolver is None or blocker.occurred_at > latest_resolver.occurred_at
         )
     ):
         reason = (
@@ -381,10 +505,7 @@ def calculate_user_state(
     if (
         last_meaningful is not None
         and last_meaningful.occurred_at < current - timedelta(days=30)
-    ) or (
-        last_meaningful is None
-        and created_at < current - timedelta(days=30)
-    ):
+    ) or (last_meaningful is None and created_at < current - timedelta(days=30)):
         return _snapshot(
             user_id=subject_id,
             status="dormant",
@@ -416,6 +537,170 @@ def calculate_user_state(
         evidence=[successes[0]] + ([last_meaningful] if last_meaningful else []),
         now=current,
     )
+
+
+def _require_utc(value: datetime, field_name: str) -> datetime:
+    if value.tzinfo is None or value.utcoffset() is None:
+        raise ValueError(f"{field_name} must include a timezone")
+    return value.astimezone(timezone.utc)
+
+
+def _calculate_user_value_snapshot(
+    user_id: int,
+    *,
+    now: datetime,
+    state_store: AnalyticsStateStore,
+    value_store: ValueAnalyticsStore,
+) -> UserValueSnapshot:
+    subject_id = positive_user_id(user_id)
+    user = state_store.get_user(subject_id)
+    if user is None:
+        raise LookupError("Analytics user was not found")
+
+    events = [
+        event
+        for event in state_store.list_user_events(subject_id, now=now)
+        if event.occurred_at.astimezone(timezone.utc) <= now
+    ]
+    activity_start = now - timedelta(days=180)
+    credit_activity = tuple(
+        timestamp.astimezone(timezone.utc)
+        for timestamp in value_store.list_credit_activity(
+            [subject_id],
+            start=activity_start,
+            end=now + timedelta(microseconds=1),
+        ).get(subject_id, ())
+        if timestamp.astimezone(timezone.utc) <= now
+    )
+    previous = value_store.get_current_snapshot(subject_id)
+
+    successes = [
+        event.occurred_at.astimezone(timezone.utc)
+        for event in events
+        if event.event_name == "backtest_completed"
+    ]
+    activation_candidates = list(successes)
+    if (
+        previous is not None
+        and previous.activated_at is not None
+        and previous.activated_at <= now
+    ):
+        activation_candidates.append(previous.activated_at)
+    activated_at = min(activation_candidates) if activation_candidates else None
+
+    meaningful_activity = [
+        event.occurred_at.astimezone(timezone.utc)
+        for event in events
+        if is_lifecycle_activity(event)
+    ]
+    meaningful_activity.extend(credit_activity)
+    if (
+        previous is not None
+        and previous.last_meaningful_activity_at is not None
+        and previous.last_meaningful_activity_at <= now
+    ):
+        meaningful_activity.append(previous.last_meaningful_activity_at)
+    last_meaningful = max(meaningful_activity) if meaningful_activity else None
+
+    window_start = datetime.combine(
+        now.date() - timedelta(days=29),
+        time.min,
+        tzinfo=timezone.utc,
+    )
+    active_days = {
+        timestamp.date()
+        for timestamp in meaningful_activity
+        if window_start <= timestamp <= now
+    }
+    successful_backtests = sum(
+        1 for timestamp in successes if window_start <= timestamp <= now
+    )
+    lifecycle = calculate_lifecycle(
+        LifecycleInputs(
+            user_id=subject_id,
+            created_at=_parse_timestamp(user["created_at"]),
+            first_successful_backtest_at=activated_at,
+            last_meaningful_activity_at=last_meaningful,
+            active_days_30d=len(active_days),
+            successful_backtests_30d=successful_backtests,
+        ),
+        now,
+    )
+    facts = value_store.get_operational_facts(subject_id, now=now)
+    operational = calculate_operational_state(
+        OperationalSignals(
+            user_id=subject_id,
+            account_restricted=facts.account_restricted,
+            usable_billing_lane=facts.usable_billing_lane,
+            selected_provider_enabled=facts.selected_provider_enabled,
+            default_credential_status=facts.default_credential_status,
+            failed_terminal_runs_24h=facts.failed_terminal_runs_24h,
+            run_beyond_safe_deadline=facts.run_beyond_safe_deadline,
+        ),
+        now,
+    )
+    return UserValueSnapshot(
+        user_id=subject_id,
+        lifecycle_segment=lifecycle.segment,
+        lifecycle_reason_code=lifecycle.reason_code,
+        lifecycle_reason=lifecycle.reason,
+        lifecycle_evidence=lifecycle.evidence,
+        operational_state=operational.state,
+        operational_reason_code=operational.reason_code,
+        operational_reason=operational.reason,
+        operational_evidence=operational.evidence,
+        activated_at=lifecycle.activated_at,
+        last_meaningful_activity_at=lifecycle.last_meaningful_activity_at,
+        inactive_days=lifecycle.inactive_days,
+        active_days_30d=lifecycle.active_days_30d,
+        successful_backtests_30d=lifecycle.successful_backtests_30d,
+        calculated_at=now,
+    )
+
+
+def calculate_user_value_snapshot(
+    user_id: int,
+    *,
+    now: datetime | None = None,
+    state_store: AnalyticsStateStore | None = None,
+    value_store: ValueAnalyticsStore | None = None,
+) -> UserValueSnapshot:
+    current = _require_utc(now or datetime.now(timezone.utc), "now")
+    states = state_store or AnalyticsStateStore()
+    values = value_store or ValueAnalyticsStore(states.base_store)
+    snapshot = _calculate_user_value_snapshot(
+        user_id,
+        now=current,
+        state_store=states,
+        value_store=values,
+    )
+    return values.upsert_current_snapshot(snapshot)
+
+
+def recalculate_user_snapshots(
+    user_id: int,
+    *,
+    now: datetime | None = None,
+    state_store: AnalyticsStateStore | None = None,
+    value_store: ValueAnalyticsStore | None = None,
+) -> tuple[UserAnalyticsSnapshot, UserValueSnapshot]:
+    """Recalculate legacy and dual-axis projections from the same evidence."""
+
+    current = _require_utc(now or datetime.now(timezone.utc), "now")
+    states = state_store or AnalyticsStateStore()
+    values = value_store or ValueAnalyticsStore(states.base_store)
+    legacy = calculate_user_state(user_id, now=current, store=states)
+    value = _calculate_user_value_snapshot(
+        user_id,
+        now=current,
+        state_store=states,
+        value_store=values,
+    )
+    if getattr(values, "analytics_base", None) is states.base_store:
+        return states.upsert_combined_snapshot(legacy, value)
+    states.upsert_snapshot(legacy)
+    values.upsert_current_snapshot(value)
+    return legacy, value
 
 
 def recalculate_user_snapshot(
@@ -457,10 +742,56 @@ def repair_stale_snapshots(
     return repaired
 
 
+def repair_stale_value_snapshots(
+    *,
+    now: datetime | None = None,
+    limit: int = 100,
+    state_store: AnalyticsStateStore | None = None,
+    value_store: ValueAnalyticsStore | None = None,
+) -> int:
+    current = _require_utc(now or datetime.now(timezone.utc), "now")
+    states = state_store or AnalyticsStateStore()
+    values = value_store or ValueAnalyticsStore(states.base_store)
+    user_ids = states.list_stale_user_ids(
+        now=current,
+        limit=limit,
+        include_time_transitions=True,
+    )
+    repaired = 0
+    for user_id in user_ids:
+        try:
+            _legacy, snapshot = recalculate_user_snapshots(
+                user_id,
+                now=current,
+                state_store=states,
+                value_store=values,
+            )
+            values.upsert_daily_snapshot(
+                UserLifecycleDailySnapshot(
+                    snapshot_date=current.date(),
+                    user_id=user_id,
+                    lifecycle_segment=snapshot.lifecycle_segment,
+                    lifecycle_reason_code=snapshot.lifecycle_reason_code,
+                    data_quality="complete",
+                    calculated_at=current,
+                )
+            )
+            repaired += 1
+        except Exception as exc:
+            print(
+                "WARNING: analytics.value_snapshot_repair_failed "
+                f"category={type(exc).__name__[:80]}"
+            )
+    return repaired
+
+
 __all__ = [
     "AnalyticsStateStore",
     "UserAnalyticsSnapshot",
+    "calculate_user_value_snapshot",
     "calculate_user_state",
     "recalculate_user_snapshot",
+    "recalculate_user_snapshots",
     "repair_stale_snapshots",
+    "repair_stale_value_snapshots",
 ]

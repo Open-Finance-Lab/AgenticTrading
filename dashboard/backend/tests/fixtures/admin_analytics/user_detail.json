@@ -3,16 +3,16 @@
   "display_name": "Synthetic Ada",
   "email": "ada.synthetic@example.test",
   "joined_at": "2026-07-01T09:00:00Z",
-  "last_meaningful_activity": "2026-08-26T11:20:00Z",
+  "last_meaningful_activity": "2026-08-22T11:20:00Z",
   "state": {
-    "status": "needs_attention",
-    "reason_code": "three_failed_runs_24h",
-    "human_readable_reason": "Three consecutive runs failed in the last 24 hours.",
-    "evidence_event_ids": ["evt_synthetic_001", "evt_synthetic_002"],
-    "calculated_at": "2026-08-26T12:33:00Z"
+    "status": "active",
+    "reason_code": "recent_meaningful_activity",
+    "human_readable_reason": "The user has recent meaningful activity.",
+    "evidence_event_ids": ["evt_synthetic_001"],
+    "calculated_at": "2026-09-03T12:00:00Z"
   },
   "primary_billing_lane": "platform_credits",
-  "default_provider": "openrouter",
+  "default_provider": "provider-synthetic",
   "country_code": "US",
   "device_category": "desktop",
   "browser_family": "Chrome",
@@ -24,33 +24,73 @@
   },
   "recent_footprint": [
     {
-      "event_id": "evt_synthetic_004",
-      "event_name": "page_viewed",
-      "occurred_at": "2026-08-26T11:20:00Z",
-      "page_view": "agents",
-      "provider_id": null,
-      "model_id": null,
-      "billing_mode": null,
-      "outcome": null,
-      "error_category": null
-    },
-    {
       "event_id": "evt_synthetic_003",
       "event_name": "backtest_failed",
-      "occurred_at": "2026-08-26T11:00:00Z",
+      "occurred_at": "2026-08-22T11:20:00Z",
       "page_view": null,
-      "provider_id": "openrouter",
-      "model_id": "openai/gpt-5.5",
+      "provider_id": "provider-synthetic",
+      "model_id": "model-synthetic-v1",
       "billing_mode": "platform_credits",
       "outcome": "failed",
       "error_category": "provider_timeout"
     }
   ],
-  "run_summary": {"requested": 12, "completed": 8, "failed": 3, "cancelled": 1},
-  "billing_lane_mix": {"platform_credits": 7, "byok": 5},
+  "run_summary": {
+    "requested": 12,
+    "completed": 8,
+    "failed": 3,
+    "cancelled": 1
+  },
+  "billing_lane_mix": {
+    "platform_credits": 7,
+    "byok": 5
+  },
   "input_tokens": 12000,
   "output_tokens": 3000,
   "platform_model_cost_usd": 4.25,
   "credits_debited_micro": 4250000,
-  "top_product_page": "agents"
+  "top_product_page": "agents",
+  "lifecycle": {
+    "segment": "at_risk",
+    "reason_code": "at_risk_previously_activated",
+    "reason": "The user previously activated and has been inactive for 8 to 29 UTC days.",
+    "evidence": ["last meaningful activity 12 days ago"],
+    "activated_at": "2026-07-02T10:00:00Z",
+    "last_meaningful_activity_at": "2026-08-22T11:20:00Z",
+    "inactive_days": 12,
+    "active_days_30d": 2,
+    "successful_backtests_30d": 2,
+    "calculated_at": "2026-09-03T12:00:00Z"
+  },
+  "operational": {
+    "state": "healthy",
+    "reason_code": "no_supported_issue",
+    "reason": "No supported current operational issue was detected.",
+    "evidence": ["All supported operational checks passed."],
+    "calculated_at": "2026-09-03T12:00:00Z"
+  },
+  "commercial": {
+    "user_id": 101,
+    "lifetime_net_purchased_micro": 7000000,
+    "commercial_tier": "invested",
+    "purchased_micro": 3000000,
+    "refunded_micro": 500000,
+    "consumed_micro": 750000,
+    "admin_grant_activity_micro": 1500000,
+    "grant_available_micro": 900000,
+    "purchased_available_micro": 1100000,
+    "total_available_micro": 2000000
+  },
+  "selected_period_start": "2026-08-01",
+  "selected_period_end": "2026-09-01",
+  "recent_lifecycle_transitions": [
+    {
+      "from_segment": "growing",
+      "to_segment": "at_risk",
+      "users": 1,
+      "period_start": "2026-08-01",
+      "period_end": "2026-09-01",
+      "data_quality": "complete"
+    }
+  ]
 }

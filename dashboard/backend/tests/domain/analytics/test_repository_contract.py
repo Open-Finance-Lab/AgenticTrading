@@ -359,6 +359,93 @@ def test_sqlite_schema_contains_all_foundation_tables(sqlite_contract):
     } <= names
 
 
+def test_sqlite_schema_adds_user_value_projection_storage(sqlite_contract):
+    store, _admin_id, _user_id = sqlite_contract
+    with store._get_connection() as conn:
+        names = {
+            row[0]
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            ).fetchall()
+        }
+        snapshot_columns = {
+            row[1]
+            for row in conn.execute(
+                "PRAGMA table_info(user_analytics_snapshots)"
+            ).fetchall()
+        }
+
+    assert {
+        "user_lifecycle_daily_snapshots",
+        "analytics_projection_jobs",
+    } <= names
+    assert {
+        "status",
+        "lifecycle_segment",
+        "operational_state",
+        "activated_at",
+        "last_meaningful_activity_at",
+        "inactive_days",
+        "active_days_30d",
+        "successful_backtests_30d",
+    } <= snapshot_columns
+
+
+def test_sqlite_user_value_migration_is_idempotent(sqlite_contract):
+    store, _admin_id, _user_id = sqlite_contract
+
+    store._init_schema()
+    store._init_schema()
+
+    with store._get_connection() as conn:
+        names = [
+            row[1]
+            for row in conn.execute(
+                "PRAGMA table_info(user_analytics_snapshots)"
+            ).fetchall()
+        ]
+    assert len(names) == len(set(names))
+
+
+def test_sqlite_migrates_existing_legacy_snapshot_table(tmp_path):
+    db_path = tmp_path / "legacy-value-analytics.db"
+    UserStore(db_path=db_path).create_user(
+        "legacy-value-user@example.test",
+        "Legacy Value User",
+        "SecurePass1!",
+    )
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            """
+            CREATE TABLE user_analytics_snapshots (
+                user_id INTEGER PRIMARY KEY,
+                status TEXT NOT NULL,
+                reason_code TEXT NOT NULL,
+                human_readable_reason TEXT NOT NULL,
+                evidence_event_ids_json TEXT NOT NULL DEFAULT '[]',
+                calculated_at TEXT NOT NULL
+            )
+            """
+        )
+
+    store = AnalyticsStore(db_path=db_path)
+    store._init_schema()
+
+    with store._get_connection() as conn:
+        columns = {
+            row[1]
+            for row in conn.execute(
+                "PRAGMA table_info(user_analytics_snapshots)"
+            ).fetchall()
+        }
+    assert {
+        "lifecycle_segment",
+        "operational_state",
+        "inactive_days",
+        "successful_backtests_30d",
+    } <= columns
+
+
 def test_sqlite_accepts_provider_quota_exhausted_category(sqlite_contract):
     store, _admin_id, user_id = sqlite_contract
     assert_error_category_contract(store, user_id)

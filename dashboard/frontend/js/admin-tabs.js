@@ -13,7 +13,8 @@
 
   function setTab(value, { updateUrl = true } = {}) {
     const tab = normalizeTab(value);
-    document.querySelectorAll('[data-admin-tab]').forEach((button) => {
+    const tablist = document.getElementById('adminTabs');
+    tablist?.querySelectorAll('[data-admin-tab]').forEach((button) => {
       const selected = button.dataset.adminTab === tab;
       button.classList.toggle('is-active', selected);
       button.setAttribute('aria-selected', selected ? 'true' : 'false');
@@ -34,24 +35,29 @@
   function bind() {
     if (initialized) return;
     initialized = true;
-    document.querySelectorAll('[data-admin-tab]').forEach((button) => {
+    const tablist = document.getElementById('adminTabs');
+    tablist?.querySelectorAll('[data-admin-tab]').forEach((button) => {
       button.addEventListener('click', () => setTab(button.dataset.adminTab));
       button.addEventListener('keydown', (event) => {
-        const keys = new Set(['ArrowRight', 'ArrowLeft', 'Home', 'End']);
+        const keys = new Set(['ArrowDown', 'ArrowUp', 'Home', 'End']);
         if (!keys.has(event.key)) return;
         event.preventDefault();
-        const buttons = [...document.querySelectorAll('[data-admin-tab]')];
+        const buttons = [...tablist.querySelectorAll('[data-admin-tab]')];
         const index = buttons.indexOf(button);
         const next = event.key === 'Home'
           ? buttons[0]
           : event.key === 'End'
             ? buttons[buttons.length - 1]
-            : event.key === 'ArrowRight'
+            : event.key === 'ArrowDown'
               ? buttons[(index + 1) % buttons.length]
               : buttons[(index - 1 + buttons.length) % buttons.length];
         next.focus();
         setTab(next.dataset.adminTab);
       });
+    });
+    window.addEventListener('popstate', () => {
+      const requested = new URL(window.location.href).searchParams.get('adminTab');
+      setTab(requested || DEFAULT_TAB, { updateUrl: false });
     });
   }
 

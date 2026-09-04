@@ -31,7 +31,6 @@ from .states import (
     calculate_user_state,
 )
 
-
 ActivitySection = Literal["timeline", "runs", "usage", "sessions"]
 _USER_STATES = {"blocked", "needs_attention", "dormant", "onboarding", "active"}
 _ATTENTION_STATES = {"blocked", "needs_attention"}
@@ -1074,9 +1073,19 @@ class AnalyticsQueryService:
         *,
         user_id: int,
         now: datetime | None = None,
+        start: datetime | None = None,
+        end: datetime | None = None,
     ) -> AnalyticsUserProfile:
         subject_id = positive_user_id(user_id)
         current = _utc(now or datetime.now(timezone.utc), "now")
+        range_start = (
+            _utc(start, "start") if start is not None else current - timedelta(days=180)
+        )
+        range_end = (
+            _utc(end, "end") if end is not None else current + timedelta(microseconds=1)
+        )
+        if range_end <= range_start:
+            raise ValueError("end must be after start")
         user = self.user_store.get_user_admin(subject_id)
         if user is None:
             raise LookupError("Analytics user was not found")
@@ -1088,8 +1097,8 @@ class AnalyticsQueryService:
                 store=self.query_store.states,
             )
         events = self.query_store.rollups.list_events(
-            start=current - timedelta(days=180),
-            end=current + timedelta(microseconds=1),
+            start=range_start,
+            end=range_end,
             include_internal=True,
             user_id=subject_id,
         )
@@ -1292,10 +1301,22 @@ def _event_matches_filters(
 
 
 analytics_query_service = AnalyticsQueryService()
+_value_analytics_query_service: ValueAnalyticsQueryService | None = None
 
 
 def get_analytics_query_service() -> AnalyticsQueryService:
     return analytics_query_service
+
+
+def get_value_analytics_query_service() -> ValueAnalyticsQueryService:
+    """Lazily construct the value service without creating an import cycle."""
+
+    global _value_analytics_query_service
+    if _value_analytics_query_service is None:
+        from .value_queries import ValueAnalyticsQueryService
+
+        _value_analytics_query_service = ValueAnalyticsQueryService()
+    return _value_analytics_query_service
 
 
 __all__ = [
@@ -1313,4 +1334,5 @@ __all__ = [
     "PaginatedUsers",
     "PanelAvailability",
     "get_analytics_query_service",
+    "get_value_analytics_query_service",
 ]
