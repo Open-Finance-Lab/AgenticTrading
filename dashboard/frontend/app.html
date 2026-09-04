@@ -13,7 +13,7 @@
          because every API call is a CORS request. -->
     <link rel="preconnect" href="https://agentictrading.onrender.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="styles.css?v=131">
+    <link rel="stylesheet" href="styles.css?v=132">
     <!-- defer: ~200KB that was render-blocking. Deferred scripts execute in
          document order (this one first, the body-end ones after), all before
          DOMContentLoaded, so Chart is defined before any chart renders. -->
@@ -2114,6 +2114,101 @@
 
         <section id="adminPanelAnalytics" class="admin-tab-panel" role="tabpanel" aria-labelledby="adminTabAnalytics" data-admin-panel="analytics">
             <div id="adminAnalyticsOverview" class="admin-analytics-overview">
+                <section id="adminAnalyticsValueOverview" class="admin-value-overview" aria-labelledby="adminAnalyticsValueTitle">
+                    <header class="admin-value-header">
+                        <div>
+                            <p class="credits-section-kicker">User value</p>
+                            <h3 id="adminAnalyticsValueTitle">Analytics</h3>
+                            <p>See who reached value, who returned, and where attention can change an outcome.</p>
+                        </div>
+                        <div class="admin-value-header-actions">
+                            <button id="adminAnalyticsRulesOpen" class="credits-icon-btn" type="button" aria-haspopup="dialog" aria-controls="adminAnalyticsRulesDialog" aria-label="How segments work" title="How segments work"><svg aria-hidden="true"><use href="#icon-book"/></svg></button>
+                            <button id="adminAnalyticsValueRefresh" class="credits-icon-btn" type="button" aria-label="Refresh user value analytics" title="Refresh user value analytics"><svg aria-hidden="true"><use href="#icon-refresh"/></svg></button>
+                        </div>
+                    </header>
+
+                    <form id="adminAnalyticsValueFilters" class="admin-value-filters" aria-label="User value date filters">
+                        <label for="adminValueStart"><span>From</span><input id="adminValueStart" type="date" required></label>
+                        <label for="adminValueEnd"><span>To</span><input id="adminValueEnd" type="date" required></label>
+                        <label class="admin-value-check" for="adminValueInternal"><input id="adminValueInternal" type="checkbox"><span>Include internal accounts</span></label>
+                        <button class="auth-btn auth-btn-secondary" type="submit">Apply range</button>
+                        <p id="adminValueFilterError" class="auth-error" role="alert" hidden></p>
+                    </form>
+
+                    <div id="adminAnalyticsHeadline" class="admin-value-headline" aria-busy="true">
+                        <article><span>Activated</span><strong data-admin-value-metric="activated">—</strong><small>First successful backtest</small></article>
+                        <article><span>Core users</span><strong data-admin-value-metric="core">—</strong><small>Repeated value in 30 days</small></article>
+                        <article><span>At risk</span><strong data-admin-value-metric="at-risk">—</strong><small>8–29 inactive UTC days</small></article>
+                        <article><span>Paid users</span><strong data-admin-value-metric="paid">—</strong><small>Net purchased ATL Credits</small></article>
+                    </div>
+                    <p id="adminValuePrimaryStatus" class="credits-status" role="status" aria-live="polite"></p>
+                    <p id="adminValuePrimaryError" class="auth-error" role="alert" hidden></p>
+
+                    <div class="admin-value-primary-grid">
+                        <section class="admin-value-card" aria-labelledby="adminLifecycleDistributionTitle">
+                            <div class="admin-value-section-head">
+                                <div><p class="credits-section-kicker">Current identity</p><h4 id="adminLifecycleDistributionTitle">Lifecycle distribution</h4></div>
+                                <span id="adminLifecycleCoverage" class="admin-value-coverage"></span>
+                            </div>
+                            <div id="adminLifecycleDistribution" class="admin-lifecycle-distribution" aria-label="Filter priority users by lifecycle"></div>
+                        </section>
+
+                        <section class="admin-value-card admin-value-movement" aria-labelledby="adminLifecycleMovementTitle">
+                            <div class="admin-value-section-head">
+                                <div><p class="credits-section-kicker">Direction of travel</p><h4 id="adminLifecycleMovementTitle">Eight-week movement</h4></div>
+                                <span id="adminLifecycleQuality" class="admin-value-quality" hidden>Incomplete data</span>
+                            </div>
+                            <div class="admin-value-chart-frame"><canvas id="adminLifecycleMovementChart" role="img" aria-label="Lifecycle movement over eight weeks" aria-describedby="adminLifecycleMovementTable"></canvas></div>
+                            <table id="adminLifecycleMovementTable" class="sr-only"><caption>Lifecycle segment counts by week</caption><thead><tr><th scope="col">Week</th><th scope="col">New</th><th scope="col">Onboarding</th><th scope="col">Growing</th><th scope="col">Core</th><th scope="col">At risk</th><th scope="col">Dormant</th></tr></thead><tbody></tbody></table>
+                        </section>
+                    </div>
+
+                    <section class="admin-value-card admin-priority-section" aria-labelledby="adminPriorityUsersTitle">
+                        <div class="admin-value-section-head">
+                            <div><p class="credits-section-kicker">Act next</p><h4 id="adminPriorityUsersTitle" tabindex="-1">Priority users</h4></div>
+                            <span id="adminPriorityUsersRange" class="admin-value-coverage" aria-live="polite"></span>
+                        </div>
+                        <form id="adminPriorityFilters" class="admin-priority-filters" role="search">
+                            <label for="adminPriorityQuery"><span>Search</span><input id="adminPriorityQuery" type="search" maxlength="100" autocomplete="off" placeholder="Name or email"></label>
+                            <label for="adminPriorityLifecycle"><span>Lifecycle</span><select id="adminPriorityLifecycle"><option value="">All lifecycle stages</option><option value="new">New</option><option value="onboarding">Onboarding</option><option value="growing">Growing</option><option value="core">Core</option><option value="at_risk">At risk</option><option value="dormant">Dormant</option></select></label>
+                            <label for="adminPriorityOperational"><span>Operational</span><select id="adminPriorityOperational"><option value="">All operational states</option><option value="blocked">Blocked</option><option value="needs_attention">Needs attention</option><option value="healthy">Healthy</option></select></label>
+                            <label for="adminPriorityCommercial"><span>Commercial</span><select id="adminPriorityCommercial"><option value="">All commercial tiers</option><option value="unpaid">Unpaid</option><option value="starter">Starter</option><option value="invested">Invested</option><option value="high_value">High value</option></select></label>
+                            <button class="auth-btn auth-btn-secondary" type="submit">Filter users</button>
+                        </form>
+                        <p id="adminPriorityStatus" class="credits-status" role="status" aria-live="polite"></p>
+                        <p id="adminPriorityError" class="auth-error" role="alert" hidden></p>
+                        <div id="adminPriorityUsers" class="admin-priority-users" aria-busy="true"></div>
+                    </section>
+
+                    <div class="admin-value-disclosures" aria-label="Deeper analysis">
+                        <section class="admin-value-disclosure">
+                            <button class="admin-value-disclosure-toggle" type="button" data-admin-value-disclosure="retention" aria-expanded="false" aria-controls="adminRetentionPanel"><span><small>Return behavior</small><strong>Activation retention</strong></span><svg aria-hidden="true"><use href="#icon-chevron-down"/></svg></button>
+                            <div id="adminRetentionPanel" class="admin-value-disclosure-panel" data-admin-value-panel="retention" hidden>
+                                <p data-admin-value-status role="status" aria-live="polite"></p><p data-admin-value-error class="auth-error" role="alert" hidden></p><button class="credits-key-action" data-admin-value-retry type="button" hidden>Retry section</button><div data-admin-value-content></div>
+                            </div>
+                        </section>
+                        <section class="admin-value-disclosure">
+                            <button class="admin-value-disclosure-toggle" type="button" data-admin-value-disclosure="commercial" aria-expanded="false" aria-controls="adminCommercialPanel"><span><small>Economic signal</small><strong>Commercial value</strong></span><svg aria-hidden="true"><use href="#icon-chevron-down"/></svg></button>
+                            <div id="adminCommercialPanel" class="admin-value-disclosure-panel" data-admin-value-panel="commercial" hidden>
+                                <p data-admin-value-status role="status" aria-live="polite"></p><p data-admin-value-error class="auth-error" role="alert" hidden></p><button class="credits-key-action" data-admin-value-retry type="button" hidden>Retry section</button><div data-admin-value-content></div>
+                            </div>
+                        </section>
+                        <section class="admin-value-disclosure">
+                            <button class="admin-value-disclosure-toggle" type="button" data-admin-value-disclosure="operational" aria-expanded="false" aria-controls="adminOperationalPanel"><span><small>Execution health</small><strong>Operational health</strong></span><svg aria-hidden="true"><use href="#icon-chevron-down"/></svg></button>
+                            <div id="adminOperationalPanel" class="admin-value-disclosure-panel" data-admin-value-panel="operational" hidden>
+                                <form id="adminOperationalFilters" class="admin-operational-filters" aria-label="Operational analytics filters">
+                                    <label for="adminOperationalBilling"><span>Billing</span><select id="adminOperationalBilling"><option value="">All billing modes</option><option value="byok">BYOK</option><option value="platform_credits">Platform Credits</option></select></label>
+                                    <label for="adminOperationalProvider"><span>Provider ID</span><input id="adminOperationalProvider" type="text" maxlength="64" autocomplete="off" placeholder="All providers"></label>
+                                    <label for="adminOperationalModel"><span>Model ID</span><input id="adminOperationalModel" type="text" maxlength="256" autocomplete="off" placeholder="All models"></label>
+                                    <button class="auth-btn auth-btn-secondary" type="submit">Apply</button>
+                                </form>
+                                <p data-admin-value-status role="status" aria-live="polite"></p><p data-admin-value-error class="auth-error" role="alert" hidden></p><button class="credits-key-action" data-admin-value-retry type="button" hidden>Retry section</button><div data-admin-value-content></div>
+                            </div>
+                        </section>
+                    </div>
+                </section>
+
+                <div class="admin-analytics-legacy-overview" hidden>
                 <header class="admin-analytics-heading">
                     <div>
                         <p class="credits-section-kicker">Platform intelligence</p>
@@ -2200,6 +2295,7 @@
                     </div>
                     <div class="admin-analytics-pager" aria-label="Users needing attention pages"><button id="adminAnalyticsUsersPrev" class="auth-btn auth-btn-secondary" type="button" disabled>Previous</button><button id="adminAnalyticsUsersNext" class="auth-btn auth-btn-secondary" type="button" disabled>Next</button></div>
                 </section>
+                </div>
             </div>
 
             <article id="adminAnalyticsProfile" class="admin-analytics-profile" aria-labelledby="adminAnalyticsProfileTitle" hidden>
@@ -2497,14 +2593,15 @@
     <script src="market-events/MarketEventFeed.js" defer></script>
     <script src="js/portfolio.js?v=17" defer></script>
     <script src="js/backtest-comparison.js?v=1" defer></script>
-    <script src="app.js?v=125" defer></script>
+    <script src="app.js?v=126" defer></script>
     <script src="js/analytics.js?v=1" defer></script>
     <script src="js/agent-editor.js?v=30" defer></script>
     <script src="js/credit-format.js?v=1" defer></script>
     <script src="js/credits.js?v=8" defer></script>
     <script src="js/admin-model-providers.js?v=1" defer></script>
     <script src="js/admin-credits.js?v=6" defer></script>
-    <script src="js/admin-analytics.js?v=2" defer></script>
+    <script src="js/admin-analytics.js?v=3" defer></script>
+    <script src="js/admin-analytics-value.js?v=1" defer></script>
     <script src="js/admin-tabs.js?v=4" defer></script>
     <script src="js/leaderboard.js?v=32" defer></script>
     <script src="home-page.js?v=50" defer></script>

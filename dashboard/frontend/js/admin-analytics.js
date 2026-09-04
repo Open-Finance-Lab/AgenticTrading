@@ -989,7 +989,6 @@
       state.active = event.detail?.tab === 'analytics';
       if (!state.active) return;
       restoreAnalyticsUrlState();
-      if (!state.profile.userId) refresh();
     });
     window.addEventListener('popstate', () => {
       const params = new URLSearchParams(window.location.search);
@@ -1010,7 +1009,11 @@
     state.active = requestedTab === 'analytics';
     if (!state.active) return;
     restoreAnalyticsUrlState();
-    if (!state.profile.userId) refresh();
+  }
+
+  function refreshSurface() {
+    if (state.profile.userId) return loadProfile(state.profile.userId);
+    return window.AdminAnalyticsValue?.refresh();
   }
 
   function syncAuth(user) {
@@ -1031,7 +1034,7 @@
     }
   }
 
-  window.AdminAnalytics = { onEnter, refresh, syncAuth };
+  window.AdminAnalytics = { onEnter, refresh: refreshSurface, syncAuth, openProfile };
   document.addEventListener('DOMContentLoaded', () => {
     if (document.documentElement.dataset.navPage === 'admin') onEnter();
   });

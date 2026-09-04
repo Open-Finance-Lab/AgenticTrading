@@ -4200,6 +4200,10 @@ function updateAuthUI() {
     window.AdminAnalytics.syncAuth(user);
   }
 
+  if (window.AdminAnalyticsValue) {
+    window.AdminAnalyticsValue.syncAuth(user);
+  }
+
   if (typeof window.refreshHomeModules === 'function') {
     window.refreshHomeModules();
   }
@@ -9209,6 +9213,9 @@ function navigateToPage(page, options = {}) {
             }
             if (window.AdminAnalytics) {
                 window.AdminAnalytics.onEnter();
+            }
+            if (window.AdminAnalyticsValue) {
+                window.AdminAnalyticsValue.onEnter();
             }
             if (window.AdminModelProviders) {
                 window.AdminModelProviders.onEnter();
