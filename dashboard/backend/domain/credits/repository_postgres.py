@@ -432,11 +432,37 @@ BEGIN
     END LOOP;
 END
 $$;
-ALTER TABLE credit_llm_reservations
-DROP CONSTRAINT IF EXISTS credit_llm_reservations_logical_attempt_key;
-ALTER TABLE credit_llm_reservations
-ADD CONSTRAINT credit_llm_reservations_logical_attempt_key
-UNIQUE (user_id, run_id, call_index, attempt_index);
+DO $$
+BEGIN
+    -- Converging, for the same reason as the index repair below: this DDL
+    -- runs on every boot and ADD CONSTRAINT ... UNIQUE builds a full index
+    -- under ACCESS EXCLUSIVE, so skip both statements once the constraint is
+    -- already the four-column one. Column identity comes from conkey rather
+    -- than a pg_get_constraintdef text match -- the same idiom as the legacy
+    -- sweep above, and it cannot drift with Postgres's deparsing. Any
+    -- mismatch simply falls back to drop+add, i.e. the previous behaviour.
+    IF NOT EXISTS (
+        SELECT 1
+        FROM pg_constraint AS con
+        WHERE con.conrelid = 'credit_llm_reservations'::regclass
+          AND con.conname = 'credit_llm_reservations_logical_attempt_key'
+          AND con.contype = 'u'
+          AND (
+              SELECT array_agg(att.attname ORDER BY key.ord)
+              FROM unnest(con.conkey) WITH ORDINALITY AS key(attnum, ord)
+              JOIN pg_attribute AS att
+                ON att.attrelid = con.conrelid
+               AND att.attnum = key.attnum
+          ) = ARRAY['user_id', 'run_id', 'call_index', 'attempt_index']::name[]
+    ) THEN
+        ALTER TABLE credit_llm_reservations
+        DROP CONSTRAINT IF EXISTS credit_llm_reservations_logical_attempt_key;
+        ALTER TABLE credit_llm_reservations
+        ADD CONSTRAINT credit_llm_reservations_logical_attempt_key
+        UNIQUE (user_id, run_id, call_index, attempt_index);
+    END IF;
+END
+$$;
 DO $$
 BEGIN
     -- Prod carried this index name over (run_id, status, call_index) before
@@ -445,6 +471,17 @@ BEGIN
     -- only while it is stale: this DDL runs on every boot (credits_store is
     -- built at import), and an unconditional DROP+CREATE would rebuild the
     -- index under ACCESS EXCLUSIVE on every deploy instead of converging.
+    --
+    -- Scope, so the next reader does not over-read this: converging is a
+    -- property of this repair and of the UNIQUE above, NOT of the migration
+    -- as a whole. Every CHECK and the FOREIGN KEY on credit_llm_reservations
+    -- and credit_ledger_entries is still dropped and re-added unconditionally,
+    -- each costing a validating full-table scan per boot. That is deliberate:
+    -- recognising an existing CHECK means comparing pg_get_constraintdef text,
+    -- which drifts with Postgres's deparsing, and a mismatch there converges
+    -- to nothing while adding a way to skip a constraint that ought to be
+    -- rewritten. Both tables sit behind a disabled billing flag today; revisit
+    -- if either grows.
     IF EXISTS (
         SELECT 1
         FROM pg_index AS idx
@@ -454,7 +491,11 @@ BEGIN
           AND split_part(pg_get_indexdef(idx.indexrelid), ' USING btree ', 2)
               <> '(run_id, status, call_index, attempt_index)'
     ) THEN
-        DROP INDEX idx_credit_llm_reservations_run_status;
+        -- IF EXISTS, not bare: the predicate above is evaluated before the
+        -- lock is taken, so two concurrent boots can both reach this line and
+        -- the loser would raise "index does not exist", aborting _init_schema
+        -- -- fatal, because credits_store is built at import.
+        DROP INDEX IF EXISTS idx_credit_llm_reservations_run_status;
     END IF;
 END
 $$;

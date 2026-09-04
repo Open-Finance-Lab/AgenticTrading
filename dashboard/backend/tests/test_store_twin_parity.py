@@ -266,21 +266,43 @@ def test_postgres_twin_signatures_match_sqlite(
 
 _EXPR = "__EXPR__"  # stands in for an f-string interpolation
 
+# A bare or double-quoted identifier, optionally schema-qualified. Matching only
+# the bare form (as this did until the #433 review) is not a narrower guard, it
+# is a *silent* one: `ON public.t(a)` and `ON "t"(a)` simply do not match, so a
+# twin written that way would sail past the ordering check below with zero
+# indexes parsed and nothing to show for it. _CREATE_INDEX_KEYWORD /
+# test_ddl_parser_sees_every_create_index exist to make that failure loud.
+_SQL_IDENT = r'(?:"[^"]+"|[A-Za-z_][A-Za-z0-9_]*)'
+_SQL_QUALIFIED = rf"(?:{_SQL_IDENT}\s*\.\s*)*({_SQL_IDENT})"
+_CREATE_INDEX_KEYWORD = re.compile(r"CREATE\s+(?:UNIQUE\s+)?INDEX\b", re.IGNORECASE)
+
 _CREATE_TABLE = re.compile(
-    r"CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*\(",
+    rf"CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?{_SQL_QUALIFIED}\s*\(",
     re.IGNORECASE,
 )
 _ADD_COLUMN = re.compile(
-    r"ALTER\s+TABLE\s+([A-Za-z_][A-Za-z0-9_]*)\s+ADD\s+COLUMN\s+"
-    r"(?:IF\s+NOT\s+EXISTS\s+)?([A-Za-z_][A-Za-z0-9_]*)",
+    rf"ALTER\s+TABLE\s+(?:IF\s+EXISTS\s+)?(?:ONLY\s+)?{_SQL_QUALIFIED}"
+    rf"\s+ADD\s+COLUMN\s+(?:IF\s+NOT\s+EXISTS\s+)?{_SQL_QUALIFIED}",
     re.IGNORECASE,
 )
 _CREATE_INDEX = re.compile(
-    r"CREATE\s+(?:UNIQUE\s+)?INDEX\s+(?:CONCURRENTLY\s+)?(?:IF\s+NOT\s+EXISTS\s+)?"
-    r"([A-Za-z_][A-Za-z0-9_]*)\s+ON\s+(?:ONLY\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*"
-    r"(?:USING\s+[A-Za-z_]+\s*)?\(",
+    rf"CREATE\s+(?:UNIQUE\s+)?INDEX\s+(?:CONCURRENTLY\s+)?"
+    rf"(?:IF\s+NOT\s+EXISTS\s+)?{_SQL_QUALIFIED}\s+ON\s+(?:ONLY\s+)?"
+    rf"{_SQL_QUALIFIED}\s*(?:USING\s+[A-Za-z_]+\s*)?\(",
     re.IGNORECASE,
 )
+
+
+def _name(raw: str) -> str:
+    """Fold one captured identifier to its comparison key.
+
+    Postgres treats a quoted identifier as case-sensitive and an unquoted one
+    as folded to lower case, so ``"T"`` and ``T`` really are different tables.
+    This guard collapses them anyway: over-matching makes it flag an ordering
+    it should not (loud, and fixable), while under-matching makes it miss the
+    #432 boot crash (silent, and shipped).
+    """
+    return raw.strip().strip('"').lower()
 _SQL_STRING = re.compile(r"'(?:[^']|'')*'")
 _IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 # Tables a Postgres twin deliberately never creates, keyed by twin class name.
@@ -312,6 +334,35 @@ _CONSTRAINT_KEYWORDS = {
 }
 
 
+def _blank_sql_comments(literal: str) -> str:
+    """``literal`` with every ``--`` comment replaced by spaces, same length.
+
+    Two reasons this is not cosmetic. A commented-out ``CREATE INDEX`` would
+    otherwise be read as real DDL, and prose inside a comment ("CREATE INDEX
+    IF NOT EXISTS matches by name ...", which the credits twin really does
+    say) would be counted as a statement the parser failed to understand.
+    Length is preserved so every offset the callers compare stays valid.
+    """
+    out = list(literal)
+    i, n = 0, len(literal)
+    while i < n:
+        if literal[i] == "'":
+            i = _skip_quoted(literal, i)
+            continue
+        if literal.startswith("--", i):
+            while i < n and literal[i] != "\n":
+                out[i] = " "
+                i += 1
+            continue
+        i += 1
+    return "".join(out)
+
+
+def _ddl_literals(source: str) -> list[str]:
+    """``_string_literals`` with SQL comments blanked -- the SQL readers' view."""
+    return [_blank_sql_comments(literal) for literal in _string_literals(source)]
+
+
 def _string_literals(source: str) -> list[str]:
     """Every string literal in a module, in source order, f-strings reassembled.
 
@@ -320,10 +371,11 @@ def _string_literals(source: str) -> list[str]:
     whose interpolations collapse to a placeholder -- enough to read the
     column name, which is never interpolated.
 
-    Source order is what the index-ordering guard reads as *execution* order:
-    every twin runs its DDL top to bottom. ``ast.walk`` is breadth-first, so
-    a statement nested one level deeper (inside an ``if``, say) would
-    otherwise sort after a shallower statement that follows it in the file.
+    Source order is what the index-ordering guard reads as a *proxy for*
+    execution order -- see that test's docstring for where the two come apart.
+    ``ast.walk`` is breadth-first, so a statement nested one level deeper
+    (inside an ``if``, say) would otherwise sort after a shallower statement
+    that follows it in the file.
     """
     tree = ast.parse(source)
 
@@ -391,8 +443,8 @@ def _index_references(literal: str) -> list[tuple[int, _IndexReference]]:
             (
                 match.start(),
                 _IndexReference(
-                    match.group(1).lower(),
-                    match.group(2).lower(),
+                    _name(match.group(1)),
+                    _name(match.group(2)),
                     frozenset(tok.lower() for tok in _IDENTIFIER.findall(clause)),
                 ),
             )
@@ -498,16 +550,16 @@ class _Schema(NamedTuple):
 def _parse_ddl(source: str) -> _Schema:
     declared: dict[str, set[str]] = {}
     migrated: dict[str, set[str]] = {}
-    for literal in _string_literals(source):
+    for literal in _ddl_literals(source):
         for match in _CREATE_TABLE.finditer(literal):
             body = _balanced_body(literal, match.end() - 1)
             if body is None:
                 continue
-            declared.setdefault(match.group(1).lower(), set()).update(
+            declared.setdefault(_name(match.group(1)), set()).update(
                 _column_names(body)
             )
         for match in _ADD_COLUMN.finditer(literal):
-            table, column = match.group(1).lower(), match.group(2).lower()
+            table, column = _name(match.group(1)), _name(match.group(2))
             declared.setdefault(table, set()).add(column)
             migrated.setdefault(table, set()).add(column)
     return _Schema(declared, migrated)
@@ -601,7 +653,7 @@ cur.execute(
 '''
     references = [
         reference
-        for literal in _string_literals(source)
+        for literal in _ddl_literals(source)
         for _, reference in _index_references(literal)
     ]
 
@@ -620,6 +672,84 @@ cur.execute(
     assert "note" in references[2].columns
 
 
+def test_ddl_parser_reads_qualified_and_quoted_identifiers():
+    """Schema-qualified and quoted DDL must parse, not silently vanish.
+
+    Before the #433 review the identifier patterns accepted a bare name only,
+    so ``ON public.t(a)`` and ``ON "t"(a)`` matched nothing at all -- the
+    ordering guard would have reported zero indexes for such a twin and passed.
+    """
+    source = '''
+cur.execute(
+    """
+    ALTER TABLE public.widgets ADD COLUMN IF NOT EXISTS "owner_id" INTEGER;
+    CREATE INDEX IF NOT EXISTS idx_q ON public.widgets(owner_id);
+    CREATE UNIQUE INDEX uq_q ON "widgets"("owner_id", label);
+    """
+)
+'''
+    literal = _ddl_literals(source)[0]
+
+    references = [reference for _, reference in _index_references(literal)]
+    assert [reference.name for reference in references] == ["idx_q", "uq_q"]
+    assert {reference.table for reference in references} == {"widgets"}
+    assert "owner_id" in references[0].columns
+    assert {"owner_id", "label"} <= references[1].columns
+
+    added = [
+        (_name(match.group(1)), _name(match.group(2)))
+        for match in _ADD_COLUMN.finditer(literal)
+    ]
+    assert added == [("widgets", "owner_id")]
+
+
+def test_ddl_parser_ignores_sql_comments():
+    """A ``--`` comment is prose, not DDL -- in both directions.
+
+    The credits twin's migration really does contain the sentence "CREATE
+    INDEX IF NOT EXISTS matches by name" inside a comment, so a parser that
+    reads comments both invents an index and, via the coverage guard below,
+    accuses itself of failing to parse one.
+    """
+    source = '''
+cur.execute(
+    """
+    -- CREATE INDEX IF NOT EXISTS idx_commented ON widgets(owner_id);
+    CREATE INDEX IF NOT EXISTS idx_real ON widgets(owner_id); -- trailing note
+    """
+)
+'''
+    literal = _ddl_literals(source)[0]
+    assert [name for _, (name, *_rest) in _index_references(literal)] == ["idx_real"]
+    assert len(_CREATE_INDEX_KEYWORD.findall(literal)) == 1
+
+
+@pytest.mark.parametrize(
+    "sqlite_mod,sqlite_cls,postgres_mod,postgres_cls", _TWINS, ids=_TWIN_IDS
+)
+def test_ddl_parser_sees_every_create_index(
+    sqlite_mod, sqlite_cls, postgres_mod, postgres_cls
+):
+    """Every CREATE INDEX in a twin's DDL must actually parse.
+
+    This is the anti-vacuity guard for the ordering test below. That test can
+    only report an index it managed to read, so an unparsed spelling does not
+    fail it -- it empties it. Counting the keyword and the parsed statements
+    separately is the only way a regex blind spot shows up as a failure rather
+    than as a green run over an unchecked twin.
+    """
+    literals = _ddl_literals(_module_source_path(postgres_mod).read_text("utf-8"))
+
+    keyword_hits = sum(len(_CREATE_INDEX_KEYWORD.findall(lit)) for lit in literals)
+    parsed = sum(len(_index_references(lit)) for lit in literals)
+
+    assert parsed == keyword_hits, (
+        f"{postgres_cls}: {keyword_hits} CREATE INDEX statement(s) in the DDL "
+        f"but only {parsed} parsed. _CREATE_INDEX has a blind spot, and the "
+        f"ordering guard silently skips whatever it cannot read."
+    )
+
+
 @pytest.mark.parametrize(
     "sqlite_mod,sqlite_cls,postgres_mod,postgres_cls", _TWINS, ids=_TWIN_IDS
 )
@@ -633,16 +763,27 @@ def test_postgres_twin_indexes_a_migrated_column_only_after_adding_it(
     EXISTS`` no-ops, so a ``CREATE INDEX`` naming ``c`` that runs *before*
     the ALTER raises UndefinedColumn at import -- fatal for a store built at
     module scope, and invisible to CI, whose Postgres is empty on every run
-    and therefore only ever exercises the CREATE path. Position in the source
-    is execution order here: every twin runs its DDL top to bottom.
+    and therefore only ever exercises the CREATE path.
+
+    Scope: this reads *source* position, which is a proxy for execution order,
+    not the thing itself. It holds for a twin whose DDL literals run where they
+    are written, which is every twin today for the columns that matter. It
+    already does not hold in general: ``users_postgres.py`` defines
+    ``AUTH_SESSIONS_DDL`` near the top of the module but executes it *after*
+    the inline ``ALTER TABLE users ADD COLUMN`` statements further down.
+    Nothing crosses tables there, so the proxy costs nothing today -- but a
+    future ``CREATE INDEX`` inside a hoisted constant, over a column added by
+    an ALTER executed earlier, would be reported as too-early when it is fine,
+    and the mirror case would pass while being the #432 bug. Read a failure
+    here as "check the execution order", not as proof of one.
     """
     source = _module_source_path(postgres_mod).read_text(encoding="utf-8")
-    literals = _string_literals(source)
+    literals = _ddl_literals(source)
 
     first_added: dict[tuple[str, str], tuple[int, int]] = {}
     for position, literal in enumerate(literals):
         for match in _ADD_COLUMN.finditer(literal):
-            key = (match.group(1).lower(), match.group(2).lower())
+            key = (_name(match.group(1)), _name(match.group(2)))
             first_added.setdefault(key, (position, match.start()))
 
     too_early = []

@@ -409,7 +409,13 @@ class PostgresBacktestDatabase:
                 # arrives by ALTER on a table that predates it, and an index created
                 # above that ALTER raises UndefinedColumn there before the column
                 # exists -- the #432 Render boot crash, in the credits twin.
-                # test_store_twin_parity.py pins this order for every twin.
+                # test_store_twin_parity.py pins this order for every twin --
+                # by *source* position, which is a proxy for execution order and
+                # holds here because this method runs its DDL top to bottom. It
+                # is not a universal property (users_postgres.py executes a
+                # hoisted constant after later inline ALTERs), so keep these
+                # CREATE INDEX calls physically below the ALTERs rather than
+                # relying on the guard to notice if they move.
                 cur.execute(
                     "CREATE INDEX IF NOT EXISTS idx_agent_runs_session "
                     "ON agent_runs(session_id)"

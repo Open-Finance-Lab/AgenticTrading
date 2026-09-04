@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
@@ -93,26 +94,73 @@ def test_postgres_boot_ddl_repairs_the_stale_run_status_index_conditionally():
     three-column index satisfies it forever. The migration must drop that
     definition -- but only that one: an unconditional DROP+CREATE runs under
     ACCESS EXCLUSIVE on every boot and never converges to a no-op.
+
+    What makes the drop conditional is its *position* -- inside the DO block's
+    staleness guard -- not the presence or absence of any keyword on the DROP
+    itself. Do not re-add an assertion banning ``IF EXISTS`` here: that spelling
+    is a concurrency requirement, because two boots can both pass the predicate
+    and the loser must no-op rather than abort _init_schema.
     """
     migration = pg_module.CREDITS_POSTGRES_GRANT_MIGRATION_DDL
     add_column = "ADD COLUMN IF NOT EXISTS attempt_index INTEGER NOT NULL DEFAULT 0"
     stale_check = "<> '(run_id, status, call_index, attempt_index)'"
-    drop_index = "DROP INDEX idx_credit_llm_reservations_run_status;"
     create_index = (
         "CREATE INDEX IF NOT EXISTS idx_credit_llm_reservations_run_status\n"
         "ON credit_llm_reservations(run_id, status, call_index, attempt_index);"
     )
 
-    for statement in (add_column, stale_check, drop_index, create_index):
+    for statement in (add_column, stale_check, create_index):
         assert statement in migration, statement
-    assert (
-        migration.index(add_column)
-        < migration.index(stale_check)
-        < migration.index(drop_index)
-        < migration.index(create_index)
+
+    drops = [
+        match.start()
+        for match in re.finditer(
+            r"DROP\s+INDEX\s+(?:IF\s+EXISTS\s+)?"
+            r"idx_credit_llm_reservations_run_status",
+            migration,
+        )
+    ]
+    assert len(drops) == 1, f"expected exactly one drop of the index, got {drops}"
+
+    guard_at = migration.index(stale_check)
+    end_if_at = migration.index("END IF;", guard_at)
+    assert guard_at < drops[0] < end_if_at, (
+        "the DROP INDEX must sit inside the staleness guard; an unconditional "
+        "one rebuilds the index under ACCESS EXCLUSIVE on every boot"
     )
-    assert "DROP INDEX IF EXISTS idx_credit_llm_reservations_run_status" not in (
-        migration
+    assert migration.index(add_column) < guard_at
+    assert end_if_at < migration.index(create_index)
+
+
+def test_postgres_boot_ddl_rebuilds_the_logical_attempt_key_conditionally():
+    """The UNIQUE that backs (user_id, run_id, call_index, attempt_index) is an
+    index build under ACCESS EXCLUSIVE, so it gets the same treatment as the
+    stale-index repair: skipped once conkey already names those four columns.
+
+    Column identity must come from ``conkey``, not a pg_get_constraintdef text
+    match -- the deparsed text drifts across Postgres versions, and a guard that
+    silently stops matching converges to nothing while still looking correct.
+    """
+    migration = pg_module.CREDITS_POSTGRES_GRANT_MIGRATION_DDL
+    conkey_check = (
+        "ARRAY['user_id', 'run_id', 'call_index', 'attempt_index']::name[]"
+    )
+    assert conkey_check in migration
+
+    adds = [
+        match.start()
+        for match in re.finditer(
+            r"ADD\s+CONSTRAINT\s+credit_llm_reservations_logical_attempt_key",
+            migration,
+        )
+    ]
+    assert len(adds) == 1, f"expected exactly one ADD CONSTRAINT, got {adds}"
+
+    guard_at = migration.index(conkey_check)
+    end_if_at = migration.index("END IF;", guard_at)
+    assert guard_at < adds[0] < end_if_at, (
+        "ADD CONSTRAINT ... UNIQUE must sit inside the conkey guard; "
+        "unconditionally it rebuilds a full index on every boot"
     )
 
 
@@ -1163,6 +1211,25 @@ def _run_status_index(conn) -> dict:
     ).fetchone()
 
 
+def _logical_attempt_constraint(conn) -> dict:
+    """OID + backing-index OID of the reservations logical-attempt UNIQUE.
+
+    conindid is the load-bearing half: a drop+re-add keeps the constraint's
+    *name* but builds a brand new index, so only the OIDs can tell a converged
+    boot from one that rebuilt under ACCESS EXCLUSIVE.
+    """
+    return conn.execute(
+        """
+        SELECT con.oid AS oid,
+               con.conindid AS conindid,
+               pg_get_constraintdef(con.oid) AS condef
+        FROM pg_constraint AS con
+        WHERE con.conrelid = 'credit_llm_reservations'::regclass
+          AND con.conname = 'credit_llm_reservations_logical_attempt_key'
+        """
+    ).fetchone()
+
+
 @pg_only
 def test_postgres_boot_migrates_pre_failover_reservation_table(
     pg_pre_failover_reservations_url,
@@ -1214,6 +1281,7 @@ def test_postgres_boot_leaves_a_repaired_run_status_index_alone(
         pg_pre_failover_reservations_url, row_factory=dict_row
     ) as conn:
         repaired = _run_status_index(conn)
+        repaired_constraint = _logical_attempt_constraint(conn)
 
     db_pool._reset_for_tests()
     pg_module.PostgresCreditsStore(pg_pre_failover_reservations_url)
@@ -1221,8 +1289,13 @@ def test_postgres_boot_leaves_a_repaired_run_status_index_alone(
         pg_pre_failover_reservations_url, row_factory=dict_row
     ) as conn:
         rebooted = _run_status_index(conn)
+        rebooted_constraint = _logical_attempt_constraint(conn)
 
     assert rebooted == repaired
+    # Same for the UNIQUE beside it: identical OIDs mean the second boot did
+    # not drop and rebuild the index behind the constraint.
+    assert repaired_constraint is not None
+    assert rebooted_constraint == repaired_constraint
 
 
 @pg_only
