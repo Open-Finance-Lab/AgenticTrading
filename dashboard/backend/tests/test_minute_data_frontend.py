@@ -27,6 +27,7 @@ def _run_formatters(expression: str):
         [node, "-e", script],
         capture_output=True,
         text=True,
+        encoding="utf-8",
         check=True,
         timeout=30,
     )
@@ -50,6 +51,7 @@ def _render_data_source_badge(run: dict):
         [node, "-e", script],
         capture_output=True,
         text=True,
+        encoding="utf-8",
         check=True,
         timeout=30,
     )
