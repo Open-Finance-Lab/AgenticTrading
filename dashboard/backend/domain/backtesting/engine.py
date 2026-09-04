@@ -701,15 +701,7 @@ class HourlyBacktester:
                 timezone=self.profile.timezone,
             )
             self.data_quality = summarize_aggregation_quality(aggregated_data)
-            self.all_data = {
-                symbol: (
-                    frame.loc[frame["is_complete"]].copy()
-                    if "is_complete" in frame.columns
-                    else frame
-                )
-                for symbol, frame in aggregated_data.items()
-                if not frame.empty
-            }
+            self.all_data = self._completed_decision_bars(aggregated_data)
             if not self.all_data:
                 raise MarketDataUnavailableError(
                     "Source bars were fetched, but no completed decision bars "
@@ -1785,6 +1777,7 @@ class HourlyBacktester:
                     market=self.profile.market,
                     timezone=self.profile.timezone,
                 )
+                bars = self._completed_decision_bars(bars)
 
         _, equity_history = generate_baselines(
             bars_by_symbol=bars,
@@ -1829,6 +1822,23 @@ class HourlyBacktester:
         print(f"     • Return: {total_return*100:+.2f}%\n")
         
         return run_id, equity_history
+
+    @staticmethod
+    def _completed_decision_bars(
+        bars_by_symbol: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Keep only decision bars whose source-bar coverage is complete."""
+        return {
+            symbol: (
+                frame.loc[
+                    frame["is_complete"].fillna(False).astype(bool)
+                ].copy()
+                if "is_complete" in frame.columns
+                else frame
+            )
+            for symbol, frame in bars_by_symbol.items()
+            if not frame.empty
+        }
     
     @staticmethod
     def _calc_sharpe(

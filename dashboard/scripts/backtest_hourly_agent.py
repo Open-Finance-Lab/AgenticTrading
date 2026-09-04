@@ -19,8 +19,6 @@ Usage:
 import sys
 import json
 import argparse
-import importlib.util
-import subprocess
 from pathlib import Path
 
 # Bootstrap for non-package execution contexts: when this module is run directly
@@ -61,27 +59,12 @@ Anthropic = _backtest_harness.Anthropic
 HAS_ANTHROPIC = _backtest_harness.HAS_ANTHROPIC
 LLM_MODEL_NAME = _backtest_harness.LLM_MODEL_NAME
 
-# A presence probe, not a use: dashboard.backend.domain.backtesting.features
-# imports pandas_ta itself. This script installs it first so that import cannot
-# fail part-way through a run. find_spec rather than a try/except import because
-# nothing here needs the module object -- only the answer to "is it installed?".
-if importlib.util.find_spec("pandas_ta") is None:
-    print("Installing pandas_ta...")
-    # sys.executable, not a bare "pip": the script may well be running under a
-    # venv whose pip is not first on PATH, and installing into the wrong
-    # interpreter would leave the import below still failing.
-    subprocess.check_call([sys.executable, "-m", "pip", "install", "pandas_ta"])
-    # The probe above populated the path-finder's directory caches with a miss;
-    # drop them so the module just written to site-packages is discoverable by
-    # the features import below rather than on the next process start.
-    importlib.invalidate_caches()
-
 # ---------------------------------------------------------------------------
 # Phase 2A extraction: the implementations below now live under the canonical
 # dashboard.backend.* packages and are re-exported here so this script's public
 # compatibility surface (and the three backend callers that import this module)
-# stays unchanged. pandas_ta is imported above first so the features module can
-# rely on it being available.
+# stays unchanged. pandas_ta is a declared project dependency imported by the
+# canonical features module.
 # ---------------------------------------------------------------------------
 #
 # Same explicit-assignment form as the harness re-exports above, for the same

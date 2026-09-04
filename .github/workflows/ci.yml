@@ -87,6 +87,31 @@ jobs:
         working-directory: packaging/agentictrading
         run: pytest tests/ -p no:cacheprovider
 
+  landing-tests:
+    name: Landing frontend checks
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: dashboard/landing
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: dashboard/landing/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck landing source
+        run: npm run typecheck
+
+      - name: Build landing source
+        run: npm run build
+
   deploy-prod:
     name: Trigger Render prod deploy
     # Deploy only from main pushes (or a manual dispatch on main), and only
