@@ -115,7 +115,7 @@ def test_admin_analytics_surface_and_module_exist():
     assert ".admin-analytics-profile" in STYLES
 
 
-def test_admin_tabs_are_accessible_default_and_url_backed():
+def test_admin_rail_is_accessible_default_and_url_backed():
     tabs = ADMIN_TABS_JS_PATH.read_text(encoding="utf-8")
     admin_start = APP_HTML.index('id="adminView"')
     nav_start = APP_HTML.index('<nav id="adminTabs"', admin_start)
@@ -126,12 +126,27 @@ def test_admin_tabs_are_accessible_default_and_url_backed():
     assert [nav_markup.index(f'data-admin-tab="{value}"') for value in expected] == sorted(
         nav_markup.index(f'data-admin-tab="{value}"') for value in expected
     )
+    assert 'aria-orientation="vertical"' in nav_markup
+    assert 'class="admin-workspace"' in APP_HTML
+    assert nav_markup.count('aria-label=') == 5
+    assert nav_markup.count('<svg aria-hidden="true">') == 4
     assert "DEFAULT_TAB = 'analytics'" in tabs
     assert "value === 'grant-pool' ? 'users' : value" in tabs
-    for key in ("ArrowRight", "ArrowLeft", "Home", "End"):
+    for key in ("ArrowUp", "ArrowDown", "Home", "End"):
         assert key in tabs
+    assert "ArrowLeft" not in tabs
+    assert "ArrowRight" not in tabs
     assert "admin:tabchange" in tabs
     assert "openAccountManagement" in tabs
+
+
+def test_credits_navigation_remains_horizontal():
+    start = APP_HTML.index('<nav id="creditsTabs"')
+    end = APP_HTML.index("</nav>", start)
+    markup = APP_HTML[start:end]
+
+    assert 'class="credits-tabs"' in markup
+    assert 'aria-orientation="vertical"' not in markup
 
 
 def test_client_uses_exact_pr2_endpoints_and_query_names():
@@ -208,10 +223,10 @@ def test_app_lifecycle_and_cache_versions_are_wired():
     assert "window.AdminAnalytics.syncAuth(user)" in APP_JS
     assert "window.AdminAnalytics.onEnter()" in APP_JS
     assert "window.AdminAnalytics.refresh()" in APP_JS
-    assert 'styles.css?v=130' in APP_HTML
+    assert 'styles.css?v=131' in APP_HTML
     assert 'app.js?v=125' in APP_HTML
     assert 'js/admin-analytics.js?v=2' in APP_HTML
-    assert 'js/admin-tabs.js?v=3' in APP_HTML
+    assert 'js/admin-tabs.js?v=4' in APP_HTML
 
 
 def test_credit_costs_use_the_shared_exact_formatter():
@@ -222,6 +237,7 @@ def test_credit_costs_use_the_shared_exact_formatter():
 
 def test_scoped_responsive_accessible_styles_exist():
     for selector in (
+        ".admin-workspace", ".admin-rail",
         ".admin-analytics-overview", ".admin-analytics-filters",
         ".admin-analytics-snapshot-grid", ".admin-analytics-trend",
         ".admin-analytics-state-badge", ".admin-analytics-attention-table",

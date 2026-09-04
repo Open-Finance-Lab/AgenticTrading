@@ -12672,7 +12672,7 @@ body.agent-editor-open {
 
 /* —— Admin console —— */
 .admin-view {
-    max-width: 1100px;
+    max-width: 1280px;
 }
 
 .admin-view .page-header {
@@ -12816,23 +12816,45 @@ body.agent-editor-open {
     white-space: nowrap;
 }
 
-/* —— Admin Grant Credits console —— */
-.admin-tabs {
+/* —— Admin workspace rail —— */
+.admin-workspace {
+    display: grid;
+    grid-template-columns: minmax(164px, 188px) minmax(0, 1fr);
+    align-items: start;
+    gap: 28px;
+    margin-top: 22px;
+}
+
+.admin-workspace-content {
+    min-width: 0;
+}
+
+.admin-rail {
+    position: sticky;
+    top: 84px;
     display: flex;
-    gap: 4px;
-    margin: 18px 0 0;
-    padding: 4px;
+    flex-direction: column;
+    gap: 5px;
+    margin: 0;
+    padding: 7px;
     border: 1px solid var(--border-color);
-    border-radius: 8px;
-    background: var(--bg-card);
-    overflow-x: auto;
+    border-radius: 12px;
+    background:
+        linear-gradient(180deg, rgba(103, 232, 249, 0.055), transparent 42%),
+        var(--bg-card);
+    box-shadow: 0 16px 38px rgba(2, 8, 23, 0.2);
 }
 
 .admin-tab {
-    min-height: 38px;
-    padding: 8px 15px;
+    position: relative;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    width: 100%;
+    min-height: 43px;
+    padding: 9px 11px;
     border: 0;
-    border-radius: 6px;
+    border-radius: 8px;
     background: transparent;
     color: var(--text-secondary);
     font: inherit;
@@ -12840,6 +12862,25 @@ body.agent-editor-open {
     font-weight: 600;
     white-space: nowrap;
     cursor: pointer;
+}
+
+.admin-tab svg {
+    flex: 0 0 auto;
+    width: 18px;
+    height: 18px;
+    stroke-width: 1.8;
+}
+
+.admin-tab::before {
+    content: "";
+    position: absolute;
+    inset: 9px auto 9px -7px;
+    width: 2px;
+    border-radius: 999px;
+    background: #67e8f9;
+    opacity: 0;
+    transform: scaleY(0.35);
+    transition: opacity 140ms ease, transform 140ms ease;
 }
 
 .admin-tab:hover,
@@ -12850,13 +12891,51 @@ body.agent-editor-open {
 
 .admin-tab.is-active {
     color: var(--text-primary);
-    background: rgba(103, 232, 249, 0.14);
+    background: rgba(103, 232, 249, 0.12);
+    box-shadow: inset 0 0 0 1px rgba(103, 232, 249, 0.12);
+}
+
+.admin-tab.is-active::before {
+    opacity: 1;
+    transform: scaleY(1);
 }
 
 .admin-tab-panel {
     min-width: 0;
-    padding-top: 4px;
+    padding-top: 0;
 }
+
+@media (max-width: 700px) {
+    .admin-workspace {
+        grid-template-columns: 52px minmax(0, 1fr);
+        gap: 12px;
+    }
+
+    .admin-rail {
+        top: 72px;
+        padding: 5px;
+    }
+
+    .admin-tab {
+        justify-content: center;
+        min-height: 42px;
+        padding: 9px;
+    }
+
+    .admin-tab span {
+        position: absolute;
+        width: 1px;
+        height: 1px;
+        padding: 0;
+        margin: -1px;
+        overflow: hidden;
+        clip: rect(0, 0, 0, 0);
+        white-space: nowrap;
+        border: 0;
+    }
+}
+
+/* —— Admin Grant Credits console —— */
 
 .admin-credits-console {
     margin: 28px 0;

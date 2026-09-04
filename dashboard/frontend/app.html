@@ -13,7 +13,7 @@
          because every API call is a CORS request. -->
     <link rel="preconnect" href="https://agentictrading.onrender.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="styles.css?v=130">
+    <link rel="stylesheet" href="styles.css?v=131">
     <!-- defer: ~200KB that was render-blocking. Deferred scripts execute in
          document order (this one first, the body-end ones after), all before
          DOMContentLoaded, so Chart is defined before any chart renders. -->
@@ -2102,12 +2102,14 @@
         <p id="adminError" class="auth-error" hidden></p>
         <p id="adminSuccess" class="account-success" hidden></p>
 
-        <nav id="adminTabs" class="admin-tabs" aria-label="Admin sections" role="tablist">
-            <button id="adminTabAnalytics" class="admin-tab is-active" type="button" role="tab" aria-selected="true" aria-controls="adminPanelAnalytics" tabindex="0" data-admin-tab="analytics">Analytics</button>
-            <button id="adminTabUsers" class="admin-tab" type="button" role="tab" aria-selected="false" aria-controls="adminPanelUsers" tabindex="-1" data-admin-tab="users">Users</button>
-            <button id="adminTabProviders" class="admin-tab" type="button" role="tab" aria-selected="false" aria-controls="adminPanelProviders" tabindex="-1" data-admin-tab="providers">Providers</button>
-            <button id="adminTabActivity" class="admin-tab" type="button" role="tab" aria-selected="false" aria-controls="adminPanelActivity" tabindex="-1" data-admin-tab="activity">Activity</button>
+        <div class="admin-workspace">
+        <nav id="adminTabs" class="admin-tabs admin-rail" aria-label="Admin sections" role="tablist" aria-orientation="vertical">
+            <button id="adminTabAnalytics" class="admin-tab is-active" type="button" role="tab" aria-label="Analytics" title="Analytics" aria-selected="true" aria-controls="adminPanelAnalytics" tabindex="0" data-admin-tab="analytics"><svg aria-hidden="true"><use href="#icon-chart"/></svg><span>Analytics</span></button>
+            <button id="adminTabUsers" class="admin-tab" type="button" role="tab" aria-label="Users" title="Users" aria-selected="false" aria-controls="adminPanelUsers" tabindex="-1" data-admin-tab="users"><svg aria-hidden="true"><use href="#icon-users"/></svg><span>Users</span></button>
+            <button id="adminTabProviders" class="admin-tab" type="button" role="tab" aria-label="Providers" title="Providers" aria-selected="false" aria-controls="adminPanelProviders" tabindex="-1" data-admin-tab="providers"><svg aria-hidden="true"><use href="#icon-network"/></svg><span>Providers</span></button>
+            <button id="adminTabActivity" class="admin-tab" type="button" role="tab" aria-label="Activity" title="Activity" aria-selected="false" aria-controls="adminPanelActivity" tabindex="-1" data-admin-tab="activity"><svg aria-hidden="true"><use href="#icon-activity"/></svg><span>Activity</span></button>
         </nav>
+        <div class="admin-workspace-content">
         <p id="adminCreditsStatus" class="credits-status admin-credits-status" role="status" aria-live="polite"></p>
 
         <section id="adminPanelAnalytics" class="admin-tab-panel" role="tabpanel" aria-labelledby="adminTabAnalytics" data-admin-panel="analytics">
@@ -2435,6 +2437,8 @@
                 </div>
             </div>
         </section>
+        </div>
+        </div>
     </div>
 
     <dialog id="adminGrantReasonDialog" class="credits-refund-dialog admin-grant-reason-dialog" aria-labelledby="adminGrantReasonTitle">
@@ -2501,7 +2505,7 @@
     <script src="js/admin-model-providers.js?v=1" defer></script>
     <script src="js/admin-credits.js?v=6" defer></script>
     <script src="js/admin-analytics.js?v=2" defer></script>
-    <script src="js/admin-tabs.js?v=3" defer></script>
+    <script src="js/admin-tabs.js?v=4" defer></script>
     <script src="js/leaderboard.js?v=32" defer></script>
     <script src="home-page.js?v=50" defer></script>
     <!-- Load order: must come after app.js (API/API_BASE/escapeHtml) and
