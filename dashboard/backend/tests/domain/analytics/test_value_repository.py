@@ -190,6 +190,30 @@ def test_current_projection_round_trips_without_overwriting_legacy_state(tmp_pat
     assert persisted_legacy.evidence_event_ids == legacy.evidence_event_ids
 
 
+def test_current_projections_are_loaded_in_one_batched_query(tmp_path):
+    user_id, analytics, credits = _stores(tmp_path)
+    second = UserStore(db_path=analytics.db_path).create_user(
+        "second-value-user@example.test",
+        "Second Value User",
+        "SecurePass1!",
+    )
+    second_id = int(second["id"])
+    store = _value_store(analytics, credits)
+    first_snapshot = _value_snapshot(user_id)
+    second_snapshot = _value_snapshot(second_id).model_copy(
+        update={"lifecycle_segment": "growing"}
+    )
+    store.upsert_current_snapshot(first_snapshot)
+    store.upsert_current_snapshot(second_snapshot)
+
+    snapshots = store.list_current_snapshots([second_id, user_id, second_id])
+
+    assert snapshots == {
+        user_id: first_snapshot,
+        second_id: second_snapshot,
+    }
+
+
 def test_daily_snapshot_and_projection_job_upserts_are_idempotent(tmp_path):
     user_id, analytics, credits = _stores(tmp_path)
     store = _value_store(analytics, credits)

@@ -347,6 +347,10 @@ class ValueAnalyticsStore:
                 row = conn.execute(
                     "SELECT * FROM user_analytics_snapshots WHERE user_id=?", (subject,)
                 ).fetchone()
+        return self._current_snapshot_from_row(row)
+
+    @staticmethod
+    def _current_snapshot_from_row(row: Any) -> UserValueSnapshot | None:
         if row is None or _row_value(row, "lifecycle_segment") is None:
             return None
 
@@ -387,6 +391,52 @@ class ValueAnalyticsStore:
             ),
             calculated_at=_timestamp(_row_value(row, "calculated_at")),
         )
+
+    def list_current_snapshots(
+        self,
+        user_ids: Sequence[int],
+    ) -> dict[int, UserValueSnapshot]:
+        ids = _ids(user_ids)
+        if not ids:
+            return {}
+        result: dict[int, UserValueSnapshot] = {}
+        for offset in range(0, len(ids), MAX_USER_BATCH):
+            chunk = ids[offset : offset + MAX_USER_BATCH]
+            if self.is_postgres:
+                clause = "user_id = ANY(%s)"
+                params: Sequence[Any] = [chunk]
+            else:
+                clause = f"user_id IN ({', '.join('?' for _ in chunk)})"
+                params = chunk
+            with self._analytics_connection() as conn:
+                if self.is_postgres:
+                    with conn.cursor() as cur:
+                        cur.execute(
+                            f"""
+                            SELECT *
+                            FROM user_analytics_snapshots
+                            WHERE {clause} AND lifecycle_segment IS NOT NULL
+                            ORDER BY user_id
+                            """,
+                            params,
+                        )
+                        rows = cur.fetchall()
+                else:
+                    rows = conn.execute(
+                        f"""
+                        SELECT *
+                        FROM user_analytics_snapshots
+                        WHERE {clause} AND lifecycle_segment IS NOT NULL
+                        ORDER BY user_id
+                        """,
+                        params,
+                    ).fetchall()
+            for row in rows:
+                user_id = int(_row_value(row, "user_id"))
+                snapshot = self._current_snapshot_from_row(row)
+                if snapshot is not None:
+                    result[user_id] = snapshot
+        return result
 
     def upsert_daily_snapshot(
         self,
