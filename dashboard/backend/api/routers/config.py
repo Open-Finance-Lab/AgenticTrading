@@ -4,15 +4,37 @@ Moved verbatim from ``dashboard/backend/app.py``. The external path
 ``/config/defaults`` and its behavior are unchanged; registered directly on the app.
 """
 
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
 
 from dashboard.backend.infrastructure.market_data.provider import (
     ifind_ashare_enabled,
     vnpy_simulation_enabled,
 )
 from dashboard.backend.paths import CONFIG_DIR
+from dashboard.backend.infrastructure.market_data.strategy_universe import (
+    STOCK_POOLS, POOL_MODES, UniverseConfigurationError, representative_presets, universe_policy,
+)
 
 router = APIRouter()
+
+
+@router.get("/config/stock-pools")
+def get_stock_pools():
+    """Backend options and previewable representative rosters for Run Backtest."""
+    try:
+        presets = representative_presets()
+        policy = universe_policy()
+    except UniverseConfigurationError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    return {
+        "stock_pools": list(STOCK_POOLS),
+        "pool_modes": list(POOL_MODES),
+        "default_pool_mode": "top30",
+        "selection_order": "symbol_asc",
+        "large_cap_min_usd": policy["large_cap_min_usd"],
+        "legacy_default": "djia_30",
+        "representative_presets": presets,
+    }
 
 
 @router.get("/config/features")

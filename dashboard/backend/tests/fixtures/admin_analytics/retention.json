@@ -1,0 +1,92 @@
+{
+  "as_of": "2026-09-03T12:00:00Z",
+  "cohorts": [
+    {
+      "cohort_week": "2026-07-06",
+      "activated_users": 3,
+      "week_1": {
+        "week": 1,
+        "mature": true,
+        "retained_users": 2,
+        "eligible_users": 3,
+        "rate": 0.6666666666666666,
+        "data_quality": "complete"
+      },
+      "week_2": {
+        "week": 2,
+        "mature": true,
+        "retained_users": 1,
+        "eligible_users": 3,
+        "rate": 0.3333333333333333,
+        "data_quality": "complete"
+      },
+      "week_4": {
+        "week": 4,
+        "mature": true,
+        "retained_users": 1,
+        "eligible_users": 3,
+        "rate": 0.3333333333333333,
+        "data_quality": "complete"
+      }
+    },
+    {
+      "cohort_week": "2026-08-24",
+      "activated_users": 2,
+      "week_1": {
+        "week": 1,
+        "mature": false,
+        "retained_users": null,
+        "eligible_users": null,
+        "rate": null,
+        "data_quality": "partial"
+      },
+      "week_2": {
+        "week": 2,
+        "mature": false,
+        "retained_users": null,
+        "eligible_users": null,
+        "rate": null,
+        "data_quality": "partial"
+      },
+      "week_4": {
+        "week": 4,
+        "mature": false,
+        "retained_users": null,
+        "eligible_users": null,
+        "rate": null,
+        "data_quality": "partial"
+      }
+    }
+  ],
+  "summary_week_1": {
+    "week": 1,
+    "mature": true,
+    "retained_users": 2,
+    "eligible_users": 3,
+    "rate": 0.6666666666666666,
+    "data_quality": "complete"
+  },
+  "summary_week_2": {
+    "week": 2,
+    "mature": true,
+    "retained_users": 1,
+    "eligible_users": 3,
+    "rate": 0.3333333333333333,
+    "data_quality": "complete"
+  },
+  "summary_week_4": {
+    "week": 4,
+    "mature": true,
+    "retained_users": 1,
+    "eligible_users": 3,
+    "rate": 0.3333333333333333,
+    "data_quality": "complete"
+  },
+  "availability": {
+    "available": true,
+    "stale": false,
+    "status": "ready",
+    "coverage_start": "2026-07-01",
+    "coverage_end": "2026-08-31"
+  }
+}

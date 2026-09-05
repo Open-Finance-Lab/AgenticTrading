@@ -1,0 +1,84 @@
+{
+  "as_of": "2026-09-03T12:00:00Z",
+  "headline": {
+    "activated_users": 24,
+    "core_users": 8,
+    "at_risk_users": 5,
+    "paid_users": 7
+  },
+  "segment_counts": {
+    "new": 3,
+    "onboarding": 6,
+    "growing": 7,
+    "core": 8,
+    "at_risk": 5,
+    "dormant": 4
+  },
+  "weekly_segments": [
+    {
+      "week_start": "2026-08-17",
+      "segment_counts": {
+        "new": 4,
+        "onboarding": 7,
+        "growing": 6,
+        "core": 6,
+        "at_risk": 4,
+        "dormant": 3
+      },
+      "data_quality": "complete"
+    },
+    {
+      "week_start": "2026-08-24",
+      "segment_counts": {
+        "new": 3,
+        "onboarding": 6,
+        "growing": 7,
+        "core": 8,
+        "at_risk": 5,
+        "dormant": 4
+      },
+      "data_quality": "partial"
+    }
+  ],
+  "transitions": [
+    {
+      "from_segment": "growing",
+      "to_segment": "core",
+      "users": 3,
+      "period_start": "2026-08-01",
+      "period_end": "2026-09-01",
+      "data_quality": "complete"
+    },
+    {
+      "from_segment": "onboarding",
+      "to_segment": "at_risk",
+      "users": 2,
+      "period_start": "2026-08-01",
+      "period_end": "2026-09-01",
+      "data_quality": "partial"
+    }
+  ],
+  "availability": {
+    "current": {
+      "available": true,
+      "stale": false,
+      "status": "ready",
+      "coverage_start": null,
+      "coverage_end": null
+    },
+    "commercial": {
+      "available": true,
+      "stale": false,
+      "status": "ready",
+      "coverage_start": null,
+      "coverage_end": null
+    },
+    "history": {
+      "available": true,
+      "stale": false,
+      "status": "partial",
+      "coverage_start": "2026-08-17",
+      "coverage_end": "2026-08-31"
+    }
+  }
+}

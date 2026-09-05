@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -18,6 +19,7 @@ from dashboard.backend.domain.analytics.query_service import (
     AnalyticsQueryService,
     AnalyticsUserFilters,
     get_analytics_query_service,
+    get_value_analytics_query_service,
 )
 from dashboard.backend.domain.analytics.repository import AnalyticsStore
 from dashboard.backend.domain.analytics.rollups import (
@@ -34,10 +36,78 @@ from dashboard.backend.domain.analytics.states import (
     AnalyticsStateStore,
     recalculate_user_snapshot,
 )
+from dashboard.backend.domain.analytics.value_queries import (
+    CommercialAnalyticsResponse,
+    LifecycleAnalyticsResponse,
+    OperationalAnalyticsResponse,
+    PaginatedValueUsers,
+    RetentionAnalyticsResponse,
+    ValueUserProfile,
+)
 from dashboard.backend.users import UserStore
 
 
 NOW = datetime(2026, 8, 26, 12, 0, tzinfo=timezone.utc)
+FIXTURE_DIR = Path(__file__).resolve().parent / "fixtures" / "admin_analytics"
+
+
+def _contract(name: str, model):
+    payload = json.loads((FIXTURE_DIR / name).read_text(encoding="utf-8"))
+    return model.model_validate(payload)
+
+
+class FixtureValueQueryService:
+    def __init__(self, subject_id: int):
+        self.subject_id = subject_id
+        self.calls = []
+
+    def get_lifecycle(self, **kwargs):
+        self.calls.append(("lifecycle", kwargs))
+        return _contract("lifecycle.json", LifecycleAnalyticsResponse)
+
+    def get_retention(self, **kwargs):
+        self.calls.append(("retention", kwargs))
+        return _contract("retention.json", RetentionAnalyticsResponse)
+
+    def get_commercial(self, **kwargs):
+        self.calls.append(("commercial", kwargs))
+        return _contract("commercial.json", CommercialAnalyticsResponse)
+
+    def get_operational(self, **kwargs):
+        self.calls.append(("operational", kwargs))
+        return _contract("operational.json", OperationalAnalyticsResponse)
+
+    def list_users(self, **kwargs):
+        self.calls.append(("users", kwargs))
+        response = _contract("users.json", PaginatedValueUsers)
+        item = response.items[0].model_copy(
+            update={
+                "user_id": self.subject_id,
+                "profile_path": f"/admin/analytics/users/{self.subject_id}",
+            }
+        )
+        return response.model_copy(
+            update={
+                "items": [item],
+                "total": 1,
+                "limit": kwargs["limit"],
+                "offset": kwargs["offset"],
+            }
+        )
+
+    def get_user_profile(self, **kwargs):
+        self.calls.append(("profile", kwargs))
+        if kwargs["user_id"] != self.subject_id:
+            raise LookupError("synthetic missing user")
+        response = _contract("user_detail.json", ValueUserProfile)
+        return response.model_copy(
+            update={
+                "user_id": self.subject_id,
+                "commercial": response.commercial.model_copy(
+                    update={"user_id": self.subject_id}
+                ),
+            }
+        )
 
 
 class QueryUsers:
@@ -376,8 +446,12 @@ def admin_analytics_api(monkeypatch):
         state_store = AnalyticsStateStore(analytics)
         recalculate_user_snapshot(subject["id"], now=at, store=state_store)
         query_service = AnalyticsQueryService(store=analytics, user_store=users)
+        value_query_service = FixtureValueQueryService(int(subject["id"]))
         monkeypatch.setattr(users_module, "user_store", users)
         app.dependency_overrides[get_analytics_query_service] = lambda: query_service
+        app.dependency_overrides[get_value_analytics_query_service] = (
+            lambda: value_query_service
+        )
         app.dependency_overrides[get_analytics_service] = lambda: event_service
         admin_token = users.create_session(admin["id"])
         outsider_token = users.create_session(outsider["id"])
@@ -387,12 +461,14 @@ def admin_analytics_api(monkeypatch):
                 "analytics": analytics,
                 "event_service": event_service,
                 "query_service": query_service,
+                "value_query_service": value_query_service,
                 "admin": admin,
                 "subject": subject,
                 "admin_headers": {"Authorization": f"Bearer {admin_token}"},
                 "outsider_headers": {"Authorization": f"Bearer {outsider_token}"},
             }
         app.dependency_overrides.pop(get_analytics_query_service, None)
+        app.dependency_overrides.pop(get_value_analytics_query_service, None)
         app.dependency_overrides.pop(get_analytics_service, None)
 
 
@@ -401,6 +477,10 @@ def test_non_admin_cannot_query_any_admin_analytics_route(admin_analytics_api):
     subject_id = api["subject"]["id"]
     calls = [
         ("/api/admin/analytics/overview", {}),
+        ("/api/admin/analytics/lifecycle", {}),
+        ("/api/admin/analytics/retention", {}),
+        ("/api/admin/analytics/commercial", {}),
+        ("/api/admin/analytics/operational", {}),
         ("/api/admin/analytics/users", {}),
         (f"/api/admin/analytics/users/{subject_id}", {}),
         (
@@ -416,6 +496,47 @@ def test_non_admin_cannot_query_any_admin_analytics_route(admin_analytics_api):
             headers=api["outsider_headers"],
         )
         assert response.status_code == 403, (path, response.text)
+
+
+@pytest.mark.parametrize(
+    "section",
+    ["lifecycle", "retention", "commercial", "operational"],
+)
+def test_admin_value_sections_have_independent_contracts(
+    admin_analytics_api,
+    section,
+):
+    api = admin_analytics_api
+    params = {
+        "from": "2026-08-01",
+        "to": "2026-08-31",
+        "include_internal": "false",
+    }
+    if section == "operational":
+        params.update(
+            {
+                "billing_mode": "platform_credits",
+                "provider": "provider_synthetic",
+                "model": "model-synthetic-v1",
+            }
+        )
+
+    response = api["client"].get(
+        f"/api/admin/analytics/{section}",
+        params=params,
+        headers=api["admin_headers"],
+    )
+
+    assert response.status_code == 200, response.text
+    name, call = api["value_query_service"].calls[-1]
+    assert name == section
+    assert call["start"] == date(2026, 8, 1)
+    assert call["end"] == date(2026, 9, 1)
+    assert call["include_internal"] is False
+    if section == "operational":
+        assert call["provider_id"] == "provider_synthetic"
+        assert call["model_id"] == "model-synthetic-v1"
+        assert call["billing_mode"] == "platform_credits"
 
 
 def test_admin_overview_accepts_documented_filters(admin_analytics_api):
@@ -445,6 +566,7 @@ def test_profile_and_activity_reads_record_access_without_body(admin_analytics_a
     subject_id = api["subject"]["id"]
     profile = api["client"].get(
         f"/api/admin/analytics/users/{subject_id}",
+        params={"from": "2026-08-01", "to": "2026-08-31"},
         headers=api["admin_headers"],
     )
     activity = api["client"].get(
@@ -459,6 +581,9 @@ def test_profile_and_activity_reads_record_access_without_body(admin_analytics_a
     assert activity.json()["next_cursor"] is not None
     assert [row["section"] for row in access[:2]] == ["runs", "overview"]
     assert all("response" not in row for row in access)
+    _name, call = api["value_query_service"].calls[-1]
+    assert call["start"] == date(2026, 8, 1)
+    assert call["end"] == date(2026, 9, 1)
 
 
 def test_admin_analytics_rejects_invalid_queries_without_echo(admin_analytics_api):
@@ -483,10 +608,13 @@ def test_admin_user_list_accepts_documented_filters(admin_analytics_api):
         params={
             "q": "Subject",
             "status": "active",
-            "last_activity_from": (today - timedelta(days=1)).isoformat(),
-            "last_activity_to": today.isoformat(),
-            "sort": "recent_runs",
-            "order": "desc",
+            "lifecycle_segment": "core",
+            "operational_state": "healthy",
+            "commercial_tier": "invested",
+            "activated": "true",
+            "last_meaningful_activity_from": (today - timedelta(days=1)).isoformat(),
+            "last_meaningful_activity_to": today.isoformat(),
+            "priority": "false",
             "limit": "1",
             "offset": "0",
         },
@@ -496,6 +624,16 @@ def test_admin_user_list_accepts_documented_filters(admin_analytics_api):
     assert response.status_code == 200, response.text
     assert response.json()["total"] == 1
     assert response.json()["items"][0]["user_id"] == api["subject"]["id"]
+    name, call = api["value_query_service"].calls[-1]
+    assert name == "users"
+    assert call["limit"] == 1
+    assert call["offset"] == 0
+    filters = call["filters"]
+    assert filters.lifecycle_segment == "core"
+    assert filters.operational_state == "healthy"
+    assert filters.commercial_tier == "invested"
+    assert filters.activated is True
+    assert filters.legacy_status == "active"
 
 
 def test_admin_analytics_maps_not_found_and_cursor_errors_safely(
@@ -552,3 +690,53 @@ def test_admin_analytics_maps_service_and_access_failures_safely(
             "detail": "Analytics is temporarily unavailable."
         }
         assert canary not in response.text
+
+
+def test_value_section_failures_are_safe_and_independent(
+    admin_analytics_api,
+    monkeypatch,
+):
+    api = admin_analytics_api
+    canary = "synthetic-secret-value-service-canary"
+    monkeypatch.setattr(
+        api["value_query_service"],
+        "get_commercial",
+        lambda **_kwargs: (_ for _ in ()).throw(RuntimeError(canary)),
+    )
+
+    commercial = api["client"].get(
+        "/api/admin/analytics/commercial",
+        headers=api["admin_headers"],
+    )
+    lifecycle = api["client"].get(
+        "/api/admin/analytics/lifecycle",
+        headers=api["admin_headers"],
+    )
+
+    assert commercial.status_code == 503
+    assert commercial.json() == {"detail": "Analytics is temporarily unavailable."}
+    assert canary not in commercial.text
+    assert lifecycle.status_code == 200
+
+
+@pytest.mark.parametrize(
+    "path,params",
+    [
+        ("/api/admin/analytics/lifecycle", {"unknown": "value"}),
+        ("/api/admin/analytics/retention", [("from", "2026-08-01"), ("from", "2026-08-02")]),
+        ("/api/admin/analytics/commercial", {"from": "2026-01-01", "to": "2026-08-01"}),
+        ("/api/admin/analytics/operational", {"provider": "synthetic secret!"}),
+        ("/api/admin/analytics/users", {"commercial_tier": "unsupported"}),
+    ],
+)
+def test_value_routes_reject_unknown_duplicate_and_unsafe_queries(
+    admin_analytics_api,
+    path,
+    params,
+):
+    api = admin_analytics_api
+    response = api["client"].get(path, params=params, headers=api["admin_headers"])
+
+    assert response.status_code == 422
+    assert response.json() == {"detail": "Invalid Analytics query."}
+    assert "synthetic secret" not in response.text

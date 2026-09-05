@@ -6,8 +6,14 @@ from pathlib import Path
 from dashboard.backend.domain.analytics.query_service import (
     AnalyticsActivityPage,
     AnalyticsOverview,
-    AnalyticsUserProfile,
-    PaginatedUsers,
+)
+from dashboard.backend.domain.analytics.value_queries import (
+    CommercialAnalyticsResponse,
+    LifecycleAnalyticsResponse,
+    OperationalAnalyticsResponse,
+    PaginatedValueUsers,
+    RetentionAnalyticsResponse,
+    ValueUserProfile,
 )
 from dashboard.backend.tests._frontend_source import APP_HTML, APP_JS, STYLES
 
@@ -49,9 +55,13 @@ def test_safe_fixtures_have_no_prohibited_response_fields():
         assert prohibited.isdisjoint(set(walk_keys(payload))), path.name
 
 
-def test_fixtures_match_committed_pr2_shapes():
+def test_fixtures_match_committed_analytics_shapes():
     overview = load_fixture("overview.json")
     partial = load_fixture("overview_partial_error.json")
+    lifecycle = load_fixture("lifecycle.json")
+    retention = load_fixture("retention.json")
+    commercial = load_fixture("commercial.json")
+    operational = load_fixture("operational.json")
     users = load_fixture("users.json")
     profile = load_fixture("user_detail.json")
     assert {"daily_active_users", "availability", "last_updated"} <= overview.keys()
@@ -60,16 +70,24 @@ def test_fixtures_match_committed_pr2_shapes():
         "error_code": "temporarily_unavailable",
     }
     assert partial["availability"]["snapshot"]["available"] is True
+    assert {"headline", "segment_counts", "weekly_segments", "transitions"} <= lifecycle.keys()
+    assert {"cohorts", "summary_week_1", "summary_week_2", "summary_week_4"} <= retention.keys()
+    assert {"tier_counts", "selected_period", "current_balances"} <= commercial.keys()
+    assert {"operational_state_counts", "top_failure_categories"} <= operational.keys()
     assert {"items", "total", "limit", "offset"} == users.keys()
-    assert "state" in profile and "activation_milestones" in profile
+    assert {"state", "activation_milestones", "lifecycle", "operational", "commercial"} <= profile.keys()
     assert "next_cursor" in load_fixture("activity_timeline.json")
 
 
-def test_fixtures_validate_against_committed_pr2_models():
+def test_fixtures_validate_against_committed_analytics_models():
     AnalyticsOverview.model_validate(load_fixture("overview.json"))
     AnalyticsOverview.model_validate(load_fixture("overview_partial_error.json"))
-    PaginatedUsers.model_validate(load_fixture("users.json"))
-    AnalyticsUserProfile.model_validate(load_fixture("user_detail.json"))
+    LifecycleAnalyticsResponse.model_validate(load_fixture("lifecycle.json"))
+    RetentionAnalyticsResponse.model_validate(load_fixture("retention.json"))
+    CommercialAnalyticsResponse.model_validate(load_fixture("commercial.json"))
+    OperationalAnalyticsResponse.model_validate(load_fixture("operational.json"))
+    PaginatedValueUsers.model_validate(load_fixture("users.json"))
+    ValueUserProfile.model_validate(load_fixture("user_detail.json"))
     for name in (
         "activity_timeline.json",
         "activity_runs.json",
@@ -91,13 +109,13 @@ def test_admin_analytics_surface_and_module_exist():
     assert 'id="adminPanelAnalytics"' in APP_HTML
     assert 'id="adminAnalyticsOverview"' in APP_HTML
     assert 'id="adminAnalyticsProfile"' in APP_HTML
-    assert 'js/admin-analytics.js?v=2' in APP_HTML
+    assert 'js/admin-analytics.js?v=5' in APP_HTML
     assert ANALYTICS_JS_PATH.exists()
     assert ".admin-analytics-overview" in STYLES
     assert ".admin-analytics-profile" in STYLES
 
 
-def test_admin_tabs_are_accessible_default_and_url_backed():
+def test_admin_rail_is_accessible_default_and_url_backed():
     tabs = ADMIN_TABS_JS_PATH.read_text(encoding="utf-8")
     admin_start = APP_HTML.index('id="adminView"')
     nav_start = APP_HTML.index('<nav id="adminTabs"', admin_start)
@@ -108,12 +126,27 @@ def test_admin_tabs_are_accessible_default_and_url_backed():
     assert [nav_markup.index(f'data-admin-tab="{value}"') for value in expected] == sorted(
         nav_markup.index(f'data-admin-tab="{value}"') for value in expected
     )
+    assert 'aria-orientation="vertical"' in nav_markup
+    assert 'class="admin-workspace"' in APP_HTML
+    assert nav_markup.count('aria-label=') == 5
+    assert nav_markup.count('<svg aria-hidden="true">') == 4
     assert "DEFAULT_TAB = 'analytics'" in tabs
     assert "value === 'grant-pool' ? 'users' : value" in tabs
-    for key in ("ArrowRight", "ArrowLeft", "Home", "End"):
+    for key in ("ArrowUp", "ArrowDown", "Home", "End"):
         assert key in tabs
+    assert "ArrowLeft" not in tabs
+    assert "ArrowRight" not in tabs
     assert "admin:tabchange" in tabs
     assert "openAccountManagement" in tabs
+
+
+def test_credits_navigation_remains_horizontal():
+    start = APP_HTML.index('<nav id="creditsTabs"')
+    end = APP_HTML.index("</nav>", start)
+    markup = APP_HTML[start:end]
+
+    assert 'class="credits-tabs"' in markup
+    assert 'aria-orientation="vertical"' not in markup
 
 
 def test_client_uses_exact_pr2_endpoints_and_query_names():
@@ -190,10 +223,13 @@ def test_app_lifecycle_and_cache_versions_are_wired():
     assert "window.AdminAnalytics.syncAuth(user)" in APP_JS
     assert "window.AdminAnalytics.onEnter()" in APP_JS
     assert "window.AdminAnalytics.refresh()" in APP_JS
-    assert 'styles.css?v=132' in APP_HTML
-    assert 'app.js?v=127' in APP_HTML
-    assert 'js/admin-analytics.js?v=2' in APP_HTML
-    assert 'js/admin-tabs.js?v=3' in APP_HTML
+    assert "window.AdminAnalyticsValue.syncAuth(user)" in APP_JS
+    assert "window.AdminAnalyticsValue.onEnter()" in APP_JS
+    assert 'styles.css?v=136' in APP_HTML
+    assert 'app.js?v=129' in APP_HTML
+    assert 'js/admin-analytics.js?v=5' in APP_HTML
+    assert 'js/admin-analytics-value.js?v=3' in APP_HTML
+    assert 'js/admin-tabs.js?v=4' in APP_HTML
 
 
 def test_credit_costs_use_the_shared_exact_formatter():
@@ -204,6 +240,7 @@ def test_credit_costs_use_the_shared_exact_formatter():
 
 def test_scoped_responsive_accessible_styles_exist():
     for selector in (
+        ".admin-workspace", ".admin-rail",
         ".admin-analytics-overview", ".admin-analytics-filters",
         ".admin-analytics-snapshot-grid", ".admin-analytics-trend",
         ".admin-analytics-state-badge", ".admin-analytics-attention-table",

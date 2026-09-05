@@ -1,0 +1,31 @@
+{
+  "as_of": "2026-09-03T12:00:00Z",
+  "operational_state_counts": {
+    "blocked": 2,
+    "needs_attention": 4,
+    "healthy": 27
+  },
+  "backtest_success_rate": 0.8,
+  "completed_runs": 40,
+  "failed_runs": 10,
+  "input_tokens": 182500,
+  "output_tokens": 44100,
+  "platform_model_cost_micro_usd": 12340000,
+  "top_failure_categories": [
+    {
+      "error_category": "credential_invalid",
+      "affected_users": 4
+    },
+    {
+      "error_category": "provider_timeout",
+      "affected_users": 2
+    }
+  ],
+  "availability": {
+    "available": true,
+    "stale": false,
+    "status": "partial",
+    "coverage_start": null,
+    "coverage_end": null
+  }
+}

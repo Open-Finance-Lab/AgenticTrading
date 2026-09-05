@@ -10,6 +10,11 @@ import pytest
 import dashboard.backend.database as db_module
 import dashboard.backend.domain.backtesting.external_run_service as ebs
 from dashboard.backend.domain.backtesting import baseline_worker as bw
+from dashboard.backend.infrastructure.market_data.alpaca_bars import (
+    FRAME_ATTR_END_CLAMPED,
+    FRAME_ATTR_FEED,
+    FRAME_ATTR_SIP_FALLBACK,
+)
 
 
 def _synth_bars(symbols, start, end):
@@ -23,9 +28,13 @@ def _synth_bars(symbols, start, end):
     for si, sym in enumerate(sorted(symbols)):
         n = len(idx)
         close = 100.0 + si + np.linspace(0, 1.0, n)
-        data[sym] = pd.DataFrame(
+        frame = pd.DataFrame(
             {"open": close, "high": close + 0.5, "low": close - 0.5,
              "close": close, "volume": 1000.0}, index=idx)
+        frame.attrs[FRAME_ATTR_FEED] = "iex"
+        frame.attrs[FRAME_ATTR_SIP_FALLBACK] = True
+        frame.attrs[FRAME_ATTR_END_CLAMPED] = True
+        data[sym] = frame
     return data
 
 
@@ -88,6 +97,10 @@ def test_final_submit_completes_before_baselines(_isolate):
     assert last["compare_url"] == f"/compare?run_ids={s.run_id}"  # no baseline ids
     assert s.baseline_run_ids == {}
     assert _isolate.get_run(s.run_id) is not None
+    metadata = _isolate.get_run(s.run_id)["metadata"]
+    assert metadata["market_data_feed"] == "iex"
+    assert metadata["sip_fallback_to_iex"] is True
+    assert metadata["end_clamped"] is True
     _FakeBacktester.gate.set()
     assert bw.wait_idle(10)
     # Polled surfaces self-heal once the worker lands.

@@ -68,9 +68,13 @@ def _recalculate_snapshot(user_id: int, event_name: str) -> None:
         return
     callback = _snapshot_recalculator
     if callback is None:
-        from .states import recalculate_user_snapshot
+        # Keep the legacy compatibility snapshot and the value-analytics
+        # projection in sync after every authoritative event.  The combined
+        # recalculator writes both projections atomically when they share the
+        # same analytics store.
+        from .states import recalculate_user_snapshots
 
-        callback = recalculate_user_snapshot
+        callback = recalculate_user_snapshots
     callback(user_id)
 
 
@@ -126,8 +130,9 @@ def _emit(*, allowed_names: set[str], group: str, **kwargs: Any) -> None:
             source_record_id=source_record_id,
             version=version,
         )
-        result = get_analytics_service().try_record_server_event(**kwargs)
-        if result is not None:
+        service = get_analytics_service()
+        result = service.try_record_server_event(**kwargs)
+        if result is not None and not getattr(service, "project_snapshots", False):
             _recalculate_snapshot(int(kwargs["user_id"]), str(event_name))
     except Exception as exc:
         _safe_warning(exc)

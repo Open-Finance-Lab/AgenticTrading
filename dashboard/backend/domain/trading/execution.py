@@ -387,6 +387,7 @@ def execute_actions(
     transaction_cost_profile: Any = None,
     market_rules: Optional[Dict[str, Any]] = None,
     fallback_prices: Optional[Dict[str, Any]] = None,
+    execution_prices: Optional[Dict[str, Any]] = None,
 ) -> float:
     """Apply ``actions`` to the given portfolio state in place.
 
@@ -450,7 +451,9 @@ def execute_actions(
             market_rule = market_rules.get(symbol)
 
             reference_price = None
-            if symbol in market_data:
+            if execution_prices is not None and symbol in execution_prices:
+                reference_price = execution_prices[symbol]
+            elif symbol in market_data:
                 reference_price = market_data[symbol]["close"]
             elif fallback_prices is not None:
                 reference_price = fallback_prices.get(symbol)
@@ -523,7 +526,11 @@ def execute_actions(
         if symbol not in market_data:
             continue
 
-        price = market_data[symbol]["close"]
+        price = (
+            execution_prices[symbol]
+            if execution_prices is not None and symbol in execution_prices
+            else market_data[symbol]["close"]
+        )
 
         if market_rule is not None:
             price_tick = getattr(transaction_cost_profile, "price_tick", 0.01)

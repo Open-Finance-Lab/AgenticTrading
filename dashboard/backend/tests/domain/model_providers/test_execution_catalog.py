@@ -10,6 +10,8 @@ from dashboard.backend.domain.model_providers.execution_catalog import (
     resolve_execution_model_route,
 )
 from dashboard.backend.domain.model_providers.models import ProviderRecord
+from dashboard.backend.domain.model_providers.repository import ModelProviderStore
+from dashboard.backend.domain.model_providers.service import ModelProviderService
 
 
 def _provider(
@@ -100,3 +102,21 @@ def test_custom_provider_requires_an_explicit_allowlist():
 def test_custom_provider_allowlist_rejects_invalid_model_ids():
     with pytest.raises(ValueError, match="model_allowlist"):
         _provider("openai_compatible", allowlist=("not allowed?",))
+
+
+def test_platform_candidates_prefer_openrouter_and_support_commonstack_only(
+    tmp_path, monkeypatch
+):
+    store = ModelProviderStore(tmp_path / "providers.db")
+    service = ModelProviderService(store=store)
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-openrouter-test-abcd")
+    monkeypatch.setenv("COMMONSTACK_API_KEY", "cs-commonstack-test-abcd")
+
+    assert service.resolve_platform_execution_candidates(
+        "qwen/qwen3.7-plus"
+    ) == ("openrouter", "commonstack")
+
+    monkeypatch.delenv("OPENROUTER_API_KEY")
+    assert service.resolve_platform_execution_candidates(
+        "qwen/qwen3.7-plus"
+    ) == ("commonstack",)

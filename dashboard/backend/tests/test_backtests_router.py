@@ -391,6 +391,24 @@ class _OpenRouterExecutionPreflightService:
         self.credential_calls.append((None, provider_id))
 
 
+class _AutoPlatformExecutionPreflightService(_OpenRouterExecutionPreflightService):
+    def resolve_platform_execution_candidates(
+        self, catalog_model_id, preferred_provider_id=None
+    ):
+        assert catalog_model_id in _ATL_EXECUTION_MODEL_IDS
+        return ("openrouter", "commonstack")
+
+    def preflight_execution_model(self, provider_id, catalog_model_id):
+        self.execution_calls.append((provider_id, catalog_model_id))
+        if provider_id not in {"openrouter", "commonstack"}:
+            raise UnsupportedExecutionModel(catalog_model_id)
+        return ExecutionModelRoute(
+            catalog_id=catalog_model_id,
+            label=catalog_model_id,
+            provider_model_id=catalog_model_id,
+        )
+
+
 def _enable_authenticated_openrouter_byok(monkeypatch):
     service = _OpenRouterExecutionPreflightService()
     monkeypatch.setattr(bt, "get_model_provider_service", lambda: service)
@@ -551,6 +569,57 @@ def test_run_metadata_response_keeps_new_fields_optional_for_legacy_runs():
     assert response.order_events_count is None
     assert response.order_events_truncated is None
     assert response.llm_execution is None
+    assert response.frequency_contract is None
+    assert response.market_data_quality is None
+    assert response.market_data_feed is None
+    assert response.sip_fallback_to_iex is None
+    assert response.end_clamped is None
+
+
+def test_run_metadata_response_exposes_minute_data_contract_and_quality():
+    response = bt._run_metadata_response(
+        _run_record(
+            {
+                "data_source": "alpaca",
+                "frequency_contract": {
+                    "source_timeframe": "5m",
+                    "decision_timeframe": "60m",
+                    "decision_frequency": "1h",
+                    "execution_timeframe": "5m",
+                    "valuation_frequency": "5m",
+                    "aggregation": "session_anchored_completed_bars",
+                    "fill_policy": "next_source_bar_open",
+                    "verification_status": "verified",
+                },
+                "market_data_quality": {
+                    "policy": "drop_incomplete_decision_bars",
+                    "decision_timestamp_min_symbol_coverage": 0.8,
+                    "total_decision_bars": 210,
+                    "usable_decision_bars": 207,
+                    "dropped_decision_bars": 3,
+                    "missing_source_bars": 2,
+                    "duplicate_source_bars": 1,
+                    "off_grid_source_bars": 0,
+                    "invalid_source_bars": 0,
+                    "symbols": {"AAPL": {"dropped_decision_bars": 3}},
+                },
+                "market_data_feed": "iex",
+                "sip_fallback_to_iex": True,
+                "end_clamped": True,
+            }
+        )
+    )
+
+    assert response.frequency_contract["source_timeframe"] == "5m"
+    assert response.frequency_contract["decision_frequency"] == "1h"
+    assert response.frequency_contract["fill_policy"] == "next_source_bar_open"
+    assert response.frequency_contract["verification_status"] == "verified"
+    assert response.market_data_quality["usable_decision_bars"] == 207
+    assert response.market_data_quality["dropped_decision_bars"] == 3
+    assert "symbols" not in response.market_data_quality
+    assert response.market_data_feed == "iex"
+    assert response.sip_fallback_to_iex is True
+    assert response.end_clamped is True
 
 
 def test_run_metadata_response_exposes_sanitized_llm_execution_evidence():
@@ -1108,6 +1177,44 @@ def test_openai_byok_accepts_gpt_catalog_id_and_keeps_it_in_handoff(monkeypatch)
     assert captured_handoff["model_id"] == "openai/gpt-5.5"
     assert service.execution_calls == [("openai", "openai/gpt-5.5")]
     assert service.credential_calls == [(7, "openai")]
+    assert spy.calls == 1
+
+
+def test_platform_credits_resolves_candidates_without_provider_input(monkeypatch):
+    spy = _Spy()
+    service = _AutoPlatformExecutionPreflightService()
+    captured_handoff = {}
+    monkeypatch.setattr(bt, "run_backtest_background", spy)
+    monkeypatch.setattr(bt, "get_model_provider_service", lambda: service)
+    monkeypatch.setattr(
+        "dashboard.backend.api.dependencies._optional_user",
+        lambda *_args, **_kwargs: {"id": 7},
+    )
+
+    def capture_handoff(**kwargs):
+        captured_handoff.update(kwargs)
+        return "signed-platform-handoff"
+
+    monkeypatch.setattr(bt, "create_execution_handoff", capture_handoff)
+
+    response = TestClient(app).post(
+        "/backtest/run",
+        json={
+            "start_date": "2026-05-01",
+            "end_date": "2026-05-02",
+            "decision_source": "llm",
+            "billing_mode": "platform_credits",
+            "model": "qwen/qwen3.7-plus",
+        },
+        headers=_sess(),
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["provider_id"] == "openrouter"
+    assert captured_handoff["provider_id"] == "openrouter"
+    assert captured_handoff["provider_ids"] == ("openrouter", "commonstack")
+    assert service.execution_calls == [("openrouter", "qwen/qwen3.7-plus")]
+    assert service.credential_calls == []
     assert spy.calls == 1
 
 

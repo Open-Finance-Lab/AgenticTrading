@@ -94,6 +94,11 @@ def temp_postgres_store():
             cur.execute("DELETE FROM password_reset_requests")
             cur.execute("DELETE FROM email_change_requests")
             cur.execute("DELETE FROM auth_sessions")
+            # Redundant on a schema this repo created (every child table FKs
+            # users with ON DELETE CASCADE), like the three above -- the
+            # explicit wipe is what keeps a long-lived dev database honest
+            # after a review branch's divergent DDL or manual tampering (#437).
+            cur.execute("DELETE FROM user_entitlements")
             cur.execute("DELETE FROM users")
     yield store
 
@@ -770,6 +775,13 @@ def test_password_reset_request_lifecycle_postgres(temp_postgres_store):
     )
     assert len(store.password_reset_request_times_since(user["id"], day)) == 2
 
+    # The route hands the store its arrival time; the row carries it verbatim.
+    arrived = users_module._utcnow() - timedelta(seconds=25)
+    stamped = store.create_password_reset_request(
+        user["id"], hash_code("C"), requested_at=arrived
+    )
+    assert stamped["created_at"] == users_module.format_stored_timestamp(arrived)
+
     store.cancel_password_reset(user["id"])
     with store._get_connection() as conn:
         with conn.cursor() as cur:
@@ -792,7 +804,7 @@ def test_password_reset_attempt_cap_cancels_postgres(temp_postgres_store):
     user = store.create_user("cap-pg@example.com", "Cap PG", "securepass1")
     row = store.create_password_reset_request(user["id"], hash_code("A"))
 
-    cap = users_module.PASSWORD_RESET_MAX_ATTEMPTS
+    cap = users_module.RESET_CODE_MAX_ATTEMPTS
     for expected in range(1, cap + 1):
         assert store.record_password_reset_attempt(row["id"]) == expected
     assert store.get_active_password_reset(user["id"]) is None

@@ -61,3 +61,43 @@ The migration continues to run in the existing PostgreSQL transaction. Any later
 ## Deployment
 
 After the hotfix PR merges, manually trigger a Render deployment because the service has `autoDeploy` disabled. Verify the deployed commit reaches `live`, confirm the startup migration no longer raises `UndefinedColumn`, then run one platform-model smoke test that can exercise OpenRouter-to-CommonStack failover.
+
+## Amendment (PR #433, 2026-09-02): the index may already exist with the wrong columns
+
+The design above assumes a legacy table has *no* `idx_credit_llm_reservations_run_status`. Production had one: commit `c0bcd863` (2026-08-24) created it over `(run_id, status, call_index)`, and `CREATE INDEX IF NOT EXISTS` matches by name alone, so the bare statement in the migration DDL no-ops against that table and the four-column definition never lands. The migration now drops the index only when `pg_get_indexdef` reports a column list other than `(run_id, status, call_index, attempt_index)`, then recreates it. The drop is conditional on purpose: this DDL runs at import on every deploy, and an unconditional DROP+CREATE would rebuild the index under ACCESS EXCLUSIVE each time instead of converging.
+
+Pinned by `test_postgres_boot_migrates_pre_failover_reservation_table` (starts from the exact pre-#432 table, stale index included) and `test_postgres_boot_leaves_a_repaired_run_status_index_alone` (a second boot keeps the same index object). `test_store_twin_parity.py` now also checks that every Postgres twin creates an index only below the `ADD COLUMN` of any column it names, which is the general form of this defect.
+
+## Amendment (PR #433 review follow-up, 2026-09-04): what converges, and what does not
+
+Two corrections to the amendment above.
+
+**The conditional drop needs `IF EXISTS` anyway.** The `IF EXISTS (...)` predicate that
+decides whether to drop is evaluated before the `DROP INDEX` takes its lock, so two
+processes booting against the same database can both pass it. The loser then raises
+`index "..." does not exist`, which aborts `_init_schema`; because `credits_store` is
+built at import, that takes down the whole app rather than one surface. Conditionality
+comes from the drop's *position inside the guard*, not from the absence of `IF EXISTS`,
+and the source guard no longer asserts otherwise.
+
+**Converging was true of the index and false of everything beside it.** The migration
+drops and re-adds thirteen constraints unconditionally on every boot. One of them —
+`credit_llm_reservations_logical_attempt_key` — is a `UNIQUE`, i.e. exactly the full
+index build under ACCESS EXCLUSIVE that the index repair was written to avoid, on the
+same table. It is now guarded too: skipped when `pg_constraint.conkey` already names
+`(user_id, run_id, call_index, attempt_index)`. Column identity is read from `conkey`
+rather than matched against `pg_get_constraintdef` text, which is a rendering and drifts
+between Postgres versions; a mismatch falls back to the previous drop+add.
+
+The remaining twelve — the `CHECK`s on `credit_llm_reservations` and
+`credit_ledger_entries`, and the `actor_user_id` foreign key — are **deliberately left
+unconditional**, each costing a validating full-table scan per boot. Recognising an
+existing `CHECK` has no `conkey` equivalent; it means comparing deparsed SQL text, and a
+guard that silently stops matching converges to nothing while still looking correct.
+Both tables sit behind a disabled billing flag today. Revisit if either grows — the cost
+is real, it is just not yet worth buying with a fragile predicate.
+
+`test_postgres_boot_leaves_a_repaired_run_status_index_alone` now pins the constraint's
+`oid` and `conindid` across a second boot as well. `conindid` is the load-bearing half:
+a drop and re-add keeps the constraint's *name*, so only the OID of the backing index
+distinguishes a converged boot from a rebuilt one.

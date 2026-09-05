@@ -32,6 +32,7 @@ EXPECTED_MARKET_ROUTES = {("GET", "/ticker", "get_ticker")}
 EXPECTED_CONFIG_ROUTES = {
     ("GET", "/config/defaults", "get_defaults"),
     ("GET", "/config/features", "get_features"),
+    ("GET", "/config/stock-pools", "get_stock_pools"),
 }
 # ``/admin/clear`` is absent on purpose: an unauthenticated DELETE that called
 # db.clear_all() became unrecoverable once AGENT_RUNS_DATABASE_URL made run
@@ -68,6 +69,10 @@ EXPECTED_ANALYTICS_ROUTES = {
 }
 EXPECTED_ADMIN_ANALYTICS_ROUTES = {
     ("GET", "/admin/analytics/overview", "get_overview"),
+    ("GET", "/admin/analytics/lifecycle", "get_lifecycle"),
+    ("GET", "/admin/analytics/retention", "get_retention"),
+    ("GET", "/admin/analytics/commercial", "get_commercial"),
+    ("GET", "/admin/analytics/operational", "get_operational"),
     ("GET", "/admin/analytics/users", "list_users"),
     ("GET", "/admin/analytics/users/{user_id}", "get_user_profile"),
     (
@@ -136,6 +141,10 @@ EXPECTED_FULL_CONTRACT = {
     ("GET", "/api/admin/users/{user_id}"),
     ("PATCH", "/api/admin/users/{user_id}"),
     ("GET", "/api/admin/analytics/overview"),
+    ("GET", "/api/admin/analytics/lifecycle"),
+    ("GET", "/api/admin/analytics/retention"),
+    ("GET", "/api/admin/analytics/commercial"),
+    ("GET", "/api/admin/analytics/operational"),
     ("GET", "/api/admin/analytics/users"),
     ("GET", "/api/admin/analytics/users/{user_id}"),
     ("GET", "/api/admin/analytics/users/{user_id}/activity"),
@@ -243,6 +252,7 @@ EXPECTED_FULL_CONTRACT = {
     ("GET", "/compare"),
     ("GET", "/config/defaults"),
     ("GET", "/config/features"),
+    ("GET", "/config/stock-pools"),
     ("GET", "/health"),
     ("GET", "/favicon.ico"),
     ("GET", "/favicon.svg"),

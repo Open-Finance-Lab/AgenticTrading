@@ -336,12 +336,10 @@ def test_platform_quota_error_retries_once_through_commonstack(
 @pytest.mark.parametrize(
     "category",
     [
-        ExecutionErrorCategory.PROVIDER_TIMEOUT,
-        ExecutionErrorCategory.PROVIDER_UNAVAILABLE,
         ExecutionErrorCategory.RESPONSE_INVALID,
         ExecutionErrorCategory.USAGE_UNAVAILABLE,
-        ExecutionErrorCategory.CREDENTIAL_INVALID,
         ExecutionErrorCategory.BILLING_FAILED,
+        ExecutionErrorCategory.ACCOUNT_RESTRICTED,
     ],
 )
 def test_non_quota_platform_failures_do_not_fail_over(
@@ -362,6 +360,43 @@ def test_non_quota_platform_failures_do_not_fail_over(
 
     assert exc_info.value.category is category
     assert fallback.calls == []
+
+
+@pytest.mark.parametrize(
+    "category",
+    [
+        ExecutionErrorCategory.PROVIDER_TIMEOUT,
+        ExecutionErrorCategory.PROVIDER_UNAVAILABLE,
+        ExecutionErrorCategory.CREDENTIAL_INVALID,
+    ],
+)
+def test_provider_selection_failures_fail_over_to_commonstack(
+    tmp_path, monkeypatch, category
+):
+    monkeypatch.setenv("COMMONSTACK_API_KEY", "cs-fake-failover-abcd")
+    primary = ScriptedExecutionAdapter([ProviderExecutionError(category)])
+    fallback = ScriptedExecutionAdapter(
+        [
+            AdapterResponse(
+                text="BUY",
+                model_id=MODEL_ID,
+                usage=LLMUsage(input_tokens=10, output_tokens=5),
+            )
+        ]
+    )
+    service, _store = _execution_service(
+        tmp_path,
+        monkeypatch,
+        primary,
+        adapters={"openrouter": primary, "commonstack": fallback},
+    )
+
+    result = service.execute(_request(f"failover-{category.value}"))
+
+    assert result.provider_id == "commonstack"
+    assert result.requested_provider_id == "openrouter"
+    assert len(primary.calls) == 1
+    assert len(fallback.calls) == 1
 
 
 def test_byok_quota_error_never_uses_platform_fallback(tmp_path, monkeypatch):

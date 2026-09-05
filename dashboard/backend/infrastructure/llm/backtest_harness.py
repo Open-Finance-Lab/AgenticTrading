@@ -163,6 +163,8 @@ def system_prompt_for_market(market_context: Optional[Dict] = None) -> str:
     market = str((market_context or {}).get("market") or "").strip().upper()
     if market == "CN":
         return A_SHARE_SYSTEM_PROMPT
+    if (market_context or {}).get("stock_pool"):
+        return SYSTEM_PROMPT.replace("DJIA stocks", "the selected US stocks and funds")
     return SYSTEM_PROMPT
 
 

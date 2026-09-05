@@ -65,12 +65,26 @@ EMAIL_CHANGE_COOLDOWN_SECONDS = 60
 EMAIL_CHANGE_MAX_REQUESTS_PER_DAY = 3
 EMAIL_CHANGE_MIN_INTERVAL_DAYS = 7
 # Password-reset flow (#187). Same code machinery as email-change, but the
-# requester is anonymous, so the cooldown and daily cap are the durable
-# backstop behind api/auth.py's in-process limiters (which reset on redeploy).
-PASSWORD_RESET_TTL_MINUTES = 15
-PASSWORD_RESET_MAX_ATTEMPTS = 5
-PASSWORD_RESET_COOLDOWN_SECONDS = 300
-PASSWORD_RESET_MAX_REQUESTS_PER_DAY = 5
+# requester is anonymous, so these caps are the durable backstop behind
+# api/auth.py's in-process limiters (which reset on redeploy). The policy the
+# resend button advertises -- 60 s between codes, one send plus five resends
+# an hour, then an hour's wait, twelve a day -- is enforced VISIBLY by those
+# limiters; the numbers here only bite silently, across a restart.
+#
+# COOLDOWN is deliberately SHORTER than the visible 60 s gate. A row is
+# stamped with the request's ARRIVAL time (the route hands it to
+# create_password_reset_request), the same instant the limiter stamps -- but
+# on a different clock, and the browser counts from the response. The
+# allowance keeps the visible gate the one that decides; see
+# api/auth.py::_BACKSTOP_SKEW_SECONDS.
+#
+# PER_DAY is a mail-bomb bound on the victim's inbox: it must clear two full
+# hours' worth, or "wait an hour, then six more" would be false.
+RESET_CODE_TTL_MINUTES = 15
+RESET_CODE_MAX_ATTEMPTS = 5
+RESET_CODE_COOLDOWN_SECONDS = 40
+RESET_CODE_MAX_REQUESTS_PER_HOUR = 6   # 1 send + 5 resends
+RESET_CODE_MAX_REQUESTS_PER_DAY = 12   # two full hourly windows
 
 
 def _expiry_iso(minutes: int) -> str:
@@ -1306,18 +1320,27 @@ class UserStore:
         return [str(row["created_at"]) for row in rows]
 
     def _password_reset_expiry(self) -> str:
-        return _expiry_iso(PASSWORD_RESET_TTL_MINUTES)
+        return _expiry_iso(RESET_CODE_TTL_MINUTES)
 
     def create_password_reset_request(
-        self, user_id: int, code_hash: str
+        self, user_id: int, code_hash: str, requested_at: Optional[datetime] = None
     ) -> Dict[str, Any]:
         """Supersede any in-flight reset request with a fresh one.
+
+        ``requested_at`` is the instant the request ARRIVED at the route; the
+        row carries it as created_at so the durable cooldown and caps measure
+        arrival-to-arrival, exactly as the in-process gates do, however long
+        the store or the send took in between. expires_at stays anchored on
+        the write, so a slow store cannot shrink the code's lifetime.
 
         Cancel + insert ride one transaction on one connection, so two racing
         creates cannot leave the earlier-delivered code alive: last write wins
         cleanly, and the loser's code fails as "no active row". Supersede, not
-        DELETE -- the append-only log is what the cooldown and daily cap read.
+        DELETE -- the append-only log is what the cooldown and caps read.
         """
+        created_at = (
+            _utcnow_iso() if requested_at is None else format_stored_timestamp(requested_at)
+        )
         conn = self._get_connection()
         cursor = conn.cursor()
         cursor.execute(
@@ -1333,7 +1356,7 @@ class UserStore:
                 (user_id, code_hash, created_at, expires_at)
             VALUES (?, ?, ?, ?)
             """,
-            (user_id, code_hash, _utcnow_iso(), self._password_reset_expiry()),
+            (user_id, code_hash, created_at, self._password_reset_expiry()),
         )
         conn.commit()
         request_id = cursor.lastrowid
@@ -1389,17 +1412,17 @@ class UserStore:
                 AND attempts < ?
             """,
             (
-                PASSWORD_RESET_MAX_ATTEMPTS,
+                RESET_CODE_MAX_ATTEMPTS,
                 _utcnow_iso(),
                 request_id,
-                PASSWORD_RESET_MAX_ATTEMPTS,
+                RESET_CODE_MAX_ATTEMPTS,
             ),
         )
         counted = cursor.rowcount == 1
         conn.commit()
         if not counted:
             conn.close()
-            return PASSWORD_RESET_MAX_ATTEMPTS
+            return RESET_CODE_MAX_ATTEMPTS
         cursor.execute(
             "SELECT attempts FROM password_reset_requests WHERE id = ?",
             (request_id,),

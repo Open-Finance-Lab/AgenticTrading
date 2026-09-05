@@ -19,8 +19,6 @@ Usage:
 import sys
 import json
 import argparse
-import importlib.util
-import subprocess
 from pathlib import Path
 
 # Bootstrap for non-package execution contexts: when this module is run directly
@@ -40,6 +38,9 @@ if not __package__:
 from dashboard.backend.paths import CREDENTIALS_DIR
 from dashboard.backend.database import db
 from dashboard.backend.infrastructure.llm.validator import DJIA_30
+from dashboard.backend.infrastructure.market_data.strategy_universe import (
+    STOCK_POOLS, POOL_MODES, resolve_strategy_universe, validate_selection,
+)
 
 # Optional: LLM integration. Phase 2C2 moved the Anthropic SDK import, the
 # default model name, and the LLM request/parse workflow into the canonical
@@ -58,27 +59,12 @@ Anthropic = _backtest_harness.Anthropic
 HAS_ANTHROPIC = _backtest_harness.HAS_ANTHROPIC
 LLM_MODEL_NAME = _backtest_harness.LLM_MODEL_NAME
 
-# A presence probe, not a use: dashboard.backend.domain.backtesting.features
-# imports pandas_ta itself. This script installs it first so that import cannot
-# fail part-way through a run. find_spec rather than a try/except import because
-# nothing here needs the module object -- only the answer to "is it installed?".
-if importlib.util.find_spec("pandas_ta") is None:
-    print("Installing pandas_ta...")
-    # sys.executable, not a bare "pip": the script may well be running under a
-    # venv whose pip is not first on PATH, and installing into the wrong
-    # interpreter would leave the import below still failing.
-    subprocess.check_call([sys.executable, "-m", "pip", "install", "pandas_ta"])
-    # The probe above populated the path-finder's directory caches with a miss;
-    # drop them so the module just written to site-packages is discoverable by
-    # the features import below rather than on the next process start.
-    importlib.invalidate_caches()
-
 # ---------------------------------------------------------------------------
 # Phase 2A extraction: the implementations below now live under the canonical
 # dashboard.backend.* packages and are re-exported here so this script's public
 # compatibility surface (and the three backend callers that import this module)
-# stays unchanged. pandas_ta is imported above first so the features module can
-# rely on it being available.
+# stays unchanged. pandas_ta is a declared project dependency imported by the
+# canonical features module.
 # ---------------------------------------------------------------------------
 #
 # Same explicit-assignment form as the harness re-exports above, for the same
@@ -257,8 +243,30 @@ def main():
         default=None,
         help="Comma-separated tickers for the tradeable universe (default: full DJIA_30)",
     )
+    parser.add_argument("--stock-pool", choices=STOCK_POOLS, default=None)
+    parser.add_argument("--pool-mode", choices=POOL_MODES, default=None,
+                        help="Select representative30 (curated coverage), top30 (symbol order), or all")
+    parser.add_argument("--universe-selection-file", default=None,
+                        help="Frozen backend selection JSON (avoids command-line size limits)")
     
     args = parser.parse_args()
+    universe_selection = None
+    if args.stock_pool is not None or args.pool_mode is not None or args.universe_selection_file:
+        if args.assets is not None or args.data_source == IFIND_ASHARE:
+            parser.error("stock pools require a US source and cannot be combined with --assets")
+        try:
+            if args.universe_selection_file:
+                if args.stock_pool is not None or args.pool_mode is not None:
+                    parser.error("use --universe-selection-file or --stock-pool, not both")
+                universe_selection = validate_selection(json.loads(
+                    Path(args.universe_selection_file).read_text(encoding="utf-8")
+                ))
+            else:
+                if args.stock_pool is None:
+                    parser.error("--pool-mode requires --stock-pool")
+                universe_selection = resolve_strategy_universe(args.stock_pool, args.pool_mode or "top30")
+        except (ValueError, OSError) as exc:
+            parser.error(str(exc))
     execution_handoff = None
     if args.execution_handoff_stdin:
         try:
@@ -393,9 +401,11 @@ def main():
     print(f"Period: {args.start} → {args.end}")
     print(f"Session: {session_id[:8]}...")
     effective_symbols = (
-        list(market_profile.symbols)
-        if args.data_source == IFIND_ASHARE
-        else (symbols or list(DJIA_30))
+        list(universe_selection["symbols"]) if universe_selection is not None else (
+            list(market_profile.symbols)
+            if args.data_source == IFIND_ASHARE
+            else (symbols or list(DJIA_30))
+        )
     )
     universe_label = f"{len(effective_symbols)} ({market_profile.universe})"
     print(f"Stocks: {universe_label}")
@@ -448,6 +458,7 @@ def main():
         runtime_type=args.runtime_type,
         runtime_config=runtime_config,
         execution_client=execution_client,
+        **({"universe_selection": universe_selection} if universe_selection is not None else {}),
     )
     
     if args.runtime_type == AI_HEDGE_FUND_RUNTIME_TYPE:
@@ -458,7 +469,10 @@ def main():
         print("⚙️  Using rule-based logic for trading decisions\n")
     
     # Step 1: Load data
-    print(f"1️⃣ Loading historical hourly data from {args.data_source}...")
+    print(
+        f"1️⃣ Loading historical source data from {args.data_source} "
+        f"(decisions remain hourly)..."
+    )
     backtester.load_data()
     
     # Step 2: Calculate indicators
