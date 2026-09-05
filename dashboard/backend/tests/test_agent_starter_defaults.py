@@ -175,10 +175,30 @@ def test_create_still_returns_the_one_time_api_key(client):
     assert body["session_id"]
 
 
-def test_marketplace_clone_keeps_its_own_pipeline(client):
-    """A template with its own pipeline must not be overwritten by the seed."""
+def test_marketplace_clone_keeps_its_own_pipeline(client, monkeypatch):
+    """A template with its own pipeline must not be overwritten by the seed.
+
+    The shipped catalog is now one-step competition-model cards plus a hosted
+    runtime, so the three-step shape is faked — the guard is the copy, not
+    which template still ships it.
+    """
+    fake_template = {
+        "template_id": "three-step-template",
+        "name": "Three-Step Template",
+        "model_name": "anthropic/claude-haiku-4-5",
+        "pipeline": [
+            {"id": "sub_gather", "presetKey": "info_gather", "prompt": "gather"},
+            {"id": "sub_signal", "presetKey": "info_to_signal", "prompt": "signal"},
+            {"id": "sub_exec", "presetKey": "signal_to_execution", "prompt": "exec"},
+        ],
+    }
+    monkeypatch.setattr(
+        marketplace_module,
+        "get_marketplace_template",
+        lambda template_id: fake_template if template_id == "three-step-template" else None,
+    )
     cloned = client.post(
-        "/api/v1/agents/marketplace/pipeline-analyst/clone",
+        "/api/v1/agents/marketplace/three-step-template/clone",
         json={},
         headers={"X-Session-Id": str(uuid.uuid4())},
     )
