@@ -2966,6 +2966,13 @@ a.header-brand:hover .title-section h1 {
     gap: 8px;
 }
 
+.admin-value-identity-actions {
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 10px;
+}
+
 .admin-value-range-switch {
     display: inline-flex;
     align-items: center;
@@ -3354,6 +3361,11 @@ a.header-brand:hover .title-section h1 {
 
     .admin-value-section-head {
         flex-direction: column;
+    }
+
+    .admin-value-primary-grid > .admin-value-card:first-child .admin-value-section-head {
+        flex-direction: row;
+        align-items: flex-start;
     }
 
     .admin-value-movement-actions {

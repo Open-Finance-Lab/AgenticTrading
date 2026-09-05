@@ -192,7 +192,7 @@ def test_exact_raw_ties_mark_every_tied_series_best():
 def test_comparison_script_and_semantic_table_ship_before_app():
     helper = '<script src="js/backtest-comparison.js?v=1" defer></script>'
     app = '<script src="app.js?v=128" defer></script>'
-    assert 'href="styles.css?v=136"' in APP_HTML
+    assert 'href="styles.css?v=137"' in APP_HTML
     assert APP_HTML.index(helper) < APP_HTML.index(app)
     for element_id in (
         "performanceLegend",

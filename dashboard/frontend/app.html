@@ -13,7 +13,7 @@
          because every API call is a CORS request. -->
     <link rel="preconnect" href="https://agentictrading.onrender.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="styles.css?v=136">
+    <link rel="stylesheet" href="styles.css?v=137">
     <!-- defer: ~200KB that was render-blocking. Deferred scripts execute in
          document order (this one first, the body-end ones after), all before
          DOMContentLoaded, so Chart is defined before any chart renders. -->
@@ -2131,7 +2131,6 @@
                             <p>See who reached value, who returned, and where attention can change an outcome.</p>
                         </div>
                         <div class="admin-value-header-actions">
-                            <button id="adminAnalyticsRulesOpen" class="credits-icon-btn admin-help-btn" type="button" aria-haspopup="dialog" aria-controls="adminAnalyticsRulesDialog" aria-label="How segments work" title="How segments work"><span aria-hidden="true">?</span></button>
                             <button id="adminAnalyticsValueRefresh" class="credits-icon-btn" type="button" aria-label="Refresh user value analytics" title="Refresh user value analytics"><svg aria-hidden="true"><use href="#icon-refresh"/></svg></button>
                         </div>
                     </header>
@@ -2157,7 +2156,10 @@
                         <section class="admin-value-card" aria-labelledby="adminLifecycleDistributionTitle">
                             <div class="admin-value-section-head">
                                 <div><p class="credits-section-kicker">Current identity</p><h4 id="adminLifecycleDistributionTitle">Lifecycle distribution</h4></div>
-                                <span id="adminLifecycleCoverage" class="admin-value-coverage"></span>
+                                <div class="admin-value-identity-actions">
+                                    <span id="adminLifecycleCoverage" class="admin-value-coverage"></span>
+                                    <button id="adminAnalyticsRulesOpen" class="credits-icon-btn admin-help-btn" type="button" aria-haspopup="dialog" aria-controls="adminAnalyticsRulesDialog" aria-label="How segments work" title="How segments work"><span aria-hidden="true">?</span></button>
+                                </div>
                             </div>
                             <div id="adminLifecycleDistribution" class="admin-lifecycle-distribution" aria-label="Filter priority users by lifecycle"></div>
                         </section>

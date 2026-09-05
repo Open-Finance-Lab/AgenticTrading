@@ -200,6 +200,10 @@ def test_movement_ranges_and_profile_navigation_are_discoverable():
     assert "admin-help-btn" in APP_HTML
     assert 'aria-label="How segments work"' in APP_HTML
     assert 'id="adminAnalyticsProfileBreadcrumbParent"' in APP_HTML
+    header_start = APP_HTML.index('class="admin-value-header"')
+    identity_start = APP_HTML.index('id="adminLifecycleDistributionTitle"')
+    assert 'id="adminAnalyticsRulesOpen"' not in APP_HTML[header_start:identity_start]
+    assert 'id="adminAnalyticsRulesOpen"' in APP_HTML[identity_start:identity_start + 700]
 
 
 def test_value_formatting_uses_intl_and_dialogs_bound_scroll():
