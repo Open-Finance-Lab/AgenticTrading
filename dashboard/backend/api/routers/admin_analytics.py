@@ -24,9 +24,9 @@ from dashboard.backend.domain.analytics.service import (
     get_analytics_service,
 )
 from dashboard.backend.domain.analytics.value_queries import (
-    MAX_VALUE_RANGE_DAYS,
     CommercialAnalyticsResponse,
     LifecycleAnalyticsResponse,
+    MAX_VALUE_RANGE_DAYS,
     OperationalAnalyticsResponse,
     PaginatedValueUsers,
     RetentionAnalyticsResponse,
@@ -56,7 +56,6 @@ _LIFECYCLE_SEGMENTS = {"new", "onboarding", "growing", "core", "at_risk", "dorma
 _OPERATIONAL_STATES = {"blocked", "needs_attention", "healthy"}
 _COMMERCIAL_TIERS = {"unpaid", "starter", "invested", "high_value"}
 _LIFECYCLE_MOVEMENT_RANGES = {"5d", "1w", "1m", "1y"}
-_MAX_VALUE_RANGE_DAYS = MAX_VALUE_RANGE_DAYS
 
 
 def _invalid_query() -> Never:
@@ -177,7 +176,7 @@ def _value_range_from_values(values: dict[str, str]) -> tuple[date, date, bool]:
         start = from_date or end - timedelta(days=30)
     except OverflowError:
         _invalid_query()
-    if end <= start or (end - start).days > _MAX_VALUE_RANGE_DAYS:
+    if end <= start or (end - start).days > MAX_VALUE_RANGE_DAYS:
         _invalid_query()
     include_internal = (
         _parse_bool(values["include_internal"])
