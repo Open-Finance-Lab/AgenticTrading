@@ -13,6 +13,8 @@ from dashboard.backend.domain.analytics.query_service import (
     AnalyticsUserProfile,
 )
 from dashboard.backend.domain.analytics.value_queries import (
+    _MAX_HISTORY_SCAN_DAYS,
+    _MOVEMENT_WINDOWS,
     UserValueFilters,
     ValueAnalyticsQueryService,
 )
@@ -129,6 +131,7 @@ class FakeValueStore:
         self.daily = list(daily)
         self.credit_activity = dict(credit_activity or {})
         self.commercial_windows = []
+        self.daily_windows = []
 
     def list_current_snapshots(self, user_ids):
         return {
@@ -149,6 +152,7 @@ class FakeValueStore:
         }
 
     def list_daily_snapshots(self, *, start, end, user_ids=None):
+        self.daily_windows.append((start, end))
         selected = None if user_ids is None else set(user_ids)
         return [
             row
@@ -304,11 +308,11 @@ def test_date_filter_changes_history_not_current_lifecycle_identity():
 
 
 @pytest.mark.parametrize(
-    ("movement_range", "granularity", "expected_max_points"),
-    [("5d", "day", 5), ("1w", "day", 7), ("1m", "week", 5), ("1y", "month", 12)],
+    ("movement_range", "granularity"),
+    [("5d", "day"), ("1w", "day"), ("1m", "week"), ("1y", "month")],
 )
 def test_lifecycle_movement_returns_selected_range_and_granularity(
-    movement_range, granularity, expected_max_points
+    movement_range, granularity
 ):
     snapshots = {1: _snapshot(1)}
     daily = [
@@ -326,8 +330,19 @@ def test_lifecycle_movement_returns_selected_range_and_granularity(
 
     assert response.movement_range == movement_range
     assert response.movement_granularity == granularity
-    assert 0 < len(response.movement_segments) <= expected_max_points
-    assert all(point.period_start for point in response.movement_segments)
+    starts = [point.period_start for point in response.movement_segments]
+    assert starts
+    assert starts == sorted(set(starts))
+    # Derived from the window rather than written down: a calendar bucket count
+    # depends on where the window falls in the calendar, so a hard-coded ceiling
+    # holds only for the dates this case happens to pick.
+    window_days = _MOVEMENT_WINDOWS[movement_range][0]
+    period_days = {"day": 1, "week": 7, "month": 28}[granularity]
+    assert len(starts) <= window_days // period_days + 2
+    assert all(
+        date(2026, 10, 1) - timedelta(days=window_days) <= day < date(2026, 10, 1)
+        for day in starts
+    )
 
 
 def test_retention_uses_nulls_for_immature_cells_and_weighted_mature_summary():
@@ -600,3 +615,122 @@ def test_internal_accounts_are_excluded_unless_explicitly_included():
 
     assert [item.user_id for item in external.items] == [1]
     assert [item.user_id for item in all_users.items] == [1, 2]
+
+
+def _transition_rollup(day: date, count: int, outcome: str = "complete"):
+    return SimpleNamespace(
+        rollup_date=day,
+        metric_name="lifecycle_transition",
+        event_name="growing",
+        user_state="core",
+        value_count=count,
+        outcome=outcome,
+    )
+
+
+def test_lifecycle_transitions_ignore_rollups_outside_the_requested_window():
+    """A long movement range widens the scan; it must not widen the totals.
+
+    `transitions` is stamped with the requested period, so a rollup from before
+    `start` that is summed in reports itself as having happened inside a window
+    it predates.
+    """
+    start = date(2026, 9, 1)
+    end = date(2026, 10, 1)
+    daily = [
+        _daily(1, start + timedelta(days=offset))
+        for offset in range(30)
+        if start + timedelta(days=offset) != date(2026, 9, 10)
+    ]
+    service, _value_store, _legacy = _service(
+        snapshots={1: _snapshot(1)},
+        daily=daily,
+        rollups=[
+            _transition_rollup(date(2026, 9, 10), 2),
+            _transition_rollup(date(2026, 1, 15), 97),
+        ],
+    )
+
+    response = service.get_lifecycle(
+        start=start,
+        end=end,
+        movement_range="1y",
+        now=datetime(2026, 10, 1, 12, tzinfo=UTC),
+    )
+
+    assert [
+        (row.from_segment, row.to_segment, row.users) for row in response.transitions
+    ] == [("growing", "core", 2)]
+
+
+def test_lifecycle_coverage_reports_the_requested_window_not_the_movement_history():
+    """Coverage describes the window the admin asked for.
+
+    The movement chart needs a wider scan than the filter range, but
+    `availability.history` is what the Lifecycle distribution card renders, so
+    it must keep describing `start..end`.
+    """
+    start = date(2026, 9, 1)
+    end = date(2026, 10, 1)
+    daily = [_daily(1, start + timedelta(days=offset)) for offset in range(30)]
+    daily.append(_daily(1, date(2025, 12, 1), quality="partial"))
+    service, _value_store, _legacy = _service(snapshots={1: _snapshot(1)}, daily=daily)
+
+    response = service.get_lifecycle(
+        start=start,
+        end=end,
+        movement_range="1y",
+        now=datetime(2026, 10, 1, 12, tzinfo=UTC),
+    )
+
+    history = response.availability["history"]
+    assert history.coverage_start == start
+    assert history.coverage_end == end - timedelta(days=1)
+    assert history.status == "ready"
+
+
+def test_lifecycle_movement_buckets_never_start_before_the_selected_window():
+    """Calendar bucketing must not label a point outside the chart's own range."""
+    start = date(2026, 9, 15)
+    end = date(2026, 10, 15)
+    window_start = end - timedelta(days=365)
+    daily = [_daily(1, window_start + timedelta(days=offset)) for offset in range(366)]
+    service, _value_store, _legacy = _service(snapshots={1: _snapshot(1)}, daily=daily)
+
+    response = service.get_lifecycle(
+        start=start,
+        end=end,
+        movement_range="1y",
+        now=datetime(2026, 10, 15, 12, tzinfo=UTC),
+    )
+
+    assert response.movement_segments
+    assert min(point.period_start for point in response.movement_segments) >= window_start
+
+
+@pytest.mark.parametrize("movement_range", sorted(_MOVEMENT_WINDOWS))
+def test_lifecycle_daily_scan_stays_within_the_derived_history_bound(movement_range):
+    """Pins the widest span of per-user rows one request may read.
+
+    Not a regression test -- `_validate_dates` already bounds the filter range,
+    so the scan is bounded today. It is a drift guard: the movement window is
+    read from a table, and a longer entry added to that table would widen this
+    scan for every eligible user with nothing else noticing.
+    """
+    start = date(2026, 9, 1)
+    end = date(2026, 10, 1)
+    service, value_store, _legacy = _service(
+        snapshots={1: _snapshot(1)},
+        daily=[_daily(1, start + timedelta(days=offset)) for offset in range(30)],
+    )
+
+    service.get_lifecycle(
+        start=start,
+        end=end,
+        movement_range=movement_range,
+        now=datetime(2026, 10, 1, 12, tzinfo=UTC),
+    )
+
+    scan_start, scan_end = value_store.daily_windows[-1]
+    assert scan_end == end
+    assert scan_start >= end - timedelta(days=_MAX_HISTORY_SCAN_DAYS + 1)

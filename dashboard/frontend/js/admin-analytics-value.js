@@ -82,7 +82,6 @@
       operational: '',
       commercial: '',
       query: '',
-      profile: '',
     },
     openDisclosures: new Set(),
     sections: {
@@ -175,7 +174,6 @@
     state.userFilters.operational = Object.hasOwn(OPERATIONAL_LABELS, operational) ? operational : '';
     state.userFilters.commercial = Object.hasOwn(COMMERCIAL_LABELS, commercial) ? commercial : '';
     state.userFilters.query = params.get('analyticsUserQuery') || '';
-    state.userFilters.profile = params.get(URL_KEYS.profile) || params.get(URL_KEYS.user) || '';
     state.openDisclosures = new Set(
       String(params.get('analyticsPanel') || '')
         .split(',')
@@ -198,7 +196,6 @@
     setOrDelete(url.searchParams, URL_KEYS.operational, state.userFilters.operational);
     setOrDelete(url.searchParams, URL_KEYS.commercial, state.userFilters.commercial);
     setOrDelete(url.searchParams, 'analyticsUserQuery', state.userFilters.query);
-    setOrDelete(url.searchParams, URL_KEYS.profile, state.userFilters.profile);
     url.searchParams.set(URL_KEYS.movementRange, state.movementRange);
     setOrDelete(url.searchParams, 'analyticsPanel', [...state.openDisclosures].sort().join(','));
     window.history.replaceState(window.history.state, '', url);
@@ -214,7 +211,7 @@
     element('adminPriorityCommercial').value = state.userFilters.commercial;
     document.querySelectorAll('[data-movement-range]').forEach((button) => {
       const selected = button.dataset.movementRange === state.movementRange;
-      button.setAttribute('aria-pressed', selected ? 'true' : 'false');
+      button.setAttribute('aria-checked', selected ? 'true' : 'false');
       button.tabIndex = selected ? 0 : -1;
     });
   }
@@ -791,6 +788,19 @@
       : element('adminValuePrimaryStatus').textContent.replace('Refreshing user value analytics…', '');
   }
 
+  async function refreshLifecycle() {
+    const requestSeq = ++state.requestSeq;
+    element('adminAnalyticsHeadline').setAttribute('aria-busy', 'true');
+    element('adminValuePrimaryError').hidden = true;
+    element('adminValuePrimaryStatus').textContent = 'Refreshing lifecycle movement…';
+    const [settled] = await Promise.allSettled([fetchLifecycle()]);
+    if (requestSeq !== state.requestSeq) return;
+    await applySettledSection('lifecycle', settled);
+    element('adminValuePrimaryStatus').textContent = state.sections.lifecycle.stale
+      ? 'Showing the last successful response; refresh failed.'
+      : '';
+  }
+
   function applyUserFilters(next = {}) {
     Object.assign(state.userFilters, next);
     setControls();
@@ -818,7 +828,7 @@
     setControls();
     writeUrlState();
     state.sections.lifecycle.loaded = false;
-    refreshPrimary();
+    refreshLifecycle();
   }
 
   function bindEvents() {
@@ -863,16 +873,12 @@
       const user = state.evidenceUser;
       if (!user) return;
       closeDialog(element('adminAnalyticsEvidenceDialog'));
-      state.userFilters.profile = String(user.user_id);
-      writeUrlState();
       window.AdminAnalytics?.openProfile(user.user_id);
     });
     element('adminAnalyticsEvidenceAccount')?.addEventListener('click', () => {
       const user = state.evidenceUser;
       if (!user) return;
       closeDialog(element('adminAnalyticsEvidenceDialog'));
-      state.userFilters.profile = '';
-      writeUrlState();
       window.AdminTabs?.openAccountManagement({ userId: user.user_id, email: user.email });
     });
     element('adminAnalyticsValueFilters')?.addEventListener('submit', (event) => {
@@ -950,12 +956,16 @@
       bindEvents();
       syncDisclosureControls();
     }
-    const tab = new URL(window.location.href).searchParams.get('adminTab') || 'analytics';
+    const params = new URL(window.location.href).searchParams;
+    const tab = params.get('adminTab') || 'analytics';
     state.active = tab === 'analytics';
     if (!state.active) return;
-    // The profile controller owns deep-link restoration. Avoid fetching the
-    // overview behind an already-open profile on a direct URL or browser back.
-    const profileRequested = /^\d+$/.test(state.userFilters.profile);
+    // The profile controller owns deep-link restoration, so skip the overview
+    // fetch behind an already-open profile. Read the live URL rather than a
+    // cached id: closing a profile clears these params, and a cached copy kept
+    // the overview blank for the rest of the page session.
+    const requested = params.get(URL_KEYS.profile) || params.get(URL_KEYS.user) || '';
+    const profileRequested = /^\d+$/.test(requested);
     if (!profileRequested && (!state.sections.lifecycle.loaded || !state.sections.users.loaded)) refreshPrimary();
   }
 

@@ -60,6 +60,25 @@ _MOVEMENT_WINDOWS: dict[str, tuple[int, Literal["day", "week", "month"]]] = {
     "1m": (31, "week"),
     "1y": (365, "month"),
 }
+MAX_VALUE_RANGE_DAYS = 180
+"""Longest filter range a caller may request, in days.
+
+The router enforces the same bound on the query string; this is the copy that
+holds for every caller, and both now read it from here. It was duplicated as a
+bare literal, which is how the two could drift apart unnoticed.
+"""
+
+_MAX_HISTORY_SCAN_DAYS = max(
+    MAX_VALUE_RANGE_DAYS, *(days for days, _granularity in _MOVEMENT_WINDOWS.values())
+)
+"""Widest span of per-user daily rows one lifecycle request may scan.
+
+`MAX_VALUE_RANGE_DAYS` bounds the *filter* range, but the movement chart reads a
+window of its own, so the scan is the wider of the two -- 365 days today, double
+the filter cap. Derived rather than written down so that adding a longer
+movement range cannot silently widen every user's scan.
+"""
+
 _PRIORITY_RANK = {
     "blocked": 0,
     "needs_attention": 1,
@@ -105,8 +124,10 @@ def _validate_dates(start: date, end: date) -> tuple[date, date]:
         raise ValueError("end must be a date")
     if end <= start:
         raise ValueError("end must be later than start")
-    if (end - start).days > 180:
-        raise ValueError("date range must contain at most 180 days")
+    if (end - start).days > MAX_VALUE_RANGE_DAYS:
+        raise ValueError(
+            f"date range must contain at most {MAX_VALUE_RANGE_DAYS} days"
+        )
     return start, end
 
 
@@ -493,7 +514,10 @@ class ValueAnalyticsQueryService:
         selected_movement_start = movement_start or end - timedelta(days=window_days)
         if selected_movement_start >= end:
             raise ValueError("lifecycle movement range is empty")
-        history_start = min(start, selected_movement_start)
+        history_start = max(
+            min(start, selected_movement_start),
+            end - timedelta(days=_MAX_HISTORY_SCAN_DAYS),
+        )
         rows = self._daily(
             user_ids,
             start=history_start - timedelta(days=1),
@@ -564,7 +588,7 @@ class ValueAnalyticsQueryService:
             latest = max(dates)
             movement.append(
                 LifecycleMovementPoint(
-                    period_start=period,
+                    period_start=max(period, selected_movement_start),
                     segment_counts=daily_counts[latest],
                     data_quality=daily_quality[latest],
                 )
@@ -588,6 +612,7 @@ class ValueAnalyticsQueryService:
         for row in rollups:
             if (
                 row.metric_name != "lifecycle_transition"
+                or not start <= row.rollup_date < end
                 or row.rollup_date in direct_dates
             ):
                 continue
@@ -613,7 +638,7 @@ class ValueAnalyticsQueryService:
                 key=lambda item: (-item[1], item[0]),
             )
         ]
-        coverage = sorted(daily_counts)
+        coverage = sorted(day for day in daily_counts if start <= day < end)
         if not coverage:
             availability = SectionAvailability(
                 available=False,
@@ -621,8 +646,8 @@ class ValueAnalyticsQueryService:
             )
         else:
             partial = (
-                any(value == "partial" for value in daily_quality.values())
-                or coverage[0] > history_start
+                any(daily_quality[day] == "partial" for day in coverage)
+                or coverage[0] > start
                 or coverage[-1] < end - timedelta(days=1)
             )
             availability = SectionAvailability(

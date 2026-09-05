@@ -3001,7 +3001,7 @@ a.header-brand:hover .title-section h1 {
     color: var(--text-primary);
 }
 
-.admin-value-range-switch button[aria-pressed="true"] {
+.admin-value-range-switch button[aria-checked="true"] {
     background: rgba(103, 232, 249, 0.16);
     color: #cffafe;
 }
