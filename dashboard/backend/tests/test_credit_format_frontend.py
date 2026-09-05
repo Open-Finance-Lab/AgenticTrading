@@ -76,7 +76,7 @@ def test_credit_formatter_loads_before_every_consumer():
     for asset in (
         'src="js/credits.js?v=8"',
         'src="js/admin-credits.js?v=6"',
-        'src="js/admin-analytics.js?v=5"',
+        'src="js/admin-analytics.js?v=6"',
     ):
         assert formatter_at < APP_HTML.index(asset)
 

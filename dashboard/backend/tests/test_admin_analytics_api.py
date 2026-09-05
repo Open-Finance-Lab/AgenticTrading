@@ -539,6 +539,31 @@ def test_admin_value_sections_have_independent_contracts(
         assert call["billing_mode"] == "platform_credits"
 
 
+@pytest.mark.parametrize("movement_range", ["5d", "1w", "1m", "1y"])
+def test_lifecycle_accepts_documented_movement_ranges(admin_analytics_api, movement_range):
+    api = admin_analytics_api
+    response = api["client"].get(
+        "/api/admin/analytics/lifecycle",
+        params={"from": "2026-08-01", "to": "2026-08-31", "movement_range": movement_range},
+        headers=api["admin_headers"],
+    )
+
+    assert response.status_code == 200, response.text
+    name, call = api["value_query_service"].calls[-1]
+    assert name == "lifecycle"
+    assert call["movement_range"] == movement_range
+
+
+def test_lifecycle_rejects_unknown_movement_range(admin_analytics_api):
+    response = admin_analytics_api["client"].get(
+        "/api/admin/analytics/lifecycle",
+        params={"movement_range": "2q"},
+        headers=admin_analytics_api["admin_headers"],
+    )
+    assert response.status_code == 422
+    assert response.json() == {"detail": "Invalid Analytics query."}
+
+
 def test_admin_overview_accepts_documented_filters(admin_analytics_api):
     api = admin_analytics_api
     response = api["client"].get(

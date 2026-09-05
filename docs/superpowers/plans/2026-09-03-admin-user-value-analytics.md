@@ -31,6 +31,17 @@
 - Use synthetic fixtures and fake repositories. Tests require no real API key, Stripe call, provider call, production database, or copied production identity.
 - Never stage or commit `dashboard/storage/data/backtest.db`, `.superpowers/`, `work/`, secrets, or generated mockup artifacts.
 
+## Follow-up UI Navigation and Movement Ranges
+
+The Direction of travel card uses a URL-backed `5D / 1W / 1M / 1Y` selector,
+defaulting to `5D`. The lifecycle contract returns display-safe movement points
+with their selected range and daily/weekly/monthly granularity. The broader
+Analytics date filters remain independent. Priority-user identities expose a
+real profile link into the existing User Analytics Profile surface. Profile
+navigation adds a history entry, breadcrumb, and back behavior that restores
+the parent filters, pagination, and scroll position. Direct links remain valid
+and fall back to the overview when no parent history entry is available.
+
 ## Locked File Structure
 
 - `dashboard/backend/domain/analytics/lifecycle.py`: pure meaningful-activity, lifecycle, operational, commercial-tier, and cohort-date rules with no I/O.

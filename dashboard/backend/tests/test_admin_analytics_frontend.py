@@ -15,7 +15,12 @@ from dashboard.backend.domain.analytics.value_queries import (
     RetentionAnalyticsResponse,
     ValueUserProfile,
 )
-from dashboard.backend.tests._frontend_source import APP_HTML, APP_JS, STYLES
+from dashboard.backend.tests._frontend_source import (
+    APP_HTML,
+    APP_JS,
+    STYLES,
+    fn_body,
+)
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -109,7 +114,7 @@ def test_admin_analytics_surface_and_module_exist():
     assert 'id="adminPanelAnalytics"' in APP_HTML
     assert 'id="adminAnalyticsOverview"' in APP_HTML
     assert 'id="adminAnalyticsProfile"' in APP_HTML
-    assert 'js/admin-analytics.js?v=5' in APP_HTML
+    assert 'js/admin-analytics.js?v=6' in APP_HTML
     assert ANALYTICS_JS_PATH.exists()
     assert ".admin-analytics-overview" in STYLES
     assert ".admin-analytics-profile" in STYLES
@@ -138,6 +143,19 @@ def test_admin_rail_is_accessible_default_and_url_backed():
     assert "ArrowRight" not in tabs
     assert "admin:tabchange" in tabs
     assert "openAccountManagement" in tabs
+
+
+def test_account_management_clears_every_analytics_profile_param():
+    """Leaving analytics for a user's account must not leave a profile behind.
+
+    `analyticsProfile` was added alongside `analyticsUser` but not to this list,
+    so the only thing clearing it was the caller happening to close the profile
+    first. A stale one here lands on a URL the overview guard refuses to load.
+    """
+    tabs = ADMIN_TABS_JS_PATH.read_text(encoding="utf-8")
+    body = fn_body("function openAccountManagement(", tabs)
+    for key in ("analyticsUser", "analyticsProfile", "analyticsSection"):
+        assert f"searchParams.delete('{key}')" in body
 
 
 def test_credits_navigation_remains_horizontal():
@@ -225,11 +243,11 @@ def test_app_lifecycle_and_cache_versions_are_wired():
     assert "window.AdminAnalytics.refresh()" in APP_JS
     assert "window.AdminAnalyticsValue.syncAuth(user)" in APP_JS
     assert "window.AdminAnalyticsValue.onEnter()" in APP_JS
-    assert 'styles.css?v=136' in APP_HTML
+    assert 'styles.css?v=138' in APP_HTML
     assert 'app.js?v=129' in APP_HTML
-    assert 'js/admin-analytics.js?v=5' in APP_HTML
-    assert 'js/admin-analytics-value.js?v=3' in APP_HTML
-    assert 'js/admin-tabs.js?v=4' in APP_HTML
+    assert 'js/admin-analytics.js?v=6' in APP_HTML
+    assert 'js/admin-analytics-value.js?v=5' in APP_HTML
+    assert 'js/admin-tabs.js?v=5' in APP_HTML
 
 
 def test_credit_costs_use_the_shared_exact_formatter():

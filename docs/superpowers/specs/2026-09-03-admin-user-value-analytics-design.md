@@ -319,6 +319,27 @@ existing Users workspace. Analytics remains read-only.
 
 ### User Analytics Profile
 
+The priority-user list and other user tables provide a direct, display-safe
+link to a dedicated User Analytics Profile route. The profile is a separate
+workspace surface rather than an inline expansion so the list remains scannable
+while Timeline, Runs, Usage, and Sessions can grow independently. A breadcrumb
+and an explicit back action return to the exact Analytics list state, including
+filters, date range, pagination, and scroll position. Browser back/forward and
+deep links follow the same URL state. Opening a profile records a history entry;
+switching profile sections replaces only the current entry, and a direct link
+falls back to the Analytics overview when no parent history entry exists.
+
+### Lifecycle Movement Ranges
+
+The Direction of travel chart defaults to the most recent five UTC calendar
+days. A compact range control in the card header offers `5D`, `1W`, `1M`, and
+`1Y`. Five-day and one-week views use daily snapshots; one-month uses weekly
+snapshots; and one-year uses monthly snapshots. The API returns the selected
+range, granularity, and display-safe period points so the client never relabels
+weekly data as daily data. Missing historical snapshots remain partial or empty
+states; the system never fabricates zero-valued history. The selected movement
+range is URL-backed independently from the broader Analytics date filters.
+
 The existing dedicated User Analytics Profile remains the full inspection
 surface with Overview, Timeline, Runs, Usage, and Sessions. Its Overview adds:
 

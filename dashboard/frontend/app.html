@@ -13,7 +13,7 @@
          because every API call is a CORS request. -->
     <link rel="preconnect" href="https://agentictrading.onrender.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="styles.css?v=136">
+    <link rel="stylesheet" href="styles.css?v=138">
     <!-- defer: ~200KB that was render-blocking. Deferred scripts execute in
          document order (this one first, the body-end ones after), all before
          DOMContentLoaded, so Chart is defined before any chart renders. -->
@@ -2130,7 +2130,6 @@
                             <p>See who reached value, who returned, and where attention can change an outcome.</p>
                         </div>
                         <div class="admin-value-header-actions">
-                            <button id="adminAnalyticsRulesOpen" class="credits-icon-btn" type="button" aria-haspopup="dialog" aria-controls="adminAnalyticsRulesDialog" aria-label="How segments work" title="How segments work"><svg aria-hidden="true"><use href="#icon-book"/></svg></button>
                             <button id="adminAnalyticsValueRefresh" class="credits-icon-btn" type="button" aria-label="Refresh user value analytics" title="Refresh user value analytics"><svg aria-hidden="true"><use href="#icon-refresh"/></svg></button>
                         </div>
                     </header>
@@ -2156,18 +2155,30 @@
                         <section class="admin-value-card" aria-labelledby="adminLifecycleDistributionTitle">
                             <div class="admin-value-section-head">
                                 <div><p class="credits-section-kicker">Current identity</p><h4 id="adminLifecycleDistributionTitle">Lifecycle distribution</h4></div>
-                                <span id="adminLifecycleCoverage" class="admin-value-coverage"></span>
+                                <div class="admin-value-identity-actions">
+                                    <span id="adminLifecycleCoverage" class="admin-value-coverage"></span>
+                                    <button id="adminAnalyticsRulesOpen" class="credits-icon-btn admin-help-btn" type="button" aria-haspopup="dialog" aria-controls="adminAnalyticsRulesDialog" aria-label="How segments work" title="How segments work"><span aria-hidden="true">?</span></button>
+                                </div>
                             </div>
                             <div id="adminLifecycleDistribution" class="admin-lifecycle-distribution" aria-label="Filter priority users by lifecycle"></div>
                         </section>
 
                         <section class="admin-value-card admin-value-movement" aria-labelledby="adminLifecycleMovementTitle">
                             <div class="admin-value-section-head">
-                                <div><p class="credits-section-kicker">Direction of travel</p><h4 id="adminLifecycleMovementTitle">Eight-week movement</h4></div>
-                                <span id="adminLifecycleQuality" class="admin-value-quality" hidden>Incomplete data</span>
+                                <div><p class="credits-section-kicker">Direction of travel</p><h4 id="adminLifecycleMovementTitle">Recent 5-day movement</h4></div>
+                                <div class="admin-value-movement-actions">
+                                    <div id="adminLifecycleMovementRanges" class="admin-value-range-switch" role="radiogroup" aria-label="Lifecycle movement range">
+                                        <button id="adminLifecycleMovementRange5d" type="button" role="radio" data-movement-range="5d" aria-checked="true">5D</button>
+                                        <button id="adminLifecycleMovementRange1w" type="button" role="radio" data-movement-range="1w" aria-checked="false" tabindex="-1">1W</button>
+                                        <button id="adminLifecycleMovementRange1m" type="button" role="radio" data-movement-range="1m" aria-checked="false" tabindex="-1">1M</button>
+                                        <button id="adminLifecycleMovementRange1y" type="button" role="radio" data-movement-range="1y" aria-checked="false" tabindex="-1">1Y</button>
+                                    </div>
+                                    <span id="adminLifecycleMovementGranularity" class="admin-value-coverage">daily snapshots</span>
+                                    <span id="adminLifecycleQuality" class="admin-value-quality" hidden>Incomplete data</span>
+                                </div>
                             </div>
-                            <div class="admin-value-chart-frame"><canvas id="adminLifecycleMovementChart" role="img" aria-label="Lifecycle movement over eight weeks" aria-describedby="adminLifecycleMovementTable"></canvas></div>
-                            <table id="adminLifecycleMovementTable" class="sr-only"><caption>Lifecycle segment counts by week</caption><thead><tr><th scope="col">Week</th><th scope="col">New</th><th scope="col">Onboarding</th><th scope="col">Growing</th><th scope="col">Core</th><th scope="col">At risk</th><th scope="col">Dormant</th></tr></thead><tbody></tbody></table>
+                            <div class="admin-value-chart-frame"><canvas id="adminLifecycleMovementChart" role="img" aria-label="Lifecycle movement across daily snapshots" aria-describedby="adminLifecycleMovementTable"></canvas></div>
+                            <table id="adminLifecycleMovementTable" class="sr-only"><caption>Lifecycle segment counts by period</caption><thead><tr><th scope="col">Period</th><th scope="col">New</th><th scope="col">Onboarding</th><th scope="col">Growing</th><th scope="col">Core</th><th scope="col">At risk</th><th scope="col">Dormant</th></tr></thead><tbody></tbody></table>
                         </section>
                     </div>
 
@@ -2307,6 +2318,11 @@
             </div>
 
             <article id="adminAnalyticsProfile" class="admin-analytics-profile" aria-labelledby="adminAnalyticsProfileTitle" hidden>
+                <nav class="admin-analytics-breadcrumbs" aria-label="Breadcrumb">
+                    <a id="adminAnalyticsProfileBreadcrumbParent" href="/app?view=admin&amp;adminTab=analytics">Analytics</a>
+                    <span aria-hidden="true">/</span>
+                    <span id="adminAnalyticsProfileBreadcrumbCurrent">User analytics profile</span>
+                </nav>
                 <button id="adminAnalyticsProfileBack" class="credits-key-action" type="button">Back to analytics overview</button>
                 <p id="adminAnalyticsProfileError" class="auth-error" role="alert" hidden></p>
                 <div class="admin-analytics-profile-layout">
@@ -2644,9 +2660,9 @@
     <script src="js/credits.js?v=8" defer></script>
     <script src="js/admin-model-providers.js?v=1" defer></script>
     <script src="js/admin-credits.js?v=6" defer></script>
-    <script src="js/admin-analytics.js?v=5" defer></script>
-    <script src="js/admin-analytics-value.js?v=3" defer></script>
-    <script src="js/admin-tabs.js?v=4" defer></script>
+    <script src="js/admin-analytics.js?v=6" defer></script>
+    <script src="js/admin-analytics-value.js?v=5" defer></script>
+    <script src="js/admin-tabs.js?v=5" defer></script>
     <script src="js/leaderboard.js?v=32" defer></script>
     <script src="home-page.js?v=50" defer></script>
     <!-- Load order: must come after app.js (API/API_BASE/escapeHtml) and

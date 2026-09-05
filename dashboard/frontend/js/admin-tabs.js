@@ -71,6 +71,7 @@
     setTab('users');
     const url = new URL(window.location.href);
     url.searchParams.delete('analyticsUser');
+    url.searchParams.delete('analyticsProfile');
     url.searchParams.delete('analyticsSection');
     window.history.replaceState(window.history.state, '', url);
     const input = document.getElementById('adminCreditsUserQuery');

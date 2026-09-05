@@ -54,6 +54,31 @@ _COMMERCIAL_TIERS: tuple[CommercialTier, ...] = (
     "high_value",
 )
 _TIER_RANK = {tier: rank for rank, tier in enumerate(_COMMERCIAL_TIERS)}
+_MOVEMENT_WINDOWS: dict[str, tuple[int, Literal["day", "week", "month"]]] = {
+    "5d": (5, "day"),
+    "1w": (7, "day"),
+    "1m": (31, "week"),
+    "1y": (365, "month"),
+}
+MAX_VALUE_RANGE_DAYS = 180
+"""Longest filter range a caller may request, in days.
+
+The router enforces the same bound on the query string; this is the copy that
+holds for every caller, and both now read it from here. It was duplicated as a
+bare literal, which is how the two could drift apart unnoticed.
+"""
+
+_MAX_HISTORY_SCAN_DAYS = max(
+    MAX_VALUE_RANGE_DAYS, *(days for days, _granularity in _MOVEMENT_WINDOWS.values())
+)
+"""Widest span of per-user daily rows one lifecycle request may scan.
+
+`MAX_VALUE_RANGE_DAYS` bounds the *filter* range, but the movement chart reads a
+window of its own, so the scan is the wider of the two -- 365 days today, double
+the filter cap. Derived rather than written down so that adding a longer
+movement range cannot silently widen every user's scan.
+"""
+
 _PRIORITY_RANK = {
     "blocked": 0,
     "needs_attention": 1,
@@ -77,6 +102,14 @@ def _week_start(value: date) -> date:
     return value - timedelta(days=value.weekday())
 
 
+def _period_start(value: date, granularity: Literal["day", "week", "month"]) -> date:
+    if granularity == "day":
+        return value
+    if granularity == "week":
+        return _week_start(value)
+    return value.replace(day=1)
+
+
 def _parse_timestamp(value: object) -> datetime:
     parsed = datetime.fromisoformat(str(value))
     if parsed.tzinfo is None or parsed.utcoffset() is None:
@@ -91,8 +124,10 @@ def _validate_dates(start: date, end: date) -> tuple[date, date]:
         raise ValueError("end must be a date")
     if end <= start:
         raise ValueError("end must be later than start")
-    if (end - start).days > 180:
-        raise ValueError("date range must contain at most 180 days")
+    if (end - start).days > MAX_VALUE_RANGE_DAYS:
+        raise ValueError(
+            f"date range must contain at most {MAX_VALUE_RANGE_DAYS} days"
+        )
     return start, end
 
 
@@ -123,6 +158,16 @@ class WeeklyLifecycleCount(BaseModel):
     data_quality: Literal["complete", "partial"]
 
 
+class LifecycleMovementPoint(BaseModel):
+    """A display-safe lifecycle snapshot at the selected chart granularity."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    period_start: date
+    segment_counts: dict[LifecycleSegment, int]
+    data_quality: Literal["complete", "partial"]
+
+
 class LifecycleTransition(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -141,6 +186,9 @@ class LifecycleAnalyticsResponse(BaseModel):
     headline: LifecycleHeadline
     segment_counts: dict[LifecycleSegment, int]
     weekly_segments: Sequence[WeeklyLifecycleCount]
+    movement_range: Literal["5d", "1w", "1m", "1y"] = "5d"
+    movement_granularity: Literal["day", "week", "month"] = "day"
+    movement_segments: Sequence[LifecycleMovementPoint] = Field(default_factory=tuple)
     transitions: Sequence[LifecycleTransition]
     availability: dict[str, SectionAvailability]
 
@@ -452,19 +500,34 @@ class ValueAnalyticsQueryService:
         start: date,
         end: date,
         use_anonymous_rollups: bool,
+        movement_start: date | None = None,
+        movement_range: str = "5d",
     ) -> tuple[
-        list[WeeklyLifecycleCount], list[LifecycleTransition], SectionAvailability
+        list[WeeklyLifecycleCount],
+        list[LifecycleMovementPoint],
+        list[LifecycleTransition],
+        SectionAvailability,
     ]:
+        if movement_range not in _MOVEMENT_WINDOWS:
+            raise ValueError("unsupported lifecycle movement range")
+        window_days, granularity = _MOVEMENT_WINDOWS[movement_range]
+        selected_movement_start = movement_start or end - timedelta(days=window_days)
+        if selected_movement_start >= end:
+            raise ValueError("lifecycle movement range is empty")
+        history_start = max(
+            min(start, selected_movement_start),
+            end - timedelta(days=_MAX_HISTORY_SCAN_DAYS),
+        )
         rows = self._daily(
             user_ids,
-            start=start - timedelta(days=1),
+            start=history_start - timedelta(days=1),
             end=end,
         )
         by_date: dict[date, list[UserLifecycleDailySnapshot]] = defaultdict(list)
         for row in rows:
             by_date[row.snapshot_date].append(row)
         rollups = (
-            self.query_store.rollups.list_rollups(start=start, end=end)
+            self.query_store.rollups.list_rollups(start=history_start, end=end)
             if use_anonymous_rollups
             else []
         )
@@ -481,7 +544,7 @@ class ValueAnalyticsQueryService:
 
         daily_counts: dict[date, dict[LifecycleSegment, int]] = {}
         daily_quality: dict[date, str] = {}
-        direct_dates = {day for day in by_date if start <= day < end}
+        direct_dates = {day for day in by_date if history_start <= day < end}
         for day in direct_dates:
             counts = Counter(row.lifecycle_segment for row in by_date[day])
             daily_counts[day] = {
@@ -503,12 +566,29 @@ class ValueAnalyticsQueryService:
         weekly: list[WeeklyLifecycleCount] = []
         by_week: dict[date, list[date]] = defaultdict(list)
         for day in daily_counts:
+            if not start <= day < end:
+                continue
             by_week[_week_start(day)].append(day)
         for week, dates in sorted(by_week.items()):
             latest = max(dates)
             weekly.append(
                 WeeklyLifecycleCount(
                     week_start=week,
+                    segment_counts=daily_counts[latest],
+                    data_quality=daily_quality[latest],
+                )
+            )
+
+        movement: list[LifecycleMovementPoint] = []
+        by_period: dict[date, list[date]] = defaultdict(list)
+        for day in daily_counts:
+            if selected_movement_start <= day < end:
+                by_period[_period_start(day, granularity)].append(day)
+        for period, dates in sorted(by_period.items()):
+            latest = max(dates)
+            movement.append(
+                LifecycleMovementPoint(
+                    period_start=max(period, selected_movement_start),
                     segment_counts=daily_counts[latest],
                     data_quality=daily_quality[latest],
                 )
@@ -532,6 +612,7 @@ class ValueAnalyticsQueryService:
         for row in rollups:
             if (
                 row.metric_name != "lifecycle_transition"
+                or not start <= row.rollup_date < end
                 or row.rollup_date in direct_dates
             ):
                 continue
@@ -557,21 +638,25 @@ class ValueAnalyticsQueryService:
                 key=lambda item: (-item[1], item[0]),
             )
         ]
-        coverage = sorted(daily_counts)
+        coverage = sorted(day for day in daily_counts if start <= day < end)
         if not coverage:
             availability = SectionAvailability(
                 available=False,
                 status="building",
             )
         else:
-            partial = any(value == "partial" for value in daily_quality.values())
+            partial = (
+                any(daily_quality[day] == "partial" for day in coverage)
+                or coverage[0] > start
+                or coverage[-1] < end - timedelta(days=1)
+            )
             availability = SectionAvailability(
                 available=True,
                 status="partial" if partial else "ready",
                 coverage_start=coverage[0],
                 coverage_end=coverage[-1],
             )
-        return weekly, transitions, availability
+        return weekly, movement, transitions, availability
 
     def get_lifecycle(
         self,
@@ -579,9 +664,14 @@ class ValueAnalyticsQueryService:
         start: date,
         end: date,
         include_internal: bool = False,
+        movement_range: str = "5d",
         now: datetime | None = None,
     ) -> LifecycleAnalyticsResponse:
         start, end = _validate_dates(start, end)
+        if movement_range not in _MOVEMENT_WINDOWS:
+            raise ValueError("unsupported lifecycle movement range")
+        window_days, _granularity = _MOVEMENT_WINDOWS[movement_range]
+        movement_start = end - timedelta(days=window_days)
         current_time = _utc(now or datetime.now(UTC), "now")
         users = self._eligible_users(include_internal=include_internal)
         current = self._current(users)
@@ -611,14 +701,16 @@ class ValueAnalyticsQueryService:
                 status="unavailable",
             )
         try:
-            weekly, transitions, history_availability = self._history(
+            weekly, movement, transitions, history_availability = self._history(
                 self._ids(users),
                 start=start,
                 end=end,
                 use_anonymous_rollups=not include_internal,
+                movement_start=movement_start,
+                movement_range=movement_range,
             )
         except Exception:
-            weekly, transitions = [], []
+            weekly, movement, transitions = [], [], []
             history_availability = SectionAvailability(
                 available=False,
                 status="unavailable",
@@ -636,6 +728,9 @@ class ValueAnalyticsQueryService:
             ),
             segment_counts=segment_counts,
             weekly_segments=weekly,
+            movement_range=movement_range,
+            movement_granularity=_MOVEMENT_WINDOWS[movement_range][1],
+            movement_segments=movement,
             transitions=transitions,
             availability=availability,
         )
@@ -1046,7 +1141,7 @@ class ValueAnalyticsQueryService:
             start=_day_start(start),
             end=_day_start(end),
         )
-        _weekly, transitions, _availability = self._history(
+        _weekly, _movement, transitions, _availability = self._history(
             [subject_id],
             start=start,
             end=end,
@@ -1069,6 +1164,7 @@ __all__ = [
     "CommercialPeriodSummary",
     "LifecycleAnalyticsResponse",
     "LifecycleHeadline",
+    "LifecycleMovementPoint",
     "LifecycleTransition",
     "OperationalAnalyticsResponse",
     "PaginatedValueUsers",

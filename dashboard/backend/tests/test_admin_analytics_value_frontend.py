@@ -2,7 +2,12 @@
 
 from pathlib import Path
 
-from dashboard.backend.tests._frontend_source import APP_HTML, STYLES
+from dashboard.backend.tests._frontend_source import (
+    APP_HTML,
+    STYLES,
+    fn_body,
+    strip_comments,
+)
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -190,6 +195,22 @@ def test_charts_disclosures_and_controls_have_semantic_state():
         assert "autocomplete=" in fragment
 
 
+def test_movement_ranges_and_profile_navigation_are_discoverable():
+    source = value_source()
+    for movement_range in ("5d", "1w", "1m", "1y"):
+        assert f'data-movement-range="{movement_range}"' in APP_HTML
+    assert "analyticsMovementRange" in source
+    assert "movement_granularity" in source
+    assert "admin-priority-profile-link" in source
+    assert "admin-help-btn" in APP_HTML
+    assert 'aria-label="How segments work"' in APP_HTML
+    assert 'id="adminAnalyticsProfileBreadcrumbParent"' in APP_HTML
+    header_start = APP_HTML.index('class="admin-value-header"')
+    identity_start = APP_HTML.index('id="adminLifecycleDistributionTitle"')
+    assert 'id="adminAnalyticsRulesOpen"' not in APP_HTML[header_start:identity_start]
+    assert 'id="adminAnalyticsRulesOpen"' in APP_HTML[identity_start:identity_start + 700]
+
+
 def test_value_formatting_uses_intl_and_dialogs_bound_scroll():
     source = value_source()
     assert "Intl.NumberFormat" in source
@@ -200,3 +221,52 @@ def test_value_formatting_uses_intl_and_dialogs_bound_scroll():
     assert "overscroll-behavior: contain" in STYLES
     assert "touch-action: manipulation" in STYLES
     assert "table.sr-only" in STYLES
+
+
+def test_profile_url_param_has_a_single_owner():
+    """`analyticsProfile` is written by the profile controller, nowhere else.
+
+    The value module used to keep its own copy in `state.userFilters` and write
+    it back from `writeUrlState`, so the two disagreed the moment a profile was
+    closed: the id survived in memory, and the next filter edit put the closed
+    profile back into the URL.
+    """
+    value = strip_comments(value_source())
+    assert "state.userFilters.profile" not in value
+    assert "URL_KEYS.profile, state.userFilters.profile" not in value
+    assert "URL_KEYS.profile" in value, "the deep-link guard still reads the key"
+    assert "'analyticsProfile'" in strip_comments(profile_source())
+
+
+def test_overview_deep_link_guard_reads_the_live_url():
+    """The guard that suppresses the overview fetch must not read a cached id.
+
+    Anchored on the URL because that is the state `closeProfile` clears; a
+    cached copy left the overview permanently blank behind a closed profile.
+    """
+    body = strip_comments(fn_body("function onEnter(", value_source()))
+    assert "searchParams" in body
+    assert "state.userFilters" not in body
+
+
+def test_movement_range_change_leaves_priority_users_alone():
+    """The range switch drives the movement chart, not the priority table."""
+    body = strip_comments(fn_body("function setMovementRange(", value_source()))
+    assert "refreshLifecycle()" in body
+    assert "refreshPrimary()" not in body
+
+
+def test_movement_range_switch_carries_radio_semantics():
+    """Roving tabindex needs a role that gives arrow keys a meaning.
+
+    `role="group"` does not, so only the selected button was reachable by Tab
+    and nothing announced that arrows moved between them.
+    """
+    start = APP_HTML.index('id="adminLifecycleMovementRanges"')
+    end = APP_HTML.index("</div>", start)
+    switch = APP_HTML[start:end]
+    assert 'role="radiogroup"' in switch
+    assert switch.count('role="radio"') == 4
+    assert switch.count("aria-checked=") == 4
+    assert "aria-pressed" not in switch
+    assert "aria-checked" in strip_comments(value_source())

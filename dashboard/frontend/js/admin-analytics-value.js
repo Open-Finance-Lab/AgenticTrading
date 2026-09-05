@@ -46,6 +46,12 @@
     needs_attention: 'A supported issue needs operator review but may not block every action.',
     healthy: 'No supported current blocker or attention condition matched.',
   });
+  const MOVEMENT_RANGES = Object.freeze({
+    '5d': { label: '5D', title: 'Recent 5-day movement', granularity: 'daily' },
+    '1w': { label: '1W', title: '7-day movement', granularity: 'daily' },
+    '1m': { label: '1M', title: 'Monthly movement', granularity: 'weekly' },
+    '1y': { label: '1Y', title: 'Yearly movement', granularity: 'monthly' },
+  });
   const CHART_COLORS = Object.freeze({
     new: '#94a3b8',
     onboarding: '#38bdf8',
@@ -60,6 +66,7 @@
     commercial: 'analyticsCommercial',
     user: 'analyticsUser',
     profile: 'analyticsProfile',
+    movementRange: 'analyticsMovementRange',
   });
   const returnFocus = new Map();
 
@@ -68,13 +75,13 @@
     active: false,
     requestSeq: 0,
     range: null,
+    movementRange: '5d',
     includeInternal: false,
     userFilters: {
       lifecycle: '',
       operational: '',
       commercial: '',
       query: '',
-      profile: '',
     },
     openDisclosures: new Set(),
     sections: {
@@ -157,6 +164,8 @@
       start: validDate(start) ? start : defaults.start,
       end: validDate(end) ? end : defaults.end,
     };
+    const movementRange = params.get(URL_KEYS.movementRange) || '5d';
+    state.movementRange = Object.hasOwn(MOVEMENT_RANGES, movementRange) ? movementRange : '5d';
     state.includeInternal = params.get('analyticsInternal') === 'true';
     const lifecycle = params.get(URL_KEYS.lifecycle) || '';
     const operational = params.get(URL_KEYS.operational) || '';
@@ -165,7 +174,6 @@
     state.userFilters.operational = Object.hasOwn(OPERATIONAL_LABELS, operational) ? operational : '';
     state.userFilters.commercial = Object.hasOwn(COMMERCIAL_LABELS, commercial) ? commercial : '';
     state.userFilters.query = params.get('analyticsUserQuery') || '';
-    state.userFilters.profile = params.get(URL_KEYS.profile) || params.get(URL_KEYS.user) || '';
     state.openDisclosures = new Set(
       String(params.get('analyticsPanel') || '')
         .split(',')
@@ -188,7 +196,7 @@
     setOrDelete(url.searchParams, URL_KEYS.operational, state.userFilters.operational);
     setOrDelete(url.searchParams, URL_KEYS.commercial, state.userFilters.commercial);
     setOrDelete(url.searchParams, 'analyticsUserQuery', state.userFilters.query);
-    setOrDelete(url.searchParams, URL_KEYS.profile, state.userFilters.profile);
+    url.searchParams.set(URL_KEYS.movementRange, state.movementRange);
     setOrDelete(url.searchParams, 'analyticsPanel', [...state.openDisclosures].sort().join(','));
     window.history.replaceState(window.history.state, '', url);
   }
@@ -201,6 +209,11 @@
     element('adminPriorityLifecycle').value = state.userFilters.lifecycle;
     element('adminPriorityOperational').value = state.userFilters.operational;
     element('adminPriorityCommercial').value = state.userFilters.commercial;
+    document.querySelectorAll('[data-movement-range]').forEach((button) => {
+      const selected = button.dataset.movementRange === state.movementRange;
+      button.setAttribute('aria-checked', selected ? 'true' : 'false');
+      button.tabIndex = selected ? 0 : -1;
+    });
   }
 
   function rangeParams() {
@@ -322,29 +335,56 @@
       : 'Current snapshot';
   }
 
-  function replaceHiddenMovementRows(series) {
+  function movementPointDate(point) {
+    return point?.period_start || point?.week_start;
+  }
+
+  function replaceHiddenMovementRows(series, granularity) {
     const body = element('adminLifecycleMovementTable')?.querySelector('tbody');
     clear(body);
-    series.forEach((week) => {
+    const table = element('adminLifecycleMovementTable');
+    const periodLabel = granularity === 'day' ? 'Day' : granularity === 'month' ? 'Month' : 'Week';
+    if (table) {
+      const caption = table.querySelector('caption');
+      if (caption) caption.textContent = `Lifecycle segment counts by ${periodLabel.toLowerCase()}`;
+      const heading = table.querySelector('thead th');
+      if (heading) heading.textContent = periodLabel;
+    }
+    series.forEach((point) => {
       const row = document.createElement('tr');
-      row.appendChild(node('th', '', formatDate(week.week_start)));
+      row.appendChild(node('th', '', formatDate(movementPointDate(point))));
       row.firstChild.scope = 'row';
       LIFECYCLE_SEGMENTS.forEach((segment) => {
-        row.appendChild(node('td', '', number(week.segment_counts?.[segment] || 0)));
+        row.appendChild(node('td', '', number(point.segment_counts?.[segment] || 0)));
       });
       body.appendChild(row);
     });
   }
 
-  function renderLifecycleMovement(series) {
-    const rows = Array.isArray(series) ? series : [];
-    replaceHiddenMovementRows(rows);
+  function renderLifecycleMovement(payload) {
+    const hasMovementContract = Array.isArray(payload?.movement_segments);
+    const range = Object.hasOwn(MOVEMENT_RANGES, payload?.movement_range)
+      ? payload.movement_range
+      : state.movementRange;
+    const config = hasMovementContract
+      ? MOVEMENT_RANGES[range]
+      : { title: 'Weekly movement', granularity: 'weekly' };
+    const granularity = payload?.movement_granularity || (
+      config.granularity === 'daily' ? 'day' : config.granularity === 'weekly' ? 'week' : 'month'
+    );
+    const rows = hasMovementContract
+      ? payload.movement_segments
+      : (Array.isArray(payload?.weekly_segments) ? payload.weekly_segments : []);
+    replaceHiddenMovementRows(rows, granularity);
+    element('adminLifecycleMovementTitle').textContent = config.title;
+    element('adminLifecycleMovementGranularity').textContent = `${config.granularity} snapshots`;
     const quality = element('adminLifecycleQuality');
-    quality.hidden = !rows.some((week) => week.data_quality === 'partial');
+    quality.hidden = !rows.some((point) => point.data_quality === 'partial');
     const canvas = element('adminLifecycleMovementChart');
+    const periodLabel = granularity === 'day' ? 'daily' : granularity === 'month' ? 'monthly' : 'weekly';
     canvas.setAttribute(
       'aria-label',
-      rows.length ? `Lifecycle movement across ${rows.length} weekly snapshots` : 'No lifecycle movement data available'
+      rows.length ? `Lifecycle movement across ${rows.length} ${periodLabel} snapshots` : 'No lifecycle movement data available'
     );
     if (state.movementChart) {
       state.movementChart.destroy();
@@ -354,10 +394,10 @@
     state.movementChart = new window.Chart(canvas, {
       type: 'line',
       data: {
-        labels: rows.map((week) => formatDate(week.week_start)),
+        labels: rows.map((point) => formatDate(movementPointDate(point))),
         datasets: LIFECYCLE_SEGMENTS.map((segment) => ({
           label: LIFECYCLE_LABELS[segment],
-          data: rows.map((week) => Number(week.segment_counts?.[segment] || 0)),
+          data: rows.map((point) => Number(point.segment_counts?.[segment] || 0)),
           borderColor: CHART_COLORS[segment],
           backgroundColor: CHART_COLORS[segment],
           borderWidth: 2,
@@ -384,7 +424,7 @@
   function renderLifecycle(payload) {
     renderHeadline(payload);
     renderDistribution(payload);
-    renderLifecycleMovement(payload.weekly_segments);
+    renderLifecycleMovement(payload);
     const incomplete = availabilityIncomplete(payload.availability);
     element('adminValuePrimaryStatus').textContent = incomplete ? 'Incomplete data · available sections remain current.' : '';
   }
@@ -443,6 +483,29 @@
     openDialog(element('adminAnalyticsEvidenceDialog'), opener);
   }
 
+  function profileHref(userId) {
+    const url = new URL(window.location.href);
+    url.searchParams.set('adminTab', 'analytics');
+    url.searchParams.set('analyticsUser', String(userId));
+    url.searchParams.set('analyticsProfile', String(userId));
+    url.searchParams.set('analyticsSection', 'overview');
+    return `${url.pathname}${url.search}`;
+  }
+
+  function profileLink(user) {
+    const label = user.display_name || user.email || `User #${user.user_id}`;
+    const link = node('a', 'admin-priority-profile-link', label);
+    link.href = profileHref(user.user_id);
+    link.setAttribute('aria-label', `Open analytics profile for ${label}`);
+    link.addEventListener('click', (event) => {
+      if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+      if (typeof window.AdminAnalytics?.openProfile !== 'function') return;
+      event.preventDefault();
+      window.AdminAnalytics.openProfile(user.user_id);
+    });
+    return link;
+  }
+
   function renderUsers(payload) {
     const target = element('adminPriorityUsers');
     clear(target);
@@ -450,7 +513,9 @@
     items.forEach((user) => {
       const row = node('article', 'admin-priority-user');
       const identity = node('div', 'admin-priority-identity');
-      identity.appendChild(node('strong', '', user.display_name || user.email || `User #${user.user_id}`));
+      const name = node('strong', '', '');
+      name.appendChild(profileLink(user));
+      identity.appendChild(name);
       identity.appendChild(node('span', '', user.email || `User #${user.user_id}`));
       row.appendChild(identity);
       const signals = node('div', 'admin-priority-signals');
@@ -673,7 +738,9 @@
   }
 
   function fetchLifecycle() {
-    return request(`${API_ENDPOINTS.lifecycle}?${rangeParams()}`);
+    const params = rangeParams();
+    params.set('movement_range', state.movementRange);
+    return request(`${API_ENDPOINTS.lifecycle}?${params}`);
   }
 
   function fetchPriorityUsers() {
@@ -721,6 +788,19 @@
       : element('adminValuePrimaryStatus').textContent.replace('Refreshing user value analytics…', '');
   }
 
+  async function refreshLifecycle() {
+    const requestSeq = ++state.requestSeq;
+    element('adminAnalyticsHeadline').setAttribute('aria-busy', 'true');
+    element('adminValuePrimaryError').hidden = true;
+    element('adminValuePrimaryStatus').textContent = 'Refreshing lifecycle movement…';
+    const [settled] = await Promise.allSettled([fetchLifecycle()]);
+    if (requestSeq !== state.requestSeq) return;
+    await applySettledSection('lifecycle', settled);
+    element('adminValuePrimaryStatus').textContent = state.sections.lifecycle.stale
+      ? 'Showing the last successful response; refresh failed.'
+      : '';
+  }
+
   function applyUserFilters(next = {}) {
     Object.assign(state.userFilters, next);
     setControls();
@@ -742,7 +822,32 @@
     if (days > 180) throw new Error('Choose no more than 180 UTC dates.');
   }
 
+  function setMovementRange(value) {
+    if (!Object.hasOwn(MOVEMENT_RANGES, value) || value === state.movementRange) return;
+    state.movementRange = value;
+    setControls();
+    writeUrlState();
+    state.sections.lifecycle.loaded = false;
+    refreshLifecycle();
+  }
+
   function bindEvents() {
+    const movementRangeKeys = Object.keys(MOVEMENT_RANGES);
+    document.querySelectorAll('[data-movement-range]').forEach((button) => {
+      button.addEventListener('click', () => setMovementRange(button.dataset.movementRange));
+      button.addEventListener('keydown', (event) => {
+        if (!['ArrowRight', 'ArrowLeft', 'Home', 'End'].includes(event.key)) return;
+        event.preventDefault();
+        const index = movementRangeKeys.indexOf(button.dataset.movementRange);
+        const next = event.key === 'Home'
+          ? movementRangeKeys[0]
+          : event.key === 'End'
+            ? movementRangeKeys[movementRangeKeys.length - 1]
+            : movementRangeKeys[(index + (event.key === 'ArrowRight' ? 1 : -1) + movementRangeKeys.length) % movementRangeKeys.length];
+        setMovementRange(next);
+        element(`adminLifecycleMovementRange${next}`).focus();
+      });
+    });
     element('adminAnalyticsRulesOpen')?.addEventListener('click', (event) => {
       renderRulesDialog();
       openDialog(element('adminAnalyticsRulesDialog'), event.currentTarget);
@@ -768,16 +873,12 @@
       const user = state.evidenceUser;
       if (!user) return;
       closeDialog(element('adminAnalyticsEvidenceDialog'));
-      state.userFilters.profile = String(user.user_id);
-      writeUrlState();
       window.AdminAnalytics?.openProfile(user.user_id);
     });
     element('adminAnalyticsEvidenceAccount')?.addEventListener('click', () => {
       const user = state.evidenceUser;
       if (!user) return;
       closeDialog(element('adminAnalyticsEvidenceDialog'));
-      state.userFilters.profile = '';
-      writeUrlState();
       window.AdminTabs?.openAccountManagement({ userId: user.user_id, email: user.email });
     });
     element('adminAnalyticsValueFilters')?.addEventListener('submit', (event) => {
@@ -855,13 +956,17 @@
       bindEvents();
       syncDisclosureControls();
     }
-    const tab = new URL(window.location.href).searchParams.get('adminTab') || 'analytics';
+    const params = new URL(window.location.href).searchParams;
+    const tab = params.get('adminTab') || 'analytics';
     state.active = tab === 'analytics';
     if (!state.active) return;
-    if (!state.sections.lifecycle.loaded || !state.sections.users.loaded) refreshPrimary();
-    if (/^\d+$/.test(state.userFilters.profile)) {
-      window.AdminAnalytics?.openProfile(state.userFilters.profile, { focus: false });
-    }
+    // The profile controller owns deep-link restoration, so skip the overview
+    // fetch behind an already-open profile. Read the live URL rather than a
+    // cached id: closing a profile clears these params, and a cached copy kept
+    // the overview blank for the rest of the page session.
+    const requested = params.get(URL_KEYS.profile) || params.get(URL_KEYS.user) || '';
+    const profileRequested = /^\d+$/.test(requested);
+    if (!profileRequested && (!state.sections.lifecycle.loaded || !state.sections.users.loaded)) refreshPrimary();
   }
 
   function syncAuth(user) {
