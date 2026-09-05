@@ -88,22 +88,30 @@ def build_price_cache(
     bars_subset: Dict[str, pd.DataFrame],
     timestamps: List[Any],
 ) -> Dict[str, Dict[Any, float]]:
-    """Forward-filled close price per symbol over the supplied timestamps."""
+    """Forward-filled close price per symbol over the supplied timestamps.
+
+    A symbol is priced from its own first bar onward: timestamps before it has
+    any bar are simply absent from its entry (callers treat a missing price as
+    "not tradable yet"). A symbol with no bars at any of the timestamps gets no
+    entry at all.
+    """
     if not timestamps:
         return {}
 
-    first_ts = timestamps[0]
     cache: Dict[str, Dict[Any, float]] = {}
     for symbol, df in bars_subset.items():
-        if first_ts not in df.index:
-            continue
-        last_price = df.loc[first_ts, "close"]
+        # dict lookup per timestamp; a duplicated index timestamp resolves to its
+        # last bar instead of surfacing as a Series.
+        closes = df["close"].to_dict()
+        last_price: Optional[float] = None
         per_ts: Dict[Any, float] = {}
         for ts in timestamps:
-            if ts in df.index:
-                last_price = df.loc[ts, "close"]
-            per_ts[ts] = last_price
-        cache[symbol] = per_ts
+            if ts in closes:
+                last_price = closes[ts]
+            if last_price is not None:
+                per_ts[ts] = last_price
+        if per_ts:
+            cache[symbol] = per_ts
     return cache
 
 

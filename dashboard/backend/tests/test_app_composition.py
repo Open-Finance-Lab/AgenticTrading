@@ -277,6 +277,8 @@ EXPECTED_FULL_CONTRACT = {
     ("GET", "/strategy"),
     ("GET", "/styles.css"),
     ("GET", "/ticker"),
+    ("GET", "/mission-control.html"),
+    ("GET", "/api/v1/mission-control/overview"),
 }
 
 

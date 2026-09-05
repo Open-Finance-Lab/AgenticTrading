@@ -358,7 +358,16 @@ function getSeriesStyle(label, entry) {
   }
   const preset = LEADERBOARD_STYLES[label];
   if (preset) return { ...preset };
-  return { color: getTeamColor(entry?.entry_id || label), kind: 'team', dash: [] };
+  // Mirrors getEntryKind's own fallback below (kept independent of it, not a
+  // call into it -- the two must degrade the same way for the same entry
+  // without either depending on the other's evaluation order). An entry_type
+  // outside 'baseline' (or absent) is a competition team; anything else --
+  // including the strategy baselines added without a LEADERBOARD_STYLES
+  // preset -- is a plain strategy curve, not a team.
+  if (entry?.entry_type && entry.entry_type !== 'baseline') {
+    return { color: getTeamColor(entry?.entry_id || label), kind: 'team', dash: [] };
+  }
+  return { color: getTeamColor(entry?.entry_id || label), kind: 'strategy', dash: [10, 6] };
 }
 
 function getEntryKind(entry) {

@@ -24,6 +24,7 @@ import httpx
 
 from dashboard.backend.api.v2.models import validate_actions
 from dashboard.backend.domain.brokers.repository import broker_store
+from dashboard.backend.execution import _live_common
 from dashboard.backend.infrastructure.brokers import robinhood_oauth
 from dashboard.backend.infrastructure.brokers.robinhood_mcp import (
     RobinhoodMCPClient,
@@ -78,7 +79,7 @@ _idempotency_cache: "OrderedDict[Tuple[int, str, str], Tuple[float, Dict[str, An
 
 def execute_enabled() -> bool:
     """True when live order placement is armed (read fresh on every call)."""
-    return os.getenv("ROBINHOOD_EXECUTE", "false").strip().lower() in {"1", "true", "yes"}
+    return os.getenv("ROBINHOOD_EXECUTE", "false").strip().lower() in {"1", "true", "yes", "on"}
 
 
 def max_order_usd() -> float:
@@ -102,26 +103,18 @@ def max_order_usd() -> float:
 
 
 def _utcnow_iso() -> str:
-    return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+    return _live_common.utcnow_iso()
 
 
 def _audit_sync(event: str, payload: Dict[str, Any]) -> None:
     """Append one audit record. Never raises — an unwritable audit dir must not
     abort a live run mid-flight."""
-    try:
-        AUDIT_DIR.mkdir(parents=True, exist_ok=True)
-        record = {"ts": _utcnow_iso(), "event": event, **payload}
-        day = datetime.now(timezone.utc).strftime("%Y%m%d")
-        path = AUDIT_DIR / f"audit_{day}.jsonl"
-        with path.open("a", encoding="utf-8") as fh:
-            fh.write(json.dumps(record, default=str) + "\n")
-    except Exception:
-        logger.exception("Robinhood audit write failed for event %s", event)
+    _live_common.audit_sync(AUDIT_DIR, logger, "Robinhood", event, payload)
 
 
 async def _audit(event: str, payload: Dict[str, Any]) -> None:
     """Async wrapper: the audit write is blocking file I/O, so keep it off the loop."""
-    await asyncio.to_thread(_audit_sync, event, payload)
+    await _live_common.audit(AUDIT_DIR, logger, "Robinhood", event, payload)
 
 
 def _ensure_access_token(user_id: int) -> Dict[str, Any]:
@@ -402,17 +395,11 @@ def _floor_quantity(qty: float) -> float:
     Rounding *down* matters: round-half-up could push the resulting notional back
     above the USD cap that produced the quantity in the first place.
     """
-    try:
-        value = float(qty)
-    except (TypeError, ValueError):
-        return 0.0
-    if not math.isfinite(value) or value <= 0:
-        return 0.0
-    return math.floor(value * 10000.0) / 10000.0
+    return _live_common.floor_quantity(qty)
 
 
 def _rejection(order: Dict[str, Any], reason: str, detail: str) -> Dict[str, Any]:
-    return {"order": order, "reason": reason, "detail": detail}
+    return _live_common.rejection(order, reason, detail)
 
 
 def _risk_gate_orders(
