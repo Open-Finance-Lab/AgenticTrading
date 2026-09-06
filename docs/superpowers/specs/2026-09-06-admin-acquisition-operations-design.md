@@ -40,8 +40,8 @@ The first source is captured from a controlled invite or campaign link when
 the account is created. The system never infers it from an email address, IP
 address, page views, or other guesses. An administrator may correct the source
 or cohort only from the User Analytics Profile. Each correction records the
-actor, timestamp, previous value, new value, and a short reason in the existing
-admin audit path. Raw referral URLs and private referral text are not stored.
+actor, timestamp, previous value, and new value in the existing admin audit
+path. Raw referral URLs and private referral text are not stored.
 
 ### Core task and activity definitions
 
