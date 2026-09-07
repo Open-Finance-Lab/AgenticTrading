@@ -30,6 +30,7 @@ def _boot_handler() -> str:
 # 1. Interactivity and the ticker must not queue behind the auth waterfall.
 # ---------------------------------------------------------------------------
 
+
 def test_nav_wiring_precedes_first_network_await():
     boot = _boot_handler()
     assert "initNavigation()" in boot
@@ -61,6 +62,7 @@ def test_config_fetches_are_not_serial_awaits():
 #    agent and provisions a duplicate starter.
 # ---------------------------------------------------------------------------
 
+
 def test_load_agents_waits_for_auth_boot_gate():
     body = fn_body("async function loadAgents(")
     assert "authBootGate" in body, (
@@ -84,14 +86,15 @@ def test_claim_calls_the_ungated_loader():
 def test_boot_opens_the_gate_after_auth_refresh():
     boot = _boot_handler()
     assert "openAuthBootGate()" in boot
-    assert boot.index("refreshAuthUser()") < boot.index("openAuthBootGate()"), (
-        "the gate must open only after the refresh/claim phase has settled"
-    )
+    assert boot.index("refreshAuthUser()") < boot.index(
+        "openAuthBootGate()"
+    ), "the gate must open only after the refresh/claim phase has settled"
 
 
 # ---------------------------------------------------------------------------
 # 3. A slow boot must not yank the page from under an explicit user click.
 # ---------------------------------------------------------------------------
+
 
 def test_initial_navigation_respects_user_click():
     body = fn_body("function applyInitialNavigation(")
@@ -105,6 +108,7 @@ def test_initial_navigation_respects_user_click():
 # 4. The network head start: preconnect + warmup so the Render cold start
 #    begins before the JS pipeline finishes downloading.
 # ---------------------------------------------------------------------------
+
 
 def test_app_html_preconnects_to_api_origin():
     assert (
@@ -137,6 +141,7 @@ def test_scripts_are_deferred():
 # 5. Visible loading feedback.
 # ---------------------------------------------------------------------------
 
+
 def test_agents_grid_ships_loading_skeleton():
     # Pre-JS, My Agents must show placeholder cards instead of a blank panel,
     # in every shelf that renders agents. Prompted Models, Open Agents, and
@@ -148,7 +153,9 @@ def test_agents_grid_ships_loading_skeleton():
         "agentsGridExternal",
     )
     skeletons = [
-        m for m in range(len(APP_HTML)) if APP_HTML.startswith("agent-card--skeleton", m)
+        m
+        for m in range(len(APP_HTML))
+        if APP_HTML.startswith("agent-card--skeleton", m)
     ]
     for grid_id in grid_ids:
         grid_at = APP_HTML.index(f'id="{grid_id}"')
@@ -178,6 +185,7 @@ def test_slow_boot_notice_is_wired():
 # 6. Cache busters: shipped HTML must reference the new revisions.
 # ---------------------------------------------------------------------------
 
+
 def test_cache_busters_bumped():
     # Floor advances whenever one of these files changes and its ?v= must ship.
     # The floor must clear whatever main already ships, not just whatever this
@@ -199,4 +207,4 @@ def test_cache_busters_bumped():
     assert "js/credit-format.js?v=1" in APP_HTML
     assert "js/credits.js?v=8" in APP_HTML
     assert "js/admin-credits.js?v=6" in APP_HTML
-    assert "js/admin-analytics.js?v=6" in APP_HTML
+    assert "js/admin-analytics.js?v=8" in APP_HTML

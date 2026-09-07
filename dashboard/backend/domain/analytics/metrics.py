@@ -8,6 +8,7 @@ from typing import Iterable
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from .acquisition import AcquisitionFilters
 from .models import AnalyticsEventRecord
 
 
@@ -33,6 +34,7 @@ class AnalyticsMetricFilters(BaseModel):
     provider_id: str | None = Field(default=None, max_length=128)
     model_id: str | None = Field(default=None, max_length=256)
     include_internal: bool = False
+    acquisition: AcquisitionFilters = Field(default_factory=AcquisitionFilters)
 
     @model_validator(mode="after")
     def validate_range(self) -> "AnalyticsMetricFilters":
@@ -159,9 +161,7 @@ def calculate_overview_metrics(
         if active_start <= event.occurred_at.astimezone(timezone.utc) < range_end
         and is_meaningful_event(event)
     }
-    affected_users = {
-        event.user_id for event in in_range if is_meaningful_event(event)
-    }
+    affected_users = {event.user_id for event in in_range if is_meaningful_event(event)}
 
     successes_by_user: dict[int, list[datetime]] = defaultdict(list)
     for event in eligible:
@@ -177,7 +177,10 @@ def calculate_overview_metrics(
         if event.event_name != "account_signed_up":
             continue
         signup_at = event.occurred_at.astimezone(timezone.utc)
-        if range_start <= signup_at < range_end and signup_at + timedelta(days=7) <= range_end:
+        if (
+            range_start <= signup_at < range_end
+            and signup_at + timedelta(days=7) <= range_end
+        ):
             mature_signups.setdefault(event.user_id, signup_at)
     converted = 0
     for user_id, signup_at in mature_signups.items():
@@ -217,9 +220,7 @@ def calculate_overview_metrics(
             input_tokens += int(event.properties.get("input_tokens", 0))
             output_tokens += int(event.properties.get("output_tokens", 0))
             if event.billing_mode == "platform_credits":
-                platform_cost_micro += int(
-                    event.properties.get("cost_micro_usd", 0)
-                )
+                platform_cost_micro += int(event.properties.get("cost_micro_usd", 0))
 
     return AnalyticsOverviewMetrics(
         active_users_7d=len(active_users),

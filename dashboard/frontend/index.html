@@ -381,6 +381,7 @@
                     email: email,
                     display_name: displayName,
                     password: password,
+                    invite_token: (new URLSearchParams(window.location.search).get('invite') || '').slice(0, 512) || undefined,
                   })
                 : await authRequest('/api/auth/login', {
                     email: email,

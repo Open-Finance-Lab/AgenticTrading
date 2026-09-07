@@ -13,6 +13,7 @@ from typing import Any, Iterator
 from dashboard.backend.database import DB_PATH
 from dashboard.backend.db_url import describe_database_url
 
+from .acquisition import AcquisitionAttribution, normalize_cohort_slug
 from .models import AnalyticsEventRecord, AppendEventResult, RetentionResult
 from .repository_common import (
     AnalyticsIdempotencyConflictError,
@@ -194,6 +195,31 @@ CREATE INDEX IF NOT EXISTS idx_admin_analytics_access_subject_time
     ON admin_analytics_access_log(subject_user_id, accessed_at DESC, sequence DESC);
 CREATE INDEX IF NOT EXISTS idx_admin_analytics_access_admin_time
     ON admin_analytics_access_log(admin_user_id, accessed_at DESC, sequence DESC);
+
+CREATE TABLE IF NOT EXISTS user_acquisition_attributions (
+    user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+    source TEXT NOT NULL DEFAULT 'unknown',
+    cohort TEXT,
+    method TEXT NOT NULL DEFAULT 'unknown',
+    attributed_at TEXT,
+    original_source TEXT NOT NULL DEFAULT 'unknown',
+    original_cohort TEXT,
+    last_corrected_at TEXT,
+    last_corrected_by_admin_id INTEGER REFERENCES users(id) ON DELETE RESTRICT
+);
+
+CREATE TABLE IF NOT EXISTS admin_analytics_attribution_audit (
+    sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+    actor_user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+    subject_user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+    changed_at TEXT NOT NULL,
+    previous_source TEXT NOT NULL,
+    new_source TEXT NOT NULL,
+    previous_cohort TEXT,
+    new_cohort TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_attribution_audit_subject_time
+    ON admin_analytics_attribution_audit(subject_user_id, changed_at DESC, sequence DESC);
 """
 
 
@@ -311,8 +337,7 @@ class AnalyticsStore:
         """Rebuild the events table when upgrading its closed category check."""
 
         users_table = conn.execute(
-            "SELECT 1 FROM sqlite_master "
-            "WHERE type = 'table' AND name = 'users'"
+            "SELECT 1 FROM sqlite_master " "WHERE type = 'table' AND name = 'users'"
         ).fetchone()
         if users_table is None:
             return
@@ -441,9 +466,7 @@ class AnalyticsStore:
         cursor_sql = ""
         if cursor is not None:
             occurred_at, sequence = decode_event_cursor(cursor)
-            cursor_sql = (
-                "AND (occurred_at < ? OR (occurred_at = ? AND sequence < ?))"
-            )
+            cursor_sql = "AND (occurred_at < ? OR (occurred_at = ? AND sequence < ?))"
             params.extend([occurred_at, occurred_at, sequence])
         params.append(page_size + 1)
         with self._get_connection() as conn:
@@ -591,6 +614,180 @@ class AnalyticsStore:
                 SELECT * FROM admin_analytics_access_log
                 WHERE subject_user_id = ?
                 ORDER BY accessed_at DESC, sequence DESC
+                LIMIT ?
+                """,
+                (subject_id, page_size),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    @staticmethod
+    def _attribution_from_row(
+        row: sqlite3.Row | dict[str, Any] | None
+    ) -> AcquisitionAttribution | None:
+        if row is None:
+            return None
+        return AcquisitionAttribution(
+            user_id=int(row["user_id"]),
+            source=str(row["source"]),
+            cohort=row["cohort"],
+            method=str(row["method"]),
+            attributed_at=row["attributed_at"],
+            original_source=str(row["original_source"]),
+            original_cohort=row["original_cohort"],
+            last_corrected_at=row["last_corrected_at"],
+            last_corrected_by_admin_id=(
+                int(row["last_corrected_by_admin_id"])
+                if row["last_corrected_by_admin_id"] is not None
+                else None
+            ),
+        )
+
+    def get_user_attribution(self, user_id: int) -> AcquisitionAttribution | None:
+        subject_id = positive_user_id(user_id)
+        with self._get_connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM user_acquisition_attributions WHERE user_id = ?",
+                (subject_id,),
+            ).fetchone()
+        return self._attribution_from_row(row)
+
+    def list_user_attributions(
+        self, user_ids: list[int] | tuple[int, ...]
+    ) -> dict[int, AcquisitionAttribution]:
+        ids = list(dict.fromkeys(positive_user_id(value) for value in user_ids))
+        if not ids:
+            return {}
+        placeholders = ", ".join("?" for _ in ids)
+        with self._get_connection() as conn:
+            rows = conn.execute(
+                f"SELECT * FROM user_acquisition_attributions WHERE user_id IN ({placeholders})",
+                ids,
+            ).fetchall()
+        return {
+            attribution.user_id: attribution
+            for attribution in (self._attribution_from_row(row) for row in rows)
+            if attribution is not None
+        }
+
+    def record_initial_attribution(
+        self, attribution: AcquisitionAttribution
+    ) -> AcquisitionAttribution:
+        if not isinstance(attribution, AcquisitionAttribution):
+            attribution = AcquisitionAttribution.model_validate(attribution)
+        attributed_at = (
+            utc_iso(attribution.attributed_at)
+            if attribution.attributed_at
+            else utcnow_iso()
+        )
+        with self._get_connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO user_acquisition_attributions (
+                    user_id, source, cohort, method, attributed_at,
+                    original_source, original_cohort
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(user_id) DO NOTHING
+                """,
+                (
+                    attribution.user_id,
+                    attribution.source,
+                    normalize_cohort_slug(attribution.cohort),
+                    attribution.method,
+                    attributed_at,
+                    attribution.source,
+                    normalize_cohort_slug(attribution.cohort),
+                ),
+            )
+            row = conn.execute(
+                "SELECT * FROM user_acquisition_attributions WHERE user_id = ?",
+                (attribution.user_id,),
+            ).fetchone()
+        result = self._attribution_from_row(row)
+        if result is None:
+            raise AnalyticsStoreError("Acquisition attribution could not be loaded")
+        return result
+
+    def update_user_attribution(
+        self,
+        user_id: int,
+        source: str,
+        cohort: str | None,
+        actor_user_id: int,
+        now: datetime | None = None,
+    ) -> AcquisitionAttribution:
+        subject_id = positive_user_id(user_id)
+        actor_id = positive_user_id(actor_user_id, "actor_user_id")
+        candidate = AcquisitionAttribution(
+            user_id=subject_id, source=source, cohort=cohort
+        )
+        safe_source = candidate.source
+        safe_cohort = candidate.cohort
+        changed_at = utc_iso(now) if now is not None else utcnow_iso()
+        with self._get_connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO user_acquisition_attributions (
+                    user_id, source, cohort, method, attributed_at,
+                    original_source, original_cohort
+                ) VALUES (?, ?, ?, 'unknown', ?, 'unknown', NULL)
+                ON CONFLICT(user_id) DO NOTHING
+                """,
+                (subject_id, "unknown", None, changed_at),
+            )
+            previous = conn.execute(
+                "SELECT source, cohort FROM user_acquisition_attributions WHERE user_id = ?",
+                (subject_id,),
+            ).fetchone()
+            if previous is None:
+                raise AnalyticsStoreError("Acquisition attribution could not be loaded")
+            conn.execute(
+                """
+                UPDATE user_acquisition_attributions
+                SET source = ?, cohort = ?, last_corrected_at = ?,
+                    last_corrected_by_admin_id = ?
+                WHERE user_id = ?
+                """,
+                (safe_source, safe_cohort, changed_at, actor_id, subject_id),
+            )
+            conn.execute(
+                """
+                INSERT INTO admin_analytics_attribution_audit (
+                    actor_user_id, subject_user_id, changed_at,
+                    previous_source, new_source, previous_cohort, new_cohort
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    actor_id,
+                    subject_id,
+                    changed_at,
+                    previous["source"],
+                    safe_source,
+                    previous["cohort"],
+                    safe_cohort,
+                ),
+            )
+            row = conn.execute(
+                "SELECT * FROM user_acquisition_attributions WHERE user_id = ?",
+                (subject_id,),
+            ).fetchone()
+        result = self._attribution_from_row(row)
+        if result is None:
+            raise AnalyticsStoreError("Acquisition attribution could not be loaded")
+        return result
+
+    def list_attribution_audit(
+        self, user_id: int, *, limit: int = 50
+    ) -> list[dict[str, Any]]:
+        subject_id = positive_user_id(user_id)
+        page_size = positive_limit(limit)
+        with self._get_connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT actor_user_id, subject_user_id, changed_at,
+                       previous_source, new_source, previous_cohort, new_cohort
+                FROM admin_analytics_attribution_audit
+                WHERE subject_user_id = ?
+                ORDER BY changed_at DESC, sequence DESC
                 LIMIT ?
                 """,
                 (subject_id, page_size),

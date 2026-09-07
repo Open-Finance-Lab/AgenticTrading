@@ -44,6 +44,7 @@ _RESOURCE_EVENTS = {
     "credits_reserved",
     "credits_settled",
     "credits_refunded",
+    "checkout_started",
 }
 SNAPSHOT_RELEVANT_EVENTS = (
     _ACCOUNT_EVENTS
@@ -298,9 +299,7 @@ def emit_safe_error_event(
     version: str | int | None = None,
 ) -> None:
     try:
-        category = error_category or classify_safe_error(
-            exc or RuntimeError()
-        )
+        category = error_category or classify_safe_error(exc or RuntimeError())
         if category not in ALLOWED_ERROR_CATEGORIES:
             raise ValueError("unsupported analytics error category")
         _emit(

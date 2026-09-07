@@ -18,6 +18,7 @@ from .lifecycle import (
     OperationalState,
     commercial_tier,
 )
+from .acquisition import AcquisitionGroupFacts
 from .repository import analytics_store
 from .repository_common import positive_limit, positive_user_id, utc_iso
 
@@ -902,6 +903,133 @@ class ValueAnalyticsStore:
                 result[user_id].append(_timestamp(_row_value(row, "created_at")))
         return {
             user_id: tuple(sorted(timestamps)) for user_id, timestamps in result.items()
+        }
+
+    def list_acquisition_facts(
+        self,
+        user_ids: Sequence[int],
+        *,
+        start: datetime,
+        end: datetime,
+        now: datetime | None = None,
+    ) -> dict[int, AcquisitionGroupFacts]:
+        """Build acquisition facts from authoritative event and Credits rows."""
+
+        ids = _ids(user_ids)
+        window_start, window_end = _validate_window(start, end)
+        if not ids:
+            return {}
+        facts: dict[int, dict[str, Any]] = {
+            user_id: {
+                "active": False,
+                "task_completed": False,
+                "success_dates": set(),
+                "runs": 0,
+                "atl_credits_settled_micro": 0,
+                "paid_intent": False,
+                "paid": False,
+            }
+            for user_id in ids
+        }
+        postgres = self.is_postgres
+        clause, id_params = self._user_clause(ids, postgres)
+        placeholder = "%s" if postgres else "?"
+        selected_params = [
+            *id_params,
+            utc_iso(window_start),
+            utc_iso(window_end),
+        ]
+        lifetime_params = list(id_params)
+        with self._analytics_connection() as conn:
+            selected_rows = self._fetchall(
+                conn,
+                postgres,
+                f"""
+                SELECT user_id, event_name, occurred_at
+                FROM analytics_events
+                WHERE {clause}
+                  AND occurred_at >= {placeholder}
+                  AND occurred_at < {placeholder}
+                  AND event_name IN ('backtest_requested', 'checkout_started')
+                """,
+                selected_params,
+            )
+            success_rows = self._fetchall(
+                conn,
+                postgres,
+                f"""
+                SELECT user_id, occurred_at
+                FROM analytics_events
+                WHERE {clause} AND event_name = 'backtest_completed'
+                """,
+                lifetime_params,
+            )
+        for row in selected_rows:
+            user_id = int(_row_value(row, "user_id"))
+            if user_id not in facts:
+                continue
+            event_name = str(_row_value(row, "event_name"))
+            if event_name == "backtest_requested":
+                facts[user_id]["active"] = True
+                facts[user_id]["runs"] += 1
+            elif event_name == "checkout_started":
+                facts[user_id]["paid_intent"] = True
+        for row in success_rows:
+            user_id = int(_row_value(row, "user_id"))
+            if user_id not in facts:
+                continue
+            facts[user_id]["task_completed"] = True
+            facts[user_id]["success_dates"].add(
+                _timestamp(_row_value(row, "occurred_at")).date()
+            )
+        for value in facts.values():
+            value["repeat"] = len(value.pop("success_dates")) >= 2
+
+        if hasattr(self.credits_base, "_get_connection"):
+            credit_postgres = hasattr(self.credits_base, "database_url")
+            credit_clause, credit_ids = self._user_clause(ids, credit_postgres)
+            credit_placeholder = "%s" if credit_postgres else "?"
+            credit_params = [*credit_ids, utc_iso(window_start), utc_iso(window_end)]
+            with self.credits_base._get_connection() as conn:
+                usage_rows = self._fetchall(
+                    conn,
+                    credit_postgres,
+                    f"""
+                    SELECT user_id, amount_micro, operation_key
+                    FROM credit_llm_usage_entries
+                    WHERE {credit_clause}
+                      AND created_at >= {credit_placeholder}
+                      AND created_at < {credit_placeholder}
+                      AND operation_key NOT LIKE '%:recovery:%'
+                    """,
+                    credit_params,
+                )
+                purchase_rows = self._fetchall(
+                    conn,
+                    credit_postgres,
+                    f"""
+                    SELECT user_id
+                    FROM credit_ledger_entries
+                    WHERE {credit_clause}
+                      AND entry_type = 'purchase'
+                      AND bucket = 'purchased'
+                      AND created_at >= {credit_placeholder}
+                      AND created_at < {credit_placeholder}
+                    """,
+                    credit_params,
+                )
+            for row in usage_rows:
+                user_id = int(_row_value(row, "user_id"))
+                if user_id in facts:
+                    facts[user_id]["atl_credits_settled_micro"] += max(
+                        -int(_row_value(row, "amount_micro", 0)), 0
+                    )
+            for row in purchase_rows:
+                user_id = int(_row_value(row, "user_id"))
+                if user_id in facts:
+                    facts[user_id]["paid"] = True
+        return {
+            user_id: AcquisitionGroupFacts(**value) for user_id, value in facts.items()
         }
 
     def _run_health(self, user_id: int, now: datetime) -> tuple[int, bool]:

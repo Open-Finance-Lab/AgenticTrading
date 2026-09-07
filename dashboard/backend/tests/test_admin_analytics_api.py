@@ -37,6 +37,7 @@ from dashboard.backend.domain.analytics.states import (
     recalculate_user_snapshot,
 )
 from dashboard.backend.domain.analytics.value_queries import (
+    AcquisitionAnalyticsResponse,
     CommercialAnalyticsResponse,
     LifecycleAnalyticsResponse,
     OperationalAnalyticsResponse,
@@ -76,6 +77,10 @@ class FixtureValueQueryService:
     def get_operational(self, **kwargs):
         self.calls.append(("operational", kwargs))
         return _contract("operational.json", OperationalAnalyticsResponse)
+
+    def get_acquisition_groups(self, **kwargs):
+        self.calls.append(("acquisition", kwargs))
+        return _contract("acquisition.json", AcquisitionAnalyticsResponse)
 
     def list_users(self, **kwargs):
         self.calls.append(("users", kwargs))
@@ -232,9 +237,7 @@ def test_query_service_merges_completed_rollups_with_current_raw_day(tmp_path):
     overview = service.get_overview(
         now=NOW,
         filters=AnalyticsMetricFilters(
-            start=datetime.combine(
-                yesterday, datetime.min.time(), tzinfo=timezone.utc
-            ),
+            start=datetime.combine(yesterday, datetime.min.time(), tzinfo=timezone.utc),
             end=NOW,
         ),
     )
@@ -418,9 +421,7 @@ def admin_analytics_api(monkeypatch):
         outsider = users.create_user(
             "outsider@example.test", "Outsider", "SecurePass1!"
         )
-        subject = users.create_user(
-            "subject@example.test", "Subject", "SecurePass1!"
-        )
+        subject = users.create_user("subject@example.test", "Subject", "SecurePass1!")
         analytics = AnalyticsStore(path)
         event_service = AnalyticsService(analytics)
         at = datetime.now(timezone.utc).replace(microsecond=0)
@@ -447,6 +448,7 @@ def admin_analytics_api(monkeypatch):
         recalculate_user_snapshot(subject["id"], now=at, store=state_store)
         query_service = AnalyticsQueryService(store=analytics, user_store=users)
         value_query_service = FixtureValueQueryService(int(subject["id"]))
+        value_query_service.store = analytics
         monkeypatch.setattr(users_module, "user_store", users)
         app.dependency_overrides[get_analytics_query_service] = lambda: query_service
         app.dependency_overrides[get_value_analytics_query_service] = (
@@ -481,6 +483,7 @@ def test_non_admin_cannot_query_any_admin_analytics_route(admin_analytics_api):
         ("/api/admin/analytics/retention", {}),
         ("/api/admin/analytics/commercial", {}),
         ("/api/admin/analytics/operational", {}),
+        ("/api/admin/analytics/acquisition", {}),
         ("/api/admin/analytics/users", {}),
         (f"/api/admin/analytics/users/{subject_id}", {}),
         (
@@ -540,11 +543,17 @@ def test_admin_value_sections_have_independent_contracts(
 
 
 @pytest.mark.parametrize("movement_range", ["5d", "1w", "1m", "1y"])
-def test_lifecycle_accepts_documented_movement_ranges(admin_analytics_api, movement_range):
+def test_lifecycle_accepts_documented_movement_ranges(
+    admin_analytics_api, movement_range
+):
     api = admin_analytics_api
     response = api["client"].get(
         "/api/admin/analytics/lifecycle",
-        params={"from": "2026-08-01", "to": "2026-08-31", "movement_range": movement_range},
+        params={
+            "from": "2026-08-01",
+            "to": "2026-08-31",
+            "movement_range": movement_range,
+        },
         headers=api["admin_headers"],
     )
 
@@ -609,6 +618,22 @@ def test_profile_and_activity_reads_record_access_without_body(admin_analytics_a
     _name, call = api["value_query_service"].calls[-1]
     assert call["start"] == date(2026, 8, 1)
     assert call["end"] == date(2026, 9, 1)
+
+
+def test_profile_accepts_shared_date_range_preset(admin_analytics_api):
+    api = admin_analytics_api
+    response = api["client"].get(
+        f"/api/admin/analytics/users/{api['subject']['id']}",
+        params={"date_range": "1w"},
+        headers=api["admin_headers"],
+    )
+
+    assert response.status_code == 200, response.text
+    name, call = api["value_query_service"].calls[-1]
+    today = datetime.now(timezone.utc).date()
+    assert name == "profile"
+    assert call["start"] == today - timedelta(days=6)
+    assert call["end"] == today + timedelta(days=1)
 
 
 def test_admin_analytics_rejects_invalid_queries_without_echo(admin_analytics_api):
@@ -711,9 +736,7 @@ def test_admin_analytics_maps_service_and_access_failures_safely(
 
     for response in (overview, profile):
         assert response.status_code == 503
-        assert response.json() == {
-            "detail": "Analytics is temporarily unavailable."
-        }
+        assert response.json() == {"detail": "Analytics is temporarily unavailable."}
         assert canary not in response.text
 
 
@@ -748,7 +771,10 @@ def test_value_section_failures_are_safe_and_independent(
     "path,params",
     [
         ("/api/admin/analytics/lifecycle", {"unknown": "value"}),
-        ("/api/admin/analytics/retention", [("from", "2026-08-01"), ("from", "2026-08-02")]),
+        (
+            "/api/admin/analytics/retention",
+            [("from", "2026-08-01"), ("from", "2026-08-02")],
+        ),
         ("/api/admin/analytics/commercial", {"from": "2026-01-01", "to": "2026-08-01"}),
         ("/api/admin/analytics/operational", {"provider": "synthetic secret!"}),
         ("/api/admin/analytics/users", {"commercial_tier": "unsupported"}),

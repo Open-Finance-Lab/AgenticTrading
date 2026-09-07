@@ -11,6 +11,7 @@
     retention: '/api/admin/analytics/retention',
     commercial: '/api/admin/analytics/commercial',
     operational: '/api/admin/analytics/operational',
+    acquisition: '/api/admin/analytics/acquisition',
     users: '/api/admin/analytics/users',
   });
   const LIFECYCLE_SEGMENTS = ['new', 'onboarding', 'growing', 'core', 'at_risk', 'dormant'];
@@ -33,6 +34,13 @@
     invested: 'Invested',
     high_value: 'High value',
   });
+  const ACQUISITION_SOURCE_LABELS = Object.freeze({
+    student: 'Student',
+    community: 'Community',
+    friend: 'Friend',
+    competition: 'Competition',
+    unknown: 'Unknown',
+  });
   const LIFECYCLE_RULES = Object.freeze({
     new: 'Account is 0–6 UTC days old and has no successful backtest.',
     onboarding: 'No successful backtest yet; the account is no longer New and is not inactive.',
@@ -52,6 +60,12 @@
     '1m': { label: '1M', title: 'Monthly movement', granularity: 'weekly' },
     '1y': { label: '1Y', title: 'Yearly movement', granularity: 'monthly' },
   });
+  const ANALYTICS_RANGES = Object.freeze({
+    '1d': { label: '1D', days: 1 },
+    '1w': { label: '1W', days: 7 },
+    '1m': { label: '1M', days: 30 },
+    '1y': { label: '1Y', days: 365 },
+  });
   const CHART_COLORS = Object.freeze({
     new: '#94a3b8',
     onboarding: '#38bdf8',
@@ -67,6 +81,12 @@
     user: 'analyticsUser',
     profile: 'analyticsProfile',
     movementRange: 'analyticsMovementRange',
+    analyticsRange: 'analyticsRange',
+    acquisitionSource: 'analyticsAcquisitionSource',
+    acquisitionCohort: 'analyticsAcquisitionCohort',
+    acquisitionGroupBy: 'analyticsAcquisitionGroupBy',
+    acquisitionOpen: 'analyticsAcquisitionOpen',
+    acquisitionMetric: 'analyticsAcquisitionMetric',
   });
   const returnFocus = new Map();
 
@@ -75,8 +95,18 @@
     active: false,
     requestSeq: 0,
     range: null,
+    analyticsRange: '1m',
     movementRange: '5d',
     includeInternal: false,
+    acquisition: {
+      source: '',
+      cohort: '',
+      lifecycle: '',
+      blocked: '',
+      paid: '',
+      groupBy: 'source',
+      metric: '',
+    },
     userFilters: {
       lifecycle: '',
       operational: '',
@@ -91,6 +121,7 @@
       retention: { loaded: false, data: null, error: null, stale: false },
       commercial: { loaded: false, data: null, error: null, stale: false },
       operational: { loaded: false, data: null, error: null, stale: false },
+      acquisition: { loaded: false, data: null, error: null, stale: false },
     },
     movementChart: null,
     evidenceUser: null,
@@ -140,31 +171,23 @@
     return window.API.request(`${API_BASE}${path}`, { method: 'GET' });
   }
 
-  function defaultUtcRange(now = new Date()) {
+  function utcRangeForPreset(preset, now = new Date()) {
+    const config = ANALYTICS_RANGES[preset] || ANALYTICS_RANGES['1m'];
     const end = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
     const start = new Date(end);
-    start.setUTCDate(start.getUTCDate() - 55);
+    start.setUTCDate(start.getUTCDate() - (config.days - 1));
     return {
       start: start.toISOString().slice(0, 10),
       end: end.toISOString().slice(0, 10),
     };
   }
 
-  function validDate(value) {
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(String(value || ''))) return false;
-    const parsed = new Date(`${value}T00:00:00Z`);
-    return Number.isFinite(parsed.getTime()) && parsed.toISOString().slice(0, 10) === value;
-  }
-
   function readUrlState() {
     const params = new URLSearchParams(window.location.search);
-    const defaults = defaultUtcRange();
-    const start = params.get('analyticsStart');
-    const end = params.get('analyticsEnd');
-    state.range = {
-      start: validDate(start) ? start : defaults.start,
-      end: validDate(end) ? end : defaults.end,
-    };
+    const analyticsRange = params.get(URL_KEYS.analyticsRange) || '1m';
+    state.analyticsRange = Object.hasOwn(ANALYTICS_RANGES, analyticsRange)
+      ? analyticsRange : '1m';
+    state.range = utcRangeForPreset(state.analyticsRange);
     const movementRange = params.get(URL_KEYS.movementRange) || '5d';
     state.movementRange = Object.hasOwn(MOVEMENT_RANGES, movementRange) ? movementRange : '5d';
     state.includeInternal = params.get('analyticsInternal') === 'true';
@@ -176,11 +199,28 @@
     state.userFilters.commercial = Object.hasOwn(COMMERCIAL_LABELS, commercial) ? commercial : '';
     state.userFilters.query = params.get('analyticsUserQuery') || '';
     state.userFilters.profile = params.get(URL_KEYS.profile) || params.get(URL_KEYS.user) || '';
+    const acquisitionSource = params.get(URL_KEYS.acquisitionSource) || '';
+    const acquisitionLifecycle = params.get('analyticsAcquisitionLifecycle') || '';
+    const acquisitionBlocked = params.get('analyticsAcquisitionBlocked') || '';
+    const acquisitionPaid = params.get('analyticsAcquisitionPaid') || '';
+    const acquisitionGroupBy = params.get(URL_KEYS.acquisitionGroupBy) || 'source';
+    state.acquisition.source = ['student', 'community', 'friend', 'competition', 'unknown'].includes(acquisitionSource)
+      ? acquisitionSource : '';
+    state.acquisition.cohort = params.get(URL_KEYS.acquisitionCohort) || '';
+    state.acquisition.lifecycle = ['new', 'active', 'at_risk', 'dormant'].includes(acquisitionLifecycle)
+      ? acquisitionLifecycle : '';
+    state.acquisition.blocked = ['true', 'false'].includes(acquisitionBlocked) ? acquisitionBlocked : '';
+    state.acquisition.paid = ['true', 'false'].includes(acquisitionPaid) ? acquisitionPaid : '';
+    state.acquisition.groupBy = ['source', 'cohort'].includes(acquisitionGroupBy) ? acquisitionGroupBy : 'source';
+    state.acquisition.metric = [
+      'active', 'task_completed', 'repeat', 'paid_intent', 'paid',
+    ].includes(params.get(URL_KEYS.acquisitionMetric)) ? params.get(URL_KEYS.acquisitionMetric) : '';
     state.openDisclosures = new Set(
       String(params.get('analyticsPanel') || '')
         .split(',')
-        .filter((name) => ['retention', 'commercial', 'operational'].includes(name))
+        .filter((name) => ['retention', 'commercial', 'operational', 'acquisition'].includes(name))
     );
+    if (params.get(URL_KEYS.acquisitionOpen) === 'true') state.openDisclosures.add('acquisition');
   }
 
   function setOrDelete(params, key, value) {
@@ -191,8 +231,9 @@
   function writeUrlState() {
     if (!window.history?.replaceState) return;
     const url = new URL(window.location.href);
-    url.searchParams.set('analyticsStart', state.range.start);
-    url.searchParams.set('analyticsEnd', state.range.end);
+    url.searchParams.set(URL_KEYS.analyticsRange, state.analyticsRange);
+    url.searchParams.delete('analyticsStart');
+    url.searchParams.delete('analyticsEnd');
     setOrDelete(url.searchParams, 'analyticsInternal', state.includeInternal ? 'true' : '');
     setOrDelete(url.searchParams, URL_KEYS.lifecycle, state.userFilters.lifecycle);
     setOrDelete(url.searchParams, URL_KEYS.operational, state.userFilters.operational);
@@ -200,20 +241,41 @@
     setOrDelete(url.searchParams, 'analyticsUserQuery', state.userFilters.query);
     setOrDelete(url.searchParams, URL_KEYS.profile, state.userFilters.profile);
     url.searchParams.set(URL_KEYS.movementRange, state.movementRange);
+    setOrDelete(url.searchParams, URL_KEYS.acquisitionSource, state.acquisition.source);
+    setOrDelete(url.searchParams, URL_KEYS.acquisitionCohort, state.acquisition.cohort);
+    setOrDelete(url.searchParams, 'analyticsAcquisitionLifecycle', state.acquisition.lifecycle);
+    setOrDelete(url.searchParams, 'analyticsAcquisitionBlocked', state.acquisition.blocked);
+    setOrDelete(url.searchParams, 'analyticsAcquisitionPaid', state.acquisition.paid);
+    url.searchParams.set(URL_KEYS.acquisitionGroupBy, state.acquisition.groupBy);
+    setOrDelete(url.searchParams, URL_KEYS.acquisitionMetric, state.acquisition.metric);
+    setOrDelete(
+      url.searchParams,
+      URL_KEYS.acquisitionOpen,
+      state.openDisclosures.has('acquisition') ? 'true' : ''
+    );
     setOrDelete(url.searchParams, 'analyticsPanel', [...state.openDisclosures].sort().join(','));
     window.history.replaceState(window.history.state, '', url);
   }
 
   function setControls() {
-    element('adminValueStart').value = state.range.start;
-    element('adminValueEnd').value = state.range.end;
     element('adminValueInternal').checked = state.includeInternal;
     element('adminPriorityQuery').value = state.userFilters.query;
     element('adminPriorityLifecycle').value = state.userFilters.lifecycle;
     element('adminPriorityOperational').value = state.userFilters.operational;
     element('adminPriorityCommercial').value = state.userFilters.commercial;
+    element('adminAcquisitionSource').value = state.acquisition.source;
+    element('adminAcquisitionCohort').value = state.acquisition.cohort;
+    element('adminAcquisitionLifecycle').value = state.acquisition.lifecycle;
+    element('adminAcquisitionBlocked').value = state.acquisition.blocked;
+    element('adminAcquisitionPaid').value = state.acquisition.paid;
+    element('adminAcquisitionGroupBy').value = state.acquisition.groupBy;
     document.querySelectorAll('[data-movement-range]').forEach((button) => {
       const selected = button.dataset.movementRange === state.movementRange;
+      button.setAttribute('aria-pressed', selected ? 'true' : 'false');
+      button.tabIndex = selected ? 0 : -1;
+    });
+    document.querySelectorAll('[data-analytics-range]').forEach((button) => {
+      const selected = button.dataset.analyticsRange === state.analyticsRange;
       button.setAttribute('aria-pressed', selected ? 'true' : 'false');
       button.tabIndex = selected ? 0 : -1;
     });
@@ -221,24 +283,60 @@
 
   function rangeParams() {
     return new URLSearchParams({
-      from: state.range.start,
-      to: state.range.end,
+      date_range: state.analyticsRange,
       include_internal: state.includeInternal ? 'true' : 'false',
     });
   }
 
+  function appendAcquisitionFilters(params, { includeMetric = false } = {}) {
+    if (state.acquisition.source) params.set('acquisition_source', state.acquisition.source);
+    if (state.acquisition.cohort) params.set('acquisition_cohort', state.acquisition.cohort);
+    if (state.acquisition.lifecycle) params.set('lifecycle', state.acquisition.lifecycle);
+    if (state.acquisition.blocked) params.set('blocked', state.acquisition.blocked);
+    if (state.acquisition.paid) params.set('paid', state.acquisition.paid);
+    if (includeMetric && state.acquisition.metric) {
+      const queryKey = {
+        active: 'acquisition_active',
+        task_completed: 'acquisition_task_completed',
+        repeat: 'acquisition_repeat',
+        paid_intent: 'acquisition_paid_intent',
+        paid: 'paid',
+      }[state.acquisition.metric];
+      if (queryKey) params.set(queryKey, 'true');
+    }
+    return params;
+  }
+
+  function acquisitionParams() {
+    const params = appendAcquisitionFilters(rangeParams());
+    params.set('group_by', state.acquisition.groupBy);
+    return params;
+  }
+
+  function acquisitionIsFilteringUsers() {
+    return Boolean(
+      state.acquisition.source
+      || state.acquisition.cohort
+      || state.acquisition.lifecycle
+      || state.acquisition.blocked
+      || state.acquisition.paid
+      || state.acquisition.metric
+    );
+  }
+
   function userParams() {
     const params = new URLSearchParams({
-      priority: 'true',
+      priority: acquisitionIsFilteringUsers() ? 'false' : 'true',
       include_internal: state.includeInternal ? 'true' : 'false',
       limit: '25',
       offset: '0',
+      date_range: state.analyticsRange,
     });
     if (state.userFilters.query) params.set('q', state.userFilters.query);
     if (state.userFilters.lifecycle) params.set('lifecycle_segment', state.userFilters.lifecycle);
     if (state.userFilters.operational) params.set('operational_state', state.userFilters.operational);
     if (state.userFilters.commercial) params.set('commercial_tier', state.userFilters.commercial);
-    return params;
+    return appendAcquisitionFilters(params, { includeMetric: true });
   }
 
   async function handleAccessLost(error) {
@@ -525,6 +623,16 @@
       signals.appendChild(badge('lifecycle', user.lifecycle?.segment, LIFECYCLE_LABELS, LIFECYCLE_RULES));
       signals.appendChild(badge('operational', user.operational?.state, OPERATIONAL_LABELS, OPERATIONAL_RULES));
       signals.appendChild(badge('commercial', user.commercial_tier, COMMERCIAL_LABELS));
+      if (acquisitionIsFilteringUsers() && user.acquisition) {
+        signals.appendChild(badge(
+          'acquisition',
+          user.acquisition.source,
+          ACQUISITION_SOURCE_LABELS
+        ));
+        if (user.acquisition.cohort) {
+          signals.appendChild(node('span', 'admin-value-badge is-acquisition-cohort', user.acquisition.cohort));
+        }
+      }
       row.appendChild(signals);
       row.appendChild(node('p', 'admin-priority-reason', user.operational?.state === 'healthy' ? user.lifecycle?.reason : user.operational?.reason));
       row.appendChild(node('span', 'admin-priority-value', credits(user.lifetime_net_purchased_micro)));
@@ -541,6 +649,9 @@
     element('adminPriorityUsersRange').textContent = payload?.total
       ? `Showing ${items.length} of ${number(payload.total)}`
       : '0 users';
+    element('adminPriorityUsersTitle').textContent = acquisitionIsFilteringUsers()
+      ? 'Acquisition users'
+      : 'Priority users';
   }
 
   function summaryGrid(entries) {
@@ -654,6 +765,104 @@
     container.appendChild(wrapper);
   }
 
+  function formatRatio(value) {
+    if (value == null || value === '') return '—';
+    const parsed = Number(value);
+    return Number.isFinite(parsed)
+      ? new Intl.NumberFormat(undefined, { maximumFractionDigits: 2 }).format(parsed)
+      : '—';
+  }
+
+  function acquisitionDrilldownLabel(group, metric) {
+    const groupLabel = group?.label || 'Unknown';
+    const metricLabel = {
+      active: 'active users',
+      task_completed: 'users who completed the task',
+      repeat: 'repeat users',
+      paid_intent: 'users with paid intent',
+      paid: 'paid users',
+    }[metric];
+    return metricLabel ? `Show ${metricLabel} from ${groupLabel}` : `Show users from ${groupLabel}`;
+  }
+
+  function openAcquisitionUsers(group, metric = '') {
+    if (!group || !['source', 'cohort'].includes(group.kind)) return;
+    if (group.kind === 'source') state.acquisition.source = group.value;
+    else state.acquisition.cohort = group.value;
+    state.acquisition.metric = metric;
+    if (metric === 'paid') state.acquisition.paid = 'true';
+    setControls();
+    writeUrlState();
+    state.sections.users.loaded = false;
+    element('adminPriorityUsers')?.setAttribute('aria-busy', 'true');
+    fetchPriorityUsers()
+      .then((payload) => applySettledSection('users', { status: 'fulfilled', value: payload }))
+      .catch((error) => applySettledSection('users', { status: 'rejected', reason: error }));
+    element('adminPriorityUsersTitle')?.scrollIntoView({ block: 'start', behavior: 'smooth' });
+    element('adminPriorityUsersTitle')?.focus({ preventScroll: true });
+  }
+
+  function acquisitionLink(group, metric, value) {
+    const button = node('button', 'admin-acquisition-drilldown', value);
+    button.type = 'button';
+    button.setAttribute('aria-label', acquisitionDrilldownLabel(group, metric));
+    button.addEventListener('click', () => openAcquisitionUsers(group, metric));
+    return button;
+  }
+
+  function renderAcquisition(payload, container) {
+    const table = container?.querySelector('table');
+    const body = table?.querySelector('tbody');
+    clear(body);
+    const available = payload?.availability?.available !== false;
+    const groups = available && Array.isArray(payload?.groups) ? payload.groups : [];
+    groups.forEach((item) => {
+      const row = document.createElement('tr');
+      const group = item.group || { kind: payload.group_by || 'source', value: 'unknown', label: 'Unknown' };
+      const groupCell = document.createElement('th');
+      groupCell.scope = 'row';
+      groupCell.appendChild(acquisitionLink(group, '', group.label || 'Unknown'));
+      row.appendChild(groupCell);
+      [
+        ['', item.users],
+        ['active', item.active],
+        ['task_completed', item.task_completed],
+        ['repeat', item.repeat],
+      ].forEach(([metric, value]) => {
+        const cell = document.createElement('td');
+        cell.appendChild(acquisitionLink(group, metric, number(value)));
+        row.appendChild(cell);
+      });
+      row.appendChild(node('td', 'admin-acquisition-number', formatRatio(item.runs_per_active_user)));
+      row.appendChild(node('td', 'admin-acquisition-number', credits(item.atl_credits_settled_micro)));
+      ['paid_intent', 'paid'].forEach((metric) => {
+        const cell = document.createElement('td');
+        cell.appendChild(acquisitionLink(group, metric, number(item[metric])));
+        row.appendChild(cell);
+      });
+      body.appendChild(row);
+    });
+    if (!body?.children.length) {
+      const row = document.createElement('tr');
+      const cell = node(
+        'td',
+        'admin-value-empty',
+        available ? 'No acquisition groups match these filters.' : SECTION_UNAVAILABLE
+      );
+      cell.colSpan = 9;
+      row.appendChild(cell);
+      body?.appendChild(row);
+    }
+    const caption = table?.querySelector('caption');
+    if (caption) {
+      caption.textContent = `Acquisition groups by ${payload?.group_by === 'cohort' ? 'operating cohort' : 'source'}`;
+    }
+    element('adminAcquisitionMaturity').textContent = payload?.purchase_window_complete === false
+      ? 'Purchase window incomplete: recent checkouts have not had seven full days to settle.'
+      : '';
+    element('adminAcquisitionRange').textContent = `${formatDate(state.range.start)} – ${formatDate(state.range.end)}`;
+  }
+
   function sectionPanel(name) {
     return document.querySelector(`[data-admin-value-panel="${name}"]`);
   }
@@ -673,6 +882,7 @@
     if (name === 'retention') renderRetention(section.data, content);
     else if (name === 'commercial') renderCommercial(section.data, content);
     else if (name === 'operational') renderOperational(section.data, content);
+    else if (name === 'acquisition') renderAcquisition(section.data, content);
     const status = panel.querySelector('[data-admin-value-status]');
     status.textContent = section.stale
       ? 'Showing the last successful response; refresh failed.'
@@ -680,7 +890,7 @@
   }
 
   function sectionPath(name) {
-    const params = rangeParams();
+    const params = name === 'acquisition' ? acquisitionParams() : rangeParams();
     if (name === 'operational') {
       const billing = element('adminOperationalBilling').value;
       const provider = element('adminOperationalProvider').value.trim();
@@ -804,14 +1014,6 @@
       .catch((error) => applySettledSection('users', { status: 'rejected', reason: error }));
   }
 
-  function validateRange(start, end) {
-    if (!validDate(start) || !validDate(end) || end < start) {
-      throw new Error('Choose a valid UTC date range.');
-    }
-    const days = Math.round((Date.parse(`${end}T00:00:00Z`) - Date.parse(`${start}T00:00:00Z`)) / 86400000) + 1;
-    if (days > 180) throw new Error('Choose no more than 180 UTC dates.');
-  }
-
   function setMovementRange(value) {
     if (!Object.hasOwn(MOVEMENT_RANGES, value) || value === state.movementRange) return;
     state.movementRange = value;
@@ -821,7 +1023,30 @@
     refreshPrimary();
   }
 
+  function setAnalyticsRange(value) {
+    if (!Object.hasOwn(ANALYTICS_RANGES, value)) return;
+    state.analyticsRange = value;
+    state.range = utcRangeForPreset(value);
+    setControls();
+  }
+
   function bindEvents() {
+    const analyticsRangeKeys = Object.keys(ANALYTICS_RANGES);
+    document.querySelectorAll('[data-analytics-range]').forEach((button) => {
+      button.addEventListener('click', () => setAnalyticsRange(button.dataset.analyticsRange));
+      button.addEventListener('keydown', (event) => {
+        if (!['ArrowRight', 'ArrowLeft', 'Home', 'End'].includes(event.key)) return;
+        event.preventDefault();
+        const index = analyticsRangeKeys.indexOf(button.dataset.analyticsRange);
+        const next = event.key === 'Home'
+          ? analyticsRangeKeys[0]
+          : event.key === 'End'
+            ? analyticsRangeKeys[analyticsRangeKeys.length - 1]
+            : analyticsRangeKeys[(index + (event.key === 'ArrowRight' ? 1 : -1) + analyticsRangeKeys.length) % analyticsRangeKeys.length];
+        setAnalyticsRange(next);
+        document.querySelector(`[data-analytics-range="${next}"]`)?.focus();
+      });
+    });
     const movementRangeKeys = Object.keys(MOVEMENT_RANGES);
     document.querySelectorAll('[data-movement-range]').forEach((button) => {
       button.addEventListener('click', () => setMovementRange(button.dataset.movementRange));
@@ -879,11 +1104,14 @@
       event.preventDefault();
       const error = element('adminValueFilterError');
       try {
-        const start = element('adminValueStart').value;
-        const end = element('adminValueEnd').value;
-        validateRange(start, end);
-        state.range = { start, end };
         state.includeInternal = element('adminValueInternal').checked;
+        state.acquisition.source = element('adminAcquisitionSource').value;
+        state.acquisition.cohort = element('adminAcquisitionCohort').value.trim();
+        state.acquisition.lifecycle = element('adminAcquisitionLifecycle').value;
+        state.acquisition.blocked = element('adminAcquisitionBlocked').value;
+        state.acquisition.paid = element('adminAcquisitionPaid').value;
+        state.acquisition.groupBy = element('adminAcquisitionGroupBy').value;
+        state.acquisition.metric = '';
         error.hidden = true;
         writeUrlState();
         refresh();
@@ -976,7 +1204,7 @@
   }
 
   function getRange() {
-    return state.range ? { ...state.range } : null;
+    return state.range ? { ...state.range, dateRange: state.analyticsRange } : null;
   }
 
   window.AdminAnalyticsValue = { onEnter, refresh, syncAuth, applyUserFilters, getRange };

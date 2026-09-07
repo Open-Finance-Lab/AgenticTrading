@@ -3192,9 +3192,15 @@ const AuthAPI = {
   },
 
   signup(email, displayName, password) {
+    const inviteToken = new URLSearchParams(window.location.search).get('invite');
     return this.request('/api/auth/signup', {
       method: 'POST',
-      body: JSON.stringify({ email, display_name: displayName, password }),
+      body: JSON.stringify({
+        email,
+        display_name: displayName,
+        password,
+        ...(inviteToken ? { invite_token: inviteToken.slice(0, 512) } : {}),
+      }),
     });
   },
 

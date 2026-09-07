@@ -32,6 +32,9 @@ from dashboard.backend.domain.credits.stripe_gateway import (
     InvalidWebhookSignatureError,
     StripeGatewayError,
 )
+from dashboard.backend.domain.analytics import (
+    instrumentation as analytics_instrumentation,
+)
 
 
 router = APIRouter(tags=["credits"])
@@ -205,6 +208,19 @@ def create_credit_checkout(
         result = credits_service.create_checkout(user_id, payload)
     except Exception as exc:
         _raise_billing_http_error(exc)
+    try:
+        analytics_instrumentation.emit_resource_event(
+            event_name="checkout_started",
+            user_id=user_id,
+            source_record_type="credit_checkout",
+            source_record_id=result.order_id,
+            properties={},
+        )
+    except Exception as exc:  # noqa: BLE001 - Analytics must not block checkout
+        print(
+            "WARNING: credits.checkout_analytics_failed "
+            f"category={type(exc).__name__[:80]}"
+        )
     return {"checkout": result.model_dump(), "test_mode": True}
 
 

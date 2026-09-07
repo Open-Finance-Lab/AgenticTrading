@@ -33,6 +33,9 @@ from dashboard.backend.tests.domain.analytics.test_repository_contract import (
     assert_subject_and_access_contract,
     assert_error_category_contract,
 )
+from dashboard.backend.tests.domain.analytics.test_acquisition_repository import (
+    assert_attribution_round_trip_contract,
+)
 from dashboard.backend.tests.domain.analytics.test_value_repository import (
     NOW,
     SyntheticAgentStore,
@@ -128,7 +131,9 @@ def test_build_analytics_store_uses_only_users_database_url(monkeypatch, capsys)
 
     assert isinstance(store, FakePostgresAnalyticsStore)
     assert created["database_url"] == "postgresql://fake/accounts"
-    assert "analytics_store backend: postgres (fake/accounts)" in capsys.readouterr().out
+    assert (
+        "analytics_store backend: postgres (fake/accounts)" in capsys.readouterr().out
+    )
 
 
 def test_dispatch_log_never_contains_database_password(monkeypatch, capsys):
@@ -208,6 +213,12 @@ def test_postgres_runs_shared_subject_and_access_contract(postgres_contract_stor
 def test_postgres_runs_pr2_query_contract(postgres_contract_store):
     store, _admin_id, user_id = postgres_contract_store
     assert_pr2_query_contract(store, user_id)
+
+
+@pg_only
+def test_postgres_runs_acquisition_attribution_contract(postgres_contract_store):
+    store, admin_id, user_id = postgres_contract_store
+    assert_attribution_round_trip_contract(store, admin_id, user_id)
 
 
 @pg_only

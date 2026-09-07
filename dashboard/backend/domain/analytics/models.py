@@ -41,6 +41,7 @@ ALLOWED_SERVER_EVENT_NAMES = {
     "credits_settled",
     "credits_refunded",
     "safe_error_recorded",
+    "checkout_started",
 }
 ALLOWED_EVENT_NAMES = ALLOWED_FRONTEND_EVENT_NAMES | ALLOWED_SERVER_EVENT_NAMES
 ALLOWED_PAGE_VIEWS = {
@@ -92,6 +93,7 @@ EVENT_GROUP_BY_NAME = {
     "credits_settled": "resource",
     "credits_refunded": "resource",
     "safe_error_recorded": "resource",
+    "checkout_started": "resource",
 }
 
 _EMPTY_SERVER_EVENTS = ALLOWED_SERVER_EVENT_NAMES - {
@@ -315,7 +317,10 @@ class AnalyticsEventDraft(BaseModel):
 
     @model_validator(mode="after")
     def validate_event_fields(self) -> "AnalyticsEventDraft":
-        if self.billing_mode is not None and self.billing_mode not in ALLOWED_BILLING_MODES:
+        if (
+            self.billing_mode is not None
+            and self.billing_mode not in ALLOWED_BILLING_MODES
+        ):
             raise ValueError("unknown billing mode")
         if self.outcome is not None and self.outcome not in ALLOWED_OUTCOMES:
             raise ValueError("unknown outcome")
@@ -359,7 +364,9 @@ class AnalyticsEventRecord(AnalyticsEventDraft):
     received_at: datetime
     country_code: str | None = Field(default=None, pattern=r"^[A-Z]{2}$")
     device_category: Literal["mobile", "tablet", "desktop", "unknown"] | None = None
-    browser_family: Literal["Edge", "Chrome", "Firefox", "Safari", "Other"] | None = None
+    browser_family: Literal["Edge", "Chrome", "Firefox", "Safari", "Other"] | None = (
+        None
+    )
     network_hash: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
 
     @field_validator("received_at")

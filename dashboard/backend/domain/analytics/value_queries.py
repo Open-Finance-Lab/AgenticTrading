@@ -8,6 +8,13 @@ from typing import Any, Literal, Sequence
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from .acquisition import (
+    AcquisitionAttribution,
+    AcquisitionFilters,
+    AcquisitionGroupFacts,
+    checkout_window_is_mature,
+    runs_per_active_user,
+)
 from .lifecycle import (
     CommercialTier,
     LifecycleResult,
@@ -22,6 +29,7 @@ from .query_service import (
     AnalyticsQueryStore,
     AnalyticsUserProfile,
     FailureCategoryCount,
+    PanelAvailability,
 )
 from .repository import analytics_store
 from .repository_common import positive_limit, positive_user_id
@@ -105,8 +113,8 @@ def _validate_dates(start: date, end: date) -> tuple[date, date]:
         raise ValueError("end must be a date")
     if end <= start:
         raise ValueError("end must be later than start")
-    if (end - start).days > 180:
-        raise ValueError("date range must contain at most 180 days")
+    if (end - start).days > 366:
+        raise ValueError("date range must contain at most 366 days")
     return start, end
 
 
@@ -248,6 +256,38 @@ class OperationalAnalyticsResponse(BaseModel):
     availability: SectionAvailability
 
 
+class AcquisitionGroupKey(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    kind: Literal["source", "cohort"]
+    value: str
+    label: str
+
+
+class AcquisitionGroup(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    group: AcquisitionGroupKey
+    users: int = Field(ge=0)
+    active: int = Field(ge=0)
+    task_completed: int = Field(ge=0)
+    repeat: int = Field(ge=0)
+    runs: int = Field(ge=0)
+    runs_per_active_user: float | None = Field(default=None, ge=0)
+    atl_credits_settled_micro: int = Field(ge=0)
+    paid_intent: int = Field(ge=0)
+    paid: int = Field(ge=0)
+
+
+class AcquisitionAnalyticsResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    groups: Sequence[AcquisitionGroup]
+    group_by: Literal["source", "cohort"]
+    purchase_window_complete: bool = True
+    availability: PanelAvailability
+
+
 class UserValueFilters(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -261,6 +301,9 @@ class UserValueFilters(BaseModel):
     priority: bool = False
     legacy_status: str | None = None
     include_internal: bool = False
+    acquisition: AcquisitionFilters = Field(default_factory=AcquisitionFilters)
+    acquisition_start: datetime | None = None
+    acquisition_end: datetime | None = None
 
     @field_validator("q")
     @classmethod
@@ -273,6 +316,8 @@ class UserValueFilters(BaseModel):
     @field_validator(
         "last_meaningful_activity_from",
         "last_meaningful_activity_to",
+        "acquisition_start",
+        "acquisition_end",
     )
     @classmethod
     def normalize_activity_timestamp(cls, value: datetime | None) -> datetime | None:
@@ -286,6 +331,12 @@ class UserValueFilters(BaseModel):
             and self.last_meaningful_activity_to < self.last_meaningful_activity_from
         ):
             raise ValueError("last meaningful activity range is reversed")
+        if (
+            self.acquisition_start is not None
+            and self.acquisition_end is not None
+            and self.acquisition_end <= self.acquisition_start
+        ):
+            raise ValueError("acquisition range is empty or reversed")
         legacy = self.legacy_status
         if legacy is not None and legacy not in {
             "blocked",
@@ -320,6 +371,7 @@ class ValueUserListItem(BaseModel):
     lifetime_net_purchased_micro: int = Field(ge=0)
     priority_group: PriorityGroup
     profile_path: str
+    acquisition: AcquisitionAttribution | None = None
 
 
 class PaginatedValueUsers(BaseModel):
@@ -338,6 +390,7 @@ class ValueUserProfile(AnalyticsUserProfile):
     selected_period_start: date
     selected_period_end: date
     recent_lifecycle_transitions: Sequence[LifecycleTransition]
+    acquisition: AcquisitionAttribution | None = None
 
 
 def _lifecycle(snapshot: UserValueSnapshot) -> LifecycleResult:
@@ -471,6 +524,147 @@ class ValueAnalyticsQueryService:
                 )
             )
         return rows
+
+    def _attributions(
+        self, users: Sequence[dict[str, Any]]
+    ) -> dict[int, AcquisitionAttribution]:
+        ids = self._ids(users)
+        result = (
+            self.store.list_user_attributions(ids)
+            if hasattr(self.store, "list_user_attributions")
+            else {}
+        )
+        for user_id in ids:
+            result.setdefault(user_id, AcquisitionAttribution(user_id=user_id))
+        return result
+
+    @staticmethod
+    def _lifecycle_bucket(snapshot: UserValueSnapshot | None) -> str | None:
+        if snapshot is None:
+            return None
+        if snapshot.lifecycle_segment == "new":
+            return "new"
+        if snapshot.lifecycle_segment == "at_risk":
+            return "at_risk"
+        if snapshot.lifecycle_segment == "dormant":
+            return "dormant"
+        return "active"
+
+    def get_acquisition_groups(
+        self,
+        *,
+        start: date,
+        end: date,
+        group_by: Literal["source", "cohort"] = "source",
+        filters: AcquisitionFilters | None = None,
+        now: datetime | None = None,
+    ) -> AcquisitionAnalyticsResponse:
+        start, end = _validate_dates(start, end)
+        if group_by not in {"source", "cohort"}:
+            raise ValueError("group_by must be source or cohort")
+        filters = filters or AcquisitionFilters()
+        if not isinstance(filters, AcquisitionFilters):
+            filters = AcquisitionFilters.model_validate(filters)
+        current_time = _utc(now or datetime.now(UTC), "now")
+        users = self._eligible_users(include_internal=filters.include_internal)
+        current = self._current(users)
+        attributions = self._attributions(users)
+        facts = self.value_store.list_acquisition_facts(
+            self._ids(users), start=_day_start(start), end=_day_start(end)
+        )
+        grouped: dict[str, dict[str, int]] = defaultdict(
+            lambda: {
+                "users": 0,
+                "active": 0,
+                "task_completed": 0,
+                "repeat": 0,
+                "runs": 0,
+                "atl_credits_settled_micro": 0,
+                "paid_intent": 0,
+                "paid": 0,
+            }
+        )
+        for user in users:
+            user_id = int(user["id"])
+            attribution = attributions[user_id]
+            fact = facts.get(user_id, AcquisitionGroupFacts())
+            snapshot = current.get(user_id)
+            if filters.source is not None and attribution.source != filters.source:
+                continue
+            if (
+                filters.cohort is not None
+                and (attribution.cohort or "unknown") != filters.cohort
+            ):
+                continue
+            if (
+                filters.lifecycle is not None
+                and self._lifecycle_bucket(snapshot) != filters.lifecycle
+            ):
+                continue
+            if filters.blocked is not None and (
+                (snapshot is not None and snapshot.operational_state == "blocked")
+                != filters.blocked
+            ):
+                continue
+            if filters.paid is not None and fact.paid != filters.paid:
+                continue
+            if filters.active is not None and fact.active != filters.active:
+                continue
+            if (
+                filters.task_completed is not None
+                and fact.task_completed != filters.task_completed
+            ):
+                continue
+            if filters.repeat is not None and fact.repeat != filters.repeat:
+                continue
+            if (
+                filters.paid_intent is not None
+                and fact.paid_intent != filters.paid_intent
+            ):
+                continue
+            key = (
+                attribution.source
+                if group_by == "source"
+                else (attribution.cohort or "unknown")
+            )
+            values = grouped[key]
+            values["users"] += 1
+            values["active"] += int(fact.active)
+            values["task_completed"] += int(fact.task_completed)
+            values["repeat"] += int(fact.repeat)
+            values["runs"] += fact.runs
+            values["atl_credits_settled_micro"] += fact.atl_credits_settled_micro
+            values["paid_intent"] += int(fact.paid_intent)
+            values["paid"] += int(fact.paid)
+        groups = []
+        for key, values in sorted(
+            grouped.items(), key=lambda item: (-item[1]["users"], item[0])
+        ):
+            groups.append(
+                AcquisitionGroup(
+                    group=AcquisitionGroupKey(
+                        kind=group_by,
+                        value=key,
+                        label=(
+                            "Unknown cohort"
+                            if group_by == "cohort" and key == "unknown"
+                            else key.replace("_", " ").title()
+                        ),
+                    ),
+                    **values,
+                    runs_per_active_user=runs_per_active_user(
+                        values["runs"], values["active"]
+                    ),
+                )
+            )
+        return AcquisitionAnalyticsResponse(
+            groups=groups,
+            group_by=group_by,
+            purchase_window_complete=checkout_window_is_mature(
+                _day_start(end), current_time
+            ),
+            availability=PanelAvailability(available=True),
+        )
 
     def _history(
         self,
@@ -1012,6 +1206,34 @@ class ValueAnalyticsQueryService:
         current_time = _utc(now or datetime.now(UTC), "now")
         users = self._eligible_users(include_internal=filters.include_internal)
         current = self._current(users)
+        attributions = self._attributions(users)
+        acquisition = filters.acquisition
+        needs_acquisition_facts = any(
+            value is not None
+            for value in (
+                acquisition.paid,
+                acquisition.active,
+                acquisition.task_completed,
+                acquisition.repeat,
+                acquisition.paid_intent,
+            )
+        )
+        acquisition_start = filters.acquisition_start or current_time - timedelta(
+            days=30
+        )
+        acquisition_end = filters.acquisition_end or current_time + timedelta(
+            microseconds=1
+        )
+        acquisition_facts = (
+            self.value_store.list_acquisition_facts(
+                self._ids(users),
+                start=acquisition_start,
+                end=acquisition_end,
+            )
+            if needs_acquisition_facts
+            and hasattr(self.value_store, "list_acquisition_facts")
+            else {}
+        )
         commercial = self._commercial(
             users,
             start=current_time.date() - timedelta(days=30),
@@ -1025,6 +1247,52 @@ class ValueAnalyticsQueryService:
             snapshot = current.get(user_id)
             fact = commercial.get(user_id)
             if snapshot is None or fact is None:
+                continue
+            attribution = attributions[user_id]
+            acquisition_fact = acquisition_facts.get(user_id, AcquisitionGroupFacts())
+            if (
+                acquisition.source is not None
+                and attribution.source != acquisition.source
+            ):
+                continue
+            if (
+                acquisition.cohort is not None
+                and (attribution.cohort or "unknown") != acquisition.cohort
+            ):
+                continue
+            if (
+                acquisition.lifecycle is not None
+                and self._lifecycle_bucket(snapshot) != acquisition.lifecycle
+            ):
+                continue
+            if acquisition.blocked is not None and (
+                (snapshot.operational_state == "blocked") != acquisition.blocked
+            ):
+                continue
+            if (
+                acquisition.paid is not None
+                and acquisition_fact.paid != acquisition.paid
+            ):
+                continue
+            if (
+                acquisition.active is not None
+                and acquisition_fact.active != acquisition.active
+            ):
+                continue
+            if (
+                acquisition.task_completed is not None
+                and acquisition_fact.task_completed != acquisition.task_completed
+            ):
+                continue
+            if (
+                acquisition.repeat is not None
+                and acquisition_fact.repeat != acquisition.repeat
+            ):
+                continue
+            if (
+                acquisition.paid_intent is not None
+                and acquisition_fact.paid_intent != acquisition.paid_intent
+            ):
                 continue
             group = _priority_group(snapshot)
             if filters.priority and group == "none":
@@ -1070,6 +1338,7 @@ class ValueAnalyticsQueryService:
                     lifetime_net_purchased_micro=fact.lifetime_net_purchased_micro,
                     priority_group=group,
                     profile_path=f"/admin/analytics/users/{user_id}",
+                    acquisition=attribution,
                 )
             )
         if filters.priority:
@@ -1130,11 +1399,20 @@ class ValueAnalyticsQueryService:
             selected_period_start=start,
             selected_period_end=end,
             recent_lifecycle_transitions=transitions,
+            acquisition=(
+                self.store.get_user_attribution(subject_id)
+                if hasattr(self.store, "get_user_attribution")
+                else None
+            )
+            or AcquisitionAttribution(user_id=subject_id),
         )
 
 
 __all__ = [
     "BalanceTotals",
+    "AcquisitionAnalyticsResponse",
+    "AcquisitionGroup",
+    "AcquisitionGroupKey",
     "CommercialAnalyticsResponse",
     "CommercialPeriodSummary",
     "LifecycleAnalyticsResponse",

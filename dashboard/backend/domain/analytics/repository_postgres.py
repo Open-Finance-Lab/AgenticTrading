@@ -9,6 +9,7 @@ import psycopg
 
 from dashboard.backend.db_url import require_postgres_url
 
+from .acquisition import AcquisitionAttribution, normalize_cohort_slug
 from .models import AnalyticsEventRecord, AppendEventResult, RetentionResult
 from .repository import _EVENT_COLUMNS, _event_values, _row_to_event
 from .repository_common import (
@@ -184,6 +185,31 @@ CREATE INDEX IF NOT EXISTS idx_admin_analytics_access_subject_time
     ON admin_analytics_access_log(subject_user_id, accessed_at DESC, sequence DESC);
 CREATE INDEX IF NOT EXISTS idx_admin_analytics_access_admin_time
     ON admin_analytics_access_log(admin_user_id, accessed_at DESC, sequence DESC);
+
+CREATE TABLE IF NOT EXISTS user_acquisition_attributions (
+    user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+    source TEXT NOT NULL DEFAULT 'unknown',
+    cohort TEXT,
+    method TEXT NOT NULL DEFAULT 'unknown',
+    attributed_at TEXT,
+    original_source TEXT NOT NULL DEFAULT 'unknown',
+    original_cohort TEXT,
+    last_corrected_at TEXT,
+    last_corrected_by_admin_id INTEGER REFERENCES users(id) ON DELETE RESTRICT
+);
+
+CREATE TABLE IF NOT EXISTS admin_analytics_attribution_audit (
+    sequence BIGSERIAL PRIMARY KEY,
+    actor_user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+    subject_user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+    changed_at TEXT NOT NULL,
+    previous_source TEXT NOT NULL,
+    new_source TEXT NOT NULL,
+    previous_cohort TEXT,
+    new_cohort TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_attribution_audit_subject_time
+    ON admin_analytics_attribution_audit(subject_user_id, changed_at DESC, sequence DESC);
 """
 
 
@@ -297,9 +323,7 @@ class PostgresAnalyticsStore:
                     )
                 existing_row = by_source or by_event
                 if existing_row is None:
-                    raise AnalyticsStoreError(
-                        "Analytics event could not be persisted"
-                    )
+                    raise AnalyticsStoreError("Analytics event could not be persisted")
                 existing = _row_to_event(existing_row)
                 ignore_event_id = by_source is not None
                 if canonical_event_payload(
@@ -489,6 +513,190 @@ class PostgresAnalyticsStore:
                     SELECT * FROM admin_analytics_access_log
                     WHERE subject_user_id = %s
                     ORDER BY accessed_at DESC, sequence DESC
+                    LIMIT %s
+                    """,
+                    (subject_id, page_size),
+                )
+                rows = cur.fetchall()
+        return [dict(row) for row in rows]
+
+    @staticmethod
+    def _attribution_from_row(row: Any | None) -> AcquisitionAttribution | None:
+        if row is None:
+            return None
+        return AcquisitionAttribution(
+            user_id=int(row["user_id"]),
+            source=str(row["source"]),
+            cohort=row["cohort"],
+            method=str(row["method"]),
+            attributed_at=row["attributed_at"],
+            original_source=str(row["original_source"]),
+            original_cohort=row["original_cohort"],
+            last_corrected_at=row["last_corrected_at"],
+            last_corrected_by_admin_id=(
+                int(row["last_corrected_by_admin_id"])
+                if row["last_corrected_by_admin_id"] is not None
+                else None
+            ),
+        )
+
+    def get_user_attribution(self, user_id: int) -> AcquisitionAttribution | None:
+        subject_id = positive_user_id(user_id)
+        with self._get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT * FROM user_acquisition_attributions WHERE user_id = %s",
+                    (subject_id,),
+                )
+                row = cur.fetchone()
+        return self._attribution_from_row(row)
+
+    def list_user_attributions(
+        self, user_ids: list[int] | tuple[int, ...]
+    ) -> dict[int, AcquisitionAttribution]:
+        ids = list(dict.fromkeys(positive_user_id(value) for value in user_ids))
+        if not ids:
+            return {}
+        with self._get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT * FROM user_acquisition_attributions WHERE user_id = ANY(%s)",
+                    (ids,),
+                )
+                rows = cur.fetchall()
+        return {
+            attribution.user_id: attribution
+            for attribution in (self._attribution_from_row(row) for row in rows)
+            if attribution is not None
+        }
+
+    def record_initial_attribution(
+        self, attribution: AcquisitionAttribution
+    ) -> AcquisitionAttribution:
+        if not isinstance(attribution, AcquisitionAttribution):
+            attribution = AcquisitionAttribution.model_validate(attribution)
+        attributed_at = (
+            utc_iso(attribution.attributed_at)
+            if attribution.attributed_at
+            else utcnow_iso()
+        )
+        with self._get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO user_acquisition_attributions (
+                        user_id, source, cohort, method, attributed_at,
+                        original_source, original_cohort
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT(user_id) DO NOTHING
+                    """,
+                    (
+                        attribution.user_id,
+                        attribution.source,
+                        normalize_cohort_slug(attribution.cohort),
+                        attribution.method,
+                        attributed_at,
+                        attribution.source,
+                        normalize_cohort_slug(attribution.cohort),
+                    ),
+                )
+                cur.execute(
+                    "SELECT * FROM user_acquisition_attributions WHERE user_id = %s",
+                    (attribution.user_id,),
+                )
+                row = cur.fetchone()
+        result = self._attribution_from_row(row)
+        if result is None:
+            raise AnalyticsStoreError("Acquisition attribution could not be loaded")
+        return result
+
+    def update_user_attribution(
+        self,
+        user_id: int,
+        source: str,
+        cohort: str | None,
+        actor_user_id: int,
+        now: datetime | None = None,
+    ) -> AcquisitionAttribution:
+        subject_id = positive_user_id(user_id)
+        actor_id = positive_user_id(actor_user_id, "actor_user_id")
+        candidate = AcquisitionAttribution(
+            user_id=subject_id, source=source, cohort=cohort
+        )
+        safe_source = candidate.source
+        safe_cohort = candidate.cohort
+        changed_at = utc_iso(now) if now is not None else utcnow_iso()
+        with self._get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO user_acquisition_attributions (
+                        user_id, source, cohort, method, attributed_at,
+                        original_source, original_cohort
+                    ) VALUES (%s, 'unknown', NULL, 'unknown', %s, 'unknown', NULL)
+                    ON CONFLICT(user_id) DO NOTHING
+                    """,
+                    (subject_id, changed_at),
+                )
+                cur.execute(
+                    "SELECT source, cohort FROM user_acquisition_attributions WHERE user_id = %s",
+                    (subject_id,),
+                )
+                previous = cur.fetchone()
+                if previous is None:
+                    raise AnalyticsStoreError(
+                        "Acquisition attribution could not be loaded"
+                    )
+                cur.execute(
+                    """
+                    UPDATE user_acquisition_attributions
+                    SET source = %s, cohort = %s, last_corrected_at = %s,
+                        last_corrected_by_admin_id = %s
+                    WHERE user_id = %s
+                    """,
+                    (safe_source, safe_cohort, changed_at, actor_id, subject_id),
+                )
+                cur.execute(
+                    """
+                    INSERT INTO admin_analytics_attribution_audit (
+                        actor_user_id, subject_user_id, changed_at,
+                        previous_source, new_source, previous_cohort, new_cohort
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s)
+                    """,
+                    (
+                        actor_id,
+                        subject_id,
+                        changed_at,
+                        previous["source"],
+                        safe_source,
+                        previous["cohort"],
+                        safe_cohort,
+                    ),
+                )
+                cur.execute(
+                    "SELECT * FROM user_acquisition_attributions WHERE user_id = %s",
+                    (subject_id,),
+                )
+                row = cur.fetchone()
+        result = self._attribution_from_row(row)
+        if result is None:
+            raise AnalyticsStoreError("Acquisition attribution could not be loaded")
+        return result
+
+    def list_attribution_audit(
+        self, user_id: int, *, limit: int = 50
+    ) -> list[dict[str, Any]]:
+        subject_id = positive_user_id(user_id)
+        page_size = positive_limit(limit)
+        with self._get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT actor_user_id, subject_user_id, changed_at,
+                           previous_source, new_source, previous_cohort, new_cohort
+                    FROM admin_analytics_attribution_audit
+                    WHERE subject_user_id = %s
+                    ORDER BY changed_at DESC, sequence DESC
                     LIMIT %s
                     """,
                     (subject_id, page_size),

@@ -69,12 +69,18 @@ EXPECTED_ANALYTICS_ROUTES = {
 }
 EXPECTED_ADMIN_ANALYTICS_ROUTES = {
     ("GET", "/admin/analytics/overview", "get_overview"),
+    ("GET", "/admin/analytics/acquisition", "get_acquisition"),
     ("GET", "/admin/analytics/lifecycle", "get_lifecycle"),
     ("GET", "/admin/analytics/retention", "get_retention"),
     ("GET", "/admin/analytics/commercial", "get_commercial"),
     ("GET", "/admin/analytics/operational", "get_operational"),
     ("GET", "/admin/analytics/users", "list_users"),
     ("GET", "/admin/analytics/users/{user_id}", "get_user_profile"),
+    (
+        "PATCH",
+        "/admin/analytics/users/{user_id}/attribution",
+        "update_user_attribution",
+    ),
     (
         "GET",
         "/admin/analytics/users/{user_id}/activity",
@@ -141,12 +147,14 @@ EXPECTED_FULL_CONTRACT = {
     ("GET", "/api/admin/users/{user_id}"),
     ("PATCH", "/api/admin/users/{user_id}"),
     ("GET", "/api/admin/analytics/overview"),
+    ("GET", "/api/admin/analytics/acquisition"),
     ("GET", "/api/admin/analytics/lifecycle"),
     ("GET", "/api/admin/analytics/retention"),
     ("GET", "/api/admin/analytics/commercial"),
     ("GET", "/api/admin/analytics/operational"),
     ("GET", "/api/admin/analytics/users"),
     ("GET", "/api/admin/analytics/users/{user_id}"),
+    ("PATCH", "/api/admin/analytics/users/{user_id}/attribution"),
     ("GET", "/api/admin/analytics/users/{user_id}/activity"),
     ("POST", "/api/admin/bootstrap"),
     ("POST", "/api/algo/chat"),
@@ -319,6 +327,7 @@ def _imported_modules(path: Path):
 # Canonical modules import + per-router contract
 # ---------------------------------------------------------------------------
 
+
 def test_canonical_router_modules_import():
     for mod in (
         health_canon,
@@ -358,8 +367,7 @@ def test_analytics_router_contract():
 
 def test_admin_analytics_router_contract():
     assert (
-        _route_triples(admin_analytics_canon.router)
-        == EXPECTED_ADMIN_ANALYTICS_ROUTES
+        _route_triples(admin_analytics_canon.router) == EXPECTED_ADMIN_ANALYTICS_ROUTES
     )
 
 
@@ -375,6 +383,7 @@ def test_backtests_router_contract():
 # Full app contract + single registration
 # ---------------------------------------------------------------------------
 
+
 def test_full_route_contract_unchanged():
     actual = {
         (m, route.path)
@@ -389,11 +398,18 @@ def test_full_route_contract_unchanged():
 def test_extracted_routes_registered_exactly_once():
     counts = _app_method_path_counts()
     extracted = (
-        EXPECTED_HEALTH_ROUTES | EXPECTED_MARKET_ROUTES | EXPECTED_CONFIG_ROUTES
-        | EXPECTED_ADMIN_ROUTES | EXPECTED_BACKTESTS_ROUTES
+        EXPECTED_HEALTH_ROUTES
+        | EXPECTED_MARKET_ROUTES
+        | EXPECTED_CONFIG_ROUTES
+        | EXPECTED_ADMIN_ROUTES
+        | EXPECTED_BACKTESTS_ROUTES
     )
     for method, path, _name in extracted:
-        assert counts.get((method, path)) == 1, (method, path, counts.get((method, path)))
+        assert counts.get((method, path)) == 1, (
+            method,
+            path,
+            counts.get((method, path)),
+        )
     api_extracted = EXPECTED_ANALYTICS_ROUTES | EXPECTED_ADMIN_ANALYTICS_ROUTES
     for method, path, _name in api_extracted:
         app_path = f"/api{path}"
@@ -407,6 +423,7 @@ def test_extracted_routes_registered_exactly_once():
 # ---------------------------------------------------------------------------
 # app.py is a thin composition root
 # ---------------------------------------------------------------------------
+
 
 def test_app_no_longer_defines_extracted_handlers_or_logic():
     src = _APP_FILE.read_text(encoding="utf-8")
@@ -451,9 +468,11 @@ def test_app_still_serves_frontend_and_startup():
 # Extracted middleware + ordering
 # ---------------------------------------------------------------------------
 
+
 def test_csp_middleware_lives_in_middleware_module():
     assert hasattr(middleware_mod, "CSPHeaderMiddleware")
     from dashboard.backend.app import CSPHeaderMiddleware as app_csp
+
     assert app_csp is middleware_mod.CSPHeaderMiddleware
 
 
@@ -509,9 +528,9 @@ def test_cors_preflight_allows_every_routed_method():
                 "Access-Control-Request-Method": method,
             },
         )
-        assert response.status_code == 200, (
-            f"{method} preflight rejected ({response.status_code}): {response.text}"
-        )
+        assert (
+            response.status_code == 200
+        ), f"{method} preflight rejected ({response.status_code}): {response.text}"
         allowed = response.headers.get("access-control-allow-methods", "")
         assert method in allowed, f"{method} missing from allow_methods: {allowed!r}"
 
@@ -519,6 +538,7 @@ def test_cors_preflight_allows_every_routed_method():
 # ---------------------------------------------------------------------------
 # Boundaries
 # ---------------------------------------------------------------------------
+
 
 def test_canonical_routers_do_not_import_scripts():
     for mod in (
@@ -544,6 +564,7 @@ def test_market_router_uses_canonical_market_data():
 # Composition root has no path manipulation (Phase 3D4B)
 # ---------------------------------------------------------------------------
 
+
 def test_app_has_no_sys_path_mutation():
     src = _APP_FILE.read_text(encoding="utf-8")
     assert "sys.path.insert" not in src
@@ -560,6 +581,7 @@ def test_app_first_party_imports_are_canonical():
 # ---------------------------------------------------------------------------
 # CORS allowlist resolution (same-origin migration)
 # ---------------------------------------------------------------------------
+
 
 def test_cors_allow_origins_defaults_to_wildcard_when_unset(monkeypatch):
     """Unset must reproduce the pre-migration default exactly.

@@ -45,10 +45,21 @@ def analytics_source() -> str:
 
 def test_safe_fixtures_have_no_prohibited_response_fields():
     prohibited = {
-        "api_key", "auth_token", "password", "verification_code",
-        "prompt", "instruction", "strategy", "portfolio", "form_value",
-        "provider_response_body", "ip_address", "user_agent",
-        "credential_ciphertext", "network_hash", "session_id",
+        "api_key",
+        "auth_token",
+        "password",
+        "verification_code",
+        "prompt",
+        "instruction",
+        "strategy",
+        "portfolio",
+        "form_value",
+        "provider_response_body",
+        "ip_address",
+        "user_agent",
+        "credential_ciphertext",
+        "network_hash",
+        "session_id",
     }
     for path in sorted(FIXTURES.glob("*.json")):
         payload = load_fixture(path.name)
@@ -70,12 +81,28 @@ def test_fixtures_match_committed_analytics_shapes():
         "error_code": "temporarily_unavailable",
     }
     assert partial["availability"]["snapshot"]["available"] is True
-    assert {"headline", "segment_counts", "weekly_segments", "transitions"} <= lifecycle.keys()
-    assert {"cohorts", "summary_week_1", "summary_week_2", "summary_week_4"} <= retention.keys()
+    assert {
+        "headline",
+        "segment_counts",
+        "weekly_segments",
+        "transitions",
+    } <= lifecycle.keys()
+    assert {
+        "cohorts",
+        "summary_week_1",
+        "summary_week_2",
+        "summary_week_4",
+    } <= retention.keys()
     assert {"tier_counts", "selected_period", "current_balances"} <= commercial.keys()
     assert {"operational_state_counts", "top_failure_categories"} <= operational.keys()
     assert {"items", "total", "limit", "offset"} == users.keys()
-    assert {"state", "activation_milestones", "lifecycle", "operational", "commercial"} <= profile.keys()
+    assert {
+        "state",
+        "activation_milestones",
+        "lifecycle",
+        "operational",
+        "commercial",
+    } <= profile.keys()
     assert "next_cursor" in load_fixture("activity_timeline.json")
 
 
@@ -109,7 +136,7 @@ def test_admin_analytics_surface_and_module_exist():
     assert 'id="adminPanelAnalytics"' in APP_HTML
     assert 'id="adminAnalyticsOverview"' in APP_HTML
     assert 'id="adminAnalyticsProfile"' in APP_HTML
-    assert 'js/admin-analytics.js?v=6' in APP_HTML
+    assert "js/admin-analytics.js?v=8" in APP_HTML
     assert ANALYTICS_JS_PATH.exists()
     assert ".admin-analytics-overview" in STYLES
     assert ".admin-analytics-profile" in STYLES
@@ -123,12 +150,12 @@ def test_admin_rail_is_accessible_default_and_url_backed():
     nav_markup = APP_HTML[nav_start:nav_end]
     expected = ["analytics", "users", "providers", "activity"]
     assert nav_markup.count("data-admin-tab=") == 4
-    assert [nav_markup.index(f'data-admin-tab="{value}"') for value in expected] == sorted(
+    assert [
         nav_markup.index(f'data-admin-tab="{value}"') for value in expected
-    )
+    ] == sorted(nav_markup.index(f'data-admin-tab="{value}"') for value in expected)
     assert 'aria-orientation="vertical"' in nav_markup
     assert 'class="admin-workspace"' in APP_HTML
-    assert nav_markup.count('aria-label=') == 5
+    assert nav_markup.count("aria-label=") == 5
     assert nav_markup.count('<svg aria-hidden="true">') == 4
     assert "DEFAULT_TAB = 'analytics'" in tabs
     assert "value === 'grant-pool' ? 'users' : value" in tabs
@@ -158,10 +185,22 @@ def test_client_uses_exact_pr2_endpoints_and_query_names():
     ):
         assert endpoint in source
     for query_name in (
-        "from", "to", "billing_mode", "provider", "model",
-        "include_internal", "q", "status", "last_activity_from",
-        "last_activity_to", "sort", "order", "limit", "offset",
-        "section", "cursor",
+        "from",
+        "to",
+        "billing_mode",
+        "provider",
+        "model",
+        "include_internal",
+        "q",
+        "status",
+        "last_activity_from",
+        "last_activity_to",
+        "sort",
+        "order",
+        "limit",
+        "offset",
+        "section",
+        "cursor",
     ):
         assert query_name in source
     assert "start_date" not in source
@@ -172,9 +211,13 @@ def test_client_uses_exact_pr2_endpoints_and_query_names():
 def test_client_owns_url_state_partial_errors_and_independent_sections():
     source = analytics_source()
     for key in (
-        "analyticsStart", "analyticsEnd", "analyticsBilling",
-        "analyticsProvider", "analyticsModel", "analyticsInternal",
-        "analyticsUser", "analyticsSection",
+        "analyticsRange",
+        "analyticsBilling",
+        "analyticsProvider",
+        "analyticsModel",
+        "analyticsInternal",
+        "analyticsUser",
+        "analyticsSection",
     ):
         assert key in source
     assert "This metric is temporarily unavailable." in source
@@ -190,10 +233,14 @@ def test_client_owns_url_state_partial_errors_and_independent_sections():
 
 def test_profile_markup_and_keyboard_contracts_are_present():
     for element_id in (
-        "adminAnalyticsProfileBack", "adminAnalyticsProfileTitle",
-        "adminAnalyticsOpenAccount", "adminAnalyticsProfileTabs",
-        "adminAnalyticsSectionOverview", "adminAnalyticsSectionTimeline",
-        "adminAnalyticsSectionRuns", "adminAnalyticsSectionUsage",
+        "adminAnalyticsProfileBack",
+        "adminAnalyticsProfileTitle",
+        "adminAnalyticsOpenAccount",
+        "adminAnalyticsProfileTabs",
+        "adminAnalyticsSectionOverview",
+        "adminAnalyticsSectionTimeline",
+        "adminAnalyticsSectionRuns",
+        "adminAnalyticsSectionUsage",
         "adminAnalyticsSectionSessions",
     ):
         assert f'id="{element_id}"' in APP_HTML
@@ -210,11 +257,19 @@ def test_analytics_is_read_only_and_uses_safe_dom_rendering():
     assert "innerHTML" not in source
     assert "textContent" in source
     assert "method: 'GET'" in source
-    for method in ("POST", "PATCH", "PUT", "DELETE"):
+    for method in ("POST", "PUT", "DELETE"):
         assert f"method: '{method}'" not in source
+    assert "method: 'PATCH'" in source
+    assert "JSON.stringify({ source, cohort })" in source
     for prohibited in (
-        "api_key", "session_id", "network_hash", "provider_response_body",
-        "credential_ciphertext", "prompt", "strategy", "portfolio",
+        "api_key",
+        "session_id",
+        "network_hash",
+        "provider_response_body",
+        "credential_ciphertext",
+        "prompt",
+        "strategy",
+        "portfolio",
     ):
         assert prohibited not in source
 
@@ -225,11 +280,11 @@ def test_app_lifecycle_and_cache_versions_are_wired():
     assert "window.AdminAnalytics.refresh()" in APP_JS
     assert "window.AdminAnalyticsValue.syncAuth(user)" in APP_JS
     assert "window.AdminAnalyticsValue.onEnter()" in APP_JS
-    assert 'styles.css?v=137' in APP_HTML
-    assert 'app.js?v=128' in APP_HTML
-    assert 'js/admin-analytics.js?v=6' in APP_HTML
-    assert 'js/admin-analytics-value.js?v=4' in APP_HTML
-    assert 'js/admin-tabs.js?v=4' in APP_HTML
+    assert "styles.css?v=137" in APP_HTML
+    assert "app.js?v=128" in APP_HTML
+    assert "js/admin-analytics.js?v=8" in APP_HTML
+    assert "js/admin-analytics-value.js?v=6" in APP_HTML
+    assert "js/admin-tabs.js?v=4" in APP_HTML
 
 
 def test_credit_costs_use_the_shared_exact_formatter():
@@ -240,12 +295,18 @@ def test_credit_costs_use_the_shared_exact_formatter():
 
 def test_scoped_responsive_accessible_styles_exist():
     for selector in (
-        ".admin-workspace", ".admin-rail",
-        ".admin-analytics-overview", ".admin-analytics-filters",
-        ".admin-analytics-snapshot-grid", ".admin-analytics-trend",
-        ".admin-analytics-state-badge", ".admin-analytics-attention-table",
-        ".admin-analytics-profile-layout", ".admin-analytics-profile-tabs",
-        ".admin-analytics-activity-table", ":focus-visible",
+        ".admin-workspace",
+        ".admin-rail",
+        ".admin-analytics-overview",
+        ".admin-analytics-filters",
+        ".admin-analytics-snapshot-grid",
+        ".admin-analytics-trend",
+        ".admin-analytics-state-badge",
+        ".admin-analytics-attention-table",
+        ".admin-analytics-profile-layout",
+        ".admin-analytics-profile-tabs",
+        ".admin-analytics-activity-table",
+        ":focus-visible",
     ):
         assert selector in STYLES
     assert "@media (max-width: 900px)" in STYLES

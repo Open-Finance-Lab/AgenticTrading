@@ -1,0 +1,6 @@
+{
+  "groups": [],
+  "group_by": "source",
+  "purchase_window_complete": false,
+  "availability": {"available": false, "error_code": "temporarily_unavailable"}
+}

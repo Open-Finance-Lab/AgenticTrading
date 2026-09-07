@@ -127,9 +127,9 @@ class AnalyticsUserFilters(BaseModel):
     status: str | None = None
     last_activity_from: datetime | None = None
     last_activity_to: datetime | None = None
-    sort: Literal[
-        "last_activity", "joined_at", "recent_runs", "recent_failures"
-    ] = "last_activity"
+    sort: Literal["last_activity", "joined_at", "recent_runs", "recent_failures"] = (
+        "last_activity"
+    )
     order: Literal["asc", "desc"] = "desc"
     include_internal: bool = False
 
@@ -153,10 +153,16 @@ class AnalyticsUserFilters(BaseModel):
         start = self.last_activity_from
         end = self.last_activity_to
         if start is not None:
-            object.__setattr__(self, "last_activity_from", _utc(start, "last_activity_from"))
+            object.__setattr__(
+                self, "last_activity_from", _utc(start, "last_activity_from")
+            )
         if end is not None:
             object.__setattr__(self, "last_activity_to", _utc(end, "last_activity_to"))
-        if start is not None and end is not None and _utc(end, "last_activity_to") < _utc(start, "last_activity_from"):
+        if (
+            start is not None
+            and end is not None
+            and _utc(end, "last_activity_to") < _utc(start, "last_activity_from")
+        ):
             raise ValueError("last_activity_to cannot be before last_activity_from")
         return self
 
@@ -262,6 +268,7 @@ class AnalyticsOverview(BaseModel):
     last_updated: datetime
     filters: AnalyticsMetricFilters
     availability: dict[str, PanelAvailability]
+    acquisition_groups: list[dict[str, Any]] = Field(default_factory=list)
 
 
 def _all_users(user_store: Any) -> list[dict[str, Any]]:
@@ -288,7 +295,9 @@ class AnalyticsQueryStore:
         if self.is_postgres:
             with self.base_store._get_connection() as conn:
                 with conn.cursor() as cur:
-                    cur.execute("SELECT * FROM user_analytics_snapshots ORDER BY user_id")
+                    cur.execute(
+                        "SELECT * FROM user_analytics_snapshots ORDER BY user_id"
+                    )
                     rows = cur.fetchall()
         else:
             with self.base_store._get_connection() as conn:
@@ -358,9 +367,7 @@ class AnalyticsQueryStore:
         excluded = (
             set()
             if include_internal
-            else self.base_store.list_excluded_user_ids(
-                include_admin_accounts=True
-            )
+            else self.base_store.list_excluded_user_ids(include_admin_accounts=True)
         )
         events = []
         for row in rows:
@@ -387,9 +394,7 @@ class AnalyticsQueryStore:
                         else None
                     ),
                     model_id=(
-                        str(row["model_id"])
-                        if row["model_id"] is not None
-                        else None
+                        str(row["model_id"]) if row["model_id"] is not None else None
                     ),
                     billing_mode=(
                         str(row["billing_mode"])
@@ -587,8 +592,7 @@ class AnalyticsQueryStore:
             sessions = [
                 row
                 for row in sessions
-                if (row["occurred_at"], row["sequence"])
-                < (cursor_at, cursor_sequence)
+                if (row["occurred_at"], row["sequence"]) < (cursor_at, cursor_sequence)
             ]
         page_rows = sessions[: page_size + 1]
         has_more = len(page_rows) > page_size
@@ -661,7 +665,9 @@ class AnalyticsQueryService:
             "funnel": _availability(),
             "friction": _availability(),
             "attention": _availability(),
+            "acquisition": _availability(),
         }
+        acquisition_groups: list[dict[str, Any]] = []
         active_users: int | None = None
         conversion: float | None = None
         success_rate: float | None = None
@@ -777,9 +783,7 @@ class AnalyticsQueryService:
             current_events = [
                 event
                 for event in raw_events
-                if max(filters.start, today_start)
-                <= event.occurred_at
-                < effective_end
+                if max(filters.start, today_start) <= event.occurred_at < effective_end
                 and _event_matches_filters(event, filters)
             ]
             current_completed = sum(
@@ -807,9 +811,7 @@ class AnalyticsQueryService:
                         filters.provider_id is None
                         or row.provider_id == filters.provider_id
                     )
-                    and (
-                        filters.model_id is None or row.model_id == filters.model_id
-                    )
+                    and (filters.model_id is None or row.model_id == filters.model_id)
                 )
             else:
                 platform_micro = sum(
@@ -843,7 +845,10 @@ class AnalyticsQueryService:
                 key = row.rollup_date.isoformat()
                 if row.metric_name == "daily_active_users" and not dimensional:
                     daily_active[key] = row.value_count
-                if row.metric_name in {"completed_runs", "terminal_completed"} and not dimensional:
+                if (
+                    row.metric_name in {"completed_runs", "terminal_completed"}
+                    and not dimensional
+                ):
                     daily_completed[key] = row.value_count
                 if (
                     dimensional
@@ -892,8 +897,7 @@ class AnalyticsQueryService:
             attention_ids = {
                 user_id
                 for user_id, snapshot in snapshots.items()
-                if user_id not in excluded
-                and snapshot.status in _ATTENTION_STATES
+                if user_id not in excluded and snapshot.status in _ATTENTION_STATES
             }
             summaries = self.query_store.summarize_users(
                 user_ids=attention_ids,
@@ -937,6 +941,31 @@ class AnalyticsQueryService:
         except Exception:
             availability["attention"] = _availability(False)
 
+        try:
+            # Import lazily: value_queries uses this legacy service for the
+            # existing profile and value panels, while acquisition itself only
+            # reads authoritative stores and does not call back here.
+            from .value_queries import ValueAnalyticsQueryService
+
+            acquisition = ValueAnalyticsQueryService(
+                store=self.store,
+                user_store=self.user_store,
+            ).get_acquisition_groups(
+                start=filters.start.date(),
+                end=max(
+                    filters.start.date() + timedelta(days=1),
+                    effective_end.date() + timedelta(days=1),
+                ),
+                filters=filters.acquisition,
+                now=current,
+            )
+            acquisition_groups = [
+                group.model_dump(mode="json") for group in acquisition.groups
+            ]
+            availability["acquisition"] = PanelAvailability(available=True)
+        except Exception:
+            availability["acquisition"] = _availability(False)
+
         return AnalyticsOverview(
             active_users_7d=active_users,
             first_success_conversion=conversion,
@@ -956,6 +985,7 @@ class AnalyticsQueryService:
             last_updated=current,
             filters=filters,
             availability=availability,
+            acquisition_groups=acquisition_groups,
         )
 
     def list_users(
@@ -1024,24 +1054,21 @@ class AnalyticsQueryService:
             )
             if filters.q is not None:
                 needle = filters.q.lower()
-                if needle not in item.email.lower() and needle not in item.display_name.lower():
+                if (
+                    needle not in item.email.lower()
+                    and needle not in item.display_name.lower()
+                ):
                     continue
             if filters.status is not None and item.status != filters.status:
                 continue
-            if (
-                filters.last_activity_from is not None
-                and (
-                    item.last_meaningful_activity is None
-                    or item.last_meaningful_activity < filters.last_activity_from
-                )
+            if filters.last_activity_from is not None and (
+                item.last_meaningful_activity is None
+                or item.last_meaningful_activity < filters.last_activity_from
             ):
                 continue
-            if (
-                filters.last_activity_to is not None
-                and (
-                    item.last_meaningful_activity is None
-                    or item.last_meaningful_activity > filters.last_activity_to
-                )
+            if filters.last_activity_to is not None and (
+                item.last_meaningful_activity is None
+                or item.last_meaningful_activity > filters.last_activity_to
             ):
                 continue
             items.append(item)
@@ -1127,7 +1154,11 @@ class AnalyticsQueryService:
                 for event in ordered
                 if event.provider_id
                 and event.event_name
-                in {"credential_defaulted", "credential_verified", "model_usage_recorded"}
+                in {
+                    "credential_defaulted",
+                    "credential_verified",
+                    "model_usage_recorded",
+                }
             ),
             None,
         )
@@ -1158,9 +1189,13 @@ class AnalyticsQueryService:
             display_name=str(user.get("display_name") or ""),
             email=str(user.get("email") or ""),
             joined_at=_parse_timestamp(user["created_at"]),
-            last_meaningful_activity=(meaningful[0].occurred_at if meaningful else None),
+            last_meaningful_activity=(
+                meaningful[0].occurred_at if meaningful else None
+            ),
             state=_snapshot_summary(snapshot),
-            primary_billing_lane=(lane_counts.most_common(1)[0][0] if lane_counts else None),
+            primary_billing_lane=(
+                lane_counts.most_common(1)[0][0] if lane_counts else None
+            ),
             default_provider=(provider_event.provider_id if provider_event else None),
             country_code=(client_event.country_code if client_event else None),
             device_category=(client_event.device_category if client_event else None),
@@ -1168,10 +1203,18 @@ class AnalyticsQueryService:
             activation_milestones=milestones,
             recent_footprint=recent,
             run_summary={
-                "requested": sum(event.event_name == "backtest_requested" for event in events),
-                "completed": sum(event.event_name == "backtest_completed" for event in events),
-                "failed": sum(event.event_name == "backtest_failed" for event in events),
-                "cancelled": sum(event.event_name == "backtest_cancelled" for event in events),
+                "requested": sum(
+                    event.event_name == "backtest_requested" for event in events
+                ),
+                "completed": sum(
+                    event.event_name == "backtest_completed" for event in events
+                ),
+                "failed": sum(
+                    event.event_name == "backtest_failed" for event in events
+                ),
+                "cancelled": sum(
+                    event.event_name == "backtest_cancelled" for event in events
+                ),
             },
             billing_lane_mix=dict(lane_counts),
             input_tokens=sum(
@@ -1196,7 +1239,9 @@ class AnalyticsQueryService:
                 for event in events
                 if event.event_name == "credits_settled"
             ),
-            top_product_page=(page_counts.most_common(1)[0][0] if page_counts else None),
+            top_product_page=(
+                page_counts.most_common(1)[0][0] if page_counts else None
+            ),
         )
 
     def get_user_activity(
@@ -1244,7 +1289,9 @@ class AnalyticsQueryService:
             items.append(
                 AnalyticsActivityItem(
                     item_type=(
-                        "run" if section == "runs" else "usage" if section == "usage" else "event"
+                        "run"
+                        if section == "runs"
+                        else "usage" if section == "usage" else "event"
                     ),
                     event_id=event.event_id,
                     event_name=event.event_name,

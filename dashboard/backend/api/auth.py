@@ -27,7 +27,14 @@ from dashboard.backend.api.rate_limit import (
     rate_limited_error,
 )
 from dashboard.backend.domain.brokers.repository import broker_store
-from dashboard.backend.domain.analytics import instrumentation as analytics_instrumentation
+from dashboard.backend.domain.analytics import (
+    instrumentation as analytics_instrumentation,
+)
+from dashboard.backend.domain.analytics.acquisition import (
+    AcquisitionAttribution,
+    resolve_invite_token,
+)
+from dashboard.backend.domain.analytics.repository import analytics_store
 from dashboard.backend.domain.agents.service import agent_service
 from dashboard.backend.domain.credits.service import credits_service
 from dashboard.backend.infrastructure.brokers import pending_links, robinhood_oauth
@@ -83,12 +90,16 @@ def _env_int(name: str, default: int, *, minimum: int = 0) -> int:
         print(f"WARNING: {name}={raw!r} is not an integer; using default {default}")
         return default
     if value < minimum:
-        print(f"WARNING: {name}={value} is below the minimum {minimum}; using default {default}")
+        print(
+            f"WARNING: {name}={value} is below the minimum {minimum}; using default {default}"
+        )
         return default
     return value
 
 
-def _build_limiter(prefix: str, max_default: int, window_default: int) -> FixedWindowRateLimiter:
+def _build_limiter(
+    prefix: str, max_default: int, window_default: int
+) -> FixedWindowRateLimiter:
     """Best-effort in-process limit (see rate_limit.py), tunable via env.
 
     Reports the effective setting at startup, following the same rule as the
@@ -242,6 +253,7 @@ class SignupRequest(BaseModel):
     email: str = Field(min_length=3, max_length=254)
     display_name: str = Field(min_length=1, max_length=100)
     password: str = Field(min_length=1, max_length=128)
+    invite_token: str | None = Field(default=None, max_length=512)
 
     @field_validator("email")
     @classmethod
@@ -327,7 +339,7 @@ def _validate_avatar_data_uri(value: str) -> str:
         prefix = f"data:{candidate};base64,"
         if value.startswith(prefix):
             mime = candidate
-            payload = value[len(prefix):]
+            payload = value[len(prefix) :]
             break
     if mime is None:
         raise ValueError("Avatar must be a base64 data URI (JPEG, PNG, or WebP).")
@@ -523,8 +535,34 @@ async def signup(payload: SignupRequest, request: Request):
             # rotates for free. Documented as a known gap rather than papered
             # over, so nobody reads the /login fix as covering both routes.
             print(f"auth.signup_conflict domain={_email_domain(payload.email)}")
-            raise HTTPException(status_code=409, detail="Email is already registered") from exc
+            raise HTTPException(
+                status_code=409, detail="Email is already registered"
+            ) from exc
         raise
+
+    # Attribution is observational: the account is already committed, and a
+    # malformed or unavailable invite store must never turn a successful signup
+    # into an error. Only the verified source/cohort is persisted; the token
+    # itself is deliberately not logged or stored.
+    try:
+        resolution = resolve_invite_token(
+            payload.invite_token,
+            os.getenv("ACQUISITION_INVITE_SIGNING_KEY"),
+        )
+        await asyncio.to_thread(
+            analytics_store.record_initial_attribution,
+            AcquisitionAttribution(
+                user_id=int(user["id"]),
+                source=resolution.source,
+                cohort=resolution.cohort,
+                method=resolution.method,
+            ),
+        )
+    except Exception as exc:  # noqa: BLE001 - attribution is best effort
+        print(
+            "WARNING: analytics.signup_attribution_failed "
+            f"category={type(exc).__name__[:80]}"
+        )
 
     await _ensure_welcome_credits(user["id"], category="signup")
 
@@ -576,7 +614,9 @@ async def login(payload: LoginRequest, request: Request):
         # This is the budget that actually bounds guessing: it is keyed on the
         # account under attack, not on anything the attacker chooses.
         if not _LOGIN_EMAIL_LIMITER.allow(email_key):
-            print(f"auth.login_rate_limited scope=email domain={_email_domain(payload.email)}")
+            print(
+                f"auth.login_rate_limited scope=email domain={_email_domain(payload.email)}"
+            )
             raise _auth_rate_limited(_LOGIN_EMAIL_LIMITER, email_key, RATE_LIMIT_DETAIL)
         print(f"auth.login_failed domain={_email_domain(payload.email)}")
         raise HTTPException(status_code=401, detail=LOGIN_FAILURE_DETAIL)
@@ -733,7 +773,9 @@ def update_display_name(
             current_user["id"], display_name
         )
     except ValueError as exc:
-        raise HTTPException(status_code=401, detail="Session is no longer valid.") from exc
+        raise HTTPException(
+            status_code=401, detail="Session is no longer valid."
+        ) from exc
     return {"user": user}
 
 
@@ -820,7 +862,9 @@ def _email_change_new_body(code: str) -> str:
     )
 
 
-def _authorize_email_change(store, current_user: dict, payload: EmailChangeRequest) -> None:
+def _authorize_email_change(
+    store, current_user: dict, payload: EmailChangeRequest
+) -> None:
     """Password check + policy + the three rate limits, or raise.
 
     Extracted so request_email_change -- which must stay ``async def`` for the
@@ -836,7 +880,9 @@ def _authorize_email_change(store, current_user: dict, payload: EmailChangeReque
     if not verify_password(payload.current_password, current_user["password_hash"]):
         raise HTTPException(status_code=400, detail="Current password is incorrect.")
     if payload.new_email == str(current_user["email"]).strip().lower():
-        raise HTTPException(status_code=400, detail="That is already your email address.")
+        raise HTTPException(
+            status_code=400, detail="That is already your email address."
+        )
     # This 409 is an account-enumeration oracle, and that is accepted: POST
     # /signup already answers the same question unauthenticated and unlimited.
     # It runs BEFORE the cooldown check below, so cooldown does not bound it --
@@ -1055,7 +1101,9 @@ def _d7_cleanup(action: str, user_id, step: str, fn) -> None:
     try:
         fn()
     except Exception as exc:  # noqa: BLE001 -- the credential change already committed
-        print(f"WARNING: {action} committed for user {user_id} but {step} failed: {exc!r}")
+        print(
+            f"WARNING: {action} committed for user {user_id} but {step} failed: {exc!r}"
+        )
 
 
 _DAILY_CAP_WINDOW = timedelta(days=1)
@@ -1073,7 +1121,9 @@ _DAILY_CAP_WINDOW = timedelta(days=1)
 # visible gate is always the one that decides; the backstops only bite across
 # a restart, where the limiters are empty anyway.
 _BACKSTOP_SKEW_SECONDS = 20
-_RESET_HOURLY_CAP_WINDOW = timedelta(hours=1) - timedelta(seconds=_BACKSTOP_SKEW_SECONDS)
+_RESET_HOURLY_CAP_WINDOW = timedelta(hours=1) - timedelta(
+    seconds=_BACKSTOP_SKEW_SECONDS
+)
 _RESET_DAILY_CAP_WINDOW = _DAILY_CAP_WINDOW - timedelta(seconds=_BACKSTOP_SKEW_SECONDS)
 
 
@@ -1123,7 +1173,9 @@ def _check_forgot_policy_coherence() -> None:
             f"hourly cap ({per_hour}); requests past it are accepted and skipped "
             "silently"
         )
-    hourly_floor = int(_RESET_HOURLY_CAP_WINDOW.total_seconds()) + _BACKSTOP_SKEW_SECONDS
+    hourly_floor = (
+        int(_RESET_HOURLY_CAP_WINDOW.total_seconds()) + _BACKSTOP_SKEW_SECONDS
+    )
     if hourly.window_seconds < hourly_floor:
         print(
             f"WARNING: AUTH_FORGOT_EMAIL_WINDOW_SECONDS={int(hourly.window_seconds)} "
@@ -1198,7 +1250,9 @@ async def _deliver_password_reset_code(email: str, requested_at: datetime) -> No
         _window_start(_RESET_DAILY_CAP_WINDOW, at=requested_at),
     )
     if recent_day:
-        since_last = (requested_at - parse_stored_timestamp(max(recent_day))).total_seconds()
+        since_last = (
+            requested_at - parse_stored_timestamp(max(recent_day))
+        ).total_seconds()
         if since_last < users_module.RESET_CODE_COOLDOWN_SECONDS:
             print(f"auth.reset_skipped reason=cooldown domain={domain}")
             return
@@ -1428,7 +1482,9 @@ def _store_avatar(user_id: int, value: Optional[str]) -> dict:
     try:
         return users_module.user_store.set_avatar(user_id, value)
     except ValueError as exc:
-        raise HTTPException(status_code=401, detail="Session is no longer valid.") from exc
+        raise HTTPException(
+            status_code=401, detail="Session is no longer valid."
+        ) from exc
 
 
 @router.put("/avatar")
@@ -1472,9 +1528,13 @@ async def robinhood_oauth_start(
     # event loop for up to ~80s per click. Push both onto worker threads.
     try:
         client_id = await asyncio.to_thread(robinhood_oauth.register_client)
-    except Exception as exc:  # noqa: BLE001 -- upstream/network failure, not a client error
+    except (
+        Exception
+    ) as exc:  # noqa: BLE001 -- upstream/network failure, not a client error
         logger.exception("Robinhood dynamic client registration failed")
-        raise HTTPException(status_code=502, detail="Could not reach Robinhood") from exc
+        raise HTTPException(
+            status_code=502, detail="Could not reach Robinhood"
+        ) from exc
 
     code_verifier, code_challenge = robinhood_oauth.generate_pkce_pair()
     agent_id = body.agent_id if body else None
@@ -1493,7 +1553,9 @@ async def robinhood_oauth_start(
         )
     except Exception as exc:  # noqa: BLE001 -- metadata fetch failure
         logger.exception("Robinhood authorize URL construction failed")
-        raise HTTPException(status_code=502, detail="Could not reach Robinhood") from exc
+        raise HTTPException(
+            status_code=502, detail="Could not reach Robinhood"
+        ) from exc
 
     return {
         "already_linked": False,
@@ -1508,7 +1570,9 @@ class RobinhoodCompleteBody(BaseModel):
 
 
 @router.get("/robinhood/callback")
-async def robinhood_oauth_callback(code: Optional[str] = None, state: Optional[str] = None):
+async def robinhood_oauth_callback(
+    code: Optional[str] = None, state: Optional[str] = None
+):
     """OAuth redirect: exchange the code, park the tokens, return to /app.
 
     Deliberately unauthenticated -- it is a browser redirect from Robinhood, and
@@ -1528,7 +1592,11 @@ async def robinhood_oauth_callback(code: Optional[str] = None, state: Optional[s
     try:
         payload = robinhood_oauth.parse_oauth_state(state)
     except ValueError as exc:
-        reason = str(exc) if str(exc) in {"invalid_state", "state_expired"} else "invalid_state"
+        reason = (
+            str(exc)
+            if str(exc) in {"invalid_state", "state_expired"}
+            else "invalid_state"
+        )
         return _app_redirect({"robinhood": "error", "reason": reason})
 
     try:
@@ -1579,7 +1647,9 @@ async def robinhood_oauth_complete(
     """
     record = pending_links.pop(body.link_code)
     if record is None:
-        raise HTTPException(status_code=400, detail="Link expired - please connect again.")
+        raise HTTPException(
+            status_code=400, detail="Link expired - please connect again."
+        )
 
     user_id = int(current_user["id"])
     if record["user_id"] != user_id:
@@ -1636,7 +1706,9 @@ def discord_oauth_start(current_user: dict = Depends(get_current_user)):
 
 
 @router.get("/discord/callback")
-async def discord_oauth_callback(code: Optional[str] = None, state: Optional[str] = None):
+async def discord_oauth_callback(
+    code: Optional[str] = None, state: Optional[str] = None
+):
     """OAuth redirect target: exchange code, persist discord_user_id, return to /app."""
     if not code or not state:
         return _app_redirect({"discord": "error", "reason": "missing_params"})
@@ -1658,7 +1730,11 @@ async def discord_oauth_callback(code: Optional[str] = None, state: Optional[str
             users_module.user_store.link_discord_user, user_id, str(discord_user["id"])
         )
     except ValueError as exc:
-        reason = str(exc) if str(exc) in {"discord_already_linked", "user_not_found"} else "link_failed"
+        reason = (
+            str(exc)
+            if str(exc) in {"discord_already_linked", "user_not_found"}
+            else "link_failed"
+        )
         return _app_redirect({"discord": "error", "reason": reason})
     except Exception:
         return _app_redirect({"discord": "error", "reason": "oauth_failed"})

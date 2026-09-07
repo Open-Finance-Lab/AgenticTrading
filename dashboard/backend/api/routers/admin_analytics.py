@@ -7,10 +7,15 @@ from datetime import date, datetime, time, timedelta, timezone
 from typing import Never
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from pydantic import ValidationError
+from pydantic import BaseModel, ConfigDict, ValidationError
 
 from dashboard.backend.api.auth import require_admin
 from dashboard.backend.domain.analytics.metrics import AnalyticsMetricFilters
+from dashboard.backend.domain.analytics.acquisition import (
+    AcquisitionAttribution,
+    AcquisitionFilters,
+    normalize_cohort_slug,
+)
 from dashboard.backend.domain.analytics.query_service import (
     AnalyticsActivityPage,
     AnalyticsOverview,
@@ -24,6 +29,7 @@ from dashboard.backend.domain.analytics.service import (
     get_analytics_service,
 )
 from dashboard.backend.domain.analytics.value_queries import (
+    AcquisitionAnalyticsResponse,
     CommercialAnalyticsResponse,
     LifecycleAnalyticsResponse,
     OperationalAnalyticsResponse,
@@ -56,6 +62,59 @@ _OPERATIONAL_STATES = {"blocked", "needs_attention", "healthy"}
 _COMMERCIAL_TIERS = {"unpaid", "starter", "invested", "high_value"}
 _LIFECYCLE_MOVEMENT_RANGES = {"5d", "1w", "1m", "1y"}
 _MAX_VALUE_RANGE_DAYS = 180
+_ACQUISITION_SOURCES = {"student", "community", "friend", "competition", "unknown"}
+_ACQUISITION_LIFECYCLES = {"new", "active", "at_risk", "dormant"}
+_DATE_RANGES = {"1d": 1, "1w": 7, "1m": 30, "1y": 365}
+
+
+class AttributionUpdateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    source: str
+    cohort: str | None = None
+
+
+def _acquisition_filters(
+    values: dict[str, str], *, include_internal: bool
+) -> AcquisitionFilters:
+    source = values.get("acquisition_source")
+    if source is not None and source not in _ACQUISITION_SOURCES:
+        _invalid_query()
+    lifecycle = values.get("lifecycle")
+    if lifecycle is not None and lifecycle not in _ACQUISITION_LIFECYCLES:
+        _invalid_query()
+    cohort = values.get("acquisition_cohort")
+    try:
+        return AcquisitionFilters(
+            source=source,
+            cohort=normalize_cohort_slug(cohort) if cohort is not None else None,
+            lifecycle=lifecycle,
+            blocked=_parse_bool(values["blocked"]) if "blocked" in values else None,
+            paid=_parse_bool(values["paid"]) if "paid" in values else None,
+            active=(
+                _parse_bool(values["acquisition_active"])
+                if "acquisition_active" in values
+                else None
+            ),
+            task_completed=(
+                _parse_bool(values["acquisition_task_completed"])
+                if "acquisition_task_completed" in values
+                else None
+            ),
+            repeat=(
+                _parse_bool(values["acquisition_repeat"])
+                if "acquisition_repeat" in values
+                else None
+            ),
+            paid_intent=(
+                _parse_bool(values["acquisition_paid_intent"])
+                if "acquisition_paid_intent" in values
+                else None
+            ),
+            include_internal=include_internal,
+        )
+    except (ValidationError, ValueError):
+        _invalid_query()
 
 
 def _invalid_query() -> Never:
@@ -124,7 +183,24 @@ def _parse_user_id(value: str) -> int:
 def _overview_filters(request: Request) -> AnalyticsMetricFilters:
     values = _query_values(
         request,
-        {"from", "to", "billing_mode", "provider", "model", "include_internal"},
+        {
+            "from",
+            "to",
+            "date_range",
+            "billing_mode",
+            "provider",
+            "model",
+            "include_internal",
+            "acquisition_source",
+            "acquisition_cohort",
+            "lifecycle",
+            "blocked",
+            "paid",
+            "acquisition_active",
+            "acquisition_task_completed",
+            "acquisition_repeat",
+            "acquisition_paid_intent",
+        },
     )
     now = datetime.now(timezone.utc)
     from_date = _parse_date(values["from"]) if "from" in values else None
@@ -132,9 +208,18 @@ def _overview_filters(request: Request) -> AnalyticsMetricFilters:
     if from_date is not None and to_date is not None and to_date < from_date:
         _invalid_query()
 
+    date_range = values.get("date_range")
+    if date_range is not None and date_range not in _DATE_RANGES:
+        _invalid_query()
+    if date_range is not None and (from_date is not None or to_date is not None):
+        _invalid_query()
     end = _exclusive_date_end(to_date) if to_date else now
     try:
-        start = _utc_midnight(from_date) if from_date else end - timedelta(days=30)
+        start = (
+            _utc_midnight(from_date)
+            if from_date
+            else end - timedelta(days=_DATE_RANGES.get(date_range or "1m", 30))
+        )
     except OverflowError:
         _invalid_query()
 
@@ -149,17 +234,19 @@ def _overview_filters(request: Request) -> AnalyticsMetricFilters:
         _invalid_query()
 
     try:
+        include_internal = (
+            _parse_bool(values["include_internal"])
+            if "include_internal" in values
+            else False
+        )
         return AnalyticsMetricFilters(
             start=start,
             end=end,
             billing_mode=billing_mode,
             provider_id=provider_id,
             model_id=model_id,
-            include_internal=(
-                _parse_bool(values["include_internal"])
-                if "include_internal" in values
-                else False
-            ),
+            include_internal=include_internal,
+            acquisition=_acquisition_filters(values, include_internal=include_internal),
         )
     except (ValidationError, ValueError):
         _invalid_query()
@@ -167,6 +254,18 @@ def _overview_filters(request: Request) -> AnalyticsMetricFilters:
 
 def _value_range_from_values(values: dict[str, str]) -> tuple[date, date, bool]:
     today = datetime.now(timezone.utc).date()
+    date_range = values.get("date_range")
+    if date_range is not None:
+        if date_range not in _DATE_RANGES or "from" in values or "to" in values:
+            _invalid_query()
+        end = today + timedelta(days=1)
+        start = end - timedelta(days=_DATE_RANGES[date_range])
+        include_internal = (
+            _parse_bool(values["include_internal"])
+            if "include_internal" in values
+            else False
+        )
+        return start, end, include_internal
     from_date = _parse_date(values["from"]) if "from" in values else None
     to_date = _parse_date(values["to"]) if "to" in values else None
     if from_date is not None and to_date is not None and to_date < from_date:
@@ -193,14 +292,14 @@ def _value_range(
 ) -> tuple[date, date, bool, dict[str, str]]:
     values = _query_values(
         request,
-        {"from", "to", "include_internal"} | (additional or set()),
+        {"from", "to", "date_range", "include_internal"} | (additional or set()),
     )
     start, end, include_internal = _value_range_from_values(values)
     return start, end, include_internal, values
 
 
 def _profile_range(request: Request) -> tuple[date, date]:
-    values = _query_values(request, {"from", "to"})
+    values = _query_values(request, {"from", "to", "date_range"})
     start, end, _include_internal = _value_range_from_values(values)
     return start, end
 
@@ -221,6 +320,18 @@ def _value_user_filters(request: Request) -> tuple[UserValueFilters, int, int]:
             "limit",
             "offset",
             "include_internal",
+            "acquisition_source",
+            "acquisition_cohort",
+            "lifecycle",
+            "blocked",
+            "paid",
+            "acquisition_active",
+            "acquisition_task_completed",
+            "acquisition_repeat",
+            "acquisition_paid_intent",
+            "from",
+            "to",
+            "date_range",
         },
     )
     query = values.get("q")
@@ -239,6 +350,15 @@ def _value_user_filters(request: Request) -> tuple[UserValueFilters, int, int]:
     if legacy_status is not None and legacy_status not in _USER_STATES:
         _invalid_query()
 
+    acquisition_range_values = {
+        key: values[key]
+        for key in ("from", "to", "date_range", "include_internal")
+        if key in values
+    }
+    acquisition_start, acquisition_end, _ = _value_range_from_values(
+        acquisition_range_values
+    )
+
     from_date = (
         _parse_date(values["last_meaningful_activity_from"])
         if "last_meaningful_activity_from" in values
@@ -252,6 +372,11 @@ def _value_user_filters(request: Request) -> tuple[UserValueFilters, int, int]:
     if from_date is not None and to_date is not None and to_date < from_date:
         _invalid_query()
     try:
+        include_internal = (
+            _parse_bool(values["include_internal"])
+            if "include_internal" in values
+            else False
+        )
         filters = UserValueFilters(
             q=query,
             lifecycle_segment=lifecycle_segment,
@@ -272,11 +397,10 @@ def _value_user_filters(request: Request) -> tuple[UserValueFilters, int, int]:
                 _parse_bool(values["priority"]) if "priority" in values else False
             ),
             legacy_status=legacy_status,
-            include_internal=(
-                _parse_bool(values["include_internal"])
-                if "include_internal" in values
-                else False
-            ),
+            include_internal=include_internal,
+            acquisition=_acquisition_filters(values, include_internal=include_internal),
+            acquisition_start=_utc_midnight(acquisition_start),
+            acquisition_end=_utc_midnight(acquisition_end),
         )
     except (ValidationError, ValueError):
         _invalid_query()
@@ -327,9 +451,7 @@ def _user_filters(request: Request) -> tuple[AnalyticsUserFilters, int, int]:
         _invalid_query()
     activity_start = _utc_midnight(from_date) if from_date else None
     activity_end = (
-        _exclusive_date_end(to_date) - timedelta(microseconds=1)
-        if to_date
-        else None
+        _exclusive_date_end(to_date) - timedelta(microseconds=1) if to_date else None
     )
 
     try:
@@ -366,6 +488,8 @@ def _activity_query(request: Request) -> tuple[str, int, str | None]:
 
 
 def _raise_service_error(exc: Exception) -> Never:
+    if isinstance(exc, HTTPException):
+        raise exc
     if isinstance(exc, LookupError):
         raise HTTPException(status_code=404, detail=_NOT_FOUND_DETAIL) from None
     if isinstance(exc, (ValidationError, ValueError)):
@@ -398,6 +522,40 @@ def get_overview(
     filters = _overview_filters(request)
     try:
         return service.get_overview(filters=filters)
+    except Exception as exc:
+        _raise_service_error(exc)
+
+
+@router.get("/acquisition", response_model=AcquisitionAnalyticsResponse)
+def get_acquisition(
+    request: Request,
+    service: ValueAnalyticsQueryService = Depends(get_value_analytics_query_service),
+):
+    start, end, include_internal, values = _value_range(
+        request,
+        additional={
+            "group_by",
+            "acquisition_source",
+            "acquisition_cohort",
+            "lifecycle",
+            "blocked",
+            "paid",
+            "acquisition_active",
+            "acquisition_task_completed",
+            "acquisition_repeat",
+            "acquisition_paid_intent",
+        },
+    )
+    group_by = values.get("group_by", "source")
+    if group_by not in {"source", "cohort"}:
+        _invalid_query()
+    try:
+        return service.get_acquisition_groups(
+            start=start,
+            end=end,
+            group_by=group_by,
+            filters=_acquisition_filters(values, include_internal=include_internal),
+        )
     except Exception as exc:
         _raise_service_error(exc)
 
@@ -527,6 +685,27 @@ def get_user_profile(
         section="overview",
     )
     return profile
+
+
+@router.patch("/users/{user_id}/attribution", response_model=AcquisitionAttribution)
+def update_user_attribution(
+    user_id: str,
+    payload: AttributionUpdateRequest,
+    admin: dict = Depends(require_admin),
+    service: ValueAnalyticsQueryService = Depends(get_value_analytics_query_service),
+):
+    subject_user_id = _parse_user_id(user_id)
+    if payload.source not in _ACQUISITION_SOURCES:
+        _invalid_query()
+    try:
+        return service.store.update_user_attribution(
+            subject_user_id,
+            source=payload.source,
+            cohort=payload.cohort,
+            actor_user_id=int(admin["id"]),
+        )
+    except Exception as exc:
+        _raise_service_error(exc)
 
 
 @router.get("/users/{user_id}/activity", response_model=AnalyticsActivityPage)

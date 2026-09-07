@@ -164,6 +164,13 @@ def test_value_fixtures_and_client_exclude_sensitive_fields():
         assert prohibited not in combined
 
 
+def test_acquisition_surface_excludes_token_metric_columns():
+    source = profile_source()
+    assert "Input tokens" not in source
+    assert "Output tokens" not in source
+    assert "Total tokens" not in source
+
+
 def test_one_failed_section_does_not_blank_other_sections():
     source = value_source()
     assert "Promise.allSettled" in source
@@ -177,9 +184,11 @@ def test_charts_disclosures_and_controls_have_semantic_state():
     table_start = APP_HTML.index('id="adminLifecycleMovementTable"')
     assert 'class="sr-only"' in APP_HTML[table_start - 80 : table_start + 120]
     assert 'aria-expanded="false"' in APP_HTML
+    for analytics_range in ("1d", "1w", "1m", "1y"):
+        assert f'data-analytics-range="{analytics_range}"' in APP_HTML
+    assert "analyticsRange" in value_source()
+    assert "date_range" in value_source()
     for control_id in (
-        "adminValueStart",
-        "adminValueEnd",
         "adminPriorityQuery",
         "adminOperationalProvider",
         "adminOperationalModel",
@@ -203,7 +212,10 @@ def test_movement_ranges_and_profile_navigation_are_discoverable():
     header_start = APP_HTML.index('class="admin-value-header"')
     identity_start = APP_HTML.index('id="adminLifecycleDistributionTitle"')
     assert 'id="adminAnalyticsRulesOpen"' not in APP_HTML[header_start:identity_start]
-    assert 'id="adminAnalyticsRulesOpen"' in APP_HTML[identity_start:identity_start + 700]
+    assert (
+        'id="adminAnalyticsRulesOpen"'
+        in APP_HTML[identity_start : identity_start + 700]
+    )
 
 
 def test_value_formatting_uses_intl_and_dialogs_bound_scroll():

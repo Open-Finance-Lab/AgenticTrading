@@ -1,0 +1,31 @@
+{
+  "groups": [
+    {
+      "group": {"kind": "source", "value": "community", "label": "Community"},
+      "users": 12,
+      "active": 7,
+      "task_completed": 5,
+      "repeat": 3,
+      "runs": 18,
+      "runs_per_active_user": 2.5714285714,
+      "atl_credits_settled_micro": 840000,
+      "paid_intent": 2,
+      "paid": 1
+    },
+    {
+      "group": {"kind": "source", "value": "unknown", "label": "Unknown"},
+      "users": 4,
+      "active": 0,
+      "task_completed": 0,
+      "repeat": 0,
+      "runs": 0,
+      "runs_per_active_user": null,
+      "atl_credits_settled_micro": 0,
+      "paid_intent": 0,
+      "paid": 0
+    }
+  ],
+  "group_by": "source",
+  "purchase_window_complete": false,
+  "availability": {"available": true, "error_code": null}
+}

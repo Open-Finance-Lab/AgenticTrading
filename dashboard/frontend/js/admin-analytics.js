@@ -13,6 +13,7 @@
   const USER_STATES = ['blocked', 'needs_attention', 'dormant', 'onboarding', 'active'];
   const USER_SORTS = new Set(['last_activity', 'joined_at', 'recent_runs', 'recent_failures']);
   const BILLING_MODES = new Set(['all', 'byok', 'platform_credits']);
+  const ANALYTICS_RANGES = new Set(['1d', '1w', '1m', '1y']);
   const DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
   const STATE_LABELS = {
     blocked: 'Blocked',
@@ -81,6 +82,19 @@
     return window.API.request(`${API_BASE}${path}`, { method: 'GET' });
   }
 
+  function updateAttribution(userId, source, cohort) {
+    if (!window.API || typeof window.API.request !== 'function') {
+      return Promise.reject(new Error('Admin Analytics API is not ready yet.'));
+    }
+    return window.API.request(
+      `${API_BASE}/api/admin/analytics/users/${encodeURIComponent(String(userId))}/attribution`,
+      {
+        method: 'PATCH',
+        body: JSON.stringify({ source, cohort }),
+      }
+    );
+  }
+
   function clearChildren(node) {
     if (!node) return;
     while (node.firstChild) node.removeChild(node.firstChild);
@@ -122,9 +136,11 @@
     const start = params.get('analyticsStart');
     const end = params.get('analyticsEnd');
     const billing = params.get('analyticsBilling');
+    const requestedRange = params.get('analyticsRange');
     return {
       start: validDate(start) ? start : defaults.start,
       end: validDate(end) ? end : defaults.end,
+      dateRange: ANALYTICS_RANGES.has(requestedRange) ? requestedRange : '1m',
       billingMode: BILLING_MODES.has(billing) ? billing : 'all',
       provider: String(params.get('analyticsProvider') || '').trim(),
       model: String(params.get('analyticsModel') || '').trim(),
@@ -138,7 +154,12 @@
     if (!valueRange || !validDate(valueRange.start) || !validDate(valueRange.end)) {
       return filters;
     }
-    return { ...filters, start: valueRange.start, end: valueRange.end };
+    return {
+      ...filters,
+      start: valueRange.start,
+      end: valueRange.end,
+      dateRange: valueRange.dateRange || filters.dateRange,
+    };
   }
 
   function setFilterControls(filters) {
@@ -158,6 +179,7 @@
       provider: element('adminAnalyticsProvider').value.trim(),
       model: element('adminAnalyticsModel').value.trim(),
       includeInternal: element('adminAnalyticsInternal').checked,
+      dateRange: state.filters?.dateRange || '1m',
     };
     if (!validDate(filters.start) || !validDate(filters.end)) {
       throw new Error('Choose a valid start and end date.');
@@ -185,8 +207,9 @@
     state.filters = filters;
     const url = new URL(window.location.href);
     url.searchParams.set('adminTab', 'analytics');
-    url.searchParams.set('analyticsStart', filters.start);
-    url.searchParams.set('analyticsEnd', filters.end);
+    url.searchParams.set('analyticsRange', filters.dateRange || '1m');
+    url.searchParams.delete('analyticsStart');
+    url.searchParams.delete('analyticsEnd');
     url.searchParams.set('analyticsBilling', filters.billingMode);
     setOptionalParam(url, 'analyticsProvider', filters.provider);
     setOptionalParam(url, 'analyticsModel', filters.model);
@@ -204,8 +227,9 @@
     if (!filters) return;
     const url = new URL(window.location.href);
     url.searchParams.set('adminTab', 'analytics');
-    url.searchParams.set('analyticsStart', filters.start);
-    url.searchParams.set('analyticsEnd', filters.end);
+    url.searchParams.set('analyticsRange', filters.dateRange || '1m');
+    url.searchParams.delete('analyticsStart');
+    url.searchParams.delete('analyticsEnd');
     url.searchParams.set('analyticsBilling', filters.billingMode);
     setOptionalParam(url, 'analyticsProvider', filters.provider);
     setOptionalParam(url, 'analyticsModel', filters.model);
@@ -480,8 +504,7 @@
 
   function overviewQuery() {
     const params = new URLSearchParams();
-    params.set('from', state.filters.start);
-    params.set('to', state.filters.end);
+    params.set('date_range', state.filters.dateRange || '1m');
     params.set('include_internal', state.filters.includeInternal ? 'true' : 'false');
     if (state.filters.billingMode !== 'all') params.set('billing_mode', state.filters.billingMode);
     if (state.filters.provider) params.set('provider', state.filters.provider);
@@ -684,10 +707,6 @@
   function renderUsageSummary(profile) {
     const list = element('adminAnalyticsUsageSummary');
     clearChildren(list);
-    appendDefinition(list, 'Input tokens', numberOrDash(profile.input_tokens));
-    appendDefinition(list, 'Output tokens', numberOrDash(profile.output_tokens));
-    const total = Number(profile.input_tokens) + Number(profile.output_tokens);
-    appendDefinition(list, 'Total tokens', Number.isFinite(total) ? numberOrDash(total) : '—');
     appendDefinition(list, 'ATL platform model cost', formatMoney(profile.platform_model_cost_usd));
     appendDefinition(list, 'ATL Credits debited', formatCreditsMicro(profile.credits_debited_micro));
     appendDefinition(list, 'Top product page', profile.top_product_page ? humanizeIdentifier(profile.top_product_page) : '—');
@@ -788,6 +807,30 @@
     renderLifecycleTransitions(profile.recent_lifecycle_transitions);
   }
 
+  function renderAttribution(profile) {
+    const attribution = profile.acquisition || {};
+    const source = attribution.source || 'unknown';
+    setProfileText('adminAnalyticsProfileSource', humanizeIdentifier(source), 'Unknown');
+    setProfileText('adminAnalyticsProfileCohort', attribution.cohort, 'Unknown');
+    setProfileText(
+      'adminAnalyticsProfileAttributionMethod',
+      humanizeIdentifier(attribution.method || 'unknown')
+    );
+    setProfileTime('adminAnalyticsProfileAttributedAt', attribution.attributed_at, 'Unknown');
+    setProfileText(
+      'adminAnalyticsProfileOriginalSource',
+      humanizeIdentifier(attribution.original_source || 'unknown')
+    );
+    setProfileTime('adminAnalyticsProfileLastCorrectedAt', attribution.last_corrected_at, 'Never');
+    setProfileText('adminAnalyticsProfileCorrectedBy', attribution.last_corrected_by_admin_id);
+    const edited = element('adminAnalyticsProfileAttributionEdited');
+    if (edited) edited.hidden = !attribution.last_corrected_at;
+    const sourceInput = element('adminAnalyticsProfileAttributionSourceInput');
+    const cohortInput = element('adminAnalyticsProfileAttributionCohortInput');
+    if (sourceInput) sourceInput.value = source;
+    if (cohortInput) cohortInput.value = attribution.cohort || '';
+  }
+
   function renderProfile(profile) {
     state.profile.detail = profile;
     setProfileText('adminAnalyticsProfileTitle', profile.display_name || profile.email || `User #${profile.user_id}`);
@@ -814,6 +857,7 @@
     renderUsageSummary(profile);
     renderFootprint(profile);
     renderValueProfile(profile);
+    renderAttribution(profile);
     const overviewPanel = document.querySelector('[data-analytics-section-panel="overview"]');
     const status = overviewPanel?.querySelector('[data-section-status]');
     if (status) status.textContent = '';
@@ -825,8 +869,7 @@
       const filters = activeFilters();
       state.filters = filters;
       const params = new URLSearchParams();
-      if (filters?.start) params.set('from', filters.start);
-      if (filters?.end) params.set('to', filters.end);
+      if (filters?.dateRange) params.set('date_range', filters.dateRange);
       const profile = await request(`/api/admin/analytics/users/${encodeURIComponent(String(userId))}?${params}`);
       if (requestSeq !== state.userRequestSeq || String(state.profile.userId) !== String(userId)) return;
       element('adminAnalyticsProfileError').hidden = true;
@@ -972,7 +1015,7 @@
   }
 
   function renderUsage(items, container) {
-    const { wrapper, body } = makeActivityTable(['Time', 'Usage event', 'Provider / model', 'Billing lane', 'Input', 'Output', 'ATL cost', 'ATL Credits debited']);
+    const { wrapper, body } = makeActivityTable(['Time', 'Usage event', 'Provider / model', 'Billing lane', 'ATL cost', 'ATL Credits debited']);
     items.forEach((item) => {
       const row = document.createElement('tr');
       appendTimeCell(row, item.occurred_at);
@@ -980,8 +1023,6 @@
       row.appendChild(textNode('td', '', [item.provider_id, item.model_id].filter(Boolean).join(' · ') || '—'));
       const byok = item.billing_mode === 'byok';
       row.appendChild(textNode('td', '', byok ? 'BYOK — no ATL charge' : (item.billing_mode ? humanizeIdentifier(item.billing_mode) : '—')));
-      row.appendChild(textNode('td', 'admin-analytics-number', numberOrDash(item.input_tokens)));
-      row.appendChild(textNode('td', 'admin-analytics-number', numberOrDash(item.output_tokens)));
       row.appendChild(textNode('td', 'admin-analytics-number', byok || item.cost_micro_usd == null ? '—' : formatMoney(Number(item.cost_micro_usd) / 1000000)));
       row.appendChild(textNode('td', 'admin-analytics-number', byok || item.amount_micro == null ? '—' : formatCreditsMicro(item.amount_micro)));
       body.appendChild(row);
@@ -1152,6 +1193,31 @@
       if (!user) return;
       closeProfile({ focus: false, history: false });
       window.AdminTabs?.openAccountManagement({ userId: user.user_id, email: user.email });
+    });
+    element('adminAnalyticsProfileAttributionForm')?.addEventListener('submit', async (event) => {
+      event.preventDefault();
+      const user = state.profile.detail;
+      const form = event.currentTarget;
+      const status = element('adminAnalyticsProfileAttributionStatus');
+      const save = element('adminAnalyticsProfileAttributionSave');
+      if (!user || !form.reportValidity()) return;
+      const source = element('adminAnalyticsProfileAttributionSourceInput').value;
+      const cohortValue = element('adminAnalyticsProfileAttributionCohortInput').value.trim();
+      const cohort = cohortValue || null;
+      save.disabled = true;
+      status.textContent = 'Saving attribution…';
+      try {
+        const attribution = await updateAttribution(user.user_id, source, cohort);
+        if (String(state.profile.userId) !== String(user.user_id)) return;
+        state.profile.detail = { ...user, acquisition: attribution };
+        renderAttribution(state.profile.detail);
+        status.textContent = 'Attribution saved.';
+      } catch (error) {
+        if (await handleAccessLost(error)) return;
+        status.textContent = 'Attribution could not be saved. The previous values are unchanged.';
+      } finally {
+        if (String(state.profile.userId) === String(user.user_id)) save.disabled = false;
+      }
     });
     document.addEventListener('admin:tabchange', (event) => {
       state.active = event.detail?.tab === 'analytics';
