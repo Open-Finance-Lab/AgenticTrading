@@ -15425,6 +15425,13 @@ table.sr-only {
     padding: 0;
 }
 
+/* Keep partial-error controls hidden until their section actually fails.
+   The shared action-button rules set display:flex, which otherwise overrides
+   the browser's default [hidden] behavior. */
+.admin-analytics-overview [hidden] {
+    display: none !important;
+}
+
 .admin-analytics-page-head,
 .admin-analytics-section-head,
 .admin-analytics-panel-head,

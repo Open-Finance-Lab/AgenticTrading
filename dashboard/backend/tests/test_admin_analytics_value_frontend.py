@@ -159,7 +159,7 @@ def test_acquisition_surface_excludes_token_and_provider_details():
 
 
 def test_static_asset_versions_are_bumped_for_the_new_surface():
-    assert "styles.css?v=138" in APP_HTML
+    assert "styles.css?v=139" in APP_HTML
     assert "js/admin-analytics.js?v=9" in APP_HTML
     assert "js/admin-analytics-value.js?v=7" in APP_HTML
 
@@ -180,3 +180,4 @@ def test_demo_aligned_visual_system_and_responsive_breakpoints_exist():
     assert "@media (max-width: 760px)" in STYLES
     assert "@media (max-width: 470px)" in STYLES
     assert "prefers-reduced-motion: reduce" in STYLES
+    assert ".admin-analytics-overview [hidden]" in STYLES
