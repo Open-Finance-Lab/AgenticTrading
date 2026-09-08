@@ -564,15 +564,19 @@
     items.forEach((user) => {
       const row = document.createElement('tr');
       appendAccountCell(row, user);
+      row.appendChild(textNode(
+        'td',
+        '',
+        humanizeIdentifier(user.acquisition_source || user.source || 'unknown')
+      ));
       const stateCell = document.createElement('td');
       stateCell.appendChild(textNode('span', `admin-analytics-state-badge is-${user.status}`, STATE_LABELS[user.status] || humanizeIdentifier(user.status)));
-      stateCell.appendChild(textNode('p', 'admin-analytics-reason', String(user.human_readable_reason || '—')));
       row.appendChild(stateCell);
+      row.appendChild(textNode('td', 'admin-analytics-reason', String(user.human_readable_reason || '—')));
       const activityCell = document.createElement('td');
       activityCell.appendChild(makeTime(user.last_meaningful_activity, 'No activity'));
       row.appendChild(activityCell);
       row.appendChild(textNode('td', 'admin-analytics-number', numberOrDash(user.recent_runs)));
-      row.appendChild(textNode('td', 'admin-analytics-number', numberOrDash(user.recent_failures)));
       const actionCell = document.createElement('td');
       const button = textNode('button', 'credits-key-action', 'View analytics');
       button.type = 'button';
@@ -595,7 +599,8 @@
     state.attention.offset = Number(payload.offset) || 0;
     const start = state.attention.total ? state.attention.offset + 1 : 0;
     const end = Math.min(state.attention.offset + items.length, state.attention.total);
-    element('adminAnalyticsUserRange').textContent = `Showing ${start}–${end} of ${state.attention.total}`;
+    const range = element('adminPriorityUsersRange') || element('adminAnalyticsUserRange');
+    if (range) range.textContent = `Showing ${start}–${end} of ${state.attention.total}`;
     element('adminAnalyticsUsersPrev').disabled = state.attention.offset <= 0;
     element('adminAnalyticsUsersNext').disabled = state.attention.offset + state.attention.limit >= state.attention.total;
   }
@@ -1042,15 +1047,12 @@
   }
 
   function renderSessions(items, container) {
-    const { wrapper, body } = makeActivityTable(['Started', 'Events', 'Visible time', 'Region', 'Device', 'Browser']);
+    const { wrapper, body } = makeActivityTable(['Started', 'Events', 'Visible time']);
     items.forEach((item) => {
       const row = document.createElement('tr');
       appendTimeCell(row, item.occurred_at);
       row.appendChild(textNode('td', 'admin-analytics-number', numberOrDash(item.session_event_count)));
       row.appendChild(textNode('td', '', formatVisibleTime(item.visible_ms)));
-      row.appendChild(textNode('td', '', item.country_code || 'Unknown'));
-      row.appendChild(textNode('td', '', item.device_category ? humanizeIdentifier(item.device_category) : 'Unknown'));
-      row.appendChild(textNode('td', '', item.browser_family || 'Unknown'));
       body.appendChild(row);
     });
     container.appendChild(wrapper);

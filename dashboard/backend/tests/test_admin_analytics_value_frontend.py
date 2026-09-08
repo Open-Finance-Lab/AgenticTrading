@@ -135,6 +135,15 @@ def test_profile_navigation_keeps_safe_dom_and_account_link():
     assert "aria-selected" in APP_HTML
 
 
+def test_action_queue_and_sessions_match_the_approved_visible_columns():
+    source = profile_source()
+    assert "humanizeIdentifier(user.acquisition_source || user.source || 'unknown')" in source
+    assert "makeActivityTable(['Started', 'Events', 'Visible time'])" in source
+    assert "adminPriorityUsersRange" in source
+    for removed in ("Region", "Device", "Browser"):
+        assert removed not in source
+
+
 def test_acquisition_surface_excludes_token_and_provider_details():
     combined = value_source() + profile_source()
     for prohibited in (
