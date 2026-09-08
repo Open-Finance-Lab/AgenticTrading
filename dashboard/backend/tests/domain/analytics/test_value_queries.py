@@ -7,6 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from dashboard.backend.domain.analytics.acquisition import AcquisitionGroupFacts
 from dashboard.backend.domain.analytics.lifecycle import commercial_tier
 from dashboard.backend.domain.analytics.query_service import (
     AnalyticsStateSummary,
@@ -123,12 +124,22 @@ class FakeBaseStore:
 
 
 class FakeValueStore:
-    def __init__(self, *, snapshots, commercial, daily=(), credit_activity=None):
+    def __init__(
+        self,
+        *,
+        snapshots,
+        commercial,
+        daily=(),
+        credit_activity=None,
+        acquisition=None,
+    ):
         self.snapshots = dict(snapshots)
         self.commercial = dict(commercial)
         self.daily = list(daily)
         self.credit_activity = dict(credit_activity or {})
+        self.acquisition = dict(acquisition or {})
         self.commercial_windows = []
+        self.acquisition_windows = []
 
     def list_current_snapshots(self, user_ids):
         return {
@@ -164,6 +175,13 @@ class FakeValueStore:
                 for value in self.credit_activity.get(user_id, ())
                 if start <= value < end
             )
+            for user_id in user_ids
+        }
+
+    def list_acquisition_facts(self, user_ids, *, start, end):
+        self.acquisition_windows.append((start, end))
+        return {
+            user_id: self.acquisition.get(user_id, AcquisitionGroupFacts())
             for user_id in user_ids
         }
 
@@ -248,12 +266,14 @@ def _service(
     rollups=(),
     excluded=(),
     legacy_availability=None,
+    acquisition=None,
 ):
     facts = commercial or {user_id: _commercial(user_id) for user_id in snapshots}
     value_store = FakeValueStore(
         snapshots=snapshots,
         commercial=facts,
         daily=daily,
+        acquisition=acquisition,
     )
     legacy_service = FakeLegacyService(legacy_availability)
     service = ValueAnalyticsQueryService(
@@ -437,6 +457,29 @@ def test_priority_order_is_group_value_inactivity_then_user_id():
     )
 
     assert [item.user_id for item in page.items] == [10, 11, 12, 13, 20, 30, 40]
+
+
+def test_priority_users_include_selected_range_accepted_runs():
+    start = datetime(2026, 9, 1, tzinfo=UTC)
+    end = datetime(2026, 9, 8, tzinfo=UTC)
+    service, value_store, _legacy = _service(
+        snapshots={101: _snapshot(101, lifecycle="at_risk")},
+        acquisition={101: AcquisitionGroupFacts(runs=2)},
+    )
+
+    page = service.list_users(
+        filters=UserValueFilters(
+            priority=True,
+            acquisition_start=start,
+            acquisition_end=end,
+        ),
+        limit=25,
+        offset=0,
+        now=NOW,
+    )
+
+    assert page.items[0].accepted_runs_in_range == 2
+    assert value_store.acquisition_windows == [(start, end)]
 
 
 def test_user_list_uses_injected_utc_day_for_commercial_window():

@@ -674,6 +674,7 @@ def test_admin_user_list_accepts_documented_filters(admin_analytics_api):
     assert response.status_code == 200, response.text
     assert response.json()["total"] == 1
     assert response.json()["items"][0]["user_id"] == api["subject"]["id"]
+    assert response.json()["items"][0]["accepted_runs_in_range"] >= 0
     name, call = api["value_query_service"].calls[-1]
     assert name == "users"
     assert call["limit"] == 1

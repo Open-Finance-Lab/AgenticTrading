@@ -369,6 +369,7 @@ class ValueUserListItem(BaseModel):
     operational: OperationalResult
     commercial_tier: CommercialTier
     lifetime_net_purchased_micro: int = Field(ge=0)
+    accepted_runs_in_range: int = Field(default=0, ge=0)
     priority_group: PriorityGroup
     profile_path: str
     acquisition: AcquisitionAttribution | None = None
@@ -1208,31 +1209,16 @@ class ValueAnalyticsQueryService:
         current = self._current(users)
         attributions = self._attributions(users)
         acquisition = filters.acquisition
-        needs_acquisition_facts = any(
-            value is not None
-            for value in (
-                acquisition.paid,
-                acquisition.active,
-                acquisition.task_completed,
-                acquisition.repeat,
-                acquisition.paid_intent,
-            )
-        )
         acquisition_start = filters.acquisition_start or current_time - timedelta(
             days=30
         )
         acquisition_end = filters.acquisition_end or current_time + timedelta(
             microseconds=1
         )
-        acquisition_facts = (
-            self.value_store.list_acquisition_facts(
-                self._ids(users),
-                start=acquisition_start,
-                end=acquisition_end,
-            )
-            if needs_acquisition_facts
-            and hasattr(self.value_store, "list_acquisition_facts")
-            else {}
+        acquisition_facts = self.value_store.list_acquisition_facts(
+            self._ids(users),
+            start=acquisition_start,
+            end=acquisition_end,
         )
         commercial = self._commercial(
             users,
@@ -1336,6 +1322,7 @@ class ValueAnalyticsQueryService:
                     operational=_operational(snapshot),
                     commercial_tier=fact.commercial_tier,
                     lifetime_net_purchased_micro=fact.lifetime_net_purchased_micro,
+                    accepted_runs_in_range=acquisition_fact.runs,
                     priority_group=group,
                     profile_path=f"/admin/analytics/users/{user_id}",
                     acquisition=attribution,

@@ -26,6 +26,7 @@
       },
       "commercial_tier": "invested",
       "lifetime_net_purchased_micro": 7000000,
+      "accepted_runs_in_range": 6,
       "priority_group": "healthy_at_risk",
       "profile_path": "/admin/analytics/users/101"
     },
@@ -55,6 +56,7 @@
       },
       "commercial_tier": "unpaid",
       "lifetime_net_purchased_micro": 0,
+      "accepted_runs_in_range": 1,
       "priority_group": "blocked",
       "profile_path": "/admin/analytics/users/102"
     }
