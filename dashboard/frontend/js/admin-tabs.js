@@ -68,10 +68,17 @@
   }
 
   function openAccountManagement({ userId, email } = {}) {
+    window.AdminAnalyticsValue?.closeUsersDirectory({
+      updateUrl: false,
+      focus: false,
+    });
     setTab('users');
     const url = new URL(window.location.href);
     url.searchParams.delete('analyticsUser');
+    url.searchParams.delete('analyticsProfile');
     url.searchParams.delete('analyticsSection');
+    url.searchParams.delete('analyticsUsersView');
+    url.searchParams.delete('analyticsUsersOffset');
     window.history.replaceState(window.history.state, '', url);
     const input = document.getElementById('adminCreditsUserQuery');
     const form = document.getElementById('adminCreditsUserSearch');

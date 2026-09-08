@@ -1,4 +1,4 @@
-"""Contracts for the Admin user-value Analytics frontend."""
+"""Contracts for the demo-aligned Admin user-value Analytics frontend."""
 
 from pathlib import Path
 
@@ -8,7 +8,6 @@ from dashboard.backend.tests._frontend_source import APP_HTML, STYLES
 ROOT = Path(__file__).resolve().parents[2]
 VALUE_JS_PATH = ROOT / "frontend" / "js" / "admin-analytics-value.js"
 PROFILE_JS_PATH = ROOT / "frontend" / "js" / "admin-analytics.js"
-FIXTURE_DIR = Path(__file__).resolve().parent / "fixtures" / "admin_analytics"
 
 
 def value_source() -> str:
@@ -19,59 +18,73 @@ def profile_source() -> str:
     return PROFILE_JS_PATH.read_text(encoding="utf-8")
 
 
-def test_value_client_uses_independent_endpoints():
+def test_demo_aligned_controller_uses_acquisition_as_the_pulse_source():
     source = value_source()
-    for endpoint in (
-        "/lifecycle",
-        "/retention",
-        "/commercial",
-        "/operational",
-        "/users",
+    for contract in (
+        "summarizeAcquisition",
+        "renderPulse",
+        "renderReturnPanel",
+        "renderValueExchange",
+        "renderActionQueue",
+        "/api/admin/analytics/overview",
+        "accepted_runs_in_range",
     ):
-        assert endpoint in source
+        assert contract in source
+    assert "analyticsRange: '1w'" in source
     assert "Promise.allSettled" in source
+    assert "innerHTML" not in source
 
 
-def test_deep_sections_fetch_only_on_first_open():
-    source = value_source()
-    assert "loaded: false" in source
-    assert "aria-expanded" in source
-    assert "ensureDisclosureLoaded" in source
-    assert "This section is temporarily unavailable." in source
-    assert 'data-admin-value-disclosure="retention"' in APP_HTML
-    assert 'data-admin-value-disclosure="commercial"' in APP_HTML
-    assert 'data-admin-value-disclosure="operational"' in APP_HTML
-
-
-def test_value_filters_are_deep_linkable():
-    source = value_source()
-    for key in (
-        "analyticsLifecycle",
-        "analyticsOperational",
-        "analyticsCommercial",
-        "analyticsUser",
-        "analyticsProfile",
+def test_overview_has_the_approved_story_order_and_metrics():
+    start = APP_HTML.index('id="adminAnalyticsOverview"')
+    end = APP_HTML.index('id="adminAnalyticsDeepSections"', start)
+    markup = APP_HTML[start:end]
+    ordered = [
+        'id="adminAnalyticsPulse"',
+        'id="adminAnalyticsAcquisition"',
+        'id="adminAnalyticsReturn"',
+        'id="adminAnalyticsValueExchange"',
+        'id="adminAnalyticsActionQueue"',
+    ]
+    assert [markup.index(item) for item in ordered] == sorted(markup.index(item) for item in ordered)
+    for label in (
+        "Active users",
+        "Task completed",
+        "Repeat users",
+        "ATL Credits settled",
     ):
-        assert key in source
-    assert "analyticsPanel" in source
-    assert "history.replaceState" in source
+        assert label in markup
+    for removed in ("Core users", "Lifecycle distribution", "Recent 5-day movement"):
+        assert removed not in markup
+    for removed_id in ("adminAcquisitionBlocked", "adminAcquisitionGroupBy", "adminPriorityFilters"):
+        assert removed_id not in markup
 
 
-def test_value_overview_has_stable_semantic_regions():
+def test_filters_apply_without_a_visible_apply_button():
+    source = value_source()
+    assert "scheduleFilterRefresh" in source
+    assert "adminAnalyticsValueFilters" in source
+    assert "change" in source
+    start = APP_HTML.index('id="adminAnalyticsOverview"')
+    end = APP_HTML.index('id="adminAnalyticsDeepSections"', start)
+    assert "Apply filters" not in APP_HTML[start:end]
+
+
+def test_acquisition_drilldown_opens_a_url_backed_users_directory():
+    source = value_source()
+    for contract in (
+        "openAnalyticsUsers",
+        "adminAnalyticsUsersDirectory",
+        "analyticsUsersView",
+        "AdminTabs?.setTab('users')",
+    ):
+        assert contract in source or contract in APP_HTML
     for element_id in (
-        "adminAnalyticsValueOverview",
-        "adminAnalyticsValueTitle",
-        "adminAnalyticsHeadline",
-        "adminLifecycleDistribution",
-        "adminLifecycleMovementChart",
-        "adminLifecycleMovementTable",
-        "adminPriorityUsers",
-        "adminRetentionPanel",
-        "adminCommercialPanel",
-        "adminOperationalPanel",
+        "adminAnalyticsUsersDirectoryBody",
+        "adminAnalyticsUsersDirectoryPrev",
+        "adminAnalyticsUsersDirectoryNext",
     ):
         assert f'id="{element_id}"' in APP_HTML
-    assert 'aria-describedby="adminLifecycleMovementTable"' in APP_HTML
 
 
 def test_value_client_handles_access_loss_partial_errors_and_stale_data():
@@ -80,7 +93,8 @@ def test_value_client_handles_access_loss_partial_errors_and_stale_data():
     assert "error?.status !== 401" in source
     assert "error?.status !== 403" in source
     assert "keepStaleData" in source
-    assert "Incomplete data" in source
+    assert "Promise.allSettled" in source
+    assert "renderPrimaryErrors" in source
     assert "Retry section" in APP_HTML
 
 
@@ -90,141 +104,70 @@ def test_value_rendering_is_safe_and_accessible():
     assert "textContent" in source
     assert "method: 'GET'" in source
     assert "aria-pressed" in source
-    assert "window.Chart" in source
-    assert ".admin-value-overview" in STYLES
+    assert "admin-analytics-overview" in STYLES
     assert ".admin-value-disclosure" in STYLES
 
 
-def test_rules_and_evidence_dialogs_are_named_and_focus_safe():
-    assert 'id="adminAnalyticsRulesDialog"' in APP_HTML
-    assert 'id="adminAnalyticsEvidenceDialog"' in APP_HTML
-    assert 'aria-labelledby="adminAnalyticsRulesTitle"' in APP_HTML
-    assert 'aria-labelledby="adminAnalyticsEvidenceTitle"' in APP_HTML
-    source = value_source()
-    for contract in (
-        "showModal()",
-        "Escape",
-        "event.target === dialog",
-        "returnFocus",
-        "focus()",
-    ):
-        assert contract in source
-
-
-def test_priority_signals_use_fixed_rules_and_display_safe_evidence():
-    source = value_source()
-    assert "LIFECYCLE_RULES" in source
-    for segment in ("new", "onboarding", "growing", "core", "at_risk", "dormant"):
-        assert f"{segment}:" in source
-    assert "lifecycle?.evidence" in source
-    assert "operational?.evidence" in source
-    assert "Open full analytics profile" in APP_HTML
-    assert "openAccountManagement" in source
-
-
-def test_profile_keeps_full_sections_and_renders_value_axes():
+def test_profile_is_progress_first_and_keeps_five_sections():
+    start = APP_HTML.index('id="adminAnalyticsProfile"')
+    end = APP_HTML.index('id="adminPanelUsers"', start)
+    markup = APP_HTML[start:end]
+    assert markup.index('id="adminAnalyticsMilestones"') < markup.index('id="adminAnalyticsProfileTabs"')
+    for section in ("Overview", "Timeline", "Runs", "Usage", "Sessions"):
+        assert f">{section}<" in markup
+    assert "Default provider" not in markup
+    assert "Legacy status" not in markup
     source = profile_source()
-    for section in ("overview", "timeline", "runs", "usage", "sessions"):
-        assert section in source
+    assert "account_signed_up" in source
+    assert "backtest_completed" in source
+    assert "Provider / model" not in source
+    assert "provider_id" not in source
+
+
+def test_profile_navigation_keeps_safe_dom_and_account_link():
+    source = profile_source()
     assert "openAccountManagement" in source
-    assert "profile.lifecycle" in source
-    assert "profile.operational" in source
-    assert "profile.commercial" in source
-    assert "recent_lifecycle_transitions" in source
-    assert "activeFilters" in source
-    assert "formatExclusiveDateOnly" in source
-    assert "getRange" in value_source()
-    for element_id in (
-        "adminAnalyticsProfileLifecycle",
-        "adminAnalyticsProfileOperational",
-        "adminAnalyticsProfileCommercial",
-        "adminAnalyticsProfileValueFacts",
-        "adminAnalyticsLifecycleEvidence",
-        "adminAnalyticsOperationalEvidence",
-        "adminAnalyticsLifecycleTransitions",
-    ):
-        assert f'id="{element_id}"' in APP_HTML
+    assert "openProfile" in source
+    assert "closeProfile" in source
+    assert "innerHTML" not in source
+    assert "method: 'GET'" in source
+    assert "data-analytics-section-tab" in APP_HTML
+    assert "aria-selected" in APP_HTML
 
 
-def test_value_fixtures_and_client_exclude_sensitive_fields():
-    fixtures = "\n".join(
-        path.read_text(encoding="utf-8") for path in sorted(FIXTURE_DIR.glob("*.json"))
-    )
-    combined = f"{value_source()}\n{fixtures}"
+def test_acquisition_surface_excludes_token_and_provider_details():
+    combined = value_source() + profile_source()
     for prohibited in (
-        "api_key",
-        "password",
-        "network_hash",
-        "raw_user_agent",
+        "Input tokens",
+        "Output tokens",
+        "Total tokens",
+        "Provider / model",
         "provider_response_body",
-        "credential_ciphertext",
-        "strategy_content",
         "prompt_text",
+        "api_key",
     ):
         assert prohibited not in combined
 
 
-def test_acquisition_surface_excludes_token_metric_columns():
-    source = profile_source()
-    assert "Input tokens" not in source
-    assert "Output tokens" not in source
-    assert "Total tokens" not in source
+def test_static_asset_versions_are_bumped_for_the_new_surface():
+    assert "styles.css?v=138" in APP_HTML
+    assert "js/admin-analytics.js?v=9" in APP_HTML
+    assert "js/admin-analytics-value.js?v=7" in APP_HTML
 
 
-def test_one_failed_section_does_not_blank_other_sections():
-    source = value_source()
-    assert "Promise.allSettled" in source
-    assert "applySettledSection" in source
-    assert "keepStaleData: true" in source
-    assert "section.stale" in source
-
-
-def test_charts_disclosures_and_controls_have_semantic_state():
-    assert 'aria-describedby="adminLifecycleMovementTable"' in APP_HTML
-    table_start = APP_HTML.index('id="adminLifecycleMovementTable"')
-    assert 'class="sr-only"' in APP_HTML[table_start - 80 : table_start + 120]
-    assert 'aria-expanded="false"' in APP_HTML
-    for analytics_range in ("1d", "1w", "1m", "1y"):
-        assert f'data-analytics-range="{analytics_range}"' in APP_HTML
-    assert "analyticsRange" in value_source()
-    assert "date_range" in value_source()
-    for control_id in (
-        "adminPriorityQuery",
-        "adminOperationalProvider",
-        "adminOperationalModel",
+def test_demo_aligned_visual_system_and_responsive_breakpoints_exist():
+    for selector in (
+        ".admin-rail-shell",
+        ".admin-analytics-page-head",
+        ".admin-analytics-filter-grid",
+        ".admin-analytics-metrics",
+        ".admin-analytics-story-section",
+        ".admin-analytics-two-col",
+        ".admin-analytics-acquisition-table",
+        ".admin-analytics-action-table",
+        ".admin-analytics-progress",
     ):
-        start = APP_HTML.index(f'id="{control_id}"')
-        fragment = APP_HTML[start : start + 220]
-        assert "name=" in fragment
-        assert "autocomplete=" in fragment
-
-
-def test_movement_ranges_and_profile_navigation_are_discoverable():
-    source = value_source()
-    for movement_range in ("5d", "1w", "1m", "1y"):
-        assert f'data-movement-range="{movement_range}"' in APP_HTML
-    assert "analyticsMovementRange" in source
-    assert "movement_granularity" in source
-    assert "admin-priority-profile-link" in source
-    assert "admin-help-btn" in APP_HTML
-    assert 'aria-label="How segments work"' in APP_HTML
-    assert 'id="adminAnalyticsProfileBreadcrumbParent"' in APP_HTML
-    header_start = APP_HTML.index('class="admin-value-header"')
-    identity_start = APP_HTML.index('id="adminLifecycleDistributionTitle"')
-    assert 'id="adminAnalyticsRulesOpen"' not in APP_HTML[header_start:identity_start]
-    assert (
-        'id="adminAnalyticsRulesOpen"'
-        in APP_HTML[identity_start : identity_start + 700]
-    )
-
-
-def test_value_formatting_uses_intl_and_dialogs_bound_scroll():
-    source = value_source()
-    assert "Intl.NumberFormat" in source
-    assert "Intl.DateTimeFormat" in source
-    assert "value == null" in source
-    assert "Not mature" in source
-    assert "toFixed(" not in source
-    assert "overscroll-behavior: contain" in STYLES
-    assert "touch-action: manipulation" in STYLES
-    assert "table.sr-only" in STYLES
+        assert selector in STYLES
+    assert "@media (max-width: 760px)" in STYLES
+    assert "@media (max-width: 470px)" in STYLES
+    assert "prefers-reduced-motion: reduce" in STYLES

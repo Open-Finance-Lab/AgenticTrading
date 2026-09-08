@@ -163,12 +163,20 @@
   }
 
   function setFilterControls(filters) {
-    element('adminAnalyticsStart').value = filters.start;
-    element('adminAnalyticsEnd').value = filters.end;
-    element('adminAnalyticsBilling').value = filters.billingMode;
-    element('adminAnalyticsProvider').value = filters.provider;
-    element('adminAnalyticsModel').value = filters.model;
-    element('adminAnalyticsInternal').checked = filters.includeInternal;
+    const values = {
+      adminAnalyticsStart: filters.start,
+      adminAnalyticsEnd: filters.end,
+      adminAnalyticsBilling: filters.billingMode,
+      adminAnalyticsProvider: filters.provider,
+      adminAnalyticsModel: filters.model,
+      adminAnalyticsInternal: filters.includeInternal,
+    };
+    Object.entries(values).forEach(([id, value]) => {
+      const control = element(id);
+      if (!control) return;
+      if (control.type === 'checkbox') control.checked = Boolean(value);
+      else control.value = value;
+    });
   }
 
   function readFilterControls() {
@@ -674,26 +682,29 @@
     target.appendChild(makeTime(value, fallback));
   }
 
-  function renderEvidence(ids) {
-    const list = element('adminAnalyticsProfileEvidence')?.querySelector('ul');
-    clearChildren(list);
-    (Array.isArray(ids) ? ids : []).forEach((id) => list.appendChild(textNode('li', '', String(id))));
-    if (!list.children.length) list.appendChild(textNode('li', '', 'No evidence event IDs available.'));
-  }
-
   function renderMilestones(profile) {
     const list = element('adminAnalyticsMilestones');
     clearChildren(list);
-    const entries = Object.entries(profile.activation_milestones || {}).sort(
-      (left, right) => new Date(left[1]) - new Date(right[1])
-    );
-    entries.forEach(([name, occurredAt]) => {
+    const steps = [
+      ['account_signed_up', 'Account created'],
+      ['agent_created', 'Agent created'],
+      ['backtest_requested', 'Backtest attempted'],
+      ['backtest_completed', 'First successful result'],
+    ];
+    let waiting = false;
+    steps.forEach(([name, label]) => {
+      const occurredAt = profile.activation_milestones?.[name];
       const item = document.createElement('li');
-      item.appendChild(textNode('strong', '', eventLabel(name)));
-      item.appendChild(makeTime(occurredAt));
+      const complete = Boolean(occurredAt) && !waiting;
+      waiting = waiting || !complete;
+      item.className = complete ? 'is-complete' : 'is-pending';
+      item.appendChild(textNode('span', 'admin-analytics-progress-dot', complete ? '✓' : ''));
+      const copy = document.createElement('div');
+      copy.appendChild(textNode('strong', '', label));
+      copy.appendChild(occurredAt ? makeTime(occurredAt) : textNode('small', '', 'Not completed'));
+      item.appendChild(copy);
       list.appendChild(item);
     });
-    if (!entries.length) list.appendChild(textNode('li', 'admin-analytics-empty-row', 'No activation milestones recorded.'));
   }
 
   function renderRunSummary(profile) {
@@ -730,7 +741,7 @@
       head.appendChild(textNode('strong', '', eventLabel(item.event_name)));
       head.appendChild(makeTime(item.occurred_at));
       row.appendChild(head);
-      const details = [item.page_view, item.provider_id, item.model_id, item.billing_mode, item.outcome, item.error_category]
+      const details = [item.page_view, item.model_id, item.billing_mode, item.outcome, item.error_category]
         .filter(Boolean).map(humanizeIdentifier).join(' · ');
       if (details) row.appendChild(textNode('p', '', details));
       list.appendChild(row);
@@ -839,19 +850,11 @@
     setProfileText('adminAnalyticsProfileUserId', profile.user_id);
     setProfileTime('adminAnalyticsProfileJoined', profile.joined_at);
     setProfileTime('adminAnalyticsProfileLastActivity', profile.last_meaningful_activity, 'No activity');
-    const stateTarget = element('adminAnalyticsProfileState');
-    clearChildren(stateTarget);
-    stateTarget.appendChild(textNode('span', `admin-analytics-state-badge is-${profile.state?.status}`, STATE_LABELS[profile.state?.status] || humanizeIdentifier(profile.state?.status)));
     setProfileText(
       'adminAnalyticsProfileReason',
       profile.operational?.state === 'healthy' ? profile.lifecycle?.reason : profile.operational?.reason
     );
     setProfileText('adminAnalyticsProfileBilling', profile.primary_billing_lane ? humanizeIdentifier(profile.primary_billing_lane) : null);
-    setProfileText('adminAnalyticsProfileProvider', profile.default_provider);
-    setProfileText('adminAnalyticsProfileRegion', profile.country_code, 'Unknown');
-    setProfileText('adminAnalyticsProfileDevice', profile.device_category ? humanizeIdentifier(profile.device_category) : null, 'Unknown');
-    setProfileText('adminAnalyticsProfileBrowser', profile.browser_family, 'Unknown');
-    renderEvidence(profile.state?.evidence_event_ids);
     renderMilestones(profile);
     renderRunSummary(profile);
     renderUsageSummary(profile);
@@ -991,7 +994,7 @@
       head.appendChild(textNode('strong', '', eventLabel(item.event_name)));
       head.appendChild(makeTime(item.occurred_at));
       row.appendChild(head);
-      const details = [item.outcome, item.provider_id, item.model_id, item.billing_mode, item.error_category]
+      const details = [item.outcome, item.model_id, item.billing_mode, item.error_category]
         .filter(Boolean).map(humanizeIdentifier).join(' · ');
       row.appendChild(textNode('p', '', details || 'No additional display-safe details.'));
       list.appendChild(row);
@@ -1000,13 +1003,13 @@
   }
 
   function renderRuns(items, container) {
-    const { wrapper, body } = makeActivityTable(['Time', 'Run event', 'Outcome', 'Provider / model', 'Billing lane', 'Error category']);
+    const { wrapper, body } = makeActivityTable(['Time', 'Run event', 'Outcome', 'Model', 'Billing lane', 'Error category']);
     items.forEach((item) => {
       const row = document.createElement('tr');
       appendTimeCell(row, item.occurred_at);
       row.appendChild(textNode('td', '', eventLabel(item.event_name)));
       row.appendChild(textNode('td', '', item.outcome ? humanizeIdentifier(item.outcome) : '—'));
-      row.appendChild(textNode('td', '', [item.provider_id, item.model_id].filter(Boolean).join(' · ') || '—'));
+      row.appendChild(textNode('td', '', item.model_id || '—'));
       row.appendChild(textNode('td', '', item.billing_mode ? humanizeIdentifier(item.billing_mode) : '—'));
       row.appendChild(textNode('td', '', item.error_category ? humanizeIdentifier(item.error_category) : '—'));
       body.appendChild(row);
@@ -1015,12 +1018,12 @@
   }
 
   function renderUsage(items, container) {
-    const { wrapper, body } = makeActivityTable(['Time', 'Usage event', 'Provider / model', 'Billing lane', 'ATL cost', 'ATL Credits debited']);
+    const { wrapper, body } = makeActivityTable(['Time', 'Usage event', 'Model', 'Billing lane', 'ATL cost', 'ATL Credits debited']);
     items.forEach((item) => {
       const row = document.createElement('tr');
       appendTimeCell(row, item.occurred_at);
       row.appendChild(textNode('td', '', eventLabel(item.event_name)));
-      row.appendChild(textNode('td', '', [item.provider_id, item.model_id].filter(Boolean).join(' · ') || '—'));
+      row.appendChild(textNode('td', '', item.model_id || '—'));
       const byok = item.billing_mode === 'byok';
       row.appendChild(textNode('td', '', byok ? 'BYOK — no ATL charge' : (item.billing_mode ? humanizeIdentifier(item.billing_mode) : '—')));
       row.appendChild(textNode('td', 'admin-analytics-number', byok || item.cost_micro_usd == null ? '—' : formatMoney(Number(item.cost_micro_usd) / 1000000)));
@@ -1268,7 +1271,7 @@
     }
   }
 
-  window.AdminAnalytics = { onEnter, refresh: refreshSurface, syncAuth, openProfile };
+  window.AdminAnalytics = { onEnter, refresh: refreshSurface, syncAuth, openProfile, closeProfile };
   document.addEventListener('DOMContentLoaded', () => {
     if (document.documentElement.dataset.navPage === 'admin') onEnter();
   });
