@@ -15430,31 +15430,30 @@ table.sr-only {
 
 /* —— Analytics cockpit alignment —— */
 .admin-view {
-    --bg-primary: #071014;
-    --bg-card: #0d191e;
-    --bg-input: #0a1519;
-    --border-color: rgba(175, 218, 224, 0.15);
-    --text-primary: #e7f4f1;
-    --text-secondary: #8da8a9;
-    --text-muted: #8da8a9;
+    --bg-primary: #0a0e27;
+    --bg-surface: #0f1328;
+    --bg-card: #131a35;
+    --bg-input: #0a0e27;
+    --border-color: #1f2937;
+    --text-primary: #e5e7eb;
+    --text-secondary: #9ca3af;
+    --text-muted: #6b7280;
     --font-family: "DM Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
     --font-mono: "DM Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
     --analytics-display: "Fraunces", Georgia, serif;
-    --analytics-surface: rgba(13, 25, 30, 0.7);
-    --analytics-surface-soft: rgba(5, 14, 18, 0.72);
-    --analytics-line: rgba(175, 218, 224, 0.15);
-    --analytics-line-strong: rgba(175, 218, 224, 0.28);
-    --analytics-accent: #73e4dc;
-    --analytics-lime: #c7ed74;
-    --analytics-amber: #f4bf68;
-    --analytics-danger: #ff8c7b;
+    --analytics-surface: #0f1328;
+    --analytics-surface-soft: #0f1328;
+    --analytics-line: #1f2937;
+    --analytics-line-strong: #374151;
+    --analytics-accent: #00bfff;
+    --analytics-lime: #00c851;
+    --analytics-amber: #ffa500;
+    --analytics-danger: #ff4141;
     max-width: 1540px;
     min-height: 100vh;
     margin: 0 auto;
     padding: 0;
-    background:
-        radial-gradient(circle at 90% -10%, rgba(115, 228, 220, 0.14), transparent 32rem),
-        linear-gradient(180deg, #081418 0%, #071014 42rem);
+    background: var(--bg-primary);
     color: var(--text-primary);
     font-family: var(--font-mono);
 }

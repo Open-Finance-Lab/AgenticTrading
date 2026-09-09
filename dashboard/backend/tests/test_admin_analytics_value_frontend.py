@@ -164,7 +164,7 @@ def test_acquisition_surface_excludes_token_and_provider_details():
 
 
 def test_static_asset_versions_are_bumped_for_the_new_surface():
-    assert "styles.css?v=149" in APP_HTML
+    assert "styles.css?v=150" in APP_HTML
     assert "js/admin-analytics.js?v=9" in APP_HTML
     assert "js/admin-analytics-value.js?v=8" in APP_HTML
 

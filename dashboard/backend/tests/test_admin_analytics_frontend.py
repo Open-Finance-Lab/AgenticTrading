@@ -298,7 +298,7 @@ def test_app_lifecycle_and_cache_versions_are_wired():
     assert "window.AdminAnalytics.refresh()" in APP_JS
     assert "window.AdminAnalyticsValue.syncAuth(user)" in APP_JS
     assert "window.AdminAnalyticsValue.onEnter()" in APP_JS
-    assert "styles.css?v=149" in APP_HTML
+    assert "styles.css?v=150" in APP_HTML
     assert 'html:has(#adminView[style*="display: block"]) .header' in STYLES
     assert '.admin-analytics-overview[hidden],' in STYLES
     assert '.admin-analytics-deep-sections[hidden],' in STYLES
