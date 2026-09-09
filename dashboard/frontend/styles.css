@@ -2782,6 +2782,24 @@ a.header-brand:hover .title-section h1 {
     }
 }
 
+/* Final ATL shell override: admin keeps the global header and ticker. */
+html[data-nav-page="admin"] .header,
+html:has(#adminView[style*="display: block"]) .header { display: flex !important; }
+html[data-nav-page="admin"] #tickerTrack,
+html[data-nav-page="admin"] .ticker-track,
+html[data-nav-page="admin"] .market-ticker,
+html[data-nav-page="admin"] .ticker-bar,
+html[data-nav-page="admin"] .ticker-info { display: block !important; }
+html:has(#adminView[style*="display: block"]) #tickerTrack,
+html:has(#adminView[style*="display: block"]) .ticker-track,
+html:has(#adminView[style*="display: block"]) .market-ticker,
+html:has(#adminView[style*="display: block"]) .ticker-bar,
+html:has(#adminView[style*="display: block"]) .ticker-info { display: block !important; }
+html[data-nav-page="admin"] .admin-rail-shell,
+html:has(#adminView[style*="display: block"]) .admin-rail-shell { display: none !important; }
+html[data-nav-page="admin"] .admin-workspace,
+html:has(#adminView[style*="display: block"]) .admin-workspace { display: block !important; min-height: 0; }
+
 /* —— Admin user-value analytics —— */
 .admin-value-overview {
     display: grid;
