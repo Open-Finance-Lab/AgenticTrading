@@ -13923,6 +13923,40 @@ table.sr-only {
     margin-top: 22px;
 }
 
+/* Admin uses the same ATL shell as every other app view. The admin rail is
+   an internal section switcher, not a replacement for the global app header. */
+html[data-nav-page="admin"] .header,
+html:has(#adminView[style*="display: block"]) .header {
+    display: flex !important;
+}
+
+html[data-nav-page="admin"] #tickerTrack,
+html[data-nav-page="admin"] .ticker-track,
+html[data-nav-page="admin"] .market-ticker,
+html[data-nav-page="admin"] .ticker-bar,
+html[data-nav-page="admin"] .ticker-info {
+    display: block !important;
+}
+
+html[data-nav-page="admin"] .admin-view .admin-workspace,
+html:has(#adminView[style*="display: block"]) .admin-view .admin-workspace {
+    display: block;
+    min-height: 0;
+}
+
+html[data-nav-page="admin"] .admin-rail-shell,
+html:has(#adminView[style*="display: block"]) .admin-rail-shell {
+    display: none;
+}
+
+html[data-nav-page="admin"] .admin-workspace-content,
+html:has(#adminView[style*="display: block"]) .admin-workspace-content {
+    width: min(1540px, 100%);
+    margin: 0 auto;
+    padding: 34px 32px 60px;
+    box-sizing: border-box;
+}
+
 .admin-workspace-content {
     min-width: 0;
 }
