@@ -159,9 +159,14 @@ def test_acquisition_surface_excludes_token_and_provider_details():
 
 
 def test_static_asset_versions_are_bumped_for_the_new_surface():
-    assert "styles.css?v=145" in APP_HTML
+    assert "styles.css?v=149" in APP_HTML
     assert "js/admin-analytics.js?v=9" in APP_HTML
     assert "js/admin-analytics-value.js?v=7" in APP_HTML
+
+
+def test_action_queue_profile_column_has_a_nonvisual_accessible_name():
+    assert '<th scope="col" aria-label="Open profile"></th>' in APP_HTML
+    assert '<span class="sr-only">Open profile</span>' not in APP_HTML
 
 
 def test_demo_aligned_visual_system_and_responsive_breakpoints_exist():

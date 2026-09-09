@@ -12,8 +12,8 @@
          start the TCP+TLS handshake now, not at the first fetch. crossorigin
          because every API call is a CORS request. -->
     <link rel="preconnect" href="https://agentictrading.onrender.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="styles.css?v=145">
+    <link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Fraunces:opsz,wght@9..144,500;9..144,650;9..144,750&family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="styles.css?v=149">
     <!-- defer: ~200KB that was render-blocking. Deferred scripts execute in
          document order (this one first, the body-end ones after), all before
          DOMContentLoaded, so Chart is defined before any chart renders. -->
@@ -2216,7 +2216,7 @@
                     <div class="admin-analytics-panel">
                         <div class="admin-analytics-panel-head"><div><p class="admin-analytics-panel-kicker">Operations</p><h5>Next useful action</h5><p>The overview starts with understanding and ends with action.</p></div><span id="adminPriorityUsersRange" aria-live="polite">—</span></div>
                         <p id="adminPriorityStatus" role="status" aria-live="polite"></p><p id="adminPriorityError" class="auth-error" role="alert" hidden></p><button class="credits-key-action" data-admin-primary-retry="users" type="button" hidden>Retry Action queue</button>
-                        <div class="admin-analytics-table-wrap"><table class="admin-analytics-action-table"><caption>Users needing attention</caption><thead><tr><th scope="col">User</th><th scope="col">Source</th><th scope="col">Status</th><th scope="col">Reason</th><th scope="col">Last active</th><th scope="col">Runs</th><th scope="col"><span class="sr-only">Open profile</span></th></tr></thead><tbody id="adminPriorityUsers"><tr><td colspan="7">Loading users…</td></tr></tbody></table></div>
+                        <div class="admin-analytics-table-wrap"><table class="admin-analytics-action-table"><caption>Users needing attention</caption><thead><tr><th scope="col">User</th><th scope="col">Source</th><th scope="col">Status</th><th scope="col">Reason</th><th scope="col">Last active</th><th scope="col">Runs</th><th scope="col" aria-label="Open profile"></th></tr></thead><tbody id="adminPriorityUsers"><tr><td colspan="7">Loading users…</td></tr></tbody></table></div>
                     </div>
                 </section>
             </div>

@@ -15305,15 +15305,33 @@ table.sr-only {
 
 /* —— Analytics cockpit alignment —— */
 .admin-view {
-    --analytics-surface: color-mix(in srgb, var(--bg-card) 94%, transparent);
-    --analytics-surface-soft: color-mix(in srgb, var(--bg-primary) 88%, transparent);
-    --analytics-line: color-mix(in srgb, var(--border-color) 78%, transparent);
+    --bg-primary: #071014;
+    --bg-card: #0d191e;
+    --bg-input: #0a1519;
+    --border-color: rgba(175, 218, 224, 0.15);
+    --text-primary: #e7f4f1;
+    --text-secondary: #8da8a9;
+    --text-muted: #8da8a9;
+    --font-family: "DM Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+    --font-mono: "DM Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+    --analytics-display: "Fraunces", Georgia, serif;
+    --analytics-surface: rgba(13, 25, 30, 0.7);
+    --analytics-surface-soft: rgba(5, 14, 18, 0.72);
+    --analytics-line: rgba(175, 218, 224, 0.15);
+    --analytics-line-strong: rgba(175, 218, 224, 0.28);
     --analytics-accent: #73e4dc;
     --analytics-lime: #c7ed74;
     --analytics-amber: #f4bf68;
     --analytics-danger: #ff8c7b;
-    max-width: 1440px;
+    max-width: 1540px;
+    min-height: 100vh;
+    margin: 0 auto;
     padding: 0;
+    background:
+        radial-gradient(circle at 90% -10%, rgba(115, 228, 220, 0.14), transparent 32rem),
+        linear-gradient(180deg, #081418 0%, #071014 42rem);
+    color: var(--text-primary);
+    font-family: var(--font-mono);
 }
 
 /* Analytics owns the admin page chrome. The generic Admin header duplicates
@@ -15344,18 +15362,20 @@ html:has(#adminView[style*="display: block"]) .ticker-info {
 }
 
 .admin-workspace {
-    grid-template-columns: 210px minmax(0, 1fr);
+    grid-template-columns: 188px minmax(0, 1fr);
     gap: 0;
     margin-top: 0;
+    min-height: 100vh;
 }
 
 .admin-rail-shell {
     position: sticky;
-    top: 64px;
+    top: 0;
     display: flex;
     flex-direction: column;
-    min-height: calc(100vh - 64px);
-    padding: 24px 16px;
+    height: 100vh;
+    min-height: 100vh;
+    padding: 25px 14px;
     border-right: 1px solid var(--analytics-line);
     background: var(--analytics-surface-soft);
 }
@@ -15366,9 +15386,9 @@ html:has(#adminView[style*="display: block"]) .ticker-info {
     gap: 9px;
     padding: 0 10px;
     color: var(--text-primary);
-    font-family: Georgia, serif;
+    font-family: var(--analytics-display);
     font-size: 20px;
-    letter-spacing: -0.03em;
+    letter-spacing: 0;
     text-decoration: none;
 }
 
@@ -15444,13 +15464,23 @@ html:has(#adminView[style*="display: block"]) .ticker-info {
 
 .admin-workspace-content {
     min-width: 0;
-    padding: 34px clamp(22px, 4vw, 56px) 64px;
+    padding: 34px clamp(20px, 4vw, 62px) 72px;
+}
+
+.admin-workspace-content:has(> #adminPanelAnalytics:not([hidden])) > #adminCreditsStatus {
+    display: none;
 }
 
 .admin-analytics-overview {
     display: grid;
-    gap: 31px;
+    gap: 0;
     padding: 0;
+}
+
+.admin-analytics-overview[hidden],
+.admin-analytics-deep-sections[hidden],
+.admin-analytics-users-directory[hidden] {
+    display: none !important;
 }
 
 /* Keep partial-error controls hidden until their section actually fails.
@@ -15473,15 +15503,22 @@ html:has(#adminView[style*="display: block"]) .ticker-info {
 .admin-analytics-page-head h3 {
     margin: 5px 0 0;
     color: var(--text-primary);
-    font: 650 clamp(28px, 4vw, 44px)/1.05 Georgia, serif;
-    letter-spacing: -0.045em;
+    font: 650 clamp(34px, 4vw, 57px)/0.98 var(--analytics-display);
+    letter-spacing: 0;
 }
 
 .admin-analytics-page-head > div:first-child > p:last-child {
     max-width: 680px;
-    margin: 10px 0 0;
+    margin: 8px 0 0;
     color: var(--text-secondary);
-    line-height: 1.55;
+    line-height: 1.7;
+}
+
+.admin-analytics-page-head {
+    align-items: flex-end;
+    gap: 26px;
+    padding-bottom: 22px;
+    border-bottom: 1px solid var(--analytics-line);
 }
 
 .admin-analytics-head-tools {
@@ -15493,28 +15530,30 @@ html:has(#adminView[style*="display: block"]) .ticker-info {
 
 .admin-analytics-range {
     display: inline-flex;
-    gap: 2px;
     padding: 3px;
-    border: 1px solid var(--analytics-line);
-    border-radius: 7px;
+    border: 1px solid var(--analytics-line-strong);
+    border-radius: 999px;
+    background: rgba(3, 11, 14, 0.4);
 }
 
 .admin-analytics-range button {
-    min-width: 38px;
-    min-height: 32px;
-    padding: 5px 8px;
+    min-width: 41px;
+    min-height: 30px;
+    padding: 5px 10px;
     border: 0;
-    border-radius: 4px;
+    border-radius: 999px;
     background: transparent;
     color: var(--text-muted);
-    font: 700 10px var(--font-mono);
+    font: 400 10px var(--font-mono);
+    letter-spacing: 0.07em;
     cursor: pointer;
 }
 
 .admin-analytics-range button:hover,
 .admin-analytics-range button[aria-pressed="true"] {
-    background: color-mix(in srgb, var(--analytics-accent) 12%, transparent);
-    color: var(--text-primary);
+    background: var(--analytics-accent);
+    color: #061013;
+    font-weight: 700;
 }
 
 .admin-analytics-updated,
@@ -15553,65 +15592,86 @@ html:has(#adminView[style*="display: block"]) .ticker-info {
     color: var(--text-primary);
 }
 
+.admin-analytics-refresh {
+    min-height: 32px;
+    padding: 7px 10px;
+    border-color: var(--analytics-line-strong);
+    color: var(--text-primary);
+    font-size: 10px;
+    font-weight: 400;
+}
+
+.admin-analytics-refresh svg {
+    width: 14px;
+    height: 14px;
+    flex: 0 0 14px;
+}
+
 .admin-analytics-context {
     display: flex;
     justify-content: space-between;
     gap: 16px;
-    margin: -12px 0 0;
-    padding: 10px 0;
-    border-block: 1px solid var(--analytics-line);
+    margin: 0;
+    padding: 14px 0;
+    border: 0;
     color: var(--text-muted);
     font: 11px/1.5 var(--font-mono);
 }
 
 .admin-analytics-context span:first-child { color: var(--text-secondary); }
+.admin-analytics-context span:last-child { color: var(--analytics-lime); }
 
 .admin-analytics-filter-grid {
     display: grid;
-    grid-template-columns: repeat(4, minmax(140px, 1fr));
-    gap: 12px;
+    grid-template-columns: repeat(4, minmax(130px, 1fr)) auto;
+    gap: 9px;
     align-items: end;
+    padding: 12px;
+    border: 1px solid var(--analytics-line);
+    border-radius: 8px;
+    background: var(--analytics-surface);
 }
 
 .admin-analytics-filter-grid label {
     display: grid;
-    gap: 7px;
+    gap: 5px;
     color: var(--text-muted);
-    font: 700 10px var(--font-mono);
-    letter-spacing: 0.04em;
+    font: 400 9px var(--font-mono);
+    letter-spacing: 0.1em;
     text-transform: uppercase;
 }
 
 .admin-analytics-filter-grid input,
 .admin-analytics-filter-grid select {
     width: 100%;
-    min-height: 40px;
-    padding: 8px 10px;
-    border: 1px solid var(--analytics-line);
+    min-height: 34px;
+    padding: 7px 9px;
+    border: 1px solid var(--analytics-line-strong);
     border-radius: 5px;
     background: var(--bg-input);
     color: var(--text-primary);
     color-scheme: dark;
-    font: 12px var(--font-family);
+    font: 11px var(--font-mono);
 }
 
 .admin-analytics-filter-toggle {
     display: flex !important;
-    grid-column: 1 / -1;
     align-items: center;
     gap: 8px;
+    padding: 0 7px 8px 2px;
     color: var(--text-secondary) !important;
     font-family: var(--font-family) !important;
     letter-spacing: 0 !important;
     text-transform: none !important;
+    white-space: nowrap;
 }
 
 .admin-analytics-filter-toggle input { width: 16px; min-height: 16px; accent-color: var(--analytics-accent); }
 
-.admin-analytics-story-section { min-width: 0; }
+.admin-analytics-story-section { min-width: 0; margin-top: 26px; }
 
 .admin-analytics-section-head { align-items: baseline; margin-bottom: 14px; }
-.admin-analytics-section-head h4 { margin: 4px 0 0; color: var(--text-primary); font: 600 22px/1.15 Georgia, serif; letter-spacing: -0.025em; }
+.admin-analytics-section-head h4 { margin: 4px 0 0; color: var(--text-primary); font: 650 23px/1.15 var(--analytics-display); letter-spacing: 0; }
 
 .admin-analytics-metrics {
     display: grid;
@@ -15620,24 +15680,39 @@ html:has(#adminView[style*="display: block"]) .ticker-info {
 }
 
 .admin-analytics-metrics article {
+    position: relative;
     min-width: 0;
     padding: 19px 18px;
     border-right: 1px solid var(--analytics-line);
 }
 
+.admin-analytics-metrics article::before {
+    content: "";
+    position: absolute;
+    top: -1px;
+    left: 18px;
+    width: 34px;
+    height: 3px;
+    background: var(--analytics-accent);
+}
+.admin-analytics-metrics article:nth-child(2)::before { background: var(--analytics-lime); }
+.admin-analytics-metrics article:nth-child(3)::before { background: var(--analytics-amber); }
+.admin-analytics-metrics article:nth-child(4)::before { background: var(--analytics-danger); }
+
 .admin-analytics-metrics article:last-child { border-right: 0; }
 .admin-analytics-metrics span,
 .admin-analytics-metrics small { display: block; color: var(--text-muted); }
 .admin-analytics-metrics span { font: 700 10px var(--font-mono); letter-spacing: 0.05em; text-transform: uppercase; }
-.admin-analytics-metrics strong { display: block; margin: 12px 0 7px; color: var(--text-primary); font: 600 clamp(26px, 3vw, 38px) var(--font-mono); letter-spacing: -0.06em; font-variant-numeric: tabular-nums; }
+.admin-analytics-metrics strong { display: block; margin: 12px 0 7px; color: var(--text-primary); font: 600 clamp(26px, 3vw, 38px) var(--font-mono); letter-spacing: 0; font-variant-numeric: tabular-nums; }
 .admin-analytics-metrics small { font-size: 10px; line-height: 1.45; }
 
 .admin-analytics-panel {
     min-width: 0;
     padding: 18px;
     border: 1px solid var(--analytics-line);
-    border-radius: 7px;
-    background: var(--analytics-surface);
+    border-radius: 8px;
+    background: linear-gradient(135deg, rgba(17, 31, 37, 0.9), rgba(8, 18, 22, 0.84));
+    box-shadow: 0 18px 45px rgba(0, 0, 0, 0.13);
 }
 
 .admin-analytics-panel-head { align-items: flex-start; margin-bottom: 16px; }
@@ -15647,7 +15722,7 @@ html:has(#adminView[style*="display: block"]) .ticker-info {
 .admin-analytics-panel-head button svg { width: 15px; height: 15px; transition: transform 180ms ease-out; }
 .admin-analytics-panel-head button.is-collapsed svg { transform: rotate(-90deg); }
 
-.admin-analytics-two-col { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
+.admin-analytics-two-col { display: grid; grid-template-columns: minmax(0, 1.15fr) minmax(320px, 0.85fr); gap: 14px; }
 
 .admin-analytics-table-wrap { min-width: 0; overflow-x: auto; border: 1px solid var(--analytics-line); border-radius: 6px; }
 .admin-analytics-acquisition-table,
@@ -15693,14 +15768,47 @@ html:has(#adminView[style*="display: block"]) .ticker-info {
 .admin-analytics-signal-list,
 .admin-analytics-funnel { display: grid; gap: 10px; margin: 0; padding: 0; list-style: none; }
 .admin-analytics-signal-list li,
-.admin-analytics-funnel li { display: flex; justify-content: space-between; gap: 12px; padding: 9px 0; border-bottom: 1px solid var(--analytics-line); }
+.admin-analytics-funnel li {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 12px;
+    align-items: center;
+    padding: 9px 0;
+    border: 0;
+    border-bottom: 1px solid var(--analytics-line);
+    border-radius: 0;
+    background: transparent;
+    overflow: visible;
+}
 .admin-analytics-signal-list li:last-child,
 .admin-analytics-funnel li:last-child { border-bottom: 0; }
 .admin-analytics-signal-list span,
 .admin-analytics-funnel span { color: var(--text-secondary); }
+.admin-analytics-signal-list span::after {
+    content: "";
+    display: block;
+    width: 100%;
+    height: 4px;
+    margin-top: 7px;
+    border-radius: 999px;
+    background: linear-gradient(
+        to right,
+        var(--analytics-accent) 0 var(--signal-progress, 73%),
+        rgba(175, 218, 224, 0.12) var(--signal-progress, 73%) 100%
+    );
+}
+.admin-analytics-signal-list li:nth-child(2) {
+    --signal-progress: 44%;
+    --analytics-accent: var(--analytics-lime);
+}
+.admin-analytics-signal-list li:nth-child(3) {
+    --signal-progress: 29%;
+    --analytics-accent: var(--analytics-amber);
+}
 .admin-analytics-signal-list strong,
 .admin-analytics-funnel strong { color: var(--text-primary); font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
 .admin-analytics-funnel { margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--analytics-line); }
+.admin-analytics-funnel li::before { display: none; }
 
 .admin-analytics-deep-sections { display: grid; gap: 18px; }
 .admin-analytics-deep-head { align-items: center; }
@@ -15734,6 +15842,12 @@ html:has(#adminView[style*="display: block"]) .ticker-info {
 .admin-analytics-profile .admin-analytics-progress { margin-top: 2px; }
 .admin-analytics-profile .admin-analytics-profile-layout { margin-top: 20px; }
 
+@media (max-width: 1050px) {
+    .admin-analytics-filter-grid { grid-template-columns: repeat(2, minmax(130px, 1fr)); }
+    .admin-analytics-filter-toggle { grid-column: 1 / -1; padding-bottom: 0; }
+    .admin-analytics-two-col { grid-template-columns: 1fr; }
+}
+
 @media (max-width: 760px) {
     .admin-workspace { grid-template-columns: 58px minmax(0, 1fr); }
     .admin-rail-shell { padding: 18px 7px; }
@@ -15747,8 +15861,9 @@ html:has(#adminView[style*="display: block"]) .ticker-info {
     .admin-analytics-panel-head,
     .admin-analytics-deep-head { flex-direction: column; align-items: flex-start; }
     .admin-analytics-head-tools { width: 100%; justify-items: stretch; }
-    .admin-analytics-range { width: fit-content; }
-    .admin-analytics-filter-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .admin-analytics-range { width: 100%; justify-content: space-between; }
+    .admin-analytics-range button { flex: 1; }
+    .admin-analytics-refresh { width: 100%; justify-content: flex-start; }
     .admin-analytics-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
     .admin-analytics-metrics article:nth-child(2) { border-right: 0; }
     .admin-analytics-two-col { grid-template-columns: 1fr; }
@@ -15762,6 +15877,7 @@ html:has(#adminView[style*="display: block"]) .ticker-info {
     .admin-analytics-metrics article { border-right: 0; border-bottom: 1px solid var(--analytics-line); }
     .admin-analytics-metrics article:last-child { border-bottom: 0; }
     .admin-analytics-context { display: grid; }
+    .admin-analytics-filter-toggle { grid-column: auto; }
 }
 
 @media (prefers-reduced-motion: reduce) {
