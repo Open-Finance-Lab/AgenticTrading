@@ -226,27 +226,6 @@ class PostgresBacktestDatabase:
                     """
                 )
 
-                cur.execute(
-                    "CREATE INDEX IF NOT EXISTS idx_agent_runs_session "
-                    "ON agent_runs(session_id)"
-                )
-                cur.execute(
-                    "CREATE INDEX IF NOT EXISTS idx_agent_runs_session_mode "
-                    "ON agent_runs(session_id, mode)"
-                )
-                cur.execute(
-                    "CREATE INDEX IF NOT EXISTS idx_run_timestamp "
-                    "ON equity_timeseries(run_id, timestamp)"
-                )
-                cur.execute(
-                    "CREATE INDEX IF NOT EXISTS idx_trades_run "
-                    "ON trades(run_id, timestamp)"
-                )
-                cur.execute(
-                    "CREATE INDEX IF NOT EXISTS idx_decisions_run "
-                    "ON backtest_decisions(run_id, step_index)"
-                )
-
                 # ADDING A COLUMN LATER? It must go in an `ALTER TABLE ... ADD COLUMN IF
                 # NOT EXISTS` below, *not* only in the CREATE above. CREATE TABLE IF NOT
                 # EXISTS silently no-ops once the table exists, so an existing deployment
@@ -424,6 +403,38 @@ class PostgresBacktestDatabase:
                 cur.execute(
                     "ALTER TABLE trades ADD COLUMN IF NOT EXISTS "
                     "market_rule_closing_gate_effective BOOLEAN"
+                )
+
+                # Indexes sit below every ADD COLUMN on purpose. agent_runs.session_id
+                # arrives by ALTER on a table that predates it, and an index created
+                # above that ALTER raises UndefinedColumn there before the column
+                # exists -- the #432 Render boot crash, in the credits twin.
+                # test_store_twin_parity.py pins this order for every twin --
+                # by *source* position, which is a proxy for execution order and
+                # holds here because this method runs its DDL top to bottom. It
+                # is not a universal property (users_postgres.py executes a
+                # hoisted constant after later inline ALTERs), so keep these
+                # CREATE INDEX calls physically below the ALTERs rather than
+                # relying on the guard to notice if they move.
+                cur.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_agent_runs_session "
+                    "ON agent_runs(session_id)"
+                )
+                cur.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_agent_runs_session_mode "
+                    "ON agent_runs(session_id, mode)"
+                )
+                cur.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_run_timestamp "
+                    "ON equity_timeseries(run_id, timestamp)"
+                )
+                cur.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_trades_run "
+                    "ON trades(run_id, timestamp)"
+                )
+                cur.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_decisions_run "
+                    "ON backtest_decisions(run_id, step_index)"
                 )
 
                 # Postgres counterpart of SQLite's

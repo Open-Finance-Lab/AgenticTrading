@@ -248,18 +248,34 @@ def test_my_agents_card_submeta_drops_duplicate_model_and_hosted_ai():
 
 
 def test_render_marketplace_category_chips_is_built_from_the_shared_label_map():
-    """The chip row is built from MARKET_LABELS rather than a second hardcoded
-    list, plus an 'all' chip that isn't a category at all. It is no longer built
-    from AGENT_SHELVES: Community filters templates by *market*, and
-    Prompted Models holds both markets, so the shelf list and the chip
-    list are different things -- built from AGENT_SHELVES this row would emit a
-    single, meaningless "Prompted Models" chip that matches no template.
+    """The chip row reads labels from MARKET_LABELS rather than a second
+    hardcoded list, plus an 'all' chip that isn't a category at all. Membership
+    is catalog-derived (marketplaceMarketChips) so an empty-market chip cannot
+    ship. It is no longer built from AGENT_SHELVES: Community filters templates
+    by *market*, and Prompted Models holds both markets, so the shelf list and
+    the chip list are different things -- built from AGENT_SHELVES this row
+    would emit a single, meaningless "Prompted Models" chip that matches no
+    template.
     """
-    body = _strip_js_comments(fn_body("function renderMarketplaceCategoryChips()"))
-    assert "MARKET_LABELS" in body
-    assert "'all'" in body
+    renderer = _strip_js_comments(fn_body("function renderMarketplaceCategoryChips()"))
+    helper = _strip_js_comments(fn_body("function marketplaceMarketChips("))
+    assert "marketplaceMarketChips(marketplaceTemplates)" in renderer
+    assert "MARKET_LABELS" in helper
+    assert "'all'" in helper
+    assert "present.has(key)" in helper
     for label in ("U.S.", "China A-Share"):
-        assert label not in body, f"{label!r} hardcoded instead of read from MARKET_LABELS"
+        assert label not in helper, f"{label!r} hardcoded instead of read from MARKET_LABELS"
+        assert label not in renderer, f"{label!r} hardcoded instead of read from MARKET_LABELS"
+
+
+def test_supermarket_second_shelf_is_titled_agents():
+    """Community's second row is Agents, not Open Agents. My Agents keeps its
+    own Open Agents title -- that surface is hosted runtimes only.
+    """
+    decl = js_const("MARKETPLACE_SHELVES")
+    assert "title: 'Agents'" in decl
+    assert "title: 'Open Agents'" not in decl
+    assert "Ready-made trading agents" in decl
 
 
 def test_navigate_to_page_resets_chip_filter_on_plain_community_entry():
@@ -382,7 +398,7 @@ def test_copy_to_my_agents_cta_is_gone():
     PR #253 made "Add to My Agents" canonical everywhere else, so this one
     holdout ternary must go, not gain a permanent sibling.
     """
-    body = _strip_js_comments(fn_body(_MARKETPLACE_RENDER_FN))
+    body = _strip_js_comments(fn_body("function buildMarketplaceCardHtml"))
     assert "Copy to My Agents" not in body
 
 
@@ -392,7 +408,7 @@ def test_add_to_my_agents_cta_is_a_single_unconditional_string():
     apart again tomorrow. Assert the direct, unconditional assignment and
     that the now-dead branch variable is gone with it.
     """
-    body = _strip_js_comments(fn_body(_MARKETPLACE_RENDER_FN))
+    body = _strip_js_comments(fn_body("function buildMarketplaceCardHtml"))
     assert "cloneLabel = 'Add to My Agents'" in body
     assert "isAiHedgeFundTemplate" not in body
 
@@ -405,7 +421,7 @@ def test_marketplace_submeta_never_renders_a_raw_category_or_model_slug():
     'anthropic/'/'nvidia/' prefix strings elsewhere in the function, so a
     whole-function check would false-positive on the table doing its job.
     """
-    body = _strip_js_comments(fn_body(_MARKETPLACE_RENDER_FN))
+    body = _strip_js_comments(fn_body("function buildMarketplaceCardHtml"))
     submeta_line = next(line for line in body.splitlines() if "agent-card-submeta" in line)
     assert "template.category" not in submeta_line
     assert "template.model_name" not in submeta_line
@@ -413,9 +429,12 @@ def test_marketplace_submeta_never_renders_a_raw_category_or_model_slug():
 
 
 def test_fallback_description_copy_is_updated():
-    body = _strip_js_comments(fn_body(_MARKETPLACE_RENDER_FN))
+    """LLM tiles stay description-free. Open Agents may show catalog copy.
+    Old fallback strings must stay gone."""
+    body = _strip_js_comments(fn_body("function buildMarketplaceCardHtml"))
     assert "Open agent template." not in body
-    assert "No description provided yet." in body
+    assert "No description provided yet." not in body
+    assert "marketplace-card-description" in body
 
 
 def test_marketplace_category_chip_container_is_present_in_community_view():
@@ -458,7 +477,12 @@ def test_community_page_carries_the_no_real_money_sentence_once():
     the brief says "once per page").
     """
     community_html = _community_view_html()
-    assert community_html.count(_CANONICAL_NO_REAL_MONEY_SENTENCE) == 1
+    shortened = (
+        "Performance is based on simulated tests and may vary between runs. "
+        "Live trading requires an explicitly connected brokerage account."
+    )
+    assert community_html.count(shortened) == 1
+    assert _CANONICAL_NO_REAL_MONEY_SENTENCE not in community_html
 
 
 def _strip_js_comments_from(source: str) -> str:

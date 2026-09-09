@@ -403,12 +403,12 @@ def test_marketplace_mode_chip_labels_avoid_banned_words():
     `renderMarketplaceGrid` so this doesn't over-match an unrelated string
     elsewhere in app.js.
     """
-    body = fn_body("function renderMarketplaceGrid")
+    body = fn_body("function buildMarketplaceCardHtml")
     assert "'Hosted runtime'" not in body
     assert "'Multi-step pipeline'" not in body
-    assert "'Hosted'" in body
-    assert "'Multi-step strategy'" in body
-    assert "'Simple instruction'" in body
+    assert "Open Source" in body
+    assert "'Simple instruction'" not in body
+    assert "'Multi-step strategy'" not in body
 
 
 def test_each_agent_gets_its_own_trading_session_is_gone():

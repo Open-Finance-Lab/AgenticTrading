@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
@@ -88,6 +89,81 @@ def test_postgres_schema_tracks_provider_attempt_identity():
     )
 
 
+def test_postgres_boot_ddl_repairs_the_stale_run_status_index_conditionally():
+    """CREATE INDEX IF NOT EXISTS matches by *name*, so prod's pre-#432
+    three-column index satisfies it forever. The migration must drop that
+    definition -- but only that one: an unconditional DROP+CREATE runs under
+    ACCESS EXCLUSIVE on every boot and never converges to a no-op.
+
+    What makes the drop conditional is its *position* -- inside the DO block's
+    staleness guard -- not the presence or absence of any keyword on the DROP
+    itself. Do not re-add an assertion banning ``IF EXISTS`` here: that spelling
+    is a concurrency requirement, because two boots can both pass the predicate
+    and the loser must no-op rather than abort _init_schema.
+    """
+    migration = pg_module.CREDITS_POSTGRES_GRANT_MIGRATION_DDL
+    add_column = "ADD COLUMN IF NOT EXISTS attempt_index INTEGER NOT NULL DEFAULT 0"
+    stale_check = "<> '(run_id, status, call_index, attempt_index)'"
+    create_index = (
+        "CREATE INDEX IF NOT EXISTS idx_credit_llm_reservations_run_status\n"
+        "ON credit_llm_reservations(run_id, status, call_index, attempt_index);"
+    )
+
+    for statement in (add_column, stale_check, create_index):
+        assert statement in migration, statement
+
+    drops = [
+        match.start()
+        for match in re.finditer(
+            r"DROP\s+INDEX\s+(?:IF\s+EXISTS\s+)?"
+            r"idx_credit_llm_reservations_run_status",
+            migration,
+        )
+    ]
+    assert len(drops) == 1, f"expected exactly one drop of the index, got {drops}"
+
+    guard_at = migration.index(stale_check)
+    end_if_at = migration.index("END IF;", guard_at)
+    assert guard_at < drops[0] < end_if_at, (
+        "the DROP INDEX must sit inside the staleness guard; an unconditional "
+        "one rebuilds the index under ACCESS EXCLUSIVE on every boot"
+    )
+    assert migration.index(add_column) < guard_at
+    assert end_if_at < migration.index(create_index)
+
+
+def test_postgres_boot_ddl_rebuilds_the_logical_attempt_key_conditionally():
+    """The UNIQUE that backs (user_id, run_id, call_index, attempt_index) is an
+    index build under ACCESS EXCLUSIVE, so it gets the same treatment as the
+    stale-index repair: skipped once conkey already names those four columns.
+
+    Column identity must come from ``conkey``, not a pg_get_constraintdef text
+    match -- the deparsed text drifts across Postgres versions, and a guard that
+    silently stops matching converges to nothing while still looking correct.
+    """
+    migration = pg_module.CREDITS_POSTGRES_GRANT_MIGRATION_DDL
+    conkey_check = (
+        "ARRAY['user_id', 'run_id', 'call_index', 'attempt_index']::name[]"
+    )
+    assert conkey_check in migration
+
+    adds = [
+        match.start()
+        for match in re.finditer(
+            r"ADD\s+CONSTRAINT\s+credit_llm_reservations_logical_attempt_key",
+            migration,
+        )
+    ]
+    assert len(adds) == 1, f"expected exactly one ADD CONSTRAINT, got {adds}"
+
+    guard_at = migration.index(conkey_check)
+    end_if_at = migration.index("END IF;", guard_at)
+    assert guard_at < adds[0] < end_if_at, (
+        "ADD CONSTRAINT ... UNIQUE must sit inside the conkey guard; "
+        "unconditionally it rebuilds a full index on every boot"
+    )
+
+
 def test_postgres_provider_attempt_index_is_created_after_its_column():
     base_ddl = pg_module.CREDITS_POSTGRES_DDL
     migration_ddl = pg_module.CREDITS_POSTGRES_GRANT_MIGRATION_DDL
@@ -168,6 +244,54 @@ def _schema_url(database_url: str, schema: str) -> str:
     query = parse_qsl(parts.query, keep_blank_values=True)
     query.append(("options", f"-csearch_path={schema}"))
     return urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(query), ""))
+
+
+@contextmanager
+def _isolated_schema(prefix: str):
+    """A throwaway schema on TEST_POSTGRES_URL, dropped (CASCADE) on exit.
+
+    Yields a URL whose search_path is pinned to the schema, so every store and
+    test connection built from it sees only this test's tables.
+    """
+    base_url = require_local_postgres_url(TEST_POSTGRES_URL)
+    schema = f"{prefix}_{uuid.uuid4().hex}"
+    with psycopg.connect(base_url) as conn:
+        conn.execute(sql.SQL("CREATE SCHEMA {}").format(sql.Identifier(schema)))
+    try:
+        yield _schema_url(base_url, schema)
+    finally:
+        db_pool._reset_for_tests()
+        with psycopg.connect(base_url) as conn:
+            conn.execute(
+                sql.SQL("DROP SCHEMA IF EXISTS {} CASCADE").format(
+                    sql.Identifier(schema)
+                )
+            )
+
+
+def _create_users(conn, rows, *, created_at: str) -> None:
+    """The users table every credits fixture needs; rows are (id, email, name, role)."""
+    conn.execute(
+        """
+        CREATE TABLE users (
+            id INTEGER PRIMARY KEY,
+            email TEXT NOT NULL UNIQUE,
+            display_name TEXT NOT NULL,
+            password_hash TEXT NOT NULL,
+            role TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        )
+        """
+    )
+    with conn.cursor() as cur:
+        cur.executemany(
+            """
+            INSERT INTO users (
+                id, email, display_name, password_hash, role, created_at
+            ) VALUES (%s, %s, %s, 'unused', %s, %s)
+            """,
+            [(*row, created_at) for row in rows],
+        )
 
 
 LEGACY_CREDITS_POSTGRES_DDL = """
@@ -261,88 +385,68 @@ CREATE TABLE credit_ledger_entries (
 """
 
 
+# Prod reservation table as of PR #431 — exists, but has neither attempt_index
+# nor the four-column unique key. CREATE TABLE IF NOT EXISTS no-ops against it.
+PRE_FAILOVER_RESERVATION_DDL = """
+CREATE TABLE credit_llm_reservations (
+    reservation_id TEXT PRIMARY KEY CHECK (length(trim(reservation_id)) > 0),
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    run_id TEXT NOT NULL CHECK (length(trim(run_id)) > 0),
+    call_index INTEGER NOT NULL CHECK (call_index >= 0),
+    reserved_micro BIGINT NOT NULL CHECK (reserved_micro > 0),
+    reserved_grant_micro BIGINT NOT NULL CHECK (reserved_grant_micro >= 0),
+    reserved_purchased_micro BIGINT NOT NULL CHECK (reserved_purchased_micro >= 0),
+    settled_micro BIGINT NOT NULL DEFAULT 0 CHECK (settled_micro >= 0),
+    actual_micro BIGINT NOT NULL DEFAULT 0 CHECK (actual_micro >= 0),
+    outstanding_micro BIGINT NOT NULL DEFAULT 0 CHECK (outstanding_micro >= 0),
+    outstanding_recovered_micro BIGINT NOT NULL DEFAULT 0
+        CHECK (outstanding_recovered_micro >= 0),
+    status TEXT NOT NULL DEFAULT 'open'
+        CHECK (status IN ('open', 'settled', 'released')),
+    operation_key TEXT NOT NULL UNIQUE CHECK (length(trim(operation_key)) > 0),
+    request_digest TEXT NOT NULL CHECK (length(trim(request_digest)) > 0),
+    evidence_json TEXT,
+    failure_reason TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    CHECK (reserved_micro = reserved_grant_micro + reserved_purchased_micro),
+    UNIQUE (user_id, run_id, call_index)
+);
+
+CREATE INDEX idx_credit_llm_reservations_run_status
+ON credit_llm_reservations(run_id, status, call_index);
+"""
+
+
 @pytest.fixture
 def pg_credits_store():
-    base_url = require_local_postgres_url(TEST_POSTGRES_URL)
-    schema = f"credits_{uuid.uuid4().hex}"
-    with psycopg.connect(base_url) as conn:
-        conn.execute(sql.SQL("CREATE SCHEMA {}").format(sql.Identifier(schema)))
-
-    scoped_url = _schema_url(base_url, schema)
-    try:
+    with _isolated_schema("credits") as scoped_url:
         with psycopg.connect(scoped_url) as conn:
-            conn.execute(
-                """
-                CREATE TABLE users (
-                    id INTEGER PRIMARY KEY,
-                    email TEXT NOT NULL UNIQUE,
-                    display_name TEXT NOT NULL,
-                    password_hash TEXT NOT NULL,
-                    role TEXT NOT NULL,
-                    created_at TEXT NOT NULL
-                )
-                """
+            _create_users(
+                conn,
+                [
+                    (1, "buyer@example.com", "Buyer", "user"),
+                    (2, "admin@example.com", "Admin", "admin"),
+                    (3, "other@example.com", "Other", "user"),
+                ],
+                created_at="2026-08-13T00:00:00+00:00",
             )
-            with conn.cursor() as cur:
-                cur.executemany(
-                    """
-                    INSERT INTO users (
-                        id, email, display_name, password_hash, role, created_at
-                    )
-                    VALUES (%s, %s, %s, 'unused', %s, '2026-08-13T00:00:00+00:00')
-                    """,
-                    [
-                        (1, "buyer@example.com", "Buyer", "user"),
-                        (2, "admin@example.com", "Admin", "admin"),
-                        (3, "other@example.com", "Other", "user"),
-                    ],
-                )
 
         yield pg_module.PostgresCreditsStore(scoped_url)
-    finally:
-        db_pool._reset_for_tests()
-        with psycopg.connect(base_url) as conn:
-            conn.execute(
-                sql.SQL("DROP SCHEMA IF EXISTS {} CASCADE").format(
-                    sql.Identifier(schema)
-                )
-            )
 
 
 @pytest.fixture
 def pg_legacy_credits_url():
-    base_url = require_local_postgres_url(TEST_POSTGRES_URL)
-    schema = f"credits_legacy_{uuid.uuid4().hex}"
-    with psycopg.connect(base_url) as conn:
-        conn.execute(sql.SQL("CREATE SCHEMA {}").format(sql.Identifier(schema)))
-
-    scoped_url = _schema_url(base_url, schema)
-    try:
+    with _isolated_schema("credits_legacy") as scoped_url:
         with psycopg.connect(scoped_url) as conn:
-            conn.execute(
-                """
-                CREATE TABLE users (
-                    id INTEGER PRIMARY KEY,
-                    email TEXT NOT NULL UNIQUE,
-                    display_name TEXT NOT NULL,
-                    password_hash TEXT NOT NULL,
-                    role TEXT NOT NULL,
-                    created_at TEXT NOT NULL
-                )
-                """
+            _create_users(
+                conn,
+                [
+                    (1, "legacy@example.com", "Legacy", "user"),
+                    (2, "admin@example.com", "Admin", "admin"),
+                ],
+                created_at="2026-08-01T00:00:00+00:00",
             )
-            with conn.cursor() as cur:
-                cur.executemany(
-                    """
-                    INSERT INTO users (
-                        id, email, display_name, password_hash, role, created_at
-                    ) VALUES (%s, %s, %s, 'unused', %s, '2026-08-01T00:00:00+00:00')
-                    """,
-                    [
-                        (1, "legacy@example.com", "Legacy", "user"),
-                        (2, "admin@example.com", "Admin", "admin"),
-                    ],
-                )
             conn.execute(LEGACY_CREDITS_POSTGRES_DDL)
             conn.execute(
                 """
@@ -437,14 +541,35 @@ def pg_legacy_credits_url():
                 )
 
         yield scoped_url
-    finally:
-        db_pool._reset_for_tests()
-        with psycopg.connect(base_url) as conn:
-            conn.execute(
-                sql.SQL("DROP SCHEMA IF EXISTS {} CASCADE").format(
-                    sql.Identifier(schema)
-                )
+
+
+@pytest.fixture
+def pg_pre_failover_reservations_url():
+    with _isolated_schema("credits_pre_failover") as scoped_url:
+        with psycopg.connect(scoped_url) as conn:
+            _create_users(
+                conn,
+                [(1, "legacy@example.com", "Legacy", "user")],
+                created_at="2026-08-31T00:00:00+00:00",
             )
+            conn.execute(PRE_FAILOVER_RESERVATION_DDL)
+            conn.execute(
+                """
+                INSERT INTO credit_llm_reservations (
+                    reservation_id, user_id, run_id, call_index, reserved_micro,
+                    reserved_grant_micro, reserved_purchased_micro, settled_micro,
+                    actual_micro, outstanding_micro, outstanding_recovered_micro,
+                    status, operation_key, request_digest, created_at, updated_at
+                ) VALUES (
+                    'pre-failover-reservation', 1, 'pre-failover-run', 0,
+                    1000000, 1000000, 0, 0, 0, 0, 0, 'open',
+                    'pre-failover-operation', repeat('p', 64),
+                    '2026-08-31T00:00:00+00:00', '2026-08-31T00:00:00+00:00'
+                )
+                """
+            )
+
+        yield scoped_url
 
 
 def _pending_order(
@@ -1072,6 +1197,105 @@ def test_postgres_migration_preserves_legacy_stripe_ledger(pg_legacy_credits_url
     assert reopened_pool["name"] == "Renamed Pool"
     assert reopened_pool["status"] == "disabled"
     assert reopened_pool_entries["count"] == 0
+
+
+def _run_status_index(conn) -> dict:
+    """OID + definition of the reservations run/status index on the search path."""
+    return conn.execute(
+        """
+        SELECT 'idx_credit_llm_reservations_run_status'::regclass::oid AS oid,
+               pg_get_indexdef(
+                   'idx_credit_llm_reservations_run_status'::regclass
+               ) AS indexdef
+        """
+    ).fetchone()
+
+
+def _logical_attempt_constraint(conn) -> dict:
+    """OID + backing-index OID of the reservations logical-attempt UNIQUE.
+
+    conindid is the load-bearing half: a drop+re-add keeps the constraint's
+    *name* but builds a brand new index, so only the OIDs can tell a converged
+    boot from one that rebuilt under ACCESS EXCLUSIVE.
+    """
+    return conn.execute(
+        """
+        SELECT con.oid AS oid,
+               con.conindid AS conindid,
+               pg_get_constraintdef(con.oid) AS condef
+        FROM pg_constraint AS con
+        WHERE con.conrelid = 'credit_llm_reservations'::regclass
+          AND con.conname = 'credit_llm_reservations_logical_attempt_key'
+        """
+    ).fetchone()
+
+
+@pg_only
+def test_postgres_boot_migrates_pre_failover_reservation_table(
+    pg_pre_failover_reservations_url,
+):
+    """Reproduce the #432 Render crash: existing reservations, no attempt_index,
+    and the three-column run/status index prod has carried since c0bcd863.
+    """
+    pg_module.PostgresCreditsStore(pg_pre_failover_reservations_url)
+
+    with psycopg.connect(
+        pg_pre_failover_reservations_url, row_factory=dict_row
+    ) as conn:
+        row = conn.execute(
+            """
+            SELECT attempt_index, provider_id
+            FROM credit_llm_reservations
+            WHERE reservation_id = 'pre-failover-reservation'
+            """
+        ).fetchone()
+        index = _run_status_index(conn)
+        unique_key = conn.execute(
+            """
+            SELECT pg_get_constraintdef(oid) AS definition
+            FROM pg_constraint
+            WHERE conrelid = 'credit_llm_reservations'::regclass
+              AND conname = 'credit_llm_reservations_logical_attempt_key'
+            """
+        ).fetchone()
+
+    assert row == {"attempt_index": 0, "provider_id": None}
+    assert index["indexdef"].endswith(
+        "(run_id, status, call_index, attempt_index)"
+    ), index["indexdef"]
+    assert unique_key == {
+        "definition": "UNIQUE (user_id, run_id, call_index, attempt_index)"
+    }
+
+
+@pg_only
+def test_postgres_boot_leaves_a_repaired_run_status_index_alone(
+    pg_pre_failover_reservations_url,
+):
+    """The stale-index repair must converge. credits_store is built at import,
+    so this migration runs on every deploy; a DROP+CREATE that fires
+    unconditionally rebuilds the index under ACCESS EXCLUSIVE each time.
+    """
+    pg_module.PostgresCreditsStore(pg_pre_failover_reservations_url)
+    with psycopg.connect(
+        pg_pre_failover_reservations_url, row_factory=dict_row
+    ) as conn:
+        repaired = _run_status_index(conn)
+        repaired_constraint = _logical_attempt_constraint(conn)
+
+    db_pool._reset_for_tests()
+    pg_module.PostgresCreditsStore(pg_pre_failover_reservations_url)
+    with psycopg.connect(
+        pg_pre_failover_reservations_url, row_factory=dict_row
+    ) as conn:
+        rebooted = _run_status_index(conn)
+        rebooted_constraint = _logical_attempt_constraint(conn)
+
+    assert rebooted == repaired
+    # Same for the UNIQUE beside it: identical OIDs mean the second boot did
+    # not drop and rebuild the index behind the constraint.
+    assert repaired_constraint is not None
+    assert rebooted_constraint == repaired_constraint
 
 
 @pg_only

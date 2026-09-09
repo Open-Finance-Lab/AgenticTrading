@@ -1,12 +1,195 @@
 {
   "templates": [
     {
+      "template_id": "claude-haiku-4-5",
+      "shelf": "llms",
+      "name": "Claude Haiku 4.5",
+      "model_name": "anthropic/claude-haiku-4-5",
+      "description": "The Competition Leaderboard's Claude Haiku 4.5 agent. Same long-only DJIA hourly backtest as the rest of the board — add it and edit the instruction to try this model yourself.",
+      "category": "us_stocks",
+      "tags": [
+        "competition model",
+        "DJIA"
+      ],
+      "author": "Agentic Trading Lab",
+      "pipeline": [
+        {
+          "id": "sub_claude_haiku",
+          "presetKey": "simple_instruction",
+          "label": "Trading instruction",
+          "prompt": "Spread the money across a few of the strongest available stocks. Buy on meaningful dips, take profits after strong run-ups, and never put everything into one stock.",
+          "outputFormat": "JSON: { \"orders\": [{ \"symbol\": \"...\", \"side\": \"buy|sell|hold\", \"qty\": number, \"order_type\": \"market|limit\", \"limit_price\": number|null, \"reason\": \"...\" }] }"
+        }
+      ]
+    },
+    {
+      "template_id": "claude-sonnet-4-6",
+      "shelf": "llms",
+      "name": "Claude Sonnet 4.6",
+      "model_name": "anthropic/claude-sonnet-4-6",
+      "description": "The Competition Leaderboard's Claude Sonnet 4.6 agent. Same long-only DJIA hourly backtest as the rest of the board — add it and edit the instruction to try this model yourself.",
+      "category": "us_stocks",
+      "tags": [
+        "competition model",
+        "DJIA"
+      ],
+      "author": "Agentic Trading Lab",
+      "pipeline": [
+        {
+          "id": "sub_claude_sonnet",
+          "presetKey": "simple_instruction",
+          "label": "Trading instruction",
+          "prompt": "Spread the money across a few of the strongest available stocks. Buy on meaningful dips, take profits after strong run-ups, and never put everything into one stock.",
+          "outputFormat": "JSON: { \"orders\": [{ \"symbol\": \"...\", \"side\": \"buy|sell|hold\", \"qty\": number, \"order_type\": \"market|limit\", \"limit_price\": number|null, \"reason\": \"...\" }] }"
+        }
+      ]
+    },
+    {
+      "template_id": "deepseek-v4-pro",
+      "shelf": "llms",
+      "name": "DeepSeek V4 Pro",
+      "model_name": "deepseek/deepseek-v4-pro",
+      "description": "The Competition Leaderboard's DeepSeek V4 Pro agent — the only model that beat the passive baselines in the April 2026 contest window. Same long-only DJIA hourly backtest; add it and edit the instruction to try this model yourself.",
+      "category": "us_stocks",
+      "tags": [
+        "competition model",
+        "DJIA"
+      ],
+      "author": "Agentic Trading Lab",
+      "pipeline": [
+        {
+          "id": "sub_deepseek_v4",
+          "presetKey": "simple_instruction",
+          "label": "Trading instruction",
+          "prompt": "Spread the money across a few of the strongest available stocks. Buy on meaningful dips, take profits after strong run-ups, and never put everything into one stock.",
+          "outputFormat": "JSON: { \"orders\": [{ \"symbol\": \"...\", \"side\": \"buy|sell|hold\", \"qty\": number, \"order_type\": \"market|limit\", \"limit_price\": number|null, \"reason\": \"...\" }] }"
+        }
+      ]
+    },
+    {
+      "template_id": "gpt-5-5",
+      "shelf": "llms",
+      "name": "GPT-5.5",
+      "model_name": "openai/gpt-5.5",
+      "description": "The Competition Leaderboard's GPT-5.5 agent. Same long-only DJIA hourly backtest as the rest of the board — add it and edit the instruction to try this model yourself.",
+      "category": "us_stocks",
+      "tags": [
+        "competition model",
+        "DJIA"
+      ],
+      "author": "Agentic Trading Lab",
+      "pipeline": [
+        {
+          "id": "sub_gpt_5_5",
+          "presetKey": "simple_instruction",
+          "label": "Trading instruction",
+          "prompt": "Spread the money across a few of the strongest available stocks. Buy on meaningful dips, take profits after strong run-ups, and never put everything into one stock.",
+          "outputFormat": "JSON: { \"orders\": [{ \"symbol\": \"...\", \"side\": \"buy|sell|hold\", \"qty\": number, \"order_type\": \"market|limit\", \"limit_price\": number|null, \"reason\": \"...\" }] }"
+        }
+      ]
+    },
+    {
+      "template_id": "gemini-3-1-pro-preview",
+      "shelf": "llms",
+      "name": "Gemini 3.1 Pro Preview",
+      "model_name": "google/gemini-3.1-pro-preview",
+      "description": "The Competition Leaderboard's Gemini 3.1 Pro Preview agent. Same long-only DJIA hourly backtest as the rest of the board — add it and edit the instruction to try this model yourself.",
+      "category": "us_stocks",
+      "tags": [
+        "competition model",
+        "DJIA"
+      ],
+      "author": "Agentic Trading Lab",
+      "pipeline": [
+        {
+          "id": "sub_gemini_pro",
+          "presetKey": "simple_instruction",
+          "label": "Trading instruction",
+          "prompt": "Spread the money across a few of the strongest available stocks. Buy on meaningful dips, take profits after strong run-ups, and never put everything into one stock.",
+          "outputFormat": "JSON: { \"orders\": [{ \"symbol\": \"...\", \"side\": \"buy|sell|hold\", \"qty\": number, \"order_type\": \"market|limit\", \"limit_price\": number|null, \"reason\": \"...\" }] }"
+        }
+      ]
+    },
+    {
+      "template_id": "nemotron-3-nano-30b",
+      "shelf": "llms",
+      "name": "Nemotron 3 Nano 30B",
+      "model_name": "nvidia/nemotron-3-nano-30b-a3b",
+      "description": "The Competition Leaderboard's NVIDIA Nemotron 3 Nano 30B agent. An open-weight model on the same long-only DJIA hourly backtest as the rest of the board — add it and edit the instruction to try this model yourself.",
+      "category": "us_stocks",
+      "tags": [
+        "competition model",
+        "DJIA"
+      ],
+      "author": "Agentic Trading Lab",
+      "pipeline": [
+        {
+          "id": "sub_nemotron_nano",
+          "presetKey": "simple_instruction",
+          "label": "Trading instruction",
+          "prompt": "Spread the money across a few of the strongest available stocks. Buy on meaningful dips, take profits after strong run-ups, and never put everything into one stock.",
+          "outputFormat": "JSON: { \"orders\": [{ \"symbol\": \"...\", \"side\": \"buy|sell|hold\", \"qty\": number, \"order_type\": \"market|limit\", \"limit_price\": number|null, \"reason\": \"...\" }] }"
+        }
+      ]
+    },
+    {
+      "template_id": "qwen3-7-plus",
+      "shelf": "llms",
+      "name": "Qwen3.7 Plus",
+      "model_name": "qwen/qwen3.7-plus",
+      "description": "The Competition Leaderboard's Qwen3.7 Plus agent. Same long-only DJIA hourly backtest as the rest of the board — add it and edit the instruction to try this model yourself.",
+      "category": "us_stocks",
+      "tags": [
+        "competition model",
+        "DJIA"
+      ],
+      "author": "Agentic Trading Lab",
+      "pipeline": [
+        {
+          "id": "sub_qwen3_7",
+          "presetKey": "simple_instruction",
+          "label": "Trading instruction",
+          "prompt": "Spread the money across a few of the strongest available stocks. Buy on meaningful dips, take profits after strong run-ups, and never put everything into one stock.",
+          "outputFormat": "JSON: { \"orders\": [{ \"symbol\": \"...\", \"side\": \"buy|sell|hold\", \"qty\": number, \"order_type\": \"market|limit\", \"limit_price\": number|null, \"reason\": \"...\" }] }"
+        }
+      ]
+    },
+    {
+      "template_id": "ai-hedge-fund",
+      "shelf": "open",
+      "card_subtitle": "Open-source multi-agent system",
+      "name": "AI Hedge Fund",
+      "model_name": "nvidia/nemotron-3-nano-30b-a3b",
+      "description": "A team of AI investors that analyzes the market, develops trading ideas, and tests them through backtesting.",
+      "category": "us_stocks",
+      "tags": [
+        "analyst team",
+        "fundamentals",
+        "official template"
+      ],
+      "author": "virattt / Agentic Trading Lab",
+      "repo_url": "https://github.com/virattt/ai-hedge-fund",
+      "runtime_type": "ai_hedge_fund",
+      "runtime_config": {
+        "analysts": [
+          "fundamentals_analyst",
+          "technical_analyst",
+          "sentiment_analyst",
+          "valuation_analyst"
+        ]
+      }
+    },
+    {
       "template_id": "balanced-starter",
+      "shelf": "open",
       "name": "Balanced Starter",
       "model_name": "anthropic/claude-haiku-4-5",
       "description": "A simple starter agent that diversifies across strong stocks, buys dips, and takes profits after run-ups.",
       "category": "us_stocks",
-      "tags": ["starter", "diversified"],
+      "tags": [
+        "starter",
+        "diversified"
+      ],
       "author": "Agentic Trading Lab",
       "pipeline": [
         {
@@ -20,11 +203,15 @@
     },
     {
       "template_id": "momentum-scout",
+      "shelf": "open",
       "name": "Momentum Scout",
       "model_name": "anthropic/claude-haiku-4-5",
       "description": "Focus on recent price strength and volume. Favor leaders with positive momentum and trim laggards quickly.",
       "category": "us_stocks",
-      "tags": ["momentum", "trend"],
+      "tags": [
+        "momentum",
+        "trend"
+      ],
       "author": "Agentic Trading Lab",
       "pipeline": [
         {
@@ -38,11 +225,15 @@
     },
     {
       "template_id": "pipeline-analyst",
+      "shelf": "open",
       "name": "Three-Step Analyst",
       "model_name": "anthropic/claude-sonnet-4-6",
       "description": "A three-step strategy: gather market facts, convert them into signals, then produce executable orders.",
       "category": "us_stocks",
-      "tags": ["multi-step strategy", "official template"],
+      "tags": [
+        "multi-step strategy",
+        "official template"
+      ],
       "author": "Agentic Trading Lab",
       "pipeline": [
         {
@@ -69,31 +260,16 @@
       ]
     },
     {
-      "template_id": "ai-hedge-fund",
-      "name": "AI Hedge Fund",
-      "model_name": "nvidia/nemotron-3-nano-30b-a3b",
-      "description": "A hosted panel of AI analysts that weigh in on every trade, run through Agentic Trading Lab's long-only backtest engine. Based on the open-source AI Hedge Fund project by virattt.",
-      "category": "us_stocks",
-      "tags": ["analyst team", "fundamentals", "official template"],
-      "author": "virattt / Agentic Trading Lab",
-      "repo_url": "https://github.com/virattt/ai-hedge-fund",
-      "runtime_type": "ai_hedge_fund",
-      "runtime_config": {
-        "analysts": [
-          "fundamentals_analyst",
-          "technical_analyst",
-          "sentiment_analyst",
-          "valuation_analyst"
-        ]
-      }
-    },
-    {
       "template_id": "blue-chip-steady",
+      "shelf": "open",
       "name": "Blue-Chip Steady",
       "model_name": "anthropic/claude-haiku-4-5",
       "description": "Buy and hold a handful of the strongest Dow companies, selling only when a position deteriorates badly. Mirrors the buy-and-hold benchmark on our leaderboard.",
       "category": "us_stocks",
-      "tags": ["buy and hold", "blue chips"],
+      "tags": [
+        "buy and hold",
+        "blue chips"
+      ],
       "author": "Agentic Trading Lab",
       "pipeline": [
         {
@@ -107,11 +283,15 @@
     },
     {
       "template_id": "even-split-dow",
+      "shelf": "open",
       "name": "Even-Split Dow",
       "model_name": "anthropic/claude-haiku-4-5",
       "description": "Spread the money evenly across all available Dow stocks and keep the split even. Mirrors the equal-weight benchmark on our leaderboard.",
       "category": "us_stocks",
-      "tags": ["equal weight", "diversified"],
+      "tags": [
+        "equal weight",
+        "diversified"
+      ],
       "author": "Agentic Trading Lab",
       "pipeline": [
         {
@@ -125,11 +305,15 @@
     },
     {
       "template_id": "ashare-steady-t1",
+      "shelf": "open",
       "name": "A-Share Steady (T+1)",
       "model_name": "anthropic/claude-haiku-4-5",
       "description": "A patient strategy for Chinese A-shares, built for that market's rule that shares bought today cannot be sold until the next trading day.",
       "category": "cn_ashares",
-      "tags": ["a-shares", "patient"],
+      "tags": [
+        "a-shares",
+        "patient"
+      ],
       "author": "Agentic Trading Lab",
       "pipeline": [
         {
@@ -143,6 +327,7 @@
     },
     {
       "template_id": "contrarian-dip-buyer",
+      "shelf": "open",
       "name": "Contrarian Dip Buyer",
       "model_name": "openai/gpt-5.5",
       "description": "Buys stocks that have sold off hard and trims them back once they have recovered. The opposite instinct to a momentum strategy.",
@@ -164,6 +349,7 @@
     },
     {
       "template_id": "sector-rotator",
+      "shelf": "open",
       "name": "Sector Rotator",
       "model_name": "google/gemini-3.1-pro-preview",
       "description": "Concentrates into whichever part of the market is leading, and moves on when leadership changes.",
@@ -185,6 +371,7 @@
     },
     {
       "template_id": "volatility-guard",
+      "shelf": "open",
       "name": "Volatility Guard",
       "model_name": "deepseek/deepseek-v4-pro",
       "description": "Holds a steady portfolio in calm markets and cuts exposure when prices start swinging. Runs on the only model that has beaten the passive baselines on our leaderboard.",
@@ -206,6 +393,7 @@
     },
     {
       "template_id": "ashare-momentum-t1",
+      "shelf": "open",
       "name": "A-Share Momentum (T+1)",
       "model_name": "qwen/qwen3.7-plus",
       "description": "Rides the strongest Chinese A-shares while respecting that market's rule that shares bought today cannot be sold until the next trading day.",

@@ -2,7 +2,12 @@
 
 from pathlib import Path
 
-from dashboard.backend.tests._frontend_source import APP_HTML, STYLES
+from dashboard.backend.tests._frontend_source import (
+    APP_HTML,
+    STYLES,
+    fn_body,
+    strip_comments,
+)
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -161,7 +166,7 @@ def test_acquisition_surface_excludes_token_and_provider_details():
 def test_static_asset_versions_are_bumped_for_the_new_surface():
     assert "styles.css?v=149" in APP_HTML
     assert "js/admin-analytics.js?v=9" in APP_HTML
-    assert "js/admin-analytics-value.js?v=7" in APP_HTML
+    assert "js/admin-analytics-value.js?v=8" in APP_HTML
 
 
 def test_action_queue_profile_column_has_a_nonvisual_accessible_name():
@@ -186,3 +191,17 @@ def test_demo_aligned_visual_system_and_responsive_breakpoints_exist():
     assert "@media (max-width: 470px)" in STYLES
     assert "prefers-reduced-motion: reduce" in STYLES
     assert ".admin-analytics-overview [hidden]" in STYLES
+
+
+def test_profile_url_param_has_a_single_owner():
+    value = strip_comments(value_source())
+    assert "state.userFilters.profile" not in value
+    assert "URL_KEYS.profile, state.userFilters.profile" not in value
+    assert "URL_KEYS.profile" in value
+    assert "'analyticsProfile'" in strip_comments(profile_source())
+
+
+def test_overview_deep_link_guard_reads_the_live_url():
+    body = strip_comments(fn_body("function onEnter(", value_source()))
+    assert "searchParams" in body
+    assert "state.userFilters" not in body

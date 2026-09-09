@@ -56,6 +56,7 @@
     acquisitionMetric: 'analyticsAcquisitionMetric',
     usersView: 'analyticsUsersView',
     usersOffset: 'analyticsUsersOffset',
+    user: 'analyticsUser',
     profile: 'analyticsProfile',
   });
 
@@ -1576,17 +1577,15 @@
       setAcquisitionExpanded(state.acquisitionOpen, { writeUrl: false });
       syncDisclosureControls();
     }
-    const tab =
-      new URL(window.location.href).searchParams.get('adminTab')
-      || 'analytics';
+    const params = new URL(window.location.href).searchParams;
+    const tab = params.get('adminTab') || 'analytics';
     state.active = tab === 'analytics';
     if (!state.active) {
       if (tab === 'users') syncUsersDirectory();
       return;
     }
-    const profileRequested = /^\d+$/.test(
-      new URL(window.location.href).searchParams.get(URL_KEYS.profile) || ''
-    );
+    const requested = params.get(URL_KEYS.profile) || params.get(URL_KEYS.user) || '';
+    const profileRequested = /^\d+$/.test(requested);
     if (
       !profileRequested
       && (

@@ -620,11 +620,16 @@ def test_profile_and_activity_reads_record_access_without_body(admin_analytics_a
     assert call["end"] == date(2026, 9, 1)
 
 
-def test_profile_accepts_shared_date_range_preset(admin_analytics_api):
+@pytest.mark.parametrize(("preset", "days"), [("1w", 7), ("1y", 365)])
+def test_profile_accepts_shared_date_range_preset(
+    admin_analytics_api,
+    preset,
+    days,
+):
     api = admin_analytics_api
     response = api["client"].get(
         f"/api/admin/analytics/users/{api['subject']['id']}",
-        params={"date_range": "1w"},
+        params={"date_range": preset},
         headers=api["admin_headers"],
     )
 
@@ -632,7 +637,7 @@ def test_profile_accepts_shared_date_range_preset(admin_analytics_api):
     name, call = api["value_query_service"].calls[-1]
     today = datetime.now(timezone.utc).date()
     assert name == "profile"
-    assert call["start"] == today - timedelta(days=6)
+    assert call["start"] == today + timedelta(days=1 - days)
     assert call["end"] == today + timedelta(days=1)
 
 
@@ -776,7 +781,7 @@ def test_value_section_failures_are_safe_and_independent(
             "/api/admin/analytics/retention",
             [("from", "2026-08-01"), ("from", "2026-08-02")],
         ),
-        ("/api/admin/analytics/commercial", {"from": "2026-01-01", "to": "2026-08-01"}),
+        ("/api/admin/analytics/commercial", {"from": "2025-01-01", "to": "2026-08-01"}),
         ("/api/admin/analytics/operational", {"provider": "synthetic secret!"}),
         ("/api/admin/analytics/users", {"commercial_tier": "unsupported"}),
     ],

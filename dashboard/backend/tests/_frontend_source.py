@@ -131,8 +131,11 @@ def _match_brace(source: str, index: int) -> int:
         index += 1
 
 
-def fn_body(signature: str) -> str:
+def fn_body(signature: str, source: str | None = None) -> str:
     """The named function's source, brace-matched to its real closing brace.
+
+    `source` defaults to app.js; pass one of the `js/*.js` modules to slice a
+    function out of it with the same brace matching.
 
     Brace-matching rather than a fixed-width slice: a `[start:start + 900]`
     window over-reads into whatever unrelated top-level code happens to follow,
@@ -145,9 +148,10 @@ def fn_body(signature: str) -> str:
     returns that parameter block instead of the body: a short, plausible-looking
     string in which every `assert "..." in body` fails, or worse, passes.
     """
-    start = APP_JS.index(signature)
-    open_brace = APP_JS.index("{", match_paren(APP_JS, APP_JS.index("(", start)))
-    return APP_JS[start : _match_brace(APP_JS, open_brace) + 1]
+    text = APP_JS if source is None else source
+    start = text.index(signature)
+    open_brace = text.index("{", match_paren(text, text.index("(", start)))
+    return text[start : _match_brace(text, open_brace) + 1]
 
 
 def js_const(name: str) -> str:
