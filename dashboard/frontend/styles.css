@@ -15835,7 +15835,7 @@ html:has(#adminView[style*="display: block"]) .ticker-info {
     padding: 18px;
     border: 1px solid var(--analytics-line);
     border-radius: 8px;
-    background: linear-gradient(135deg, rgba(17, 31, 37, 0.9), rgba(8, 18, 22, 0.84));
+    background: var(--analytics-surface);
     box-shadow: 0 18px 45px rgba(0, 0, 0, 0.13);
 }
 
@@ -15918,7 +15918,7 @@ html:has(#adminView[style*="display: block"]) .ticker-info {
     background: linear-gradient(
         to right,
         var(--analytics-accent) 0 var(--signal-progress, 73%),
-        rgba(175, 218, 224, 0.12) var(--signal-progress, 73%) 100%
+        rgba(55, 65, 81, 0.55) var(--signal-progress, 73%) 100%
     );
 }
 .admin-analytics-signal-list li:nth-child(2) {
