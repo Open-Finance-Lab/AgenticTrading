@@ -15494,6 +15494,12 @@ html:has(#adminView[style*="display: block"]) .ticker-info {
     display: none !important;
 }
 
+/* Keep the global ATL navigation available while the admin workspace is open. */
+html[data-nav-page="admin"] .header,
+html:has(#adminView[style*="display: block"]) .header {
+    display: flex !important;
+}
+
 .admin-workspace {
     grid-template-columns: 188px minmax(0, 1fr);
     gap: 0;
