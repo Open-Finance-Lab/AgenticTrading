@@ -50,6 +50,7 @@ def test_us_bars_are_anchored_to_0930_and_labeled_at_bucket_end():
     assert result.iloc[0]["expected_source_bars"] == 12
     assert bool(result.iloc[0]["is_complete"]) is True
     assert result.iloc[0]["vwap"] == 106.0
+    assert result.iloc[0]["turnover"] == 12_720.0
     # The final 15:30-16:00 bucket is complete, but its 16:00 label has no
     # following source bar and is filtered from the execution plan by the engine.
     assert result.index[-1] == pd.Timestamp("2026-03-02 21:00:00", tz="UTC")

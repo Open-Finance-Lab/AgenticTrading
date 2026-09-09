@@ -2,8 +2,8 @@
 
 One dataset (indicator-enriched decision bars + source bars + trading
 timestamps + price caches) per ``(symbols, start_date, end_date,
-source_timeframe, decision_timeframe)`` key, shared by every session with that
-config. READ-ONLY CONTRACT: every consumer treats the dataset frames,
+source_timeframe, decision_timeframe, equity_metadata_source)`` key, shared by
+every session with that config. READ-ONLY CONTRACT: every consumer treats the dataset frames,
 timestamps and caches as immutable — verified convention across the engine,
 baselines, and PortfolioManager. Never mutate a dataset.
 
@@ -37,6 +37,10 @@ from dashboard.backend.domain.backtesting.bar_aggregation import (
     summarize_aggregation_quality,
 )
 from dashboard.backend.infrastructure.market_data.alpaca_bars import AlpacaDataLoader
+from dashboard.backend.infrastructure.market_data.equity_metadata import (
+    configured_dataset_path,
+    load_and_enrich_us_equity_bars,
+)
 from dashboard.backend.infrastructure.market_data.frequency import (
     normalize_bar_timeframe,
     timeframe_minutes,
@@ -67,6 +71,7 @@ class MarketDataset:
         "source_data", "source_timestamps", "source_price_cache",
         "execution_timestamps", "source_timeframe", "decision_timeframe",
         "data_quality",
+        "equity_metadata",
     )
 
     def __init__(self, key: Tuple, all_data: Dict[str, pd.DataFrame],
@@ -77,7 +82,8 @@ class MarketDataset:
                  execution_timestamps: Optional[List[Any]] = None,
                  source_timeframe: str = "60m",
                  decision_timeframe: str = "60m",
-                 data_quality: Optional[Dict[str, Any]] = None):
+                 data_quality: Optional[Dict[str, Any]] = None,
+                 equity_metadata: Optional[Dict[str, Any]] = None):
         self.key = key
         self.all_data = all_data
         self.timestamps = timestamps
@@ -100,6 +106,7 @@ class MarketDataset:
         self.source_timeframe = source_timeframe
         self.decision_timeframe = decision_timeframe
         self.data_quality = data_quality or {}
+        self.equity_metadata = equity_metadata or {}
 
 
 class _Entry:
@@ -129,6 +136,7 @@ def _dataset_key(
         str(end_date),
         normalize_bar_timeframe(source_timeframe),
         normalize_bar_timeframe(decision_timeframe),
+        str(configured_dataset_path() or ""),
     )
 
 
@@ -288,6 +296,10 @@ def _build_dataset(
         raise RuntimeError("No completed decision bars returned from Alpaca")
     for symbol, df in all_data.items():
         all_data[symbol] = TechnicalIndicators.calculate_indicators(df)
+    all_data, equity_metadata = load_and_enrich_us_equity_bars(
+        all_data,
+        timezone="US/Eastern",
+    )
     timestamps = _build_trading_timestamps(all_data)
     if not timestamps:
         raise RuntimeError("No trading hours in the selected date range")
@@ -326,6 +338,7 @@ def _build_dataset(
         source_timeframe=actual_source,
         decision_timeframe=requested_decision,
         data_quality=data_quality,
+        equity_metadata=equity_metadata,
     )
     mb = sum(float(df.memory_usage(deep=True).sum()) for df in all_data.values()) / 1e6
     print(f"📊 market-data dataset built: {key[1]}→{key[2]} "

@@ -72,6 +72,33 @@ IEX）、是否由 SIP 降级到 IEX，以及请求结束时间是否因实时�
 网页在回测高级详情中显示这些来源信息，使频率正确但 tape 不同的运行也不会
 被误认为完全等价。
 
+## Agent 的流动性与公司元数据
+
+美股小时决策 snapshot 还可以包含三类逐标的数据，而不改变每小时一次的
+Agent 调用频率：
+
+- `turnover`：该已完成小时内各 5 分钟 bar 的 `VWAP × volume` 之和，币种见
+  snapshot 的 `market.native_currency`；缺失 VWAP 的旧数据按各源 bar 收盘价
+  估算，而不是使用小时末收盘价估算整小时。
+- `market_cap_usd`：当前决策价格乘以当日已经生效的 SEC 披露股数；日表中的
+  收盘市值只用于质量校验，绝不会直接注入盘中决策。`market_cap_status` 同时
+  暴露数据的新鲜度或缺失原因。
+- `sic_code`、`industry`、`sector`：按决策日命中的 SEC SIC 生效区间提供。
+  `sector` 是 SIC division，不是 GICS 行业板块。
+
+成交额来自 Alpaca bar，无需额外配置。市值和行业数据位于仓库外，运行网页
+服务前需配置其一：
+
+```powershell
+$env:US_EQUITY_DATASET_PATH = 'D:\Project\Trading\US_Data\us_equities_5min_2016_2025'
+# 或设置数据根目录，系统会追加默认数据集目录名：
+$env:US_EQUITY_DATA_ROOT = 'D:\Project\Trading\US_Data'
+```
+
+未配置外部数据集时回测仍可运行，且不会用当前市值或未来记录填充历史空值；
+Agent 仅收到实际可用的字段。显式配置的目录损坏或 schema 不兼容时回测失败，
+防止静默使用不可信的公司元数据。
+
 ## 代码契约
 
 `dashboard/backend/infrastructure/market_data/frequency.py` 提供：

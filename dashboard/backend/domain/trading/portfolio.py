@@ -91,7 +91,7 @@ def build_market_signals(market_data):
     """Build the per-symbol market-signal dict from real market data rows."""
     market_signals = {}
     for symbol, row in market_data.items():
-        market_signals[symbol] = {
+        signal = {
             "price": row["close"],
             "rsi": row.get("rsi_14"),
             "macd": row.get("macd"),
@@ -101,6 +101,19 @@ def build_market_signals(market_data):
             "bb_upper": row.get("bb_upper"),
             "bb_lower": row.get("bb_lower"),
         }
+        # Fundamental/liquidity fields are optional so providers without the
+        # configured US metadata dataset retain their historical snapshot shape.
+        for field in (
+            "turnover",
+            "market_cap_usd",
+            "market_cap_status",
+            "sic_code",
+            "industry",
+            "sector",
+        ):
+            if field in row and row.get(field) is not None:
+                signal[field] = row.get(field)
+        market_signals[symbol] = signal
     return market_signals
 
 

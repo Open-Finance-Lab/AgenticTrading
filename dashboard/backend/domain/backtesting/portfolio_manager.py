@@ -412,6 +412,17 @@ class PortfolioManager:
                     "bb_upper": bb_upper,
                     "bb_lower": bb_lower,
                 }
+                for field in ("turnover", "market_cap_usd"):
+                    value = signal.get(field)
+                    if value is not None and pd.notna(value):
+                        market_snapshot["top_signals"][symbol][field] = float(value)
+                sic_code = signal.get("sic_code")
+                if sic_code is not None and pd.notna(sic_code):
+                    market_snapshot["top_signals"][symbol]["sic_code"] = int(sic_code)
+                for field in ("market_cap_status", "industry", "sector"):
+                    value = signal.get(field)
+                    if value is not None and pd.notna(value):
+                        market_snapshot["top_signals"][symbol][field] = str(value)
             
             # Ensure market_snapshot is fully JSON-serializable before sending
             try:

@@ -564,6 +564,12 @@ Trading style:
 - Do not return all HOLD if there is cash available and at least one reasonable bullish setup.
 - Do not over-focus on RSI alone.
 
+Additional per-symbol context when present:
+- turnover is traded notional during the completed decision bar, denominated in market.native_currency.
+- market_cap_usd is point-in-time market capitalization at the decision price; market_cap_status describes data quality.
+- industry and sector are SEC SIC classifications, not GICS classifications.
+- Missing optional fields mean unavailable data, never zero.
+
 BUY logic:
 Buy when at least 2 of these are true:
 - price is above SMA20
@@ -679,6 +685,8 @@ CUSTOM_STRATEGY_OUTPUT_CONTRACT = """
 === EXECUTION CONTRACT (fixed — always obey, even if it conflicts with the strategy above) ===
 Run the strategy above as a DJIA portfolio trading agent on historical hourly data.
 - Use ONLY the provided market_snapshot. No internet, tools, APIs, or code.
+- When present, turnover is completed-bar traded notional; market_cap_usd is point-in-time; industry/sector use SEC SIC.
+- Treat missing optional market fields as unavailable, never zero.
 - Trade ONLY symbols listed in VALID SYMBOLS.
 - Only SELL symbols that are currently owned (see current_holdings).
 - position_size must be an integer share count; use 0 for hold.
