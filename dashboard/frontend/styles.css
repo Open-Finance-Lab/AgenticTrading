@@ -2799,6 +2799,10 @@ html[data-nav-page="admin"] .admin-rail-shell,
 html:has(#adminView[style*="display: block"]) .admin-rail-shell { display: none !important; }
 html[data-nav-page="admin"] .admin-workspace,
 html:has(#adminView[style*="display: block"]) .admin-workspace { display: block !important; min-height: 0; }
+html[data-nav-page="admin"] .ticker-bar,
+html:has(#adminView[style*="display: block"]) .ticker-bar { display: flex !important; }
+html[data-nav-page="admin"] .ticker-track,
+html:has(#adminView[style*="display: block"]) .ticker-track { display: flex !important; }
 
 /* —— Admin user-value analytics —— */
 .admin-value-overview {
