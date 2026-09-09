@@ -9582,7 +9582,15 @@ function navigateToPage(page, options = {}) {
 
     if (historyMode === 'none') return;
     const nextState = getNavigationState();
-    if (historyMode === 'push' && navigationStatesEqual(prevState, nextState)) return;
+    const currentUrl = `${window.location.pathname}${window.location.search}${window.location.hash}`;
+    const desiredUrl = buildNavigationUrl(nextState);
+    // Do not leave a stale ?view=home (or another old route) behind when the
+    // visible view is already Admin. This can happen after restoring a cached
+    // tab state: the state comparison is equal, but the address bar still
+    // points at the public page and a reload paints the wrong shell.
+    if (historyMode === 'push'
+        && navigationStatesEqual(prevState, nextState)
+        && currentUrl === desiredUrl) return;
     syncNavigationHistory({ replace: historyMode === 'replace' });
 }
 
