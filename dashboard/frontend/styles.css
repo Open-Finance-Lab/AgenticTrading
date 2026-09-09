@@ -2802,7 +2802,9 @@ html:has(#adminView[style*="display: block"]) .admin-workspace { display: block 
 html[data-nav-page="admin"] .ticker-bar,
 html:has(#adminView[style*="display: block"]) .ticker-bar { display: flex !important; }
 html[data-nav-page="admin"] .ticker-track,
-html:has(#adminView[style*="display: block"]) .ticker-track { display: flex !important; }
+html:has(#adminView[style*="display: block"]) .ticker-track,
+html[data-nav-page="admin"] #tickerTrack,
+html:has(#adminView[style*="display: block"]) #tickerTrack { display: flex !important; }
 
 /* —— Admin user-value analytics —— */
 .admin-value-overview {
