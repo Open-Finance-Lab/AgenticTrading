@@ -16085,3 +16085,22 @@ html:has(#adminView[style*="display: block"]) .header {
     .admin-view *::before,
     .admin-view *::after { scroll-behavior: auto; transition-duration: 0.01ms; animation-duration: 0.01ms; }
 }
+
+/* Keep the complete ATL chrome visible on admin routes (must come after the
+   legacy admin overrides above). */
+html[data-nav-page="admin"] .header,
+html:has(#adminView[style*="display: block"]) .header { display: flex !important; }
+html[data-nav-page="admin"] #tickerTrack,
+html[data-nav-page="admin"] .ticker-track,
+html[data-nav-page="admin"] .market-ticker,
+html[data-nav-page="admin"] .ticker-bar,
+html[data-nav-page="admin"] .ticker-info,
+html:has(#adminView[style*="display: block"]) #tickerTrack,
+html:has(#adminView[style*="display: block"]) .ticker-track,
+html:has(#adminView[style*="display: block"]) .market-ticker,
+html:has(#adminView[style*="display: block"]) .ticker-bar,
+html:has(#adminView[style*="display: block"]) .ticker-info { display: block !important; }
+html[data-nav-page="admin"] .admin-rail-shell,
+html:has(#adminView[style*="display: block"]) .admin-rail-shell { display: none !important; }
+html[data-nav-page="admin"] .admin-workspace,
+html:has(#adminView[style*="display: block"]) .admin-workspace { display: block !important; min-height: 0; }
