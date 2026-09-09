@@ -14564,6 +14564,11 @@ table.sr-only {
     text-transform: uppercase;
 }
 
+.admin-analytics-filters > label,
+.admin-analytics-attention-filters > label {
+    min-height: 72px;
+}
+
 .admin-analytics-filters input,
 .admin-analytics-filters select,
 .admin-analytics-attention-filters input,
@@ -14987,7 +14992,11 @@ table.sr-only {
 }
 
 #adminAnalyticsProfileBack {
+    width: auto;
+    min-height: 34px;
     margin-bottom: 16px;
+    padding: 7px 12px;
+    font-size: 12px;
 }
 
 .admin-analytics-profile-layout {
@@ -15716,6 +15725,13 @@ html:has(#adminView[style*="display: block"]) .ticker-info {
     color: var(--text-primary);
 }
 
+.admin-analytics-deep-head .admin-analytics-back,
+#adminAnalyticsProfileBack {
+    flex: 0 0 auto;
+    width: fit-content;
+    justify-content: flex-start;
+}
+
 .admin-analytics-refresh {
     min-height: 32px;
     padding: 7px 10px;
@@ -15941,6 +15957,8 @@ html:has(#adminView[style*="display: block"]) .ticker-info {
 .admin-analytics-deep-sections .admin-value-disclosure { border: 1px solid var(--analytics-line); border-radius: 7px; background: var(--analytics-surface); overflow: hidden; }
 .admin-analytics-deep-sections .admin-value-disclosure-toggle { width: 100%; justify-content: space-between; border: 0; border-radius: 0; padding: 15px 17px; }
 .admin-analytics-deep-sections .admin-value-disclosure-panel { padding: 0 17px 17px; }
+.admin-analytics-deep-sections table th,
+.admin-analytics-deep-sections table td { padding: 10px 12px; text-align: left; white-space: nowrap; }
 
 .admin-analytics-progress { margin: 0 0 22px; padding: 18px; border: 1px solid var(--analytics-line); border-radius: 7px; background: var(--analytics-surface); }
 .admin-analytics-progress > .admin-analytics-section-head { margin-bottom: 12px; }
