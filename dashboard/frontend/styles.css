@@ -15313,6 +15313,16 @@ table.sr-only {
     --analytics-amber: #f4bf68;
     --analytics-danger: #ff8c7b;
     max-width: 1440px;
+    padding: 0;
+}
+
+/* Analytics owns the admin page chrome. The generic Admin header duplicates
+   the demo's title and refresh controls above the rail, so keep it out of the
+   analytics composition (section-level status remains inside the workspace). */
+.admin-view > .page-header,
+.admin-view > #adminError,
+.admin-view > #adminSuccess {
+    display: none;
 }
 
 .admin-workspace {
