@@ -15318,10 +15318,8 @@ table.sr-only {
 
 /* Analytics owns the admin page chrome. The generic Admin header duplicates
    the demo's title and refresh controls above the rail, so keep it out of the
-   analytics composition (section-level status remains inside the workspace). */
-.admin-view > .page-header,
-.admin-view > #adminError,
-.admin-view > #adminSuccess {
+   analytics composition while retaining global error/success messages. */
+.admin-view > .page-header {
     display: none;
 }
 
