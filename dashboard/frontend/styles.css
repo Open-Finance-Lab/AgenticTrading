@@ -15323,6 +15323,18 @@ table.sr-only {
     display: none;
 }
 
+/* The approved analytics demo is a standalone operator workspace. Hide the
+   public product chrome while the admin view is active so the rail starts at
+   the top of the viewport instead of below the marketing header and ticker. */
+html[data-nav-page="admin"] .header,
+html[data-nav-page="admin"] #tickerTrack,
+html[data-nav-page="admin"] .ticker-track,
+html[data-nav-page="admin"] .market-ticker,
+html[data-nav-page="admin"] .ticker-bar,
+html[data-nav-page="admin"] .ticker-info {
+    display: none !important;
+}
+
 .admin-workspace {
     grid-template-columns: 210px minmax(0, 1fr);
     gap: 0;
