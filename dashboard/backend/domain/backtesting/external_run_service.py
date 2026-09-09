@@ -305,6 +305,7 @@ class ExternalBacktestSession:
         self.data_quality: Dict[str, Any] = {}
         self.frequency_contract: Optional[Dict[str, str]] = None
         self.market_data_provenance: Dict[str, Any] = {}
+        self.equity_metadata: Dict[str, Any] = {}
         self._valuation_cursor = 0
 
         self.step_opened_at: Optional[datetime] = None
@@ -369,6 +370,7 @@ class ExternalBacktestSession:
             getattr(dataset, "execution_timestamps", self.timestamps)
         )
         self.data_quality = dict(getattr(dataset, "data_quality", {}) or {})
+        self.equity_metadata = dict(getattr(dataset, "equity_metadata", {}) or {})
         self.source_timeframe = getattr(
             dataset, "source_timeframe", self.profile.timeframe
         )
@@ -541,6 +543,17 @@ class ExternalBacktestSession:
                     signal.get("bb_lower") if pd.notna(signal.get("bb_lower")) else 0
                 ),
             }
+            for field in ("turnover", "market_cap_usd"):
+                value = signal.get(field)
+                if value is not None and pd.notna(value):
+                    snapshot["top_signals"][symbol][field] = float(value)
+            sic_code = signal.get("sic_code")
+            if sic_code is not None and pd.notna(sic_code):
+                snapshot["top_signals"][symbol]["sic_code"] = int(sic_code)
+            for field in ("market_cap_status", "industry", "sector"):
+                value = signal.get(field)
+                if value is not None and pd.notna(value):
+                    snapshot["top_signals"][symbol][field] = str(value)
 
         return snapshot
 
@@ -863,6 +876,11 @@ class ExternalBacktestSession:
                     else {}
                 ),
                 **self.market_data_provenance,
+                **(
+                    {"equity_metadata": self.equity_metadata}
+                    if self.equity_metadata.get("status") == "available"
+                    else {}
+                ),
             },
         )
         db.insert_equity_points(self.run_id, equity_curve)

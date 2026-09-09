@@ -211,7 +211,12 @@ workers — only `POST .../decision` mutates state.
 `market.features` carries the per-symbol technical indicators (price, RSI,
 MACD, SMAs, Bollinger bands) for **every symbol in
 `constraints.allowed_symbols`** (the run's `config.symbols`, or the full
-DJIA-30 default) that has market data at that step.
+DJIA-30 default) that has market data at that step. US equity observations also
+carry completed-bar `turnover` in the market's native currency. When the server
+has a point-in-time US equity metadata dataset configured, observations add
+`market_cap_usd`, `market_cap_status`, `sic_code`, `industry`, and `sector`.
+Industry fields use SEC SIC rather than GICS; absent optional fields mean that
+the data is unavailable and must not be interpreted as zero.
 
 `market.bars` and `market.events` are reserved for future environment types
 (raw OHLCV windows, corporate events); in `us-equity-hourly-v1` they are

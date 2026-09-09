@@ -60,6 +60,10 @@ from dashboard.backend.infrastructure.market_data.alpaca_bars import (
     MarketDataUnavailableError,
     feed_provenance,
 )
+from dashboard.backend.infrastructure.market_data.equity_metadata import (
+    EquityMetadataUnavailableError,
+    load_and_enrich_us_equity_bars,
+)
 from dashboard.backend.infrastructure.market_data.ifind_client import IFindClientError
 from dashboard.backend.infrastructure.market_data.ifind_fx import (
     IFindFxError,
@@ -265,6 +269,7 @@ class HourlyBacktester:
         self.data_quality = {}
         self.frequency_contract = None
         self.market_data_provenance = {}
+        self.equity_metadata = {}
         self.currency_context: CurrencyContext | None = None
         self.native_initial_capital = self.initial_capital
         if self.profile.native_currency == self.profile.reporting_currency:
@@ -831,6 +836,16 @@ class HourlyBacktester:
             count += 1
             if count % 5 == 0:
                 print(f"  ✅ {count}/{len(self.all_data)} symbols...")
+        if getattr(self, "data_source", None) == ALPACA:
+            try:
+                self.all_data, self.equity_metadata = load_and_enrich_us_equity_bars(
+                    self.all_data,
+                    timezone=self.profile.timezone,
+                )
+            except EquityMetadataUnavailableError as exc:
+                raise MarketDataUnavailableError(
+                    "Configured US equity metadata is unavailable"
+                ) from exc
         print(f"  ✅ All indicators calculated\n")
     
     def _effective_profile(self) -> MarketProfile:
@@ -882,6 +897,9 @@ class HourlyBacktester:
             )
         if getattr(self, "universe_selection", None) is not None:
             metadata["universe_selection"] = dict(self.universe_selection)
+        equity_metadata = dict(getattr(self, "equity_metadata", {}) or {})
+        if equity_metadata.get("status") == "available":
+            metadata["equity_metadata"] = equity_metadata
         if profile.transaction_cost_profile is not None:
             metadata["transaction_cost_profile"] = (
                 profile.transaction_cost_profile.to_metadata()
@@ -1059,6 +1077,12 @@ class HourlyBacktester:
         if getattr(self, "universe_selection", None) is not None:
             result["stock_pool"] = self.universe_selection["stock_pool"]
             result["pool_mode"] = self.universe_selection["pool_mode"]
+        equity_metadata = dict(getattr(self, "equity_metadata", {}) or {})
+        if equity_metadata.get("status") == "available":
+            result["equity_metadata"] = {
+                "classification": equity_metadata["classification"],
+                "point_in_time": equity_metadata["point_in_time"],
+            }
         if self.profile.lot_size > 1:
             # Conditional for the same reason `settlement` below is: this dict
             # is serialized straight into the LLM prompt, so an unconditional

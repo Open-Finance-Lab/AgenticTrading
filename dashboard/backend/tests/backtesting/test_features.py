@@ -37,6 +37,21 @@ def test_does_not_mutate_input():
     pd.testing.assert_frame_equal(df, before)
 
 
+def test_turnover_prefers_bar_vwap_and_falls_back_to_close():
+    frame = pd.DataFrame(
+        {
+            "close": [10.0, 20.0],
+            "volume": [100.0, 50.0],
+            "vwap": [11.0, None],
+        },
+        index=pd.date_range("2026-01-01", periods=2, freq="h"),
+    )
+
+    out = TechnicalIndicators.calculate_indicators(frame)
+
+    assert out["turnover"].tolist() == [1_100.0, 1_000.0]
+
+
 def test_sma_values_are_rolling_means():
     df = _df(60, seed=1)
     out = TechnicalIndicators.calculate_indicators(df)

@@ -193,6 +193,40 @@ def test_make_trading_decision_with_llm_buy_and_tokens():
     assert pm.llm_calls == 1
 
 
+def test_liquidity_market_cap_and_industry_reach_llm_snapshot(monkeypatch):
+    from dashboard.backend.domain.backtesting import portfolio_manager as pm_mod
+
+    state = _llm_state()
+    state["market_signals"]["AAPL"].update(
+        {
+            "turnover": 12_500_000.0,
+            "market_cap_usd": 3_100_000_000_000.0,
+            "market_cap_status": "available",
+            "sic_code": 3571,
+            "industry": "Electronic Computers",
+            "sector": "Manufacturing",
+        }
+    )
+    captured = {}
+
+    def capture_prompt(snapshot, **_kwargs):
+        captured.update(snapshot["top_signals"]["AAPL"])
+        return "prompt"
+
+    monkeypatch.setattr(pm_mod, "create_prompt", capture_prompt)
+    response = _FakeResp(json.dumps({"actions": []}), _FakeUsage(1, 1))
+    pm = CanonicalPortfolioManager(100000)
+
+    pm.make_trading_decision_with_llm(state, _FakeClient(response))
+
+    assert captured["turnover"] == 12_500_000.0
+    assert captured["market_cap_usd"] == 3_100_000_000_000.0
+    assert captured["market_cap_status"] == "available"
+    assert captured["sic_code"] == 3571
+    assert captured["industry"] == "Electronic Computers"
+    assert captured["sector"] == "Manufacturing"
+
+
 def test_llm_omitting_position_size_yields_a_whole_lot_on_ashares():
     """The harness must not size an order the executor is certain to reject.
 

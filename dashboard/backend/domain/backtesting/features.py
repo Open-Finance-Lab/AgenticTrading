@@ -40,6 +40,17 @@ class TechnicalIndicators:
 
         df = df.copy()
 
+        # Preserve an actual source-bar turnover when aggregation supplied one.
+        # Legacy hourly providers can still expose an approximation from their
+        # own bar VWAP (preferred) or close, always in the market's native currency.
+        if "turnover" not in df.columns and {"close", "volume"} <= set(df.columns):
+            prices = pd.to_numeric(df["close"], errors="coerce")
+            if "vwap" in df.columns:
+                vwap = pd.to_numeric(df["vwap"], errors="coerce")
+                prices = vwap.where(vwap.notna() & vwap.abs().lt(float("inf")), prices)
+            volume = pd.to_numeric(df["volume"], errors="coerce")
+            df["turnover"] = prices * volume
+
         # Check if we have enough data for indicators
         min_required = 50  # Need at least 50 bars for SMA50
         if len(df) < min_required:

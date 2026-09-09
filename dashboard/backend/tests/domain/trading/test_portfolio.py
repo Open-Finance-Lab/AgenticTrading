@@ -153,6 +153,29 @@ def test_build_market_signals_missing_keys_none():
     assert sig["macd"] is None
 
 
+def test_build_market_signals_forwards_liquidity_and_company_metadata():
+    md = {
+        "AAPL": _row(
+            200.0,
+            turnover=12_500_000.0,
+            market_cap_usd=3_100_000_000_000.0,
+            market_cap_status="available",
+            sic_code=3571,
+            industry="Electronic Computers",
+            sector="Manufacturing",
+        )
+    }
+
+    signal = build_market_signals(md)["AAPL"]
+
+    assert signal["turnover"] == 12_500_000.0
+    assert signal["market_cap_usd"] == 3_100_000_000_000.0
+    assert signal["market_cap_status"] == "available"
+    assert signal["sic_code"] == 3571
+    assert signal["industry"] == "Electronic Computers"
+    assert signal["sector"] == "Manufacturing"
+
+
 # ---------------------------------------------------------------------------
 # build_portfolio_state (golden fixture)
 # ---------------------------------------------------------------------------

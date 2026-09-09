@@ -170,6 +170,13 @@ def aggregate_bars(
         )
         volume = float(pd.to_numeric(group["volume"], errors="coerce").fillna(0).sum())
         close = float(group["close"].iloc[-1])
+        source_volume = pd.to_numeric(group["volume"], errors="coerce").fillna(0.0)
+        turnover_prices = pd.to_numeric(group["close"], errors="coerce")
+        if "vwap" in group.columns:
+            source_vwap = pd.to_numeric(group["vwap"], errors="coerce")
+            turnover_prices = source_vwap.where(
+                np.isfinite(source_vwap), turnover_prices
+            )
         record = {
             "timestamp": bucket_end.tz_convert("UTC"),
             "open": float(group["open"].iloc[0]),
@@ -177,6 +184,10 @@ def aggregate_bars(
             "low": float(pd.to_numeric(group["low"], errors="coerce").min()),
             "close": close,
             "volume": volume,
+            # Alpaca's per-bar VWAP times share volume is the traded notional.
+            # Falling back to each source bar's close keeps older fixtures and
+            # providers useful without introducing an hour-end-price estimate.
+            "turnover": float((turnover_prices * source_volume).sum()),
             "source_bar_count": int(len(group)),
             "expected_source_bars": expected,
             "missing_source_bars": int(missing_source_bars),
