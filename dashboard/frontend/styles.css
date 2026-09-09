@@ -15335,6 +15335,14 @@ html[data-nav-page="admin"] .ticker-info {
     display: none !important;
 }
 
+/* Also key off the rendered panel. This covers restored/stale URLs where the
+   admin panel is already visible before navigation state is persisted. */
+html:has(#adminView[style*="display: block"]) .header,
+html:has(#adminView[style*="display: block"]) .ticker-bar,
+html:has(#adminView[style*="display: block"]) .ticker-info {
+    display: none !important;
+}
+
 .admin-workspace {
     grid-template-columns: 210px minmax(0, 1fr);
     gap: 0;
