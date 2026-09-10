@@ -16,6 +16,23 @@ from .llm_agent import LLMAgentStrategy
 from .market_index import MarketIndexStrategy
 from .mean_variance import MeanVarianceStrategy
 
+# External strategies (Strategy Lab catalog: TradingAgents / QuantConnect /
+# freqtrade), added as deterministic baselines -- none involve an LLM call.
+from .tradingagents_composite import TradingAgentsCompositeStrategy
+from .capm_alpha_ranking import CAPMAlphaRankingStrategy
+from .momentum_effect import MomentumEffectStrategy
+from .volatility_effect import VolatilityEffectStrategy
+from .short_term_reversal import ShortTermReversalStrategy
+from .overnight_anomaly import OvernightAnomalyStrategy
+from .turn_of_month import TurnOfMonthStrategy
+from .bandtastic import BandtasticStrategy
+from .supertrend_triple import SupertrendTripleStrategy
+from .hlhb import HlhbStrategy
+from .trendrider import TrendRiderStrategy
+from .pattern_recognition import PatternRecognitionStrategy
+from .universal_macd import UniversalMACDStrategy
+from .almgren_chriss_twap import AlmgrenChrissTwapStrategy
+
 _STRATEGY_CLASSES = [
     BuyHoldStrategy,
     EqualWeightIndexStrategy,
@@ -23,6 +40,20 @@ _STRATEGY_CLASSES = [
     MarketIndexStrategy,
     MeanVarianceStrategy,
     LLMAgentStrategy,
+    TradingAgentsCompositeStrategy,
+    CAPMAlphaRankingStrategy,
+    MomentumEffectStrategy,
+    VolatilityEffectStrategy,
+    ShortTermReversalStrategy,
+    OvernightAnomalyStrategy,
+    TurnOfMonthStrategy,
+    BandtasticStrategy,
+    SupertrendTripleStrategy,
+    HlhbStrategy,
+    TrendRiderStrategy,
+    PatternRecognitionStrategy,
+    UniversalMACDStrategy,
+    AlmgrenChrissTwapStrategy,
 ]
 
 _REGISTRY: Dict[str, Type[BaselineStrategy]] = {cls.key: cls for cls in _STRATEGY_CLASSES}

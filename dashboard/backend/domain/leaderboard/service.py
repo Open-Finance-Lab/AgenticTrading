@@ -52,6 +52,14 @@ _SKIP_CACHE_PATH = DATA_DIR / "leaderboard_skip_cache.json"
 _DAILY_REFRESH_STATE_PATH = DATA_DIR / "leaderboard_daily_refresh.json"
 _daily_refresh_lock = threading.Lock()
 _daily_refresh_running = False
+# Single-flight guard for ensure_leaderboard_runs' fetch+compute section, one
+# lock per (session_id, start_date, end_date) window. Independent of
+# _daily_refresh_lock above, which only gates the daily schedule's own
+# dedup/in-progress bookkeeping -- not the compute section itself, which any
+# period (contest/daily/live) can reach concurrently (e.g. a live page load
+# racing the daily-refresh background thread for the same window).
+_window_locks: Dict[Tuple[str, str, str], threading.Lock] = {}
+_window_locks_guard = threading.Lock()
 # (configured_feed, stale_feeds) pairs already reported — see _warn_on_feed_drift.
 _warned_feed_drift: set[Tuple[str, Tuple[str, ...]]] = set()
 
@@ -218,6 +226,25 @@ def _cached_run_index(
         ):
             index.setdefault(run.get("llm_model"), run)
     return index
+
+
+def _window_lock(session_id: str, start_date: str, end_date: str) -> threading.Lock:
+    """Single-flight lock, one per ``(session_id, start_date, end_date)`` window.
+
+    Guards the Alpaca-fetch + strategy-compute section of
+    ``ensure_leaderboard_runs`` so two concurrent callers for the same window
+    cannot both fetch bars and both run every missing baseline strategy
+    (measured at ~9.4s of CPU across 14 strategies for one such pass).
+    Created lazily and never removed; the key space is bounded by how many
+    distinct (session, window) pairs the board has ever served.
+    """
+    key = (session_id, start_date, end_date)
+    with _window_locks_guard:
+        lock = _window_locks.get(key)
+        if lock is None:
+            lock = threading.Lock()
+            _window_locks[key] = lock
+        return lock
 
 
 def _daily_models_status(config: Dict[str, Any]) -> Dict[str, Any]:
@@ -901,17 +928,17 @@ def ensure_leaderboard_runs(
     if force_refresh:
         skip_cache = _clear_skips_for_window(session_id, start_date, end_date, skip_cache)
 
+    # One query for the whole window instead of one `_find_cached_run` DB scan
+    # per strategy (O(entries × runs) otherwise) -- reused below for the
+    # compute loop's own existence check too.
+    cached_index = _cached_run_index(start_date, end_date, session_id)
     cached_runs: List[Dict[str, Any]] = []
     missing: List[Dict[str, Any]] = []
     for strategy in config.get("strategies", []):
         if not _auto_compute(strategy):
             continue  # LLM models are deployed manually, never block a request
         strategy_id = strategy["id"]
-        cached = (
-            None
-            if force_refresh
-            else _find_cached_run(strategy_id, start_date, end_date, session_id)
-        )
+        cached = None if force_refresh else cached_index.get(strategy_id)
         if cached:
             cached_runs.append(cached)
             continue
@@ -934,121 +961,146 @@ def ensure_leaderboard_runs(
             "cache_hit": True,
         }
 
-    needs_fetch = bool(missing) or force_refresh
-    bars_by_symbol: Optional[Dict[str, Any]] = None
-    if needs_fetch:
-        if _config_needs_alpaca(config):
-            fetch_start = _alpaca_bars_start(config)
-            bars_by_symbol = fetch_hourly_bars(
-                _symbols_for_config(config), fetch_start, end_date
-            )
-            if not bars_by_symbol:
-                print(
-                    "⚠️ No Alpaca market data — skipping stock-based baselines "
-                    "(index lines still use Yahoo Finance)"
+    # Single-flight per window: only the first caller through here fetches
+    # bars and runs strategies. Any other concurrent caller for the same
+    # window blocks on this lock; once released, the re-check just inside it
+    # finds the cache warm instead of redoing the same fetch/compute pass.
+    with _window_lock(session_id, start_date, end_date):
+        if not force_refresh:
+            cached_index = _cached_run_index(start_date, end_date, session_id)
+            still_missing: List[Dict[str, Any]] = []
+            for strategy in missing:
+                cached = cached_index.get(strategy["id"])
+                if cached:
+                    cached_runs.append(cached)
+                    continue
+                still_missing.append(strategy)
+            missing = still_missing
+            if not missing:
+                return {
+                    "session_id": session_id,
+                    "start_date": start_date,
+                    "end_date": end_date,
+                    "period": config.get("period", "contest"),
+                    "created": 0,
+                    "skipped": 0,
+                    "refreshed_at": _utcnow_iso(),
+                    "cache_hit": True,
+                }
+
+        needs_fetch = bool(missing) or force_refresh
+        bars_by_symbol: Optional[Dict[str, Any]] = None
+        if needs_fetch:
+            if _config_needs_alpaca(config):
+                fetch_start = _alpaca_bars_start(config)
+                bars_by_symbol = fetch_hourly_bars(
+                    _symbols_for_config(config), fetch_start, end_date
                 )
+                if not bars_by_symbol:
+                    print(
+                        "⚠️ No Alpaca market data — skipping stock-based baselines "
+                        "(index lines still use Yahoo Finance)"
+                    )
+                    bars_by_symbol = {}
+            else:
                 bars_by_symbol = {}
-        else:
-            bars_by_symbol = {}
 
-    created = 0
-    skipped = 0
-    # Only iterate strategies that still need work (or everything on force refresh).
-    to_run = config.get("strategies", []) if force_refresh else missing
-    for strategy in to_run:
-        strategy_id = strategy["id"]
-        if not _auto_compute(strategy):
-            continue  # deployed via deploy_model_run(), not on-demand
-        existing = None if force_refresh else _find_cached_run(
-            strategy_id, start_date, end_date, session_id
-        )
-        if existing and not force_refresh:
-            continue
+        created = 0
+        skipped = 0
+        # Only iterate strategies that still need work (or everything on force refresh).
+        to_run = config.get("strategies", []) if force_refresh else missing
+        for strategy in to_run:
+            strategy_id = strategy["id"]
+            if not _auto_compute(strategy):
+                continue  # deployed via deploy_model_run(), not on-demand
+            existing = None if force_refresh else cached_index.get(strategy_id)
+            if existing and not force_refresh:
+                continue
 
-        strategy_impl = get_strategy(strategy)
-        required = strategy_impl.required_symbols()
-        if bars_by_symbol is not None:
-            bars = bars_by_symbol
-        else:
-            bars = fetch_hourly_bars(required, start_date, end_date) if required else {}
+            strategy_impl = get_strategy(strategy)
+            required = strategy_impl.required_symbols()
+            if bars_by_symbol is not None:
+                bars = bars_by_symbol
+            else:
+                bars = fetch_hourly_bars(required, start_date, end_date) if required else {}
 
-        if required and not bars:
-            print(f"⚠️ Skipping {strategy_id}: no Alpaca bars for contest window")
-            _record_skip(
-                session_id, start_date, end_date, strategy_id, "no_bars", skip_cache
+            if required and not bars:
+                print(f"⚠️ Skipping {strategy_id}: no Alpaca bars for contest window")
+                _record_skip(
+                    session_id, start_date, end_date, strategy_id, "no_bars", skip_cache
+                )
+                skipped += 1
+                continue
+
+            curve = strategy_impl.run(bars, start_date, end_date, initial_capital)
+            if not curve:
+                print(f"⚠️ Skipping {strategy_id}: empty equity curve")
+                _record_skip(
+                    session_id, start_date, end_date, strategy_id, "empty_curve", skip_cache
+                )
+                skipped += 1
+                continue
+
+            metrics = calc_metrics(curve, initial_capital)
+            run_id = _run_id(strategy_id, start_date, end_date)
+
+            # Belt-and-suspenders: the auto-compute path is meant for cheap rule-based
+            # baselines (LLM entries carry auto_compute=false and deploy manually via
+            # deploy_model_run). Guard here too so a misconfigured LLM entry can't
+            # slip a rule-based fallback onto the board without the manual override.
+            _reject_if_llm_fallback(
+                strategy_id,
+                strategy_impl,
+                int(getattr(strategy_impl, "llm_calls", 0) or 0),
+                llm_decisions=_reported_int(strategy_impl, "llm_decisions"),
+                decision_steps=int(getattr(strategy_impl, "decision_steps", 0) or 0),
+                model=strategy.get("model"),
+                model_id=getattr(strategy_impl, "model_id", None) or strategy.get("model_id"),
             )
-            skipped += 1
-            continue
 
-        curve = strategy_impl.run(bars, start_date, end_date, initial_capital)
-        if not curve:
-            print(f"⚠️ Skipping {strategy_id}: empty equity curve")
-            _record_skip(
-                session_id, start_date, end_date, strategy_id, "empty_curve", skip_cache
-            )
-            skipped += 1
-            continue
-
-        metrics = calc_metrics(curve, initial_capital)
-        run_id = _run_id(strategy_id, start_date, end_date)
-
-        # Belt-and-suspenders: the auto-compute path is meant for cheap rule-based
-        # baselines (LLM entries carry auto_compute=false and deploy manually via
-        # deploy_model_run). Guard here too so a misconfigured LLM entry can't
-        # slip a rule-based fallback onto the board without the manual override.
-        _reject_if_llm_fallback(
-            strategy_id,
-            strategy_impl,
-            int(getattr(strategy_impl, "llm_calls", 0) or 0),
-            llm_decisions=_reported_int(strategy_impl, "llm_decisions"),
-            decision_steps=int(getattr(strategy_impl, "decision_steps", 0) or 0),
-            model=strategy.get("model"),
-            model_id=getattr(strategy_impl, "model_id", None) or strategy.get("model_id"),
-        )
-
-        db.insert_run(
-            run_id=run_id,
-            session_id=session_id,
-            agent_name=strategy["name"],
-            mode=LEADERBOARD_MODE,
-            start_date=start_date,
-            end_date=end_date,
-            initial_equity=metrics["initial_equity"],
-            final_equity=metrics["final_equity"],
-            total_return=metrics["total_return"],
-            sharpe_ratio=metrics["sharpe_ratio"],
-            max_drawdown=metrics["max_drawdown"],
-            num_trades=strategy_impl.num_trades(),
-            llm_model=strategy_id,
-            metadata=_with_market_data_provenance(
-                _llm_run_metadata(
-                    strategy_id,
-                    strategy,
-                    strategy_impl,
-                    model_id=(
-                        getattr(strategy_impl, "model_id", None)
-                        or strategy.get("model_id")
+            db.insert_run(
+                run_id=run_id,
+                session_id=session_id,
+                agent_name=strategy["name"],
+                mode=LEADERBOARD_MODE,
+                start_date=start_date,
+                end_date=end_date,
+                initial_equity=metrics["initial_equity"],
+                final_equity=metrics["final_equity"],
+                total_return=metrics["total_return"],
+                sharpe_ratio=metrics["sharpe_ratio"],
+                max_drawdown=metrics["max_drawdown"],
+                num_trades=strategy_impl.num_trades(),
+                llm_model=strategy_id,
+                metadata=_with_market_data_provenance(
+                    _llm_run_metadata(
+                        strategy_id,
+                        strategy,
+                        strategy_impl,
+                        model_id=(
+                            getattr(strategy_impl, "model_id", None)
+                            or strategy.get("model_id")
+                        ),
+                        initial_capital=initial_capital,
+                        start_date=start_date,
+                        end_date=end_date,
                     ),
-                    initial_capital=initial_capital,
-                    start_date=start_date,
-                    end_date=end_date,
+                    feed_provenance(bars),
                 ),
-                feed_provenance(bars),
-            ),
-        )
-        db.insert_equity_points(run_id, curve)
-        created += 1
+            )
+            db.insert_equity_points(run_id, curve)
+            created += 1
 
-    return {
-        "session_id": session_id,
-        "start_date": start_date,
-        "end_date": end_date,
-        "period": config.get("period", "contest"),
-        "created": created,
-        "skipped": skipped,
-        "refreshed_at": _utcnow_iso(),
-        "cache_hit": False,
-    }
+        return {
+            "session_id": session_id,
+            "start_date": start_date,
+            "end_date": end_date,
+            "period": config.get("period", "contest"),
+            "created": created,
+            "skipped": skipped,
+            "refreshed_at": _utcnow_iso(),
+            "cache_hit": False,
+        }
 
 
 class LeaderboardFallbackError(RuntimeError):
@@ -1429,8 +1481,12 @@ def get_leaderboard(
     entries: List[Dict[str, Any]] = []
     display_capital = float(config.get("initial_capital", INITIAL_CAPITAL))
 
+    # One query for the whole window instead of one `_find_cached_run` DB scan
+    # per strategy -- ensure_leaderboard_runs just finished writing this
+    # window, so a fresh index here reflects everything it created.
+    cached_index = _cached_run_index(start_date, end_date, session_id)
     for strategy in config.get("strategies", []):
-        run = _find_cached_run(strategy["id"], start_date, end_date, session_id)
+        run = cached_index.get(strategy["id"])
         if not run:
             continue
 

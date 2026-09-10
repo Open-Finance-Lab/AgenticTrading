@@ -20,13 +20,14 @@ import json
 import os
 import re
 import subprocess
-import sys
 import threading
 import uuid
 from copy import deepcopy
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+from dashboard.backend.paths import resolve_python_exe
 
 # Resolves to the ``dashboard/`` directory — identical to the previous
 # ``Path(__file__).resolve().parent.parent`` when this module lived at
@@ -132,16 +133,8 @@ def _default_backtest_dates() -> tuple[str, str]:
 
 
 def _resolve_python_exe() -> str:
-    project_dir = _PROJECT_DIR
-    venv_dir = project_dir / ".venv"
-    if venv_dir.exists():
-        win_py = venv_dir / "Scripts" / "python.exe"
-        if win_py.exists():
-            return str(win_py)
-        unix_py = venv_dir / "bin" / "python3"
-        if unix_py.exists():
-            return str(unix_py)
-    return sys.executable
+    venv_dir = _PROJECT_DIR / ".venv"
+    return resolve_python_exe(venv_dir)
 
 
 def _get_anthropic_client():

@@ -1,0 +1,184 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Mission Control</title>
+<link rel="stylesheet" href="/styles.css">
+<style>
+  body { background: var(--bg-primary); color: var(--text-primary); font-family: var(--font-base); margin: 0; }
+  .mc-wrap { max-width: 1200px; margin: 0 auto; padding: 2rem 1.5rem 4rem; }
+  .mc-header { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px; margin-bottom: 1.5rem; }
+  .mc-title { font-size: 24px; font-weight: 600; margin: 0; }
+  .mc-back { color: var(--text-secondary); text-decoration: none; font-size: 13px; }
+  .mc-back:hover { color: var(--text-primary); }
+  .mc-status-row { display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 2rem; }
+  .mc-pill { display: inline-flex; align-items: center; gap: 6px; padding: 6px 12px; border-radius: 100px; font-size: 12px; font-weight: 500; border: 1px solid var(--border-color); }
+  .mc-pill.armed { background: rgba(255, 65, 65, 0.12); color: var(--danger-color); border-color: rgba(255, 65, 65, 0.3); }
+  .mc-pill.safe { background: rgba(0, 200, 81, 0.1); color: var(--success-color); border-color: rgba(0, 200, 81, 0.3); }
+  .mc-pill.dot { width: 8px; height: 8px; border-radius: 50%; background: currentColor; display: inline-block; padding: 0; border: 0; }
+  .mc-columns { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; }
+  @media (max-width: 900px) { .mc-columns { grid-template-columns: 1fr; } }
+  .mc-column-label { font-size: 12px; text-transform: uppercase; letter-spacing: 0.06em; font-weight: 600; margin: 0 0 12px; padding-bottom: 8px; border-bottom: 2px solid; }
+  .mc-column-label.real { color: var(--danger-color); border-color: var(--danger-color); }
+  .mc-column-label.paper { color: var(--info-color); border-color: var(--info-color); }
+  .mc-card { background: var(--bg-card); border: 1px solid var(--border-color); border-radius: 10px; padding: 1.25rem 1.5rem; margin-bottom: 1.25rem; }
+  .mc-card.real { border-top: 3px solid var(--danger-color); }
+  .mc-card.paper { border-top: 3px solid var(--info-color); }
+  .mc-wallet-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 14px; }
+  .mc-stat-label { font-size: 11px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.04em; margin: 0 0 4px; }
+  .mc-stat-value { font-family: var(--font-mono); font-size: 20px; font-weight: 600; margin: 0; }
+  .mc-not-configured { color: var(--text-muted); font-size: 13px; line-height: 1.6; }
+  .mc-not-configured code { background: var(--bg-input); padding: 2px 6px; border-radius: 4px; font-size: 12px; }
+  .mc-holdings-title { font-size: 14px; font-weight: 600; margin: 0 0 10px; color: var(--text-secondary); }
+  table.mc-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  table.mc-table th { text-align: right; font-weight: 500; color: var(--text-muted); font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.03em; padding: 0 6px 6px 0; border-bottom: 1px solid var(--border-color); }
+  table.mc-table th:first-child { text-align: left; }
+  table.mc-table td { text-align: right; padding: 6px 6px 6px 0; font-family: var(--font-mono); border-bottom: 1px solid var(--grid-color); }
+  table.mc-table td:first-child { text-align: left; font-weight: 600; }
+  .mc-pl-pos { color: var(--success-color); }
+  .mc-pl-neg { color: var(--danger-color); }
+  .mc-empty-row td { text-align: center; color: var(--text-muted); padding: 1.5rem 0; }
+  .mc-refresh { background: none; border: 1px solid var(--border-color); color: var(--text-secondary); padding: 6px 14px; border-radius: 6px; font-size: 12px; cursor: pointer; }
+  .mc-refresh:hover { background: var(--bg-hover); color: var(--text-primary); }
+  .mc-error { color: var(--danger-color); font-size: 12px; margin-top: 8px; }
+</style>
+</head>
+<body>
+<div class="mc-wrap">
+  <div class="mc-header">
+    <h1 class="mc-title">Mission Control</h1>
+    <div style="display:flex; align-items:center; gap:14px;">
+      <span id="mcTimestamp" style="font-size:12px; color:var(--text-muted); font-family: var(--font-mono);"></span>
+      <button class="mc-refresh" onclick="loadOverview()">Refresh</button>
+      <a class="mc-back" href="/app">&larr; Back to dashboard</a>
+    </div>
+  </div>
+
+  <div class="mc-status-row" id="mcStatusRow"></div>
+
+  <div class="mc-columns">
+    <div>
+      <p class="mc-column-label real">Real money</p>
+      <div class="mc-card real" id="mcRealWallet"></div>
+      <div class="mc-card real">
+        <p class="mc-holdings-title">Holdings</p>
+        <div id="mcRealHoldings"></div>
+      </div>
+    </div>
+    <div>
+      <p class="mc-column-label paper">Paper trading</p>
+      <div class="mc-card paper" id="mcPaperWallet"></div>
+      <div class="mc-card paper">
+        <p class="mc-holdings-title">Holdings</p>
+        <div id="mcPaperHoldings"></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+function escapeHtml(value) {
+  return String(value ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+function money(v) {
+  if (v === null || v === undefined) return '—';
+  return '$' + Number(v).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+function pct(v) {
+  if (v === null || v === undefined) return '—';
+  return (v >= 0 ? '+' : '') + (v * 100).toFixed(2) + '%';
+}
+function plClass(v) {
+  if (v === null || v === undefined) return '';
+  return v >= 0 ? 'mc-pl-pos' : 'mc-pl-neg';
+}
+
+function renderWallet(container, snapshot, kind) {
+  if (!snapshot.configured || !snapshot.account) {
+    const hint = kind === 'live'
+      ? 'Set <code>ALPACA_LIVE_API_KEY</code> / <code>ALPACA_LIVE_SECRET_KEY</code> in <code>dashboard/.env</code> to connect a real account.'
+      : 'Set <code>ALPACA_API_KEY</code> / <code>ALPACA_SECRET_KEY</code> in <code>dashboard/.env</code> to connect a paper account.';
+    container.innerHTML = '<p class="mc-not-configured">Not connected. ' + hint + '</p>' +
+      (snapshot.error ? '<p class="mc-error">' + escapeHtml(snapshot.error) + '</p>' : '');
+    return;
+  }
+  const a = snapshot.account;
+  container.innerHTML =
+    '<div class="mc-wallet-grid">' +
+      '<div><p class="mc-stat-label">Portfolio value</p><p class="mc-stat-value">' + money(a.portfolio_value) + '</p></div>' +
+      '<div><p class="mc-stat-label">Cash</p><p class="mc-stat-value">' + money(a.cash) + '</p></div>' +
+      '<div><p class="mc-stat-label">Buying power</p><p class="mc-stat-value">' + money(a.buying_power) + '</p></div>' +
+      '<div><p class="mc-stat-label">Equity</p><p class="mc-stat-value">' + money(a.equity) + '</p></div>' +
+    '</div>';
+}
+
+function renderHoldings(container, snapshot) {
+  if (!snapshot.configured) {
+    container.innerHTML = '<p class="mc-not-configured">No account connected.</p>';
+    return;
+  }
+  const positions = (snapshot.positions || []).filter(p => Math.abs(p.qty) > 0.0001);
+  if (positions.length === 0) {
+    container.innerHTML = '<table class="mc-table"><tbody><tr class="mc-empty-row"><td>No open positions</td></tr></tbody></table>';
+    return;
+  }
+  positions.sort((a, b) => (b.market_value || 0) - (a.market_value || 0));
+  let rows = positions.map(p =>
+    '<tr>' +
+      '<td>' + escapeHtml(p.symbol) + '</td>' +
+      '<td>' + Number(p.qty).toLocaleString(undefined, { maximumFractionDigits: 4 }) + '</td>' +
+      '<td>' + money(p.current_price) + '</td>' +
+      '<td>' + money(p.market_value) + '</td>' +
+      '<td class="' + plClass(p.unrealized_pl) + '">' + money(p.unrealized_pl) + '</td>' +
+      '<td class="' + plClass(p.unrealized_plpc) + '">' + pct(p.unrealized_plpc) + '</td>' +
+    '</tr>'
+  ).join('');
+  container.innerHTML =
+    '<table class="mc-table"><thead><tr>' +
+      '<th>Symbol</th><th>Qty</th><th>Price</th><th>Value</th><th>P&amp;L</th><th>P&amp;L %</th>' +
+    '</tr></thead><tbody>' + rows + '</tbody></table>';
+}
+
+function renderStatusRow(data) {
+  const armed = data.live_execute_enabled;
+  const pills = [];
+  pills.push(
+    '<span class="mc-pill ' + (armed ? 'armed' : 'safe') + '">' +
+      '<span class="mc-pill dot"></span>' +
+      (armed ? 'LIVE EXECUTION ARMED (real orders can place)' : 'Live execution off (review-only)') +
+    '</span>'
+  );
+  pills.push('<span class="mc-pill safe"><span class="mc-pill dot"></span>Per-order cap $' + Number(data.live_max_order_usd).toFixed(0) + '</span>');
+  document.getElementById('mcStatusRow').innerHTML = pills.join('');
+}
+
+async function loadOverview() {
+  try {
+    const res = await fetch('/api/v1/mission-control/overview', { credentials: 'include' });
+    if (res.status === 401 || res.status === 403) {
+      document.getElementById('mcStatusRow').innerHTML =
+        '<span class="mc-error">Sign in as an admin to view Mission Control.</span>';
+      return;
+    }
+    const data = await res.json();
+    renderStatusRow(data);
+    renderWallet(document.getElementById('mcRealWallet'), data.live, 'live');
+    renderHoldings(document.getElementById('mcRealHoldings'), data.live);
+    renderWallet(document.getElementById('mcPaperWallet'), data.paper, 'paper');
+    renderHoldings(document.getElementById('mcPaperHoldings'), data.paper);
+    document.getElementById('mcTimestamp').textContent = 'Updated ' + new Date(data.timestamp).toLocaleTimeString();
+  } catch (e) {
+    document.getElementById('mcStatusRow').innerHTML = '<span class="mc-error">Failed to load: ' + escapeHtml(e) + '</span>';
+  }
+}
+
+loadOverview();
+setInterval(loadOverview, 30000);
+</script>
+</body>
+</html>

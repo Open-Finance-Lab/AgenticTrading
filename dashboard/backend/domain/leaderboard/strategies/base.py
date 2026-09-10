@@ -12,12 +12,15 @@ from typing import Any, Dict, List
 
 import pandas as pd
 
+from dashboard.backend.infrastructure.llm.validator import DJIA_30
+
 
 class BaselineStrategy(ABC):
     """A single leaderboard baseline strategy.
 
     Subclasses declare a class-level ``key`` (used by the registry / config
-    ``strategy`` field) and implement ``required_symbols`` and ``run``.
+    ``strategy`` field) and implement ``run``; they override
+    ``required_symbols`` only when the DJIA-30 default universe doesn't apply.
     """
 
     key: str = ""
@@ -27,9 +30,11 @@ class BaselineStrategy(ABC):
         self.id = self.config.get("id")
         self.name = self.config.get("name")
 
-    @abstractmethod
     def required_symbols(self) -> List[str]:
-        """Symbols this strategy needs market data for."""
+        """Symbols this strategy needs market data for: ``config["symbols"]``
+        when set, else the DJIA 30 universe."""
+        symbols = self.config.get("symbols")
+        return list(symbols) if symbols else list(DJIA_30)
 
     @abstractmethod
     def run(
@@ -42,5 +47,8 @@ class BaselineStrategy(ABC):
         """Return an hourly equity curve: [{timestamp, equity, cash, positions_value}, ...]."""
 
     def num_trades(self) -> int:
-        """Number of trades this strategy executes (for display only)."""
-        return 0
+        """Number of trades this strategy executes (for display only).
+
+        Strategies that count trades set ``self._num_trades`` in ``run()``.
+        """
+        return getattr(self, "_num_trades", 0)
