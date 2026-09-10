@@ -11,7 +11,11 @@ blocks by default. CommonStack leaderboard models (Gemini, Qwen, DeepSeek, …)
 likewise bill thinking into ``output_tokens``, so OpenRouter enables reasoning
 by default. Effort levels map to a hard ``reasoning.max_tokens`` budget (e.g.
 medium→2048) so a JSON text block still fits on long trading prompts — bare
-provider default / effort-% often spends the whole ceiling on thinking. Set
+provider default / effort-% often spends the whole ceiling on thinking. That
+budget is then clamped against each request's own ``max_tokens`` (see
+``_clamp_reasoning_budget``): a mapped budget can exceed the configured output
+ceiling — medium's 2048 against the harness's default 2000 does — and a request
+whose thinking budget does not leave room for an answer cannot return one. Set
 ``OPENROUTER_REASONING_EFFORT=none`` to force-disable; ``auto`` leaves the
 provider alone; ``OPENROUTER_REASONING_MAX_TOKENS`` overrides the mapped budget.
 """
@@ -43,6 +47,77 @@ _EFFORT_TO_REASONING_BUDGET = {
     "xhigh": 6144,
     "max": 8192,
 }
+
+# A thinking budget and the answer share one output ceiling. Anthropic requires
+# ``max_tokens > thinking.budget_tokens``, and a reply that spends the whole
+# ceiling on reasoning carries no text block at all -- which is exactly the
+# empty response the retry paths in ``pipeline_runner`` / ``portfolio_manager``
+# exist to recover from, at one billed call each. The default pairing was
+# structurally incapable of returning text: effort ``medium`` asks for 2048
+# thinking tokens while ``request_trading_decision`` sends ``max_tokens=2000``.
+# So the budget is clamped against the ceiling the caller is actually sending,
+# leaving this much room for the JSON.
+_MIN_ANSWER_TOKENS = 512
+# OpenRouter's floor for ``reasoning.max_tokens``. A budget below it is not a
+# smaller budget, it is a rejected request -- so a ceiling too small to hold
+# the floor plus an answer disables reasoning instead of shrinking it.
+_MIN_REASONING_BUDGET = 1024
+
+# One line per distinct (budget, ceiling) pairing: this runs per request, and a
+# silent clamp is the failure mode being fixed, not an acceptable one.
+_WARNED_BUDGET_CEILINGS: set = set()
+
+
+def _clamp_reasoning_budget(budget: int, max_tokens: Any) -> Optional[int]:
+    """Largest legal thinking budget that still leaves room for an answer.
+
+    ``None`` when the ceiling cannot fit ``_MIN_REASONING_BUDGET`` plus an
+    answer: the caller then disables reasoning rather than sending a request
+    that cannot return text. An unknown ceiling (``None``, or anything not a
+    positive int) is left alone -- there is nothing to clamp against.
+    """
+    if isinstance(max_tokens, bool) or not isinstance(max_tokens, int):
+        return budget
+    if max_tokens <= 0:
+        return budget
+    room = max_tokens - _MIN_ANSWER_TOKENS
+    if budget <= room:
+        return budget
+    clamped = room if room >= _MIN_REASONING_BUDGET else None
+    key = (budget, max_tokens)
+    if key not in _WARNED_BUDGET_CEILINGS:
+        _WARNED_BUDGET_CEILINGS.add(key)
+        action = (
+            f"clamping it to {clamped}"
+            if clamped is not None
+            else "disabling reasoning for this request"
+        )
+        print(
+            f"⚠️ OpenRouter reasoning budget {budget} leaves no room for an "
+            f"answer under max_tokens={max_tokens}; {action} so the reply can "
+            f"still carry a text block"
+        )
+    return clamped
+
+
+def _reasoning_off_body() -> dict[str, Any]:
+    """``extra_body`` payload that disables reasoning (a fresh dict per call)."""
+    # ``effort: none`` is the documented disable; ``enabled: false`` and
+    # ``exclude: true`` cover providers that ignore effort alone.
+    return {
+        "reasoning": {
+            "effort": "none",
+            "enabled": False,
+            "exclude": True,
+        }
+    }
+
+
+def _reasoning_body_for_budget(budget: int, max_tokens: Any) -> dict[str, Any]:
+    clamped = _clamp_reasoning_budget(budget, max_tokens)
+    if clamped is None:
+        return _reasoning_off_body()
+    return {"reasoning": {"max_tokens": clamped, "enabled": True}}
 
 
 def base_url() -> str:
@@ -91,7 +166,11 @@ def reasoning_is_explicitly_enabled(override: Optional[str]) -> bool:
     return effort not in _OFF_VALUES and effort not in _PASSTHROUGH_VALUES
 
 
-def reasoning_extra_body(override: Optional[str] = None) -> Optional[dict[str, Any]]:
+def reasoning_extra_body(
+    override: Optional[str] = None,
+    *,
+    max_tokens: Any = None,
+) -> Optional[dict[str, Any]]:
     """OpenRouter ``reasoning`` payload to merge into ``extra_body``, or ``None``.
 
     ``OPENROUTER_REASONING_EFFORT``:
@@ -108,21 +187,15 @@ def reasoning_extra_body(override: Optional[str] = None) -> Optional[dict[str, A
     if effort in _PASSTHROUGH_VALUES:
         return None
     if effort in _OFF_VALUES:
-        # ``effort: none`` is the documented disable; ``enabled: false`` and
-        # ``exclude: true`` cover providers that ignore effort alone.
-        return {
-            "reasoning": {
-                "effort": "none",
-                "enabled": False,
-                "exclude": True,
-            }
-        }
-    override = _reasoning_max_tokens_override()
-    if override is not None:
-        return {"reasoning": {"max_tokens": override, "enabled": True}}
+        return _reasoning_off_body()
+    budget_override = _reasoning_max_tokens_override()
+    if budget_override is not None:
+        return _reasoning_body_for_budget(budget_override, max_tokens)
     budget = _EFFORT_TO_REASONING_BUDGET.get(effort)
     if budget is not None:
-        return {"reasoning": {"max_tokens": budget, "enabled": True}}
+        return _reasoning_body_for_budget(budget, max_tokens)
+    # An unrecognised effort string carries no number to clamp; the provider
+    # owns the budget in that case.
     return {"reasoning": {"effort": effort, "enabled": True}}
 
 
@@ -141,6 +214,8 @@ def _reasoning_budget_tokens(override: Optional[str] = None) -> Optional[int]:
 
 def anthropic_thinking_kwarg(
     override: Optional[str] = None,
+    *,
+    max_tokens: Any = None,
 ) -> Optional[dict[str, Any]]:
     """Anthropic Messages ``thinking`` kwarg for OpenRouter's Anthropic skin.
 
@@ -148,13 +223,21 @@ def anthropic_thinking_kwarg(
     When enabled with a known budget → ``{"type": "enabled", "budget_tokens": N}``
     so thinking cannot consume the entire ``max_tokens`` ceiling (Nemotron
     otherwise often returns only thinking/redacted_thinking).
+
+    ``max_tokens`` is that ceiling. Pass it: a budget larger than the ceiling
+    made the "so thinking cannot consume the entire ceiling" guarantee above
+    false, and a budget it cannot share with an answer disables reasoning
+    outright rather than shipping a request that cannot reply.
     """
     if reasoning_is_disabled(override):
         return {"type": "disabled"}
     budget = _reasoning_budget_tokens(override)
     if budget is None:
         return None
-    return {"type": "enabled", "budget_tokens": budget}
+    clamped = _clamp_reasoning_budget(budget, max_tokens)
+    if clamped is None:
+        return {"type": "disabled"}
+    return {"type": "enabled", "budget_tokens": clamped}
 
 
 def _default_headers() -> dict[str, str]:
@@ -177,13 +260,20 @@ class _OpenRouterMessages:
         self._reasoning_effort = reasoning_effort
 
     def create(self, **kwargs: Any) -> Any:
-        extras = reasoning_extra_body(self._reasoning_effort)
+        # Both payloads are clamped against the ceiling this very request
+        # carries, not against the default one: the recovery calls raise
+        # ``max_tokens`` precisely so reasoning and the JSON both fit, and a
+        # demo run lowers it below anything reasoning can share.
+        ceiling = kwargs.get("max_tokens")
+        extras = reasoning_extra_body(self._reasoning_effort, max_tokens=ceiling)
         if extras:
             body = dict(kwargs.get("extra_body") or {})
             if "reasoning" not in body:
                 body.update(extras)
                 kwargs["extra_body"] = body
-        thinking = anthropic_thinking_kwarg(self._reasoning_effort)
+        thinking = anthropic_thinking_kwarg(
+            self._reasoning_effort, max_tokens=ceiling
+        )
         if thinking is not None and "thinking" not in kwargs:
             kwargs["thinking"] = thinking
         return self._inner.create(**kwargs)

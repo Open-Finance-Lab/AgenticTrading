@@ -481,7 +481,20 @@ class PortfolioManager:
                 # blocks. Retry, then one last JSON-only rescue call so we do
                 # not tank H6 coverage on intermittent empty responses.
                 llm_response = None
-                no_text_retries = 4
+                # How many times the failing ceiling is re-asked before the
+                # rescue call raises it. ``pipeline_runner`` escalates on its
+                # FIRST retry and then stops: a reply already obtained at the
+                # recovery ceiling has nothing different left to ask for, so a
+                # second escalated request is the same request again.
+                # ``LLM_ESCALATE_CEILING_ON_RETRY=1`` makes this loop agree --
+                # one request at the configured ceiling, then the rescue call
+                # below -- instead of paying for four identical failures first.
+                # An empty reply is what a reply looks like when reasoning ran
+                # out the output ceiling before any text was emitted, which is
+                # not the kind of failure a same-ceiling retry fixes. The first
+                # request and the rescue call are byte-identical either way;
+                # only the count of same-ceiling retries between them moves.
+                no_text_retries = 1 if escalate_ceiling_on_retry() else 4
                 # One recovery budget (``RECOVERY_MAX_OUTPUT_TOKENS``) per
                 # step, spent by whichever unusable reply claims it first: the
                 # final rescue call below, or the truncation retry after the
@@ -489,55 +502,34 @@ class PortfolioManager:
                 # different left to ask for.
                 recovery_spent = False
                 output_delta = 0
-                # An empty reply is what a reply looks like when reasoning ran
-                # out the output ceiling before any text was emitted, so
-                # re-asking at the same ceiling asks for the same failure.
-                # ``pipeline_runner`` already escalates on its first retry;
-                # this makes the single-prompt loop agree instead of spending
-                # four calls first. The FIRST request is untouched either way.
-                escalate = escalate_ceiling_on_retry()
                 for attempt in range(no_text_retries + 1):
                     if attempt == no_text_retries:
                         # Final rescue: preserve the provider's reasoning mode,
                         # but give the model more room for reasoning plus JSON.
-                        attempt_max_tokens = RECOVERY_MAX_OUTPUT_TOKENS
                         print(
                             "   ⚠️  Final rescue call with reasoning preserved "
                             f"and max_tokens={RECOVERY_MAX_OUTPUT_TOKENS}"
                         )
                         recovery_spent = True
-                    else:
-                        attempt_max_tokens = (
-                            RECOVERY_MAX_OUTPUT_TOKENS
-                            if (escalate and attempt > 0)
-                            else None
+                        response = _request_trading_decision(
+                            llm_client,
+                            prompt=prompt,
+                            model=model,
+                            max_tokens=RECOVERY_MAX_OUTPUT_TOKENS,
+                            temperature=temperature,
+                            market_context=market_context,
                         )
-                        if attempt_max_tokens is not None and attempt == 1:
-                            print(
-                                "   ⚠️  Retrying with reasoning preserved and "
-                                f"max_tokens={RECOVERY_MAX_OUTPUT_TOKENS}"
-                            )
-                    # Passed only when it is actually being raised, so an
-                    # unescalated attempt is the identical call it is today --
-                    # same kwargs, not merely the same resolved value.
-                    extra = ({"max_tokens": attempt_max_tokens}
-                             if attempt_max_tokens is not None else {})
-                    response = _request_trading_decision(
-                        llm_client,
-                        prompt=prompt,
-                        model=model,
-                        temperature=temperature,
-                        market_context=market_context,
-                        **extra,
-                    )
+                    else:
+                        response = _request_trading_decision(
+                            llm_client,
+                            prompt=prompt,
+                            model=model,
+                            temperature=temperature,
+                            market_context=market_context,
+                        )
                     output_delta = self._record_llm_usage(response)
                     try:
                         llm_response = _extract_response_text(response)
-                        # A reply already obtained at the recovery ceiling has
-                        # nothing different left to ask for, so the post-parse
-                        # truncation retry below must not repeat it.
-                        if attempt_max_tokens == RECOVERY_MAX_OUTPUT_TOKENS:
-                            recovery_spent = True
                         break
                     except AttributeError as extract_err:
                         if "No text content" not in str(extract_err):
