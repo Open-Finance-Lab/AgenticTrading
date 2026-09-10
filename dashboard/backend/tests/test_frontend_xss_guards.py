@@ -251,3 +251,22 @@ def test_leaderboard_table_and_detail_use_the_renderers():
     src = _LEADERBOARD_JS.read_text(encoding="utf-8")
     assert "renderLeaderboardRowHtml" in _extract_function(src, "populateLeaderboardTable")
     assert "renderLeaderboardDetailHtml(" in _extract_function(src, "selectLeaderboardTeam")
+
+
+def test_the_chart_legend_escapes_the_series_label():
+    """`buildCustomLegend` builds `innerHTML` from `ds.label`, which is a server
+    string: the entry's model or team name, straight off the leaderboard payload.
+
+    Every other `innerHTML` site in leaderboard.js routes its fields through
+    `escapeHtml` (the file says so at the `renderRankRow` comment); this one
+    interpolated `shortName(ds.label)` raw. The board's roster is curated config
+    today, so it was not reachable from a signup form -- but the same legend
+    renders TEAM names, and "the sink is fine because of who currently fills it"
+    is exactly the assumption a later feature breaks silently.
+    """
+    source = _LEADERBOARD_JS.read_text(encoding="utf-8")
+    legend = source[source.index("function buildCustomLegend") :]
+    legend = legend[: legend.index("\nasync function")]
+    assert "${escapeHtml(shortName(ds.label))}" in legend, (
+        "the legend interpolates a server-controlled label into innerHTML unescaped"
+    )

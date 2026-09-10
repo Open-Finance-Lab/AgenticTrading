@@ -4893,6 +4893,32 @@ a.header-brand:hover .title-section h1 {
     padding: 8px 6px 2px;
 }
 
+/* Category heading inside the chart key ("Model", "Baseline Strategy", "Market
+   Index"). The legend has always been sorted by category and never said so, and
+   since the recolour it is the only place the encoding is written down: hue means
+   model, grey + dash means reference.
+
+   `flex-basis: 100%` forces a row break so each heading actually leads its group
+   -- the container is a wrapping flex row, where an inline heading would drift
+   into the middle of the previous group at some widths and label the wrong thing.
+   Muted and uppercase so it reads as a section marker rather than a curve whose
+   swatch failed to render. */
+.chart-legend-custom .legend-group-label {
+    flex-basis: 100%;
+    text-align: center;
+    margin-top: 4px;
+    color: var(--text-muted);
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    line-height: 1;
+}
+
+.chart-legend-custom .legend-group-label:first-child {
+    margin-top: 0;
+}
+
 .chart-legend-custom .legend-item {
     display: inline-flex;
     align-items: center;
@@ -7829,11 +7855,41 @@ html[data-nav-page="home"] #homeView .dashboard-bottom-grid .home-module--market
    sliver, which is the failure `flex: 0 0 auto` was originally guarding
    against -- a floor states that directly instead of buying it by refusing to
    shrink at all. */
+/* The floor is 168px, and it is bounded on BOTH sides. Know what it does and
+   does not reach before touching it -- a floor only binds where the clamp falls
+   below it, which is a narrower band than it looks.
+
+   26vh crosses 168px at a 646px-tall viewport, so this floor changes nothing
+   above that; a typical desktop window already gets 178-280px from the clamp
+   alone. What it changes is the 508-646px band, where the chart went from
+   132-168px to a flat 168px -- +12px at 600px, +36px at the short end. That is
+   the regime the "too compact to see the trend" report (user feedback,
+   2026-09-03) came from: their screenshot carries no endpoint pills, and pills
+   appear at 178px, so their viewport was under ~685px.
+
+   It is NOT free. The panel is bounded and the chart is the flex item that
+   yields (see .hm-rank-chart's flex: 0 1 auto and the guard on it), so every px
+   added here is a px the standings list no longer gets in that same band --
+   roughly one row at the short end. That trade is the point of the change, not
+   an oversight: the list keeps its rows everywhere the clamp already wins.
+
+   Above: `BOARD_MIN_LABEL_HEIGHT` (178px, js/leaderboard.js) is where
+   `boardFrameLayout` starts drawing endpoint labels. A floor past that would
+   answer "the lines are too compact" by stacking nine pills into the panel --
+   the other complaint in the same feedback document. It is an explicit constant
+   rather than the geometry it used to fall out of ((BOARD_PILL_HEIGHT + 1) * 9
+   + BOARD_XAXIS_ALLOWANCE) because that geometry moves between frames: the
+   x-axis term is a 34px estimate on first paint and the real ~24px afterwards,
+   so a floor set against the estimate was ~10px inside the band where the next
+   re-layout turns the pills on. The clamp stays at 26vh for the same reason:
+   raising it would pull the threshold down to a ~685px viewport, turning labels
+   on for a band that has never had them. Both bounds are pinned by
+   test_frontend_home_chart_height.py. */
 .hm-rank-chart {
     flex: 0 1 auto;
     position: relative;
     height: clamp(140px, 26vh, 280px);
-    min-height: 132px;
+    min-height: 168px;
     margin-bottom: 10px;
 }
 .hm-rank-chart canvas {
@@ -10833,6 +10889,27 @@ body.agent-editor-open {
 .agent-capital-note {
     font-size: 13px;
     color: var(--text-secondary);
+}
+
+/* Inline validity message for the Allocated Capital inputs, written by
+   `setCashInputValidity` into the `[data-cash-error-slot]` beside each field.
+
+   It exists because the old behaviour was to CLAMP a rejected amount silently:
+   the field disagreed with what was typed and never said why (2026-09-03 user
+   feedback). `role="alert"` on the span is what carries the same correction to
+   a screen reader, since the visible colour cannot. --danger-color is the token
+   the rest of the form's error text uses; a bespoke red here would drift. */
+.capital-input-error {
+    font-size: 13px;
+    color: var(--danger-color);
+}
+
+/* The field itself has to look wrong too -- a message below a normal-looking
+   input reads as a hint, not a rejection. Border only: a red fill would fight
+   the value the user still needs to read and edit. */
+.agent-capital-input[aria-invalid="true"],
+.auth-field input[aria-invalid="true"] {
+    border-color: var(--danger-color);
 }
 
 .agent-editor-broker {

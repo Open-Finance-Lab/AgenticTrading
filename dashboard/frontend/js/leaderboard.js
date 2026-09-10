@@ -49,12 +49,28 @@ const HOVER_HIT_RADIUS_PX = 16;
 //   benchmark -> neutral gray, dotted / dash-dot, understated
 //   strategy  -> colored, long-dashed, secondary
 //   team      -> solid, prominent (colors assigned stably, never by rank)
+// The five reference curves carry NO hue: hue is the models' channel (see
+// MODEL_COLOR_PALETTE below), and identity here is carried entirely by dash.
+//
+// They used to be bright and coloured (#38BDF8 / #C084FC / #4ADE80), which
+// collided with the model palette's blue, violet and green and made a baseline
+// read as a thirteenth competitor -- the "labeling is quite messy" report of
+// 2026-09-03. Desaturating them instead was measured and does not work: every
+// muted trio came out at normal-vision Delta E 0.9-9.1 against a >= 15 floor, so
+// a muted-but-still-coded baseline is a colour that claims to say something and
+// cannot. Neutral grey says the true thing instead -- "not a competitor" -- and
+// the dash pattern does the identifying.
+//
+// Every dash is therefore UNIQUE, which the three strategies previously were
+// not (all three shipped [10, 6]). With colour no longer distinguishing them, a
+// shared dash would make "Buy & Hold vs Mean-Variance" unanswerable from the
+// chart. Pinned by test_frontend_leaderboard_palette.py.
 const LEADERBOARD_STYLES = {
   SPY: { color: '#CBD5E1', kind: 'benchmark', dash: [2, 4] },
   DJIA: { color: '#94A3B8', kind: 'benchmark', dash: [8, 4, 2, 4] },
-  'Buy & Hold': { color: '#38BDF8', kind: 'strategy', dash: [10, 6] },
-  'Mean-Variance': { color: '#C084FC', kind: 'strategy', dash: [10, 6] },
-  'Equal-Weight': { color: '#4ADE80', kind: 'strategy', dash: [10, 6] },
+  'Buy & Hold': { color: '#B4BFCE', kind: 'strategy', dash: [10, 6] },
+  'Mean-Variance': { color: '#7C8798', kind: 'strategy', dash: [4, 4] },
+  'Equal-Weight': { color: '#A0AAB9', kind: 'strategy', dash: [14, 3, 3, 3] },
 };
 
 // Visual hierarchy: teams are boldest, provided models prominent (solid),
@@ -63,6 +79,22 @@ const KIND_WIDTH = { team: 2.25, model: 2.0, strategy: 1.6, benchmark: 1.1 };
 const KIND_ALPHA = { team: 1.0, model: 0.95, strategy: 0.7, benchmark: 0.5 };
 const EMPHASIS_WIDTH = 3;
 
+// Heading each `kind` sits under in the chart legend.
+//
+// These are the RANKING TABLE's words, not new ones: `formatEntryBadge` below
+// produces exactly 'Model' / 'Baseline Strategy' / 'Market Index' for the badge
+// on each row. The legend sorted by kind and never named the groups, so the
+// taxonomy existed twice -- once as badges in the table, once as an unlabelled
+// sort order in the key -- with nothing linking them. Sharing the strings is
+// what keeps them from becoming two names for one thing.
+// Pinned by test_frontend_leaderboard_palette.py.
+const KIND_GROUP_LABEL = {
+  team: 'Team',
+  model: 'Model',
+  strategy: 'Baseline Strategy',
+  benchmark: 'Market Index',
+};
+
 // Stable bright palette for actual competition teams (assigned first-seen).
 const TEAM_COLOR_PALETTE = [
   '#F97316', '#EAB308', '#EC4899', '#14B8A6', '#A855F7',
@@ -70,16 +102,30 @@ const TEAM_COLOR_PALETTE = [
 ];
 const teamColorMap = {};
 
-// Provided LLM models get their own warm, distinct palette (solid lines) so
-// they read as a separate category from rule-based strategy baselines.
-// Ten, not five: `getModelColor` assigns `PALETTE[n % len]` in first-seen
-// order, and the board carries seven models -- at five, models 6 and 7 were
-// handed models 1 and 2's colours. That was cosmetic while the colour was
-// decoration and is not, now that screen 0's rank-row swatch is the chart's
-// only key to which curve is which.
+// Provided LLM models get the whole categorical hue space (solid lines): they
+// are what a reader actually compares, and the reference curves above have been
+// neutralised precisely to free it up.
+//
+// EIGHT, and the count is a measured limit rather than a round number. This is
+// the dataviz validated categorical order, stepped for a dark surface, and it
+// PASSES all five palette checks on both chart surfaces (#131a35 and #0a0e27):
+// lightness band, chroma floor, CVD separation (worst adjacent Delta E 8.4),
+// normal-vision floor (worst adjacent 19.3), and >= 3:1 contrast.
+//
+// It replaced a ten-slot palette that FAILED two of those checks -- worst
+// adjacent normal-vision Delta E 11.2 between #FB923C and #FBBF24, and every
+// entry above the dark lightness band. Those ten slots existed so a board of
+// seven models never wrapped, but the headroom was bought in curves the reader
+// cannot separate, which is the opposite of what a palette is for.
+//
+// `getModelColor` still assigns `PALETTE[n % len]`, so the wrap threshold moved
+// from ten to eight. Do NOT append a ninth hue to restore headroom: appending
+// two was measured and breaks the set (chroma floor and CVD both FAIL at ten).
+// A board that grows past eight models needs a re-validated palette --
+// `node scripts/validate_palette.js "<hexes>" --mode dark --surface "#131a35"`.
 const MODEL_COLOR_PALETTE = [
-  '#FBBF24', '#FB923C', '#F472B6', '#A78BFA', '#34D399',
-  '#22D3EE', '#F87171', '#A3E635', '#E879F9', '#60A5FA',
+  '#3987e5', '#d95926', '#199e70', '#c98500',
+  '#d55181', '#008300', '#9085e9', '#e66767',
 ];
 const modelColorMap = {};
 
@@ -232,6 +278,25 @@ const BOARD_ARROW_HEAD_HALF = 4;
 // onwards the real number is read off the scale, and this is only the estimate
 // that stands in before any layout has happened.
 const BOARD_XAXIS_ALLOWANCE = 34;
+// Shortest canvas that may carry endpoint labels at all, checked before any
+// geometry.
+//
+// THE GEOMETRIC VERDICT IS NOT STABLE ACROSS FRAMES, which is the whole reason
+// this exists. `boardFrameLayout` divides `chart.height - boardXAxisHeight(chart)`
+// by the label count, and boardXAxisHeight returns the 34px ESTIMATE on the
+// first frame and the real number -- 20.4px on the tab, ~24px on screen 0 at its
+// 14px ticks -- on every frame after. So a canvas sized between the two
+// resulting thresholds draws no pills on first paint and then acquires nine of
+// them on the next re-layout: a resize, a hover-driven `chart.update('none')`,
+// a tab switch. Nothing reports it and no test that calls the function once can
+// see it.
+//
+// 178 is the number the rest of the repo already states as the flip point
+// (.hm-rank-chart's comment in styles.css, test_frontend_home_chart_height.py).
+// Declaring it makes that statement true by construction instead of an
+// inference from a measurement the running code discards. The per-count gap
+// check below still applies on top -- this is a floor, not a replacement.
+const BOARD_MIN_LABEL_HEIGHT = 178;
 const BOARD_AXIS_COLOR = 'rgba(148, 163, 184, 0.45)';
 
 /** The x-axis strip's real height, or a conservative stand-in before layout.
@@ -312,6 +377,9 @@ function boardLabelBlockWidth(chart, labels) {
 function boardFrameLayout(chart, labels, fraction) {
   const none = { gutter: BOARD_ARROW_PAD, drawLabels: false, gap: 0 };
   if (!labels || !labels.length) return none;
+  // Before any geometry, and on `chart.height` alone so the verdict cannot move
+  // between frames. See BOARD_MIN_LABEL_HEIGHT.
+  if (chart.height < BOARD_MIN_LABEL_HEIGHT) return none;
   const usableHeight = chart.height - boardXAxisHeight(chart);
   const gap = Math.min(BOARD_LABEL_GAP_MAX, usableHeight / labels.length);
   if (gap < BOARD_LABEL_GAP_MIN) return none;
@@ -1946,19 +2014,34 @@ function buildCustomLegend(chart) {
     .map((ds, i) => ({ ds, i }))
     .sort((a, b) => (order[a.ds._style.kind] ?? 9) - (order[b.ds._style.kind] ?? 9));
 
+  // `items` is already sorted by kind, so a heading is emitted whenever the kind
+  // changes rather than by grouping the list again -- one traversal, and the
+  // headings cannot disagree with the order they label.
+  let lastKind = null;
   container.innerHTML = items.map(({ ds }) => {
     const st = ds._style;
     const hidden = hiddenSeries.has(ds.label);
     const w = Math.min(KIND_WIDTH[st.kind] || 2, 2.4);
     const dash = (st.dash && st.dash.length) ? st.dash.join(',') : '';
     const stroke = hidden ? 'rgba(148,163,184,0.4)' : st.color;
-    return `
+    // Only a kind that is actually on the chart gets a heading: the board omits
+    // teams entirely today, and an empty "Team" group would be a promise the
+    // roster does not keep.
+    let heading = '';
+    if (st.kind !== lastKind) {
+      lastKind = st.kind;
+      const label = KIND_GROUP_LABEL[st.kind];
+      if (label) {
+        heading = `<span class="legend-group-label" role="presentation">${escapeHtml(label)}</span>`;
+      }
+    }
+    return `${heading}
       <button class="legend-item${hidden ? ' legend-hidden' : ''}" data-label="${ds.label.replace(/"/g, '&quot;')}">
         <svg class="legend-sample" width="26" height="10" viewBox="0 0 26 10">
           <line x1="1" y1="5" x2="25" y2="5" stroke="${stroke}" stroke-width="${w}"
             ${dash ? `stroke-dasharray="${dash}"` : ''} stroke-linecap="round" />
         </svg>
-        <span class="legend-label">${shortName(ds.label)}</span>
+        <span class="legend-label">${escapeHtml(shortName(ds.label))}</span>
       </button>`;
   }).join('');
 

@@ -63,15 +63,20 @@ export const BOARD_BASELINE_IDS = ['buy_hold_djia', 'djia_index'];
 
 /** Mirrors `MODEL_COLOR_PALETTE` in dashboard/frontend/js/leaderboard.js, in
  *  order. A visitor who signs up lands on a board whose curves they have
- *  already learned here, so the same model must be the same colour on both. */
+ *  already learned here, so the same model must be the same colour on both.
+ *
+ *  Do not edit either copy alone -- test_landing_live_board.py compares them
+ *  element for element. These eight are a VALIDATED set (dataviz palette
+ *  validator, dark surface): appending a ninth hue to buy wrap headroom breaks
+ *  the separation guarantees. See the note on the /app copy for the numbers. */
 export const MODEL_COLOR_PALETTE = [
-  '#FBBF24', '#FB923C', '#F472B6', '#A78BFA', '#34D399',
-  '#22D3EE', '#F87171', '#A3E635', '#E879F9', '#60A5FA',
+  '#3987e5', '#d95926', '#199e70', '#c98500',
+  '#d55181', '#008300', '#9085e9', '#e66767',
 ];
 
 /** Mirrors the relevant rows of `LEADERBOARD_STYLES`, rekeyed onto entry ids. */
 export const BASELINE_STYLES: Record<string, { color: string; dash: string }> = {
-  buy_hold_djia: { color: '#38BDF8', dash: '10 6' },
+  buy_hold_djia: { color: '#B4BFCE', dash: '10 6' },
   djia_index: { color: '#94A3B8', dash: '8 4 2 4' },
 };
 

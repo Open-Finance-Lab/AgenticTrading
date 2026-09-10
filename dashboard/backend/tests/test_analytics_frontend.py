@@ -41,12 +41,12 @@ def _function_body(source: str, signature: str) -> str:
 
 
 def test_analytics_script_loads_between_app_and_page_scripts():
-    app_at = APP_HTML.index('<script src="app.js?v=129" defer></script>')
+    app_at = APP_HTML.index('<script src="app.js?v=130" defer></script>')
     analytics_at = APP_HTML.index(
         '<script src="js/analytics.js?v=1" defer></script>'
     )
     editor_at = APP_HTML.index(
-        '<script src="js/agent-editor.js?v=30" defer></script>'
+        '<script src="js/agent-editor.js?v=31" defer></script>'
     )
     assert app_at < analytics_at < editor_at
 

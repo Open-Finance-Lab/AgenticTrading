@@ -46,6 +46,16 @@ export const BOARD_ARROW_PAD = 18;
 export const BOARD_ARROW_HEAD_LENGTH = 8;
 export const BOARD_ARROW_HEAD_HALF = 4;
 export const BOARD_XAXIS_ALLOWANCE = 34;
+// Shortest canvas that may carry endpoint labels at all. Mirrors
+// js/leaderboard.js, where it fixes a verdict that moved between frames -- the
+// dashboard reads the x-axis's real height off the chart after the first
+// layout, so the geometric threshold there is ~10px lower than the one
+// BOARD_XAXIS_ALLOWANCE implies. This module has no chart and therefore never
+// had that bug, but the two copies are pinned to declare the same constants
+// with the same values (test_landing_board_frame.py), and a frame that draws
+// labels at one height on the landing page and not the other is exactly the
+// drift that pinning exists to prevent.
+export const BOARD_MIN_LABEL_HEIGHT = 178;
 export const BOARD_AXIS_COLOR = 'rgba(148, 163, 184, 0.45)';
 
 export type LabelText = { name: string; value: string };
@@ -130,6 +140,8 @@ export function frameLayout(input: {
   const fraction = input.fraction ?? BOARD_GUTTER_FRACTION;
   const none: Frame = { gutter: BOARD_ARROW_PAD, drawLabels: false, gap: 0 };
   if (!labels.length || width <= 0 || height <= 0) return none;
+  // Before any geometry, and on `height` alone. See BOARD_MIN_LABEL_HEIGHT.
+  if (height < BOARD_MIN_LABEL_HEIGHT) return none;
   const gap = Math.min(BOARD_LABEL_GAP_MAX, (height - BOARD_XAXIS_ALLOWANCE) / labels.length);
   if (gap < BOARD_LABEL_GAP_MIN) return none;
   if ((labels.length - 1) * gap + BOARD_PILL_HEIGHT > height) return none;

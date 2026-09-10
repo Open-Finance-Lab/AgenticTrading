@@ -240,23 +240,52 @@ def test_a_short_card_refuses_before_ever_measuring_a_label():
     """The `gap < BOARD_LABEL_GAP_MIN` branch in `frameLayout`, reached before
     a floor is ever measured -- and, until this test, never driven true by
     anything in this suite. The shipped comment near BOARD_LABEL_GAP_MAX/MIN
-    cites the real case this guards against: 9 series into a 152-168px mobile
-    canvas (`clamp(140px, 26vh, 280px)` at a narrow viewport).
+    cites the real case this guards against: many series into a short canvas.
 
-    height=160 with 9 labels: gap = min(20, (160-34)/9) = 14.0, below
+    12 labels at height=200: gap = min(20, (200-34)/12) = 13.83, below
     BOARD_LABEL_GAP_MIN (16), so frameLayout must refuse right there. Width is
     set absurdly large (100000) so the width-based floor check -- the other
     return-none path -- cannot be what actually fires; if this test passed
     with a narrow width instead, it would prove nothing about this branch
     specifically, since either guard alone produces the same {drawLabels:
-    false, gutter: BOARD_ARROW_PAD} shape."""
+    false, gutter: BOARD_ARROW_PAD} shape.
+
+    THE HEIGHT IS ABOVE BOARD_MIN_LABEL_HEIGHT FOR THE SAME REASON. This case
+    used to be 9 labels at 160px, which the min-height gate added later now
+    refuses one branch earlier -- leaving the assertions passing while covering
+    nothing. At 9 labels the two thresholds are the same number (16 * 9 + 34 =
+    178), so separating them needs a different label count, not a different
+    height."""
     result = _run_ts(
         """
-const labels = Array.from({length: 9}, (_, i) => ({name: 'M' + i, value: '+1%'}));
-const frame = module.exports.frameLayout({width: 100000, height: 160, labels});
+const labels = Array.from({length: 12}, (_, i) => ({name: 'M' + i, value: '+1%'}));
+const frame = module.exports.frameLayout({width: 100000, height: 200, labels});
 console.log(JSON.stringify({gutter: frame.gutter, draw: frame.drawLabels, gap: frame.gap}));
 """
     )
     assert result["draw"] is False
     assert result["gutter"] == pytest.approx(18.0)
     assert result["gap"] == 0
+
+
+def test_a_card_shorter_than_the_label_floor_refuses_whatever_the_geometry_says():
+    """`BOARD_MIN_LABEL_HEIGHT`, the gate above the gap arithmetic.
+
+    Two labels at 160px clear every geometric check -- gap = min(20, 126/2) =
+    20, well past BOARD_LABEL_GAP_MIN -- so before the gate this drew pills
+    into a 160px card. The gate exists because the dashboard copy's equivalent
+    arithmetic changes between the first frame and the second (it reads the
+    x-axis's real height off the chart once one exists), which made the label
+    verdict move with no input changing. A height-only floor cannot do that."""
+    result = _run_ts(
+        """
+const labels = Array.from({length: 2}, (_, i) => ({name: 'M' + i, value: '+1%'}));
+const above = module.exports.frameLayout({width: 900, height: 178, labels});
+const below = module.exports.frameLayout({width: 900, height: 177, labels});
+console.log(JSON.stringify({above: above.drawLabels, below: below.drawLabels}));
+"""
+    )
+    assert result["above"] is True
+    assert result["below"] is False, (
+        "a card shorter than BOARD_MIN_LABEL_HEIGHT still drew endpoint labels"
+    )

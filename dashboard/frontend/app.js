@@ -317,7 +317,15 @@ const CASH_STEP_INPUT_IDS = [
 ];
 
 function cashStepMeta(input) {
-  const step = Math.max(1, Number(input.step) || 100);
+  // `data-cash-step` first, `input.step` only as a fallback. The markup ships
+  // `step="any"` now (see bindCashStepInput), so on a real field `input.step`
+  // no longer carries the increment -- it still does in the node harness, whose
+  // fake element predates the split and is what the fallback keeps working.
+  const declared = Number(input.dataset && input.dataset.cashStep);
+  const step = Math.max(
+    1,
+    Number.isFinite(declared) && declared > 0 ? declared : Number(input.step) || 100,
+  );
   const min = Number(input.min);
   const max = Number(input.max);
   return {
@@ -347,9 +355,36 @@ function nudgeCashStepInput(input, direction) {
 function bindCashStepInput(input) {
   if (!input || input.dataset.cashStepBound === '1') return;
   input.dataset.cashStepBound = '1';
-  if (!input.step || input.step === 'any') input.step = '100';
+  // NOTE WHAT IS DELIBERATELY ABSENT: this used to force `input.step = '100'`.
+  // Both create-agent fields sit inside a <form> with a submit button, so that
+  // made 100 a NATIVE constraint -- and once the change handler stopped
+  // snapping typed text to the grid, the browser began refusing the submit
+  // outright ("the two nearest valid values are 1200 and 1300"), so
+  // submitCreateExternalAgent/submitCreateBuiltinAgent never ran. That is a
+  // worse failure than the snapping it replaced, and an invisible one: the
+  // value is in range, so nothing in this module has anything to report.
+  // `step` cannot be spinner ergonomics and not a constraint at the same time,
+  // so the markup ships `step="any"` and declares the increment in
+  // `data-cash-step`, which only this module reads. `min`/`max`/`required` stay
+  // native -- they are real constraints, and the other fields in those forms
+  // still want the browser's own message.
 
   let lastValue = snapCashStepValue(input, input.value === '' ? 0 : input.value);
+
+  // Re-seed the closure and clear any message. For callers that assign `.value`
+  // programmatically -- opening the agent editor, resetting a create form --
+  // which fire no event, so without this the previous agent's red border and
+  // its message ride along onto the next agent's perfectly valid number, and
+  // `lastValue` keeps comparing against a value that is no longer on screen.
+  //
+  // Parked on the element rather than in a module-level WeakMap because the
+  // node harness extracts these functions BY NAME and runs them alone
+  // (test_frontend_capital_input.py); module state it did not extract would be
+  // a ReferenceError there, which is a poor reason for the guard to go quiet.
+  input._cashStepResync = () => {
+    lastValue = snapCashStepValue(input, input.value === '' ? 0 : input.value);
+    setCashInputValidity(input, null);
+  };
 
   input.addEventListener('keydown', (event) => {
     if (event.key === 'ArrowUp') {
@@ -363,7 +398,30 @@ function bindCashStepInput(input) {
     }
   });
 
-  input.addEventListener('input', () => {
+  input.addEventListener('input', (event) => {
+    // Two guards, and they are load-bearing to different degrees.
+    //
+    // `input.value === ''` is the unconditional one and the one that fixes the
+    // reported bug on its own, with no assumption about any browser: sizing the
+    // correction off the numeric diff cannot tell a spinner misfire from an
+    // edit, because deleting the last character of "1" leaves `Number('') === 0`
+    // -- a diff of exactly -1, indistinguishable from the +/-1 glitch. So the
+    // guard fired while the user was DELETING and refilled the field by a whole
+    // step, clamped to `min`: "1" in the backtest field, "0" in the paper field,
+    // neither clearable. Reported with screenshots, 2026-09-03.
+    //
+    // `event.inputType` additionally covers editing that does not pass through
+    // empty (typing over a selection). It rests on typing/deleting reporting an
+    // inputType per the Input Events spec -- solid -- and on a *mouse* click on
+    // the native spinner NOT reporting one, which is NOT verified in a browser
+    // here (see test_frontend_capital_input.py). If that second half is wrong,
+    // the only casualty is the +/-1 correction for mouse-driven spinner clicks;
+    // ArrowUp/ArrowDown are already intercepted in the keydown handler above,
+    // and nothing about the clearing fix depends on it.
+    if (event?.inputType || input.value === '') {
+      lastValue = Number(input.value);
+      return;
+    }
     const value = Number(input.value);
     if (!Number.isFinite(value)) return;
     const diff = value - lastValue;
@@ -382,11 +440,99 @@ function bindCashStepInput(input) {
   });
 
   input.addEventListener('change', () => {
-    if (input.value === '') return;
-    const snapped = snapCashStepValue(input, input.value);
-    if (String(snapped) !== input.value) input.value = String(snapped);
-    lastValue = snapped;
+    // EMPTY IS TWO STATES. `type="number"` sanitises anything it cannot parse
+    // ("1e", "--", "1.2.3") to the empty string, so a field the user filled
+    // with junk is indistinguishable by `.value` from one they cleared on
+    // purpose. `validity.badInput` is the only thing that separates them --
+    // without it the junk case read as "cleared", showed no message, and
+    // submitted `parseAgentCashAllocationInput('')`, i.e. the 1000 default,
+    // under text still visibly sitting in the box.
+    if (input.value === '') {
+      const bad = !!(input.validity && input.validity.badInput);
+      setCashInputValidity(input, bad ? 'Enter a dollar amount.' : null);
+      return;
+    }
+    const { min, max } = cashStepMeta(input);
+    const value = Number(input.value);
+    // Unreachable through a real `type="number"` field -- a non-empty `.value`
+    // there has already been parsed by the control -- and kept only so the
+    // non-browser callers (the node harness, and anything that reuses this on a
+    // text input) fail the same way the badInput branch above does rather than
+    // falling through to a NaN comparison, which is false in both directions.
+    if (!Number.isFinite(value)) {
+      setCashInputValidity(input, 'Enter a dollar amount.');
+      return;
+    }
+    if (value < min || value > max) {
+      // Clamping silently is the refill bug one step later: the field disagrees
+      // with what was typed and never says why. Say why instead, and leave the
+      // number on screen so there is something to correct.
+      setCashInputValidity(
+        input,
+        `Enter an amount between $${min.toLocaleString()} and $${max.toLocaleString()}.`,
+      );
+      lastValue = value;
+      return;
+    }
+    setCashInputValidity(input, null);
+    // Whole dollars only -- `step` is spinner ergonomics, NOT a constraint on
+    // typed text, and snapping to it rewrote every amount that was not a
+    // multiple of 100: "5" became "1" (rounded down to 0, then clamped up to
+    // `min`) and "1234" became "1200", neither of them announced. The server
+    // accepts any integer in range (agent-editor.js), so there was never a
+    // reason to round the user's own number to our spinner's grid.
+    const rounded = Math.round(value);
+    if (String(rounded) !== input.value) input.value = String(rounded);
+    lastValue = rounded;
   });
+}
+
+/** Mark a capital input valid/invalid and render the message beside it.
+ *
+ *  The slot is looked up through the input's own parent rather than by id, so
+ *  a field with no message element next to it simply carries the `aria-invalid`
+ *  state and the `dataset` message -- no branch here for whether the DOM is
+ *  present, and nothing to keep in sync with markup that may not exist yet.
+ */
+function setCashInputValidity(input, message) {
+  if (message) {
+    input.dataset.cashError = message;
+    input.setAttribute('aria-invalid', 'true');
+  } else {
+    delete input.dataset.cashError;
+    input.removeAttribute('aria-invalid');
+  }
+  const slot = input.parentElement?.querySelector?.('[data-cash-error-slot]');
+  if (slot) {
+    if (message) {
+      // UNHIDE FIRST, then write. The slot is `role="alert"`, and a `hidden`
+      // element is not in the accessibility tree -- text written before the
+      // reveal mutates a region nobody is monitoring, so most screen readers
+      // announce nothing at all. Since the red border is the only other signal,
+      // that is precisely the reader this markup was added for.
+      slot.hidden = false;
+      slot.textContent = message;
+    } else {
+      slot.textContent = '';
+      slot.hidden = true;
+    }
+  }
+}
+
+/** Clear a capital input's error state and re-sync its spinner baseline.
+ *
+ *  Call after assigning `.value` from code. Assignment fires no event, so
+ *  nothing else in this module ever learns the field changed. Safe on an
+ *  unbound or missing input: the message is still cleared, which is the half
+ *  that is visible.
+ */
+function resetCashStepInput(input) {
+  if (!input) return;
+  if (typeof input._cashStepResync === 'function') {
+    input._cashStepResync();
+    return;
+  }
+  setCashInputValidity(input, null);
 }
 
 function bindCashStepInputs() {
@@ -2866,6 +3012,10 @@ function openCreateExternalAgentModal() {
   const form = document.getElementById('createExternalAgentForm');
   if (errorEl) errorEl.hidden = true;
   if (form) form.reset();
+  // `form.reset()` restores `value="1000"` and nothing else: not `aria-invalid`,
+  // not the message in the error slot, not the spinner baseline. Without this
+  // the modal reopens showing a red, error-labelled field on the default value.
+  resetCashStepInput(document.getElementById('externalAgentCashAllocation'));
   if (modal) modal.hidden = false;
 }
 
@@ -2904,6 +3054,10 @@ function openCreateBuiltinAgentModal() {
   const form = document.getElementById('createBuiltinAgentForm');
   if (errorEl) errorEl.hidden = true;
   if (form) form.reset();
+  // `form.reset()` restores `value="1000"` and nothing else: not `aria-invalid`,
+  // not the message in the error slot, not the spinner baseline. Without this
+  // the modal reopens showing a red, error-labelled field on the default value.
+  resetCashStepInput(document.getElementById('builtinAgentCashAllocation'));
   if (modal) modal.hidden = false;
 }
 
