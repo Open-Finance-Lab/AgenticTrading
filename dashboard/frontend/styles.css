@@ -7873,13 +7873,18 @@ html[data-nav-page="home"] #homeView .dashboard-bottom-grid .home-module--market
    roughly one row at the short end. That trade is the point of the change, not
    an oversight: the list keeps its rows everywhere the clamp already wins.
 
-   Above: 178px is where `boardFrameLayout` starts drawing endpoint labels for
-   nine series ((BOARD_PILL_HEIGHT + 1) * 9 + BOARD_XAXIS_ALLOWANCE). A floor
-   past that would answer "the lines are too compact" by stacking nine pills into
-   the panel -- the other complaint in the same feedback document. The clamp
-   stays at 26vh for the same reason: raising it would pull the label threshold
-   down to a ~593px viewport, turning labels on for a band that has never had
-   them. Both bounds are pinned by test_frontend_home_chart_height.py. */
+   Above: `BOARD_MIN_LABEL_HEIGHT` (178px, js/leaderboard.js) is where
+   `boardFrameLayout` starts drawing endpoint labels. A floor past that would
+   answer "the lines are too compact" by stacking nine pills into the panel --
+   the other complaint in the same feedback document. It is an explicit constant
+   rather than the geometry it used to fall out of ((BOARD_PILL_HEIGHT + 1) * 9
+   + BOARD_XAXIS_ALLOWANCE) because that geometry moves between frames: the
+   x-axis term is a 34px estimate on first paint and the real ~24px afterwards,
+   so a floor set against the estimate was ~10px inside the band where the next
+   re-layout turns the pills on. The clamp stays at 26vh for the same reason:
+   raising it would pull the threshold down to a ~685px viewport, turning labels
+   on for a band that has never had them. Both bounds are pinned by
+   test_frontend_home_chart_height.py. */
 .hm-rank-chart {
     flex: 0 1 auto;
     position: relative;

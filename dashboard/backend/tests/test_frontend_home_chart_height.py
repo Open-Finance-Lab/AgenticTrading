@@ -8,13 +8,23 @@ list does, so at a short viewport it is not the `clamp()` that binds -- it is
 about.
 
 Raising it is not a free CSS tweak, because the same height decides whether the
-chart draws endpoint labels. `boardFrameLayout` gives up and reserves the arrow
-alone once the per-label pitch falls under `BOARD_LABEL_GAP_MIN`, and the pitch
-is `(height - BOARD_XAXIS_ALLOWANCE) / labels`. With today's constants and screen
-0's nine curves that flips at **178px**: below it the panel is label-free, at or
-above it nine pills appear. So a floor raised past 178 would answer "the lines
-are too compact" by adding nine labels to the same panel -- which is the *other*
-complaint in the same document ("the labeling is quite messy"), one screen over.
+chart draws endpoint labels. `boardFrameLayout` refuses them outright below
+`BOARD_MIN_LABEL_HEIGHT` (178px), so a floor raised past that would answer "the
+lines are too compact" by adding nine labels to the same panel -- which is the
+*other* complaint in the same document ("the labeling is quite messy"), one
+screen over.
+
+THIS GUARD USED TO DERIVE THE 178 instead of reading it, as
+`(BOARD_PILL_HEIGHT + 1) * 9 + BOARD_XAXIS_ALLOWANCE`, and that derivation was
+wrong in the direction that matters. `BOARD_XAXIS_ALLOWANCE` is only the
+FIRST-FRAME estimate: from the second update onwards `boardFrameLayout` divides
+by the real axis height off `chart.scales.x`, ~24px on this panel at its 14px
+ticks. The true geometric flip was therefore ~168px, not 178 -- exactly the
+floor this file was clearing -- so nine pills would have appeared on the first
+re-layout after paint (a resize into the 508-646px band is one) with the guard
+still green, because a test that calls the function once only ever sees the
+estimate. The threshold is now an explicit constant on the JS side and this
+reads it.
 
 Hence two guards: the floor is high enough to be worth the change, and still low
 enough that the label verdict at short viewports is exactly what it was.
@@ -62,15 +72,15 @@ def _chart_floor_px() -> int:
     return int(match.group(1))
 
 
-def _label_flip_threshold_px(series: int) -> int:
-    """Smallest chart height at which `boardFrameLayout` starts drawing labels.
+def _label_flip_threshold_px() -> int:
+    """Smallest chart height at which `boardFrameLayout` will draw labels.
 
-    Derived from the shipped constants rather than restated: a guard that hard-
-    codes 178 keeps passing after someone edits `BOARD_PILL_HEIGHT`, which is
-    precisely when it needed to fail.
+    Read from the shipped constant rather than restated, so lowering
+    `BOARD_MIN_LABEL_HEIGHT` under an unchanged floor reddens this. It is NOT
+    re-derived from the pill/axis geometry any more -- see the module docstring
+    for why that derivation read ~10px high and hid the bug it existed to catch.
     """
-    gap_min = _js_int("BOARD_PILL_HEIGHT") + 1  # BOARD_LABEL_GAP_MIN, derived
-    return gap_min * series + _js_int("BOARD_XAXIS_ALLOWANCE")
+    return _js_int("BOARD_MIN_LABEL_HEIGHT")
 
 
 def test_the_home_chart_floor_is_tall_enough_to_show_a_trend():
@@ -88,14 +98,35 @@ def test_the_home_chart_floor_stays_below_the_endpoint_label_threshold():
     This is the one that would have caught the mistake: raising the floor to
     "make the chart bigger" reads as pure improvement right up until nine
     endpoint pills appear in a panel whose sibling complaint is that labelling
-    is messy. The threshold is computed from the shipped constants, so this
-    fails if someone raises the floor OR lowers `BOARD_PILL_HEIGHT` underneath it.
+    is messy. The threshold is read off the shipped constant, so this fails if
+    someone raises the floor OR lowers `BOARD_MIN_LABEL_HEIGHT` underneath it.
     """
-    flip = _label_flip_threshold_px(_SCREEN_ZERO_SERIES)
+    flip = _label_flip_threshold_px()
     floor = _chart_floor_px()
     assert floor < flip, (
         f"the home chart floor ({floor}px) is at or above the {flip}px at which "
         f"{_SCREEN_ZERO_SERIES} endpoint labels start drawing. Short viewports "
         "would gain a label stack the panel has never shown -- decide that "
         "deliberately, do not acquire it by raising a min-height"
+    )
+
+
+def test_the_label_threshold_does_not_depend_on_a_measurement_taken_once():
+    """`BOARD_MIN_LABEL_HEIGHT` has to gate on `chart.height` and nothing else.
+
+    The gate this replaced was `(height - boardXAxisHeight(chart)) / labels`,
+    and `boardXAxisHeight` deliberately returns two different numbers over a
+    chart's life: `BOARD_XAXIS_ALLOWANCE` before the first layout, the scale's
+    real height after. A verdict built on it therefore changes on re-layout
+    while nothing about the page changed, which is unobservable to every test
+    in this repo -- all of them call the layout function once. Pinning the
+    gate's SHAPE is the only thing that can catch a revert to the geometry.
+    """
+    match = re.search(
+        r"if \(chart\.height < BOARD_MIN_LABEL_HEIGHT\) return none;", _LEADERBOARD_JS
+    )
+    assert match, (
+        "boardFrameLayout no longer refuses labels on chart.height alone; if the "
+        "gate moved back onto boardXAxisHeight, the label verdict is frame-"
+        "dependent again and the home chart floor above is no longer safe"
     )

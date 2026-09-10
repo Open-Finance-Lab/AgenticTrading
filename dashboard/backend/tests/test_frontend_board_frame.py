@@ -314,17 +314,52 @@ console.log(JSON.stringify({ gutter: frame.gutter, draw: frame.drawLabels }));
 def test_a_chart_too_short_to_stack_its_labels_drops_them_too():
     """Screen 0's panel clamps to `clamp(140px, 26vh, 280px)` and draws nine
     curves. Nine labels at the 13px minimum need 117px of plot; at the 140px
-    floor there is not that much once the x-axis is taken out."""
+    floor there is not that much once the x-axis is taken out.
+
+    `crowded` is what keeps the GAP branch covered now that
+    BOARD_MIN_LABEL_HEIGHT gates ahead of it: at nine labels the two thresholds
+    are the same number (16 * 9 + 34 = 178), so `short` above no longer reaches
+    the arithmetic. Twelve labels at 200px does -- gap = (200 - 34) / 12 =
+    13.83, under BOARD_LABEL_GAP_MIN, on a canvas the height gate passes."""
     result = _run_node(
         """
 console.log(JSON.stringify({
   tall: boardFrameLayout(makeChart(900, 280), makeLabels(9), 0.4).drawLabels,
   short: boardFrameLayout(makeChart(900, 140), makeLabels(9), 0.4).drawLabels,
+  crowded: boardFrameLayout(makeChart(900, 200), makeLabels(12), 0.4).drawLabels,
 }));
 """
     )
     assert result["tall"] is True
     assert result["short"] is False
+    assert result["crowded"] is False, (
+        "the per-label gap check no longer refuses a crowded but tall-enough "
+        "canvas -- only the height gate is left, and it cannot see label count"
+    )
+
+
+def test_a_chart_shorter_than_the_label_floor_refuses_whatever_the_geometry_says():
+    """`BOARD_MIN_LABEL_HEIGHT`, the gate above the gap arithmetic.
+
+    Two labels at 160px clear every geometric check -- gap = min(20, 126/2) =
+    20 -- so before the gate this drew pills into a 160px canvas. The gate is a
+    pure function of `chart.height`, which is the point: the arithmetic below it
+    divides by `boardXAxisHeight(chart)`, and that deliberately returns the 34px
+    estimate before the first layout and the scale's real height (~20-24px)
+    after. A verdict built on it changes on re-layout with no input changing,
+    and no test that calls this function once can observe it."""
+    result = _run_node(
+        """
+console.log(JSON.stringify({
+  above: boardFrameLayout(makeChart(900, 178), makeLabels(2), 0.4).drawLabels,
+  below: boardFrameLayout(makeChart(900, 177), makeLabels(2), 0.4).drawLabels,
+}));
+"""
+    )
+    assert result["above"] is True
+    assert result["below"] is False, (
+        "a canvas shorter than BOARD_MIN_LABEL_HEIGHT still drew endpoint labels"
+    )
 
 
 def test_the_stagger_gap_tightens_before_it_gives_up():

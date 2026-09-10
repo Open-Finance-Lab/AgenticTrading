@@ -26,7 +26,9 @@ import subprocess
 
 import pytest
 
-from ._frontend_source import APP_HTML, fn_body
+from ._frontend_source import APP_HTML, APP_JS, FRONTEND, fn_body, strip_comments
+
+_AGENT_EDITOR_JS = (FRONTEND / "js" / "agent-editor.js").read_text(encoding="utf-8")
 
 _requires_node = pytest.mark.skipif(
     shutil.which("node") is None, reason="node is not available"
@@ -36,15 +38,42 @@ _requires_node = pytest.mark.skipif(
 # touches: value/step/min/max, dataset, attributes and event registration.
 # `_fire` invokes the registered handlers directly so a test can send the exact
 # event sequence a browser sends, in order, with no jsdom dependency.
+#
+# `validity.badInput` and the error slot are modelled because both are load-
+# bearing and neither is observable from `.value`: a number input sanitises
+# unparseable text to "", and `role="alert"` announces nothing if the text is
+# written while the region is still `hidden`. The slot RECORDS the order of its
+# own writes, since that ordering is the entire contract.
 _FAKE_ELEMENT = """
-function makeInput({ value = '1000', step = '100', min = '0', max = '3000' } = {}) {
+function makeSlot() {
+  const writes = [];
+  return {
+    writes,
+    _hidden: true,
+    _text: '',
+    get hidden() { return this._hidden; },
+    set hidden(v) { this._hidden = v; writes.push(['hidden', v]); },
+    get textContent() { return this._text; },
+    set textContent(v) { this._text = v; writes.push(['textContent', v]); },
+  };
+}
+function makeInput({ value = '1000', step = 'any', min = '0', max = '3000',
+                    cashStep = '100', withSlot = false } = {}) {
   const listeners = Object.create(null);
+  const slot = withSlot ? makeSlot() : null;
+  const dataset = Object.create(null);
+  if (cashStep != null) dataset.cashStep = String(cashStep);
   return {
     value: String(value),
     step: String(step),
     min: String(min),
     max: String(max),
-    dataset: Object.create(null),
+    validity: { badInput: false },
+    _slot: slot,
+    parentElement: slot
+      ? { querySelector(sel) { return sel === '[data-cash-error-slot]' ? slot : null; } }
+      : null,
+    dataset,
     attributes: Object.create(null),
     setAttribute(name, val) { this.attributes[name] = String(val); },
     removeAttribute(name) { delete this.attributes[name]; },
@@ -72,6 +101,7 @@ def _harness() -> str:
             fn_body("function nudgeCashStepInput("),
             fn_body("function bindCashStepInput("),
             fn_body("function setCashInputValidity("),
+            fn_body("function resetCashStepInput("),
             _FAKE_ELEMENT,
         ]
     )
@@ -265,4 +295,221 @@ def test_every_bound_capital_input_has_somewhere_to_render_its_error():
         label_end = APP_HTML.index("</label>", match.end())
         assert "data-cash-error-slot" in APP_HTML[label_start:label_end], (
             f"{input_id} can be marked invalid with no way to say why"
+        )
+
+
+# ---------------------------------------------------------------------------
+# The form-submit path: the half none of the cases above touch.
+# ---------------------------------------------------------------------------
+
+
+def _cash_input_tags() -> dict[str, str]:
+    ids = re.findall(r"'([A-Za-z]+)'", fn_body("const CASH_STEP_INPUT_IDS ="))
+    assert len(ids) >= 4, "the bound-input list shrank; update this guard"
+    tags = {}
+    for input_id in ids:
+        match = re.search(rf'<input id="{input_id}"[^>]*>', APP_HTML)
+        assert match, f"{input_id} is bound in app.js but absent from app.html"
+        tags[input_id] = match.group(0)
+    return tags
+
+
+def test_the_spinner_increment_is_not_also_a_form_constraint():
+    """The bug that survived every case above, because none of them submits.
+
+    `externalAgentCashAllocation` and `builtinAgentCashAllocation` sit inside
+    forms with `type="submit"` buttons and no `novalidate`. While the change
+    handler snapped typed text onto the step grid, the field could not violate
+    `step` -- so shipping `step="100"` cost nothing. Keeping the typed value
+    (the fix this file is about) inverted that: the browser began refusing the
+    submit for any amount off the grid, with "the two nearest valid values are
+    1200 and 1300", and `submitCreateExternalAgent` never ran. Nothing in JS
+    can report it, because the value is in range and perfectly valid to us.
+
+    So the increment lives in `data-cash-step`, which only bindCashStepInput
+    reads, and `step` stays `any` -- the one value that keeps `stepMismatch`
+    out of the form's constraint set. `min`/`max`/`required` are deliberately
+    left native: those are real constraints, and the other fields in the same
+    forms still want the browser's own message.
+    """
+    for input_id, tag in _cash_input_tags().items():
+        assert 'step="any"' in tag, (
+            f"{input_id} carries a numeric step. Inside a form that is a native "
+            "constraint, and the create-agent submit is refused for every amount "
+            "off the grid -- silently, from this module's point of view"
+        )
+        assert re.search(r'data-cash-step="\d+"', tag), (
+            f"{input_id} declares no data-cash-step, so cashStepMeta falls back "
+            "to a literal and the increment is no longer stated in the markup"
+        )
+
+
+def test_binding_a_field_does_not_write_step_back_onto_it():
+    """The other half of the same fix, and the easier one to undo by accident.
+
+    `bindCashStepInput` used to normalise `step` to '100' at bind time, which
+    put the constraint back on the element regardless of what the markup said.
+    A guard on the markup alone would stay green through that.
+    """
+    # Comments stripped first: the line this guards against is now DESCRIBED in
+    # a comment inside the same function, so an un-stripped scan is satisfied by
+    # the prose explaining the bug rather than by the code avoiding it. That is
+    # the failure `strip_comments` exists for, and this guard walked into it.
+    body = strip_comments(fn_body("function bindCashStepInput("))
+    assert not re.search(r"input\.step\s*=", body), (
+        "bindCashStepInput assigns input.step again -- that reinstates the "
+        "native step constraint the markup was changed to avoid"
+    )
+
+
+# ---------------------------------------------------------------------------
+# "" is two states.
+# ---------------------------------------------------------------------------
+
+
+@_requires_node
+def test_unparseable_text_is_reported_rather_than_read_as_cleared():
+    """`type="number"` hands us "" for "1e" and "--" exactly as it does for a
+    field the user emptied on purpose. Read as "cleared", junk showed no
+    message and submitted `parseAgentCashAllocationInput('')` -- the 1000
+    default -- under text still visibly sitting in the box.
+    """
+    result = _run_node(
+        """(() => {
+  const el = makeInput({ value: '1000' });
+  bindCashStepInput(el);
+  el.value = '';                 // what the control does with "1e"
+  el.validity.badInput = true;
+  el._fire('input', { inputType: 'insertText' });
+  el._fire('change');
+  return { invalid: el.getAttribute('aria-invalid'), error: el.dataset.cashError || null };
+})()"""
+    )
+    assert result["invalid"] == "true", "unparseable text was accepted silently"
+    assert result["error"], "no message for the inline error to render"
+
+
+@_requires_node
+def test_deliberately_clearing_the_field_still_reports_nothing():
+    """The other side of the branch above, and the one the whole PR is for: an
+    empty field with no bad input is a field mid-edit, not an error.
+    """
+    result = _run_node(
+        """(() => {
+  const el = makeInput({ value: '1000' });
+  bindCashStepInput(el);
+  el.value = '';
+  el._fire('input', { inputType: 'deleteContentBackward' });
+  el._fire('change');
+  return { value: el.value, invalid: el.getAttribute('aria-invalid') };
+})()"""
+    )
+    assert result["value"] == ""
+    assert result["invalid"] is None, "clearing the field was flagged as an error"
+
+
+# ---------------------------------------------------------------------------
+# The message has to be announceable, and has to not outlive its value.
+# ---------------------------------------------------------------------------
+
+
+@_requires_node
+def test_the_error_slot_is_revealed_before_its_text_is_written():
+    """`role="alert"` is a live region, and a `hidden` element is not in the
+    accessibility tree. Writing the text first mutates a region nobody is
+    monitoring, so the reveal that follows announces nothing -- and the red
+    border is the only other signal, which is the reader this markup exists for.
+    """
+    writes = _run_node(
+        """(() => {
+  const el = makeInput({ value: '1000', min: '1', withSlot: true });
+  bindCashStepInput(el);
+  el.value = '5000';
+  el._fire('input', { inputType: 'insertText' });
+  el._fire('change');
+  return el._slot.writes;
+})()"""
+    )
+    kinds = [w[0] for w in writes]
+    assert "textContent" in kinds and "hidden" in kinds, writes
+    assert kinds.index("hidden") < kinds.index("textContent"), (
+        f"the slot's text was written before it was revealed ({writes}); a "
+        "hidden live region announces nothing when it is later unhidden"
+    )
+
+
+@_requires_node
+def test_refilling_the_field_from_code_clears_a_stale_error():
+    """Switching agents in the editor, or reopening a create modal.
+
+    Both assign `.value` directly, which fires no event -- so the previous
+    agent's red border, its `aria-invalid` and its "Enter an amount between..."
+    message all rode along onto the next agent's perfectly valid number and
+    stayed until someone typed in the field. `form.reset()` is the same story:
+    it restores `value="1000"` and touches none of the state above.
+    """
+    result = _run_node(
+        """(() => {
+  const el = makeInput({ value: '1000', min: '1', withSlot: true });
+  bindCashStepInput(el);
+  el.value = '5000';
+  el._fire('input', { inputType: 'insertText' });
+  el._fire('change');            // now red, with a message
+  el.value = '1000';             // the next agent, assigned from code
+  resetCashStepInput(el);
+  return {
+    invalid: el.getAttribute('aria-invalid'),
+    error: el.dataset.cashError || null,
+    slotText: el._slot.textContent,
+    slotHidden: el._slot.hidden,
+  };
+})()"""
+    )
+    assert result["invalid"] is None, "aria-invalid survived the refill"
+    assert result["error"] is None, "the message survived the refill"
+    assert result["slotText"] == "" and result["slotHidden"] is True
+
+
+@_requires_node
+def test_the_reset_also_resyncs_the_spinner_baseline():
+    """`lastValue` is closure state, and a refill that leaves it stale makes the
+    NEXT spinner click compute its diff against a number no longer on screen --
+    a +/-1 that is not a glitch, corrected by a whole step.
+    """
+    value = _run_node(
+        """(() => {
+  const el = makeInput({ value: '1000' });
+  bindCashStepInput(el);
+  el.value = '2000';             // assigned from code, no event
+  resetCashStepInput(el);
+  el.value = '2001';             // native spinner, +1
+  el._fire('input');
+  return el.value;
+})()"""
+    )
+    assert value == "2100", (
+        "the spinner baseline was not re-synced on refill, so the correction "
+        "was computed against a stale value"
+    )
+
+
+def test_every_caller_that_refills_a_capital_field_resets_it():
+    """The unit above is only worth having if the three refill sites call it.
+
+    Source-shape rather than behavioural: `fillHeader` and the two modal
+    openers reach for `document.getElementById`, which the node harness has no
+    way to stand up. This is what fails when a fourth refill site is added.
+    """
+    fill_header = fn_body("function fillHeader(", _AGENT_EDITOR_JS)
+    assert fill_header.count("resetCapitalInput(") == 2, (
+        "agent-editor's fillHeader refills both capital fields; each one needs "
+        "its validity state cleared or it inherits the previous agent's error"
+    )
+    for opener in ("function openCreateExternalAgentModal(",
+                   "function openCreateBuiltinAgentModal("):
+        body = fn_body(opener, APP_JS)
+        assert "form.reset()" in body, f"{opener} no longer resets its form"
+        assert "resetCashStepInput(" in body, (
+            f"{opener} resets the form without clearing the capital field's "
+            "error state, so the modal reopens red on a default value"
         )

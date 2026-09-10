@@ -278,6 +278,25 @@ const BOARD_ARROW_HEAD_HALF = 4;
 // onwards the real number is read off the scale, and this is only the estimate
 // that stands in before any layout has happened.
 const BOARD_XAXIS_ALLOWANCE = 34;
+// Shortest canvas that may carry endpoint labels at all, checked before any
+// geometry.
+//
+// THE GEOMETRIC VERDICT IS NOT STABLE ACROSS FRAMES, which is the whole reason
+// this exists. `boardFrameLayout` divides `chart.height - boardXAxisHeight(chart)`
+// by the label count, and boardXAxisHeight returns the 34px ESTIMATE on the
+// first frame and the real number -- 20.4px on the tab, ~24px on screen 0 at its
+// 14px ticks -- on every frame after. So a canvas sized between the two
+// resulting thresholds draws no pills on first paint and then acquires nine of
+// them on the next re-layout: a resize, a hover-driven `chart.update('none')`,
+// a tab switch. Nothing reports it and no test that calls the function once can
+// see it.
+//
+// 178 is the number the rest of the repo already states as the flip point
+// (.hm-rank-chart's comment in styles.css, test_frontend_home_chart_height.py).
+// Declaring it makes that statement true by construction instead of an
+// inference from a measurement the running code discards. The per-count gap
+// check below still applies on top -- this is a floor, not a replacement.
+const BOARD_MIN_LABEL_HEIGHT = 178;
 const BOARD_AXIS_COLOR = 'rgba(148, 163, 184, 0.45)';
 
 /** The x-axis strip's real height, or a conservative stand-in before layout.
@@ -358,6 +377,9 @@ function boardLabelBlockWidth(chart, labels) {
 function boardFrameLayout(chart, labels, fraction) {
   const none = { gutter: BOARD_ARROW_PAD, drawLabels: false, gap: 0 };
   if (!labels || !labels.length) return none;
+  // Before any geometry, and on `chart.height` alone so the verdict cannot move
+  // between frames. See BOARD_MIN_LABEL_HEIGHT.
+  if (chart.height < BOARD_MIN_LABEL_HEIGHT) return none;
   const usableHeight = chart.height - boardXAxisHeight(chart);
   const gap = Math.min(BOARD_LABEL_GAP_MAX, usableHeight / labels.length);
   if (gap < BOARD_LABEL_GAP_MIN) return none;

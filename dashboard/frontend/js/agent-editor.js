@@ -967,6 +967,16 @@
     if (note) note.hidden = isSimplePipeline(subAgents);
   }
 
+  /** app.js owns the capital fields' validity layer; this screen only fills
+   *  them. Guarded rather than called directly because agent-editor.js is a
+   *  separate classic script -- a load-order change that drops app.js should
+   *  leave the editor filling fields, not throwing on every open. */
+  function resetCapitalInput(input) {
+    if (typeof window.resetCashStepInput === 'function') {
+      window.resetCashStepInput(input);
+    }
+  }
+
   function fillHeader(agent) {
     const nameInput = document.getElementById('agentEditorNameInput');
     const descInput = document.getElementById('agentEditorDescription');
@@ -977,6 +987,14 @@
     if (descInput) descInput.value = agent.description || '';
     if (cashInput) {
       cashInput.value = agent.cash_allocation != null ? String(agent.cash_allocation) : '';
+      // Assigning `.value` fires no event, so bindCashStepInput's validity layer
+      // never learns the field changed: the previous agent's red border, its
+      // aria-invalid and its "Enter an amount between..." message all survive
+      // into this agent's perfectly valid number, and keep surviving until
+      // someone edits the field. An error that outlives its cause is what
+      // test_correcting_an_invalid_value_clears_the_flag exists to prevent --
+      // this is the same defect reached by the other route, switching agents.
+      resetCapitalInput(cashInput);
     }
     const backtestInput = document.getElementById('agentEditorBacktestAllocation');
     if (backtestInput) {
@@ -990,6 +1008,7 @@
         if (Number.isFinite(value) && value > 0) { resolved = value; break; }
       }
       backtestInput.value = String(Math.min(Math.round(resolved), 3000));
+      resetCapitalInput(backtestInput);
     }
     if (meta) {
       meta.textContent = agent.agent_type === 'builtin' ? 'Built-in agent' : 'External agent';
