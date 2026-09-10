@@ -322,10 +322,13 @@ console.log(JSON.stringify({
 }));
 """
     )
-    palette = [
-        "#FBBF24", "#FB923C", "#F472B6", "#A78BFA", "#34D399",
-        "#22D3EE", "#F87171", "#A3E635", "#E879F9", "#60A5FA",
-    ]
+    # LIFTED from the shipped source, not restated. A copy of the palette here
+    # tests the code against this file's own values: when the palette was
+    # revalidated and replaced in 2026-09, the restated copy is what failed --
+    # not because the slot arithmetic under test broke (it did not), but because
+    # the fixture disagreed with the module it was checking. The same restatement
+    # would have gone on passing if the shipped list had been reordered.
+    palette = _js_array(_LIB_TS, "MODEL_COLOR_PALETTE")
     # Model order in payload is claude_haiku_4_5(0), gpt_5_5(1),
     # deepseek_v4_pro(2), qwen3_7_plus(3).
     assert result["deepseek"] == palette[2]

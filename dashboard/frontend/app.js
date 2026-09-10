@@ -363,7 +363,30 @@ function bindCashStepInput(input) {
     }
   });
 
-  input.addEventListener('input', () => {
+  input.addEventListener('input', (event) => {
+    // Two guards, and they are load-bearing to different degrees.
+    //
+    // `input.value === ''` is the unconditional one and the one that fixes the
+    // reported bug on its own, with no assumption about any browser: sizing the
+    // correction off the numeric diff cannot tell a spinner misfire from an
+    // edit, because deleting the last character of "1" leaves `Number('') === 0`
+    // -- a diff of exactly -1, indistinguishable from the +/-1 glitch. So the
+    // guard fired while the user was DELETING and refilled the field by a whole
+    // step, clamped to `min`: "1" in the backtest field, "0" in the paper field,
+    // neither clearable. Reported with screenshots, 2026-09-03.
+    //
+    // `event.inputType` additionally covers editing that does not pass through
+    // empty (typing over a selection). It rests on typing/deleting reporting an
+    // inputType per the Input Events spec -- solid -- and on a *mouse* click on
+    // the native spinner NOT reporting one, which is NOT verified in a browser
+    // here (see test_frontend_capital_input.py). If that second half is wrong,
+    // the only casualty is the +/-1 correction for mouse-driven spinner clicks;
+    // ArrowUp/ArrowDown are already intercepted in the keydown handler above,
+    // and nothing about the clearing fix depends on it.
+    if (event?.inputType || input.value === '') {
+      lastValue = Number(input.value);
+      return;
+    }
     const value = Number(input.value);
     if (!Number.isFinite(value)) return;
     const diff = value - lastValue;
@@ -382,11 +405,60 @@ function bindCashStepInput(input) {
   });
 
   input.addEventListener('change', () => {
-    if (input.value === '') return;
-    const snapped = snapCashStepValue(input, input.value);
-    if (String(snapped) !== input.value) input.value = String(snapped);
-    lastValue = snapped;
+    if (input.value === '') {
+      setCashInputValidity(input, null);
+      return;
+    }
+    const { min, max } = cashStepMeta(input);
+    const value = Number(input.value);
+    if (!Number.isFinite(value)) {
+      setCashInputValidity(input, 'Enter a dollar amount.');
+      return;
+    }
+    if (value < min || value > max) {
+      // Clamping silently is the refill bug one step later: the field disagrees
+      // with what was typed and never says why. Say why instead, and leave the
+      // number on screen so there is something to correct.
+      setCashInputValidity(
+        input,
+        `Enter an amount between $${min.toLocaleString()} and $${max.toLocaleString()}.`,
+      );
+      lastValue = value;
+      return;
+    }
+    setCashInputValidity(input, null);
+    // Whole dollars only -- `step` is spinner ergonomics, NOT a constraint on
+    // typed text, and snapping to it rewrote every amount that was not a
+    // multiple of 100: "5" became "1" (rounded down to 0, then clamped up to
+    // `min`) and "1234" became "1200", neither of them announced. The server
+    // accepts any integer in range (agent-editor.js), so there was never a
+    // reason to round the user's own number to our spinner's grid.
+    const rounded = Math.round(value);
+    if (String(rounded) !== input.value) input.value = String(rounded);
+    lastValue = rounded;
   });
+}
+
+/** Mark a capital input valid/invalid and render the message beside it.
+ *
+ *  The slot is looked up through the input's own parent rather than by id, so
+ *  a field with no message element next to it simply carries the `aria-invalid`
+ *  state and the `dataset` message -- no branch here for whether the DOM is
+ *  present, and nothing to keep in sync with markup that may not exist yet.
+ */
+function setCashInputValidity(input, message) {
+  if (message) {
+    input.dataset.cashError = message;
+    input.setAttribute('aria-invalid', 'true');
+  } else {
+    delete input.dataset.cashError;
+    input.removeAttribute('aria-invalid');
+  }
+  const slot = input.parentElement?.querySelector?.('[data-cash-error-slot]');
+  if (slot) {
+    slot.textContent = message || '';
+    slot.hidden = !message;
+  }
 }
 
 function bindCashStepInputs() {

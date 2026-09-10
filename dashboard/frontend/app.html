@@ -844,6 +844,7 @@
                 <label class="auth-field">
                     <span>Paper Trading Allocated Capital (max $3,000)</span>
                     <input id="externalAgentCashAllocation" type="number" min="0" max="3000" step="100" value="1000" required aria-describedby="externalAgentCashHint">
+                    <span class="capital-input-error" data-cash-error-slot role="alert" hidden></span>
                 </label>
                 <p id="externalAgentCashHint" class="credential-hint">Cash reserved from My Portfolio for this agent's paper trading. Backtests start from this amount by default but never spend it.</p>
                 <p id="createExternalAgentError" class="auth-error" hidden></p>
@@ -877,6 +878,7 @@
                 <label class="auth-field">
                     <span>Paper Trading Allocated Capital (max $3,000)</span>
                     <input id="builtinAgentCashAllocation" type="number" min="0" max="3000" step="100" value="1000" required aria-describedby="builtinAgentCashHint">
+                    <span class="capital-input-error" data-cash-error-slot role="alert" hidden></span>
                 </label>
                 <p id="builtinAgentCashHint" class="credential-hint">Cash reserved from My Portfolio for this agent's paper trading. Backtests start from this amount by default but never spend it.</p>
                 <p id="createBuiltinAgentError" class="auth-error" hidden></p>
@@ -1137,11 +1139,13 @@
                             <label class="agent-capital-field" for="agentEditorCashAllocation">
                                 <span class="agent-capital-label">Paper Trading <span class="agent-capital-max">max $3,000</span></span>
                                 <input id="agentEditorCashAllocation" class="agent-capital-input" type="number" min="0" max="3000" step="100" placeholder="1000" aria-label="Paper Trading Allocated Capital">
+                                <span class="capital-input-error" data-cash-error-slot role="alert" hidden></span>
                                 <span class="agent-capital-note">Reserved from your My Portfolio balance while this agent paper-trades. Backtests use a separate simulated amount and never touch it.</span>
                             </label>
                             <label class="agent-capital-field" for="agentEditorBacktestAllocation">
                                 <span class="agent-capital-label">Backtesting <span class="agent-capital-max">max $3,000</span></span>
                                 <input id="agentEditorBacktestAllocation" class="agent-capital-input" type="number" min="1" max="3000" step="100" placeholder="1000" aria-label="Backtest Allocated Capital">
+                                <span class="capital-input-error" data-cash-error-slot role="alert" hidden></span>
                                 <span class="agent-capital-note">Simulated only. Never spends real cash.</span>
                             </label>
                         </div>

@@ -764,10 +764,18 @@ def test_a_band_too_small_for_the_stack_is_refused_rather_than_clipped():
 
 def test_a_panel_too_short_for_its_labels_reserves_the_arrow_and_nothing_else():
     """The degradation, at the layout hook -- and the reachable one. Screen 0's
-    chart is 132px tall at any viewport <= 700px high (measured), where nine
-    labels want a 10.9px pitch against a 13px legibility floor. The frame gives
-    the gutter back rather than stacking unreadable text, which is what a
-    rendered check at 390px and at 1440x600 showed it doing."""
+    chart is short at any viewport <= 700px high, where nine labels want a pitch
+    well under the legibility floor. The frame gives the gutter back rather than
+    stacking unreadable text, which is what a rendered check at 390px and at
+    1440x600 showed it doing.
+
+    132 here is the *unit* case and no longer screen 0's own floor: that was
+    raised to 168px in 2026-09 ("lines too compact to see the trend"), which is
+    still label-free -- 14.9px pitch against a 16px floor. Screen 0's side of
+    that arithmetic, including the 178px ceiling the floor must stay under, is
+    pinned in test_frontend_home_chart_height.py, computed from the shipped
+    constants rather than restated. Keep this case's numbers fixed: it is
+    testing the hook's degradation, not the panel's CSS."""
     out = _run_node(
         """
 const chart = makeChart(550, 132);
