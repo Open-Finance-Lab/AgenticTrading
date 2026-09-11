@@ -9192,10 +9192,43 @@ html[data-nav-page="home"] #homeView .dashboard-bottom-grid .home-module--market
     color: var(--text-primary);
 }
 
+/* The run-history control and the label that names it, kept together and set
+   apart from the 1D/1W/1M/ALL group. `margin-right: auto` pushes the time
+   buttons to the far end of the row so the two groups cannot read as one
+   toolbar -- which is how a tester came to miss run history entirely. */
+.backtest-run-history {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-right: auto;
+    min-width: 0;
+}
+
+.backtest-run-history-label {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text-secondary);
+    white-space: nowrap;
+}
+
 .chart-controls .backtest-run-select {
     flex: 0 1 auto;
     min-width: 220px;
     max-width: 360px;
+}
+
+/* The row wraps at narrow widths; without this the select collapses to its
+   220px floor and overflows the card instead of shrinking with it. */
+@media (max-width: 640px) {
+    .backtest-run-history {
+        flex: 1 0 100%;
+        margin-right: 0;
+    }
+
+    .chart-controls .backtest-run-select {
+        min-width: 0;
+        flex: 1 1 auto;
+    }
 }
 
 .agent-action-btn {
@@ -12398,6 +12431,46 @@ body.agent-editor-open {
    patch targets it by attribute and only a change to the *set* of running
    agents triggers a full re-render -- so hide it rather than omit it. */
 .agent-card-running-detail:empty {
+    display: none;
+}
+
+/* The live equity curve, redrawn once a second from the progress payload the
+   engine already publishes. Full width rather than the 80px the SVG declares:
+   the sparkline scales to its box, and on a card this is the only picture of
+   the run the user gets without leaving the page. */
+.agent-card-running-spark {
+    margin: 8px 0 0;
+    line-height: 0;
+}
+
+.agent-card-running-spark .agent-card-sparkline {
+    width: 100%;
+    height: 36px;
+}
+
+/* Empty until the first point arrives. Same rule as the detail and staleness
+   nodes: the per-second patch fills this by attribute, so it must be rendered
+   from the start -- and an empty 36px box under the progress bar reads as a
+   broken chart rather than as "no data yet". */
+.agent-card-running-spark:empty {
+    display: none;
+}
+
+.agent-card-running-equity {
+    margin: 2px 0 0;
+    font-size: 12px;
+    font-variant-numeric: tabular-nums;
+    color: #4ade80;
+}
+
+.agent-card-running-equity.is-neg {
+    color: #ff6b6b;
+}
+
+/* Empty before two points exist -- one published step cannot make a line, and
+   a percentage against itself would read 0.00% for the opening minutes of
+   every run. */
+.agent-card-running-equity:empty {
     display: none;
 }
 

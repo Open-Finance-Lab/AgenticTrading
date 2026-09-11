@@ -435,6 +435,11 @@ def test_the_two_renderers_agree_when_progress_vanishes():
 def _advance(previous_js: str, progress_js: str, now: int) -> dict:
     script = "\n".join(
         [
+            # advanceBacktestProgress reads this when it trims the live equity
+            # curve for the card sparkline. Injected rather than stubbed: the
+            # harness runs the shipped function, so it owes it the shipped
+            # constant.
+            js_const("LIVE_SPARK_MAX_POINTS"),
             fn_body("function advanceBacktestProgress("),
             f"console.log(JSON.stringify("
             f"advanceBacktestProgress({previous_js}, {progress_js}, {now})));",

@@ -1180,6 +1180,8 @@ function renderAgentRunningBody(agent, running) {
         <div class="agent-card-running-bar${view.determinate ? ' is-determinate' : ''}" data-running-bar="${id}"${view.determinate ? ` style="width: ${view.pct}%"` : ''}></div>
       </div>
       <p class="agent-card-running-detail" data-running-detail="${id}">${escapeHtml(view.detail)}</p>
+      <div class="agent-card-running-spark" data-running-spark="${id}">${view.sparkHtml}</div>
+      <p class="agent-card-running-equity${view.equityPositive ? '' : ' is-neg'}" data-running-equity="${id}">${escapeHtml(view.equityLabel)}</p>
       <p class="agent-card-running-stale" data-running-stale="${id}">${escapeHtml(view.notice)}</p>
     </div>
     ${renderAgentAllocatedCapitalHero(agent)}`;
@@ -1427,6 +1429,7 @@ function renderAgentRunningActions(agent) {
   return `
     <div class="agent-card-actions agent-card-actions--status">
       <button class="agent-card-cta agent-card-cta--configure agent-configure-btn" type="button" data-agent-id="${id}">Configure</button>
+      <button class="agent-card-cta agent-view-live-btn" type="button" data-agent-id="${id}">View live chart</button>
       <button class="agent-card-cta agent-card-cta--disabled" type="button" disabled aria-disabled="true">Running…</button>
     </div>`;
 }
@@ -1689,6 +1692,27 @@ function renderAgentCards(grid, agents, categoryKey) {
     btn.addEventListener('click', async () => {
       const agent = visibleAgents.find((a) => a.agent_id === btn.dataset.agentId);
       await openAgentInPaper(agent);
+    });
+  });
+
+  grid.querySelectorAll('.agent-view-live-btn').forEach((btn) => {
+    btn.addEventListener('click', async (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      const agentId = btn.dataset.agentId;
+      const agent =
+        agents.find((a) => a.agent_id === agentId) ||
+        allAgents.find((a) => a.agent_id === agentId);
+      if (!agent) {
+        console.warn('View live chart: agent not found', agentId);
+        return;
+      }
+      // The *running* run id, explicitly. openAgentInBacktest falls back to
+      // resolveLatestAgentRunId when given none, which mid-run resolves to the
+      // previous *finished* run -- the one view someone clicking "View live
+      // chart" is certainly not asking for.
+      const running = getAgentBacktestRunning(agentId);
+      await openAgentInBacktest(agent, running?.runId || null);
     });
   });
 
@@ -5660,6 +5684,8 @@ function refreshRunningAgentCards() {
         stale: document.querySelectorAll('[data-running-stale]'),
         track: document.querySelectorAll('[data-running-track]'),
         bar: document.querySelectorAll('[data-running-bar]'),
+        spark: document.querySelectorAll('[data-running-spark]'),
+        equity: document.querySelectorAll('[data-running-equity]'),
     };
     const patch = (list, attribute, agentId, apply) => {
         list.forEach((el) => {
@@ -5684,6 +5710,16 @@ function refreshRunningAgentCards() {
         });
         patch(nodes.detail, 'data-running-detail', agentId, (el) => {
             el.textContent = view.detail;
+        });
+        // innerHTML, and safe: view.sparkHtml is built entirely from numbers
+        // this file computed plus a hashed numeric gradient id. No field of it
+        // is server- or user-controlled, so there is no string to escape.
+        patch(nodes.spark, 'data-running-spark', agentId, (el) => {
+            el.innerHTML = view.sparkHtml;
+        });
+        patch(nodes.equity, 'data-running-equity', agentId, (el) => {
+            el.textContent = view.equityLabel;
+            el.classList.toggle('is-neg', !view.equityPositive);
         });
         patch(nodes.stale, 'data-running-stale', agentId, (el) => {
             el.textContent = view.notice;
@@ -7086,6 +7122,15 @@ function formatBacktestElapsed(seconds) {
 /** A progress file older than this is reported as stale (seconds). */
 const BACKTEST_STALE_SECONDS = 120;
 
+/** Points kept from the live equity curve for the My Agents card sparkline.
+ *
+ * engine._publish_live_progress() writes the *whole* curve every step, so an
+ * hourly year is ~1,750 points re-parsed once a second for the length of the
+ * run. The card draws them into an 80px SVG, which cannot resolve more than a
+ * fraction of that, so everything past the tail is cost with no pixel behind
+ * it. The Backtest tab's full chart still reads the untruncated payload. */
+const LIVE_SPARK_MAX_POINTS = 120;
+
 /**
  * Coarse remaining-time estimate, or null when no honest one exists.
  *
@@ -7225,9 +7270,29 @@ function advanceBacktestProgress(previous, progress, now) {
     const keepAnchor =
         Number.isFinite(anchorStep) && Number.isFinite(anchorAt) && anchorStep <= step;
     const age = Number(progress?.progress_age_seconds);
+    // The curve the card plots, which this fold used to drop on the floor.
+    // Non-finite points are removed rather than passed along: `equity` is JSON
+    // written by a subprocess mid-run, and a single null reaching the path
+    // builder emits `LNaN,NaN` and blanks the whole SVG. Tail, not head -- the
+    // newest points are the ones the user is waiting on.
+    const rawCurve = Array.isArray(progress?.equity_curve) ? progress.equity_curve : [];
+    const equityCurve = rawCurve
+        // Coerce only what is already a number-ish value: Number(null) is 0 and
+        // Number('') is 0, both finite, so a null equity would survive the
+        // filter below as a plotted crash to zero -- a *worse* render than the
+        // gap it was meant to become.
+        .map((point) => {
+            const value = point?.equity;
+            return value === null || value === undefined || value === ''
+                ? NaN
+                : Number(value);
+        })
+        .filter((value) => Number.isFinite(value))
+        .slice(-LIVE_SPARK_MAX_POINTS);
     return {
         step,
         totalSteps: total,
+        equityCurve,
         // Server-computed (see resolveProgressAgeSeconds), and null when a
         // backend omits it -- which suppresses the staleness notice rather than
         // guessing at a value the payload never claimed.
@@ -7259,10 +7324,48 @@ function deriveRunningProgress(running) {
         Number.isFinite(step) && Number.isFinite(total) && total > 0 && step > 0;
     const pct = determinate ? Math.min(99, Math.round((100 * step) / total)) : null;
     const eta = determinate ? resolveBacktestEta(running) : null;
+    // Live equity, derived here for the same reason the bar and the staleness
+    // note are: two renderers paint this card and only one of them runs more
+    // than twice a run, so a field computed in the template is a field the
+    // patch path can never move.
+    //
+    // The baseline is the curve's own first point -- the opening equity the
+    // engine actually applied. The agent's saved backtest_allocation is only a
+    // *request*: resolve_initial_capital() clamps it to
+    // MAX_BACKTEST_INITIAL_CAPITAL before the run starts, so measuring against
+    // it would print a percentage that disagrees with the line drawn above it.
+    const curve = Array.isArray(running.equityCurve) ? running.equityCurve : [];
+    const plotted = curve.length >= 2;
+    const opening = curve[0];
+    const latest = curve[curve.length - 1];
+    const gain = plotted ? latest - opening : null;
+    const gainPct = plotted && opening ? (gain / opening) * 100 : null;
+    const equityPositive = gain == null || gain >= 0;
     return {
         determinate,
         pct,
         eta,
+        // '' before the first point, so :empty hides the node -- distinct from
+        // the helper's placeholder dash, which is the honest render of a run
+        // that has published exactly one point and cannot make a line yet.
+        sparkHtml: curve.length
+            ? renderAgentSparklineFromValues(
+                  curve,
+                  equityPositive,
+                  `live-${running.runId || 'run'}`,
+              )
+            : '',
+        equityPositive,
+        equityLabel: plotted
+            ? [
+                  formatAgentMoney(latest),
+                  gainPct == null
+                      ? null
+                      : `${gainPct >= 0 ? '+' : ''}${gainPct.toFixed(2)}%`,
+              ]
+                  .filter(Boolean)
+                  .join(' · ')
+            : '',
         stepLabel: determinate ? `${step}/${total}` : '',
         // Deliberately excludes elapsed: the head already renders it one line
         // above, and printing "3:05" beside "3:05 elapsed" is the kind of noise
@@ -7505,7 +7608,7 @@ function attachToLiveBacktest(runId, progress = null, launchConfig = null) {
             runSelect.insertBefore(opt, runSelect.firstChild);
         }
         runSelect.value = runId;
-        runSelect.hidden = false;
+        setBacktestRunSelectorVisible(true);
     }
     clearPerformanceComparison(
         'live',
@@ -10258,6 +10361,22 @@ function resolveSelectedExternalRun(externalRuns) {
     return latestRun([...externalRuns]);
 }
 
+/** Show or hide the run-history control *and* the label that names it.
+ *
+ * The select used to carry its own `hidden`, which was fine while it was the
+ * only node. It now sits in a labelled group, and "Run history" standing over
+ * nothing on a session with no runs is worse than the unlabelled select this
+ * replaced -- so visibility gets a single owner rather than two writers that
+ * agree today. */
+function setBacktestRunSelectorVisible(visible) {
+    const select = document.getElementById('backtestRunSelect');
+    const group = document.getElementById('backtestRunHistory');
+    // The group is the element the markup hides; the select's own `hidden` is
+    // cleared once here so an older cached app.html cannot leave it stuck.
+    if (select) select.hidden = false;
+    if (group) group.hidden = !visible;
+}
+
 function populateBacktestRunSelector(externalRuns, { runningId = null } = {}) {
     const select = document.getElementById('backtestRunSelect');
     if (!select) return;
@@ -10278,11 +10397,11 @@ function populateBacktestRunSelector(externalRuns, { runningId = null } = {}) {
 
     if (!sorted.length) {
         select.innerHTML = '';
-        select.hidden = true;
+        setBacktestRunSelectorVisible(false);
         return;
     }
 
-    select.hidden = false;
+    setBacktestRunSelectorVisible(true);
     const previous = select.value || localStorage.getItem(SELECTED_BACKTEST_RUN_KEY);
     select.innerHTML = sorted
         .map((run) => {
