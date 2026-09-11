@@ -107,6 +107,39 @@ def _harness() -> str:
     )
 
 
+def _cash_input_tags() -> dict[str, str]:
+    """Every bound capital input's real `<input>` tag, straight from app.html."""
+    ids = re.findall(r"'([A-Za-z]+)'", fn_body("const CASH_STEP_INPUT_IDS ="))
+    assert len(ids) >= 4, "the bound-input list shrank; update this guard"
+    tags = {}
+    for input_id in ids:
+        match = re.search(rf'<input id="{input_id}"[^>]*>', APP_HTML)
+        assert match, f"{input_id} is bound in app.js but absent from app.html"
+        tags[input_id] = match.group(0)
+    return tags
+
+
+def _shipped_cash_mins() -> dict[str, str]:
+    """`min` as each bound field actually ships it.
+
+    Read rather than written down. Every case below used to hardcode the min it
+    expected, so when the backtest field moved from `min="1"` to `min="0"` on
+    2026-09-10 its regression test went on probing a synthetic element no field
+    in the app resembled -- passing, and covering nothing that shipped. A test
+    whose fixture is copied out of the markup drifts the moment the markup does,
+    and drifts silently, because the copy still describes *something*.
+    """
+    mins = {}
+    for input_id, tag in _cash_input_tags().items():
+        match = re.search(r'\bmin="([^"]*)"', tag)
+        assert match, f"{input_id} ships no min= for the clamp to read"
+        mins[input_id] = match.group(1)
+    return mins
+
+
+_SHIPPED_CASH_MINS = _shipped_cash_mins()
+
+
 def _run_node(expr: str):
     node = shutil.which("node")
     if not node:
@@ -139,29 +172,26 @@ def _backspace_to_empty(min_value: str) -> str:
 
 
 @_requires_node
-def test_backspacing_the_backtest_field_empty_leaves_it_empty():
-    """The reported bug, at the field the user screenshotted.
+@pytest.mark.parametrize(
+    ("input_id", "min_value"), sorted(_SHIPPED_CASH_MINS.items())
+)
+def test_backspacing_a_capital_field_empty_leaves_it_empty(input_id, min_value):
+    """The reported bug, run against every field that actually ships the layer.
 
     A field that refills itself while you are deleting cannot be retyped: the
-    user is left inserting digits around a "1" they never asked for, which is
+    user is left inserting digits around a value they never asked for, which is
     exactly how the feedback describes it ("the number 1 would be confusing").
+
+    The refill lands on `min`, so `min` is what makes the symptom look like one
+    thing or another -- "1" reads as broken, "0" reads as a deliberate choice of
+    no capital. That is why the case is driven off each field's shipped `min`
+    instead of a literal: the two originally hardcoded here (1 and 0) described
+    the fields as they stood before 2026-09-10, and the backtest field's has
+    since moved.
     """
-    assert _backspace_to_empty("1") == "", (
-        "the spinner-correction guard fired on a deletion and refilled the field"
-    )
-
-
-@_requires_node
-def test_backspacing_the_paper_trading_field_empty_leaves_it_empty():
-    """The same defect, one field over, and the reason it needs its own case.
-
-    The paper field's `min` is 0, so the refill lands on "0" rather than "1" --
-    a value that looks deliberate rather than broken. Asserting only the
-    backtest field would leave the paper field free to regress into a state that
-    reads as a real user choice of "no capital".
-    """
-    assert _backspace_to_empty("0") == "", (
-        "the spinner-correction guard fired on a deletion and refilled the field"
+    assert _backspace_to_empty(min_value) == "", (
+        f"{input_id}: the spinner-correction guard fired on a deletion "
+        "and refilled the field"
     )
 
 
@@ -186,7 +216,10 @@ def test_a_spinner_click_still_moves_by_a_full_step():
     assert result == "1100", "a spinner click must land on the configured step"
 
 
-def _type_and_commit(text: str, *, min_value: str = "1") -> dict:
+_DEFAULT_CASH_MIN = sorted(set(_SHIPPED_CASH_MINS.values()))[0]
+
+
+def _type_and_commit(text: str, *, min_value: str = _DEFAULT_CASH_MIN) -> dict:
     """Type `text` into a cleared field and blur it, as a user filling it in does."""
     return _run_node(
         f"""(() => {{
@@ -230,13 +263,18 @@ def test_a_small_typed_amount_is_not_rounded_away_to_the_minimum():
 
 @_requires_node
 def test_typing_below_the_minimum_is_flagged_rather_than_rewritten():
-    """Their second ask: "if smaller than 1, return a red error message".
+    """Their second ask: "if smaller than the minimum, return a red error message".
 
     The value is left on screen and the field marked invalid, so the message has
     something to render from and the user's own number is still there to fix.
+
+    The probe is ``-1`` against ``min="0"``, not ``0`` against ``min="1"``: both
+    shipped fields have carried ``min="0"`` since 2026-09-10 (see
+    tests/test_zero_backtest_capital.py), so a case built on a min of 1 would go
+    on passing against a synthetic element no field in the app resembles.
     """
-    result = _type_and_commit("0")
-    assert result["value"] == "0", "the typed value was overwritten instead of flagged"
+    result = _type_and_commit("-1", min_value="0")
+    assert result["value"] == "-1", "the typed value was overwritten instead of flagged"
     assert result["invalid"] == "true", "nothing marks the field invalid"
     assert result["error"], "no message for the inline error to render"
 
@@ -260,9 +298,9 @@ def test_correcting_an_invalid_value_clears_the_flag():
     """
     result = _run_node(
         """(() => {
-  const el = makeInput({ value: '1000', min: '1' });
+  const el = makeInput({ value: '1000', min: '0' });
   bindCashStepInput(el);
-  el.value = '0';
+  el.value = '-5';
   el._fire('input', { inputType: 'insertText' });
   el._fire('change');
   el.value = '500';
@@ -301,17 +339,6 @@ def test_every_bound_capital_input_has_somewhere_to_render_its_error():
 # ---------------------------------------------------------------------------
 # The form-submit path: the half none of the cases above touch.
 # ---------------------------------------------------------------------------
-
-
-def _cash_input_tags() -> dict[str, str]:
-    ids = re.findall(r"'([A-Za-z]+)'", fn_body("const CASH_STEP_INPUT_IDS ="))
-    assert len(ids) >= 4, "the bound-input list shrank; update this guard"
-    tags = {}
-    for input_id in ids:
-        match = re.search(rf'<input id="{input_id}"[^>]*>', APP_HTML)
-        assert match, f"{input_id} is bound in app.js but absent from app.html"
-        tags[input_id] = match.group(0)
-    return tags
 
 
 def test_the_spinner_increment_is_not_also_a_form_constraint():
@@ -512,4 +539,59 @@ def test_every_caller_that_refills_a_capital_field_resets_it():
         assert "resetCashStepInput(" in body, (
             f"{opener} resets the form without clearing the capital field's "
             "error state, so the modal reopens red on a default value"
+        )
+
+
+def test_every_capital_field_accepts_zero():
+    """Both halves of the Allocated Capital card agree about zero.
+
+    They did not until 2026-09-10: the Paper Trading input shipped `min="0"`
+    and the Backtesting input beside it shipped `min="1"`, so a typed 0 was
+    accepted on the left and refused on the right with "Enter an amount between
+    $1 and $3,000". Two boxes in one card disagreeing about the same number
+    reads as the card being broken, which is how it was reported.
+
+    `min` is also what `snapCashStepValue` clamps to, so the floor was doing
+    double duty as the value the field refilled itself with -- see the module
+    docstring. The backend floor moved with it
+    (tests/test_zero_backtest_capital.py); this is the half a user can see.
+    """
+    for input_id, tag in _cash_input_tags().items():
+        assert 'min="0"' in tag, (
+            f"{input_id} does not accept $0. The two fields in the Allocated "
+            "Capital card must agree, and the backend floor is now 0"
+        )
+
+
+def test_the_editor_does_not_reimpose_a_dollar_floor_in_js():
+    """The `min` attribute is not the only gate -- getEditorState has its own.
+
+    Relaxing the markup and leaving `value < 1` in the validator would swap a
+    browser message for a thrown one: the field would accept the 0 and the save
+    would fail, which is a worse version of the same bug.
+    """
+    source = strip_comments(_AGENT_EDITOR_JS)
+    assert "value < 1" not in source, (
+        "getEditorState still rejects amounts below $1 in JS, so the relaxed "
+        "min attribute only moves where the refusal comes from"
+    )
+    assert "must be at least $1" not in source
+
+
+def test_both_backtest_capital_resolvers_honour_a_saved_zero():
+    """app.js renders the number; agent-editor.js refills the box with it.
+
+    They are separate implementations of one fallback chain, and both used
+    `value > 0` on the *saved* candidate. That made a $0 setting invisible in
+    the card and self-erasing in the editor -- reopening Configure showed the
+    fallback, and the next save wrote the fallback back. Fixing one and not the
+    other leaves the erasure intact, so this asserts the shape in both.
+    """
+    for label, source in (
+        ("app.js", strip_comments(APP_JS)),
+        ("agent-editor.js", strip_comments(_AGENT_EDITOR_JS)),
+    ):
+        assert "backtest_allocation != null" in source, (
+            f"{label} does not separate a saved backtest_allocation of 0 from a "
+            "NULL column, so a deliberate $0 falls through to the paper sleeve"
         )

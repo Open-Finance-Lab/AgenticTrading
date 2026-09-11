@@ -77,7 +77,15 @@ but they are different kinds of money and have their own limits:
    setting rather than a per-run choice, so the **Run Backtest** dialog shows it
    read-only. Leave the field blank and it follows the agent's Paper Trading
    Allocated Capital. A backtest never spends real portfolio cash and never
-   changes it. Minimum **$1**, maximum **$10,000**.
+   changes it. Minimum **$0**, maximum **$3,000** — the same ceiling as the
+   Paper Trading field above, so neither capital can outgrow one agent's share
+   of the portfolio.
+
+   **$0 is a real amount, and blank is not $0.** Type ``0`` and the backtest
+   runs like any other: the agent simply has nothing to trade, so every order
+   is refused for insufficient cash, the equity curve stays flat at $0, and the
+   return is reported as ``0.00%``. Leaving the field *empty* means something
+   different — "not configured" — and falls back as described above.
 
 Paper trading is not switched on yet, so the first of those two currently has
 nothing to spend. **Run Paper Trading** sits beside **Run Backtest** on every
@@ -90,7 +98,10 @@ The reservation is real in the meantime: Paper Trading Allocated Capital leaves
 **My Portfolio** the moment you set it and reduces the cash available to your
 other agents. You can drop it to **$0** on an agent you only plan to backtest —
 give that agent its own **Backtesting** amount first, though, or its backtests
-fall back to $1,000 along with it.
+fall back to $1,000 rather than to $0. That asymmetry is deliberate: an *empty*
+Backtesting field mirrors the Paper Trading sleeve only while that sleeve is
+funded, so nobody who simply does not paper-trade gets their backtests silently
+zeroed. A typed ``0`` is always honoured.
 
 Start from a template
 ---------------------

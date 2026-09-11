@@ -33,7 +33,10 @@ from dashboard.backend.infrastructure.llm.validator import (
     actions_to_executable,
     parse_actions_payload,
 )
-from dashboard.backend.domain.backtesting.constants import resolve_initial_capital
+from dashboard.backend.domain.backtesting.constants import (
+    fractional_return,
+    resolve_initial_capital,
+)
 from dashboard.backend.domain.backtesting.metrics import (
     calculate_max_drawdown,
     calculate_sharpe,
@@ -835,7 +838,7 @@ class ExternalBacktestSession:
             self.run_id = _new_ext_run_id()
         initial_eq = equity_curve[0]["equity"] if equity_curve else self.initial_capital
         final_eq = equity_curve[-1]["equity"] if equity_curve else self.initial_capital
-        total_return = (final_eq - self.initial_capital) / self.initial_capital
+        total_return = fractional_return(final_eq, self.initial_capital)
 
         est_cost = token_cost.estimate_cost_usd(
             self.model_name, self.est_input_tokens, self.est_output_tokens
@@ -1245,8 +1248,20 @@ def start_backtest(
             owner_user_id = agent.get("owner_user_id") if agent else None
             if owner_user_id is not None:
                 session.analytics_user_id = int(owner_user_id)
-        except Exception:
-            pass
+        except Exception as exc:
+            # Fail open -- analytics attribution must never stop a run from
+            # starting -- but not silently. A bare `pass` made "this deployment
+            # emits no owner ids" and "the agent store has been raising on every
+            # lookup since the last deploy" the same observable: runs start,
+            # rows arrive, every one of them anonymous. Same rule as the news
+            # adapter in CLAUDE.md's fail-closed-is-not-fail-visible section --
+            # keep the fallback, print at the boundary. print(), not logging:
+            # log records are invisible under the deployed uvicorn.
+            print(
+                f"⚠️ analytics attribution unavailable for backtest "
+                f"{backtest_id}: {type(exc).__name__}: {exc}",
+                flush=True,
+            )
 
     with _lock:
         # Counted and inserted under one acquisition: as a check in the router

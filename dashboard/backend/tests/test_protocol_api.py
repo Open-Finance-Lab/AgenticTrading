@@ -489,6 +489,57 @@ def test_reject_nonfinite_quantity(client):
     assert inf.status_code == 422, inf.text
 
 
+def test_accept_zero_initial_cash(client):
+    """$0 is a legal amount of simulated capital, on this surface too.
+
+    The protocol service carried its own ``requested <= 0`` refusal, separate
+    from the agents API's ``Field(ge=...)`` and from the dashboard route's.
+    Relaxing one and not the others is how the Configure card came to disagree
+    with itself in the first place -- see tests/test_zero_backtest_capital.py.
+    """
+    agent_id, key, _ = _new_agent(client)
+    version_id = _new_version(client, agent_id, key)
+
+    resp = client.post(
+        "/api/v1/runs",
+        json={
+            "agent_version_id": version_id,
+            "environment": {"type": "backtest", "environment_id": "us-equity-hourly-v1"},
+            "config": {
+                "start_date": "2026-04-15",
+                "end_date": "2026-04-16",
+                "symbols": ["AAPL", "MSFT"],
+                "initial_cash": 0,
+            },
+        },
+        headers={"X-API-Key": key},
+    )
+    assert resp.status_code == 200, resp.text
+
+
+def test_reject_negative_initial_cash(client):
+    """Zero opened up; negative did not."""
+    agent_id, key, _ = _new_agent(client)
+    version_id = _new_version(client, agent_id, key)
+
+    resp = client.post(
+        "/api/v1/runs",
+        json={
+            "agent_version_id": version_id,
+            "environment": {"type": "backtest", "environment_id": "us-equity-hourly-v1"},
+            "config": {
+                "start_date": "2026-04-15",
+                "end_date": "2026-04-16",
+                "symbols": ["AAPL", "MSFT"],
+                "initial_cash": -1,
+            },
+        },
+        headers={"X-API-Key": key},
+    )
+    assert resp.status_code == 400, resp.text
+    assert resp.json()["detail"]["error"]["code"] == "invalid_config"
+
+
 def test_reject_nondefault_initial_cash(client):
     """create_run rejects config.initial_cash above MAX_BACKTEST_INITIAL_CAPITAL."""
     agent_id, key, _ = _new_agent(client)
@@ -730,6 +781,61 @@ def test_full_run_to_completion_and_result(client):
 
     metrics = client.get(f"/api/v1/runs/{run_id}/metrics", headers={"X-API-Key": key}).json()
     assert "total_return" in metrics["metrics"]
+
+
+def test_full_zero_capital_run_completes_and_reports_a_zero_return(client):
+    """The $0 run, driven all the way through finalize -- not just accepted.
+
+    ``test_accept_zero_initial_cash`` proves create_run stopped refusing it;
+    that says nothing about whether the run can *end*. Finalize divides by
+    initial capital, and until 2026-09-10 the $1 floor was the only guard on
+    that division: accepting the 0 without ``fractional_return`` would have
+    swapped a readable 400 at create time for a ``ZeroDivisionError`` in the
+    finalize path, after the caller had already spent every step of the run.
+
+    A run with no cash fills nothing, so the honest report is a flat curve and
+    0.00% -- not ``inf``, and not a crash.
+    """
+    agent_id, key, _ = _new_agent(client)
+    version_id = _new_version(client, agent_id, key)
+
+    created = client.post(
+        "/api/v1/runs",
+        json={
+            "agent_version_id": version_id,
+            "environment": {"type": "backtest", "environment_id": "us-equity-hourly-v1"},
+            "config": {
+                "start_date": "2026-04-15",
+                "end_date": "2026-04-16",
+                "symbols": ["AAPL", "MSFT"],
+                "initial_cash": 0,
+            },
+        },
+        headers={"X-API-Key": key},
+    )
+    assert created.status_code == 200, created.text
+    run_id = created.json()["run_id"]
+
+    for _ in range(200):
+        body = _wait_for_step(client, run_id, key)
+        if body.get("status") == "completed":
+            break
+        resp = client.post(
+            f"/api/v1/runs/{run_id}/steps/{body['step_id']}/decision",
+            json={"idempotency_key": str(uuid.uuid4()), "orders": []},
+            headers={"X-API-Key": key},
+        )
+        assert resp.status_code == 200, resp.text
+    else:
+        raise AssertionError("$0 run did not complete")
+
+    status = client.get(f"/api/v1/runs/{run_id}/status", headers={"X-API-Key": key}).json()
+    assert status["status"] == "completed"
+
+    metrics = client.get(
+        f"/api/v1/runs/{run_id}/metrics", headers={"X-API-Key": key}
+    ).json()["metrics"]
+    assert metrics["total_return"] == 0
 
 
 def test_run_result_before_completion(client):

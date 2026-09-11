@@ -116,7 +116,11 @@ def test_patch_backtest_allocation_alone_is_not_no_fields_to_update(client):
     assert resp.status_code != 400
 
 
-@pytest.mark.parametrize("bad", [0, -100, 3001])
+# 0 is deliberately absent: it moved from "out of range" to a legal amount on
+# 2026-09-10, when this field stopped disagreeing with the ``cash_allocation``
+# field beside it in the same Configure card. tests/test_zero_backtest_capital.py
+# owns that boundary; this list stays for the ends that are still closed.
+@pytest.mark.parametrize("bad", [-1, -100, 3001])
 def test_backtest_allocation_out_of_range_is_rejected(client, bad):
     headers = _headers()
     resp = client.post(

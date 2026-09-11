@@ -29,7 +29,10 @@ from dashboard.backend.infrastructure.llm.validator import DJIA_30, TOP_10_STOCK
 from dashboard.backend.infrastructure.market_data.strategy_universe import (
     resolve_strategy_universe, validate_selection,
 )
-from dashboard.backend.domain.backtesting.constants import INITIAL_CAPITAL
+from dashboard.backend.domain.backtesting.constants import (
+    INITIAL_CAPITAL,
+    fractional_return,
+)
 from dashboard.backend.domain.backtesting.currency import (
     CurrencyContext,
     CurrencyContextError,
@@ -1559,7 +1562,7 @@ class HourlyBacktester:
             # Progress
             if (i + 1) % 100 == 0:
                 equity = manager.equity_history[-1]["equity"]
-                pct_return = ((equity - self.initial_capital) / self.initial_capital) * 100
+                pct_return = fractional_return(equity, self.initial_capital) * 100
                 print(f"   Decision {i+1}/{len(all_timestamps)}: Equity ${equity:,.0f} ({pct_return:+.1f}%)")
 
         if self.intraday_mode:
@@ -1595,7 +1598,7 @@ class HourlyBacktester:
         run_id = self.live_run_id or f"agent_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}"
         initial_eq = equity_curve[0]["equity"] if equity_curve else self.initial_capital
         final_eq = equity_curve[-1]["equity"] if equity_curve else self.initial_capital
-        total_return = (final_eq - self.initial_capital) / self.initial_capital
+        total_return = fractional_return(final_eq, self.initial_capital)
 
         # Attribute a hosted run to its model only if the model actually drove
         # steps. A row naming a model beside ``llm_calls=0`` is precisely the
@@ -1697,6 +1700,14 @@ class HourlyBacktester:
     
     def run_buyhold_baseline(self) -> Tuple[str, List[Dict]]:
         """Buy and hold baseline using shared baseline generator."""
+        # ``generate_baselines`` at $0 returns a flat zero history, which is
+        # then written to ``agent_runs`` as a real row -- so a $0 run recorded
+        # buy-and-hold as having returned 0.00% over its window. The chart is
+        # rebuilt per request; these rows outlive it.
+        if not self.initial_capital > 0:
+            print("📊 Buy & Hold baseline skipped: this run has no capital\n")
+            return None, []
+
         print("📊 Running Buy & Hold baseline...\n")
 
         # Full DJIA runs keep the historical 10-stock B&H sleeve; other universes
@@ -1744,7 +1755,7 @@ class HourlyBacktester:
         run_id = f"buyhold_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}"
         initial_eq = equity_history[0]["equity"]
         final_eq = equity_history[-1]["equity"]
-        total_return = (final_eq - self.initial_capital) / self.initial_capital
+        total_return = fractional_return(final_eq, self.initial_capital)
         
         db.insert_run(
             run_id=run_id,
@@ -1777,6 +1788,12 @@ class HourlyBacktester:
     
     def run_djia_baseline(self) -> Tuple[str, List[Dict]]:
         """DJIA index baseline using shared baseline generator."""
+        # Same reasoning as run_buyhold_baseline: a benchmark scaled to $0 is a
+        # row claiming the Dow returned 0.00%, not a benchmark.
+        if not self.initial_capital > 0:
+            print("📊 DJIA Index baseline skipped: this run has no capital\n")
+            return None, []
+
         if not self._effective_profile().index_baseline_enabled:
             return None, []
 
@@ -1820,7 +1837,7 @@ class HourlyBacktester:
         run_id = f"djia_index_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}"
         initial_eq = equity_history[0]["equity"]
         final_eq = equity_history[-1]["equity"]
-        total_return = (final_eq - self.initial_capital) / self.initial_capital
+        total_return = fractional_return(final_eq, self.initial_capital)
         
         db.insert_run(
             run_id=run_id,
