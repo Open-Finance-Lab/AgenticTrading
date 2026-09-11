@@ -38,7 +38,7 @@ numba==0.61.2
 openai==1.101.0
 pandas==2.3.2
 pandas-ta==0.4.71b0
-pyarrow==21.0.0
+pyarrow==23.0.1
 platformdirs==4.3.7
 propcache==0.4.1
 pycparser==3.0
