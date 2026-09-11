@@ -82,9 +82,15 @@ GET /api/v1/environments/{environment_id}
 ```
 
 The current universe is the DJIA 30 with a default initial cash of `1000`.
-Callers may override it via `config.initial_cash` on `POST /api/v1/runs`, up to
-a `10000` cap — a request above the cap gets a 400 `invalid_config` error, not
-a silent clamp.
+Callers may override it via `config.initial_cash` on `POST /api/v1/runs`, within
+`0` to `3000` — a request outside that range gets a 400 `invalid_config` error,
+not a silent clamp. The error body names the bound it broke
+(`min_initial_cash` / `max_initial_cash` in `details`).
+
+`0` is a legal amount, not a rejected one. A zero-capital run is created and
+stepped like any other; the agent simply has nothing to spend, so every order is
+refused for insufficient cash, the equity curve stays flat at `0`, and the run
+finalises with a `total_return` of `0`.
 
 ---
 

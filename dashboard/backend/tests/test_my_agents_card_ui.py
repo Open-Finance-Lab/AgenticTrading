@@ -86,16 +86,16 @@ def test_card_backtest_capital_falls_back_to_the_sleeve():
     assert out.count("$2,000") == 2
 
 
-def test_zero_paper_sleeve_displays_as_zero_but_backtest_capital_does_not():
-    """The two capitals deliberately diverge at $0 -- this is not a bug.
+def test_an_unset_backtest_capital_does_not_mirror_a_zero_paper_sleeve():
+    """The two capitals diverge when the backtest one is UNSET -- by design.
 
-    `cash_allocation` is `ge=0` server-side: a $0 paper sleeve is a real,
-    legal state and must be shown honestly, not padded to a default. But
-    `backtest_allocation` is `ge=1` server-side -- a backtest cannot run on
-    $0 -- so `resolveBacktestCapital` treats a non-positive value as absent
-    and falls through to the $1,000 default. Rendering these two the same
-    way would either lie about a user's real (zero) money or hand a $0 into
-    an API call that would 422.
+    `cash_allocation` is `ge=0`: a $0 paper sleeve is a real, legal state and is
+    shown honestly rather than padded to a default. `backtest_allocation` is
+    `ge=0` too as of 2026-09-10, but this case is the NULL column -- "never
+    configured" -- which mirrors the paper sleeve only when that sleeve is
+    funded. A $0 sleeve is the ordinary state of someone who does not
+    paper-trade at all, and mirroring it would silently zero the backtests of
+    every such agent that never touched this field.
     """
     out = _run_node(
         _harness(
@@ -105,6 +105,26 @@ def test_zero_paper_sleeve_displays_as_zero_but_backtest_capital_does_not():
     )
     assert "$0" in out
     assert "$1,000" in out
+
+
+def test_a_saved_zero_backtest_capital_is_displayed_as_zero():
+    """The other half of the split above, and the one that used to be lost.
+
+    ``$0`` became a saveable backtest amount on 2026-09-10, but
+    ``resolveBacktestCapital``'s ``value > 0`` still read it as absent -- so the
+    card and the Run Backtest dialog rendered $1,000 (or the paper sleeve) over
+    a setting the owner had explicitly chosen, after a save that reported
+    success. Reopening Configure then wrote the displayed number back, which
+    made the setting undo itself by being looked at.
+    """
+    out = _run_node(
+        _harness(
+            "console.log(renderAgentAllocatedCapitalHero("
+            "{cash_allocation: 2000, backtest_allocation: 0}));"
+        )
+    )
+    assert "$0" in out, "a saved $0 backtest capital was replaced by a fallback"
+    assert "$1,000" not in out
 
 
 def test_run_paper_trading_button_is_disabled_and_explained():

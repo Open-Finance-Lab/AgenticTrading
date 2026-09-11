@@ -837,17 +837,24 @@
     let backtest_allocation = null;
     if (backtestInput && backtestInput.value !== '') {
       const value = Number(backtestInput.value);
-      if (!Number.isFinite(value) || value < 1) {
-        throw new Error('Backtest Allocated Capital must be at least $1.');
+      // `< 0`, matching the Paper Trading branch above. $0 is a legal amount of
+      // simulated capital as of 2026-09-10 -- a run with no cash makes no
+      // trades and reports 0.00%, which is a real answer, not an error state.
+      if (!Number.isFinite(value) || value < 0) {
+        throw new Error('Backtest Allocated Capital must be zero or greater.');
       }
       if (value > 3000) {
         throw new Error('Backtest Allocated Capital cannot exceed $3,000.');
       }
       backtest_allocation = Math.round(value);
     } else {
-      // Non-positive counts as absent: cash_allocation is legally 0 (a $0 paper
-      // sleeve), but backtest capital is >= 1 server-side, so 0 must fall
-      // through to the default rather than becoming an unsaveable value.
+      // EMPTY, not zero. A typed 0 is saved verbatim by the branch above; this
+      // is the "never configured" case, which mirrors the paper sleeve the way
+      // the field's own hint promises ("Backtests start from this amount by
+      // default"). The `> 0` below is therefore about the *mirror*, not about
+      // what is saveable: a $0 paper sleeve is a common state for someone who
+      // does not paper-trade, and silently turning their unset backtest capital
+      // into $0 would change a run they never touched. Unset stays $1,000.
       backtest_allocation =
         Number.isFinite(Number(cash_allocation)) && Number(cash_allocation) > 0
           ? Math.min(Math.round(Number(cash_allocation)), 3000)
@@ -998,14 +1005,18 @@
     }
     const backtestInput = document.getElementById('agentEditorBacktestAllocation');
     if (backtestInput) {
-      // Non-positive counts as absent: cash_allocation is legally 0 (a $0 paper
-      // sleeve), but backtest capital is >= 1 server-side, so 0 must fall
-      // through to the default rather than becoming an unsaveable value.
-      const candidates = [agent.backtest_allocation, agent.cash_allocation];
-      let resolved = 1000;
-      for (const raw of candidates) {
-        const value = Number(raw);
-        if (Number.isFinite(value) && value > 0) { resolved = value; break; }
+      // Mirrors resolveBacktestCapital in app.js -- a saved 0 is an answer and
+      // only NULL falls through to the paper sleeve. With `> 0` on the first
+      // candidate, reopening Configure on a $0 agent showed 1000 in the box,
+      // and the next save wrote that back: the setting undid itself by being
+      // looked at.
+      const saved = Number(agent.backtest_allocation);
+      let resolved;
+      if (agent.backtest_allocation != null && Number.isFinite(saved) && saved >= 0) {
+        resolved = saved;
+      } else {
+        const sleeve = Number(agent.cash_allocation);
+        resolved = Number.isFinite(sleeve) && sleeve > 0 ? sleeve : 1000;
       }
       backtestInput.value = String(Math.min(Math.round(resolved), 3000));
       resetCapitalInput(backtestInput);

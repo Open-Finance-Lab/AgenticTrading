@@ -1106,12 +1106,23 @@ function formatSignedReturnPct(frac) {
  * did, i.e. starting from its paper sleeve.
  */
 function resolveBacktestCapital(agent) {
-  const candidates = [agent?.backtest_allocation, agent?.cash_allocation];
-  for (const raw of candidates) {
-    const value = Number(raw);
-    if (Number.isFinite(value) && value > 0) {
-      return Math.min(Math.round(value), MAX_BACKTEST_ALLOCATED_CAPITAL);
-    }
+  // A SAVED 0 is an answer; only NULL falls through. `> 0` on this first
+  // candidate sent a deliberate $0 down the fallback chain and rendered it as
+  // the agent's paper sleeve, or $1,000 -- the card and the Run Backtest dialog
+  // then both displayed capital the owner had explicitly set to something else,
+  // with the save having reported success.
+  const saved = Number(agent?.backtest_allocation);
+  if (agent?.backtest_allocation != null && Number.isFinite(saved) && saved >= 0) {
+    return Math.min(Math.round(saved), MAX_BACKTEST_ALLOCATED_CAPITAL);
+  }
+  // The NULL case, unchanged: mirror the paper sleeve, but only a funded one.
+  // `> 0` is right *here* -- a $0 sleeve is the ordinary state of someone who
+  // does not paper-trade, and mirroring it would zero the backtests of every
+  // such agent that never set this field. See getEditorState in agent-editor.js,
+  // which makes the same split for the same reason.
+  const sleeve = Number(agent?.cash_allocation);
+  if (Number.isFinite(sleeve) && sleeve > 0) {
+    return Math.min(Math.round(sleeve), MAX_BACKTEST_ALLOCATED_CAPITAL);
   }
   return DEFAULT_AGENT_CASH_ALLOCATION;
 }

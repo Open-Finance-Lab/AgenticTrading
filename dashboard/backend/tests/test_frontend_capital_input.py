@@ -230,13 +230,18 @@ def test_a_small_typed_amount_is_not_rounded_away_to_the_minimum():
 
 @_requires_node
 def test_typing_below_the_minimum_is_flagged_rather_than_rewritten():
-    """Their second ask: "if smaller than 1, return a red error message".
+    """Their second ask: "if smaller than the minimum, return a red error message".
 
     The value is left on screen and the field marked invalid, so the message has
     something to render from and the user's own number is still there to fix.
+
+    The probe is ``-1`` against ``min="0"``, not ``0`` against ``min="1"``: both
+    shipped fields have carried ``min="0"`` since 2026-09-10 (see
+    tests/test_zero_backtest_capital.py), so a case built on a min of 1 would go
+    on passing against a synthetic element no field in the app resembles.
     """
-    result = _type_and_commit("0")
-    assert result["value"] == "0", "the typed value was overwritten instead of flagged"
+    result = _type_and_commit("-1", min_value="0")
+    assert result["value"] == "-1", "the typed value was overwritten instead of flagged"
     assert result["invalid"] == "true", "nothing marks the field invalid"
     assert result["error"], "no message for the inline error to render"
 
@@ -512,4 +517,59 @@ def test_every_caller_that_refills_a_capital_field_resets_it():
         assert "resetCashStepInput(" in body, (
             f"{opener} resets the form without clearing the capital field's "
             "error state, so the modal reopens red on a default value"
+        )
+
+
+def test_every_capital_field_accepts_zero():
+    """Both halves of the Allocated Capital card agree about zero.
+
+    They did not until 2026-09-10: the Paper Trading input shipped `min="0"`
+    and the Backtesting input beside it shipped `min="1"`, so a typed 0 was
+    accepted on the left and refused on the right with "Enter an amount between
+    $1 and $3,000". Two boxes in one card disagreeing about the same number
+    reads as the card being broken, which is how it was reported.
+
+    `min` is also what `snapCashStepValue` clamps to, so the floor was doing
+    double duty as the value the field refilled itself with -- see the module
+    docstring. The backend floor moved with it
+    (tests/test_zero_backtest_capital.py); this is the half a user can see.
+    """
+    for input_id, tag in _cash_input_tags().items():
+        assert 'min="0"' in tag, (
+            f"{input_id} does not accept $0. The two fields in the Allocated "
+            "Capital card must agree, and the backend floor is now 0"
+        )
+
+
+def test_the_editor_does_not_reimpose_a_dollar_floor_in_js():
+    """The `min` attribute is not the only gate -- getEditorState has its own.
+
+    Relaxing the markup and leaving `value < 1` in the validator would swap a
+    browser message for a thrown one: the field would accept the 0 and the save
+    would fail, which is a worse version of the same bug.
+    """
+    source = strip_comments(_AGENT_EDITOR_JS)
+    assert "value < 1" not in source, (
+        "getEditorState still rejects amounts below $1 in JS, so the relaxed "
+        "min attribute only moves where the refusal comes from"
+    )
+    assert "must be at least $1" not in source
+
+
+def test_both_backtest_capital_resolvers_honour_a_saved_zero():
+    """app.js renders the number; agent-editor.js refills the box with it.
+
+    They are separate implementations of one fallback chain, and both used
+    `value > 0` on the *saved* candidate. That made a $0 setting invisible in
+    the card and self-erasing in the editor -- reopening Configure showed the
+    fallback, and the next save wrote the fallback back. Fixing one and not the
+    other leaves the erasure intact, so this asserts the shape in both.
+    """
+    for label, source in (
+        ("app.js", strip_comments(APP_JS)),
+        ("agent-editor.js", strip_comments(_AGENT_EDITOR_JS)),
+    ):
+        assert "backtest_allocation != null" in source, (
+            f"{label} does not separate a saved backtest_allocation of 0 from a "
+            "NULL column, so a deliberate $0 falls through to the paper sleeve"
         )

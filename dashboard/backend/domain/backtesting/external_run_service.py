@@ -33,7 +33,10 @@ from dashboard.backend.infrastructure.llm.validator import (
     actions_to_executable,
     parse_actions_payload,
 )
-from dashboard.backend.domain.backtesting.constants import resolve_initial_capital
+from dashboard.backend.domain.backtesting.constants import (
+    fractional_return,
+    resolve_initial_capital,
+)
 from dashboard.backend.domain.backtesting.metrics import (
     calculate_max_drawdown,
     calculate_sharpe,
@@ -835,7 +838,7 @@ class ExternalBacktestSession:
             self.run_id = _new_ext_run_id()
         initial_eq = equity_curve[0]["equity"] if equity_curve else self.initial_capital
         final_eq = equity_curve[-1]["equity"] if equity_curve else self.initial_capital
-        total_return = (final_eq - self.initial_capital) / self.initial_capital
+        total_return = fractional_return(final_eq, self.initial_capital)
 
         est_cost = token_cost.estimate_cost_usd(
             self.model_name, self.est_input_tokens, self.est_output_tokens

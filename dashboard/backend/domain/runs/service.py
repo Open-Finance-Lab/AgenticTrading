@@ -31,6 +31,7 @@ from dashboard.backend.database import db
 from dashboard.backend.domain.backtesting.constants import (
     INITIAL_CAPITAL,
     MAX_BACKTEST_INITIAL_CAPITAL,
+    MIN_BACKTEST_INITIAL_CAPITAL,
     resolve_initial_capital,
 )
 from dashboard.backend.execution.base import TERMINAL_STATUSES
@@ -598,11 +599,17 @@ def create_run(
             raise ProtocolError(
                 "invalid_config", "config.initial_cash must be a number", 400
             )
-        if requested <= 0:
+        # `< MIN`, not `<= 0`: $0 is a legal (degenerate) run. Written as a
+        # failed `>=` so NaN -- which `float("nan")` accepts and which fails
+        # every comparison -- is refused here rather than surviving into the
+        # engine's arithmetic.
+        if not requested >= float(MIN_BACKTEST_INITIAL_CAPITAL):
             raise ProtocolError(
                 "invalid_config",
-                "config.initial_cash must be greater than 0",
+                "config.initial_cash cannot be negative "
+                f"(minimum {MIN_BACKTEST_INITIAL_CAPITAL:g})",
                 400,
+                details={"min_initial_cash": MIN_BACKTEST_INITIAL_CAPITAL},
             )
         if requested > float(MAX_BACKTEST_INITIAL_CAPITAL) + 1e-9:
             raise ProtocolError(

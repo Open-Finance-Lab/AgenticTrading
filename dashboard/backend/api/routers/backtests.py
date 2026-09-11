@@ -98,7 +98,9 @@ from dashboard.backend.infrastructure.ai_hedge_fund.adapter import (
     runtime_unavailable_reason,
 )
 from dashboard.backend.domain.backtesting.constants import (
+    INITIAL_CAPITAL,
     MAX_BACKTEST_INITIAL_CAPITAL,
+    MIN_BACKTEST_INITIAL_CAPITAL,
     resolve_initial_capital,
 )
 from dashboard.backend.infrastructure.llm.validator import DJIA_30
@@ -206,6 +208,30 @@ def _filter_equity_for_run(
         market=profile.market,
         market_timezone=profile.timezone,
     )
+
+
+def _run_initial_capital(run: Dict[str, Any], first_equity: Any) -> float:
+    """Capital a stored run started from, for scaling its benchmark curves.
+
+    Deliberately NOT ``run["initial_equity"] or first_equity or 1_000``. That
+    chain reads *zero* as *missing*, so a $0 run -- legal since 2026-09-10 --
+    scaled DJIA and buy-and-hold to $1,000 and drew them a thousand times above
+    an agent curve sitting flat on the axis. Falling back on `None` is the
+    behaviour that was intended all along; `or` only ever approximated it, and
+    approximated it correctly right up until zero became reachable.
+    """
+    for candidate in (run.get("initial_equity"), first_equity):
+        if candidate is None:
+            continue
+        try:
+            value = float(candidate)
+        except (TypeError, ValueError):
+            continue
+        # NaN is stored as a float and is not None, so it passes both guards
+        # above; it would poison every scaled point downstream.
+        if value == value:
+            return value
+    return float(INITIAL_CAPITAL)
 
 
 def _stored_buyhold_baseline(
@@ -1823,8 +1849,20 @@ def run_backtest_endpoint(
             initial_capital = float(initial_capital)
         except (TypeError, ValueError):
             raise HTTPException(status_code=422, detail="initial_capital must be a number.")
-        if initial_capital <= 0:
-            raise HTTPException(status_code=422, detail="initial_capital must be greater than 0.")
+        # Against MIN, not against a literal 0: $0 is a legal (degenerate) run
+        # -- no cash, no fills, flat curve, 0.00% return. See the note in
+        # domain/backtesting/constants.py for why the old floor existed and
+        # what replaced it. Written as a failed `>=` rather than `<` so NaN --
+        # which `float()` accepts and which is false against every comparison
+        # -- is refused here instead of sliding past both bounds.
+        if not initial_capital >= float(MIN_BACKTEST_INITIAL_CAPITAL):
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    "initial_capital cannot be negative "
+                    f"(minimum {MIN_BACKTEST_INITIAL_CAPITAL:g})."
+                ),
+            )
         if initial_capital > float(MAX_BACKTEST_INITIAL_CAPITAL):
             raise HTTPException(
                 status_code=422,
@@ -2309,9 +2347,7 @@ def get_backtest_chart_data(run_id: str, request: Request):
     if not agent_curve:
         raise HTTPException(status_code=404, detail="No equity data to plot for this run")
 
-    initial_capital = float(
-        run.get("initial_equity") or agent_curve[0].get("equity") or 1_000
-    )
+    initial_capital = _run_initial_capital(run, agent_curve[0].get("equity"))
     agent_card = agent_service.agents.get_agent_by_session(session_id)
     card_name = (agent_card or {}).get("name")
 
@@ -2641,7 +2677,7 @@ def _render_run_plot_png(run_id: str) -> bytes:
     if not timestamps:
         raise HTTPException(status_code=404, detail="No equity data to plot for this run")
 
-    initial_capital = float(run.get("initial_equity") or agent_values[0] or 1_000)
+    initial_capital = _run_initial_capital(run, agent_values[0])
     index_baselines_ok = True
     if profile.index_baseline_enabled:
         baselines, index_baselines_ok = market_index_baselines_with_status(
