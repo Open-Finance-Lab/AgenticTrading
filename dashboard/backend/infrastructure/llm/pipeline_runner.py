@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import copy
 import json
+import os
 import re
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -47,6 +48,38 @@ beyond the episode context."""
 # for both reasoning tokens and the final JSON. This is intentionally scoped to
 # retries so reasoning stays enabled without doubling every successful call.
 RECOVERY_MAX_OUTPUT_TOKENS = max(DEFAULT_MAX_OUTPUT_TOKENS, 4096)
+
+
+def escalate_ceiling_on_retry() -> bool:
+    """Whether a retry after an empty reply should raise the output ceiling.
+
+    This module already does it, and does it **once**: an empty pipeline
+    response is retried at ``RECOVERY_MAX_OUTPUT_TOKENS`` rather than at the
+    ceiling that just failed, and the step then ends either way. The
+    single-prompt loop in ``portfolio_manager`` does not -- it retries four
+    times at the failing ceiling and only then raises it -- so the same failure
+    costs four extra billed calls there and one here.
+
+    Off by default; ``LLM_ESCALATE_CEILING_ON_RETRY=1`` makes the two paths
+    agree: one request at the configured ceiling, one at the recovery ceiling.
+    Parity means the escalated retry *replaces* the same-ceiling ones rather
+    than being applied to each of them -- repeating an escalated request is the
+    same request again, which is the objection this flag exists to answer.
+
+    It lives here rather than beside its caller because it is a question about
+    ``RECOVERY_MAX_OUTPUT_TOKENS``, which is defined here.
+
+    False unless the ceiling would actually move. That constant is
+    ``max(DEFAULT_MAX_OUTPUT_TOKENS, 4096)``, so an operator running
+    ``LLM_MAX_OUTPUT_TOKENS>=4096`` would get a "recovery" request identical to
+    the one that just failed -- trading four same-ceiling retries for one
+    same-ceiling retry, a straight loss of attempts against an intermittent
+    empty reply with no escalation bought.
+    """
+    raw = os.getenv("LLM_ESCALATE_CEILING_ON_RETRY", "").strip().lower()
+    if raw not in ("1", "true", "yes", "on"):
+        return False
+    return RECOVERY_MAX_OUTPUT_TOKENS > DEFAULT_MAX_OUTPUT_TOKENS
 
 
 def is_post_trade_step(step: Any) -> bool:

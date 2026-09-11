@@ -141,6 +141,13 @@ os.environ.pop("IFIND_REFRESH_TOKEN", None)
 os.environ.pop("IFIND_ACCESS_TOKEN", None)
 os.environ.pop("IFIND_BASE_URL", None)
 
+# Same reason, one layer down: this one changes how many times the empty-reply
+# retry loop re-asks the failing output ceiling before the rescue call. A
+# developer configured like prod (where it is meant to be set) would otherwise
+# see the harness suite's call-shape assertions fail as unexplained assertion
+# errors rather than as a config leak.
+os.environ.pop("LLM_ESCALATE_CEILING_ON_RETRY", None)
+
 
 @atexit.register
 def _cleanup_test_db_dir() -> None:

@@ -243,6 +243,162 @@ def test_openrouter_reasoning_max_tokens_env_overrides(monkeypatch):
     }
 
 
+# --------------------------------------------------------------------------
+# The thinking budget and the answer share one output ceiling
+#
+# ``anthropic_thinking_kwarg``'s whole purpose is that "thinking cannot consume
+# the entire max_tokens ceiling" -- but the mapped budget was never checked
+# against the ceiling the request actually carries, and the default pairing
+# (effort ``medium`` → 2048 against the harness's ``max_tokens=2000``) made
+# that guarantee false on *every first request*. A reply that cannot emit text
+# is the empty response the retry paths downstream exist to recover from, at a
+# billed call each, so this is the root cause under those retries.
+# --------------------------------------------------------------------------
+
+
+def _fresh_warn_state(monkeypatch):
+    """The clamp warns once per (budget, ceiling); isolate that across tests."""
+    monkeypatch.setattr(openrouter, "_WARNED_BUDGET_CEILINGS", set())
+
+
+def test_the_budget_is_clamped_to_leave_room_for_an_answer(monkeypatch):
+    monkeypatch.setenv("OPENROUTER_REASONING_EFFORT", "medium")
+    monkeypatch.delenv("OPENROUTER_REASONING_MAX_TOKENS", raising=False)
+    _fresh_warn_state(monkeypatch)
+
+    expected = 2000 - openrouter._MIN_ANSWER_TOKENS
+    assert openrouter.anthropic_thinking_kwarg(max_tokens=2000) == {
+        "type": "enabled",
+        "budget_tokens": expected,
+    }
+    assert openrouter.reasoning_extra_body(max_tokens=2000) == {
+        "reasoning": {"max_tokens": expected, "enabled": True}
+    }
+
+
+def test_a_budget_that_already_fits_is_left_alone(monkeypatch):
+    monkeypatch.setenv("OPENROUTER_REASONING_EFFORT", "medium")
+    monkeypatch.delenv("OPENROUTER_REASONING_MAX_TOKENS", raising=False)
+    _fresh_warn_state(monkeypatch)
+
+    # The recovery ceiling exists precisely so reasoning and the JSON both fit.
+    assert openrouter.anthropic_thinking_kwarg(max_tokens=4096) == {
+        "type": "enabled",
+        "budget_tokens": 2048,
+    }
+
+
+def test_an_unknown_ceiling_is_not_clamped_against(monkeypatch):
+    monkeypatch.setenv("OPENROUTER_REASONING_EFFORT", "medium")
+    monkeypatch.delenv("OPENROUTER_REASONING_MAX_TOKENS", raising=False)
+    _fresh_warn_state(monkeypatch)
+
+    for ceiling in (None, 0, -1, "2000", True):
+        assert openrouter.anthropic_thinking_kwarg(max_tokens=ceiling) == {
+            "type": "enabled",
+            "budget_tokens": 2048,
+        }, ceiling
+
+
+def test_a_ceiling_too_small_for_any_legal_budget_disables_reasoning(monkeypatch):
+    """``LLM_MAX_OUTPUT_TOKENS=600`` is a documented small-demo config.
+
+    1024 is OpenRouter's floor for ``reasoning.max_tokens``, so there is no
+    smaller budget to fall back to -- only a request that cannot answer.
+    """
+    monkeypatch.setenv("OPENROUTER_REASONING_EFFORT", "medium")
+    monkeypatch.delenv("OPENROUTER_REASONING_MAX_TOKENS", raising=False)
+    _fresh_warn_state(monkeypatch)
+
+    assert openrouter.anthropic_thinking_kwarg(max_tokens=600) == {
+        "type": "disabled"
+    }
+    body = openrouter.reasoning_extra_body(max_tokens=600)
+    assert body["reasoning"]["enabled"] is False
+    assert body["reasoning"]["effort"] == "none"
+
+
+def test_the_env_budget_override_is_clamped_too(monkeypatch):
+    monkeypatch.setenv("OPENROUTER_REASONING_EFFORT", "medium")
+    monkeypatch.setenv("OPENROUTER_REASONING_MAX_TOKENS", "6000")
+    _fresh_warn_state(monkeypatch)
+
+    expected = 2000 - openrouter._MIN_ANSWER_TOKENS
+    assert openrouter.anthropic_thinking_kwarg(max_tokens=2000) == {
+        "type": "enabled",
+        "budget_tokens": expected,
+    }
+
+
+def test_the_clamp_is_announced_once_per_pairing(monkeypatch, capsys):
+    monkeypatch.setenv("OPENROUTER_REASONING_EFFORT", "medium")
+    monkeypatch.delenv("OPENROUTER_REASONING_MAX_TOKENS", raising=False)
+    _fresh_warn_state(monkeypatch)
+
+    for _ in range(3):
+        openrouter.anthropic_thinking_kwarg(max_tokens=2000)
+    out = capsys.readouterr().out
+    assert out.count("leaves no room for an answer") == 1
+    assert "max_tokens=2000" in out
+
+
+def test_the_proxy_clamps_against_the_ceiling_it_is_sending(monkeypatch):
+    monkeypatch.setenv("OPENROUTER_REASONING_EFFORT", "medium")
+    monkeypatch.delenv("OPENROUTER_REASONING_MAX_TOKENS", raising=False)
+    _fresh_warn_state(monkeypatch)
+    recorded = {}
+
+    class _Inner:
+        def create(self, **kwargs):
+            recorded.update(kwargs)
+            return "ok"
+
+    proxy = openrouter._OpenRouterMessages(_Inner())
+    proxy.create(model="m", max_tokens=2000, messages=[])
+
+    budget = recorded["thinking"]["budget_tokens"]
+    assert budget + openrouter._MIN_ANSWER_TOKENS <= 2000
+    assert recorded["extra_body"]["reasoning"]["max_tokens"] == budget
+
+
+def test_the_proxy_leaves_a_recovery_call_unclamped(monkeypatch):
+    monkeypatch.setenv("OPENROUTER_REASONING_EFFORT", "medium")
+    monkeypatch.delenv("OPENROUTER_REASONING_MAX_TOKENS", raising=False)
+    _fresh_warn_state(monkeypatch)
+    recorded = {}
+
+    class _Inner:
+        def create(self, **kwargs):
+            recorded.update(kwargs)
+            return "ok"
+
+    proxy = openrouter._OpenRouterMessages(_Inner())
+    proxy.create(model="m", max_tokens=4096, messages=[])
+    assert recorded["thinking"] == {"type": "enabled", "budget_tokens": 2048}
+
+
+def test_the_shipping_default_pairing_can_return_text(monkeypatch):
+    """The regression this clamp exists for, pinned across both modules.
+
+    Neither constant is wrong on its own; they were only ever wrong together,
+    so the guard has to read both -- a test that hardcodes 2048 and 2000 goes
+    green again the moment one of them moves.
+    """
+    from dashboard.backend.infrastructure.llm.backtest_harness import (
+        DEFAULT_MAX_OUTPUT_TOKENS,
+    )
+
+    monkeypatch.delenv("OPENROUTER_REASONING_EFFORT", raising=False)
+    monkeypatch.delenv("OPENROUTER_REASONING_MAX_TOKENS", raising=False)
+    _fresh_warn_state(monkeypatch)
+
+    thinking = openrouter.anthropic_thinking_kwarg(
+        max_tokens=DEFAULT_MAX_OUTPUT_TOKENS
+    )
+    if thinking.get("type") == "enabled":
+        assert thinking["budget_tokens"] < DEFAULT_MAX_OUTPUT_TOKENS
+
+
 def test_make_llm_client_commonstack_ignores_openrouter_key(monkeypatch):
     if not providers_pkg.HAS_ANTHROPIC:
         pytest.skip("anthropic SDK not installed")

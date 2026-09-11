@@ -56,6 +56,7 @@ from dashboard.backend.infrastructure.llm.backtest_harness import (
 )
 from dashboard.backend.infrastructure.llm.pipeline_runner import (
     RECOVERY_MAX_OUTPUT_TOKENS,
+    escalate_ceiling_on_retry,
     response_text_or_none,
     run_pipeline_decision,
     truncation_reason,
@@ -491,7 +492,20 @@ class PortfolioManager:
                 # blocks. Retry, then one last JSON-only rescue call so we do
                 # not tank H6 coverage on intermittent empty responses.
                 llm_response = None
-                no_text_retries = 4
+                # How many times the failing ceiling is re-asked before the
+                # rescue call raises it. ``pipeline_runner`` escalates on its
+                # FIRST retry and then stops: a reply already obtained at the
+                # recovery ceiling has nothing different left to ask for, so a
+                # second escalated request is the same request again.
+                # ``LLM_ESCALATE_CEILING_ON_RETRY=1`` makes this loop agree --
+                # one request at the configured ceiling, then the rescue call
+                # below -- instead of paying for four identical failures first.
+                # An empty reply is what a reply looks like when reasoning ran
+                # out the output ceiling before any text was emitted, which is
+                # not the kind of failure a same-ceiling retry fixes. The first
+                # request and the rescue call are byte-identical either way;
+                # only the count of same-ceiling retries between them moves.
+                no_text_retries = 1 if escalate_ceiling_on_retry() else 4
                 # One recovery budget (``RECOVERY_MAX_OUTPUT_TOKENS``) per
                 # step, spent by whichever unusable reply claims it first: the
                 # final rescue call below, or the truncation retry after the
