@@ -456,3 +456,41 @@ The published Sphinx tree has no page on admin analytics, lifecycle segments,
 or cohorts. Nothing is stale because nothing exists. A page for administrators
 describing the three axes, the segment definitions, and the "as of yesterday"
 freshness rule is a follow-up owned by the maintainer, not part of these PRs.
+
+## Amendments
+
+Recorded 2026-09-12 while writing the implementation plan
+(`docs/superpowers/plans/2026-09-12-user-analytics-architecture.md`). The design
+is unchanged; these correct three statements of fact about the code it replaces.
+
+1. **"Why now" understates the cause.** The sixty-second sweep was one of two
+   burners. `AnalyticsService.record_server_event` also recomputes the caller's
+   snapshot synchronously, in the request, for every accepted lifecycle event,
+   and each recompute reads that user's full 180-day history twice.
+   `_build_analytics_service` enables it in production. One backtest emits four
+   progress events, so a single run cost eight full-history scans before the
+   sweep ran at all. This is the larger of the two. It is the same defect --
+   a label materialized from a copy of the facts -- and the same fix: ingestion
+   maintains `user_activity`, and nothing recomputes. PR A throttles it;
+   PR B deletes it.
+
+2. **The overview's current-day read is not bounded today.** `rollup_current_day`
+   reads a 30-day trailing window and `rollup_day` a 31-day one, because the
+   conversion and repeat-rate formulas need trailing context. "One bounded
+   one-day scan" is therefore a narrowing to implement, not a property to
+   preserve. Context comes from the rollups, which already hold it; a metric
+   that cannot be computed that way is shown as of yesterday rather than
+   widening the scan.
+
+3. **The activity route changes slightly.** The read-paths table marks
+   `GET /users/{id}/activity` unchanged. Its sessions section scans a user's
+   entire experience-event history with no time window, which contradicts the
+   event-log discipline rules above, so it gains a 30-day window. The timeline,
+   runs and usage sections are unchanged.
+
+One thing the plan confirmed rather than corrected: `agent_runs.owner_user_id`
+is genuinely required. `model_usage_recorded` carries `cost_micro_usd`, but only
+the historical backfill emits it; the live path emits `credits_reserved`,
+`credits_settled` and `credits_refunded`, which measure the user's own credit
+spend rather than operator-funded cost. Operator cost lives in
+`agent_runs.est_cost_usd` and nowhere else.
