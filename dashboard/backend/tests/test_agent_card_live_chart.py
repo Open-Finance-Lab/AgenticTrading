@@ -298,3 +298,22 @@ def test_selector_visibility_has_one_owner():
     # group and the select back under separate owners.
     assert "select.hidden =" not in source
     assert "runSelect.hidden =" not in source
+
+
+def test_a_zero_capital_run_reports_no_percentage():
+    """PR #449 made `0` a legal backtest capital and describes the result as "a
+    real, flat, 0.00% run", so the opening equity this card divides by can now
+    genuinely be zero.
+
+    The `&& opening` guard in deriveRunningProgress is what stops that: removed,
+    the same input renders `$0.00 · NaN%` (verified directly against the shipped
+    function, not reasoned about). A dollar figure alone is the honest render --
+    there is no percentage of nothing.
+    """
+    zero = _LIVE.replace(_CURVE, "[0, 0, 0]")
+    html = _render_raw(f"{{elapsedSeconds: 185, ...{zero}}}")
+    equity = html.split('data-running-equity="a1">')[1].split("</p>")[0]
+    assert equity == "$0.00", equity
+    assert "NaN" not in html
+    # Flat is not losing: a zero-capital run must not paint itself red.
+    assert "is-neg" not in html
