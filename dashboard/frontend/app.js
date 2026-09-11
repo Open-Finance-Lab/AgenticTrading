@@ -1841,6 +1841,117 @@ function setAgentMarketFilter(market) {
   applyAgentFilters();
 }
 
+/**
+ * The first-loop checklist on My Agents: run a backtest, see its results.
+ *
+ * Every tick is derived from data the page already holds -- nothing is stored.
+ * The alternative was a localStorage flag, and this file already carries the
+ * cautionary instance: defaultAgentProvisionGuardKey()'s own comment records
+ * that user ids recycle on local SQLite and on Render's ephemeral disk, so such
+ * a key can end up naming a different person.
+ *
+ * **Agent existence is deliberately not a step.** Signup provisions three
+ * starter cards (api/auth.py -> provision_starter_agents) and
+ * ensureDefaultFoundationAgent() re-provisions them client-side for guests, so
+ * `agents.length > 0` is true for everyone who has ever loaded the page. A step
+ * keyed on it would arrive pre-ticked and teach the reader that the ticks mean
+ * nothing.
+ *
+ * **The two steps read different sources, and cannot both read run_count.** The
+ * dashboard engine writes its agent_runs row only at completion, with
+ * final_equity already populated -- there is no in-flight row. So `run_count`
+ * answers "are there results" and is silent about the minutes a user actually
+ * spends waiting. The launch step therefore also consults the in-flight
+ * registry, which is the only witness to that middle state; without it the
+ * checklist would jump 0 -> 2 in one instant and never show progress.
+ */
+function deriveOnboardingChecklist(agents, running) {
+    const roster = Array.isArray(agents) ? agents : [];
+    const finished = roster.some((agent) => {
+        const count = agent ? agent.run_count : null;
+        // Rejected before coercion, not after: Number(null) is 0 and
+        // Number('') is 0, so a finiteness check on the coerced value reads an
+        // absent count as a real zero -- which is the right answer here only by
+        // accident, and the wrong one for any guard written as `>= 0`.
+        if (count === null || count === undefined || count === '') return false;
+        return Number(count) > 0;
+    });
+    const inFlight = Object.keys(running || {}).length > 0;
+    return {
+        // Hidden until the roster lands, so the first paint of a returning user
+        // -- who closed this loop months ago -- never flashes an open to-do
+        // list at them; hidden again for good once the loop closes.
+        visible: roster.length > 0 && !finished,
+        finished,
+        steps: [
+            {
+                key: 'launch',
+                label: 'Run your first backtest',
+                // This step being done while the panel is still visible can
+                // only mean a run is in flight -- `finished` hides the panel
+                // outright -- so the ticked hint can say so rather than repeat
+                // instructions the reader has already followed.
+                hint: inFlight
+                    ? 'Running now. Its progress is on the card below.'
+                    : 'Pick an agent below and open it in Backtest.',
+                done: finished || inFlight,
+            },
+            {
+                key: 'results',
+                label: 'See your results',
+                hint: 'Its equity curve and metrics land on the Backtest tab when the run finishes.',
+                done: finished,
+            },
+        ],
+    };
+}
+
+/**
+ * Paint the checklist panel.
+ *
+ * renderAgentCategories() is the only caller, deliberately. The running card
+ * beside it needs a second, per-second renderer because its numbers move
+ * continuously; a tick here moves on exactly two events, a launch and a
+ * completion, and both change the *set* of running agents --  which
+ * refreshRunningAgentCards() already answers with a full re-render. While that
+ * set holds steady no tick can move, so a 1Hz render site could only repaint
+ * the same two rows.
+ *
+ * The signature guard is therefore not an optimisation for that caller that no
+ * longer exists: it keeps any repaint of the grid (a search keystroke, a chip)
+ * from rebuilding a panel whose state is unchanged.
+ */
+function renderOnboardingChecklist(agents) {
+    const panel = document.getElementById('onboardingChecklist');
+    if (!panel) return;
+    const state = deriveOnboardingChecklist(agents, readRunningBacktests());
+    const signature = `${state.visible}|${state.steps.map((s) => (s.done ? 1 : 0)).join('')}`;
+    if (panel.dataset.onboardingSignature === signature) return;
+    panel.dataset.onboardingSignature = signature;
+    panel.hidden = !state.visible;
+    if (!state.visible) {
+        panel.innerHTML = '';
+        return;
+    }
+    const items = state.steps
+        .map(
+            (step) => `
+            <li class="onboarding-step${step.done ? ' is-done' : ''}">
+                <span class="onboarding-step-mark" aria-hidden="true"></span>
+                <span class="onboarding-step-body">
+                    <span class="onboarding-step-label">${escapeHtml(step.label)}</span>
+                    <span class="onboarding-step-hint">${escapeHtml(step.hint)}</span>
+                </span>
+                <span class="sr-only">${step.done ? 'Done' : 'Not done yet'}</span>
+            </li>`,
+        )
+        .join('');
+    panel.innerHTML = `
+        <h3 class="onboarding-title">Get your first result</h3>
+        <p class="onboarding-lede">Your agents are already set up. Two steps to a finished backtest.</p>
+        <ol class="onboarding-steps">${items}</ol>`;
+}
+
 function renderAgentCategories(agents) {
   const errorEl = document.getElementById('agentsErrorState');
   const shelves = AGENT_SHELVES.map((shelf) => {
@@ -1856,6 +1967,12 @@ function renderAgentCategories(agents) {
 
   if (errorEl) errorEl.hidden = true; // a successful render clears any prior error
 
+  // allAgents, never the `agents` parameter: renderAgentCategories is called
+  // with getFilteredAgents(), which the search box and the market chips
+  // narrow. The checklist is about the account, so filtering down to a
+  // shelf that happens to exclude the agent carrying the runs must not
+  // resurrect a panel the user already closed by finishing a backtest.
+  renderOnboardingChecklist(allAgents);
   renderAgentMarketChips();
 
   const defaultId = getDefaultAgentId();
