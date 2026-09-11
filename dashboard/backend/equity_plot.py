@@ -133,6 +133,29 @@ def market_index_baselines_with_status(
     forges a log line. The dates are ``!r``-quoted for the same reason.
     """
     where = f" [{_log_safe(context)}]" if context else ""
+    # Every index point is ``initial_capital * (level / base)``, so a $0 run --
+    # legal since 2026-09-10 -- scales DJIA and the Nasdaq-100 to flat zero
+    # lines drawn directly on top of the agent's own flat zero line. That reads
+    # as "the benchmark data failed" while ``index_baselines_ok`` goes on
+    # reporting ``true``; publishing nothing at least says what is true, which
+    # is that there is no capital for a benchmark to be scaled to.
+    #
+    # ``True``, like the unusable-window branch below: ``False`` means
+    # *transient and retryable*, which disables plot caching and prints the
+    # degraded-render note. Neither applies -- this run is permanently
+    # baseline-free, and its render is complete rather than incomplete.
+    try:
+        capital = float(initial_capital)
+    except (TypeError, ValueError):
+        capital = 0.0
+    if not capital > 0:  # NaN fails every comparison, so test for the good case
+        print(
+            f"⚠️ index baselines skipped{where}: no capital to scale to "
+            f"(initial_capital={initial_capital!r})",
+            flush=True,
+        )
+        return [], True
+
     if not usable_window(start_date, end_date):
         print(
             f"⚠️ index baselines skipped{where}: unusable run window "

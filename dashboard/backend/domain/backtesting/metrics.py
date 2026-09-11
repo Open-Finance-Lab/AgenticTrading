@@ -28,15 +28,33 @@ def calculate_sharpe(
     hourly behavior.
 
     Returns: float
-        Annualized Sharpe ratio. Returns 0 if insufficient data or zero volatility.
+        Annualized Sharpe ratio. Returns 0 if insufficient data, zero volatility,
+        or an undefined per-step return (see below).
     """
     if len(equity_curve) < 2:
         return 0
 
-    equities = np.array([e["equity"] for e in equity_curve])
-    returns = np.diff(equities) / equities[:-1]
+    equities = np.array([e["equity"] for e in equity_curve], dtype=float)
+    # A step whose *opening* equity is 0 has no defined return: the $0 runs made
+    # legal on 2026-09-10 produce an all-zero curve, so every step is 0/0.
+    #
+    # This cannot be left to the zero-volatility exit below, because
+    # ``np.std(nan) == 0`` is False -- NaN would fall straight through it and be
+    # written to ``agent_runs.sharpe_ratio``. That is invisible on SQLite, which
+    # coerces NaN to NULL on write, and fatal on the Postgres run-history
+    # backend (``AGENT_RUNS_DATABASE_URL``), which round-trips it: Starlette
+    # encodes with ``allow_nan=False``, so every route returning a plain dict
+    # rather than a ``response_model`` answers 500 for that run.
+    #
+    # 0 is the same convention ``fractional_return`` settled on for the return
+    # itself: with no capital there is nothing to have been at risk, so the
+    # honest answer to "how was it risk-adjusted" is "it wasn't".
+    with np.errstate(divide="ignore", invalid="ignore"):
+        returns = np.diff(equities) / equities[:-1]
 
-    if len(returns) == 0 or np.std(returns) == 0:
+    if len(returns) == 0 or not np.all(np.isfinite(returns)):
+        return 0
+    if np.std(returns) == 0:
         return 0
 
     periods_per_year = 252 * 6.5 if periods_per_year is None else periods_per_year
@@ -58,6 +76,13 @@ def calculate_max_drawdown(equity_curve: List[Dict]) -> float:
     for equity in equities:
         if equity > running_max:
             running_max = equity
+        # No peak means no drawdown from it. An unfunded run sits at 0 for its
+        # whole curve, making this ``(0 - 0) / 0``. The old code already landed
+        # on the right answer, but only by accident -- ``nan < max_dd`` is
+        # False, so max_dd stayed 0 -- while numpy printed a RuntimeWarning into
+        # the stdout of every $0 backtest.
+        if running_max == 0:
+            continue
         dd = (equity - running_max) / running_max
         if dd < max_dd:
             max_dd = dd

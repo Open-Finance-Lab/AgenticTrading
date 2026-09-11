@@ -272,3 +272,168 @@ def test_neither_route_gate_hardcodes_a_positive_floor_any_more():
             f"{module.__name__} still refuses $0 with its own literal floor."
         )
         assert "MIN_BACKTEST_INITIAL_CAPITAL" in source
+
+
+# --------------------------------------------------------------------------
+# The metrics the floor was also standing in front of
+#
+# ``fractional_return`` fixed the *return* division. Sharpe and max-drawdown
+# divide by the equity **series**, which is all zeros for an unfunded run --
+# the same zero denominator, two call sites over. Neither was touched, and
+# neither failure is visible locally: SQLite coerces NaN to NULL on write, so
+# the whole suite stays green while the Postgres run-history backend prod sets
+# (``AGENT_RUNS_DATABASE_URL``) round-trips the NaN intact.
+# --------------------------------------------------------------------------
+
+
+def test_sharpe_of_a_zero_capital_curve_is_zero_rather_than_nan():
+    """``np.std(returns) == 0`` is False for NaN, so the existing zero-volatility
+    early return does not catch this -- the guard has to precede the division.
+    """
+    from dashboard.backend.domain.backtesting.metrics import calculate_sharpe
+
+    sharpe = calculate_sharpe([{"equity": 0.0}] * 5)
+    assert sharpe == 0
+    assert sharpe == sharpe, "NaN reached the stored sharpe_ratio"
+
+
+def test_max_drawdown_of_a_zero_capital_curve_is_zero_without_warning():
+    """Its *result* was already right -- ``dd < max_dd`` is False for NaN, so
+    max_dd stays 0 by accident. The 0/0 still runs, and numpy prints a
+    RuntimeWarning into the stdout of every $0 backtest.
+    """
+    import warnings
+
+    from dashboard.backend.domain.backtesting.metrics import calculate_max_drawdown
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        assert calculate_max_drawdown([{"equity": 0.0}] * 5) == 0
+    assert not [w for w in caught if issubclass(w.category, RuntimeWarning)], (
+        "a $0 run prints a numpy divide warning into its own stdout"
+    )
+
+
+def test_no_metric_of_a_zero_capital_curve_is_unserialisable():
+    """The shape of the prod failure, expressed as the thing that actually breaks.
+
+    Starlette's ``JSONResponse`` encodes with ``allow_nan=False``. Routes that
+    return a plain dict rather than a ``response_model`` -- ``/runs/{id}/metrics``,
+    ``/result``, ``agents.py``'s builtin listing, the Discord route, v2's
+    leaderboard -- therefore answer **500** for any run carrying a NaN metric,
+    which is every $0 run once run history is on Postgres. An agent that
+    completes the run this PR makes legal cannot then read its own result.
+    """
+    import json
+
+    from dashboard.backend.domain.backtesting.metrics import (
+        calculate_max_drawdown,
+        calculate_sharpe,
+    )
+
+    curve = [{"equity": 0.0}] * 5
+    json.dumps(
+        {
+            "sharpe_ratio": float(calculate_sharpe(curve)),
+            "max_drawdown": float(calculate_max_drawdown(curve)),
+        },
+        allow_nan=False,
+    )
+
+
+def test_funded_curves_keep_their_existing_sharpe_and_drawdown():
+    """The guard must be a zero-denominator guard, not a flattener."""
+    from dashboard.backend.domain.backtesting.metrics import (
+        calculate_max_drawdown,
+        calculate_sharpe,
+    )
+
+    rising = [{"equity": v} for v in (1_000.0, 1_010.0, 1_030.0, 1_020.0)]
+    assert calculate_sharpe(rising) != 0
+    assert calculate_max_drawdown(rising) == pytest.approx(-10.0 / 1_030.0)
+
+
+# --------------------------------------------------------------------------
+# The benchmark curves: $0 x anything is still $0
+# --------------------------------------------------------------------------
+
+
+def test_index_baselines_are_skipped_rather_than_scaled_to_zero():
+    """``initial_capital * (value / base)`` is 0 for every point of a $0 run.
+
+    DJIA and Nasdaq-100 then draw as flat zero lines directly on top of the
+    agent's own flat zero line, which reads as "the benchmark data failed" --
+    while ``index_baselines_ok`` goes on reporting ``true``. Publishing nothing
+    is the honest render; there is no benchmark a $0 portfolio can be scaled to.
+
+    ``upstream_ok`` stays ``True``: ``False`` means *transient and retryable*,
+    which turns off plot caching (``_UncachedPlotPng``) and prints the degraded
+    -render note. Neither applies -- this window is permanently baseline-free,
+    exactly like the ``usable_window`` branch above it.
+    """
+    from datetime import datetime, timezone
+
+    from dashboard.backend import equity_plot
+
+    original = equity_plot.fetch_index_hourly
+
+    def _explode(*args, **kwargs):
+        raise AssertionError("Yahoo queried for a run no baseline can be scaled to")
+
+    equity_plot.fetch_index_hourly = _explode
+    try:
+        baselines, upstream_ok = equity_plot.market_index_baselines_with_status(
+            [datetime(2026, 4, 15, 14, 30, tzinfo=timezone.utc)],
+            "2026-04-15",
+            "2026-04-28",
+            0.0,
+        )
+    finally:
+        equity_plot.fetch_index_hourly = original
+
+    assert baselines == []
+    assert upstream_ok is True, "a $0 run is baseline-free, not degraded"
+
+
+def test_a_funded_run_still_asks_for_its_index_baselines():
+    """The cheapest way to pass the case above is to stop fetching entirely."""
+    from datetime import datetime, timezone
+
+    from dashboard.backend import equity_plot
+
+    asked = []
+    original = equity_plot.fetch_index_hourly
+
+    def _record(symbol, start, end):
+        asked.append(symbol)
+        return []
+
+    equity_plot.fetch_index_hourly = _record
+    try:
+        equity_plot.market_index_baselines_with_status(
+            [datetime(2026, 4, 15, 14, 30, tzinfo=timezone.utc)],
+            "2026-04-15",
+            "2026-04-28",
+            1_000.0,
+        )
+    finally:
+        equity_plot.fetch_index_hourly = original
+
+    assert asked, "a funded run stopped requesting index baselines"
+
+
+def test_the_engine_stores_no_baseline_run_for_a_zero_capital_backtest():
+    """The persisted twin of the chart bug, and the longer-lived one.
+
+    ``generate_baselines`` at $0 produces a flat zero history, which is then
+    written to ``agent_runs`` as a real row: a $0 run recorded the DJIA as
+    having returned 0.00% over its window. The chart is regenerated per
+    request; these rows are not.
+    """
+    from dashboard.backend.domain.backtesting.engine import HourlyBacktester
+
+    backtester = object.__new__(HourlyBacktester)
+    backtester.initial_capital = 0.0
+
+    assert backtester.run_buyhold_baseline() == (None, [])
+    assert backtester.run_djia_baseline() == (None, [])

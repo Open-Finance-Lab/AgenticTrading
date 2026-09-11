@@ -1700,6 +1700,14 @@ class HourlyBacktester:
     
     def run_buyhold_baseline(self) -> Tuple[str, List[Dict]]:
         """Buy and hold baseline using shared baseline generator."""
+        # ``generate_baselines`` at $0 returns a flat zero history, which is
+        # then written to ``agent_runs`` as a real row -- so a $0 run recorded
+        # buy-and-hold as having returned 0.00% over its window. The chart is
+        # rebuilt per request; these rows outlive it.
+        if not self.initial_capital > 0:
+            print("📊 Buy & Hold baseline skipped: this run has no capital\n")
+            return None, []
+
         print("📊 Running Buy & Hold baseline...\n")
 
         # Full DJIA runs keep the historical 10-stock B&H sleeve; other universes
@@ -1780,6 +1788,12 @@ class HourlyBacktester:
     
     def run_djia_baseline(self) -> Tuple[str, List[Dict]]:
         """DJIA index baseline using shared baseline generator."""
+        # Same reasoning as run_buyhold_baseline: a benchmark scaled to $0 is a
+        # row claiming the Dow returned 0.00%, not a benchmark.
+        if not self.initial_capital > 0:
+            print("📊 DJIA Index baseline skipped: this run has no capital\n")
+            return None, []
+
         if not self._effective_profile().index_baseline_enabled:
             return None, []
 

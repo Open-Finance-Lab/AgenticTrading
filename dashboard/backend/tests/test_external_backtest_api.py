@@ -221,3 +221,42 @@ def test_insert_trades_legacy_schema(tmp_path):
     assert len(rows) == 1
     assert rows[0]["quantity"] == 10
     assert rows[0]["side"] == "BUY"
+
+
+def test_a_broken_analytics_attribution_is_reported_rather_than_swallowed(
+    monkeypatch, capsys
+):
+    """`except Exception: pass` around the owner lookup (CodeQL py/empty-except).
+
+    Failing open here is right -- analytics attribution must never stop a run
+    from starting -- but failing *silently* makes "this deployment emits no
+    owner ids" and "the agent store has been raising on every lookup since the
+    last deploy" the same observable: runs start, analytics arrive, every row
+    anonymous. That is the shape CLAUDE.md's "fail-closed is not fail-visible"
+    section is about, and the fix is the same one: keep the fallback, print at
+    the boundary so absent stays distinguishable from broken.
+    """
+
+    class _Broken:
+        def get_agent_by_session(self, session_id):
+            raise RuntimeError("agent store is down")
+
+    monkeypatch.setattr(svc, "agent_store", _Broken())
+    svc._sessions.clear()
+
+    started = svc.start_backtest(
+        session_id="attrib",
+        agent_name="a",
+        model_name="m",
+        start_date="2026-04-15",
+        end_date="2026-04-16",
+        emit_analytics=True,
+    )
+
+    assert started["status"] == "loading", "analytics broke the run start"
+    session = svc._sessions[started["backtest_id"]]
+    assert session.analytics_user_id is None, "attribution must still fail open"
+
+    printed = capsys.readouterr().out
+    assert "analytics" in printed.lower(), "the swallowed failure said nothing"
+    assert "agent store is down" in printed, "the cause was not reported"
