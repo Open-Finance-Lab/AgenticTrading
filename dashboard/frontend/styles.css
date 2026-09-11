@@ -3820,9 +3820,19 @@ a.header-brand:hover .title-section h1 {
         justify-content: flex-start;
     }
 
-    .performance-card .chart-controls .backtest-run-select {
+    /* The run-history group takes the wrapped row; the select fills what is
+       left of the group after its label, rather than claiming 100% of it. The
+       full-width rule lived on the select until the label existed to share the
+       box -- and as the *more* specific of the two candidate rules it went on
+       winning silently over anything a narrower breakpoint tried to say. */
+    .performance-card .chart-controls .backtest-run-history {
         flex: 1 0 100%;
-        width: 100%;
+        margin-right: 0;
+    }
+
+    .performance-card .chart-controls .backtest-run-select {
+        flex: 1 1 auto;
+        width: auto;
         min-width: 0;
         max-width: none;
     }
@@ -9215,20 +9225,6 @@ html[data-nav-page="home"] #homeView .dashboard-bottom-grid .home-module--market
     flex: 0 1 auto;
     min-width: 220px;
     max-width: 360px;
-}
-
-/* The row wraps at narrow widths; without this the select collapses to its
-   220px floor and overflows the card instead of shrinking with it. */
-@media (max-width: 640px) {
-    .backtest-run-history {
-        flex: 1 0 100%;
-        margin-right: 0;
-    }
-
-    .chart-controls .backtest-run-select {
-        min-width: 0;
-        flex: 1 1 auto;
-    }
 }
 
 .agent-action-btn {

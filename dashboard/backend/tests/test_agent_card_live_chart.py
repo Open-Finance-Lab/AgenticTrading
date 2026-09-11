@@ -31,7 +31,13 @@ import subprocess
 
 import pytest
 
-from dashboard.backend.tests._frontend_source import css_blocks, fn_body, js_const
+from dashboard.backend.tests._frontend_source import (
+    APP_JS,
+    css_blocks,
+    fn_body,
+    js_const,
+    strip_comments,
+)
 
 pytestmark = pytest.mark.skipif(
     shutil.which("node") is None, reason="node is not installed"
@@ -132,19 +138,14 @@ def test_fold_ignores_non_numeric_equity_points():
 
 
 def _render(running_js: str) -> str:
-    script = "\n".join(
-        [
-            js_const("BACKTEST_STALE_SECONDS"),
-            "function escapeHtml(s) { return String(s); }",
-            "function renderAgentAllocatedCapitalHero() { return ''; }",
-            "function formatBacktestElapsed(s) { return String(s); }",
-            *[fn_body(signature) for signature in _SPARK_HELPERS],
-            fn_body("function renderAgentRunningBody("),
-            "console.log(JSON.stringify(renderAgentRunningBody("
-            f"{{agent_id: 'a1'}}, {{elapsedSeconds: 185, ...{_LIVE}}})));",
-        ]
-    )
-    return _node(script)
+    """`_render_raw` with an elapsed timer spread over it.
+
+    It used to interpolate the module-level `_LIVE` and drop its own argument on
+    the floor, which is invisible while every caller passes `_LIVE` and silently
+    vacuous for the first one that does not -- including the long-curve case
+    below, whose entire point is a curve other than `_LIVE`'s.
+    """
+    return _render_raw(f"{{elapsedSeconds: 185, ...{running_js}}}")
 
 
 def _render_raw(running_js: str) -> str:
@@ -317,3 +318,242 @@ def test_a_zero_capital_run_reports_no_percentage():
     assert "NaN" not in html
     # Flat is not losing: a zero-capital run must not paint itself red.
     assert "is-neg" not in html
+
+
+# --- The baseline the percentage is measured against --------------------------
+#
+# `advanceBacktestProgress` trims the curve to LIVE_SPARK_MAX_POINTS, so the
+# first point of what the card receives is the opening equity only for the first
+# 120 published steps. Past that it is the equity 120 steps ago, and a gain
+# measured against it is a rolling-window return wearing the run's label.
+
+
+def test_fold_carries_the_runs_true_opening():
+    """Read before the trim, carried beside it. The trim is what destroys it."""
+    curve = ", ".join(f"{{equity: {1000 + i}}}" for i in range(400))
+    folded = _fold(f"{{step: 3, total_steps: 10, equity_curve: [{curve}]}}")
+    assert folded["openingEquity"] == 1000
+    # ...and the trimmed curve genuinely no longer holds it.
+    assert folded["equityCurve"][0] == 1280
+
+
+def test_opening_is_the_first_plottable_point_not_the_first_point():
+    """Same filter the curve gets: a null opening reaching the division renders
+    `NaN%`, and `Number(null)` is a finite 0 that would render `Infinity%`."""
+    folded = _fold(
+        "{step: 3, total_steps: 10, equity_curve: "
+        "[{equity: null}, {equity: 1000}, {equity: 1010}]}"
+    )
+    assert folded["openingEquity"] == 1000
+
+
+def test_opening_is_null_before_any_point_arrives():
+    """Normal for the opening ticks. Null, not 0: a zero baseline is a legal
+    run since PR #449, so the two must stay distinguishable."""
+    folded = _fold("{step: 3, total_steps: 10}")
+    assert folded["openingEquity"] is None
+
+
+def test_card_measures_gain_against_the_opening_not_the_window():
+    """The defect in one assertion. A long run down 8% overall, up over its last
+    120 bars, reported `+0.33%` in green -- the number, the sign and the colour
+    all taken from a window the label never mentions."""
+    windowed = (
+        "{step: 400, totalSteps: 500, ageSeconds: 1, ageAt: Date.now(),"
+        " firstStep: 4, firstStepAt: Date.now() - 184000,"
+        " openingEquity: 1000, equityCurve: [917, 918, 920]}"
+    )
+    html = _render(windowed)
+    equity = html.split('data-running-equity="a1">')[1].split("</p>")[0]
+    assert "$920.00" in equity
+    assert "-8.00%" in equity
+    # The colour is derived from the same gain, so it moves with it or the card
+    # paints a loss green.
+    assert "is-neg" in html
+
+
+def test_card_falls_back_to_the_curve_head_without_a_carried_opening():
+    """One poll's worth of back-compat: an entry folded by the previous build
+    has no `openingEquity`, and for a run short enough to be untrimmed the two
+    baselines are the same number anyway."""
+    html = _render(_LIVE)
+    equity = html.split('data-running-equity="a1">')[1].split("</p>")[0]
+    assert "+4.32%" in equity
+
+
+# --- The box the sparkline is told to fill ------------------------------------
+
+
+def test_sparkline_stretches_to_a_box_wider_than_its_viewbox():
+    """`width: 100%` over a `viewBox="0 0 80 36"` does nothing on its own: the
+    default `xMidYMid meet` scales by min(W/80, H/36), which is 1 for every box
+    wider than 80px at this height. The curve drew at 80px, centred, with ~110px
+    of blank card on each side of it."""
+    source = fn_body("function renderAgentSparklineFromValues(")
+    # Both SVGs -- the curve and the placeholder dash share the box.
+    assert source.count('preserveAspectRatio="none"') == 2
+    # Non-uniform scale thickens a stroke along one axis only, so a steep step
+    # would draw several times heavier than a flat one.
+    assert source.count('vector-effect="non-scaling-stroke"') == 2
+    blocks = css_blocks(".agent-card-running-spark .agent-card-sparkline")
+    assert any("width: 100%" in block for block in blocks), blocks
+
+
+# --- The narrow-width layout --------------------------------------------------
+
+
+def test_narrow_layout_widens_the_group_not_the_select():
+    """The select sits in a labelled flex group now. `flex: 1 0 100%` on the
+    select claims the whole group box while a nowrap label and an 8px gap still
+    need room in it, and `flex-shrink: 0` forbids the give -- the performance
+    card overflows sideways at phone width. Worse, that rule is the most
+    specific one targeting the select, so a later, narrower breakpoint trying to
+    relax it loses silently."""
+    select = css_blocks(".performance-card .chart-controls .backtest-run-select")
+    assert select, "the narrow-width select rule is gone entirely"
+    assert not any("flex: 1 0 100%" in block for block in select), select
+    group = css_blocks(".performance-card .chart-controls .backtest-run-history")
+    assert any("flex: 1 0 100%" in block for block in group), group
+
+
+# --- Which run the live view attaches to --------------------------------------
+
+
+def _status_url(live_run_id: str) -> str:
+    script = "\n".join(
+        [
+            "const API_BASE = 'http://x';",
+            fn_body("function backtestStatusUrl("),
+            f"console.log(JSON.stringify(backtestStatusUrl({live_run_id})));",
+        ]
+    )
+    return _node(script)
+
+
+def test_status_url_carries_the_run_when_one_is_named():
+    assert _status_url("'run-b/1'") == (
+        "http://x/backtest/status?live_run_id=run-b%2F1"
+    )
+
+
+def test_status_url_omits_the_parameter_when_no_run_is_named():
+    assert _status_url("null") == "http://x/backtest/status"
+
+
+def test_loading_the_backtest_tab_asks_about_the_run_it_was_given():
+    """`/backtest/status` with no `live_run_id` answers with the *newest* active
+    slot this session owns. openAgentInBacktest pinned the running run and then
+    called loadData(), which asked the unqualified question and overwrote the
+    pin -- so with two agents running, "View live chart" on A opened B's chart,
+    under B's "Running..." option, with HTTP 200 throughout."""
+    source = strip_comments(fn_body("async function loadData("))
+    assert "backtestStatusUrl(liveRunId)" in source
+    opener = strip_comments(fn_body("async function openAgentInBacktest("))
+    assert "loadData({" in opener and "liveRunId" in opener
+
+
+def test_every_status_poll_goes_through_the_one_url_builder():
+    """The poller passed the id and loadData did not: two spellings of the same
+    request, one of them wrong, and nothing at either call site to show which."""
+    builder = strip_comments(fn_body("function backtestStatusUrl("))
+    # The qualified spelling and the bare one, both inside the builder...
+    assert builder.count("/backtest/status") == 2
+    # ...and nowhere else in app.js. Counted rather than searched-and-removed: a
+    # `.replace()` of the canonical literal deletes a *duplicate* of it too, so
+    # the guard would go green on precisely the regression it exists to catch.
+    assert strip_comments(APP_JS).count("/backtest/status") == 2
+
+
+# --- The selector and the label that names it ---------------------------------
+
+
+def _visibility(visible: str, *, with_group: bool) -> dict:
+    group = "backtestRunHistory: {hidden: false}," if with_group else ""
+    script = "\n".join(
+        [
+            f"const nodes = {{backtestRunSelect: {{hidden: false}}, {group}}};",
+            "const document = {getElementById: (id) => nodes[id] || null};",
+            fn_body("function setBacktestRunSelectorVisible("),
+            f"setBacktestRunSelectorVisible({visible});",
+            "console.log(JSON.stringify({select: nodes.backtestRunSelect.hidden,"
+            " group: nodes.backtestRunHistory"
+            " ? nodes.backtestRunHistory.hidden : null}));",
+        ]
+    )
+    return _node(script)
+
+
+def test_hiding_the_selector_hides_the_group_that_holds_it():
+    assert _visibility("false", with_group=True)["group"] is True
+
+
+def test_showing_the_selector_clears_a_stale_hidden_on_the_select():
+    """The reason the select is written at all: an older cached app.html can
+    have left `hidden` on it, inside a group that is now visible."""
+    shown = _visibility("true", with_group=True)
+    assert shown["group"] is False
+    assert shown["select"] is False
+
+
+def test_hiding_falls_back_to_the_select_when_the_group_is_missing():
+    """Stale markup is exactly the case the unconditional `select.hidden = false`
+    was written for, and exactly the case it broke: with no group, hide() hid
+    nothing and *unhid* the select -- which populateBacktestRunSelector has just
+    emptied -- so a session with no runs rendered a blank dropdown."""
+    assert _visibility("false", with_group=False)["select"] is True
+    assert _visibility("true", with_group=False)["select"] is False
+
+
+def _populate(*, pin: str, select_value: str, running_id: str, runs: str) -> dict:
+    """Run the shipped populateBacktestRunSelector over a stubbed DOM."""
+    script = "\n".join(
+        [
+            js_const("SELECTED_BACKTEST_RUN_KEY"),
+            f"const store = {{[SELECTED_BACKTEST_RUN_KEY]: {pin}}};",
+            "const localStorage = {getItem: (k) => store[k] ?? null,"
+            " setItem: (k, v) => { store[k] = v; },"
+            " removeItem: (k) => { delete store[k]; }};",
+            f"const select = {{value: {select_value}, innerHTML: '', hidden: false}};",
+            "const group = {hidden: false};",
+            "const document = {getElementById: (id) => id === 'backtestRunSelect'"
+            " ? select : (id === 'backtestRunHistory' ? group : null)};",
+            "function escapeHtml(s) { return String(s); }",
+            "function formatBacktestRunPrimary(r) { return r.agent_name || 'Agent'; }",
+            "function formatBacktestRunLabel(r) { return r.run_id; }",
+            "function getBacktestLaunchConfig() {"
+            " return {agentName: 'A', startedAt: ''}; }",
+            fn_body("function setBacktestRunSelectorVisible("),
+            fn_body("function populateBacktestRunSelector("),
+            f"populateBacktestRunSelector({runs}, {{runningId: {running_id}}});",
+            "console.log(JSON.stringify({selected: select.value,"
+            " pin: store[SELECTED_BACKTEST_RUN_KEY] ?? null,"
+            " options: select.innerHTML}));",
+        ]
+    )
+    return _node(script)
+
+
+_FINISHED = "[{run_id: 'X', agent_name: 'A', created_at: '2026-09-01'}]"
+
+
+def test_an_explicit_pin_outranks_whatever_the_tab_was_showing():
+    """The other half of the wrong-run defect, and the one that survives fixing
+    the status call. openAgentInBacktest writes the pin and navigates; the
+    Backtest tab's <select> is not destroyed in between, so it still holds the
+    finished run the user was looking at ten seconds ago. Reading the DOM first
+    made that stale value outrank "open this run" -- and then rewrote the pin to
+    match, so the live view was never attached."""
+    result = _populate(
+        pin="'runA'", select_value="'X'", running_id="'runA'", runs=_FINISHED
+    )
+    assert result["selected"] == "runA"
+    assert result["pin"] == "runA"
+
+
+def test_the_dom_value_still_wins_when_nothing_is_pinned():
+    """The fallback is real: localStorage can be unavailable or cleared, and the
+    selection the user is looking at is a better answer than the newest run."""
+    result = _populate(
+        pin="undefined", select_value="'X'", running_id="null", runs=_FINISHED
+    )
+    assert result["selected"] == "X"

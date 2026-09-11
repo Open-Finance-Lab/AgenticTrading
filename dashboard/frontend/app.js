@@ -881,7 +881,17 @@ function hashStringSeed(str) {
   return Math.abs(h) || 1;
 }
 
-/** Render card sparkline from real equity samples (or a 2-point start→end fallback). */
+/** Render card sparkline from real equity samples (or a 2-point start→end fallback).
+ *
+ * `preserveAspectRatio="none"` on both SVGs below is what makes a CSS width
+ * override mean anything. The default (`xMidYMid meet`) scales uniformly by
+ * min(boxW/80, boxH/36), so in any box taller-than-it-is-wide-relative -- which
+ * is every box wider than 80px at this 36px height -- the factor is 1 and the
+ * curve renders at its native 80x36, letterboxed dead centre. The running
+ * card's `width: 100%` looked like it stretched the chart and did nothing at
+ * all. Paired with `vector-effect="non-scaling-stroke"`: once the x and y
+ * scales differ, a plain stroke thickens along one axis, so a steep step in the
+ * curve would draw several times heavier than a flat one. */
 function renderAgentSparklineFromValues(values, positive = true, seed = 'spark') {
   const nums = (Array.isArray(values) ? values : [])
     .map(Number)
@@ -896,8 +906,8 @@ function renderAgentSparklineFromValues(values, positive = true, seed = 'spark')
 
   if (nums.length < 2) {
     return `
-    <svg class="agent-card-sparkline agent-card-sparkline--empty" viewBox="0 0 ${w} ${h}" width="${w}" height="${h}" aria-hidden="true">
-      <path d="M4,${(h / 2).toFixed(1)} H${w - 4}" fill="none" stroke="rgba(148,163,184,0.35)" stroke-width="1.5" stroke-linecap="round" stroke-dasharray="3 3"/>
+    <svg class="agent-card-sparkline agent-card-sparkline--empty" viewBox="0 0 ${w} ${h}" width="${w}" height="${h}" preserveAspectRatio="none" aria-hidden="true">
+      <path d="M4,${(h / 2).toFixed(1)} H${w - 4}" fill="none" stroke="rgba(148,163,184,0.35)" stroke-width="1.5" stroke-linecap="round" stroke-dasharray="3 3" vector-effect="non-scaling-stroke"/>
     </svg>`;
   }
 
@@ -917,7 +927,7 @@ function renderAgentSparklineFromValues(values, positive = true, seed = 'spark')
   const line = pts.map((p, i) => `${i === 0 ? 'M' : 'L'}${p[0].toFixed(1)},${p[1].toFixed(1)}`).join(' ');
   const area = `${line} L${w},${h} L0,${h} Z`;
   return `
-    <svg class="agent-card-sparkline" viewBox="0 0 ${w} ${h}" width="${w}" height="${h}" aria-hidden="true">
+    <svg class="agent-card-sparkline" viewBox="0 0 ${w} ${h}" width="${w}" height="${h}" preserveAspectRatio="none" aria-hidden="true">
       <defs>
         <linearGradient id="${fillId}" x1="0" y1="0" x2="0" y2="1">
           <stop offset="0%" stop-color="${color}" stop-opacity="0.35"/>
@@ -925,7 +935,7 @@ function renderAgentSparklineFromValues(values, positive = true, seed = 'spark')
         </linearGradient>
       </defs>
       <path d="${area}" fill="url(#${fillId})"/>
-      <path d="${line}" fill="none" stroke="${color}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+      <path d="${line}" fill="none" stroke="${color}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke"/>
     </svg>`;
 }
 
@@ -1558,7 +1568,14 @@ async function openAgentInBacktest(agent, runId = null) {
   // NOT await. The same-session re-apply must not clear SELECTED_BACKTEST_RUN_KEY
   // (see applyActiveAgent's previousSession guard).
   activateAgent(agent);
-  await loadData();
+  // Only when the pinned run is this agent's *running* one. The other caller
+  // (View runs) pins a finished run, and asking the status route about a
+  // finished run 404s -- which would lose the sibling-run detection the run
+  // selector needs to offer its "Running..." option.
+  const live = getAgentBacktestRunning(agent.agent_id);
+  await loadData({
+    liveRunId: resolvedRunId && live?.runId === resolvedRunId ? resolvedRunId : null,
+  });
 }
 
 async function openAgentInPaper(agent) {
@@ -7122,6 +7139,25 @@ function formatBacktestElapsed(seconds) {
 /** A progress file older than this is reported as stale (seconds). */
 const BACKTEST_STALE_SECONDS = 120;
 
+/** The /backtest/status URL for one run, or for "whatever this browser runs".
+ *
+ * Three callers build this URL and the interesting half is what happens when
+ * `liveRunId` is omitted: the route then answers with the *newest* active slot
+ * owned by this session (`_resolve_status_slot`, which walks `_active_slots` in
+ * reverse), so a caller that already knows which run it means and leaves the
+ * parameter off is not asking a looser question -- it is asking about a
+ * different run, and getting HTTP 200 for the answer. With five concurrent runs
+ * allowed per owner by default, that is a routine case, not an edge one.
+ *
+ * Centralised rather than repeated because the poller passed the id and
+ * loadData() did not: two spellings of the same request, one of them wrong, and
+ * nothing in either call site to show which. */
+function backtestStatusUrl(liveRunId = null) {
+    return liveRunId
+        ? `${API_BASE}/backtest/status?live_run_id=${encodeURIComponent(liveRunId)}`
+        : `${API_BASE}/backtest/status`;
+}
+
 /** Points kept from the live equity curve for the My Agents card sparkline.
  *
  * engine._publish_live_progress() writes the *whole* curve every step, so an
@@ -7276,7 +7312,7 @@ function advanceBacktestProgress(previous, progress, now) {
     // builder emits `LNaN,NaN` and blanks the whole SVG. Tail, not head -- the
     // newest points are the ones the user is waiting on.
     const rawCurve = Array.isArray(progress?.equity_curve) ? progress.equity_curve : [];
-    const equityCurve = rawCurve
+    const plottable = rawCurve
         // Coerce only what is already a number-ish value: Number(null) is 0 and
         // Number('') is 0, both finite, so a null equity would survive the
         // filter below as a plotted crash to zero -- a *worse* render than the
@@ -7287,12 +7323,25 @@ function advanceBacktestProgress(previous, progress, now) {
                 ? NaN
                 : Number(value);
         })
-        .filter((value) => Number.isFinite(value))
-        .slice(-LIVE_SPARK_MAX_POINTS);
+        .filter((value) => Number.isFinite(value));
+    const equityCurve = plottable.slice(-LIVE_SPARK_MAX_POINTS);
     return {
         step,
         totalSteps: total,
         equityCurve,
+        // The run's opening equity, read *before* the tail trim above and
+        // carried separately because the trim destroys it. The card's gain
+        // percentage is measured against this; measuring against
+        // `equityCurve[0]` silently turns into a rolling 120-step return once a
+        // run outgrows the cap, so a run down 8% overall but up over the last
+        // two hours prints a green "+0.31%" -- the number and the colour both
+        // wrong, and both wrong only on long runs nobody watches to the end.
+        //
+        // Re-read every tick rather than anchored like firstStep: the engine
+        // rewrites the whole curve each step, so point zero is always the real
+        // opening, and re-reading costs nothing while surviving the store being
+        // cleared and rebuilt mid-run.
+        openingEquity: plottable.length ? plottable[0] : null,
         // Server-computed (see resolveProgressAgeSeconds), and null when a
         // backend omits it -- which suppresses the staleness notice rather than
         // guessing at a value the payload never claimed.
@@ -7329,14 +7378,22 @@ function deriveRunningProgress(running) {
     // than twice a run, so a field computed in the template is a field the
     // patch path can never move.
     //
-    // The baseline is the curve's own first point -- the opening equity the
-    // engine actually applied. The agent's saved backtest_allocation is only a
-    // *request*: resolve_initial_capital() clamps it to
-    // MAX_BACKTEST_INITIAL_CAPITAL before the run starts, so measuring against
-    // it would print a percentage that disagrees with the line drawn above it.
+    // The baseline is the run's opening equity -- the one the engine actually
+    // applied. The agent's saved backtest_allocation is only a *request*:
+    // resolve_initial_capital() clamps it to MAX_BACKTEST_INITIAL_CAPITAL
+    // before the run starts, so measuring against it would print a percentage
+    // that disagrees with the line drawn above it.
+    //
+    // `openingEquity` rather than `curve[0]`, because the curve here is the
+    // trimmed tail (LIVE_SPARK_MAX_POINTS): its first point is the opening only
+    // for the first 120 published steps, and past that it is simply the equity
+    // 120 steps ago. The fallback is for an entry folded before this field
+    // existed -- one poll old at most, and correct for exactly the short runs
+    // where the two agree anyway.
     const curve = Array.isArray(running.equityCurve) ? running.equityCurve : [];
     const plotted = curve.length >= 2;
-    const opening = curve[0];
+    const carried = Number(running.openingEquity);
+    const opening = Number.isFinite(carried) ? carried : curve[0];
     const latest = curve[curve.length - 1];
     const gain = plotted ? latest - opening : null;
     const gainPct = plotted && opening ? (gain / opening) * 100 : null;
@@ -7712,7 +7769,7 @@ function ensureBacktestPolling() {
                 jobs.push({ key: liveBacktestRunId, agentId: null, runId: liveBacktestRunId });
             }
             if (!jobs.length) {
-                const statusUrl = `${API_BASE}/backtest/status`;
+                const statusUrl = backtestStatusUrl();
                 const status = await API.get(statusUrl);
                 if (!status?.running) {
                     stopBacktestPolling();
@@ -7722,9 +7779,7 @@ function ensureBacktestPolling() {
             }
 
             const snapshots = await Promise.all(jobs.map(async (job) => {
-                const statusUrl = job.runId
-                    ? `${API_BASE}/backtest/status?live_run_id=${encodeURIComponent(job.runId)}`
-                    : `${API_BASE}/backtest/status`;
+                const statusUrl = backtestStatusUrl(job.runId);
                 try {
                     return { job, status: await API.get(statusUrl), failed: false };
                 } catch (error) {
@@ -10371,9 +10426,15 @@ function resolveSelectedExternalRun(externalRuns) {
 function setBacktestRunSelectorVisible(visible) {
     const select = document.getElementById('backtestRunSelect');
     const group = document.getElementById('backtestRunHistory');
-    // The group is the element the markup hides; the select's own `hidden` is
-    // cleared once here so an older cached app.html cannot leave it stuck.
-    if (select) select.hidden = false;
+    // The group is the element the markup hides, and clearing the select's own
+    // `hidden` is what stops an older cached app.html leaving it stuck hidden
+    // inside a group that is now visible. That only holds *while the group
+    // exists*: with stale markup there is no group, so an unconditional clear
+    // inverts into the failure it was written to prevent -- hide() unhides the
+    // bare <select>, which populateBacktestRunSelector has just emptied, and a
+    // session with no runs renders a blank dropdown where it used to render
+    // nothing. Fall back to owning the select directly when it is all there is.
+    if (select) select.hidden = group ? false : !visible;
     if (group) group.hidden = !visible;
 }
 
@@ -10402,7 +10463,18 @@ function populateBacktestRunSelector(externalRuns, { runningId = null } = {}) {
     }
 
     setBacktestRunSelectorVisible(true);
-    const previous = select.value || localStorage.getItem(SELECTED_BACKTEST_RUN_KEY);
+    // The stored pin first, the DOM's current value only as a fallback. Every
+    // writer of `select.value` writes the pin in the same breath -- the change
+    // handler, attachToLiveBacktest, and this function's own tail -- so the two
+    // agree except in the one case they are *made* to disagree: a caller that
+    // pinned a run and is asking for it now. Reading the DOM first let whatever
+    // the tab happened to be showing outrank that, which is the other half of
+    // how "View live chart" opened someone else's run: the status call asked
+    // about the wrong run, and this line then discarded the right answer too.
+    // (Verified directly against this function, not reasoned about: with the
+    // pin at the running run and a finished run still selected in the DOM, it
+    // returned the finished one and rewrote the pin to match.)
+    const previous = localStorage.getItem(SELECTED_BACKTEST_RUN_KEY) || select.value;
     select.innerHTML = sorted
         .map((run) => {
             const isRunning = run._running || run.run_id === runningId;
@@ -10564,7 +10636,7 @@ function resolveBaselinesForRun(run, sessionRuns) {
 /**
  * Load dashboard data from backend API
  */
-async function loadData() {
+async function loadData({ liveRunId = null } = {}) {
     try {
         console.log('Loading data for mode:', currentMode);
         
@@ -10579,7 +10651,12 @@ async function loadData() {
             let runningId = liveBacktestRunId || null;
             let statusProgress = null;
             try {
-                const status = await API.get(`${API_BASE}/backtest/status`);
+                // `liveRunId` is the run the caller is opening, when it knows.
+                // Without it this asks "what is the newest thing this browser is
+                // running?", which is a different question the moment two runs
+                // are in flight -- and the answer overwrites the pin set just
+                // above, so "View live chart" on agent A opened agent B.
+                const status = await API.get(backtestStatusUrl(liveRunId));
                 if (status?.running && status.live_run_id) {
                     runningId = status.live_run_id;
                     liveBacktestRunId = runningId;
