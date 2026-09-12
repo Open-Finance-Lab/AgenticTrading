@@ -12,7 +12,8 @@ maintained inline with the code that changes them.
 Every entry below was re-verified against source on 2026-09-10, on `main` at
 `f5f803c3`. Where a suspected item turned out to be correct it is recorded under
 **Checked, not stale** rather than deleted, so the same false lead is not chased
-twice.
+twice. Entries added after that date carry their own verification anchor
+instead, because the code they describe is not on `main` yet - see entry 6.
 
 ---
 
@@ -110,6 +111,36 @@ does — every row is built from the curated roster in
 `dashboard/config/leaderboard.json`, and `api/routers/leaderboard.py` exposes no
 submission route.
 
+## 6. Incomplete: the first-loop checklist on My Agents
+
+**File:** `docs/source/lab/getting_started.rst:7-10` - the four numbered steps of
+"Run a backtest in the dashboard".
+
+**Shipped in #451** (anchors verified 2026-09-11 on `feat/user-feedback-batch-d`
+at `90d44aae`, not yet on `main`): a **Get your first result** panel -
+`#onboardingChecklist` (`app.html:989`), painted by `renderOnboardingChecklist()`
+(`app.js:1957`) - sitting directly above the agent grid, with two steps: **Run
+your first backtest** and **See your results**.
+
+Step 1 of the manual sends the reader to **My Agents** and step 2 to an agent's
+card. The panel is between them, and it is the first thing on that screen for
+precisely the reader this page is written for, so the walkthrough now skips past
+a visible element rather than naming it.
+
+**Must state plainly - it is derived state, not a to-do list.** Every tick comes
+from data the page already holds (`deriveOnboardingChecklist`, `app.js:1891`);
+nothing is persisted. There is no dismiss control and no way to bring the panel
+back: it shows only while the roster has loaded and **no** agent has a completed
+run, and it goes away for good on the first finished backtest. Copy inviting the
+reader to dismiss it, finish it later, or reopen it would describe a control that
+does not exist.
+
+**Careful:** do not write "create an agent" as one of its steps. Signup
+provisions starter agents (`api/auth.py` -> `provision_starter_agents`) and the
+client re-provisions them for guests, so a step keyed on agent existence would
+arrive pre-ticked; it was left out for that reason, and documenting it back in
+would teach a reader that the ticks mean nothing.
+
 ---
 
 ## Checked, not stale
@@ -138,7 +169,9 @@ submission route.
 
 One branch, one PR, `docs:` prefix. Items 2 and 3 likely want a new
 `docs/source/lab/credits.rst` added to the `lab/index.rst` toctree rather than
-being wedged into `accounts.rst`. Items 1, 4 and 5 are edits in place.
+being wedged into `accounts.rst`. Items 1, 4, 5 and 6 are edits in place - and
+4 and 6 touch the same four numbered steps in `getting_started.rst`, so write
+them together rather than as two passes over one list.
 
 Sphinx deps are optional and live in `requirements-sphinx.txt` — install those
 before building to check the toctree.

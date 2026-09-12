@@ -1882,6 +1882,159 @@ function setAgentMarketFilter(market) {
   applyAgentFilters();
 }
 
+/**
+ * True from a run ending successfully until the roster refresh that carries its
+ * new run_count lands. Only the checklist reads it; see
+ * deriveOnboardingChecklist's `awaitingResults` for what it bridges. Cleared by
+ * loadAgentsNow(), which is the only thing that can answer the question it
+ * stands in for -- so every path that sets it must also reach that call.
+ */
+let onboardingAwaitingRunCount = false;
+
+/**
+ * The first-loop checklist on My Agents: run a backtest, see its results.
+ *
+ * Every tick is derived from data the page already holds -- nothing is stored.
+ * The alternative was a localStorage flag, and this file already carries the
+ * cautionary instance: defaultAgentProvisionGuardKey()'s own comment records
+ * that user ids recycle on local SQLite and on Render's ephemeral disk, so such
+ * a key can end up naming a different person.
+ *
+ * **Agent existence is deliberately not a step.** Signup provisions three
+ * starter cards (api/auth.py -> provision_starter_agents) and
+ * ensureDefaultFoundationAgent() re-provisions them client-side for guests, so
+ * `agents.length > 0` is true for everyone who has ever loaded the page. A step
+ * keyed on it would arrive pre-ticked and teach the reader that the ticks mean
+ * nothing.
+ *
+ * **The two steps read different sources, and cannot both read run_count.** The
+ * dashboard engine writes its agent_runs row only at completion, with
+ * final_equity already populated -- there is no in-flight row. So `run_count`
+ * answers "are there results" and is silent about the minutes a user actually
+ * spends waiting. The launch step therefore also consults the in-flight
+ * registry, which is the only witness to that middle state; without it the
+ * checklist would jump 0 -> 2 in one instant and never show progress.
+ *
+ * **`runs` is the swept list from listRunningBacktests(), never the raw
+ * sessionStorage map.** The map keeps entries for runs that died without a
+ * terminal status; the shelves below drop those the moment they paint, through
+ * getAgentBacktestRunning(). A tick taken from the unswept map therefore
+ * announced "its progress is on the card below" a few milliseconds before the
+ * same render decided there was no card -- and nothing schedules another paint,
+ * so the panel sat there pointing at nothing.
+ *
+ * **`awaitingResults` is the third state, and it exists because the two facts
+ * above go stale at different instants.** A run ending clears its registry
+ * entry immediately, while the run_count that replaces it arrives a fetch
+ * later; in between, both reads are false and the checklist un-ticked itself at
+ * the exact moment the user finished the loop it is celebrating.
+ */
+function deriveOnboardingChecklist(agents, runs, { awaitingResults = false } = {}) {
+    const roster = Array.isArray(agents) ? agents : [];
+    // agentRunCount() rather than a local read of run_count: it is already this
+    // page's answer to "how many backtests does this agent have", fallbacks
+    // included, and the card beside the panel is rendered from it. Two
+    // definitions meant a payload carrying `runs` but no `run_count` could badge
+    // a card BACKTESTED directly under a checklist insisting otherwise.
+    const finished = roster.some((agent) => agent && agentRunCount(agent) > 0);
+    // Only runs whose agent is still on the roster. The entry outlives the
+    // agent in two ordinary cases -- the agent was deleted, and logoutUser()
+    // navigates away without clearing sessionStorage, so the next account in
+    // that tab inherits the previous one's entries. Neither paints a card.
+    const rosterIds = new Set(
+        roster.map((agent) => (agent ? agent.agent_id : null)).filter(Boolean),
+    );
+    const inFlight = (Array.isArray(runs) ? runs : []).some(
+        (run) => run && rosterIds.has(run.agentId),
+    );
+    let launchHint = 'Pick an agent below and open it in Backtest.';
+    if (inFlight) {
+        launchHint = 'Running now. Its progress is on the card below.';
+    } else if (awaitingResults) {
+        launchHint = 'Finishing up — loading your results.';
+    }
+    return {
+        // Hidden until the roster lands, so the first paint of a returning user
+        // -- who closed this loop months ago -- never flashes an open to-do
+        // list at them; hidden again for good once the loop closes.
+        visible: roster.length > 0 && !finished,
+        finished,
+        steps: [
+            {
+                key: 'launch',
+                label: 'Run your first backtest',
+                // This step being done while the panel is still visible means a
+                // run is either in flight or just ended -- `finished` hides the
+                // panel outright -- so the ticked hint can say which, rather
+                // than repeat instructions the reader has already followed.
+                hint: launchHint,
+                done: finished || inFlight || awaitingResults,
+            },
+            {
+                key: 'results',
+                label: 'See your results',
+                hint: 'Its equity curve and metrics land on the Backtest tab when the run finishes.',
+                done: finished,
+            },
+        ],
+    };
+}
+
+/**
+ * Paint the checklist panel.
+ *
+ * renderAgentCategories() is the only caller, deliberately. The running card
+ * beside it needs a second, per-second renderer because its numbers move
+ * continuously; a tick here moves on exactly two events, a launch and a
+ * completion, and both change the *set* of running agents --  which
+ * refreshRunningAgentCards() already answers with a full re-render. While that
+ * set holds steady no tick can move, so a 1Hz render site could only repaint
+ * the same two rows.
+ *
+ * The signature guard is therefore not an optimisation for that caller that no
+ * longer exists: it keeps any repaint of the grid (a search keystroke, a chip)
+ * from rebuilding a panel whose state is unchanged.
+ */
+function renderOnboardingChecklist(agents) {
+    const panel = document.getElementById('onboardingChecklist');
+    if (!panel) return;
+    const state = deriveOnboardingChecklist(agents, listRunningBacktests(), {
+        awaitingResults: onboardingAwaitingRunCount,
+    });
+    // The hints are part of the signature, not just the ticks. A run ending
+    // moves the launch step from "Running now" to "loading your results" with
+    // both steps' done-ness unchanged, so a ticks-only signature matched and
+    // returned -- leaving the panel claiming a finished run was still going.
+    const signature = [
+        state.visible,
+        ...state.steps.map((s) => `${s.done ? 1 : 0}${s.hint}`),
+    ].join('|');
+    if (panel.dataset.onboardingSignature === signature) return;
+    panel.dataset.onboardingSignature = signature;
+    panel.hidden = !state.visible;
+    if (!state.visible) {
+        panel.innerHTML = '';
+        return;
+    }
+    const items = state.steps
+        .map(
+            (step) => `
+            <li class="onboarding-step${step.done ? ' is-done' : ''}">
+                <span class="onboarding-step-mark" aria-hidden="true"></span>
+                <span class="onboarding-step-body">
+                    <span class="onboarding-step-label">${escapeHtml(step.label)}</span>
+                    <span class="onboarding-step-hint">${escapeHtml(step.hint)}</span>
+                </span>
+                <span class="sr-only">${step.done ? 'Done' : 'Not done yet'}</span>
+            </li>`,
+        )
+        .join('');
+    panel.innerHTML = `
+        <h3 class="onboarding-title">Get your first result</h3>
+        <p class="onboarding-lede">Your agents are already set up. Two steps to a finished backtest.</p>
+        <ol class="onboarding-steps">${items}</ol>`;
+}
+
 function renderAgentCategories(agents) {
   const errorEl = document.getElementById('agentsErrorState');
   const shelves = AGENT_SHELVES.map((shelf) => {
@@ -1897,6 +2050,12 @@ function renderAgentCategories(agents) {
 
   if (errorEl) errorEl.hidden = true; // a successful render clears any prior error
 
+  // allAgents, never the `agents` parameter: renderAgentCategories is called
+  // with getFilteredAgents(), which the search box and the market chips
+  // narrow. The checklist is about the account, so filtering down to a
+  // shelf that happens to exclude the agent carrying the runs must not
+  // resurrect a panel the user already closed by finishing a backtest.
+  renderOnboardingChecklist(allAgents);
   renderAgentMarketChips();
 
   const defaultId = getDefaultAgentId();
@@ -2357,6 +2516,10 @@ async function loadAgentsNow() {
     await alignStarterAgentNames(agents);
 
     allAgents = agents;
+    // Cleared BEFORE the render below, not after: this roster is the answer the
+    // flag was standing in for, so the paint it feeds must come from the roster
+    // rather than from the guess that covered the gap.
+    onboardingAwaitingRunCount = false;
     applyAgentFilters();
     populateBacktestAgentSelect();
     if (typeof window.renderPortfolio === 'function') {
@@ -2371,6 +2534,9 @@ async function loadAgentsNow() {
     }
   } catch (error) {
     console.warn('Failed to load agents:', error.message);
+    // The fetch concluded, badly. Holding the bridge open would keep the launch
+    // step ticked against a roster that will never arrive to confirm it.
+    onboardingAwaitingRunCount = false;
     if (isDemoMode()) {
       allAgents = visibleMockAgents();
       applyAgentFilters();
@@ -7793,6 +7959,7 @@ function ensureBacktestPolling() {
             }));
 
             let anyRunning = false;
+            let anyFinished = false;
             let finishedFocused = null;
 
             for (const { job, status, failed } of snapshots) {
@@ -7895,6 +8062,14 @@ function ensureBacktestPolling() {
                     // an entry a previous build left filed under its agent id.
                     if (liveId) clearAgentBacktestRunning(liveId);
                     if (job.key && job.key !== liveId) clearAgentBacktestRunning(job.key);
+                    anyFinished = true;
+                    // Armed here, between the registry clear above and the
+                    // roster refresh below, because that is exactly the window
+                    // in which neither of the checklist's two sources knows a
+                    // run happened. Only on success: a failed run leaves no
+                    // results to wait for, and un-ticking is then the honest
+                    // answer -- the user does need to run another one.
+                    if (status.success) onboardingAwaitingRunCount = true;
                     if (viewingLive || liveId === liveBacktestRunId) {
                         finishedFocused = {
                             status,
@@ -7915,6 +8090,16 @@ function ensureBacktestPolling() {
             // tab — that page is the landing page after launch.
             if (playgroundTab === 'agents' && currentPage === 'playground') {
                 refreshRunningAgentCards();
+                // Every completion, not only the focused one. A finished run
+                // changes run_count, which both the card's run-count line and
+                // the checklist read, and refreshRunningAgentCards() above has
+                // just re-rendered the page from the pre-run roster. Gated on
+                // the focused run, a background completion never reached this
+                // call at all -- its results stayed off the page, and the
+                // bridge flag armed above had nothing to clear it.
+                // loadAgents() coalesces concurrent callers, so the focused
+                // path below does not need its own.
+                if (anyFinished) loadAgents();
             }
 
             if (finishedFocused) {
@@ -7925,9 +8110,6 @@ function ensureBacktestPolling() {
                     liveBacktestProgress = null;
                 }
                 lastRenderedRunningKey = null;
-                if (playgroundTab === 'agents' && currentPage === 'playground') {
-                    loadAgents();
-                }
 
                 if (status.error) {
                     const source = getBacktestLaunchConfig(liveId || finishedId)?.dataSource;

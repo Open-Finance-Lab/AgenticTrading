@@ -983,6 +983,10 @@
                         <button id="addAgentBtnToolbar" class="home-btn home-btn-primary agent-toolbar-add" type="button">Add Agent +</button>
                     </div>
                 </div>
+                <!-- Ships hidden: first paint happens before the agents call
+                     answers, and an open checklist in that gap is shown to
+                     everyone, including users who closed the loop long ago. -->
+                <section id="onboardingChecklist" class="onboarding-checklist" aria-label="Getting started" hidden></section>
                 <div id="agentsCategories">
                     <section class="agents-category" data-category="prompted">
                         <div class="agents-category-head">
