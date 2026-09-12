@@ -121,6 +121,7 @@ class PostgresBacktestDatabase:
                         num_trades INTEGER DEFAULT 0,
                         llm_model TEXT DEFAULT 'rule-based',
                         llm_calls INTEGER DEFAULT 0,
+                        llm_decisions INTEGER DEFAULT 0,
                         input_tokens INTEGER DEFAULT 0,
                         output_tokens INTEGER DEFAULT 0,
                         est_cost_usd DOUBLE PRECISION DEFAULT 0,
@@ -251,6 +252,13 @@ class PostgresBacktestDatabase:
                 cur.execute(
                     "ALTER TABLE agent_runs ADD COLUMN IF NOT EXISTS "
                     "llm_calls INTEGER DEFAULT 0"
+                )
+                # Prod runs this twin for agent_runs, so a column added to the
+                # SQLite store alone is a prod-only UndefinedColumn that local
+                # tests cannot reach.
+                cur.execute(
+                    "ALTER TABLE agent_runs ADD COLUMN IF NOT EXISTS "
+                    "llm_decisions INTEGER DEFAULT 0"
                 )
                 cur.execute(
                     "ALTER TABLE agent_runs ADD COLUMN IF NOT EXISTS "
@@ -475,6 +483,7 @@ class PostgresBacktestDatabase:
                    num_trades: int = 0,
                    llm_model: str = "rule-based",
                    llm_calls: int = 0,
+                   llm_decisions: int = 0,
                    input_tokens: int = 0,
                    output_tokens: int = 0,
                    est_cost_usd: float = 0.0,
@@ -539,8 +548,9 @@ class PostgresBacktestDatabase:
                     (run_id, session_id, agent_name, mode, start_date, end_date,
                      initial_equity, final_equity, total_return, sharpe_ratio,
                      max_drawdown, num_trades, llm_model,
-                     llm_calls, input_tokens, output_tokens, est_cost_usd, metadata)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                     llm_calls, llm_decisions, input_tokens, output_tokens,
+                     est_cost_usd, metadata)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     ON CONFLICT (run_id) DO UPDATE SET
                         session_id = EXCLUDED.session_id,
                         agent_name = EXCLUDED.agent_name,
@@ -555,6 +565,7 @@ class PostgresBacktestDatabase:
                         num_trades = EXCLUDED.num_trades,
                         llm_model = EXCLUDED.llm_model,
                         llm_calls = EXCLUDED.llm_calls,
+                        llm_decisions = EXCLUDED.llm_decisions,
                         input_tokens = EXCLUDED.input_tokens,
                         output_tokens = EXCLUDED.output_tokens,
                         est_cost_usd = EXCLUDED.est_cost_usd,
@@ -565,7 +576,8 @@ class PostgresBacktestDatabase:
                         run_id, session_id, agent_name, mode, start_date, end_date,
                         initial_equity, final_equity, total_return, sharpe_ratio,
                         max_drawdown, num_trades, llm_model,
-                        llm_calls, input_tokens, output_tokens, est_cost_usd,
+                        llm_calls, llm_decisions, input_tokens, output_tokens,
+                        est_cost_usd,
                         json.dumps(metadata) if metadata is not None else None,
                     ),
                 )

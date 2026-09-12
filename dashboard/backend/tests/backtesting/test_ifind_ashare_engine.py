@@ -431,6 +431,16 @@ def test_ifind_engine_uses_profile_symbols_in_explicit_rule_mode(monkeypatch):
         "timeframe": "60m",
         "timezone": "Asia/Shanghai",
         "decision_source": "rule_based",
+        # What the caller asked for, beside what the run did. They agree here
+        # because nothing was downgraded -- and that agreement is the only
+        # thing separating this row from a run that asked for a model and
+        # silently traded rule-based, which persists the same
+        # `decision_source` (issue #169).
+        "requested_decision_source": "rule_based",
+        # Coverage denominator for llm_decisions (issue #169): steps the model
+        # was asked to decide. A rule-based run asked it none, so the row says
+        # 0 of 60 rather than leaving the denominator absent.
+        "decision_steps": 60,
         "benchmark": "equal_weight_buyhold",
         "t_plus_one_enabled": True,
         "symbols": list(A_SHARE_DEMO_6_SYMBOLS),

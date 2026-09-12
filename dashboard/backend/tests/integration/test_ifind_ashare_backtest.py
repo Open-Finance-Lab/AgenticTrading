@@ -648,6 +648,11 @@ def test_ifind_offline_response_reaches_engine_database_and_chart(
         "timeframe": "60m",
         "timezone": "Asia/Shanghai",
         "decision_source": "rule_based",
+        # The request, recorded beside the outcome. Equal here because this
+        # run asked for rule-based logic and got it -- and that equality is
+        # the only difference from a run that asked for a model and silently
+        # traded rule-based, which writes the same `decision_source` (#169).
+        "requested_decision_source": "rule_based",
         "benchmark": "equal_weight_buyhold",
         "t_plus_one_enabled": True,
         "symbols": list(symbols),
@@ -676,6 +681,14 @@ def test_ifind_offline_response_reaches_engine_database_and_chart(
             "scope": "full_day_suspension_and_closing_limits",
         },
     }
+    # Coverage denominator for llm_decisions (issue #169): steps the model was
+    # asked to decide. Pulled out of the exact comparison because it is a
+    # property of this universe's data rather than a fixed constant -- but
+    # asserted against the curve, not against itself, so a run that stopped
+    # recording it cannot pass.
+    decision_steps = agent_run["metadata"].pop("decision_steps")
+    assert decision_steps == len(test_db.get_equity_curve(agent_run_id))
+    assert agent_run["llm_decisions"] == 0
     # A run with no fills writes no cost totals. The baseline may have initial
     # fills, so its totals are asserted separately below.
     assert agent_run["metadata"] == expected_metadata

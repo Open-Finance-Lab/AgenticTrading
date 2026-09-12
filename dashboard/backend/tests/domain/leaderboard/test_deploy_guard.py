@@ -462,3 +462,81 @@ def test_default_model_name_is_gateway_aware(monkeypatch):
     monkeypatch.setenv("COMMONSTACK_API_KEY", "x")
     assert bh.default_model_name() == bh.COMMONSTACK_MODEL_NAME
     assert bh.default_model_name("openrouter") == bh.OPENROUTER_MODEL_NAME
+
+
+def test_a_published_row_records_the_decisions_the_guard_measured(guard_env, monkeypatch):
+    """The number the guard admitted the run on has to reach the row.
+
+    ``deploy_model_run`` reads ``llm_decisions`` to decide whether a curve may
+    publish and then wrote a row carrying only ``llm_calls``, leaving the
+    column at its ``DEFAULT 0`` on exactly the runs H6 exists to police. The
+    billing counter cannot stand in for it -- that substitution is the defect
+    the two counters were split to prevent -- and anything reading provenance
+    off a board row gets a zero nobody measured.
+    """
+    _use(monkeypatch, FakeLLMStrategy(
+        used_llm=True, llm_calls=100, llm_decisions=96, decision_steps=100))
+
+    result = canon_service.deploy_model_run("claude_haiku_4_5", force_refresh=True)
+
+    row = guard_env.get_run(result["run_id"])
+    assert row["llm_calls"] == 100
+    assert row["llm_decisions"] == 96
+
+
+def test_a_strategy_that_reports_no_decisions_still_records_what_was_measured(
+    guard_env, monkeypatch
+):
+    """`_reported_int` answers None for a strategy shape that does not report
+    the counter, and the guard's documented response is to measure `llm_calls`
+    instead. Handing that None straight to `insert_run` writes NULL -- which
+    reads back as "nobody counted" on a run that was counted, and is the
+    absent-versus-zero confusion this whole column exists to end, one layer
+    down."""
+    _use(monkeypatch, FakeLLMStrategy(
+        used_llm=True, llm_calls=95, decision_steps=100, report_decisions=False))
+
+    result = canon_service.deploy_model_run("claude_haiku_4_5", force_refresh=True)
+
+    row = guard_env.get_run(result["run_id"])
+    assert row["llm_decisions"] == 95   # the number the guard admitted it on
+
+
+def test_the_auto_compute_path_records_the_counters_it_guarded_on(tmp_path, monkeypatch):
+    """The same defect as above, at the sibling insert.
+
+    `ensure_leaderboard_runs` reads both counters to run the belt-and-suspenders
+    guard and then wrote a row carrying neither, so an LLM entry that passed it
+    landed with `llm_calls = 0` and `llm_decisions = 0` -- the exact shape
+    `classify_decision_provenance` reads as a rule-based curve wearing the
+    model's name. The row has to say what the guard measured.
+    """
+    cfg = {
+        "session_id": "lb-auto-test",
+        "start_date": "2026-04-15",
+        "end_date": "2026-05-15",
+        "initial_capital": 100000,
+        "strategies": [
+            {"id": "sneaky_llm", "name": "Sneaky", "model": "Sneaky",
+             "strategy": "llm_agent", "auto_compute": True},
+        ],
+    }
+    test_db = BacktestDatabase(db_path=tmp_path / "lb.db")
+    monkeypatch.setattr(canon_service, "db", test_db)
+    monkeypatch.setattr(canon_service, "load_leaderboard_config", lambda: dict(cfg))
+    monkeypatch.setattr(canon_service, "get_strategy", lambda entry: FakeLLMStrategy(
+        used_llm=True, llm_calls=100, llm_decisions=96, decision_steps=100))
+    monkeypatch.setattr(canon_service, "fetch_hourly_bars", lambda syms, s, e: {"AAPL": object()})
+    monkeypatch.setattr(canon_service, "calc_metrics", lambda curve, cap: {
+        "initial_equity": cap, "final_equity": cap, "total_return": 0.0,
+        "sharpe_ratio": 0.0, "max_drawdown": 0.0,
+    })
+    monkeypatch.setattr(canon_service.token_cost, "estimate_cost_usd", lambda m, i, o: 0.0)
+
+    canon_service.ensure_leaderboard_runs(force_refresh=True)
+
+    run_id = canon_service._run_id("sneaky_llm", "2026-04-15", "2026-05-15")
+    row = test_db.get_run(run_id)
+    assert row is not None
+    assert row["llm_calls"] == 100
+    assert row["llm_decisions"] == 96

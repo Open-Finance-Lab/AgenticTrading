@@ -458,6 +458,10 @@ def _insert_one_run(target: "PostgresBacktestDatabase", run: Dict[str, Any]) -> 
         num_trades=_coalesce(run, "num_trades", 0),
         llm_model=_coalesce(run, "llm_model", "rule-based"),
         llm_calls=_coalesce(run, "llm_calls", 0),
+        # Not a second spelling of llm_calls: steps the model actually drove.
+        # Dropping it here would republish every migrated LLM run as a total
+        # fallback, since 0 is what a row with no counter also reads as.
+        llm_decisions=_coalesce(run, "llm_decisions", 0),
         input_tokens=_coalesce(run, "input_tokens", 0),
         output_tokens=_coalesce(run, "output_tokens", 0),
         est_cost_usd=_coalesce(run, "est_cost_usd", 0.0),

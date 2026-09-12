@@ -77,6 +77,11 @@ from dashboard.backend.domain.model_providers.service import (
     get_model_provider_service,
 )
 from dashboard.backend.domain.analytics import instrumentation as analytics_instrumentation
+from dashboard.backend.domain.backtesting.provenance import (
+    DECISION_STEPS_KEY,
+    describe_decision_provenance,
+    run_decision_provenance,
+)
 from dashboard.backend.domain.credits.service import credits_service
 from dashboard.backend.api.rate_limit import FixedWindowRateLimiter, client_key
 from dashboard.backend.domain.agents.service import agent_service
@@ -287,6 +292,17 @@ class RunMetadata(BaseModel):
     timeframe: Optional[str] = None
     timezone: Optional[str] = None
     decision_source: Optional[str] = None
+    # What actually drove the run, beside `decision_source` above (what was
+    # asked for). Both are needed: they differ exactly in the case issue #169
+    # is about, and the results view renders the N-of-M badge off the counts
+    # rather than re-deriving a coverage threshold in the browser.
+    decision_provenance: Optional[str] = None
+    decision_fallback: Optional[bool] = None
+    decision_badge: Optional[str] = None
+    decision_note: Optional[str] = None
+    llm_calls: Optional[int] = None
+    llm_decisions: Optional[int] = None
+    decision_steps: Optional[int] = None
     benchmark: Optional[str] = None
     symbols: Optional[List[str]] = None
     universe_selection: Optional[Dict[str, Any]] = None
@@ -463,6 +479,13 @@ def _run_metadata_response(run: Dict[str, Any]) -> RunMetadata:
                     }
                 else:
                     payload[field] = metadata[field]
+    # After the metadata copy, so `decision_source` above is already the
+    # requested value and this cannot overwrite it with the observed one. The
+    # block is the single producer of both, so the two can never be computed
+    # from different readings of the same row.
+    provenance = run_decision_provenance(run)
+    if provenance:
+        payload.update(provenance)
     return RunMetadata(**payload)
 
 
@@ -2163,6 +2186,34 @@ def run_backtest_endpoint(
         response["provider_id"] = provider_id
     return response
 
+def _finished_agent_run(
+    runs: List[Dict[str, Any]], live_run_id: Optional[str]
+) -> Optional[Dict[str, Any]]:
+    """The agent run a completed status call is reporting on, or None.
+
+    ``runs`` is already scoped to the caller's session, so matching inside it
+    preserves the ownership boundary the completed branch established;
+    ``db.get_run(live_run_id)`` would answer for any session's run.
+
+    The no-id fallback takes the newest row and only when it carries the
+    provenance witness. Baseline rows (buy-and-hold, DJIA) are inserted *after*
+    the agent run and never carry it, so they cannot be mistaken for the run --
+    and refusing to search further back means a caller with no ``live_run_id``
+    gets no verdict rather than an *earlier* run's verdict. Reporting a stale
+    run's provenance as this one's would be the same class of lie this endpoint
+    is being fixed for.
+    """
+    if live_run_id:
+        return next(
+            (run for run in runs if run.get("run_id") == live_run_id), None
+        )
+    newest = runs[0] if runs else None
+    metadata = newest.get("metadata") if newest else None
+    if isinstance(metadata, dict) and DECISION_STEPS_KEY in metadata:
+        return newest
+    return None
+
+
 @router.get("/backtest/status")
 def get_backtest_status(
     request: Request,
@@ -2244,7 +2295,7 @@ def get_backtest_status(
                 "message": "Session mismatch",
             }
 
-        return {
+        payload = {
             "running": False,
             "success": True,
             "runs_count": int(slot.get("runs_count") or 0),
@@ -2252,6 +2303,18 @@ def get_backtest_status(
             "live_run_id": slot.get("live_run_id"),
             "message": "Backtest completed successfully",
         }
+        # Additive: every field above keeps its name and meaning, because
+        # app.js and the legacy surface both poll this route. What changes is
+        # that a run the model never drove can no longer answer with a bare
+        # success -- the honest label was already in the row and this endpoint
+        # was the boundary it died at (issue #169).
+        provenance = run_decision_provenance(
+            _finished_agent_run(runs, slot.get("live_run_id"))
+        )
+        if provenance:
+            payload.update(provenance)
+            payload["message"] = describe_decision_provenance(provenance)
+        return payload
     else:
         return {
             "running": False,

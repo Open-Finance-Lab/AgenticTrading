@@ -626,6 +626,122 @@ def test_hosted_run_row_reports_runtime_calls_not_zero(patched_engine):
     assert "gpt-4.1" not in str(run_row["llm_model"])
 
 
+def test_rule_based_run_persists_zero_model_decisions_and_its_step_count(
+    patched_engine,
+):
+    """Layer B of #169: the counter that catches a silent fallback had to exist
+    in the row at all. A dashboard backtest is a subprocess, so the in-process
+    H6 guard never sees these numbers -- persisting them is the only way they
+    cross back."""
+    run_id, equity_curve = _run_rule_based(patched_engine)
+
+    run = patched_engine.runs[0]
+    assert run["run_id"] == run_id
+    assert run["llm_calls"] == 0
+    assert run["llm_decisions"] == 0
+    # The coverage denominator: steps the model was asked to decide. The
+    # non-intraday path marks equity once per decision step, so the curve
+    # length is that count without restating it here.
+    assert run["metadata"]["decision_steps"] == len(equity_curve)
+
+
+def test_hosted_run_counts_decisions_over_the_steps_it_was_asked_for(
+    patched_engine,
+):
+    """A hosted runtime decides once per trading day and holds on every other
+    bar, so the hourly bar count is not its denominator -- it would report a
+    healthy run as roughly 1/7 covered. Steps it drove plus steps it was asked
+    for and could not answer is."""
+    from dashboard.backend.infrastructure.ai_hedge_fund.adapter import (
+        AiHedgeFundRuntimeError,
+    )
+
+    class FlakyRunner:
+        def __init__(self):
+            self.calls = 0
+
+        def run(self, payload, *, timeout_seconds):
+            self.calls += 1
+            if self.calls == 2:
+                raise AiHedgeFundRuntimeError("timed out after 300 seconds")
+            return {"decisions": {"AAPL": {"action": "hold", "quantity": 0,
+                                           "confidence": 55.0, "reasoning": "ok"}}}
+
+    bt = _hosted_backtester(FlakyRunner())
+    bt.run_agent_backtest()
+
+    run = patched_engine.runs[0]
+    drove = bt.runtime_dispatcher.calls
+    held = len(bt.runtime_step_failures)
+    assert drove > 0 and held == 1
+    assert run["llm_decisions"] == drove
+    assert run["metadata"]["decision_steps"] == drove + held
+    # Well short of the bar count, which is the point of not using it.
+    assert run["metadata"]["decision_steps"] < len(bt.all_data["AAPL"])
+
+
+def test_a_run_downgraded_for_want_of_a_model_records_what_it_asked_for(
+    patched_engine, monkeypatch
+):
+    """The headline case of #169, and the one the persisted `decision_source`
+    cannot report.
+
+    Both availability downgrades in __init__ rewrite `self.decision_source` to
+    rule_based, and _agent_run_metadata persists whatever that attribute holds
+    at the end. So a run that asked for a model and never got one persisted
+    byte-identically to one the caller ordered rule-based -- and the surface
+    reading it then told the first user that rule-based logic was what they
+    ordered. The request is captured before the downgrade for that reason.
+    """
+    monkeypatch.setattr(engine_mod, "HAS_ANTHROPIC", True)
+    monkeypatch.setattr(engine_mod, "make_llm_client", lambda *a, **k: None)
+
+    bt = HourlyBacktester(
+        "2026-03-01", "2026-04-01", "downgraded",
+        use_llm=True, decision_source="llm",
+    )
+    # The downgrade this test exists for: no client, not strict, so the run
+    # proceeds rule-based instead of raising.
+    assert bt.use_llm is False
+    assert bt.decision_source == "rule_based"
+    assert bt.requested_decision_source == "llm"
+
+    bt.load_data()
+    bt.calculate_indicators()
+    bt.run_agent_backtest()
+
+    metadata = patched_engine.runs[0]["metadata"]
+    assert metadata["decision_source"] == "rule_based"      # what it did
+    assert metadata["requested_decision_source"] == "llm"   # what it was asked
+
+
+def test_a_missing_sdk_downgrade_also_records_the_request(
+    patched_engine, monkeypatch
+):
+    """The second downgrade site. It leaves `use_llm` True for the client
+    lookup below it, so it is reached on a different condition than the one
+    above and has to record the request just the same."""
+    monkeypatch.setattr(engine_mod, "HAS_ANTHROPIC", False)
+
+    bt = HourlyBacktester(
+        "2026-03-01", "2026-04-01", "no-sdk",
+        use_llm=True, decision_source="llm",
+    )
+    assert bt.decision_source == "rule_based"
+    assert bt.requested_decision_source == "llm"
+
+
+def test_an_intentionally_rule_based_run_asked_for_rule_based(patched_engine):
+    """The other half of the same key: it must not turn every rule-based run
+    into a fallback. A caller that ordered rule-based logic got exactly what it
+    ordered, and the two rows differ only in this field."""
+    run_id, _ = _run_rule_based(patched_engine)
+
+    metadata = patched_engine.runs[0]["metadata"]
+    assert metadata["decision_source"] == "rule_based"
+    assert metadata["requested_decision_source"] == "rule_based"
+
+
 def test_hosted_run_that_never_reached_the_model_is_not_attributed_to_it(
     patched_engine, monkeypatch
 ):

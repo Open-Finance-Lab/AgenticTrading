@@ -674,6 +674,47 @@ def test_post_parse_exception_is_billed_but_not_a_decision():
     assert pm.llm_decisions == 0    # but not a usable model decision
 
 
+def test_missing_client_is_neither_billed_nor_a_decision():
+    """The first fallback site: no client, or the SDK is absent.
+
+    Nothing was called, so nothing is billed -- and the step traded rule-based,
+    so nothing is a model decision either. Both counters staying 0 is what lets
+    a run with a model name on it and no usable decisions be told apart from
+    one that never had a client at all.
+    """
+    pm = bha.PortfolioManager(100000)
+    out = pm.make_trading_decision_with_llm(_portfolio_state(), None)
+    assert out == pm.make_trading_decision(_portfolio_state())
+    assert pm.llm_calls == 0
+    assert pm.llm_decisions == 0
+
+
+def test_pipeline_with_no_parseable_decision_is_billed_but_not_a_decision(monkeypatch):
+    """The pipeline path's own fallback, which the single-prompt cases miss.
+
+    ``run_pipeline_decision`` bills every sub-agent step it ran before giving
+    up, so this is the multi-step shape of the same defect: real spend, a
+    rule-based curve, and -- before llm_decisions was persisted -- a run row
+    that looked like four clean model calls.
+    """
+    pm = bha.PortfolioManager(100000)
+    monkeypatch.setattr(
+        portfolio_manager_module,
+        "run_pipeline_decision",
+        lambda *args, **kwargs: (None, (120, 40), 4, []),
+    )
+
+    out = pm.make_trading_decision_with_llm(
+        _portfolio_state(),
+        _FakeClient(_FakeResponse("unused")),
+        pipeline=[{"role": "analyst"}],
+    )
+
+    assert out == pm.make_trading_decision(_portfolio_state())
+    assert pm.llm_calls == 4        # every sub-agent step was billed
+    assert pm.llm_decisions == 0    # and none of them drove the step
+
+
 def test_malformed_action_item_is_billed_but_not_a_decision():
     # A non-empty actions list whose items are the wrong shape (strings, not
     # dicts) also throws inside the processing loop → rule-based fallback.

@@ -7,6 +7,8 @@ from pathlib import Path
 
 import pytest
 
+from dashboard.backend.tests._frontend_source import fn_body, strip_comments
+
 
 _FRONTEND = Path(__file__).resolve().parents[2] / "frontend"
 _APP_HTML = _FRONTEND / "app.html"
@@ -346,7 +348,14 @@ def test_backtest_launch_failure_remains_visible_instead_of_loading_history(js):
     assert re.search(r"function\s+showBacktestLaunchFailure\s*\(", js)
     assert "statusLabel: 'Failed'" in js
     assert "Backtest did not start." in js
-    assert "isError ? 'Backtest did not start' : 'Backtest in progress'" in js
+    # A failed launch retitles the panel, so the error state is never shown
+    # under "Backtest in progress". Asserted as the branch rather than as one
+    # ternary's spelling: the same helper grew a third title ("Backtest
+    # complete", for a panel that outlives its run) and an exact-source match
+    # failed on a change that kept this contract intact.
+    panel = strip_comments(fn_body("function showBacktestRunProgress", js))
+    assert "if (isError) title.textContent = 'Backtest did not start';" in panel
+    assert "title.textContent = 'Backtest in progress';" in panel
     assert re.search(
         r"!runningId\s*&&\s*\(liveBacktestLaunchPending\s*\|\|\s*liveBacktestLaunchError\)",
         js,

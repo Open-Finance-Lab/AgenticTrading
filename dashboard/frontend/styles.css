@@ -6223,6 +6223,14 @@ a.header-brand:hover .title-section h1 {
     overflow-wrap: anywhere;
 }
 
+/* Model coverage below the leaderboard's publishable floor. Colour alone is
+   not the signal -- the cell only renders at all when coverage is under 100%,
+   and its label carries the counts -- so this reads as emphasis rather than as
+   the only thing separating a degraded run from a clean one. */
+.backtest-config-detail-cell.is-degraded strong {
+    color: var(--warning-color);
+}
+
 .backtest-config-meta-row {
     display: flex;
     justify-content: space-between;

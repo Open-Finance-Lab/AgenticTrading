@@ -996,11 +996,13 @@ def ensure_leaderboard_runs(
         # baselines (LLM entries carry auto_compute=false and deploy manually via
         # deploy_model_run). Guard here too so a misconfigured LLM entry can't
         # slip a rule-based fallback onto the board without the manual override.
+        auto_llm_calls = int(getattr(strategy_impl, "llm_calls", 0) or 0)
+        auto_llm_decisions = _reported_int(strategy_impl, "llm_decisions")
         _reject_if_llm_fallback(
             strategy_id,
             strategy_impl,
-            int(getattr(strategy_impl, "llm_calls", 0) or 0),
-            llm_decisions=_reported_int(strategy_impl, "llm_decisions"),
+            auto_llm_calls,
+            llm_decisions=auto_llm_decisions,
             decision_steps=int(getattr(strategy_impl, "decision_steps", 0) or 0),
             model=strategy.get("model"),
             model_id=getattr(strategy_impl, "model_id", None) or strategy.get("model_id"),
@@ -1020,6 +1022,16 @@ def ensure_leaderboard_runs(
             max_drawdown=metrics["max_drawdown"],
             num_trades=strategy_impl.num_trades(),
             llm_model=strategy_id,
+            # The numbers the guard immediately above just measured. This path
+            # is meant for rule-based baselines, where both are 0 -- but it
+            # publishes any entry the guard lets through, and dropping them
+            # wrote `llm_model = <entry>` beside `llm_calls = 0`, which is the
+            # exact shape `classify_decision_provenance` reads as a rule-based
+            # curve wearing that model's name.
+            llm_calls=auto_llm_calls,
+            llm_decisions=(
+                auto_llm_calls if auto_llm_decisions is None else auto_llm_decisions
+            ),
             metadata=_with_market_data_provenance(
                 _llm_run_metadata(
                     strategy_id,
@@ -1357,6 +1369,16 @@ def deploy_model_run(
         num_trades=strategy_impl.num_trades(),
         llm_model=entry_id,
         llm_calls=llm_calls,
+        # The same number `_reject_if_llm_fallback` just admitted this run on.
+        # Persisting only `llm_calls` left the column at its DEFAULT 0 on the
+        # rows H6 governs, and the billing counter cannot stand in for it --
+        # that substitution is what the two counters were split to prevent.
+        #
+        # `_reported_int` answers None for a strategy shape that does not
+        # report the counter, and the guard's documented response to that is to
+        # measure `llm_calls` instead; the row mirrors it rather than writing
+        # NULL, which would read back as "nobody counted" on a run that was.
+        llm_decisions=llm_calls if llm_decisions is None else llm_decisions,
         input_tokens=input_tokens,
         output_tokens=output_tokens,
         est_cost_usd=est_cost,

@@ -7305,6 +7305,68 @@ function formatBacktestElapsed(seconds) {
 /** A progress file older than this is reported as stale (seconds). */
 const BACKTEST_STALE_SECONDS = 120;
 
+/**
+ * What actually drove a finished run, or null when there is nothing to say.
+ *
+ * The sentence comes from the server (`decision_note`) rather than being
+ * templated here from the same counters: one message with two owners disagrees
+ * the moment either side's wording moves, and "the dashboard and the backend
+ * describe this run differently" is the bug one layer up from the one this
+ * exists to fix (issue #169).
+ *
+ * Null for a clean `llm` run — it already reads "Completed in 1:23." and a line
+ * confirming the model drove it adds nothing — and null for `unknown`, a run
+ * written before the counters existed, which must not be accused of a fallback
+ * nobody recorded.
+ */
+function formatDecisionProvenance(status) {
+    return status?.decision_note || null;
+}
+
+/**
+ * True when the run asked for the model and did not get it.
+ *
+ * Reads the server's `decision_fallback` instead of comparing
+ * `decision_source` against `decision_provenance` here, so "was this a
+ * fallback?" keeps one owner. An intentionally rule-based run is not one: it
+ * is labelled, but it is also exactly what was ordered, so it does not hold the
+ * completion panel open.
+ */
+function backtestFellBackFromTheModel(status) {
+    return status?.decision_fallback === true;
+}
+
+/** How long a clean completion message stays up before the panel dismisses. */
+const BACKTEST_COMPLETION_DISMISS_MS = 2500;
+
+/**
+ * Settle the completion panel for a run that has just finished.
+ *
+ * Called *after* `await loadData()`, and it re-shows the panel rather than
+ * only withholding the dismissal timer, because loadData() hides this panel on
+ * its way past: with the finished run no longer reported as running, its
+ * backtest branch falls through to `showBacktestRunProgress(false)`
+ * unconditionally. A guard that merely skipped the timeout therefore read as
+ * "keep the panel up" and kept nothing up -- the sentence was already off
+ * screen, and the timer it skipped would have fired against a hidden panel.
+ * Nothing about that is visible at the call site, which is why the decision
+ * lives here where it can be executed by a test instead of read.
+ *
+ * A clean run still auto-dismisses: its message only says the run finished,
+ * which the results loadData() has just painted say better.
+ */
+function settleFinishedBacktestPanel(status, elapsedSeconds, message) {
+    if (!backtestFellBackFromTheModel(status)) {
+        setTimeout(
+            () => showBacktestRunProgress(false),
+            BACKTEST_COMPLETION_DISMISS_MS,
+        );
+        return;
+    }
+    showBacktestRunProgress(true, { isFinished: true });
+    updateBacktestRunProgress({ elapsedSeconds, message });
+}
+
 /** The /backtest/status URL for one run, or for "whatever this browser runs".
  *
  * Three callers build this URL and the interesting half is what happens when
@@ -7599,7 +7661,18 @@ function deriveRunningProgress(running) {
     };
 }
 
-function showBacktestRunProgress(show, { isError = false } = {}) {
+/**
+ * `isFinished` is for a panel that outlives the run it describes.
+ *
+ * Every other caller shows this panel while something is still happening, so
+ * the markup's defaults -- the title "Backtest in progress", a progress track,
+ * and a hint about the 60-minute limit -- were always true for as long as it
+ * was on screen. A fallback run now holds the panel open indefinitely after
+ * the run is over (see `settleFinishedBacktestPanel`), and those three would
+ * otherwise sit under a finished backtest telling the user to keep waiting for
+ * it. The elapsed clock stays: on a finished run it is the duration.
+ */
+function showBacktestRunProgress(show, { isError = false, isFinished = false } = {}) {
     const panel = document.getElementById('backtestRunProgress');
     if (!panel) return;
     panel.hidden = !show;
@@ -7608,10 +7681,14 @@ function showBacktestRunProgress(show, { isError = false } = {}) {
     const elapsed = panel.querySelector('.backtest-run-elapsed');
     const track = panel.querySelector('.backtest-run-progress-track');
     const hint = panel.querySelector('.backtest-run-progress-hint');
-    if (title) title.textContent = isError ? 'Backtest did not start' : 'Backtest in progress';
+    if (title) {
+        if (isError) title.textContent = 'Backtest did not start';
+        else if (isFinished) title.textContent = 'Backtest complete';
+        else title.textContent = 'Backtest in progress';
+    }
     if (elapsed) elapsed.hidden = !!isError;
-    if (track) track.hidden = !!isError;
-    if (hint) hint.hidden = !!isError;
+    if (track) track.hidden = isError || isFinished;
+    if (hint) hint.hidden = isError || isFinished;
 }
 
 /**
@@ -8120,9 +8197,14 @@ function ensureBacktestPolling() {
                         message,
                     });
                 } else if (status.success) {
+                    const provenance = formatDecisionProvenance(status);
+                    const completionMessage = [
+                        `Completed in ${formatBacktestElapsed(displayElapsed)}.`,
+                        provenance,
+                    ].filter(Boolean).join(' ');
                     updateBacktestRunProgress({
                         elapsedSeconds: displayElapsed,
-                        message: `Completed in ${formatBacktestElapsed(displayElapsed)}.`,
+                        message: completionMessage,
                     });
                     if (finishedId) {
                         localStorage.setItem(SELECTED_BACKTEST_RUN_KEY, finishedId);
@@ -8130,7 +8212,18 @@ function ensureBacktestPolling() {
                         localStorage.removeItem(SELECTED_BACKTEST_RUN_KEY);
                     }
                     await loadData();
-                    setTimeout(() => showBacktestRunProgress(false), 2500);
+                    // After loadData(), never before: it repaints this panel
+                    // too, so a run the model never drove has to have its
+                    // message re-asserted rather than merely left alone. The
+                    // message is passed along because re-showing the panel is
+                    // not enough on its own -- the text is what says what
+                    // produced the numbers now on screen, and 2.5s was never
+                    // long enough to read a sentence nobody expected.
+                    settleFinishedBacktestPanel(
+                        status,
+                        displayElapsed,
+                        completionMessage,
+                    );
                 } else {
                     showBacktestRunProgress(false);
                 }
@@ -9295,6 +9388,25 @@ function renderBacktestRunConfig(
         'backtestConfigDecisionSource',
         decisionSourceLabel,
     );
+    // "N of M steps model-driven", beside the decision method the run asked
+    // for. The server sends the label only when coverage is below 100% and the
+    // run actually asked for a model, so this cell appearing at all IS the
+    // signal -- there is no threshold reproduced here, and none to drift.
+    const coverageBadge = running ? null : (run?.decision_badge || null);
+    const coverageRow = document.getElementById('backtestConfigDecisionCoverageRow');
+    if (coverageRow) {
+        coverageRow.hidden = !coverageBadge;
+        // Degraded styling only once the shortfall is large enough that the
+        // leaderboard would refuse the curve. A couple of held steps on an
+        // otherwise clean run is worth stating, not worth alarming about.
+        coverageRow.classList.toggle(
+            'is-degraded',
+            Boolean(coverageBadge) && run?.decision_provenance !== LLM_DECISION_SOURCE,
+        );
+    }
+    if (coverageBadge) {
+        setBacktestConfigText('backtestConfigDecisionCoverage', coverageBadge);
+    }
     setBacktestConfigText(
         'backtestConfigWindow',
         start && end ? `${start} → ${end}` : '—',
