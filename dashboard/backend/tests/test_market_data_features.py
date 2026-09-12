@@ -12,6 +12,7 @@ from fastapi.testclient import TestClient
 
 from dashboard.backend.app import app
 import dashboard.backend.api.routers.backtests as backtests
+from dashboard.backend.tests._fake_child import FakeChild
 from dashboard.backend.infrastructure.market_data.provider import (
     IFIND_ASHARE,
     MarketDataDependencyError,
@@ -578,11 +579,11 @@ def test_background_command_uses_profile_decision_source(
 ):
     captured = {}
 
-    def fake_run(command, **kwargs):
+    def fake_popen(command, **kwargs):
         captured["command"] = command
-        return SimpleNamespace(returncode=0, stdout="", stderr="")
+        return FakeChild()
 
-    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(subprocess, "Popen", fake_popen)
     monkeypatch.setattr(backtests.db, "get_runs_by_mode", lambda mode: [])
 
     REAL_RUN_BACKTEST_BACKGROUND(
@@ -606,11 +607,11 @@ def test_background_command_uses_profile_decision_source(
 def test_background_command_propagates_explicit_ifind_llm(monkeypatch):
     captured = {}
 
-    def fake_run(command, **kwargs):
+    def fake_popen(command, **kwargs):
         captured["command"] = command
-        return SimpleNamespace(returncode=0, stdout="", stderr="")
+        return FakeChild()
 
-    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(subprocess, "Popen", fake_popen)
     monkeypatch.setattr(backtests.db, "get_runs_by_mode", lambda mode: [])
 
     REAL_RUN_BACKTEST_BACKGROUND(
@@ -636,15 +637,15 @@ def test_background_command_propagates_explicit_ifind_llm(monkeypatch):
 def test_background_injects_only_resolved_financial_datasets_credential(monkeypatch):
     captured = {}
 
-    def fake_run(command, **kwargs):
+    def fake_popen(command, **kwargs):
         captured["command"] = command
         captured["env"] = kwargs["env"]
-        return SimpleNamespace(returncode=0, stdout="", stderr="")
+        return FakeChild()
 
     monkeypatch.setenv(
         "FINANCIAL_DATASETS_API_KEY", "ambient-key-must-be-replaced"
     )
-    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(subprocess, "Popen", fake_popen)
     monkeypatch.setattr(backtests.db, "get_runs_by_mode", lambda mode: [])
 
     REAL_RUN_BACKTEST_BACKGROUND(
@@ -664,10 +665,10 @@ def test_background_error_is_sanitized_and_clears_running_state(monkeypatch):
     secret = "test-ifind-token-that-must-not-leak"
     monkeypatch.setenv("IFIND_ACCESS_TOKEN", secret)
 
-    def fail_run(command, **kwargs):
+    def fail_popen(command, **kwargs):
         raise RuntimeError(f"upstream failed with access_token={secret}")
 
-    monkeypatch.setattr(subprocess, "run", fail_run)
+    monkeypatch.setattr(subprocess, "Popen", fail_popen)
 
     REAL_RUN_BACKTEST_BACKGROUND(
         "2026-04-01",

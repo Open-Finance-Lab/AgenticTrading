@@ -1420,8 +1420,15 @@ async function submitDuplicateAgent() {
   }
 }
 
-function renderAgentRunningActions(agent) {
+function renderAgentRunningActions(agent, running = null) {
   const id = escapeHtml(agent.agent_id);
+  // The launch registers its card BEFORE the POST answers, so a run has no id
+  // for the first tick or so of its life. `data-running-cancel` is the patch
+  // hook refreshRunningAgentCards() fills in when the id arrives -- a full
+  // re-render only fires when the SET of running agents changes, which
+  // promoting a pending key does not, so without that patch the button would
+  // stay hidden for the entire run of every backtest started from this page.
+  const runId = running && running.runId ? escapeHtml(String(running.runId)) : '';
   // Configure stays available while a backtest runs: the request that started
   // the job carried its own copy of the pipeline, model and window, so a later
   // save in the editor cannot reach, change or cancel it — and the run declines
@@ -1440,7 +1447,8 @@ function renderAgentRunningActions(agent) {
     <div class="agent-card-actions agent-card-actions--status">
       <button class="agent-card-cta agent-card-cta--configure agent-configure-btn" type="button" data-agent-id="${id}">Configure</button>
       <button class="agent-card-cta agent-view-live-btn" type="button" data-agent-id="${id}">View live chart</button>
-      <button class="agent-card-cta agent-card-cta--disabled" type="button" disabled aria-disabled="true">Running…</button>
+      <button class="agent-card-cta agent-card-cta--cancel agent-cancel-backtest-btn" type="button" data-running-cancel="${id}" data-run-id="${runId}"${runId ? '' : ' hidden'}>Cancel</button>
+      <button class="agent-card-cta agent-card-cta--disabled" type="button" disabled aria-disabled="true" data-running-pending="${id}"${runId ? ' hidden' : ''}>Starting…</button>
     </div>`;
 }
 
@@ -1662,7 +1670,7 @@ function renderAgentCards(grid, agents, categoryKey) {
         <span class="status-badge ${statusBadge.className}"><span class="status-badge-dot" aria-hidden="true"></span>${statusBadge.label}</span>
       </div>
       ${running ? renderAgentRunningBody(agent, running) : renderAgentCardBody(agent, statusBadge.key)}
-      ${running ? renderAgentRunningActions(agent) : renderAgentCardActions(agent, statusBadge.key)}
+      ${running ? renderAgentRunningActions(agent, running) : renderAgentCardActions(agent, statusBadge.key)}
     `;
     const identity = card.querySelector('.agent-card-identity');
     if (identity) {
@@ -1745,6 +1753,21 @@ function renderAgentCards(grid, agents, categoryKey) {
         return;
       }
       await openAgentInBacktest(agent, resolveLatestAgentRunId(agent));
+    });
+  });
+
+  grid.querySelectorAll('.agent-cancel-backtest-btn').forEach((btn) => {
+    btn.addEventListener('click', async (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      const runId = btn.dataset.runId;
+      if (!runId) return;
+      btn.disabled = true;
+      try {
+        await cancelBacktest(runId);
+      } finally {
+        btn.disabled = false;
+      }
     });
   });
 
@@ -5893,6 +5916,8 @@ function refreshRunningAgentCards() {
         bar: document.querySelectorAll('[data-running-bar]'),
         spark: document.querySelectorAll('[data-running-spark]'),
         equity: document.querySelectorAll('[data-running-equity]'),
+        cancel: document.querySelectorAll('[data-running-cancel]'),
+        pending: document.querySelectorAll('[data-running-pending]'),
     };
     const patch = (list, attribute, agentId, apply) => {
         list.forEach((el) => {
@@ -5944,6 +5969,18 @@ function refreshRunningAgentCards() {
             el.setAttribute('aria-valuenow', String(view.pct));
             el.setAttribute('aria-valuemin', '0');
             el.setAttribute('aria-valuemax', '100');
+        });
+        // The Cancel button lives in the ACTIONS block, not the body, but it
+        // obeys the same rule the comment above states: a full re-render fires
+        // only when the set of running agents changes, so anything not patched
+        // here is frozen at its launch value -- and at launch the run has no id
+        // yet. Patched, the button appears the tick after the POST answers.
+        patch(nodes.cancel, 'data-running-cancel', agentId, (el) => {
+            el.dataset.runId = entry.runId || '';
+            el.hidden = !entry.runId;
+        });
+        patch(nodes.pending, 'data-running-pending', agentId, (el) => {
+            el.hidden = !!entry.runId;
         });
         patch(nodes.bar, 'data-running-bar', agentId, (el) => {
             el.classList.toggle('is-determinate', view.determinate);
@@ -6066,6 +6103,23 @@ document.addEventListener('DOMContentLoaded', async () => {
                 localStorage.removeItem(SELECTED_BACKTEST_RUN_KEY);
             }
             await loadData();
+        });
+    }
+
+    const backtestRunCancel = document.getElementById('backtestRunCancel');
+    if (backtestRunCancel) {
+        backtestRunCancel.addEventListener('click', async () => {
+            const runId = backtestRunCancel.dataset.runId || backtestCancelTargetRunId;
+            if (!runId) return;
+            backtestRunCancel.disabled = true;
+            try {
+                await cancelBacktest(runId);
+            } finally {
+                // Re-enabled rather than left dead: the request may have raced
+                // a completion, in which case the run is over and the poller
+                // hides the button on its next tick anyway.
+                backtestRunCancel.disabled = false;
+            }
         });
     }
 
@@ -7685,34 +7739,107 @@ function deriveRunningProgress(running) {
     };
 }
 
+/** The run the Backtest panel's Cancel button acts on, or null. */
+let backtestCancelTargetRunId = null;
+
 /**
- * `isFinished` is for a panel that outlives the run it describes.
+ * Point the Backtest panel's Cancel button at a run, or take it away.
+ *
+ * Null at every terminal call site. A Cancel offered for a run that has already
+ * stopped answers 404 -- and a control that fails when clicked is worse than no
+ * control, because it teaches the user the feature does not work at the exact
+ * moment they most need to believe it does.
+ */
+function setBacktestCancelTarget(runId) {
+    backtestCancelTargetRunId = runId || null;
+    const cancel = document.getElementById('backtestRunCancel');
+    if (!cancel) return;
+    cancel.dataset.runId = backtestCancelTargetRunId || '';
+    const panel = document.getElementById('backtestRunProgress');
+    const terminal = !!panel
+        && (panel.classList.contains('is-error') || panel.classList.contains('is-cancelled'));
+    cancel.hidden = terminal || !backtestCancelTargetRunId;
+    cancel.disabled = false;
+}
+
+/**
+ * Ask the server to stop one running backtest.
+ *
+ * Deliberately does not paint a terminal state itself: the poller owns what the
+ * panel and the cards say, and it reads the server's verdict a tick later. A
+ * cancel that raced a completion comes back `cancelled: false`, and saying so
+ * plainly is the point -- claiming a cancel that did not happen is the failure
+ * issue #273 calls out by name.
+ */
+async function cancelBacktest(runId) {
+    if (!runId) return null;
+    try {
+        const data = await API.post(`${API_BASE}/backtest/cancel`, { live_run_id: runId });
+        showAppToast(
+            data && data.cancelled === false
+                ? 'That backtest had already finished.'
+                : 'Backtest cancelled.',
+        );
+        return data;
+    } catch (error) {
+        // 404 is the server's answer for "unknown run" AND for "not yours",
+        // deliberately indistinguishable. From this browser only the first is
+        // reachable, and it means the run ended between the paint and the
+        // click.
+        showAppToast(
+            error && error.status === 404
+                ? 'That backtest is no longer running.'
+                : (error?.message || 'Could not cancel the backtest.'),
+        );
+        return null;
+    }
+}
+
+/**
+ * `isFinished` and `isCancelled` are for a panel that outlives the run it
+ * describes; they are three states, not shades of one.
  *
  * Every other caller shows this panel while something is still happening, so
  * the markup's defaults -- the title "Backtest in progress", a progress track,
  * and a hint about the 60-minute limit -- were always true for as long as it
  * was on screen. A fallback run now holds the panel open indefinitely after
- * the run is over (see `settleFinishedBacktestPanel`), and those three would
- * otherwise sit under a finished backtest telling the user to keep waiting for
- * it. The elapsed clock stays: on a finished run it is the duration.
+ * the run is over (see `settleFinishedBacktestPanel`), and a cancelled run
+ * leaves it up too; those three would otherwise sit under a stopped backtest
+ * telling the user to keep waiting for it. The elapsed clock stays: on a run
+ * that is over it is the duration.
  */
-function showBacktestRunProgress(show, { isError = false, isFinished = false } = {}) {
+function showBacktestRunProgress(
+    show,
+    { isError = false, isFinished = false, isCancelled = false } = {},
+) {
     const panel = document.getElementById('backtestRunProgress');
     if (!panel) return;
     panel.hidden = !show;
     panel.classList.toggle('is-error', !!isError);
+    // A third state, not a shade of the second. `is-cancelled` is styled
+    // neutral rather than red because the user stopped their own run -- calling
+    // that a failure is the same class of lie as reporting a rule-based
+    // fallback curve as a clean model run.
+    panel.classList.toggle('is-cancelled', !!isCancelled);
     const title = panel.querySelector('.backtest-run-progress-title');
     const elapsed = panel.querySelector('.backtest-run-elapsed');
     const track = panel.querySelector('.backtest-run-progress-track');
     const hint = panel.querySelector('.backtest-run-progress-hint');
+    const cancel = document.getElementById('backtestRunCancel');
+    // Over is over: an error, a cancel and a finished fallback run all mean the
+    // progress track and the 60-minute hint are describing something that is no
+    // longer happening.
+    const terminal = !!isError || !!isCancelled || !!isFinished;
     if (title) {
         if (isError) title.textContent = 'Backtest did not start';
+        else if (isCancelled) title.textContent = 'Backtest cancelled';
         else if (isFinished) title.textContent = 'Backtest complete';
         else title.textContent = 'Backtest in progress';
     }
     if (elapsed) elapsed.hidden = !!isError;
-    if (track) track.hidden = isError || isFinished;
-    if (hint) hint.hidden = isError || isFinished;
+    if (track) track.hidden = terminal;
+    if (hint) hint.hidden = terminal;
+    if (cancel) cancel.hidden = terminal || !show || !backtestCancelTargetRunId;
 }
 
 /**
@@ -7902,6 +8029,9 @@ function prepareLiveBacktestView(launchConfig = null) {
     clearTradingLog('Backtest running… orders will appear here.');
     initLiveBacktestChart();
     renderBacktestRunConfig(null, { running: true, launchConfig });
+    // No id until the POST answers, so there is nothing to cancel yet -- and
+    // clearing is what stops the previous run's id from being offered here.
+    setBacktestCancelTarget(null);
     showBacktestRunProgress(true);
 }
 
@@ -7945,6 +8075,11 @@ function attachToLiveBacktest(runId, progress = null, launchConfig = null) {
         { run_id: runId },
         { running: true, launchConfig: launchConfig || getBacktestLaunchConfig(runId) },
     );
+    // Armed here as well as in the poller: this is the path that opens the
+    // panel onto a run already in flight (View live chart, a reload mid-run),
+    // and waiting for the next poll tick would leave that run uncancellable
+    // for the first second of every visit.
+    setBacktestCancelTarget(runId);
     showBacktestRunProgress(true);
     if (progress) {
         updateLiveBacktestChart(progress);
@@ -7984,6 +8119,7 @@ function showBacktestLaunchFailure(message, launchConfig, runKey = null) {
     liveBacktestRunId = null;
     liveBacktestLaunchPending = false;
     liveBacktestLaunchError = true;
+    setBacktestCancelTarget(null);
     renderBacktestRunConfig(null, { launchConfig, statusLabel: 'Failed' });
     clearPerformanceComparison('error', 'Backtest did not start.');
     clearTradingLog('Backtest did not start.');
@@ -8089,6 +8225,7 @@ function ensureBacktestPolling() {
                     }
                     const lostMessage = 'Lost contact with the backtest — it may still be running. Reload to check.';
                     if (wasViewed) {
+                        setBacktestCancelTarget(null);
                         showBacktestRunProgress(true, { isError: true });
                         updateBacktestRunProgress({ elapsedSeconds: attempts, message: lostMessage });
                     } else {
@@ -8135,6 +8272,10 @@ function ensureBacktestPolling() {
 
                     if (viewingLive) {
                         liveBacktestChartActive = true;
+                        // Armed from the server's own id for the run the panel
+                        // is pinned to, so the button can never act on a
+                        // sibling run the user happens to have in flight.
+                        setBacktestCancelTarget(liveId);
                         if (status.progress) {
                             updateLiveBacktestChart(status.progress);
                             updateLiveTradingLog(status.progress);
@@ -8164,6 +8305,14 @@ function ensureBacktestPolling() {
                     if (liveId) clearAgentBacktestRunning(liveId);
                     if (job.key && job.key !== liveId) clearAgentBacktestRunning(job.key);
                     anyFinished = true;
+                    // Every surface, not only the focused one: a cancel can be
+                    // pressed on a My Agents card whose run the Backtest panel
+                    // is not pinned to, and that card simply reverts to its
+                    // normal body. Without this the user's own deliberate
+                    // action would produce no acknowledgement at all.
+                    if (status.cancelled && !viewingLive && liveId !== liveBacktestRunId) {
+                        showAppToast('Backtest cancelled.');
+                    }
                     // Armed here, between the registry clear above and the
                     // roster refresh below, because that is exactly the window
                     // in which neither of the checklist's two sources knows a
@@ -8211,8 +8360,32 @@ function ensureBacktestPolling() {
                     liveBacktestProgress = null;
                 }
                 lastRenderedRunningKey = null;
+                setBacktestCancelTarget(null);
 
-                if (status.error) {
+                if (status.cancelled) {
+                    // Ahead of the error branch and never through it. The
+                    // server sends no `error` for a cancel, and the panel must
+                    // not read like one: `is-cancelled`, not `is-error`.
+                    //
+                    // Run config repainted FIRST, and with a null run: the last
+                    // paint came from the running branch and still says
+                    // "Running", and renderBacktestRunConfig() hides the
+                    // progress panel outright when it has neither a run nor a
+                    // launch config -- the same ordering showBacktestLaunchFailure
+                    // relies on. Null rather than the run row is also what keeps
+                    // the Model coverage cell off a cancelled run: that badge is
+                    // read from `run.decision_badge`, and a run that was stopped
+                    // mid-flight has no coverage verdict to report.
+                    renderBacktestRunConfig(null, {
+                        launchConfig: getBacktestLaunchConfig(liveId || finishedId),
+                        statusLabel: 'Cancelled',
+                    });
+                    showBacktestRunProgress(true, { isCancelled: true });
+                    updateBacktestRunProgress({
+                        elapsedSeconds: displayElapsed,
+                        message: `Cancelled after ${formatBacktestElapsed(displayElapsed)}.`,
+                    });
+                } else if (status.error) {
                     const source = getBacktestLaunchConfig(liveId || finishedId)?.dataSource;
                     const message = formatBacktestError(status.error, source);
                     showBacktestRunProgress(true, { isError: true });
@@ -8280,6 +8453,7 @@ function ensureBacktestPolling() {
                 }
                 liveBacktestChartActive = false;
                 liveBacktestRunId = null;
+                setBacktestCancelTarget(null);
                 // The finished branch above clears finished runs; this one must
                 // clear every orphan so a stale card cannot pick up the NEXT
                 // run's step/percent from a leftover map entry.

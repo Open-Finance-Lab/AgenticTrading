@@ -12,6 +12,7 @@ from fastapi.testclient import TestClient
 
 from dashboard.backend.app import app
 import dashboard.backend.api.routers.backtests as backtests
+from dashboard.backend.tests._fake_child import FakeChild
 from dashboard.backend.domain.backtesting import engine
 from dashboard.backend.infrastructure.market_data.strategy_universe import resolve_strategy_universe
 from dashboard.backend.infrastructure.llm.validator import DJIA_30, create_prompt
@@ -105,14 +106,14 @@ def test_worker_transfers_snapshot_by_file_and_cleans_up(catalog, monkeypatch):
     selection = resolve_strategy_universe("all", "all")
     captured = {}
 
-    def fake_run(command, **kwargs):
+    def fake_popen(command, **kwargs):
         assert "--assets" not in command
         path = Path(command[command.index("--universe-selection-file") + 1])
         captured["path"] = path
         assert json.loads(path.read_text()) == selection
-        return SimpleNamespace(returncode=0, stdout="", stderr="")
+        return FakeChild()
 
-    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(subprocess, "Popen", fake_popen)
     monkeypatch.setattr(backtests.db, "get_runs_by_mode", lambda *_: [])
     backtests.run_backtest_background("2026-05-01", "2026-05-02", "test-pool",
                                      decision_source="rule_based", universe_selection=selection)

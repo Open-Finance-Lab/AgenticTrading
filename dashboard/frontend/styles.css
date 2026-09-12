@@ -6491,6 +6491,30 @@ a.header-brand:hover .title-section h1 {
     line-height: 1.4;
 }
 
+.backtest-run-cancel {
+    flex: 0 0 auto;
+    padding: 4px 10px;
+    border-radius: 6px;
+    border: 1px solid var(--border-color);
+    background: transparent;
+    color: var(--text-secondary);
+    font-size: 11px;
+    font-weight: 700;
+    cursor: pointer;
+    transition: color 0.15s, border-color 0.15s, background 0.15s;
+}
+
+.backtest-run-cancel:hover:not(:disabled) {
+    color: #f87171;
+    border-color: rgba(248, 113, 113, 0.55);
+    background: rgba(248, 113, 113, 0.08);
+}
+
+.backtest-run-cancel:disabled {
+    opacity: 0.55;
+    cursor: progress;
+}
+
 .backtest-run-progress.is-error {
     border-color: rgba(248, 113, 113, 0.45);
     background: rgba(248, 113, 113, 0.08);
@@ -6498,6 +6522,21 @@ a.header-brand:hover .title-section h1 {
 
 .backtest-run-progress.is-error .backtest-run-elapsed {
     color: #f87171;
+}
+
+/*
+ * Cancelled is a THIRD terminal state, and deliberately not tinted like
+ * `is-error`. A user who stopped their own run has not hit a failure, and
+ * painting it red says they did -- the same lie as reporting a rule-based
+ * fallback as a clean LLM success. Neutral slate, not red, not cyan.
+ */
+.backtest-run-progress.is-cancelled {
+    border-color: rgba(148, 163, 184, 0.45);
+    background: rgba(148, 163, 184, 0.08);
+}
+
+.backtest-run-progress.is-cancelled .backtest-run-elapsed {
+    color: var(--text-secondary);
 }
 
 .algo-setup-status {
@@ -10389,6 +10428,25 @@ html[data-nav-page="home"] #homeView .dashboard-bottom-grid .home-module--market
 
 .agent-card-cta--disabled:hover {
     filter: none;
+}
+
+/*
+ * Outlined rather than filled, for the same reason `--disabled` is neutral
+ * rather than a faded primary: the running card's action row must not present
+ * "Cancel" with the same visual weight as the primary actions beside it. It is
+ * the escape hatch, not the thing to click.
+ */
+.agent-card-cta--cancel {
+    background: transparent;
+    border-color: var(--border-color);
+    color: var(--text-secondary);
+}
+
+.agent-card-cta--cancel:hover {
+    filter: none;
+    color: #f87171;
+    border-color: rgba(248, 113, 113, 0.55);
+    background: rgba(248, 113, 113, 0.08);
 }
 
 .agent-card-menu {
