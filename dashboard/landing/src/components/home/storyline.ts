@@ -18,7 +18,14 @@ export const STORY_AGENT_NAME = "Alpha";
  *  board now sits four screens up, so naming a REAL roster model over the REAL
  *  contest window turned a fabricated `+14.2%` into a claim a visitor falsifies
  *  by scrolling: the board publishes that same model's actual return over that
- *  same window from that same $10,000 base.
+ *  same window.
+ *
+ *  The bases no longer coincide -- leaderboard.json publishes $100,000 and this
+ *  block is a user's own $10,000 backtest -- but do NOT treat that as the guard.
+ *  The falsifiable claim was always the RETURN, which is base-independent, and
+ *  a reader comparing two percentages does not check what each was seeded with.
+ *  This value is the demo user's setting, not a copy of the board's base, so it
+ *  stays at $10,000 and does not move when the board's does.
  *
  *  Breaking either half breaks the comparison; the window is the cheaper half,
  *  and both are broken here. Nothing else changed -- the numbers, the dollar

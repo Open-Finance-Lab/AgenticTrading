@@ -422,6 +422,50 @@ def test_the_scaling_shim_says_it_is_a_shim():
 
 
 # --------------------------------------------------------------------------
+# #365 criterion 2 — config and stored rows agree
+# --------------------------------------------------------------------------
+
+
+def test_the_config_capital_matches_what_the_committed_rows_were_run_at():
+    """The product decision on this branch, pinned against prod's own database.
+
+    ``dashboard/storage/data/backtest.db`` is not a fixture — on the free-tier
+    Render service it *is* the running database. Every contest row in it was
+    computed at $100,000, so aligning ``leaderboard.json`` makes those rows
+    correct as they stand and needs no re-run (#194, the re-run, is blocked on
+    LLM credits).
+
+    This is the only case in this file that depends on the alignment, and it
+    ships in the same commit as it, so dropping that commit drops this guard
+    with it. Everything else here is written against whatever the config says.
+    """
+    import sqlite3
+
+    from dashboard.backend.paths import DEFAULT_DB_PATH
+
+    config = lb_service.load_leaderboard_config()
+    conn = sqlite3.connect(f"file:{DEFAULT_DB_PATH}?immutable=1", uri=True)
+    try:
+        seeds = [
+            row[0]
+            for row in conn.execute(
+                "SELECT DISTINCT initial_equity FROM agent_runs WHERE mode = ?",
+                (lb_service.LEADERBOARD_MODE,),
+            )
+        ]
+    finally:
+        conn.close()
+
+    assert seeds, "the committed seed database has no leaderboard rows"
+    for seed in seeds:
+        assert seed == pytest.approx(config["initial_capital"], abs=0.01), (
+            f"a committed leaderboard row was run at {seed} while "
+            f"leaderboard.json publishes {config['initial_capital']} — the board "
+            "would mix capital bases"
+        )
+
+
+# --------------------------------------------------------------------------
 # #365 criterion 3 — warn on mixed capital, on the feed-drift pattern
 # --------------------------------------------------------------------------
 

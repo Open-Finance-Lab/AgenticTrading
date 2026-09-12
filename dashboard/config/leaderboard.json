@@ -1,7 +1,7 @@
 {
   "session_id": "leaderboard-contest",
   "daily_session_id": "leaderboard-daily",
-  "initial_capital": 10000,
+  "initial_capital": 100000,
   "start_date": "2026-04-15",
   "end_date": "2026-05-15",
   "reference_start_date": "2026-03-15",
