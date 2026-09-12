@@ -9336,6 +9336,25 @@ function renderBacktestRunConfig(
         'backtestConfigDecisionSource',
         decisionSourceLabel,
     );
+    // "N of M steps model-driven", beside the decision method the run asked
+    // for. The server sends the label only when coverage is below 100% and the
+    // run actually asked for a model, so this cell appearing at all IS the
+    // signal -- there is no threshold reproduced here, and none to drift.
+    const coverageBadge = running ? null : (run?.decision_badge || null);
+    const coverageRow = document.getElementById('backtestConfigDecisionCoverageRow');
+    if (coverageRow) {
+        coverageRow.hidden = !coverageBadge;
+        // Degraded styling only once the shortfall is large enough that the
+        // leaderboard would refuse the curve. A couple of held steps on an
+        // otherwise clean run is worth stating, not worth alarming about.
+        coverageRow.classList.toggle(
+            'is-degraded',
+            Boolean(coverageBadge) && run?.decision_provenance !== LLM_DECISION_SOURCE,
+        );
+    }
+    if (coverageBadge) {
+        setBacktestConfigText('backtestConfigDecisionCoverage', coverageBadge);
+    }
     setBacktestConfigText(
         'backtestConfigWindow',
         start && end ? `${start} → ${end}` : '—',

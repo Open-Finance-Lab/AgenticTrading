@@ -95,18 +95,28 @@ def classify_decision_provenance(
         return DECISION_PROVENANCE_RULE_BASED
 
     calls = _as_int(llm_calls)
-    if calls <= 0:
-        # A model name beside zero calls is a rule-based curve wearing that
-        # model's name -- the same shape the H6 guard refuses to publish.
-        return DECISION_PROVENANCE_RULE_BASED
 
     if llm_decisions is None:
-        return DECISION_PROVENANCE_UNKNOWN
+        # A model name beside zero calls is a rule-based curve wearing that
+        # model's name -- the same shape the H6 guard refuses to publish. With
+        # no decision count on the row, the call count is the only evidence
+        # left, so it decides here and only here.
+        return (
+            DECISION_PROVENANCE_RULE_BASED if calls <= 0
+            else DECISION_PROVENANCE_UNKNOWN
+        )
 
     decisions = _as_int(llm_decisions)
     if decisions <= 0:
+        # Covers zero calls too: nothing the model drove, whatever was billed.
         return DECISION_PROVENANCE_RULE_BASED
 
+    # Deliberately NOT short-circuited on ``calls <= 0`` above. `llm_calls` is
+    # only incremented for a response whose usage could be read
+    # (``PortfolioManager._record_llm_usage``), so a provider that reports no
+    # usage yields llm_calls == 0 on a run the model genuinely drove every step
+    # of. Reading that as rule-based would be a false accusation -- the exact
+    # failure in the other direction from the one this module exists for.
     steps = _as_int(decision_steps)
     denominator = steps if steps > 0 else calls
     # Same comparison as the H6 guard, inverted: it raises when
@@ -174,7 +184,35 @@ def run_decision_provenance(run: Optional[Mapping[str, Any]]) -> Optional[Dict[s
         "decision_steps": decision_steps,
     }
     block["decision_note"] = decision_provenance_note(block)
+    block["decision_badge"] = decision_coverage_badge(block)
     return block
+
+
+def decision_coverage_badge(provenance: Mapping[str, Any]) -> Optional[str]:
+    """"N of M steps model-driven", or None when there is nothing to flag.
+
+    **Fires below 100%, not below the H6 threshold, and that gap is the point.**
+    ``MIN_LLM_DECISION_COVERAGE`` answers "may this publish to the leaderboard";
+    this answers "should the user be told something degraded". A 159/161 run
+    passes the first and still has two steps the user paid for and did not get,
+    so the counts drive the badge and the threshold drives the verdict. They are
+    never collapsed into one number.
+
+    None for a run the caller explicitly ordered rule-based: there is no model
+    coverage to report a ratio about, and ``decision_provenance_note`` already
+    labels it. None when the counts are unknown, for the usual reason -- a row
+    that predates the counters must not be shown a ratio invented from a
+    defaulted 0.
+    """
+    decisions = provenance.get("llm_decisions")
+    steps = provenance.get("decision_steps")
+    if decisions is None or not steps:
+        return None
+    if provenance.get("decision_source") == RULE_BASED_DECISION_SOURCE:
+        return None
+    if _as_int(decisions) >= _as_int(steps):
+        return None
+    return f"{_as_int(decisions)} of {_as_int(steps)} steps model-driven"
 
 
 def decision_provenance_note(provenance: Mapping[str, Any]) -> Optional[str]:
@@ -185,14 +223,24 @@ def decision_provenance_note(provenance: Mapping[str, Any]) -> Optional[str]:
     fields worded twice is two owners of one message, and they disagree the
     moment either side's wording moves.
 
-    None for a clean run and for ``unknown``: a run the model drove needs no
-    note, and a row written before the counters existed has nothing to report
-    -- saying anything there would be inventing a finding out of missing data.
+    None only for a run the model drove *entirely* and for ``unknown``. An
+    ``llm`` verdict still gets a note when any step fell back: the H6 threshold
+    decides whether a curve is publishable, not whether the user should be told
+    they paid for steps the model did not answer. A row written before the
+    counters existed has nothing to report -- saying anything there would be
+    inventing a finding out of missing data.
     """
     verdict = provenance.get("decision_provenance")
+    recorded = provenance.get("llm_decisions") is not None
     decisions = _as_int(provenance.get("llm_decisions"))
     steps = _as_int(provenance.get("decision_steps"))
 
+    if verdict == DECISION_PROVENANCE_LLM and recorded and steps and decisions < steps:
+        held = steps - decisions
+        return (
+            f"{held} of {steps} steps fell back to rule-based logic; the model "
+            "drove the rest."
+        )
     if verdict == DECISION_PROVENANCE_PARTIAL:
         scale = f" only {decisions} of {steps} steps" if steps else " only part of it"
         return (

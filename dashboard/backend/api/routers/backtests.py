@@ -292,6 +292,17 @@ class RunMetadata(BaseModel):
     timeframe: Optional[str] = None
     timezone: Optional[str] = None
     decision_source: Optional[str] = None
+    # What actually drove the run, beside `decision_source` above (what was
+    # asked for). Both are needed: they differ exactly in the case issue #169
+    # is about, and the results view renders the N-of-M badge off the counts
+    # rather than re-deriving a coverage threshold in the browser.
+    decision_provenance: Optional[str] = None
+    decision_fallback: Optional[bool] = None
+    decision_badge: Optional[str] = None
+    decision_note: Optional[str] = None
+    llm_calls: Optional[int] = None
+    llm_decisions: Optional[int] = None
+    decision_steps: Optional[int] = None
     benchmark: Optional[str] = None
     symbols: Optional[List[str]] = None
     universe_selection: Optional[Dict[str, Any]] = None
@@ -468,6 +479,13 @@ def _run_metadata_response(run: Dict[str, Any]) -> RunMetadata:
                     }
                 else:
                     payload[field] = metadata[field]
+    # After the metadata copy, so `decision_source` above is already the
+    # requested value and this cannot overwrite it with the observed one. The
+    # block is the single producer of both, so the two can never be computed
+    # from different readings of the same row.
+    provenance = run_decision_provenance(run)
+    if provenance:
+        payload.update(provenance)
     return RunMetadata(**payload)
 
 

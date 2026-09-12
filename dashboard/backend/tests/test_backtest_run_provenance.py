@@ -36,7 +36,12 @@ from dashboard.backend.domain.backtesting.provenance import (
     run_decision_provenance,
 )
 from dashboard.backend.domain.leaderboard import service as leaderboard_service
-from dashboard.backend.tests._frontend_source import APP_JS, fn_body, strip_comments
+from dashboard.backend.tests._frontend_source import (
+    APP_HTML,
+    APP_JS,
+    fn_body,
+    strip_comments,
+)
 
 
 # ===========================================================================
@@ -127,6 +132,19 @@ def test_a_missing_denominator_still_catches_the_total_fallback():
         llm_decisions=0,
         decision_steps=None,
     ) == DECISION_PROVENANCE_RULE_BASED
+
+
+def test_a_usage_blind_provider_is_not_mistaken_for_a_fallback():
+    """``llm_calls`` only ticks for a response whose usage could be read
+    (``PortfolioManager._record_llm_usage``), so a provider that reports none
+    yields 0 calls on a run the model drove every step of. Reading that as
+    rule-based is the same lie in the other direction."""
+    assert classify_decision_provenance(
+        llm_model="claude-haiku-4-5",
+        llm_calls=0,
+        llm_decisions=30,
+        decision_steps=30,
+    ) == DECISION_PROVENANCE_LLM
 
 
 def test_the_threshold_has_exactly_one_owner():
@@ -244,6 +262,109 @@ def test_a_row_without_the_witness_reports_unknown():
 
 def test_no_row_yields_no_block():
     assert run_decision_provenance(None) is None
+
+
+# ===========================================================================
+# The N-of-M badge, and why its bar is not the H6 bar
+# ===========================================================================
+
+def test_a_publishable_run_still_badges_below_one_hundred_percent():
+    """The acceptance criterion, and the whole reason the badge is driven by
+    the counts rather than by the verdict.
+
+    159/161 clears MIN_LLM_DECISION_COVERAGE, so the leaderboard would publish
+    it and the verdict stays ``llm``. The user still paid for two steps the
+    model did not answer, and "may this publish" is not the same question as
+    "should the user be told something degraded".
+    """
+    block = run_decision_provenance(
+        _row(
+            llm_calls=161,
+            llm_decisions=159,
+            metadata={"decision_source": "llm", "decision_steps": 161},
+        )
+    )
+
+    assert block["decision_provenance"] == DECISION_PROVENANCE_LLM
+    assert block["decision_fallback"] is False
+    assert block["decision_badge"] == "159 of 161 steps model-driven"
+    assert block["decision_note"] is not None
+
+
+def test_full_coverage_shows_no_badge():
+    assert run_decision_provenance(_row())["decision_badge"] is None
+
+
+def test_the_badge_fires_on_a_single_held_step():
+    """One step short of 100% is still short of 100%. The bar is equality, so
+    there is no second threshold here to drift away from the first."""
+    block = run_decision_provenance(
+        _row(
+            llm_calls=30,
+            llm_decisions=29,
+            metadata={"decision_source": "llm", "decision_steps": 30},
+        )
+    )
+    assert block["decision_badge"] == "29 of 30 steps model-driven"
+
+
+def test_a_total_fallback_badges_zero_of_n():
+    block = run_decision_provenance(
+        _row(llm_decisions=0, metadata={"decision_source": "llm", "decision_steps": 30})
+    )
+    assert block["decision_badge"] == "0 of 30 steps model-driven"
+
+
+def test_an_intentional_rule_based_run_shows_no_coverage_ratio():
+    """There is no model coverage to report a ratio about -- the caller asked
+    for none. The note already labels the run."""
+    block = run_decision_provenance(
+        _row(
+            llm_model="rule-based",
+            llm_calls=0,
+            llm_decisions=0,
+            metadata={"decision_source": "rule_based", "decision_steps": 30},
+        )
+    )
+    assert block["decision_badge"] is None
+    assert block["decision_note"] == "Rule-based strategy — no model decisions."
+
+
+def test_a_row_without_the_witness_shows_no_badge():
+    """A ratio invented out of a defaulted 0 would read as a finding."""
+    block = run_decision_provenance(
+        _row(llm_decisions=0, metadata={"data_source": "alpaca"})
+    )
+    assert block["decision_badge"] is None
+
+
+def test_the_badge_bar_and_the_publish_bar_are_different_numbers():
+    """Pins the asymmetry itself, not one example of it.
+
+    Sweeping the whole coverage range: every run short of 100% badges, while
+    only runs under MIN_LLM_DECISION_COVERAGE lose the ``llm`` verdict. A
+    change that collapsed the two would break this and nothing else.
+    """
+    steps = 100
+    badged = set()
+    verdicts = {}
+    for decisions in range(steps + 1):
+        block = run_decision_provenance(
+            _row(
+                llm_calls=steps,
+                llm_decisions=decisions,
+                metadata={"decision_source": "llm", "decision_steps": steps},
+            )
+        )
+        if block["decision_badge"]:
+            badged.add(decisions)
+        verdicts[decisions] = block["decision_provenance"]
+
+    assert badged == set(range(steps))            # everything below 100%
+    assert steps not in badged                    # and nothing at it
+    publishable = {n for n, v in verdicts.items() if v == DECISION_PROVENANCE_LLM}
+    assert min(publishable) == 95                 # the H6 bar, not 100
+    assert publishable < badged | {steps}         # strictly the looser test
 
 
 # ===========================================================================
@@ -484,6 +605,97 @@ def test_status_never_answers_with_another_runs_provenance(status_mirror):
     assert again.json()["decision_provenance"] == DECISION_PROVENANCE_RULE_BASED
 
 
+def test_status_carries_the_badge_for_a_publishable_but_degraded_run(status_mirror):
+    """Coverage over the H6 bar and under 100%: no fallback warning, but the
+    user is still told two steps were not model-driven."""
+    session_id = str(uuid.uuid4())
+    body = _finished_status(
+        status_mirror,
+        session_id,
+        f"agent_{uuid.uuid4().hex[:8]}",
+        llm_model="claude-haiku-4-5",
+        llm_calls=161,
+        llm_decisions=159,
+        metadata={"decision_source": "llm", "decision_steps": 161},
+    )
+
+    assert body["decision_provenance"] == DECISION_PROVENANCE_LLM
+    assert body["decision_fallback"] is False
+    assert body["decision_badge"] == "159 of 161 steps model-driven"
+    assert body["llm_decisions"] == 159 and body["decision_steps"] == 161
+
+
+# ===========================================================================
+# The badge survives the poll: it rides the run record too
+# ===========================================================================
+
+def test_the_run_record_carries_the_verdict_and_the_counts():
+    """``/backtest/status`` is transient -- the panel it feeds is gone seconds
+    after the run ends and never comes back on a reload. The results view reads
+    the run record, so the badge has to live there or it is not really on the
+    result at all."""
+    session_id = str(uuid.uuid4())
+    run_id = f"agent_{uuid.uuid4().hex[:8]}"
+    db.insert_run(
+        run_id=run_id,
+        session_id=session_id,
+        agent_name="Agent",
+        mode="backtest",
+        start_date="2026-03-01",
+        end_date="2026-04-01",
+        initial_equity=100000.0,
+        final_equity=101000.0,
+        total_return=0.01,
+        llm_model="claude-haiku-4-5",
+        llm_calls=30,
+        llm_decisions=10,
+        metadata={"decision_source": "llm", "decision_steps": 30},
+    )
+
+    resp = TestClient(app).get(
+        "/api/backtest/runs", headers={"X-Session-Id": session_id}
+    )
+    assert resp.status_code == 200, resp.text
+    record = next(r for r in resp.json() if r["run_id"] == run_id)
+
+    assert record["decision_source"] == "llm"        # asked for
+    assert record["decision_provenance"] == DECISION_PROVENANCE_PARTIAL  # got
+    assert record["decision_badge"] == "10 of 30 steps model-driven"
+    assert record["decision_fallback"] is True
+    assert record["llm_calls"] == 30
+    assert record["llm_decisions"] == 10
+    assert record["decision_steps"] == 30
+
+
+def test_the_run_record_keeps_requested_and_observed_apart():
+    """`decision_source` on this model already meant "what was requested"
+    before this feature. The provenance block is applied after the metadata
+    copy and must not overwrite it with the observed verdict."""
+    session_id = str(uuid.uuid4())
+    run_id = f"agent_{uuid.uuid4().hex[:8]}"
+    db.insert_run(
+        run_id=run_id,
+        session_id=session_id,
+        agent_name="Agent",
+        mode="backtest",
+        start_date="2026-03-01",
+        end_date="2026-04-01",
+        initial_equity=100000.0,
+        llm_model="claude-haiku-4-5",
+        llm_calls=30,
+        llm_decisions=0,
+        metadata={"decision_source": "llm", "decision_steps": 30},
+    )
+
+    resp = TestClient(app).get(
+        "/api/backtest/runs", headers={"X-Session-Id": session_id}
+    )
+    record = next(r for r in resp.json() if r["run_id"] == run_id)
+
+    assert record["decision_source"] == "llm"
+    assert record["decision_provenance"] == DECISION_PROVENANCE_RULE_BASED
+
+
 # ===========================================================================
 # /app renders it
 # ===========================================================================
@@ -502,6 +714,26 @@ def test_a_fallback_run_does_not_auto_hide_the_panel():
     # The auto-hide must be *inside* that guard, not beside it.
     guarded = body[body.index("backtestFellBackFromTheModel(status)"):]
     assert guarded.index("showBacktestRunProgress(false), 2500") < guarded.index("} else {")
+
+
+def test_the_results_view_renders_the_coverage_badge():
+    """The persistent half: a cell on the run's own config panel, so the
+    N-of-M indicator is still there after the completion panel is gone."""
+    assert 'id="backtestConfigDecisionCoverageRow"' in APP_HTML
+    assert 'id="backtestConfigDecisionCoverage"' in APP_HTML
+    body = strip_comments(fn_body("function renderBacktestRunConfig"))
+    assert "run?.decision_badge" in body
+    assert "coverageRow.hidden = !coverageBadge" in body
+
+
+def test_the_browser_owns_no_coverage_threshold():
+    """The badge's bar is equality with the step count and the verdict's bar is
+    the server's constant. Neither is a number the frontend may hold: a copy of
+    0.95 here is how the dashboard and the leaderboard start disagreeing about
+    whether the model drove a run."""
+    body = strip_comments(fn_body("function renderBacktestRunConfig"))
+    assert "0.95" not in body
+    assert "MIN_LLM_DECISION_COVERAGE" not in strip_comments(APP_JS)
 
 
 def test_the_browser_does_not_compose_its_own_provenance_copy():
