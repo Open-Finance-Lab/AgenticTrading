@@ -3024,7 +3024,12 @@ then assembles one `OperationalSignals` per id:
 - `usable_billing_lane` — `platform_lane or verified_byok_lane`, as at line 1042.
 - `failed_terminal_runs_24h` — pool call 7's `(time, status)` pairs across every agent belonging to the owner, sort newest-first by the effective time, then `consecutive_failed_terminal_runs([status for _t, status in pooled])`. Pool **before** sorting: sorting per agent and concatenating gives a different sequence and therefore a different count.
 
-A user absent from every dict gets the model's defaults, which classify as `healthy`.
+A user absent from every dict gets the model's defaults, which classify as `healthy`. That is deliberate for one user — absence of a credential or a run is not a problem to report — but note **what it means in bulk, because this is the batched path's one fail-open**. `OperationalSignals`' defaults are all permissive (`usable_billing_lane=True`, `selected_provider_enabled=True`, `default_credential_status="verified"`, `lifecycle.py:139-141`), so if any one of the seven calls silently returns `{}` — a renamed column, a store swapped for a stub, an empty `IN` list — **every user reads as healthy** and the operational board goes uniformly green with no error anywhere. Absent and fine are byte-identical, which is precisely the failure mode the repo's *fail-closed is not fail-visible* rule exists for.
+
+Two cheap guards, both worth having:
+
+- The budget case's `assert 4 <= small_calls` lower bound. Its job is not the number; it is that "zero queries" cannot satisfy the equality above it.
+- A `print(f"WARNING: analytics.operational_signals_empty source=<name>")` when a call returns an empty mapping for a non-empty `user_ids`. A population with zero billing rows is possible on a fresh deploy and is not worth an exception, but it is always worth a line.
 
 Seven calls, not four. The number is incidental; what matters is that none of them takes a scalar user id and none of them grows with the population — which is what Task B10's guard and this task's own budget case assert.
 
