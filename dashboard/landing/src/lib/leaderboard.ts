@@ -14,7 +14,8 @@ export type LeaderboardEntry = {
   model: string;
   is_model: boolean;
   cumulative_return: number;
-  portfolio_value: number;
+  // `null` when the run recorded no final equity -- absent, not $0.
+  portfolio_value: number | null;
   initial_equity: number;
   equity_curve: EquityPoint[];
 };
@@ -170,12 +171,17 @@ export function formatTooltipDate(isoStamp: string): string {
 }
 
 /** Fractions, not dollars, and not for scale safety -- because of what the
- *  labels MEAN. Every dollar level in this payload is a x0.1 rescale of a
- *  $100,000 backtest onto the config's $10,000 display base (leaderboard
- *  service.py), so a `$10,749` tick names an account that never existed, while
- *  the percent is exactly what ran. The old hero was allowed a dollar axis only
- *  because its curves were fabricated with a clean base of 1000; live data
- *  removes that premise. */
+ *  labels MEAN. The percent is exactly what ran: `cumulative_return` comes off
+ *  the stored row untouched by any display scaling.
+ *
+ *  THE RESCALE THIS NOTE USED TO DESCRIBE IS GONE. It said every dollar level
+ *  was a x0.1 rescale of a $100,000 backtest onto the config's $10,000 display
+ *  base, so a `$10,749` tick named an account that never existed.
+ *  leaderboard.json now declares `initial_capital: 100000` -- what all 12
+ *  published runs were actually seeded at -- so `scale` is 1.0. Kept as percent
+ *  anyway: the old hero was allowed a dollar axis only because its curves were
+ *  fabricated with a clean base of 1000, and live data removes that premise
+ *  whatever the base happens to be. */
 export function buildBoardData(payload: {
   entries?: LeaderboardEntry[];
   window?: { label?: string };

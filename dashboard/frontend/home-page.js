@@ -1489,23 +1489,28 @@ function homeChartSeries(entries, build) {
             const raw = curves[label] || [];
             // Fractions, not dollars -- because of what the labels MEAN, not
             // for scale safety. The rank list beside this chart is its key and
-            // already renders percent (`homeFormatReturnPct`); and every dollar
-            // level here is a x0.1 rescale of a $100,000 backtest, since all 12
-            // published runs stored `initial_equity = 100000` while
-            // leaderboard.json declares `initial_capital: 10000`
-            // (service.py `scale = display_capital / stored_initial`). So a
-            // "$10,749" tick names an account that never existed, while
-            // `cumulative_return` comes off the stored run untouched by that
-            // rescale -- +7.49% is exactly what ran.
+            // already renders percent (`homeFormatReturnPct`), and percent is
+            // the number the stored run actually produced: `cumulative_return`
+            // comes off the row untouched by any display scaling.
+            //
+            // THE RESCALE THIS NOTE USED TO DESCRIBE IS GONE. It said every
+            // dollar level was a x0.1 rescale of a $100,000 backtest onto a
+            // $10,000 config base, so a "$10,749" tick named an account that
+            // never existed. leaderboard.json now declares
+            // `initial_capital: 100000`, which is what all 12 published runs
+            // were actually seeded at, so `scale` is 1.0 and the ticks are the
+            // run's own dollars. Kept as percent anyway: the rank list is this
+            // chart's key and renders percent, and nothing here should depend
+            // on a config value agreeing with the stored rows.
             //
             // Dividing per series rather than by one shared constant is
             // DEFENCE IN DEPTH on this function, not a live fix for issue #365:
             // get_leaderboard reports the same `display_capital` as every
-            // entry's `initial_equity`, so the bases agree today and a dollar
-            // axis would NOT draw a scale break. Do not re-derive that claim --
-            // it was measured and is false. #365's real damage is to the
-            // returns (a $10k re-run trades in a coarser share quantum), which
-            // no choice of y-axis can repair.
+            // entry's `initial_equity`, so the bases agree and a dollar axis
+            // would NOT draw a scale break. Do not re-derive that claim -- it
+            // was measured and is false. #365's real damage was to the returns
+            // (a $10k re-run trades in a coarser share quantum), which no
+            // choice of y-axis can repair.
             //
             // Same formula and same fallback order as
             // `transformLeaderboardChartData`'s 'cumulative' branch in
@@ -1786,7 +1791,13 @@ async function loadHomeLeaderboardModule() {
     }
 
     function homeFormatPortfolioValue(value) {
-        const n = Number(value);
+        // `Number(null)` is 0 and 0 is finite, so the guard below never saw the
+        // shape it was written for: a run with no recorded final equity
+        // rendered as `$0` rather than as no value. The server sends `null` for
+        // exactly that case.
+        const n = (value === null || value === undefined || value === '')
+            ? NaN
+            : Number(value);
         if (!Number.isFinite(n)) return '—';
         if (n >= 1000) {
             return `$${Math.round(n).toLocaleString('en-US')}`;

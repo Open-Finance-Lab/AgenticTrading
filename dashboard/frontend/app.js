@@ -2787,18 +2787,28 @@ function downsampleMarketplaceCurve(curve, maxPoints = 48) {
 }
 
 function marketplaceIndexedPctSeries(curve) {
-  // Cumulative return from the first equity point, in percent (0 = start).
+  // Cumulative return from the first OBSERVED equity point, in percent
+  // (0 = start). A point with no observation keeps its slot with `pct: null`
+  // so marketplaceLinePath can break the line there.
+  //
+  // `Number(point?.equity)` + `Number.isFinite` was NOT a guard against the
+  // shape that actually arrives: `Number(null)` is 0, and 0 is finite, so a
+  // stored NULL equity was read as a $0 account and drew this card's sparkline
+  // as a collapse to -100% (issue #390). Reject the empty shapes explicitly.
   if (!Array.isArray(curve) || curve.length < 2) return null;
-  const points = [];
-  for (const point of curve) {
-    const equity = Number(point?.equity);
-    if (!Number.isFinite(equity)) continue;
-    points.push({ t: point.timestamp, equity });
-  }
-  if (points.length < 2) return null;
-  const initial = points[0].equity;
+  const points = curve.map((point) => {
+    const raw = point == null ? null : point.equity;
+    const equity = (raw === null || raw === undefined || raw === '') ? NaN : Number(raw);
+    return { t: point?.timestamp, equity: Number.isFinite(equity) ? equity : null };
+  });
+  const observed = points.filter((point) => point.equity != null);
+  if (observed.length < 2) return null;
+  const initial = observed[0].equity;
   if (!initial) return null;
-  return points.map((point) => ({ t: point.t, pct: ((point.equity / initial) - 1) * 100 }));
+  return points.map((point) => ({
+    t: point.t,
+    pct: point.equity == null ? null : ((point.equity / initial) - 1) * 100,
+  }));
 }
 
 function formatMarketplaceMd(iso) {
@@ -2831,10 +2841,20 @@ function marketplaceNicePctTicks(min, max) {
 }
 
 function marketplaceLinePath(series, xOf, yOf) {
-  return series.map((point, i) => {
-    const cmd = i === 0 ? 'M' : 'L';
-    return `${cmd}${xOf(i).toFixed(1)},${yOf(point.pct).toFixed(1)}`;
-  }).join(' ');
+  // A null pct is a missing observation: lift the pen and start a new subpath,
+  // so the card shows a gap rather than bridging over hours nobody has data
+  // for. `M` therefore depends on the previous point, not on `i === 0`.
+  let penDown = false;
+  const parts = [];
+  series.forEach((point, i) => {
+    if (point.pct == null) {
+      penDown = false;
+      return;
+    }
+    parts.push(`${penDown ? 'L' : 'M'}${xOf(i).toFixed(1)},${yOf(point.pct).toFixed(1)}`);
+    penDown = true;
+  });
+  return parts.join(' ');
 }
 
 /** Agent vs DJIA comparison chart from real contest equity_curve points. */
@@ -2844,7 +2864,11 @@ function buildMarketplaceCompareChartHtml(agentCurve, benchmarkCurve, { positive
   const bench = marketplaceIndexedPctSeries(downsampleMarketplaceCurve(benchmarkCurve));
   const agentColor = positive ? '#4ade80' : '#f87171';
   const benchColor = '#94a3b8';
-  const pcts = agent.map((p) => p.pct).concat(bench ? bench.map((p) => p.pct) : []);
+  // Nulls are gaps, not data: including them would make Math.min/max NaN and
+  // poison every y coordinate on the card.
+  const pcts = agent.map((p) => p.pct)
+    .concat(bench ? bench.map((p) => p.pct) : [])
+    .filter((v) => v != null);
   const ticks = marketplaceNicePctTicks(Math.min(...pcts), Math.max(...pcts));
   const yMin = ticks[0];
   const yMax = ticks[ticks.length - 1];

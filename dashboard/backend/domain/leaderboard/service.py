@@ -11,6 +11,7 @@ moved.
 from __future__ import annotations
 
 import json
+import math
 import os
 import secrets
 import tempfile
@@ -54,6 +55,28 @@ _daily_refresh_lock = threading.Lock()
 _daily_refresh_running = False
 # (configured_feed, stale_feeds) pairs already reported — see _warn_on_feed_drift.
 _warned_feed_drift: set[Tuple[str, Tuple[str, ...]]] = set()
+# Two seeds are "the same seed" within this many dollars. A stored
+# ``initial_equity`` has been through a backtest and a JSON round-trip — the
+# committed board carries 100000.00000000003 for one entry — so `==` here would
+# report a mismatch nobody made.
+_SEED_MATCH_TOLERANCE = 0.01
+# (entry_id, stored_seed, display_capital) triples already reported — see
+# _warn_on_seed_mismatch.
+_warned_seed_mismatch: set[Tuple[str, float, float]] = set()
+# (configured_capital, stale_capitals) pairs already reported — see
+# _warn_on_capital_drift.
+_warned_capital_drift: set[Tuple[float, Tuple[float, ...]]] = set()
+# (entry_id, run_id) pairs already reported — see _warn_on_prompt_drift.
+_warned_prompt_drift: set[Tuple[str, str]] = set()
+# (entry_id, run_id, rendered_condition) triples already reported — see
+# _report_curve_integrity.
+_warned_curve_integrity: set[Tuple[str, str, str]] = set()
+# How a cached row compares to what the board is asking for. STALE is the only
+# value that refuses a row, and it is deliberately the only one a *recorded*
+# disagreement can produce — see _cache_match_rank.
+_CACHE_MATCH = 0
+_CACHE_UNRECORDED = 1
+_CACHE_STALE = 2
 
 # Daily board window is the last *completed* US cash session, not UTC-yesterday.
 _US_EASTERN = ZoneInfo("America/New_York")
@@ -201,38 +224,74 @@ def _set_daily_refresh_running(value: bool) -> None:
 
 
 def _cached_run_index(
-    start_date: str, end_date: str, session_id: str
-) -> Dict[str, Dict[str, Any]]:
-    """``llm_model`` → cached leaderboard run for one window, in one query.
+    start_date: str,
+    end_date: str,
+    session_id: str,
+    initial_capital: Optional[float] = None,
+    prompt_by_entry: Optional[Dict[str, Optional[str]]] = None,
+) -> Tuple[Dict[str, Dict[str, Any]], set]:
+    """``(cached run by llm_model, entry ids whose row drifted from the config)``.
 
     ``_find_cached_run`` rescans the whole session per lookup, so calling it in
-    a loop is O(entries × runs) DB work on a request path. First match wins,
-    matching ``_find_cached_run``'s semantics exactly.
+    a loop is O(entries × runs) DB work on a request path. Same predicate and
+    the same ranking, one query — see ``_cache_match_rank``.
+
+    A drifted entry appears in **both** returns: it is still a cached row (so
+    ``models_pending`` cannot count it and trigger a billable redeploy — see
+    ``_resolve_cached_run``), and it is named so the caller can report it as
+    something other than healthy.
     """
+    wanted = _finite_positive(initial_capital)
+    prompts = prompt_by_entry or {}
     index: Dict[str, Dict[str, Any]] = {}
+    ranks: Dict[str, int] = {}
     for run in db.get_runs_by_session(session_id) or []:
-        if (
+        if not (
             run.get("mode") == LEADERBOARD_MODE
             and run.get("start_date") == start_date
             and run.get("end_date") == end_date
         ):
-            index.setdefault(run.get("llm_model"), run)
-    return index
+            continue
+        key = run.get("llm_model")
+        rank = _cache_match_rank(run, wanted, _wanted_prompt(prompts.get(key)))
+        if key not in index or rank < ranks[key]:
+            index[key] = run
+            ranks[key] = rank
+    drifted = {key for key, rank in ranks.items() if rank == _CACHE_STALE}
+    return index, drifted
 
 
 def _daily_models_status(config: Dict[str, Any]) -> Dict[str, Any]:
     """How many competition LLM curves exist for the current daily window."""
     entries = llm_leaderboard_entries(config)
     # Single scan: this runs on every public GET of the daily board.
-    cached_runs = _cached_run_index(
-        config["start_date"], config["end_date"], config["session_id"]
+    cached_runs, drifted_ids = _cached_run_index(
+        config["start_date"],
+        config["end_date"],
+        config["session_id"],
+        config.get("initial_capital", INITIAL_CAPITAL),
+        {e["id"]: e.get("strategy_prompt") for e in entries},
     )
     cached = 0
+    drifted = 0
     pending_ids: List[str] = []
     for entry in entries:
         entry_id = entry["id"]
         if cached_runs.get(entry_id):
+            # Drifted rows count as CACHED, never pending: pending is what
+            # `maybe_schedule_daily_leaderboard_refresh` spends money on. See
+            # `_resolve_cached_run`.
             cached += 1
+            # ⚠ Counted HERE, not as `len(drifted_ids)`. `_cached_run_index`
+            # ranks every run in the session and window — the five baselines
+            # included — while every other number in this dict is computed over
+            # `llm_leaderboard_entries` alone. Taking the raw set size let a
+            # drifted baseline report `models_config_drift` above `models_total`,
+            # i.e. more of a population drifted than the population has members.
+            # Intersecting with the entries actually counted keeps the invariant
+            # drift ≤ cached ≤ total, which is what makes the dict readable.
+            if entry_id in drifted_ids:
+                drifted += 1
         else:
             pending_ids.append(entry_id)
     total = len(entries)
@@ -240,7 +299,8 @@ def _daily_models_status(config: Dict[str, Any]) -> Dict[str, Any]:
         "trading_date": config["start_date"],
         "models_total": total,
         "models_cached": cached,
-        "models_pending": total - cached,
+        "models_config_drift": drifted,
+        "models_pending": len(pending_ids),
         "pending_entry_ids": pending_ids,
         "refresh_in_progress": _daily_refresh_running,
     }
@@ -731,7 +791,66 @@ def resolve_leaderboard_config(period: Optional[str] = "contest") -> Dict[str, A
     }
 
 
+def _finite_positive(value: Any) -> Optional[float]:
+    """``value`` as a positive finite float, or None when it is not one.
+
+    ``None``, ``NaN``, ``inf``, a non-numeric string and ``0`` all answer None:
+    every one of them is a number this module must neither divide by nor
+    publish as a seed. ``bool`` is excluded explicitly because ``float(True)``
+    is ``1.0``, which would sail through every other check.
+    """
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        num = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(num) or num <= 0:
+        return None
+    return num
+
+
+def _finite(value: Any) -> Optional[float]:
+    """``value`` as a finite float, or None when it is not a number at all.
+
+    The twin of ``_finite_positive`` for the columns where ``0`` and a negative
+    are *real observations* rather than a missing one: a final equity, a return,
+    a drawdown. ``_finite_positive`` must reject zero because its callers divide
+    by the result; these callers rank on it, and refusing an account that truly
+    went to zero would be the same absent-as-a-value conflation one column over.
+    """
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        num = float(value)
+    except (TypeError, ValueError):
+        return None
+    return num if math.isfinite(num) else None
+
+
+def _run_seed(run: Dict[str, Any]) -> Optional[float]:
+    """The seed a stored run was actually executed at, or None if unrecorded."""
+    return _finite_positive(run.get("initial_equity"))
+
+
 def _run_id(strategy_id: str, start_date: str, end_date: str) -> str:
+    """Deterministic id for one leaderboard run — deliberately seed-free.
+
+    ⚠ **Do not put the seed capital in here.** It was tried: the reasoning was
+    that ``insert_run`` is INSERT OR REPLACE on this id, so a re-run at a new
+    seed overwrites the old row rather than sitting beside it, and the
+    seed-aware lookup below then has nothing to choose between. True, and still
+    the wrong trade — because the twelve rows in the committed seed database
+    carry these *seed-free* ids. A suffixed id does not replace them, it
+    **inserts alongside** them, so the first force-refresh after such a change
+    doubles every entry on the board and orphans twelve equity curves that
+    nothing ever prunes. Duplicate history is worse than the ambiguity it buys.
+
+    One id per (entry, window) is the invariant: a refresh replaces the row and
+    its curve, so a window can hold exactly one seed and ``_cache_match_rank``'s
+    job is to notice when that seed is not the one the config publishes — not to
+    arbitrate between rival rows.
+    """
     return f"lb_{strategy_id}_{start_date.replace('-', '')}_{end_date.replace('-', '')}"
 
 
@@ -831,16 +950,142 @@ def _prune_stale_window_skips(
     return kept
 
 
-def _find_cached_run(strategy_id: str, start_date: str, end_date: str, session_id: str) -> Optional[Dict[str, Any]]:
+def _wanted_prompt(value: Any) -> Optional[str]:
+    """The strategy prompt to compare on, or None to not compare at all."""
+    return value.strip() if isinstance(value, str) and value.strip() else None
+
+
+def _run_strategy_prompt(run: Dict[str, Any]) -> Optional[str]:
+    """The instruction a published run recorded, or None if it recorded none.
+
+    Written by ``_llm_run_metadata`` into ``agent_runs.metadata`` (PR #366).
+    Every row in the committed seed database predates it and has
+    ``metadata = NULL``, which is exactly why an unrecorded prompt has to mean
+    *unknown* and not *empty*.
+    """
+    metadata = run.get("metadata")
+    if not isinstance(metadata, dict):
+        return None
+    return _wanted_prompt(metadata.get("strategy_prompt"))
+
+
+def _cache_match_rank(
+    run: Dict[str, Any],
+    wanted_capital: Optional[float],
+    wanted_prompt: Optional[str],
+) -> int:
+    """How well one cached row answers what the board is asking for.
+
+    ``_CACHE_MATCH`` every recorded dimension agrees, ``_CACHE_UNRECORDED`` the
+    row never recorded one of them, ``_CACHE_STALE`` the row recorded one and it
+    disagrees. Shared by ``_resolve_cached_run`` and ``_cached_run_index`` so
+    the scan and its batched twin cannot drift.
+
+    **Only a recorded disagreement is stale.** The twelve rows in the committed
+    seed database carry no ``metadata`` at all, so treating *unrecorded* as a
+    mismatch would refuse the entire board — and refusing is not free even
+    though it never recomputes, because the entry then vanishes from a public
+    page. A dimension the *config* does not set is not compared either: the
+    prompt a run records is resolved off the strategy impl, not only off
+    ``leaderboard.json``, so a one-sided comparison would drop legitimate rows.
+    """
+    rank = _CACHE_MATCH
+    if wanted_capital is not None:
+        seed = _run_seed(run)
+        if seed is None:
+            rank = max(rank, _CACHE_UNRECORDED)
+        elif abs(seed - wanted_capital) > _SEED_MATCH_TOLERANCE:
+            return _CACHE_STALE
+    if wanted_prompt is not None:
+        stored = _run_strategy_prompt(run)
+        if stored is None:
+            rank = max(rank, _CACHE_UNRECORDED)
+        elif stored != wanted_prompt:
+            return _CACHE_STALE
+    return rank
+
+
+def _resolve_cached_run(
+    strategy_id: str,
+    start_date: str,
+    end_date: str,
+    session_id: str,
+    initial_capital: Optional[float] = None,
+    strategy_prompt: Optional[str] = None,
+) -> Tuple[Optional[Dict[str, Any]], int]:
+    """``(cached run, how well it matches)`` for one entry and window.
+
+    ⚠ **The config is a RANKING key here, never a filter, and that is a spend
+    control.** A row for this window is always returned if one exists; the rank
+    only says whether it was produced under the config the board now publishes.
+    Refusing a drifted row would make it *missing*, and missing is not a quiet
+    state in this module:
+
+    * ``ensure_leaderboard_runs`` answers missing by recomputing — on a public,
+      unauthenticated GET, and on every page load for as long as the config
+      disagrees.
+    * ``_daily_models_status`` reports missing as **pending**, and a non-zero
+      pending count is what ``maybe_schedule_daily_leaderboard_refresh`` acts
+      on; ``refresh_daily_leaderboard`` then calls ``deploy_model_run`` for
+      **every** configured LLM entry. With ``LEADERBOARD_DAILY_AUTO_DEPLOY``
+      armed, one edit to ``leaderboard.json`` would buy a billable re-run of the
+      whole board from an anonymous request.
+
+    So a cache miss caused by a config change is not merely undesirable, it is
+    unbounded spend — which is why this cannot miss. It is also the policy
+    ``_warn_on_feed_drift`` already set for the identical problem one field
+    over: warn, never treat as missing, leave recomputing to an operator.
+    ``_warn_on_capital_drift`` is the matching signal, and issue #365's third
+    criterion asks for exactly that warning — a criterion that would be dead
+    code if a drifted row were refused instead of published.
+
+    Preference order: a row matching every recorded dimension, then a row that
+    never recorded one, then a row that recorded one and disagrees. With no
+    ``initial_capital`` or ``strategy_prompt`` passed, nothing is compared and
+    the first row for the window wins, exactly as this has always behaved.
+    """
+    wanted_capital = _finite_positive(initial_capital)
+    wanted_prompt = _wanted_prompt(strategy_prompt)
+    best: Optional[Dict[str, Any]] = None
+    best_rank = _CACHE_STALE + 1
     for run in db.get_runs_by_session(session_id) or []:
-        if (
+        if not (
             run.get("mode") == LEADERBOARD_MODE
             and run.get("start_date") == start_date
             and run.get("end_date") == end_date
             and run.get("llm_model") == strategy_id
         ):
-            return run
-    return None
+            continue
+        rank = _cache_match_rank(run, wanted_capital, wanted_prompt)
+        if rank < best_rank:
+            best, best_rank = run, rank
+            if rank == _CACHE_MATCH:
+                break  # nothing can beat it; stop scanning
+    return best, best_rank
+
+
+def _find_cached_run(
+    strategy_id: str,
+    start_date: str,
+    end_date: str,
+    session_id: str,
+    initial_capital: Optional[float] = None,
+    strategy_prompt: Optional[str] = None,
+) -> Optional[Dict[str, Any]]:
+    """The cached run for one entry and window, or None. See ``_resolve_cached_run``.
+
+    Passing neither ``initial_capital`` nor ``strategy_prompt`` compares nothing
+    and returns the first row for the window, which is what this function has
+    always done.
+    """
+    return _resolve_cached_run(
+        strategy_id,
+        start_date,
+        end_date,
+        session_id,
+        initial_capital,
+        strategy_prompt,
+    )[0]
 
 
 def _symbols_for_config(config: Dict[str, Any]) -> List[str]:
@@ -910,9 +1155,19 @@ def ensure_leaderboard_runs(
         cached = (
             None
             if force_refresh
-            else _find_cached_run(strategy_id, start_date, end_date, session_id)
+            else _find_cached_run(
+                strategy_id,
+                start_date,
+                end_date,
+                session_id,
+                initial_capital,
+                strategy.get("strategy_prompt"),
+            )
         )
         if cached:
+            # A row that drifted from the config is still a HIT, deliberately:
+            # see `_resolve_cached_run`. `_warn_on_capital_drift` below is what
+            # reports it; recomputing is an operator action.
             cached_runs.append(cached)
             continue
         if not force_refresh and _is_skipped(session_id, start_date, end_date, strategy_id, skip_cache):
@@ -920,6 +1175,7 @@ def ensure_leaderboard_runs(
         missing.append(strategy)
 
     _warn_on_feed_drift(cached_runs, _configured_feed_or_none())
+    _warn_on_capital_drift(cached_runs, initial_capital)
 
     # Nothing left to compute — serve cached board without touching Alpaca.
     if not missing and not force_refresh:
@@ -960,7 +1216,12 @@ def ensure_leaderboard_runs(
         if not _auto_compute(strategy):
             continue  # deployed via deploy_model_run(), not on-demand
         existing = None if force_refresh else _find_cached_run(
-            strategy_id, start_date, end_date, session_id
+            strategy_id,
+            start_date,
+            end_date,
+            session_id,
+            initial_capital,
+            strategy.get("strategy_prompt"),
         )
         if existing and not force_refresh:
             continue
@@ -1218,6 +1479,58 @@ def _warn_on_feed_drift(runs: List[Dict[str, Any]], configured: Optional[str]) -
     )
 
 
+def _warn_on_capital_drift(
+    runs: List[Dict[str, Any]], configured: Optional[float]
+) -> None:
+    """Print when cached rows were run at seed capital the board no longer publishes.
+
+    The capital twin of ``_warn_on_feed_drift`` directly above, and deliberately
+    the same shape for the same reason: this is the established answer in this
+    module to "cached rows are not comparable". A warning, once per distinct
+    drift per process, never an auto-refresh — ``ensure_leaderboard_runs`` and
+    ``get_leaderboard`` both run on a public, unauthenticated GET, and
+    recomputing is an operator action (``POST /api/v1/leaderboard/refresh`` with
+    ``force=true``).
+
+    Why capital is a comparability problem and not a display one: a $10,000 run
+    buys whole shares in a coarser quantum than a $100,000 one and pays
+    per-trade costs against a smaller base, so it is a *different run* of the
+    same strategy, with different returns. Scaling the dollar levels hides that
+    and fixes nothing. A board holding both is ranking two things that were not
+    measured the same way (issue #365).
+    """
+    wanted = _finite_positive(configured)
+    if wanted is None:
+        return
+    stale = sorted(
+        {
+            seed
+            for run in runs
+            if (seed := _run_seed(run)) and abs(seed - wanted) > _SEED_MATCH_TOLERANCE
+        }
+    )
+    if not stale:
+        return
+    seen_key = (wanted, tuple(stale))
+    if seen_key in _warned_capital_drift:
+        return
+    _warned_capital_drift.add(seen_key)
+    rendered = ", ".join(f"${seed:,.2f}" for seed in stale)
+    print(
+        f"WARNING: leaderboard has cached runs seeded at {rendered} while the "
+        f"board publishes ${wanted:,.2f}. Curves seeded at different capital "
+        "are not comparable — a smaller account trades a coarser share quantum, "
+        "so the returns differ, not just the dollar levels. Align initial_capital "
+        "in dashboard/config/leaderboard.json to the seed the rows were actually "
+        "run at, or re-run BOTH halves of the board. ⚠ Do not force-refresh on "
+        "its own: `ensure_leaderboard_runs` recomputes only the auto_compute "
+        "baselines, so it moves those to the new seed and strands the LLM "
+        "entries at the old one — which mixes the board rather than aligning it, "
+        "and drops whichever half lands in the minority. The LLM half is "
+        "redeployed by deploy_model_run(force_refresh=True)."
+    )
+
+
 def _llm_run_metadata(
     entry_id: str,
     entry: Dict[str, Any],
@@ -1297,8 +1610,30 @@ def deploy_model_run(
         available = [s.get("id") for s in config.get("strategies", [])]
         raise ValueError(f"Unknown leaderboard entry '{entry_id}'. Available: {available}")
 
-    existing = _find_cached_run(entry_id, start_date, end_date, session_id)
+    existing, existing_rank = _resolve_cached_run(
+        entry_id,
+        start_date,
+        end_date,
+        session_id,
+        initial_capital,
+        entry.get("strategy_prompt"),
+    )
     if existing and not force_refresh:
+        # A drifted row short-circuits here exactly like a matching one, and
+        # that is the point: this function is reached from
+        # `refresh_daily_leaderboard`, which loops over EVERY configured LLM
+        # entry, and that loop is reachable from a public unauthenticated GET
+        # whenever LEADERBOARD_DAILY_AUTO_DEPLOY is armed. Re-running on a
+        # config change would answer one edit to leaderboard.json with a
+        # billable re-run of the whole board. `force_refresh=True` is the
+        # operator's way to ask for it on purpose.
+        if existing_rank == _CACHE_STALE:
+            # Both reasons a row can be stale, because only one of them has a
+            # board-wide scan behind it. `_warn_on_capital_drift` finds nothing
+            # when the disagreement is the prompt, so before the second call a
+            # drifted instruction produced no signal anywhere.
+            _warn_on_capital_drift([existing], initial_capital)
+            _warn_on_prompt_drift(entry_id, existing, entry.get("strategy_prompt"))
         return {
             "entry_id": entry_id,
             "run_id": existing["run_id"],
@@ -1417,12 +1752,39 @@ def deploy_model_run(
 
 
 def _rank_sort_key(entry: Dict[str, Any]) -> tuple:
-    """Official rank is by final portfolio value (nof1-style); tie-break on return."""
-    pv = entry.get("portfolio_value")
-    if pv is None:
-        # Unit tests / partial fixtures may omit dollars — fall back to return.
-        pv = entry.get("cumulative_return") or 0
-    return (-float(pv), -(entry.get("cumulative_return") or 0))
+    """Official rank is by final portfolio value (nof1-style); tie-break on return.
+
+    ⚠ **Never rank a return against dollars.** The old fallback was
+    ``pv = entry.get("cumulative_return") or 0``, which was harmless only while
+    ``portfolio_value`` could not be None — and this change is precisely what
+    made it nullable. Reachable, it hands the sort a *fraction* (``0.07``) to
+    compare against its neighbours' *dollars* (``107494``), so an entry whose
+    final equity nobody recorded ranks **dead last** no matter how well it
+    actually did. That is the same defect this module just removed from the
+    Value column — an absent number published as a real one — pointing the other
+    way, and it lands in the column the board is ranked on.
+
+    So the absent case is put back on the dollar axis instead: the entry carries
+    the seed the board publishes and the return the run recorded, and
+    ``seed × (1 + return)`` is the final equity those two imply. This value is a
+    **sort key only** — ``portfolio_value`` stays ``None`` on the wire and both
+    tables still render it as an em dash. Ranking is a total order over the
+    board and has to produce *some* position; inventing a displayed dollar
+    figure is what must not happen.
+    """
+    ret = _finite(entry.get("cumulative_return"))
+    value = _finite(entry.get("portfolio_value"))
+    if value is None:
+        seed = _finite_positive(entry.get("initial_equity"))
+        if seed is not None and ret is not None:
+            value = seed * (1.0 + ret)
+    if value is None:
+        # Neither dollars nor a seed to rebuild them from. Only partial fixtures
+        # reach this — every entry `get_leaderboard` builds sets `initial_equity`
+        # to the board's published capital — and there the whole board is
+        # dimensionless, so ranking on the return alone compares like with like.
+        value = ret if ret is not None else 0.0
+    return (-value, -(ret if ret is not None else 0.0))
 
 
 def _rank_entries(entries: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -1434,6 +1796,207 @@ def _rank_entries(entries: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     for idx, entry in enumerate(entries):
         entry["rank"] = idx + 1
     return entries
+
+
+def _scaled_level(value: Any, scale: float) -> Optional[float]:
+    """One stored dollar level, scaled — with *absent* preserved as absent.
+
+    A stored NULL means "no observation at this timestamp", which is a
+    different fact from "the account held $0". ``float(pt.get("equity") or 0)``
+    conflated them, and because ``chart_equity_curve`` prepends an open tick at
+    starting capital the series then read as a −100% loss. The damage is not
+    one bad marker: ``align_equity_curves`` puts every entry on one shared
+    axis, so a single −100% series sets the y-range and visually flattens every
+    honest curve on the board (issue #390).
+
+    A real ``0.0`` is still a real ``0.0`` and passes through — an account that
+    actually went to zero did lose 100%.
+    """
+    num = _finite(value)
+    return None if num is None else num * scale
+
+
+def _stored_seed(run: Dict[str, Any], equity_hourly: List[Dict[str, Any]]) -> Optional[float]:
+    """The seed the stored curve was actually run at, or None if unknowable.
+
+    Never falls back to the *config's* capital. That fallback was issue #365:
+    with ``initial_equity`` NULL it made ``scale`` exactly ``1.0``, so a curve
+    genuinely seeded at $100,000 was published unscaled and labelled $10,000 —
+    a wrong number that looked like a deliberate one. The curve's own first
+    observation is a fact about the run; the config is a fact about the board.
+    """
+    seed = _run_seed(run)
+    if seed is not None:
+        return seed
+    for point in equity_hourly:
+        seed = _finite_positive(point.get("equity"))
+        if seed is not None:
+            return seed
+    return None
+
+
+def _report_curve_integrity(
+    entry_id: str, run_id: str, scaled_hourly: List[Dict[str, Any]]
+) -> None:
+    """Make an *absent* curve distinguishable from a *broken* one in the log.
+
+    CLAUDE.md's fail-closed-is-not-fail-visible rule: a per-point warning cannot
+    report a total contract break, so the wholesale boundary — no points at all,
+    or every point unusable — logs ERROR, while a partial gap logs a single
+    aggregate WARNING naming the count rather than one line per point.
+
+    **Once per distinct condition per process**, like ``_warn_on_capital_drift``
+    and ``_warn_on_seed_mismatch`` beside it, and for the reason those two give:
+    this runs on a public unauthenticated GET, once per entry, so an undeduped
+    line turns one broken curve into twelve lines every time anybody loads the
+    board — and an alert channel has a credibility budget that every repeat
+    spends. The key carries the *counts*, not just the run, so a curve that
+    degrades further still reports the new state.
+    """
+    total = len(scaled_hourly)
+    missing = sum(1 for point in scaled_hourly if point.get("equity") is None)
+    if not total:
+        message = (
+            f"ERROR: leaderboard entry '{entry_id}' (run {run_id}): the stored "
+            "run has no equity points at all — the board can draw only its "
+            "opening tick. A cached run with no curve is a broken write, not an "
+            "empty window."
+        )
+    elif missing == total:
+        message = (
+            f"ERROR: leaderboard entry '{entry_id}' (run {run_id}): all {total} "
+            "stored equity points are NULL or unparseable — this curve is "
+            "broken, not absent."
+        )
+    elif missing:
+        message = (
+            f"WARNING: leaderboard entry '{entry_id}' (run {run_id}): {missing} "
+            f"of {total} equity points carry no value; the chart draws them as "
+            "gaps."
+        )
+    else:
+        return
+    key = (entry_id, run_id, f"{missing}/{total}")
+    if key in _warned_curve_integrity:
+        return
+    _warned_curve_integrity.add(key)
+    print(message)
+
+
+def _warn_on_seed_mismatch(
+    entry_id: str, run_id: str, stored_initial: float, display_capital: float
+) -> None:
+    """Say out loud that a published row was rescaled from a seed nobody recorded.
+
+    Narrower than ``_warn_on_capital_drift``, and complementary: that one scans
+    the board for rows whose *recorded* seed disagrees with the config, so it is
+    structurally blind to a row with no recorded seed at all. This is the only
+    report such a row gets, and its seed came from the curve's own first point
+    rather than from anything the run wrote down.
+
+    One line per distinct mismatch, not per request, and never alongside the
+    board-level warning for the same row — this runs on a public GET, and an
+    alert channel has a credibility budget that every duplicate line spends.
+    """
+    key = (entry_id, stored_initial, display_capital)
+    if key in _warned_seed_mismatch:
+        return
+    _warned_seed_mismatch.add(key)
+    print(
+        f"WARNING: leaderboard entry '{entry_id}' (run {run_id}) was run at "
+        f"${stored_initial:,.2f} but the board publishes ${display_capital:,.2f}; "
+        "dollar levels are rescaled for display. Re-run the board at the "
+        "published seed to remove the shim (issue #194)."
+    )
+
+
+def _warn_on_prompt_drift(
+    entry_id: str, run: Dict[str, Any], wanted_prompt: Optional[str]
+) -> None:
+    """Say out loud that a cached curve predates the instruction now configured.
+
+    The prompt twin of ``_warn_on_capital_drift``, and it exists because
+    ``_cache_match_rank`` returns ``_CACHE_STALE`` for **two** reasons — a
+    recorded seed that disagrees, and a recorded prompt that disagrees — while
+    only the first had a reporter. ``deploy_model_run`` short-circuits a stale
+    row to the cached curve either way (deliberately: re-running on a config
+    edit answers one line of JSON with a billable redeploy of the whole board),
+    so a changed instruction reused the old curve in total silence. That is
+    CLAUDE.md's fail-closed-is-not-fail-visible shape exactly: "nobody changed
+    the prompt" and "the prompt changed and is being ignored" were byte-identical
+    from outside.
+
+    Once per (entry, run) per process, for the reason the two warnings above it
+    give. The prompt text itself is deliberately **not** printed: it is operator
+    config that can run to paragraphs, and a log line nobody can read is one
+    more way to spend the channel's credibility.
+    """
+    wanted = _wanted_prompt(wanted_prompt)
+    if wanted is None:
+        return
+    stored = _run_strategy_prompt(run)
+    if stored is None or stored == wanted:
+        return
+    run_id = str(run.get("run_id") or "")
+    key = (entry_id, run_id)
+    if key in _warned_prompt_drift:
+        return
+    _warned_prompt_drift.add(key)
+    print(
+        f"WARNING: leaderboard entry '{entry_id}' (run {run_id}) was computed "
+        "under a different strategy_prompt than dashboard/config/leaderboard.json "
+        "now configures; the cached curve is published as-is rather than "
+        "answering a config edit with a billable re-run. Redeploy this entry "
+        "with force_refresh=True to run it under the current instruction."
+    )
+
+
+def _board_capital_base(
+    seeds: List[float], display_capital: float
+) -> Optional[float]:
+    """The one seed this board will publish, or None when there is nothing to publish.
+
+    **The defect is mixed capital, not capital that disagrees with the config.**
+    Twelve entries all seeded at $100,000 under a `$10,000` config are mutually
+    comparable — the board is internally consistent and merely mislabelled, and
+    refusing to publish it would turn a labelling problem into an outage on the
+    Competition Leaderboard, which is the site's acquisition hook. Twelve
+    entries across two seeds are *not* comparable at any label, because the
+    smaller account trades a coarser share quantum: that is the state that
+    corrupts a ranking, and the minority is what must not publish.
+
+    So: the largest group of mutually-equal seeds wins, and everything outside
+    it is dropped by the caller. Ties go to the group matching the config, then
+    to the first seen, so the choice is deterministic rather than dict-ordered.
+    **This can never return None for a non-empty ``seeds``** — the winning group
+    is the largest, so it always has at least one member — which is the property
+    that makes a one-character config typo unable to empty the board.
+
+    ⚠ ``seeds`` holds only the seeds rows actually **recorded**; the caller
+    filters. A derived seed is an estimate read off a curve's first point and
+    must not get a vote on what the board's base is — see the caller for why.
+    So None here means "no row on this board wrote down its seed", not "no
+    rows", and the caller answers it by publishing every row unfiltered.
+    """
+    groups: List[Tuple[float, int]] = []
+    for seed in seeds:
+        for index, (base, count) in enumerate(groups):
+            if abs(base - seed) <= _SEED_MATCH_TOLERANCE:
+                groups[index] = (base, count + 1)
+                break
+        else:
+            groups.append((seed, 1))
+    if not groups:
+        return None
+    best = max(
+        range(len(groups)),
+        key=lambda i: (
+            groups[i][1],
+            abs(groups[i][0] - display_capital) <= _SEED_MATCH_TOLERANCE,
+            -i,
+        ),
+    )
+    return groups[best][0]
 
 
 def get_leaderboard(
@@ -1449,29 +2012,125 @@ def get_leaderboard(
     strategy_by_id = {s["id"]: s for s in config.get("strategies", [])}
 
     entries: List[Dict[str, Any]] = []
+    board_runs: List[Dict[str, Any]] = []
     display_capital = float(config.get("initial_capital", INITIAL_CAPITAL))
 
+    # FIRST PASS: resolve every entry's run and the seed it was actually run at.
+    # Nothing can be scaled until the whole board is known, because the base to
+    # scale onto is a property of the board and not of any one row — see
+    # `_board_capital_base`.
+    resolved: List[Tuple[Dict[str, Any], Dict[str, Any], float, List[Dict[str, Any]]]] = []
     for strategy in config.get("strategies", []):
-        run = _find_cached_run(strategy["id"], start_date, end_date, session_id)
+        run = _find_cached_run(
+            strategy["id"],
+            start_date,
+            end_date,
+            session_id,
+            display_capital,
+            strategy.get("strategy_prompt"),
+        )
         if not run:
             continue
+        board_runs.append(run)
 
         equity_hourly = db.get_equity_curve(run["run_id"]) or []
-        stored_initial = float(
-            run.get("initial_equity") or config.get("initial_capital", INITIAL_CAPITAL)
-        )
-        # Display capital may differ from the stored seed run (e.g. $100k seed
-        # shown as $1k). Scale dollar levels; returns / Sharpe stay unchanged.
-        scale = (display_capital / stored_initial) if stored_initial else 1.0
+        stored_initial = _stored_seed(run, equity_hourly)
+        if stored_initial is None:
+            # A published leaderboard row is a claim, and with no recorded seed
+            # and no usable first point there is no honest number to make it
+            # with. Skipping costs one row; the old config fallback published a
+            # curve at an unverified scale, which costs the board's credibility.
+            print(
+                f"ERROR: leaderboard entry '{strategy['id']}' (run "
+                f"{run['run_id']}) records no seed capital and its curve has no "
+                "usable first point — omitted from the board rather than "
+                "published at a scale nobody verified (issue #365)."
+            )
+            continue
+        resolved.append((strategy, run, stored_initial, equity_hourly))
+
+    # Criterion 3 of issue #365: one board must not mix seed capital. This is
+    # the only seam that sees EVERY entry — `ensure_leaderboard_runs` skips the
+    # LLM entries before it looks anything up (they deploy manually), which is
+    # precisely the half the mixing lives in.
+    _warn_on_capital_drift(board_runs, display_capital)
+    # ⚠ ONLY A RECORDED SEED VOTES, AND ONLY A RECORDED SEED CAN BE OUTVOTED.
+    # `_stored_seed` falls back to the curve's own first equity point, and that
+    # point is the equity at the END of the run's first hour — seed plus one
+    # hour of P&L. So a run seeded at exactly $100,000 that moved 0.4% in hour
+    # one derives $100,400, and comparing THAT against the board's base at a
+    # one-cent tolerance is not a capital check, it is a check on whether the
+    # strategy happened to be flat at the open. Every derived row that moved at
+    # all failed it and vanished from the public Competition board — the same
+    # absent-treated-as-a-measurement defect this change exists to remove, and
+    # a strictly worse outcome than the unscaled row that used to publish.
+    #
+    # The tolerance is right for what it was written for: a *recorded* seed is
+    # an exact stored number (100000.00000000003 is a float round-trip, not a
+    # different capital), so a penny of disagreement there really does mean two
+    # runs at two capitals. A derived seed simply cannot carry that signal.
+    # Hence the split: recorded seeds decide the base and are held to it;
+    # derived rows publish through the scaling shim and are reported by
+    # `_warn_on_seed_mismatch` — which is what that warning was written for and
+    # was, before this, unreachable whenever the board agreed with its config.
+    recorded_seeds = [
+        seed for _, run, seed, _ in resolved if _run_seed(run) is not None
+    ]
+    capital_base = _board_capital_base(recorded_seeds, display_capital)
+
+    # SECOND PASS: publish the entries that share the board's one capital base.
+    for strategy, run, stored_initial, equity_hourly in resolved:
+        if (
+            capital_base is not None
+            and _run_seed(run) is not None
+            and abs(stored_initial - capital_base) > _SEED_MATCH_TOLERANCE
+        ):
+            # An outlier in a board that otherwise agrees. Ranking it against
+            # the rest would compare runs that were not measured the same way.
+            print(
+                f"WARNING: leaderboard entry '{strategy['id']}' (run "
+                f"{run['run_id']}) was run at ${stored_initial:,.2f} while the "
+                f"rest of this board was run at ${capital_base:,.2f} — omitted "
+                "rather than ranked against curves it is not comparable with "
+                "(issue #365). Re-run this entry at the board's seed: a "
+                "force-refresh does that only for an auto_compute baseline, an "
+                "LLM entry needs deploy_model_run(force_refresh=True)."
+            )
+            continue
+        # SCALING IS A COMPATIBILITY SHIM, NOT A RE-RUN, and it is only honest
+        # for a scale-free strategy. Position sizing, whole-share/lot quanta and
+        # per-trade costs make a $10k run a genuinely *different* run from a
+        # $100k one rather than a scaled copy of it — a $10k account cannot buy
+        # the same basket in the same proportions, so its returns differ, not
+        # just its dollar levels. Returns / Sharpe below come off the stored run
+        # untouched, so the shim moves the dollar axis only. Re-running each
+        # entry at the published seed is the real fix (issue #194).
+        scale = display_capital / stored_initial
+        if (
+            _run_seed(run) is None
+            and abs(stored_initial - display_capital) > _SEED_MATCH_TOLERANCE
+        ):
+            # ONLY THE DERIVED CASE, and the narrowing is the point. A row
+            # that recorded its seed is already reported by
+            # `_warn_on_capital_drift` over the whole board above, and two lines
+            # for one condition is how a log stops being read: an alert channel
+            # has a credibility budget, and every duplicate line spends it, the
+            # same way a badge that cries wolf stops being looked at. This one
+            # covers what that warning structurally cannot see -- `_run_seed` is
+            # None here, so the board's own drift scan skips the row entirely.
+            _warn_on_seed_mismatch(
+                strategy["id"], run["run_id"], stored_initial, display_capital
+            )
         scaled_hourly = [
             {
                 **pt,
-                "equity": float(pt.get("equity") or 0) * scale,
-                "cash": float(pt.get("cash") or 0) * scale,
-                "positions_value": float(pt.get("positions_value") or 0) * scale,
+                "equity": _scaled_level(pt.get("equity"), scale),
+                "cash": _scaled_level(pt.get("cash"), scale),
+                "positions_value": _scaled_level(pt.get("positions_value"), scale),
             }
             for pt in equity_hourly
         ]
+        _report_curve_integrity(strategy["id"], run["run_id"], scaled_hourly)
         equity_curve = chart_equity_curve(
             scaled_hourly,
             initial_equity=display_capital,
@@ -1479,11 +2138,14 @@ def get_leaderboard(
         )
         strat = strategy_by_id.get(strategy["id"], strategy)
         is_model = strat.get("strategy") == "llm_agent" or strat.get("label") == "Model"
-        final_equity = run.get("final_equity")
-        if final_equity is None:
-            portfolio_value = display_capital
-        else:
-            portfolio_value = float(final_equity) * scale
+        # `= display_capital` here was the same defect as the two this change
+        # exists for: a run that recorded no final equity was published as an
+        # account that finished exactly level, which is a claim nobody made.
+        # `_rank_sort_key` already falls back to `cumulative_return` for a None,
+        # and both chart readers now render it as an em dash.
+        stored_final = run.get("final_equity")
+        scaled_final = _scaled_level(stored_final, scale)
+        portfolio_value = scaled_final
 
         entries.append(
             {
