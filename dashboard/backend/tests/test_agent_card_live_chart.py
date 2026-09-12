@@ -475,9 +475,11 @@ def _visibility(visible: str, *, with_group: bool) -> dict:
             "const document = {getElementById: (id) => nodes[id] || null};",
             fn_body("function setBacktestRunSelectorVisible("),
             f"setBacktestRunSelectorVisible({visible});",
-            "console.log(JSON.stringify({select: nodes.backtestRunSelect.hidden,"
-            " group: nodes.backtestRunHistory"
-            " ? nodes.backtestRunHistory.hidden : null}));",
+            (
+                "console.log(JSON.stringify({select: nodes.backtestRunSelect.hidden,"
+                " group: nodes.backtestRunHistory"
+                " ? nodes.backtestRunHistory.hidden : null}));"
+            ),
         ]
     )
     return _node(script)
@@ -510,24 +512,32 @@ def _populate(*, pin: str, select_value: str, running_id: str, runs: str) -> dic
         [
             js_const("SELECTED_BACKTEST_RUN_KEY"),
             f"const store = {{[SELECTED_BACKTEST_RUN_KEY]: {pin}}};",
-            "const localStorage = {getItem: (k) => store[k] ?? null,"
-            " setItem: (k, v) => { store[k] = v; },"
-            " removeItem: (k) => { delete store[k]; }};",
+            (
+                "const localStorage = {getItem: (k) => store[k] ?? null,"
+                " setItem: (k, v) => { store[k] = v; },"
+                " removeItem: (k) => { delete store[k]; }};"
+            ),
             f"const select = {{value: {select_value}, innerHTML: '', hidden: false}};",
             "const group = {hidden: false};",
-            "const document = {getElementById: (id) => id === 'backtestRunSelect'"
-            " ? select : (id === 'backtestRunHistory' ? group : null)};",
+            (
+                "const document = {getElementById: (id) => id === 'backtestRunSelect'"
+                " ? select : (id === 'backtestRunHistory' ? group : null)};"
+            ),
             "function escapeHtml(s) { return String(s); }",
             "function formatBacktestRunPrimary(r) { return r.agent_name || 'Agent'; }",
             "function formatBacktestRunLabel(r) { return r.run_id; }",
-            "function getBacktestLaunchConfig() {"
-            " return {agentName: 'A', startedAt: ''}; }",
+            (
+                "function getBacktestLaunchConfig() {"
+                " return {agentName: 'A', startedAt: ''}; }"
+            ),
             fn_body("function setBacktestRunSelectorVisible("),
             fn_body("function populateBacktestRunSelector("),
             f"populateBacktestRunSelector({runs}, {{runningId: {running_id}}});",
-            "console.log(JSON.stringify({selected: select.value,"
-            " pin: store[SELECTED_BACKTEST_RUN_KEY] ?? null,"
-            " options: select.innerHTML}));",
+            (
+                "console.log(JSON.stringify({selected: select.value,"
+                " pin: store[SELECTED_BACKTEST_RUN_KEY] ?? null,"
+                " options: select.innerHTML}));"
+            ),
         ]
     )
     return _node(script)
