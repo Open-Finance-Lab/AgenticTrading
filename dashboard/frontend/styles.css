@@ -3664,6 +3664,13 @@ a.header-brand:hover .title-section h1 {
         display: none;
     }
 
+    /* Must share the hide rule's breakpoint above, not the ≤900px block's --
+       a narrower re-show threshold left the setup panel gone with no
+       replacement between this width and 900px (issue #129). */
+    .playground-backtest-panel .left-panel {
+        display: flex;
+    }
+
     .chart-legend {
         grid-template-columns: 1fr;
     }
@@ -3799,10 +3806,6 @@ a.header-brand:hover .title-section h1 {
 
     .main-container {
         grid-template-columns: 1fr;
-    }
-
-    .playground-backtest-panel .left-panel {
-        display: flex;
     }
 
     .playground-backtest-panel .right-panel {

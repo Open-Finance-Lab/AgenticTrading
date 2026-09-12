@@ -8,11 +8,17 @@ a declaration inside a rule, an identifier in an expression -- via the helpers
 below.
 
 Know what these cannot prove. CSS text shows a rule exists, never that anything
-is visible at a given viewport: the ``@media (max-width: 900px)`` rules below
-coexist with a pre-existing ``.left-panel { display: none }`` at
-``max-width: 1200px``, so the setup panel is still hidden from 901-1200px and
-these assertions pass anyway. Layout needs a real browser; treat this file as a
-wiring guard only.
+is visible at a given viewport -- these assertions would pass even if the rule
+they check were shadowed by a higher-specificity or later-cascading one.
+Layout needs a real browser; treat this file as a wiring guard only.
+
+(The setup panel used to be exactly such a case: ``.playground-backtest-panel
+.left-panel { display: flex }`` lived in this file's ``900px`` block while the
+``.left-panel { display: none }`` it was meant to correct fired from
+``max-width: 1200px``, leaving the panel hidden with no replacement from
+901-1200px -- issue #129. The re-show rule now lives in the 1200px block, next
+to the hide rule it answers; see the breakpoint-equality guard in
+test_frontend_setup_panel_breakpoint.py.)
 """
 
 import re
@@ -112,12 +118,20 @@ def test_backtest_request_and_result_labels_include_data_source(js):
     assert "vn.py simulated data" in js
 
 
-def test_mobile_backtest_exposes_setup_controls(css):
+def test_narrow_viewport_backtest_exposes_setup_controls(css):
     """Wiring guard only -- see the module docstring on what CSS text cannot
-    prove about actual visibility."""
+    prove about actual visibility.
+
+    Named for "narrow", not "mobile": the setup panel's re-show rule sits at the
+    1200px breakpoint (issue #129), which is a laptop in a split window, while
+    the two rules under it remain 900px/phone-width ones.
+    """
+    narrow = _media_block(css, "1200px")
     mobile = _media_block(css, "900px")
 
-    assert _has_declaration(mobile, ".playground-backtest-panel .left-panel", "display", "flex")
+    # Shares the 1200px breakpoint with the `.left-panel { display: none }`
+    # rule it corrects (issue #129) -- not the 900px block below.
+    assert _has_declaration(narrow, ".playground-backtest-panel .left-panel", "display", "flex")
     assert _has_declaration(mobile, ".playground-backtest-panel .right-panel", "display", "flex")
     assert _has_declaration(mobile, ".performance-card .section-header", "flex-direction", "column")
 
