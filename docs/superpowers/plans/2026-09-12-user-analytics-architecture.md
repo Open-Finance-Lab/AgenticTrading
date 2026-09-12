@@ -2758,7 +2758,7 @@ NOW = datetime(2026, 9, 12, 12, 0, tzinfo=timezone.utc)
 
 def test_batched_signals_match_the_per_user_facts(operational_fixture):
     """Same users, same instant, same answer."""
-    store, user_ids = operational_fixture
+    store, user_ids = operational_fixture.store, operational_fixture.user_ids
 
     batched = store.list_operational_signals(user_ids, now=NOW)
 
@@ -2787,7 +2787,7 @@ def test_batched_signals_match_the_per_user_facts(operational_fixture):
         )
 
 
-def test_batched_signals_do_not_query_per_user(operational_fixture, counting_stores):
+def test_batched_signals_do_not_query_per_user(tmp_path):
     """Query count is fixed, not proportional to the population.
 
     Asserting a literal ceiling ("<= 4") pins an implementation detail this
@@ -2796,18 +2796,18 @@ def test_batched_signals_do_not_query_per_user(operational_fixture, counting_sto
     property that actually matters is that neither number moves when the
     user count does.
     """
-    small_store, small_ids = operational_fixture
-    large_store, large_ids = _operational_fixture_of_size(len(small_ids) * 4)
+    small = _operational_fixture(tmp_path / "small", users=10)
+    large = _operational_fixture(tmp_path / "large", users=40)
 
-    counting_stores.reset()
-    small_store.list_operational_signals(small_ids, now=NOW)
-    small_calls = counting_stores.total_calls
+    small.reset()
+    small.store.list_operational_signals(small.user_ids, now=NOW)
+    small_calls = small.total_calls
 
-    counting_stores.reset()
-    large_store.list_operational_signals(large_ids, now=NOW)
+    large.reset()
+    large.store.list_operational_signals(large.user_ids, now=NOW)
 
-    assert counting_stores.calls_with_scalar_user_id == []
-    assert counting_stores.total_calls == small_calls
+    assert large.calls_with_scalar_user_id == []
+    assert large.total_calls == small_calls
     # A loose absolute bound as well, so "zero queries because it silently
     # returned defaults" cannot pass the equality above.
     assert 4 <= small_calls <= 8
@@ -2820,10 +2820,11 @@ def test_the_batched_count_is_consecutive_not_total(operational_fixture):
     every other assertion stayed green, because both numbers are plausible
     and only one of them matches the reason code the UI renders.
     """
-    store, _user_ids = operational_fixture
     user_id = operational_fixture.interleaved_failures_id
 
-    signals = store.list_operational_signals([user_id], now=NOW)[user_id]
+    signals = operational_fixture.store.list_operational_signals(
+        [user_id], now=NOW
+    )[user_id]
 
     assert signals.failed_terminal_runs_24h == 2
     assert calculate_operational_state(signals, NOW).state == "healthy"
@@ -2831,16 +2832,18 @@ def test_the_batched_count_is_consecutive_not_total(operational_fixture):
 
 def test_a_user_with_no_rows_reads_as_healthy(operational_fixture):
     """Absence of a credential or a run is not a problem to report."""
-    store, user_ids = operational_fixture
+    absent = max(operational_fixture.user_ids) + 1
 
-    signals = store.list_operational_signals([max(user_ids) + 1], now=NOW)[
-        max(user_ids) + 1
-    ]
+    signals = operational_fixture.store.list_operational_signals(
+        [absent], now=NOW
+    )[absent]
 
     assert calculate_operational_state(signals, NOW).state == "healthy"
 ```
 
-Build `operational_fixture`, `_operational_fixture_of_size` and `counting_stores` as local fixtures/helpers in this file, seeding at least:
+Build `_operational_fixture(path, *, users=N)` as a local helper returning one object — `.store` (a `ValueAnalyticsStore` whose bases are wrapped in call-counting spies), `.user_ids`, `.total_calls`, `.calls_with_scalar_user_id`, `.reset()`, and the named ids below — with a thin `operational_fixture` pytest fixture over it for the default seed. **One object, not a `(store, ids)` tuple and a separate `counting_stores` fixture**: the budget case has to compare two differently-sized populations, which needs two independent stores *and* their two independent counters, and a module-level counter fixture cannot tell them apart. Follow `_daily_fixture` in Task B10, which has the same shape for the same reason.
+
+Seed at least:
 
 - one restricted account;
 - one account with an invalid default credential;
@@ -3236,6 +3239,24 @@ def test_the_job_issues_no_query_for_a_single_user(daily_fixture, counting_store
 ```
 
 `capsys.readouterr()` is drained once and reused above. Calling it twice, as the first draft of this file did, returns an empty buffer the second time and the `"category=" in ...` assertion then passes only because of an `or True` — which is worth stating explicitly because it is the exact shape of an assertion that can never fail.
+
+`daily_fixture` is one object, in the same shape as `_operational_fixture` in Task B7 and `_daily_fixture` in Task B10. The cases above need it to expose:
+
+| Member | Purpose |
+|---|---|
+| `.store`, `.counting_store` | the real store, and a call-counting wrapper over it |
+| `.admin_id`, `.excluded_id`, `.active_id`, `.at_risk_id` | seeded accounts, by role in the assertions |
+| `.created_today_id` | an account created after D ended — must get no row |
+| `.fact_for(user_id)`, `.transitions_for(user_id)` | read back one row |
+| `.break_step(name)`, `.repair_step(name)` | make one job step raise, then stop it raising |
+| `.seed_previous_segment(segment)` | write D-1's fact row so the transition diff has something to compare against |
+| `.touch_activity(user_id, at=)` | set `user_activity` to an instant **after** D ended, which is the state any overnight traffic leaves behind |
+| `.create_user_at(when)` | add an account with that `created_at`, returning `.created_today_id` |
+| `.seed_two_of_three_before_d()` | a user one active day and one success short of `core` in `D-29..D-1` |
+| `.seed_success_on(day, user_id)` | one `backtest_completed` on that day |
+| `.append_event(user_id, *, event_name, occurred_at, received_at)` | append with an explicit `received_at`, which is what makes the late-arrival case reproducible |
+
+The last four exist only for the two correctness properties in job steps 9a/9b and the recompute sweep. A fixture that cannot set `received_at` independently of `occurred_at` cannot express "arrived after the day was written" at all, which is how that defect survived the first draft.
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
