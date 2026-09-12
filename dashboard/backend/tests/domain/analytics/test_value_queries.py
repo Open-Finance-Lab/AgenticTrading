@@ -29,12 +29,13 @@ UTC = timezone.utc
 NOW = datetime(2026, 9, 3, 12, 0, tzinfo=UTC)
 
 
-def _user(user_id: int) -> dict[str, object]:
+def _user(user_id: int, user_group: str = "unknown") -> dict[str, object]:
     return {
         "id": user_id,
         "display_name": f"Value User {user_id}",
         "email": f"value-{user_id}@example.test",
         "created_at": (NOW - timedelta(days=90)).isoformat(),
+        "user_group": user_group,
     }
 
 
@@ -249,11 +250,13 @@ def _service(
     commercial=None,
     daily=(),
     events=(),
+    user_groups=None,
     rollups=(),
     excluded=(),
     legacy_availability=None,
 ):
     facts = commercial or {user_id: _commercial(user_id) for user_id in snapshots}
+    group_values = dict(user_groups or {})
     value_store = FakeValueStore(
         snapshots=snapshots,
         commercial=facts,
@@ -262,12 +265,36 @@ def _service(
     legacy_service = FakeLegacyService(legacy_availability)
     service = ValueAnalyticsQueryService(
         store=FakeBaseStore(excluded),
-        user_store=FakeUserStore([_user(user_id) for user_id in snapshots]),
+        user_store=FakeUserStore(
+            [_user(user_id, group_values.get(user_id, "unknown")) for user_id in snapshots]
+        ),
         value_store=value_store,
         query_store=FakeQueryStore(events=events, rollups=rollups),
         legacy_service=legacy_service,
     )
     return service, value_store, legacy_service
+
+
+def _metric_event(
+    user_id: int,
+    event_name: str,
+    occurred_at: str | datetime,
+    *,
+    billing_mode: str | None = None,
+    properties: dict[str, object] | None = None,
+):
+    at = (
+        datetime.fromisoformat(occurred_at)
+        if isinstance(occurred_at, str)
+        else occurred_at
+    )
+    return SimpleNamespace(
+        user_id=user_id,
+        event_name=event_name,
+        occurred_at=at,
+        billing_mode=billing_mode,
+        properties=properties or {},
+    )
 
 
 def _activity(user_id: int, occurred_at: datetime):
@@ -470,6 +497,101 @@ def test_user_list_uses_injected_utc_day_for_commercial_window():
             datetime(2026, 9, 4, tzinfo=UTC),
         )
     ]
+
+
+def test_group_summary_has_six_rows_zeroes_and_fixed_order():
+    service, _value_store, _legacy = _service(
+        snapshots={1: _snapshot(1)},
+        user_groups={1: "organic"},
+        events=[
+            _metric_event(
+                1,
+                "backtest_requested",
+                "2026-09-01T01:00:00+00:00",
+            ),
+            _metric_event(
+                1,
+                "backtest_completed",
+                "2026-09-01T02:00:00+00:00",
+            ),
+            _metric_event(
+                1,
+                "backtest_completed",
+                "2026-09-03T02:00:00+00:00",
+            ),
+        ],
+    )
+
+    result = service.get_groups(
+        date(2026, 9, 1), date(2026, 9, 4), now=NOW
+    )
+
+    assert [row.group for row in result.groups] == [
+        "internal",
+        "invited",
+        "organic",
+        "competition",
+        "partner",
+        "unknown",
+    ]
+    organic = result.groups[2]
+    assert organic.users == 1
+    assert organic.successful_run_users == 1
+    assert organic.repeat_users == 1
+    assert organic.total_runs == 1
+    assert result.groups[0].users == 0
+    assert result.availability.status == "ready"
+
+
+def test_group_summary_cost_excludes_byok_and_paid_uses_lifetime_credits():
+    service, _value_store, _legacy = _service(
+        snapshots={1: _snapshot(1), 2: _snapshot(2)},
+        user_groups={1: "partner", 2: "organic"},
+        commercial={
+            1: _commercial(1, 5_000_000),
+            2: _commercial(2, 0),
+        },
+        events=[
+            _metric_event(
+                1,
+                "model_usage_recorded",
+                "2026-09-01T01:00:00+00:00",
+                billing_mode="platform_credits",
+                properties={"cost_micro_usd": 1234},
+            ),
+            _metric_event(
+                1,
+                "model_usage_recorded",
+                "2026-09-01T02:00:00+00:00",
+                billing_mode="byok",
+                properties={"cost_micro_usd": 9999},
+            ),
+        ],
+    )
+
+    result = service.get_groups(
+        date(2026, 9, 1), date(2026, 9, 2), now=NOW
+    )
+
+    partner = next(row for row in result.groups if row.group == "partner")
+    organic = next(row for row in result.groups if row.group == "organic")
+    assert partner.atl_cost_micro_usd == 1234
+    assert partner.paid_users == 1
+    assert organic.atl_cost_micro_usd == 0
+    assert organic.paid_users == 0
+
+
+def test_user_group_filter_applies_to_priority_users():
+    service, _value_store, _legacy = _service(
+        snapshots={1: _snapshot(1, operational="blocked"), 2: _snapshot(2)},
+        user_groups={1: "partner", 2: "organic"},
+    )
+
+    filters = UserValueFilters(user_group="partner", priority=True)
+    page = service.list_users(filters=filters, limit=25, offset=0, now=NOW)
+
+    assert filters.user_group == "partner"
+    assert [item.user_id for item in page.items] == [1]
 
 
 def test_commercial_response_keeps_revenue_usage_grants_cost_and_balances_separate():
