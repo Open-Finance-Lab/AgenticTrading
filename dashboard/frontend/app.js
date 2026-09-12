@@ -5679,6 +5679,23 @@ const BACKTEST_POLL_FAILURE_BUDGET = 5;
 // the real live_run_id by promoteBacktestRunKey(). Entries written by an earlier
 // build were keyed by agent id and carry no `agentId` field; every read below
 // falls back to the key, so a reload mid-run across a deploy keeps its card.
+/**
+ * Label for the ex-rights dates a run crossed.
+ *
+ * Pure and hoisted out of the render so it can be executed under node: the
+ * clause that matters -- "drop is not a real loss" -- is the entire reason the
+ * row exists, and a source-shape guard cannot tell whether it survives a
+ * truncation.
+ */
+function formatCorporateActionGaps(gaps) {
+    const sample = gaps
+        .slice(0, 3)
+        .map((gap) => `${gap.symbol} ${gap.date}`)
+        .join(' · ');
+    const more = gaps.length > 3 ? ` · +${gaps.length - 3} more` : '';
+    return `${sample}${more} — drop is not a real loss`;
+}
+
 const RUNNING_BACKTESTS_KEY = 'running-backtests';
 // Paired with a timestamp in the key below: the counter alone restarts at 0 on
 // reload, and sessionStorage survives a reload, so a fresh launch would land on
@@ -9560,6 +9577,22 @@ function renderBacktestRunConfig(
     if (marketRulesRow) marketRulesRow.hidden = !showMarketRules;
     if (showMarketRules) {
         setBacktestConfigText('backtestConfigMarketRules', 'Enabled');
+    }
+    // A run reaches here only with the operator override armed, so this row is
+    // the whole visible half of issue #346: the curve still charts the ex-rights
+    // drop as a loss, and this is what stops a reader taking that loss at face
+    // value. Absent (the overwhelming majority) hides the row rather than
+    // rendering a reassuring "None" nobody asked for.
+    const corporateActionGaps = Array.isArray(marketRuleProfile?.corporate_action_gaps)
+        ? marketRuleProfile.corporate_action_gaps
+        : [];
+    const corporateActionsRow = document.getElementById('backtestConfigCorporateActionsRow');
+    if (corporateActionsRow) corporateActionsRow.hidden = corporateActionGaps.length === 0;
+    if (corporateActionGaps.length) {
+        setBacktestConfigText(
+            'backtestConfigCorporateActions',
+            formatCorporateActionGaps(corporateActionGaps),
+        );
     }
     const rejectionLabels = {
         suspended: 'Suspended',

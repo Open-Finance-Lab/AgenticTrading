@@ -140,6 +140,10 @@ os.environ.pop("ADMIN_BOOTSTRAP_SECRET", None)
 os.environ.pop("IFIND_REFRESH_TOKEN", None)
 os.environ.pop("IFIND_ACCESS_TOKEN", None)
 os.environ.pop("IFIND_BASE_URL", None)
+# Not a credential, same baseline argument: this one decides whether a window
+# crossing a 除权除息 date refuses or runs, so a developer with it exported sees
+# the refusal tests pass vacuously.
+os.environ.pop("IFIND_ALLOW_CORPORATE_ACTION_GAPS", None)
 
 # Same reason, one layer down: this one changes how many times the empty-reply
 # retry loop re-asks the failing output ceiling before the rescue call. A
