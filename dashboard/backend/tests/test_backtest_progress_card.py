@@ -435,6 +435,11 @@ def test_the_two_renderers_agree_when_progress_vanishes():
 def _advance(previous_js: str, progress_js: str, now: int) -> dict:
     script = "\n".join(
         [
+            # advanceBacktestProgress reads this when it trims the live equity
+            # curve for the card sparkline. Injected rather than stubbed: the
+            # harness runs the shipped function, so it owes it the shipped
+            # constant.
+            js_const("LIVE_SPARK_MAX_POINTS"),
             fn_body("function advanceBacktestProgress("),
             f"console.log(JSON.stringify("
             f"advanceBacktestProgress({previous_js}, {progress_js}, {now})));",
@@ -782,11 +787,19 @@ def test_poller_queries_each_concurrent_live_run_id():
     """After entitlements allow N concurrent dashboard backtests, a single
     focused liveBacktestRunId poll left every other card on an empty bar.
     The poller must ask /backtest/status?live_run_id= for each in-flight job.
+
+    The query string itself now lives in `backtestStatusUrl` -- loadData built
+    the same URL without the parameter and opened the wrong run, so there is one
+    builder rather than three spellings. What this guard is about survives the
+    move unchanged: the poller must hand it *each job's own* run id, not poll
+    once for whatever the session is running most recently.
     """
     poller = fn_body("function ensureBacktestPolling(")
     assert "Promise.all" in poller
-    assert "live_run_id=" in poller
+    assert "backtestStatusUrl(job.runId)" in poller
     assert "liveBacktestProgressByRunId[" in poller
+    builder = fn_body("function backtestStatusUrl(")
+    assert "live_run_id=" in builder
 
 
 def test_progress_reaches_each_concurrent_agent():

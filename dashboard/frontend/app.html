@@ -1293,9 +1293,17 @@
                         <span id="backtestDataSourceBadge" class="data-source-badge" hidden></span>
                     </div>
                     <div class="chart-controls">
-                        <select id="backtestRunSelect" class="filter-select backtest-run-select" aria-label="Select backtest run" hidden>
-                            <option value="">Latest run</option>
-                        </select>
+                        <!-- Labelled and lifted out of the time-range row on
+                             purpose: as a bare select between the chart title
+                             and 1D/1W/1M/ALL it read as another way to reframe
+                             the current chart, and a tester concluded run
+                             history was not stored at all. -->
+                        <div class="backtest-run-history" id="backtestRunHistory" hidden>
+                            <label class="backtest-run-history-label" for="backtestRunSelect">Run history</label>
+                            <select id="backtestRunSelect" class="filter-select backtest-run-select" aria-label="Select backtest run">
+                                <option value="">Latest run</option>
+                            </select>
+                        </div>
                         <button class="time-btn active">1D</button>
                         <button class="time-btn">1W</button>
                         <button class="time-btn">1M</button>
