@@ -4,6 +4,14 @@
 
   const { formatCredits, formatCreditsMicro } = window.CreditFormat;
   const ADMIN_CREDITS_USERS_PAGE_SIZE = 25;
+  const USER_GROUP_OPTIONS = Object.freeze([
+    ['internal', 'Internal'],
+    ['invited', 'Invited'],
+    ['organic', 'Organic'],
+    ['competition', 'Competition'],
+    ['partner', 'Partner'],
+    ['unknown', 'Unknown'],
+  ]);
 
   const state = {
     initialized: false,
@@ -165,6 +173,47 @@
     return user.display_name || user.email || `User #${user.id}`;
   }
 
+  function normalizeUserGroup(value) {
+    const normalized = String(value || '').trim().toLowerCase();
+    return USER_GROUP_OPTIONS.some(([optionValue]) => optionValue === normalized)
+      ? normalized
+      : 'unknown';
+  }
+
+  function userGroupLabel(value) {
+    const normalized = normalizeUserGroup(value);
+    return USER_GROUP_OPTIONS.find(([optionValue]) => optionValue === normalized)?.[1] || 'Unknown';
+  }
+
+  function renderUserGroup(user) {
+    const select = document.createElement('select');
+    select.className = 'admin-credits-group-select';
+    select.setAttribute('aria-label', `Group for ${userName(user)}`);
+    const currentGroup = normalizeUserGroup(user.user_group);
+    USER_GROUP_OPTIONS.forEach(([optionValue, label]) => {
+      const option = document.createElement('option');
+      option.value = optionValue;
+      option.textContent = label;
+      option.selected = optionValue === currentGroup;
+      select.appendChild(option);
+    });
+    select.addEventListener('change', () => mutateUserGroup(user, select));
+    return select;
+  }
+
+  function groupErrorNode(groupSelect) {
+    return groupSelect?.closest('.admin-credits-group')?.querySelector('.admin-credits-group-error') || null;
+  }
+
+  function setGroupError(groupSelect, message = '') {
+    const errorNode = groupErrorNode(groupSelect);
+    if (!errorNode) return;
+    errorNode.textContent = message;
+    errorNode.hidden = !message;
+    if (message) groupSelect.setAttribute('aria-invalid', 'true');
+    else groupSelect.removeAttribute('aria-invalid');
+  }
+
   function renderUsersPager() {
     const range = element('adminCreditsUsersRange');
     const previous = element('adminCreditsUsersPrevBtn');
@@ -192,7 +241,7 @@
     if (!state.users.length) {
       const row = document.createElement('tr');
       const cell = textNode('td', 'admin-empty', 'No matching accounts.');
-      cell.colSpan = 8;
+      cell.colSpan = 9;
       row.appendChild(cell);
       body.appendChild(row);
       return;
@@ -205,6 +254,15 @@
       account.className = 'admin-credits-account';
       account.appendChild(textNode('strong', '', userName(user)));
       account.appendChild(textNode('span', '', user.email || `User #${user.id}`));
+      const groupCell = document.createElement('td');
+      groupCell.className = 'admin-credits-group';
+      const groupSelect = renderUserGroup(user);
+      const groupError = textNode('span', 'admin-credits-group-error', '');
+      groupError.id = `admin-credits-group-error-${Number(user.id)}`;
+      groupError.hidden = true;
+      groupError.setAttribute('role', 'alert');
+      groupSelect.setAttribute('aria-describedby', groupError.id);
+      groupCell.append(groupSelect, groupError);
       const roleCell = document.createElement('td');
       roleCell.className = 'admin-credits-role';
       const role = user.role === 'admin' ? 'admin' : 'user';
@@ -271,6 +329,7 @@
 
       row.append(
         account,
+        groupCell,
         roleCell,
         statusCell,
         textNode('td', 'admin-credits-number', formatCredits(balance.display_grant_credits)),
@@ -281,6 +340,42 @@
       );
       body.appendChild(row);
     });
+  }
+
+  async function mutateUserGroup(user, groupSelect) {
+    const previousGroup = normalizeUserGroup(user.user_group);
+    const nextGroup = normalizeUserGroup(groupSelect.value);
+    const subject = userName(user);
+    setGroupError(groupSelect);
+    if (nextGroup === previousGroup) {
+      groupSelect.value = previousGroup;
+      return;
+    }
+
+    groupSelect.disabled = true;
+    try {
+      setStatus(`Updating group for ${subject}…`, 'pending');
+      const data = await request(`/api/admin/users/${Number(user.id)}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ user_group: nextGroup }),
+      });
+      const updatedUser = data?.user || {};
+      if (!Object.prototype.hasOwnProperty.call(updatedUser, 'user_group')) {
+        throw new Error('Group update response was incomplete.');
+      }
+      const savedGroup = normalizeUserGroup(updatedUser.user_group);
+      Object.assign(user, updatedUser);
+      user.user_group = savedGroup;
+      groupSelect.value = savedGroup;
+      setGroupError(groupSelect);
+      setStatus(`${subject} is now in ${userGroupLabel(savedGroup)}.`, 'success');
+    } catch (error) {
+      groupSelect.value = previousGroup;
+      setGroupError(groupSelect, error.message || 'Group update failed.');
+      if (!handleAccessLost(error)) setStatus(error.message || 'Group update failed.', 'error');
+    } finally {
+      groupSelect.disabled = false;
+    }
   }
 
   async function reinstateUser(user) {

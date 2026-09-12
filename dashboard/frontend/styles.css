@@ -14420,6 +14420,10 @@ table.sr-only {
     font-size: 12px;
 }
 
+.admin-credits-users-table {
+    min-width: 900px;
+}
+
 .admin-credits-users-table th,
 .admin-credits-users-table td,
 .admin-credits-activity-table th,
@@ -14501,6 +14505,45 @@ table.sr-only {
     color: var(--text-primary);
     font: inherit;
     font-size: 12px;
+}
+
+.admin-credits-group {
+    white-space: nowrap;
+}
+
+.admin-credits-group-select {
+    width: 132px;
+    min-width: 118px;
+    max-width: 160px;
+    padding: 6px 8px;
+    border: 1px solid var(--border-color);
+    border-radius: 6px;
+    background: var(--bg-primary);
+    color: var(--text-primary);
+    font: inherit;
+    font-size: 12px;
+}
+
+.admin-credits-role-select:focus,
+.admin-credits-group-select:focus {
+    outline: none;
+    border-color: var(--info-color);
+    box-shadow: 0 0 0 2px rgba(0, 191, 255, 0.12);
+}
+
+.admin-credits-group-select:disabled {
+    cursor: wait;
+    opacity: 0.62;
+}
+
+.admin-credits-group-error {
+    display: block;
+    max-width: 160px;
+    margin-top: 4px;
+    color: var(--danger-color);
+    font-size: 10px;
+    line-height: 1.35;
+    white-space: normal;
 }
 
 .admin-credits-number,
