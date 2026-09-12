@@ -5,7 +5,6 @@ from __future__ import annotations
 import subprocess
 import sys
 import uuid
-from types import SimpleNamespace
 
 import pytest
 from fastapi.testclient import TestClient

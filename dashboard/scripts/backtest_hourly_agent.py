@@ -560,11 +560,12 @@ def _exit_on_sigterm(signum, _frame):
     escalates to SIGKILL precisely so this unwind can happen — with no handler
     installed, that grace period bought nothing and its comment said otherwise.
 
-    Raising rather than calling ``sys.exit`` because a signal handler runs on
-    the main thread: the exception propagates through the ``finally`` blocks the
-    same way a ``KeyboardInterrupt`` would. A child that ignores this still dies
-    to the SIGKILL, so the handler can only make the stop cleaner, never slower
-    than the grace period.
+    ``SystemExit`` specifically, because it derives from ``BaseException``: the
+    backtest path is full of ``except Exception`` arms that would otherwise
+    swallow the stop and carry on, and the one ``except BaseException`` it does
+    pass through (``market_data_store``) re-raises. The handler can only make
+    the stop cleaner, never slower than the grace period — a run that ignores
+    this still dies to the SIGKILL behind it.
     """
     raise SystemExit(128 + signum)
 

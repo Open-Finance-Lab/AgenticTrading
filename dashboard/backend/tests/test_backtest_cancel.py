@@ -876,14 +876,19 @@ def test_a_real_cancel_reaps_the_grandchild_not_just_the_child():
     checks the grandchild is dead after the same two calls the cancel route
     makes.
     """
-    child = subprocess.Popen(
+    # Joined outside the argv list: adjacent string literals inside a list are
+    # indistinguishable from a missing comma at a glance, which is what
+    # py/implicit-string-concatenation-in-list exists to catch.
+    spawn_a_grandchild = "; ".join(
         [
-            sys.executable,
-            "-c",
-            "import subprocess, sys, time; "
-            "g = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)']); "
-            "print(g.pid, flush=True); time.sleep(30)",
-        ],
+            "import subprocess, sys, time",
+            "g = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'])",
+            "print(g.pid, flush=True)",
+            "time.sleep(30)",
+        ]
+    )
+    child = subprocess.Popen(
+        [sys.executable, "-c", spawn_a_grandchild],
         stdout=subprocess.PIPE,
         text=True,
         start_new_session=True,
@@ -915,12 +920,12 @@ def test_a_real_cancel_reaps_the_grandchild_not_just_the_child():
         for pid in (grandchild_pid, child.pid):
             try:
                 os.kill(pid, signal.SIGKILL)
-            except OSError:
+            except OSError:  # already gone — which is the outcome under test
                 pass
         child.stdout.close()
         try:
             child.wait(timeout=5)
-        except subprocess.TimeoutExpired:
+        except subprocess.TimeoutExpired:  # reaped by init; nothing to leak
             pass
 
 

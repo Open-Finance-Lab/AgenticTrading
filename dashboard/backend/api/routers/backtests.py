@@ -1983,7 +1983,7 @@ def _close_child_streams(process: Any) -> None:
             continue
         try:
             stream.close()
-        except (OSError, ValueError):
+        except (OSError, ValueError):  # already closed, or the child died first
             pass
 
 
@@ -2063,12 +2063,12 @@ def _run_backtest_subprocess(
         if getattr(process, "stdin", None) is not None:
             try:
                 process.stdin.write(stdin_payload or "")
-            except (OSError, ValueError):
+            except (OSError, ValueError):  # child exited before reading its handoff
                 pass
             finally:
                 try:
                     process.stdin.close()
-                except (OSError, ValueError):
+                except (OSError, ValueError):  # same: nothing left to close
                     pass
         try:
             returncode = process.wait(timeout=timeout)
