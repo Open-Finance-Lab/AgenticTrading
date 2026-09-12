@@ -19,8 +19,8 @@ Update this table as work lands. `state` is one of:
 | PR | Issues | Branch | Worktree | Base | State | PR # |
 |---|---|---|---|---|---|---|
 | 1 | #129 | `fix/backtest-setup-panel-dead-band` | `../ATL-worktrees/p1-setup-panel` | `main` | pr-open | #457 |
-| 2 | #169 | `fix/backtest-run-provenance` | `../ATL-worktrees/p1-provenance` | `main` | in-progress | — |
-| 3 | #273, #308 | `fix/backtest-cancel-and-memory` | `../ATL-worktrees/p1-cancel-memory` | PR 2 branch | not-started | — |
+| 2 | #169 | `fix/backtest-run-provenance` | `../ATL-worktrees/p1-provenance` | `main` | pushed `0288ff79` | — |
+| 3 | #273, #308 | `fix/backtest-cancel-and-memory` | `../ATL-worktrees/p1-cancel-memory` | `fix/backtest-run-provenance` @ `0288ff79` | in-progress | — |
 | 4 | #390, #365 | `fix/leaderboard-curve-integrity` | `../ATL-worktrees/p2-curve-integrity` | `main` | in-progress | — |
 | — | design docs | `docs/backtest-p1-p2-design` | `../ATL-worktrees/docs-design` | `main` | pr-open | #456 |
 
@@ -254,3 +254,9 @@ Append newest last. One line per meaningful event.
   That test now asserts the 1200px block, and a new guard
   (`test_frontend_setup_panel_breakpoint.py`) compares the two breakpoints and was
   confirmed to fail on the pre-fix CSS.
+- `2026-09-11` — PR 2 pushed `0288ff79` (4464 passed / 163 skipped). Adds
+  `domain/backtesting/provenance.py`, the `llm_decisions` column in **both** the SQLite
+  and Postgres schemas, and 485 lines of tests.
+- `2026-09-11` — PR 3 dispatched, stacked on `0288ff79`. Its refund step is struck (no
+  debit exists to reverse) and it is briefed **not** to claim it closes #308 — it ships
+  the product guard, not the capacity fix.
