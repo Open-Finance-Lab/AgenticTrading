@@ -14,7 +14,8 @@ export type LeaderboardEntry = {
   model: string;
   is_model: boolean;
   cumulative_return: number;
-  portfolio_value: number;
+  // `null` when the run recorded no final equity -- absent, not $0.
+  portfolio_value: number | null;
   initial_equity: number;
   equity_curve: EquityPoint[];
 };

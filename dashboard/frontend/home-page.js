@@ -1786,7 +1786,13 @@ async function loadHomeLeaderboardModule() {
     }
 
     function homeFormatPortfolioValue(value) {
-        const n = Number(value);
+        // `Number(null)` is 0 and 0 is finite, so the guard below never saw the
+        // shape it was written for: a run with no recorded final equity
+        // rendered as `$0` rather than as no value. The server sends `null` for
+        // exactly that case.
+        const n = (value === null || value === undefined || value === '')
+            ? NaN
+            : Number(value);
         if (!Number.isFinite(n)) return '—';
         if (n >= 1000) {
             return `$${Math.round(n).toLocaleString('en-US')}`;

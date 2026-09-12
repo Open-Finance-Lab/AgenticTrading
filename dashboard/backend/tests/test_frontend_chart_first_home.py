@@ -197,6 +197,11 @@ def _harness() -> str:
             _extract(_LEADERBOARD_JS, "getTeamColor"),
             _extract(_LEADERBOARD_JS, "getSeriesStyle"),
             _extract(_LEADERBOARD_JS, "chartTimeKey"),
+            # `buildEquityCurvesFromEntries` calls this to reject an equity
+            # `Number.isFinite(Number(...))` would have accepted (`Number(null)`
+            # is 0). Omit it and the harness dies with a ReferenceError rather
+            # than testing anything.
+            _extract(_LEADERBOARD_JS, "finiteNumber"),
             # The real builder, so the gate is exercised against the actual
             # "silently drops curveless entries" behaviour rather than a stub
             # that would drop them the way the test author assumed.

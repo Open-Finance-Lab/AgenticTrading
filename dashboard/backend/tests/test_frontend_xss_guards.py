@@ -188,6 +188,11 @@ def _run_leaderboard_driver(js_body: str) -> dict:
             _extract_function(app_src, "escapeHtml"),
             _extract_function(src, "formatEntryBadge"),
             _extract_function(src, "formatLeaderboardNumber"),
+            # Both reached by the row/detail renderers: `portfolio_value` is
+            # `float | null` on the wire now, and the dash formatter is what
+            # keeps an absent value from rendering as `$0.00`.
+            _extract_function(src, "finiteNumber"),
+            _extract_function(src, "formatLeaderboardMoneyOrDash"),
             _extract_function(src, "renderLeaderboardRowHtml"),
             _extract_function(src, "renderLeaderboardDetailHtml"),
             "const entry = JSON.parse(process.argv[1]);",

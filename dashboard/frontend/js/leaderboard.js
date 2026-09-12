@@ -1161,6 +1161,19 @@ function formatLeaderboardNumber(num) {
   return Number(num || 0).toFixed(2).replace(/\B(?=(\d{3})+(?!\d))/g, ',');
 }
 
+/** A dollar amount, or an em dash when there is no amount to render.
+ *
+ *  `formatLeaderboardNumber` answers `0.00` for null, undefined and '' -- fine
+ *  for a chart tick, wrong for a value that is simply absent. A run that
+ *  recorded no final equity used to reach the table as the board's starting
+ *  capital, i.e. an account that finished exactly level; the server now sends
+ *  `null`, and printing `$0.00` for it would be the same invention with a
+ *  different number. */
+function formatLeaderboardMoneyOrDash(value) {
+  const n = finiteNumber(value);
+  return Number.isFinite(n) ? `$${formatLeaderboardNumber(n)}` : '—';
+}
+
 function formatShortDate(isoDay) {
   if (!isoDay) return '';
   const d = new Date(String(isoDay).includes('T') ? isoDay : `${isoDay}T00:00:00`);
@@ -1183,6 +1196,24 @@ function formatChartTooltipLabel(ts) {
     });
   }
   return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+}
+
+/** A finite number, or NaN for every shape that is not one.
+ *
+ *  Ported from the landing's `src/lib/leaderboard.ts` (PR #387) under the same
+ *  name and the same semantics, deliberately: both surfaces read the same
+ *  `equity_curve` payload, and "what counts as a number here" is not a question
+ *  two readers of one wire format get to answer differently.
+ *
+ *  The whole point is the first line. `Number.isFinite(Number(x))` is NOT this
+ *  function: `Number(null)` is 0 and 0 is finite, so the obvious guard passes
+ *  the single most likely malformed shape straight through -- and downstream,
+ *  a $0 account is a -100% return.
+ */
+function finiteNumber(value) {
+  if (value === null || value === undefined || value === '') return NaN;
+  const n = Number(value);
+  return Number.isFinite(n) ? n : NaN;
 }
 
 /** Normalize equity timestamps to hour precision for shared-axis alignment. */
@@ -1209,7 +1240,23 @@ function buildEquityCurvesFromEntries(entries) {
     points.forEach((pt) => {
       const key = chartTimeKey(pt.timestamp);
       if (!key) return;
-      byTime[key] = Number(pt.equity) || 0;
+      // SKIPPED, NOT ZEROED. `Number(pt.equity) || 0` read every unparseable
+      // equity -- null, undefined, '', NaN -- as a $0 account, and the
+      // base-relative transforms downstream turn $0 into
+      // (0 - 10000) / 10000 = -100%. That does not misplace one marker: this
+      // chart shares ONE y-axis across every series, so a single -100% point
+      // sets the range and flattens the whole board's spread into a sliver
+      // (issue #390). The server now sends `null` for a stored NULL instead of
+      // 0; this is the client half of the same fix.
+      //
+      // Skipping rather than storing an explicit null: an unrecorded point is
+      // exactly a missing timestamp, which this function ALREADY represents --
+      // the map below fills `null` for any hour a series does not carry, and
+      // both charts null-fill from there. A REAL 0 still gets through and still
+      // reads -100%, which is what an account at zero actually did.
+      const value = finiteNumber(pt == null ? null : pt.equity);
+      if (!Number.isFinite(value)) return;
+      byTime[key] = value;
       timeSet.add(key);
     });
     perEntry.push({ entry, seriesLabel: entry.model || entry.team_name, byTime });
@@ -1320,7 +1367,7 @@ function renderLeaderboardRowHtml(entry) {
             <span class="team-badge">${escapeHtml(formatEntryBadge(entry.team_badge))}</span>
           </div>
         </td>
-        <td style="text-align: right; font-family: var(--font-mono);">$${formatLeaderboardNumber(entry.portfolio_value)}</td>
+        <td style="text-align: right; font-family: var(--font-mono);">${formatLeaderboardMoneyOrDash(entry.portfolio_value)}</td>
         <td style="text-align: right;" class="${retClass}">
           <span class="metric-value-text">${(ret * 100).toFixed(2)}%</span>
         </td>
@@ -1366,7 +1413,7 @@ function renderLeaderboardDetailHtml(entry, totalEntries) {
       </div>
       <div class="team-detail-row">
         <span class="team-detail-label">Value</span>
-        <span class="team-detail-value">$${formatLeaderboardNumber(entry.portfolio_value)}</span>
+        <span class="team-detail-value">${formatLeaderboardMoneyOrDash(entry.portfolio_value)}</span>
       </div>
       <div class="team-detail-row">
         <span class="team-detail-label">Return</span>
@@ -2103,6 +2150,9 @@ async function renderEquityCurvesChart() {
       fill: false,
       // Series use different hour grids (e.g. SPY :30 vs LLM :00). On a shared
       // axis that leaves many nulls; span across them so each curve still draws.
+      // An unrecorded point arrives as one more of those nulls and is bridged
+      // the same way -- #390's contract is that the server stops publishing it
+      // as a real $0, not that this chart grows a second rendering mode.
       spanGaps: true,
       hidden: hiddenSeries.has(label),
     });
@@ -2181,19 +2231,25 @@ async function renderEquityCurvesChart() {
             label(context) {
               const ds = context.dataset;
               const idx = context.dataIndex;
-              const equity = (ds._raw && ds._raw[idx]) || 0;
-              const ret = (equity - ds._initial) / (ds._initial || 1);
+              // `(ds._raw[idx]) || 0` printed "$0.00" and "-100.00%" for an
+              // hour with no observation -- the same conflation of absent with
+              // zero the series itself carried (issue #390). An em dash says
+              // "no data" and cannot be mistaken for a number.
+              const rawValue = finiteNumber(ds._raw ? ds._raw[idx] : null);
+              const equity = Number.isFinite(rawValue) ? rawValue : null;
+              const ret = equity == null ? null : (equity - ds._initial) / (ds._initial || 1);
               const entry = ds._entry || {};
               const lines = [
                 ds.label,
-                `Return: ${(ret * 100).toFixed(2)}%`,
-                `Value: $${formatLeaderboardNumber(equity)}`,
+                `Return: ${ret == null ? '—' : `${(ret * 100).toFixed(2)}%`}`,
+                `Value: ${equity == null ? '—' : `$${formatLeaderboardNumber(equity)}`}`,
                 `Rank: ${entry.rank ?? '—'} / ${leaderboardPayload?.total_entries || '—'}`,
               ];
 
               const benchDs = context.chart.data.datasets.find((d) => d.label === selectedBenchmarkLabel);
-              if (benchDs && benchDs.label !== ds.label && benchDs._raw && benchDs._raw[idx] != null) {
-                const benchRet = (benchDs._raw[idx] - benchDs._initial) / (benchDs._initial || 1);
+              const benchEquity = finiteNumber(benchDs && benchDs._raw ? benchDs._raw[idx] : null);
+              if (ret != null && benchDs && benchDs.label !== ds.label && Number.isFinite(benchEquity)) {
+                const benchRet = (benchEquity - benchDs._initial) / (benchDs._initial || 1);
                 const diff = (ret - benchRet) * 100;
                 const sign = diff >= 0 ? '+' : '';
                 lines.push(`vs ${shortName(selectedBenchmarkLabel)}: ${sign}${diff.toFixed(2)}%`);
