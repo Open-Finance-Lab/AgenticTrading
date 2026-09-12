@@ -1316,29 +1316,46 @@ function getFilteredLeaderboardEntries() {
   // Left Rank stays the official portfolio-value rank; this only reorders rows.
   const entries = (leaderboardPayload?.entries || []).slice();
   const dir = currentLeaderboardSortDir === 'asc' ? 1 : -1;
-  const num = (v) => Number(v) || 0;
-  entries.sort((a, b) => {
-    let cmp = 0;
+  // `Number(v) || 0` used to live here, and it was the client half of the same
+  // defect this board just removed from the Value column's *rendering*: the
+  // server now sends `null` for a final equity nobody recorded, the cell draws
+  // an em dash -- and the comparator still scored it $0. Bottom of a descending
+  // sort, top of an ascending one: a run with no recorded value was presented as
+  // a total loss, in the column the board ranks on. (`Number(null)` is 0 and 0
+  // is finite, so the obvious `Number.isFinite(Number(x))` guard does not catch
+  // this either -- see `finiteNumber`.)
+  //
+  // Absent has no position on a numeric axis, so it leaves the axis: missing
+  // values sort to the END in BOTH directions, the way every spreadsheet
+  // handles a blank cell. Flipping them with the arrow would be the same
+  // invented claim wearing the other sign.
+  const sortKey = (entry) => {
     switch (currentLeaderboardSort) {
-      case 'rank':
-        cmp = num(a.rank) - num(b.rank);
-        break;
       case 'value':
-        cmp = num(a.portfolio_value) - num(b.portfolio_value);
-        break;
+        return finiteNumber(entry.portfolio_value);
       case 'return':
-        cmp = num(a.cumulative_return) - num(b.cumulative_return);
-        break;
+        return finiteNumber(entry.cumulative_return);
       case 'sharpe':
-        cmp = num(a.sharpe_ratio) - num(b.sharpe_ratio);
-        break;
-      case 'dd':
-        cmp = Math.abs(num(a.max_drawdown)) - Math.abs(num(b.max_drawdown));
-        break;
+        return finiteNumber(entry.sharpe_ratio);
+      case 'dd': {
+        const dd = finiteNumber(entry.max_drawdown);
+        return Number.isNaN(dd) ? NaN : Math.abs(dd);
+      }
+      case 'rank':
       default:
-        cmp = num(a.rank) - num(b.rank);
+        return finiteNumber(entry.rank);
     }
-    return cmp * dir;
+  };
+  entries.sort((a, b) => {
+    const x = sortKey(a);
+    const y = sortKey(b);
+    const xMissing = Number.isNaN(x);
+    const yMissing = Number.isNaN(y);
+    if (xMissing || yMissing) {
+      if (xMissing && yMissing) return 0;
+      return xMissing ? 1 : -1;
+    }
+    return (x - y) * dir;
   });
   return entries;
 }

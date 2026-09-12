@@ -135,6 +135,7 @@ class _Board:
         equities,
         run_id=None,
         final_equity=None,
+        total_return=0.05,
         session_id=_SESSION,
     ):
         """One cached leaderboard run and its curve. ``equities`` may hold None."""
@@ -157,7 +158,7 @@ class _Board:
                 if final_equity is not None
                 else (finite[-1] if finite else None)
             ),
-            total_return=0.05,
+            total_return=total_return,
             sharpe_ratio=1.0,
             max_drawdown=-0.01,
             num_trades=1,
@@ -213,6 +214,8 @@ def board(tmp_path, monkeypatch):
     # drift would otherwise see no line at all.
     monkeypatch.setattr(lb_service, "_warned_seed_mismatch", set())
     monkeypatch.setattr(lb_service, "_warned_capital_drift", set())
+    monkeypatch.setattr(lb_service, "_warned_prompt_drift", set())
+    monkeypatch.setattr(lb_service, "_warned_curve_integrity", set())
     return _Board(test_db, monkeypatch)
 
 
@@ -960,12 +963,20 @@ def test_a_run_with_no_final_equity_publishes_null_not_starting_capital(board):
 
 
 def test_an_absent_portfolio_value_still_ranks(board):
-    """``_rank_sort_key`` falls back to ``cumulative_return`` for a None.
+    """Publishing null would be a regression if it made the entry unsortable.
 
-    Publishing null would be a regression if it made the entry unsortable.
+    ⚠ Asserting only that the ranks are ``[1, 2]`` is not a test: a total order
+    always produces those. **Which** entry got rank 1 is the whole question, and
+    the old ``pv = cumulative_return or 0`` fallback got it backwards — it
+    ranked a *fraction* (0.20) against its neighbour's *dollars* (105,000), so
+    the better run placed last precisely because its dollars were absent.
     """
     run_id = _seed_run(
-        board, "djia_index", initial_equity=_DISPLAY_CAPITAL, equities=[_DISPLAY_CAPITAL]
+        board,
+        "djia_index",
+        initial_equity=_DISPLAY_CAPITAL,
+        equities=[_DISPLAY_CAPITAL],
+        total_return=0.20,
     )
     board.set_final_equity(run_id, None)
     _seed_run(
@@ -973,11 +984,21 @@ def test_an_absent_portfolio_value_still_ranks(board):
         "spy_index",
         initial_equity=_DISPLAY_CAPITAL,
         equities=[_DISPLAY_CAPITAL, _DISPLAY_CAPITAL * 1.05],
+        final_equity=_DISPLAY_CAPITAL * 1.05,
+        total_return=0.05,
     )
 
     payload = lb_service.get_leaderboard()
+    by_id = {e["entry_id"]: e for e in payload["entries"]}
 
     assert [e["rank"] for e in payload["entries"]] == [1, 2]
+    assert by_id["djia_index"]["rank"] == 1, (
+        "a +20% run must outrank a +5% one; ranking its return against the "
+        "other's dollars buried it"
+    )
+    assert by_id["djia_index"]["portfolio_value"] is None, (
+        "the reconstruction is a sort key only — the wire value stays absent"
+    )
 
 
 def test_both_tables_render_an_absent_portfolio_value_as_a_dash():
@@ -1172,8 +1193,16 @@ def test_a_derived_seed_that_differs_from_the_board_is_reported(board, capsys):
 
     It scans rows for a *recorded* seed; this row has none, so its seed came
     from the curve's own first point and the board-level scan skips it.
+
+    ⚠ **The second entry is load-bearing.** A single-entry board makes
+    `_board_capital_base` return the derived seed itself, so the row passes the
+    majority filter for a reason that says nothing about the code under test —
+    and this case went green for a year against a build where the warning was
+    unreachable on every board that had more than one row. A recorded neighbour
+    at the published capital is the shape production actually has.
     """
     _seed_run(board, "djia_index", initial_equity=None, equities=[_OTHER_CAPITAL, _OTHER_CAPITAL * 1.05])
+    _seed_run(board, "spy_index", initial_equity=_DISPLAY_CAPITAL, equities=[_DISPLAY_CAPITAL])
 
     lb_service.get_leaderboard()
     lb_service.get_leaderboard()
@@ -1196,3 +1225,247 @@ def test_a_recorded_seed_is_not_reported_twice(board, capsys):
 
     assert "not comparable" in out
     assert "published seed" not in out
+
+
+# --------------------------------------------------------------------------
+# review follow-ups — the same absent-as-a-value defect, three more places
+# --------------------------------------------------------------------------
+
+
+def test_a_derived_seed_is_not_outvoted_by_the_recorded_majority(board, capsys):
+    """A derived seed is an estimate, and estimates do not get a vote.
+
+    ``_stored_seed`` falls back to the curve's own first equity point, which is
+    the equity at the **end** of the run's first hour — seed plus one hour of
+    P&L. Holding that to the board's base at a one-cent tolerance asks "was this
+    strategy exactly flat at the open?", not "was this run seeded differently",
+    and every derived row that moved at all answered no and vanished from a
+    public board. Publishing it through the scaling shim with a warning is the
+    outcome ``_warn_on_seed_mismatch`` was written for.
+    """
+    for entry_id in ("djia_index", "spy_index"):
+        _seed_run(board, entry_id, initial_equity=_DISPLAY_CAPITAL, equities=[_DISPLAY_CAPITAL])
+    # No recorded seed, and a curve whose first point is one good hour above it.
+    _seed_run(
+        board,
+        "buy_hold_djia",
+        initial_equity=None,
+        equities=[_DISPLAY_CAPITAL * 1.004, _DISPLAY_CAPITAL * 1.01],
+    )
+
+    payload = lb_service.get_leaderboard()
+    out = capsys.readouterr().out
+
+    assert {e["entry_id"] for e in payload["entries"]} == {
+        "djia_index",
+        "spy_index",
+        "buy_hold_djia",
+    }, "a row whose seed nobody recorded must not be dropped for having moved"
+    assert "buy_hold_djia" in out and "#194" in out, (
+        "and it is still reported, because its scale came off its own curve"
+    )
+
+
+def test_a_recorded_minority_is_still_dropped_when_a_derived_row_is_present(board, capsys):
+    """The narrowing must not weaken the check it narrows.
+
+    A *recorded* seed that disagrees is still two runs at two capitals, and the
+    derived row sitting beside it neither rescues it nor votes for it.
+    """
+    for entry_id in ("djia_index", "spy_index"):
+        _seed_run(board, entry_id, initial_equity=_DISPLAY_CAPITAL, equities=[_DISPLAY_CAPITAL])
+    _seed_run(board, "buy_hold_djia", initial_equity=_OTHER_CAPITAL, equities=[_OTHER_CAPITAL])
+    _seed_run(board, "equal_weight_djia", initial_equity=None, equities=[_OTHER_CAPITAL])
+
+    published = {e["entry_id"] for e in lb_service.get_leaderboard()["entries"]}
+
+    assert "buy_hold_djia" not in published, "a recorded outlier is still dropped"
+    assert published == {"djia_index", "spy_index", "equal_weight_djia"}
+
+
+def test_a_board_where_nobody_recorded_a_seed_publishes_every_row(board):
+    """``_board_capital_base`` returning None means "no votes", never "no board".
+
+    The old code could not reach this state — every row voted — so the guard has
+    to be pinned: an all-derived board (every row predating the column being
+    written) must degrade to publishing everything with the shim, not to empty.
+    """
+    for entry_id in ("djia_index", "spy_index", "buy_hold_djia"):
+        _seed_run(board, entry_id, initial_equity=None, equities=[_OTHER_CAPITAL])
+
+    payload = lb_service.get_leaderboard()
+
+    assert len(payload["entries"]) == 3
+
+
+def test_the_remediation_text_does_not_send_an_operator_to_empty_the_board(board, capsys):
+    """⚠ A half-refresh is worse than no refresh, and the old copy prescribed it.
+
+    ``ensure_leaderboard_runs`` recomputes only ``_auto_compute`` strategies, so
+    "force-refresh to recompute" moves the five baselines to the new seed and
+    strands the seven LLM entries at the old one. That does not align the board,
+    it *mixes* it — and the seven then outvote the five, dropping every baseline
+    and the chart's benchmarks with them.
+    """
+    _seed_run(board, "djia_index", initial_equity=_OTHER_CAPITAL, equities=[_OTHER_CAPITAL])
+
+    lb_service.get_leaderboard()
+    out = capsys.readouterr().out
+
+    assert "Force-refresh to recompute" not in out
+    assert "deploy_model_run" in out, (
+        "the LLM half needs naming, or the operator does half the job"
+    )
+
+
+def test_a_broken_curve_is_reported_once_per_process(board, capsys):
+    """Same credibility budget as the two warnings beside it.
+
+    This runs per entry on a public unauthenticated GET, so an undeduped line
+    is one ERROR per broken curve per page load, forever.
+    """
+    _seed_run(board, "djia_index", initial_equity=_DISPLAY_CAPITAL, equities=[None, None])
+
+    lb_service.get_leaderboard()
+    lb_service.get_leaderboard()
+    lines = [
+        ln
+        for ln in capsys.readouterr().out.splitlines()
+        if "djia_index" in ln and "broken, not absent" in ln
+    ]
+
+    assert len(lines) == 1, lines
+
+
+def test_a_drifted_baseline_does_not_inflate_the_model_drift_count(board):
+    """Every other number in that dict is counted over the LLM entries alone.
+
+    ``_cached_run_index`` ranks every run in the session and window, baselines
+    included, so ``len(drifted_ids)`` could report more of a population drifted
+    than the population has members.
+    """
+    config = lb_service.resolve_leaderboard_config("contest")
+    llm_id = lb_service.llm_leaderboard_entries(config)[0]["id"]
+    _seed_run(board, "djia_index", initial_equity=_OTHER_CAPITAL, equities=[_OTHER_CAPITAL])
+    _seed_run(board, llm_id, initial_equity=_OTHER_CAPITAL, equities=[_OTHER_CAPITAL])
+
+    status = lb_service._daily_models_status(config)
+
+    assert status["models_config_drift"] == 1, "the drifted baseline is not a model"
+    assert status["models_config_drift"] <= status["models_cached"] <= status["models_total"]
+
+
+def test_a_changed_instruction_is_reported_when_the_cached_curve_is_reused(
+    board, monkeypatch, capsys
+):
+    """Fail-closed is not fail-visible (CLAUDE.md).
+
+    Reusing the cached curve on a config edit is deliberate — the alternative is
+    answering one line of JSON with a billable redeploy of the whole board — but
+    ``_warn_on_capital_drift`` finds nothing when the disagreement is the prompt,
+    so "nobody changed the instruction" and "the instruction changed and is
+    being ignored" were byte-identical from outside.
+    """
+    entry_id = "claude_haiku_4_5"
+    run_id = _seed_run(board, entry_id, initial_equity=_DISPLAY_CAPITAL, equities=[_DISPLAY_CAPITAL])
+    board.set_metadata(run_id, {"strategy_prompt": "buy the dip"})
+    monkeypatch.setattr(
+        lb_service,
+        "resolve_leaderboard_config",
+        lambda period=None: {
+            "session_id": _SESSION,
+            "start_date": _START,
+            "end_date": _END,
+            "initial_capital": _DISPLAY_CAPITAL,
+            "period": "contest",
+            "strategies": [
+                {"id": entry_id, "strategy": "llm_agent", "strategy_prompt": "sell the rip"}
+            ],
+        },
+    )
+    monkeypatch.setattr(
+        lb_service,
+        "get_strategy",
+        lambda *a, **k: (_ for _ in ()).throw(
+            AssertionError("a drifted prompt must not trigger a billable deploy")
+        ),
+    )
+
+    result = lb_service.deploy_model_run(entry_id)
+    out = capsys.readouterr().out
+
+    assert result["cached"] is True, "reuse is the intended behaviour"
+    assert "strategy_prompt" in out and entry_id in out, (
+        "and it must not be silent about what it reused"
+    )
+    assert "buy the dip" not in out and "sell the rip" not in out, (
+        "operator config can run to paragraphs; the line names the entry, not "
+        "the prompt"
+    )
+
+
+_SORT_HARNESS = (
+    _extract_function(_LEADERBOARD_JS, "finiteNumber"),
+    _extract_function(_LEADERBOARD_JS, "getFilteredLeaderboardEntries"),
+)
+
+
+def _sorted_ids(entries_js, field, direction):
+    return _run_node(
+        *_SORT_HARNESS,
+        f"let leaderboardPayload = {{ entries: {entries_js} }};",
+        f"let currentLeaderboardSort = '{field}';",
+        f"let currentLeaderboardSortDir = '{direction}';",
+        (
+            # Parenthesised, not two adjacent literals in the argument list:
+            # `py/implicit-string-concatenation-in-list` is a live alert class in
+            # this repo (PR #450 closed five of them) and an accidental
+            # concatenation reads as a missing comma.
+            "console.log(JSON.stringify("
+            "getFilteredLeaderboardEntries().map((e) => e.entry_id)));"
+        ),
+    )
+
+
+def test_the_value_sort_does_not_place_an_absent_value_at_the_top(board):
+    """`Number(v) || 0` was still in the comparator after the cell learned `—`.
+
+    Ascending, a run whose final equity nobody recorded scored $0 and sorted
+    *first* — the table's most prominent row, claiming a total loss nobody
+    measured.
+    """
+    entries = (
+        "[{entry_id:'has',portfolio_value:105000},"
+        "{entry_id:'absent',portfolio_value:null},"
+        "{entry_id:'low',portfolio_value:99000}]"
+    )
+
+    assert _sorted_ids(entries, "value", "asc") == ["low", "has", "absent"]
+
+
+def test_the_value_sort_keeps_an_absent_value_out_of_the_bottom_claim_too(board):
+    """Missing leaves the axis in BOTH directions.
+
+    Flipping it with the arrow is the same invented claim wearing the other
+    sign: descending, `|| 0` ranked an unrecorded run *above* every genuine
+    loss on the board.
+    """
+    entries = (
+        "[{entry_id:'up',cumulative_return:0.05},"
+        "{entry_id:'absent',cumulative_return:null},"
+        "{entry_id:'down',cumulative_return:-0.10}]"
+    )
+
+    assert _sorted_ids(entries, "return", "desc") == ["up", "down", "absent"]
+    assert _sorted_ids(entries, "return", "asc") == ["down", "up", "absent"]
+
+
+def test_a_real_zero_still_sorts_as_a_number(board):
+    """The point is never "treat 0 as missing" — an account can really be flat."""
+    entries = (
+        "[{entry_id:'up',cumulative_return:0.05},"
+        "{entry_id:'flat',cumulative_return:0},"
+        "{entry_id:'absent',cumulative_return:null}]"
+    )
+
+    assert _sorted_ids(entries, "return", "desc") == ["up", "flat", "absent"]

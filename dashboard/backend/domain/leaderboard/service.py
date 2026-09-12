@@ -66,6 +66,11 @@ _warned_seed_mismatch: set[Tuple[str, float, float]] = set()
 # (configured_capital, stale_capitals) pairs already reported — see
 # _warn_on_capital_drift.
 _warned_capital_drift: set[Tuple[float, Tuple[float, ...]]] = set()
+# (entry_id, run_id) pairs already reported — see _warn_on_prompt_drift.
+_warned_prompt_drift: set[Tuple[str, str]] = set()
+# (entry_id, run_id, rendered_condition) triples already reported — see
+# _report_curve_integrity.
+_warned_curve_integrity: set[Tuple[str, str, str]] = set()
 # How a cached row compares to what the board is asking for. STALE is the only
 # value that refuses a row, and it is deliberately the only one a *recorded*
 # disagreement can produce — see _cache_match_rank.
@@ -268,6 +273,7 @@ def _daily_models_status(config: Dict[str, Any]) -> Dict[str, Any]:
         {e["id"]: e.get("strategy_prompt") for e in entries},
     )
     cached = 0
+    drifted = 0
     pending_ids: List[str] = []
     for entry in entries:
         entry_id = entry["id"]
@@ -276,6 +282,16 @@ def _daily_models_status(config: Dict[str, Any]) -> Dict[str, Any]:
             # `maybe_schedule_daily_leaderboard_refresh` spends money on. See
             # `_resolve_cached_run`.
             cached += 1
+            # ⚠ Counted HERE, not as `len(drifted_ids)`. `_cached_run_index`
+            # ranks every run in the session and window — the five baselines
+            # included — while every other number in this dict is computed over
+            # `llm_leaderboard_entries` alone. Taking the raw set size let a
+            # drifted baseline report `models_config_drift` above `models_total`,
+            # i.e. more of a population drifted than the population has members.
+            # Intersecting with the entries actually counted keeps the invariant
+            # drift ≤ cached ≤ total, which is what makes the dict readable.
+            if entry_id in drifted_ids:
+                drifted += 1
         else:
             pending_ids.append(entry_id)
     total = len(entries)
@@ -283,7 +299,7 @@ def _daily_models_status(config: Dict[str, Any]) -> Dict[str, Any]:
         "trading_date": config["start_date"],
         "models_total": total,
         "models_cached": cached,
-        "models_config_drift": len(drifted_ids),
+        "models_config_drift": drifted,
         "models_pending": len(pending_ids),
         "pending_entry_ids": pending_ids,
         "refresh_in_progress": _daily_refresh_running,
@@ -792,6 +808,24 @@ def _finite_positive(value: Any) -> Optional[float]:
     if not math.isfinite(num) or num <= 0:
         return None
     return num
+
+
+def _finite(value: Any) -> Optional[float]:
+    """``value`` as a finite float, or None when it is not a number at all.
+
+    The twin of ``_finite_positive`` for the columns where ``0`` and a negative
+    are *real observations* rather than a missing one: a final equity, a return,
+    a drawdown. ``_finite_positive`` must reject zero because its callers divide
+    by the result; these callers rank on it, and refusing an account that truly
+    went to zero would be the same absent-as-a-value conflation one column over.
+    """
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        num = float(value)
+    except (TypeError, ValueError):
+        return None
+    return num if math.isfinite(num) else None
 
 
 def _run_seed(run: Dict[str, Any]) -> Optional[float]:
@@ -1474,8 +1508,14 @@ def _warn_on_capital_drift(
         f"WARNING: leaderboard has cached runs seeded at {rendered} while the "
         f"board publishes ${wanted:,.2f}. Curves seeded at different capital "
         "are not comparable — a smaller account trades a coarser share quantum, "
-        "so the returns differ, not just the dollar levels. Force-refresh to "
-        "recompute, or align initial_capital in dashboard/config/leaderboard.json."
+        "so the returns differ, not just the dollar levels. Align initial_capital "
+        "in dashboard/config/leaderboard.json to the seed the rows were actually "
+        "run at, or re-run BOTH halves of the board. ⚠ Do not force-refresh on "
+        "its own: `ensure_leaderboard_runs` recomputes only the auto_compute "
+        "baselines, so it moves those to the new seed and strands the LLM "
+        "entries at the old one — which mixes the board rather than aligning it, "
+        "and drops whichever half lands in the minority. The LLM half is "
+        "redeployed by deploy_model_run(force_refresh=True)."
     )
 
 
@@ -1576,7 +1616,12 @@ def deploy_model_run(
         # billable re-run of the whole board. `force_refresh=True` is the
         # operator's way to ask for it on purpose.
         if existing_rank == _CACHE_STALE:
+            # Both reasons a row can be stale, because only one of them has a
+            # board-wide scan behind it. `_warn_on_capital_drift` finds nothing
+            # when the disagreement is the prompt, so before the second call a
+            # drifted instruction produced no signal anywhere.
             _warn_on_capital_drift([existing], initial_capital)
+            _warn_on_prompt_drift(entry_id, existing, entry.get("strategy_prompt"))
         return {
             "entry_id": entry_id,
             "run_id": existing["run_id"],
@@ -1685,12 +1730,39 @@ def deploy_model_run(
 
 
 def _rank_sort_key(entry: Dict[str, Any]) -> tuple:
-    """Official rank is by final portfolio value (nof1-style); tie-break on return."""
-    pv = entry.get("portfolio_value")
-    if pv is None:
-        # Unit tests / partial fixtures may omit dollars — fall back to return.
-        pv = entry.get("cumulative_return") or 0
-    return (-float(pv), -(entry.get("cumulative_return") or 0))
+    """Official rank is by final portfolio value (nof1-style); tie-break on return.
+
+    ⚠ **Never rank a return against dollars.** The old fallback was
+    ``pv = entry.get("cumulative_return") or 0``, which was harmless only while
+    ``portfolio_value`` could not be None — and this change is precisely what
+    made it nullable. Reachable, it hands the sort a *fraction* (``0.07``) to
+    compare against its neighbours' *dollars* (``107494``), so an entry whose
+    final equity nobody recorded ranks **dead last** no matter how well it
+    actually did. That is the same defect this module just removed from the
+    Value column — an absent number published as a real one — pointing the other
+    way, and it lands in the column the board is ranked on.
+
+    So the absent case is put back on the dollar axis instead: the entry carries
+    the seed the board publishes and the return the run recorded, and
+    ``seed × (1 + return)`` is the final equity those two imply. This value is a
+    **sort key only** — ``portfolio_value`` stays ``None`` on the wire and both
+    tables still render it as an em dash. Ranking is a total order over the
+    board and has to produce *some* position; inventing a displayed dollar
+    figure is what must not happen.
+    """
+    ret = _finite(entry.get("cumulative_return"))
+    value = _finite(entry.get("portfolio_value"))
+    if value is None:
+        seed = _finite_positive(entry.get("initial_equity"))
+        if seed is not None and ret is not None:
+            value = seed * (1.0 + ret)
+    if value is None:
+        # Neither dollars nor a seed to rebuild them from. Only partial fixtures
+        # reach this — every entry `get_leaderboard` builds sets `initial_equity`
+        # to the board's published capital — and there the whole board is
+        # dimensionless, so ranking on the return alone compares like with like.
+        value = ret if ret is not None else 0.0
+    return (-value, -(ret if ret is not None else 0.0))
 
 
 def _rank_entries(entries: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -1718,15 +1790,8 @@ def _scaled_level(value: Any, scale: float) -> Optional[float]:
     A real ``0.0`` is still a real ``0.0`` and passes through — an account that
     actually went to zero did lose 100%.
     """
-    if value is None or isinstance(value, bool):
-        return None
-    try:
-        num = float(value)
-    except (TypeError, ValueError):
-        return None
-    if not math.isfinite(num):
-        return None
-    return num * scale
+    num = _finite(value)
+    return None if num is None else num * scale
 
 
 def _stored_seed(run: Dict[str, Any], equity_hourly: List[Dict[str, Any]]) -> Optional[float]:
@@ -1757,29 +1822,43 @@ def _report_curve_integrity(
     report a total contract break, so the wholesale boundary — no points at all,
     or every point unusable — logs ERROR, while a partial gap logs a single
     aggregate WARNING naming the count rather than one line per point.
+
+    **Once per distinct condition per process**, like ``_warn_on_capital_drift``
+    and ``_warn_on_seed_mismatch`` beside it, and for the reason those two give:
+    this runs on a public unauthenticated GET, once per entry, so an undeduped
+    line turns one broken curve into twelve lines every time anybody loads the
+    board — and an alert channel has a credibility budget that every repeat
+    spends. The key carries the *counts*, not just the run, so a curve that
+    degrades further still reports the new state.
     """
     total = len(scaled_hourly)
+    missing = sum(1 for point in scaled_hourly if point.get("equity") is None)
     if not total:
-        print(
+        message = (
             f"ERROR: leaderboard entry '{entry_id}' (run {run_id}): the stored "
             "run has no equity points at all — the board can draw only its "
             "opening tick. A cached run with no curve is a broken write, not an "
             "empty window."
         )
-        return
-    missing = sum(1 for point in scaled_hourly if point.get("equity") is None)
-    if missing == total:
-        print(
+    elif missing == total:
+        message = (
             f"ERROR: leaderboard entry '{entry_id}' (run {run_id}): all {total} "
             "stored equity points are NULL or unparseable — this curve is "
             "broken, not absent."
         )
     elif missing:
-        print(
+        message = (
             f"WARNING: leaderboard entry '{entry_id}' (run {run_id}): {missing} "
             f"of {total} equity points carry no value; the chart draws them as "
             "gaps."
         )
+    else:
+        return
+    key = (entry_id, run_id, f"{missing}/{total}")
+    if key in _warned_curve_integrity:
+        return
+    _warned_curve_integrity.add(key)
+    print(message)
 
 
 def _warn_on_seed_mismatch(
@@ -1809,6 +1888,47 @@ def _warn_on_seed_mismatch(
     )
 
 
+def _warn_on_prompt_drift(
+    entry_id: str, run: Dict[str, Any], wanted_prompt: Optional[str]
+) -> None:
+    """Say out loud that a cached curve predates the instruction now configured.
+
+    The prompt twin of ``_warn_on_capital_drift``, and it exists because
+    ``_cache_match_rank`` returns ``_CACHE_STALE`` for **two** reasons — a
+    recorded seed that disagrees, and a recorded prompt that disagrees — while
+    only the first had a reporter. ``deploy_model_run`` short-circuits a stale
+    row to the cached curve either way (deliberately: re-running on a config
+    edit answers one line of JSON with a billable redeploy of the whole board),
+    so a changed instruction reused the old curve in total silence. That is
+    CLAUDE.md's fail-closed-is-not-fail-visible shape exactly: "nobody changed
+    the prompt" and "the prompt changed and is being ignored" were byte-identical
+    from outside.
+
+    Once per (entry, run) per process, for the reason the two warnings above it
+    give. The prompt text itself is deliberately **not** printed: it is operator
+    config that can run to paragraphs, and a log line nobody can read is one
+    more way to spend the channel's credibility.
+    """
+    wanted = _wanted_prompt(wanted_prompt)
+    if wanted is None:
+        return
+    stored = _run_strategy_prompt(run)
+    if stored is None or stored == wanted:
+        return
+    run_id = str(run.get("run_id") or "")
+    key = (entry_id, run_id)
+    if key in _warned_prompt_drift:
+        return
+    _warned_prompt_drift.add(key)
+    print(
+        f"WARNING: leaderboard entry '{entry_id}' (run {run_id}) was computed "
+        "under a different strategy_prompt than dashboard/config/leaderboard.json "
+        "now configures; the cached curve is published as-is rather than "
+        "answering a config edit with a billable re-run. Redeploy this entry "
+        "with force_refresh=True to run it under the current instruction."
+    )
+
+
 def _board_capital_base(
     seeds: List[float], display_capital: float
 ) -> Optional[float]:
@@ -1826,9 +1946,15 @@ def _board_capital_base(
     So: the largest group of mutually-equal seeds wins, and everything outside
     it is dropped by the caller. Ties go to the group matching the config, then
     to the first seen, so the choice is deterministic rather than dict-ordered.
-    **This can never return None for a non-empty board** — the winning group is
-    the largest, so it always has at least one member — which is the property
+    **This can never return None for a non-empty ``seeds``** — the winning group
+    is the largest, so it always has at least one member — which is the property
     that makes a one-character config typo unable to empty the board.
+
+    ⚠ ``seeds`` holds only the seeds rows actually **recorded**; the caller
+    filters. A derived seed is an estimate read off a curve's first point and
+    must not get a vote on what the board's base is — see the caller for why.
+    So None here means "no row on this board wrote down its seed", not "no
+    rows", and the caller answers it by publishing every row unfiltered.
     """
     groups: List[Tuple[float, int]] = []
     for seed in seeds:
@@ -1906,14 +2032,36 @@ def get_leaderboard(
     # LLM entries before it looks anything up (they deploy manually), which is
     # precisely the half the mixing lives in.
     _warn_on_capital_drift(board_runs, display_capital)
-    capital_base = _board_capital_base(
-        [seed for _, _, seed, _ in resolved], display_capital
-    )
+    # ⚠ ONLY A RECORDED SEED VOTES, AND ONLY A RECORDED SEED CAN BE OUTVOTED.
+    # `_stored_seed` falls back to the curve's own first equity point, and that
+    # point is the equity at the END of the run's first hour — seed plus one
+    # hour of P&L. So a run seeded at exactly $100,000 that moved 0.4% in hour
+    # one derives $100,400, and comparing THAT against the board's base at a
+    # one-cent tolerance is not a capital check, it is a check on whether the
+    # strategy happened to be flat at the open. Every derived row that moved at
+    # all failed it and vanished from the public Competition board — the same
+    # absent-treated-as-a-measurement defect this change exists to remove, and
+    # a strictly worse outcome than the unscaled row that used to publish.
+    #
+    # The tolerance is right for what it was written for: a *recorded* seed is
+    # an exact stored number (100000.00000000003 is a float round-trip, not a
+    # different capital), so a penny of disagreement there really does mean two
+    # runs at two capitals. A derived seed simply cannot carry that signal.
+    # Hence the split: recorded seeds decide the base and are held to it;
+    # derived rows publish through the scaling shim and are reported by
+    # `_warn_on_seed_mismatch` — which is what that warning was written for and
+    # was, before this, unreachable whenever the board agreed with its config.
+    recorded_seeds = [
+        seed for _, run, seed, _ in resolved if _run_seed(run) is not None
+    ]
+    capital_base = _board_capital_base(recorded_seeds, display_capital)
 
     # SECOND PASS: publish the entries that share the board's one capital base.
     for strategy, run, stored_initial, equity_hourly in resolved:
-        if capital_base is not None and (
-            abs(stored_initial - capital_base) > _SEED_MATCH_TOLERANCE
+        if (
+            capital_base is not None
+            and _run_seed(run) is not None
+            and abs(stored_initial - capital_base) > _SEED_MATCH_TOLERANCE
         ):
             # An outlier in a board that otherwise agrees. Ranking it against
             # the rest would compare runs that were not measured the same way.
@@ -1922,7 +2070,9 @@ def get_leaderboard(
                 f"{run['run_id']}) was run at ${stored_initial:,.2f} while the "
                 f"rest of this board was run at ${capital_base:,.2f} — omitted "
                 "rather than ranked against curves it is not comparable with "
-                "(issue #365). Force-refresh to re-run it at the board's seed."
+                "(issue #365). Re-run this entry at the board's seed: a "
+                "force-refresh does that only for an auto_compute baseline, an "
+                "LLM entry needs deploy_model_run(force_refresh=True)."
             )
             continue
         # SCALING IS A COMPATIBILITY SHIM, NOT A RE-RUN, and it is only honest
