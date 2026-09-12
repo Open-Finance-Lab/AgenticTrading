@@ -40,8 +40,45 @@ a boundary, and the discard is indistinguishable from the healthy case.
 | #273 | the child's liveness | `subprocess.run` returns no handle to act on |
 | #308 | the child's output, incrementally | `capture_output=True` buffers it all in parent RAM |
 
-`#129` is the odd one out: a plain CSS dead band. It is in P1 because it is the door to
-the same room.
+`#129` is the odd one out: a plain CSS dead band.
+
+### Refined 2026-09-11, during implementation: absence is not a value
+
+The table above says "computed, then discarded". Implementing #169 showed that is only
+one direction of a single underlying error, and the other direction bit twice in one PR.
+
+**The root error is conflating *absence of an observation* with *an observed value*.**
+
+- **Discarding** — a real observation is thrown away and reads as nothing. `llm_model`
+  carries `"rule-based"` and `/backtest/status` never looks.
+- **Manufacturing** — an absence is read as a real observation, which is worse, because
+  it fabricates a finding rather than losing one:
+  - `float(pt.get("equity") or 0)` — *no data at this timestamp* becomes a real `$0`, a
+    −100% curve. (#390)
+  - `run.get("initial_equity") or config[...]` — *seed unrecorded* becomes *seed equals
+    config*, and the scale silently computes to `1.0`. (#365)
+  - `llm_decisions == 0` on a pre-migration row is `DEFAULT 0` backfill, not "the model
+    drove nothing" — classifying it as a fallback would accuse the entire back
+    catalogue.
+  - `llm_calls == 0` from a usage-blind provider is "usage was unreadable", not "no call
+    was made". `_record_llm_usage` (`portfolio_manager.py:803-817`) deliberately does not
+    increment when `_extract_token_usage` raises, so a run the model drove every step of
+    can carry `llm_calls == 0`. A classifier shortcutting on that reports a perfect run
+    as a total fallback.
+
+**The rule.** A classifier must distinguish *"I observed that nothing happened"* from
+*"I have no observation"*, and may report a finding only from the first. Every counter
+feeding a verdict therefore needs a **witness** for whether it was recorded at all —
+`metadata.decision_steps` witnesses `llm_decisions`; `llm_decisions` in turn witnesses
+`llm_calls`. Where no witness exists the honest output is a fourth state (`unknown`),
+never the negative verdict.
+
+**Why this matters more for a badge than for a guard, and asymmetrically.** The H6 guard
+fails toward *refusing to publish*: a false positive costs one leaderboard entry. A badge
+fails toward *telling a user their run was fake*: a false positive costs the badge's
+credibility for every future run, after which the true ones are ignored too. A warning
+nobody believes is worse than no warning, because it consumes the attention a real one
+would need. That asymmetry is the whole argument for `unknown` existing.
 
 ---
 
