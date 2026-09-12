@@ -184,9 +184,12 @@ concurrency slots held for the duration.
   only *error* and *runs_count*, and routing a cancel through `error` would report the
   user's own deliberate action as a failure — a different lie in the same place we are
   fixing #169. Add `cancelled` and give `/backtest/status` a matching branch.
-- Refund the credit. `POST /backtest/run` debits at accept; a cancelled LLM run that
-  made no billed call must return it, on the same `llm_calls`-as-witness rule
-  `domain/entitlements/credits.py` already documents.
+- Release the billing hold. ~~`POST /backtest/run` debits at accept~~ — **corrected
+  2026-09-12**: it does not, and has not since `3eebb7da`. Billing is per call and
+  usage-based (`infrastructure/llm/execution/service.py`), so a cancel must release the
+  *reservation*, not refund a per-run credit. The parent's `finally` already calls
+  `finalize_run` for exactly this case (`backtests.py:1627-1634`), which is why the
+  shipped cancel needed no billing code of its own.
 - **Both frontend surfaces** carry the control and the `cancelled` state — the My Agents
   card and the Backtest tab — per the issue's acceptance criteria. One surface updated
   is a half-shipped change.
