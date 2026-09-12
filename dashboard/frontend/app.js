@@ -7743,6 +7743,19 @@ function deriveRunningProgress(running) {
 let backtestCancelTargetRunId = null;
 
 /**
+ * Runs this browser has already been told it cancelled, awaiting one poll tick.
+ *
+ * `cancelBacktest()` toasts on the server's own response; the poller toasts
+ * again for any cancelled run the Backtest panel is not pinned to, so it can
+ * acknowledge a cancel pressed on a My Agents card. Both are right on their own
+ * and together they double-toasted the one case that is both -- Cancel pressed
+ * on a card while the panel sits on another run. An entry is consumed by the
+ * first tick that reports the run terminal, so the set holds at most the cancels
+ * in flight.
+ */
+const backtestCancelsAnnouncedLocally = new Set();
+
+/**
  * Point the Backtest panel's Cancel button at a run, or take it away.
  *
  * Null at every terminal call site. A Cancel offered for a run that has already
@@ -7775,8 +7788,12 @@ async function cancelBacktest(runId) {
     if (!runId) return null;
     try {
         const data = await API.post(`${API_BASE}/backtest/cancel`, { live_run_id: runId });
+        const raced = data && data.cancelled === false;
+        // Only a cancel that actually took effect is announced here, so only
+        // that one has to be suppressed a tick later.
+        if (!raced) backtestCancelsAnnouncedLocally.add(runId);
         showAppToast(
-            data && data.cancelled === false
+            raced
                 ? 'That backtest had already finished.'
                 : 'Backtest cancelled.',
         );
@@ -8310,7 +8327,15 @@ function ensureBacktestPolling() {
                     // is not pinned to, and that card simply reverts to its
                     // normal body. Without this the user's own deliberate
                     // action would produce no acknowledgement at all.
-                    if (status.cancelled && !viewingLive && liveId !== liveBacktestRunId) {
+                    const announcedHere = liveId
+                        ? backtestCancelsAnnouncedLocally.delete(liveId)
+                        : false;
+                    if (
+                        status.cancelled
+                        && !announcedHere
+                        && !viewingLive
+                        && liveId !== liveBacktestRunId
+                    ) {
                         showAppToast('Backtest cancelled.');
                     }
                     // Armed here, between the registry clear above and the

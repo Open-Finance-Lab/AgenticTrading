@@ -15,6 +15,7 @@ registered before ``/api/backtest/{run_id}`` and ``/runs/latest/metrics`` before
 import json
 import os
 import re
+import signal
 import subprocess
 import time
 import uuid
@@ -658,7 +659,11 @@ def _slot_snapshot(slot: Dict[str, Any]) -> Dict[str, Any]:
     the child's ``Popen`` handle, which is process-local machinery and has no
     business reaching a JSON response. ``cancelled`` is listed because
     ``/backtest/status`` branches on it, and a snapshot that dropped it would
-    report a cancelled run as "no backtest has been run yet".
+    report a cancelled run as "no backtest has been run yet". ``elapsed_seconds``
+    is listed because ``started_at`` is cleared at finalize, so it is the only
+    surviving record of how long a terminal run went -- without it the panel
+    falls back to the poller's attempt count and tells a user who cancelled a
+    forty-minute run that it lasted five seconds.
     """
     return {
         "running": bool(slot.get("running")),
@@ -666,6 +671,7 @@ def _slot_snapshot(slot: Dict[str, Any]) -> Dict[str, Any]:
         "error": slot.get("error"),
         "runs_count": int(slot.get("runs_count") or 0),
         "started_at": slot.get("started_at"),
+        "elapsed_seconds": slot.get("elapsed_seconds"),
         "progress_file": slot.get("progress_file"),
         "live_run_id": slot.get("live_run_id"),
         "session_id": slot.get("session_id"),
@@ -770,9 +776,28 @@ def _try_acquire_backtest_slot(
 
 
 def _update_slot(live_run_id: str, **fields: Any) -> None:
+    """Merge fields into a *live* slot, or into the legacy mirror.
+
+    The lookup is ``_active_slots`` only. Falling back to ``_recent_slots`` --
+    the finalized tier -- made terminal state writable again, and the window is
+    not theoretical: the worker's one ``running=True`` update happens strictly
+    before ``_attach_backtest_process``, so any cancel that beats the launch was
+    already finalized into ``_recent_slots`` and was then flipped straight back
+    to ``running: True`` here, with nothing left to finalize it a second time.
+    ``/backtest/status`` reported that cancelled run as running until the poller
+    gave up, and ``count_active_dashboard_backtests()`` counted its freed slot
+    against the server-wide cap for the life of the process.
+
+    A terminal run returns without touching the legacy mirror either: dropping
+    through to the un-slotted branch below would stamp this run's fields onto
+    whichever run that mirror currently describes.
+    """
     with _backtest_slots_lock:
-        slot = _active_slots.get(live_run_id) or _recent_slots.get(live_run_id)
-        if not slot:
+        slot = _active_slots.get(live_run_id)
+        if slot is None:
+            if live_run_id in _recent_slots:
+                # Already terminal. See the docstring.
+                return
             # Legacy / test path: no slot was ever registered, so the global
             # mirror is the only place this run exists.
             mirrored = backtest_status.get("live_run_id")
@@ -789,6 +814,13 @@ def _update_slot(live_run_id: str, **fields: Any) -> None:
             # last owned it while carrying this run's fields, and both the
             # status route and the concurrency count read that pair.
             backtest_status["live_run_id"] = live_run_id
+            return
+        if slot.get("cancel_requested") or slot.get("cancelled"):
+            # Backstop for an active slot a cancel has marked but not yet moved.
+            # ``_cancel_backtest_slot`` marks and finalizes under one acquisition
+            # of this lock, so nothing should reach here -- but the invariant
+            # this function owes its callers is "never write a run whose owner
+            # has been told it is over", not "trust that ordering".
             return
         slot.update(fields)
         if backtest_status.get("live_run_id") == live_run_id:
@@ -821,59 +853,105 @@ def _finalize_slot(
     as broken every time a user changes their mind.
     """
     with _backtest_slots_lock:
-        slot = _active_slots.pop(live_run_id, None)
-        if not slot:
-            finished = _recent_slots.get(live_run_id)
-            if finished is not None and finished.get("cancelled"):
-                # A cancel finalized this run while its worker was still
-                # unwinding — a window of microseconds, but a real one, since
-                # the route deliberately finalizes rather than waiting for the
-                # thread. The cancel is the verdict. Falling through would
-                # overwrite it AND, because the branch below writes the legacy
-                # mirror unconditionally, would stamp this run's outcome onto
-                # whichever run that mirror currently describes.
-                return
-            backtest_status["running"] = False
-            backtest_status["started_at"] = None
-            backtest_status["live_run_id"] = None
-            backtest_status["progress_file"] = None
-            if error is not None:
-                backtest_status["error"] = error
-            backtest_status["runs_count"] = runs_count
-            return
-        slot["running"] = False
-        slot["error"] = error
-        slot["runs_count"] = runs_count
-        slot["started_at"] = None
-        slot["progress_file"] = None
-        slot["cancelled"] = bool(cancelled)
-        # Drop the child handle with the slot. It only means anything while the
-        # run is live, and ``_recent_slots`` retains fifty of these.
-        slot["process"] = None
-        _recent_slots[live_run_id] = slot
-        # Bound retention so a long-lived process does not grow forever.
-        if len(_recent_slots) > 50:
-            oldest = next(iter(_recent_slots))
-            _recent_slots.pop(oldest, None)
-        if backtest_status.get("live_run_id") == live_run_id:
-            _mirror_slot_to_legacy(slot)
-            backtest_status["progress_file"] = None
-            backtest_status["started_at"] = None
-    user_id = slot.get("user_id")
-    if user_id is not None:
-        if cancelled:
-            event_name = "backtest_cancelled"
-            error_category = None
-        else:
-            succeeded = error is None and runs_count > 0
-            event_name = "backtest_completed" if succeeded else "backtest_failed"
-            error_category = None if succeeded else "internal_error"
-        analytics_instrumentation.emit_run_event(
-            event_name=event_name,
-            user_id=int(user_id),
-            run_id=live_run_id,
-            error_category=error_category,
+        event = _finalize_slot_locked(
+            live_run_id, error=error, runs_count=runs_count, cancelled=cancelled
         )
+    _emit_slot_run_event(event)
+
+
+def _finalize_slot_locked(
+    live_run_id: str,
+    *,
+    error: Optional[str],
+    runs_count: int,
+    cancelled: bool = False,
+) -> Optional[Dict[str, Any]]:
+    """The terminal transition itself. THE CALLER MUST HOLD THE LEDGER LOCK.
+
+    Split out so ``_cancel_backtest_slot`` can do its running-check and its
+    finalize under ONE acquisition. Releasing between the two let a completing
+    worker finalize in the gap, which defeated the ``cancelled`` guard below --
+    the run is in ``_recent_slots`` by then, marked *not* cancelled -- and
+    dropped the cancel into the branch that writes the legacy mirror
+    unconditionally, clobbering whichever unrelated live run that mirror was
+    describing while still answering ``cancelled: true`` for a run that had
+    finished on its own.
+
+    Returns the analytics event to emit, or None. The emit stays OUTSIDE the
+    lock deliberately: it can reach a store, and this lock is taken by every
+    status poll and every launch.
+    """
+    slot = _active_slots.pop(live_run_id, None)
+    if not slot:
+        finished = _recent_slots.get(live_run_id)
+        if finished is not None and finished.get("cancelled"):
+            # A cancel finalized this run while its worker was still
+            # unwinding — a window of microseconds, but a real one, since
+            # the route deliberately finalizes rather than waiting for the
+            # thread. The cancel is the verdict. Falling through would
+            # overwrite it AND, because the branch below writes the legacy
+            # mirror unconditionally, would stamp this run's outcome onto
+            # whichever run that mirror currently describes.
+            return None
+        backtest_status["running"] = False
+        backtest_status["started_at"] = None
+        backtest_status["live_run_id"] = None
+        backtest_status["progress_file"] = None
+        if error is not None:
+            backtest_status["error"] = error
+        backtest_status["runs_count"] = runs_count
+        return None
+    slot["running"] = False
+    slot["error"] = error
+    slot["runs_count"] = runs_count
+    # Captured before ``started_at`` is cleared, because it is the only record
+    # of how long the run went that survives into the terminal state. The
+    # status route reports from it; the alternative the client falls back to is
+    # its own poll-attempt counter, which restarts whenever the page does.
+    started_at = slot.get("started_at")
+    if started_at:
+        slot["elapsed_seconds"] = max(0, int(time.time() - started_at))
+    else:
+        slot["elapsed_seconds"] = int(slot.get("elapsed_seconds") or 0)
+    slot["started_at"] = None
+    slot["progress_file"] = None
+    slot["cancelled"] = bool(cancelled)
+    # Drop the child handle with the slot. It only means anything while the
+    # run is live, and ``_recent_slots`` retains fifty of these.
+    slot["process"] = None
+    _recent_slots[live_run_id] = slot
+    # Bound retention so a long-lived process does not grow forever.
+    if len(_recent_slots) > 50:
+        oldest = next(iter(_recent_slots))
+        _recent_slots.pop(oldest, None)
+    if backtest_status.get("live_run_id") == live_run_id:
+        _mirror_slot_to_legacy(slot)
+        backtest_status["progress_file"] = None
+        backtest_status["started_at"] = None
+    user_id = slot.get("user_id")
+    if user_id is None:
+        return None
+    if cancelled:
+        return {
+            "event_name": "backtest_cancelled",
+            "user_id": int(user_id),
+            "run_id": live_run_id,
+            "error_category": None,
+        }
+    succeeded = error is None and runs_count > 0
+    return {
+        "event_name": "backtest_completed" if succeeded else "backtest_failed",
+        "user_id": int(user_id),
+        "run_id": live_run_id,
+        "error_category": None if succeeded else "internal_error",
+    }
+
+
+def _emit_slot_run_event(event: Optional[Dict[str, Any]]) -> None:
+    """Emit a terminal run event once the ledger lock has been released."""
+    if not event:
+        return
+    analytics_instrumentation.emit_run_event(**event)
 
 
 def _release_slot(live_run_id: str) -> None:
@@ -900,9 +978,12 @@ def _release_slot(live_run_id: str) -> None:
 # ============================================================================
 
 # SIGTERM, then this long, then SIGKILL. Long enough for the backtest script's
-# own ``finally`` to close its DB handle and drop its progress file; short
-# enough that a child which ignores SIGTERM cannot hold the owner's freed slot
-# against the server-wide cap for a noticeable time.
+# own ``finally`` to close its DB pools and drop its progress file -- which it
+# only reaches because ``backtest_hourly_agent.py`` installs a SIGTERM handler;
+# under the default disposition the process dies where it stands, no ``finally``
+# runs, and this grace period bought nothing it claimed to. Short enough that a
+# child which ignores SIGTERM cannot hold the owner's freed slot against the
+# server-wide cap for a noticeable time.
 _CANCEL_GRACE_SECONDS = 5.0
 
 
@@ -916,44 +997,103 @@ class _BacktestCancelled(Exception):
     """
 
 
-def _signal_backtest_process(process: Any) -> bool:
-    """SIGTERM the child. True when the signal was delivered.
+def _resolve_child_pgid(process: Any) -> Optional[int]:
+    """The child's OWN process group, or None when it does not have one.
 
-    Swallows every failure mode because all of them mean the same thing here:
-    the child is already gone, or was never started. Neither is a reason to
-    fail the cancel the user just asked for.
+    The backtest child is launched with ``start_new_session=True``, so it leads
+    a group of its own and everything it spawns inherits that group. That is
+    what makes the group the unit to signal: the direct child installs a SIGTERM
+    handler and exits promptly, which says nothing about the AI Hedge Fund
+    grandchild still holding a resident set and a billable upstream call for up
+    to ``AI_HEDGE_FUND_TIMEOUT_SECONDS`` — against a slot the cancel route has
+    already freed, on a 512MB instance. That orphan is issue #308's failure
+    arriving by the door this PR opened.
+
+    Returns None rather than the parent's own group whenever the child has no
+    session of its own — a test stub, a platform where ``start_new_session`` is
+    a no-op, a handle already reaped. Signalling that group would signal the web
+    process itself.
+    """
+    if os.name != "posix" or not hasattr(os, "killpg"):
+        return None
+    try:
+        pgid = os.getpgid(int(getattr(process, "pid", None)))
+        if pgid == os.getpgid(0):
+            return None
+    except (OSError, AttributeError, TypeError, ValueError):
+        return None
+    return pgid
+
+
+def _killpg(pgid: Optional[int], sig: int) -> bool:
+    """Signal a process group. True when it was delivered."""
+    if pgid is None:
+        return False
+    try:
+        os.killpg(pgid, sig)
+    except (OSError, AttributeError, TypeError):
+        # ESRCH is the common case and the benign one: the group emptied out
+        # between the resolve and here, which is the outcome we wanted anyway.
+        return False
+    return True
+
+
+def _signal_backtest_process(process: Any) -> bool:
+    """SIGTERM the child and everything it started. True when a signal landed.
+
+    Group first, then the handle. The group is what actually ends the run;
+    ``terminate()`` alone reached exactly one pid and left the grandchild (see
+    ``_resolve_child_pgid``) running. The handle call stays because it is the
+    only path that works when the child has no group of its own.
+
+    Swallows every failure mode of the handle call because all of them mean the
+    same thing here: the child is already gone, or was never started. Neither is
+    a reason to fail the cancel the user just asked for.
     """
     if process is None:
         return False
+    group_signalled = _killpg(_resolve_child_pgid(process), signal.SIGTERM)
     try:
         process.terminate()
     except Exception:  # noqa: BLE001 - see docstring
-        return False
+        return group_signalled
     return True
 
 
 def _kill_backtest_process_after_grace(
     process: Any, grace_seconds: float = _CANCEL_GRACE_SECONDS
 ) -> None:
-    """Wait out the grace period, then SIGKILL a child that ignored SIGTERM.
+    """Wait out the grace period, then SIGKILL whatever is left of the group.
 
     Split from ``_signal_backtest_process`` so the route can deliver the signal
     inline — the caller's request has taken effect before the response is
     written — while the seconds-long escalation happens off the request thread.
+
+    Two orderings here are load-bearing.
+
+    The group id is resolved BEFORE the wait: ``wait()`` reaps the child, after
+    which ``os.getpgid`` raises ESRCH and the id is unrecoverable at exactly the
+    moment a surviving grandchild still needs it.
+
+    The group sweep runs even when the child exited within the grace, because
+    the child exiting is not evidence the run stopped. Reusing a resolved pgid
+    after the reap is safe by the POSIX rule that a process group id cannot be
+    recycled while any member of the group is alive: if something is still there
+    to kill, the id is still ours, and if nothing is, the call is a no-op.
     """
     if process is None:
         return
+    pgid = _resolve_child_pgid(process)
     try:
         process.wait(timeout=grace_seconds)
-        return
     except subprocess.TimeoutExpired:
-        pass
-    except Exception:  # noqa: BLE001 - already reaped; nothing left to kill
-        return
-    try:
-        process.kill()
+        try:
+            process.kill()
+        except Exception:  # noqa: BLE001 - already reaped; nothing left to kill
+            pass
     except Exception:  # noqa: BLE001 - same
         pass
+    _killpg(pgid, signal.SIGKILL)
 
 
 def _attach_backtest_process(live_run_id: str, process: Any) -> bool:
@@ -1013,6 +1153,32 @@ def _slot_visible_to(
     # ``session_id`` is the agent's (where results file) and ``owner_session``
     # is the visitor's (who started it), and the visitor polls with their own.
     return session_id in (slot.get("session_id"), slot.get("owner_session"))
+
+
+def _slot_cancellable_by(
+    slot: Dict[str, Any], *, session_id: str, user_id: Optional[int]
+) -> bool:
+    """Is this caller entitled to STOP this run?
+
+    Strictly narrower than ``_slot_visible_to``, and deliberately NOT that
+    function with a different name. The read rule accepts the slot's
+    ``session_id`` as an identity, and for a built-in agent that is the
+    *agent's* session -- which ``/backtest/status`` hands back to every visitor
+    who runs the agent. Sharing the rule therefore made a published id a licence
+    to kill somebody else's run, including a signed-in owner's, since the
+    ``user_id`` branch is skipped whenever the caller sends no auth. Read access
+    to a run you started is one thing; ending one you did not is another.
+
+    Cancel keys on who *started* it: the account when the run has one, and
+    otherwise ``owner_session`` -- the caller's own browser session, which no
+    response publishes. For every run outside the built-in-agent case the two
+    session ids are equal, so nothing about ordinary ownership changes.
+    """
+    if user_id is not None and slot.get("user_id") is not None:
+        return int(slot["user_id"]) == int(user_id)
+    if not session_id:
+        return False
+    return session_id == slot.get("owner_session")
 
 
 def _resolve_status_slot(
@@ -1077,12 +1243,13 @@ def _cancel_backtest_slot(
 ) -> Tuple[bool, Optional[Any]]:
     """Authorize a cancel, mark the slot, and hand back the child to signal.
 
-    Ownership is ``_slot_visible_to`` — the same rule ``_resolve_status_slot``
-    applies, reused rather than restated, so the two routes cannot drift into
-    disagreeing about who owns a run. An unknown id and another caller's id
-    raise the SAME 404: a session id is an access grant in this codebase (see
-    ``_owner_context``), so a distinguishable refusal would let this route be
-    used first to test whether a run id exists and then to learn whose it is.
+    Ownership is ``_slot_cancellable_by``, which is STRICTLY NARROWER than the
+    ``_slot_visible_to`` rule the status route reads with -- see its docstring
+    for why one rule could not serve both a read and a stop. An unknown id and
+    another caller's id raise the SAME 404: a session id is an access grant in
+    this codebase (see ``_owner_context``), so a distinguishable refusal would
+    let this route be used first to test whether a run id exists and then to
+    learn whose it is.
 
     Returns ``(accepted, process)``.
 
@@ -1099,13 +1266,15 @@ def _cancel_backtest_slot(
     registered a slot, so it has no child handle and no quota to release —
     answering 200 for it would report a cancel that cannot have happened.
 
-    ``_finalize_slot`` runs here rather than in the worker so the owner's
-    concurrency quota is freed the moment the request is accepted, instead of
-    whenever the background thread next notices its child died.
+    The finalize runs here rather than in the worker so the owner's concurrency
+    quota is freed the moment the request is accepted, instead of whenever the
+    background thread next notices its child died. It runs under the SAME lock
+    acquisition as the running-check above, which is load-bearing: see
+    ``_finalize_slot_locked``.
     """
     with _backtest_slots_lock:
         slot = _active_slots.get(live_run_id) or _recent_slots.get(live_run_id)
-        if slot is None or not _slot_visible_to(
+        if slot is None or not _slot_cancellable_by(
             slot, session_id=session_id, user_id=user_id
         ):
             raise HTTPException(status_code=404, detail="Backtest run not found")
@@ -1113,7 +1282,10 @@ def _cancel_backtest_slot(
             return False, None
         slot["cancel_requested"] = True
         process = slot.get("process")
-    _finalize_slot(live_run_id, error=None, runs_count=0, cancelled=True)
+        event = _finalize_slot_locked(
+            live_run_id, error=None, runs_count=0, cancelled=True
+        )
+    _emit_slot_run_event(event)
     return True, process
 
 
@@ -1594,11 +1766,37 @@ def _backtest_subprocess_timeout(
 # ``MAX_ACTIVE_DASHBOARD_BACKTESTS`` gives 0 — so an operator on free hosting
 # can turn it off from the Render dashboard without a deploy.
 _DEFAULT_MAX_AI_HEDGE_FUND_TRADING_DAYS = 10
-# Past this the parent's own four-hour ceiling is the binding constraint anyway
-# (``MAX_SUBPROCESS_TIMEOUT_SECONDS`` / ``AI_HEDGE_FUND_TIMEOUT_SECONDS``), so a
-# larger setting would only move the failure from a clear 422 to a run killed
-# mid-flight after the user waited for it.
-_MAX_AI_HEDGE_FUND_TRADING_DAYS_CEILING = 60
+# Only reached when AI_HEDGE_FUND_TIMEOUT_SECONDS is unreadable; mirrors the
+# adapter's own default so the two agree about an unconfigured deployment.
+_FALLBACK_STEP_TIMEOUT_SECONDS = 300
+
+
+def _ai_hedge_fund_trading_days_ceiling() -> int:
+    """Largest window the parent's own wall-clock budget can actually finish.
+
+    Derived, never a constant. Past this the parent is the binding constraint
+    again and a larger setting only moves the failure from a clear 422 to a run
+    killed mid-flight after the user waited for it — which is exactly what the
+    hardcoded 60 this replaces admitted: with the default 300s step timeout the
+    parent covers ``(14400 - 600) / 300`` = 46 trading days, so an operator
+    setting 55 had it accepted, had it clear the 422 gate, and had the run
+    SIGTERMed four hours in.
+
+    Same inputs as ``_backtest_subprocess_timeout``, inverted, so the bound and
+    the budget cannot disagree about how big a window is.
+    """
+    try:
+        step_seconds = max(1, int(resolve_step_timeout_seconds()))
+    except (AiHedgeFundConfigurationError, TypeError, ValueError):
+        # This runs at import, and ``resolve_step_timeout_seconds`` raises on a
+        # junk AI_HEDGE_FUND_TIMEOUT_SECONDS. CLAUDE.md records that a bare
+        # ``int()`` at module scope in this very module once killed app boot;
+        # borrowing another module's validator must not reintroduce that by the
+        # back door. The launch path reads the same value and reports the real
+        # configuration error to the operator who set it.
+        step_seconds = _FALLBACK_STEP_TIMEOUT_SECONDS
+    usable = MAX_SUBPROCESS_TIMEOUT_SECONDS - SUBPROCESS_TIMEOUT_OVERHEAD_SECONDS
+    return max(1, usable // step_seconds)
 
 
 def _max_ai_hedge_fund_trading_days() -> int:
@@ -1610,26 +1808,31 @@ def _max_ai_hedge_fund_trading_days() -> int:
     falls back — the whole app must not fail to start because one optional
     bound was mistyped in a web form.
     """
+    ceiling = _ai_hedge_fund_trading_days_ceiling()
+    # The default is clamped too. A deployment with a long per-step timeout can
+    # have a ceiling below 10, and shipping a default the parent cannot finish
+    # is the same mid-flight kill arriving without anyone setting anything.
+    default = min(_DEFAULT_MAX_AI_HEDGE_FUND_TRADING_DAYS, ceiling)
     raw = os.getenv("MAX_AI_HEDGE_FUND_TRADING_DAYS")
     if raw is None or not str(raw).strip():
-        return _DEFAULT_MAX_AI_HEDGE_FUND_TRADING_DAYS
+        return default
     try:
         value = int(str(raw).strip())
     except (TypeError, ValueError):
         print(
             "MAX_AI_HEDGE_FUND_TRADING_DAYS is not an integer "
-            f"({raw!r}); using {_DEFAULT_MAX_AI_HEDGE_FUND_TRADING_DAYS}",
+            f"({raw!r}); using {default}",
             flush=True,
         )
-        return _DEFAULT_MAX_AI_HEDGE_FUND_TRADING_DAYS
-    if value < 0 or value > _MAX_AI_HEDGE_FUND_TRADING_DAYS_CEILING:
+        return default
+    if value < 0 or value > ceiling:
         print(
             f"MAX_AI_HEDGE_FUND_TRADING_DAYS is out of range ({value}; allowed "
-            f"0-{_MAX_AI_HEDGE_FUND_TRADING_DAYS_CEILING}); using "
-            f"{_DEFAULT_MAX_AI_HEDGE_FUND_TRADING_DAYS}",
+            f"0-{ceiling}, derived from MAX_SUBPROCESS_TIMEOUT_SECONDS and "
+            f"AI_HEDGE_FUND_TIMEOUT_SECONDS); using {default}",
             flush=True,
         )
-        return _DEFAULT_MAX_AI_HEDGE_FUND_TRADING_DAYS
+        return default
     return value
 
 
@@ -1823,6 +2026,12 @@ def _run_backtest_subprocess(
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
+        # The child leads its own process group, so a cancel or a timeout can
+        # signal the whole tree instead of one pid. Without it the AI Hedge Fund
+        # grandchild outlived every stop path — see ``_resolve_child_pgid``.
+        # Ignored on non-POSIX platforms, where the helpers fall back to the
+        # handle.
+        start_new_session=True,
     )
     if live_run_id and not _attach_backtest_process(live_run_id, process):
         # A cancel landed between slot acquisition and launch. The slot is
@@ -2843,6 +3052,12 @@ def get_backtest_status(
         return {
             "running": False,
             "cancelled": True,
+            # Recorded at finalize, because ``started_at`` is cleared there.
+            # Without it the poller falls back to its own attempt count — the
+            # ticks of the CURRENT polling interval — so a user who reloaded
+            # forty minutes into a run and then cancelled was told it lasted
+            # five seconds.
+            "elapsed_seconds": int(slot.get("elapsed_seconds") or 0),
             "live_run_id": slot.get("live_run_id"),
             "message": "Backtest cancelled.",
         }

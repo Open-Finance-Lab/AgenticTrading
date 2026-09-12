@@ -20,7 +20,11 @@ action*, so every path that reports it must keep it distinct from a failure.
 survives at each boundary it crosses — slot, status route, analytics event.
 """
 
+import os
+import signal
 import subprocess
+import sys
+import time
 import uuid
 
 import pytest
@@ -331,8 +335,13 @@ def test_worker_reports_a_cancelled_child_as_cancelled_not_as_return_code(monkey
     session_id = owner["X-Session-Id"]
     _acquire(run_id, session_id)
 
+    # Spied on ``_finalize_slot_locked`` rather than ``_finalize_slot``: the
+    # cancel route calls the locked core directly (it holds the ledger lock
+    # across its own running-check), so the wrapper no longer sees every
+    # finalize. The core does, which is what "exactly once" has to be counted
+    # at.
     finalized = []
-    real_finalize = bt._finalize_slot
+    real_finalize = bt._finalize_slot_locked
 
     def spy_finalize(live_run_id, *, error, runs_count, cancelled=False):
         finalized.append((live_run_id, error, runs_count, cancelled))
@@ -351,7 +360,7 @@ def test_worker_reports_a_cancelled_child_as_cancelled_not_as_return_code(monkey
 
     child = CancellingChild(returncode=-15, stdout="universe: DJIA30\n")
     monkeypatch.setattr(subprocess, "Popen", lambda cmd, **kwargs: child)
-    monkeypatch.setattr(bt, "_finalize_slot", spy_finalize)
+    monkeypatch.setattr(bt, "_finalize_slot_locked", spy_finalize)
     monkeypatch.setattr(bt, "run_backtest_background", _REAL_RUN_BACKTEST_BACKGROUND)
 
     bt.run_backtest_background(
@@ -598,3 +607,429 @@ def test_backtest_run_refuses_an_over_long_hosted_window(client, monkeypatch):
 
     assert response.status_code == 422, response.text
     assert "10 trading days" in response.text
+
+
+# ===========================================================================
+# The ledger's terminal tier is write-once
+# ===========================================================================
+
+def test_a_cancelled_run_cannot_be_flipped_back_to_running_by_its_worker(client):
+    """The ordering here is the normal one, not an exotic interleaving.
+
+    The slot is taken in the request handler; the worker reaches its one
+    ``running=True`` update on another thread a few milliseconds later, and it
+    reaches it STRICTLY BEFORE ``_attach_backtest_process`` — the point at which
+    a cancel is noticed. So every cancel that beats the launch lands in this
+    window. ``_update_slot`` used to resolve ``_recent_slots`` as a fallback and
+    merge into whatever it found, which un-finalized the run: nothing finalizes
+    it a second time, so the status route reported a cancelled run as running
+    until the poller gave up and the freed slot was counted against the
+    server-wide cap for the life of the process.
+    """
+    owner = _sess()
+    run_id = "agent_cancel_then_update"
+    _acquire(run_id, owner["X-Session-Id"])
+    bt._cancel_backtest_slot(
+        live_run_id=run_id, session_id=owner["X-Session-Id"], user_id=None
+    )
+
+    bt._update_slot(
+        run_id,
+        running=True,
+        error=None,
+        started_at=time.time(),
+        progress_file="/tmp/backtest_progress_agent_cancel_then_update.json",
+        session_id=owner["X-Session-Id"],
+    )
+
+    slot = bt._recent_slots[run_id]
+    assert (slot["running"], slot["cancelled"]) == (False, True)
+    assert run_id not in bt._active_slots
+    # The freed slot stays freed.
+    assert bt.count_active_dashboard_backtests() == 0
+    assert bt.backtest_status["running"] is False
+    body = client.get(
+        "/backtest/status", params={"live_run_id": run_id}, headers=owner
+    ).json()
+    assert (body["cancelled"], body["running"]) == (True, False)
+
+
+def test_a_late_update_for_a_terminal_run_does_not_reach_the_legacy_mirror():
+    """The other half of the same narrowing.
+
+    Refusing a terminal slot is only safe if it returns outright. Dropping
+    through to the un-slotted branch — the one that exists for the legacy/test
+    path — would write this run's fields onto whichever run the global mirror
+    currently describes, which is the same clobber the finalize guard exists to
+    prevent, arriving by a different door.
+    """
+    owner = _sess()
+    finished = "agent_finished_run"
+    _acquire(finished, owner["X-Session-Id"])
+    bt._finalize_slot(finished, error=None, runs_count=1)
+    live = "agent_live_mirror_owner"
+    _acquire(live, owner["X-Session-Id"])
+
+    bt._update_slot(finished, running=True, progress_file="/tmp/stale.json")
+
+    assert bt.backtest_status["live_run_id"] == live
+    assert bt.backtest_status["running"] is True
+    assert bt.backtest_status["progress_file"] is None
+
+
+# ===========================================================================
+# Cancel authorizes and finalizes without releasing the ledger lock
+# ===========================================================================
+
+def test_cancel_finalizes_under_the_acquisition_it_authorized_under(monkeypatch):
+    """The gap between the running-check and the finalize was the bug.
+
+    With the lock released in between, a completing worker could finalize in the
+    gap; the cancel's finalize then found the run already in ``_recent_slots``
+    marked NOT cancelled, sailed past the guard written for exactly this, and
+    fell into the branch that writes the legacy mirror unconditionally — over an
+    unrelated live run. Asserting the observable ("the mirror is intact") cannot
+    pin this, because the interleaving is what has to be impossible.
+    """
+    held = []
+    real = bt._finalize_slot_locked
+
+    def spy(live_run_id, **kwargs):
+        held.append(bt._backtest_slots_lock.locked())
+        return real(live_run_id, **kwargs)
+
+    monkeypatch.setattr(bt, "_finalize_slot_locked", spy)
+    owner = _sess()
+    run_id = "agent_cancel_under_lock"
+    _acquire(run_id, owner["X-Session-Id"])
+    bt._attach_backtest_process(run_id, FakeChild())
+
+    bt._cancel_backtest_slot(
+        live_run_id=run_id, session_id=owner["X-Session-Id"], user_id=None
+    )
+
+    assert held == [True]
+
+
+def test_a_cancel_that_lost_the_race_leaves_an_unrelated_mirror_alone():
+    """The outcome the gap produced, pinned from the outside.
+
+    Two separate lies came out of one write: the route answered ``cancelled:
+    true`` for a run that had completed on its own, and the finalize behind it
+    reset the legacy mirror — which by then described a DIFFERENT, still-running
+    run — to "no backtest running".
+    """
+    owner = _sess()
+    losing = "agent_cancel_lost_race"
+    _acquire(losing, owner["X-Session-Id"])
+    bt._attach_backtest_process(losing, FakeChild())
+    bt._finalize_slot(losing, error=None, runs_count=2)
+    live = "agent_untouched_mirror_owner"
+    _acquire(live, owner["X-Session-Id"])
+
+    accepted, process = bt._cancel_backtest_slot(
+        live_run_id=losing, session_id=owner["X-Session-Id"], user_id=None
+    )
+
+    assert (accepted, process) == (False, None)
+    assert bt._recent_slots[losing]["cancelled"] is False
+    assert bt._recent_slots[losing]["runs_count"] == 2
+    assert bt.backtest_status["live_run_id"] == live
+    assert bt.backtest_status["running"] is True
+
+
+# ===========================================================================
+# Who may stop a run (as opposed to watch one)
+# ===========================================================================
+
+def test_a_published_agent_session_is_not_a_licence_to_cancel(client):
+    """A read rule and a stop rule cannot be the same rule here.
+
+    A built-in agent's run files under the AGENT's session so it lands on that
+    agent's public card, and ``/backtest/status`` hands that id back to every
+    visitor who runs the agent. Under the shared ``_slot_visible_to`` rule,
+    replaying it authorized a cancel — of anyone else's run of that agent, the
+    ``user_id`` branch being skipped whenever the caller sends no auth.
+    """
+    starter = _sess()
+    agent_session = str(uuid.uuid4())
+    run_id = "agent_builtin_shared_session"
+    assert (
+        bt._try_acquire_backtest_slot(
+            live_run_id=run_id,
+            session_id=agent_session,
+            owner_session=starter["X-Session-Id"],
+            user_id=None,
+        )
+        is None
+    )
+    bt._attach_backtest_process(run_id, FakeChild())
+
+    # The route publishes the agent's session id to the visitor polling it...
+    body = client.get(
+        "/backtest/status", params={"live_run_id": run_id}, headers=starter
+    ).json()
+    assert body["session_id"] == agent_session
+
+    # ...and replaying it buys nothing. Same 404 as an unknown run.
+    refused = client.post(
+        "/backtest/cancel",
+        json={"live_run_id": run_id},
+        headers={"X-Session-Id": agent_session},
+    )
+    assert refused.status_code == 404
+    assert bt._active_slots[run_id]["running"] is True
+    assert bt._active_slots[run_id]["cancel_requested"] is False
+
+    # The visitor who started it still can — this must not have become a
+    # feature nobody can use.
+    accepted = client.post(
+        "/backtest/cancel", json={"live_run_id": run_id}, headers=starter
+    )
+    assert accepted.status_code == 200 and accepted.json()["cancelled"] is True
+
+
+# ===========================================================================
+# Stopping the tree, not the pid
+# ===========================================================================
+
+def test_sigterm_goes_to_the_group_not_only_to_the_handle(monkeypatch):
+    """``terminate()`` reaches exactly one pid.
+
+    The run's memory and its billable upstream call live in the grandchild, so a
+    cancel that signalled only the direct child freed the slot and left the
+    resident set behind — issue #308's failure arriving through the door the
+    cancel route opened.
+    """
+    sent = []
+    monkeypatch.setattr(bt, "_resolve_child_pgid", lambda process: 31337)
+    monkeypatch.setattr(
+        bt, "_killpg", lambda pgid, sig: bool(sent.append((pgid, sig))) or True
+    )
+    child = FakeChild()
+
+    assert bt._signal_backtest_process(child) is True
+
+    assert sent == [(31337, signal.SIGTERM)]
+    assert child.terminated == 1
+
+
+def test_the_group_sweep_runs_even_when_the_child_went_quietly(monkeypatch):
+    """A child that exits is not evidence the run stopped.
+
+    ``backtest_hourly_agent.py`` installs a SIGTERM handler and exits promptly,
+    so the clean-exit path is the COMMON one — and it was the path that returned
+    before any escalation, leaving the grandchild running. The order matters
+    too: ``wait()`` reaps the child, after which the group id is unrecoverable.
+    """
+    order = []
+
+    def fake_resolve(process):
+        order.append("resolve")
+        return 5150
+
+    def fake_killpg(pgid, sig):
+        order.append(("killpg", pgid, sig))
+        return True
+
+    class OrderingChild(FakeChild):
+        def wait(self, timeout=None):
+            order.append("wait")
+            return super().wait(timeout)
+
+    monkeypatch.setattr(bt, "_resolve_child_pgid", fake_resolve)
+    monkeypatch.setattr(bt, "_killpg", fake_killpg)
+    obedient = OrderingChild()
+
+    bt._kill_backtest_process_after_grace(obedient, grace_seconds=0)
+
+    assert order == ["resolve", "wait", ("killpg", 5150, signal.SIGKILL)]
+    # The handle itself is not killed: it already exited.
+    assert obedient.killed == 0
+
+
+def test_the_group_helpers_never_signal_the_web_process_own_group(monkeypatch):
+    """The one way this change could take the site down.
+
+    ``start_new_session`` is a no-op on some platforms and a test stub has no
+    session at all; in both cases the child's group IS the web process's group,
+    and a SIGKILL to it kills uvicorn. Resolving to None is what makes the
+    helpers fall back to the handle instead.
+    """
+    class SameGroupChild(FakeChild):
+        pid = 4242
+
+    monkeypatch.setattr(os, "getpgid", lambda pid: 777)
+    assert bt._resolve_child_pgid(SameGroupChild()) is None
+    # A stub with no pid at all resolves to None as well, which is why every
+    # other case in this module still exercises the handle path.
+    assert bt._resolve_child_pgid(FakeChild()) is None
+    assert bt._killpg(None, signal.SIGKILL) is False
+
+
+@pytest.mark.skipif(os.name != "posix", reason="process groups are POSIX-only")
+def test_a_real_cancel_reaps_the_grandchild_not_just_the_child():
+    """The only assertion that proves the orphan is gone.
+
+    Every other case here mocks the signalling. This one launches a real child
+    that spawns a real grandchild — the shape of the AI Hedge Fund runner — and
+    checks the grandchild is dead after the same two calls the cancel route
+    makes.
+    """
+    child = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            "import subprocess, sys, time; "
+            "g = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)']); "
+            "print(g.pid, flush=True); time.sleep(30)",
+        ],
+        stdout=subprocess.PIPE,
+        text=True,
+        start_new_session=True,
+    )
+    grandchild_pid = int(child.stdout.readline().strip())
+
+    def alive(pid: int) -> bool:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            return True
+        return True
+
+    try:
+        # Deliberately no internal helper in the assertions: this case has to
+        # fail by leaving a live grandchild behind, not by a missing attribute.
+        assert os.getpgid(child.pid) != os.getpgid(0)
+
+        bt._signal_backtest_process(child)
+        bt._kill_backtest_process_after_grace(child, grace_seconds=2)
+
+        deadline = time.time() + 5
+        while time.time() < deadline and alive(grandchild_pid):
+            time.sleep(0.05)
+        assert not alive(grandchild_pid)
+    finally:
+        for pid in (grandchild_pid, child.pid):
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except OSError:
+                pass
+        child.stdout.close()
+        try:
+            child.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            pass
+
+
+# ===========================================================================
+# What a cancelled run reports about itself
+# ===========================================================================
+
+def test_the_child_is_launched_into_its_own_session(monkeypatch):
+    """Without this the group helpers are dead code in production.
+
+    Every group assertion above resolves the child's pgid, and a child that
+    shares the web process's group resolves to None by design — so a dropped
+    ``start_new_session`` would leave all of them passing while cancel went back
+    to signalling one pid.
+    """
+    seen = {}
+    child = FakeChild()
+
+    def fake_popen(cmd, **kwargs):
+        seen.update(kwargs)
+        return child
+
+    monkeypatch.setattr(subprocess, "Popen", fake_popen)
+    bt._run_backtest_subprocess(
+        ["python", "-c", "pass"],
+        cwd=".",
+        env={},
+        stdin_payload="",
+        timeout=60,
+        live_run_id=None,
+    )
+
+    assert seen.get("start_new_session") is True
+
+
+def test_a_cancelled_run_reports_how_long_it_actually_went(client):
+    """``started_at`` is cleared at finalize, so the elapsed time has to be
+    captured there or it is gone.
+
+    Without it the client falls back to its own poll-attempt counter, which
+    counts ticks of the CURRENT polling interval: a user who reloaded the page
+    forty minutes into a run and then cancelled was told it lasted five seconds.
+    """
+    owner = _sess()
+    run_id = "agent_cancel_elapsed"
+    _acquire(run_id, owner["X-Session-Id"])
+    bt._active_slots[run_id]["started_at"] = time.time() - 2400
+    bt._attach_backtest_process(run_id, FakeChild())
+
+    client.post("/backtest/cancel", json={"live_run_id": run_id}, headers=owner)
+    body = client.get(
+        "/backtest/status", params={"live_run_id": run_id}, headers=owner
+    ).json()
+
+    assert body["cancelled"] is True
+    assert 2400 <= body["elapsed_seconds"] < 2500
+
+
+# ===========================================================================
+# The window ceiling is derived, not asserted
+# ===========================================================================
+
+def test_the_window_ceiling_comes_from_the_parent_budget(monkeypatch):
+    """The hardcoded 60 admitted the very kill it was written to prevent.
+
+    With the default 300s step timeout the parent covers (14400 - 600) / 300 =
+    46 trading days, so ``MAX_AI_HEDGE_FUND_TRADING_DAYS=55`` was accepted,
+    cleared the 422 gate, and had the run SIGTERMed four hours in.
+    """
+    monkeypatch.setattr(bt, "resolve_step_timeout_seconds", lambda: 300)
+    expected = (
+        bt.MAX_SUBPROCESS_TIMEOUT_SECONDS - bt.SUBPROCESS_TIMEOUT_OVERHEAD_SECONDS
+    ) // 300
+    assert bt._ai_hedge_fund_trading_days_ceiling() == expected == 46
+
+    monkeypatch.setenv("MAX_AI_HEDGE_FUND_TRADING_DAYS", "55")
+    assert (
+        bt._max_ai_hedge_fund_trading_days()
+        == bt._DEFAULT_MAX_AI_HEDGE_FUND_TRADING_DAYS
+    )
+    # A window the parent can actually finish is still honoured.
+    monkeypatch.setenv("MAX_AI_HEDGE_FUND_TRADING_DAYS", "46")
+    assert bt._max_ai_hedge_fund_trading_days() == 46
+
+
+def test_the_ceiling_and_the_default_both_track_a_longer_step_timeout(monkeypatch):
+    """Raising AI_HEDGE_FUND_TIMEOUT_SECONDS shrinks how many days fit.
+
+    The DEFAULT is clamped as well: shipping 10 under a step timeout that only
+    covers 6 is the same mid-flight kill with nobody having configured anything.
+    """
+    monkeypatch.setattr(bt, "resolve_step_timeout_seconds", lambda: 2000)
+    assert bt._ai_hedge_fund_trading_days_ceiling() == 6
+    monkeypatch.delenv("MAX_AI_HEDGE_FUND_TRADING_DAYS", raising=False)
+    assert bt._max_ai_hedge_fund_trading_days() == 6
+
+
+def test_an_unreadable_step_timeout_does_not_kill_app_import(monkeypatch):
+    """CLAUDE.md records a bare int() at module scope in this module killing app
+    boot. Deriving the ceiling borrows another module's validator — and its
+    exceptions with it — at import time, so the borrow has to be guarded."""
+    def explode():
+        raise bt.AiHedgeFundConfigurationError("AI_HEDGE_FUND_TIMEOUT_SECONDS bad")
+
+    monkeypatch.setattr(bt, "resolve_step_timeout_seconds", explode)
+
+    assert bt._ai_hedge_fund_trading_days_ceiling() == 46
+    monkeypatch.delenv("MAX_AI_HEDGE_FUND_TRADING_DAYS", raising=False)
+    assert (
+        bt._max_ai_hedge_fund_trading_days()
+        == bt._DEFAULT_MAX_AI_HEDGE_FUND_TRADING_DAYS
+    )

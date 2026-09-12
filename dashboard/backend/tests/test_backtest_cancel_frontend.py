@@ -202,3 +202,31 @@ def test_terminal_paths_take_the_cancel_button_away():
 
     assert "setBacktestCancelTarget(null)" in poller
     assert "setBacktestCancelTarget(null)" in launch_failure
+
+
+def test_a_cancel_is_announced_once_even_when_the_panel_is_elsewhere():
+    """Two correct toasts, one wrong outcome.
+
+    `cancelBacktest()` announces the server's own answer, and the poller
+    announces any cancelled run the Backtest panel is not pinned to — which is
+    how a cancel pressed on a My Agents card gets acknowledged at all. Press
+    Cancel on a card while the panel sits on another run and both fire, one tick
+    apart, for the same run. The poller's toast is the one that yields: it is the
+    fallback for a cancel this browser did not initiate.
+
+    A source-shape guard because a payload-driven test cannot see it: feeding the
+    poller a `{cancelled: true}` payload toasts once whether or not the request
+    path ever recorded anything.
+    """
+    request = strip_comments(fn_body("async function cancelBacktest("))
+    poller = strip_comments(fn_body("function ensureBacktestPolling("))
+
+    # Recorded only for a cancel that actually took effect -- a cancel that
+    # raced a completion says something else, and has nothing to suppress.
+    assert "backtestCancelsAnnouncedLocally.add(runId)" in request
+    assert "if (!raced)" in request
+
+    # ...and consumed by the first tick that sees the run terminal, so the set
+    # holds at most the cancels in flight.
+    assert "backtestCancelsAnnouncedLocally.delete(liveId)" in poller
+    assert "&& !announcedHere" in poller
