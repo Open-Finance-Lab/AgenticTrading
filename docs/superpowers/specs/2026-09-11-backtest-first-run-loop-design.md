@@ -100,6 +100,12 @@ child.
 - Return it in `/backtest/status`'s completed payload, and render it on the result. A
   run that fell back must not be able to display the words "completed successfully"
   with nothing else attached.
+- **The issue's stated acceptance criterion is an "N of M steps were model-driven"
+  badge shown whenever coverage is below 100%**, so the payload carries the raw
+  numerator and denominator, not only the verdict. Note the asymmetry and keep it:
+  H6's bar is 95% (*may this publish?*) while the badge fires below 100% (*should the
+  user be told something degraded?*). Two different questions; do not collapse them
+  into one number.
 
 **Contract note.** This adds fields; it removes none. `/backtest/status` is polled by
 `app.js` and by the legacy surface — additive only.
@@ -130,28 +136,48 @@ concurrency slots held for the duration.
 - Refund the credit. `POST /backtest/run` debits at accept; a cancelled LLM run that
   made no billed call must return it, on the same `llm_calls`-as-witness rule
   `domain/entitlements/credits.py` already documents.
+- **Both frontend surfaces** carry the control and the `cancelled` state — the My Agents
+  card and the Backtest tab — per the issue's acceptance criteria. One surface updated
+  is a half-shipped change.
 
 ### 4. Survivable — #308, an AHF backtest OOMs the instance
 
-Two contributors, and the parent-side one is ours.
+**The reporter frames this as a hosting-capacity failure, not an application bug, and
+that framing is correct.** Their acceptance criteria offer three exits: (a) bump the
+Render web service to 1–2GB, (b) a product guard that refuses AHF on the free tier with
+a clear UI error, or (c) isolate AHF into its own service.
 
-`subprocess.run(capture_output=True)` accumulates the **entire** child stdout and
-stderr in parent memory before returning. The AHF runtime spawns one upstream
-subprocess per trading day and each is verbose. On a 512MB Render free-tier instance
-that buffer is a real share of the budget, and when the kernel picks a victim it is not
-required to pick the backtest — it can take the web process, which is why a single
-backtest downs the whole site.
+Note `render.yaml` already says `plan: standard`; per CLAUDE.md the live service runs on
+the **free tier** and that file is documentation, not the deploy mechanism. So (a) is not
+a code change at all — it is an operator action carrying a recurring monthly cost, and
+it is the user's call, not this workstream's.
 
-**Fix.**
-- The `Popen` change in #273 already replaces the unbounded buffer: drain the child's
-  output on a reader thread, cap what is retained (keep head and tail, drop the
-  middle — the head carries universe/decision-source/FX bootstrap, the tail carries the
-  failure), and write through to the log as it arrives.
-- Add a pre-flight refusal for the AHF runtime when the requested window would exceed a
-  configured bound, returning a clear message rather than accepting a request that
-  cannot survive. Bound is an env var with a safe default, parsed defensively — the
-  module already documents an unparseable value killing app boot as a bug it has had
-  once.
+**This is on the onboarding path, which is why it is P1.** AI Hedge Fund is a built-in
+agent on `/app?view=agents` — exactly where the first-loop checklist sends a new user. So
+a new user's *first* backtest can be the one that downs the site for everybody.
+
+**What this PR ships: (b), plus a real but secondary memory reduction.**
+
+- A pre-flight refusal for the AHF runtime when the requested window exceeds a
+  configured bound, with a clear message rather than an accepted request that cannot
+  survive. The bound is an env var with a safe default, defensively parsed — never a
+  bare `int()` at module scope, which has killed app boot in this module before.
+- The `Popen` change from #273 also replaces the parent's unbounded output buffer:
+  `subprocess.run(capture_output=True)` at `backtests.py:1130` accumulates the **entire**
+  child stdout/stderr in parent memory for the whole run. Drain on a reader thread and
+  retain a bounded head+tail — the head carries universe/decision-source/FX bootstrap,
+  the tail carries the failure. A second `capture_output=True` exists at
+  `adapter.py:240`, once per trading day; it is transient per call and freed, so the
+  outer site is the real accumulator.
+
+**This PR does not close #308.** The `AiHedgeFundSubprocessRunner`'s own footprint is the
+driver; the parent-side buffer is a contributor, not the cause. The PR contains the
+failure and keeps it off the onboarding path. Say exactly that in the PR body rather
+than claiming a fix.
+
+**The question worth putting to the user** is not "how do we fit AHF into 512MB" but
+"should the heaviest runtime be reachable from the onboarding path at all". Gating it off
+that path costs nothing; keeping it there costs a plan upgrade.
 
 **Ordering.** #273 and #308 are one change to one call site. They ship together.
 
@@ -182,41 +208,64 @@ nothing appears to move.
 **Fix.** Distinguish absent from zero. Carry `None` through rather than coercing, let
 the chart layer render a gap, and log at the wholesale boundary when an entire series
 comes back empty — *absent* and *broken* must not be byte-identical. Both chart layers
-read this payload, so the wire format change lands with both readers updated.
+read this payload, so the wire format change lands with both readers updated; build on
+the existing `finiteNumber` helper in `js/leaderboard.js` rather than adding a parallel
+one. PR #387 hardened the landing side already, and the reporter confirms the fix
+cannot happen client-side alone.
 
-### 6. #365 — a $100k curve published as a $10k one
+### 6. #365 — one board, two capital bases
 
-`service.py:1436-1439`:
+**Corrected 2026-09-11 against the issue body.** An earlier draft of this spec blamed
+the `or config[...]` NULL fallback below. That is a real latent defect, but it is not
+what #365 reports. The reporter's mechanism:
 
-```python
-stored_initial = float(
-    run.get("initial_equity") or config.get("initial_capital", INITIAL_CAPITAL)
-)
-scale = (display_capital / stored_initial) if stored_initial else 1.0
-```
+`dashboard/config/leaderboard.json` declares `initial_capital: 10000`, but **all twelve
+published contest-window curves in the committed seed DB were computed at $100,000**.
+The config changed *after* those runs were written (commits `0cfc8fb`, `ea1bf2b`,
+`1dd5816`, 2026-07-05/07-12).
 
-The scaling itself is correct and deliberate. The failure is the fallback: when a run's
-`initial_equity` is `NULL`, `stored_initial` becomes the *config* capital (`$10,000`,
-`dashboard/config/leaderboard.json:3`), so `scale` computes to exactly `1.0` and a curve
-actually seeded at `$100,000` is published **unscaled**, labelled `$10,000`.
+Because `_find_cached_run`'s key omits seed capital, the two halves of the board then
+diverge:
 
-`_find_cached_run` matches on `(mode, start_date, end_date, llm_model)` only — seed
-capital is not part of the key — so a stale row from a different seed is reused without
-anything noticing.
+- baselines (`auto_compute: true`) **recompute at $10k**
+- LLM entries (`auto_compute: false`) **stay cached at $100k**
+
+leaving one board ranking entries against two different capital bases. That is the
+headline defect — not a single mis-scaled curve.
+
+The `or`-fallback at `service.py:1436-1439` remains worth fixing in the same pass: when
+`initial_equity` is `NULL`, `stored_initial` becomes the *config* capital, `scale`
+computes to exactly `1.0`, and a `$100k` curve publishes unscaled under a `$10k` label.
+Whether that path is live depends on what the seed rows actually hold, which is an
+empirical question to settle against `dashboard/storage/data/backtest.db` before
+choosing the repair — read-only; never commit a mutation to that file.
 
 **Fix.**
-- Do not infer a seed from config. When `initial_equity` is missing, derive it from the
-  curve's own first point; if that is unavailable too, skip the entry and log — a
-  published row is a claim, and there is no honest number to make it with.
-- Include seed capital in the cache key so runs at different seeds stop colliding.
-- **Then re-run the board.** The rows on prod today were written under the old key.
-  This overlaps open issue **#194**; link it rather than duplicating it.
+- Widen the cache key. The issue author notes `strategy_prompt` is missing from it too,
+  and that covering **both** `initial_capital` and `strategy_prompt` fixes both problems
+  in one change. (`strategy_prompt` arrives with PR #366; include it only if that has
+  merged.)
+- **A cache miss must be inert.** Adding seed capital to the key makes every LLM entry
+  miss, and CLAUDE.md warns that a miss can trigger baseline recomputation — and, with
+  `LEADERBOARD_DAILY_AUTO_DEPLOY` armed, billable LLM deploys from a public
+  unauthenticated GET. A miss must skip-and-log, never recompute, never auto-deploy. If
+  that cannot be made provably true, the key change splits out of this PR.
+- Tighten `service.py:1204-1206`, where a stored `0.0` is falsy and would collapse to
+  config capital. The column is `NOT NULL` so the state cannot occur today; the author
+  asked for an explicit `is None` check whenever the code is next touched, and this PR
+  touches it.
+- Never infer a seed from config. Where no honest seed exists, skip the entry and log —
+  a published row is a claim.
 
-**Scale-invariance caveat.** Scaling is only honest for a strategy whose behaviour is
-scale-free. It is not, in general: position sizing, lot sizes and per-trade costs make a
-`$10k` run a genuinely different run from a `$100k` one, not a scaled one. Re-running at
-the published seed is the correct fix; scaling is the compatibility shim. Say so in the
-code.
+**The re-run cannot be assumed.** #194 would repopulate the LLM entries, and it is
+**blocked on LLM API credits**. So this PR must leave the board honest *without* a
+re-run: mixed-capital rows must not publish silently, even if that means publishing
+fewer rows.
+
+**Scale-invariance caveat.** Scaling is only honest for a scale-free strategy. Position
+sizing, lot sizes and per-trade costs make a `$10k` run a genuinely different run from a
+`$100k` one, not a scaled one. Re-running at the published seed is the real fix;
+scaling is the compatibility shim. Say so in the code.
 
 ---
 

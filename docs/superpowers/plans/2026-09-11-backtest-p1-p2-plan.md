@@ -18,11 +18,11 @@ Update this table as work lands. `state` is one of:
 
 | PR | Issues | Branch | Worktree | Base | State | PR # |
 |---|---|---|---|---|---|---|
-| 1 | #129 | `fix/backtest-setup-panel-dead-band` | `../ATL-worktrees/p1-setup-panel` | `main` | not-started | — |
-| 2 | #169 | `fix/backtest-run-provenance` | `../ATL-worktrees/p1-provenance` | `main` | not-started | — |
+| 1 | #129 | `fix/backtest-setup-panel-dead-band` | `../ATL-worktrees/p1-setup-panel` | `main` | in-progress | — |
+| 2 | #169 | `fix/backtest-run-provenance` | `../ATL-worktrees/p1-provenance` | `main` | in-progress | — |
 | 3 | #273, #308 | `fix/backtest-cancel-and-memory` | `../ATL-worktrees/p1-cancel-memory` | PR 2 branch | not-started | — |
-| 4 | #390, #365 | `fix/leaderboard-curve-integrity` | `../ATL-worktrees/p2-curve-integrity` | `main` | not-started | — |
-| — | design docs | `docs/backtest-p1-p2-design` | `../ATL-worktrees/docs-design` | `main` | in-progress | — |
+| 4 | #390, #365 | `fix/leaderboard-curve-integrity` | `../ATL-worktrees/p2-curve-integrity` | `main` | in-progress | — |
+| — | design docs | `docs/backtest-p1-p2-design` | `../ATL-worktrees/docs-design` | `main` | pr-open | #456 |
 
 PR 3's worktree is created only after PR 2 has its first commit, since it branches off
 PR 2.
@@ -116,30 +116,59 @@ unbounded child output.
 
 ## PR 4 — #390 + #365, leaderboard curve integrity
 
+**Revised 2026-09-11** after reading the issue bodies; the original #365 mechanism in
+this plan was a guess the reporter's investigation contradicts. See the spec.
+
 **Files:** `domain/leaderboard/service.py`, `domain/leaderboard/baselines.py`,
-`dashboard/frontend/` chart layers, tests.
+`dashboard/frontend/js/leaderboard.js` and the app chart layer, tests.
 
 1. **#390.** At `service.py:1447-1449`, stop coercing `NULL` to `0`. Carry `None`
-   through, render a gap. Log ERROR at the wholesale boundary — a whole series coming
-   back empty is a contract break, and a per-point warning cannot report it.
-2. **Readers.** Both chart layers read this payload. Update both in the same PR;
-   a wire-format change with one reader updated is a half-shipped change.
-3. **#365.** At `service.py:1436-1439`, stop falling back to config capital. Derive the
-   seed from the curve's first point; if that is unavailable, **skip the entry and log**
-   rather than publish a row scaled by a number nobody verified.
-4. **Cache key.** Add seed capital to `_find_cached_run`'s key so runs at different
-   seeds stop colliding.
-5. **Comment the shim.** Scaling is only honest for scale-free strategies; position
-   sizing, lot sizes and per-trade costs make a `$10k` run a different run, not a
-   scaled one. Re-running at the published seed is the real fix.
-6. **Board re-run.** Rows on prod were written under the old key. Overlaps open issue
-   **#194** — link it, do not duplicate it. The re-run itself is an operator action, not
-   part of this PR; note it in the PR body.
+   through; render a gap. Log ERROR at the wholesale boundary — a series that comes back
+   entirely empty is a contract break and a per-point warning cannot report it. Build on
+   the existing `finiteNumber` helper in `js/leaderboard.js`; PR #387 hardened the
+   landing side already. Update **both** chart readers in this PR.
 
-**Done when:** no published curve can claim a seed it did not run at, and a missing
-observation renders as missing.
+2. **#365 — settle the facts before choosing the repair.** Query the committed seed DB
+   (`dashboard/storage/data/backtest.db`, read-only, never commit a mutation) and find
+   what the twelve `lb_*` runs actually hold for `initial_equity`: `100000`, `10000`, or
+   `NULL`. If it is `100000`, the existing `scale` already normalises those curves and
+   the practical defect is narrower than the issue implies. If `NULL`, they publish
+   unscaled at `scale = 1.0`. The answer decides the fix.
 
----
+3. **The real #365 defect is mixed capital across one board.** Baselines
+   (`auto_compute: true`) recompute at the config's `$10k`; LLM entries
+   (`auto_compute: false`) stay cached at the `$100k` they were written at, because
+   `_find_cached_run`'s key omits seed capital.
+
+4. **Widen the cache key — carefully.** Cover `initial_capital` *and* `strategy_prompt`
+   (the issue author notes both are missing and one change fixes both;
+   `strategy_prompt` arrives with PR #366 — include it only if that merged). **A miss
+   must be inert:** skip-and-log, never recompute, never auto-deploy. CLAUDE.md warns a
+   miss can trigger baseline recomputation and, with `LEADERBOARD_DAILY_AUTO_DEPLOY`
+   armed, billable LLM deploys from a public unauthenticated GET. If inertness cannot be
+   proven from the code, split the key change out of this PR.
+
+5. **Do not assume a re-run.** #194 would repopulate the LLM entries and is **blocked on
+   LLM API credits**. The board must be honest without it — publish fewer rows rather
+   than mixed-capital rows.
+
+6. **Tighten `service.py:1204-1206`** — a stored `0.0` is falsy and would collapse to
+   config capital. `NOT NULL` makes it unreachable today; the author asked for an
+   explicit `is None` check when the code is next touched, and this PR touches it.
+
+7. **Comment the shim.** Scaling is only honest for a scale-free strategy; position
+   sizing, lot sizes and per-trade costs make a `$10k` run a different run, not a scaled
+   one.
+
+8. **Tests:** a `NULL` point renders as a gap, never `0`, and never drags the shared
+   axis; a run with no honest seed is skipped-and-logged rather than published at
+   `scale = 1.0`; runs at different seeds do not collide; a legacy row does not cause a
+   board-wide cache miss; a miss cannot reach `deploy_model_run`.
+
+9. **Suite green:** `python -m pytest dashboard/backend/tests/ -q`.
+
+**Fallback:** if #365 turns out to require the re-run #194 is blocked on, ship #390
+alone and say so. A correct partial fix beats a confident wrong one.
 
 ## Shared conventions
 
@@ -163,3 +192,12 @@ Append newest last. One line per meaningful event.
 
 - `2026-09-11` — Workstream opened. Design spec written, four worktrees created,
   baseline `main` @ `193400d6`. Nothing implemented yet.
+- `2026-09-11` — Design spec + plan committed; PR #456 opened. Four worktrees created.
+- `2026-09-11` — PRs 1, 2 and 4 dispatched in parallel worktrees.
+- `2026-09-11` — Issue bodies read. **Two corrections landed in the spec.** #365's
+  mechanism is mixed capital across one board (baselines recompute at $10k while LLM
+  entries stay cached at $100k), not the NULL-fallback this plan first guessed; and #308
+  is a hosting-capacity failure whose real exits are an ops plan upgrade or a product
+  guard, so PR 3 ships the guard and must not claim to close it.
+- `2026-09-11` — **Open decision for the user:** #308 option (a) is a Render plan
+  upgrade, a recurring monthly cost. Not taken; flagged.
