@@ -23,6 +23,54 @@ class MarketRuleDataError(RuntimeError):
     """Raised when required market-rule observations are unavailable or invalid."""
 
 
+@dataclass(frozen=True)
+class CorporateActionGap:
+    """An overnight move no A-share daily limit band can produce.
+
+    The widest band is 20% (STAR/ChiNext), so a larger move is not trading: it
+    is a 除权除息 (ex-rights/ex-dividend) date seen through unadjusted prices.
+    """
+
+    symbol: str
+    trading_date: date
+    overnight_move: Decimal
+
+    def to_metadata(self) -> dict[str, object]:
+        return {
+            "symbol": self.symbol,
+            "date": self.trading_date.isoformat(),
+            "overnight_move": float(self.overnight_move),
+        }
+
+
+class CorporateActionGapError(MarketRuleDataError):
+    """Raised when the requested window crosses a 除权除息 date.
+
+    A subclass, so every existing ``except MarketRuleDataError`` keeps working
+    and this can never escape as an unhandled error. It carries the gaps rather
+    than only a message because the same observations are what a permitted run
+    records in its metadata -- one producer, two consumers.
+    """
+
+    def __init__(self, gaps: Iterable[CorporateActionGap]) -> None:
+        self.gaps = tuple(gaps)
+        sample = ", ".join(
+            f"{gap.symbol} on {gap.trading_date.isoformat()} "
+            f"({gap.overnight_move:.0%})"
+            for gap in self.gaps[:3]
+        )
+        super().__init__(
+            f"This window crosses {len(self.gaps)} ex-rights/ex-dividend "
+            f"(除权除息) date(s): {sample}"
+            f"{' and others' if len(self.gaps) > 3 else ''}. A-share prices are "
+            "requested unadjusted, so the ex-rights drop would be charted as a "
+            "real loss with no offsetting cash credit — in the agent curve and "
+            "in the buy-and-hold baseline alike. Choose a window that does not "
+            "cross it, or set IFIND_ALLOW_CORPORATE_ACTION_GAPS=1 to run anyway "
+            "and have the affected dates recorded on the result."
+        )
+
+
 class ClosingLimitState(str, Enum):
     """Official security state at the daily close."""
 
@@ -164,7 +212,17 @@ class DailyMarketRule:
 class MarketRuleCalendar:
     """Read-only lookup of validated rules keyed by symbol and market date."""
 
-    def __init__(self, rules: Iterable[DailyMarketRule]) -> None:
+    def __init__(
+        self,
+        rules: Iterable[DailyMarketRule],
+        *,
+        corporate_action_gaps: Iterable[CorporateActionGap] = (),
+    ) -> None:
+        # Carried on the calendar rather than raised, because these reach here
+        # only on the permitted path: a run that was allowed to cross an
+        # ex-rights date still has to say so on its own result, where the
+        # subprocess's stdout never reaches anyone.
+        self.corporate_action_gaps = tuple(corporate_action_gaps)
         normalized: dict[tuple[str, date], DailyMarketRule] = {}
         for rule in rules:
             if not isinstance(rule, DailyMarketRule):
@@ -199,10 +257,18 @@ class MarketRuleCalendar:
 
     def to_metadata(self) -> dict[str, object]:
         sample = next(iter(self._rules.values()))
-        return {
+        metadata: dict[str, object] = {
             "enabled": True,
             "source": sample.source,
             "version": sample.version,
             "observations": len(self._rules),
             "scope": "full_day_suspension_and_closing_limits",
         }
+        # Omitted when empty rather than written as [] — the overwhelming
+        # majority of runs cross no ex-rights date, and a key present on every
+        # run trains the reader to skip it.
+        if self.corporate_action_gaps:
+            metadata["corporate_action_gaps"] = [
+                gap.to_metadata() for gap in self.corporate_action_gaps
+            ]
+        return metadata

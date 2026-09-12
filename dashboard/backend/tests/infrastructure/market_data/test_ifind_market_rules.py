@@ -8,6 +8,7 @@ import pytest
 
 from dashboard.backend.domain.backtesting.market_rules import (
     ClosingLimitState,
+    CorporateActionGapError,
     MarketRuleDataError,
 )
 from dashboard.backend.infrastructure.market_data.ifind_market_rules import (
@@ -379,15 +380,8 @@ def test_unexpected_trading_status_is_reported_apart_from_a_missing_close():
         adapt(payload)
 
 
-def test_unadjusted_ex_rights_gap_is_reported_not_swallowed(capsys):
-    """Unadjusted prices put corporate actions straight into the equity curve.
-
-    Both feeds are requested unadjusted so the audit can show the official close
-    a limit was set against, and nothing in the backend applies dividends or
-    splits. A 10-for-3 bonus issue therefore reads as a ~23% overnight loss in
-    the agent curve and the buy-and-hold baseline alike, with no offsetting cash
-    credit. This does not correct it — it stops it being invisible.
-    """
+def _ex_rights_payload_and_bars():
+    """A ~23% overnight drop, the shape of a 10-for-3 bonus issue."""
     payload = history_payload()
     payload["tables"][1]["table"]["close"][1] = 1140.00
     local_bars = bars()
@@ -396,8 +390,57 @@ def test_unadjusted_ex_rights_gap_is_reported_not_swallowed(capsys):
         (datetime(2025, 9, 1, 14, tzinfo=CN), 1138.0),
         (datetime(2025, 9, 1, 15, tzinfo=CN), 1140.0),
     ])
+    return payload, local_bars
 
-    response_to_market_rules(
+
+def test_an_ex_rights_window_is_refused_by_default():
+    """Unadjusted prices put corporate actions straight into the equity curve.
+
+    Both feeds are requested unadjusted so the audit can show the official close
+    a limit was set against, and nothing in the backend applies dividends or
+    splits. A 10-for-3 bonus issue therefore reads as a ~23% overnight loss in
+    the agent curve and the buy-and-hold baseline alike, with no offsetting cash
+    credit.
+
+    This used to print a warning and carry on. A dashboard backtest is a
+    subprocess whose stdout reaches nobody, so the run published a loss that did
+    not happen and told no one -- issue #169's failure in another place. The
+    default is now a refusal that names the dates.
+    """
+    payload, local_bars = _ex_rights_payload_and_bars()
+
+    with pytest.raises(CorporateActionGapError) as excinfo:
+        response_to_market_rules(
+            payload,
+            expected_symbols=SYMBOLS,
+            required_dates=(DAY_1, DAY_2),
+            bars_by_symbol=local_bars,
+            fetch_basic_status=suspended_supplement,
+        )
+
+    message = str(excinfo.value)
+    assert "600519.SH on 2025-09-01" in message
+    # The remedy has to travel with the refusal; an error that only says "no"
+    # sends the user looking for a credentials problem that does not exist.
+    assert "Choose a window" in message
+    assert "IFIND_ALLOW_CORPORATE_ACTION_GAPS" in message
+    assert [(gap.symbol, gap.trading_date) for gap in excinfo.value.gaps] == [
+        ("600519.SH", DAY_2)
+    ]
+
+
+def test_a_permitted_ex_rights_window_records_the_dates_on_the_result(
+    monkeypatch, capsys
+):
+    """The override runs the window, and the run has to say so on its own result.
+
+    The metadata is the point, not the print: the print is the thing that failed
+    to reach anyone. `to_metadata()` is what reaches the results panel.
+    """
+    monkeypatch.setenv("IFIND_ALLOW_CORPORATE_ACTION_GAPS", "1")
+    payload, local_bars = _ex_rights_payload_and_bars()
+
+    calendar = response_to_market_rules(
         payload,
         expected_symbols=SYMBOLS,
         required_dates=(DAY_1, DAY_2),
@@ -405,9 +448,44 @@ def test_unadjusted_ex_rights_gap_is_reported_not_swallowed(capsys):
         fetch_basic_status=suspended_supplement,
     )
 
+    assert calendar.to_metadata()["corporate_action_gaps"] == [
+        {"symbol": "600519.SH", "date": "2025-09-01", "overnight_move": pytest.approx(
+            0.2297297297297297, rel=1e-6
+        )}
+    ]
     warning = capsys.readouterr().out
     assert "unadjusted" in warning
     assert "600519.SH 2025-09-01" in warning
+
+
+@pytest.mark.parametrize("value", ["0", "false", "no", "off", "", "  "])
+def test_only_a_truthy_override_permits_an_ex_rights_window(monkeypatch, value):
+    """A spend-shaped flag's falsy spellings must not read as "on"."""
+    monkeypatch.setenv("IFIND_ALLOW_CORPORATE_ACTION_GAPS", value)
+    payload, local_bars = _ex_rights_payload_and_bars()
+
+    with pytest.raises(CorporateActionGapError):
+        response_to_market_rules(
+            payload,
+            expected_symbols=SYMBOLS,
+            required_dates=(DAY_1, DAY_2),
+            bars_by_symbol=local_bars,
+            fetch_basic_status=suspended_supplement,
+        )
+
+
+def test_a_clean_window_writes_no_corporate_action_key():
+    """Present on every run, the key stops being read. Omitted when empty."""
+    calendar = response_to_market_rules(
+        history_payload(),
+        expected_symbols=SYMBOLS,
+        required_dates=(DAY_1, DAY_2),
+        bars_by_symbol=bars(),
+        fetch_basic_status=suspended_supplement,
+    )
+
+    assert "corporate_action_gaps" not in calendar.to_metadata()
+    assert calendar.corporate_action_gaps == ()
 
 
 def test_a_gap_across_a_suspension_is_not_reported_as_a_corporate_action():

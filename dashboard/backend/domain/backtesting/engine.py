@@ -72,7 +72,10 @@ from dashboard.backend.infrastructure.market_data.ifind_fx import (
     IFindFxError,
     MAX_RELATIVE_DEVIATION,
 )
-from dashboard.backend.domain.backtesting.market_rules import MarketRuleDataError
+from dashboard.backend.domain.backtesting.market_rules import (
+    CorporateActionGapError,
+    MarketRuleDataError,
+)
 from dashboard.backend.infrastructure.market_data.provider import (
     ALPACA,
     create_market_data_provider,
@@ -748,6 +751,12 @@ class HourlyBacktester:
                 self.end_date,
                 bars_by_symbol=self.all_data,
             )
+        except CorporateActionGapError as exc:
+            # Not prefixed like the arm below: the rule data is available and
+            # valid, and telling the user it is missing sends them to look for a
+            # credentials problem that does not exist. The message already names
+            # the dates and what to do about them.
+            raise MarketDataUnavailableError(str(exc)) from exc
         except (IFindClientError, MarketRuleDataError, ValueError) as exc:
             raise MarketDataUnavailableError(
                 f"Market rule data unavailable: {exc}"

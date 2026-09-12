@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from collections.abc import Callable, Mapping, Sequence
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
@@ -11,6 +12,8 @@ import pandas as pd
 
 from dashboard.backend.domain.backtesting.market_rules import (
     ClosingLimitState,
+    CorporateActionGap,
+    CorporateActionGapError,
     DailyMarketRule,
     MarketRuleCalendar,
     MarketRuleDataError,
@@ -28,6 +31,24 @@ LIMIT_STATUS_FIELD = "ths_up_and_down_status_stock"
 # therefore lands in the equity curve as a real overnight loss that never
 # happened. Detecting it does not fix it; it stops it being silent.
 _CORPORATE_ACTION_GAP = Decimal("0.21")
+
+_TRUTHY = {"1", "true", "yes", "on"}
+
+
+def corporate_action_gaps_allowed() -> bool:
+    """Whether a window crossing a 除权除息 date may run anyway.
+
+    Strict opt-in, and the refusal is the default, because the alternative is
+    publishing a curve whose headline loss did not happen. The escape hatch
+    exists because June-July is dense with bonus issues and a hard refusal with
+    no override would make those months unrunnable -- the same shape as
+    ``ALPACA_ALLOW_RECENT_SIP``, which relaxes a different clamp the same way.
+
+    Read per call rather than captured at import: ``tests/conftest.py`` strips
+    it, and a module-level read would freeze whichever value the first import
+    happened to see.
+    """
+    return (os.getenv("IFIND_ALLOW_CORPORATE_ACTION_GAPS") or "").strip().lower() in _TRUTHY
 
 
 def _fail(detail: str) -> MarketRuleDataError:
@@ -265,7 +286,7 @@ def response_to_market_rules(
 
     rules: list[DailyMarketRule] = []
     unaligned: list[tuple[str, date]] = []
-    price_gaps: list[tuple[str, date, Decimal]] = []
+    price_gaps: list[CorporateActionGap] = []
     for symbol in expected:
         frame = bars_by_symbol.get(symbol)
         if frame is None:
@@ -337,7 +358,13 @@ def response_to_market_rules(
             if previous_close is not None and previous_close > 0:
                 move = abs(official_close - previous_close) / previous_close
                 if move > _CORPORATE_ACTION_GAP:
-                    price_gaps.append((symbol, trading_date, move))
+                    price_gaps.append(
+                        CorporateActionGap(
+                            symbol=symbol,
+                            trading_date=trading_date,
+                            overnight_move=move,
+                        )
+                    )
             previous_close = official_close
             final_bar = _final_bar_for_date(frame, trading_date)
             if final_bar is None:
@@ -376,9 +403,15 @@ def response_to_market_rules(
                 )
             )
     if price_gaps:
+        # Refused by default. This warning previously only reached stdout, and a
+        # dashboard backtest is a subprocess whose stdout nobody reads — so the
+        # run published a loss that did not happen, and said so to no one. That
+        # is the failure issue #169 was about, in a different place.
+        if not corporate_action_gaps_allowed():
+            raise CorporateActionGapError(price_gaps)
         sample = ", ".join(
-            f"{symbol} {trading_date} {move:.0%}"
-            for symbol, trading_date, move in price_gaps[:5]
+            f"{gap.symbol} {gap.trading_date} {gap.overnight_move:.0%}"
+            for gap in price_gaps[:5]
         )
         print(
             f"   ⚠️  {len(price_gaps)} overnight move(s) exceed every A-share "
@@ -399,4 +432,4 @@ def response_to_market_rules(
             f"and cannot be closing-gated: {sample}"
             f"{' …' if len(unaligned) > 5 else ''}"
         )
-    return MarketRuleCalendar(rules)
+    return MarketRuleCalendar(rules, corporate_action_gaps=price_gaps)
