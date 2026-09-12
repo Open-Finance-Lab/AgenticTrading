@@ -23,6 +23,7 @@ import bcrypt
 
 from dashboard.backend.database import DB_PATH
 from dashboard.backend.db_url import describe_database_url
+from dashboard.backend.domain.user_groups import coerce_user_group, parse_user_group
 from dashboard.backend.session_tokens import (
     absolute_expiry,
     hash_session_token,
@@ -428,17 +429,18 @@ def public_user_with_entitlements(
     row: sqlite3.Row | Dict[str, Any],
     entitlements: Dict[str, Any],
 ) -> Dict[str, Any]:
-    """Admin projection: the public user plus entitlements, minus ``avatar``.
+    """Admin projection: the public user plus group and entitlements, minus ``avatar``.
 
     Avatars are data: URIs bounded at 200_000 chars each on write
-    (``api/auth.py``). The admin console renders emails, names, roles and two
-    numbers — never the image — so carrying them would make a 100-row page tens
-    of megabytes of response body on a free-tier box for nothing. Callers that
+    (``api/auth.py``). The admin console renders emails, names, roles, one group
+    and two numbers — never the image — so carrying it would make a 100-row page
+    tens of megabytes of response body on a free-tier box for nothing. Callers that
     merge this into a stored user (``saveAdminUserRole``) spread it over the
     existing object, so an absent key leaves the cached avatar intact.
     """
     payload = public_user(row)
     payload.pop("avatar", None)
+    payload["user_group"] = coerce_user_group(dict(row).get("user_group"))
     payload["entitlements"] = entitlements
     return payload
 
@@ -703,6 +705,7 @@ class UserStore:
                 display_name TEXT NOT NULL,
                 password_hash TEXT NOT NULL,
                 role TEXT NOT NULL DEFAULT 'user',
+                user_group TEXT NOT NULL DEFAULT 'unknown',
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
             """
@@ -750,6 +753,10 @@ class UserStore:
             )
         if "avatar" not in columns:
             cursor.execute("ALTER TABLE users ADD COLUMN avatar TEXT")
+        if "user_group" not in columns:
+            cursor.execute(
+                "ALTER TABLE users ADD COLUMN user_group TEXT NOT NULL DEFAULT 'unknown'"
+            )
         cursor.execute(
             """
             CREATE UNIQUE INDEX IF NOT EXISTS idx_users_discord_user_id
@@ -1717,11 +1724,12 @@ class UserStore:
         user_id: int,
         *,
         role: Optional[str] = None,
+        user_group: Optional[str] = None,
         max_concurrent_backtests: Optional[int] = None,
         credits: Optional[int] = None,
         updated_by_admin_id: Optional[int] = None,
     ) -> Optional[Dict[str, Any]]:
-        """Role and entitlements for one user, in a single transaction.
+        """Role, group, and entitlements for one user, in one transaction.
 
         ``PATCH /api/admin/users/{id}`` advertises one atomic change. Doing it
         as a role write then ``set_entitlements`` meant a failure on the
@@ -1733,6 +1741,9 @@ class UserStore:
             normalized_role = (role or "").strip().lower()
             if normalized_role not in VALID_ROLES:
                 raise ValueError("invalid_role")
+        normalized_group = (
+            parse_user_group(user_group) if user_group is not None else None
+        )
         next_max, next_credits = validate_entitlement_patch(
             max_concurrent_backtests, credits
         )
@@ -1756,6 +1767,11 @@ class UserStore:
                 cursor.execute(
                     "UPDATE users SET role = ? WHERE id = ?",
                     (normalized_role, int(user_id)),
+                )
+            if normalized_group is not None:
+                cursor.execute(
+                    "UPDATE users SET user_group = ? WHERE id = ?",
+                    (normalized_group, int(user_id)),
                 )
             if touches_entitlements:
                 cursor.execute(ENTITLEMENTS_UPSERT_SQLITE, entitlements_upsert_params(
