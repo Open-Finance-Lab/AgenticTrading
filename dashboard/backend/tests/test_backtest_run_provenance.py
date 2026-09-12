@@ -17,7 +17,6 @@ the in-process H6 guard that would have caught it never sees the run.
 """
 
 import copy
-import json
 import uuid
 
 import pytest
