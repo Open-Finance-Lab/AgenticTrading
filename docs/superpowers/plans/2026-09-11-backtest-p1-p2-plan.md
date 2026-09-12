@@ -515,3 +515,34 @@ Append newest last. One line per meaningful event.
 - `2026-09-11` — #458 head is now `7b96ceba`; #460 remains based on `3710c43b`. No rebase
   needed: the only new commit deletes an unused import in a test file #460 does not
   touch, so it merges trivially and will already be in `main` by the time #460 retargets.
+- `2026-09-12` — **#459 force-pushed again** (`057303ec` fix + `cd9ef340` chore).
+  Integration re-verified for the third time: all four PRs merge cleanly onto current
+  `main`, **4567 passed / 163 skipped / 0 failed**; reverting `cd9ef340` gives **4566
+  passed / 0 failed**. Note `app.html` is now a *third* shared surface between branches
+  (with `app.js` and `styles.css`) and auto-merges clean.
+- `2026-09-12` — **The copy sweep justified the one-commit-revert requirement for a
+  reason neither of us had listed.** `app.html:1533` and `:1639` — Live Trading
+  Leaderboard copy — both stated *"Every season starts flat at $10,000"*. Per CLAUDE.md
+  the live board reuses the contest config byte-for-byte, so that number **is**
+  `initial_capital`. Had those lines landed in the *fix* commit, dropping the chore
+  commit would have left the board's copy reading **$100,000** over a board publishing
+  **$10,000** — the same contradiction the chore commit exists to remove, pointed the
+  other way. The chore commit now carries everything that depends on the value: config,
+  guard test, both copy lines, three stale comments. Verified by actually reverting it.
+- `2026-09-12` — **The landing's `$10,000` is not a duplicate and correctly stays.**
+  `storyline.ts` and `ChatSimulation.tsx` describe the *demo user's own backtest*, not the
+  board — a user backtest at $10,000 is normal (`DEFAULT_PORTFOLIO_EQUITY`). But a comment
+  there claimed the fabricated `+14.2%` was falsifiable because the board publishes the
+  same model's return *"from that same $10,000 base"*. That premise is now false; the
+  falsifiable claim was always the **return**, which is base-independent. Comment fixed —
+  the divergent bases must not be treated as the guard.
+- `2026-09-12` — Flagged, deliberately untouched: `|| 10000` last-resort chart-base
+  fallbacks in `js/leaderboard.js` (×4) and `landing/src/lib/leaderboard.ts` (×1). They
+  hardcode the old number but are code fallbacks rather than copy, never fire (the server
+  always sends `initial_equity`), and `test_home_chart_matches_the_leaderboards_percent_formula`
+  pins the two chains as equivalent — so changing one without the other breaks it.
+- `2026-09-12` — `docs/source/lab/`: **nothing stale from this change.** Every capital
+  reference there is per-agent Allocated Capital, not the board base.
+- `2026-09-12` — Tooling gotcha worth keeping: **`git revert --abort` after
+  `revert --no-commit` silently reset a branch to the stale remote tip.** Recovered from
+  reflog, nothing lost. It does not do what it looks like it does.
