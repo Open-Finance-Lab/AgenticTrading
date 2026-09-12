@@ -191,4 +191,3 @@ real administrator session to:
    load without changing unrelated filters.
 
 Only after those checks pass should the GitHub PR be reported as complete.
-
