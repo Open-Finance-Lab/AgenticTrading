@@ -287,3 +287,16 @@ Append newest last. One line per meaningful event.
 - `2026-09-11` — Also found in `app.js`: the existing null guard was **inert, not
   absent**. `Number(point?.equity)` + `Number.isFinite` reads as a null check, but
   `Number(null)` is `0` and `0` is finite.
+- `2026-09-11` — **#129 severity corrected.** Verified in `app.html`: the backtest launch
+  flow is `#runBacktestModal`, opened from My Agents, and the `Market Data` selector the
+  issue names lives inside it. The `.left-panel` this PR restores is a **read-only "Run
+  config" summary**. A user at 1100px can still run a backtest; they lose the summary of
+  what they ran. #129 is real but is **not** a precondition for the onboarding loop — my
+  original "reachable / door to the same room" framing was wrong, and the issue body
+  describes a pre-#450/#451 UI. Relay that to #129's triage.
+- `2026-09-11` — PR #457 updated (`8f9c7787`): guard restyled onto
+  `test_vnpy_simulation_frontend.py`'s `_media_block`/`_declarations` idiom, with one
+  deliberate deviation — the bare `.left-panel` lookup is line-anchored, because
+  `.left-panel` is a literal substring of `.playground-backtest-panel .left-panel` and an
+  unanchored search matches inside the compound selector. Issue's cited `styles.css:2183`
+  is `.chart-legend` on current main: stale, not a second hide site.

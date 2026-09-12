@@ -64,6 +64,20 @@ restore has the same breakpoint as the hide. Verify the three bands (>1200, 901�
 
 This is CSS only. No JS, no backend, no contract.
 
+**Severity corrected 2026-09-11, after verifying against `app.html`.** This spec first
+called #129 "the door to the same room" — the control surface for launching a backtest.
+That is no longer true on `main` and the issue text describes an earlier UI. The launch
+flow now lives in `#runBacktestModal` (`app.html:~347`), opened from My Agents; the
+`Market Data` selector the reporter names is inside that modal, not in the panel. The
+current `<aside class="left-panel">` (`app.html:1208`) is a **read-only "Run config"
+summary** — agent, model, market, date range, capital, billing — displayed beside
+results, whose own empty state reads "No backtests yet. Run one from My Agents."
+
+So a user at 1100px **can still start a backtest**; what they lose is the summary of what
+they ran. The defect is real and worth fixing, but it does not block the onboarding loop,
+and #129 stays in P1 as cheap adjacent work rather than as a precondition. Whoever
+triages #129 should be told the body describes a pre-#450/#451 layout.
+
 ### 2. Honest — #169, a rule-based fallback reported as a clean result
 
 There are **two** independent layers here, and the issue reads as one.
