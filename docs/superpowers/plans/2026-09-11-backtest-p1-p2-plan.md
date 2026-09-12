@@ -19,7 +19,7 @@ Update this table as work lands. `state` is one of:
 | PR | Issues | Branch | Worktree | Base | State | PR # |
 |---|---|---|---|---|---|---|
 | 1 | #129 | `fix/backtest-setup-panel-dead-band` | `../ATL-worktrees/p1-setup-panel` | `main` | pr-open | #457 |
-| 2 | #169 | `fix/backtest-run-provenance` | `../ATL-worktrees/p1-provenance` | `main` | pushed `0288ff79` | — |
+| 2 | #169 | `fix/backtest-run-provenance` | `../ATL-worktrees/p1-provenance` | `main` | pr-open (draft) | #458 |
 | 3 | #273, #308 | `fix/backtest-cancel-and-memory` | `../ATL-worktrees/p1-cancel-memory` | `fix/backtest-run-provenance` @ `0288ff79` | in-progress | — |
 | 4 | #390, #365 | `fix/leaderboard-curve-integrity` | `../ATL-worktrees/p2-curve-integrity` | `main` | pr-open (draft) | #459 |
 | — | design docs | `docs/backtest-p1-p2-design` | `../ATL-worktrees/docs-design` | `main` | pr-open | #456 |
@@ -300,3 +300,25 @@ Append newest last. One line per meaningful event.
   `.left-panel` is a literal substring of `.playground-backtest-panel .left-panel` and an
   unanchored search matches inside the compound selector. Issue's cited `styles.css:2183`
   is `.chart-legend` on current main: stale, not a second hide site.
+- `2026-09-11` — **PR #458 open (draft), and it corrected the spec's naming.**
+  `decision_source` is **already taken and means the requested source** — the
+  `backtest_decisions` column in both DB twins (`database.py:246`/`:607`,
+  `database_postgres.py:207`), a `RunMetadata` field (`backtests.py:289`/`:381`), and
+  `resolve_decision_source` — with the vocabulary literally
+  `RULE_BASED_DECISION_SOURCE = "rule_based"` / `LLM_DECISION_SOURCE = "llm"`
+  (`profiles.py:20-21`). Publishing the *observed* verdict under that name would have
+  made requested and actual byte-indistinguishable in the one case the PR exists for.
+  Resolution: `decision_provenance` for observed, `decision_source` retained for
+  requested, sharing the constants so the two compare with `==`. **Verified at source.**
+- `2026-09-11` — **A fourth verdict, `unknown`, is load-bearing.** `llm_decisions` ships
+  `DEFAULT 0`, which backfills every historical row, so `llm_decisions == 0` cannot
+  separate "the model drove nothing" from "nobody was counting". Classifying those as
+  `rule_based` would accuse the entire back catalogue of a silent fallback — a false
+  alarm broad enough to teach users to ignore the badge, which is worse than the bug.
+  The witness is `metadata.decision_steps`, written by the same path that writes the
+  column; absent means `unknown`, no note, and a byte-identical clean message.
+- `2026-09-11` — **All code PRs converted to draft with a `DO NOT MERGE` first line.**
+  CLAUDE.md records this repo has no branch protection and that collaborators merge open
+  PRs unreviewed; merging to `main` auto-deploys prod. An instruction to the agent is not
+  a gate GitHub shows or enforces. #456 (docs) left ready — harmless, and landing the
+  plan on `main` helps a resuming session find it.
