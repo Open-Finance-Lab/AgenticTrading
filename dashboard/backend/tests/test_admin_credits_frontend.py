@@ -105,6 +105,30 @@ def test_admin_grant_console_has_responsive_operation_and_audit_styles():
     assert "@media (max-width: 600px)" in STYLES
 
 
+def test_account_management_has_one_group_editor():
+    admin_start = APP_HTML.index('id="adminView"')
+    admin_end = APP_HTML.index('id="adminLegacyUsersPanel"', admin_start)
+    account_management = APP_HTML[admin_start:admin_end]
+    assert '<th scope="col">Group</th>' in account_management
+    assert 'colspan="9"' in account_management
+    assert "admin-credits-group-select" in ADMIN_JS
+    assert "mutateUserGroup" in ADMIN_JS
+    assert "method: 'PATCH'" in ADMIN_JS
+    assert "/api/admin/users/${Number(user.id)}" in ADMIN_JS
+    assert "JSON.stringify({ user_group: nextGroup })" in ADMIN_JS
+    assert "state.usersRequestSeq += 1" in ADMIN_JS
+    assert "groupSelect.disabled = true" in ADMIN_JS
+    assert "groupSelect.disabled = false" in ADMIN_JS
+    assert "user.user_group = savedGroup" in ADMIN_JS
+    assert "admin-credits-group-error" in ADMIN_JS
+    labels = ("Internal", "Invited", "Organic", "Competition", "Partner", "Unknown")
+    positions = [ADMIN_JS.index(label) for label in labels]
+    assert positions == sorted(positions)
+    assert ".admin-credits-group-select" in STYLES
+    assert ".admin-credits-users-table {" in STYLES
+    assert "overflow-x: auto" in STYLES
+
+
 def test_admin_tabs_default_to_analytics_and_are_url_backed():
     assert "DEFAULT_TAB = 'analytics'" in ADMIN_TABS_JS
     assert "adminTab" in ADMIN_TABS_JS

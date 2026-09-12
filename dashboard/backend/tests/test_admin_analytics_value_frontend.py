@@ -32,9 +32,49 @@ def test_value_client_uses_independent_endpoints():
         "/commercial",
         "/operational",
         "/users",
+        "/groups",
     ):
         assert endpoint in source
     assert "Promise.allSettled" in source
+
+
+def test_analytics_has_group_filter_and_summary_contract():
+    assert 'id="adminValueGroup"' in APP_HTML
+    assert 'id="adminAnalyticsGroupSummary"' in APP_HTML
+    assert 'id="adminAnalyticsGroupTable"' in APP_HTML
+    assert 'id="adminAnalyticsGroupBody"' in APP_HTML
+    source = value_source()
+    assert "/api/admin/analytics/groups" in source
+    assert "analyticsGroup" in source
+    assert "renderGroups" in source
+    for label in (
+        "Internal", "Invited", "Organic", "Competition", "Partner", "Unknown"
+    ):
+        assert label in APP_HTML or label in source
+
+
+def test_group_summary_has_fixed_order_bars_and_accessible_fallback():
+    source = value_source()
+    for group in ("internal", "invited", "organic", "competition", "partner", "unknown"):
+        assert group in source
+    assert "USER_GROUPS.map" in source
+    assert "Math.max(1" in source
+    assert "admin-group-bar-fill" in source
+    assert "aria-hidden" in source
+    assert 'aria-describedby="adminAnalyticsGroupSummaryFallback"' in APP_HTML
+    assert 'id="adminAnalyticsGroupSummaryFallback"' in APP_HTML
+
+
+def test_group_filter_preserves_include_internal_and_updates_priority_users():
+    source = value_source()
+    range_body = strip_comments(fn_body("function rangeParams(", source))
+    user_body = strip_comments(fn_body("function userParams(", source))
+    assert "include_internal" in range_body
+    assert "user_group" in range_body
+    assert "include_internal" in user_body
+    assert "user_group" in user_body
+    assert "state.userFilters.group" in source
+    assert "applyUserFilters({" in source
 
 
 def test_deep_sections_fetch_only_on_first_open():

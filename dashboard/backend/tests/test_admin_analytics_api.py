@@ -38,12 +38,16 @@ from dashboard.backend.domain.analytics.states import (
 )
 from dashboard.backend.domain.analytics.value_queries import (
     CommercialAnalyticsResponse,
+    GroupAnalyticsResponse,
     LifecycleAnalyticsResponse,
     OperationalAnalyticsResponse,
     PaginatedValueUsers,
     RetentionAnalyticsResponse,
+    SectionAvailability,
+    UserGroupSummary,
     ValueUserProfile,
 )
+from dashboard.backend.domain.user_groups import USER_GROUP_LABELS, USER_GROUPS
 from dashboard.backend.users import UserStore
 
 
@@ -76,6 +80,33 @@ class FixtureValueQueryService:
     def get_operational(self, **kwargs):
         self.calls.append(("operational", kwargs))
         return _contract("operational.json", OperationalAnalyticsResponse)
+
+    def get_groups(self, **kwargs):
+        self.calls.append(("groups", kwargs))
+        selected = kwargs.get("user_group")
+        return GroupAnalyticsResponse(
+            as_of=NOW,
+            groups=[
+                UserGroupSummary(
+                    group=group,
+                    label=USER_GROUP_LABELS[group],
+                    users=(1 if selected in {None, group} and group == "unknown" else 0),
+                    successful_run_users=0,
+                    repeat_users=0,
+                    total_runs=0,
+                    atl_cost_micro_usd=0,
+                    paid_users=0,
+                )
+                for group in USER_GROUPS
+            ],
+            selected_user_group=selected,
+            availability=SectionAvailability(
+                available=True,
+                status="ready",
+                coverage_start=date(2026, 8, 1),
+                coverage_end=date(2026, 8, 30),
+            ),
+        )
 
     def list_users(self, **kwargs):
         self.calls.append(("users", kwargs))
@@ -481,6 +512,7 @@ def test_non_admin_cannot_query_any_admin_analytics_route(admin_analytics_api):
         ("/api/admin/analytics/retention", {}),
         ("/api/admin/analytics/commercial", {}),
         ("/api/admin/analytics/operational", {}),
+        ("/api/admin/analytics/groups", {}),
         ("/api/admin/analytics/users", {}),
         (f"/api/admin/analytics/users/{subject_id}", {}),
         (
@@ -537,6 +569,49 @@ def test_admin_value_sections_have_independent_contracts(
         assert call["provider_id"] == "provider_synthetic"
         assert call["model_id"] == "model-synthetic-v1"
         assert call["billing_mode"] == "platform_credits"
+
+
+def test_group_endpoint_propagates_filter_and_always_returns_six_rows(
+    admin_analytics_api,
+):
+    api = admin_analytics_api
+    response = api["client"].get(
+        "/api/admin/analytics/groups",
+        params={
+            "from": "2026-08-01",
+            "to": "2026-08-31",
+            "user_group": "organic",
+            "include_internal": "false",
+        },
+        headers=api["admin_headers"],
+    )
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert len(body["groups"]) == 6
+    assert [row["group"] for row in body["groups"]] == list(USER_GROUPS)
+    assert body["selected_user_group"] == "organic"
+    name, call = api["value_query_service"].calls[-1]
+    assert name == "groups"
+    assert call["start"] == date(2026, 8, 1)
+    assert call["end"] == date(2026, 9, 1)
+    assert call["include_internal"] is False
+    assert call["user_group"] == "organic"
+
+
+def test_group_endpoint_rejects_unknown_group(admin_analytics_api):
+    response = admin_analytics_api["client"].get(
+        "/api/admin/analytics/groups",
+        params={
+            "from": "2026-09-01",
+            "to": "2026-09-03",
+            "user_group": "friends",
+        },
+        headers=admin_analytics_api["admin_headers"],
+    )
+
+    assert response.status_code == 422
+    assert response.json() == {"detail": "Invalid Analytics query."}
 
 
 @pytest.mark.parametrize("movement_range", ["5d", "1w", "1m", "1y"])
@@ -636,6 +711,7 @@ def test_admin_user_list_accepts_documented_filters(admin_analytics_api):
             "lifecycle_segment": "core",
             "operational_state": "healthy",
             "commercial_tier": "invested",
+            "user_group": "partner",
             "activated": "true",
             "last_meaningful_activity_from": (today - timedelta(days=1)).isoformat(),
             "last_meaningful_activity_to": today.isoformat(),
@@ -657,6 +733,7 @@ def test_admin_user_list_accepts_documented_filters(admin_analytics_api):
     assert filters.lifecycle_segment == "core"
     assert filters.operational_state == "healthy"
     assert filters.commercial_tier == "invested"
+    assert filters.user_group == "partner"
     assert filters.activated is True
     assert filters.legacy_status == "active"
 

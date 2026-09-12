@@ -19,6 +19,7 @@ CodeQL's py/import-and-import-from flags it.
 
 import os
 from datetime import timedelta
+from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
@@ -407,6 +408,14 @@ def test_avatar_column_lazy_migration_postgres():
             assert cur.fetchone() is not None
 
 
+def test_users_postgres_repeats_sqlite_user_group_migration():
+    """The deployed users table must gain the group column lazily too."""
+    source = Path(__file__).resolve().parents[1] / "users_postgres.py"
+    sql = source.read_text(encoding="utf-8")
+    assert "ADD COLUMN IF NOT EXISTS user_group" in sql
+    assert "user_group TEXT NOT NULL DEFAULT 'unknown'" in sql
+
+
 @pg_only
 def test_update_display_name_postgres(temp_postgres_store):
     user = temp_postgres_store.create_user("pgname@example.com", "PG Name", "securepass1")
@@ -629,6 +638,34 @@ def test_apply_admin_patch_atomic_postgres(temp_postgres_store):
     # Last-admin guard, serialized by the advisory lock.
     with pytest.raises(ValueError, match="last_admin"):
         store.apply_admin_patch(admin["id"], role="user")
+
+
+@pg_only
+def test_user_group_default_and_atomic_patch_postgres(temp_postgres_store):
+    store = temp_postgres_store
+    user = store.create_user(
+        "pg-group@example.test", "PG Group", "securepass1"
+    )
+
+    assert store.get_user_admin(user["id"])["user_group"] == "unknown"
+
+    updated = store.apply_admin_patch(
+        user["id"], user_group="competition", credits=11
+    )
+
+    assert updated["user_group"] == "competition"
+    assert updated["entitlements"]["credits"] == 11
+    assert store.list_users_admin()[0]["user_group"] == "competition"
+
+    # The group is admin-only; public signup/session projections stay unchanged.
+    assert "user_group" not in user
+    token = store.create_session(user["id"])
+    session_user = store.get_user_for_token(token)
+    assert session_user is not None
+    assert "user_group" in session_user  # raw store row, not an API projection
+    from dashboard.backend.users import public_user
+
+    assert "user_group" not in public_user(session_user)
 
 
 @pg_only

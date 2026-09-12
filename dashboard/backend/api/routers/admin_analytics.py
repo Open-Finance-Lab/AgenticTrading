@@ -25,6 +25,7 @@ from dashboard.backend.domain.analytics.service import (
 )
 from dashboard.backend.domain.analytics.value_queries import (
     CommercialAnalyticsResponse,
+    GroupAnalyticsResponse,
     LifecycleAnalyticsResponse,
     MAX_VALUE_RANGE_DAYS,
     OperationalAnalyticsResponse,
@@ -34,6 +35,7 @@ from dashboard.backend.domain.analytics.value_queries import (
     ValueAnalyticsQueryService,
     ValueUserProfile,
 )
+from dashboard.backend.domain.user_groups import parse_user_group
 
 
 router = APIRouter(
@@ -214,6 +216,7 @@ def _value_user_filters(request: Request) -> tuple[UserValueFilters, int, int]:
             "lifecycle_segment",
             "operational_state",
             "commercial_tier",
+            "user_group",
             "activated",
             "last_meaningful_activity_from",
             "last_meaningful_activity_to",
@@ -235,6 +238,12 @@ def _value_user_filters(request: Request) -> tuple[UserValueFilters, int, int]:
     tier = values.get("commercial_tier")
     if tier is not None and tier not in _COMMERCIAL_TIERS:
         _invalid_query()
+    user_group = values.get("user_group")
+    if user_group is not None:
+        try:
+            user_group = parse_user_group(user_group)
+        except ValueError:
+            _invalid_query()
     legacy_status = values.get("status")
     if legacy_status is not None and legacy_status not in _USER_STATES:
         _invalid_query()
@@ -257,6 +266,7 @@ def _value_user_filters(request: Request) -> tuple[UserValueFilters, int, int]:
             lifecycle_segment=lifecycle_segment,
             operational_state=operational_state,
             commercial_tier=tier,
+            user_group=user_group,
             activated=(
                 _parse_bool(values["activated"]) if "activated" in values else None
             ),
@@ -483,6 +493,32 @@ def get_operational(
             billing_mode=billing_mode,
             provider_id=provider_id,
             model_id=model_id,
+        )
+    except Exception as exc:
+        _raise_service_error(exc)
+
+
+@router.get("/groups", response_model=GroupAnalyticsResponse)
+def get_groups(
+    request: Request,
+    service: ValueAnalyticsQueryService = Depends(get_value_analytics_query_service),
+):
+    start, end, include_internal, values = _value_range(
+        request,
+        additional={"user_group"},
+    )
+    selected_group = values.get("user_group")
+    if selected_group is not None:
+        try:
+            selected_group = parse_user_group(selected_group)
+        except ValueError:
+            _invalid_query()
+    try:
+        return service.get_groups(
+            start=start,
+            end=end,
+            include_internal=include_internal,
+            user_group=selected_group,
         )
     except Exception as exc:
         _raise_service_error(exc)
