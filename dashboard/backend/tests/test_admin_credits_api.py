@@ -191,6 +191,7 @@ def test_admin_user_search_composes_identity_with_bucket_projection(
             "email": "needle@example.com",
             "display_name": "needle",
             "role": "user",
+            "user_group": "unknown",
             "balance": {
                 "grant_committed_micro": 0,
                 "purchased_committed_micro": 0,

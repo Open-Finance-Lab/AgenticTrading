@@ -335,6 +335,60 @@ def test_admin_patch_entitlements_and_role(isolated_auth):
     assert body["entitlements"]["credits"] == 50
 
 
+def test_admin_can_patch_group_and_public_me_does_not_expose_it(
+    isolated_auth, capsys
+):
+    client, store = isolated_auth
+    admin = _signup(client, "group-admin@example.com")
+    target = _signup(client, "group-target@example.com")
+    _promote(store, admin["id"])
+    client.post(
+        "/api/auth/login",
+        json={"email": "group-admin@example.com", "password": "SecurePass1!"},
+    )
+
+    response = client.patch(
+        "/api/admin/users/" + str(target["id"]),
+        json={"user_group": "organic"},
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["user"]["user_group"] == "organic"
+    audit = capsys.readouterr().out
+    assert "old_group=unknown" in audit
+    assert "new_group=organic" in audit
+    assert f"actor={admin['id']}" in audit
+    assert f"target={target['id']}" in audit
+    assert "group-target@example.com" not in audit
+    assert "user_group" not in client.get("/api/auth/me").json()["user"]
+
+
+def test_admin_group_patch_rejects_null_and_unknown_value(isolated_auth):
+    client, store = isolated_auth
+    admin = _signup(client, "group-validation@example.com")
+    _promote(store, admin["id"])
+    target = _signup(client, "group-invalid@example.com")
+    client.post(
+        "/api/auth/login",
+        json={
+            "email": "group-validation@example.com",
+            "password": "SecurePass1!",
+        },
+    )
+
+    null_response = client.patch(
+        "/api/admin/users/" + str(target["id"]),
+        json={"user_group": None},
+    )
+    assert null_response.status_code == 400, null_response.text
+
+    invalid_response = client.patch(
+        "/api/admin/users/" + str(target["id"]),
+        json={"user_group": "friends"},
+    )
+    assert invalid_response.status_code == 422, invalid_response.text
+
+
 def test_backtest_slot_respects_entitlement(monkeypatch, tmp_path):
     """The dashboard runner's per-owner slots read the same entitlement.
 

@@ -18,6 +18,7 @@ from dashboard.backend.api.rate_limit import (
     client_ip,
     rate_limited_error,
 )
+from dashboard.backend.domain.user_groups import UserGroup
 from dashboard.backend.session_tokens import secrets_equal
 from dashboard.backend.users import (
     MAX_CONCURRENT_BACKTESTS_CAP,
@@ -91,6 +92,7 @@ _BOOTSTRAP_REFUSAL = "Invalid bootstrap secret"
 
 class AdminUserPatch(BaseModel):
     role: Optional[Literal["user", "admin"]] = None
+    user_group: Optional[UserGroup] = None
     # ge=0, not ge=1: a floor equal to the default quota is not a control. An
     # admin watching a fresh account burn LLM budget could only lower it to the
     # value that account already had; 0 is "suspended" and needs no new field
@@ -241,6 +243,7 @@ def patch_user(
         )
     if (
         payload.role is None
+        and payload.user_group is None
         and payload.max_concurrent_backtests is None
         and payload.credits is None
     ):
@@ -259,6 +262,13 @@ def patch_user(
                 detail="Cannot demote yourself; ask another admin",
             )
 
+    # Read the current admin projection before the atomic write. The projection
+    # is already the tolerant/coerced boundary for legacy malformed values, so
+    # the audit line below records the value an operator actually sees rather
+    # than whatever untrusted raw text happens to be in the database.
+    previous = users_module.user_store.get_user_admin(user_id)
+    previous_group = previous.get("user_group") if previous else None
+
     # One store call, one transaction. Applying the role and the entitlements
     # as two separate writes meant a failure on the second left the first
     # committed behind a 500, so the console kept showing a row the database no
@@ -267,6 +277,7 @@ def patch_user(
         updated = users_module.user_store.apply_admin_patch(
             user_id,
             role=payload.role,
+            user_group=payload.user_group,
             max_concurrent_backtests=payload.max_concurrent_backtests,
             credits=payload.credits,
             updated_by_admin_id=admin["id"],
@@ -280,6 +291,8 @@ def patch_user(
                 status_code=400,
                 detail="Cannot demote the last admin account",
             ) from exc
+        if code == "invalid_user_group":
+            raise HTTPException(status_code=422, detail="Invalid user group") from exc
         # invalid_role / invalid_* range errors are unreachable from this
         # route — the Pydantic model's Literal and Field bounds reject those
         # requests as 422 before the store runs — so they re-raise as the
@@ -293,6 +306,8 @@ def patch_user(
         "user_patched",
         actor=int(admin["id"]),
         target=int(user_id),
+        old_group=previous_group,
+        new_group=updated["user_group"],
         role=payload.role,
         max_concurrent_backtests=payload.max_concurrent_backtests,
         credits=payload.credits,

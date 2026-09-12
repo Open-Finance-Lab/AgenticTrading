@@ -223,6 +223,11 @@ def list_grant_users(
                 "email": identity["email"],
                 "display_name": identity["display_name"],
                 "role": identity["role"],
+                # Account Management is the canonical editor for this
+                # admin-only dimension. Keep the stable stored value alongside
+                # the identity fields so the frontend can render one select
+                # without a second users lookup.
+                "user_group": identity.get("user_group", "unknown"),
                 "balance": balance,
             }
         )
