@@ -141,6 +141,48 @@ client re-provisions them for guests, so a step keyed on agent existence would
 arrive pre-ticked; it was left out for that reason, and documenting it back in
 would teach a reader that the ticks mean nothing.
 
+## 7. Missing: no cancel control is documented (pending, #273)
+
+**File:** `docs/source/lab/getting_started.rst:7-10` — the numbered backtest steps.
+
+**Landing with the P1 workstream** (spec:
+`docs/superpowers/specs/2026-09-11-backtest-first-run-loop-design.md`): a backtest
+becomes cancellable, with the control on **both** surfaces — the My Agents card and the
+Backtest tab — and a `cancelled` outcome that is deliberately *not* a failure.
+
+Until that ships the manual is accurate by omission; the moment it does, a walkthrough
+that describes starting a run and waiting for it is describing a one-way door that no
+longer exists. **Do not write this entry up before the PR merges** — the control's exact
+placement is still moving.
+
+## 8. Missing: decision provenance on a result (pending, #169)
+
+**Files:** `getting_started.rst:11-13` (reading your results) and anywhere the manual
+implies a finished backtest used the model you selected.
+
+**Landing with the same workstream:** a result will carry a decision-source verdict and
+an **"N of M steps were model-driven"** badge whenever coverage is below 100%.
+
+**Must state plainly:** a backtest can complete successfully having fallen back to
+rule-based decisions for some or all steps. Today the manual gives a reader no reason to
+suspect that, which is the user-facing half of #169. Note the two thresholds do
+different jobs and copy must not merge them — the badge fires below **100%** (*was
+anything degraded?*), while the leaderboard's H6 guard bars publication below **95%**
+(*may this be published under a model's name?*).
+
+## 9. Stale on arrival: AI Hedge Fund on free hosting (#308, option d)
+
+**Files:** nowhere — `grep -ri "hedge fund" docs/source/lab/` finds no operational note.
+
+Issue #308's acceptance criteria include a documentation exit: **state that AHF
+backtests are unsupported on free hosting**, and keep the "server is waking up" toast
+scoped to cold starts so it is not read as covering an OOM.
+
+This one is worth writing **whether or not** the plan upgrade happens, because it is the
+only exit that costs nothing. If the service is later moved to a paid plan, this entry
+becomes a note about which runtimes are heavy rather than a warning — reword, do not
+delete.
+
 ---
 
 ## Checked, not stale
