@@ -18,7 +18,7 @@ Update this table as work lands. `state` is one of:
 
 | PR | Issues | Branch | Worktree | Base | State | PR # |
 |---|---|---|---|---|---|---|
-| 1 | #129 | `fix/backtest-setup-panel-dead-band` | `../ATL-worktrees/p1-setup-panel` | `main` | in-progress | — |
+| 1 | #129 | `fix/backtest-setup-panel-dead-band` | `../ATL-worktrees/p1-setup-panel` | `main` | pr-open | #457 |
 | 2 | #169 | `fix/backtest-run-provenance` | `../ATL-worktrees/p1-provenance` | `main` | in-progress | — |
 | 3 | #273, #308 | `fix/backtest-cancel-and-memory` | `../ATL-worktrees/p1-cancel-memory` | PR 2 branch | not-started | — |
 | 4 | #390, #365 | `fix/leaderboard-curve-integrity` | `../ATL-worktrees/p2-curve-integrity` | `main` | in-progress | — |
@@ -247,3 +247,10 @@ Append newest last. One line per meaningful event.
   `api/routers/backtests.py`; the policy module and its tests survived intact, so CI
   never noticed. PR 3's planned refund step is therefore unbuildable and has been struck.
   Awaiting the user's decision on whether to re-arm and whether to file an issue.
+- `2026-09-11` — **PR #457 open (#129).** Re-show rule moved into the 1200px block.
+  Suite 4438 passed / 163 skipped. Notable: `test_vnpy_simulation_frontend.py`'s
+  docstring on `main` *documented the 901-1200px dead band as a known limitation its
+  assertions pass anyway* — the guard was written to tolerate the bug, not catch it.
+  That test now asserts the 1200px block, and a new guard
+  (`test_frontend_setup_panel_breakpoint.py`) compares the two breakpoints and was
+  confirmed to fail on the pre-fix CSS.
