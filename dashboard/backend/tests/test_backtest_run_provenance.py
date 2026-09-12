@@ -816,12 +816,19 @@ def _settle(status):
             fn_body("function backtestFellBackFromTheModel"),
             fn_body("function settleFinishedBacktestPanel"),
             harness,
-            f"settleFinishedBacktestPanel({json.dumps(status)}, 61, "
-            f"{json.dumps(_COMPLETION_MESSAGE)});",
+            # Parenthesised: an implicit concatenation between two list items
+            # is indistinguishable from a missing comma, which here would
+            # silently drop a statement from the script instead of failing.
+            (
+                f"settleFinishedBacktestPanel({json.dumps(status)}, 61, "
+                f"{json.dumps(_COMPLETION_MESSAGE)});"
+            ),
             "const scheduled = timers.length;",
             "timers.forEach((fn) => fn());",   # the dismissal timeout elapses
-            "console.log(JSON.stringify("
-            "{ panelVisible, panelMessage, panelFinished, scheduled }));",
+            (
+                "console.log(JSON.stringify("
+                "{ panelVisible, panelMessage, panelFinished, scheduled }));"
+            ),
         ]
     )
     result = subprocess.run(
