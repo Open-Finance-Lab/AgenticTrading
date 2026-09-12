@@ -459,3 +459,26 @@ Append newest last. One line per meaningful event.
   chart; #460 at 1420-1748 and 5869-8046) and `styles.css` (#457 at 3664/3801, #460 at
   6220+). Note `main` advanced during the session (`1ecebee7 Update README.md`), which is
   a reminder that others push here while this workstream is open.
+- `2026-09-11` — **#459 force-pushed into two separable commits**, invalidating the
+  earlier integration run. Re-verified from scratch:
+  - `0b61af90` **fix** — the defects, green on its own with the config untouched.
+  - `5ec37ff5` **chore** — the `$100,000` config value *and the one test that guards it*.
+  - **All four PRs re-merged onto current `main`: 4567 passed, 163 skipped, 0 failed.**
+  - **Reversibility verified empirically**, not promised: reverting `5ec37ff5` in the
+    combined tree drops the config back to `10000`, removes 45 lines across 2 files, and
+    the suite is **4566 passed, 0 failed** — exactly one test fewer, the guard that ships
+    with the decision. "One commit to revert" is now a measured claim.
+- `2026-09-11` — **`_run_id` seed suffix reverted, and the reason is the best catch of
+  the PR.** Pressing on "can this leave two rows for one window?" turned up **yes**:
+  `_find_cached_run` matches on `(mode, start, end, llm_model)`, not on `run_id`, so the
+  twelve committed rows are found either way — but their ids are *seed-free*, so a
+  suffixed id does not replace them, it **inserts alongside**. The first force-refresh
+  after the PR would have **doubled every entry on the board** and orphaned twelve equity
+  curves nothing prunes — at the aligned config, for zero benefit, because the seed had
+  not changed. `_run_id` is seed-free again with a comment saying why, pinned by
+  `test_a_refresh_replaces_the_existing_row_rather_than_adding_one`.
+- `2026-09-11` — `portfolio_value` needed a **client half** too: `formatLeaderboardNumber(null)`
+  returns `"0.00"`, so the standings table and detail panel would have printed **`$0.00`**
+  — the same absence-as-zero bug one column over. `home-page.js`'s
+  `homeFormatPortfolioValue` carried the identical inert `Number.isFinite` guard.
+- `2026-09-11` — PR #459 final: **50 test cases**, suite 4487 green standalone.
