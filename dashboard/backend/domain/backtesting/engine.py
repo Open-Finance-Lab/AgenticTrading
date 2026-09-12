@@ -980,6 +980,19 @@ class HourlyBacktester:
         decision_source = getattr(self, "decision_source", None)
         if decision_source is not None:
             meta["decision_source"] = decision_source
+        decision_steps = getattr(self, "llm_decision_steps", None)
+        if decision_steps is not None:
+            # Denominator for "did the model actually drive this run?" --
+            # llm_decisions / decision_steps, the same ratio the leaderboard's
+            # H6 guard applies, under the name it already uses for it.
+            #
+            # Its *presence* is also the witness that this row records
+            # llm_decisions at all: that column was added with DEFAULT 0, so
+            # every row written before it existed reads back as 0, and a bare 0
+            # cannot tell "the model drove nothing" from "nobody was counting".
+            # Reading provenance off such a row without this key would accuse
+            # every historical run of a fallback it never had.
+            meta["decision_steps"] = int(decision_steps)
         if self.use_llm:
             meta["llm_max_output_tokens"] = llm_harness.DEFAULT_MAX_OUTPUT_TOKENS
         llm_execution = getattr(self, "_llm_execution_evidence", None)
@@ -1620,6 +1633,36 @@ class HourlyBacktester:
         # row self-consistent rather than silently understating the run.
         llm_calls_total = manager.llm_calls + runtime_calls
 
+        # Steps the model actually drove, and the steps it was asked to drive.
+        # Persisted beside llm_calls because they answer different questions:
+        # llm_calls is the *billing* counter and ticks on a truncated or
+        # unparseable response that then traded rule-based, so a run with
+        # llm_calls == decision_steps and llm_decisions == 0 is a total
+        # fallback wearing the model's name. Nothing downstream could see that
+        # before -- dashboard backtests are subprocesses, so PortfolioManager's
+        # in-process counter (and the H6 guard that reads it) never crossed
+        # back to the parent. Issue #169.
+        if self.runtime_type == PIPELINE_RUNTIME_TYPE:
+            llm_decisions_total = manager.llm_decisions
+            decision_steps_total = total_steps
+        else:
+            # A hosted runtime decides once per trading day and holds on every
+            # other bar, so the hourly bar count is not its denominator: it
+            # would report a genuine run as ~1/7 covered. `runtime_calls` is
+            # every step it drove, and each entry in `runtime_step_failures` is
+            # a step it was asked for and could not answer -- their sum is the
+            # steps the model was actually asked to decide. There is no
+            # billed-but-unusable case on this path (the bridge reports no
+            # usage at all), which is why numerator and billing counter
+            # coincide here and must not be collapsed anywhere else.
+            llm_decisions_total = runtime_calls
+            decision_steps_total = runtime_calls + len(self.runtime_step_failures)
+        # Read back out of `self` by _agent_run_metadata below, the same way it
+        # already reads decision_source and the execution evidence. Not named
+        # `decision_steps`: that spelling is already taken in this module for
+        # the *pipeline's* decision stages, which is a different thing entirely.
+        self.llm_decision_steps = decision_steps_total
+
         llm_execution = None
         execution_client = getattr(self, "execution_client", None)
         if execution_client is not None:
@@ -1664,6 +1707,7 @@ class HourlyBacktester:
             num_trades=len(manager.trades),
             llm_model=llm_model,  # Track which model was used
             llm_calls=llm_calls_total,
+            llm_decisions=llm_decisions_total,
             input_tokens=manager.input_tokens,
             output_tokens=manager.output_tokens,
             est_cost_usd=est_cost,

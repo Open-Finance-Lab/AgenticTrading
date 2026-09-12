@@ -141,6 +141,7 @@ class BacktestDatabase:
                 max_drawdown REAL,
                 num_trades INTEGER DEFAULT 0,
                 llm_calls INTEGER DEFAULT 0,
+                llm_decisions INTEGER DEFAULT 0,
                 input_tokens INTEGER DEFAULT 0,
                 output_tokens INTEGER DEFAULT 0,
                 est_cost_usd REAL DEFAULT 0,
@@ -354,6 +355,12 @@ class BacktestDatabase:
             token_columns = [
                 ("llm_calls",
                  "ALTER TABLE agent_runs ADD COLUMN llm_calls INTEGER DEFAULT 0"),
+                # Steps the model actually drove, not billed calls. The two
+                # differ exactly when a billed response was unusable and the
+                # step silently traded rule-based, which is the run this column
+                # exists to make visible (issue #169).
+                ("llm_decisions",
+                 "ALTER TABLE agent_runs ADD COLUMN llm_decisions INTEGER DEFAULT 0"),
                 ("input_tokens",
                  "ALTER TABLE agent_runs ADD COLUMN input_tokens INTEGER DEFAULT 0"),
                 ("output_tokens",
@@ -631,11 +638,18 @@ class BacktestDatabase:
                    num_trades: int = 0,
                    llm_model: str = "rule-based",
                    llm_calls: int = 0,
+                   llm_decisions: int = 0,
                    input_tokens: int = 0,
                    output_tokens: int = 0,
                    est_cost_usd: float = 0.0,
                    metadata: Optional[Dict[str, Any]] = None) -> None:
         """Insert a new backtest run with session_id, LLM model and token-cost tracking.
+
+        ``llm_calls`` and ``llm_decisions`` are not two spellings of one number:
+        the first is billed API calls, the second is steps the model actually
+        drove. A run where every response was billed and unusable has
+        ``llm_calls == decision_steps`` and ``llm_decisions == 0``, and reading
+        provenance off ``llm_calls`` reports it as fully model-driven.
 
         ``metadata`` is an optional JSON config snapshot (e.g. the effective
         LLM_MAX_OUTPUT_TOKENS in force during the run)."""
@@ -647,12 +661,14 @@ class BacktestDatabase:
             (run_id, session_id, agent_name, mode, start_date, end_date,
              initial_equity, final_equity, total_return, sharpe_ratio,
              max_drawdown, num_trades, llm_model,
-             llm_calls, input_tokens, output_tokens, est_cost_usd, metadata)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             llm_calls, llm_decisions, input_tokens, output_tokens,
+             est_cost_usd, metadata)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (run_id, session_id, agent_name, mode, start_date, end_date,
               initial_equity, final_equity, total_return, sharpe_ratio,
               max_drawdown, num_trades, llm_model,
-              llm_calls, input_tokens, output_tokens, est_cost_usd,
+              llm_calls, llm_decisions, input_tokens, output_tokens,
+              est_cost_usd,
               json.dumps(metadata) if metadata is not None else None))
 
         conn.commit()

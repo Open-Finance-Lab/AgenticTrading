@@ -626,6 +626,60 @@ def test_hosted_run_row_reports_runtime_calls_not_zero(patched_engine):
     assert "gpt-4.1" not in str(run_row["llm_model"])
 
 
+def test_rule_based_run_persists_zero_model_decisions_and_its_step_count(
+    patched_engine,
+):
+    """Layer B of #169: the counter that catches a silent fallback had to exist
+    in the row at all. A dashboard backtest is a subprocess, so the in-process
+    H6 guard never sees these numbers -- persisting them is the only way they
+    cross back."""
+    run_id, equity_curve = _run_rule_based(patched_engine)
+
+    run = patched_engine.runs[0]
+    assert run["run_id"] == run_id
+    assert run["llm_calls"] == 0
+    assert run["llm_decisions"] == 0
+    # The coverage denominator: steps the model was asked to decide. The
+    # non-intraday path marks equity once per decision step, so the curve
+    # length is that count without restating it here.
+    assert run["metadata"]["decision_steps"] == len(equity_curve)
+
+
+def test_hosted_run_counts_decisions_over_the_steps_it_was_asked_for(
+    patched_engine,
+):
+    """A hosted runtime decides once per trading day and holds on every other
+    bar, so the hourly bar count is not its denominator -- it would report a
+    healthy run as roughly 1/7 covered. Steps it drove plus steps it was asked
+    for and could not answer is."""
+    from dashboard.backend.infrastructure.ai_hedge_fund.adapter import (
+        AiHedgeFundRuntimeError,
+    )
+
+    class FlakyRunner:
+        def __init__(self):
+            self.calls = 0
+
+        def run(self, payload, *, timeout_seconds):
+            self.calls += 1
+            if self.calls == 2:
+                raise AiHedgeFundRuntimeError("timed out after 300 seconds")
+            return {"decisions": {"AAPL": {"action": "hold", "quantity": 0,
+                                           "confidence": 55.0, "reasoning": "ok"}}}
+
+    bt = _hosted_backtester(FlakyRunner())
+    bt.run_agent_backtest()
+
+    run = patched_engine.runs[0]
+    drove = bt.runtime_dispatcher.calls
+    held = len(bt.runtime_step_failures)
+    assert drove > 0 and held == 1
+    assert run["llm_decisions"] == drove
+    assert run["metadata"]["decision_steps"] == drove + held
+    # Well short of the bar count, which is the point of not using it.
+    assert run["metadata"]["decision_steps"] < len(bt.all_data["AAPL"])
+
+
 def test_hosted_run_that_never_reached_the_model_is_not_attributed_to_it(
     patched_engine, monkeypatch
 ):

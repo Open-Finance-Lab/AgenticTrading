@@ -7305,6 +7305,37 @@ function formatBacktestElapsed(seconds) {
 /** A progress file older than this is reported as stale (seconds). */
 const BACKTEST_STALE_SECONDS = 120;
 
+/**
+ * What actually drove a finished run, or null when there is nothing to say.
+ *
+ * The sentence comes from the server (`decision_note`) rather than being
+ * templated here from the same counters: one message with two owners disagrees
+ * the moment either side's wording moves, and "the dashboard and the backend
+ * describe this run differently" is the bug one layer up from the one this
+ * exists to fix (issue #169).
+ *
+ * Null for a clean `llm` run — it already reads "Completed in 1:23." and a line
+ * confirming the model drove it adds nothing — and null for `unknown`, a run
+ * written before the counters existed, which must not be accused of a fallback
+ * nobody recorded.
+ */
+function formatDecisionProvenance(status) {
+    return status?.decision_note || null;
+}
+
+/**
+ * True when the run asked for the model and did not get it.
+ *
+ * Reads the server's `decision_fallback` instead of comparing
+ * `decision_source` against `decision_provenance` here, so "was this a
+ * fallback?" keeps one owner. An intentionally rule-based run is not one: it
+ * is labelled, but it is also exactly what was ordered, so it does not hold the
+ * completion panel open.
+ */
+function backtestFellBackFromTheModel(status) {
+    return status?.decision_fallback === true;
+}
+
 /** The /backtest/status URL for one run, or for "whatever this browser runs".
  *
  * Three callers build this URL and the interesting half is what happens when
@@ -8120,9 +8151,13 @@ function ensureBacktestPolling() {
                         message,
                     });
                 } else if (status.success) {
+                    const provenance = formatDecisionProvenance(status);
                     updateBacktestRunProgress({
                         elapsedSeconds: displayElapsed,
-                        message: `Completed in ${formatBacktestElapsed(displayElapsed)}.`,
+                        message: [
+                            `Completed in ${formatBacktestElapsed(displayElapsed)}.`,
+                            provenance,
+                        ].filter(Boolean).join(' '),
                     });
                     if (finishedId) {
                         localStorage.setItem(SELECTED_BACKTEST_RUN_KEY, finishedId);
@@ -8130,7 +8165,13 @@ function ensureBacktestPolling() {
                         localStorage.removeItem(SELECTED_BACKTEST_RUN_KEY);
                     }
                     await loadData();
-                    setTimeout(() => showBacktestRunProgress(false), 2500);
+                    // A run the model never drove keeps the panel up. This is
+                    // the only surface that says what produced the numbers
+                    // loadData() has just painted, and 2.5s is not long enough
+                    // to read a sentence the user was not expecting.
+                    if (!backtestFellBackFromTheModel(status)) {
+                        setTimeout(() => showBacktestRunProgress(false), 2500);
+                    }
                 } else {
                     showBacktestRunProgress(false);
                 }

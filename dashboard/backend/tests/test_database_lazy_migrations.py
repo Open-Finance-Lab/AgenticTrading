@@ -36,6 +36,7 @@ from dashboard.backend.database import BacktestDatabase
 # string default keeps its quotes.
 _TOKEN_COLUMNS = {
     "llm_calls": ("INTEGER", 0, "0"),
+    "llm_decisions": ("INTEGER", 0, "0"),
     "input_tokens": ("INTEGER", 0, "0"),
     "output_tokens": ("INTEGER", 0, "0"),
     "est_cost_usd": ("REAL", 0, "0"),
