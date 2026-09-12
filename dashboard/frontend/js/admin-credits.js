@@ -352,6 +352,11 @@
       return;
     }
 
+    // Invalidate any list request that was already in flight. Without this,
+    // a slower pre-save response can arrive after the PATCH and re-render the
+    // row from its stale `Unknown` snapshot, making a successful save look
+    // like it was lost until the next refresh.
+    state.usersRequestSeq += 1;
     groupSelect.disabled = true;
     try {
       setStatus(`Updating group for ${subject}…`, 'pending');
@@ -359,6 +364,10 @@
         method: 'PATCH',
         body: JSON.stringify({ user_group: nextGroup }),
       });
+      // A refresh may have started while the PATCH was in flight. Its
+      // response was built before this mutation committed, so invalidate it
+      // before publishing the server-confirmed row below.
+      state.usersRequestSeq += 1;
       const updatedUser = data?.user || {};
       if (!Object.prototype.hasOwnProperty.call(updatedUser, 'user_group')) {
         throw new Error('Group update response was incomplete.');
@@ -370,6 +379,9 @@
       setGroupError(groupSelect);
       setStatus(`${subject} is now in ${userGroupLabel(savedGroup)}.`, 'success');
     } catch (error) {
+      // Also discard a concurrent list response on failure; it may otherwise
+      // repaint the select after we restore the value from before the save.
+      state.usersRequestSeq += 1;
       groupSelect.value = previousGroup;
       setGroupError(groupSelect, error.message || 'Group update failed.');
       if (!handleAccessLost(error)) setStatus(error.message || 'Group update failed.', 'error');

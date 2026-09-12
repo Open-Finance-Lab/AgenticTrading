@@ -116,6 +116,7 @@ def test_account_management_has_one_group_editor():
     assert "method: 'PATCH'" in ADMIN_JS
     assert "/api/admin/users/${Number(user.id)}" in ADMIN_JS
     assert "JSON.stringify({ user_group: nextGroup })" in ADMIN_JS
+    assert "state.usersRequestSeq += 1" in ADMIN_JS
     assert "groupSelect.disabled = true" in ADMIN_JS
     assert "groupSelect.disabled = false" in ADMIN_JS
     assert "user.user_group = savedGroup" in ADMIN_JS
