@@ -365,3 +365,25 @@ Append newest last. One line per meaningful event.
   system promises; the criterion is one person's phrasing of a complaint.** Both briefs I
   wrote from issue text (#365's refusal, #169's `decision_source` naming) would have
   broken working contracts, and both times the agent reading the code caught it.
+- `2026-09-11` — **PR #458 complete** (head `226d18ce`). The import-cycle guard was
+  tested by trying to break it, and the result changed what shipped:
+  - **Module-level import: unguardable, and does not need a guard.** Adding the import at
+    `portfolio_manager.py`'s top level takes the session down in `conftest` autouse
+    setup, before any test body — and moving the guard to `test_architecture_boundaries.py`
+    does not help, because conftest still dies. Nothing in this repo can report it. It
+    needs no report: it is an unmissable ImportError storm. What it needs is a
+    **recognisable signature**, because the traceback names neither file whose
+    relationship caused it. The docstring records the line to look for:
+    `cannot import name 'MIN_LLM_DECISION_COVERAGE' from partially initialized module`.
+  - **Function-local import: guarded, and this is the dangerous shape.** It collects
+    green and raises in production on the first fallback step — the least-exercised path
+    in the module. *A developer who hits the cycle head-on fixes it in thirty seconds;
+    one who defers the import to "avoid the cycle" ships it.*
+  - The guard is a **BFS over an AST import graph** from every `domain/leaderboard/*`
+    module, not a deny-list of three names, so the invariant widens by itself. It carries
+    a **non-vacuity assert** — the walk must reach `portfolio_manager` — so a broken
+    parser or renamed package fails loudly instead of passing as "no cycle found".
+- `2026-09-11` — Process note: the `DO NOT MERGE` line on #458 was wiped by a routine
+  `gh pr edit --body`, which replaces the body wholesale. No error, no warning, PR still
+  looked fine. **Draft status is the gate that actually held**, because it is a separate
+  flag no normal operation overwrites as a side effect. Verify both layers, not either.
