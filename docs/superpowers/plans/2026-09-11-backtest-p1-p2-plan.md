@@ -231,6 +231,32 @@ git push --force-with-lease origin fix/backtest-cancel-and-memory
 Do this **before** either PR is marked ready. Do not rebase PR 3 onto `main` — that
 would drop PR 2's provenance fields out from under it.
 
+## CI coverage — read this before marking anything ready
+
+**#460 gets no CI at all while it is stacked.** `.github/workflows/ci.yml` triggers on
+`pull_request: branches: [main]`, and #460's base is `fix/backtest-run-provenance`. So
+Backend tests, CodeQL and the packaging/landing checks **never fire on it**. Its only
+green mark is Vercel. This is the price of stacking, and it is not visible from the PR
+page — the checks list simply looks short.
+
+Coverage for #460 therefore comes from two places, and both must be kept true:
+1. The local combined-tree run recorded above (4567 passed on all four merged onto
+   `main`).
+2. GitHub, automatically, the moment #458 merges and #460 is retargeted to `main`.
+
+**Do not mark #460 ready on the strength of a green checks list** — re-run the combined
+tree locally, or retarget it first and wait for CI.
+
+**Read CodeQL on the merge ref, and re-read it after any force-push.**
+`gh api "repos/.../code-scanning/alerts?ref=refs/pull/N/merge&state=open"`. The branch ref
+returns empty and looks clean. Both live alerts found this way were `note` severity:
+- #458 — `py/unused-import`, a genuinely unused `import json`. **Fixed** (`7b96ceba`).
+- #459 — `py/unused-global-variable` on `_HOME_JS`. **Stale, not real**: the alert predates
+  the force-push, and `_HOME_JS` is used at `:989`/`:995`, where
+  `homeFormatPortfolioValue` is extracted and tested. CodeQL shows `skipping` on #459
+  because it has not re-analysed the new head. An alert on a merge ref is authoritative
+  about the commit it ran on, which is not necessarily the commit you are looking at.
+
 ## Shared conventions
 
 - **Every PR:** full suite green (`pytest dashboard/backend/tests/ -v`) before opening.
@@ -482,3 +508,10 @@ Append newest last. One line per meaningful event.
   — the same absence-as-zero bug one column over. `home-page.js`'s
   `homeFormatPortfolioValue` carried the identical inert `Number.isFinite` guard.
 - `2026-09-11` — PR #459 final: **50 test cases**, suite 4487 green standalone.
+- `2026-09-11` — CI audit. #457, #458, #459 fully green on GitHub. **#460 has no CI by
+  construction** (workflows are `pull_request: branches: [main]`; its base is not main).
+  Merge-ref CodeQL surfaced two `note` alerts: #458's was real and is fixed
+  (`7b96ceba`), #459's was stale from before its force-push.
+- `2026-09-11` — #458 head is now `7b96ceba`; #460 remains based on `3710c43b`. No rebase
+  needed: the only new commit deletes an unused import in a test file #460 does not
+  touch, so it merges trivially and will already be in `main` by the time #460 retargets.
