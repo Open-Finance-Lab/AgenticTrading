@@ -21,7 +21,7 @@ Update this table as work lands. `state` is one of:
 | 1 | #129 | `fix/backtest-setup-panel-dead-band` | `../ATL-worktrees/p1-setup-panel` | `main` | pr-open | #457 |
 | 2 | #169 | `fix/backtest-run-provenance` | `../ATL-worktrees/p1-provenance` | `main` | pushed `0288ff79` | — |
 | 3 | #273, #308 | `fix/backtest-cancel-and-memory` | `../ATL-worktrees/p1-cancel-memory` | `fix/backtest-run-provenance` @ `0288ff79` | in-progress | — |
-| 4 | #390, #365 | `fix/leaderboard-curve-integrity` | `../ATL-worktrees/p2-curve-integrity` | `main` | in-progress | — |
+| 4 | #390, #365 | `fix/leaderboard-curve-integrity` | `../ATL-worktrees/p2-curve-integrity` | `main` | pr-open (draft) | #459 |
 | — | design docs | `docs/backtest-p1-p2-design` | `../ATL-worktrees/docs-design` | `main` | pr-open | #456 |
 
 PR 3's worktree is created only after PR 2 has its first commit, since it branches off
@@ -260,3 +260,30 @@ Append newest last. One line per meaningful event.
 - `2026-09-11` — PR 3 dispatched, stacked on `0288ff79`. Its refund step is struck (no
   debit exists to reverse) and it is briefed **not** to claim it closes #308 — it ships
   the product guard, not the capacity fix.
+- `2026-09-11` — **PR #459 open (draft).** Seed DB settled #365: all twelve `lb_*` rows
+  hold `initial_equity = 100000` (one as `100000.00000000003`), zero NULLs, first curve
+  point exactly `100000.0`, `metadata` NULL on all twelve. Config declares `10000`, so
+  `scale = 0.1` already normalises the board to a $10k display — **the mixed-capital
+  board is latent, not live.** It begins at the next `force=true` refresh, when
+  `auto_compute` baselines recompute at $10k while LLM entries stay at $100k. Even then
+  the *display* would not diverge; the damage is to **returns**, because a $10k re-run
+  trades in a coarser share quantum and is a different run rather than a rescaled one.
+  That is what makes it a ranking defect. Resolution: align config to `100000` in an
+  isolated, reversible commit.
+- `2026-09-11` — **Verified spend path, worth keeping.** A leaderboard cache miss is
+  **not** inert today. `maybe_schedule_daily_leaderboard_refresh` →
+  `_run_daily_refresh_background` → `refresh_daily_leaderboard(deploy_models=True)`
+  iterates *every* `llm_leaderboard_entries(config)` and calls `deploy_model_run` without
+  consulting `pending_entry_ids`; `deploy_model_run` short-circuits only on a
+  `_find_cached_run` hit. So widening the cache key without care converts a display bug
+  into **billable LLM runs reachable from a public unauthenticated GET** whenever
+  `LEADERBOARD_DAILY_AUTO_DEPLOY` is armed. PR #459 makes a seed mismatch inert at all
+  four spend/serve points and pins each with a test.
+- `2026-09-11` — Design note settled for #459: the defect is **mixed** capital, not
+  capital disagreeing with config. A board whose entries all share one seed is
+  internally consistent and merely mislabelled, so it is served with a warning; only
+  genuinely mixed seeds drop the outliers. The skip rule must never empty the board — a
+  one-line config typo would otherwise take down the acquisition hook.
+- `2026-09-11` — Also found in `app.js`: the existing null guard was **inert, not
+  absent**. `Number(point?.equity)` + `Number.isFinite` reads as a null check, but
+  `Number(null)` is `0` and `0` is finite.
