@@ -47,10 +47,22 @@ helper, since that is where the fallbacks happen -- and it closes. Two shapes,
 with very different symptoms:
 
 * **A module-level import takes the app down at startup**, and the whole test
-  session with it, in conftest before any test body runs. The traceback names
-  neither file whose relationship caused it; the line to recognise is
-  ``cannot import name 'MIN_LLM_DECISION_COVERAGE' from partially initialized
-  module``. No guard can fire here -- nothing is left running to fire one.
+  session with it, in conftest before any test body runs. No guard can fire
+  here -- nothing is left running to fire one -- so recognise it by sight::
+
+      ImportError: cannot import name 'MIN_LLM_DECISION_COVERAGE' from
+      partially initialized module 'dashboard.backend.domain.leaderboard.service'
+      (most likely due to a circular import)
+
+  **That error blames the wrong edge, and this is the expensive part.** The two
+  modules it names -- ``provenance`` and ``leaderboard/service`` -- are the
+  edge that was always there and is correct. The edge that broke it is the
+  import you just added, which appears only as one unremarkable frame in the
+  middle of the traceback. The head of that traceback is whichever route
+  imported first (measured: ``app`` -> ``api/router`` -> ``external_backtest``
+  -> ``external_run_service`` -> ``portfolio_manager``), so the reader starts
+  in an API module with nothing to do with either package. Read the traceback
+  for *who imported ``provenance``*, not for the modules in the error text.
 * **A function-local import collects green and ships.** It raises on the first
   fallback step, in production, on the path that is already the least
   exercised. ``test_provenance_is_not_reachable_from_the_leaderboard_package``
