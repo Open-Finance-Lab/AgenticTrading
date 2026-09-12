@@ -118,9 +118,14 @@ def test_backtest_request_and_result_labels_include_data_source(js):
     assert "vn.py simulated data" in js
 
 
-def test_mobile_backtest_exposes_setup_controls(css):
+def test_narrow_viewport_backtest_exposes_setup_controls(css):
     """Wiring guard only -- see the module docstring on what CSS text cannot
-    prove about actual visibility."""
+    prove about actual visibility.
+
+    Named for "narrow", not "mobile": the setup panel's re-show rule sits at the
+    1200px breakpoint (issue #129), which is a laptop in a split window, while
+    the two rules under it remain 900px/phone-width ones.
+    """
     narrow = _media_block(css, "1200px")
     mobile = _media_block(css, "900px")
 
