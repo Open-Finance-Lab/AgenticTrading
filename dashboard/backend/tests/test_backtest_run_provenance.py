@@ -888,8 +888,14 @@ def test_a_finished_panel_stops_advertising_a_run_in_flight():
     duration."""
     body = strip_comments(fn_body("function showBacktestRunProgress"))
     assert "'Backtest complete'" in body
-    assert "track.hidden = isError || isFinished" in body
-    assert "hint.hidden = isError || isFinished" in body
+    # The three in-flight elements hide off one `terminal` flag, which a
+    # cancelled run (issue #273) joined after this guard was written. Pinning
+    # the flag's definition plus its two readers keeps the contract this test
+    # exists for -- isFinished still reaches the track and the hint -- without
+    # pinning one expression's spelling, which the third state had to rewrite.
+    assert "const terminal = !!isError || !!isCancelled || !!isFinished;" in body
+    assert "track.hidden = terminal" in body
+    assert "hint.hidden = terminal" in body
     assert "elapsed.hidden = !!isError" in body
 
 
