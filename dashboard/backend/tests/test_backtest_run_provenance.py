@@ -17,6 +17,9 @@ the in-process H6 guard that would have caught it never sees the run.
 """
 
 import copy
+import json
+import shutil
+import subprocess
 import uuid
 
 import pytest
@@ -39,6 +42,7 @@ from dashboard.backend.tests._frontend_source import (
     APP_HTML,
     APP_JS,
     fn_body,
+    js_const,
     strip_comments,
 )
 
@@ -233,6 +237,77 @@ def test_an_intentional_rule_based_run_is_labelled_but_not_a_fallback():
     assert block["decision_provenance"] == DECISION_PROVENANCE_RULE_BASED
     assert block["decision_fallback"] is False
     assert "fell back" not in block["decision_note"]
+
+
+def test_a_silently_downgraded_run_is_a_fallback_not_a_choice():
+    """The run this whole feature is named for, and the one shape that got it
+    backwards.
+
+    Both LLM-availability downgrades in the engine rewrite `decision_source` to
+    rule_based, so the row a silent fallback writes carries the *outcome* under
+    the name that is supposed to carry the *request*. Read that way, the worst
+    case in the system -- asked for a model, never called one -- reported as an
+    intentional rule-based run, with no badge and a note telling the user this
+    is what they ordered. The request is recorded under its own key so the two
+    can disagree, which is the entire point of the block.
+    """
+    block = run_decision_provenance(
+        _row(
+            llm_model="rule-based",
+            llm_calls=0,
+            llm_decisions=0,
+            metadata={
+                "decision_source": "rule_based",        # what it did
+                "requested_decision_source": "llm",     # what it was asked
+                "decision_steps": 30,
+            },
+        )
+    )
+
+    assert block["decision_source"] == "llm"
+    assert block["decision_provenance"] == DECISION_PROVENANCE_RULE_BASED
+    assert block["decision_fallback"] is True
+    assert "fell back" in block["decision_note"]
+    # And the ratio is no longer suppressed as "nothing to report about a
+    # rule-based run": zero of thirty is the finding.
+    assert block["decision_badge"] == "0 of 30 steps model-driven"
+
+
+def test_an_intentional_rule_based_run_records_the_same_source_twice():
+    """The other half of the same key. A caller that ordered rule-based logic
+    got what it ordered, and the *only* thing separating that row from the
+    fallback above is these two fields agreeing."""
+    block = run_decision_provenance(
+        _row(
+            llm_model="rule-based",
+            llm_calls=0,
+            llm_decisions=0,
+            metadata={
+                "decision_source": "rule_based",
+                "requested_decision_source": "rule_based",
+                "decision_steps": 30,
+            },
+        )
+    )
+
+    assert block["decision_source"] == "rule_based"
+    assert block["decision_fallback"] is False
+    assert block["decision_badge"] is None
+    assert "fell back" not in block["decision_note"]
+
+
+def test_a_row_written_before_the_request_key_reads_the_source_it_has():
+    """Rows already in the database carry only `decision_source`, and for a run
+    that was never downgraded it *is* the request. Withholding the verdict from
+    them would trade one wrong answer for no answer on every historical row;
+    the rows this cannot speak for are the downgraded ones, which are also the
+    rows that never recorded the question."""
+    block = run_decision_provenance(
+        _row(llm_decisions=0, metadata={"decision_source": "llm", "decision_steps": 30})
+    )
+
+    assert block["decision_source"] == "llm"
+    assert block["decision_fallback"] is True
 
 
 def test_a_clean_run_gets_no_note():
@@ -705,14 +780,117 @@ def test_the_success_branch_renders_the_verdict():
     assert "formatDecisionProvenance(status)" in body
 
 
-def test_a_fallback_run_does_not_auto_hide_the_panel():
-    """2.5s is not long enough to read a sentence nobody expected, and the
-    numbers loadData() has just painted stay on screen afterwards."""
+def _settle(status):
+    """Run the completion branch's panel decision under node, as it is actually
+    reached: after loadData() has already hidden the panel.
+
+    Executed rather than grepped because the first cut of this guard asserted
+    the *shape* of the branch -- a `if (!backtestFellBackFromTheModel(status))`
+    wrapping the dismissal timer -- and that shape was satisfied by code which
+    could not work. `await loadData()` runs first and hides this panel on its
+    way past, so withholding the 2.5s timeout withheld a hide from an
+    already-hidden panel, and the fallback sentence the branch existed to keep
+    on screen was never on screen. A source-shape assertion cannot see that;
+    only running the thing against a panel loadData() has just hidden can.
+
+    Returns the panel state a user would be looking at once the dismissal
+    timer, if one was scheduled, has fired.
+    """
+    harness = """
+        let panelVisible = false;   // loadData() has just hidden it
+        let panelMessage = 'Completed in 1:01.';
+        let panelFinished = false;
+        const timers = [];
+        function showBacktestRunProgress(show, { isFinished = false } = {}) {
+            panelVisible = !!show;
+            panelFinished = !!isFinished;
+        }
+        function updateBacktestRunProgress({ message }) {
+            if (message) panelMessage = message;
+        }
+        globalThis.setTimeout = (fn) => { timers.push(fn); };
+    """
+    script = "\n".join(
+        [
+            js_const("BACKTEST_COMPLETION_DISMISS_MS"),
+            fn_body("function backtestFellBackFromTheModel"),
+            fn_body("function settleFinishedBacktestPanel"),
+            harness,
+            f"settleFinishedBacktestPanel({json.dumps(status)}, 61, "
+            f"{json.dumps(_COMPLETION_MESSAGE)});",
+            "const scheduled = timers.length;",
+            "timers.forEach((fn) => fn());",   # the dismissal timeout elapses
+            "console.log(JSON.stringify("
+            "{ panelVisible, panelMessage, panelFinished, scheduled }));",
+        ]
+    )
+    result = subprocess.run(
+        ["node", "-e", script], capture_output=True, text=True, timeout=30
+    )
+    assert result.returncode == 0, result.stderr
+    return json.loads(result.stdout)
+
+
+_COMPLETION_MESSAGE = (
+    "Completed in 1:01. No step used the model \u2014 every decision fell back "
+    "to rule-based logic."
+)
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node is not installed")
+def test_a_fallback_run_still_has_its_panel_up_after_loaddata_hid_it():
+    """The load-bearing case: loadData() has already hidden the panel, so the
+    branch has to put it back rather than decline to take it down."""
+    settled = _settle({"success": True, "decision_fallback": True})
+
+    assert settled["panelVisible"] is True
+    assert settled["panelMessage"] == _COMPLETION_MESSAGE
+    assert settled["scheduled"] == 0   # and nothing is queued to take it away
+    # A panel that outlives its run must stop describing one in flight: the
+    # markup's defaults are "Backtest in progress", a progress track and a
+    # hint about the 60-minute limit, all of which were only ever true while
+    # something was still happening.
+    assert settled["panelFinished"] is True
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node is not installed")
+def test_a_clean_run_dismisses_itself():
+    """The other half. A run the model drove says only that it finished, which
+    the results loadData() has just painted say better."""
+    settled = _settle({"success": True, "decision_fallback": False})
+
+    assert settled["panelVisible"] is False
+    assert settled["scheduled"] == 1
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node is not installed")
+def test_a_run_that_predates_the_provenance_fields_dismisses_itself():
+    """A status payload from a backend that does not send `decision_fallback`
+    is not a fallback. Treating "no answer" as "yes" would pin the panel open
+    on every run during a rolling deploy."""
+    settled = _settle({"success": True})
+
+    assert settled["panelVisible"] is False
+    assert settled["scheduled"] == 1
+
+
+def test_a_finished_panel_stops_advertising_a_run_in_flight():
+    """`isFinished` has to reach the three elements the markup defaults for a
+    running backtest -- the title, the progress track and the wait hint. The
+    elapsed clock is deliberately not one of them: on a finished run it is the
+    duration."""
+    body = strip_comments(fn_body("function showBacktestRunProgress"))
+    assert "'Backtest complete'" in body
+    assert "track.hidden = isError || isFinished" in body
+    assert "hint.hidden = isError || isFinished" in body
+    assert "elapsed.hidden = !!isError" in body
+
+
+def test_the_panel_is_settled_after_loaddata_not_before():
+    """The ordering is the whole bug. Settling first would re-show a panel that
+    loadData() then hides, which is the same failure facing the other way."""
     body = strip_comments(fn_body("function ensureBacktestPolling"))
-    assert "if (!backtestFellBackFromTheModel(status)) {" in body
-    # The auto-hide must be *inside* that guard, not beside it.
-    guarded = body[body.index("backtestFellBackFromTheModel(status)"):]
-    assert guarded.index("showBacktestRunProgress(false), 2500") < guarded.index("} else {")
+    assert body.index("await loadData();") < body.index("settleFinishedBacktestPanel(")
 
 
 def test_the_results_view_renders_the_coverage_badge():
