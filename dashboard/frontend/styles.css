@@ -2824,7 +2824,7 @@ a.header-brand:hover .title-section h1 {
 
 .admin-value-filters {
     display: grid;
-    grid-template-columns: repeat(2, minmax(145px, 185px)) minmax(220px, 1fr) auto;
+    grid-template-columns: repeat(2, minmax(145px, 185px)) minmax(155px, 1fr) minmax(220px, 1fr) auto;
     align-items: end;
     gap: 10px;
     padding: 13px 14px;
@@ -2845,6 +2845,7 @@ a.header-brand:hover .title-section h1 {
 }
 
 .admin-value-filters input,
+.admin-value-filters select,
 .admin-priority-filters input,
 .admin-priority-filters select,
 .admin-operational-filters input,
@@ -3291,6 +3292,99 @@ a.header-brand:hover .title-section h1 {
     text-transform: uppercase;
 }
 
+.admin-value-group-summary {
+    display: grid;
+    gap: 12px;
+}
+
+.admin-value-group-table {
+    width: 100%;
+    min-width: 900px;
+    border-collapse: collapse;
+    font-size: 12px;
+    font-variant-numeric: tabular-nums;
+}
+
+.admin-value-group-table th,
+.admin-value-group-table td {
+    padding: 10px 10px;
+    border-bottom: 1px solid rgba(148, 163, 184, 0.13);
+    color: var(--text-secondary);
+    text-align: left;
+    white-space: nowrap;
+}
+
+.admin-value-group-table thead th {
+    color: var(--text-muted);
+    font-size: 10px;
+    text-transform: uppercase;
+}
+
+.admin-value-group-table thead th:not(:first-child),
+.admin-value-group-table td:not(:first-child) {
+    text-align: right;
+}
+
+.admin-value-group-table tbody tr:last-child th,
+.admin-value-group-table tbody tr:last-child td {
+    border-bottom: 0;
+}
+
+.admin-value-group-table .admin-group-name {
+    min-width: 118px;
+    color: var(--text-primary);
+    font-weight: 600;
+}
+
+.admin-group-swatch {
+    display: inline-block;
+    width: 8px;
+    height: 8px;
+    margin-right: 8px;
+    border-radius: 50%;
+    background: var(--admin-group-color, #94a3b8);
+    vertical-align: middle;
+}
+
+.admin-group-users-cell {
+    min-width: 245px;
+}
+
+.admin-group-users-metric {
+    display: grid;
+    grid-template-columns: minmax(120px, 1fr) auto;
+    align-items: center;
+    gap: 10px;
+}
+
+.admin-group-bar {
+    display: block;
+    min-width: 120px;
+}
+
+.admin-group-bar-track {
+    display: block;
+    height: 8px;
+    overflow: hidden;
+    border-radius: 999px;
+    background: rgba(148, 163, 184, 0.13);
+}
+
+.admin-group-bar-fill {
+    display: block;
+    width: var(--admin-group-bar-width, 0%);
+    height: 100%;
+    border-radius: inherit;
+    background: var(--admin-group-color, #94a3b8);
+    transition: width 180ms ease;
+}
+
+.admin-group-number {
+    color: var(--text-primary) !important;
+    font-family: var(--font-mono);
+    font-variant-numeric: tabular-nums;
+}
+
 .admin-operational-filters {
     grid-template-columns: repeat(3, minmax(150px, 1fr)) auto;
     margin-bottom: 12px;
@@ -3415,7 +3509,8 @@ a.header-brand:hover .title-section h1 {
 }
 
 @media (prefers-reduced-motion: reduce) {
-    .admin-value-disclosure-toggle svg {
+    .admin-value-disclosure-toggle svg,
+    .admin-group-bar-fill {
         transition: none;
     }
 }

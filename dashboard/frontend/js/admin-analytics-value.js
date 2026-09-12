@@ -12,6 +12,24 @@
     commercial: '/api/admin/analytics/commercial',
     operational: '/api/admin/analytics/operational',
     users: '/api/admin/analytics/users',
+    groups: '/api/admin/analytics/groups',
+  });
+  const USER_GROUPS = ['internal', 'invited', 'organic', 'competition', 'partner', 'unknown'];
+  const USER_GROUP_LABELS = Object.freeze({
+    internal: 'Internal',
+    invited: 'Invited',
+    organic: 'Organic',
+    competition: 'Competition',
+    partner: 'Partner',
+    unknown: 'Unknown',
+  });
+  const USER_GROUP_COLORS = Object.freeze({
+    internal: '#a78bfa',
+    invited: '#38bdf8',
+    organic: '#2dd4bf',
+    competition: '#fbbf24',
+    partner: '#fb7185',
+    unknown: '#94a3b8',
   });
   const LIFECYCLE_SEGMENTS = ['new', 'onboarding', 'growing', 'core', 'at_risk', 'dormant'];
   const LIFECYCLE_LABELS = Object.freeze({
@@ -64,6 +82,7 @@
     lifecycle: 'analyticsLifecycle',
     operational: 'analyticsOperational',
     commercial: 'analyticsCommercial',
+    group: 'analyticsGroup',
     user: 'analyticsUser',
     profile: 'analyticsProfile',
     movementRange: 'analyticsMovementRange',
@@ -81,6 +100,7 @@
       lifecycle: '',
       operational: '',
       commercial: '',
+      group: '',
       query: '',
     },
     openDisclosures: new Set(),
@@ -90,6 +110,7 @@
       retention: { loaded: false, data: null, error: null, stale: false },
       commercial: { loaded: false, data: null, error: null, stale: false },
       operational: { loaded: false, data: null, error: null, stale: false },
+      groups: { loaded: false, data: null, error: null, stale: false },
     },
     movementChart: null,
     evidenceUser: null,
@@ -170,9 +191,11 @@
     const lifecycle = params.get(URL_KEYS.lifecycle) || '';
     const operational = params.get(URL_KEYS.operational) || '';
     const commercial = params.get(URL_KEYS.commercial) || '';
+    const group = params.get(URL_KEYS.group) || '';
     state.userFilters.lifecycle = LIFECYCLE_SEGMENTS.includes(lifecycle) ? lifecycle : '';
     state.userFilters.operational = Object.hasOwn(OPERATIONAL_LABELS, operational) ? operational : '';
     state.userFilters.commercial = Object.hasOwn(COMMERCIAL_LABELS, commercial) ? commercial : '';
+    state.userFilters.group = USER_GROUPS.includes(group) ? group : '';
     state.userFilters.query = params.get('analyticsUserQuery') || '';
     state.openDisclosures = new Set(
       String(params.get('analyticsPanel') || '')
@@ -195,6 +218,7 @@
     setOrDelete(url.searchParams, URL_KEYS.lifecycle, state.userFilters.lifecycle);
     setOrDelete(url.searchParams, URL_KEYS.operational, state.userFilters.operational);
     setOrDelete(url.searchParams, URL_KEYS.commercial, state.userFilters.commercial);
+    setOrDelete(url.searchParams, URL_KEYS.group, state.userFilters.group);
     setOrDelete(url.searchParams, 'analyticsUserQuery', state.userFilters.query);
     url.searchParams.set(URL_KEYS.movementRange, state.movementRange);
     setOrDelete(url.searchParams, 'analyticsPanel', [...state.openDisclosures].sort().join(','));
@@ -209,6 +233,7 @@
     element('adminPriorityLifecycle').value = state.userFilters.lifecycle;
     element('adminPriorityOperational').value = state.userFilters.operational;
     element('adminPriorityCommercial').value = state.userFilters.commercial;
+    element('adminValueGroup').value = state.userFilters.group;
     document.querySelectorAll('[data-movement-range]').forEach((button) => {
       const selected = button.dataset.movementRange === state.movementRange;
       button.setAttribute('aria-checked', selected ? 'true' : 'false');
@@ -216,12 +241,16 @@
     });
   }
 
-  function rangeParams() {
-    return new URLSearchParams({
+  function rangeParams({ includeGroup = false } = {}) {
+    const params = new URLSearchParams({
       from: state.range.start,
       to: state.range.end,
       include_internal: state.includeInternal ? 'true' : 'false',
     });
+    if (includeGroup && state.userFilters.group) {
+      params.set('user_group', state.userFilters.group);
+    }
+    return params;
   }
 
   function userParams() {
@@ -235,6 +264,7 @@
     if (state.userFilters.lifecycle) params.set('lifecycle_segment', state.userFilters.lifecycle);
     if (state.userFilters.operational) params.set('operational_state', state.userFilters.operational);
     if (state.userFilters.commercial) params.set('commercial_tier', state.userFilters.commercial);
+    if (state.userFilters.group) params.set('user_group', state.userFilters.group);
     return params;
   }
 
@@ -427,6 +457,157 @@
     renderLifecycleMovement(payload);
     const incomplete = availabilityIncomplete(payload.availability);
     element('adminValuePrimaryStatus').textContent = incomplete ? 'Incomplete data · available sections remain current.' : '';
+  }
+
+  function groupCount(value) {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) && parsed >= 0 ? Math.round(parsed) : 0;
+  }
+
+  function groupSummaryStatus(payload, rows, { stale = false } = {}) {
+    if (stale) return 'Showing the last successful response; refresh failed.';
+    const availability = payload?.availability;
+    if (!availability || availability.available === false || availability.status === 'unavailable') {
+      return SECTION_UNAVAILABLE;
+    }
+    if (availabilityIncomplete(availability)) {
+      return 'Partial data · some event or billing signals may be incomplete.';
+    }
+    const totalUsers = rows.reduce((total, row) => total + row.users, 0);
+    if (!totalUsers) {
+      const selected = payload?.selected_user_group;
+      return selected && USER_GROUP_LABELS[selected]
+        ? `No ${USER_GROUP_LABELS[selected]} users in this range.`
+        : 'No user accounts in this range.';
+    }
+    const timestamp = payload?.as_of ? new Date(payload.as_of) : null;
+    if (timestamp && Number.isFinite(timestamp.getTime())) {
+      return `Updated ${new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short' }).format(timestamp)}`;
+    }
+    return '';
+  }
+
+  function setGroupSummaryLoading(loading) {
+    const summary = element('adminAnalyticsGroupSummary');
+    const status = element('adminAnalyticsGroupSummaryStatus');
+    if (summary) summary.setAttribute('aria-busy', loading ? 'true' : 'false');
+    if (status && loading) {
+      status.textContent = state.sections.groups.data
+        ? 'Refreshing group summary…'
+        : 'Loading group summary…';
+    }
+  }
+
+  function renderGroups(payload, { stale = false } = {}) {
+    const summary = element('adminAnalyticsGroupSummary');
+    const table = element('adminAnalyticsGroupTable');
+    const body = element('adminAnalyticsGroupBody');
+    const fallback = element('adminAnalyticsGroupSummaryFallback');
+    const error = element('adminAnalyticsGroupSummaryError');
+    if (!body) return;
+
+    const sourceRows = Array.isArray(payload?.groups) ? payload.groups : [];
+    const rowsByGroup = new Map(
+      sourceRows
+        .filter((row) => USER_GROUPS.includes(row?.group))
+        .map((row) => [row.group, row])
+    );
+    const rows = USER_GROUPS.map((group) => {
+      const source = rowsByGroup.get(group) || {};
+      return {
+        group,
+        label: USER_GROUP_LABELS[group],
+        users: groupCount(source.users),
+        successful_run_users: groupCount(source.successful_run_users),
+        repeat_users: groupCount(source.repeat_users),
+        total_runs: groupCount(source.total_runs),
+        atl_cost_micro_usd: groupCount(source.atl_cost_micro_usd),
+        paid_users: groupCount(source.paid_users),
+      };
+    });
+    const hasRows = Array.isArray(payload?.groups);
+    const maxUsers = Math.max(1, ...rows.map((row) => row.users));
+    clear(body);
+
+    if (!hasRows) {
+      if (table) table.setAttribute('aria-busy', 'false');
+      if (summary) summary.setAttribute('aria-busy', 'false');
+      if (fallback) {
+        fallback.textContent = stale
+          ? 'The latest group summary could not be loaded.'
+          : SECTION_UNAVAILABLE;
+        fallback.hidden = false;
+      }
+      if (error) {
+        error.textContent = stale ? SECTION_UNAVAILABLE : '';
+        error.hidden = !stale;
+      }
+      const status = element('adminAnalyticsGroupSummaryStatus');
+      if (status) status.textContent = stale ? groupSummaryStatus(payload, rows, { stale }) : SECTION_UNAVAILABLE;
+      return;
+    }
+
+    rows.forEach((row) => {
+      const tableRow = document.createElement('tr');
+      tableRow.dataset.userGroup = row.group;
+
+      const groupCell = node('th', 'admin-group-name', row.label);
+      groupCell.scope = 'row';
+      const swatch = node('span', 'admin-group-swatch');
+      swatch.style.setProperty('--admin-group-color', USER_GROUP_COLORS[row.group]);
+      swatch.setAttribute('aria-hidden', 'true');
+      groupCell.prepend(swatch);
+      tableRow.appendChild(groupCell);
+
+      const usersCell = node('td', 'admin-group-users-cell');
+      const usersMetric = node('div', 'admin-group-users-metric');
+      const bar = node('span', 'admin-group-bar');
+      const track = node('span', 'admin-group-bar-track');
+      const fill = node('span', 'admin-group-bar-fill');
+      const width = Math.round((row.users / maxUsers) * 100);
+      fill.style.setProperty('--admin-group-bar-width', `${width}%`);
+      fill.style.setProperty('--admin-group-color', USER_GROUP_COLORS[row.group]);
+      track.appendChild(fill);
+      bar.appendChild(track);
+      bar.setAttribute('aria-hidden', 'true');
+      usersMetric.appendChild(bar);
+      usersMetric.appendChild(node('span', 'admin-group-number', number(row.users)));
+      usersCell.appendChild(usersMetric);
+      usersCell.setAttribute('aria-label', `${row.label}: ${number(row.users)} users`);
+      tableRow.appendChild(usersCell);
+
+      [
+        ['successful_run_users', 'Successful run users'],
+        ['repeat_users', 'Repeat users'],
+        ['total_runs', 'Total runs'],
+        ['atl_cost_micro_usd', 'ATL cost'],
+        ['paid_users', 'Paid users'],
+      ].forEach(([field, label]) => {
+        const value = field === 'atl_cost_micro_usd'
+          ? dollarsFromMicro(row[field])
+          : number(row[field]);
+        const cell = node('td', 'admin-group-number', value);
+        cell.setAttribute('aria-label', `${label}: ${value}`);
+        tableRow.appendChild(cell);
+      });
+      body.appendChild(tableRow);
+    });
+
+    if (table) table.setAttribute('aria-busy', 'false');
+    if (summary) summary.setAttribute('aria-busy', 'false');
+    if (fallback) {
+      fallback.textContent = '';
+      fallback.hidden = true;
+    }
+    if (error) {
+      const unavailable = !payload?.availability
+        || payload.availability.available === false
+        || payload.availability.status === 'unavailable';
+      error.textContent = unavailable && !stale ? SECTION_UNAVAILABLE : '';
+      error.hidden = !unavailable || stale;
+    }
+    const status = element('adminAnalyticsGroupSummaryStatus');
+    if (status) status.textContent = groupSummaryStatus(payload, rows, { stale });
   }
 
   function badge(kind, value, labels, rules) {
@@ -747,6 +928,11 @@
     return request(`${API_ENDPOINTS.users}?${userParams()}`);
   }
 
+  function fetchGroups() {
+    const params = rangeParams({ includeGroup: true });
+    return request(`${API_ENDPOINTS.groups}?${params}`);
+  }
+
   async function applySettledSection(name, result) {
     const section = state.sections[name];
     if (result.status === 'fulfilled') {
@@ -755,20 +941,28 @@
       section.error = null;
       section.stale = false;
       if (name === 'lifecycle') renderLifecycle(result.value);
+      else if (name === 'groups') renderGroups(result.value);
       else renderUsers(result.value);
       return;
     }
     if (await handleAccessLost(result.reason)) return;
     section.error = SECTION_UNAVAILABLE;
     section.stale = Boolean(section.data);
-    const target = name === 'lifecycle' ? element('adminValuePrimaryError') : element('adminPriorityError');
+    if (section.stale) {
+      if (name === 'lifecycle') renderLifecycle(section.data);
+      else if (name === 'groups') renderGroups(section.data, { stale: true });
+      else renderUsers(section.data);
+    } else if (name === 'groups') {
+      renderGroups(null);
+    }
+    const target = name === 'lifecycle'
+      ? element('adminValuePrimaryError')
+      : name === 'groups'
+        ? element('adminAnalyticsGroupSummaryError')
+        : element('adminPriorityError');
     if (target) {
       target.textContent = SECTION_UNAVAILABLE;
       target.hidden = false;
-    }
-    if (section.stale) {
-      if (name === 'lifecycle') renderLifecycle(section.data);
-      else renderUsers(section.data);
     }
   }
 
@@ -776,13 +970,16 @@
     const requestSeq = ++state.requestSeq;
     element('adminAnalyticsHeadline').setAttribute('aria-busy', 'true');
     element('adminPriorityUsers').setAttribute('aria-busy', 'true');
+    setGroupSummaryLoading(true);
     element('adminValuePrimaryError').hidden = true;
     element('adminPriorityError').hidden = true;
+    element('adminAnalyticsGroupSummaryError').hidden = true;
     element('adminValuePrimaryStatus').textContent = 'Refreshing user value analytics…';
-    const results = await Promise.allSettled([fetchLifecycle(), fetchPriorityUsers()]);
+    const results = await Promise.allSettled([fetchLifecycle(), fetchPriorityUsers(), fetchGroups()]);
     if (requestSeq !== state.requestSeq) return;
     await applySettledSection('lifecycle', results[0]);
     await applySettledSection('users', results[1]);
+    await applySettledSection('groups', results[2]);
     element('adminValuePrimaryStatus').textContent = state.sections.lifecycle.stale
       ? 'Showing the last successful response; refresh failed.'
       : element('adminValuePrimaryStatus').textContent.replace('Refreshing user value analytics…', '');
@@ -809,9 +1006,14 @@
       button.setAttribute('aria-pressed', button.dataset.lifecycle === state.userFilters.lifecycle ? 'true' : 'false');
     });
     state.sections.users.loaded = false;
-    fetchPriorityUsers()
-      .then((payload) => applySettledSection('users', { status: 'fulfilled', value: payload }))
-      .catch((error) => applySettledSection('users', { status: 'rejected', reason: error }));
+    state.sections.groups.loaded = false;
+    const groupError = element('adminAnalyticsGroupSummaryError');
+    if (groupError) groupError.hidden = true;
+    setGroupSummaryLoading(true);
+    Promise.allSettled([fetchPriorityUsers(), fetchGroups()]).then(async ([users, groups]) => {
+      await applySettledSection('users', users);
+      await applySettledSection('groups', groups);
+    });
   }
 
   function validateRange(start, end) {
@@ -890,6 +1092,8 @@
         validateRange(start, end);
         state.range = { start, end };
         state.includeInternal = element('adminValueInternal').checked;
+        const selectedGroup = element('adminValueGroup').value;
+        state.userFilters.group = USER_GROUPS.includes(selectedGroup) ? selectedGroup : '';
         error.hidden = true;
         writeUrlState();
         refresh();
@@ -898,6 +1102,12 @@
         error.hidden = false;
         error.focus();
       }
+    });
+    element('adminValueGroup')?.addEventListener('change', (event) => {
+      const selectedGroup = event.currentTarget.value;
+      applyUserFilters({
+        group: USER_GROUPS.includes(selectedGroup) ? selectedGroup : '',
+      });
     });
     element('adminAnalyticsValueRefresh')?.addEventListener('click', refresh);
     element('adminPriorityFilters')?.addEventListener('submit', (event) => {
@@ -966,7 +1176,11 @@
     // the overview blank for the rest of the page session.
     const requested = params.get(URL_KEYS.profile) || params.get(URL_KEYS.user) || '';
     const profileRequested = /^\d+$/.test(requested);
-    if (!profileRequested && (!state.sections.lifecycle.loaded || !state.sections.users.loaded)) refreshPrimary();
+    if (!profileRequested && (
+      !state.sections.lifecycle.loaded
+      || !state.sections.users.loaded
+      || !state.sections.groups.loaded
+    )) refreshPrimary();
   }
 
   function syncAuth(user) {

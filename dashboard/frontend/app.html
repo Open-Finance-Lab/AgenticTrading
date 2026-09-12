@@ -2159,9 +2159,10 @@
                         </div>
                     </header>
 
-                    <form id="adminAnalyticsValueFilters" class="admin-value-filters" aria-label="User value date filters">
+                    <form id="adminAnalyticsValueFilters" class="admin-value-filters" aria-label="User value filters">
                         <label for="adminValueStart"><span>From</span><input id="adminValueStart" name="from" type="date" autocomplete="off" required></label>
                         <label for="adminValueEnd"><span>To</span><input id="adminValueEnd" name="to" type="date" autocomplete="off" required></label>
+                        <label for="adminValueGroup"><span>User group</span><select id="adminValueGroup" name="user_group" class="filter-select" autocomplete="off"><option value="">All user groups</option><option value="internal">Internal</option><option value="invited">Invited</option><option value="organic">Organic</option><option value="competition">Competition</option><option value="partner">Partner</option><option value="unknown">Unknown</option></select></label>
                         <label class="admin-value-check" for="adminValueInternal"><input id="adminValueInternal" name="include_internal" type="checkbox"><span>Include internal accounts</span></label>
                         <button class="auth-btn auth-btn-secondary" type="submit">Apply range</button>
                         <p id="adminValueFilterError" class="auth-error" role="alert" tabindex="-1" hidden></p>
@@ -2175,6 +2176,24 @@
                     </div>
                     <p id="adminValuePrimaryStatus" class="credits-status" role="status" aria-live="polite"></p>
                     <p id="adminValuePrimaryError" class="auth-error" role="alert" hidden></p>
+
+                    <section id="adminAnalyticsGroupSummary" class="admin-value-card admin-value-group-summary" aria-labelledby="adminAnalyticsGroupSummaryTitle" aria-busy="true">
+                        <div class="admin-value-section-head">
+                            <div><p class="credits-section-kicker">Where users come from</p><h4 id="adminAnalyticsGroupSummaryTitle">Group summary</h4></div>
+                            <span id="adminAnalyticsGroupSummaryStatus" class="admin-value-coverage" data-admin-value-status role="status" aria-live="polite">Loading group summary…</span>
+                        </div>
+                        <p id="adminAnalyticsGroupSummaryError" class="auth-error" role="alert" hidden></p>
+                        <div class="admin-value-table-wrap">
+                            <table id="adminAnalyticsGroupTable" class="admin-value-group-table" aria-describedby="adminAnalyticsGroupSummaryFallback">
+                                <caption class="sr-only">Users and value signals by user group</caption>
+                                <thead>
+                                    <tr><th scope="col">Group</th><th scope="col">Users</th><th scope="col">Successful run users</th><th scope="col">Repeat users</th><th scope="col">Total runs</th><th scope="col">ATL cost</th><th scope="col">Paid users</th></tr>
+                                </thead>
+                                <tbody id="adminAnalyticsGroupBody"></tbody>
+                            </table>
+                        </div>
+                        <p id="adminAnalyticsGroupSummaryFallback" class="admin-value-empty" hidden></p>
+                    </section>
 
                     <div class="admin-value-primary-grid">
                         <section class="admin-value-card" aria-labelledby="adminLifecycleDistributionTitle">
