@@ -1016,14 +1016,22 @@ def test_a_day_of_ticks_reads_each_user_once(tmp_path):
 
 
 def test_the_budget_test_has_teeth(tmp_path, monkeypatch):
-    """Restore the pre-fix behaviour and confirm the budget case catches it.
+    """Restore the pre-fix sweep behaviour and confirm the budget case catches it.
 
     A budget assertion that cannot fail is worse than no assertion, and
     `assert reads == 200` passes trivially if the sweep stops running at
-    all. Forcing the old "every event is stale" answer is the same
-    demonstration a manual `git stash` was reaching for, except this one
-    runs in CI on every commit and cannot revert a colleague's working
-    tree.
+    all. This is the same demonstration a manual `git stash` was reaching
+    for, except it runs in CI on every commit and cannot revert a
+    colleague's working tree.
+
+    Patching `list_stale_user_ids` is the whole mechanism, and it is the
+    faithful reproduction: before this PR the sweep re-selected a full page
+    every tick, because the split-write path left `lifecycle_segment` NULL
+    and the day's `user_lifecycle_daily_snapshots` row unwritten, and
+    `list_stale_user_ids(include_time_transitions=True)` matches on both
+    (states.py:293-301). Note it is *not* `snapshot_recompute_due` that
+    matters here -- that guard sits on the ingestion path and the sweep
+    never consults it.
     """
     from types import SimpleNamespace
 
@@ -1033,9 +1041,6 @@ def test_the_budget_test_has_teeth(tmp_path, monkeypatch):
     service, store = _fixture(tmp_path, users=200)
     value_store = service.value_store
 
-    # The freshness guard is the whole of Task A1. Answering True for every
-    # user is exactly the behaviour this PR removed.
-    monkeypatch.setattr(states, "snapshot_recompute_due", lambda *_a, **_k: True)
     monkeypatch.setattr(
         states.AnalyticsStateStore,
         "list_stale_user_ids",
