@@ -20,7 +20,7 @@ Update this table as work lands. `state` is one of:
 |---|---|---|---|---|---|---|
 | 1 | #129 | `fix/backtest-setup-panel-dead-band` | `../ATL-worktrees/p1-setup-panel` | `main` | pr-open | #457 |
 | 2 | #169 | `fix/backtest-run-provenance` | `../ATL-worktrees/p1-provenance` | `main` | pr-open (draft) | #458 |
-| 3 | #273, #308 | `fix/backtest-cancel-and-memory` | `../ATL-worktrees/p1-cancel-memory` | `fix/backtest-run-provenance` @ `0288ff79` | in-progress | — |
+| 3 | #273, #308 | `fix/backtest-cancel-and-memory` | `../ATL-worktrees/p1-cancel-memory` | `fix/backtest-run-provenance` | pr-open (draft), **rebase pending** | #460 |
 | 4 | #390, #365 | `fix/leaderboard-curve-integrity` | `../ATL-worktrees/p2-curve-integrity` | `main` | pr-open (draft) | #459 |
 | — | design docs | `docs/backtest-p1-p2-design` | `../ATL-worktrees/docs-design` | `main` | pr-open | #456 |
 
@@ -409,3 +409,26 @@ Append newest last. One line per meaningful event.
   the instruction to read the traceback for *who imported `provenance`* rather than for
   the modules the error names. As the agent put it: a docstring is the only thing still
   running when the interpreter isn't.
+- `2026-09-11` — **PR #460 open (draft), stacked on #458. All four PRs now exist.**
+  Cancel is SIGTERM inline in the route (so the request has taken effect before the
+  response is written) → `_CANCEL_GRACE_SECONDS = 5.0` on a watchdog → SIGKILL, with the
+  slot finalized at accept so the owner's quota frees immediately. Timeout is enforced by
+  `process.wait(timeout=…)` with two reader threads draining the pipes — which is what
+  makes `wait` safe instead of `communicate` — and re-raises `TimeoutExpired` carrying the
+  output the old path discarded. Retention is head 32k + tail 32k per stream,
+  line-granular, with redaction still over everything retained.
+  `MAX_AI_HEDGE_FUND_TRADING_DAYS` default **10**, range 0–60, `0` disables; over-long
+  422, disabled 503, junk falls back with a log line rather than raising at import.
+- `2026-09-11` — **A pre-existing bug that only cancel could reach.** The
+  late-worker-finalize branch writes the legacy `backtest_status` mirror
+  *unconditionally*, so it would stamp this run's outcome onto whichever run the mirror
+  described. Unreachable before, because without cancel two finalizes could never race —
+  **adding the feature made a dormant bug reachable.** Strongest argument yet for the
+  rule that a new terminal state gets its own branch rather than being folded into
+  `error`. The sibling race is resolved the same way: a cancel landing after a clean exit
+  still reports `cancelled`, because the alternative is calling the user's deliberate
+  action a crash.
+- `2026-09-11` — Rebase of #460 onto `3710c43b` is **pending**; `merge-base --is-ancestor`
+  confirms it is not yet based on PR 2's tip. A clean textual rebase is not evidence the
+  two features compose: verify a **cancelled** run emits no decision badge and no
+  fallback note.
