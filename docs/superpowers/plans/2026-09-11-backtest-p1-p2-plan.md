@@ -20,7 +20,7 @@ Update this table as work lands. `state` is one of:
 |---|---|---|---|---|---|---|
 | 1 | #129 | `fix/backtest-setup-panel-dead-band` | `../ATL-worktrees/p1-setup-panel` | `main` | pr-open | #457 |
 | 2 | #169 | `fix/backtest-run-provenance` | `../ATL-worktrees/p1-provenance` | `main` | pr-open (draft) | #458 |
-| 3 | #273, #308 | `fix/backtest-cancel-and-memory` | `../ATL-worktrees/p1-cancel-memory` | `fix/backtest-run-provenance` | pr-open (draft), **rebase pending** | #460 |
+| 3 | #273, #308 | `fix/backtest-cancel-and-memory` | `../ATL-worktrees/p1-cancel-memory` | `fix/backtest-run-provenance` @ `3710c43b` | pr-open (draft), rebased `010f0b47` | #460 |
 | 4 | #390, #365 | `fix/leaderboard-curve-integrity` | `../ATL-worktrees/p2-curve-integrity` | `main` | pr-open (draft) | #459 |
 | — | design docs | `docs/backtest-p1-p2-design` | `../ATL-worktrees/docs-design` | `main` | pr-open | #456 |
 
@@ -432,3 +432,30 @@ Append newest last. One line per meaningful event.
   confirms it is not yet based on PR 2's tip. A clean textual rebase is not evidence the
   two features compose: verify a **cancelled** run emits no decision badge and no
   fallback note.
+- `2026-09-11` — **#460 rebased onto `3710c43b` (`c66c5b0a` → `010f0b47`). No textual
+  conflicts — and that proved nothing, exactly as expected.** The real composition defect
+  was elsewhere: `/backtest/status` composed fine (the `cancelled` branch is a sibling
+  that returns early), but `app.js`'s **config panel still read `Status: Running`** after
+  a cancel, because the last `renderBacktestRunConfig` call came from the running branch.
+  The error path has the same gap — pre-existing — but a cancel is deliberate and
+  immediate, so the user is staring at the panel when it happens. Fixed by repainting
+  with `renderBacktestRunConfig(null, {...statusLabel: 'Cancelled'})`, where **`null` as
+  the run is what structurally forbids the coverage badge**, since #458 reads it from
+  `run.decision_badge`. Repaint must precede `showBacktestRunProgress` (the renderer hides
+  the panel outright with neither run nor launch config); pinned.
+- `2026-09-11` — **The AHF bound is a wall-clock measurement and a memory hunch, in that
+  order — and the PR body says so.** 10 trading days × `AI_HEDGE_FUND_TIMEOUT_SECONDS`
+  (300s) + 600s overhead = **3600s, exactly the existing 60-minute parent budget**; 11
+  days overruns it. So 10 is the largest window whose worst case fits a budget this repo
+  already committed to. But **the window controls how many sequential upstream children
+  run, not how big each one is**, so peak RSS — what the OOM killer acts on — is barely
+  moved. *It shortens exposure, not the peak.* This is the clearest evidence yet that
+  #308 needs the ops decision (option a or c), not a product guard.
+- `2026-09-11` — **INTEGRATION VERIFIED. All four PRs merge cleanly onto current `main`
+  and the full suite is green on the combined tree: 4559 passed, 163 skipped, 0 failed.**
+  Checked in a throwaway worktree, merging #457 → #460 (which carries #458) → #459 onto
+  `origin/main`. No file is touched by two independent branches in overlapping hunks:
+  `app.js` is the only real shared surface (#459 at 2787-2864, the marketplace compare
+  chart; #460 at 1420-1748 and 5869-8046) and `styles.css` (#457 at 3664/3801, #460 at
+  6220+). Note `main` advanced during the session (`1ecebee7 Update README.md`), which is
+  a reminder that others push here while this workstream is open.
