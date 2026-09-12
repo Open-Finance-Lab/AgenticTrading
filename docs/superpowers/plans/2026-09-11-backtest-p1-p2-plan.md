@@ -99,8 +99,12 @@ and on screen, and the coverage counter survives the subprocess boundary.
    `_slot_visible_to` (`:804`) — reuse, do not restate. Unknown id and another user's
    id both 404, per `_resolve_status_slot`'s documented reasoning. Terminate, grace
    period, then kill.
-5. **Refund.** A cancelled LLM run that made no billed call returns its credit, on the
-   `llm_calls`-as-witness rule in `domain/entitlements/credits.py`.
+5. **Refund — DO NOT BUILD. There is nothing to refund.** Credit metering is currently
+   **unwired from the production path**; see "Credit metering is disconnected" below.
+   `POST /backtest/run` debits nothing, so a cancel has no charge to reverse. Do not
+   invent a refund, and do **not** re-wire metering inside this PR — re-arming a spend
+   control is a user-visible behaviour change that needs its own decision, not a rider
+   on a cancel button.
 6. **Status.** `/backtest/status` gains the `cancelled` branch.
 7. **AHF pre-flight.** Refuse an over-bound window for the AHF runtime with a usable
    message. Bound is an env var, defensively parsed with a safe default and a log line —
@@ -170,6 +174,43 @@ this plan was a guess the reporter's investigation contradicts. See the spec.
 **Fallback:** if #365 turns out to require the re-run #194 is blocked on, ship #390
 alone and say so. A correct partial fix beats a confident wrong one.
 
+## Out-of-scope finding: credit metering is disconnected
+
+**Verified 2026-09-11 on `main` @ `193400d6`. Not one of the six issues; recorded here
+because PR 3 was planned against behaviour that does not exist.**
+
+`domain/entitlements/credits.py` implements the LLM-run metering policy and is fully
+unit-tested. **Nothing in production calls it.** The only non-test import of
+`domain/entitlements` in the entire backend is `api/routers/admin_users.py:179`, which
+uses it solely to report `credits_metering_enabled` in admin stats.
+
+- `authorize_llm_run` — called only by `tests/test_credit_metering.py`
+- `refund_llm_run` — called only by `tests/test_credit_metering.py`
+
+So no credit is ever debited for a dashboard LLM backtest, and setting
+`CREDITS_METERING_ENABLED=1` changes nothing but an admin boolean.
+
+**It was wired, and a later commit removed it.** `git log -S` isolates the change:
+
+- `c8bdbcd6` *feat(admin): meter credits against LLM backtests* — added the wiring.
+- `3eebb7da` *feat: add secure llm worker handoff* (2026-08-24) — **removed it.** The
+  diff against `api/routers/backtests.py` deletes the `entitlements` import, the
+  `credits.authorize_llm_run(owner_user_id)` debit at accept, and both
+  `credits.refund_llm_run(...)` calls. All deletions; nothing replaced them.
+
+The suite stayed green because the tests exercise the policy module directly and never
+the route. CLAUDE.md still documents this metering as live and load-bearing — including
+the ordering subtlety about the debit landing *after* the concurrency check — so the
+documentation now describes a control that is switched off.
+
+This is the workstream's own defect class in its purest form: a correct, tested policy
+disconnected at the boundary, with everything around it still asserting it works. It
+differs from the other five only in that the discarded value is **money**.
+
+**Not actioned.** Re-arming a spend control changes behaviour for real users, and filing
+on a shared repo assigns work to others — both are the user's call. Raised, awaiting a
+decision.
+
 ## Shared conventions
 
 - **Every PR:** full suite green (`pytest dashboard/backend/tests/ -v`) before opening.
@@ -201,3 +242,8 @@ Append newest last. One line per meaningful event.
   guard, so PR 3 ships the guard and must not claim to close it.
 - `2026-09-11` — **Open decision for the user:** #308 option (a) is a Render plan
   upgrade, a recurring monthly cost. Not taken; flagged.
+- `2026-09-11` — **Out-of-scope finding, verified:** credit metering is unwired from
+  prod. `3eebb7da` (2026-08-24) deleted the debit and both refunds from
+  `api/routers/backtests.py`; the policy module and its tests survived intact, so CI
+  never noticed. PR 3's planned refund step is therefore unbuildable and has been struck.
+  Awaiting the user's decision on whether to re-arm and whether to file an issue.
