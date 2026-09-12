@@ -256,14 +256,30 @@ snapshot_date
 from_segment
 to_segment
 inactive_days      at the transition
+data_quality       'complete' | 'partial', from the day it was derived from
 created_at
 ```
+
+`UNIQUE (user_id, snapshot_date)`, written with `ON CONFLICT … DO UPDATE`. The
+constraint is there to stop a duplicate when the daily job retries a day, not
+to make the first write final: the day a transition is rewritten is the day the
+first attempt was wrong, and `DO NOTHING` would leave this table permanently
+disagreeing with the `user_daily_facts` row the retry did correct.
+
+`data_quality` carries the quality of the day the transition was derived from,
+so a consumer can tell a transition computed from a complete day from one
+computed from a day whose ledger or run source was unavailable. Without it,
+"activated user reached fourteen inactive days" can fire on evidence the job
+itself marked incomplete.
 
 No consumer exists in this design. The future outreach rule "activated user
 reached fourteen inactive days" is one `SELECT` over this table plus an
 `outreach_log` of its own, and fires at most once per inactivity episode
-because each episode produces exactly one `growing → at_risk` row. Retained
-180 days.
+because each episode produces exactly one `growing → at_risk` row.
+
+Retained 180 days, expired by the same retention sweep that expires
+`user_daily_facts` — this table carries a user id and is the easiest one in the
+design to forget, because nothing reads it yet.
 
 ### `users.cohort`
 
@@ -295,20 +311,44 @@ users:**
    operator cost.
 4. One ledger query grouped by user for `D`: own spend and the lifetime net
    purchase that feeds `commercial_tier()`.
-5. Three grouped queries for operational state (credits billing state,
-   provider credential status, failed terminal runs), the same predicates the
-   current `get_operational_facts` uses, written once per user rather than
-   three queries per user in a loop.
-6. Compute `lifecycle_segment` for `D` from `user_activity` plus the 30-day
-   sums over existing facts, upsert `user_daily_facts`, and append
-   `lifecycle_transitions` where the segment changed.
-7. Run the retention coordinator (existing) if due.
+5. A fixed set of grouped queries for operational state (credits billing
+   state, provider credential facts, the enabled-provider and platform-
+   credential sets, agent ownership, and terminal runs in the trailing 24
+   hours), the same predicates the current `get_operational_facts` uses,
+   written once for the population rather than five-plus queries per user in a
+   loop. It is more than three queries and cannot be fewer: `protocol_runs`
+   and `external_agents` live in different databases, so the run count needs
+   two statements and a fold in application code. What matters is that the
+   count is fixed, not that it is small.
+6. Compute `lifecycle_segment` for `D` and upsert `user_daily_facts`, then
+   write `lifecycle_transitions` where the segment changed. Two properties of
+   this step are load-bearing:
+   - **Evidence is clamped to the end of `D`.** `user_activity` is one row per
+     user overwritten in place — it describes now, not the end of an earlier
+     day — and the segment rule refuses evidence newer than its `as_of`. A
+     user who acted after midnight therefore aborts the step unless their
+     activation and activity timestamps are clamped, with the fact table
+     supplying the last active date on or before `D`.
+   - **The 30-day window includes `D`.** The sums come from a table this step
+     is about to write, so summing "the last 30 days of existing facts"
+     silently means 29. `D`'s own contribution comes from step 2's result, in
+     memory, so the stored segment equals what the read path computes the next
+     morning.
+7. Recompute any day in the last week whose events arrived after that day's
+   facts were written, comparing `received_at` against the stored
+   `calculated_at`. Events legitimately arrive late — the frontend route
+   accepts `occurred_at` up to 24 hours old, and a run finishing at 23:59 is
+   appended after midnight — and the day-claim cursor means nothing would ever
+   revisit them otherwise. Both fact rows and transitions are upserts so a
+   recompute corrects rather than duplicates.
+8. Run the retention coordinator (existing) if due.
 
 Every step is wrapped individually; a failed step marks that day's rows
 `partial` and logs `WARNING: analytics.daily_facts.<step>_failed
 category=<exception class>`, never a message body. A failed day is retried on
 the next tick because the cursor is only advanced past `D` after step 6
-succeeds.
+succeeds. Step 7 is a separate safety net and not a substitute: it covers the
+day that *succeeded* and whose evidence changed afterwards.
 
 **Migration of existing history.** Eight weeks of `user_lifecycle_daily_snapshots`
 are copied into `user_daily_facts` with run, cost, and tier columns NULL and

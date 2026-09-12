@@ -42,7 +42,7 @@ Exact values, copied from the spec. Every task's requirements implicitly include
 - Log lines use `print()`, never `logger` — `dashboard.backend.*` loggers sit at WARNING in prod and emit nothing. Failure lines carry an exception class name only, never a message body: `print(f"WARNING: analytics.x_failed category={type(exc).__name__[:80]}")`.
 - Postgres parameters that can be `None` and land inside `COALESCE` or another type-inferring context need an explicit `::integer` / `::text` cast. psycopg sends a bare `None` as OID 0 and Postgres refuses to resolve it. No SQLite test can catch a missing cast.
 - Use synthetic fixtures and fake repositories. No test requires a real API key, a Stripe call, a provider call, a production database, or a copied production identity.
-- Never stage or commit `dashboard/storage/data/backtest.db`. A bare backend import outside the pytest conftest runs `CREATE TABLE IF NOT EXISTS` and `ALTER TABLE` against the committed seed database. Check `git status` before every `git add`, and stage named paths, never `-A`.
+- Never stage or commit `dashboard/storage/data/backtest.db`. A bare backend import outside the pytest conftest runs `CREATE TABLE IF NOT EXISTS` and `ALTER TABLE` against the committed seed database. Check `git status` before every `git add`, and stage named paths — never `-A`, and never a bare `git add -u`. That file is **tracked**, so `-u` stages it exactly as readily as `-A` does; if you need `-u` for a step that deletes files, scope it to a path (`git add -u -- dashboard/backend/domain/analytics`).
 
 ## Locked File Structure
 
@@ -128,10 +128,7 @@ import pytest
 from dashboard.backend.domain.analytics.repository import AnalyticsStore
 from dashboard.backend.domain.analytics.service import AnalyticsService
 from dashboard.backend.domain.analytics.states import AnalyticsStateStore
-from dashboard.backend.domain.analytics.value_repository import (
-    CurrentOperationalFacts,
-    UserValueSnapshot,
-)
+from dashboard.backend.domain.analytics.value_repository import ValueAnalyticsStore
 
 
 NOW = datetime(2026, 9, 12, 12, 0, tzinfo=timezone.utc)
@@ -152,29 +149,38 @@ class CountingStateStore:
         return self._inner.list_user_events(user_id, now=now, days=days)
 
 
-class StubValueStore:
-    """Minimal value store: real enough for the projection, counts nothing."""
+class _EmptyBase:
+    """Answers every non-analytics store call with "nothing here".
 
-    def __init__(self):
-        self.snapshots: dict[int, UserValueSnapshot] = {}
-        self.daily: list = []
+    `ValueAnalyticsStore` imports the **production** credits, provider, agent
+    and run singletons whenever one of those constructor arguments is None, so
+    a tmp_path fixture has to pass all four explicitly or it reaches the real
+    database. Deliberately has no `_get_connection` and no
+    `get_platform_credential_public`: `list_credit_activity` and
+    `get_operational_facts` both branch on `hasattr` for those, and their
+    absence is what selects the empty answer.
 
-    def list_credit_activity(self, user_ids, *, start, end):
-        return {user_id: () for user_id in user_ids}
+    If a method is missing, the constructor path raises `AttributeError`
+    rather than silently degrading -- add it here, do not widen the store.
+    """
 
-    def get_current_snapshot(self, user_id):
-        return self.snapshots.get(user_id)
+    def list_user_credentials(self, *_args, **_kwargs):
+        return []
 
-    def get_operational_facts(self, user_id, *, now):
-        return CurrentOperationalFacts(user_id=user_id)
+    def list_all_providers(self):
+        return []
 
-    def upsert_current_snapshot(self, snapshot):
-        self.snapshots[snapshot.user_id] = snapshot
-        return snapshot
+    def list_agents(self, **_kwargs):
+        return []
 
-    def upsert_daily_snapshot(self, snapshot):
-        self.daily.append(snapshot)
-        return snapshot
+    def list_runs(self, *_args, **_kwargs):
+        return []
+
+    def get_account_billing_state(self, *_args, **_kwargs):
+        return {}
+
+    def get_balance_projections(self, *_args, **_kwargs):
+        return {}
 
 
 def _fixture(tmp_path, *, users=1):
@@ -203,10 +209,29 @@ def _fixture(tmp_path, *, users=1):
             )
     analytics = AnalyticsStore(path)
     counting = CountingStateStore(AnalyticsStateStore(analytics))
+    empty = _EmptyBase()
+    # A real ValueAnalyticsStore over the same AnalyticsStore, not a stub.
+    # Two things in the sweep depend on it and neither is optional:
+    # `recalculate_user_snapshots` takes the combined-write path only when
+    # `values.analytics_base is states.base_store` (states.py:700), and a
+    # stub fails that check into the split write, which sets the six legacy
+    # columns and leaves `lifecycle_segment` NULL; and
+    # `repair_stale_value_snapshots` writes `user_lifecycle_daily_snapshots`
+    # through `upsert_daily_snapshot`, which a stub collecting rows in a list
+    # never persists. `list_stale_user_ids(include_time_transitions=True)`
+    # re-selects on BOTH of those (states.py:293-301), so a stub makes every
+    # user stale on every tick and the budget assertion below can never hold.
+    value_store = ValueAnalyticsStore(
+        analytics,
+        credits_base=empty,
+        provider_base=empty,
+        agent_base=empty,
+        run_base=empty,
+    )
     service = AnalyticsService(
         analytics,
         state_store=counting,
-        value_store=StubValueStore(),
+        value_store=value_store,
         project_snapshots=True,
     )
     return service, counting
@@ -240,6 +265,37 @@ def test_repeated_events_do_not_repeat_the_history_read(tmp_path):
 
     assert baseline > 0
     assert many_store.event_reads == baseline
+
+
+def test_a_store_outage_skips_the_recompute_rather_than_forcing_it(tmp_path, capsys):
+    """The guard fails closed, and says so.
+
+    The outage this PR answers was a saturated connection pool. A guard
+    that answered "recompute" on a store error would run the 180-day scan
+    precisely when the pool is exhausted, which is the opposite of what it
+    is for.
+    """
+    from dashboard.backend.domain.analytics import states
+
+    service, store = _fixture(tmp_path)
+    value_store = service.value_store
+
+    def explode(_user_id):
+        raise sqlite3.OperationalError("database is locked")
+
+    # Seed a snapshot first: "never computed" is the one case that still
+    # returns True, and it would mask the arm under test.
+    _emit(service, 0, NOW - timedelta(days=2))
+    reads_before = store.event_reads
+    value_store.get_current_snapshot = explode
+
+    assert (
+        states.snapshot_recompute_due(1, now=NOW, value_store=value_store) is False
+    )
+    assert "analytics.snapshot_freshness_unavailable" in capsys.readouterr().out
+
+    _emit(service, 1, NOW)
+    assert store.event_reads == reads_before
 ```
 
 - [ ] **Step 2: Run the test to verify it fails**
@@ -275,19 +331,37 @@ def snapshot_recompute_due(
     the request. The stored ``calculated_at`` is one indexed row read and
     answers the same question, so a fresh snapshot skips the scan.
 
-    Fails open: a store error returns True, because a projection that is
-    merely expensive is still better than one that silently stops.
+    Fails **closed**: a store error returns False, skipping the recompute.
+    This guard exists to control cost, and a cost guard that fails open
+    removes the brake exactly when the vehicle is heaviest. The outage this
+    PR answers surfaced as ``psycopg_pool.PoolTimeout`` -- a saturated pool
+    -- so a store error here is not an unrelated blip, it is the very
+    condition under which the 180-day scan must not run. Skipping costs a
+    label that is at most a day stale, which the sweep repairs anyway;
+    failing open costs the outage again. A snapshot that has never been
+    written is the one exception: it returns True, because there is no
+    stale label to fall back on and one first read per user is bounded.
     """
     current = _require_utc(now, "now")
     values = value_store or ValueAnalyticsStore(AnalyticsStateStore().base_store)
     try:
         snapshot = values.get_current_snapshot(positive_user_id(user_id))
-    except Exception:
-        return True
+    except Exception as exc:
+        print(
+            "WARNING: analytics.snapshot_freshness_unavailable "
+            f"category={type(exc).__name__[:80]}"
+        )
+        return False
     if snapshot is None:
         return True
     return snapshot.calculated_at <= current - SNAPSHOT_STALE_AFTER
 ```
+
+The log line is not decoration. Fail-closed and "nothing to do" are otherwise
+byte-identical from the outside -- the projection simply stops happening -- and
+that is the shape the repo's *fail-closed is not fail-visible* rule exists to
+prevent. One line at the boundary makes a store outage distinguishable from a
+quiet path.
 
 Note `_require_utc` is defined at `states.py:542`, below this insertion point. That is fine: it is resolved at call time, not at import time.
 
@@ -886,12 +960,18 @@ git commit -m "fix(auth): answer 503 when the account store is unreachable"
 Append to `dashboard/backend/tests/domain/analytics/test_read_budget.py`:
 
 ```python
-def test_a_day_of_ticks_reads_each_user_once(tmp_path, monkeypatch):
-    """Ninety-six sweeps over 200 users cost 200 history reads, not 19,200.
+def test_a_day_of_ticks_reads_each_user_once(tmp_path):
+    """Ninety-four sweeps over 200 users cost 200 history reads, not 9,400.
 
     The reaper ticks every 60 seconds. Any per-user read inside it is
     multiplied by users x 1440, which is exactly how a 5 GB monthly egress
     allowance was spent in seven days.
+
+    9,400 rather than 19,200: `run_analytics_maintenance` clamps to
+    `page_size = max(1, min(snapshot_limit, 100))` (maintenance.py:60), so
+    one leg can never select more than 100 users per tick however many
+    exist. 94 ticks x 100 is the pre-fix ceiling for the one remaining leg
+    after Task A3 deletes the legacy one.
     """
     from types import SimpleNamespace
 
@@ -915,9 +995,14 @@ def test_a_day_of_ticks_reads_each_user_once(tmp_path, monkeypatch):
         )
 
     # Start after midnight and stay inside one UTC day, so the day-rollover
-    # re-selection is measured by its own test rather than this one.
+    # re-selection is measured by its own test rather than this one. 94, not
+    # 96: at 15-minute spacing from 00:30, tick 94 lands on 2026-09-13
+    # 00:00 exactly and trips the `calculated_at < day_start` arm of
+    # `list_stale_user_ids` (states.py:294), which would re-read all 200 and
+    # make this assertion fail for a reason it is not about. 00:30 + 93 x
+    # 15min = 23:45 is the last tick inside the day.
     start = datetime(2026, 9, 12, 0, 30, tzinfo=timezone.utc)
-    for tick in range(96):
+    for tick in range(94):
         maintenance.run_analytics_maintenance(
             now=start + timedelta(minutes=15 * tick),
             snapshot_limit=100,
@@ -926,16 +1011,68 @@ def test_a_day_of_ticks_reads_each_user_once(tmp_path, monkeypatch):
             backfill_lifecycle=stub_backfill,
         )
 
+    # Ticks 1 and 2 take the two pages of 100; the rest find nothing stale.
     assert store.event_reads == 200
+
+
+def test_the_budget_test_has_teeth(tmp_path, monkeypatch):
+    """Restore the pre-fix behaviour and confirm the budget case catches it.
+
+    A budget assertion that cannot fail is worse than no assertion, and
+    `assert reads == 200` passes trivially if the sweep stops running at
+    all. Forcing the old "every event is stale" answer is the same
+    demonstration a manual `git stash` was reaching for, except this one
+    runs in CI on every commit and cannot revert a colleague's working
+    tree.
+    """
+    from types import SimpleNamespace
+
+    from dashboard.backend.domain.analytics import maintenance, states
+
+    maintenance.reset_maintenance_guard_for_tests()
+    service, store = _fixture(tmp_path, users=200)
+    value_store = service.value_store
+
+    # The freshness guard is the whole of Task A1. Answering True for every
+    # user is exactly the behaviour this PR removed.
+    monkeypatch.setattr(states, "snapshot_recompute_due", lambda *_a, **_k: True)
+    monkeypatch.setattr(
+        states.AnalyticsStateStore,
+        "list_stale_user_ids",
+        lambda self, **kwargs: list(range(1, kwargs["limit"] + 1)),
+    )
+
+    start = datetime(2026, 9, 12, 0, 30, tzinfo=timezone.utc)
+    for tick in range(10):
+        maintenance.run_analytics_maintenance(
+            now=start + timedelta(minutes=15 * tick),
+            snapshot_limit=100,
+            rebuild_rollup=lambda _day, **_kwargs: None,
+            repair_value_snapshots=lambda **kwargs: states.repair_stale_value_snapshots(
+                now=kwargs["now"],
+                limit=kwargs["limit"],
+                state_store=store,
+                value_store=value_store,
+            ),
+            backfill_lifecycle=lambda **_kwargs: SimpleNamespace(
+                processed_users=0, written_rows=0, complete=True
+            ),
+        )
+
+    assert store.event_reads == 1000
 ```
 
-- [ ] **Step 2: Run the test to verify it fails**
+- [ ] **Step 2: Run both cases**
 
 ```bash
-~/atl-venv/bin/python -m pytest dashboard/backend/tests/domain/analytics/test_read_budget.py::test_a_day_of_ticks_reads_each_user_once -v
+~/atl-venv/bin/python -m pytest dashboard/backend/tests/domain/analytics/test_read_budget.py -v
 ```
 
-Expected: PASS if Tasks A1 through A3 are complete, FAIL with a number far above 200 otherwise. Run it once with `git stash` applied to confirm it catches the old behaviour, then restore. Use `git stash push -u -m "budget-check"` and `git stash apply <sha>` — never a bare `git stash pop`, because the stash stack is shared with the other worktrees on this machine.
+Expected: both PASS, with Tasks A1 through A3 complete.
+
+**Do not try to demonstrate this with `git stash`.** Tasks A1, A2 and A3 each end in their own commit (steps A1.8, A2.8, A3.6), so by the time A5 runs there is nothing of the fix left in the working tree — a stash would revert only A5's own uncommitted test file, deleting the assertion instead of restoring the behaviour it is meant to catch, and then "passing" by vacuum. Worse, `git stash push -u` sweeps the **entire** working tree including untracked files, and the branch instruction at the top of this PR (`git switch -c … origin/main`) puts the work in the repo's single shared checkout, where sibling agent sessions have uncommitted work of their own and get no signal that it was taken.
+
+`test_the_budget_test_has_teeth` is the replacement: it forces the pre-fix answer through `monkeypatch`, asserts the cost explodes, and keeps doing so in CI on every later commit. If you want the historical comparison anyway, read it out of git without touching the tree — `git show <pre-A1-sha>:dashboard/backend/domain/analytics/states.py` — rather than mutating the checkout.
 
 - [ ] **Step 3: Add the CLAUDE.md gotcha**
 
@@ -971,6 +1108,16 @@ PR title: `fix: bound analytics read budget`. Keep the body short — two senten
 Branch: `git switch -c feat/user-analytics-daily-facts origin/main`
 
 Do **not** branch off PR A. PR A is a throwaway whose changes this PR deletes; branching off it makes the deletion look like a revert of an unmerged PR. Cut from `origin/main`, and rebase once PR A lands.
+
+**What that means for the three files PR A also touches.** Cutting from `origin/main` means PR A's work is *absent from this branch* until the rebase. Three tasks below are written as edits to it, and each has to be read as "create it now, reconcile at the rebase":
+
+| File | Before the rebase | At the rebase |
+|---|---|---|
+| `tests/domain/analytics/test_read_budget.py` | Does not exist. Task B4 step 1 **creates** it, carrying over the `NOW`, `CountingStateStore`, `_EmptyBase`, `_fixture` and `_emit` helpers from Task A1 verbatim. | Git reports an add/add conflict. Keep this branch's version of the helpers, then delete PR A's four cases (`test_repeated_events_do_not_repeat_the_history_read`, `test_a_store_outage_skips_the_recompute_rather_than_forcing_it`, `test_a_day_of_ticks_reads_each_user_once`, `test_the_budget_test_has_teeth`) — they measure a code path this PR removes. |
+| `domain/analytics/states.py` | Has no `snapshot_recompute_due` or `SNAPSHOT_STALE_AFTER`. Task B4 step 4 has nothing to delete; just replace the projection call. | PR A's additions arrive and are deleted wholesale with the file in Task B9 step 4. |
+| `api/auth.py` | PR A's 503 mapping is absent, and this PR does not touch the file. | Takes PR A's version unchanged. No conflict. |
+
+Do the rebase as its own commit, run the full suite on both tiers immediately after, and do not fold it into a feature commit — an add/add conflict resolved inside a larger diff is invisible in review.
 
 This PR must run green on the CI Postgres tier before merge. Locally that means Docker:
 
@@ -1156,6 +1303,8 @@ CREATE TABLE IF NOT EXISTS lifecycle_transitions (
     from_segment TEXT NOT NULL,
     to_segment TEXT NOT NULL,
     inactive_days INTEGER NOT NULL DEFAULT 0 CHECK (inactive_days >= 0),
+    data_quality TEXT NOT NULL DEFAULT 'complete'
+        CHECK (data_quality IN ('complete', 'partial')),
     created_at TEXT NOT NULL,
     UNIQUE (user_id, snapshot_date),
     FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
@@ -1164,7 +1313,11 @@ CREATE INDEX IF NOT EXISTS idx_lifecycle_transitions_day
     ON lifecycle_transitions(snapshot_date, to_segment);
 ```
 
-The `UNIQUE (user_id, snapshot_date)` is load-bearing, not decoration: the daily job retries a failed day on the next tick, and without it a retry appends a second copy of every transition it already wrote.
+The `UNIQUE (user_id, snapshot_date)` is load-bearing, not decoration: the daily job retries a failed day on the next tick, and without it a retry appends a second copy of every transition it already wrote. It is a conflict *target*, though, not a write barrier — Task B8's upsert resolves it with `DO UPDATE`, never `DO NOTHING`, so a retry can **correct** a transition a partial attempt got wrong rather than freezing it. See the note there for why that distinction decides whether the outreach hook is trustworthy.
+
+`data_quality` mirrors the column on `user_daily_facts` and exists for the same reason: a transition derived from a day whose ledger or run step failed is a weaker claim than one derived from a complete day, and "activated user reached fourteen inactive days" firing on incomplete evidence is exactly the mistake the column prevents. Consumers filter on it; the daily job sets it from the day's own `data_quality`.
+
+No separate index is needed for the 180-day expiry Task B9 step 5 adds: `snapshot_date` is the leading column of `idx_lifecycle_transitions_day`, and both dialects use a leading-column prefix for a `WHERE snapshot_date < ?` range scan.
 
 - [ ] **Step 4: Add the Postgres DDL**
 
@@ -1216,6 +1369,8 @@ CREATE TABLE IF NOT EXISTS lifecycle_transitions (
     from_segment TEXT NOT NULL,
     to_segment TEXT NOT NULL,
     inactive_days INTEGER NOT NULL DEFAULT 0 CHECK (inactive_days >= 0),
+    data_quality TEXT NOT NULL DEFAULT 'complete'
+        CHECK (data_quality IN ('complete', 'partial')),
     created_at TEXT NOT NULL,
     UNIQUE (user_id, snapshot_date)
 );
@@ -1622,7 +1777,7 @@ git commit -m "feat(runs): record the owner on dashboard backtest rows"
 - Modify: `dashboard/backend/domain/analytics/value_repository.py` — add `UserActivity` beside `UserLifecycleDailySnapshot` (line 101) and `record_activity` on `ValueAnalyticsStore` (class at line 211)
 - Modify: `dashboard/backend/domain/analytics/service.py:38-77` and `:169-182`
 - Modify: `dashboard/backend/domain/analytics/instrumentation.py:60-78` and `:134-136`
-- Test: `dashboard/backend/tests/domain/analytics/test_read_budget.py` (replace the PR A cases)
+- Test: `dashboard/backend/tests/domain/analytics/test_read_budget.py` (**create** on this branch — see the rebase table at the top of PR B)
 
 **Interfaces:**
 - Consumes: `user_activity` from Task B1.
@@ -1631,13 +1786,13 @@ git commit -m "feat(runs): record the owner on dashboard backtest rows"
   - `ValueAnalyticsStore.record_activity(user_id: int, *, occurred_at: datetime, activating: bool, now: datetime) -> None`
   - `AnalyticsService(store, *, state_store=None, value_store=None, maintain_activity: bool = False)` — the `project_snapshots` flag is renamed, because there are no snapshots left for it to project.
 
-  Task B5 reads `UserActivity`; Task B7 corrects the same row from the ledger.
+  Task B5 reads `UserActivity`; Task B8's `ledger` step corrects the same row from the credits tables.
 
 This is the change that makes the 2026-09-11 outage structurally impossible. One upsert of two timestamps replaces a 180-day read of the event log, and it happens on the write the event log already performs.
 
 - [ ] **Step 1: Write the failing test**
 
-Replace the three PR A cases in `dashboard/backend/tests/domain/analytics/test_read_budget.py` with:
+Create `dashboard/backend/tests/domain/analytics/test_read_budget.py`. This branch is cut from `origin/main`, so the file PR A adds is **not here yet** — copy the module docstring, `NOW`, `CountingStateStore`, `_EmptyBase`, `_fixture` and `_emit` from Task A1 step 1 verbatim, then add the cases below. PR A's own four cases arrive at the rebase and are deleted there; the table at the top of PR B says how.
 
 ```python
 def test_ingestion_never_reads_a_users_history(tmp_path):
@@ -1653,7 +1808,8 @@ def test_ingestion_never_reads_a_users_history(tmp_path):
     assert store.event_reads == 0
 
 
-def test_first_success_sets_activated_at_once(tmp_path):
+def test_activated_at_holds_the_earliest_success(tmp_path):
+    """Activation is the *first* success, in occurred_at order."""
     service, store = _fixture(tmp_path)
     value_store = service.value_store
 
@@ -1681,6 +1837,37 @@ def test_first_success_sets_activated_at_once(tmp_path):
     assert activity.last_meaningful_activity_at == NOW
 
 
+def test_an_out_of_order_success_moves_activated_at_earlier(tmp_path):
+    """The newest write does not own the value; the earliest instant does.
+
+    Ingestion sees events in arrival order, not occurred_at order: a
+    `backtest_completed` can be appended late, replayed from the queue, or
+    backdated by the 24-hour acceptance window in `service.py:96-97`. If
+    activation were pinned by whichever row landed first, this user's
+    activation cohort week -- and therefore their whole column of the
+    retention grid -- would be permanently wrong, with nothing able to
+    correct it.
+    """
+    service, _store = _fixture(tmp_path)
+    value_store = service.value_store
+
+    for suffix, occurred in (("late", NOW), ("early", NOW - timedelta(days=5))):
+        service.record_server_event(
+            event_name="backtest_completed",
+            user_id=1,
+            source_event_id=f"run:backtest_completed:run-{suffix}",
+            source_record_type="run",
+            source_record_id=f"run-{suffix}",
+            occurred_at=occurred,
+        )
+
+    activity = value_store.get_activity(1)
+
+    assert activity.activated_at == NOW - timedelta(days=5)
+    # The activity clock still only advances.
+    assert activity.last_meaningful_activity_at == NOW
+
+
 def test_page_views_do_not_advance_the_activity_clock(tmp_path):
     """Only the meaningful-activity set counts. A visit is not activity."""
     service, _store = _fixture(tmp_path)
@@ -1698,7 +1885,7 @@ def test_page_views_do_not_advance_the_activity_clock(tmp_path):
     assert value_store.get_activity(1) is None
 ```
 
-`StubValueStore` in that file gains `record_activity` and `get_activity` implementations, or is replaced by a real `ValueAnalyticsStore` over the fixture's `AnalyticsStore`. Prefer the real store here: this task's whole claim is about what the SQL does.
+`_fixture` already builds a real `ValueAnalyticsStore` over the fixture's `AnalyticsStore` with `_EmptyBase` for the four non-analytics bases, so `record_activity` and `get_activity` are exercised as real SQL with no further wiring. Keep it that way rather than substituting a stub: this task's whole claim is about what the SQL does, and the `MIN`/`MAX` NULL behaviour it turns on is dialect-specific — a Python stub would agree with both dialects and catch neither.
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
@@ -1735,14 +1922,26 @@ On `ValueAnalyticsStore`, following the `upsert_daily_snapshot` branching style 
     ) -> None:
         """Advance one user's activity timestamps. One statement, no read.
 
-        ``activated_at`` is set once and never moves: COALESCE keeps the
-        stored value, and a non-activating event passes NULL. The activity
-        clock only ever advances, so a late-arriving old event cannot make a
-        user look more dormant than they are.
+        The two columns move in opposite directions, on purpose.
+
+        ``activated_at`` keeps the **earliest** success, because activation
+        is defined as the first server-authoritative ``backtest_completed``
+        by ``occurred_at`` -- not by arrival order. Ingestion does not see
+        events in occurred_at order: a completion can be appended late,
+        replayed, or backdated up to the 24 hours ``service.py:96-97``
+        accepts. A plain ``COALESCE(stored, incoming)`` would freeze
+        whichever row happened to land first and make the value
+        uncorrectable afterwards, which would also silently turn Task B8's
+        step-4 repair into a no-op. A non-activating event passes NULL and
+        the COALESCE pair leaves the stored value alone.
+
+        ``last_meaningful_activity_at`` only ever advances, so a
+        late-arriving old event cannot make a user look more dormant than
+        they are.
 
         Timestamps are ISO-8601 UTC text throughout this schema, which orders
-        lexicographically, so GREATEST/MAX over the text is the same
-        comparison as over the instants.
+        lexicographically, so LEAST/MIN and GREATEST/MAX over the text are the
+        same comparisons as over the instants.
         """
         subject_id = positive_user_id(user_id)
         occurred = utc_iso(_utc(occurred_at, "occurred_at"))
@@ -1758,8 +1957,13 @@ On `ValueAnalyticsStore`, following the `upsert_daily_snapshot` branching style 
                     user_id, activated_at, last_meaningful_activity_at, updated_at
                 ) VALUES (%s, %s::text, %s, %s)
                 ON CONFLICT(user_id) DO UPDATE SET
-                    activated_at = COALESCE(
-                        user_activity.activated_at, EXCLUDED.activated_at
+                    activated_at = LEAST(
+                        COALESCE(
+                            user_activity.activated_at, EXCLUDED.activated_at
+                        ),
+                        COALESCE(
+                            EXCLUDED.activated_at, user_activity.activated_at
+                        )
                     ),
                     last_meaningful_activity_at = GREATEST(
                         COALESCE(
@@ -1776,8 +1980,13 @@ On `ValueAnalyticsStore`, following the `upsert_daily_snapshot` branching style 
                     user_id, activated_at, last_meaningful_activity_at, updated_at
                 ) VALUES (?, ?, ?, ?)
                 ON CONFLICT(user_id) DO UPDATE SET
-                    activated_at = COALESCE(
-                        user_activity.activated_at, excluded.activated_at
+                    activated_at = MIN(
+                        COALESCE(
+                            user_activity.activated_at, excluded.activated_at
+                        ),
+                        COALESCE(
+                            excluded.activated_at, user_activity.activated_at
+                        )
                     ),
                     last_meaningful_activity_at = MAX(
                         COALESCE(
@@ -1796,7 +2005,7 @@ On `ValueAnalyticsStore`, following the `upsert_daily_snapshot` branching style 
                 conn.execute(sql, values)
 ```
 
-Two dialect traps are handled above and must not be "simplified" away. SQLite's scalar `max(X, Y)` returns NULL if **either** argument is NULL, which is why the stored value is COALESCEd against the incoming one first rather than passed raw. And `%s::text` on the nullable `activated_at` parameter gives psycopg a type for the `None` it would otherwise send as OID 0.
+Two dialect traps are handled above and must not be "simplified" away. SQLite's scalar `max(X, Y)` and `min(X, Y)` both return NULL if **either** argument is NULL, which is why each stored value is COALESCEd against the incoming one before the comparison rather than passed raw — that applies to the new `MIN` on `activated_at` exactly as it does to the `MAX`. Postgres `LEAST`/`GREATEST` skip NULLs instead, so the COALESCE pair is redundant there but harmless, and keeping both dialects spelled the same way is worth more than saving two lines. And `%s::text` on the nullable `activated_at` parameter gives psycopg a type for the `None` it would otherwise send as OID 0.
 
 Add the matching reader:
 
@@ -1895,7 +2104,7 @@ git commit -m "feat(analytics): maintain user activity from ingestion"
   - `resolve_group_badge(*, role: str, cohort: str | None, tier: CommercialTier) -> str` in `lifecycle.py`
   - `RecentFactTotals(active_days: int, successful_backtests: int, runs_requested: int, runs_completed: int, runs_failed: int, runs_cancelled: int, operator_cost_micro: int, own_spend_micro: int, days_present: int)` in `value_repository.py`
   - `ValueAnalyticsStore.sum_recent_facts(user_ids: Sequence[int], *, start: date, end: date) -> dict[int, RecentFactTotals]`
-  - `build_lifecycle_inputs(user_id: int, *, created_at: datetime, activity: UserActivity | None, totals: RecentFactTotals | None) -> LifecycleInputs` in `lifecycle_reads.py`
+  - `build_lifecycle_inputs(user_id: int, *, created_at: datetime, activity: UserActivity | None, totals: RecentFactTotals | None, as_of: datetime) -> LifecycleInputs` in `lifecycle_reads.py`. `as_of` is required, not defaulted: the live read path passes `now` and the daily job passes the end of the day it is computing, and a default would silently give the job the live answer.
 
   Task B7 uses all four. Task C1 and C2 call `build_lifecycle_inputs` on the read path.
 
@@ -1910,7 +2119,7 @@ Create `dashboard/backend/tests/domain/analytics/test_lifecycle_reads.py`:
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 
 import pytest
 
@@ -1956,6 +2165,7 @@ def test_core_needs_three_active_days_and_three_successes():
         created_at=NOW - timedelta(days=60),
         activity=activity,
         totals=_totals(active_days=3, successful_backtests=3),
+        as_of=NOW,
     )
 
     assert calculate_lifecycle(inputs, NOW).segment == "core"
@@ -1965,6 +2175,7 @@ def test_core_needs_three_active_days_and_three_successes():
         created_at=NOW - timedelta(days=60),
         activity=activity,
         totals=_totals(active_days=3, successful_backtests=2),
+        as_of=NOW,
     )
     assert calculate_lifecycle(below, NOW).segment == "growing"
 
@@ -1975,11 +2186,67 @@ def test_a_user_with_no_activity_row_falls_back_to_signup():
         created_at=NOW - timedelta(days=2),
         activity=None,
         totals=None,
+        as_of=NOW,
     )
     result = calculate_lifecycle(inputs, NOW)
 
     assert result.segment == "new"
     assert result.active_days_30d == 0
+
+
+def test_evidence_newer_than_as_of_is_clamped_not_raised():
+    """Serving a past day from a table that only knows the present.
+
+    `user_activity` is one row per user, overwritten in place. Asked for
+    the end of yesterday while holding a timestamp from this morning,
+    `calculate_lifecycle` raises rather than guessing -- so the clamp has to
+    happen here, and the fact table is where the answer for that past day
+    actually lives.
+    """
+    end_of_yesterday = datetime(2026, 9, 11, 23, 59, 59, tzinfo=timezone.utc)
+    activity = UserActivity(
+        user_id=1,
+        activated_at=NOW,  # activated today
+        last_meaningful_activity_at=NOW,  # active today
+        updated_at=NOW,
+    )
+
+    inputs = build_lifecycle_inputs(
+        1,
+        created_at=NOW - timedelta(days=60),
+        activity=activity,
+        totals=_totals(active_days=1, last_active_date=date(2026, 9, 4)),
+        as_of=end_of_yesterday,
+    )
+
+    # Not activated as of yesterday, and last active on the 4th.
+    assert inputs.first_successful_backtest_at is None
+    assert inputs.last_meaningful_activity_at == datetime(
+        2026, 9, 4, tzinfo=timezone.utc
+    )
+    result = calculate_lifecycle(inputs, end_of_yesterday)
+    assert result.segment == "at_risk"
+
+
+def test_the_live_path_clamps_nothing():
+    """as_of=now is the identity case, and must stay cost-free."""
+    activity = UserActivity(
+        user_id=1,
+        activated_at=NOW - timedelta(days=3),
+        last_meaningful_activity_at=NOW,
+        updated_at=NOW,
+    )
+
+    inputs = build_lifecycle_inputs(
+        1,
+        created_at=NOW - timedelta(days=60),
+        activity=activity,
+        totals=_totals(active_days=5, successful_backtests=5),
+        as_of=NOW,
+    )
+
+    assert inputs.first_successful_backtest_at == activity.activated_at
+    assert inputs.last_meaningful_activity_at == activity.last_meaningful_activity_at
 
 
 def test_inactivity_crosses_at_risk_without_any_new_evidence():
@@ -1995,6 +2262,7 @@ def test_inactivity_crosses_at_risk_without_any_new_evidence():
         created_at=NOW - timedelta(days=90),
         activity=activity,
         totals=_totals(),
+        as_of=NOW,
     )
 
     assert calculate_lifecycle(inputs, NOW).segment == "growing"
@@ -2071,6 +2339,11 @@ class RecentFactTotals(BaseModel):
     # requested means the window is incomplete, which the UI labels rather
     # than rendering as zero.
     days_present: int = Field(default=0, ge=0)
+    # The latest date inside the window on which this user was active, or
+    # None. Task B8 needs it to answer "what did this user's activity look
+    # like as of the end of day D" -- `user_activity` holds one row
+    # overwritten in place and cannot answer a question about the past.
+    last_active_date: date | None = None
 ```
 
 and on `ValueAnalyticsStore`, one grouped query over the whole batch:
@@ -2091,7 +2364,7 @@ and on `ValueAnalyticsStore`, one grouped query over the whole batch:
         """
 ```
 
-The SQL is `SELECT user_id, SUM(active) AS active_days, SUM(runs_completed) AS successful_backtests, SUM(runs_requested), SUM(runs_failed), SUM(runs_cancelled), SUM(operator_cost_micro), SUM(own_spend_micro), COUNT(*) AS days_present FROM user_daily_facts WHERE snapshot_date BETWEEN ? AND ? AND user_id IN (...) GROUP BY user_id`, with `_user_clause` (line 710) building the IN list and `%s`/`?` chosen from `self.is_postgres`. `active` is a boolean on Postgres, so sum it as `SUM(CASE WHEN active THEN 1 ELSE 0 END)` on both dialects rather than relying on `SUM(boolean)`, which Postgres rejects outright.
+The SQL is `SELECT user_id, SUM(active) AS active_days, SUM(runs_completed) AS successful_backtests, SUM(runs_requested), SUM(runs_failed), SUM(runs_cancelled), SUM(operator_cost_micro), SUM(own_spend_micro), COUNT(*) AS days_present, MAX(CASE WHEN active THEN snapshot_date END) AS last_active_date FROM user_daily_facts WHERE snapshot_date BETWEEN ? AND ? AND user_id IN (...) GROUP BY user_id`, with `_user_clause` (line 710) building the IN list and `%s`/`?` chosen from `self.is_postgres`. `active` is a boolean on Postgres, so sum it as `SUM(CASE WHEN active THEN 1 ELSE 0 END)` on both dialects rather than relying on `SUM(boolean)`, which Postgres rejects outright. The same `CASE` shape gives `last_active_date` for free — it rides the `GROUP BY` the query already does, so the column Task B8 needs for its as-of clamp costs no extra round-trip. `snapshot_date` is `TEXT` in ISO-8601, which orders lexicographically, so `MAX` over it is `MAX` over the dates.
 
 `successful_backtests` is `runs_completed` by definition: a completed backtest is a successful one, and activation is the first `backtest_completed` event.
 
@@ -2110,7 +2383,7 @@ What changed is where the struct comes from: two indexed reads of
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, time, timezone
 
 from .lifecycle import LifecycleInputs
 from .repository_common import positive_user_id
@@ -2123,8 +2396,9 @@ def build_lifecycle_inputs(
     created_at: datetime,
     activity: UserActivity | None,
     totals: RecentFactTotals | None,
+    as_of: datetime,
 ) -> LifecycleInputs:
-    """Assemble one user's lifecycle inputs from stored rows.
+    """Assemble one user's lifecycle inputs from stored rows, as of ``as_of``.
 
     A user with no ``user_activity`` row has never done anything meaningful;
     ``calculate_lifecycle`` anchors on ``created_at`` in that case, so a
@@ -2133,18 +2407,52 @@ def build_lifecycle_inputs(
     ``active_days_30d`` is capped at 30 because the model bounds it there and
     a migrated or double-counted window must not raise a validation error on
     a read path.
+
+    **Every timestamp is clamped to ``as_of``, and that is not defensive
+    programming -- it is the only thing that lets this function serve a past
+    day at all.** ``calculate_lifecycle`` raises
+    ``ValueError("lifecycle evidence cannot occur after as_of")`` when its
+    anchor is newer than ``as_of`` (lifecycle.py:240-243), and
+    ``user_activity`` is a single row per user overwritten in place: it says
+    what is true *now*, never what was true at the end of some earlier day.
+    The live read path passes ``as_of=now`` and nothing clamps; the daily job
+    passes the end of the day it is computing, and without this every user
+    who acted after midnight would abort the whole population's fact write.
+
+    ``activated_at`` newer than ``as_of`` becomes None rather than being
+    clamped to ``as_of``: "activated after this day" means "not activated as
+    of this day", and pretending they activated at midnight would put them in
+    the wrong retention cohort.
+
+    ``last_meaningful_activity_at`` newer than ``as_of`` falls back to
+    ``totals.last_active_date`` -- the fact table *does* keep history, which
+    is the whole reason it exists. Midnight-start of that date is the
+    conservative choice: ``calculate_lifecycle`` counts ``inactive_days`` in
+    whole UTC dates, so the time of day is never read.
     """
     subject_id = positive_user_id(user_id)
     counts = totals or RecentFactTotals()
+    boundary = as_of
+
+    activated_at = activity.activated_at if activity is not None else None
+    if activated_at is not None and activated_at > boundary:
+        activated_at = None
+
+    last_activity = (
+        activity.last_meaningful_activity_at if activity is not None else None
+    )
+    if last_activity is not None and last_activity > boundary:
+        last_activity = (
+            datetime.combine(counts.last_active_date, time.min, tzinfo=timezone.utc)
+            if counts.last_active_date is not None
+            else None
+        )
+
     return LifecycleInputs(
         user_id=subject_id,
         created_at=created_at,
-        first_successful_backtest_at=(
-            activity.activated_at if activity is not None else None
-        ),
-        last_meaningful_activity_at=(
-            activity.last_meaningful_activity_at if activity is not None else None
-        ),
+        first_successful_backtest_at=activated_at,
+        last_meaningful_activity_at=last_activity,
         active_days_30d=min(30, counts.active_days),
         successful_backtests_30d=counts.successful_backtests,
     )
@@ -2152,6 +2460,8 @@ def build_lifecycle_inputs(
 
 __all__ = ["build_lifecycle_inputs"]
 ```
+
+A user whose `created_at` is after `as_of` is **not** this function's problem to clamp — `calculate_lifecycle` would raise on `account_age_days < 0`, and rightly so, because an account that did not exist on day D has no day D. Task B8 excludes those users from the eligible set instead; the live read path can never hit it.
 
 - [ ] **Step 6: Run the tests to verify they pass**
 
@@ -2347,18 +2657,26 @@ git commit -m "feat(analytics): claim a projection day with compare-and-set"
 
 **Files:**
 - Modify: `dashboard/backend/domain/credits/repository.py` and `repository_postgres.py` — add `list_account_billing_states`
-- Modify: `dashboard/backend/domain/model_providers/repository.py` (and its Postgres twin if one exists) — add `list_default_credential_statuses`
-- Modify: `dashboard/backend/domain/runs/repository.py` — add `count_failed_terminal_runs`
-- Modify: `dashboard/backend/domain/analytics/value_repository.py` — add `list_operational_signals`
+- Modify: `dashboard/backend/domain/model_providers/repository.py` and its Postgres twin — add `list_default_credential_facts` and `list_platform_credential_statuses`
+- Modify: `dashboard/backend/domain/agents/repository.py` and its Postgres twin — add `list_agent_owners`
+- Modify: `dashboard/backend/domain/runs/repository.py` — add `list_terminal_runs_since`
+- Modify: `dashboard/backend/domain/analytics/lifecycle.py` — add `consecutive_failed_terminal_runs`
+- Modify: `dashboard/backend/domain/analytics/value_repository.py` — add `list_operational_signals`; rewrite `_run_health` to call the shared counter
 - Test: `dashboard/backend/tests/domain/analytics/test_operational_signals.py` (create)
 
 **Interfaces:**
 - Consumes: nothing from earlier tasks.
-- Produces: `ValueAnalyticsStore.list_operational_signals(user_ids: Sequence[int], *, now: datetime) -> dict[int, OperationalSignals]`, returning the same `OperationalSignals` model `calculate_operational_state` already consumes. Task B8 step 5 calls it once per day.
+- Produces: `ValueAnalyticsStore.list_operational_signals(user_ids: Sequence[int], *, now: datetime) -> dict[int, OperationalSignals]`, returning the same `OperationalSignals` model `calculate_operational_state` already consumes. Task B8 step 7 calls it once per day.
 
 `get_operational_facts` (`value_repository.py:960`) is the single worst shape in the module: per call it makes two credits-store calls, two provider-store calls, sometimes a `ModelProviderService.list_execution_options` call, and then `1 + len(agents)` run-store calls inside `_run_health` (line 907). Multiply that by every user in a loop and one "cheap" panel becomes hundreds of round-trips.
 
-Keep `get_operational_facts` exactly as it is. It is the **live** path for one user's profile, where one user's worth of fan-out is correct. This task adds a batched sibling for the daily job, and the two must agree — which the equivalence test below is for.
+Keep `get_operational_facts`'s **signature and call site** exactly as they are. It is the **live** path for one user's profile, where one user's worth of fan-out is correct. This task adds a batched sibling for the daily job, and the two must agree — which the equivalence test below is for.
+
+Three things about the real schema shape this task, and getting any of them wrong produces code that cannot run or a test that cannot pass:
+
+1. **The run count crosses a database boundary, so it cannot be one statement.** `protocol_runs` (`domain/runs/repository.py:87-104`) has `run_id, agent_id, agent_version_id, session_id, environment_id, environment_type, config, backtest_id, result_run_id, status, created_at, updated_at, owner_instance, heartbeat_at, step_index, total_steps` — and **no owner column**. The agent→owner mapping lives in `external_agents.owner_user_id` (`domain/agents/repository.py:121`), which is in `CONTENT_DATABASE_URL` while runs are in `DATABASE_PATH` SQLite. No join can span them. The fix is **two** statements plus a fold in Python: owners→agents, then agents→runs. Both are set-based, so the user-count-independence guard in Task B10 still holds; what does not hold is "one SQL statement with an `IN` list".
+2. **The rule is consecutive-from-most-recent, not a total.** `_run_health` (`value_repository.py:936-940`) walks the user's terminal runs newest-first and `break`s at the first non-failure. A user with failed, failed, succeeded, failed, failed inside 24 hours scores **2**, where `COUNT(*) WHERE status IN ('failed','timed_out')` scores 4. `calculate_operational_state` fires `needs_attention` at `>= 3` (`lifecycle.py:327`) and its evidence string reads "consecutive terminal runs failed", so a total would silently reclassify that user on the daily board while their live profile still said healthy. Rather than write the rule twice and trust a test to notice the drift, **extract it once** as a pure function and call it from both sides. Note the ordering is across *all* of an owner's agents pooled together, not per agent — `_run_health` sorts the pooled list before counting.
+3. **`usable_billing_lane` and `selected_provider_enabled` are batchable, and must be batched.** They look per-user because `get_operational_facts` reaches them through `ModelProviderService.list_execution_options(user_id)`, but that method's only per-user input is `list_user_credentials(user_id)` → `default_counts`. `platform_credits_available` depends solely on the provider row, the platform credential and the environment secret — no user at all (`model_providers/service.py:162-213`). So `platform_lane` is `balance > 0 AND <one population-wide boolean>`, and `verified_byok_lane` needs only each user's default credentials joined to the provider set. Do **not** weaken the equivalence test to dodge these two fields: dropping them is exactly the silent drift the test exists to catch, and they are the two that decide whether a user can run anything at all.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -2415,14 +2733,45 @@ def test_batched_signals_match_the_per_user_facts(operational_fixture):
 
 
 def test_batched_signals_do_not_query_per_user(operational_fixture, counting_stores):
-    """One query per signal, not one per user."""
-    store, user_ids = operational_fixture
+    """Query count is fixed, not proportional to the population.
+
+    Asserting a literal ceiling ("<= 4") pins an implementation detail this
+    task cannot honour: the run count alone needs two statements, because
+    protocol_runs and external_agents are in different databases. The
+    property that actually matters is that neither number moves when the
+    user count does.
+    """
+    small_store, small_ids = operational_fixture
+    large_store, large_ids = _operational_fixture_of_size(len(small_ids) * 4)
 
     counting_stores.reset()
-    store.list_operational_signals(user_ids, now=NOW)
+    small_store.list_operational_signals(small_ids, now=NOW)
+    small_calls = counting_stores.total_calls
+
+    counting_stores.reset()
+    large_store.list_operational_signals(large_ids, now=NOW)
 
     assert counting_stores.calls_with_scalar_user_id == []
-    assert counting_stores.total_calls <= 4
+    assert counting_stores.total_calls == small_calls
+    # A loose absolute bound as well, so "zero queries because it silently
+    # returned defaults" cannot pass the equality above.
+    assert 4 <= small_calls <= 8
+
+
+def test_the_batched_count_is_consecutive_not_total(operational_fixture):
+    """failed, failed, succeeded, failed, failed inside 24h scores 2.
+
+    This is the one place the two implementations could disagree while
+    every other assertion stayed green, because both numbers are plausible
+    and only one of them matches the reason code the UI renders.
+    """
+    store, _user_ids = operational_fixture
+    user_id = operational_fixture.interleaved_failures_id
+
+    signals = store.list_operational_signals([user_id], now=NOW)[user_id]
+
+    assert signals.failed_terminal_runs_24h == 2
+    assert calculate_operational_state(signals, NOW).state == "healthy"
 
 
 def test_a_user_with_no_rows_reads_as_healthy(operational_fixture):
@@ -2436,7 +2785,17 @@ def test_a_user_with_no_rows_reads_as_healthy(operational_fixture):
     assert calculate_operational_state(signals, NOW).state == "healthy"
 ```
 
-Build `operational_fixture` and `counting_stores` as local fixtures in this file, seeding at least: one restricted account, one account with an invalid default credential, one with three failed terminal runs inside 24 hours, and one clean account. Follow the seeding style of `dashboard/backend/tests/domain/analytics/test_value_repository.py`.
+Build `operational_fixture`, `_operational_fixture_of_size` and `counting_stores` as local fixtures/helpers in this file, seeding at least:
+
+- one restricted account;
+- one account with an invalid default credential;
+- one with three consecutive failed terminal runs inside 24 hours (`needs_attention`);
+- one with failed, failed, succeeded, failed, failed inside 24 hours, exposed as `interleaved_failures_id` — the case that separates "consecutive" from "total", and the only seed that distinguishes the two implementations;
+- one whose runs are spread across **two** agents, so the pooled newest-first ordering is exercised rather than a per-agent one;
+- one whose default provider is disabled (`selected_provider_enabled is False`) and one with no usable lane (`usable_billing_lane is False`) — without these two the equivalence test passes on the model defaults and proves nothing;
+- one clean account.
+
+Follow the seeding style of `dashboard/backend/tests/domain/analytics/test_value_repository.py`.
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
@@ -2446,9 +2805,41 @@ Build `operational_fixture` and `counting_stores` as local fixtures in this file
 
 Expected: FAIL with `AttributeError: ... 'list_operational_signals'`.
 
-- [ ] **Step 3: Add the three batched store reads**
+- [ ] **Step 3: Extract the consecutive-failure rule**
 
-Each mirrors an existing per-user method, takes a sequence of ids, and returns a dict keyed by user id. Each is one SQL statement with an `IN` list, not a loop.
+Before any batching, give the rule one owner. In `dashboard/backend/domain/analytics/lifecycle.py`, beside `calculate_operational_state`:
+
+```python
+def consecutive_failed_terminal_runs(
+    statuses: Sequence[str],
+) -> int:
+    """Count leading failures in a newest-first sequence of terminal statuses.
+
+    The rule `calculate_operational_state` reports as
+    "three_consecutive_failed_runs", lifted out of `_run_health` so the live
+    profile and the daily job cannot answer it differently. A total count is
+    a different number -- failed, failed, succeeded, failed, failed is 2 here
+    and 4 to a `COUNT(*)` -- and the reason code the UI renders says
+    "consecutive", so the total would be wrong on screen as well as
+    inconsistent between the two paths.
+
+    Pure and sequence-shaped rather than query-shaped on purpose: one caller
+    has rows from an ORM-ish list, the other from a cross-database fold, and
+    neither can express this in SQL over its own data alone.
+    """
+    count = 0
+    for status in statuses:
+        if status not in _FAILED_RUN_STATUSES:
+            break
+        count += 1
+    return count
+```
+
+`_FAILED_RUN_STATUSES = frozenset({"failed", "timed_out"})` moves here too, and `value_repository.py` imports both. Then rewrite `_run_health`'s counting loop (`value_repository.py:936-940`) to build the pooled newest-first status list it already has and call this function. Its behaviour must not change; `test_value_repository.py`'s existing operational cases are the proof.
+
+- [ ] **Step 4: Add the batched store reads**
+
+Each takes a sequence of ids and returns a dict keyed by user id, and none of them loops. All but the run pair are one SQL statement with an `IN` list.
 
 `domain/credits/repository.py` and its Postgres twin, mirroring `get_account_billing_state`:
 
@@ -2459,35 +2850,76 @@ Each mirrors an existing per-user method, takes a sequence of ids, and returns a
         """Billing state for many accounts in one query."""
 ```
 
-`domain/model_providers/repository.py`, mirroring `list_user_credentials`:
+`domain/model_providers/repository.py` and its Postgres twin, mirroring `list_user_credentials`. Note this returns **facts, not a bare status**: `selected_provider_enabled` and `verified_byok_lane` both need to know *which* provider each default credential points at, and a `dict[int, str]` throws that away, which is why the equivalence test could not pass against the earlier shape.
 
 ```python
-    def list_default_credential_statuses(
+    def list_default_credential_facts(
         self, user_ids: Sequence[int]
-    ) -> dict[int, str]:
-        """Each user's default credential status, worst-first.
+    ) -> dict[int, DefaultCredentialFacts]:
+        """Each user's default credentials, as one row per user.
 
-        Precedence matches get_operational_facts: invalid beats
+        `status` precedence matches get_operational_facts: invalid beats
         verification_unavailable beats verified; a user with no default
-        credential is 'missing'.
+        credential is 'missing'. `default_provider_ids` carries every
+        provider a default credential points at, and
+        `verified_default_provider_counts` the per-provider count of
+        *verified* defaults -- the `== 1` test in
+        ModelProviderService.list_execution_options (service.py:194) is a
+        count, not a boolean, and collapsing it to one loses the
+        two-defaults case.
+        """
+
+
+    def list_platform_credential_statuses(self) -> dict[str, str]:
+        """Every provider's platform-credential status. Takes no user id.
+
+        The population-wide half of `platform_credits_available`: it depends
+        only on the provider row, its platform credential and the
+        environment secret, never on who is asking. One call for the whole
+        job, which is why it is not in the per-user batch at all.
         """
 ```
 
-`domain/runs/repository.py`, replacing the `1 + len(agents)` fan-out in `_run_health`:
+`domain/agents/repository.py` and its Postgres twin — the first half of the cross-database run count:
 
 ```python
-    def count_failed_terminal_runs(
+    def list_agent_owners(
+        self, user_ids: Sequence[int]
+    ) -> dict[str, int]:
+        """agent_id -> owner_user_id for these owners, in one query.
+
+        `external_agents.owner_user_id` is indexed
+        (`idx_external_agents_owner`, repository.py:135), and this table is
+        in CONTENT_DATABASE_URL while protocol_runs is in DATABASE_PATH, so
+        this mapping has to come back to Python before the runs can be
+        counted. Rows with a NULL owner are omitted rather than grouped.
+        """
+```
+
+`domain/runs/repository.py` — the second half:
+
+```python
+    def list_terminal_runs_since(
         self,
-        user_ids: Sequence[int],
+        agent_ids: Sequence[str],
         *,
         since: datetime,
-    ) -> dict[int, int]:
-        """Failed terminal runs per owner since ``since``, in one query."""
+    ) -> dict[str, tuple[tuple[datetime, str], ...]]:
+        """Terminal runs for these agents since ``since``, newest first.
+
+        Returns `(effective_time, status)` pairs per agent, where the
+        effective time is `COALESCE(updated_at, created_at)` -- the same
+        ordering key `_run_health` uses. Bounded by construction: a 24-hour
+        window of terminal runs across the whole population is a small
+        result, and the caller pools and re-sorts them per owner because
+        the consecutive rule runs over an owner's agents together, not per
+        agent.
+        """
 ```
 
 Add the matching method to every Postgres twin in the same commit. `test_store_twin_parity.py` compares the public method set and every signature, so a method on one side only fails the build.
 
-- [ ] **Step 4: Compose them**
+- [ ] **Step 5: Compose them**
 
 On `ValueAnalyticsStore`:
 
@@ -2512,9 +2944,33 @@ On `ValueAnalyticsStore`:
         """
 ```
 
-Its body issues `get_balance_projections(ids)` (already batched, line 731's neighbour), `list_account_billing_states(ids)`, `list_default_credential_statuses(ids)`, and `count_failed_terminal_runs(ids, since=now - timedelta(hours=24))`, then assembles one `OperationalSignals` per id using the same boolean precedence `get_operational_facts` uses at lines 1035-1046. A user absent from every dict gets the model's defaults, which classify as `healthy`.
+Its body issues, in this order and each exactly once regardless of population size:
 
-- [ ] **Step 5: Run the tests to verify they pass**
+| # | Call | Shape |
+|---|---|---|
+| 1 | `get_balance_projections(ids)` | already batched, line 731's neighbour |
+| 2 | `list_account_billing_states(ids)` | per-user, batched |
+| 3 | `list_default_credential_facts(ids)` | per-user, batched |
+| 4 | `list_all_providers()` | population-wide |
+| 5 | `list_platform_credential_statuses()` | population-wide |
+| 6 | `list_agent_owners(ids)` | per-user, batched — CONTENT database |
+| 7 | `list_terminal_runs_since(agent_ids, since=now - timedelta(hours=24))` | per-agent, batched — runs database |
+
+then assembles one `OperationalSignals` per id:
+
+- `account_restricted` — `billing.get(uid, {}).get("account_status") == "restricted"`, as at line 1040.
+- `default_credential_status` — straight from call 3, same worst-first precedence.
+- `selected_provider_enabled` — `all(providers[p].status == "enabled" for p in facts.default_provider_ids)`, matching lines 1009-1013. An empty set of defaults is `all([]) is True`, which is the existing behaviour and must stay: "no default credential" is not "a disabled provider".
+- `verified_byok_lane` — `any(provider.byok_enabled and facts.verified_default_provider_counts.get(p) == 1 for enabled providers p)`, matching `list_execution_options` (`service.py:190-196`). The `== 1` is deliberate, not `>= 1`.
+- `platform_lane` — `balance > 0 and PLATFORM_LANE_OPEN`, where `PLATFORM_LANE_OPEN` is computed **once for the whole batch** from calls 4 and 5 plus `_environment_platform_secret`: `any(p.status == "enabled" and p.platform_enabled and (platform_status[p] == "verified" or environment_secret(p)) for p in providers)`. No user appears in that expression, which is the whole reason the two fields are batchable at all.
+- `usable_billing_lane` — `platform_lane or verified_byok_lane`, as at line 1042.
+- `failed_terminal_runs_24h` — pool call 7's `(time, status)` pairs across every agent belonging to the owner, sort newest-first by the effective time, then `consecutive_failed_terminal_runs([status for _t, status in pooled])`. Pool **before** sorting: sorting per agent and concatenating gives a different sequence and therefore a different count.
+
+A user absent from every dict gets the model's defaults, which classify as `healthy`.
+
+Seven calls, not four. The number is incidental; what matters is that none of them takes a scalar user id and none of them grows with the population — which is what Task B10's guard and this task's own budget case assert.
+
+- [ ] **Step 6: Run the tests to verify they pass**
 
 ```bash
 ~/atl-venv/bin/python -m pytest dashboard/backend/tests/domain/analytics/test_operational_signals.py -v
@@ -2523,13 +2979,16 @@ TEST_POSTGRES_URL=postgresql://postgres:atl@localhost:55432/postgres \
   ~/atl-venv/bin/python -m pytest dashboard/backend/tests/domain/ -q
 ```
 
-Expected: PASS on all three.
+Expected: PASS on all three. Also re-run `test_value_repository.py` — step 3 rewrote `_run_health`'s counting loop, and its existing operational cases are what prove the extraction changed no behaviour.
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 7: Commit**
 
 ```bash
 git add dashboard/backend/domain/credits/ dashboard/backend/domain/model_providers/ \
+        dashboard/backend/domain/agents/repository.py \
+        dashboard/backend/domain/agents/repository_postgres.py \
         dashboard/backend/domain/runs/repository.py \
+        dashboard/backend/domain/analytics/lifecycle.py \
         dashboard/backend/domain/analytics/value_repository.py \
         dashboard/backend/tests/domain/analytics/test_operational_signals.py
 git status --short
@@ -2540,17 +2999,19 @@ git commit -m "perf(analytics): batch operational signals across users"
 
 **Files:**
 - Create: `dashboard/backend/domain/analytics/daily_facts.py`
-- Modify: `dashboard/backend/domain/analytics/value_repository.py` — add `aggregate_events_for_day`, `aggregate_operator_cost_for_day`, `aggregate_ledger_for_day`, `upsert_daily_facts`, `append_lifecycle_transitions`, `list_facts_for_date`
+- Modify: `dashboard/backend/domain/analytics/value_repository.py` — add `aggregate_events_for_day`, `aggregate_operator_cost_for_day`, `aggregate_ledger_for_day`, `upsert_daily_facts`, `append_lifecycle_transitions`, `list_facts_for_date`, `list_days_needing_recompute`
 - Modify: `dashboard/backend/domain/analytics/maintenance.py` — the tick becomes a due check plus this job
 - Test: `dashboard/backend/tests/domain/analytics/test_daily_facts.py` (create)
 
 **Interfaces:**
 - Consumes: `claim_projection_day` (B6), `list_operational_signals` (B7), `build_lifecycle_inputs` and `sum_recent_facts` (B5), `record_activity`/`list_activity` (B4), `owner_user_id` (B3), `users.cohort` (B2), the three tables (B1).
 - Produces: `run_daily_facts(*, now: datetime | None = None, value_store: ValueAnalyticsStore | None = None) -> DailyFactsReport` and
-  `DailyFactsReport(snapshot_date: date | None, claimed: bool, users_written: int, transitions_written: int, partial: bool, failed_steps: tuple[str, ...])`.
+  `DailyFactsReport(snapshot_date: date | None, claimed: bool, users_written: int, transitions_written: int, partial: bool, failed_steps: tuple[str, ...], recomputed_dates: tuple[date, ...])`.
   Task B10 measures it; PR C reads what it writes.
 
 A fixed sequence of steps over the previous UTC day `D`, each one set-based query across the whole population. Each step is wrapped individually: a failure marks the day's rows `partial` and logs `WARNING: analytics.daily_facts.<step>_failed category=<exception class>`. The cursor is rolled back unless the facts step succeeds, so a failed day is retried on the next tick.
+
+**Two properties decide whether this job is correct, and neither is obvious from the step list.** The day's evidence must be clamped to the end of D — `user_activity` stores no history, so feeding it to `calculate_lifecycle(as_of=<end of D>)` raises on the first user active after midnight. And the day must stay recomputable after it is written, because events legitimately arrive after the aggregate is taken. Job steps 9a, 9b and 11 below are those two properties; read them before writing any of this.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -2606,11 +3067,12 @@ def test_a_segment_change_appends_exactly_one_transition(daily_fixture):
 def test_a_failed_step_marks_the_day_partial_and_retries_it(daily_fixture, capsys):
     daily_fixture.break_step("ledger")
     first = run_daily_facts(now=NOW, value_store=daily_fixture.store)
+    printed = capsys.readouterr().out
 
     assert first.partial is True
     assert "ledger" in first.failed_steps
-    assert "analytics.daily_facts.ledger_failed" in capsys.readouterr().out
-    assert "category=" in capsys.readouterr().out or True
+    assert "analytics.daily_facts.ledger_failed" in printed
+    assert "category=" in printed
 
     daily_fixture.repair_step("ledger")
     retry = run_daily_facts(now=NOW + timedelta(minutes=1), value_store=daily_fixture.store)
@@ -2618,11 +3080,107 @@ def test_a_failed_step_marks_the_day_partial_and_retries_it(daily_fixture, capsy
     assert retry.partial is False
 
 
+def test_a_retry_corrects_the_transition_the_partial_day_wrote(daily_fixture):
+    """DO UPDATE, not DO NOTHING.
+
+    The day a transition is rewritten is the day the first attempt was
+    wrong. Freezing it leaves `lifecycle_transitions` permanently
+    disagreeing with the `user_daily_facts` row the retry did correct.
+    """
+    daily_fixture.seed_previous_segment("growing")
+    daily_fixture.break_step("ledger")
+    run_daily_facts(now=NOW, value_store=daily_fixture.store)
+    first = daily_fixture.transitions_for(daily_fixture.at_risk_id)[0]
+
+    daily_fixture.repair_step("ledger")
+    run_daily_facts(now=NOW + timedelta(minutes=1), value_store=daily_fixture.store)
+    corrected = daily_fixture.transitions_for(daily_fixture.at_risk_id)
+
+    assert len(corrected) == 1
+    assert first.data_quality == "partial"
+    assert corrected[0].data_quality == "complete"
+
+
+def test_a_user_active_after_midnight_does_not_abort_the_day(daily_fixture):
+    """The regression that would have fired on the first night in prod.
+
+    `user_activity` is overwritten in place, so a user who acts at 00:02
+    has a `last_meaningful_activity_at` newer than the end of D. Fed to
+    `calculate_lifecycle(as_of=<end of D>)` unclamped that raises, and the
+    single try/except around the step turns one such user into zero fact
+    rows for the entire population.
+    """
+    daily_fixture.touch_activity(daily_fixture.active_id, at=NOW)
+    daily_fixture.create_user_at(NOW)
+
+    report = run_daily_facts(now=NOW, value_store=daily_fixture.store)
+
+    assert report.partial is False
+    assert report.failed_steps == ()
+    assert report.users_written >= 1
+    written = {
+        row.user_id
+        for row in daily_fixture.store.list_facts_for_date(date(2026, 9, 11))
+    }
+    assert daily_fixture.active_id in written
+    # Created after D ended: no day D to describe.
+    assert daily_fixture.created_today_id not in written
+
+
+def test_the_stored_segment_counts_its_own_day(daily_fixture):
+    """The trailing window is 30 dates ending at D, D included.
+
+    Sitting at two active days and two successes before D, plus an active
+    day with a success on D, is the `core` threshold exactly. Summing only
+    D-29..D-1 writes `growing` and the read path answers `core` the next
+    morning.
+    """
+    user_id = daily_fixture.seed_two_of_three_before_d()
+    daily_fixture.seed_success_on(date(2026, 9, 11), user_id)
+
+    run_daily_facts(now=NOW, value_store=daily_fixture.store)
+
+    assert daily_fixture.fact_for(user_id).lifecycle_segment == "core"
+
+
+def test_an_event_arriving_after_the_day_was_written_is_picked_up(daily_fixture):
+    """Late arrivals are recomputed, not lost.
+
+    A run finishing at 23:59 can be appended minutes later, and the
+    frontend route accepts `occurred_at` up to 24 hours old. Both land
+    inside D after D's aggregate was taken, and the cursor has already
+    moved past D.
+    """
+    run_daily_facts(now=NOW, value_store=daily_fixture.store)
+    before = daily_fixture.fact_for(daily_fixture.active_id).runs_completed
+
+    daily_fixture.append_event(
+        daily_fixture.active_id,
+        event_name="backtest_completed",
+        occurred_at=datetime(2026, 9, 11, 23, 59, tzinfo=timezone.utc),
+        received_at=NOW + timedelta(minutes=5),
+    )
+    report = run_daily_facts(now=NOW + timedelta(hours=1), value_store=daily_fixture.store)
+
+    assert date(2026, 9, 11) in report.recomputed_dates
+    assert daily_fixture.fact_for(daily_fixture.active_id).runs_completed == before + 1
+
+
+def test_a_settled_day_is_not_recomputed_forever(daily_fixture):
+    """The sweep is driven by evidence, not by a timer."""
+    run_daily_facts(now=NOW, value_store=daily_fixture.store)
+    report = run_daily_facts(now=NOW + timedelta(hours=1), value_store=daily_fixture.store)
+
+    assert report.recomputed_dates == ()
+
+
 def test_the_job_issues_no_query_for_a_single_user(daily_fixture, counting_store):
     run_daily_facts(now=NOW, value_store=counting_store)
 
     assert counting_store.calls_with_scalar_user_id == []
 ```
+
+`capsys.readouterr()` is drained once and reused above. Calling it twice, as the first draft of this file did, returns an empty buffer the second time and the `"category=" in ...` assertion then passes only because of an `or True` — which is worth stating explicitly because it is the exact shape of an assertion that can never fail.
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
@@ -2632,7 +3190,7 @@ def test_the_job_issues_no_query_for_a_single_user(daily_fixture, counting_store
 
 Expected: FAIL at import — `daily_facts` does not exist.
 
-- [ ] **Step 3: Add the six set-based store methods**
+- [ ] **Step 3: Add the set-based store methods**
 
 On `ValueAnalyticsStore`. Each is exactly one statement.
 
@@ -2688,7 +3246,8 @@ SELECT user_id,
         end of the day rather than as of whenever the row is read.
 
         It also yields each user's latest credit-activity timestamp for the
-        day, which step 4 uses to correct user_activity. A dropped
+        day, which the job's `ledger` step uses to correct user_activity.
+        A dropped
         credits_settled event must not leave a paying user looking inactive.
         """
 
@@ -2698,17 +3257,58 @@ SELECT user_id,
     def append_lifecycle_transitions(
         self, rows: Sequence[LifecycleTransitionRow]
     ) -> int:
-        """Append segment changes, ignoring ones already recorded.
+        """Write segment changes for one day, correcting any already there.
 
-        INSERT ... ON CONFLICT (user_id, snapshot_date) DO NOTHING, so a
-        retried day appends nothing a successful earlier attempt wrote.
+        INSERT ... ON CONFLICT (user_id, snapshot_date) DO UPDATE SET
+        from_segment, to_segment, inactive_days, data_quality, created_at --
+        **not** DO NOTHING.
+
+        DO NOTHING looks like the safe choice and is the wrong one. The day
+        this table is rewritten is exactly the day something went wrong: a
+        step failed and the row was derived from a missing source, or a late
+        event changed the day's totals. DO NOTHING freezes that first,
+        weakest answer forever, and since the retry corrects `user_daily_facts`
+        (which upserts) the two tables then disagree permanently -- the fact
+        row says one segment, the transition says the user moved to another.
+        The UNIQUE constraint's job is to stop a *duplicate*, which DO UPDATE
+        does equally well while leaving the row correctable.
+
+        `data_quality` comes from the day's own quality, so a consumer can
+        tell a transition derived from a complete day from one derived from a
+        partial one. "Activated user reached fourteen inactive days" firing on
+        evidence the job itself marked incomplete is the outreach failure this
+        column prevents.
         """
 
     def list_facts_for_date(self, day: date) -> list[UserDailyFact]:
         """Every fact row for one date. Used for the previous day's segments."""
+
+    def list_days_needing_recompute(
+        self, *, since: date, until: date
+    ) -> list[date]:
+        """Past days whose events arrived after their facts were computed.
+
+        One statement. Groups `analytics_events` in the window by
+        `date(occurred_at)`, takes `MAX(received_at)` per day, and returns
+        the days where that exceeds the `MIN(calculated_at)` already stored
+        on `user_daily_facts` for the same date.
+
+        This exists because `aggregate_events_for_day` filters on
+        `occurred_at` while the job runs minutes after midnight, and the two
+        do not line up. The frontend route accepts `occurred_at` up to 24
+        hours old (`service.py:96-97`), and a server event for a run that
+        finished at 23:59 can be appended after the aggregate was taken.
+        Without this sweep every such row is silently dropped from `active`,
+        DAU and the four run-outcome counts, permanently and with no signal:
+        the cursor has moved past the day and the due check never looks at it
+        again. `received_at` is the right witness precisely because it is the
+        one timestamp the writer cannot backdate.
+        """
 ```
 
 Define `DayEventTotals`, `LedgerDayTotals`, `UserDailyFact` and `LifecycleTransitionRow` as frozen Pydantic models beside `UserActivity`, matching the column names in the Task B1 DDL exactly.
+
+Seven methods, not six: `list_days_needing_recompute` is the late-arrival sweep and is not optional. Note both `upsert_daily_facts` and `append_lifecycle_transitions` must be true upserts for it to work — a recompute that cannot overwrite is a recompute that does nothing.
 
 - [ ] **Step 4: Write the job**
 
@@ -2742,24 +3342,48 @@ class DailyFactsReport(BaseModel):
     transitions_written: int = Field(default=0, ge=0)
     partial: bool = False
     failed_steps: tuple[str, ...] = ()
+    # Earlier days this tick recomputed because late events landed in them.
+    # Reported rather than silent: a day that keeps reappearing here is a
+    # clock-skew or a replay problem, and the only place it is visible.
+    recomputed_dates: tuple[date, ...] = ()
 ```
 
-`run_daily_facts` then, in order:
+`run_daily_facts` is two passes over the same `compute_day(D)` routine: the new day, then any earlier day whose evidence has changed since it was written.
 
-1. Resolve `D = now.date() - 1 day`. Read the job row; if `cursor == D.isoformat()`, return `DailyFactsReport(snapshot_date=D, claimed=False)` having issued exactly one query.
-2. `claim_projection_day(DAILY_FACTS_JOB, expected_cursor=<stored cursor>, day=D, now=now)`. If False, another process or an earlier tick owns the day; return `claimed=False`.
-3. Step `rollup`: `rollup_day(D, now=<midnight of now.date()>)`, unchanged.
-4. Step `events`: `aggregate_events_for_day(D)`; feed `first_success_at` and `last_activity_at` back through `record_activity` **only for users whose stored row is missing or older**, which repairs a dropped ingestion write without touching the rest.
-5. Step `runs`: `aggregate_operator_cost_for_day(D)`.
-6. Step `ledger`: `aggregate_ledger_for_day(D)`; apply its activity timestamps the same way.
-7. Step `operational`: `list_operational_signals(eligible_ids, now=<end of D>)`.
-8. Step `facts`: for each eligible user, `build_lifecycle_inputs` over `list_activity` plus `sum_recent_facts(start=D - 29 days, end=D)`, `calculate_lifecycle(..., as_of=<end of D>)`, `commercial_tier(lifetime_net_micro)`, then one `upsert_daily_facts` batch.
-9. Step `transitions`: diff against `list_facts_for_date(D - 1 day)` and `append_lifecycle_transitions`.
-10. Step `retention`: `analytics_retention_coordinator.run_if_due()`, unchanged.
+1. Resolve `D = now.date() - 1 day`. Read the job row. If `cursor == D.isoformat()`, D is done — skip to step 11 having issued exactly one query.
+2. `claim_projection_day(DAILY_FACTS_JOB, expected_cursor=<stored cursor>, day=D, now=now)`. If False, another process or an earlier tick owns the day; skip to step 11.
+3. `compute_day(D)`, steps 4 through 10 below.
+4. Step `rollup`: `rollup_day(D, now=<midnight of now.date()>)`, unchanged.
+5. Step `events`: `aggregate_events_for_day(D)`; feed `first_success_at` and `last_activity_at` back through `record_activity`. Pass every user's values unconditionally rather than pre-filtering on "stored row is missing or older" — `record_activity`'s own SQL is already the filter (MIN on `activated_at`, MAX on the activity clock, after Task B4's correction), and doing it a second time in Python is a second copy of the rule that can disagree with the first.
+6. Step `runs`: `aggregate_operator_cost_for_day(D)`.
+7. Step `ledger`: `aggregate_ledger_for_day(D)`; apply its activity timestamps the same way.
+8. Step `operational`: `list_operational_signals(eligible_ids, now=<end of D>)`.
+9. Step `facts`: one `build_lifecycle_inputs` pass over the whole eligible set, then one `upsert_daily_facts` batch. Two things here are easy to get wrong and both are described in detail below (job steps 9a and 9b): the evidence must be **clamped to D**, and the trailing window must **include D**.
+10. Step `transitions`: diff against `list_facts_for_date(D - 1 day)` and `append_lifecycle_transitions`, carrying the day's `data_quality` onto each row.
+11. Step `recompute`: `list_days_needing_recompute(since=D - 6 days, until=D - 1 day)`, and `compute_day(E)` for each `E` returned, newest first, at most two per tick. This is the late-arrival sweep; it does **not** touch the cursor, because those days are already claimed.
+12. Step `retention`: `analytics_retention_coordinator.run_if_due()`, unchanged.
 
-Eligible users are every non-admin, non-excluded account — the same predicate `list_stale_user_ids` uses at `states.py:315-316`, lifted into one `SELECT users.id, users.role, users.cohort, users.created_at FROM users LEFT JOIN analytics_subject_settings ...` with no LIMIT. A few hundred rows of four columns is one small query; this is the only place the whole user list is materialized.
+**Job step 9a — the evidence must be clamped to D, or the job crashes every night.**
 
-Wrap each step in its own try/except that records the step name, sets `partial`, and prints `WARNING: analytics.daily_facts.<step>_failed category=<class>`. Advance nothing on failure: the cursor was already claimed, so on the next tick the due check sees `cursor == D` and skips. **That is wrong for a failed day**, so on any failure roll the cursor back to its previous value before returning, which is what makes the retry in the test above work.
+`calculate_lifecycle` raises `ValueError("lifecycle evidence cannot occur after as_of")` when its anchor is newer than `as_of` (`lifecycle.py:240-243`). The job asks for `as_of = <end of D>` but `user_activity` holds one row per user overwritten in place — it is *as of now*, and it has no history at all. So any user who emitted a lifecycle event since midnight has `last_meaningful_activity_at` on today's date, `inactive_days` computes to `-1`, and the exception fires. Since the step wraps the whole population in one try/except, **one such user marks the entire day partial and writes zero fact rows** — every night, forever, for a site with any overnight traffic at all. The same applies to `account_age_days` for an account created today.
+
+`build_lifecycle_inputs` therefore takes an `as_of` and returns evidence no newer than it:
+
+- `created_at` — from the eligible-users query. A user whose `created_at` is after the end of D has no day D; **drop them from the eligible set for this day** rather than clamping, because a zero-age row would claim they existed.
+- `activated_at` — `stored.activated_at if stored.activated_at <= end_of_D else None`. Activation is monotonic and set-once, so "activated after D" simply means "not activated as of D", which is the honest answer and the one the retention cohort needs.
+- `last_meaningful_activity_at` — `stored.last_meaningful_activity_at` when it is `<= end_of_D`; otherwise the last date on which the user was active *at or before D*, which comes from the fact table, not from `user_activity`. Extend `sum_recent_facts` to return it: `MAX(CASE WHEN active THEN snapshot_date END) AS last_active_date` is one more column in a `GROUP BY` the query already performs, so it costs nothing. If neither is available the user was inactive for the whole window and `None` is correct — `calculate_lifecycle` falls back to `created_at` as its anchor, which is what a dormant classification needs.
+
+The stored value is usable for most users precisely because a dormant or at-risk user *by definition* has not been active recently, so their row is already older than `end_of_D`. The clamp only bites for users active today, and those are exactly the users the fact table can answer for.
+
+**Job step 9b — the trailing window must include D, or the stored segment is computed from 29 days.**
+
+`sum_recent_facts(start=D-29, end=D)` is issued by the very step that is about to write D's row, so it sums `D-29..D-1` — 29 dates, not 30. A user whose third active day and third successful backtest both land on D is written as `growing`; the next day the read path sums the same 30 dates *including* D and answers `core`. The users list, segment distribution, retention grid and `lifecycle_transitions` would all take the stored value while the profile showed the live one, which is precisely the "every per-user number agrees with the page that owns it" goal this design exists for — and it would inject a spurious growing→core transition one day late into the outreach hook.
+
+Fix it in memory, not with a second query: call `sum_recent_facts(start=D - 29, end=D - 1)` and add D's own contribution from the step-`events` result already in hand (`active` adds 1 to `active_days`, `runs_completed` adds to `successful_backtests`). Deterministic, no extra round-trip, and no circular dependency on a row that does not exist yet. Pin it with a test: a user sitting at two active days and two successes before D, active with a success on D, must be written `core` on D's row.
+
+**Eligible users.** Every non-admin, non-excluded account created on or before the end of D — the predicate `list_stale_user_ids` uses at `states.py:315-316` plus the creation-date bound from job step 9a, lifted into one `SELECT users.id, users.role, users.cohort, users.created_at FROM users LEFT JOIN analytics_subject_settings ...` with no LIMIT. A few hundred rows of four columns is one small query; this is the only place the whole user list is materialized.
+
+**Failure handling.** Wrap each step in its own try/except that records the step name, sets `partial`, and prints `WARNING: analytics.daily_facts.<step>_failed category=<class>`. Advance nothing on failure: the cursor was already claimed, so on the next tick the due check sees `cursor == D` and skips. **That is wrong for a failed day**, so on any failure roll the cursor back to its previous value before returning, which is what makes the retry in the test above work. The recompute pass in step 11 is a second, independent safety net covering the case where the day *succeeded* and the evidence changed afterwards — the two are not substitutes for each other.
 
 - [ ] **Step 5: Rewrite the maintenance tick**
 
@@ -2863,7 +3487,13 @@ In this order, so the suite stays runnable between steps:
 2. `grep -rn "from .states import\|from dashboard.backend.domain.analytics.states import\|lifecycle_backfill" dashboard/` and fix every remaining importer. `value_queries.py` and `query_service.py` will be among them; have them raise `NotImplementedError` only if PR C has not landed yet — better, do the minimum rewrite here to keep the routes serving, and let PR C do the real read-path work.
 3. Remove `user_lifecycle_daily_snapshots` and the thirteen value columns on `user_analytics_snapshots` from both DDL constants, and remove `_migrate_value_columns` (`repository.py:279`) and the matching `ADD COLUMN IF NOT EXISTS` loop (`repository_postgres.py:210-228`).
 4. Update `tests/domain/analytics/test_repository_contract.py:365-390` and `test_repository_postgres.py:167-180`, which currently assert those exact tables and columns exist.
-5. Point `retention.py` at `user_daily_facts`: `list_expiring_daily_dates` and `delete_daily_snapshots_for_date` become fact-table operations, and `rollup_lifecycle_day` reads `list_facts_for_date`. Keep the 180-day window and the write-rollups-before-delete order exactly as they are.
+5. Point `retention.py` at **both** new user-keyed tables:
+   - `user_daily_facts` — `list_expiring_daily_dates` and `delete_daily_snapshots_for_date` become fact-table operations, and `rollup_lifecycle_day` reads `list_facts_for_date`.
+   - `lifecycle_transitions` — add `list_expiring_transition_dates` and `delete_transitions_for_date` alongside them, expiring on the same 180-day window and in the same sweep.
+
+   Keep the 180-day window and the write-rollups-before-delete order exactly as they are.
+
+   **`lifecycle_transitions` is easy to miss and it is the worst one to miss.** It carries a `user_id`, so the Global Constraint at the top of this plan ("any table carrying a user id is retained 180 days") and the spec's own line for this table both apply to it — but Task B1 only creates it, Task B8 only appends to it, and nothing else in this plan ever deletes from it. Left as first drafted, it grows without bound and quietly becomes the longest-lived personal data in the analytics schema: precisely the leak the 180-day rule exists to prevent, in the one table nobody reads often enough to notice. Pin it with a test asserting an old transition row is gone after a sweep, in the same file as the fact-row case — a rule with no test is a rule that expires with whoever remembered it.
 
 SQLite cannot drop a column from a table with a composite PK without a rebuild, but `user_analytics_snapshots` has a simple `user_id` PK, so `ALTER TABLE ... DROP COLUMN` works on modern SQLite. If the installed version refuses, leave the columns in place and unused rather than rebuilding the table — the seed database is the production database and a rebuild there is not worth the risk.
 
@@ -2880,14 +3510,17 @@ Expected: PASS on both, with a lower skip count on the second.
 - [ ] **Step 6: Commit**
 
 ```bash
-git add -u
+git status --short
+git add -u -- dashboard/backend/domain/analytics dashboard/backend/tests
 git add dashboard/backend/domain/analytics/facts_migration.py \
         dashboard/backend/tests/domain/analytics/test_facts_migration.py
 git status --short
 git commit -m "refactor(analytics): retire the snapshot model"
 ```
 
-`git add -u` stages deletions of tracked files only, so it will not pick up the seed database unless that file is already modified. Read the `git status --short` output before committing regardless.
+**`git add -u` stages every change to tracked files — modifications as well as deletions.** The earlier draft of this step claimed it stages "deletions of tracked files only", which is wrong and dangerous here in a way no other task is: this step deletes files across the tree and runs the full suite immediately beforehand, and `dashboard/storage/data/backtest.db` is a **tracked** file that a bare backend import rewrites in place (the Global Constraint at the top of this plan, and the repo's own `CLAUDE.md`). A bare `git add -u` after a full-suite run is therefore one of the most likely ways to commit the seed database in this entire plan.
+
+The path-scoped form above cannot reach `dashboard/storage/`, which is the actual protection; the `git status --short` before it is there so you see what you are about to stage rather than trusting the flag. Same rule as the Global Constraints section: stage named paths, and never `-A`.
 
 ### Task B10: Pin the budget and the event-log discipline
 
@@ -2901,7 +3534,7 @@ git commit -m "refactor(analytics): retire the snapshot model"
 
 - [ ] **Step 1: Write the budget test**
 
-Replace the PR A day-of-ticks case with the user-count-independence one:
+Add the user-count-independence cases below. If PR A has already merged and this branch has been rebased, delete its four cases in the same commit — they measure the sweep this PR removes, and the rebase table at the top of PR B names them. If the rebase has not happened yet, there is nothing to delete; add these and revisit at the rebase.
 
 ```python
 def test_the_daily_job_costs_the_same_at_any_user_count(tmp_path):
@@ -3123,7 +3756,7 @@ In `admin_analytics.py`, accept `role`, `tier` and `cohort` in the users query p
 
 - [ ] **Step 4: Rewire the two list paths**
 
-`ValueAnalyticsQueryService.list_users` reads `users` joined to `user_activity` and to yesterday's `user_daily_facts` row. Tier and operational state come from that row, which is why the response labels them as of yesterday. The segment is computed live per page through `build_lifecycle_inputs` over the batched `list_activity` and `sum_recent_facts` — one query each for the page, never one per row. `group` comes from `resolve_group_badge`.
+`ValueAnalyticsQueryService.list_users` reads `users` joined to `user_activity` and to yesterday's `user_daily_facts` row. Tier and operational state come from that row, which is why the response labels them as of yesterday. The segment is computed live per page through `build_lifecycle_inputs` over the batched `list_activity` and `sum_recent_facts` — one query each for the page, never one per row — with `as_of=now`, the identity case where nothing is clamped. `group` comes from `resolve_group_badge`.
 
 `AnalyticsQueryService.list_users` (the legacy surface) loses its 30-day all-user event scan and reads `sum_recent_facts` instead. If nothing still calls it after PR C, delete it rather than leaving a second users list that answers differently.
 
@@ -3300,7 +3933,7 @@ git commit -m "perf(analytics): bound the overview to one current-day scan"
 - Consumes: `user_daily_facts` (B1), `list_facts_for_date` (B8).
 - Produces: new `metric_name` values in `analytics_daily_rollups`. Nothing consumes them yet; they exist so the history survives the 180-day expiry.
 
-Fact rows carry a user id and therefore expire at 180 days. Anything worth keeping longer has to be anonymous before they go, and the retention service already writes rollups before deleting — that ordering is the thing to preserve.
+Fact rows carry a user id and therefore expire at 180 days — and so do `lifecycle_transitions` rows, which Task B9 step 5 adds to the same sweep. Anything worth keeping longer has to be anonymous before they go, and the retention service already writes rollups before deleting — that ordering is the thing to preserve.
 
 **No DDL change.** `analytics_daily_rollups` has a nine-column composite primary key, and adding a dimension to it means rebuilding the table in SQLite. Use the existing `user_state` column as the dimension *value* and encode the dimension *name* in `metric_name`:
 
@@ -3334,6 +3967,26 @@ def test_tier_and_cohort_totals_survive_expiry(retention_fixture):
         r.metric_name == "cohort_runs_completed" and r.user_state == "lab"
         for r in rollups
     )
+
+
+def test_every_user_keyed_table_expires_together(retention_fixture):
+    """Both new tables carry a user id, so both expire at 180 days.
+
+    `lifecycle_transitions` is the one that gets forgotten: Task B1 creates
+    it and Task B8 appends to it, and neither is a place anyone goes looking
+    for a retention rule. Unexpired it becomes the longest-lived personal
+    data in the schema, in the table read least often.
+    """
+    retention_fixture.seed_facts(date(2026, 3, 1), tier="starter", cohort="lab")
+    retention_fixture.seed_transition(date(2026, 3, 1), "growing", "at_risk")
+    retention_fixture.seed_transition(date(2026, 9, 10), "at_risk", "dormant")
+
+    retention_fixture.service.run_once(now=NOW)
+
+    assert retention_fixture.facts_for(date(2026, 3, 1)) == []
+    assert retention_fixture.transitions_for(date(2026, 3, 1)) == []
+    # Inside the window, untouched.
+    assert retention_fixture.transitions_for(date(2026, 9, 10)) != []
 ```
 
 - [ ] **Step 2: Run it to verify it fails, then implement**
@@ -3479,8 +4132,13 @@ git commit -m "feat(analytics): build user metrics once and filter by audience"
 **Files:**
 - Modify: `dashboard/frontend/app.html` — the filter block at lines 2255-2260, the users table at lines 2475-2476, the cache busters at lines 2665-2678
 - Modify: `dashboard/frontend/js/admin-analytics-value.js` (996 lines) — filter state, the three new controls, the group badge
+- Modify: `dashboard/frontend/js/admin-analytics.js` — `readFilterControls()` and the URL state the new controls wire into
 - Modify: `dashboard/frontend/js/admin-credits.js` — the cohort field on the Users tab
+- Modify: `dashboard/frontend/styles.css` — styling for the three filter controls and the Cohort column
+- Modify: `dashboard/backend/tests/_frontend_source.py` — add the `ADMIN_CREDITS_JS` constant
 - Test: `dashboard/backend/tests/test_admin_analytics_value_frontend.py` and `test_admin_analytics_frontend.py`
+
+All five frontend files are listed because step 1 asserts a bumped cache buster for each, and step 2's rule is "bump each file you edit". An earlier draft listed three and asserted five, which leaves the implementer to either bump files the task says it does not touch or ship a red test. If it turns out the controls genuinely need no CSS, drop `styles.css` from **both** lists in the same edit — the two must agree, whichever way.
 
 **Interfaces:**
 - Consumes: the axis filters from C1 and `PATCH /api/admin/users/{id}` with `cohort` from B2.
@@ -3488,7 +4146,15 @@ git commit -m "feat(analytics): build user metrics once and filter by audience"
 
 - [ ] **Step 1: Write the failing guard tests**
 
-The frontend has no build step, so the guards read source text through `dashboard/backend/tests/_frontend_source.py`. Add:
+The frontend has no build step, so the guards read source text through `dashboard/backend/tests/_frontend_source.py`. That module currently exports `FRONTEND`, `APP_HTML`, `APP_JS` and `STYLES` — and **not** `ADMIN_CREDITS_JS`, so add it there first, beside the other three:
+
+```python
+ADMIN_CREDITS_JS = (FRONTEND / "js" / "admin-credits.js").read_text(encoding="utf-8")
+```
+
+Without that line the guard below fails at import with `NameError`, which reads as a broken test file rather than a missing constant and costs an eliminated-by-bisect CI round.
+
+Then add:
 
 ```python
 def test_the_three_axis_filters_exist():
@@ -3511,13 +4177,23 @@ def test_cache_buster_versions_are_pinned():
 
 - [ ] **Step 2: Bump every cache buster you touch, and only those**
 
-Current values in `app.html`: `styles.css?v=139` (line 16), `js/admin-analytics.js?v=6`, `js/admin-analytics-value.js?v=5`, `js/admin-credits.js?v=6`, `js/admin-tabs.js?v=5` (lines 2674-2676, 2673). Bump each file you edit by one and update **every** test that pins it. Find them all first:
+Current values in `app.html`: `styles.css?v=139` (line 16), `js/admin-credits.js?v=6`, `js/admin-analytics.js?v=6`, `js/admin-analytics-value.js?v=5` (lines 2673-2675), `js/admin-tabs.js?v=5`. Bump each file you edit by one — the four in the assertions above, not `admin-tabs.js`, which this task does not touch — and update **every** test that pins it. Find them all first:
 
 ```bash
 command grep -rn "?v=" dashboard/frontend/app.html dashboard/backend/tests/ | sort
 ```
 
-Use `command grep`, not `grep`: the shell's `grep` is shimmed to `ugrep` here and hides gitignored files. Five test files pin these strings; a missed one is a red CI run on an otherwise finished PR.
+Use `command grep`, not `grep`: the shell's `grep` is shimmed to `ugrep` here and hides gitignored files. Eleven test files pin some `?v=` string; **five** pin one of the four this task bumps, and all five have to move together:
+
+| File | Pins |
+|---|---|
+| `test_admin_analytics_frontend.py` | `styles.css`, `admin-analytics.js` (x2), `admin-analytics-value.js` |
+| `test_admin_credits_frontend.py` | `admin-credits.js` |
+| `test_backtest_comparison_frontend.py` | `styles.css` |
+| `test_credit_format_frontend.py` | `admin-credits.js`, `admin-analytics.js` |
+| `test_frontend_fast_boot.py` | `styles.css`, `admin-credits.js`, `admin-analytics.js` |
+
+A missed one is a red CI run on an otherwise finished PR. The table is here rather than left to the grep because the count alone ("five test files") does not tell you *which* five, and `test_backtest_comparison_frontend.py` is the one nobody expects to care about an analytics cache buster.
 
 - [ ] **Step 3: Add the controls**
 
@@ -3542,7 +4218,12 @@ Expected: PASS on both.
 - [ ] **Step 5: Commit and open the PR**
 
 ```bash
-git add dashboard/frontend/ dashboard/backend/tests/
+git status --short
+git add dashboard/frontend/app.html dashboard/frontend/styles.css \
+        dashboard/frontend/js/admin-analytics.js \
+        dashboard/frontend/js/admin-analytics-value.js \
+        dashboard/frontend/js/admin-credits.js \
+        dashboard/backend/tests/
 git status --short
 git commit -m "feat(admin): filter analytics by role, tier and cohort"
 git push -u origin feat/user-analytics-read-paths
@@ -3570,3 +4251,59 @@ Checked against the spec section by section. Three things the plan resolves that
 4. **The activity route is not quite unchanged.** The spec's read-paths table marks `GET /users/{id}/activity` as unchanged. Its sessions section reaches `list_session_rows` (`query_service.py:526`), which scans a user's entire `event_group='experience'` history with no time window and paginates in Python. That is an unbounded per-user read and it contradicts the discipline rules the same spec sets, so PR C task 1 step 6 gives it a 30-day window. The timeline, runs and usage sections are genuinely unchanged.
 
 One spec requirement has no task by design: the outreach sender, the My Usage page, the subscription system and the `viewer` role are all explicit non-goals. Their seams are built — `lifecycle_transitions` in PR B task 1 and 8, `get_user_metrics` in PR C task 5, `commercial_tier` untouched in `lifecycle.py`, and admin accounts for the supervisor.
+
+## Code scanning
+
+The repository has **32 open CodeQL alerts** on `main` (3 `warning`, 29 `note`; no `error`, and none with a security severity). Dependabot is at zero and secret scanning is not enabled on this repository. None of the 32 are introduced by this work — check before assuming otherwise, since an alert appearing during PR B is far more likely to be new than pre-existing.
+
+**Seven of them are retired by this plan as a side effect**, and their disappearance is a useful signal that the deletions in Task B9 actually landed:
+
+| Alert | Location | Retired by |
+|---|---|---|
+| `py/cyclic-import` (x2) | `domain/analytics/states.py:22-23` | B9 step 4 deletes the file |
+| `py/cyclic-import` | `domain/analytics/service.py:236` | the `from .states import` line goes with it |
+| `py/ineffectual-statement` (x3) | `domain/analytics/lifecycle_backfill.py:117,125,132` | B9 step 4 deletes the file |
+| `py/unused-global-variable` | `domain/analytics/maintenance.py:103` | B8 step 5 deletes `_last_rollup_day` |
+
+Three alerts in analytics files are **not** retired and should not be "tidied" as part of these PRs:
+
+- `py/cyclic-import` at `value_repository.py:1025` — the deferred `ModelProviderService` import inside `get_operational_facts`. Task B7 keeps that method deliberately; the import is deferred *because* of the cycle, which is the correct fix already.
+- `py/cyclic-import` at `service.py:237` and `value_queries.py:20`, `rollups.py:19`, `query_service.py:1316`, `instrumentation.py:15` — same pattern, same reason.
+- `py/ineffectual-statement` at `backfill.py:116` — a different module from `lifecycle_backfill.py`, and out of scope here.
+
+The remaining alerts live outside the analytics package. Fixing them is worth doing and belongs in its own PR: a cleanup sweep folded into a data-model change is a diff no reviewer can read.
+
+## Corrections from review
+
+A review pass against the real source found fourteen defects in the first draft. They are recorded here rather than only fixed in place, because most of them were *plausible* — the kind a second draft reintroduces.
+
+**The plan was wrong about the schema in two places, and both changed the design.**
+
+1. **`protocol_runs` has no owner column** (`domain/runs/repository.py:87-104`), and the agent→owner mapping is in `external_agents`, which lives in a different database. "One SQL statement with an `IN` list" was not implementable; the run count is now two statements plus a fold. Task B7.
+2. **`ModelProviderService.list_execution_options` is *mostly* user-independent** (`model_providers/service.py:162-213`) — only `list_user_credentials` takes a user. The first draft treated `usable_billing_lane` and `selected_provider_enabled` as unbatchable and left them out of the batched read, which would have made the equivalence test fail for every user with a disabled provider. They are batchable, and now are. Task B7.
+
+**Three defects would have produced a job that fails nightly or silently loses data.**
+
+3. **`user_activity` cannot answer a question about the past.** It is one row per user overwritten in place, so `calculate_lifecycle(as_of=<end of D>)` raised on the first user active after midnight — and because the step wraps the whole population in one try/except, that meant zero fact rows for everyone, every night. Job step 9a.
+4. **The trailing window excluded its own day.** `sum_recent_facts(start=D-29, end=D)` runs before D's row exists, so it summed 29 dates and the stored segment disagreed with the read path from the next morning onward. Job step 9b.
+5. **Events that arrive after the day is written were lost permanently.** The aggregate filters `occurred_at` while the cursor moves past D, and nothing ever looked again. The frontend route accepts events up to 24 hours old, so this was not an edge case. Job step 11.
+
+**Four were correctness traps that a test would not have caught.**
+
+6. **`ON CONFLICT … DO NOTHING` on transitions** froze the answer from a failed attempt, permanently disagreeing with the fact row the retry corrected. Now `DO UPDATE`, with a `data_quality` column so a partial-day transition is identifiable. Tasks B1, B8.
+7. **`activated_at` was immutable under `COALESCE`**, so ingestion pinned activation to whichever completion arrived first rather than the earliest — and Task B8's "defensive, idempotent" repair of it was a no-op. Now `LEAST`/`MIN`. Task B4.
+8. **"Failed terminal runs in 24h" is not the rule.** `_run_health` counts *consecutive from the most recent* and the reason code says so; a `COUNT(*)` is a different number that would reclassify users on the daily board while their profile said healthy. The rule is now one pure function called by both paths. Task B7.
+9. **`lifecycle_transitions` had no expiry**, despite carrying a user id and a stated 180-day retention. It would have become the longest-lived personal data in the schema, in the table nothing reads. Task B9 step 5, Task C4.
+
+**Two were guards that could not have fired.**
+
+10. **Task A5's budget test could never pass**: its stub value store failed the `values.analytics_base is states.base_store` check (`states.py:700`), forcing the split write that leaves `lifecycle_segment` NULL, so every user was re-selected on every tick. It also ran 96 ticks from 00:30, which crosses midnight, and its docstring's "19,200" ignored the `snapshot_limit` clamp. Task A1's fixture now builds a real store; the count is 94 and the number is 9,400.
+11. **The `git stash` demonstration proved nothing** — A1 through A3 are each committed before A5 runs, so a stash reverts only A5's own uncommitted test. Replaced with a `monkeypatch` case that forces the pre-fix behaviour and keeps working in CI.
+
+**Three were process defects that would have cost a CI round or worse.**
+
+12. **`git add -u` stages modifications, not just deletions** — the first draft's parenthetical said otherwise, in the one task that runs the full suite immediately before committing, where `dashboard/storage/data/backtest.db` is tracked and gets rewritten by a bare import. Now path-scoped. Task B9, and the Global Constraints bullet.
+13. **Tasks B4 and B10 edited a file that does not exist on their branch.** PR B is cut from `origin/main` and PR A's test file only arrives at the rebase. There is now an explicit rebase table at the top of PR B. 
+14. **Task C6 asserted cache-buster bumps for two files its own Files list did not name**, and referenced `ADMIN_CREDITS_JS`, which `tests/_frontend_source.py` does not export — an import-time `NameError`. Both fixed, and the five test files that pin these strings are named rather than counted.
+
+One review finding did **not** hold up and was deliberately not acted on: the claim that "Five test files pin these strings" undercounted. Eleven test files pin some `?v=` string, but exactly five pin one of the four assets Task C6 bumps, so the original count was right. The sentence now names them anyway, because a bare count is what made it re-derivable in the first place.
