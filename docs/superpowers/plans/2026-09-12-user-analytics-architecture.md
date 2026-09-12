@@ -2109,7 +2109,7 @@ git commit -m "feat(analytics): maintain user activity from ingestion"
   - `resolve_group_badge(*, role: str, cohort: str | None, tier: CommercialTier) -> str` in `lifecycle.py`
   - `RecentFactTotals(active_days: int, successful_backtests: int, runs_requested: int, runs_completed: int, runs_failed: int, runs_cancelled: int, operator_cost_micro: int, own_spend_micro: int, days_present: int)` in `value_repository.py`
   - `ValueAnalyticsStore.sum_recent_facts(user_ids: Sequence[int], *, start: date, end: date) -> dict[int, RecentFactTotals]`
-  - `build_lifecycle_inputs(user_id: int, *, created_at: datetime, activity: UserActivity | None, totals: RecentFactTotals | None, as_of: datetime) -> LifecycleInputs` in `lifecycle_reads.py`. `as_of` is required, not defaulted: the live read path passes `now` and the daily job passes the end of the day it is computing, and a default would silently give the job the live answer.
+  - `build_lifecycle_inputs(user_id: int, *, created_at: datetime, activity: UserActivity | None, totals: RecentFactTotals | None, as_of: datetime, day_activity_at: datetime | None = None) -> LifecycleInputs` in `lifecycle_reads.py`. `as_of` is required, not defaulted: the live read path passes `now` and the daily job passes the end of the day it is computing, and a default would silently give the job the live answer. `day_activity_at` *is* defaulted, because it only exists for the daily job — it is the user's last activity inside the day being computed, which is the one thing no window over past fact rows can supply.
 
   Task B7 uses all four. Task C1 and C2 call `build_lifecycle_inputs` on the read path.
 
@@ -2231,6 +2231,37 @@ def test_evidence_newer_than_as_of_is_clamped_not_raised():
     )
     result = calculate_lifecycle(inputs, end_of_yesterday)
     assert result.segment == "at_risk"
+
+
+def test_activity_inside_the_computed_day_beats_the_window_fallback():
+    """A user active only on D is not dormant, and the window cannot say so.
+
+    Job step 9b narrows the fact window to D-29..D-1, so a user whose first
+    activity in a month lands on D has no row in it. Falling straight
+    through to `last_active_date` reads None and classifies them Dormant on
+    the very day they came back.
+    """
+    end_of_yesterday = datetime(2026, 9, 11, 23, 59, 59, tzinfo=timezone.utc)
+    activity = UserActivity(
+        user_id=1,
+        activated_at=NOW - timedelta(days=200),
+        last_meaningful_activity_at=NOW,  # newer than as_of, so clamped
+        updated_at=NOW,
+    )
+
+    inputs = build_lifecycle_inputs(
+        1,
+        created_at=NOW - timedelta(days=300),
+        activity=activity,
+        totals=_totals(active_days=1, last_active_date=None),
+        as_of=end_of_yesterday,
+        day_activity_at=datetime(2026, 9, 11, 18, 0, tzinfo=timezone.utc),
+    )
+
+    assert inputs.last_meaningful_activity_at == datetime(
+        2026, 9, 11, 18, 0, tzinfo=timezone.utc
+    )
+    assert calculate_lifecycle(inputs, end_of_yesterday).segment == "growing"
 
 
 def test_the_live_path_clamps_nothing():
@@ -2402,6 +2433,7 @@ def build_lifecycle_inputs(
     activity: UserActivity | None,
     totals: RecentFactTotals | None,
     as_of: datetime,
+    day_activity_at: datetime | None = None,
 ) -> LifecycleInputs:
     """Assemble one user's lifecycle inputs from stored rows, as of ``as_of``.
 
@@ -2429,11 +2461,26 @@ def build_lifecycle_inputs(
     of this day", and pretending they activated at midnight would put them in
     the wrong retention cohort.
 
-    ``last_meaningful_activity_at`` newer than ``as_of`` falls back to
-    ``totals.last_active_date`` -- the fact table *does* keep history, which
-    is the whole reason it exists. Midnight-start of that date is the
-    conservative choice: ``calculate_lifecycle`` counts ``inactive_days`` in
-    whole UTC dates, so the time of day is never read.
+    ``last_meaningful_activity_at`` is only replaced when the stored value is
+    newer than ``as_of``, because when it is not, it is authoritative and more
+    precise than any fallback. The replacement walks newest-first:
+
+    1. ``day_activity_at`` -- the user's own last activity **inside the day
+       being computed**, from the daily job's one-day event aggregate. This
+       has to come first and it is the case a date-window fallback alone
+       silently gets wrong: a user whose only recent activity is on ``D``
+       itself has no row in the ``D-29..D-1`` window at all, so skipping
+       straight to ``totals`` would read them as inactive for thirty days and
+       classify an active user as Dormant.
+    2. ``totals.last_active_date`` -- the fact table *does* keep history,
+       which is the whole reason it exists. Midnight-start of that date is the
+       conservative choice; ``calculate_lifecycle`` counts ``inactive_days`` in
+       whole UTC dates, so the time of day is never read.
+    3. None -- no activity anywhere in the window, so ``created_at`` anchors
+       the calculation, which is what a dormant classification needs.
+
+    The live read path passes ``as_of=now`` and no ``day_activity_at``, and
+    every branch here is inert for it.
     """
     subject_id = positive_user_id(user_id)
     counts = totals or RecentFactTotals()
@@ -2447,11 +2494,14 @@ def build_lifecycle_inputs(
         activity.last_meaningful_activity_at if activity is not None else None
     )
     if last_activity is not None and last_activity > boundary:
-        last_activity = (
-            datetime.combine(counts.last_active_date, time.min, tzinfo=timezone.utc)
-            if counts.last_active_date is not None
-            else None
-        )
+        if day_activity_at is not None and day_activity_at <= boundary:
+            last_activity = day_activity_at
+        elif counts.last_active_date is not None:
+            last_activity = datetime.combine(
+                counts.last_active_date, time.min, tzinfo=timezone.utc
+            )
+        else:
+            last_activity = None
 
     return LifecycleInputs(
         user_id=subject_id,
@@ -3376,9 +3426,13 @@ class DailyFactsReport(BaseModel):
 
 - `created_at` — from the eligible-users query. A user whose `created_at` is after the end of D has no day D; **drop them from the eligible set for this day** rather than clamping, because a zero-age row would claim they existed.
 - `activated_at` — `stored.activated_at if stored.activated_at <= end_of_D else None`. Activation is monotonic and set-once, so "activated after D" simply means "not activated as of D", which is the honest answer and the one the retention cohort needs.
-- `last_meaningful_activity_at` — `stored.last_meaningful_activity_at` when it is `<= end_of_D`; otherwise the last date on which the user was active *at or before D*, which comes from the fact table, not from `user_activity`. Extend `sum_recent_facts` to return it: `MAX(CASE WHEN active THEN snapshot_date END) AS last_active_date` is one more column in a `GROUP BY` the query already performs, so it costs nothing. If neither is available the user was inactive for the whole window and `None` is correct — `calculate_lifecycle` falls back to `created_at` as its anchor, which is what a dormant classification needs.
+- `last_meaningful_activity_at` — `stored.last_meaningful_activity_at` when it is `<= end_of_D`, because then it is authoritative. Otherwise, newest-first: **the user's own last activity inside D**, from the step-`events` aggregate already in hand; then the last date they were active in `D-29..D-1`, from the fact table; then `None`.
 
-The stored value is usable for most users precisely because a dormant or at-risk user *by definition* has not been active recently, so their row is already older than `end_of_D`. The clamp only bites for users active today, and those are exactly the users the fact table can answer for.
+  The first of those three is the one that is easy to drop and expensive to get wrong. Because job step 9b narrows the fact-table window to `D-29..D-1`, a user whose only recent activity is on **D itself** has no row in it — so a fallback that went straight to the fact table would read them as inactive for thirty days and write an active user down as **Dormant**. The one-day aggregate is the only source that knows about D, which is why it has to be threaded into `build_lifecycle_inputs` as `day_activity_at` rather than left implicit.
+
+  Extend `sum_recent_facts` for the second: `MAX(CASE WHEN active THEN snapshot_date END) AS last_active_date` is one more column in a `GROUP BY` the query already performs, so it costs nothing. `None` at the end is correct rather than defensive — the user was inactive for the whole window and `calculate_lifecycle` anchors on `created_at`, which is what a dormant classification needs.
+
+The stored value is usable for most users precisely because a dormant or at-risk user *by definition* has not been active recently, so their row is already older than `end_of_D`. The clamp only bites for users active today, and those are exactly the users the other two sources can answer for.
 
 **Job step 9b — the trailing window must include D, or the stored segment is computed from 29 days.**
 
