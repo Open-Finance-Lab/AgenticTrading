@@ -223,7 +223,7 @@ Once PR 2 stops moving:
 ```bash
 cd ../ATL-worktrees/p1-cancel-memory
 git fetch origin fix/backtest-run-provenance
-git rebase origin/fix/backtest-run-provenance
+git rebase origin/fix/backtest-run-provenance   # PR 2 final head: 3710c43b
 # resolve, re-run the suite, then force-with-lease
 git push --force-with-lease origin fix/backtest-cancel-and-memory
 ```
@@ -387,3 +387,25 @@ Append newest last. One line per meaningful event.
   `gh pr edit --body`, which replaces the body wholesale. No error, no warning, PR still
   looked fine. **Draft status is the gate that actually held**, because it is a separate
   flag no normal operation overwrites as a side effect. Verify both layers, not either.
+- `2026-09-11` — PR #458 final head `3710c43b`. **The circular-import traceback blames
+  the edge you must not remove.** Measured, not reasoned:
+
+  ```
+  ImportError: cannot import name 'MIN_LLM_DECISION_COVERAGE' from
+  partially initialized module 'dashboard.backend.domain.leaderboard.service'
+  (most likely due to a circular import)
+  ```
+
+  The two modules named — `provenance` and `leaderboard/service` — are the edge that was
+  **always there and is correct**. The edge that actually broke it is the newly added
+  import, which appears as one unremarkable frame mid-traceback. The traceback *head* is
+  whichever route imported first; measured, that was
+  `app` → `api/router` → `external_backtest` → `external_run_service` → `portfolio_manager`,
+  so the reader opens in an API module unrelated to either package. **Someone bisecting
+  from the error text works on the one edge they must not remove** — which would delete
+  the single-owner property the shared constant exists to provide.
+
+  The docstring therefore carries the verbatim error, the measured traceback head, and
+  the instruction to read the traceback for *who imported `provenance`* rather than for
+  the modules the error names. As the agent put it: a docstring is the only thing still
+  running when the interpreter isn't.
