@@ -344,3 +344,24 @@ Append newest last. One line per meaningful event.
   plan on `main` helps a resuming session find it.
 - `2026-09-11` — Noted the PR 3 rebase obligation: it branched at `0288ff79`, PR 2 has
   moved on, and both edit `backtests.py` and `app.js`.
+- `2026-09-11` — **PR #459 reworked and green** (4479 passed). Two deviations from the
+  brief, both approved:
+  1. **"Invalidate" is a ranking key, not a refusal.** My skip-and-log instruction would
+     have broken a pinned contract I did not know about:
+     `test_get_leaderboard_scales_to_display_capital_and_prefers_model_leader` seeds
+     $100k rows under a $1k config and asserts they are **served rescaled**, with
+     `display_capital` published. Scale-and-serve is designed behaviour. Criterion 1's
+     complaint is the word *silently*, not *reusing* — so the seed joins the key, an
+     exact-seed row wins, drift warns, and nothing recomputes. Inertness is now trivially
+     true rather than argued from a trace.
+  2. `_warn_on_seed_mismatch` narrowed to the derived-seed case so one condition cannot
+     emit two log lines. An alert channel has a credibility budget.
+- `2026-09-11` — **#390 is not the column its title names.** `equity` is `NOT NULL` in
+  both backends; the reachable half is `cash` and `positions_value`, which the committed
+  DB declares nullable because `CREATE TABLE IF NOT EXISTS` never tightened the existing
+  table. The schema **drift** was the risk, not the declared schema.
+- `2026-09-11` — Orchestration lesson, twice over: **where an issue's acceptance
+  criterion and an existing pinned test disagree, the test is evidence about what the
+  system promises; the criterion is one person's phrasing of a complaint.** Both briefs I
+  wrote from issue text (#365's refusal, #169's `decision_source` naming) would have
+  broken working contracts, and both times the agent reading the code caught it.
