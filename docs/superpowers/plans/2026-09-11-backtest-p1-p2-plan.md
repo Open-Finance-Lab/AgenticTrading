@@ -174,7 +174,36 @@ this plan was a guess the reporter's investigation contradicts. See the spec.
 **Fallback:** if #365 turns out to require the re-run #194 is blocked on, ship #390
 alone and say so. A correct partial fix beats a confident wrong one.
 
-## Out-of-scope finding: credit metering is disconnected
+## RETRACTED out-of-scope finding: "credit metering is disconnected"
+
+> **RETRACTED 2026-09-12. The observations below are accurate; the conclusion drawn
+> from them is wrong, and the section is kept rather than deleted so the mistake stays
+> legible.** `3eebb7da` did not leave dashboard LLM spend unmetered. It removed the
+> one-credit metering *and replaced it*, in the same change, with the unified LLM
+> execution layer planned in
+> `docs/superpowers/plans/2026-08-24-unified-llm-execution-layer.md` — whose own File
+> Map names `api/routers/backtests.py` for "removal of old one-credit metering".
+>
+> The live control, verified at source: `/backtest/run` with `decision_source='llm'`
+> on the pipeline runtime is sign-in-only and requires `billing_mode`
+> (`backtests.py:2755-2841`); the worker receives a signed handoff
+> (`backtest_hourly_agent.py:170`); and `infrastructure/llm/execution/service.py`
+> reserves, settles and releases **per call, by provider-reported usage** against
+> `credit_ledger_entries`, failing closed on any settlement mismatch. The parent
+> repeats `finalize_run` in its `finally` so a killed subprocess cannot strand a
+> reservation. Metering did not stop; it moved, and got finer.
+>
+> **What survives of the finding:** `domain/entitlements/` is now vestigial — one
+> non-test reader, `admin_users.py:179`, for a stats boolean — and CLAUDE.md described
+> the superseded mechanism as live until it was corrected alongside this note.
+>
+> **Why it is worth keeping.** The grep was right and the inference was not. This
+> workstream's whole theme is that an absence is not a value; "no caller found" is an
+> absence, and reading it as "no control exists" is the same error the six issues were
+> about, committed by the reviewer instead of by the code. The rule that would have
+> caught it: when a control looks deleted, find the commit that deleted it and read
+> what that commit added.
+
 
 **Verified 2026-09-11 on `main` @ `193400d6`. Not one of the six issues; recorded here
 because PR 3 was planned against behaviour that does not exist.**
@@ -207,9 +236,9 @@ This is the workstream's own defect class in its purest form: a correct, tested 
 disconnected at the boundary, with everything around it still asserting it works. It
 differs from the other five only in that the discarded value is **money**.
 
-**Not actioned.** Re-arming a spend control changes behaviour for real users, and filing
-on a shared repo assigns work to others — both are the user's call. Raised, awaiting a
-decision.
+**Not actioned, and now must not be** — see the retraction at the top of this section.
+Re-arming `authorize_llm_run` would add a second, coarser charge on top of the
+usage-based settlement that is already running.
 
 ## Orchestration TODO — rebase PR 3 before it is marked ready
 
