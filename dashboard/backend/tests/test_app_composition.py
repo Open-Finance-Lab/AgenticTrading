@@ -84,6 +84,7 @@ EXPECTED_ADMIN_ANALYTICS_ROUTES = {
 EXPECTED_BACKTESTS_ROUTES = {
     ("POST", "/backtest/run", "run_backtest_endpoint"),
     ("GET", "/backtest/status", "get_backtest_status"),
+    ("POST", "/backtest/cancel", "cancel_backtest_endpoint"),
     ("GET", "/api/backtest/runs", "get_backtest_runs"),
     ("GET", "/api/backtest/compare/latest", "compare_latest_backtests"),
     ("GET", "/api/backtest/{run_id}/chart-data", "get_backtest_chart_data"),
@@ -249,6 +250,7 @@ EXPECTED_FULL_CONTRACT = {
     ("GET", "/app.js"),
     ("POST", "/backtest/run"),
     ("GET", "/backtest/status"),
+    ("POST", "/backtest/cancel"),
     ("GET", "/compare"),
     ("GET", "/config/defaults"),
     ("GET", "/config/features"),

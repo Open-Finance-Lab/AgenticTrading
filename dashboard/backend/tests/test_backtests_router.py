@@ -26,6 +26,7 @@ from dashboard.backend.domain.model_providers.execution_catalog import (
     UnsupportedExecutionModel,
 )
 import dashboard.backend.api.routers.backtests as bt
+from dashboard.backend.tests._fake_child import FakeChild
 
 
 _REAL_RUN_BACKTEST_BACKGROUND = bt.run_backtest_background
@@ -913,7 +914,16 @@ def test_hosted_backtest_timeout_is_capped_and_never_below_pipeline():
 
 
 def test_pipeline_timeout_finalizes_execution_and_slot_once(monkeypatch):
-    """A parent timeout keeps the existing single-owner cleanup path."""
+    """A parent timeout keeps the existing single-owner cleanup path.
+
+    The ``Popen`` rewrite that made cancel possible (issue #273) is the easiest
+    place to lose this: ``subprocess.run(timeout=...)`` enforced the budget for
+    free and ``Popen`` does not, so the wall-clock bound now lives in an
+    explicit ``wait(timeout=...)``. The parent must still stop the child at
+    ``_backtest_subprocess_timeout``'s number, still surface it as a
+    ``TimeoutExpired``, and still finalize the slot and the execution
+    reservation exactly once each.
+    """
     run_id = "agent_timeout_cleanup"
     session_id = str(uuid.uuid4())
     assert (
@@ -925,13 +935,14 @@ def test_pipeline_timeout_finalizes_execution_and_slot_once(monkeypatch):
         is None
     )
 
-    subprocess_calls = []
+    popen_calls = []
     finalized_slots = []
     finalized_execution_runs = []
+    child = FakeChild(stdout="run header line\n", timeout_waits=1)
 
-    def fake_run(cmd, **kwargs):
-        subprocess_calls.append({"cmd": cmd, **kwargs})
-        raise subprocess.TimeoutExpired(cmd, kwargs["timeout"])
+    def fake_popen(cmd, **kwargs):
+        popen_calls.append({"cmd": cmd, **kwargs})
+        return child
 
     class FakeExecutionService:
         def __init__(self, **_kwargs):
@@ -942,11 +953,13 @@ def test_pipeline_timeout_finalizes_execution_and_slot_once(monkeypatch):
 
     real_finalize_slot = bt._finalize_slot
 
-    def spy_finalize_slot(live_run_id, *, error, runs_count):
+    def spy_finalize_slot(live_run_id, *, error, runs_count, cancelled=False):
         finalized_slots.append((live_run_id, runs_count))
-        return real_finalize_slot(live_run_id, error=error, runs_count=runs_count)
+        return real_finalize_slot(
+            live_run_id, error=error, runs_count=runs_count, cancelled=cancelled
+        )
 
-    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(subprocess, "Popen", fake_popen)
     monkeypatch.setattr(bt, "LLMExecutionService", FakeExecutionService)
     monkeypatch.setattr(bt, "get_model_provider_service", lambda: object())
     monkeypatch.setattr(bt, "_finalize_slot", spy_finalize_slot)
@@ -961,12 +974,19 @@ def test_pipeline_timeout_finalizes_execution_and_slot_once(monkeypatch):
         execution_handoff_payload="opaque-test-handoff",
     )
 
-    assert len(subprocess_calls) == 1
-    assert subprocess_calls[0]["timeout"] == 3600
+    assert len(popen_calls) == 1
+    # The budget moved from a `run(timeout=)` kwarg to the parent's own wait.
+    assert child.wait_timeouts[0] == 3600
+    # Timed out => terminated. The child died inside the grace period, so no
+    # SIGKILL was needed.
+    assert (child.terminated, child.killed) == (1, 0)
     assert finalized_slots == [(run_id, 0)]
     assert finalized_execution_runs == [run_id]
     assert run_id not in bt._active_slots
     assert bt._recent_slots[run_id]["running"] is False
+    assert bt._recent_slots[run_id]["cancelled"] is False
+    # The handle is dropped with the run; _recent_slots retains fifty of these.
+    assert bt._recent_slots[run_id]["process"] is None
 
 
 def test_ai_hedge_fund_requires_openrouter_not_direct_openai(client, monkeypatch):

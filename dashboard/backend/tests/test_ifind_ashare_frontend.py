@@ -350,9 +350,10 @@ def test_backtest_launch_failure_remains_visible_instead_of_loading_history(js):
     assert "Backtest did not start." in js
     # A failed launch retitles the panel, so the error state is never shown
     # under "Backtest in progress". Asserted as the branch rather than as one
-    # ternary's spelling: the same helper grew a third title ("Backtest
-    # complete", for a panel that outlives its run) and an exact-source match
-    # failed on a change that kept this contract intact.
+    # ternary's spelling: the same helper now carries four titles (it also
+    # outlives its run for a fallback completion and for a cancel, issue #273)
+    # and an exact-source match failed on changes that kept this contract
+    # intact.
     panel = strip_comments(fn_body("function showBacktestRunProgress", js))
     assert "if (isError) title.textContent = 'Backtest did not start';" in panel
     assert "title.textContent = 'Backtest in progress';" in panel

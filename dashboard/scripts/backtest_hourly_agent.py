@@ -19,6 +19,7 @@ Usage:
 import sys
 import json
 import argparse
+import signal
 from pathlib import Path
 
 # Bootstrap for non-package execution contexts: when this module is run directly
@@ -549,7 +550,28 @@ def _close_pools() -> None:
         pool_module.close_all_pools()
 
 
+def _exit_on_sigterm(signum, _frame):
+    """Turn the dashboard's cancel signal into an ordinary interpreter exit.
+
+    Default SIGTERM disposition kills the process where it stands: the
+    ``finally`` below never runs, the DB pools stay open, and the progress file
+    this run is writing is left behind. The cancel path in
+    ``api/routers/backtests.py`` budgets ``_CANCEL_GRACE_SECONDS`` before it
+    escalates to SIGKILL precisely so this unwind can happen — with no handler
+    installed, that grace period bought nothing and its comment said otherwise.
+
+    ``SystemExit`` specifically, because it derives from ``BaseException``: the
+    backtest path is full of ``except Exception`` arms that would otherwise
+    swallow the stop and carry on, and the one ``except BaseException`` it does
+    pass through (``market_data_store``) re-raises. The handler can only make
+    the stop cleaner, never slower than the grace period — a run that ignores
+    this still dies to the SIGKILL behind it.
+    """
+    raise SystemExit(128 + signum)
+
+
 if __name__ == "__main__":
+    signal.signal(signal.SIGTERM, _exit_on_sigterm)
     # Reached through the module alias bound at the top rather than a second
     # `from` import of the same module: importing one module both ways in one
     # file is its own CodeQL finding (py/import-and-import-from), and the alias

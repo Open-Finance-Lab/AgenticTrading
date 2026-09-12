@@ -15,6 +15,7 @@ import pytest
 import requests
 
 from dashboard.backend.app import app
+from dashboard.backend.tests._fake_child import FakeChild
 from dashboard.backend.api.routers import backtests as backtests_router
 from dashboard.backend.database import BacktestDatabase
 from dashboard.backend.domain.backtesting import engine as engine_module
@@ -286,12 +287,12 @@ def test_ifind_api_background_builds_one_controlled_cli_command(
 
     captured = {}
 
-    def fake_subprocess_run(command, **kwargs):
+    def fake_popen(command, **kwargs):
         captured["command"] = list(command)
         captured["environment"] = kwargs["env"]
-        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+        return FakeChild()
 
-    monkeypatch.setattr(subprocess, "run", fake_subprocess_run)
+    monkeypatch.setattr(subprocess, "Popen", fake_popen)
     thread.run_target()
 
     command = captured["command"]
@@ -343,12 +344,12 @@ def test_ifind_refresh_token_is_inherited_by_subprocess_without_leaking(
 
     captured = {}
 
-    def fake_subprocess_run(command, **kwargs):
+    def fake_popen(command, **kwargs):
         captured["command"] = list(command)
         captured["environment"] = kwargs["env"]
-        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+        return FakeChild()
 
-    monkeypatch.setattr(subprocess, "run", fake_subprocess_run)
+    monkeypatch.setattr(subprocess, "Popen", fake_popen)
     thread = _CapturingThread.last
     assert thread is not None
     thread.run_target()
@@ -449,16 +450,32 @@ def test_ifind_llm_request_reaches_engine_database_and_chart_without_fallback(
         _fail_external("rule-based fallback"),
     )
 
+    class _InProcessChild(FakeChild):
+        """Runs the CLI where the child would, i.e. from inside `wait()`.
+
+        The worker launches with Popen and writes the signed handoff to the
+        child's stdin before waiting on it, so the payload only exists by the
+        time `wait()` is called -- `subprocess.run(input=...)` used to hand it
+        over at call time.
+        """
+
+        def __init__(self, command):
+            super().__init__()
+            self._command = list(command)
+
+        def wait(self, timeout=None):
+            monkeypatch.setattr(sys, "argv", [str(self._command[1]), *self._command[2:]])
+            monkeypatch.setattr(sys, "stdin", io.StringIO(self.stdin.value))
+            backtest_hourly_agent.main()
+            return super().wait(timeout)
+
     def run_cli_in_process(command, **_kwargs):
         assert command[command.index("--decision-source") + 1] == "llm"
         assert command[command.index("--model") + 1] == "openai/gpt-5.5"
         assert "--execution-handoff-stdin" in command
-        monkeypatch.setattr(sys, "argv", [str(command[1]), *command[2:]])
-        monkeypatch.setattr(sys, "stdin", io.StringIO(_kwargs["input"]))
-        backtest_hourly_agent.main()
-        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+        return _InProcessChild(command)
 
-    monkeypatch.setattr(subprocess, "run", run_cli_in_process)
+    monkeypatch.setattr(subprocess, "Popen", run_cli_in_process)
 
     response = TestClient(app).post(
         "/backtest/run",
