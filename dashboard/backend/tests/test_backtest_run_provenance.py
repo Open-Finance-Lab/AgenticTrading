@@ -281,6 +281,36 @@ def test_llm_decisions_round_trips_through_insert_run():
     )
 
 
+def test_the_postgres_backfill_carries_llm_decisions():
+    """The SQLite -> Postgres copy must not drop the counter.
+
+    0 is also what a row with no counter reads as, so a backfill that omitted
+    it would republish every migrated LLM run as a total fallback.
+    """
+    from dashboard.scripts import backfill_runs_to_postgres as backfill
+
+    captured: dict = {}
+
+    class _Target:
+        def insert_run(self, **kwargs):
+            captured.update(kwargs)
+
+    backfill._insert_one_run(_Target(), {
+        "run_id": "r",
+        "session_id": "s",
+        "agent_name": "Agent",
+        "mode": "backtest",
+        "start_date": "2026-03-01",
+        "end_date": "2026-04-01",
+        "initial_equity": 100000.0,
+        "llm_calls": 30,
+        "llm_decisions": 29,
+    })
+
+    assert captured["llm_calls"] == 30
+    assert captured["llm_decisions"] == 29
+
+
 def test_insert_run_defaults_llm_decisions_for_callers_that_have_none():
     """Baselines and paper trading call insert_run without it and must not
     start failing; their rows are rule-based by construction anyway."""
