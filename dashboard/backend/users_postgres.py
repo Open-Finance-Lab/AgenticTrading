@@ -46,6 +46,7 @@ from dashboard.backend.users import (
     hash_password,
     is_expired,
     parse_stored_timestamp,
+    parse_user_group,
     public_entitlements,
     public_user,
     public_user_with_entitlements,
@@ -94,6 +95,7 @@ class PostgresUserStore:
                         display_name TEXT NOT NULL,
                         password_hash TEXT NOT NULL,
                         role TEXT NOT NULL DEFAULT 'user',
+                        user_group TEXT NOT NULL DEFAULT 'unknown',
                         created_at TEXT NOT NULL,
                         discord_user_id TEXT,
                         avatar TEXT
@@ -111,6 +113,12 @@ class PostgresUserStore:
                     """
                     ALTER TABLE users
                     ADD COLUMN IF NOT EXISTS avatar TEXT
+                    """
+                )
+                cur.execute(
+                    """
+                    ALTER TABLE users
+                    ADD COLUMN IF NOT EXISTS user_group TEXT NOT NULL DEFAULT 'unknown'
                     """
                 )
                 cur.execute(
@@ -929,6 +937,7 @@ class PostgresUserStore:
         user_id: int,
         *,
         role: Optional[str] = None,
+        user_group: Optional[str] = None,
         max_concurrent_backtests: Optional[int] = None,
         credits: Optional[int] = None,
         updated_by_admin_id: Optional[int] = None,
@@ -939,6 +948,9 @@ class PostgresUserStore:
             normalized_role = (role or "").strip().lower()
             if normalized_role not in VALID_ROLES:
                 raise ValueError("invalid_role")
+        normalized_group = (
+            parse_user_group(user_group) if user_group is not None else None
+        )
         next_max, next_credits = validate_entitlement_patch(
             max_concurrent_backtests, credits
         )
@@ -965,6 +977,12 @@ class PostgresUserStore:
                         cur.execute(
                             "UPDATE users SET role = %s WHERE id = %s RETURNING *",
                             (normalized_role, int(user_id)),
+                        )
+                        user_row = cur.fetchone()
+                    if normalized_group is not None:
+                        cur.execute(
+                            "UPDATE users SET user_group = %s WHERE id = %s RETURNING *",
+                            (normalized_group, int(user_id)),
                         )
                         user_row = cur.fetchone()
                     if touches_entitlements:

@@ -916,6 +916,36 @@ def test_postgres_twin_repeats_every_sqlite_lazy_migration(
     )
 
 
+def test_user_store_twins_explicitly_migrate_user_group():
+    """Pin the account-group migration in both source-level twin guards.
+
+    The generic schema checks above catch drift, but this focused assertion
+    keeps the admin-only dimension's deployed-table migration visible in the
+    parity suite's failure output and prevents a future refactor from hiding
+    it behind a dynamically assembled SQL fragment.
+    """
+    sqlite_source = _module_source_path("dashboard.backend.users").read_text(
+        encoding="utf-8"
+    )
+    postgres_source = _module_source_path(
+        "dashboard.backend.users_postgres"
+    ).read_text(encoding="utf-8")
+
+    sqlite_schema = _parse_ddl(sqlite_source)
+    postgres_schema = _parse_ddl(postgres_source)
+
+    assert "user_group" in sqlite_schema.declared["users"]
+    assert "user_group" in postgres_schema.declared["users"]
+    assert "user_group" in sqlite_schema.migrated["users"]
+    assert "user_group" in postgres_schema.migrated["users"]
+
+    folded_postgres = re.sub(r"\s+", " ", postgres_source)
+    assert (
+        "ALTER TABLE users ADD COLUMN IF NOT EXISTS user_group "
+        "TEXT NOT NULL DEFAULT 'unknown'"
+    ) in folded_postgres
+
+
 def test_credits_postgres_migrates_every_column_added_by_sqlite_rebuild():
     """Credits rebuilds its ledger instead of using SQLite ADD COLUMN statements.
 
