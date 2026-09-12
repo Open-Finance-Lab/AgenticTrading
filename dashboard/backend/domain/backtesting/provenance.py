@@ -105,6 +105,13 @@ DECISION_PROVENANCE_UNKNOWN = "unknown"
 #: records ``llm_decisions`` at all. See ``run_decision_provenance``.
 DECISION_STEPS_KEY = "decision_steps"
 
+#: Metadata key carrying what the run *asked* for, as opposed to what it did.
+#: ``decision_source`` cannot answer that: the engine overwrites it with
+#: ``rule_based`` when no model client is available, so the one run that must
+#: be reported as a fallback is the one whose row denies being one. See
+#: ``run_decision_provenance``.
+REQUESTED_DECISION_SOURCE_KEY = "requested_decision_source"
+
 # Labels the engine persists when no model drove the run. "rule-based" is the
 # one it actually writes (engine.py); the rest are defensive, since a caller
 # with no model configured can leave the column empty or null.
@@ -185,10 +192,20 @@ def run_decision_provenance(run: Optional[Mapping[str, Any]]) -> Optional[Dict[s
 
     Returns both facts side by side, because the bug is precisely that they can
     differ: ``decision_source`` is what the caller *asked* for (the meaning that
-    name already carries in ``POST /backtest/run``'s response and in this row's
-    own metadata) and ``decision_provenance`` is what actually happened.
-    ``decision_fallback`` is the two disagreeing -- the run asked for the model
-    and did not get it.
+    name already carries in ``POST /backtest/run``'s response) and
+    ``decision_provenance`` is what actually happened. ``decision_fallback`` is
+    the two disagreeing -- the run asked for the model and did not get it.
+
+    The request is read from ``metadata.requested_decision_source``, **not**
+    from ``metadata.decision_source``, which is the *effective* source: the
+    engine rewrites its own ``decision_source`` to ``rule_based`` when no model
+    client is available, so on the one run that most needs reporting -- asked
+    for a model, never called one -- that key holds the outcome and claims it
+    was the request. Reading it as intent reported the headline failure as a
+    deliberate rule-based run: no fallback, no badge, and a note telling the
+    user this is what they ordered. Rows written before the engine recorded the
+    two separately fall back to it, since it is the only source they carry and
+    it is correct for every run that was not downgraded.
 
     ``metadata.decision_steps`` is the witness that this row records
     ``llm_decisions``. The column was added with ``DEFAULT 0``, so every row
@@ -217,7 +234,15 @@ def run_decision_provenance(run: Optional[Mapping[str, Any]]) -> Optional[Dict[s
         decision_steps=decision_steps,
     )
 
-    requested = metadata.get("decision_source")
+    requested = metadata.get(REQUESTED_DECISION_SOURCE_KEY)
+    if requested is None:
+        # A row written before the engine recorded the two separately. Its
+        # ``decision_source`` is the *effective* source, which equals the
+        # request on every run that was not downgraded -- so it is the right
+        # answer for most historical rows and the only one available for any of
+        # them. The rows it cannot speak for are exactly the downgraded ones,
+        # and those are the rows that never recorded the question.
+        requested = metadata.get("decision_source")
     requested = str(requested) if requested else None
     # Only claimed when the request is on record. Inferring intent from
     # ``llm_model`` cannot work here: a total fallback persists the honest

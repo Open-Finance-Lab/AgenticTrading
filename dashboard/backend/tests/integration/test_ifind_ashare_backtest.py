@@ -648,6 +648,11 @@ def test_ifind_offline_response_reaches_engine_database_and_chart(
         "timeframe": "60m",
         "timezone": "Asia/Shanghai",
         "decision_source": "rule_based",
+        # The request, recorded beside the outcome. Equal here because this
+        # run asked for rule-based logic and got it -- and that equality is
+        # the only difference from a run that asked for a model and silently
+        # traded rule-based, which writes the same `decision_source` (#169).
+        "requested_decision_source": "rule_based",
         "benchmark": "equal_weight_buyhold",
         "t_plus_one_enabled": True,
         "symbols": list(symbols),

@@ -289,6 +289,19 @@ class HourlyBacktester:
             self.profile,
             requested_decision_source,
         )
+        # The resolved *request*, frozen here because the two availability
+        # downgrades below rewrite `self.decision_source` in place and
+        # `_agent_run_metadata` persists whatever it holds at the end of the
+        # run. Without this the headline case of #169 -- "I asked for a model
+        # and every step traded rule-based" -- persisted identically to a run
+        # the caller deliberately ordered rule-based, and the surfaces reading
+        # the row reported the silent fallback as exactly what was ordered.
+        #
+        # Resolved rather than raw: `resolve_decision_source` is what validates
+        # the request against the market profile and fills in that profile's
+        # default, so the raw argument is None on the common path and says
+        # nothing about what the run was going to do.
+        self.requested_decision_source = self.decision_source
         self.strict_llm = bool(execution_client) or (
             decision_source is not None
             and data_source == IFIND_ASHARE
@@ -980,6 +993,18 @@ class HourlyBacktester:
         decision_source = getattr(self, "decision_source", None)
         if decision_source is not None:
             meta["decision_source"] = decision_source
+        # What the run asked for, beside what it ended up doing. These differ
+        # only when the model was unavailable, which is precisely the run that
+        # has to be reported as a fallback rather than as a choice -- and
+        # `decision_source` above has already been overwritten with the
+        # outcome by then. Written unconditionally (not only when they differ)
+        # so its *presence* separates a row this code wrote from one that
+        # predates the key, the same way `decision_steps` does for the
+        # counters: a reader cannot otherwise tell "asked for rule-based" from
+        # "nobody recorded the question".
+        requested_decision_source = getattr(self, "requested_decision_source", None)
+        if requested_decision_source is not None:
+            meta["requested_decision_source"] = requested_decision_source
         decision_steps = getattr(self, "llm_decision_steps", None)
         if decision_steps is not None:
             # Denominator for "did the model actually drive this run?" --
