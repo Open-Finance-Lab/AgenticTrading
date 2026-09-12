@@ -422,6 +422,95 @@ def test_discord_bot_imports_without_secrets():
 # Settlement semantics come from the market profile, never a constructor default
 # ---------------------------------------------------------------------------
 
+def test_provenance_is_not_reachable_from_the_leaderboard_package():
+    """The import cycle this module sits inside, kept open at one point.
+
+    ``provenance`` imports ``leaderboard/service.py`` for the threshold, and
+    the leaderboard already imports back into ``domain/backtesting``
+    (``strategies/llm_agent`` -> ``portfolio_manager``; ``baselines`` ->
+    ``constants``/``metrics``). ``domain/backtesting`` <-> ``domain/leaderboard``
+    is therefore a package-level cycle already, and it is survivable only
+    because it does not close on *this* module: nothing the leaderboard can
+    reach imports ``provenance``.
+
+    One import from ``portfolio_manager`` -- the most natural place someone
+    would reach for a verdict helper, since that is where the fallbacks happen
+    -- closes it, and the app dies at import with a traceback naming neither of
+    the two files whose relationship caused it. This fails first, and prints
+    the chain.
+
+    Deliberately a reachability walk rather than a deny-list of three module
+    names: the invariant is "nothing the leaderboard can reach", which widens
+    by itself the day the leaderboard imports another backtesting module.
+
+    **What this can and cannot catch, measured rather than assumed.** A plain
+    module-level import closing the cycle takes the whole pytest session down
+    in conftest setup, before any test body runs -- this one included. That
+    case needs no guard: it is an unmissable ImportError storm, and the
+    recognisable line is "cannot import name 'MIN_LLM_DECISION_COVERAGE' from
+    partially initialized module".
+
+    The case this guard is actually for is the *deferred* one: a
+    function-local ``from ...provenance import ...`` inside a module the
+    leaderboard reaches. That collects green, passes CI, and raises on the
+    first fallback step in production. ``ast.walk`` sees imports at any depth,
+    so it is caught here; verified by adding exactly that import and watching
+    this fail while the rest of the suite stayed green.
+    """
+    backend, repo_root = _BACKEND, _REPO_ROOT
+
+    graph: dict[str, set[str]] = {}
+    for path in backend.rglob("*.py"):
+        parts = path.relative_to(backend).parts
+        if "tests" in parts or "__pycache__" in parts:
+            continue
+        module = ".".join(path.relative_to(repo_root).with_suffix("").parts)
+        edges = set()
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+            if isinstance(node, ast.Import):
+                edges.update(alias.name for alias in node.names)
+            elif isinstance(node, ast.ImportFrom) and node.module and not node.level:
+                edges.add(node.module)
+                edges.update(f"{node.module}.{a.name}" for a in node.names)
+        graph[module] = {e for e in edges if e.startswith("dashboard.backend")}
+
+    # A package import reaches its __init__, which may re-export submodules.
+    def _targets(name: str) -> set[str]:
+        return {m for m in graph if m == name or m == f"{name}.__init__"}
+
+    parent: dict[str, str] = {}
+    frontier = [m for m in graph if m.startswith("dashboard.backend.domain.leaderboard")]
+    seen = set(frontier)
+    while frontier:
+        module = frontier.pop()
+        for edge in graph.get(module, ()):
+            for target in _targets(edge):
+                if target not in seen:
+                    seen.add(target)
+                    parent[target] = module
+                    frontier.append(target)
+
+    # Non-vacuity: the reverse edge really is there, so an empty walk (a broken
+    # parser, a renamed package) cannot pass this as "no cycle".
+    assert "dashboard.backend.domain.backtesting.portfolio_manager" in seen, (
+        "the leaderboard no longer reaches portfolio_manager -- this walk is "
+        "not measuring what it claims to"
+    )
+
+    offender = "dashboard.backend.domain.backtesting.provenance"
+    if offender in seen:
+        chain, cursor = [offender], offender
+        while cursor in parent:
+            cursor = parent[cursor]
+            chain.append(cursor)
+        pytest.fail(
+            "provenance imports domain/leaderboard for MIN_LLM_DECISION_COVERAGE, "
+            "so the leaderboard must not reach provenance -- that closes the "
+            "cycle and kills app import. Chain:\n  "
+            + "\n  ".join(reversed(chain))
+        )
+
+
 def test_portfolio_manager_construction_always_declares_settlement():
     """Every production PortfolioManager must pass ``t_plus_one_enabled``.
 

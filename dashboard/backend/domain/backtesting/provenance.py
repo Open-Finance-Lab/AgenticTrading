@@ -25,6 +25,48 @@ The threshold is imported from the leaderboard domain rather than restated.
 Two owners of one number disagree eventually, and "the dashboard and the
 leaderboard disagree about whether the model drove this run" is the same defect
 one layer up.
+
+WHO MAY IMPORT THIS MODULE
+--------------------------
+**``portfolio_manager``, ``constants`` and ``metrics`` must not.** Neither must
+anything else in this package that ``domain/leaderboard`` can reach.
+
+``MIN_LLM_DECISION_COVERAGE`` is an H6 *publish* policy -- "may this curve go on
+the leaderboard" -- so the leaderboard owns it, and importing it here points a
+dependency from ``domain/backtesting`` at ``domain/leaderboard``. The reverse
+edge already exists: ``leaderboard/service.py`` imports
+``leaderboard.strategies``, whose ``llm_agent`` imports
+``backtesting.portfolio_manager``, and ``leaderboard/baselines.py`` imports
+``backtesting.constants`` and ``backtesting.metrics``. So the two packages are
+already a cycle at package level, and this module sits inside it.
+
+It works today only because the cycle does not close *on this module*: nothing
+reachable from ``domain/leaderboard`` imports ``provenance``. Add one import
+from ``portfolio_manager`` -- the most natural place to reach for a verdict
+helper, since that is where the fallbacks happen -- and it closes. Two shapes,
+with very different symptoms:
+
+* **A module-level import takes the app down at startup**, and the whole test
+  session with it, in conftest before any test body runs. The traceback names
+  neither file whose relationship caused it; the line to recognise is
+  ``cannot import name 'MIN_LLM_DECISION_COVERAGE' from partially initialized
+  module``. No guard can fire here -- nothing is left running to fire one.
+* **A function-local import collects green and ships.** It raises on the first
+  fallback step, in production, on the path that is already the least
+  exercised. ``test_provenance_is_not_reachable_from_the_leaderboard_package``
+  (in ``tests/test_architecture_boundaries.py``, which is why it lives there
+  and not beside the other provenance tests) catches this one and prints the
+  import chain.
+
+Import it from ``api/`` and from the engine's *callers* instead. ``engine.py``
+deliberately does not: it only needs to *write* the counters, and the backtest
+subprocess would otherwise carry the whole leaderboard package's import weight
+inside a 512MB instance.
+
+The direction of the dependency is the price of having one owner of the
+threshold, and it is worth paying. Do not "fix" the cycle by moving the
+constant into ``domain/backtesting`` -- that inverts who owns a leaderboard
+policy, which is the actual defect the single owner prevents.
 """
 
 from __future__ import annotations
