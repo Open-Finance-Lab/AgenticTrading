@@ -211,6 +211,26 @@ differs from the other five only in that the discarded value is **money**.
 on a shared repo assigns work to others — both are the user's call. Raised, awaiting a
 decision.
 
+## Orchestration TODO — rebase PR 3 before it is marked ready
+
+PR 3 (`fix/backtest-cancel-and-memory`) was branched from PR 2 at `0288ff79`. PR 2's
+head has since advanced (`b0fe7e71`, and more while the N-of-M badge lands), so the two
+branches have diverged. **Both edit `api/routers/backtests.py` and `frontend/app.js`**,
+so this is a real conflict surface, not a formality.
+
+Once PR 2 stops moving:
+
+```bash
+cd ../ATL-worktrees/p1-cancel-memory
+git fetch origin fix/backtest-run-provenance
+git rebase origin/fix/backtest-run-provenance
+# resolve, re-run the suite, then force-with-lease
+git push --force-with-lease origin fix/backtest-cancel-and-memory
+```
+
+Do this **before** either PR is marked ready. Do not rebase PR 3 onto `main` — that
+would drop PR 2's provenance fields out from under it.
+
 ## Shared conventions
 
 - **Every PR:** full suite green (`pytest dashboard/backend/tests/ -v`) before opening.
@@ -322,3 +342,5 @@ Append newest last. One line per meaningful event.
   PRs unreviewed; merging to `main` auto-deploys prod. An instruction to the agent is not
   a gate GitHub shows or enforces. #456 (docs) left ready — harmless, and landing the
   plan on `main` helps a resuming session find it.
+- `2026-09-11` — Noted the PR 3 rebase obligation: it branched at `0288ff79`, PR 2 has
+  moved on, and both edit `backtests.py` and `app.js`.
