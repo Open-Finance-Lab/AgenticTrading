@@ -371,6 +371,17 @@ async def serve_strategy_viewer():
     """Serve the standalone strategy viewer (reads ?code=... client-side)."""
     return FileResponse(frontend_path / "strategy.html")
 
+
+@app.get("/admin-analytics", include_in_schema=False)
+async def serve_admin_analytics():
+    """Serve the standalone admin analytics page (preview: synthetic sample data).
+
+    The admin console's Analytics tab redirects here; the page gates itself
+    client-side on an admin session via /api/auth/me. Vercel serves the same
+    file through ``cleanUrls``; this route is for the Render origin.
+    """
+    return FileResponse(frontend_path / "admin-analytics.html")
+
 @app.get("/styles.css", include_in_schema=False)
 async def serve_styles():
     """Serve styles.css."""
