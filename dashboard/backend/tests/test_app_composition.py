@@ -279,6 +279,7 @@ EXPECTED_FULL_CONTRACT = {
     ("GET", "/runs/{run_id}/rejected-orders"),
     ("GET", "/runs/{run_id}/trades"),
     ("GET", "/strategy"),
+    ("GET", "/admin-analytics"),
     ("GET", "/styles.css"),
     ("GET", "/ticker"),
 }

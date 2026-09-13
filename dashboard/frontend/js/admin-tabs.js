@@ -13,6 +13,13 @@
 
   function setTab(value, { updateUrl = true } = {}) {
     const tab = normalizeTab(value);
+    if (tab === 'analytics') {
+      // The Analytics tab now lives on the standalone /admin-analytics page
+      // (preview with synthetic data). Leave the in-app panel in place but
+      // never show it; providers/users/activity still render here.
+      window.location.assign('/admin-analytics');
+      return tab;
+    }
     const tablist = document.getElementById('adminTabs');
     tablist?.querySelectorAll('[data-admin-tab]').forEach((button) => {
       const selected = button.dataset.adminTab === tab;

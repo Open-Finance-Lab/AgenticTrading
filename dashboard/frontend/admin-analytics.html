@@ -1,0 +1,406 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ATL Analytics — Overview Prototype</title>
+  <style>
+    :root{color-scheme:dark;--bg:#0a0e27;--surface:#12172b;--line:#2a3041;--line-strong:#384158;--text:#e5e7eb;--muted:#9ca3af;--accent:#00bfff;--green:#42cc8b;--amber:#e6b75c;--red:#f08080;--violet:#8797ff;--font-base:-apple-system,BlinkMacSystemFont,"Segoe UI","Helvetica Neue",sans-serif;font-family:var(--font-base);color:var(--text);background:var(--bg)}
+    *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:14px/1.45 var(--font-base)}button,select,input{font:inherit}button,select{min-height:40px;color:var(--text);background:var(--surface);border:1px solid var(--line);border-radius:6px}button{padding:8px 12px;cursor:pointer}select{width:100%;padding:8px 32px 8px 11px}a{color:inherit;text-decoration:none}a:hover,button:hover{color:var(--accent)}:focus-visible{outline:2px solid var(--accent);outline-offset:3px}[hidden]{display:none!important}h1,h2,h3,p{margin-top:0}h1{margin-bottom:6px;font-size:29px;line-height:1.15}h2{margin-bottom:0;font-size:18px;line-height:1.25}small,.muted{color:var(--muted)}strong{font-variant-numeric:tabular-nums}
+    header{display:flex;align-items:center;justify-content:space-between;gap:20px;min-height:80px;padding:14px 28px;background:var(--surface);border-bottom:1px solid var(--line)}.brand{display:flex;align-items:center;gap:12px;font-size:22px;font-weight:700}.brand img{width:48px;height:48px;object-fit:contain}.product-nav{display:flex;gap:25px;color:var(--muted)}.sample-label{color:var(--amber);font-size:11px;letter-spacing:.08em;text-transform:uppercase}
+    .workspace{display:grid;grid-template-columns:196px minmax(0,1fr);min-height:calc(100vh - 80px)}aside{padding:24px 16px;border-right:1px solid var(--line)}aside>strong{display:block;margin:0 12px 20px}aside a{display:block;margin-bottom:4px;padding:10px 12px;border-radius:6px;color:var(--muted)}aside a:hover{background:#101c31}.analytics-parent{display:flex;align-items:center;justify-content:space-between;color:var(--accent);background:#132c41}.analytics-subnav{margin:0 0 14px 15px;padding-left:8px;border-left:1px solid var(--line)}.analytics-subnav a{padding:7px 10px;font-size:12px}.analytics-subnav a.active{color:var(--accent);background:#102536}
+    main{width:100%;max-width:1420px;margin:0 auto;padding:30px 36px 50px}.page-head,.section-head,.live-head,.breadcrumb{display:flex;align-items:center;justify-content:space-between;gap:16px}.page-head p{margin:0}.page-actions{display:flex;align-items:center;gap:10px}.range{display:flex;gap:3px;padding:3px;border:1px solid var(--line);border-radius:7px}.range button{min-width:45px;min-height:34px;padding:5px 10px;background:transparent;border-color:transparent}.range button[aria-pressed=true]{color:#061521;background:var(--accent)}
+    .filters{display:grid;grid-template-columns:repeat(4,minmax(130px,1fr)) auto;gap:12px;align-items:end;margin:22px 0 0;padding:0 0 22px;border-bottom:1px solid var(--line)}.filter-field{display:grid;gap:7px;min-width:0;color:var(--muted);font-size:12px}.check-field{display:flex;align-items:center;gap:8px;min-height:40px;white-space:nowrap;color:var(--muted);font-size:12px}.check-field input{accent-color:var(--accent)}
+    .live-health{margin:28px 0 0;padding:0 0 22px;border-bottom:1px solid var(--line-strong)}.live-head{margin-bottom:16px}.live-title{display:flex;align-items:center;gap:10px}.live-dot{width:8px;height:8px;flex:none;border-radius:50%;background:var(--green);box-shadow:0 0 0 5px rgba(66,204,139,.12)}.live-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));border-top:1px solid var(--line);border-bottom:1px solid var(--line)}.live-cell{min-width:0;padding:18px 20px;border-left:1px solid var(--line)}.live-cell:first-child{padding-left:0;border-left:0}.live-cell:last-child{padding-right:0}.live-label{color:var(--muted);font-size:12px}.live-value{display:block;margin:6px 0 4px;font-size:34px;line-height:1}.live-cell.running .live-value{color:var(--accent)}.live-cell.queued .live-value{color:var(--amber)}.live-cell.blocked .live-value{color:var(--red)}.mini-viz{height:54px;margin-top:12px}.sparkline{width:100%;height:54px;overflow:visible}.sparkline .gridline{stroke:var(--line);stroke-width:1}.sparkline .area{fill:rgba(0,191,255,.09)}.sparkline .line{fill:none;stroke:var(--accent);stroke-width:2.2}.sparkline.queue .area{fill:rgba(230,183,92,.09)}.sparkline.queue .line{stroke:var(--amber)}.run-lanes{display:grid;align-content:center;gap:5px}.run-lanes i{display:block;height:5px;border-radius:2px;background:#28637a}.run-lanes i:nth-child(1){width:92%}.run-lanes i:nth-child(2){width:76%}.run-lanes i:nth-child(3){width:64%}.run-lanes i:nth-child(4){width:86%}.run-lanes i:nth-child(5){width:57%}.run-lanes i:nth-child(6){width:71%}.run-lanes i:nth-child(7){width:48%}.run-lanes i:nth-child(8){width:61%}.blocked-reasons{display:grid;align-content:center;gap:8px}.blocked-reasons p{display:grid;grid-template-columns:55px 1fr 18px;align-items:center;gap:7px;margin:0;font-size:11px}.blocked-reasons i{display:block;height:7px;border-radius:2px;background:var(--red)}.module-link{display:inline-flex;align-items:center;gap:7px;margin-top:18px;color:var(--accent);font-weight:600}.module-link:after{content:"→";transition:transform .16s ease}.module-link:hover:after{transform:translateX(3px)}
+    .overview-row{display:grid;grid-template-columns:minmax(0,1.08fr) minmax(0,.92fr);gap:34px}.overview-row.equal{grid-template-columns:repeat(2,minmax(0,1fr))}.panel{min-width:0;padding:28px 0;border-bottom:1px solid var(--line)}.section-head{align-items:flex-start;margin-bottom:20px}.section-head small{display:block;margin-top:5px}.section-meta{text-align:right}.headline-number{display:block;margin-bottom:3px;color:var(--text);font-size:25px;line-height:1;font-weight:650}.bar-chart{display:flex;align-items:end;gap:11px;height:180px;padding-top:8px;border-bottom:1px solid var(--line)}.bar-column{display:flex;flex:1;flex-direction:column;justify-content:end;align-items:center;gap:7px;height:100%;min-width:18px;color:var(--muted);font-size:11px}.bar-column b{font-weight:500}.bar-column i{display:block;width:min(34px,70%);min-height:3px;height:var(--height);border-radius:3px 3px 0 0;background:var(--accent)}.shared-link-row{padding:0 0 28px;border-bottom:1px solid var(--line)}
+    .source-wrap,.value-wrap{display:grid;grid-template-columns:156px 1fr;align-items:center;gap:26px;min-height:180px}.source-donut,.value-donut{position:relative;width:150px;height:150px;border-radius:50%}.source-donut{background:conic-gradient(var(--accent) 0 48%,var(--green) 48% 80%,var(--violet) 80% 100%)}.value-donut{background:conic-gradient(var(--accent) 0 35%,var(--green) 35% 75%,var(--amber) 75% 100%)}.source-donut:after,.value-donut:after{content:attr(data-total);position:absolute;inset:27px;display:grid;place-items:center;border-radius:50%;background:var(--bg);color:var(--text);font-size:18px;font-weight:650;text-align:center;white-space:pre-line}.legend{display:grid;gap:11px}.legend-row{display:grid;grid-template-columns:10px 1fr auto;align-items:center;gap:8px;color:var(--muted)}.legend-row i{width:10px;height:10px;border-radius:2px;background:var(--accent)}.legend-row i.green{background:var(--green)}.legend-row i.violet{background:var(--violet)}.legend-row i.amber{background:var(--amber)}.legend-row b{color:var(--text);font-weight:600}
+    .funnel{display:grid;gap:8px}.funnel-step{display:grid;grid-template-columns:1fr auto;align-items:center;width:var(--width);min-width:58%;padding:11px 13px;border-left:3px solid var(--accent);background:var(--surface)}.funnel-step:last-child{border-left-color:var(--green)}.funnel-step span{color:var(--muted);font-size:12px}.funnel-step b{font-size:16px}.attention-list{display:grid;gap:3px}.attention-row{display:grid;grid-template-columns:6px 116px 30px 1fr;align-items:center;gap:10px;min-height:48px;border-bottom:1px solid var(--line)}.attention-row:last-child{border-bottom:0}.severity{width:6px;height:30px;border-radius:3px;background:var(--red)}.severity.warn{background:var(--amber)}.severity.muted{background:#697586}.attention-row b{font-size:20px}.attention-row small{line-height:1.35}.attention-note{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-top:13px;padding-top:12px;border-top:1px solid var(--line);color:var(--muted);font-size:12px}.attention-note a{color:var(--accent);font-weight:600}
+    .retention-chart{display:grid;grid-template-columns:68px repeat(4,1fr);gap:6px;align-items:center}.retention-chart>span{color:var(--muted);font-size:11px;text-align:center}.retention-chart .row-label{text-align:left}.retention-cell{display:grid;place-items:center;min-height:34px;border:1px solid var(--line);border-radius:4px;background:rgba(0,191,255,var(--alpha));color:var(--text);font-size:11px}.retention-cell.empty{color:#596177;background:transparent}
+    .stack-columns{display:flex;align-items:end;gap:22px;height:150px;padding:8px 14px 0;border-bottom:1px solid var(--line)}.stack-column{display:flex;flex:1;flex-direction:column;justify-content:end;align-items:center;gap:7px;height:100%;color:var(--muted);font-size:11px}.stack-bar{display:flex;flex-direction:column-reverse;width:min(50px,70%);height:var(--height);overflow:hidden;border-radius:3px 3px 0 0}.stack-bar i:first-child{height:72%;background:var(--accent)}.stack-bar i:last-child{flex:1;background:var(--violet)}.inline-key{display:flex;flex-wrap:wrap;gap:15px;margin-top:12px;color:var(--muted);font-size:11px}.inline-key i{display:inline-block;width:8px;height:8px;margin-right:6px;border-radius:2px;background:var(--accent)}.inline-key i.violet{background:var(--violet)}
+    .revenue-viz{height:164px;padding-top:18px;border-bottom:1px solid var(--line)}.revenue-viz svg{width:100%;height:115px}.revenue-viz .gridline{stroke:var(--line);stroke-width:1}.revenue-viz .area{fill:rgba(66,204,139,.10)}.revenue-viz .line{fill:none;stroke:var(--green);stroke-width:2.2}.revenue-viz .labels{display:flex;justify-content:space-between;color:var(--muted);font-size:11px}
+    .lifecycle-bar{display:flex;height:14px;margin:18px 0 20px;overflow:hidden;border-radius:3px}.lifecycle-bar i:nth-child(1){width:25%;background:var(--accent)}.lifecycle-bar i:nth-child(2){width:23%;background:var(--violet)}.lifecycle-bar i:nth-child(3){width:28%;background:var(--green)}.lifecycle-bar i:nth-child(4){width:15%;background:var(--amber)}.lifecycle-bar i:nth-child(5){width:7%;background:var(--red)}.lifecycle-bar i:nth-child(6){width:2%;background:#697586}.lifecycle-legend{display:grid;grid-template-columns:repeat(3,1fr);gap:12px 18px}.lifecycle-legend div{display:grid;grid-template-columns:8px 1fr auto;align-items:center;gap:7px;color:var(--muted);font-size:12px}.lifecycle-legend i{width:8px;height:8px;border-radius:2px;background:var(--accent)}.lifecycle-legend div:nth-child(2) i{background:var(--violet)}.lifecycle-legend div:nth-child(3) i{background:var(--green)}.lifecycle-legend div:nth-child(4) i{background:var(--amber)}.lifecycle-legend div:nth-child(5) i{background:var(--red)}.lifecycle-legend div:nth-child(6) i{background:#697586}.lifecycle-legend b{color:var(--text)}
+    .failure-bars{display:grid;gap:15px}.failure-row{display:grid;grid-template-columns:145px 1fr 28px;align-items:center;gap:10px}.failure-row span{color:var(--muted);font-size:12px}.failure-track{height:10px;overflow:hidden;border-radius:2px;background:#171d31}.failure-track i{display:block;width:var(--width);height:100%;background:var(--red);opacity:.85}
+    .detail-view{padding-top:4px}.breadcrumb{justify-content:flex-start;margin-bottom:22px;color:var(--muted)}.breadcrumb a{color:var(--accent)}.metric-strip{display:grid;grid-template-columns:repeat(4,1fr);margin:26px 0 4px;border-top:1px solid var(--line);border-bottom:1px solid var(--line)}.detail-metric{padding:20px;border-left:1px solid var(--line)}.detail-metric:first-child{padding-left:0;border-left:0}.detail-metric span{color:var(--muted);font-size:12px}.detail-metric strong{display:block;margin-top:7px;font-size:27px}.detail-section{padding:26px 0;border-bottom:1px solid var(--line)}.table-wrap{overflow:auto}table{width:100%;border-collapse:collapse;text-align:left;white-space:nowrap}th,td{padding:13px 11px;border-bottom:1px solid var(--line)}th{color:var(--muted);font-size:12px;font-weight:500}th:first-child,td:first-child{padding-left:0}.badge{display:inline-block;padding:4px 7px;border-radius:4px;background:#252b36;font-size:12px}.badge.bad{color:var(--red)}.badge.warn{color:var(--amber)}.badge.good{color:var(--green)}
+    .profile-head{align-items:flex-start}.identity{display:flex;align-items:center;gap:15px}.avatar{display:grid;place-items:center;width:52px;height:52px;border-radius:50%;background:#153c48;color:var(--accent);font-size:20px}.identity-panel{position:relative;margin-top:26px;padding:22px 54px 22px 0;border-top:1px solid var(--line);border-bottom:1px solid var(--line)}.help-button{position:absolute;top:18px;right:0;display:grid;place-items:center;width:36px;min-height:36px;padding:0;border-radius:50%}.milestones{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin:28px 0}.milestone{padding-top:13px;border-top:3px solid var(--green)}.tabs{display:flex;gap:6px;margin:24px 0 0;overflow:auto}.tabs button{background:transparent;border-color:transparent;border-bottom:2px solid transparent;border-radius:0}.tabs button[aria-selected=true]{color:var(--accent);border-bottom-color:var(--accent)}dialog{width:min(540px,90vw);padding:24px;color:var(--text);background:var(--surface);border:1px solid var(--line);border-radius:8px}dialog::backdrop{background:rgba(0,0,0,.64)}.dialog-head{display:flex;align-items:center;justify-content:space-between}.dialog-head button{width:36px;min-height:36px;padding:0}footer{padding-top:24px;color:var(--muted);font-size:11px}
+    @media(max-width:1040px){.product-nav{display:none}.filters{grid-template-columns:repeat(2,minmax(0,1fr))}.live-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.live-cell:nth-child(3){padding-left:0;border-left:0}.live-cell:nth-child(-n+2){border-bottom:1px solid var(--line)}.overview-row,.overview-row.equal{grid-template-columns:1fr;gap:0}.metric-strip{grid-template-columns:repeat(2,1fr)}.detail-metric:nth-child(3){padding-left:0;border-left:0;border-top:1px solid var(--line)}.detail-metric:nth-child(4){border-top:1px solid var(--line)}}
+    @media(max-width:680px){header{padding:12px 15px}.brand{font-size:17px}.brand img{width:40px;height:40px}.sample-label{display:none}.workspace{grid-template-columns:66px minmax(0,1fr)}aside{padding:18px 6px}aside>strong{display:none}aside a{overflow:hidden;padding:10px 7px;font-size:0;text-align:center}aside a::first-letter{font-size:14px}.analytics-parent span{display:none}.analytics-subnav{margin-left:9px;padding-left:3px}main{padding:24px 16px 40px}.page-head{flex-direction:column;align-items:stretch}.page-actions{flex-direction:row;align-items:center;justify-content:space-between}.live-head{flex-direction:column;align-items:flex-start}.range button{min-width:38px;padding-inline:7px}.filters{grid-template-columns:1fr}.live-grid{grid-template-columns:1fr}.live-cell,.live-cell:first-child,.live-cell:nth-child(3),.live-cell:last-child{padding:16px 0;border-left:0;border-bottom:1px solid var(--line)}.live-cell:last-child{border-bottom:0}.source-wrap,.value-wrap{grid-template-columns:1fr;justify-items:center}.legend{width:100%}.attention-row{grid-template-columns:6px 98px 28px 1fr}.retention-chart{grid-template-columns:55px repeat(4,1fr);gap:4px}.lifecycle-legend{grid-template-columns:repeat(2,1fr)}.failure-row{grid-template-columns:120px 1fr 24px}.metric-strip{grid-template-columns:1fr}.detail-metric,.detail-metric:first-child,.detail-metric:nth-child(3){padding:17px 0;border-left:0;border-top:1px solid var(--line)}.milestones{grid-template-columns:repeat(2,1fr)}}
+    /* Iteration: separate live operations from system health and make the funnel read top-to-bottom. */
+    .overview-row.single{grid-template-columns:1fr}
+    #overview .overview-row.equal:last-child{grid-template-columns:1fr}
+    #overview .overview-row.equal:last-child > .panel:nth-child(2){display:none}
+    .funnel{gap:27px}
+    .funnel-step{position:relative;margin-inline:auto}
+    .funnel-step:not(:last-child)::before{content:"";position:absolute;left:50%;bottom:-18px;width:1px;height:14px;background:var(--line-strong);transform:translateX(-50%)}
+    .funnel-step:not(:last-child)::after{content:"";position:absolute;left:50%;bottom:-22px;width:7px;height:7px;border-right:1.5px solid var(--muted);border-bottom:1.5px solid var(--muted);transform:translateX(-50%) rotate(45deg)}
+    .attention-note>div{display:grid;gap:2px}
+    .attention-note strong{color:var(--text);font-size:12px;font-weight:600}
+    .detail-live-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:26px}
+    .operation-lanes,.blocker-list{display:grid;gap:12px}
+    .operation-lane{display:grid;grid-template-columns:100px 1fr auto;align-items:center;gap:12px}
+    .operation-lane span{color:var(--muted);font-size:12px}
+    .operation-lane i{display:block;height:8px;border-radius:2px;background:var(--accent);opacity:.82}
+    .operation-lane b{font-size:12px;font-weight:600}
+    .queue-detail{height:150px;padding-top:10px;border-bottom:1px solid var(--line)}
+    .queue-detail svg{width:100%;height:120px}
+    .queue-detail .gridline{stroke:var(--line);stroke-width:1}
+    .queue-detail .area{fill:rgba(230,183,92,.1)}
+    .queue-detail .line{fill:none;stroke:var(--amber);stroke-width:2.2}
+    .blocker-item{display:grid;grid-template-columns:8px 1fr auto;align-items:center;gap:10px;padding:10px 0;border-bottom:1px solid var(--line)}
+    .blocker-item:last-child{border-bottom:0}
+    .blocker-item i{width:8px;height:8px;border-radius:50%;background:var(--red)}
+    .blocker-item span{color:var(--muted);font-size:12px}
+    .blocker-item b{font-size:12px}
+    @media(max-width:680px){.detail-live-grid{grid-template-columns:1fr}}
+    /* 2026-09 iteration: compact health rail, horizontal funnel, differentiated charts and explicit axes. */
+    .live-health{display:grid;grid-template-columns:minmax(230px,300px) minmax(0,1fr);column-gap:30px;align-items:start}
+    .live-head{grid-column:1/-1}
+    .live-grid{grid-column:1;grid-template-columns:1fr;grid-auto-rows:minmax(0,1fr)}
+    .live-cell,.live-cell:first-child,.live-cell:last-child{display:grid;grid-template-columns:1fr auto;grid-template-areas:"label value" "desc viz";align-items:center;gap:3px 12px;min-height:55px;padding:9px 0;border-left:0;border-bottom:1px solid var(--line)}
+    .live-cell:last-child{border-bottom:0}
+    .live-label{grid-area:label}
+    .live-value{grid-area:value;margin:0;font-size:24px}
+    .live-cell>small{grid-area:desc}
+    .live-cell>.mini-viz{grid-area:viz;height:27px;min-width:100px;margin:0}
+    .live-cell .run-lanes{min-width:100px;gap:3px}
+    .live-cell .run-lanes i{height:3px}
+    .live-cell .blocked-reasons{min-width:100px;gap:4px}
+    .live-cell .blocked-reasons p{grid-template-columns:45px 1fr 14px;gap:5px;font-size:9px}
+    .live-health>.module-link{grid-column:1/-1;margin-top:14px}
+    .live-composite{grid-column:2;align-self:stretch;min-width:0;padding:14px 0 0}
+    .live-composite-head{display:flex;align-items:flex-start;justify-content:space-between;gap:14px;margin-bottom:8px}
+    .live-composite-head h3{margin:0;font-size:15px}
+    .live-composite-head small{display:block;margin-top:4px;color:var(--muted)}
+    .live-chip{padding:4px 7px;border:1px solid var(--line);border-radius:4px;color:var(--muted);font-size:10px;white-space:nowrap}
+    .live-composite-chart{width:100%;height:158px;overflow:visible}
+    .live-composite-chart .gridline{stroke:var(--line);stroke-width:1}
+    .live-composite-chart .axis{stroke:var(--line-strong);stroke-width:1}
+    .live-composite-chart .axis-label{fill:var(--muted);font-size:10px}
+    .live-composite-chart .pulse{fill:none;stroke-width:2.2;stroke-linecap:round;stroke-linejoin:round}
+    .live-composite-chart .pulse-online{stroke:var(--accent)}
+    .live-composite-chart .pulse-active{stroke:var(--green)}
+    .live-composite-chart .pulse-queue{stroke:var(--amber)}
+    .live-composite-chart .pulse-blocked{stroke:var(--red);stroke-dasharray:2 5}
+    .spark-axis{stroke:var(--line-strong);stroke-width:1}
+    .queue-detail .queue-axis{stroke:var(--line-strong);stroke-width:1}
+    .queue-detail .queue-axis-label{fill:var(--muted);font-size:10px}
+    .live-composite-legend{display:flex;flex-wrap:wrap;gap:12px 18px;margin-top:1px;color:var(--muted);font-size:11px}
+    .live-composite-legend span{display:inline-flex;align-items:center;gap:6px}
+    .live-composite-legend i{width:8px;height:8px;border-radius:50%;background:var(--accent)}
+    .live-composite-legend i.active{background:var(--green)}
+    .live-composite-legend i.queue{background:var(--amber)}
+    .live-composite-legend i.blocked{background:var(--red)}
+    .funnel{display:flex;align-items:stretch;gap:12px;overflow-x:auto;padding:4px 20px 10px 0}
+    .funnel-step{flex:1 0 135px;width:auto!important;min-width:135px;margin:0;padding:13px 12px;grid-template-columns:1fr;gap:12px;align-content:space-between;border-top:3px solid var(--accent);border-left:0}
+    .funnel-step:last-child{border-top-color:var(--green);border-left:0}
+    .funnel-step:not(:last-child)::before{left:auto;right:-13px;bottom:auto;top:50%;width:13px;height:1px;background:var(--line-strong);transform:translateY(-50%)}
+    .funnel-step:not(:last-child)::after{left:auto;right:-16px;bottom:auto;top:50%;width:7px;height:7px;border-right:1.5px solid var(--muted);border-bottom:1.5px solid var(--muted);transform:translateY(-50%) rotate(-45deg)}
+    .source-wrap,.value-wrap{display:block;min-height:180px}
+    .source-bars{display:grid;gap:12px;min-height:180px;padding-top:6px}
+    .source-track{display:flex;height:24px;overflow:hidden;border-radius:3px;background:#171d31}
+    .source-track i{display:block;width:var(--share);height:100%;background:var(--accent)}
+    .source-track i:nth-child(2){background:var(--green)}
+    .source-track i:nth-child(3){background:var(--violet)}
+    .source-scale{display:flex;justify-content:space-between;color:var(--muted);font-size:10px}
+    .source-rank{display:grid;gap:9px}
+    .source-rank-row{display:grid;grid-template-columns:9px 1fr auto;align-items:center;gap:8px;color:var(--muted);font-size:12px}
+    .source-rank-row i{width:9px;height:9px;border-radius:2px;background:var(--accent)}
+    .source-rank-row i.green{background:var(--green)}
+    .source-rank-row i.violet{background:var(--violet)}
+    .source-rank-row b{color:var(--text);font-weight:600}
+    .value-steps{display:grid;gap:13px;min-height:180px;padding-top:10px}
+    .value-step{display:grid;grid-template-columns:132px 1fr auto;align-items:center;gap:10px;color:var(--muted);font-size:12px}
+    .value-step>span{white-space:nowrap}
+    .value-step b{color:var(--text);font-size:12px;white-space:nowrap}
+    .value-track{height:12px;overflow:hidden;border-radius:2px;background:#171d31}
+    .value-track i{display:block;width:var(--share);height:100%;background:var(--accent)}
+    .value-step:nth-child(2) .value-track i{background:var(--green)}
+    .value-step:nth-child(3) .value-track i{background:var(--amber)}
+    .chart-with-axis{position:relative;background:repeating-linear-gradient(to bottom,transparent 0,transparent calc(25% - 1px),rgba(56,65,88,.42) calc(25% - 1px),rgba(56,65,88,.42) 25%)}
+    #active-chart.with-axis{padding:12px 0 24px 32px;border-bottom:1px solid var(--line)}
+    #credits-chart.with-axis{padding:8px 0 22px 32px;border-bottom:1px solid var(--line)}
+    .chart-y-axis{position:absolute;left:0;top:9px;bottom:22px;display:flex;flex-direction:column;justify-content:space-between;color:var(--muted);font-size:10px;line-height:1;pointer-events:none}
+    .chart-y-axis span{display:block;min-width:24px;text-align:left}
+    #active-chart.with-axis::after,#credits-chart.with-axis::after{content:"";position:absolute;left:32px;right:0;bottom:23px;border-bottom:1px solid var(--line-strong);pointer-events:none}
+    #credits-chart.with-axis::after{bottom:21px}
+    .revenue-viz svg.line-chart{overflow:visible}
+    .revenue-viz .chart-axis{stroke:var(--line-strong);stroke-width:1}
+    .revenue-viz .chart-gridline{stroke:var(--line);stroke-width:1}
+    .revenue-viz .chart-axis-label{fill:var(--muted);font-size:10px}
+    #overview .overview-row.equal:last-child{max-width:920px;margin-right:auto}
+    #overview .overview-row.equal:last-child .panel{padding-top:22px;padding-bottom:18px}
+    #overview .overview-row.equal:last-child .lifecycle-bar{max-width:760px;height:12px;margin:14px 0 16px}
+    #overview .overview-row.equal:last-child .lifecycle-legend{max-width:760px;gap:9px 18px}
+    @media(max-width:900px){.live-health{grid-template-columns:1fr;row-gap:14px}.live-head,.live-grid,.live-composite,.live-health>.module-link{grid-column:1}.live-composite{padding-top:0}.live-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.live-cell:nth-child(3){padding-left:0;border-left:0}.live-cell:nth-child(-n+2){border-bottom:1px solid var(--line)}}
+    @media(max-width:680px){.live-grid{grid-template-columns:1fr}.live-cell,.live-cell:first-child,.live-cell:nth-child(3),.live-cell:last-child{padding:9px 0;border-left:0;border-bottom:1px solid var(--line)}.live-cell:last-child{border-bottom:0}.live-composite-chart{height:142px}.source-rank-row{grid-template-columns:8px 1fr auto}.value-step{grid-template-columns:112px 1fr auto;gap:8px}.value-step>span{white-space:normal}.funnel-step{min-width:122px;flex-basis:122px}#overview .overview-row.equal:last-child{max-width:none}}
+    /* Final density pass: keep the new visual language compact at a glance. */
+    .live-cell,.live-cell:first-child,.live-cell:last-child{min-height:45px;padding:6px 0}
+    .live-cell>.mini-viz{height:22px}
+    .live-cell .run-lanes{gap:2px}
+    .live-cell .run-lanes i{height:2px}
+    .live-composite{padding-top:8px}
+    .live-composite-chart{height:132px}
+    #overview .overview-row.equal:last-child{max-width:760px}
+    .funnel-step:not(:last-child)::before{content:"→";right:-19px;top:50%;left:auto;bottom:auto;width:auto;height:auto;background:transparent;color:var(--muted);font-size:17px;line-height:1;transform:translateY(-50%);z-index:2}
+    .funnel-step:not(:last-child)::after{display:none}
+  </style>
+  <script>
+    // Preview gate: this page ships synthetic sample data, but it is an admin
+    // surface, so anyone without an admin session is sent back to the app.
+    // Same cookie session and /api/auth/me probe app.js boots on.
+    (function () {
+      fetch("/api/auth/me", { credentials: "include", headers: { Accept: "application/json" } })
+        .then(function (r) { return r.ok ? r.json() : null; })
+        .then(function (d) {
+          var u = d && d.user;
+          if (!u || u.role !== "admin") window.location.replace("/app");
+        })
+        .catch(function () { window.location.replace("/app"); });
+    })();
+  </script>
+</head>
+<body>
+  <header><a class="brand" href="#overview"><img src="images/atltransparent.png" alt="ATL">Agentic Trading Lab</a><nav class="product-nav" aria-label="Product"><a href="/app">Home</a><a href="/app?view=playground&amp;playgroundTab=agents">My Agents</a><a href="/app?view=competition">Competition</a><a href="/app?view=community">Community</a></nav><span class="sample-label">Sample data</span></header>
+  <div class="workspace">
+    <aside><strong>Administration</strong><a class="analytics-parent" href="#overview" aria-expanded="true">Analytics <span aria-hidden="true">⌄</span></a><nav class="analytics-subnav" aria-label="Analytics modules"><a class="active" href="#overview">Overview</a><a href="#funnel">Sources &amp; funnel</a><a href="#retention">Retention</a><a href="#credits">Credits &amp; revenue</a><a href="#lifecycle">User lifecycle</a><a href="#live">Live operations</a><a href="#health">System health</a><a href="#profiles">User profiles</a></nav><a href="#profiles">Users</a><a href="/app?view=admin&amp;adminTab=providers">Providers</a><a href="/app?view=admin&amp;adminTab=activity">Activity</a></aside>
+    <main>
+      <section id="overview" aria-label="Analytics overview">
+        <div class="page-head"><div><h1>Overview</h1><p class="muted">User activity, acquisition and attention</p></div><div class="page-actions"><div class="range" aria-label="Date range"><button type="button" aria-pressed="false">1D</button><button type="button" aria-pressed="true">1W</button><button type="button" aria-pressed="false">1M</button><button type="button" aria-pressed="false">1Y</button></div><small>UTC</small></div></div>
+        <div class="filters"><label class="filter-field"><span>Source</span><select><option>All sources</option><option>Community</option><option>Student</option><option>Friend referral</option></select></label><label class="filter-field"><span>Cohort</span><select><option>All cohorts</option><option>September intake</option><option>August intake</option></select></label><label class="filter-field"><span>Lifecycle</span><select><option>All lifecycle stages</option><option>New</option><option>Onboarding</option><option>Growing</option><option>Core</option><option>At risk</option><option>Dormant</option></select></label><label class="filter-field"><span>Payment</span><select><option>All paid states</option><option>Paid</option><option>Unpaid</option></select></label><label class="check-field"><input type="checkbox">Internal accounts</label></div>
+        <section class="live-health" aria-labelledby="live-title"><div class="live-head"><div class="live-title"><i class="live-dot" aria-hidden="true"></i><div><h2 id="live-title">Real-time health</h2><small>Current platform state</small></div></div><small>Updated just now</small></div><div class="live-grid"><article class="live-cell"><span class="live-label">Online now</span><strong class="live-value">12</strong><small>Last 60 minutes</small><div class="mini-viz"><svg class="sparkline" viewBox="0 0 220 54" role="img" aria-label="Online users trend over the last 60 minutes"><line class="gridline" x1="0" y1="46" x2="220" y2="46"/><path class="area" d="M0 43 L32 38 L63 40 L94 29 L126 33 L157 20 L188 24 L220 12 L220 54 L0 54 Z"/><path class="line" d="M0 43 L32 38 L63 40 L94 29 L126 33 L157 20 L188 24 L220 12"/></svg></div></article><article class="live-cell running"><span class="live-label">Active runs</span><strong class="live-value">8</strong><small>Backtests running</small><div class="mini-viz run-lanes" role="img" aria-label="Eight active backtests"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div></article><article class="live-cell queued"><span class="live-label">Queued</span><strong class="live-value">3</strong><small>Waiting to start</small><div class="mini-viz"><svg class="sparkline queue" viewBox="0 0 220 54" role="img" aria-label="Queue depth trend over the last 60 minutes"><line class="gridline" x1="0" y1="46" x2="220" y2="46"/><path class="area" d="M0 45 L32 41 L63 32 L94 36 L126 23 L157 29 L188 17 L220 23 L220 54 L0 54 Z"/><path class="line" d="M0 45 L32 41 L63 32 L94 36 L126 23 L157 29 L188 17 L220 23"/></svg></div></article><article class="live-cell blocked"><span class="live-label">Blocked users</span><strong class="live-value">1</strong><small>Needs immediate action</small><div class="mini-viz blocked-reasons" role="img" aria-label="Blocked user reasons"><p><span>Billing</span><i style="width:100%"></i><b>1</b></p><p><span>Provider</span><i style="width:0"></i><b>0</b></p></div></article></div><a class="module-link" href="#live">Open live operations</a></section>
+        <div class="overview-row"><section class="panel"><div class="section-head"><div><h2>Active users</h2><small id="active-bucket">Daily · selected range</small></div><div class="section-meta"><strong class="headline-number" id="active-total">32</strong><small>accepted backtest requesters</small></div></div><div class="bar-chart" id="active-chart" role="img" aria-label="Active users for the selected range"></div><a class="module-link" href="#profiles">Open active users</a></section><section class="panel"><div class="section-head"><div><h2>Where users come from</h2><small>Account source · lifetime</small></div><div class="section-meta"><strong class="headline-number">100</strong><small>identified users</small></div></div><div class="source-wrap"><div class="source-donut" data-total="100&#10;users" role="img" aria-label="Community 48 percent, Student 32 percent, Friend referral 20 percent"></div><div class="legend"><div class="legend-row"><i></i><span>Community</span><b>48%</b></div><div class="legend-row"><i class="green"></i><span>Student</span><b>32%</b></div><div class="legend-row"><i class="violet"></i><span>Friend referral</span><b>20%</b></div></div></div><a class="module-link" href="#funnel">Open source analysis</a></section></div>
+        <div class="overview-row equal"><section class="panel"><div class="section-head"><div><h2>Activation funnel</h2><small>Account to first successful result</small></div><div class="section-meta"><strong class="headline-number">52.5%</strong><small>overall activation</small></div></div><div class="funnel" role="img" aria-label="Activation funnel"><div class="funnel-step" style="--width:100%"><span>Account created</span><b>80</b></div><div class="funnel-step" style="--width:86%"><span>Agent created</span><b>60</b></div><div class="funnel-step" style="--width:75%"><span>Backtest attempted</span><b>50</b></div><div class="funnel-step" style="--width:66%"><span>First successful result</span><b>42</b></div></div><a class="module-link" href="#funnel">Open user funnel</a></section><section class="panel"><div class="section-head"><div><h2>Users needing attention</h2><small>Current state</small></div><div class="section-meta"><strong class="headline-number">7</strong><small>affected users</small></div></div><div class="attention-list"><div class="attention-row"><i class="severity"></i><span>Blocked</span><b>1</b><small>No usable billing lane</small></div><div class="attention-row"><i class="severity warn"></i><span>Needs attention</span><b>4</b><small>Recent failures or stale setup</small></div><div class="attention-row"><i class="severity muted"></i><span>At risk</span><b>2</b><small>No meaningful activity for 8–29 days</small></div></div><a class="module-link" href="#profiles">Open user profiles</a></section></div>
+        <div class="overview-row equal"><section class="panel"><div class="section-head"><div><h2>Users reaching value</h2><small>Successful-result depth · lifetime</small></div><div class="section-meta"><strong class="headline-number">52</strong><small>users with a result</small></div></div><div class="value-wrap"><div class="value-donut" data-total="80&#10;users" role="img" aria-label="28 users not yet successful, 32 successful once, 20 repeat users"></div><div class="legend"><div class="legend-row"><i></i><span>Not yet successful</span><b>28 · 35%</b></div><div class="legend-row"><i class="green"></i><span>Successful once</span><b>32 · 40%</b></div><div class="legend-row"><i class="amber"></i><span>Repeat users</span><b>20 · 25%</b></div></div></div><a class="module-link" href="#lifecycle">Open user lifecycle</a></section><section class="panel"><div class="section-head"><div><h2>Users coming back</h2><small>First-success cohorts</small></div><div class="section-meta"><strong class="headline-number">66.7%</strong><small>Week 1 return</small></div></div><div class="retention-chart" role="img" aria-label="Retention cohort heatmap"><span></span><span>W0</span><span>W1</span><span>W2</span><span>W4</span><span class="row-label">Aug 17</span><div class="retention-cell" style="--alpha:.55">100%</div><div class="retention-cell" style="--alpha:.42">66.7%</div><div class="retention-cell" style="--alpha:.30">50%</div><div class="retention-cell" style="--alpha:.18">33%</div><span class="row-label">Aug 24</span><div class="retention-cell" style="--alpha:.55">100%</div><div class="retention-cell" style="--alpha:.38">60%</div><div class="retention-cell" style="--alpha:.24">40%</div><div class="retention-cell empty">—</div><span class="row-label">Aug 31</span><div class="retention-cell" style="--alpha:.55">100%</div><div class="retention-cell" style="--alpha:.34">55%</div><div class="retention-cell empty">—</div><div class="retention-cell empty">—</div></div><a class="module-link" href="#retention">Open retention</a></section></div>
+        <div class="overview-row equal"><section class="panel"><div class="section-head"><div><h2>Credits usage</h2><small class="selected-range">Selected range · 1W</small></div><div class="section-meta"><strong class="headline-number" id="credits-total">10.260</strong><small>ATL Credits settled</small></div></div><div class="stack-columns" id="credits-chart" role="img" aria-label="Platform Credits and BYOK runs by period"></div><div class="inline-key"><span><i></i>Platform Credits</span><span><i class="violet"></i>BYOK runs</span></div></section><section class="panel"><div class="section-head"><div><h2>Revenue</h2><small class="selected-range">Selected range · 1W</small></div><div class="section-meta"><strong class="headline-number" id="revenue-total">15.000</strong><small>purchased Credits</small></div></div><div class="revenue-viz"><svg viewBox="0 0 420 115" role="img" aria-label="Purchased Credits trend"><line class="gridline" x1="0" y1="95" x2="420" y2="95"/><line class="gridline" x1="0" y1="55" x2="420" y2="55"/><path class="area" d="M0 96 L70 87 L140 90 L210 66 L280 73 L350 43 L420 22 L420 110 L0 110 Z"/><path class="line" d="M0 96 L70 87 L140 90 L210 66 L280 73 L350 43 L420 22"/></svg><div class="labels"><span>Sep 4</span><span>Sep 7</span><span>Sep 10</span></div></div></section></div><div class="shared-link-row"><a class="module-link" href="#credits">Open Credits &amp; revenue</a></div>
+        <div class="overview-row equal"><section class="panel"><div class="section-head"><div><h2>User lifecycle</h2><small>Current distribution</small></div><div class="section-meta"><strong class="headline-number">80</strong><small>classified users</small></div></div><div class="lifecycle-bar" role="img" aria-label="Lifecycle distribution"><i></i><i></i><i></i><i></i><i></i><i></i></div><div class="lifecycle-legend"><div><i></i><span>New</span><b>20</b></div><div><i></i><span>Onboarding</span><b>18</b></div><div><i></i><span>Growing</span><b>22</b></div><div><i></i><span>Core</span><b>12</b></div><div><i></i><span>At risk</span><b>6</b></div><div><i></i><span>Dormant</span><b>2</b></div></div><a class="module-link" href="#lifecycle">Open lifecycle</a></section><section class="panel"><div class="section-head"><div><h2>What is blocking users?</h2><small class="selected-range">Failed runs · selected range · 1W</small></div><div class="section-meta"><strong class="headline-number">12</strong><small>failed terminal runs</small></div></div><div class="failure-bars" role="img" aria-label="Failure categories"><div class="failure-row"><span>Provider unavailable</span><div class="failure-track"><i style="--width:78%"></i></div><b>5</b></div><div class="failure-row"><span>Invalid response</span><div class="failure-track"><i style="--width:62%"></i></div><b>4</b></div><div class="failure-row"><span>Billing failed</span><div class="failure-track"><i style="--width:46%"></i></div><b>3</b></div></div><a class="module-link" href="#health">Open system health</a></section></div>
+      </section>
+      <section id="detail" class="detail-view" hidden aria-live="polite"></section>
+      <section id="profile" class="detail-view" hidden><nav class="breadcrumb" aria-label="Breadcrumb"><a href="#profiles">User profiles</a><span>/</span><span>Alex Chen</span></nav><div class="page-head profile-head"><div class="identity"><div class="avatar">A</div><div><h1>Alex Chen</h1><p class="muted">demo-user@example.test · Community · September intake</p></div></div><a class="module-link" href="#profiles">Back to user profiles</a></div><section class="identity-panel"><h2>Current identity</h2><button class="help-button" type="button" aria-label="How states are determined" title="How states are determined">?</button><p><span class="badge">Growing</span> <span class="badge bad">Blocked</span> <span class="badge">Unpaid</span></p><p>No usable billing lane · last evaluated Sep 10, 09:30 UTC</p><small>Last meaningful activity Sep 10, 09:24 UTC · First successful result Sep 7, 11:12 UTC</small></section><div class="milestones"><div class="milestone">Account created<br><small>Sep 6, 10:00 UTC</small></div><div class="milestone">Agent created<br><small>Sep 6, 10:04 UTC</small></div><div class="milestone">Backtest attempted<br><small>Sep 6, 10:08 UTC</small></div><div class="milestone">First result<br><small>Sep 7, 11:12 UTC</small></div></div><div class="tabs" role="tablist" aria-label="User analytics"><button type="button" role="tab" aria-selected="true">Overview</button><button type="button" role="tab" aria-selected="false">Timeline</button><button type="button" role="tab" aria-selected="false">Runs</button><button type="button" role="tab" aria-selected="false">Usage</button><button type="button" role="tab" aria-selected="false">Sessions</button></div><section id="profile-body" class="detail-section"></section></section>
+      <footer>Layout proposal · synthetic data · no live account changes</footer>
+    </main>
+  </div>
+  <dialog id="rules-dialog"><div class="dialog-head"><h2>How states are determined</h2><button type="button" aria-label="Close">×</button></div><p><strong>Lifecycle</strong> describes progress and meaningful activity. Passive visits and refreshes do not count.</p><p><strong>Blocked</strong> describes a current obstacle to a core action. It is separate from lifecycle.</p><p><strong>Commercial value</strong> uses settled purchases minus refunds. Admin Grants do not count as purchases.</p><p>At risk means 8–29 inactive UTC days. Dormant means at least 30.</p></dialog>
+  <script>
+    var rangeData={"1D":{labels:["00:00","04:00","08:00","12:00","16:00","20:00"],active:[2,4,8,12,10,6],total:18,bucket:"4-hour buckets",credits:"1.240",revenue:"2.500"},"1W":{labels:["Sep 4","Sep 5","Sep 6","Sep 7","Sep 8","Sep 9","Sep 10"],active:[6,9,8,12,10,18,24],total:32,bucket:"Daily",credits:"10.260",revenue:"15.000"},"1M":{labels:["Aug 12","Aug 19","Aug 26","Sep 2","Sep 9"],active:[18,24,28,35,32],total:64,bucket:"Weekly",credits:"34.820",revenue:"48.000"},"1Y":{labels:["Oct","Nov","Dec","Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep"],active:[8,12,18,16,24,28,36,40,42,51,58,64],total:80,bucket:"Monthly",credits:"210.480",revenue:"324.000"}};
+    var moduleData={funnel:{title:"Sources & funnel",description:"Understand where users came from and where they stop before their first successful result.",metrics:[["Identified users","100"],["Community","48%"],["First result","42"],["Activation","52.5%"]],table:[["Stage","Users","From previous step"],["Account created","80","—"],["Agent created","60","75%"],["Backtest attempted","50","83.3%"],["First successful result","42","84%"]]},retention:{title:"Retention",description:"See whether users return after reaching their first successful result.",metrics:[["Week 1 return","66.7%"],["Week 2 return","50%"],["Eligible users","12"],["Repeat users","20"]],table:[["First-success cohort","Users","Week 1","Week 2","Week 4"],["Aug 17","12","8 / 12","6 / 12","4 / 12"],["Aug 24","10","6 / 10","4 / 10","Not mature"],["Aug 31","20","11 / 20","Not mature","Not mature"]]},usage:{title:"Usage & Credits",description:"Separate settled ATL Credits consumption from BYOK activity.",metrics:[["Runs","58"],["ATL Credits settled","10.260"],["Platform runs","40"],["BYOK runs","18"]],table:[["Billing mode","Runs","ATL Credits","Share"],["Platform Credits","40","10.260","69%"],["BYOK","18","Not applicable","31%"]]},revenue:{title:"Revenue",description:"Track settled purchases and refunds separately from administrator Grants.",metrics:[["Purchasers","3"],["Purchased Credits","15.000"],["Refunds","0.000"],["Admin Grants","20.000"]],table:[["Purchase journey","Users","Selected period"],["Credits page viewed","12","1W"],["Checkout started","5","1W"],["Purchase settled","3","1W"]]},lifecycle:{title:"User lifecycle",description:"See current user maturity and inactivity without mixing it with operational blockers.",metrics:[["Growing","22"],["Core","12"],["At risk","6"],["Dormant","2"]],table:[["Stage","Users","Rule summary"],["New","20","Account under 7 days; no successful result"],["Onboarding","18","Not yet activated"],["Growing","22","Activated and recently active"],["Core","12","Repeated recent value"],["At risk","6","8–29 inactive UTC days"],["Dormant","2","30+ inactive UTC days"]]},health:{title:"System health",description:"Monitor live workload and identify failures preventing users from receiving results.",metrics:[["Online now","12"],["Active runs","8"],["Queued","3"],["Blocked users","1"]],table:[["Safe failure category","Failed runs","Affected users"],["Provider unavailable","5","4"],["Invalid response","4","3"],["Billing failed","3","1"]]},profiles:{title:"User profiles",description:"Choose a user to inspect their timeline, runs, usage and sessions.",metrics:[["Active users","32"],["Needs attention","7"],["Blocked","1"],["At risk","2"]],table:[["User","Source","Lifecycle","Operational state","Last active (UTC)"],["<a class=\"module-link\" href=\"#profile\">Alex Chen</a>","Community","Growing","<span class=\"badge bad\">Blocked</span>","Sep 10, 09:24"],["Sam Lee","Student","At risk","<span class=\"badge good\">Healthy</span>","Aug 29, 14:08"],["Jordan Wu","Community","New","<span class=\"badge warn\">Needs attention</span>","Sep 10, 08:15"]]}};
+    moduleData.credits={title:"Credits & revenue",description:"Review platform Credits usage and settled purchases together.",metrics:[["ATL Credits settled","10.260"],["Purchased Credits","15.000"],["Platform runs","40"],["BYOK runs","18"]],table:[["Measure","Value","Scope"],["ATL Credits settled","10.260","Selected period"],["Purchased Credits","15.000","Selected period"],["Refunds","0.000","Selected period"],["Admin Grants","20.000","Excluded from revenue"]]};
+    var overview=document.querySelector("#overview"),detail=document.querySelector("#detail"),profile=document.querySelector("#profile"),rangeButtons=[].slice.call(document.querySelectorAll(".range button")),activeChart=document.querySelector("#active-chart");
+    function renderRange(key){var sample=rangeData[key];rangeButtons.forEach(function(button){button.setAttribute("aria-pressed",String(button.textContent===key))});[].slice.call(document.querySelectorAll(".selected-range")).forEach(function(node){node.textContent="Selected range · "+key});document.querySelector("#active-total").textContent=sample.total;document.querySelector("#active-bucket").textContent=sample.bucket+" · selected range";document.querySelector("#credits-total").textContent=sample.credits;document.querySelector("#revenue-total").textContent=sample.revenue;var max=Math.max.apply(null,sample.active);activeChart.innerHTML=sample.active.map(function(value,index){return "<div class=\"bar-column\"><b>"+value+"</b><i style=\"--height:"+Math.max(4,value/max*76)+"%\"></i><span>"+sample.labels[index]+"</span></div>"}).join("");activeChart.setAttribute("aria-label","Active users "+sample.labels.map(function(label,index){return label+": "+sample.active[index]}).join(", "));renderCredits(sample)}
+    function renderCredits(sample){var chart=document.querySelector("#credits-chart"),count=Math.min(sample.labels.length,7),labels=sample.labels.slice(-count),values=sample.active.slice(-count),max=Math.max.apply(null,values);chart.innerHTML=values.map(function(value,index){return "<div class=\"stack-column\"><b>"+value+"</b><div class=\"stack-bar\" style=\"--height:"+Math.max(20,value/max*86)+"%\"><i></i><i></i></div><span>"+labels[index]+"</span></div>"}).join("")}
+    function renderDetail(key){var module=moduleData[key],headers=module.table[0],rows=module.table.slice(1),metrics=module.metrics.map(function(pair){return "<div class=\"detail-metric\"><span>"+pair[0]+"</span><strong>"+pair[1]+"</strong></div>"}).join(""),heads=headers.map(function(header){return "<th scope=\"col\">"+header+"</th>"}).join(""),body=rows.map(function(row){return "<tr>"+row.map(function(cell){return "<td>"+cell+"</td>"}).join("")+"</tr>"}).join("");detail.innerHTML="<nav class=\"breadcrumb\"><a href=\"#overview\">Analytics</a><span>/</span><span>"+module.title+"</span></nav><div class=\"page-head\"><div><h1 tabindex=\"-1\">"+module.title+"</h1><p class=\"muted\">"+module.description+"</p></div><span class=\"sample-label\">Sample data · "+(window.selectedRange||"1W")+"</span></div><div class=\"metric-strip\">"+metrics+"</div><section class=\"detail-section\"><div class=\"section-head\"><div><h2>Detailed view</h2><small>Illustrative records only</small></div></div><div class=\"table-wrap\"><table><thead><tr>"+heads+"</tr></thead><tbody>"+body+"</tbody></table></div></section>";detail.querySelector("h1").focus({preventScroll:true})}
+    function showProfileTab(name){var content={Overview:"<h2>User summary</h2><p>4 runs · 2 successful · 2 active UTC days · 0.320 Credits settled</p><p class=\"muted\">Recent blocker: no usable billing lane.</p>",Timeline:"<h2>Timeline</h2><p>Sep 10, 09:24 UTC · Backtest requested</p><p>Sep 10, 09:24 UTC · Blocked: no usable billing lane</p><p>Sep 7, 11:12 UTC · First successful result</p>",Runs:"<h2>Runs</h2><p>Requested, started and ended timestamps · model · billing mode · market data · status · safe failure reason.</p>",Usage:"<h2>Usage</h2><p>Platform Credits · BYOK · settled consumption · current balance · purchased and granted Credits separately.</p>",Sessions:"<h2>Sessions</h2><p>Session start and end · visited product pages · estimated foreground duration · recent activity.</p>"};document.querySelector("#profile-body").innerHTML=content[name];[].slice.call(document.querySelectorAll(".tabs [role=tab]")).forEach(function(button){button.setAttribute("aria-selected",String(button.textContent===name))})}
+    function route(){var key=location.hash.slice(1)||"overview",isProfile=key==="profile",isDetail=Boolean(moduleData[key]);overview.hidden=isProfile||isDetail;profile.hidden=!isProfile;detail.hidden=!isDetail;[].slice.call(document.querySelectorAll(".analytics-subnav a")).forEach(function(link){link.classList.toggle("active",link.hash==="#"+(isProfile?"profiles":key))});if(isDetail)renderDetail(key);if(isProfile)showProfileTab("Overview");if(!isProfile&&!isDetail&&key!=="overview"&&key!=="live")location.hash="overview";window.scrollTo(0,0)}
+    rangeButtons.forEach(function(button){button.addEventListener("click",function(){window.selectedRange=button.textContent;renderRange(button.textContent)})});document.querySelector(".analytics-parent").addEventListener("click",function(event){event.preventDefault();var nav=document.querySelector(".analytics-subnav");nav.hidden=!nav.hidden;event.currentTarget.setAttribute("aria-expanded",String(!nav.hidden))});[].slice.call(document.querySelectorAll(".tabs [role=tab]")).forEach(function(button){button.addEventListener("click",function(){showProfileTab(button.textContent)})});var dialog=document.querySelector("#rules-dialog");document.querySelector(".help-button").addEventListener("click",function(){dialog.showModal()});dialog.querySelector("button").addEventListener("click",function(){dialog.close()});window.addEventListener("hashchange",route);window.selectedRange="1W";renderRange("1W");route();
+  </script>
+  <script>
+    (function(){
+      moduleData.live={title:"Live operations",description:"Monitor current workload, queue pressure and blocked accounts.",metrics:[["Online now","12"],["Active runs","8"],["Queued","3"],["Blocked users","1"]],table:[["Workload signal","Current value","Window"],["Online now","12","Current"],["Active runs","8","Current"],["Queued","3","Current"],["Blocked users","1","Current"]]};
+      moduleData.health={title:"System health",description:"Track reliability and failure reasons that prevent users from receiving results.",metrics:[["Failed runs","12"],["Success rate","96.4%"],["Provider failures","5"],["Billing failures","3"]],table:[["Failure category","Failed runs","Affected users"],["Provider unavailable","5","4"],["Invalid response","4","3"],["Billing failed","3","1"]]};
+      var baseRenderDetail=renderDetail;
+      renderDetail=function(key){
+        baseRenderDetail(key);
+        if(key!=="live")return;
+        detail.insertAdjacentHTML("beforeend",`<section class="detail-section"><div class="section-head"><div><h2>Current workload</h2><small>Live status by operation</small></div><span class="sample-label">Updated just now</span></div><div class="detail-live-grid"><div><h3>Active run lanes</h3><div class="operation-lanes"><div class="operation-lane"><span>Run 01 · trend</span><i style="width:92%"></i><b>running</b></div><div class="operation-lane"><span>Run 02 · macro</span><i style="width:76%"></i><b>running</b></div><div class="operation-lane"><span>Run 03 · value</span><i style="width:64%"></i><b>running</b></div><div class="operation-lane"><span>Run 04 · momentum</span><i style="width:86%"></i><b>running</b></div><div class="operation-lane"><span>Run 05 · pairs</span><i style="width:57%"></i><b>running</b></div><div class="operation-lane"><span>Run 06 · sector</span><i style="width:71%"></i><b>running</b></div><div class="operation-lane"><span>Run 07 · carry</span><i style="width:48%"></i><b>running</b></div><div class="operation-lane"><span>Run 08 · risk</span><i style="width:61%"></i><b>running</b></div></div></div><div><h3>Queue pressure</h3><div class="queue-detail"><svg viewBox="0 0 420 120" role="img" aria-label="Queue depth over the last 60 minutes"><line class="gridline" x1="0" y1="98" x2="420" y2="98"/><line class="gridline" x1="0" y1="58" x2="420" y2="58"/><path class="area" d="M0 96 L60 86 L120 60 L180 70 L240 38 L300 52 L360 24 L420 42 L420 110 L0 110 Z"/><path class="line" d="M0 96 L60 86 L120 60 L180 70 L240 38 L300 52 L360 24 L420 42"/></svg></div><small>Last 60 minutes · peak 5 waiting</small></div><div><h3>Current blockers</h3><div class="blocker-list"><div class="blocker-item"><i></i><span>Billing lane unavailable</span><b>1 user</b></div><div class="blocker-item"><i style="background:var(--amber)"></i><span>Provider capacity watch</span><b>0 users</b></div><div class="blocker-item"><i style="background:var(--green)"></i><span>No other active blockers</span><b>clear</b></div></div></div></div></section>`);
+      };
+      if(location.hash==="#live"||location.hash==="#health")route();
+    })();
+  </script>
+  <script>
+    (function(){
+      var overviewPanels=[].slice.call(document.querySelectorAll("#overview .panel"));
+      var blockerPanel=overviewPanels.filter(function(panel){var heading=panel.querySelector("h2");return heading&&heading.textContent.trim()==="What is blocking users?";})[0];
+      var attentionPanel=overviewPanels.filter(function(panel){var heading=panel.querySelector("h2");return heading&&heading.textContent.trim()==="Users needing attention";})[0];
+      if(blockerPanel){
+        var blockerRow=blockerPanel.parentElement;
+        blockerPanel.remove();
+        if(blockerRow&&!blockerRow.children.length)blockerRow.remove();
+      }
+      if(attentionPanel&&!attentionPanel.querySelector(".attention-note")){
+        var note=document.createElement("div");
+        note.className="attention-note";
+        note.innerHTML='<div><span>What is blocking users?</span><strong>No usable billing lane</strong></div><a href="#health">View reason details</a>';
+        attentionPanel.querySelector(".attention-list").after(note);
+      }
+      function addHealthBreakdown(){
+        if(location.hash!=="#health"||document.querySelector(".health-breakdown"))return;
+        detail.insertAdjacentHTML("beforeend",`<section class="detail-section health-breakdown"><div class="section-head"><div><h2>What is blocking users?</h2><small>Failure reasons · selected range</small></div><div class="section-meta"><strong class="headline-number">12</strong><small>failed terminal runs</small></div></div><div class="failure-bars" role="img" aria-label="Failure reasons"><div class="failure-row"><span>Provider unavailable</span><div class="failure-track"><i style="--width:78%"></i></div><b>5</b></div><div class="failure-row"><span>Invalid response</span><div class="failure-track"><i style="--width:62%"></i></div><b>4</b></div><div class="failure-row"><span>Billing failed</span><div class="failure-track"><i style="--width:46%"></i></div><b>3</b></div></div></section>`);
+      }
+      window.addEventListener("hashchange",addHealthBreakdown);
+      addHealthBreakdown();
+    })();
+  </script>
+  <script>
+    (function(){
+      var svgNS="http://www.w3.org/2000/svg";
+      function svgNode(name,attrs,text){var node=document.createElementNS(svgNS,name);Object.keys(attrs||{}).forEach(function(key){node.setAttribute(key,attrs[key])});if(text!=null)node.textContent=text;return node}
+      function setAxis(chart,values){
+        if(!chart)return;
+        chart.classList.add("with-axis","chart-with-axis");
+        var max=Math.max.apply(null,values.concat([1]));
+        var ticks=[max,Math.round(max*2/3),Math.round(max/3),0];
+        var axis=chart.querySelector(".chart-y-axis");
+        if(!axis){axis=document.createElement("div");axis.className="chart-y-axis";chart.insertBefore(axis,chart.firstChild)}
+        axis.innerHTML=ticks.map(function(tick){return "<span>"+tick+"</span>"}).join("");
+      }
+      function decorateRevenue(sample){
+        var svg=document.querySelector(".revenue-viz svg");
+        if(!svg)return;
+        svg.classList.add("line-chart");
+        var group=svg.querySelector(".chart-axes");
+        if(!group){
+          group=svgNode("g",{class:"chart-axes"});
+          group.appendChild(svgNode("line",{class:"chart-gridline",x1:"28",y1:"55",x2:"420",y2:"55"}));
+          group.appendChild(svgNode("line",{class:"chart-axis",x1:"28",y1:"15",x2:"28",y2:"100"}));
+          group.appendChild(svgNode("line",{class:"chart-axis",x1:"28",y1:"100",x2:"420",y2:"100"}));
+          group.appendChild(svgNode("text",{class:"chart-axis-label",x:"3",y:"19",id:"revenue-axis-top"},"15"));
+          group.appendChild(svgNode("text",{class:"chart-axis-label",x:"3",y:"59",id:"revenue-axis-mid"},"7.5"));
+          group.appendChild(svgNode("text",{class:"chart-axis-label",x:"12",y:"104"},"0"));
+          svg.insertBefore(group,svg.firstChild);
+        }
+        var max=parseFloat((sample&&sample.revenue)||"15")||15;
+        var top=group.querySelector("#revenue-axis-top"),mid=group.querySelector("#revenue-axis-mid");
+        if(top)top.textContent=max.toFixed(1).replace(/\.0$/," ");
+        if(mid)mid.textContent=(max/2).toFixed(1).replace(/\.0$/," ");
+      }
+      function decorateRange(sample){
+        setAxis(document.querySelector("#active-chart"),sample.active);
+        setAxis(document.querySelector("#credits-chart"),sample.active);
+        decorateRevenue(sample);
+      }
+      function replaceSourceChart(){
+        var wrap=document.querySelector(".source-wrap");
+        if(!wrap||wrap.querySelector(".source-bars"))return;
+        wrap.innerHTML='<div class="source-bars" role="img" aria-label="User source mix: Community 48 percent, Student 32 percent, Friend referral 20 percent"><div class="source-track"><i style="--share:48%"></i><i style="--share:32%"></i><i style="--share:20%"></i></div><div class="source-scale"><span>0%</span><span>50%</span><span>100%</span></div><div class="source-rank"><div class="source-rank-row"><i></i><span>Community</span><b>48%</b></div><div class="source-rank-row"><i class="green"></i><span>Student</span><b>32%</b></div><div class="source-rank-row"><i class="violet"></i><span>Friend referral</span><b>20%</b></div></div></div>';
+      }
+      function replaceValueChart(){
+        var wrap=document.querySelector(".value-wrap");
+        if(!wrap||wrap.querySelector(".value-steps"))return;
+        wrap.innerHTML='<div class="value-steps" role="img" aria-label="Value progression: 28 users not yet successful, 32 successful once, 20 repeat users"><div class="value-step"><span>Not yet successful</span><div class="value-track"><i style="--share:35%"></i></div><b>28 · 35%</b></div><div class="value-step"><span>Successful once</span><div class="value-track"><i style="--share:40%"></i></div><b>32 · 40%</b></div><div class="value-step"><span>Repeat users</span><div class="value-track"><i style="--share:25%"></i></div><b>20 · 25%</b></div></div>';
+      }
+      function addLiveComposite(){
+        var live=document.querySelector(".live-health"),link=live&&live.querySelector(":scope > .module-link");
+        if(!live||!link||live.querySelector(".live-composite"))return;
+        var composite=document.createElement("div");
+        composite.className="live-composite";
+        composite.innerHTML='<div class="live-composite-head"><div><h3>Workload profile</h3><small>Current load across the last hour</small></div><span class="live-chip">12 / 24 slots</span></div><svg class="live-composite-chart" viewBox="0 0 520 190" role="img" aria-label="Online, active, queued and blocked workload over the last 60 minutes"><line class="gridline" x1="48" y1="24" x2="500" y2="24"/><line class="gridline" x1="48" y1="60" x2="500" y2="60"/><line class="gridline" x1="48" y1="96" x2="500" y2="96"/><line class="gridline" x1="48" y1="132" x2="500" y2="132"/><line class="axis" x1="48" y1="18" x2="48" y2="164"/><line class="axis" x1="48" y1="164" x2="500" y2="164"/><polyline class="pulse pulse-online" points="48,116 112,108 176,111 240,92 304,98 368,72 432,79 500,58"/><polyline class="pulse pulse-active" points="48,135 112,131 176,134 240,119 304,123 368,106 432,111 500,100"/><polyline class="pulse pulse-queue" points="48,151 112,147 176,136 240,141 304,126 368,132 432,119 500,126"/><polyline class="pulse pulse-blocked" points="48,158 112,158 176,158 240,158 304,158 368,158 432,154 500,154"/><text class="axis-label" x="18" y="27">16</text><text class="axis-label" x="18" y="63">12</text><text class="axis-label" x="18" y="99">8</text><text class="axis-label" x="18" y="135">4</text><text class="axis-label" x="27" y="168">0</text><text class="axis-label" x="48" y="183">−60m</text><text class="axis-label" x="265" y="183">−30m</text><text class="axis-label" x="477" y="183">Now</text></svg><div class="live-composite-legend"><span><i></i>Online</span><span><i class="active"></i>Active runs</span><span><i class="queue"></i>Queued</span><span><i class="blocked"></i>Blocked</span></div>';
+        live.insertBefore(composite,link);
+      }
+      function decorateMiniAxes(){
+        [].slice.call(document.querySelectorAll(".live-health .sparkline")).forEach(function(svg){
+          if(svg.querySelector(".spark-axis"))return;
+          var group=svgNode("g",{class:"spark-axes"});
+          group.appendChild(svgNode("line",{class:"spark-axis",x1:"0",y1:"8",x2:"0",y2:"46"}));
+          group.appendChild(svgNode("line",{class:"spark-axis",x1:"0",y1:"46",x2:"220",y2:"46"}));
+          svg.insertBefore(group,svg.firstChild);
+        });
+      }
+      function decorateQueueAxes(){
+        var svg=document.querySelector(".queue-detail svg");
+        if(!svg||svg.querySelector(".queue-axis"))return;
+        var group=svgNode("g",{class:"queue-axes"});
+        group.appendChild(svgNode("line",{class:"queue-axis",x1:"28",y1:"12",x2:"28",y2:"110"}));
+        group.appendChild(svgNode("line",{class:"queue-axis",x1:"28",y1:"110",x2:"420",y2:"110"}));
+        group.appendChild(svgNode("text",{class:"queue-axis-label",x:"6",y:"18"},"5"));
+        group.appendChild(svgNode("text",{class:"queue-axis-label",x:"6",y:"62"},"2"));
+        group.appendChild(svgNode("text",{class:"queue-axis-label",x:"13",y:"114"},"0"));
+        svg.insertBefore(group,svg.firstChild);
+      }
+      var baseDetail=renderDetail;
+      renderDetail=function(key){baseDetail(key);decorateQueueAxes()};
+      var baseRange=renderRange;
+      renderRange=function(key){baseRange(key);decorateRange(rangeData[key]||rangeData["1W"])};
+      replaceSourceChart();
+      replaceValueChart();
+      addLiveComposite();
+      decorateMiniAxes();
+      decorateQueueAxes();
+      renderRange(window.selectedRange||"1W");
+    })();
+  </script>
+  <style id="final-v3-four-updates">
+    /* Final v3 alignment: source mix, revenue points, and compact live workload. */
+    .source-wrap.final-source-wrap{display:grid;grid-template-columns:178px minmax(0,1fr);align-items:center;gap:24px;min-height:196px}
+    .source-donut.final-source-donut{width:168px;height:168px;flex:none;background:conic-gradient(var(--accent) 0 22%,var(--green) 22% 40%,var(--violet) 40% 62%,var(--amber) 62% 74%,var(--red) 74% 92%,#6f86a8 92% 100%);box-shadow:inset 0 0 0 1px rgba(255,255,255,.06)}
+    .source-donut.final-source-donut:after{inset:31px;font-size:17px}
+    .source-legend-six{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px 18px}
+    .source-legend-six .legend-row{min-width:0;grid-template-columns:9px 1fr auto;gap:7px;font-size:12px}
+    .source-legend-six .legend-row i{width:9px;height:9px}
+    .source-legend-six .legend-row i.source-green{background:var(--green)}
+    .source-legend-six .legend-row i.source-violet{background:var(--violet)}
+    .source-legend-six .legend-row i.source-amber{background:var(--amber)}
+    .source-legend-six .legend-row i.source-red{background:var(--red)}
+    .source-legend-six .legend-row i.source-steel{background:#6f86a8}
+    .revenue-viz.final-revenue-viz{height:190px;padding-top:8px;border-bottom:1px solid var(--line)}
+    .final-revenue-viz svg{display:block;width:100%;height:174px;overflow:visible}
+    .final-revenue-viz .revenue-grid{stroke:var(--line);stroke-width:1}
+    .final-revenue-viz .revenue-axis{stroke:var(--line-strong);stroke-width:1}
+    .final-revenue-viz .revenue-axis-label,.final-revenue-viz .revenue-x-label{fill:var(--muted);font-size:10px}
+    .final-revenue-viz .revenue-area{fill:rgba(66,204,139,.11)}
+    .final-revenue-viz .revenue-line{fill:none;stroke:var(--green);stroke-width:2.4;stroke-linecap:round;stroke-linejoin:round}
+    .final-revenue-viz .revenue-point{fill:var(--green);stroke:var(--bg);stroke-width:2}
+    .final-revenue-viz .revenue-point-label{fill:var(--text);font-size:10px;font-weight:600;text-anchor:middle}
+    @media(max-width:680px){.source-wrap.final-source-wrap{grid-template-columns:1fr;justify-items:center;gap:17px}.source-legend-six{width:100%;gap:10px 14px}.revenue-viz.final-revenue-viz{height:184px}.final-revenue-viz svg{height:168px}}
+  </style>
+  <script>
+    (function(){
+      var svgNS="http://www.w3.org/2000/svg";
+      function node(name,attrs,text){var el=document.createElementNS(svgNS,name);Object.keys(attrs||{}).forEach(function(key){el.setAttribute(key,attrs[key])});if(text!=null)el.textContent=text;return el}
+
+      /* Make the source taxonomy explicit in both navigation and detail view. */
+      [].slice.call(document.querySelectorAll('a[href="#funnel"]')).forEach(function(link){
+        if(link.closest(".analytics-subnav"))link.textContent="User sources";
+      });
+      if(window.moduleData&&moduleData.funnel){
+        moduleData.funnel.title="User sources";
+        moduleData.funnel.description="Compare the six account-source groups and see where users progress toward a first successful result.";
+        moduleData.funnel.metrics=[["Identified users","100"],["Largest source","Organic · 22%"],["First result","42"],["Activation","52.5%"]];
+        moduleData.funnel.table=[["Source","Users","Share"],["Internal","22","22%"],["Invited","18","18%"],["Organic","22","22%"],["Competition","12","12%"],["Partner","18","18%"],["Unknown","8","8%"]];
+      }
+      var sourceSelect=document.querySelector(".filter-field select");
+      if(sourceSelect){
+        sourceSelect.innerHTML='<option>All sources</option><option>Internal</option><option>Invited</option><option>Organic</option><option>Competition</option><option>Partner</option><option>Unknown</option>';
+      }
+      var sourceWrap=document.querySelector(".source-wrap");
+      var sources=[
+        ["Internal","22%",""],["Invited","18%","source-green"],["Organic","22%","source-violet"],
+        ["Competition","12%","source-amber"],["Partner","18%","source-red"],["Unknown","8%","source-steel"]
+      ];
+      if(sourceWrap){
+        sourceWrap.className="source-wrap final-source-wrap";
+        sourceWrap.innerHTML='<div class="source-donut final-source-donut" data-total="100&#10;users" role="img" aria-label="User sources: Internal 22 percent, Invited 18 percent, Organic 22 percent, Competition 12 percent, Partner 18 percent, Unknown 8 percent"></div><div class="source-legend-six">'+sources.map(function(item){return '<div class="legend-row"><i class="'+item[2]+'"></i><span>'+item[0]+'</span><b>'+item[1]+'</b></div>';}).join("")+'</div>';
+      }
+
+      /* Rebuild Revenue as a real point-line chart so values, axes, and range changes stay legible. */
+      var revenueSeries={"1D":[0.2,0.5,0.7,1.1,1.7,2.5],"1W":[1.2,1.8,2.4,3.4,5.2,9.1,15],"1M":[4,8.5,14,24,48],"1Y":[12,25,42,58,76,98,126,158,204,246,286,324]};
+      function drawRevenue(sample,key){
+        var wrap=document.querySelector(".revenue-viz");
+        if(!wrap)return;
+        wrap.className="revenue-viz final-revenue-viz";
+        var values=revenueSeries[key]||revenueSeries["1W"], labels=sample.labels||[], width=520,height=180,left=42,right=508,top=19,bottom=141,plotWidth=right-left,plotHeight=bottom-top,max=Math.max.apply(null,values.concat([1]));
+        var points=values.map(function(value,index){var x=left+(values.length===1?0:index/(values.length-1)*plotWidth),y=bottom-(value/max)*plotHeight;return {x:x,y:y,value:value,label:labels[index]||("Point "+(index+1))};});
+        var svg=node("svg",{viewBox:"0 0 "+width+" "+height,role:"img",class:"line-chart","aria-label":"Purchased Credits revenue trend with "+values.length+" data points"});
+        var grid=[0,.5,1].map(function(ratio){var y=bottom-ratio*plotHeight;var g=node("line",{class:"revenue-grid",x1:left,y1:y,x2:right,y2:y});svg.appendChild(g);return {ratio:ratio,y:y};});
+        svg.appendChild(node("line",{class:"revenue-axis",x1:left,y1:top,x2:left,y2:bottom}));
+        svg.appendChild(node("line",{class:"revenue-axis",x1:left,y1:bottom,x2:right,y2:bottom}));
+        [max,max/2,0].forEach(function(value,index){svg.appendChild(node("text",{class:"revenue-axis-label",x:5,y:[top+3,(top+bottom)/2+3,bottom+3][index]},value>=100?Math.round(value):value.toFixed(1).replace(/\\.0$/,"")));});
+        var linePath=points.map(function(point,index){return (index?"L":"M")+point.x.toFixed(1)+" "+point.y.toFixed(1)}).join(" ");
+        svg.appendChild(node("path",{class:"revenue-area",d:linePath+" L "+right+" "+bottom+" L "+left+" "+bottom+" Z"}));
+        svg.appendChild(node("path",{class:"revenue-line",d:linePath}));
+        points.forEach(function(point){
+          var circle=node("circle",{class:"revenue-point",cx:point.x,cy:point.y,r:4,tabindex:"0"});
+          circle.appendChild(node("title",{},point.label+": "+point.value.toFixed(1)+" purchased Credits"));
+          svg.appendChild(circle);
+          svg.appendChild(node("text",{class:"revenue-point-label",x:point.x,y:Math.max(top+11,point.y-9)},point.value>=100?Math.round(point.value):point.value.toFixed(1).replace(/\\.0$/,"")));
+        });
+        var shown=[0,Math.floor((labels.length-1)/2),labels.length-1].filter(function(index,pos,arr){return arr.indexOf(index)===pos});
+        shown.forEach(function(index){var point=points[index];svg.appendChild(node("text",{class:"revenue-x-label",x:point.x,y:164,"text-anchor":index===0?"start":index===labels.length-1?"end":"middle"},labels[index]||""));});
+        wrap.innerHTML="";wrap.appendChild(svg);
+      }
+      var priorRenderRange=window.renderRange;
+      if(typeof priorRenderRange==="function"){
+        window.renderRange=function(key){priorRenderRange(key);drawRevenue(window.rangeData&&rangeData[key]||{},key);};
+        drawRevenue(window.rangeData&&rangeData[window.selectedRange||"1W"]||{},window.selectedRange||"1W");
+      }else{drawRevenue({labels:["Sep 4","Sep 5","Sep 6","Sep 7","Sep 8","Sep 9","Sep 10"]},"1W");}
+    })();
+  </script>
+</body>
+</html>

@@ -27,6 +27,7 @@ EXEMPT_PATHS = {
     '/compare',  # Public equity comparison (browser-friendly links)
     '/runs',  # Public backtest run listing
     '/strategy',  # Public strategy viewer page (shared links, no session needed)
+    '/admin-analytics',  # Static admin analytics page; gates itself client-side on /api/auth/me
 }
 
 EXEMPT_EXTENSIONS = {'.js', '.css', '.png', '.jpg', '.gif', '.svg', '.woff', '.woff2', '.ttf'}
