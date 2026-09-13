@@ -11,13 +11,21 @@
     return ALLOWED_TABS.has(normalizedValue) ? normalizedValue : DEFAULT_TAB;
   }
 
-  function setTab(value, { updateUrl = true } = {}) {
+  // `leave` gates the hand-off to the standalone /admin-analytics page. It is
+  // true only on admin *intent* — entering the admin view, clicking the tab.
+  // The page-load and popstate calls below pass false: they run on every /app
+  // load to initialise hidden panel state, and a redirect there bounced every
+  // view of the app to /admin-analytics (PR #467 regression).
+  function setTab(value, { updateUrl = true, leave = true } = {}) {
     const tab = normalizeTab(value);
-    if (tab === 'analytics') {
+    if (tab === 'analytics' && leave) {
       // The Analytics tab now lives on the standalone /admin-analytics page
       // (preview with synthetic data). Leave the in-app panel in place but
       // never show it; providers/users/activity still render here.
-      window.location.assign('/admin-analytics');
+      // `replace`, not `assign`: `/app?view=admin` must not stay in history,
+      // or Back reloads it, app.js routes to admin, and we redirect forward
+      // again — a loop the user cannot escape with the Back button.
+      window.location.replace('/admin-analytics');
       return tab;
     }
     const tablist = document.getElementById('adminTabs');
@@ -64,7 +72,7 @@
     });
     window.addEventListener('popstate', () => {
       const requested = new URL(window.location.href).searchParams.get('adminTab');
-      setTab(requested || DEFAULT_TAB, { updateUrl: false });
+      setTab(requested || DEFAULT_TAB, { updateUrl: false, leave: false });
     });
   }
 
@@ -88,6 +96,14 @@
     input?.focus();
   }
 
+  // Page load only initialises panel state; app.js routes `?view=admin` to
+  // navigateToPage('admin') → onEnter, which is where the redirect belongs.
+  function init() {
+    bind();
+    const requested = new URL(window.location.href).searchParams.get('adminTab');
+    setTab(requested || DEFAULT_TAB, { leave: false });
+  }
+
   window.AdminTabs = { onEnter, openAccountManagement, setTab };
-  document.addEventListener('DOMContentLoaded', onEnter);
+  document.addEventListener('DOMContentLoaded', init);
 })();

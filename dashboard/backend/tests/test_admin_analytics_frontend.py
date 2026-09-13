@@ -247,7 +247,7 @@ def test_app_lifecycle_and_cache_versions_are_wired():
     assert 'app.js?v=130' in APP_HTML
     assert 'js/admin-analytics.js?v=6' in APP_HTML
     assert 'js/admin-analytics-value.js?v=5' in APP_HTML
-    assert 'js/admin-tabs.js?v=6' in APP_HTML
+    assert 'js/admin-tabs.js?v=7' in APP_HTML
 
 
 def test_credit_costs_use_the_shared_exact_formatter():
