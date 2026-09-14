@@ -532,9 +532,15 @@ _recent_slots: Dict[str, Dict[str, Any]] = {}
 # so one default-entitlement account can actually reach its own quota, and no
 # higher: a dashboard backtest is a *subprocess* (unlike the protocol surfaces'
 # in-process step sessions, whose global caps are 50/100), and each one pins a
-# loaded bar window inside a 512MB free-tier instance. It is also the LLM spend
-# bound -- before this module grew slots the runner was single-flight, so the
-# ceiling was exactly 1. Operators on a larger plan raise it explicitly.
+# loaded bar window.
+#
+# This number was sized against a 512MB free instance. Prod moved to Render
+# Standard (1 CPU / 2GB) on 2026-09-11, so RAM is no longer what holds it at 5
+# -- the LLM *spend* bound is. Before this module grew slots the runner was
+# single-flight and the ceiling was exactly 1; a larger value here multiplies
+# operator API cost by the same factor. Raising it is now a budget decision
+# rather than a capacity one, and wants a measured per-run footprint first
+# (issue #308).
 _DEFAULT_MAX_ACTIVE_DASHBOARD_BACKTESTS = 5
 
 
@@ -546,8 +552,9 @@ def _max_active_dashboard_backtests() -> int:
     at import, and a negative value must not silently refuse every backtest
     (0 is a legitimate "drain the runner" setting, ``-1`` is a typo). The
     default is deliberately conservative -- each in-flight run pins a loaded
-    bar window in a 512MB free-tier dyno, and an LLM run spends operator money
-    per trading hour, so this is a spend bound as much as a memory one.
+    bar window, and an LLM run spends operator money per trading hour. Since
+    the 2026-09-11 move to Render Standard (2GB) the spend half is the binding
+    one; see ``_DEFAULT_MAX_ACTIVE_DASHBOARD_BACKTESTS`` above.
     """
     raw = os.getenv("MAX_ACTIVE_DASHBOARD_BACKTESTS")
     if raw is None or not str(raw).strip():
@@ -1006,8 +1013,10 @@ def _resolve_child_pgid(process: Any) -> Optional[int]:
     handler and exits promptly, which says nothing about the AI Hedge Fund
     grandchild still holding a resident set and a billable upstream call for up
     to ``AI_HEDGE_FUND_TIMEOUT_SECONDS`` — against a slot the cancel route has
-    already freed, on a 512MB instance. That orphan is issue #308's failure
-    arriving by the door this PR opened.
+    already freed. That orphan is issue #308's failure arriving by the door
+    this PR opened, and the 2026-09-11 move to a 2GB plan does not retire it:
+    an unreaped grandchild holds its resident set for as long as the timeout
+    allows, whatever the ceiling above it is.
 
     Returns None rather than the parent's own group whenever the child has no
     session of its own — a test stub, a platform where ``start_new_session`` is
@@ -1749,22 +1758,32 @@ def _backtest_subprocess_timeout(
 #
 # The hosted runtime spends one upstream *subprocess per trading day*, each
 # loading its own lookback window and analyst graph beside a parent already
-# holding uvicorn, FastAPI and the Postgres pools. On the 512MB free instance
-# the kernel's victim is the whole web process, so one backtest denies service
-# to every user until a replacement instance is healthy — and since PR #451 a
-# backtest is the onboarding task, where a new user gets exactly one pass.
+# holding uvicorn, FastAPI and the Postgres pools. The kernel's victim is the
+# whole web process, so one backtest denies service to every user until a
+# replacement instance is healthy — and since PR #451 a backtest is the
+# onboarding task, where a new user gets exactly one pass.
 #
 # Issue #308's own framing is that this is a hosting-capacity failure rather
 # than an application bug, and its acceptance criteria are alternatives: raise
 # the instance's RAM, isolate the runtime into its own service, document it as
-# unsupported, or REFUSE the run with a clear error. This is the refusal. It
-# does not make the runtime fit and it does not close the issue; it keeps the
-# request that cannot fit off the onboarding path, and says so to the person
-# who asked for it.
+# unsupported, or REFUSE the run with a clear error. This bound is the refusal.
+#
+# **The RAM exit was taken on 2026-09-11**: prod moved from a 512MB free
+# instance to Render Standard (1 CPU / 2GB). The Render API records six
+# ``oomKilled`` events at ``memoryLimit: 512Mi`` between 2026-09-08 and
+# 2026-09-10 and none since. Measured on the new plan: ~300MB idle, 882MB
+# observed peak — so the app no longer fits in 512MB at all, and the headroom
+# a hosted-runtime child actually has is ~1.1GB, not 2GB.
+#
+# The default below stays at 10 regardless, because nothing here has ever
+# measured one child's resident set. 10 was itself a guess against the old
+# ceiling, and replacing it with a larger guess against a larger ceiling is the
+# same mistake with more RAM behind it. Raise it from the Render dashboard once
+# a run is profiled — it is env-overridable precisely so that needs no deploy.
 #
 # 0 disables the hosted runtime outright — the same meaning
-# ``MAX_ACTIVE_DASHBOARD_BACKTESTS`` gives 0 — so an operator on free hosting
-# can turn it off from the Render dashboard without a deploy.
+# ``MAX_ACTIVE_DASHBOARD_BACKTESTS`` gives 0 — so an operator on constrained
+# hosting can turn it off from the Render dashboard without a deploy.
 _DEFAULT_MAX_AI_HEDGE_FUND_TRADING_DAYS = 10
 # Only reached when AI_HEDGE_FUND_TIMEOUT_SECONDS is unreadable; mirrors the
 # adapter's own default so the two agree about an unconfigured deployment.
@@ -1882,9 +1901,11 @@ def _enforce_ai_hedge_fund_window(start_date: str, end_date: str) -> None:
 #
 # ``subprocess.run(capture_output=True)`` accumulated the child's ENTIRE stdout
 # and stderr in parent memory for the life of the run, and a dashboard backtest
-# prints per trading hour. That buffer is a *contributor* to the free-tier OOM
-# in issue #308 — the hosted runtime's own footprint is the driver — but it is
-# the part of it that lives in the parent, which is the process Render kills.
+# prints per trading hour. That buffer is a *contributor* to the OOM in issue
+# #308 — the hosted runtime's own footprint is the driver — but it is the part
+# of it that lives in the parent, which is the process Render kills. The 2GB
+# plan raises the ceiling; it does not bound an accumulator whose size grows
+# with the length of the run.
 #
 # Head AND tail, not a plain ring buffer: the head carries the universe, the
 # decision source and the FX bootstrap — the lines that say what this run
@@ -3496,7 +3517,7 @@ _DEGRADED_PLOT_NOTE = (
 
 # A short negative cache for degraded renders. Keeping them out of the lru_cache
 # entirely (see _UncachedPlotPng) is right for a blip, but a *persistent* Yahoo
-# block is a steady state on a free-tier host with shared egress IPs — and this
+# block is a steady state on a host with shared egress IPs — and this
 # route is public, unauthenticated and exempt from the session middleware. With
 # no bound at all, that state re-runs the full matplotlib render on every hit,
 # forever, which is precisely the cost the lru_cache exists to avoid. One retry

@@ -73,7 +73,7 @@ with very different symptoms:
 Import it from ``api/`` and from the engine's *callers* instead. ``engine.py``
 deliberately does not: it only needs to *write* the counters, and the backtest
 subprocess would otherwise carry the whole leaderboard package's import weight
-inside a 512MB instance.
+in every child the run forks.
 
 The direction of the dependency is the price of having one owner of the
 threshold, and it is worth paying. Do not "fix" the cycle by moving the

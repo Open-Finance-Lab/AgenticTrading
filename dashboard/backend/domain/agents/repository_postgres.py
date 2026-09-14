@@ -3,7 +3,7 @@
 Selected instead of the default SQLite AgentStore when CONTENT_DATABASE_URL is set
 (see repository.py's _build_agent_store). Exists because the SQLite store
 lives in DATABASE_PATH, which resets to the committed seed database on every
-deploy of the disk-less Render free-tier host -- silently deleting every
+deploy of the disk-less Render host -- silently deleting every
 registered agent and invalidating every issued API key (resolve_api_key is
 the sole auth path for /api/v1 and /api/v2). Method surface, return schemas,
 and behavior are identical to AgentStore; only the SQL dialect differs.

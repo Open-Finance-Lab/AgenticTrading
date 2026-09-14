@@ -3,7 +3,7 @@
 Selected instead of the default SQLite BacktestDatabase when AGENT_RUNS_DATABASE_URL is
 set (see database.py's _build_backtest_db). Exists because the SQLite store lives
 in DATABASE_PATH, which resets to the committed seed database on every deploy of
-the disk-less Render free-tier host -- silently deleting every backtest run,
+the disk-less Render host -- silently deleting every backtest run,
 equity curve, trade log and decision log, which is why issue #145 (the leaderboard
 refresh cron) is blocked. Method surface and return schemas are identical to
 BacktestDatabase, and for the overwhelming majority of calls only the SQL

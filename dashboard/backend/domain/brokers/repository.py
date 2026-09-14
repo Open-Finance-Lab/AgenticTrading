@@ -288,7 +288,7 @@ def _build_user_store():
         print(f"broker_connections backend: postgres ({describe_database_url(url)})")
         # Deliberately no try/except: a construction failure must abort boot.
         # Silently falling back to SQLite would park live-brokerage refresh
-        # tokens on the disk-less Render free tier, where the file resets to the
+        # tokens on the disk-less Render host, where the file resets to the
         # committed seed database on every deploy -- exactly the failure this
         # twin exists to prevent, and one that reports itself as a healthy app.
         return BrokerConnectionStorePostgres(url)

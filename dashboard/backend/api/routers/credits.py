@@ -51,7 +51,7 @@ _WEBHOOK_LIMITER = FixedWindowRateLimiter(max_events=600, window_seconds=60)
 # Signature verification needs the raw bytes, so the body must be read before
 # the request can be authenticated at all — which is exactly why the read has
 # to be bounded. A Stripe event is a few KB; 256 KiB is generous. Without this
-# a single anonymous POST can buffer an arbitrary body into a 512MB instance.
+# a single anonymous POST can buffer an arbitrary body into the web process.
 _MAX_WEBHOOK_BODY_BYTES = 256 * 1024
 
 

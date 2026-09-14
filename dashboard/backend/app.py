@@ -109,7 +109,8 @@ _CORS_ALLOW_CREDENTIALS = _CORS_ORIGINS != ["*"]
 # the event loop (no threadpool hop), so the cost is paid by every concurrent
 # request. Measured on a 462 KB equity curve, level 9 costs 25.0 ms for 20.1%
 # of original while level 6 costs 6.4 ms for 20.8% -- 4x the event-loop stall
-# to save 0.7 percentage points, on a free-tier CPU that is slower still.
+# to save 0.7 percentage points, on a single-CPU instance whose event loop has
+# no second core to be stalled off.
 app.add_middleware(GZipMiddleware, minimum_size=1024, compresslevel=6)
 
 # Enable CORS for frontend

@@ -1,8 +1,14 @@
 services:
   - type: web
     name: agentic-trading-api
+    # ⚠ The live service is `env: docker` (builds ./Dockerfile), not python.
+    # This block is documentation; prod does not sync from this file. Verified
+    # against the Render API 2026-09-14.
     env: python
     region: oregon
+    # Live since 2026-09-11: Standard, reported by the API as `1c-2g`
+    # (1 CPU / 2 GB). Before that the service ran on the 512 MB free tier and
+    # was OOM-killed six times in 72h -- see CLAUDE.md "Prod deploy reality".
     plan: standard
     
     # Build and run from repository root (dashboard lives under dashboard/).
@@ -93,10 +99,19 @@ services:
       - key: PUBLIC_APP_URL
         sync: false
     
-    # Health check
+    # Health check. Set on the live service 2026-09-14 -- it had been empty
+    # since launch, so Render noticed only hard exits and a process that wedged
+    # while still holding its port went unnoticed.
     healthCheckPath: /health
     
-    # File storage for SQLite database (persistent)
+    # File storage for SQLite database.
+    #
+    # ⚠ NOT PROVISIONED. The live service reports `disk: null` (Render API,
+    # 2026-09-14), so DATABASE_PATH=/data/backtest.db above falls back to the
+    # committed seed backtest.db and resets on every deploy -- destroying
+    # protocol_runs, protocol_steps and idempotency_keys, which have no Postgres
+    # option. The 2026-09-11 plan upgrade did NOT change this. This block records
+    # the intent only; prod does not sync from this file.
     disks:
       - name: database
         mountPath: /data
