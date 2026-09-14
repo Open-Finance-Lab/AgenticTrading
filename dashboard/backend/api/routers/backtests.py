@@ -2008,6 +2008,51 @@ def _max_pipeline_llm_calls() -> int:
     return usable // max(1, PIPELINE_SECONDS_PER_LLM_CALL)
 
 
+def _enforce_pipeline_llm_window(
+    runtime_type: str,
+    decision_source: str,
+    start_date: str,
+    end_date: str,
+    pipeline: Optional[List[Dict[str, Any]]],
+) -> None:
+    """Refuse a pipeline LLM run the fixed parent budget cannot finish.
+
+    Only 422, never 503: unlike the hosted guard there is no "turned off here"
+    state to report, and every refusal this raises is one the caller can act on
+    -- by shortening the window or by removing pipeline steps.
+
+    Both exits are named because the bound is a PRODUCT of the two. A user whose
+    window is already short and whose pipeline is wide is told to shorten the
+    window by a message that names only dates, and has no way to discover the
+    real lever. ``MAX_BACKTEST_DAYS`` is the calendar half of this bound; this
+    is the half that knows what the window costs.
+    """
+    if runtime_type != PIPELINE_RUNTIME_TYPE:
+        return
+    if decision_source != LLM_DECISION_SOURCE:
+        return
+    estimated = _estimated_pipeline_llm_calls(start_date, end_date, pipeline)
+    allowed = _max_pipeline_llm_calls()
+    if estimated <= allowed:
+        return
+
+    trading_days = _estimated_decision_days(start_date, end_date)
+    decision_steps, _post_trade_steps = split_pipeline(pipeline)
+    steps = max(1, len(decision_steps))
+    minutes = PIPELINE_SUBPROCESS_TIMEOUT_SECONDS // 60
+    raise HTTPException(
+        status_code=422,
+        detail=(
+            f"This run needs about {estimated} model calls "
+            f"({trading_days} trading days x "
+            f"{PIPELINE_DECISION_BARS_PER_TRADING_DAY} hourly bars x "
+            f"{steps} pipeline step(s)), and a backtest has room for about "
+            f"{allowed} within its {minutes}-minute limit. Shorten the date "
+            "range, or use fewer pipeline steps, and run it again."
+        ),
+    )
+
+
 # ============================================================================
 # Running the child (issues #273 and #308)
 # ============================================================================

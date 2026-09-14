@@ -17,6 +17,7 @@ from datetime import datetime
 import pytest
 import pytz
 import requests
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 from dashboard.backend.app import app
@@ -1831,3 +1832,103 @@ def test_pipeline_seconds_per_call_honours_a_valid_override(monkeypatch):
 
     monkeypatch.setenv("PIPELINE_SECONDS_PER_LLM_CALL", "300")
     assert bt._pipeline_seconds_per_llm_call() == 300
+
+
+def test_pipeline_window_guard_allows_the_shipped_default_window():
+    """The modal's own pre-filled window must not 422 on the onboarding path.
+
+    2026-04-15 -> 2026-04-23 with the advertised four-module pipeline is 196 of
+    200 calls. It passes by four -- deliberately pinned, so that anyone who
+    shrinks the budget or raises the per-call estimate sees exactly which run
+    they just made illegal.
+    """
+    pipeline = [{"label": f"Step {i}"} for i in range(4)]
+    assert (
+        bt._enforce_pipeline_llm_window(
+            "pipeline", "llm", "2026-04-15", "2026-04-23", pipeline
+        )
+        is None
+    )
+
+
+def test_pipeline_window_guard_refuses_a_wide_pipeline_over_a_legal_window():
+    """A window inside MAX_BACKTEST_DAYS can still be uncompletable.
+
+    This is the case MAX_BACKTEST_DAYS cannot express: 14 calendar days is
+    legal, but four decision steps over it is 280 calls against a 200-call
+    budget. Window length alone does not say how much a run costs.
+    """
+    pipeline = [{"label": f"Step {i}"} for i in range(4)]
+    with pytest.raises(HTTPException) as excinfo:
+        bt._enforce_pipeline_llm_window(
+            "pipeline", "llm", "2026-04-06", "2026-04-19", pipeline
+        )
+    assert excinfo.value.status_code == 422
+
+
+def test_pipeline_window_guard_names_both_levers_and_both_numbers():
+    """A refusal naming one lever is a dead end for a user blocked by the other.
+
+    The bound is a product of window length and pipeline width, so the message
+    has to offer both exits -- and name the estimate AND the budget, the way
+    _enforce_ai_hedge_fund_window names the bound and the request.
+    """
+    pipeline = [{"label": f"Step {i}"} for i in range(4)]
+    with pytest.raises(HTTPException) as excinfo:
+        bt._enforce_pipeline_llm_window(
+            "pipeline", "llm", "2026-04-06", "2026-04-19", pipeline
+        )
+    detail = excinfo.value.detail
+    assert "280" in detail          # what this request needs
+    assert "200" in detail          # what the deployment allows
+    assert "shorten" in detail.lower()
+    assert "step" in detail.lower()
+
+
+def test_pipeline_window_guard_allows_a_single_prompt_over_the_full_window():
+    """The no-pipeline path costs one call per bar and fits the full fortnight.
+
+    70 calls of 200. Lowering MAX_BACKTEST_DAYS must not be read as having
+    made the simple path marginal too.
+    """
+    assert (
+        bt._enforce_pipeline_llm_window(
+            "pipeline", "llm", "2026-04-06", "2026-04-19", None
+        )
+        is None
+    )
+
+
+def test_pipeline_window_guard_ignores_runs_it_does_not_govern():
+    """Rule-based runs and the hosted runtime are out of scope.
+
+    A rule-based run makes no model calls at all, and the hosted path has its
+    own window bound sized from its own enforced per-step timeout. Applying a
+    pipeline-shaped estimate to either would refuse runs on arithmetic that
+    does not describe them.
+    """
+    wide = [{"label": f"Step {i}"} for i in range(4)]
+    assert (
+        bt._enforce_pipeline_llm_window(
+            "pipeline", "rule_based", "2026-04-06", "2026-04-19", wide
+        )
+        is None
+    )
+    assert (
+        bt._enforce_pipeline_llm_window(
+            "ai_hedge_fund", "llm", "2026-04-06", "2026-04-19", wide
+        )
+        is None
+    )
+
+
+def test_pipeline_window_guard_tracks_the_operator_override(monkeypatch):
+    """Raising the per-call estimate shrinks what is runnable, immediately."""
+    pipeline = [{"label": f"Step {i}"} for i in range(4)]
+    monkeypatch.setattr(bt, "PIPELINE_SECONDS_PER_LLM_CALL", 30)
+    assert bt._max_pipeline_llm_calls() == 100
+    with pytest.raises(HTTPException) as excinfo:
+        bt._enforce_pipeline_llm_window(
+            "pipeline", "llm", "2026-04-15", "2026-04-23", pipeline
+        )
+    assert excinfo.value.status_code == 422
