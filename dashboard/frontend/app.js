@@ -774,28 +774,61 @@ function shelfIdSuffix(shelfKey) {
 /** Per-shelf page index (0-based), keyed by AGENT_SHELVES' `key`. Reset on search change. */
 let agentGridPage = Object.fromEntries(AGENT_SHELVES.map((shelf) => [shelf.key, 0]));
 
-/* How many cards the last render actually put on screen.
+/** An agent the Capital Allocation legend draws a row for.
  *
- * The Capital Allocation panel beside the grid is portfolio-wide -- it lists
- * every agent holding a sleeve, because a pie that omitted some would not add
- * up to the portfolio. The grid is not: a search term, a market chip and the
- * per-shelf page cap each hide cards the legend still lists, which reads as
- * the panel inventing agents. Counted during the render rather than recomputed
- * afterwards, so the number cannot drift from what was painted. */
-let agentGridShownCount = 0;
+ * Mirrors buildAgentAllocationData's `cash_allocation > 0` filter in
+ * js/portfolio.js. The grid note reconciles the grid against that legend, so it
+ * has to count the set the legend actually draws: an agent carrying no sleeve
+ * has no row there, and its absence from the grid reconciles nothing. */
+function holdsAllocatedCapital(agent) {
+  return agent?.cash_allocation != null && Number(agent.cash_allocation) > 0;
+}
+
+function countAllocatedCapital(agents) {
+  return (agents || []).filter(holdsAllocatedCapital).length;
+}
+
+/** Per-stage elision, from the four counts the grid render measured.
+ *
+ * Every cause is a *drop*, never "is this control set". A search term matching
+ * everything, a market chip excluding nothing and a page cap above the shelf
+ * size are all invisible to the user, so naming one of them explains a
+ * disagreement that is not there. The stages are consecutive
+ * (painted <= chipped <= searched <= roster), which buys the invariant the
+ * sentence leans on: `shown < total` holds if and only if some cause is true,
+ * so the note can never trail off into a bare "because of" nothing.
+ *
+ * Pure -- no DOM -- so the guards can run it under node. */
+function agentGridVisibilityFrom({ roster, searched, chipped, painted }) {
+  return {
+    shown: painted,
+    total: roster,
+    searching: searched < roster,
+    filtered: chipped < searched,
+    paged: painted < chipped,
+  };
+}
+
+/* What the last grid render painted, counted over the set the Capital
+ * Allocation legend lists.
+ *
+ * The panel beside the grid is portfolio-wide -- it lists every agent holding a
+ * sleeve, because a pie that omitted some would not add up to the portfolio.
+ * The grid is not: a search term, a market chip and the per-shelf page cap each
+ * hide cards the legend still lists, which reads as the panel inventing agents.
+ *
+ * Written once per render from counts taken during it, so no figure here can
+ * drift from what was actually on screen. */
+let agentGridVisibility = agentGridVisibilityFrom({
+  roster: 0,
+  searched: 0,
+  chipped: 0,
+  painted: 0,
+});
 
 /** `{ shown, total, searching, filtered, paged }` for the last grid render. */
 function describeAgentGridVisibility() {
-  const total = (allAgents || []).length;
-  return {
-    shown: Math.min(agentGridShownCount, total),
-    total,
-    searching: !!(document.getElementById('agentSearchInput')?.value || '').trim(),
-    filtered: agentMarketFilter !== 'all',
-    paged: AGENT_SHELVES.some(
-      (shelf) => (allAgents || []).filter(shelf.match).length > AGENT_GRID_PAGE_SIZE,
-    ),
-  };
+  return { ...agentGridVisibility };
 }
 window.describeAgentGridVisibility = describeAgentGridVisibility;
 
@@ -1720,7 +1753,6 @@ function renderAgentCards(grid, agents, categoryKey) {
   bindAgentCardMenus(grid);
 
   renderAgentGridFooter(categoryKey, total, page, pageCount);
-  agentGridShownCount += visibleAgents.length;
 
   grid.querySelectorAll('.agent-configure-btn').forEach((btn) => {
     btn.addEventListener('click', () => {
@@ -1856,6 +1888,11 @@ function renderAgentCards(grid, agents, categoryKey) {
       }
     });
   });
+
+  // Returned rather than tallied into a module-level counter: the caller
+  // measures every stage of the grid render in one place, so the note beside
+  // the pie cannot report a count from one render and a cause from another.
+  return visibleAgents;
 }
 
 // Empty-state HTML for the Prompted Models shelf. Three cases, deliberately
@@ -2098,7 +2135,19 @@ function renderAgentCategories(agents) {
   if (shelves.some(({ grid }) => !grid)) return;
 
   if (errorEl) errorEl.hidden = true; // a successful render clears any prior error
-  agentGridShownCount = 0;
+
+  // Stage-by-stage counts for the Capital Allocation note, over the set that
+  // panel lists (agents carrying a sleeve) rather than the whole roster.
+  //
+  // The roster figure is measured on the DECORATED list: the legend is drawn
+  // from allAgents.map(decorateAgent), and decorateAgent is what restores a
+  // sleeve saved locally rather than by the server. Counting raw allAgents here
+  // would under-count exactly those agents and understate the total.
+  const rosterWithCapital = countAllocatedCapital(allAgents.map(decorateAgent));
+  // `agents` is the search-filtered roster -- see getFilteredAgents.
+  const searchedWithCapital = countAllocatedCapital(agents);
+  let chippedWithCapital = 0;
+  let paintedWithCapital = 0;
 
   // allAgents, never the `agents` parameter: renderAgentCategories is called
   // with getFilteredAgents(), which the search box and the market chips
@@ -2135,7 +2184,12 @@ function renderAgentCategories(agents) {
       // filed under a market the platform can't actually vouch for.
       matched = matched.filter((a) => agentMarketKey(a) === agentMarketFilter);
     }
-    renderAgentCards(grid, matched, shelf.key);
+    // Every agent lands on exactly one shelf (see agentShelfKey), so summing
+    // across shelves covers the search-filtered set once and only once.
+    chippedWithCapital += countAllocatedCapital(matched);
+    paintedWithCapital += countAllocatedCapital(
+      renderAgentCards(grid, matched, shelf.key),
+    );
 
     if (shelf.key === 'external') {
       if (matched.length > 0) {
@@ -2159,6 +2213,15 @@ function renderAgentCategories(agents) {
         ? openAgentsEmptyHtml({ searching })
         : promptedEmptyHtml({ searching, marketFilter: agentMarketFilter });
     }
+  });
+
+  // One assignment, from counts this render took: no half-updated state, and
+  // no cause left over from a previous pass.
+  agentGridVisibility = agentGridVisibilityFrom({
+    roster: rosterWithCapital,
+    searched: searchedWithCapital,
+    chipped: chippedWithCapital,
+    painted: paintedWithCapital,
   });
 
   // Every repaint of the grid can change how many cards are on screen -- a
@@ -4042,7 +4105,17 @@ async function claimAgentsForUser({ reload = true } = {}) {
   try {
     await API.post(`${API_BASE}/api/v1/agents/claim-account`, {});
   } catch (error) {
-    console.warn('Agent account claim skipped:', error.message);
+    // ERROR, and not the word "skipped": this is a drift boundary, not a
+    // no-op. The guest agents stay unclaimed, so their sleeves keep counting
+    // against `allocated` while belonging to no account -- the user's
+    // spendable cash drops and the next allocation comes back 400
+    // "Insufficient unallocated cash" with nothing on screen connecting the
+    // two. The panel states the stranded amount (allocationUnclaimedNoteHtml);
+    // this line is what says the claim is why.
+    console.error(
+      'Agent account claim FAILED — guest agents stay unclaimed and their capital is not spendable:',
+      error.message,
+    );
   }
   if (reload) {
     // Ungated on purpose: this call IS the claim-then-load ordering the auth

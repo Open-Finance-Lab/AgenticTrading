@@ -9727,6 +9727,16 @@ html[data-nav-page="home"] #homeView .dashboard-bottom-grid .home-module--market
     border-top: 1px solid var(--border-subtle, rgba(148, 163, 184, 0.16));
 }
 
+/* Unlike the grid note, this one reports money the account cannot spend --
+ * amber rather than muted, so it does not read as another layout footnote.
+ * Both can render at once, hence its own top rule. */
+.allocation-legend-hint--unclaimed {
+    margin-top: 8px;
+    padding-top: 8px;
+    border-top: 1px solid var(--border-subtle, rgba(148, 163, 184, 0.16));
+    color: var(--warning, #f59e0b);
+}
+
 .agents-grid-footer {
     display: flex;
     align-items: center;

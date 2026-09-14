@@ -24,6 +24,21 @@ def _scope(request: Request) -> AgentScope:
     total summed over a narrower set publishes a number the panel beside it
     contradicts -- and offers the difference back as cash the account can spend
     a second time.
+
+    ⚠ This makes the two figures **agree**; it is not a bound on total
+    allocation. The scope is built from caller-supplied headers
+    (``X-Browser-Id``/``X-Session-Id``), so a client that sends neither -- the
+    SDK, curl, a cron -- gets ``EMPTY_SCOPE`` and is validated against the
+    account-only figure, exactly as before this existed. That is the right
+    answer for such a caller (an unclaimed guest agent is not its account's
+    yet) and it does mean the allocation an unclaimed sleeve would have refused
+    can still go through from a header-less client.
+
+    What catches it is ``_reconcile``, not this: once the claim lands, the
+    sleeves become owned, the derived ``cash_available`` clamps at 0 and the
+    over-allocation is reported rather than hidden. Deriving the figure instead
+    of ledgering it is what makes that state self-correcting -- see the module
+    docstring in ``domain/portfolios/service.py``.
     """
     return AgentScope.from_owner_context(_browser_context(request))
 

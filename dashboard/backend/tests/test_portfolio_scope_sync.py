@@ -11,9 +11,11 @@ yet: a real dollar figure rendered in the legend that the "Allocated to
 Agents" total did not include, with the difference offered back to the user as
 unallocated cash they could spend twice.
 
-These tests pin the union scope on the portfolio side, and pin the one thing
-that must NOT follow it: the persisted ``user_portfolios.cash_available``
-cache, which is keyed by account and so cannot depend on which browser asked.
+These tests pin the union scope on the portfolio side; the one thing that must
+NOT follow it (the persisted ``user_portfolios.cash_available`` cache, keyed by
+account and so unable to depend on which browser asked); and the scope's own
+limit -- it is built from caller-supplied headers, so it makes the panel's two
+figures *agree* rather than bounding total allocation.
 """
 
 from __future__ import annotations
@@ -192,8 +194,16 @@ def test_persisted_cash_cache_stays_account_scoped(env):
     assert scoped["allocated"] > plain["allocated"]
 
 
-def test_allocation_cannot_spend_an_unclaimed_sleeve_twice(env):
-    """The validation path uses the same scope the panel displays."""
+def test_allocation_from_the_browser_cannot_spend_an_unclaimed_sleeve_twice(env):
+    """The validation path uses the same scope the panel displays.
+
+    Scoped to the *browser*, deliberately: the scope comes from caller-supplied
+    headers, so this pins that a browser seeing the sleeve in its own legend is
+    validated against it -- not that no client anywhere can allocate past it. A
+    caller sending no browser identity still gets the account-only figure; see
+    ``api/routers/portfolio._scope`` for why that is the right answer there and
+    what catches the over-allocation instead.
+    """
     client, user_store, _portfolio_store, agent_store = env
     agent_store.create_agent(
         name="Guest sleeve",
@@ -223,3 +233,57 @@ def test_allocation_cannot_spend_an_unclaimed_sleeve_twice(env):
     )
     assert resp.status_code == 400, resp.text
     assert "insufficient" in resp.json()["detail"].lower()
+
+
+def test_a_header_less_caller_is_validated_against_the_account_alone(env):
+    """The documented limit of the scope, pinned rather than only described.
+
+    ``AgentScope`` is built from caller-supplied headers, so a client that
+    sends none -- the SDK, curl, a cron -- is validated against the owner's
+    sleeves alone, exactly as before the scope existed. That is the right
+    answer for such a caller (an unclaimed guest agent belongs to no account
+    yet), and it means the scope makes the panel's two figures *agree*; it is
+    not a ceiling on total allocation. The over-allocation it lets through
+    surfaces at claim time through ``_reconcile``, which derives
+    ``cash_available`` and so reports the state instead of hiding it.
+
+    If this ever starts returning 400, the bound became real -- update
+    ``api/routers/portfolio._scope`` rather than deleting the case.
+    """
+    client, user_store, _portfolio_store, agent_store = env
+    agent_store.create_agent(
+        name="Guest sleeve",
+        owner_user_id=None,
+        owner_browser_session=BROWSER,
+        agent_type="builtin",
+        cash_allocation=9000.0,
+    )
+    _signup(client)
+    user = user_store.get_user_by_email("scope@example.com")
+    target = agent_store.create_agent(
+        name="Target",
+        owner_user_id=user["id"],
+        owner_browser_session=BROWSER,
+        agent_type="builtin",
+        cash_allocation=0.0,
+    )
+
+    # No X-Browser-Id and no X-Session-Id: nothing to scope by.
+    bare = {
+        "Origin": "http://testserver",
+        "X-CSRF-Token": client.cookies.get(csrf_cookie_name()) or "",
+    }
+    resp = client.get("/api/v1/portfolio", headers=bare)
+    assert resp.status_code == 200, resp.text
+    portfolio = resp.json()["portfolio"]
+    # Starter agents only (3 x 1000) — the 9000 guest sleeve is invisible here.
+    assert portfolio["allocated"] == pytest.approx(3000.0)
+    assert portfolio["cash_available"] == pytest.approx(7000.0)
+    assert portfolio["unclaimed_allocated"] == pytest.approx(0.0)
+
+    resp = client.post(
+        "/api/v1/portfolio/allocate",
+        json={"agent_id": target["agent_id"], "amount": 500.0},
+        headers=bare,
+    )
+    assert resp.status_code == 200, resp.text

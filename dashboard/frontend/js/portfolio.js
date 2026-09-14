@@ -349,9 +349,11 @@ function sortAllocationLegendSlices(slices) {
  * pie that dropped them would no longer add up to the portfolio. Without this
  * line the two disagree silently and the panel reads as inventing agents.
  *
- * Deliberately anchored on the count the grid actually painted, not on whether
- * a filter happens to be set: a filter that hides nothing is not worth a
- * caveat, and the page cap hides cards with no filter set at all. */
+ * Both counts come from describeAgentGridVisibility, which measures them over
+ * the agents this legend draws rows for (a positive sleeve) and marks a cause
+ * only when that stage actually dropped one. So the numbers here reconcile
+ * against what is on the panel, and no cause is named for a control that hid
+ * nothing -- see agentGridVisibilityFrom in app.js. */
 function allocationGridNoteHtml() {
     const view = typeof window.describeAgentGridVisibility === 'function'
         ? window.describeAgentGridVisibility()
@@ -362,8 +364,30 @@ function allocationGridNoteHtml() {
     if (view.filtered) causes.push('the market filter');
     if (view.paged) causes.push('paging');
     const why = causes.length ? ` because of ${causes.join(' and ')}` : '';
-    return `<p class="allocation-legend-hint allocation-legend-hint--grid">Every agent holding capital is listed here.`
-        + ` The cards above show ${view.shown} of ${view.total}${why}.</p>`;
+    const these = view.total === 1 ? 'agent' : 'agents';
+    return `<p class="allocation-legend-hint allocation-legend-hint--grid">All ${view.total}`
+        + ` ${these} holding capital are listed here.`
+        + ` The cards above show ${view.shown} of them${why}.</p>`;
+}
+
+/* Capital allocated to agents this browser created before sign-in, which the
+ * account has not taken ownership of yet.
+ *
+ * `POST /api/v1/agents/claim-account` links them at login and the figure goes
+ * to zero. When that call fails the client only logs it, so without this line
+ * the sole symptom is the account's spendable cash quietly sitting lower than
+ * the sleeves it owns -- and an allocation refused as "Insufficient
+ * unallocated cash" for a reason nothing on screen states. Naming the amount
+ * is what keeps "nothing to claim" tellable apart from "the claim failed". */
+function allocationUnclaimedNoteHtml(portfolio) {
+    // Half a cent: this is a derived difference of two float sums, so an exact
+    // `> 0` would raise a banner over a $0.00 rounding remainder.
+    const unclaimed = Number(portfolio?.unclaimed_allocated) || 0;
+    if (unclaimed < 0.005) return '';
+    return `<p class="allocation-legend-hint allocation-legend-hint--unclaimed">`
+        + `${pfMoney(unclaimed)} of this is held by agents created in this browser`
+        + ` before you signed in, and is not linked to your account yet — so it counts`
+        + ` as allocated but cannot be spent. Reload to retry linking them.</p>`;
 }
 
 /** Repaint the legend from the slices already on the canvas — no refetch. */
@@ -394,7 +418,8 @@ function renderAllocationLegend(legendEl, slices) {
     legendEl.innerHTML =
         `<div class="allocation-legend-scroll${expanded ? ' allocation-legend-scroll--expanded' : ''}" style="max-height:${maxHeight}px">` +
         `<ul class="allocation-legend-list">${rowsHtml}</ul></div>${toggleHtml}` +
-        allocationGridNoteHtml();
+        allocationGridNoteHtml() +
+        allocationUnclaimedNoteHtml(livePortfolio);
 
     if (!allocationLegendBound) {
         allocationLegendBound = true;
@@ -489,6 +514,10 @@ function renderPortfolioFromLive(portfolio, agents, options) {
         equity: Number(portfolio.equity) || 0,
         cash_available: Number(portfolio.cash_available) || 0,
         allocated: Number(portfolio.allocated) || 0,
+        // Named explicitly because this object is a whitelist, not a copy: the
+        // legend's unclaimed line reads it, and an unnamed field would reach
+        // the note as undefined on the cached instant-paint path.
+        unclaimed_allocated: Number(portfolio.unclaimed_allocated) || 0,
     };
     writeCachedPortfolio(livePortfolio);
     setPortfolioSampleBadgeVisible(false);

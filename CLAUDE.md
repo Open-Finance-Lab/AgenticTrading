@@ -102,14 +102,35 @@ account could spend twice. Every router call site passes the scope; the default
 `EMPTY_SCOPE` reproduces the old account-only behaviour for a caller with no
 browser identity (SDK, cron, tests).
 
+⚠ **This makes the two figures agree; it is not a ceiling on allocation.** The
+scope is built from caller-supplied headers (`X-Browser-Id`/`X-Session-Id`), so a
+client sending neither is validated against the account-only figure exactly as
+before it existed — which is the right answer there (an unclaimed guest agent is
+not that account's yet) and does mean the allocation an unclaimed sleeve would
+have refused still goes through from a header-less client. What catches it is
+`_reconcile`: once the claim lands the sleeves become owned, the derived
+`cash_available` clamps at 0 and the over-allocation is *reported* rather than
+hidden — deriving the figure instead of ledgering it is what makes that state
+self-correcting. Pinned both ways by `tests/test_portfolio_scope_sync.py`; don't
+read the browser-scoped case as a global double-spend bound.
+
 ⚠ **`user_portfolios.cash_available` deliberately does *not* follow the scope.**
 That row is keyed by user, so caching the scoped figure would make it rewrite
 itself on every read from a browser holding a different set of unclaimed agents —
 two browsers of one account clobbering each other forever. `_split_allocations`
 returns `(owned, visible)` from one query for exactly this: `owned` is persisted,
 `visible` is returned. The gap is reported as `portfolio.unclaimed_allocated`
-rather than folded silently into the total, so "nothing to claim" stays tellable
-apart from "`claimAgentsForUser` failed and only `console.warn`ed".
+rather than folded silently into the total.
+
+⚠ **That field needs an observer to be worth anything, and it has two.** The
+legend renders it (`allocationUnclaimedNoteHtml`, amber, naming the stranded
+amount), and a failed claim logs `console.error` — not the old
+`console.warn('… claim skipped')`, which read as a no-op and is the one thing it
+is not. Reported-but-unread is the same failure as unreported: the symptom of a
+silently failed claim is the account's spendable cash sitting lower than the
+sleeves it owns and the next allocation returning 400 "Insufficient unallocated
+cash", with nothing on screen connecting the two. If you add another derived
+"drift" field here, wire its reader in the same change.
 
 Starter provisioning at signup (`agents/service.py::provision_starter_agents`) is
 the one path left account-scoped on purpose: the claim has not run yet at that
@@ -120,9 +141,29 @@ onboarding agents. Pinned by `tests/test_portfolio_scope_sync.py`.
 portfolio-wide (a pie that dropped agents would not add up); the grid is
 search-filtered, market-chip-filtered and capped at `AGENT_GRID_PAGE_SIZE` (5)
 per shelf. `describeAgentGridVisibility()` publishes what the grid actually
-painted and `allocationGridNoteHtml()` renders the reconciling line — anchored on
-the painted count, never on whether a filter is set, so a filter that hides
-nothing raises no caveat and the page cap raises one with no filter at all.
+painted and `allocationGridNoteHtml()` renders the reconciling line.
+
+Two rules make that line trustworthy, and both are **measured during the render**
+(`renderAgentCategories` → `agentGridVisibilityFrom`), not inferred afterwards:
+
+- **Count the set the legend draws, not the roster.** Both figures run through
+  `countAllocatedCapital`, mirroring `buildAgentAllocationData`'s
+  `cash_allocation > 0` filter. An agent with no sleeve has no legend row, so its
+  absence from the grid reconciles nothing — counting `allAgents.length` printed
+  "shows 5 of 10" beside three legend rows, a caveat for a disagreement that did
+  not exist against a total matching nothing on screen. The roster count is taken
+  on the **decorated** list (`allAgents.map(decorateAgent)`), since that is what
+  restores a locally-overridden sleeve and therefore what the legend sees.
+- **Name a cause only when that stage dropped a row**, never when the control is
+  merely set. A search matching everything, a chip excluding nothing and a page
+  cap above the shelf size are all invisible to the user. The stages are
+  consecutive (`painted ≤ chipped ≤ searched ≤ roster`), which buys the invariant
+  the sentence leans on: `shown < total` iff some cause is true, so it can never
+  trail off into a bare "because of" nothing.
+
+`tests/test_allocation_panel_grid_note.py` pins both, including the invariant as
+an exhaustive sweep. Don't reintroduce a roster-wide total or a
+`agentMarketFilter !== 'all'`-style cause flag.
 
 ### Baseline strategies (registry pattern)
 
