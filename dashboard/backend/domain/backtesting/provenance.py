@@ -72,8 +72,10 @@ with very different symptoms:
 
 Import it from ``api/`` and from the engine's *callers* instead. ``engine.py``
 deliberately does not: it only needs to *write* the counters, and the backtest
-subprocess would otherwise carry the whole leaderboard package's import weight
-in every child the run forks.
+subprocess -- ``dashboard/scripts/backtest_hourly_agent.py``, one per run --
+would otherwise carry the whole leaderboard package's import weight. The AI
+Hedge Fund runtime's per-trading-day children are not what this is about: they
+run under a separate interpreter and never import ``engine.py`` at all.
 
 The direction of the dependency is the price of having one owner of the
 threshold, and it is worth paying. Do not "fix" the cycle by moving the

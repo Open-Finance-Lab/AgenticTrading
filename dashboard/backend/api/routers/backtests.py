@@ -535,12 +535,18 @@ _recent_slots: Dict[str, Dict[str, Any]] = {}
 # loaded bar window.
 #
 # This number was sized against a 512MB free instance. Prod moved to Render
-# Standard (1 CPU / 2GB) on 2026-09-11, so RAM is no longer what holds it at 5
-# -- the LLM *spend* bound is. Before this module grew slots the runner was
-# single-flight and the ceiling was exactly 1; a larger value here multiplies
-# operator API cost by the same factor. Raising it is now a budget decision
-# rather than a capacity one, and wants a measured per-run footprint first
-# (issue #308).
+# Standard (1 CPU / 2GB) on 2026-09-11, which raised the capacity ceiling
+# without establishing where it now sits: nothing has ever measured one
+# child's resident set, and the ~1.1GB of headroom above the observed 882MB
+# peak belongs to the *instance*, shared across however many slots this value
+# opens -- it is not 1.1GB per child. So RAM is not ruled out as the constraint
+# here; it has only stopped being the obviously binding one.
+#
+# The bound that can be reasoned about without a measurement is *spend*.
+# Before this module grew slots the runner was single-flight and the ceiling
+# was exactly 1, so a larger value here multiplies operator API cost by the
+# same factor. Raising this therefore wants both -- a budget decision *and* a
+# profiled per-run footprint -- rather than either one alone.
 _DEFAULT_MAX_ACTIVE_DASHBOARD_BACKTESTS = 5
 
 
@@ -1772,14 +1778,20 @@ def _backtest_subprocess_timeout(
 # instance to Render Standard (1 CPU / 2GB). The Render API records six
 # ``oomKilled`` events at ``memoryLimit: 512Mi`` between 2026-09-08 and
 # 2026-09-10 and none since. Measured on the new plan: ~300MB idle, 882MB
-# observed peak — so the app no longer fits in 512MB at all, and the headroom
-# a hosted-runtime child actually has is ~1.1GB, not 2GB.
+# observed peak — though that peak was taken *on 2GB*, where nothing pressures
+# the allocator to stay small, so it bounds what the app wants rather than what
+# it needs. Above it sits ~1.1GB of headroom, and that figure is the **whole
+# instance's**: ``MAX_ACTIVE_DASHBOARD_BACKTESTS`` admits several concurrent
+# ``POST /backtest/run`` runs (five by default), and this window bound is
+# enforced in that same handler -- so the 1.1GB is shared across every
+# in-flight run plus the parent. Do not read it as a per-child budget.
 #
 # The default below stays at 10 regardless, because nothing here has ever
 # measured one child's resident set. 10 was itself a guess against the old
 # ceiling, and replacing it with a larger guess against a larger ceiling is the
-# same mistake with more RAM behind it. Raise it from the Render dashboard once
-# a run is profiled — it is env-overridable precisely so that needs no deploy.
+# same mistake with more RAM behind it. Profile one child's peak RSS first,
+# then raise it from the Render dashboard — it is env-overridable precisely so
+# that needs no deploy.
 #
 # 0 disables the hosted runtime outright — the same meaning
 # ``MAX_ACTIVE_DASHBOARD_BACKTESTS`` gives 0 — so an operator on constrained
