@@ -172,6 +172,18 @@ def js_const(name: str) -> str:
     return match.group(0)
 
 
+def js_let(name: str) -> str:
+    """The named top-level `let` declaration, verbatim including the `;`.
+
+    The mutable-state sibling of `js_const`: a counter or cache whose only
+    contract is its starting value, lifted rather than restated so a harness
+    tests the shipped seed instead of a copy that can silently drift from it.
+    """
+    match = re.search(rf"^let {re.escape(name)} = [^;]+;", APP_JS, re.MULTILINE)
+    assert match, f"{name} is no longer a top-level let in app.js"
+    return match.group(0)
+
+
 def js_string_const(name: str) -> str:
     """The *value* of a single-quoted JS string constant in app.js.
 

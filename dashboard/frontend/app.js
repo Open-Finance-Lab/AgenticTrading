@@ -9237,7 +9237,12 @@ function readBacktestLaunchConfigMap() {
     try {
         const raw = localStorage.getItem(BACKTEST_LAUNCH_CONFIG_KEY);
         const parsed = raw ? JSON.parse(raw) : {};
-        return parsed && typeof parsed === 'object' ? parsed : {};
+        // `typeof [] === 'object'`, so an array would pass this check and reach
+        // the eviction loop below, which reads/deletes it by string key -- the
+        // same shape hole readRunningBacktests() rejects at the door.
+        return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+            ? parsed
+            : {};
     } catch (_error) {
         return {};
     }

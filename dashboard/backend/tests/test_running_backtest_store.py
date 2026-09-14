@@ -20,30 +20,16 @@ A skip is not a pass: the module is skipped wholesale when `node` is absent.
 """
 
 import json
-import re
 import shutil
 import subprocess
 
 import pytest
 
-from dashboard.backend.tests._frontend_source import APP_JS, fn_body, js_const
+from dashboard.backend.tests._frontend_source import fn_body, js_const, js_let
 
 pytestmark = pytest.mark.skipif(
     shutil.which("node") is None, reason="node is not installed"
 )
-
-
-def _js_let(name: str) -> str:
-    """The named top-level `let` declaration, verbatim.
-
-    The sibling of `js_const` for mutable module state. `pendingBacktestSeq` is
-    a counter whose only contract is that it keeps increasing, and restating it
-    in the harness would test the harness's own seed rather than the shipped
-    one.
-    """
-    match = re.search(rf"^let {re.escape(name)} = [^;]+;", APP_JS, re.MULTILINE)
-    assert match, f"{name} is no longer a top-level let in app.js"
-    return match.group(0)
 
 
 _STORE_FUNCTIONS = (
@@ -97,9 +83,13 @@ function storedStore() {
 }
 """
 
-# getAgentBacktestRunning() reads the live-poller globals directly.
+# getAgentBacktestRunning() reads the live-poller globals directly. Matches
+# app.js's own `Object.create(null)`, not a plain `{}`: a run id colliding with
+# an Object.prototype key (e.g. "constructor") would read back a function
+# instead of `undefined` on the real object, and a plain-object double would
+# never surface that.
 _PROGRESS_GLOBALS = """
-let liveBacktestProgressByRunId = {};
+let liveBacktestProgressByRunId = Object.create(null);
 let liveBacktestRunId = null;
 let liveBacktestProgress = null;
 """
@@ -111,7 +101,7 @@ def _harness(body: str, *, extra: str = "") -> str:
             _CLOCK,
             js_const("BACKTEST_POLL_MAX_SECONDS"),
             js_const("RUNNING_BACKTESTS_KEY"),
-            _js_let("pendingBacktestSeq"),
+            js_let("pendingBacktestSeq"),
             _SESSION_STORAGE,
             _PROGRESS_GLOBALS,
             *[fn_body(sig) for sig in _STORE_FUNCTIONS],
@@ -241,15 +231,23 @@ def test_an_entry_past_the_ceiling_is_dropped_and_swept():
     assert out["stored"] == {}
 
 
-def test_an_entry_with_no_startedat_is_dropped_by_the_card_lookup():
-    """`Number(undefined)` is NaN, and NaN fails every comparison silently.
+def test_an_entry_with_an_unparsable_startedat_is_dropped_by_the_card_lookup():
+    """`Number("garbage")` is NaN, and NaN fails every comparison silently.
 
-    Without the `Number.isFinite` guard the elapsed check reads `NaN > 3600`,
-    which is false -- so a malformed entry would be permanently fresh and pin
-    the card to "Backtesting..." for the life of the tab.
+    A missing `startedAt` does NOT reach this guard: `entry.startedAt || 0`
+    coerces the missing field to `0` first, so elapsed becomes a huge but
+    *finite* count of seconds since the epoch -- already past the ceiling on
+    its own, which made the previous version of this test pass whether or not
+    `Number.isFinite` was there at all (verified by mutation: deleting the
+    guard left this case green). A non-numeric truthy string skips that `|| 0`
+    rescue and reaches `Number()` unconverted, so elapsed is genuinely NaN and
+    the case actually depends on the guard: without it, `NaN > 3600` is false
+    and a malformed entry would be permanently fresh, pinning the card to
+    "Backtesting..." for the life of the tab.
     """
     out = _run(
-        "seedStore({'run-1': {agentId: 'a1', runId: 'run-1'}});"
+        "seedStore({'run-1': {agentId: 'a1', runId: 'run-1',"
+        " startedAt: 'not-a-timestamp'}});"
         "console.log(JSON.stringify({"
         "entry: getAgentBacktestRunning('a1'), stored: storedStore()}));"
     )
@@ -424,21 +422,57 @@ _FAKE_DOM = """
 const rendered = [];
 function applyAgentFilters() { rendered.push('re-render'); }
 function formatBacktestElapsed(s) { return `${s}s`; }
-function deriveRunningProgress(entry) {
-    return {
-        determinate: true, pct: 42, sparkHtml: '<svg/>', equityPositive: true,
-        equityLabel: '$1', stepLabel: '1/2', detail: '42%', notice: '',
-    };
+// Mutable rather than a fixed return, so a case can drive the indeterminate /
+// negative-equity branches of the patch loop without a second fake.
+let _progressView = {
+    determinate: true, pct: 42, sparkHtml: '<svg/>', equityPositive: true,
+    equityLabel: '$1', stepLabel: '1/2', detail: '42%', notice: '',
+};
+function deriveRunningProgress(entry) { return _progressView; }
+
+// `dataset.runId` <-> attribute `data-run-id`, the same live mapping a real
+// element has -- a disconnected `dataset` object would not notice code that
+// started reading `getAttribute('data-run-id')` instead, or vice versa.
+function _toDataAttr(prop) {
+    return 'data-' + String(prop).replace(/[A-Z]/g, (c) => '-' + c.toLowerCase());
 }
 function fakeEl(attribute, value) {
-    return {
-        _attrs: {[attribute]: value}, _removed: [], dataset: {}, style: {},
+    const attrs = {[attribute]: value};
+    const classes = new Set();
+    const el = {
+        _attrs: attrs,
+        _removed: [],
+        style: {},
         textContent: null, innerHTML: null, hidden: null,
-        classList: {toggle() {}},
-        getAttribute(name) { return this._attrs[name] ?? null; },
-        setAttribute(name, v) { this._attrs[name] = String(v); },
+        classList: {
+            contains(name) { return classes.has(name); },
+            // Real DOM signature: an explicit `force` always wins, otherwise
+            // toggle flips. A no-op stub here could not tell a correct
+            // `toggle('is-neg', !equityPositive)` call from one with the
+            // condition inverted or dropped -- both looked identical: nothing.
+            toggle(name, force) {
+                const add = force === undefined ? !classes.has(name) : Boolean(force);
+                if (add) classes.add(name); else classes.delete(name);
+                return add;
+            },
+        },
+        getAttribute(name) {
+            return Object.prototype.hasOwnProperty.call(attrs, name) ? attrs[name] : null;
+        },
+        setAttribute(name, v) { attrs[name] = String(v); },
         removeAttribute(name) { this._removed.push(name); },
     };
+    el.dataset = new Proxy({}, {
+        get(_target, prop) {
+            const name = _toDataAttr(prop);
+            return Object.prototype.hasOwnProperty.call(attrs, name) ? attrs[name] : undefined;
+        },
+        set(_target, prop, value) {
+            attrs[_toDataAttr(prop)] = String(value);
+            return true;
+        },
+    });
+    return el;
 }
 const domNodes = {};
 const document = {
@@ -447,26 +481,53 @@ const document = {
         return domNodes[attribute] || [];
     },
 };
-let lastRenderedRunningKey = null;
 """
+
+#: All ten `data-running-*` attributes the patch loop queries by. A case that
+#: only wires up a few of these leaves the rest frozen at `null`/`undefined`,
+#: which reads as "patched fine" for a field never actually touched.
+_RUNNING_ATTRIBUTES = (
+    "elapsed", "step", "detail", "stale", "track", "bar", "spark", "equity",
+    "cancel", "pending",
+)
 
 
 def _run_refresh(body: str) -> dict:
     return _run(
         body,
         extra="\n".join(
-            [_FAKE_DOM, fn_body("function refreshRunningAgentCards(")]
+            [
+                _FAKE_DOM,
+                js_let("lastRenderedRunningKey"),
+                fn_body("function refreshRunningAgentCards("),
+            ]
         ),
     )
 
 
-def test_an_unchanged_running_set_patches_without_re_rendering():
+def _wire_all_nodes_js() -> str:
+    """JS that creates one `fakeEl` per `data-running-*` attribute for agent
+    a1, registers each in `domNodes`, and binds them to JS names matching the
+    attribute (`elapsed`, `step`, ...)."""
+    return "".join(
+        f"const {attr} = fakeEl('data-running-{attr}', 'a1');"
+        f"domNodes['data-running-{attr}'] = [{attr}];"
+        for attr in _RUNNING_ATTRIBUTES
+    )
+
+
+def test_an_unchanged_running_set_patches_every_field_without_re_rendering():
     """The grid is rebuilt from `innerHTML = ''`, so a per-second re-render
-    destroys focus, scroll and any open menu for the length of the run."""
+    destroys focus, scroll and any open menu for the length of the run.
+
+    Wires up all ten `data-running-*` node categories, not just `elapsed`: a
+    version of this test that only checked `elapsed` stayed green through a
+    mutation that broke step/detail/stale/spark/equity/track/bar patching,
+    since those nodes were never queried at all.
+    """
     out = _run_refresh(
-        "const elapsed = fakeEl('data-running-elapsed', 'a1');"
-        "domNodes['data-running-elapsed'] = [elapsed];"
-        "seedStore({'run-1': {agentId: 'a1', runId: 'run-1',"
+        _wire_all_nodes_js()
+        + "seedStore({'run-1': {agentId: 'a1', runId: 'run-1',"
         " startedAt: nowMs - 5000}});"
         "refreshRunningAgentCards();"
         "const first = rendered.length;"
@@ -474,13 +535,67 @@ def test_an_unchanged_running_set_patches_without_re_rendering():
         "refreshRunningAgentCards();"
         "console.log(JSON.stringify({"
         "firstCall: first, total: rendered.length,"
-        "elapsedText: elapsed.textContent}));"
+        "elapsedText: elapsed.textContent,"
+        "stepText: step.textContent,"
+        "detailText: detail.textContent,"
+        "staleText: stale.textContent,"
+        "sparkHtml: spark.innerHTML,"
+        "equityText: equity.textContent,"
+        "equityIsNeg: equity.classList.contains('is-neg'),"
+        "barIsDeterminate: bar.classList.contains('is-determinate'),"
+        "barWidth: bar.style.width,"
+        "trackNow: track.getAttribute('aria-valuenow'),"
+        "trackMin: track.getAttribute('aria-valuemin'),"
+        "trackMax: track.getAttribute('aria-valuemax')}));"
     )
     # The first call sees the key change from null and re-renders once; the
     # two after it patch.
     assert out["firstCall"] == 1
     assert out["total"] == 1
     assert out["elapsedText"] == "5s"
+    assert out["stepText"] == "1/2"
+    assert out["detailText"] == "42%"
+    assert out["staleText"] == ""
+    assert out["sparkHtml"] == "<svg/>"
+    assert out["equityText"] == "$1"
+    assert out["equityIsNeg"] is False
+    assert out["barIsDeterminate"] is True
+    assert out["barWidth"] == "42%"
+    assert out["trackNow"] == "42"
+    assert out["trackMin"] == "0"
+    assert out["trackMax"] == "100"
+
+
+def test_the_indeterminate_and_negative_equity_branches_patch_too():
+    """The other side of the same fields: an indeterminate run clears the
+    aria-value* attributes and the bar's inline width instead of zeroing them
+    (a progressbar stuck at valuenow=0 is a false statement; the stylesheet's
+    sweep animation needs the width absent, not empty), and a losing run's
+    equity node gets `is-neg` added rather than left off.
+    """
+    out = _run_refresh(
+        _wire_all_nodes_js()
+        + "track.setAttribute('aria-valuenow', '10');"
+        "track.setAttribute('aria-valuemin', '0');"
+        "track.setAttribute('aria-valuemax', '100');"
+        "bar.style.width = '10%';"
+        "_progressView = {"
+        "determinate: false, pct: 0, sparkHtml: '<svg/>', equityPositive: false,"
+        "equityLabel: '-$1', stepLabel: '', detail: '', notice: 'stale'};"
+        "seedStore({'run-1': {agentId: 'a1', runId: 'run-1',"
+        " startedAt: nowMs - 5000}});"
+        "refreshRunningAgentCards();"
+        "refreshRunningAgentCards();"
+        "console.log(JSON.stringify({"
+        "equityIsNeg: equity.classList.contains('is-neg'),"
+        "barIsDeterminate: bar.classList.contains('is-determinate'),"
+        "barWidth: bar.style.width,"
+        "trackRemoved: track._removed.slice().sort()}));"
+    )
+    assert out["equityIsNeg"] is True
+    assert out["barIsDeterminate"] is False
+    assert out["barWidth"] == ""
+    assert out["trackRemoved"] == ["aria-valuemax", "aria-valuemin", "aria-valuenow"]
 
 
 def test_a_changed_running_set_re_renders_and_returns_before_patching():
@@ -558,3 +673,62 @@ def test_the_cancel_button_appears_the_tick_after_the_post_answers():
     )
     assert out["atLaunch"] == {"runId": "", "hidden": True, "pendingHidden": False}
     assert out["after"] == {"runId": "run-7", "hidden": False, "pendingHidden": True}
+
+
+# ===========================================================================
+# readBacktestLaunchConfigMap: the same array-shape hole as readRunningBacktests
+# ===========================================================================
+
+_LAUNCH_CONFIG_FUNCTIONS = (
+    "function readBacktestLaunchConfigMap(",
+    "function stashBacktestLaunchConfig(",
+    "function getBacktestLaunchConfig(",
+)
+
+
+def _run_launch_config(body: str) -> dict:
+    script = "\n".join(
+        [
+            js_const("BACKTEST_LAUNCH_CONFIG_KEY"),
+            "const localStorage = {\n"
+            "    _data: {},\n"
+            "    getItem(key) {\n"
+            "        return Object.prototype.hasOwnProperty.call(this._data, key)\n"
+            "            ? this._data[key]\n"
+            "            : null;\n"
+            "    },\n"
+            "    setItem(key, value) { this._data[key] = String(value); },\n"
+            "};",
+            *[fn_body(sig) for sig in _LAUNCH_CONFIG_FUNCTIONS],
+            body,
+        ]
+    )
+    result = subprocess.run(
+        ["node", "-e", script], capture_output=True, text=True, timeout=30
+    )
+    assert result.returncode == 0, result.stderr
+    return json.loads(result.stdout)
+
+
+def test_a_stored_launch_config_array_reads_as_empty_not_swept():
+    """`typeof [] === 'object'`, so an array used to pass the container check
+    here too -- the identical hole `readRunningBacktests` was fixed for.
+    Unguarded, `stashBacktestLaunchConfig`'s eviction loop would then read and
+    delete the array by string key instead of treating it as corrupt.
+    """
+    out = _run_launch_config(
+        "localStorage.setItem(BACKTEST_LAUNCH_CONFIG_KEY, '[1,2,3]');"
+        "console.log(JSON.stringify({map: readBacktestLaunchConfigMap()}));"
+    )
+    assert out["map"] == {}
+
+
+def test_stash_and_get_round_trip_through_the_array_guarded_map():
+    out = _run_launch_config(
+        "stashBacktestLaunchConfig('run-1', {agentId: 'a1'});"
+        "console.log(JSON.stringify({"
+        "config: getBacktestLaunchConfig('run-1'),"
+        "missing: getBacktestLaunchConfig('run-does-not-exist')}));"
+    )
+    assert out["config"]["agentId"] == "a1"
+    assert out["missing"] is None
