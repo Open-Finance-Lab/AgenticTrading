@@ -1,7 +1,14 @@
 # Landing page
 
-Marketing landing page shown at `/` before the main dashboard at `/app`. React +
+The page served at `/`, for **both** signed-out and signed-in visitors. React +
 Vite + Tailwind v4.
+
+It used to be signed-out only: the auth gate in the shipped `index.html`
+`location.replace`d anyone carrying a valid session to `/app`, so `/` and
+/app's Home screen were free to drift into two different products, and did. The
+redirect is gone. What changes between the two audiences is the CTAs —
+`src/lib/cta.ts` holds both pairs and `src/components/home/LandingCTA.tsx`
+chooses — and nothing else.
 
 Originally exported from a Replit **pnpm monorepo**; it has since been made a
 self-contained standalone app so it builds with plain `npm` (no workspace, no
@@ -35,8 +42,13 @@ Vite `index.html` **plus a small inline auth layer** that can't live in the stat
 React bundle. That layer is, by design, all that remains hand-written in
 `index.html`:
 
-- an **auth-gate `<script>`** in `<head>` that redirects already-logged-in visitors
-  straight to `/app` (runs before React to avoid a content flash);
+- an **auth-gate `<script>`** in `<head>` that revalidates a cached `auth-user`
+  against `/api/auth/me` and holds the page invisible until it answers (runs
+  before React, to avoid a content flash). It does **not** redirect: it decides
+  whether the cached profile is real, clears it if not, and dispatches a
+  `landing-auth-change` event so an already-mounted React tree re-reads it —
+  `storage` does not fire in the tab that wrote, so without that dispatch an
+  expired session keeps rendering the signed-in CTAs;
 - the **`#landingAuthModal`** markup + its `<style id="landing-auth-patch">` and
   end-of-body `<script>` — a signup/sign-in modal that talks to `/api/auth/*` and
   a click delegation that funnels the landing's CTAs into it.
@@ -76,7 +88,23 @@ flow, so verify in a browser (or headlessly — load `/`, confirm each section r
 once, the modal opens on every **Start Free** button *in signup mode* and on the
 navbar's **Sign in** button *in login mode*, and the only console error is
 the `/_vercel/insights/script.js` 404, which exists off Vercel and is expected) before
-shipping. Note the **Sign in** control is `lg:`-gated — widen the viewport past
+shipping.
+
+**Check the signed-in half too**, which is the half no anonymous smoke test
+reaches: with a valid session, `/` must render rather than bounce, every CTA must
+read **Test a trading idea** + **Join our Discord community**, and both must
+NAVIGATE. A signed-in CTA that opens the signup modal instead is the failure mode
+to watch for — the delegated handler in `index.html` matches on the
+`data-landing-auth` attribute *and* on the literal labels `Start Free` /
+`Get Started`, and either match calls `preventDefault()`, so it will swallow an
+`<a>` as readily as a `<button>`.
+`test_no_signed_in_cta_is_hijacked_by_the_delegated_handler` pins both rules
+against the real `index.html`, so this is a browser confirmation rather than the
+only line of defence.
+
+Then sign out from `/app`: it `location.replace`s back to `/`, and the CTAs must
+already read **Start Free** — `logoutUser` clears the cached profile before the
+hop for exactly that reason. Note the **Sign in** control is `lg:`-gated — widen the viewport past
 1024px or it legitimately will not be in the DOM's layout. Longer term, folding the auth modal + gate into the React source would
 remove even this remnant, making the build output *exactly* the shipped page.
 

@@ -1,6 +1,5 @@
 import { MessageSquare, LineChart, Trophy, Cpu, Code2, Hash } from "lucide-react";
-import { Button } from "@/components/ui/button";
-import { PRIMARY_LANDING_CTA } from "@/lib/cta";
+import { LandingCTA } from "./LandingCTA";
 
 /** Unnumbered on purpose: Talk/Test below run the numbered sequence, and a
  *  second one here made the summary compete with the narrative it introduces.
@@ -95,14 +94,10 @@ export function WhyCare() {
         </div>
 
         <div className="mt-14">
-          <Button
-            size="lg"
-            type="button"
-            data-landing-auth={PRIMARY_LANDING_CTA.authMode}
+          <LandingCTA
             className="bg-primary text-primary-foreground hover:bg-primary/90 text-base h-12 px-8"
-          >
-            {PRIMARY_LANDING_CTA.label}
-          </Button>
+            secondaryClassName="border-border text-foreground hover:bg-muted text-base h-12 px-8"
+          />
         </div>
       </div>
     </section>

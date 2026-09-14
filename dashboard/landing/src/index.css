@@ -384,6 +384,33 @@ html {
   .landing-scroll-hint-icon { animation: none; }
 }
 
+/* ── Hero board standings scroll ─────────────────────────────────── */
+/* Ports `.home-module-rank-list`'s scrollbar from
+   dashboard/frontend/styles.css:8076-8088 so the two surfaces that draw this
+   same table scroll identically. It is here rather than on a Tailwind utility
+   because `scrollbar-width`, `scrollbar-color` and `::-webkit-scrollbar` have
+   no utility form — the height and overflow rules that do stay in the
+   component, where the reserve derivation can see them.
+
+   A visible-on-demand thumb rather than `scrollbar-gutter: stable`: the list is
+   the only thing on this card that scrolls, and a permanently reserved 6px
+   gutter narrows the name column on the one breakpoint where it is already
+   tightest. */
+.board-rank-scroll {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(148, 163, 184, 0.35) transparent;
+}
+.board-rank-scroll::-webkit-scrollbar {
+  width: 6px;
+}
+.board-rank-scroll::-webkit-scrollbar-thumb {
+  background: rgba(148, 163, 184, 0.35);
+  border-radius: 999px;
+}
+.board-rank-scroll::-webkit-scrollbar-track {
+  background: transparent;
+}
+
 /* ── Discord channel mock (Talk section) ─────────────────────────── */
 .discord-mock-wrap {
   width: 100%;

@@ -1,8 +1,7 @@
 import { motion } from "framer-motion";
-import { Button } from "@/components/ui/button";
 import { ChevronDown } from "lucide-react";
 import { useState, useEffect } from "react";
-import { PRIMARY_LANDING_CTA } from "@/lib/cta";
+import { LandingCTA } from "./LandingCTA";
 import { BoardPreview } from "./BoardPreview";
 
 const HEADLINE_LINE_1 = ["Talk", "to", "Agents"] as const;
@@ -132,14 +131,10 @@ export function Hero() {
             animate={{ opacity: 1, y: 0 }}
             transition={{ duration: 0.5, delay: ctaDelay }}
           >
-            <Button
-              size="lg"
-              type="button"
-              data-landing-auth={PRIMARY_LANDING_CTA.authMode}
+            <LandingCTA
               className="w-full sm:w-auto bg-primary text-primary-foreground glow-primary hover:bg-primary/90 text-base h-12 px-8"
-            >
-              {PRIMARY_LANDING_CTA.label}
-            </Button>
+              secondaryClassName="w-full sm:w-auto border-border text-foreground hover:bg-muted text-base h-12 px-8"
+            />
           </motion.div>
           {/* The challenge the board raises, and the one line of small print
               that keeps it from reading as an invitation to risk anything. The

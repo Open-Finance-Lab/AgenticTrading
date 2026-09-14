@@ -145,35 +145,52 @@ def test_the_landing_chart_uses_its_own_measured_clamp():
     """Both reserves are derived, not taste, and there are TWO because the card's
     non-chart height is not one number: one thing beside the copy at >=lg, and
     another stacked at phone widths where the title, the window chip and the
-    caption all wrap and the chip strip runs to eight rows.
+    caption all wrap.
 
-    RE-DERIVED when the board went live -- the strip went from five hardcoded
-    entries to nine from the payload and the "Illustrative example" chip became
-    a longer window label -- and BOTH NUMBERS MOVED. Measured against the BUILT
-    card with the board READY, at the NARROWEST width of each band:
+    RE-DERIVED when the chip strip became the scrollable ranking table, which is
+    the third time these two numbers have moved and the first time the thing
+    that moved them stopped being a row count. The rule is unchanged --
+    ``reserve = ceil10(cardTop + nonChart) + 10`` at the NARROWEST width of each
+    band -- and the arithmetic is spelled out in the component beside the
+    constants:
 
-        lg+     460 = ceil10(136 cardTop + 313.75 non-chart @1024x768) + 10
-        below   730 = ceil10(132 cardTop + 583.25 non-chart @360x800)  + 10
+        lg+     510 = ceil10(136 cardTop + 362.95 non-chart @1024x768) + 10
+        below   650 = ceil10(132 cardTop + 504.45 non-chart @360x800)  + 10
 
-    The trailing +10 is measured too: rounding alone left 0.25px of fold slack
-    at 1024, a margin that survives exactly one browser.
+    Each starts from the measured figure it replaces (313.75 and 583.25), takes
+    out the chip strip's height at that width (four rows / 120px at 1024, eight
+    rows / 248px at 360, plus a 32px caption block in both) and puts back the
+    table's, which does not vary by width: 20px caption + 25.2px head + 156px
+    list. THAT INVARIANCE IS THE POINT. The strip's height was a function of how
+    many entries the roster had and how wide the card was, so every roster
+    change and every re-measurement at a new width moved these constants --
+    which is exactly how an lg value derived at 1440 came to govern a band
+    starting at 1024. A fixed-height scrolling list has no row count: the board
+    can grow to twenty entries and the non-chart height does not move.
 
-    THE OLD lg VALUE WAS MEASURED AT THE WRONG WIDTH, which is why it is pinned
-    here with the band spelled out. `lg:` binds from 1024, but 390 was derived
-    at 1440 where non-chart is 249.75; from 1024 to 1279 the strip takes a fifth
-    row and the card hung 55.75px BELOW THE FOLD across that entire band while
-    every viewport it had been checked at (1280+) passed with 4.25px to spare.
-    Re-derive at 1024 and 360, never at 1440 and 390.
+    THE ARITHMETIC HALF IS NOT A MEASUREMENT, and this docstring should not
+    pretend otherwise. cardTop and the header block carry over from the browser
+    measurements above; the strip heights removed and the table height added are
+    computed from pitches stated in the source (24px + 8px for the strip, and
+    13.5px/1.35 + 3px padding-block = 24.2px + 8px for the rows). Re-measure at
+    1024x768 and 360x800 when a browser is available and correct both numbers if
+    they disagree.
 
-    The 260px FLOOR is what binds on a phone, not either reserve: at 390x844 the
-    card needs 920.5px against 844, so the strip's tail is below the fold at any
-    reserve. That is deliberate -- see the component comment. The floor is
+    The fit that binds is still 1024x768 and still by ~10px: the chart floors at
+    260 there (768 - 510 = 258), so the card needs 136 + 362.95 + 260 = 758.95
+    against 768.
+
+    The 260px FLOOR is what binds on a phone, not either reserve -- unchanged,
+    and now less severe: 504.45 of non-chart against the old 583.25 pulls ~79px
+    of the card back above the fold, because a table that scrolls does not wrap
+    the way a strip did. Still below the fold, still deliberate. The floor is
     pinned here so a future "fix" that shrinks it to chase the fold has to argue
     with this docstring first: the chart already ends above the fold there, and
     lowering the floor trades the chart for its own fallback key.
 
-    RE-DERIVE BOTH AGAIN if the caption, title or chip strip changes height. The
-    failure mode is a silently half-visible card, not a broken build.
+    RE-DERIVE BOTH AGAIN if the caption, the title, the table head or the list's
+    ``max-h`` changes height. The failure mode is a silently half-visible card,
+    not a broken build.
 
     The var() indirection is load-bearing and not a tidy-up: the formula's
     commas defeat Tailwind's arbitrary-VALUE parser, so the breakpoint-dependent
@@ -182,7 +199,7 @@ def test_the_landing_chart_uses_its_own_measured_clamp():
     board = _BOARD.replace(" ", "")
     assert "clamp(260px,calc(100dvh-var(--board-chart-reserve)),520px)" in board
     # UNPREFIXED, and this is the severe one. As a bare substring check this
-    # assertion was satisfied by `md:[--board-chart-reserve:730px]`: below `md`
+    # assertion was satisfied by `md:[--board-chart-reserve:650px]`: below `md`
     # the custom property is then undefined, `clamp(260px, calc(100dvh -
     # var(--board-chart-reserve)), 520px)` is invalid at computed-value time, the
     # `height` declaration is DROPPED, the container computes to `auto`, and
@@ -198,11 +215,11 @@ def test_the_landing_chart_uses_its_own_measured_clamp():
     # which no `[a-z]:` lookbehind rejects. Anchoring on the separator rejects
     # every variant form, present and future, because a variant by definition
     # occupies the characters between the separator and the class.
-    assert re.search(r'(?:^|\s)\[--board-chart-reserve:730px\](?=\s|"|$)', _BOARD), (
+    assert re.search(r'(?:^|\s)\[--board-chart-reserve:650px\](?=\s|"|$)', _BOARD), (
         "the base reserve must be unprefixed, or the clamp is invalid below "
         "that breakpoint and the chart region computes to 0"
     )
-    assert "lg:[--board-chart-reserve:460px]" in board, "the side-by-side reserve"
+    assert "lg:[--board-chart-reserve:510px]" in board, "the side-by-side reserve"
     assert "56vh" not in _BOARD, "the first draft's clamp fails at four viewports"
     assert "h-[210px]" not in _BOARD and "md:h-[240px]" not in _BOARD
 
@@ -334,44 +351,169 @@ def test_the_panel_title_is_text_xl():
     assert 'className="text-xl font-bold flex items-center gap-2 min-w-0"' in _BOARD
 
 
-def test_the_standings_table_becomes_a_chip_strip_that_can_show_every_chip():
-    """Demotion, not deletion: the chart ships no <Legend>, so the chips are the
-    only thing linking a curve colour to a model name -- and they are now also
-    the fallback when the endpoint rail declines to draw (a narrow card, a
-    Recharts internal that moved). The full table lives in Race.tsx.
+def test_the_hero_card_carries_the_full_ranking_table_and_scrolls_it():
+    """THIS CASE REPLACES ONE THAT ASSERTED THE OPPOSITE, and the reversal was
+    adjudicated rather than drifted into.
 
-    THE STRIP MUST WRAP, and the pressure just went up: it went from five
-    hardcoded entries to nine from the payload. `flex-nowrap` with
-    `overflow-hidden` cut entries off the end wherever the strip was narrower
-    than its content -- measured scrollWidth 910 against clientWidth 285 at 390
-    (one chip survives, keying five drawn curves), 663 at 768, 895 at 1024, so
-    the whole lg band and every phone, silently, because the only live-browser
-    guard on it ran at 1440.
+    It used to be ``test_the_standings_table_becomes_a_chip_strip_that_can_show
+    _every_chip``, and its argument was sound for what the card then was: a
+    table costs vertical height the chart needs, so the standings were demoted
+    to a wrapping chip strip and the full ranking lived in Race.tsx four screens
+    down. It banned ``grid-cols-12`` for that reason and required ``flex-wrap``,
+    because a strip that cannot wrap silently truncates -- measured scrollWidth
+    910 against clientWidth 285 at 390px, so four of five chips simply vanished.
+
+    What changed is the premise, not the measurement. The strip's height was
+    unbounded in the one direction that mattered: it grew with the roster and
+    with every narrowing of the card, which is why its height had to be
+    re-measured into the chart reserve three separate times. A table whose rows
+    live in a fixed-height scrolling viewport is bounded in both -- 148px
+    whatever the roster does -- so the card can carry ranks, ending values and
+    Sharpe for every contender AND keep a chart the strip was protecting. Race
+    no longer holds the detail; this is now the only ranking on the page, which
+    is also why the columns below are pinned by name.
+
+    The strip's two jobs both had to survive the swap, and both are asserted
+    here: it was the only thing linking a curve's colour to a name (the chart
+    ships no Recharts <Legend>), and the fallback whenever EndpointRail declines
+    to draw. A table without the per-row swatch would silently drop both.
     """
     board = _BOARD
-    assert "grid-cols-12" not in board, "the 5-row table is what the chart needs the height of"
-    assert "flex-wrap" in board and "flex-nowrap" not in board, (
-        "a legend that cannot show its entries is not a legend"
+
+    # ONE TEMPLATE FOR HEAD AND ROWS. The /app original cannot desync because
+    # styles.css joins the two selectors into a single rule; here the shared
+    # constant is that rule, so what is pinned is that BOTH consumers use it and
+    # that no third grid template exists to drift from.
+    assert "const RANK_GRID" in board, "the head/row grid template must be one constant"
+    assert board.count("${RANK_GRID}") == 2, (
+        "the header row and the data rows must both be laid out by RANK_GRID; "
+        "a second literal template is how a table unaligns from its own header"
     )
-    # Anchored on the JSX render site (`{standings.map`), NOT on the first
-    # `standings.map` in the file. The old card mapped its rows exactly once, so
-    # a bare `.index("SAMPLE_STANDINGS.map")` was the strip; the live card maps
-    # `standings` three times, and the two earlier call sites (the frameLayout
-    # labels and valueByKey) sit ~4.5KB above the strip. Anchoring on the first
-    # put this 400-char window over the ResizeObserver effect, where
-    # `overflow-hidden` can never appear -- verified by mutation: adding
-    # `overflow-hidden` to the chip strip's own className left this case GREEN.
-    strip = board[board.index("{standings.map") - 400 : board.index("{standings.map")]
-    assert "overflow-hidden" not in strip, (
-        "clipping the strip is the same failure by another route -- no scrollbar, "
-        "no ellipsis, and nothing fails"
+    literal_grids = re.findall(r'"[^"]*grid-cols-\[[^"]*"', board)
+    assert len(literal_grids) == 1, (
+        f"grid templates must live only in RANK_GRID; found {literal_grids}"
     )
-    assert "text-base" in board, "text-sm rows were one of the three reported problems"
-    # The identity link. `swatch` is gone with the sample rows; the colour now
-    # comes off the same BoardSeries the curve is drawn from, which is stronger:
-    # a row and its curve cannot disagree because there is one value.
+
+    # BOUNDED HEIGHT AND A SCROLLBAR, which is what buys the chart its size
+    # back. `max-h` without `overflow-y-auto` clips rows with no scrollbar and
+    # nothing failing -- the same shape as the chip strip's silent truncation,
+    # which is the failure this card has now shipped twice and must not a third
+    # time.
+    # READ OFF THE <ol> ITSELF, not a character window around it. The case this
+    # replaces had to take `board[index - 400 : index]` because the chip strip
+    # was one unremarkable <div> among many and the file maps `standings` three
+    # times; that window was mis-anchored once already and passed a mutation
+    # that added `overflow-hidden` to the strip. The scroll container is the
+    # file's only <ol>, so the element can be matched exactly and the mutation
+    # has nowhere to hide.
+    ol = re.search(r'<ol\s+className="([^"]*)"', board)
+    assert ol, "the standings list is no longer an <ol> — re-anchor this guard"
+    classes = ol.group(1)
+    assert "overflow-y-auto" in classes, "the standings list must scroll, not clip"
+    # PINNED WHOLE, like the two reserves, because all three numbers are derived
+    # and derived together: 148 is the height the lg reserve was computed
+    # against, and 620 is chosen so the list starts giving height back exactly
+    # at the viewport where the fit runs out (100dvh - 620 == 148 at 768). A
+    # bare "has some max-h" check would pass on any of them being edited alone,
+    # which is the only way they can go wrong.
+    assert "max-h-[clamp(96px,calc(100dvh-620px),148px)]" in classes, (
+        f"the list must keep its derived height clamp — see the derivation in "
+        f"BoardPreview.tsx and in this module's clamp case; found {classes!r}"
+    )
+    assert "overflow-hidden" not in classes, (
+        "clipping the list is the same failure by another route -- no scrollbar, "
+        "no ellipsis, and nothing fails. (`overflow-x-hidden` is fine and is a "
+        "different class; this bans the unaxed form on the scrolling element.)"
+    )
+
+    # THE COLUMNS, BY NAME. This is the only ranking on the page now.
+    # \s* around the label: the formatter breaks a <span> that carries more than
+    # one attribute across lines, so the Sharpe cell (which also carries the
+    # tooltip `title`) collapses to "> Sharpe <" while the bare ones collapse to
+    # ">Contender<". A tight match passes on four columns and fails on the fifth
+    # for a reason that has nothing to do with the column.
+    head_text = _collapse(board)
+    for column in ("Ending value", "Return", "Sharpe"):
+        assert re.search(rf">\s*{re.escape(column)}\s*<", head_text), (
+            f"the {column!r} column is gone"
+        )
+    assert re.search(r">\s*Contender\s*<", head_text), (
+        "the column holds benchmarks too -- see "
+        "test_the_standings_table_does_not_present_a_benchmark_as_an_ai_model"
+    )
+
+    # THE PHONE TABLE IS THREE COLUMNS, and the tracks drop with the cells: a
+    # `hidden` cell stops occupying its column but its TRACK survives, so a
+    # narrow template is required alongside, not instead.
+    assert board.count("hidden sm:block") == 4, (
+        "Ending value and Sharpe each drop below sm in BOTH the head and the "
+        "rows -- four cells, or the table and its header disagree at one width"
+    )
+    assert "sm:grid-cols-[" in board and "grid-cols-[26px_minmax(0,1fr)_78px]" in board, (
+        "a narrow three-track template must accompany the hidden cells"
+    )
+
+    # THE STRIP'S TWO JOBS. The colour comes off the same BoardStanding the
+    # curve is drawn from, so a row and its curve cannot disagree.
     assert "item.color" in board
     assert "dataKey=" in board
+
+
+def test_the_standings_table_waits_for_the_fetch_before_claiming_the_board_is_empty():
+    """The table's four states, and the one that was missing.
+
+    `standingsCoverage([])` is `"empty"`, and `standings` is `[]` in all three
+    of `loading`, `error` and a genuinely empty 200 -- so a table that branches
+    on coverage alone renders "The standings came back empty. The request
+    succeeded and carried no entries" while the request is still in flight, and
+    again when it failed outright. Both are false sentences, and the first one
+    is on screen for the whole of a free-tier cold start: 30-60 seconds, for the
+    first visitor of the day, above the fold.
+
+    It is the fail-closed-is-not-fail-visible shape inverted. The usual version
+    makes a failure look like success; this one makes a pending request look
+    like a settled, successful, empty one -- and it asserts the success
+    explicitly, in the copy, which is worse than saying nothing.
+
+    The chart above never had this: its branches start from `board.status` and
+    only reach coverage on `ready`. Race.tsx's table, which this one replaced,
+    started from `board.status` too. The gating was the one thing that did not
+    travel with the rows, and nothing in the suite noticed, because every other
+    guard reads the source for structure rather than for order.
+
+    PINNED AS ORDER, NOT PRESENCE. `board.status` appearing somewhere in the file
+    is satisfied by the chart's own branches 200 lines above; what makes the
+    table correct is that its status checks come BEFORE its coverage check
+    inside the list.
+    """
+    board = _BOARD
+    ol = board.index('data-testid="board-rank-list"')
+    table = board[ol:]
+
+    loading = table.find('board.status === "loading"')
+    error = table.find('board.status === "error"')
+    empty = table.find('tableCoverage === "empty"')
+
+    assert loading != -1, (
+        "the standings list must render a loading state — until the fetch "
+        "settles there is no board to call empty"
+    )
+    assert error != -1, (
+        "the standings list must name a failed fetch rather than reporting it "
+        "as a successful empty response"
+    )
+    assert empty != -1, "the genuinely-empty branch is gone"
+    assert loading < empty and error < empty, (
+        "the status branches must be tested BEFORE the coverage branch, or an "
+        "in-flight request renders the copy that claims it already succeeded"
+    )
+
+    # The baselines-only notice is a claim about a SUCCESSFUL response too, and
+    # reaches its own branch by the same route.
+    assert 'board.status === "ready" && tableCoverage === "baselines-only"' in board, (
+        "the 'no AI model results came back' line asserts a completed request; "
+        "it must not render for one that has not completed"
+    )
 
 
 def test_the_hero_draws_the_board_the_signed_in_home_draws():
@@ -507,10 +649,33 @@ def test_the_two_surfaces_agree_on_the_numbers_that_must_agree():
     assert "fontSize={14}" in _BOARD
     assert re.search(r"font:\s*\{\s*size:\s*14\s*\}", home_js)
 
-    # The key's type scale: text-base on /, and /app's rows inherit the panel's
-    # base size rather than the old 11px table register.
-    assert "text-base" in _BOARD
+    # THE ROW TYPE SCALE, AND IT IS NOW ONE NUMBER ON BOTH SURFACES -- which is
+    # a stronger guard than the one it replaces, not a weaker one.
+    #
+    # This used to assert `text-base` on / against `hm-rank-swatch` on /app:
+    # two different facts about two different treatments, agreeing on nothing.
+    # It could not do better, because / had a chip strip and /app had a table;
+    # there was no shared number to pin. / now draws the same table, so the
+    # shared number exists and is 13.5px -- styles.css sets it for the promoted
+    # hero card specifically (`.home-landing-board .home-module-rank-list li`),
+    # and the React rows take it as an arbitrary value because Tailwind's scale
+    # has no half-pixel step.
+    #
+    # The swatch assertion stays and gains its counterpart: the colour-to-name
+    # link is what both surfaces would silently lose if a row stopped carrying
+    # it, and neither chart draws a legend to fall back on.
+    styles_css = (
+        Path(__file__).resolve().parents[2] / "frontend" / "styles.css"
+    ).read_text(encoding="utf-8")
+    assert "text-[13.5px]" in _BOARD, "the landing rows must keep the /app row size"
+    assert ".home-landing-board .home-module-rank-list li { font-size: 13.5px; }" in styles_css, (
+        "the /app hero card's row size moved; the landing's text-[13.5px] now "
+        "disagrees with it"
+    )
     assert "hm-rank-swatch" in home_js
+    assert "backgroundColor: item.color" in _BOARD, (
+        "the landing rows must carry the curve's own colour, as /app's do"
+    )
 
     # Neither surface draws a built-in legend: the standings/chips are the key.
     assert "<Legend" not in _BOARD

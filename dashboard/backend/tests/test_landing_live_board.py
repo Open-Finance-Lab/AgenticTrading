@@ -417,9 +417,17 @@ const board = module.exports.buildBoardData({entries, window: {label: 'test wind
 def test_standings_are_re_ranked_by_return_after_the_model_baseline_regroup():
     """`selectBoardEntries` returns models.concat(baselines) -- it DELIBERATELY
     destroys rank order, because the model colour palette is assigned by
-    position. `standings.sort` is the only thing that puts rank back, and
-    Race.tsx renders `#{index + 1}` straight off the array index, so without it
-    the rank column is a lie about a board that mostly lost to buy-and-hold.
+    position. `standings.sort` is the only thing that puts rank back, and the
+    hero card's table renders `item.rank` -- which `buildBoardData` assigns
+    from the array index AFTER that sort -- so without it the rank column is a
+    lie about a board that mostly lost to buy-and-hold.
+
+    `rank` IS ASSERTED TOO, AND SEPARATELY FROM THE ORDER. It used to be
+    `#{index + 1}` computed in the JSX, where the rendered number could not
+    disagree with the array; it is a field now, so it can. Assigning it at push
+    time instead of after the sort is a one-line edit that leaves the order
+    correct and the numbers shuffled -- `standingsKeys` alone would stay green
+    through it.
 
     Nothing pinned the sort. Deleting it left 80 tests green while publishing
     GPT-5.5 at -2% as rank 3, ahead of Buy & Hold at +3% at rank 4.
@@ -432,6 +440,7 @@ def test_standings_are_re_ranked_by_return_after_the_model_baseline_regroup():
 console.log(JSON.stringify({
   standingsKeys: board.standings.map((s) => s.key),
   rets: board.standings.map((s) => s.ret),
+  ranks: board.standings.map((s) => s.rank),
 }));
 """
     )
@@ -443,6 +452,57 @@ console.log(JSON.stringify({
         "gpt_5_5",            # -2%
     ]
     assert result["rets"] == ["+5.00%", "+3.00%", "+2.00%", "+1.00%", "-2.00%"]
+    # 1..5 IN ORDER, which is only true if rank was assigned after the sort.
+    #
+    # `selectBoardEntries` regroups to models-then-baselines, so push order here
+    # is claude=1, qwen=2, gpt=3, buy_hold=4, djia=5 -- and the sort then reads
+    # those push numbers back in RETURN order, giving [1, 4, 2, 5, 3]. Verified
+    # by mutation: moving the assignment to push time fails this case with
+    # exactly that list. The fixture is deliberately interleaved for this reason;
+    # one whose payload order already matched the sorted order would pass either
+    # way and pin nothing.
+    assert result["ranks"] == [1, 2, 3, 4, 5]
+
+
+def test_standings_carry_the_ending_value_and_sharpe_the_table_renders():
+    """The two columns the ported table added, and the absent case for each.
+
+    `portfolio_value` IS THE ONE THAT MATTERS. The server sends `null` for a run
+    that recorded no final equity, and `Number(null)` is `0` -- so the obvious
+    formatter publishes that run as an account that finished at exactly $0, next
+    to a `-100%` the same defect produces on the curve. Both surfaces have
+    shipped that bug: it is what home-page.js's `homeFormatPortfolioValue`
+    comment and this module's `finiteNumber` exist to record. Pinned as a
+    rendered em dash rather than as a null, because the string is what a visitor
+    sees and the string is what a "tidy-up" to `Number(value).toFixed()` would
+    change.
+
+    Sharpe's em dash is NOT reachable through the live API today -- the payload
+    builder sends `run.get("sharpe_ratio") or 0`, which collapses absent onto a
+    real 0.00 before it leaves the server. It is pinned anyway: the client rule
+    is the one that survives that being fixed, and an untested branch is how the
+    fix would arrive with the display still reading "0.00"."""
+    result = _run_ts(
+        """
+const entries = [
+  {entry_id: 'a', team_name: 'A', team_badge: 'Model', model: 'A', is_model: true,
+   cumulative_return: 0.05, portfolio_value: 105000, sharpe_ratio: 1.234,
+   initial_equity: 100000, equity_curve: []},
+  {entry_id: 'b', team_name: 'B', team_badge: 'Model', model: 'B', is_model: true,
+   cumulative_return: 0.01, portfolio_value: null, sharpe_ratio: null,
+   initial_equity: 100000, equity_curve: []},
+];
+const board = module.exports.buildBoardData({entries, window: {label: 'w'}});
+console.log(JSON.stringify({
+  values: board.standings.map((s) => s.endingValue),
+  sharpes: board.standings.map((s) => s.sharpe),
+}));
+"""
+    )
+    assert result["values"] == ["$105,000", "—"], (
+        "a run with no recorded final equity must render as absent, never as $0"
+    )
+    assert result["sharpes"] == ["1.23", "—"]
 
 
 # ---------------------------------------------------------------------------
@@ -1410,21 +1470,42 @@ def test_both_board_consumers_branch_on_coverage_and_not_only_on_status():
     "everything is fine" rendered byte-identically, at HTTP 200, with a green
     suite.
 
+    BOTH CONSUMERS ARE NOW ONE COMPONENT, and the two questions stayed two.
+    Race.tsx used to render the standings table and therefore had to ask
+    `standingsCoverage`; the table moved into the hero card, so BoardPreview.tsx
+    now asks both -- and they are genuinely different questions rather than one
+    with an alias. `chartCoverage` reads `series` and `standingsCoverage` reads
+    `standings`, and `buildBoardData` pushes every selected entry to `standings`
+    while only reaching `series.push` past a drawable-values check. A model with
+    no curve is in one collection and not the other, so a card that answered the
+    table's branch with the chart's rule printed "No AI model results came back"
+    directly above a list of seven models.
+
     Pinned as the CALL (parens), not the imported name: `noUnusedLocals` is off,
     so an import with no call site typechecks clean and would satisfy a bare
-    substring check while both components went back to drawing a confident
-    frame over nothing."""
+    substring check while the component went back to drawing a confident frame
+    over nothing.
+
+    THE LAST ASSERTION IS THE DE-DUPLICATION ITSELF. Race rendering its own copy
+    of the same nine rows, four screens below the chart they describe, is what
+    this change removed; nothing else in the suite would notice it coming back,
+    and it would come back as a green, plausible-looking addition."""
     assert "chartCoverage(" in _BOARD_PREVIEW_TSX, (
         "the hero must ask what the 200 actually carried before drawing a frame"
     )
-    assert "standingsCoverage(" in _RACE_TSX_SRC, (
+    assert "standingsCoverage(" in _BOARD_PREVIEW_TSX, (
         "the standings table must ask the same question before rendering rows"
     )
-    for name, src in (("BoardPreview.tsx", _BOARD_PREVIEW_TSX), ("Race.tsx", _RACE_TSX_SRC)):
-        assert '=== "empty"' in src, f"{name} must render the empty case differently"
-        assert '=== "baselines-only"' in src, (
-            f"{name} must say so when a 200 carried no model entries"
-        )
+    assert '=== "empty"' in _BOARD_PREVIEW_TSX, (
+        "BoardPreview.tsx must render the empty case differently"
+    )
+    assert '=== "baselines-only"' in _BOARD_PREVIEW_TSX, (
+        "BoardPreview.tsx must say so when a 200 carried no model entries"
+    )
+    assert "standings.map(" not in _RACE_TSX_SRC, (
+        "Race is rendering the standings again — there is one ranking on this "
+        "page and it is the hero card's, beside the chart it describes"
+    )
 
 
 def test_neither_consumer_invents_a_fallback_dataset_for_the_empty_case():

@@ -1,5 +1,4 @@
-import { Button } from "@/components/ui/button";
-import { PRIMARY_LANDING_CTA } from "@/lib/cta";
+import { LandingCTA } from "./LandingCTA";
 
 export function FooterCTA() {
   return (
@@ -11,14 +10,10 @@ export function FooterCTA() {
         </p>
         <h2 className="text-4xl md:text-5xl font-bold tracking-tighter mb-10">Ready to test your first idea?</h2>
         <div className="flex flex-col sm:flex-row items-center justify-center gap-4">
-          <Button
-            size="lg"
-            type="button"
-            data-landing-auth={PRIMARY_LANDING_CTA.authMode}
+          <LandingCTA
             className="w-full sm:w-auto bg-primary text-primary-foreground hover:bg-primary/90 text-base h-12 px-8"
-          >
-            {PRIMARY_LANDING_CTA.label}
-          </Button>
+            secondaryClassName="w-full sm:w-auto border-border text-foreground hover:bg-muted text-base h-12 px-8"
+          />
         </div>
 
         <div className="mt-24 pt-8 border-t border-border flex flex-col md:flex-row justify-between items-center text-sm text-muted-foreground">
