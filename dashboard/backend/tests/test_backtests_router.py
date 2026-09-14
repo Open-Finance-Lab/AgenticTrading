@@ -1932,3 +1932,51 @@ def test_pipeline_window_guard_tracks_the_operator_override(monkeypatch):
             "pipeline", "llm", "2026-04-15", "2026-04-23", pipeline
         )
     assert excinfo.value.status_code == 422
+
+
+def test_backtest_run_refuses_an_uncompletable_pipeline_window(client):
+    """The 422 arrives before the rate limiter, the slot ledger and any spend.
+
+    A refusal that costs a rate-limit token or a concurrency slot punishes the
+    user for a request the server was always going to decline -- and one that
+    arrives after the billing preflight has touched the credential store has
+    already done work on a run that cannot happen.
+    """
+    response = client.post(
+        "/backtest/run",
+        json={
+            "start_date": "2026-04-06",
+            "end_date": "2026-04-19",
+            "decision_source": "llm",
+            "model": "claude-haiku-4-5-20251001",
+            "billing_mode": "byok",
+            "pipeline": [{"label": f"Step {i}"} for i in range(4)],
+        },
+        headers=_sess(),
+    )
+    assert response.status_code == 422
+    detail = response.json()["detail"]
+    assert "280" in detail
+    assert "shorten" in detail.lower()
+
+
+def test_backtest_run_still_refuses_an_over_long_window_on_dates_alone(client):
+    """MAX_BACKTEST_DAYS keeps its own distinct message.
+
+    The two bounds answer different questions and a user who picked a
+    three-week window should be told the window is too long, not handed call
+    arithmetic about a pipeline they may not have configured.
+    """
+    response = client.post(
+        "/backtest/run",
+        json={
+            "start_date": "2026-04-01",
+            "end_date": "2026-04-30",
+            "decision_source": "llm",
+            "model": "claude-haiku-4-5-20251001",
+            "billing_mode": "byok",
+        },
+        headers=_sess(),
+    )
+    assert response.status_code == 422
+    assert "max 14 days" in response.json()["detail"]

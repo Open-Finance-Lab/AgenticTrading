@@ -2901,6 +2901,17 @@ def run_backtest_endpoint(
     # Validate before taking rate-limit capacity or scheduling the worker.
     _validate_backtest_params(start_date, end_date, strategy_prompt, model, pipeline)
 
+    # After the date validation above, so this never has to be a second date
+    # validator, and before the rate limiter, the slot ledger and the billing
+    # preflight below -- for the reason _enforce_ai_hedge_fund_window is placed
+    # ahead of its credential lookup: a run this deployment cannot finish is
+    # refused whether or not the caller's credentials are good, and there is no
+    # reason to spend a rate-limit token, a concurrency slot or a trip to the
+    # secret store to say so.
+    _enforce_pipeline_llm_window(
+        runtime_type, resolved_decision_source, start_date, end_date, pipeline
+    )
+
     if not _backtest_rate_limiter.allow(client_key(request)):
         raise HTTPException(
             status_code=429,
