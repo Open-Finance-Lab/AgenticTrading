@@ -3,7 +3,7 @@
 Selected instead of the default SQLite AgentVersionStore when CONTENT_DATABASE_URL is
 set (see version_repository.py's _build_agent_version_store). Versions are
 immutable reproducibility snapshots and were previously lost with their agents
-on every deploy of the disk-less Render free-tier host. Method surface, return
+on every deploy of the disk-less Render host. Method surface, return
 schemas, and behavior are identical to AgentVersionStore; only the SQL dialect
 differs.
 """

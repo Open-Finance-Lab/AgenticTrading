@@ -1,8 +1,14 @@
 services:
   - type: web
     name: agentic-trading-api
+    # ⚠ The live service is `env: docker` (builds ./Dockerfile), not python.
+    # This block is documentation; prod does not sync from this file. Verified
+    # against the Render API 2026-09-14.
     env: python
     region: oregon
+    # Live since 2026-09-11: Standard, reported by the API as `1c-2g`
+    # (1 CPU / 2 GB). Before that the service ran on the 512 MB free tier and
+    # was OOM-killed six times in 72h -- see CLAUDE.md "Prod deploy reality".
     plan: standard
     
     # Build and run from repository root (dashboard lives under dashboard/).
@@ -93,10 +99,30 @@ services:
       - key: PUBLIC_APP_URL
         sync: false
     
-    # Health check
+    # Health check. Set on the live service 2026-09-14 -- it had been empty
+    # since launch, so Render noticed only hard exits and a process that wedged
+    # while still holding its port went unnoticed.
     healthCheckPath: /health
     
-    # File storage for SQLite database (persistent)
+    # File storage for SQLite database.
+    #
+    # ⚠ NOT PROVISIONED. The live service reports `disk: null` (Render API,
+    # 2026-09-14), and prod does not sync from this file -- so the
+    # DATABASE_PATH=/data/backtest.db above is not in effect either. The live
+    # service leaves DATABASE_PATH *unset*, which is why the app opens the
+    # committed seed backtest.db and resets it on every deploy, destroying
+    # protocol_runs, protocol_steps and idempotency_keys (no Postgres option
+    # for any of the three). The 2026-09-11 plan upgrade did NOT change this.
+    # This block records the intent only.
+    #
+    # ⚠ Do NOT set DATABASE_PATH in the Render dashboard before the disk is
+    # actually provisioned. Nothing falls back: `database.py` reads a bare
+    # `os.getenv("DATABASE_PATH", DEFAULT_DB_PATH)` and then mkdir -p's the
+    # parent, so on a disk-less service it would happily create /data and open
+    # a brand-new *empty* database -- losing the seed runs that
+    # dashboard/config/defaults.json points at. That is a worse failure than
+    # the per-deploy reset above, not a graceful degradation of it. Provision
+    # the disk first, then set the var.
     disks:
       - name: database
         mountPath: /data

@@ -290,8 +290,8 @@ class CreditsStore:
         used it that way, so each call leaked an OS file handle and — in WAL
         mode — a read mark that holds off checkpointing until CPython happens
         to collect it. Under the Credits page's order poll (120 requests per
-        minute per user, one connection each) that accumulates against a
-        512MB instance and an ever-growing ``-wal`` sidecar.
+        minute per user, one connection each) that accumulates open file
+        handles and an ever-growing ``-wal`` sidecar.
 
         Every other store in this repo (``users.py``, ``domain/agents``,
         ``domain/strategies``) closes explicitly instead. Wrapping the helper

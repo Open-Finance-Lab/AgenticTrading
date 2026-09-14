@@ -4,7 +4,7 @@ Selected instead of the default SQLite BrokerConnectionStore when
 ``USERS_DATABASE_URL`` or ``CONTENT_DATABASE_URL`` is set (see repository.py's
 ``_build_user_store``). Exists because the SQLite store lives in ``DB_PATH``,
 which resets to the committed seed database on every deploy of the disk-less
-Render free-tier host -- silently discarding every linked brokerage account and
+Render host -- silently discarding every linked brokerage account and
 its refresh token, with no error surfaced anywhere. Method surface, keyword
 arguments, and return schemas are identical to BrokerConnectionStore; only the
 SQL dialect and the timestamp column types differ.

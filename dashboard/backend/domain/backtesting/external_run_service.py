@@ -99,8 +99,8 @@ _lock = threading.Lock()
 # **every** resident session in the dict below — including the ones the v1/v2
 # protocol surfaces open through run_service.create_run, which share this
 # registry. That is deliberate on both halves: the quantity worth bounding is
-# resident bar windows on a free-tier box, whoever opened them; and when that
-# is scarce, the surface that gets refused first should be the one with no
+# resident bar windows on the one web instance, whoever opened them; and when
+# that is scarce, the surface that gets refused first should be the one with no
 # account, agent or key behind it. So this ceiling can refuse a legacy start
 # while protocol runs (bounded separately by MAX_ACTIVE_RUNS_GLOBAL, 100) keep
 # creating — never the reverse.

@@ -434,7 +434,7 @@ def public_user_with_entitlements(
     Avatars are data: URIs bounded at 200_000 chars each on write
     (``api/auth.py``). The admin console renders emails, names, roles, one group
     and two numbers — never the image — so carrying it would make a 100-row page
-    tens of megabytes of response body on a free-tier box for nothing. Callers that
+    tens of megabytes of response body for nothing. Callers that
     merge this into a stored user (``saveAdminUserRole``) spread it over the
     existing object, so an absent key leaves the cached avatar intact.
     """

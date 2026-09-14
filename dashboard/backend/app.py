@@ -107,9 +107,18 @@ _CORS_ALLOW_CREDENTIALS = _CORS_ORIGINS != ["*"]
 #
 # compresslevel=6, not Starlette's default of 9: Starlette compresses inline on
 # the event loop (no threadpool hop), so the cost is paid by every concurrent
-# request. Measured on a 462 KB equity curve, level 9 costs 25.0 ms for 20.1%
-# of original while level 6 costs 6.4 ms for 20.8% -- 4x the event-loop stall
-# to save 0.7 percentage points, on a free-tier CPU that is slower still.
+# request -- the loop is single-threaded no matter how many cores the instance
+# has, so a stall here delays every other in-flight response. Measured on a
+# 462 KB equity curve, level 9 costs 25.0 ms for 20.1% of original while
+# level 6 costs 6.4 ms for 20.8% -- 4x the event-loop stall to save 0.7
+# percentage points.
+#
+# ⚠ The original argument leaned on the prod CPU being *slower* than wherever
+# those numbers were taken, which amplified the stall. Prod moved to a full CPU
+# on 2026-09-11, so that amplification is gone and the case for 6 over 9 is
+# weaker than it was, not stronger. The ratio should survive the move; the
+# absolute gap wants re-measuring on the current plan before anyone leans on it
+# again.
 app.add_middleware(GZipMiddleware, minimum_size=1024, compresslevel=6)
 
 # Enable CORS for frontend

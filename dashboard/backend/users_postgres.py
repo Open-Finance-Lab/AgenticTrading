@@ -4,7 +4,7 @@ Postgres-backed UserStore implementation.
 Selected instead of the default SQLite UserStore when USERS_DATABASE_URL is
 set (see users.py's _build_user_store). Exists because the SQLite UserStore
 shares DB_PATH with backtest data, and the deployed backend runs on a
-disk-less Render free-tier host where that file resets on every deploy --
+disk-less Render host where that file resets on every deploy --
 silently deleting every account (see CLAUDE.md gotchas).
 """
 

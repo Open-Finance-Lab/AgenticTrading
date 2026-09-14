@@ -124,7 +124,7 @@ def test_oversized_webhook_body_is_refused(billing_api):
     """Signature verification needs the raw bytes, so the read comes first.
 
     That is precisely why it must be bounded: without a ceiling one anonymous
-    POST can buffer an arbitrary body into a 512MB instance.
+    POST can buffer an arbitrary body into the web process.
     """
     from dashboard.backend.api.routers import credits as credits_router
 

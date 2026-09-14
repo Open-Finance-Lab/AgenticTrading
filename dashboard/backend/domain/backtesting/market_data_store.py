@@ -52,8 +52,10 @@ from dashboard.backend.infrastructure.market_data.frequency import (
 # that is a floor — the size print below counts only the all_data frames (not
 # timestamps or price_cache) and was taken on synthetic harness bars, not real
 # Alpaca DJIA-30 data. It no longer supports the old ~200 MB worst-case claim
-# against the 512 MB free tier; there is no settled byte budget, so the
-# 4-entry cap rests on entry count alone. Byte-aware accounting is a
+# against what was then a 512 MB free tier; there is no settled byte budget, so
+# the 4-entry cap rests on entry count alone. (Prod has been Render Standard /
+# 2GB since 2026-09-11, which moves a ceiling this was never actually sized
+# against.) Byte-aware accounting is a
 # 1000-tier refinement; the size print below keeps a pathological mix visible.
 MARKET_DATA_CACHE_MAX_ENTRIES = int(os.getenv("MARKET_DATA_CACHE_MAX_ENTRIES", "4"))
 NEGATIVE_TTL_SECONDS = 30.0
