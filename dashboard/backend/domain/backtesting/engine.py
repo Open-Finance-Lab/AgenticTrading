@@ -751,13 +751,20 @@ class HourlyBacktester:
                 self.end_date,
                 bars_by_symbol=self.all_data,
             )
-        except CorporateActionGapError as exc:
-            # Not prefixed like the arm below: the rule data is available and
-            # valid, and telling the user it is missing sends them to look for a
-            # credentials problem that does not exist. The message already names
-            # the dates and what to do about them.
-            raise MarketDataUnavailableError(str(exc)) from exc
-        except (IFindClientError, MarketRuleDataError, ValueError) as exc:
+        except (CorporateActionGapError, IFindClientError, MarketRuleDataError, ValueError) as exc:
+            if isinstance(exc, CorporateActionGapError):
+                # Not prefixed like the branch below: the rule data is
+                # available and valid, and telling the user it is missing
+                # sends them to look for a credentials problem that does not
+                # exist. The message already names the dates and what to do
+                # about them. A single ``except`` tuple plus this branch,
+                # rather than two ``except`` clauses ordered specific-first:
+                # ``CorporateActionGapError`` no longer subclasses
+                # ``MarketRuleDataError`` (it is a bad-input condition, not a
+                # data-unavailable one), so two clauses would put the choice
+                # of message back in the hands of whichever one a future edit
+                # happened to list first.
+                raise MarketDataUnavailableError(str(exc)) from exc
             raise MarketDataUnavailableError(
                 f"Market rule data unavailable: {exc}"
             ) from exc

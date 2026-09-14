@@ -1,5 +1,7 @@
 """Sanitized adapter tests for official iFinD A-share market rules."""
 
+import copy
+import pickle
 from datetime import date, datetime
 from zoneinfo import ZoneInfo
 
@@ -450,12 +452,77 @@ def test_a_permitted_ex_rights_window_records_the_dates_on_the_result(
 
     assert calendar.to_metadata()["corporate_action_gaps"] == [
         {"symbol": "600519.SH", "date": "2025-09-01", "overnight_move": pytest.approx(
-            0.2297297297297297, rel=1e-6
+            -0.2297297297297297, rel=1e-6
         )}
     ]
     warning = capsys.readouterr().out
     assert "unadjusted" in warning
     assert "600519.SH 2025-09-01" in warning
+
+
+def test_a_refused_window_survives_pickling(monkeypatch):
+    """``args`` must hold ``gaps``, not the rendered message.
+
+    A subprocess backtest that fails with this error crosses a process
+    boundary at least once (multiprocessing, or any retry path that pickles
+    the exception to hand it back). The default ``Exception.__reduce__``
+    reconstructs via ``cls(*self.args)``; if ``args`` held the formatted
+    string instead, that call would be ``CorporateActionGapError(message)``,
+    which iterates the string's characters into ``self.gaps`` and then raises
+    ``AttributeError`` the moment anything asks a "gap" for ``.symbol``.
+    """
+    payload, local_bars = _ex_rights_payload_and_bars()
+
+    with pytest.raises(CorporateActionGapError) as excinfo:
+        response_to_market_rules(
+            payload,
+            expected_symbols=SYMBOLS,
+            required_dates=(DAY_1, DAY_2),
+            bars_by_symbol=local_bars,
+            fetch_basic_status=suspended_supplement,
+        )
+
+    for reconstructed in (
+        pickle.loads(pickle.dumps(excinfo.value)),
+        copy.deepcopy(excinfo.value),
+    ):
+        assert [(gap.symbol, gap.trading_date) for gap in reconstructed.gaps] == [
+            ("600519.SH", DAY_2)
+        ]
+        assert "600519.SH on 2025-09-01" in str(reconstructed)
+
+
+def test_an_unaligned_symbol_is_still_reported_when_a_gap_also_refuses_the_run(
+    capsys,
+):
+    """The gap refusal must not silently eat an unrelated diagnostic.
+
+    One symbol can be unaligned (no hourly bars for an active date) while a
+    different symbol in the same universe crosses a corporate-action gap. The
+    gap raises and aborts the run, but the operator still needs to know the
+    unaligned symbol-date existed -- it was computed before the raise, and
+    printing it after the raise never runs.
+    """
+    payload, local_bars = _ex_rights_payload_and_bars()
+    # 688981 traded on DAY_2 per the official feed, but its hourly series
+    # stops at DAY_1 -- the same shape as
+    # test_active_symbol_date_without_hourly_bars_is_kept_ungated.
+    payload["tables"][0]["table"]["close"][1] = 103.0
+    payload["tables"][0]["table"]["ths_trading_status_stock"][1] = "交易"
+    payload["tables"][0]["table"]["ths_up_and_down_status_stock"][1] = "涨停"
+
+    with pytest.raises(CorporateActionGapError):
+        response_to_market_rules(
+            payload,
+            expected_symbols=SYMBOLS,
+            required_dates=(DAY_1, DAY_2),
+            bars_by_symbol=local_bars,
+            fetch_basic_status=lambda *_args: pytest.fail("unexpected supplement"),
+        )
+
+    warning = capsys.readouterr().out
+    assert "688981.SH 2025-09-01" in warning
+    assert "cannot be closing-gated" in warning
 
 
 @pytest.mark.parametrize("value", ["0", "false", "no", "off", "", "  "])

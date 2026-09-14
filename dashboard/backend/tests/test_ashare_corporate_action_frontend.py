@@ -1,13 +1,14 @@
 """The ex-rights row on a results panel, and why it is a row at all.
 
-Issue #346. A window crossing a 除权除息 date is refused by default; the
-override runs it and the run records the dates. This is the half a reader
-actually sees -- the curve still charts the drop as a loss, and this row is
-what stops them taking that number at face value.
+Issue #346. A window crossing a 除权除息 date (or an unbanded STAR/ChiNext
+IPO-week move) is refused by default; the override runs it and the run
+records the dates. This is the half a reader actually sees -- the curve still
+charts the move as a real gain or loss, and this row is what stops them
+taking that number at face value.
 
-The label is executed under node rather than pattern-matched: "drop is not a
-real loss" is the entire reason the row exists, and a string check cannot tell
-whether it survives a truncation that keeps the symbols.
+The label is executed under node rather than pattern-matched: "not a real
+gain or loss" is the entire reason the row exists, and a string check cannot
+tell whether it survives a truncation that keeps the symbols.
 """
 
 import json
@@ -31,6 +32,11 @@ pytestmark = pytest.mark.skipif(
 def _format(gaps: list[dict]) -> str:
     script = "\n".join(
         [
+            # formatCorporateActionGaps calls the shared truncateAndJoin
+            # helper -- both bodies have to ship into the isolated script, or
+            # node throws ReferenceError before the assertions below get to
+            # say anything more useful.
+            fn_body("function truncateAndJoin("),
             fn_body("function formatCorporateActionGaps("),
             "console.log(JSON.stringify(formatCorporateActionGaps("
             f"{json.dumps(gaps)})));",
@@ -47,7 +53,7 @@ def test_one_gap_names_the_symbol_the_date_and_the_caveat():
     label = _format([{"symbol": "600519.SH", "date": "2025-09-01"}])
     assert "600519.SH" in label
     assert "2025-09-01" in label
-    assert "not a real loss" in label
+    assert "not a real gain or loss" in label
 
 
 def test_many_gaps_are_truncated_without_losing_the_caveat():
@@ -62,7 +68,7 @@ def test_many_gaps_are_truncated_without_losing_the_caveat():
     )
     assert label.count("·") == 3
     assert "+2 more" in label
-    assert "not a real loss" in label
+    assert "not a real gain or loss" in label
 
 
 def test_the_row_exists_and_is_hidden_by_default():

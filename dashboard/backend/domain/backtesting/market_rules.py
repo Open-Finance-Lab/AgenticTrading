@@ -23,12 +23,24 @@ class MarketRuleDataError(RuntimeError):
     """Raised when required market-rule observations are unavailable or invalid."""
 
 
+# Shared by every place that prints or raises a sample of gaps (this module and
+# ``ifind_market_rules.py``), so the sample size cannot drift between the
+# exception message, the allowed-run warning, and the UI row.
+GAP_SAMPLE_LIMIT = 5
+
+
 @dataclass(frozen=True)
 class CorporateActionGap:
-    """An overnight move no A-share daily limit band can produce.
+    """A signed overnight move no A-share daily limit band can produce.
 
     The widest band is 20% (STAR/ChiNext), so a larger move is not trading: it
-    is a 除权除息 (ex-rights/ex-dividend) date seen through unadjusted prices.
+    is most often a 除权除息 (ex-rights/ex-dividend) date seen through
+    unadjusted prices, though an unbanded first-week move on a newly listed
+    STAR/ChiNext symbol can also cross it legitimately. ``overnight_move`` is
+    signed (positive = price rose) because the corporate action itself can go
+    either way — a share consolidation raises the unadjusted price, a split,
+    dividend, or rights issue lowers it — and mislabeling a rise as "a loss"
+    is itself a wrong number shown to the operator.
     """
 
     symbol: str
@@ -43,31 +55,49 @@ class CorporateActionGap:
         }
 
 
-class CorporateActionGapError(MarketRuleDataError):
-    """Raised when the requested window crosses a 除权除息 date.
+class CorporateActionGapError(ValueError):
+    """Raised when the requested window (dates × symbols) cannot be backtested
+    on unadjusted prices as given — a bad-input condition, not a case of the
+    rule data itself being unavailable or invalid, so this deliberately does
+    NOT subclass ``MarketRuleDataError``. Callers that need to catch it
+    alongside that family list both explicitly.
 
-    A subclass, so every existing ``except MarketRuleDataError`` keeps working
-    and this can never escape as an unhandled error. It carries the gaps rather
-    than only a message because the same observations are what a permitted run
-    records in its metadata -- one producer, two consumers.
+    Carries the gaps rather than only a message because the same observations
+    are what a permitted run records in its metadata -- one producer, two
+    consumers. The message itself is built lazily in ``__str__`` rather than
+    passed to ``super().__init__()``: ``BaseException.__reduce__`` reconstructs
+    an exception as ``cls(*self.args)``, so if ``args`` held the formatted
+    string, unpickling would call ``__init__`` with a string where ``gaps`` is
+    expected. Keeping ``args == (gaps,)`` makes reconstruction call
+    ``CorporateActionGapError(gaps)`` again, which is exactly what pickling an
+    exception is supposed to do.
     """
 
     def __init__(self, gaps: Iterable[CorporateActionGap]) -> None:
-        self.gaps = tuple(gaps)
+        gaps = tuple(gaps)
+        super().__init__(gaps)
+        self.gaps = gaps
+
+    def __str__(self) -> str:
+        gaps = self.gaps
         sample = ", ".join(
             f"{gap.symbol} on {gap.trading_date.isoformat()} "
-            f"({gap.overnight_move:.0%})"
-            for gap in self.gaps[:3]
+            f"({gap.overnight_move:+.0%})"
+            for gap in gaps[:GAP_SAMPLE_LIMIT]
         )
-        super().__init__(
-            f"This window crosses {len(self.gaps)} ex-rights/ex-dividend "
-            f"(除权除息) date(s): {sample}"
-            f"{' and others' if len(self.gaps) > 3 else ''}. A-share prices are "
-            "requested unadjusted, so the ex-rights drop would be charted as a "
-            "real loss with no offsetting cash credit — in the agent curve and "
-            "in the buy-and-hold baseline alike. Choose a window that does not "
-            "cross it, or set IFIND_ALLOW_CORPORATE_ACTION_GAPS=1 to run anyway "
-            "and have the affected dates recorded on the result."
+        return (
+            f"This window crosses {len(gaps)} date(s) where the overnight "
+            f"move exceeds every A-share daily limit band: {sample}"
+            f"{' and others' if len(gaps) > GAP_SAMPLE_LIMIT else ''}. That is "
+            "usually a 除权除息 (ex-rights/ex-dividend) date, but can also be "
+            "an unbanded first-week move on a newly listed STAR/ChiNext "
+            "symbol. A-share prices are requested unadjusted, so it would be "
+            "charted as a real gain or loss that never happened — in the "
+            "agent curve and in the buy-and-hold baseline alike, and across "
+            "every symbol in this run, not only the ones listed above. "
+            "Choose a window that does not cross it, or set "
+            "IFIND_ALLOW_CORPORATE_ACTION_GAPS=1 to run anyway and have the "
+            "affected dates recorded on the result."
         )
 
 
@@ -262,7 +292,7 @@ class MarketRuleCalendar:
             "source": sample.source,
             "version": sample.version,
             "observations": len(self._rules),
-            "scope": "full_day_suspension_and_closing_limits",
+            "scope": "full_day_suspension_and_closing_limits_and_corporate_action_gaps",
         }
         # Omitted when empty rather than written as [] — the overwhelming
         # majority of runs cross no ex-rights date, and a key present on every
