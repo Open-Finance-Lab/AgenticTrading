@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from collections.abc import Callable, Mapping, Sequence
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
@@ -10,7 +11,10 @@ from typing import Any
 import pandas as pd
 
 from dashboard.backend.domain.backtesting.market_rules import (
+    GAP_SAMPLE_LIMIT,
     ClosingLimitState,
+    CorporateActionGap,
+    CorporateActionGapError,
     DailyMarketRule,
     MarketRuleCalendar,
     MarketRuleDataError,
@@ -20,14 +24,46 @@ from dashboard.backend.domain.backtesting.market_rules import (
 TRADING_STATUS_FIELD = "ths_trading_status_stock"
 LIMIT_STATUS_FIELD = "ths_up_and_down_status_stock"
 
+# Not imported from ``provider._feature_enabled``, despite doing the same
+# truthy-parsing: ``provider.py`` imports ``alpaca_bars`` at module scope, and
+# this module is reached from ``ifind_ashare.py``, whose own import is
+# guarded (test_ifind_provider_import_is_lazy_and_has_no_network_or_fallback_imports)
+# to never pull Alpaca's machinery in just to construct an iFinD provider.
+# Importing one name from ``provider`` would import all of it.
+_TRUTHY = {"1", "true", "yes", "on"}
+
 # Wider than any A-share daily band (10% main boards, 20% STAR/ChiNext), so an
-# overnight move past it cannot have come from trading. Both the hourly bars and
-# these daily closes are requested unadjusted — deliberately, because the audit
-# has to show the official close a limit was set against, not a back-adjusted
-# one — and nothing in the backend applies dividends or splits. A 除权除息 date
-# therefore lands in the equity curve as a real overnight loss that never
-# happened. Detecting it does not fix it; it stops it being silent.
+# overnight move past it cannot have come from trading under a limit band --
+# it is most often a 除权除息 date, though a newly listed STAR/ChiNext symbol
+# trades unbanded for its first five sessions and can legitimately cross this
+# too. Both the hourly bars and these daily closes are requested unadjusted —
+# deliberately, because the audit has to show the official close a limit was
+# set against, not a back-adjusted one — and nothing in the backend applies
+# dividends or splits. A 除权除息 date therefore lands in the equity curve as
+# a real overnight gain or loss that never happened. Detecting it does not fix
+# it; it stops it being silent.
 _CORPORATE_ACTION_GAP = Decimal("0.21")
+
+
+def corporate_action_gaps_allowed() -> bool:
+    """Whether a window with an overnight move past every daily limit band
+    (usually a 除权除息 date; occasionally an unbanded STAR/ChiNext IPO-week
+    move) may run anyway.
+
+    Strict opt-in, and the refusal is the default, because the alternative is
+    publishing a curve whose headline gain or loss did not happen. Named after
+    the strict-opt-in shape of ``ALPACA_ALLOW_RECENT_SIP``, but the risk it
+    accepts is not the same: that flag trades a staleness clamp for fresher
+    data that is still correct once fetched. This one trades a refusal for a
+    curve segment that is *known wrong* on unadjusted prices -- the affected
+    dates are recorded on the result precisely because the number itself
+    cannot be trusted, only audited.
+
+    Read per call rather than captured at import: ``tests/conftest.py`` strips
+    it, and a module-level read would freeze whichever value the first import
+    happened to see.
+    """
+    return (os.getenv("IFIND_ALLOW_CORPORATE_ACTION_GAPS") or "").strip().lower() in _TRUTHY
 
 
 def _fail(detail: str) -> MarketRuleDataError:
@@ -265,7 +301,7 @@ def response_to_market_rules(
 
     rules: list[DailyMarketRule] = []
     unaligned: list[tuple[str, date]] = []
-    price_gaps: list[tuple[str, date, Decimal]] = []
+    price_gaps: list[CorporateActionGap] = []
     for symbol in expected:
         frame = bars_by_symbol.get(symbol)
         if frame is None:
@@ -335,9 +371,20 @@ def response_to_market_rules(
                 )
             _require_price_tick(official_close, tick, symbol, trading_date)
             if previous_close is not None and previous_close > 0:
-                move = abs(official_close - previous_close) / previous_close
-                if move > _CORPORATE_ACTION_GAP:
-                    price_gaps.append((symbol, trading_date, move))
+                # Signed: the corporate action itself can go either way (a
+                # consolidation raises the unadjusted price; a split,
+                # dividend, or rights issue lowers it), and reporting every
+                # move as "a drop" would be a wrong number in the direction
+                # that matters to whoever reads it.
+                move = (official_close - previous_close) / previous_close
+                if abs(move) > _CORPORATE_ACTION_GAP:
+                    price_gaps.append(
+                        CorporateActionGap(
+                            symbol=symbol,
+                            trading_date=trading_date,
+                            overnight_move=move,
+                        )
+                    )
             previous_close = official_close
             final_bar = _final_bar_for_date(frame, trading_date)
             if final_bar is None:
@@ -375,28 +422,49 @@ def response_to_market_rules(
                     final_bar_timestamp=final_bar,
                 )
             )
-    if price_gaps:
-        sample = ", ".join(
-            f"{symbol} {trading_date} {move:.0%}"
-            for symbol, trading_date, move in price_gaps[:5]
-        )
-        print(
-            f"   ⚠️  {len(price_gaps)} overnight move(s) exceed every A-share "
-            f"daily limit band, which trading cannot produce — these prices are "
-            f"unadjusted, so a 除权除息 (ex-rights/ex-dividend) date will show in "
-            f"the equity curve and in the buy-and-hold baseline as a loss that "
-            f"did not happen: {sample}"
-            f"{' …' if len(price_gaps) > 5 else ''}"
-        )
     if unaligned:
+        # Printed before the price_gaps block below, deliberately: that block
+        # can raise, and this diagnostic must still reach stdout when it does
+        # -- a universe can have both an unaligned symbol-date and, on a
+        # different symbol, an unadjusted-price gap, and finding out about
+        # only whichever happened to be checked last is worse than finding
+        # out about neither.
+        #
         # Absent is not the same as broken: say so, or a run whose rules never
         # gated anything looks exactly like one whose rules all held.
         sample = ", ".join(
-            f"{symbol} {trading_date}" for symbol, trading_date in unaligned[:5]
+            f"{symbol} {trading_date}" for symbol, trading_date in unaligned[:GAP_SAMPLE_LIMIT]
         )
         print(
             f"   ⚠️  {len(unaligned)} active symbol-date(s) have no hourly bars "
             f"and cannot be closing-gated: {sample}"
-            f"{' …' if len(unaligned) > 5 else ''}"
+            f"{' …' if len(unaligned) > GAP_SAMPLE_LIMIT else ''}"
         )
-    return MarketRuleCalendar(rules)
+    if price_gaps:
+        # Refused by default. This warning previously only reached stdout, and a
+        # dashboard backtest is a subprocess whose stdout nobody reads — so the
+        # run published a gain or loss that did not happen, and said so to no
+        # one. That is the failure issue #169 was about, in a different place.
+        #
+        # The refusal blocks the whole run, every symbol in the universe, not
+        # only the ones with a gap -- a universe-wide curve computed with one
+        # symbol's price silently wrong is not safe to publish for the other
+        # symbols either, since the portfolio weights and any index/baseline
+        # built alongside it are shared across the whole universe.
+        if not corporate_action_gaps_allowed():
+            raise CorporateActionGapError(price_gaps)
+        sample = ", ".join(
+            f"{gap.symbol} {gap.trading_date} {gap.overnight_move:+.0%}"
+            for gap in price_gaps[:GAP_SAMPLE_LIMIT]
+        )
+        print(
+            f"   ⚠️  {len(price_gaps)} overnight move(s) exceed every A-share "
+            f"daily limit band, which trading cannot produce — most often a "
+            f"除权除息 (ex-rights/ex-dividend) date, occasionally an unbanded "
+            f"first-week move on a newly listed STAR/ChiNext symbol. These "
+            f"prices are unadjusted, so it will show in the equity curve and "
+            f"in the buy-and-hold baseline as a gain or loss that did not "
+            f"happen: {sample}"
+            f"{' …' if len(price_gaps) > GAP_SAMPLE_LIMIT else ''}"
+        )
+    return MarketRuleCalendar(rules, corporate_action_gaps=price_gaps)

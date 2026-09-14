@@ -23,6 +23,84 @@ class MarketRuleDataError(RuntimeError):
     """Raised when required market-rule observations are unavailable or invalid."""
 
 
+# Shared by every place that prints or raises a sample of gaps (this module and
+# ``ifind_market_rules.py``), so the sample size cannot drift between the
+# exception message, the allowed-run warning, and the UI row.
+GAP_SAMPLE_LIMIT = 5
+
+
+@dataclass(frozen=True)
+class CorporateActionGap:
+    """A signed overnight move no A-share daily limit band can produce.
+
+    The widest band is 20% (STAR/ChiNext), so a larger move is not trading: it
+    is most often a 除权除息 (ex-rights/ex-dividend) date seen through
+    unadjusted prices, though an unbanded first-week move on a newly listed
+    STAR/ChiNext symbol can also cross it legitimately. ``overnight_move`` is
+    signed (positive = price rose) because the corporate action itself can go
+    either way — a share consolidation raises the unadjusted price, a split,
+    dividend, or rights issue lowers it — and mislabeling a rise as "a loss"
+    is itself a wrong number shown to the operator.
+    """
+
+    symbol: str
+    trading_date: date
+    overnight_move: Decimal
+
+    def to_metadata(self) -> dict[str, object]:
+        return {
+            "symbol": self.symbol,
+            "date": self.trading_date.isoformat(),
+            "overnight_move": float(self.overnight_move),
+        }
+
+
+class CorporateActionGapError(ValueError):
+    """Raised when the requested window (dates × symbols) cannot be backtested
+    on unadjusted prices as given — a bad-input condition, not a case of the
+    rule data itself being unavailable or invalid, so this deliberately does
+    NOT subclass ``MarketRuleDataError``. Callers that need to catch it
+    alongside that family list both explicitly.
+
+    Carries the gaps rather than only a message because the same observations
+    are what a permitted run records in its metadata -- one producer, two
+    consumers. The message itself is built lazily in ``__str__`` rather than
+    passed to ``super().__init__()``: ``BaseException.__reduce__`` reconstructs
+    an exception as ``cls(*self.args)``, so if ``args`` held the formatted
+    string, unpickling would call ``__init__`` with a string where ``gaps`` is
+    expected. Keeping ``args == (gaps,)`` makes reconstruction call
+    ``CorporateActionGapError(gaps)`` again, which is exactly what pickling an
+    exception is supposed to do.
+    """
+
+    def __init__(self, gaps: Iterable[CorporateActionGap]) -> None:
+        gaps = tuple(gaps)
+        super().__init__(gaps)
+        self.gaps = gaps
+
+    def __str__(self) -> str:
+        gaps = self.gaps
+        sample = ", ".join(
+            f"{gap.symbol} on {gap.trading_date.isoformat()} "
+            f"({gap.overnight_move:+.0%})"
+            for gap in gaps[:GAP_SAMPLE_LIMIT]
+        )
+        return (
+            f"This window crosses {len(gaps)} date(s) where the overnight "
+            f"move exceeds every A-share daily limit band: {sample}"
+            f"{' and others' if len(gaps) > GAP_SAMPLE_LIMIT else ''}. That is "
+            "usually a 除权除息 (ex-rights/ex-dividend) date, but can also be "
+            "an unbanded first-week move on a newly listed STAR/ChiNext "
+            "symbol. A-share prices are requested unadjusted, so it would be "
+            "charted as a real gain or loss that never happened — in the "
+            "agent curve and in the buy-and-hold baseline alike, and across "
+            "every symbol in this run, not only the ones listed above. "
+            "Choose a window that does not cross it, or set "
+            "IFIND_ALLOW_CORPORATE_ACTION_GAPS=1 to run anyway and have the "
+            "affected dates recorded on the result."
+        )
+
+
 class ClosingLimitState(str, Enum):
     """Official security state at the daily close."""
 
@@ -164,7 +242,17 @@ class DailyMarketRule:
 class MarketRuleCalendar:
     """Read-only lookup of validated rules keyed by symbol and market date."""
 
-    def __init__(self, rules: Iterable[DailyMarketRule]) -> None:
+    def __init__(
+        self,
+        rules: Iterable[DailyMarketRule],
+        *,
+        corporate_action_gaps: Iterable[CorporateActionGap] = (),
+    ) -> None:
+        # Carried on the calendar rather than raised, because these reach here
+        # only on the permitted path: a run that was allowed to cross an
+        # ex-rights date still has to say so on its own result, where the
+        # subprocess's stdout never reaches anyone.
+        self.corporate_action_gaps = tuple(corporate_action_gaps)
         normalized: dict[tuple[str, date], DailyMarketRule] = {}
         for rule in rules:
             if not isinstance(rule, DailyMarketRule):
@@ -199,10 +287,18 @@ class MarketRuleCalendar:
 
     def to_metadata(self) -> dict[str, object]:
         sample = next(iter(self._rules.values()))
-        return {
+        metadata: dict[str, object] = {
             "enabled": True,
             "source": sample.source,
             "version": sample.version,
             "observations": len(self._rules),
-            "scope": "full_day_suspension_and_closing_limits",
+            "scope": "full_day_suspension_and_closing_limits_and_corporate_action_gaps",
         }
+        # Omitted when empty rather than written as [] — the overwhelming
+        # majority of runs cross no ex-rights date, and a key present on every
+        # run trains the reader to skip it.
+        if self.corporate_action_gaps:
+            metadata["corporate_action_gaps"] = [
+                gap.to_metadata() for gap in self.corporate_action_gaps
+            ]
+        return metadata

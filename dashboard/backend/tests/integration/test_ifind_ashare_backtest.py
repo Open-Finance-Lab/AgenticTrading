@@ -695,7 +695,7 @@ def test_ifind_offline_response_reaches_engine_database_and_chart(
             "source": "ifind_http",
             "version": "ifind-ashare-closing-rules-v1",
             "observations": len(symbols) * 15,
-            "scope": "full_day_suspension_and_closing_limits",
+            "scope": "full_day_suspension_and_closing_limits_and_corporate_action_gaps",
         },
     }
     # Coverage denominator for llm_decisions (issue #169): steps the model was

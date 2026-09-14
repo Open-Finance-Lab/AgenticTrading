@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from datetime import datetime, time, timedelta
+from datetime import date, datetime, time, timedelta
+from decimal import Decimal
 import json
 import os
 import subprocess
@@ -17,8 +18,11 @@ from dashboard.backend.domain.backtesting import engine as engine_module
 from dashboard.backend.domain.backtesting.engine import HourlyBacktester
 from dashboard.backend.domain.backtesting.currency import CurrencyContext
 from dashboard.backend.domain.backtesting.market_rules import (
+    CorporateActionGap,
+    CorporateActionGapError,
     DailyMarketRule,
     MarketRuleCalendar,
+    MarketRuleDataError,
 )
 from dashboard.backend.infrastructure.llm import backtest_harness as llm_harness
 from dashboard.backend.infrastructure.market_data.profiles import (
@@ -469,7 +473,7 @@ def test_ifind_engine_uses_profile_symbols_in_explicit_rule_mode(monkeypatch):
                 "source": "ifind_http",
                 "version": "ifind-ashare-closing-rules-v1",
                 "observations": 90,
-                "scope": "full_day_suspension_and_closing_limits",
+                "scope": "full_day_suspension_and_closing_limits_and_corporate_action_gaps",
             },
         # No rejected_orders* keys at all: a clean run writes nothing rather
         # than an empty array on every A-share row.
@@ -551,7 +555,7 @@ def test_ifind_engine_resolves_csi300_sample20_and_records_provenance(
             "source": "ifind_http",
             "version": "ifind-ashare-closing-rules-v1",
             "observations": 300,
-            "scope": "full_day_suspension_and_closing_limits",
+            "scope": "full_day_suspension_and_closing_limits_and_corporate_action_gaps",
         },
     }
 
@@ -912,6 +916,43 @@ def test_fx_validation_failure_surfaces_its_reason_instead_of_credentials(monkey
     assert "no usable daily rates" in message
     assert "blank_closes=120" in message
     assert "permission" not in message
+
+
+def test_corporate_action_gap_is_not_reported_as_missing_rule_data(monkeypatch):
+    """A gap refusal must not send the operator looking for a credentials bug.
+
+    ``CorporateActionGapError`` no longer subclasses ``MarketRuleDataError``
+    (it is a bad-input condition -- this window on unadjusted prices -- not a
+    case of the rule data being unavailable or invalid), so the engine has to
+    special-case it explicitly rather than rely on it being caught by a
+    ``except MarketRuleDataError`` arm.
+    """
+    class GapProvider(RecordingProvider):
+        def fetch_market_rules(self, symbols, start, end, *, bars_by_symbol):
+            raise CorporateActionGapError(
+                [CorporateActionGap(symbols[0], date(2026, 4, 1), Decimal("-0.23"))]
+            )
+
+    backtester = _ifind_backtester(monkeypatch, GapProvider(make_cn_bars()))
+
+    with pytest.raises(MarketDataUnavailableError) as excinfo:
+        backtester.load_data()
+
+    message = str(excinfo.value)
+    assert "Market rule data unavailable" not in message
+    assert "Choose a window" in message
+
+
+def test_other_market_rule_errors_keep_the_unavailable_prefix(monkeypatch):
+    """The sibling case: a genuine data problem still reads as one."""
+    class BrokenRuleProvider(RecordingProvider):
+        def fetch_market_rules(self, symbols, start, end, *, bars_by_symbol):
+            raise MarketRuleDataError("missing symbol-date rule for 600519.SH")
+
+    backtester = _ifind_backtester(monkeypatch, BrokenRuleProvider(make_cn_bars()))
+
+    with pytest.raises(MarketDataUnavailableError, match="Market rule data unavailable"):
+        backtester.load_data()
 
 
 def test_transport_failure_still_points_at_credentials(monkeypatch):

@@ -183,6 +183,29 @@ only exit that costs nothing. If the service is later moved to a paid plan, this
 becomes a note about which runtimes are heavy rather than a warning — reword, do not
 delete.
 
+## 10. Undocumented refusal: an A-share window that crosses a 除权除息 date
+
+**File:** nowhere yet. There is **no** A-share integration page — `grep -rl 'A-share'`
+over the hosted docs returns only `getting_started.rst:45,112` (one sentence on T+1 and
+one cross-reference) and `marketplace.rst`. So this wants a new
+`docs/integrations/ifind-ashare.md` alongside the existing `vnpy-*.md` pages, not an
+edit in place.
+
+**Shipped with #346's visibility half** (anchors verified 2026-09-12 on
+`fix/ashare-corporate-action-gap`): an A-share backtest whose window crosses an
+ex-rights/ex-dividend date is now **refused** rather than silently charting the drop
+as a loss. The error names the symbols and dates and points at
+`IFIND_ALLOW_CORPORATE_ACTION_GAPS=1`.
+
+**Must state plainly** that the override does not fix the curve. A permitted run still
+charts the ex-rights drop as a loss; what it gains is an **Ex-rights dates crossed** row
+on the results panel saying so. Copy implying the flag makes the numbers correct would
+be worse than no copy.
+
+**Careful:** do not write "adjust your prices" as the remedy. The unadjusted request is
+deliberate — the market-rule audit needs the official close a 涨停/跌停 was set against —
+so the user-facing remedy is to pick a window, not to change a setting on the data.
+
 ---
 
 ## Checked, not stale

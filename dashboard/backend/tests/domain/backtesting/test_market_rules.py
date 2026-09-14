@@ -117,7 +117,7 @@ def test_calendar_is_read_only_and_requires_exact_symbol_date():
         "source": "ifind_http",
         "version": "ifind-ashare-closing-rules-v1",
         "observations": 1,
-        "scope": "full_day_suspension_and_closing_limits",
+        "scope": "full_day_suspension_and_closing_limits_and_corporate_action_gaps",
     }
     with pytest.raises(MarketRuleDataError, match="missing"):
         calendar.rule_for("600519.SH", DAY)

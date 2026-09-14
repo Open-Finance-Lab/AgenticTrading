@@ -5679,6 +5679,37 @@ const BACKTEST_POLL_FAILURE_BUDGET = 5;
 // the real live_run_id by promoteBacktestRunKey(). Entries written by an earlier
 // build were keyed by agent id and carry no `agentId` field; every read below
 // falls back to the key, so a reload mid-run across a deploy keeps its card.
+/**
+ * Truncate a list to `limit` items, joined by `separator`, with a
+ * "+N more" tail when items were dropped. Shared by every row that
+ * summarizes a possibly-long list without wanting to render all of it --
+ * pulled out once two independent copies (universe symbols, corporate
+ * action gaps) had already drifted to different truncation limits.
+ */
+function truncateAndJoin(items, { limit, mapFn = String, separator = ', ', moreLabel = ' +' } = {}) {
+    const shown = items.slice(0, limit).map(mapFn).join(separator);
+    const remaining = items.length - limit;
+    return remaining > 0 ? `${shown}${moreLabel}${remaining} more` : shown;
+}
+
+/**
+ * Label for the ex-rights (or unbanded IPO-week) dates a run crossed.
+ *
+ * Pure and hoisted out of the render so it can be executed under node: the
+ * clause that matters -- this is a gap that never happened, not a confirmed
+ * loss -- is the entire reason the row exists, and a source-shape guard
+ * cannot tell whether it survives a truncation.
+ */
+function formatCorporateActionGaps(gaps) {
+    const sample = truncateAndJoin(gaps, {
+        limit: 3,
+        mapFn: (gap) => `${gap.symbol} ${gap.date}`,
+        separator: ' · ',
+        moreLabel: ' · +',
+    });
+    return `${sample} — not a real gain or loss`;
+}
+
 const RUNNING_BACKTESTS_KEY = 'running-backtests';
 // Paired with a timestamp in the key below: the counter alone restarts at 0 on
 // reload, and sessionStorage survives a reload, so a fresh launch would land on
@@ -9294,7 +9325,7 @@ function describeUniverseFromAssets(assets) {
         }
     }
     if (assets.length <= 8) return assets.join(', ');
-    return `${assets.slice(0, 6).join(', ')} +${assets.length - 6} more`;
+    return truncateAndJoin(assets, { limit: 6 });
 }
 
 function setBacktestConfigText(id, value) {
@@ -9573,6 +9604,22 @@ function renderBacktestRunConfig(
     if (marketRulesRow) marketRulesRow.hidden = !showMarketRules;
     if (showMarketRules) {
         setBacktestConfigText('backtestConfigMarketRules', 'Enabled');
+    }
+    // A run reaches here only with the operator override armed, so this row is
+    // the whole visible half of issue #346: the curve still charts the ex-rights
+    // drop as a loss, and this is what stops a reader taking that loss at face
+    // value. Absent (the overwhelming majority) hides the row rather than
+    // rendering a reassuring "None" nobody asked for.
+    const corporateActionGaps = Array.isArray(marketRuleProfile?.corporate_action_gaps)
+        ? marketRuleProfile.corporate_action_gaps
+        : [];
+    const corporateActionsRow = document.getElementById('backtestConfigCorporateActionsRow');
+    if (corporateActionsRow) corporateActionsRow.hidden = corporateActionGaps.length === 0;
+    if (corporateActionGaps.length) {
+        setBacktestConfigText(
+            'backtestConfigCorporateActions',
+            formatCorporateActionGaps(corporateActionGaps),
+        );
     }
     const rejectionLabels = {
         suspended: 'Suspended',

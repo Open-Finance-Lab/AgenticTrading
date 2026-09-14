@@ -89,9 +89,21 @@ no offsetting cash credit. A 10-for-3 bonus issue, ordinary in June–July, read
 
 Correcting it means real corporate-action handling and is out of scope here. What is
 in scope is not hiding it: `response_to_market_rules` compares consecutive official
-closes per symbol and warns when an overnight move exceeds every A-share daily band
+closes per symbol and flags an overnight move exceeding every A-share daily band
 (21%, above the 20% STAR/ChiNext limit), which trading cannot produce. Suspensions
 break the comparison chain, since a halt legitimately lets a price gap on resumption.
+
+**Amended 2026-09-12 (issue #346).** "Not hiding it" was a `print()`, and a dashboard
+backtest is a subprocess whose stdout reaches nobody — so the detection existed and the
+run still published the false loss silently. The default is now a **refusal**
+(`CorporateActionGapError`, naming the symbols and dates), with
+`IFIND_ALLOW_CORPORATE_ACTION_GAPS=1` as the operator override; a permitted run carries
+the dates in `market_rule_profile.corporate_action_gaps` and the results panel renders
+them. The curve is still wrong on the override path — the override buys a *labelled*
+wrong number rather than a silent one. The correction itself is still open, and the
+choice between the two shapes is a real one: crediting the action as cash keeps prices
+real, so the ¥5 commission floor and the ¥0.01 tick stay meaningful, whereas a
+forward-adjusted second series would apply both to prices that never traded.
 
 ### Official iFinD command verification
 
