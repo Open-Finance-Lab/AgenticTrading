@@ -80,6 +80,7 @@ from dashboard.backend.infrastructure.llm.execution.models import (
     BillingMode,
     LLMRunEvidence,
 )
+from dashboard.backend.infrastructure.llm.pipeline_runner import split_pipeline
 from dashboard.backend.domain.model_providers.execution_catalog import (
     UnsupportedExecutionModel,
 )
@@ -1874,6 +1875,67 @@ def _enforce_ai_hedge_fund_window(start_date: str, end_date: str) -> None:
                 "Shorten the date range and run it again."
             ),
         )
+
+
+# ============================================================================
+# Pipeline LLM window preflight (issue #474, item 1)
+# ============================================================================
+#
+# The hosted guard above can invert its own budget because the hosted path
+# ENFORCES a per-step timeout: _backtest_subprocess_timeout multiplies
+# resolve_step_timeout_seconds() by a day count, and
+# _ai_hedge_fund_trading_days_ceiling() inverts that same product, which is why
+# its docstring can say the bound and the budget cannot disagree.
+#
+# Nothing enforces a per-bar ceiling on the pipeline path. run_pipeline_decision
+# issues one model call per pipeline decision step per hourly bar, each with up
+# to one retry, and the only wall-clock bound anywhere is the 60s httpx read
+# timeout every provider adapter takes by default. A refusal built on that worst
+# case -- 3000 / (60 * 4) = about 12 bars, under two trading days -- would refuse
+# essentially every run. So the number below is a CALIBRATED ESTIMATE of typical
+# per-call latency, not an inverted ceiling, and the 3600s timeout stays the real
+# backstop: a slow reasoning model can still exhaust the budget and be killed.
+# What this preflight removes is the obviously uncompletable case, before any
+# spend and while the user still has the dates on screen.
+#
+# ⚠ The safe direction is INVERTED relative to _backtest_subprocess_timeout.
+# That function over-provisions on purpose, because it sizes a BUDGET. This one
+# computes a REFUSAL: under-estimating the work lets a marginal run through and
+# the timeout catches it, while over-estimating refuses a run that would have
+# succeeded -- on the declared onboarding task, where a new user gets one pass.
+# Do not "tighten" these estimates toward the worst case.
+
+# Hourly decision bars in one trading day. US is the widest session
+# (_market_hours_only keeps roughly 09:30 through 16:00); CN runs two shorter
+# sessions and costs less. One number for both, taken from the wider market,
+# because a per-profile table here would be a second place for the bar cadence
+# to be wrong and every profile already pins a 60m decision timeframe.
+PIPELINE_DECISION_BARS_PER_TRADING_DAY = 7
+
+
+def _estimated_pipeline_llm_calls(
+    start_date: str, end_date: str, pipeline: Optional[List[Dict[str, Any]]]
+) -> int:
+    """Upper-bound the model calls a pipeline LLM backtest will make.
+
+    Decision steps run inside the hourly loop; post-trade steps run once at a
+    trading-day boundary (``run_post_trade_analysis``). Counting post-trade
+    steps per bar would overstate such a pipeline by about 7x and refuse
+    windows that finish comfortably.
+
+    ``max(1, ...)`` is load-bearing: ``split_pipeline(None)`` returns two empty
+    lists, and the single-prompt path -- the most common run there is -- would
+    otherwise estimate zero calls and skip the guard entirely.
+    """
+    trading_days = _estimated_decision_days(start_date, end_date)
+    if trading_days <= 0:
+        # _validate_backtest_params already answered a bad range with a 422
+        # before this runs. Returning 0 keeps this from becoming a second,
+        # competing date validator with its own error surface.
+        return 0
+    decision_steps, post_trade_steps = split_pipeline(pipeline)
+    bars = trading_days * PIPELINE_DECISION_BARS_PER_TRADING_DAY
+    return bars * max(1, len(decision_steps)) + trading_days * len(post_trade_steps)
 
 
 # ============================================================================

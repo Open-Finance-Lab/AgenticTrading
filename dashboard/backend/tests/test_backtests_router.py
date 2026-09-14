@@ -1723,3 +1723,66 @@ def test_backtest_window_cap_is_two_weeks():
     product has one window vocabulary rather than two.
     """
     assert bt.MAX_BACKTEST_DAYS == 14
+
+
+def test_pipeline_call_estimate_counts_one_call_per_bar_with_no_pipeline():
+    """A single-prompt LLM run calls the model once per hourly bar.
+
+    ``max(1, len(decision_steps))`` is what makes the no-pipeline path cost
+    anything at all -- ``split_pipeline(None)`` returns two empty lists, and a
+    bare multiplication would estimate zero calls for the most common run
+    there is.
+    """
+    # 2026-04-15 (Wed) -> 2026-04-23 (Thu) is 7 weekdays.
+    assert bt._estimated_decision_days("2026-04-15", "2026-04-23") == 7
+    assert (
+        bt._estimated_pipeline_llm_calls("2026-04-15", "2026-04-23", None)
+        == 7 * bt.PIPELINE_DECISION_BARS_PER_TRADING_DAY
+    )
+
+
+def test_pipeline_call_estimate_multiplies_by_decision_steps():
+    """Each decision step is its own model call, per bar.
+
+    ``run_pipeline_decision`` loops the decision steps inside the hourly loop,
+    so a four-module pipeline costs 4x a single prompt over the same window --
+    which is the whole reason window length alone cannot bound a run.
+    """
+    pipeline = [{"label": f"Step {i}"} for i in range(4)]
+    assert (
+        bt._estimated_pipeline_llm_calls("2026-04-15", "2026-04-23", pipeline)
+        == 7 * bt.PIPELINE_DECISION_BARS_PER_TRADING_DAY * 4
+    )
+
+
+def test_pipeline_call_estimate_charges_post_trade_steps_per_day_not_per_bar():
+    """Post-trade steps fire at a day boundary, not every bar.
+
+    ``engine.py`` calls ``run_post_trade_analysis`` once per trading day, so
+    counting them per bar would overstate a post-trade pipeline by ~7x and
+    refuse windows that finish comfortably.
+    """
+    days = 7
+    bars = days * bt.PIPELINE_DECISION_BARS_PER_TRADING_DAY
+    decision_only = [{"label": "Signal"}]
+    with_post_trade = decision_only + [{"presetKey": "post_trade_analysis"}]
+
+    assert (
+        bt._estimated_pipeline_llm_calls("2026-04-15", "2026-04-23", decision_only)
+        == bars
+    )
+    assert (
+        bt._estimated_pipeline_llm_calls("2026-04-15", "2026-04-23", with_post_trade)
+        == bars + days
+    )
+
+
+def test_pipeline_call_estimate_is_zero_for_an_unusable_range():
+    """Unparseable or inverted dates estimate zero rather than raising.
+
+    ``_validate_backtest_params`` already 422s those before the guard runs, so
+    this only has to avoid becoming a second, competing date validator with its
+    own error surface.
+    """
+    assert bt._estimated_pipeline_llm_calls("not-a-date", "also-bad", None) == 0
+    assert bt._estimated_pipeline_llm_calls("2026-04-23", "2026-04-15", None) == 0
