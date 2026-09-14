@@ -111,7 +111,7 @@ def test_ifind_mode_applies_one_month_dates_without_changing_capital(html, js):
         js,
     )
     assert re.search(
-        r"IFIND_ASHARE_END_DATE\s*=\s*['\"]2026-05-01['\"]",
+        r"IFIND_ASHARE_END_DATE\s*=\s*['\"]2026-04-15['\"]",
         js,
     )
     assert "previousStartDate" in js
@@ -382,3 +382,30 @@ def test_ifind_fixed_universe_has_stable_responsive_layout(css):
         re.S,
     )
     assert re.search(r"\.ifind-symbol-item\s*\{[^}]*min-width\s*:\s*0", css, re.S)
+
+
+def test_the_ifind_prefill_window_is_runnable_under_the_server_cap(js):
+    """The auto-applied A-share window must be one the server will accept.
+
+    Pinning the two date literals -- which the test above does -- says nothing
+    about whether they are legal. That is exactly how this broke: lowering
+    MAX_BACKTEST_DAYS from 31 to 14 left this prefill at 30 days, so choosing
+    the iFinD A-share source wrote an unrunnable window into the form and the
+    next click answered 422. The literal test stayed green throughout.
+
+    Asserted against the imported server constant rather than a copy of it, so
+    the two cannot drift apart again.
+    """
+    from datetime import date
+
+    from dashboard.backend.api.routers.backtests import MAX_BACKTEST_DAYS
+
+    start = re.search(r"IFIND_ASHARE_START_DATE\s*=\s*['\"]([\d-]+)['\"]", js)
+    end = re.search(r"IFIND_ASHARE_END_DATE\s*=\s*['\"]([\d-]+)['\"]", js)
+    assert start and end, "iFinD prefill date constants not found in app.js"
+
+    span = (date.fromisoformat(end.group(1)) - date.fromisoformat(start.group(1))).days
+    assert 0 < span <= MAX_BACKTEST_DAYS, (
+        f"iFinD prefill window is {span} days, but the server refuses anything "
+        f"over {MAX_BACKTEST_DAYS}"
+    )

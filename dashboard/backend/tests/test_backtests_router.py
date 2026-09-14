@@ -1980,3 +1980,54 @@ def test_backtest_run_still_refuses_an_over_long_window_on_dates_alone(client):
     )
     assert response.status_code == 422
     assert "max 14 days" in response.json()["detail"]
+
+
+def test_pipeline_refusal_breakdown_accounts_for_post_trade_steps():
+    """The shown arithmetic must reconcile with the total printed beside it.
+
+    The breakdown is a product of per-bar terms, but a post-trade step fires
+    once a trading day. Without naming it the message multiplies out to LESS
+    than the total it quotes, so a user who checks the sum concludes a correct
+    refusal is a bug -- and the one lever the message does not mention is the
+    one that would fix their run.
+    """
+    days = 10
+    bars_per_day = bt.PIPELINE_DECISION_BARS_PER_TRADING_DAY
+    pipeline = [{"label": f"Step {i}"} for i in range(4)] + [
+        {"presetKey": "post_trade_analysis"}
+    ]
+    expected = days * bars_per_day * 4 + days
+
+    with pytest.raises(HTTPException) as excinfo:
+        bt._enforce_pipeline_llm_window(
+            bt.PIPELINE_RUNTIME_TYPE,
+            bt.LLM_DECISION_SOURCE,
+            "2026-04-06",
+            "2026-04-19",
+            pipeline,
+        )
+
+    detail = excinfo.value.detail
+    assert str(expected) in detail
+    assert f"{days} trading days x {bars_per_day} hourly bars x 4 pipeline step(s)" in detail
+    assert "plus 1 post-trade step(s) once per trading day" in detail
+    # The breakdown now reconciles: the per-bar product plus the per-day term
+    # equals the quoted total.
+    assert days * bars_per_day * 4 + days == expected
+
+
+def test_pipeline_refusal_breakdown_is_unchanged_without_post_trade_steps():
+    """The common case keeps the exact wording it shipped with."""
+    with pytest.raises(HTTPException) as excinfo:
+        bt._enforce_pipeline_llm_window(
+            bt.PIPELINE_RUNTIME_TYPE,
+            bt.LLM_DECISION_SOURCE,
+            "2026-04-06",
+            "2026-04-19",
+            [{"label": f"Step {i}"} for i in range(4)],
+        )
+
+    detail = excinfo.value.detail
+    assert "280" in detail
+    assert "post-trade" not in detail
+    assert "plus" not in detail

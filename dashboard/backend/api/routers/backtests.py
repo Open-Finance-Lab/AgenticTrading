@@ -2037,18 +2037,30 @@ def _enforce_pipeline_llm_window(
         return
 
     trading_days = _estimated_decision_days(start_date, end_date)
-    decision_steps, _post_trade_steps = split_pipeline(pipeline)
+    decision_steps, post_trade_steps = split_pipeline(pipeline)
     steps = max(1, len(decision_steps))
     minutes = PIPELINE_SUBPROCESS_TIMEOUT_SECONDS // 60
+    # The product names the per-bar steps only. A post-trade step fires once a
+    # trading day, not once a bar, so with one in the pipeline the breakdown
+    # multiplies out to LESS than the total printed beside it -- and a user who
+    # checks the arithmetic concludes a correct refusal is a bug. Empty string
+    # when there is no post-trade step, so the common case reads exactly as
+    # before.
+    post_trade_note = (
+        f", plus {len(post_trade_steps)} post-trade step(s) once per trading day"
+        if post_trade_steps
+        else ""
+    )
     raise HTTPException(
         status_code=422,
         detail=(
             f"This run needs about {estimated} model calls "
             f"({trading_days} trading days x "
             f"{PIPELINE_DECISION_BARS_PER_TRADING_DAY} hourly bars x "
-            f"{steps} pipeline step(s)), and a backtest has room for about "
-            f"{allowed} within its {minutes}-minute limit. Shorten the date "
-            "range, or use fewer pipeline steps, and run it again."
+            f"{steps} pipeline step(s){post_trade_note}), and a backtest has "
+            f"room for about {allowed} within its {minutes}-minute limit. "
+            "Shorten the date range, or use fewer pipeline steps, and run it "
+            "again."
         ),
     )
 

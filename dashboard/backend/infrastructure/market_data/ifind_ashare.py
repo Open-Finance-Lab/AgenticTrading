@@ -27,6 +27,19 @@ _SESSIONS_PER_TRADING_DAY = 4
 # with -- and a weekday count cannot see them, so a stricter fraction would
 # refuse good data every May. Half still catches the failure this guard exists
 # for: an empty, one-day, or wholesale-truncated upstream reply.
+#
+# ⚠ Half is calibrated against the one- and two-day closures, and it does NOT
+# cover the week-long ones. National Day (Oct 1-7) and Spring Festival each
+# shut the exchange for most of a trading week, so a window that is legal
+# under MAX_BACKTEST_DAYS and whose data is perfectly good can still land
+# under this floor and be refused as incomplete -- a false refusal, not a
+# missed detection, so it fails in the safe direction and says so loudly
+# rather than charting a short curve as real. The honest fix is a CN trading
+# calendar, which this module deliberately does not carry: inventing one here
+# would put a second, unversioned holiday table in the codebase next to the
+# exchange's own. Lowering the fraction instead would trade a visible false
+# refusal for a silent acceptance of a genuinely truncated reply, which is
+# the trade this guard exists to refuse. Tracked as a follow-up on #474.
 _MINIMUM_BAR_COMPLETENESS = 0.5
 # One full session day. Keeps a very short window from deriving a floor of
 # zero, which would disable the check entirely.
