@@ -1786,3 +1786,48 @@ def test_pipeline_call_estimate_is_zero_for_an_unusable_range():
     """
     assert bt._estimated_pipeline_llm_calls("not-a-date", "also-bad", None) == 0
     assert bt._estimated_pipeline_llm_calls("2026-04-23", "2026-04-15", None) == 0
+
+
+def test_pipeline_seconds_per_call_default_and_derived_call_budget():
+    """15s/call over the usable budget leaves 200 calls.
+
+    Usable is the parent budget minus the overhead constant, because data load,
+    baseline generation and persistence sit outside the decision loop and their
+    share is already reserved.
+    """
+    assert bt._DEFAULT_PIPELINE_SECONDS_PER_LLM_CALL == 15
+    assert bt.PIPELINE_SECONDS_PER_LLM_CALL == 15
+
+    usable = (
+        bt.PIPELINE_SUBPROCESS_TIMEOUT_SECONDS
+        - bt.SUBPROCESS_TIMEOUT_OVERHEAD_SECONDS
+    )
+    assert usable == 3000
+    assert bt._max_pipeline_llm_calls() == 200
+
+
+@pytest.mark.parametrize("raw", ["", "   ", "abc", "12.5", "0", "-4", "301"])
+def test_pipeline_seconds_per_call_falls_back_on_junk(monkeypatch, raw):
+    """A mistyped env value logs and falls back; it never kills app boot.
+
+    CLAUDE.md records that a bare int() at module scope in this very module once
+    took the whole app down on a typo. 0 is refused specifically because it
+    would make the call budget a ZeroDivisionError rather than a bound.
+    """
+    monkeypatch.setenv("PIPELINE_SECONDS_PER_LLM_CALL", raw)
+    assert (
+        bt._pipeline_seconds_per_llm_call()
+        == bt._DEFAULT_PIPELINE_SECONDS_PER_LLM_CALL
+    )
+
+
+def test_pipeline_seconds_per_call_honours_a_valid_override(monkeypatch):
+    """An operator who has measured real latency tunes this without a deploy."""
+    monkeypatch.setenv("PIPELINE_SECONDS_PER_LLM_CALL", "30")
+    assert bt._pipeline_seconds_per_llm_call() == 30
+
+    monkeypatch.setenv("PIPELINE_SECONDS_PER_LLM_CALL", "1")
+    assert bt._pipeline_seconds_per_llm_call() == 1
+
+    monkeypatch.setenv("PIPELINE_SECONDS_PER_LLM_CALL", "300")
+    assert bt._pipeline_seconds_per_llm_call() == 300

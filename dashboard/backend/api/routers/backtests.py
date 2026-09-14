@@ -1938,6 +1938,76 @@ def _estimated_pipeline_llm_calls(
     return bars * max(1, len(decision_steps)) + trading_days * len(post_trade_steps)
 
 
+# Typical wall-clock for one model call on this deployment. NOT enforced
+# anywhere -- see the banner above. 15s is calibrated for a model that spends a
+# little time reasoning; a fast completion model finishes in a few seconds and a
+# slow reasoning model can exceed the 60s httpx read timeout, which is why this
+# is an operator dial rather than a literal.
+#
+# Consequence worth knowing before changing it: at 15s the shipped modal default
+# window (7 weekdays, 49 bars) running the four-module pipeline advertised at
+# app.html:1462 costs 196 of the 200 available calls -- it passes by four. That
+# is not an argument for a smaller number here; it is evidence that the fixed
+# 3600s budget is undersized for the advertised product (issue #474, item 5).
+_DEFAULT_PIPELINE_SECONDS_PER_LLM_CALL = 15
+# A value this high already refuses almost every window (200 -> 10 calls). Past
+# it the setting stops expressing latency and starts silently disabling the
+# lane, which deserves its own explicit switch rather than a large number here.
+_MAX_PIPELINE_SECONDS_PER_LLM_CALL = 300
+
+
+def _pipeline_seconds_per_llm_call() -> int:
+    """Seconds one model call is assumed to take on this deployment.
+
+    Parsed defensively for the reason CLAUDE.md records about this very module:
+    an operator-set integer read with a bare ``int()`` at module scope once
+    killed app boot on a typo. Junk, zero, negative and out-of-range values log
+    and fall back -- the whole app must not fail to start because one optional
+    estimate was mistyped in a web form. Zero is refused specifically because it
+    would turn ``_max_pipeline_llm_calls`` into a ``ZeroDivisionError`` at the
+    top of the request path.
+    """
+    default = _DEFAULT_PIPELINE_SECONDS_PER_LLM_CALL
+    raw = os.getenv("PIPELINE_SECONDS_PER_LLM_CALL")
+    if raw is None or not str(raw).strip():
+        return default
+    try:
+        value = int(str(raw).strip())
+    except (TypeError, ValueError):
+        print(
+            "PIPELINE_SECONDS_PER_LLM_CALL is not an integer "
+            f"({raw!r}); using {default}",
+            flush=True,
+        )
+        return default
+    if value < 1 or value > _MAX_PIPELINE_SECONDS_PER_LLM_CALL:
+        print(
+            f"PIPELINE_SECONDS_PER_LLM_CALL is out of range ({value}; allowed "
+            f"1-{_MAX_PIPELINE_SECONDS_PER_LLM_CALL}); using {default}",
+            flush=True,
+        )
+        return default
+    return value
+
+
+PIPELINE_SECONDS_PER_LLM_CALL = _pipeline_seconds_per_llm_call()
+
+
+def _max_pipeline_llm_calls() -> int:
+    """Model calls the fixed parent budget has room for.
+
+    Read through a function rather than frozen into a module constant so a test
+    that monkeypatches ``PIPELINE_SECONDS_PER_LLM_CALL`` sees its own value --
+    the same reason ``_enforce_ai_hedge_fund_window`` reads its module-level
+    limit at call time instead of closing over it.
+    """
+    usable = max(
+        0,
+        PIPELINE_SUBPROCESS_TIMEOUT_SECONDS - SUBPROCESS_TIMEOUT_OVERHEAD_SECONDS,
+    )
+    return usable // max(1, PIPELINE_SECONDS_PER_LLM_CALL)
+
+
 # ============================================================================
 # Running the child (issues #273 and #308)
 # ============================================================================

@@ -152,6 +152,11 @@ os.environ.pop("IFIND_ALLOW_CORPORATE_ACTION_GAPS", None)
 # errors rather than as a config leak.
 os.environ.pop("LLM_ESCALATE_CEILING_ON_RETRY", None)
 
+# A developer configured like prod would otherwise have a different call
+# budget than the suite asserts, and read the resulting refusals as
+# unrelated failures.
+os.environ.pop("PIPELINE_SECONDS_PER_LLM_CALL", None)
+
 
 @atexit.register
 def _cleanup_test_db_dir() -> None:
