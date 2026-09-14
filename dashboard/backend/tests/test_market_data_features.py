@@ -157,7 +157,7 @@ def test_unknown_source_returns_422_before_scheduling(monkeypatch):
         "/backtest/run",
         json={
             "start_date": "2026-04-01",
-            "end_date": "2026-04-23",
+            "end_date": "2026-04-15",
             "data_source": "unknown",
         },
         headers=session_headers(),
@@ -176,7 +176,7 @@ def test_disabled_simulation_returns_403_before_scheduling(monkeypatch):
         "/backtest/run",
         json={
             "start_date": "2026-04-01",
-            "end_date": "2026-04-23",
+            "end_date": "2026-04-15",
             "data_source": VNPY_SIMULATION,
         },
         headers=session_headers(),
@@ -202,7 +202,7 @@ def test_missing_vnpy_returns_503_before_scheduling(monkeypatch):
         "/backtest/run",
         json={
             "start_date": "2026-04-01",
-            "end_date": "2026-04-23",
+            "end_date": "2026-04-15",
             "data_source": VNPY_SIMULATION,
         },
         headers=session_headers(),
@@ -222,7 +222,7 @@ def test_disabled_ifind_returns_403_before_scheduling(monkeypatch):
         "/backtest/run",
         json={
             "start_date": "2026-04-01",
-            "end_date": "2026-04-23",
+            "end_date": "2026-04-15",
             "data_source": IFIND_ASHARE,
             "universe": A_SHARE_DEMO_6,
             "timeframe": "60m",
@@ -246,7 +246,7 @@ def test_missing_ifind_token_returns_503_before_scheduling(monkeypatch):
         "/backtest/run",
         json={
             "start_date": "2026-04-01",
-            "end_date": "2026-04-23",
+            "end_date": "2026-04-15",
             "data_source": IFIND_ASHARE,
             "universe": A_SHARE_DEMO_6,
             "timeframe": "60m",
@@ -272,7 +272,7 @@ def test_refresh_token_allows_ifind_backtest_scheduling(monkeypatch):
         "/backtest/run",
         json={
             "start_date": "2026-04-01",
-            "end_date": "2026-04-23",
+            "end_date": "2026-04-15",
             "data_source": IFIND_ASHARE,
             "universe": A_SHARE_DEMO_6,
             "timeframe": "60m",
@@ -295,7 +295,7 @@ def test_ifind_rejects_wrong_universe_before_checking_credentials(monkeypatch):
         "/backtest/run",
         json={
             "start_date": "2026-04-01",
-            "end_date": "2026-04-23",
+            "end_date": "2026-04-15",
             "data_source": IFIND_ASHARE,
             "universe": "custom_a_share_pool",
             "timeframe": "60m",
@@ -318,7 +318,7 @@ def test_ifind_rejects_unsupported_timeframe_before_scheduling(monkeypatch):
         "/backtest/run",
         json={
             "start_date": "2026-04-01",
-            "end_date": "2026-04-23",
+            "end_date": "2026-04-15",
             "data_source": IFIND_ASHARE,
             "universe": A_SHARE_DEMO_6,
             "timeframe": "1d",
@@ -348,7 +348,7 @@ def test_enabled_simulation_is_passed_to_background_runner(monkeypatch):
         "/backtest/run",
         json={
             "start_date": "2026-04-01",
-            "end_date": "2026-04-23",
+            "end_date": "2026-04-15",
             "data_source": VNPY_SIMULATION,
         },
         headers=session_headers(),
@@ -378,7 +378,7 @@ def test_enabled_ifind_profile_is_passed_to_background_runner(monkeypatch):
         "/backtest/run?assets=AAPL,MSFT",
         json={
             "start_date": "2026-04-01",
-            "end_date": "2026-04-23",
+            "end_date": "2026-04-15",
             "data_source": IFIND_ASHARE,
             "universe": A_SHARE_DEMO_6,
             "timeframe": "60m",
@@ -431,7 +431,7 @@ def test_ifind_explicit_llm_is_preflighted_and_scheduled(monkeypatch, universe):
         "/backtest/run",
         json={
             "start_date": "2026-04-01",
-            "end_date": "2026-04-23",
+            "end_date": "2026-04-15",
             "data_source": IFIND_ASHARE,
             "universe": universe,
             "timeframe": "60m",
@@ -537,7 +537,7 @@ def test_enabled_ifind_csi300_sample20_is_passed_to_background_runner(
         "/backtest/run",
         json={
             "start_date": "2026-06-23",
-            "end_date": "2026-07-23",
+            "end_date": "2026-07-07",
             "data_source": IFIND_ASHARE,
             "universe": CSI300_SAMPLE_20_2026H2,
             "timeframe": "60m",
