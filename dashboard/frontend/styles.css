@@ -9720,6 +9720,13 @@ html[data-nav-page="home"] #homeView .dashboard-bottom-grid .home-module--market
     line-height: 1.4;
 }
 
+/* Sits under the legend rows, so it needs the gap the rows don't. */
+.allocation-legend-hint--grid {
+    margin-top: 8px;
+    padding-top: 8px;
+    border-top: 1px solid var(--border-subtle, rgba(148, 163, 184, 0.16));
+}
+
 .agents-grid-footer {
     display: flex;
     align-items: center;

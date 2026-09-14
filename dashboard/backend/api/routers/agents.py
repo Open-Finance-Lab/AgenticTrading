@@ -51,7 +51,7 @@ from dashboard.backend.api.dependencies import (
     _resolve_agent_access,
 )
 from dashboard.backend.api.rate_limit import FixedWindowRateLimiter, client_key
-from dashboard.backend.domain.portfolios.service import portfolio_service
+from dashboard.backend.domain.portfolios.service import AgentScope, portfolio_service
 
 router = APIRouter(prefix="/v1/agents", tags=["agents"])
 
@@ -175,7 +175,9 @@ def create_agent(
     # to roll back if the insert fails, and nothing to compensate.
     if ctx["user_id"] and cash > 0:
         try:
-            portfolio_service.ensure_cash_for_new_agent(ctx["user_id"], cash)
+            portfolio_service.ensure_cash_for_new_agent(
+                ctx["user_id"], cash, AgentScope.from_owner_context(ctx)
+            )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -199,7 +201,9 @@ def create_agent(
         category=body.category,
     )
     if ctx["user_id"]:
-        portfolio_service.get_or_create_portfolio(ctx["user_id"])
+        portfolio_service.get_or_create_portfolio(
+            ctx["user_id"], AgentScope.from_owner_context(ctx)
+        )
     return {
         "agent": agent_service.agent_with_stats(agent),
         "session_id": agent["session_id"],
@@ -279,7 +283,9 @@ def clone_marketplace_agent(
     cash = float(DEFAULT_AGENT_CASH_ALLOCATION)
     if ctx["user_id"] and cash > 0:
         try:
-            portfolio_service.ensure_cash_for_new_agent(ctx["user_id"], cash)
+            portfolio_service.ensure_cash_for_new_agent(
+                ctx["user_id"], cash, AgentScope.from_owner_context(ctx)
+            )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
     try:
@@ -293,7 +299,9 @@ def clone_marketplace_agent(
     except MarketplaceTemplateNotFoundError:
         raise HTTPException(status_code=404, detail="Marketplace template not found")
     if ctx["user_id"]:
-        portfolio_service.get_or_create_portfolio(ctx["user_id"])
+        portfolio_service.get_or_create_portfolio(
+            ctx["user_id"], AgentScope.from_owner_context(ctx)
+        )
     return {"agent": agent}
 
 
@@ -482,6 +490,7 @@ def update_agent(
                     owner_user_id=ctx["user_id"],
                     agent=existing,
                     new_amount=ledger_new_amount,
+                    scope=AgentScope.from_owner_context(ctx),
                 )
             except ValueError as exc:
                 raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -512,6 +521,7 @@ def update_agent(
             owner_user_id=ctx["user_id"],
             agent=agent,
             new_amount=ledger_new_amount,
+            scope=AgentScope.from_owner_context(ctx),
         )["agent"]
     return {"agent": agent}
 
@@ -632,7 +642,10 @@ def delete_agent(
     # overshoots equity on any agent that never debited the ledger in the first
     # place, and would 500 a request whose agent row is already deleted.
     if owner_user_id:
-        portfolio_service.reclaim_all_on_delete(owner_user_id=int(owner_user_id))
+        portfolio_service.reclaim_all_on_delete(
+            owner_user_id=int(owner_user_id),
+            scope=AgentScope.from_owner_context(ctx),
+        )
     return {"status": "deleted", "agent_id": agent_id, "reclaimed": sleeve}
 
 
@@ -672,7 +685,9 @@ def duplicate_agent(
     cash = float(DEFAULT_AGENT_CASH_ALLOCATION)
     if ctx["user_id"] and cash > 0:
         try:
-            portfolio_service.ensure_cash_for_new_agent(ctx["user_id"], cash)
+            portfolio_service.ensure_cash_for_new_agent(
+                ctx["user_id"], cash, AgentScope.from_owner_context(ctx)
+            )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
     try:
@@ -688,7 +703,9 @@ def duplicate_agent(
     except AgentServiceError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     if ctx["user_id"]:
-        portfolio_service.get_or_create_portfolio(ctx["user_id"])
+        portfolio_service.get_or_create_portfolio(
+            ctx["user_id"], AgentScope.from_owner_context(ctx)
+        )
     return {"agent": agent}
 
 

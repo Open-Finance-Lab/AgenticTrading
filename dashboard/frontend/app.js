@@ -774,6 +774,31 @@ function shelfIdSuffix(shelfKey) {
 /** Per-shelf page index (0-based), keyed by AGENT_SHELVES' `key`. Reset on search change. */
 let agentGridPage = Object.fromEntries(AGENT_SHELVES.map((shelf) => [shelf.key, 0]));
 
+/* How many cards the last render actually put on screen.
+ *
+ * The Capital Allocation panel beside the grid is portfolio-wide -- it lists
+ * every agent holding a sleeve, because a pie that omitted some would not add
+ * up to the portfolio. The grid is not: a search term, a market chip and the
+ * per-shelf page cap each hide cards the legend still lists, which reads as
+ * the panel inventing agents. Counted during the render rather than recomputed
+ * afterwards, so the number cannot drift from what was painted. */
+let agentGridShownCount = 0;
+
+/** `{ shown, total, searching, filtered, paged }` for the last grid render. */
+function describeAgentGridVisibility() {
+  const total = (allAgents || []).length;
+  return {
+    shown: Math.min(agentGridShownCount, total),
+    total,
+    searching: !!(document.getElementById('agentSearchInput')?.value || '').trim(),
+    filtered: agentMarketFilter !== 'all',
+    paged: AGENT_SHELVES.some(
+      (shelf) => (allAgents || []).filter(shelf.match).length > AGENT_GRID_PAGE_SIZE,
+    ),
+  };
+}
+window.describeAgentGridVisibility = describeAgentGridVisibility;
+
 function agentGridPageCount(total) {
   return Math.max(1, Math.ceil(total / AGENT_GRID_PAGE_SIZE));
 }
@@ -1695,6 +1720,7 @@ function renderAgentCards(grid, agents, categoryKey) {
   bindAgentCardMenus(grid);
 
   renderAgentGridFooter(categoryKey, total, page, pageCount);
+  agentGridShownCount += visibleAgents.length;
 
   grid.querySelectorAll('.agent-configure-btn').forEach((btn) => {
     btn.addEventListener('click', () => {
@@ -2072,6 +2098,7 @@ function renderAgentCategories(agents) {
   if (shelves.some(({ grid }) => !grid)) return;
 
   if (errorEl) errorEl.hidden = true; // a successful render clears any prior error
+  agentGridShownCount = 0;
 
   // allAgents, never the `agents` parameter: renderAgentCategories is called
   // with getFilteredAgents(), which the search box and the market chips
@@ -2133,6 +2160,13 @@ function renderAgentCategories(agents) {
         : promptedEmptyHtml({ searching, marketFilter: agentMarketFilter });
     }
   });
+
+  // Every repaint of the grid can change how many cards are on screen -- a
+  // keystroke, a chip, a pager click -- and none of them touch the portfolio,
+  // so the panel has to be told rather than waiting for its own next render.
+  if (typeof window.refreshAllocationLegendNote === 'function') {
+    window.refreshAllocationLegendNote();
+  }
 }
 
 // Reserved entry point for connect-your-own agents: the connection mechanism

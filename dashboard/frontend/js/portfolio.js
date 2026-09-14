@@ -342,6 +342,38 @@ function sortAllocationLegendSlices(slices) {
     return [...agents, ...unallocated];
 }
 
+/* The panel is portfolio-wide; the grid beside it is not.
+ *
+ * A search term, a market chip and the per-shelf page cap each hide agent
+ * cards that still hold capital -- and the legend still lists them, because a
+ * pie that dropped them would no longer add up to the portfolio. Without this
+ * line the two disagree silently and the panel reads as inventing agents.
+ *
+ * Deliberately anchored on the count the grid actually painted, not on whether
+ * a filter happens to be set: a filter that hides nothing is not worth a
+ * caveat, and the page cap hides cards with no filter set at all. */
+function allocationGridNoteHtml() {
+    const view = typeof window.describeAgentGridVisibility === 'function'
+        ? window.describeAgentGridVisibility()
+        : null;
+    if (!view || !view.total || view.shown >= view.total) return '';
+    const causes = [];
+    if (view.searching) causes.push('your search');
+    if (view.filtered) causes.push('the market filter');
+    if (view.paged) causes.push('paging');
+    const why = causes.length ? ` because of ${causes.join(' and ')}` : '';
+    return `<p class="allocation-legend-hint allocation-legend-hint--grid">Every agent holding capital is listed here.`
+        + ` The cards above show ${view.shown} of ${view.total}${why}.</p>`;
+}
+
+/** Repaint the legend from the slices already on the canvas — no refetch. */
+function repaintAllocationLegend() {
+    const legendEl = document.getElementById('agentAllocationLegend');
+    const sliceData = document.getElementById('agentAllocationChart')?._pfSliceData;
+    if (!legendEl || !sliceData?.slices) return;
+    renderAllocationLegend(legendEl, sliceData.slices);
+}
+
 function renderAllocationLegend(legendEl, slices) {
     const sorted = sortAllocationLegendSlices(slices || []);
     const agentCount = sorted.filter((s) => s.label !== 'Unallocated' && s.label !== 'Loading').length;
@@ -361,7 +393,8 @@ function renderAllocationLegend(legendEl, slices) {
 
     legendEl.innerHTML =
         `<div class="allocation-legend-scroll${expanded ? ' allocation-legend-scroll--expanded' : ''}" style="max-height:${maxHeight}px">` +
-        `<ul class="allocation-legend-list">${rowsHtml}</ul></div>${toggleHtml}`;
+        `<ul class="allocation-legend-list">${rowsHtml}</ul></div>${toggleHtml}` +
+        allocationGridNoteHtml();
 
     if (!allocationLegendBound) {
         allocationLegendBound = true;
@@ -369,11 +402,7 @@ function renderAllocationLegend(legendEl, slices) {
             const btn = event.target.closest('[data-allocation-legend-toggle]');
             if (!btn) return;
             allocationLegendExpanded = btn.getAttribute('aria-expanded') !== 'true';
-            const canvas = document.getElementById('agentAllocationChart');
-            const sliceData = canvas?._pfSliceData;
-            if (sliceData?.slices) {
-                renderAllocationLegend(legendEl, sliceData.slices);
-            }
+            repaintAllocationLegend();
         });
     }
 }
@@ -571,3 +600,4 @@ window.repaintPortfolioFromCache = repaintPortfolioFromCache;
 window.paintPortfolioBoot = paintPortfolioBoot;
 window.prefetchPortfolio = prefetchPortfolio;
 window.updateAgentAllocationFromAgents = updateAgentAllocationFromAgents;
+window.refreshAllocationLegendNote = repaintAllocationLegend;

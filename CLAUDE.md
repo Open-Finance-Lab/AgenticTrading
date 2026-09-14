@@ -89,6 +89,41 @@ Pipeline is **backtest → SQLite → API → dashboard**. The backend is layere
 - **Frontend** — `dashboard/frontend/` is the served static root and holds **both** UIs: the **landing page** (`index.html` + `assets/`) served at **`/`**, and the vanilla-JS + Chart.js **dashboard** (`app.html`, `app.js`, `styles.css`, no build step) served at **`/app`**. The landing page is a Vite/React marketing site whose **source** lives in `dashboard/landing/` (Replit-exported, de-monorepo'd; `npm run build`); its build output ships as `frontend/index.html` + `frontend/assets/`. `app.py` adds a `/app/`→`/app` 308 redirect so the dashboard's relative asset paths resolve. Vercel deploys the static `dashboard/frontend`.
 - **Paths** (`dashboard/backend/paths.py`): single source of truth for on-disk locations.
 
+### Capital Allocation is scoped to the caller, not just the account
+
+`GET /api/v1/agents` answers with the owner's agents **union** the unclaimed
+guest agents of the calling browser (`agents/repository.py::list_agents`), and the
+My Agents page draws its Capital Allocation pie with one slice per agent in that
+answer. `PortfolioService` therefore takes an **`AgentScope`** (browser + trading
+session, built from `api/dependencies._browser_context`) and sums the same set:
+summing the owner's agents alone published an "Allocated to Agents" total the
+legend beside it contradicted, and offered the difference back as cash the
+account could spend twice. Every router call site passes the scope; the default
+`EMPTY_SCOPE` reproduces the old account-only behaviour for a caller with no
+browser identity (SDK, cron, tests).
+
+⚠ **`user_portfolios.cash_available` deliberately does *not* follow the scope.**
+That row is keyed by user, so caching the scoped figure would make it rewrite
+itself on every read from a browser holding a different set of unclaimed agents —
+two browsers of one account clobbering each other forever. `_split_allocations`
+returns `(owned, visible)` from one query for exactly this: `owned` is persisted,
+`visible` is returned. The gap is reported as `portfolio.unclaimed_allocated`
+rather than folded silently into the total, so "nothing to claim" stays tellable
+apart from "`claimAgentsForUser` failed and only `console.warn`ed".
+
+Starter provisioning at signup (`agents/service.py::provision_starter_agents`) is
+the one path left account-scoped on purpose: the claim has not run yet at that
+moment, so scoping it would let a returning guest's large sleeve starve the three
+onboarding agents. Pinned by `tests/test_portfolio_scope_sync.py`.
+
+**The panel and the grid legitimately show different counts.** The legend is
+portfolio-wide (a pie that dropped agents would not add up); the grid is
+search-filtered, market-chip-filtered and capped at `AGENT_GRID_PAGE_SIZE` (5)
+per shelf. `describeAgentGridVisibility()` publishes what the grid actually
+painted and `allocationGridNoteHtml()` renders the reconciling line — anchored on
+the painted count, never on whether a filter is set, so a filter that hides
+nothing raises no caveat and the page cap raises one with no filter at all.
+
 ### Baseline strategies (registry pattern)
 
 `dashboard/backend/domain/leaderboard/strategies/` holds benchmark strategies (`buy_hold`, `equal_weight_index`, `market_index`, `mean_variance`, `llm_agent`, …). To add one: subclass `BaselineStrategy` (`base.py`), give it a `key`, add the class to `_STRATEGY_CLASSES` in `registry.py`. `get_strategy(config)` resolves by `strategy`/`type` key.

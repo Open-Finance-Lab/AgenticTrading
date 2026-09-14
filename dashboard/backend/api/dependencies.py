@@ -30,7 +30,14 @@ def _optional_user(request: Request, authorization: Optional[str] = None) -> Opt
     return user_store.get_user_for_token(token)
 
 
-def _owner_context(request: Request, authorization: Optional[str]) -> Dict[str, Any]:
+def _browser_context(request: Request) -> Dict[str, Optional[str]]:
+    """The non-account half of ``_owner_context`` — headers only, no user lookup.
+
+    Split out so a route that has already resolved its user (the portfolio
+    router, via ``get_current_user``) can scope a query to the same agent set
+    ``GET /api/v1/agents`` would answer with, without paying for a second
+    session lookup or re-deriving the header precedence rules here.
+    """
     trading_session = request.headers.get("x-session-id") or request.headers.get("X-Session-Id")
     browser_owner = request.headers.get("x-browser-id") or request.headers.get("X-Browser-Id")
     if not browser_owner:
@@ -41,12 +48,15 @@ def _owner_context(request: Request, authorization: Optional[str]) -> Dict[str, 
         # for built-in agents. Clients that can send X-Browser-Id should; this
         # branch exists for API-only importers with no browser identity.
         browser_owner = trading_session
-    user = _optional_user(request, authorization)
     return {
-        "user_id": user["id"] if user else None,
         "browser_session": browser_owner.strip() if browser_owner else None,
         "trading_session": trading_session.strip() if trading_session else None,
     }
+
+
+def _owner_context(request: Request, authorization: Optional[str]) -> Dict[str, Any]:
+    user = _optional_user(request, authorization)
+    return {"user_id": user["id"] if user else None, **_browser_context(request)}
 
 
 def _require_owner_context(request: Request, authorization: Optional[str]) -> Dict[str, Any]:
