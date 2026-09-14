@@ -5689,7 +5689,15 @@ function readRunningBacktests() {
     try {
         const raw = sessionStorage.getItem(RUNNING_BACKTESTS_KEY);
         const parsed = raw ? JSON.parse(raw) : {};
-        return parsed && typeof parsed === 'object' ? parsed : {};
+        // `typeof [] === 'object'`, so an array would pass the shape check and
+        // reach the sweep, which deletes its indices. JSON.stringify writes the
+        // holes back as nulls and JSON.parse reads them as a dense array again,
+        // so the sweep finds three dead entries, writes, and finds them again
+        // on the next read -- a store that never converges and re-writes
+        // sessionStorage on every launch. Rejected here instead.
+        return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+            ? parsed
+            : {};
     } catch (error) {
         return {};
     }
@@ -9229,7 +9237,12 @@ function readBacktestLaunchConfigMap() {
     try {
         const raw = localStorage.getItem(BACKTEST_LAUNCH_CONFIG_KEY);
         const parsed = raw ? JSON.parse(raw) : {};
-        return parsed && typeof parsed === 'object' ? parsed : {};
+        // `typeof [] === 'object'`, so an array would pass this check and reach
+        // the eviction loop below, which reads/deletes it by string key -- the
+        // same shape hole readRunningBacktests() rejects at the door.
+        return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+            ? parsed
+            : {};
     } catch (_error) {
         return {};
     }

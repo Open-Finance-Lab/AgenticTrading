@@ -150,6 +150,14 @@ def test_run_backtest_lands_on_my_agents():
 
 
 def test_running_state_survives_a_refresh():
+    """Kept as a presence check only; the behaviour is covered elsewhere.
+
+    This asserts the store exists, which is all a string match can do. Its
+    arithmetic, its shape handling and the re-render-versus-patch decision are
+    executed under node in `test_running_backtest_store.py` (issue #258). Do
+    not grow this one -- a string check that looks like coverage is worse than
+    an obvious presence check.
+    """
     assert "sessionStorage" in _APP_JS
     assert "function markAgentBacktestRunning(" in _APP_JS
     assert "function clearAgentBacktestRunning(" in _APP_JS
