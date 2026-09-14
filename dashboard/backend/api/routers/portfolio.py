@@ -1,12 +1,13 @@
 """Account-bound portfolio API (signed-in users only)."""
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from dashboard.backend.api.auth import get_current_user
+from dashboard.backend.api.dependencies import _browser_context
 from dashboard.backend.domain.agents.service import agent_service
 from dashboard.backend.domain.backtesting.constants import MAX_AGENT_CASH_ALLOCATION
-from dashboard.backend.domain.portfolios.service import portfolio_service
+from dashboard.backend.domain.portfolios.service import AgentScope, portfolio_service
 
 router = APIRouter(prefix="/v1/portfolio", tags=["portfolio"])
 
@@ -14,6 +15,32 @@ router = APIRouter(prefix="/v1/portfolio", tags=["portfolio"])
 class TransferBody(BaseModel):
     agent_id: str = Field(min_length=1, max_length=100)
     amount: float = Field(gt=0, le=MAX_AGENT_CASH_ALLOCATION)
+
+
+def _scope(request: Request) -> AgentScope:
+    """Scope every figure to the agent set this caller's My Agents list shows.
+
+    The Capital Allocation pie draws one slice per agent in that list, so a
+    total summed over a narrower set publishes a number the panel beside it
+    contradicts -- and offers the difference back as cash the account can spend
+    a second time.
+
+    ⚠ This makes the two figures **agree**; it is not a bound on total
+    allocation. The scope is built from caller-supplied headers
+    (``X-Browser-Id``/``X-Session-Id``), so a client that sends neither -- the
+    SDK, curl, a cron -- gets ``EMPTY_SCOPE`` and is validated against the
+    account-only figure, exactly as before this existed. That is the right
+    answer for such a caller (an unclaimed guest agent is not its account's
+    yet) and it does mean the allocation an unclaimed sleeve would have refused
+    can still go through from a header-less client.
+
+    What catches it is ``_reconcile``, not this: once the claim lands, the
+    sleeves become owned, the derived ``cash_available`` clamps at 0 and the
+    over-allocation is reported rather than hidden. Deriving the figure instead
+    of ledgering it is what makes that state self-correcting -- see the module
+    docstring in ``domain/portfolios/service.py``.
+    """
+    return AgentScope.from_owner_context(_browser_context(request))
 
 
 def _owned_agent(agent_id: str, user_id: int) -> dict:
@@ -26,14 +53,17 @@ def _owned_agent(agent_id: str, user_id: int) -> dict:
 
 
 @router.get("")
-def get_portfolio(current_user: dict = Depends(get_current_user)):
+def get_portfolio(request: Request, current_user: dict = Depends(get_current_user)):
     """Return the caller's portfolio, bootstrapping at $10k if missing."""
-    portfolio = portfolio_service.get_or_create_portfolio(current_user["id"])
+    portfolio = portfolio_service.get_or_create_portfolio(
+        current_user["id"], _scope(request)
+    )
     return {"portfolio": portfolio}
 
 
 @router.post("/allocate")
 def allocate_cash(
+    request: Request,
     body: TransferBody,
     current_user: dict = Depends(get_current_user),
 ):
@@ -44,6 +74,7 @@ def allocate_cash(
             owner_user_id=current_user["id"],
             agent=agent,
             amount=body.amount,
+            scope=_scope(request),
         )
     except ValueError as exc:
         # InsufficientCashError subclasses ValueError; both are caller errors.
@@ -54,6 +85,7 @@ def allocate_cash(
 
 @router.post("/reclaim")
 def reclaim_cash(
+    request: Request,
     body: TransferBody,
     current_user: dict = Depends(get_current_user),
 ):
@@ -64,6 +96,7 @@ def reclaim_cash(
             owner_user_id=current_user["id"],
             agent=agent,
             amount=body.amount,
+            scope=_scope(request),
         )
     except ValueError as exc:
         # InsufficientSleeveError subclasses ValueError; both are caller errors.
