@@ -474,38 +474,38 @@ def test_ifind_provider_import_is_lazy_and_has_no_network_or_fallback_imports():
 
 def test_minimum_bars_for_a_full_14_day_window_is_half_of_10_weekdays():
     from dashboard.backend.infrastructure.market_data.ifind_ashare import (
-        _minimum_bars_for_window,
+        minimum_bars_for_window,
     )
 
     # 2026-04-06 -> 2026-04-20 is 10 weekdays; expected = 10 * 4 = 40; floor = 20.
-    assert _minimum_bars_for_window(date(2026, 4, 6), date(2026, 4, 20)) == 20
+    assert minimum_bars_for_window(date(2026, 4, 6), date(2026, 4, 20)) == 20
 
 
 def test_minimum_bars_for_the_30_day_spy_window_is_44():
     from dashboard.backend.infrastructure.market_data.ifind_ashare import (
-        _minimum_bars_for_window,
+        minimum_bars_for_window,
     )
 
     # 2026-04-01 -> 2026-05-01 is 22 weekdays; expected = 22 * 4 = 88; floor = 44.
-    assert _minimum_bars_for_window(date(2026, 4, 1), date(2026, 5, 1)) == 44
+    assert minimum_bars_for_window(date(2026, 4, 1), date(2026, 5, 1)) == 44
 
 
 def test_minimum_bars_for_a_one_day_window_is_raised_to_the_absolute_floor():
     from dashboard.backend.infrastructure.market_data.ifind_ashare import (
-        _minimum_bars_for_window,
+        minimum_bars_for_window,
     )
 
     # 1 weekday -> expected = 4; int(4 * 0.5) = 2, raised to the absolute floor of 4.
-    assert _minimum_bars_for_window(date(2026, 4, 6), date(2026, 4, 7)) == 4
+    assert minimum_bars_for_window(date(2026, 4, 6), date(2026, 4, 7)) == 4
 
 
 def test_minimum_bars_for_a_weekend_only_window_is_raised_to_the_absolute_floor():
     from dashboard.backend.infrastructure.market_data.ifind_ashare import (
-        _minimum_bars_for_window,
+        minimum_bars_for_window,
     )
 
     # 0 weekdays -> expected = 0; raised to the absolute floor of 4.
-    assert _minimum_bars_for_window(date(2026, 4, 11), date(2026, 4, 13)) == 4
+    assert minimum_bars_for_window(date(2026, 4, 11), date(2026, 4, 13)) == 4
 
 
 def test_minimum_bars_never_exceeds_what_any_legal_window_can_actually_return():
@@ -518,7 +518,7 @@ def test_minimum_bars_never_exceeds_what_any_legal_window_can_actually_return():
     """
     from dashboard.backend.api.routers.backtests import MAX_BACKTEST_DAYS
     from dashboard.backend.infrastructure.market_data.ifind_ashare import (
-        _minimum_bars_for_window,
+        minimum_bars_for_window,
     )
 
     base = date(2026, 4, 6)  # a Monday
@@ -530,7 +530,7 @@ def test_minimum_bars_never_exceeds_what_any_legal_window_can_actually_return():
             for day_offset in range((end - start).days)
             if (start + timedelta(days=day_offset)).weekday() < 5
         )
-        floor = _minimum_bars_for_window(start, end)
+        floor = minimum_bars_for_window(start, end)
         assert floor <= weekdays * 4, (
             f"start={start} weekdays={weekdays} floor={floor} exceeds what "
             f"the window can return ({weekdays * 4} bars)"

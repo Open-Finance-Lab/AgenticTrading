@@ -41,13 +41,19 @@ class IFindDateInputError(ValueError):
     """Raised when provider date inputs cannot form a half-open date window."""
 
 
-def _minimum_bars_for_window(start: date, end: date) -> int:
+def minimum_bars_for_window(start: date, end: date) -> int:
     """Return the fewest valid bars a complete response may hold.
 
     Derived from the requested half-open window rather than fixed, because a
     flat count is simultaneously a hidden minimum window (it was 50, i.e. ~13
     trading days) and unreachable once MAX_BACKTEST_DAYS fell to 14 -- a
     14-day window holds at most 10 weekdays, or 40 bars.
+
+    Public because the same depth question is asked twice on this path, at two
+    layers: here, against one upstream response, and again in
+    ``domain/backtesting/engine.py``'s ``_validate_ifind_loaded_data``, against
+    the assembled per-symbol frames. Both used to hardcode 50 independently,
+    which is how the second one outlived the first being fixed.
     """
     weekdays = sum(
         1
@@ -105,7 +111,7 @@ class IFindAshareProvider:
             expected_symbols=canonical_symbols,
             start=start_date,
             end=end_date,
-            min_bars=_minimum_bars_for_window(start_date, end_date),
+            min_bars=minimum_bars_for_window(start_date, end_date),
         )
 
     def fetch_usd_cny(

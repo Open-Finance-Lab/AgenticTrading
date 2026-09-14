@@ -684,7 +684,7 @@ def test_ifind_offline_response_reaches_engine_database_and_chart(
         "fx_start_rate": 7.0,
         "fx_end_rate": 7.0,
         "fx_market_start_date": "2026-04-01",
-        "fx_market_end_date": "2026-04-21",
+        "fx_market_end_date": "2026-04-14",
         "fx_observation_start_date": "2026-03-31",
         "fx_observation_end_date": "2026-03-31",
         "native_initial_capital": 7_000.0,
@@ -694,7 +694,10 @@ def test_ifind_offline_response_reaches_engine_database_and_chart(
             "enabled": True,
             "source": "ifind_http",
             "version": "ifind-ashare-closing-rules-v1",
-            "observations": len(symbols) * 15,
+            # One closing-rule observation per symbol per trading day, so this
+            # tracks the window: START..END holds 10 weekdays, not the 15 the
+            # pre-14-day-cap window did.
+            "observations": len(symbols) * 10,
             "scope": "full_day_suspension_and_closing_limits_and_corporate_action_gaps",
         },
     }

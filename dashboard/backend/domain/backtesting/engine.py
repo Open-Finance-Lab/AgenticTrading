@@ -67,6 +67,9 @@ from dashboard.backend.infrastructure.market_data.equity_metadata import (
     EquityMetadataUnavailableError,
     load_and_enrich_us_equity_bars,
 )
+from dashboard.backend.infrastructure.market_data.ifind_ashare import (
+    minimum_bars_for_window,
+)
 from dashboard.backend.infrastructure.market_data.ifind_client import IFindClientError
 from dashboard.backend.infrastructure.market_data.ifind_fx import (
     IFindFxError,
@@ -838,14 +841,25 @@ class HourlyBacktester:
                 f"missing={missing!r} unexpected={unexpected!r}"
             )
 
+        # Scaled to the requested window, not a flat count. A fixed 50 lived
+        # here and in ifind_ashare.py, and both were quietly a ~13-trading-day
+        # minimum window: once MAX_BACKTEST_DAYS fell to 14, no legal window
+        # could reach it (at most 10 weekdays x 4 A-share 60m sessions = 40
+        # bars), so every A-share run raised here instead of returning data.
+        # Parsing is bare because the provider has already normalized these
+        # same two strings by the time any data exists to validate.
+        floor = minimum_bars_for_window(
+            date.fromisoformat(self.start_date),
+            date.fromisoformat(self.end_date),
+        )
         short = {
             symbol: len(self.all_data[symbol])
             for symbol in expected
-            if len(self.all_data[symbol]) < 50
+            if len(self.all_data[symbol]) < floor
         }
         if short:
             raise MarketDataUnavailableError(
-                f"iFinD symbols have fewer than 50 bars: {short!r}"
+                f"iFinD symbols have fewer than {floor} bars: {short!r}"
             )
 
         common_index = self.all_data[expected[0]].index
