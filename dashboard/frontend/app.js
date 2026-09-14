@@ -9973,7 +9973,7 @@ async function runBacktest() {
     // still on screen. Without this the only feedback is a 422 that arrives after
     // the modal has closed, and the helper copy used to actively invite the
     // mistake ("Change it to any range you have data for").
-    const MAX_BACKTEST_DAYS = 31;
+    const MAX_BACKTEST_DAYS = 14;
     const spanDays = Math.round(
         (Date.parse(`${endDate}T00:00:00Z`) - Date.parse(`${startDate}T00:00:00Z`)) / 86400000,
     );

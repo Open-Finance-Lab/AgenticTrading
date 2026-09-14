@@ -1710,3 +1710,16 @@ def test_run_metadata_deferral_scalars_are_none_for_legacy_runs():
     response = bt._run_metadata_response(_run_record())
     assert response.t1_deferred_events is None
     assert response.t1_deferred_shares is None
+
+
+def test_backtest_window_cap_is_two_weeks():
+    """A dashboard backtest is capped at a fortnight (issue #474 item 1).
+
+    31 days was set when the parent budget was the only bound and nothing
+    counted LLM calls. A 31-day window is ~22 weekdays x ~7 hourly bars = ~154
+    decision bars, and a multi-step pipeline multiplies that by its step count
+    -- far past what the fixed 3600s budget can finish. Two weeks matches the
+    fortnight the Live Trading Leaderboard's seasons already use, so the
+    product has one window vocabulary rather than two.
+    """
+    assert bt.MAX_BACKTEST_DAYS == 14
