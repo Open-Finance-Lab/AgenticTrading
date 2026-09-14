@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 import pandas as pd
@@ -19,7 +19,18 @@ DateInput = str | date | datetime
 Adapter = Callable[..., dict[str, pd.DataFrame]]
 MarketRuleAdapter = Callable[..., object]
 _MARKET_TIMEZONE = ZoneInfo("Asia/Shanghai")
-_MINIMUM_BARS = 50
+# A-share cash equities trade four 60m bars a session: 09:30-11:30 and
+# 13:00-15:00. The floor below is expressed against that, not as a flat count.
+_SESSIONS_PER_TRADING_DAY = 4
+# Half the weekday-derived expectation. It has to absorb exchange holidays --
+# Qingming and Labour Day both fall inside the windows this universe ships
+# with -- and a weekday count cannot see them, so a stricter fraction would
+# refuse good data every May. Half still catches the failure this guard exists
+# for: an empty, one-day, or wholesale-truncated upstream reply.
+_MINIMUM_BAR_COMPLETENESS = 0.5
+# One full session day. Keeps a very short window from deriving a floor of
+# zero, which would disable the check entirely.
+_ABSOLUTE_MINIMUM_BARS = _SESSIONS_PER_TRADING_DAY
 
 
 class IFindUniverseError(ValueError):
@@ -28,6 +39,23 @@ class IFindUniverseError(ValueError):
 
 class IFindDateInputError(ValueError):
     """Raised when provider date inputs cannot form a half-open date window."""
+
+
+def _minimum_bars_for_window(start: date, end: date) -> int:
+    """Return the fewest valid bars a complete response may hold.
+
+    Derived from the requested half-open window rather than fixed, because a
+    flat count is simultaneously a hidden minimum window (it was 50, i.e. ~13
+    trading days) and unreachable once MAX_BACKTEST_DAYS fell to 14 -- a
+    14-day window holds at most 10 weekdays, or 40 bars.
+    """
+    weekdays = sum(
+        1
+        for offset in range((end - start).days)
+        if (start + timedelta(days=offset)).weekday() < 5
+    )
+    expected = weekdays * _SESSIONS_PER_TRADING_DAY
+    return max(_ABSOLUTE_MINIMUM_BARS, int(expected * _MINIMUM_BAR_COMPLETENESS))
 
 
 class IFindAshareProvider:
@@ -77,7 +105,7 @@ class IFindAshareProvider:
             expected_symbols=canonical_symbols,
             start=start_date,
             end=end_date,
-            min_bars=_MINIMUM_BARS,
+            min_bars=_minimum_bars_for_window(start_date, end_date),
         )
 
     def fetch_usd_cny(
