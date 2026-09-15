@@ -29,7 +29,12 @@ import subprocess
 
 import pytest
 
-from dashboard.backend.tests._frontend_source import css_blocks, fn_body, js_const
+from dashboard.backend.tests._frontend_source import (
+    FRONTEND,
+    css_blocks,
+    fn_body,
+    js_const,
+)
 
 pytestmark = pytest.mark.skipif(
     shutil.which("node") is None, reason="node is not installed"
@@ -862,3 +867,111 @@ def test_progress_reaches_each_concurrent_agent():
     result = _node(script)
     assert result["a"]["step"] == 3
     assert result["b"]["step"] == 8
+
+
+def _timeout_message(timeout_js: str) -> str:
+    """Run the real formatBacktestTimeoutMessage against the real formatter.
+
+    `credit-format.js` is loaded rather than stubbed: the amount's precision is
+    the whole reason the card and the Credits page agree, and a stub that
+    rounded differently would let them diverge with every case still green.
+    """
+    format_js = (
+        FRONTEND / "js" / "credit-format.js"
+    ).read_text(encoding="utf-8")
+    script = "\n".join(
+        [
+            "const window = globalThis;",
+            format_js,
+            fn_body("function formatBacktestTimeoutMessage("),
+            f"console.log(JSON.stringify(formatBacktestTimeoutMessage({timeout_js})));",
+        ]
+    )
+    return _node(script)
+
+
+def test_timeout_card_names_the_limit_the_cost_and_both_levers():
+    """Three facts, in the order a user needs them: what happened, what it cost,
+    what to change. The third line names BOTH levers, matching the 422 that
+    refuses an over-long pipeline window -- a user who meets both refusals
+    should hear one story."""
+    message = _timeout_message(
+        "{limit_seconds: 3600, billing_mode: 'platform_credits',"
+        " spent_micro: 42318, model_calls: 2}"
+    )
+    assert message == (
+        "Stopped at the 60-minute limit. "
+        "Model calls completed before the stop cost 0.042318 Credits. "
+        "Shorten the date range, or use fewer pipeline steps, then run it again."
+    )
+
+
+def test_timeout_card_derives_the_minutes_from_the_budget_it_was_given():
+    """Derived, never a literal. `app.js`'s old ceiling message hardcoded
+    "60 minutes" and would have gone on saying it after the number moved."""
+    message = _timeout_message(
+        "{limit_seconds: 7200, billing_mode: 'byok',"
+        " spent_micro: null, model_calls: null}"
+    )
+    assert message.startswith("Stopped at the 120-minute limit.")
+
+
+def test_timeout_card_omits_the_cost_line_entirely_on_byok():
+    """Not "0.000000 Credits" -- BYOK never touches the ATL ledger, so any
+    amount at all is a claim about a row that does not exist."""
+    message = _timeout_message(
+        "{limit_seconds: 3600, billing_mode: 'byok',"
+        " spent_micro: null, model_calls: null}"
+    )
+    assert "Credits" not in message
+    assert message == (
+        "Stopped at the 60-minute limit. "
+        "Shorten the date range, or use fewer pipeline steps, then run it again."
+    )
+
+
+def test_timeout_card_survives_a_payload_with_no_timeout_block():
+    """The status route attaches `timeout` conditionally, so absence is a real
+    case. The card must still say what happened rather than throwing inside the
+    poll callback, which would silently stop every other run's polling too."""
+    message = _timeout_message("undefined")
+    assert message == (
+        "Stopped at the time limit. "
+        "Shorten the date range, or use fewer pipeline steps, then run it again."
+    )
+
+
+def test_timed_out_panel_is_its_own_state_not_an_error_shade():
+    """`is-timed-out`, not `is-error`. The user did not do anything wrong, and
+    the panel must not read as though they did -- the same argument the
+    `is-cancelled` comment already makes for the third state."""
+    body = fn_body("function showBacktestRunProgress(")
+    assert "isTimedOut" in body
+    assert "'is-timed-out'" in body
+    assert "Backtest stopped at the time limit" in body
+    blocks = css_blocks(".backtest-run-progress.is-timed-out")
+    assert blocks, ".backtest-run-progress.is-timed-out has no styles.css rule"
+
+
+def test_poll_dispatch_takes_the_timeout_branch_before_the_error_branch():
+    """A payload with `timed_out` must not reach `status.error`.
+
+    The server sends no `error` key for a timeout, so the error branch would
+    paint the red "Backtest did not start" panel with an undefined message --
+    for a run that started, ran for an hour, and was billed.
+
+    Sliced to the `finishedFocused` block FIRST. `status.cancelled` also appears
+    earlier in `ensureBacktestPolling`, in the toast that announces a cancel on
+    an unfocused card, and a scan over the whole function would anchor on that
+    one instead -- passing even if the dispatch's cancel branch were deleted
+    outright.
+    """
+    body = fn_body("function ensureBacktestPolling(")
+    dispatch = body[body.index("if (finishedFocused) {"):]
+    cancelled_at = dispatch.index("status.cancelled")
+    timeout_at = dispatch.index("status.timed_out")
+    error_at = dispatch.index("status.error")
+    assert cancelled_at < timeout_at < error_at, (
+        "the finishedFocused dispatch must test cancelled, then timed_out, then "
+        "error -- the server sends no `error` key for either of the first two"
+    )

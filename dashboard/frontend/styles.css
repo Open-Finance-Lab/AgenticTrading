@@ -5763,6 +5763,23 @@ a.header-brand:hover .title-section h1 {
     color: var(--text-secondary);
 }
 
+/*
+ * A FOURTH terminal state, and not a shade of `is-error` -- the argument the
+ * `is-cancelled` comment above makes applies here too, for a different reason.
+ * A cancel is neutral because the user chose it. A timeout is amber because
+ * nobody chose it: the product ran out of the budget it set itself, and billed
+ * the user for the model calls that settled first. Red would say they broke
+ * something; slate would say nothing happened. Neither is true.
+ */
+.backtest-run-progress.is-timed-out {
+    border-color: rgba(251, 191, 36, 0.45);
+    background: rgba(251, 191, 36, 0.08);
+}
+
+.backtest-run-progress.is-timed-out .backtest-run-elapsed {
+    color: #fbbf24;
+}
+
 .algo-setup-status {
     margin-top: 8px;
     padding: 10px 14px;
