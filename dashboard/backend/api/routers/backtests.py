@@ -1919,8 +1919,9 @@ def _enforce_ai_hedge_fund_window(start_date: str, end_date: str) -> None:
 # billing CN at seven bars overstates an A-share run by ~75%, and this guard
 # computes a REFUSAL, so overstating refuses runs that would have finished --
 # the direction the banner above explicitly tells us not to move in. The
-# shipped A-share prefill with a three-step pipeline estimated 231 calls
-# against a 200 budget and 422'd; its true cost is about 120.
+# shipped A-share prefill (11 trading days) with a three-step pipeline
+# estimated 11 x 7 x 3 = 231 calls against a 200 budget and 422'd; its true
+# cost is 11 x 4 x 3 = 132.
 #
 # The duplication worry is answered by not duplicating: the CN number is
 # imported from ``infrastructure/market_data/ifind_ashare.py``, where the same
