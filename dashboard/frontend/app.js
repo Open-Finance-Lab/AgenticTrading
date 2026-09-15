@@ -8011,7 +8011,17 @@ function formatBacktestTimeoutMessage(timeout) {
             : 'Stopped at the time limit.',
     ];
     const spentMicro = timeout ? timeout.spent_micro : null;
-    if (spentMicro !== null && spentMicro !== undefined) {
+    // Guarded the same way admin-analytics-value.js's `credits()` guards this
+    // same call (js/admin-analytics-value.js:292) -- but omitting the line
+    // entirely when the formatter is unavailable, not falling back to a second
+    // implementation of its six-decimal math. A wrong number is worse than no
+    // number, and this function already has a rule for "no number": the BYOK
+    // omission just below.
+    if (
+        spentMicro !== null &&
+        spentMicro !== undefined &&
+        window.CreditFormat?.formatCreditsMicro
+    ) {
         // Omitted entirely on BYOK rather than rendered as zero: BYOK never
         // touches the ATL ledger, so "0.000000 Credits" is a claim about a row
         // that does not exist.
