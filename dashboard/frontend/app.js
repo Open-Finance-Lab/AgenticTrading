@@ -7987,21 +7987,61 @@ async function cancelBacktest(runId) {
 }
 
 /**
- * `isFinished` and `isCancelled` are for a panel that outlives the run it
- * describes; they are three states, not shades of one.
+ * The three sentences a timed-out backtest owes its user.
+ *
+ * Composed HERE, not on the server, for the same reason the season badge's
+ * number has exactly one owner: the amount has to be formatted by the same
+ * helper the Credits page uses (`CreditFormat.formatCreditsMicro`, exact to six
+ * decimal places), and a sentence built server-side would put that formatting
+ * and this copy under two owners that drift. The server sends facts; this turns
+ * them into words, where `test_app_copy_register.py` can see them.
+ *
+ * `timeout` may be undefined -- `/backtest/status` attaches the block only when
+ * the worker recorded one -- so every field is read defensively. Throwing here
+ * would throw inside the poll callback and stop polling for every other run on
+ * the page.
+ */
+function formatBacktestTimeoutMessage(timeout) {
+    const limitSeconds = Number(timeout && timeout.limit_seconds);
+    const lines = [
+        // Derived, never a literal: the old ceiling message hardcoded
+        // "60 minutes" and would have gone on saying it after the budget moved.
+        Number.isFinite(limitSeconds) && limitSeconds > 0
+            ? `Stopped at the ${Math.round(limitSeconds / 60)}-minute limit.`
+            : 'Stopped at the time limit.',
+    ];
+    const spentMicro = timeout ? timeout.spent_micro : null;
+    if (spentMicro !== null && spentMicro !== undefined) {
+        // Omitted entirely on BYOK rather than rendered as zero: BYOK never
+        // touches the ATL ledger, so "0.000000 Credits" is a claim about a row
+        // that does not exist.
+        lines.push(
+            `Model calls completed before the stop cost ${window.CreditFormat.formatCreditsMicro(spentMicro)} Credits.`,
+        );
+    }
+    // Both levers, matching the 422 that refuses an over-long pipeline window.
+    // Naming only the window is a dead end for a user whose real problem is a
+    // wide pipeline.
+    lines.push('Shorten the date range, or use fewer pipeline steps, then run it again.');
+    return lines.join(' ');
+}
+
+/**
+ * `isFinished`, `isCancelled` and `isTimedOut` are for a panel that outlives
+ * the run it describes; they are four states, not shades of one.
  *
  * Every other caller shows this panel while something is still happening, so
  * the markup's defaults -- the title "Backtest in progress", a progress track,
  * and a hint about the 60-minute limit -- were always true for as long as it
  * was on screen. A fallback run now holds the panel open indefinitely after
- * the run is over (see `settleFinishedBacktestPanel`), and a cancelled run
- * leaves it up too; those three would otherwise sit under a stopped backtest
- * telling the user to keep waiting for it. The elapsed clock stays: on a run
- * that is over it is the duration.
+ * the run is over (see `settleFinishedBacktestPanel`), and a cancelled or
+ * timed-out run leaves it up too; those three would otherwise sit under a
+ * stopped backtest telling the user to keep waiting for it. The elapsed clock
+ * stays: on a run that is over it is the duration.
  */
 function showBacktestRunProgress(
     show,
-    { isError = false, isFinished = false, isCancelled = false } = {},
+    { isError = false, isFinished = false, isCancelled = false, isTimedOut = false } = {},
 ) {
     const panel = document.getElementById('backtestRunProgress');
     if (!panel) return;
@@ -8012,18 +8052,23 @@ function showBacktestRunProgress(
     // that a failure is the same class of lie as reporting a rule-based
     // fallback curve as a clean model run.
     panel.classList.toggle('is-cancelled', !!isCancelled);
+    // A fourth state, and not a shade of the first either. A run the product
+    // stopped because it ran out of the budget it set itself is not the user's
+    // error -- amber, like a warning, not `is-error`'s red.
+    panel.classList.toggle('is-timed-out', !!isTimedOut);
     const title = panel.querySelector('.backtest-run-progress-title');
     const elapsed = panel.querySelector('.backtest-run-elapsed');
     const track = panel.querySelector('.backtest-run-progress-track');
     const hint = panel.querySelector('.backtest-run-progress-hint');
     const cancel = document.getElementById('backtestRunCancel');
-    // Over is over: an error, a cancel and a finished fallback run all mean the
-    // progress track and the 60-minute hint are describing something that is no
-    // longer happening.
-    const terminal = !!isError || !!isCancelled || !!isFinished;
+    // Over is over: an error, a cancel, a timeout and a finished fallback run
+    // all mean the progress track and the 60-minute hint are describing
+    // something that is no longer happening.
+    const terminal = !!isError || !!isCancelled || !!isTimedOut || !!isFinished;
     if (title) {
         if (isError) title.textContent = 'Backtest did not start';
         else if (isCancelled) title.textContent = 'Backtest cancelled';
+        else if (isTimedOut) title.textContent = 'Backtest stopped at the time limit';
         else if (isFinished) title.textContent = 'Backtest complete';
         else title.textContent = 'Backtest in progress';
     }
@@ -8031,6 +8076,32 @@ function showBacktestRunProgress(
     if (track) track.hidden = terminal;
     if (hint) hint.hidden = terminal;
     if (cancel) cancel.hidden = terminal || !show || !backtestCancelTargetRunId;
+}
+
+/**
+ * Paint the Backtest panel for a run the server stopped at its time limit.
+ *
+ * Factored out of the poll callback rather than inlined beside the cancel and
+ * error branches so `_frontend_source.fn_body` can lift it: neither of those
+ * two is reachable by a node harness today, and this state's copy -- the
+ * derived minutes, the BYOK omission, the exact amount -- is precisely what
+ * needs executing rather than grepping.
+ *
+ * Run config repainted FIRST and with a null run, exactly as the cancel branch
+ * does: the previous paint came from the running branch and still says
+ * "Running", and a run stopped mid-flight has no coverage verdict for the Model
+ * coverage cell to read.
+ */
+function renderBacktestTimeoutPanel(status, displayElapsed, launchRunId) {
+    renderBacktestRunConfig(null, {
+        launchConfig: getBacktestLaunchConfig(launchRunId),
+        statusLabel: 'Stopped at limit',
+    });
+    showBacktestRunProgress(true, { isTimedOut: true });
+    updateBacktestRunProgress({
+        elapsedSeconds: displayElapsed,
+        message: formatBacktestTimeoutMessage(status && status.timeout),
+    });
 }
 
 /**
@@ -8584,6 +8655,17 @@ function ensureBacktestPolling() {
                         elapsedSeconds: displayElapsed,
                         message: `Cancelled after ${formatBacktestElapsed(displayElapsed)}.`,
                     });
+                } else if (status.timed_out) {
+                    // Between cancelled and error, and never through either.
+                    // The server sends no `error` key for a timeout, so the
+                    // error branch below would paint the red "Backtest did not
+                    // start" panel with an undefined message -- for a run that
+                    // started, ran for an hour, and was billed.
+                    renderBacktestTimeoutPanel(
+                        status,
+                        displayElapsed,
+                        liveId || finishedId,
+                    );
                 } else if (status.error) {
                     const source = getBacktestLaunchConfig(liveId || finishedId)?.dataSource;
                     const message = formatBacktestError(status.error, source);
@@ -10300,7 +10382,7 @@ async function runBacktest() {
 async function pollBacktestStatus(btn) {
     ensureBacktestPolling();
     // Legacy callers awaited this; keep a lightweight wait until the poller stops
-    // or the run leaves "running" (max ~60 min).
+    // or the run leaves "running" (max ~70 min).
     const maxAttempts = BACKTEST_POLL_MAX_SECONDS;
     for (let i = 0; i < maxAttempts; i += 1) {
         if (!backtestPollTimer) {
