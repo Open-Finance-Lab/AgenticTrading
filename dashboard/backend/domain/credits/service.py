@@ -414,6 +414,14 @@ class CreditsService:
             results.append(result)
         return results
 
+    def sum_run_llm_spend(self, user_id: int, run_id: str) -> tuple[int, int]:
+        """Settled LLM spend for one run: ``(micro_credits, distinct_calls)``.
+
+        A read, so unlike its neighbours it emits no analytics buckets: it is
+        reporting what was already recorded, not recording anything.
+        """
+        return self.store.sum_run_llm_spend(user_id, run_id)
+
     @staticmethod
     def _emit_credit_buckets(
         *,
