@@ -243,8 +243,8 @@ def test_app_lifecycle_and_cache_versions_are_wired():
     assert "window.AdminAnalytics.refresh()" in APP_JS
     assert "window.AdminAnalyticsValue.syncAuth(user)" in APP_JS
     assert "window.AdminAnalyticsValue.onEnter()" in APP_JS
-    assert 'styles.css?v=140' in APP_HTML
-    assert 'app.js?v=131' in APP_HTML
+    assert 'styles.css?v=141' in APP_HTML
+    assert 'app.js?v=132' in APP_HTML
     assert 'js/admin-analytics.js?v=6' in APP_HTML
     assert 'js/admin-analytics-value.js?v=5' in APP_HTML
     assert 'js/admin-tabs.js?v=7' in APP_HTML
