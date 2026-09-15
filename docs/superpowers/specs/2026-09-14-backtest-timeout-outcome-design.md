@@ -440,8 +440,10 @@ at `:917` already drives this path and is the case to extend, via
 **Credits repositories** — `sum_run_llm_spend` on SQLite (`tests/domain/credits/test_repository.py`)
 and on the Postgres twin (`test_repository_postgres.py`, `@pg_only`, guarded by
 `_postgres_testing.require_local_postgres_url`). Both must include a case with a `:recovery:`
-entry present, asserting it is **excluded** — the twins share no base class, so this is the
-only thing keeping them in step.
+entry present, asserting it is **included** — per §3's first rule, which this sentence
+contradicted until it was corrected. The twins share no base class at runtime, so a
+behavioural case on each engine is the only thing keeping their *semantics* in step;
+`tests/test_store_twin_parity.py` already pins the method's existence and signature.
 
 **Frontend under `node`** (`_frontend_source.fn_body`, per `test_backtest_progress_card.py`):
 - the timeout branch paints its three lines, with the amount formatted by `CreditFormat`;
