@@ -24,6 +24,7 @@ produced.
 """
 
 import json
+import re
 import shutil
 import subprocess
 
@@ -34,6 +35,7 @@ from dashboard.backend.tests._frontend_source import (
     css_blocks,
     fn_body,
     js_const,
+    strip_comments,
 )
 
 pytestmark = pytest.mark.skipif(
@@ -951,6 +953,26 @@ def test_timed_out_panel_is_its_own_state_not_an_error_shade():
     assert "Backtest stopped at the time limit" in body
     blocks = css_blocks(".backtest-run-progress.is-timed-out")
     assert blocks, ".backtest-run-progress.is-timed-out has no styles.css rule"
+
+
+def test_a_timed_out_panel_stops_advertising_a_run_in_flight():
+    """`isTimedOut` has to reach the `terminal` flag, or a timed-out card keeps
+    a live progress track and the "limit: 60 minutes" wait hint sitting under a
+    panel that says the run stopped.
+
+    Nothing pinned this before: `test_a_finished_panel_stops_advertising_a_run_
+    in_flight` (test_backtest_run_provenance.py) only asserts `isFinished` is in
+    `terminal`, by design, so it would still pass with `!!isTimedOut ||` deleted
+    from the expression. Mirrors that test's style -- pin the flag's definition
+    plus membership, not the whole expression's spelling, so a fifth state does
+    not break this again.
+    """
+    body = strip_comments(fn_body("function showBacktestRunProgress("))
+    terminal_def = re.search(r"const terminal = ([^;]+);", body)
+    assert terminal_def, "showBacktestRunProgress must define `const terminal`"
+    assert re.search(r"\bisTimedOut\b", terminal_def.group(1)), (
+        "`terminal` must still be derived from isTimedOut"
+    )
 
 
 def test_poll_dispatch_takes_the_timeout_branch_before_the_error_branch():
