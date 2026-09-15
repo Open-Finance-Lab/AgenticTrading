@@ -2122,3 +2122,203 @@ def test_omitting_the_data_source_preserves_the_previous_estimate():
     assert bt._estimated_pipeline_llm_calls(
         "2026-04-06", "2026-04-19", pipeline
     ) == bt._estimated_pipeline_llm_calls("2026-04-06", "2026-04-19", pipeline, "alpaca")
+
+
+def test_finalize_slot_records_a_timeout_as_its_own_outcome():
+    """Four outcomes, not three: succeeded, failed, cancelled, timed out.
+
+    A timeout is not a cancel (the user did nothing) and not a crash (nothing
+    threw -- the product ran out of the budget it set itself, and billed for
+    what settled first). Asserted as separate fields rather than one tuple
+    equality so a failure names which field moved.
+    """
+    run_id = "agent_timeout_outcome"
+    session_id = str(uuid.uuid4())
+    assert (
+        bt._try_acquire_backtest_slot(
+            live_run_id=run_id, session_id=session_id, user_id=None
+        )
+        is None
+    )
+
+    detail = {
+        "limit_seconds": 3600,
+        "billing_mode": "platform_credits",
+        "spent_micro": 42_318,
+        "model_calls": 2,
+    }
+    bt._finalize_slot(
+        run_id, error=None, runs_count=0, timed_out=True, timeout_detail=detail
+    )
+
+    slot = bt._recent_slots[run_id]
+    assert slot["timed_out"] is True
+    assert slot["cancelled"] is False
+    assert slot["error"] is None
+    assert slot["running"] is False
+    assert slot["timeout_detail"] == detail
+
+    # A real cancel must never also read as a timeout: the two flags are set
+    # by disjoint call sites (the cancel route always passes `cancelled=True`
+    # with `timed_out` left at its default), and the status route trusts that
+    # disjointness to place its two branches in either order safely. Pin it
+    # at the source rather than only at the read path.
+    cancel_run_id = "agent_timeout_outcome_cancel_check"
+    assert (
+        bt._try_acquire_backtest_slot(
+            live_run_id=cancel_run_id, session_id=session_id, user_id=None
+        )
+        is None
+    )
+    bt._finalize_slot(cancel_run_id, error=None, runs_count=0, cancelled=True)
+    cancel_slot = bt._recent_slots[cancel_run_id]
+    assert cancel_slot["cancelled"] is True
+    assert cancel_slot["timed_out"] is False
+
+
+def test_status_prefers_cancelled_over_timed_out_when_a_slot_carries_both(client):
+    """Pins `get_backtest_status`'s branch order directly, because nothing else
+    can.
+
+    In real traffic `cancelled` and `timed_out` are set by disjoint call sites
+    -- the cancel route never passes `timed_out=True`, and the worker's timeout
+    arm never passes `cancelled=True` -- so a slot never legitimately carries
+    both today. That is exactly why the ordering is otherwise untestable: a
+    mutation check that swapped the two `elif` branches in
+    `get_backtest_status` left every other test in this suite green, because
+    none of them can construct the one slot state where the order matters.
+
+    This test manufactures that state directly -- artificial today, but
+    exactly the shape a future bug that sets both flags would produce -- so
+    the branch order (cancelled wins) stays pinned even though production
+    code never manufactures it on its own.
+    """
+    session_id = str(uuid.uuid4())
+    headers = {"X-Session-Id": session_id}
+    run_id = "agent_timeout_and_cancel_both"
+    assert (
+        bt._try_acquire_backtest_slot(
+            live_run_id=run_id, session_id=session_id, user_id=None
+        )
+        is None
+    )
+    bt._finalize_slot(
+        run_id,
+        error=None,
+        runs_count=0,
+        cancelled=True,
+        timed_out=True,
+        timeout_detail={
+            "limit_seconds": 3600,
+            "billing_mode": "platform_credits",
+            "spent_micro": 42_318,
+            "model_calls": 2,
+        },
+    )
+
+    body = client.get(
+        f"/backtest/status?live_run_id={run_id}", headers=headers
+    ).json()
+
+    assert body["cancelled"] is True
+    assert "timed_out" not in body
+    assert "timeout" not in body
+
+
+def test_status_reports_timed_out_as_neither_an_error_nor_a_success(client):
+    """Both frontend surfaces branch on these keys.
+
+    A timeout routed through `error` paints the red "Backtest did not start"
+    panel for something the user did not cause; one routed through `success`
+    would claim results that do not exist. Neither key may appear.
+    """
+    session_id = str(uuid.uuid4())
+    headers = {"X-Session-Id": session_id}
+    run_id = "agent_timeout_status"
+    assert (
+        bt._try_acquire_backtest_slot(
+            live_run_id=run_id, session_id=session_id, user_id=None
+        )
+        is None
+    )
+    bt._finalize_slot(
+        run_id,
+        error=None,
+        runs_count=0,
+        timed_out=True,
+        timeout_detail={
+            "limit_seconds": 3600,
+            "billing_mode": "platform_credits",
+            "spent_micro": 42_318,
+            "model_calls": 2,
+        },
+    )
+
+    body = client.get(
+        f"/backtest/status?live_run_id={run_id}", headers=headers
+    ).json()
+
+    assert body["running"] is False
+    assert body["timed_out"] is True
+    assert "error" not in body
+    assert "success" not in body
+    assert body["message"] == "Backtest stopped at the time limit."
+    assert body["timeout"] == {
+        "limit_seconds": 3600,
+        "billing_mode": "platform_credits",
+        "spent_micro": 42_318,
+        "model_calls": 2,
+    }
+
+
+def test_status_omits_the_timeout_block_when_no_detail_was_recorded(client):
+    """The branch must still answer for a slot finalized without a detail dict
+    -- the shape is conditional, so absence is a real case, not an error."""
+    session_id = str(uuid.uuid4())
+    headers = {"X-Session-Id": session_id}
+    run_id = "agent_timeout_no_detail"
+    assert (
+        bt._try_acquire_backtest_slot(
+            live_run_id=run_id, session_id=session_id, user_id=None
+        )
+        is None
+    )
+    bt._finalize_slot(run_id, error=None, runs_count=0, timed_out=True)
+
+    body = client.get(
+        f"/backtest/status?live_run_id={run_id}", headers=headers
+    ).json()
+
+    assert body["timed_out"] is True
+    assert "timeout" not in body
+
+
+def test_timed_out_run_emits_backtest_failed_with_the_timeout_reason(monkeypatch):
+    """A timeout IS a failure -- the user got nothing and was charged -- so it
+    keeps `backtest_failed` and the success-rate KPI stays honest. What was
+    missing is the reason, and `error_category` is the field that carries it."""
+    emitted = []
+    monkeypatch.setattr(
+        bt.analytics_instrumentation,
+        "emit_run_event",
+        lambda **kwargs: emitted.append(kwargs),
+    )
+
+    run_id = "agent_timeout_analytics"
+    session_id = str(uuid.uuid4())
+    assert (
+        bt._try_acquire_backtest_slot(
+            live_run_id=run_id, session_id=session_id, user_id=4242
+        )
+        is None
+    )
+    bt._finalize_slot(run_id, error=None, runs_count=0, timed_out=True)
+
+    assert emitted == [
+        {
+            "event_name": "backtest_failed",
+            "user_id": 4242,
+            "run_id": run_id,
+            "error_category": "run_timeout",
+        }
+    ]

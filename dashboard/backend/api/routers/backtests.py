@@ -676,15 +676,21 @@ def _slot_snapshot(slot: Dict[str, Any]) -> Dict[str, Any]:
     the child's ``Popen`` handle, which is process-local machinery and has no
     business reaching a JSON response. ``cancelled`` is listed because
     ``/backtest/status`` branches on it, and a snapshot that dropped it would
-    report a cancelled run as "no backtest has been run yet". ``elapsed_seconds``
-    is listed because ``started_at`` is cleared at finalize, so it is the only
-    surviving record of how long a terminal run went -- without it the panel
-    falls back to the poller's attempt count and tells a user who cancelled a
-    forty-minute run that it lasted five seconds.
+    report a cancelled run as "no backtest has been run yet" -- and the same is
+    true of ``timed_out``. ``elapsed_seconds`` is listed because ``started_at``
+    is cleared at finalize, so it is the only surviving record of how long a
+    terminal run went -- without it the panel falls back to the poller's
+    attempt count and tells a user who cancelled a forty-minute run that it
+    lasted five seconds.
     """
     return {
         "running": bool(slot.get("running")),
         "cancelled": bool(slot.get("cancelled")),
+        "timed_out": bool(slot.get("timed_out")),
+        # The facts the status route reports back: budget, lane, spend, call
+        # count. Composed once by the worker's timeout arm -- the only scope
+        # holding all four at once -- and never recomputed on the read path.
+        "timeout_detail": slot.get("timeout_detail"),
         "error": slot.get("error"),
         "runs_count": int(slot.get("runs_count") or 0),
         "started_at": slot.get("started_at"),
@@ -786,6 +792,12 @@ def _try_acquire_backtest_slot(
             # route reports.
             "cancel_requested": False,
             "cancelled": False,
+            # The fourth terminal outcome. Seeded here rather than relied on as
+            # a missing key, so `_slot_snapshot` and the status route can read
+            # it with `.get()` and get False rather than None on every run that
+            # did not time out.
+            "timed_out": False,
+            "timeout_detail": None,
         }
         _active_slots[live_run_id] = slot
         _mirror_slot_to_legacy(slot)
@@ -857,21 +869,43 @@ def _finalize_slot(
     error: Optional[str],
     runs_count: int,
     cancelled: bool = False,
+    timed_out: bool = False,
+    timeout_detail: Optional[Dict[str, Any]] = None,
 ) -> None:
     """Move a slot to its terminal state.
 
-    Three outcomes, not two. ``cancelled`` is deliberately NOT routed through
+    Four outcomes, not two. ``cancelled`` is deliberately NOT routed through
     ``error``: a cancel is the owner's own deliberate action, and reporting it
     back to them as a failure is the same class of lie as reporting a run the
     model never drove as a clean success (issue #169, the change this one
     stacks on). The status route branches on it, and the analytics event below
     is ``backtest_cancelled`` rather than ``backtest_failed`` for the same
-    reason — a dashboard that counts cancels as failures measures the product
+    reason -- a dashboard that counts cancels as failures measures the product
     as broken every time a user changes their mind.
+
+    ``timed_out`` is the fourth, and it is neither of the other two. Not a
+    cancel: the user did nothing, and telling them they stopped their own run
+    is a different lie in the same family. Not a crash: nothing threw -- the
+    product ran out of the wall-clock budget it set itself, and billed them for
+    the model calls that settled before it did. So ``error`` stays None here
+    (routing it through ``error`` lands in the existing error branch and
+    nothing on screen changes), the user-facing outcome is its own status
+    branch, and the analytics event below stays ``backtest_failed`` with
+    ``error_category="run_timeout"`` -- because unlike a cancel, a timeout IS a
+    failure, and moving it out of that event would quietly lift timeouts out of
+    the success-rate KPI.
+
+    ``timeout_detail`` is facts only -- budget, lane, spend, call count -- never
+    a sentence. The client composes the copy so the copy register can see it.
     """
     with _backtest_slots_lock:
         event = _finalize_slot_locked(
-            live_run_id, error=error, runs_count=runs_count, cancelled=cancelled
+            live_run_id,
+            error=error,
+            runs_count=runs_count,
+            cancelled=cancelled,
+            timed_out=timed_out,
+            timeout_detail=timeout_detail,
         )
     _emit_slot_run_event(event)
 
@@ -882,6 +916,8 @@ def _finalize_slot_locked(
     error: Optional[str],
     runs_count: int,
     cancelled: bool = False,
+    timed_out: bool = False,
+    timeout_detail: Optional[Dict[str, Any]] = None,
 ) -> Optional[Dict[str, Any]]:
     """The terminal transition itself. THE CALLER MUST HOLD THE LEDGER LOCK.
 
@@ -896,7 +932,9 @@ def _finalize_slot_locked(
 
     Returns the analytics event to emit, or None. The emit stays OUTSIDE the
     lock deliberately: it can reach a store, and this lock is taken by every
-    status poll and every launch.
+    status poll and every launch -- the same rule covers a ``timed_out``
+    caller's credits read (Task 4's ``sum_run_llm_spend``): compose
+    ``timeout_detail`` before acquiring this lock, never while holding it.
     """
     slot = _active_slots.pop(live_run_id, None)
     if not slot:
@@ -933,6 +971,8 @@ def _finalize_slot_locked(
     slot["started_at"] = None
     slot["progress_file"] = None
     slot["cancelled"] = bool(cancelled)
+    slot["timed_out"] = bool(timed_out)
+    slot["timeout_detail"] = timeout_detail
     # Drop the child handle with the slot. It only means anything while the
     # run is live, and ``_recent_slots`` retains fifty of these.
     slot["process"] = None
@@ -954,6 +994,19 @@ def _finalize_slot_locked(
             "user_id": int(user_id),
             "run_id": live_run_id,
             "error_category": None,
+        }
+    if timed_out:
+        # Still `backtest_failed`: the user asked for a backtest, got nothing,
+        # and was billed. A separate event name would need nine registrations
+        # and would drop timeouts out of `metrics.py`'s `_TERMINAL_FAILURE`,
+        # `states.py`'s consecutive-failure alert and `backfill.py`'s terminal
+        # map -- the three things that exist to notice runs failing. What was
+        # missing is the reason, not the outcome.
+        return {
+            "event_name": "backtest_failed",
+            "user_id": int(user_id),
+            "run_id": live_run_id,
+            "error_category": "run_timeout",
         }
     succeeded = error is None and runs_count > 0
     return {
@@ -3353,6 +3406,27 @@ def get_backtest_status(
             "live_run_id": slot.get("live_run_id"),
             "message": "Backtest cancelled.",
         }
+    elif slot.get("timed_out"):
+        # Between cancelled and error, and never routed through either. The
+        # shape mirrors the cancel branch -- no `error` key, no `success` key --
+        # because nothing failed and nothing completed. What is new is
+        # `timeout`, a facts-only sub-object the client turns into a sentence:
+        # the amount has to be formatted by the same helper the Credits page
+        # uses, and composing the sentence here would put the number's
+        # formatting and the user's copy under two different owners.
+        payload = {
+            "running": False,
+            "timed_out": True,
+            "elapsed_seconds": int(slot.get("elapsed_seconds") or 0),
+            "live_run_id": slot.get("live_run_id"),
+            # Fallback for any client that does not know this branch, matching
+            # "Backtest cancelled." above.
+            "message": "Backtest stopped at the time limit.",
+        }
+        timeout_detail = slot.get("timeout_detail")
+        if timeout_detail:
+            payload["timeout"] = timeout_detail
+        return payload
     elif slot.get("error"):
         return {
             "running": False,
