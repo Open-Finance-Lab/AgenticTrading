@@ -231,3 +231,95 @@ def test_watcher_reports_api_error_status(job_store, monkeypatch):
 
     done = job_store.get(job.job_id)
     assert done.status == STATUS_NOTIFIED
+
+
+def test_watcher_reports_a_timed_out_run_instead_of_waiting_out_the_budget(
+    job_store, monkeypatch
+):
+    """The loop knew only running/error/success, so a `timed_out` payload fell
+    through with neither continue nor break -- 360 polls later the for/else
+    delivered "still running after 30 minutes" for an outcome the server had
+    already reported on the second poll."""
+    live_run_id = "agent_20260914_timeout01"
+    job = job_store.create_job(
+        discord_user_id="42",
+        channel_id=99,
+        session_id="sess-timeout",
+        label="t1me0ut",
+        live_run_id=live_run_id,
+    )
+    poster = _PostRecorder()
+    _install_common(monkeypatch, poster)
+
+    polls = {"n": 0}
+
+    async def fake_api_get(path: str, *, headers=None, timeout: int = 30):
+        assert path == "/backtest/status"
+        polls["n"] += 1
+        if polls["n"] == 1:
+            return {"running": True}
+        return {
+            "running": False,
+            "timed_out": True,
+            "elapsed_seconds": 3600,
+            "live_run_id": live_run_id,
+            "message": "Backtest stopped at the time limit.",
+            "timeout": {
+                "limit_seconds": 3600,
+                "billing_mode": "platform_credits",
+                "spent_micro": 42_318,
+                "model_calls": 2,
+            },
+        }
+
+    monkeypatch.setattr(bot, "api_get", fake_api_get)
+
+    asyncio.run(bot.watch_and_deliver_backtest(job.job_id))
+
+    # Broke out on the second poll, not after 360 of them.
+    assert polls["n"] == 2
+    assert len(poster.calls) == 1
+    content = poster.calls[0]["content"]
+    assert "60-minute limit" in content
+    assert "still running after 30 minutes" not in content
+
+
+def test_watcher_reports_a_cancelled_run_instead_of_waiting_out_the_budget(
+    job_store, monkeypatch
+):
+    """The same gap, which this surface has had since the cancel route shipped:
+    a user who cancels a Discord-launched backtest gets the identical
+    thirty-minute non-answer."""
+    live_run_id = "agent_20260914_cancel01"
+    job = job_store.create_job(
+        discord_user_id="42",
+        channel_id=99,
+        session_id="sess-cancel",
+        label="cance11ed",
+        live_run_id=live_run_id,
+    )
+    poster = _PostRecorder()
+    _install_common(monkeypatch, poster)
+
+    polls = {"n": 0}
+
+    async def fake_api_get(path: str, *, headers=None, timeout: int = 30):
+        assert path == "/backtest/status"
+        polls["n"] += 1
+        return {
+            "running": False,
+            "cancelled": True,
+            "elapsed_seconds": 120,
+            "live_run_id": live_run_id,
+            "message": "Backtest cancelled.",
+        }
+
+    monkeypatch.setattr(bot, "api_get", fake_api_get)
+
+    asyncio.run(bot.watch_and_deliver_backtest(job.job_id))
+
+    assert polls["n"] == 1
+    assert len(poster.calls) == 1
+    content = poster.calls[0]["content"]
+    assert "cancelled" in content.lower()
+    assert "still running after 30 minutes" not in content

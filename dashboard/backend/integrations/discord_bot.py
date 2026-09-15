@@ -560,6 +560,44 @@ async def watch_and_deliver_backtest(
                     )
                 continue
 
+            if status.get("timed_out"):
+                # The server stopped this run at its own wall-clock budget and
+                # said so. Without this branch the payload matched none of the
+                # three shapes below, fell through with neither continue nor
+                # break, and the for/else delivered "still running after 30
+                # minutes" -- half an hour after the answer was available.
+                detail = status.get("timeout") or {}
+                limit_seconds = detail.get("limit_seconds")
+                minutes = (
+                    round(int(limit_seconds) / 60)
+                    if isinstance(limit_seconds, int) and limit_seconds > 0
+                    else None
+                )
+                parts = [
+                    f"Stopped at the {minutes}-minute limit."
+                    if minutes
+                    else "Stopped at the time limit."
+                ]
+                spent_micro = detail.get("spent_micro")
+                if isinstance(spent_micro, int):
+                    parts.append(
+                        f"Model calls completed before the stop cost "
+                        f"{spent_micro / 1_000_000:.6f} Credits."
+                    )
+                parts.append(
+                    "Shorten the date range, or use fewer pipeline steps, "
+                    "then run it again."
+                )
+                terminal_error = " ".join(parts)
+                break
+
+            if status.get("cancelled"):
+                # The same gap, which this surface has had since the cancel
+                # route shipped. Fixed here because this change is what made it
+                # visible, and leaving it would be shipping a bug we just read.
+                terminal_error = "Backtest cancelled."
+                break
+
             if status.get("error"):
                 terminal_error = str(status["error"])[:1500]
                 break
