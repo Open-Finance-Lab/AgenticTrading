@@ -949,15 +949,28 @@ def test_pipeline_timeout_finalizes_execution_and_slot_once(monkeypatch):
         def __init__(self, **_kwargs):
             pass
 
-        def finalize_run(self, execution_run_id):
+        def finalize_run(self, execution_run_id, *, billing_mode=None):
             finalized_execution_runs.append(execution_run_id)
 
     real_finalize_slot = bt._finalize_slot
 
-    def spy_finalize_slot(live_run_id, *, error, runs_count, cancelled=False):
+    def spy_finalize_slot(
+        live_run_id,
+        *,
+        error,
+        runs_count,
+        cancelled=False,
+        timed_out=False,
+        timeout_detail=None,
+    ):
         finalized_slots.append((live_run_id, runs_count))
         return real_finalize_slot(
-            live_run_id, error=error, runs_count=runs_count, cancelled=cancelled
+            live_run_id,
+            error=error,
+            runs_count=runs_count,
+            cancelled=cancelled,
+            timed_out=timed_out,
+            timeout_detail=timeout_detail,
         )
 
     monkeypatch.setattr(subprocess, "Popen", fake_popen)
@@ -981,13 +994,112 @@ def test_pipeline_timeout_finalizes_execution_and_slot_once(monkeypatch):
     # Timed out => terminated. The child died inside the grace period, so no
     # SIGKILL was needed.
     assert (child.terminated, child.killed) == (1, 0)
-    assert finalized_slots == [(run_id, 0)]
     assert finalized_execution_runs == [run_id]
     assert run_id not in bt._active_slots
     assert bt._recent_slots[run_id]["running"] is False
     assert bt._recent_slots[run_id]["cancelled"] is False
     # The handle is dropped with the run; _recent_slots retains fifty of these.
     assert bt._recent_slots[run_id]["process"] is None
+    # The outcome, not just the cleanup. Before this the TimeoutExpired fell
+    # into the generic `except Exception` arm and the user received a tail
+    # slice of the child's argv -- `_sanitize_backtest_error` truncates from
+    # the END, which is right for a stack trace and wrong for a TimeoutExpired
+    # whose informative clause trails a long command line.
+    assert bt._recent_slots[run_id]["timed_out"] is True
+    assert bt._recent_slots[run_id]["error"] is None
+    # Exactly once. A second _finalize_slot from the `finally` would overwrite
+    # the timeout with a zero-run completion.
+    assert finalized_slots == [(run_id, 0)]
+
+
+def _drive_pipeline_timeout(monkeypatch, *, run_id, billing_mode, user_id=None):
+    """Run the real worker to a parent timeout and return the finalized slot.
+
+    Shared by the two lane cases below rather than copied: the setup is eight
+    monkeypatches and a FakeChild, and a copy that drifts in one of them stops
+    testing the branch it names.
+    """
+    session_id = str(uuid.uuid4())
+    assert (
+        bt._try_acquire_backtest_slot(
+            live_run_id=run_id, session_id=session_id, user_id=user_id
+        )
+        is None
+    )
+
+    child = FakeChild(stdout="run header line\n", timeout_waits=1)
+
+    class FakeExecutionService:
+        def __init__(self, **_kwargs):
+            pass
+
+        def finalize_run(self, execution_run_id, *, billing_mode=None):
+            return []
+
+    monkeypatch.setattr(subprocess, "Popen", lambda cmd, **kwargs: child)
+    monkeypatch.setattr(bt, "LLMExecutionService", FakeExecutionService)
+    monkeypatch.setattr(bt, "get_model_provider_service", lambda: object())
+    monkeypatch.setattr(bt, "run_backtest_background", _REAL_RUN_BACKTEST_BACKGROUND)
+    monkeypatch.setattr(
+        bt.credits_service,
+        "sum_run_llm_spend",
+        lambda uid, rid: (42_318, 2),
+    )
+
+    bt.run_backtest_background(
+        start_date="2026-01-01",
+        end_date="2026-01-02",
+        session_id=session_id,
+        live_run_id=run_id,
+        decision_source="rule_based",
+        execution_handoff_payload="opaque-test-handoff",
+        billing_mode=billing_mode,
+    )
+    return bt._recent_slots[run_id]
+
+
+def test_platform_credits_timeout_discloses_what_the_run_cost(monkeypatch):
+    """The whole point: the user waited an hour, got nothing, and was billed.
+
+    `finalize_run` in the `finally` only RELEASES open holds -- it never settles
+    -- so every settled row was already written by the child as it went, and the
+    sum read here is final.
+    """
+    slot = _drive_pipeline_timeout(
+        monkeypatch,
+        run_id="agent_timeout_platform",
+        billing_mode="platform_credits",
+        user_id=4242,
+    )
+
+    assert slot["timed_out"] is True
+    assert slot["timeout_detail"] == {
+        "limit_seconds": 3600,
+        "billing_mode": "platform_credits",
+        "spent_micro": 42_318,
+        "model_calls": 2,
+    }
+
+
+def test_byok_timeout_reports_no_spend_rather_than_zero(monkeypatch):
+    """None, not 0. BYOK never touches the ATL ledger, so a zero here would be
+    indistinguishable from "platform lane, nothing settled yet" -- and the card
+    would tell a BYOK user their run cost 0.000000 Credits, which is a claim
+    about a ledger that has no row for them at all."""
+    slot = _drive_pipeline_timeout(
+        monkeypatch,
+        run_id="agent_timeout_byok",
+        billing_mode="byok",
+        user_id=4242,
+    )
+
+    assert slot["timed_out"] is True
+    assert slot["timeout_detail"] == {
+        "limit_seconds": 3600,
+        "billing_mode": "byok",
+        "spent_micro": None,
+        "model_calls": None,
+    }
 
 
 def test_ai_hedge_fund_requires_openrouter_not_direct_openai(client, monkeypatch):
@@ -1237,6 +1349,12 @@ def test_platform_credits_resolves_candidates_without_provider_input(monkeypatch
     assert service.execution_calls == [("openrouter", "qwen/qwen3.7-plus")]
     assert service.credential_calls == []
     assert spy.calls == 1
+    # The lane reaches the worker, not just the handoff envelope. This is the
+    # only route-level wire in front of the timeout arm's spend disclosure, and
+    # its failure is silent: drop the kwarg and every production timeout reports
+    # `billing_mode: "byok", spent_micro: None` with the whole suite still green,
+    # because the timeout tests call the worker directly with an explicit lane.
+    assert spy.last_kwargs["billing_mode"] == "platform_credits"
 
 
 def test_openai_byok_rejects_claude_before_worker_start(monkeypatch):

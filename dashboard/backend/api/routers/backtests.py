@@ -1451,6 +1451,13 @@ def run_backtest_background(
     financial_datasets_api_key: Optional[str] = None,
     execution_handoff_payload: Optional[str] = None,
     universe_selection: Optional[Dict[str, Any]] = None,
+    # The billing lane, threaded from the route because it is NOT otherwise
+    # reachable here: it is folded into the opaque signed
+    # `execution_handoff_payload` before this function is called, and that
+    # envelope's TTL (300s) is far shorter than this run's budget (3600s), so
+    # decoding it at timeout time would fail even if we had the key. Used only
+    # to decide whether a timeout has a Credits cost worth reporting.
+    billing_mode: Optional[str] = None,
 ):
     """Run backtest in background thread.
 
@@ -1686,6 +1693,71 @@ def run_backtest_background(
         # overwrite `cancelled` with a bare zero-run completion and leave the
         # poller reporting "no backtest has been run yet".
         resolved_live_run_id = None
+    except subprocess.TimeoutExpired:
+        # Ahead of the generic arm, which would send this through
+        # `_sanitize_backtest_error` -- `_redact_credentials(...)[-max_chars:]`,
+        # a TAIL truncation. That is right for a stack trace and wrong for a
+        # TimeoutExpired, whose informative clause trails a long argv: the user
+        # waits up to an hour and receives a fragment of a command line.
+        print(
+            f"⏱️  Backtest hit the {subprocess_timeout}s limit: "
+            f"{resolved_live_run_id}",
+            flush=True,
+        )
+        if resolved_live_run_id:
+            # Read the owner under the ledger lock, then run the credits query
+            # OUTSIDE it. `_finalize_slot_locked`'s docstring gives the rule for
+            # the analytics emit -- "it can reach a store, and this lock is
+            # taken by every status poll and every launch" -- and a credits
+            # aggregate is the same hazard, over a bigger table.
+            timeout_user_id = _slot_analytics_user_id(resolved_live_run_id)
+            spent_micro = None
+            model_calls = None
+            if billing_mode == "platform_credits" and timeout_user_id is not None:
+                # Complete at this moment: the `finally`'s `finalize_run` only
+                # RELEASES open reservations (see
+                # `release_run_llm_reservations`), it never settles, so every
+                # settled row was written by the child as it went. The hold for
+                # the call that was interrupted is released, not charged --
+                # excluding it is the right answer, not a rounding error.
+                try:
+                    spent_micro, model_calls = credits_service.sum_run_llm_spend(
+                        timeout_user_id, resolved_live_run_id
+                    )
+                except Exception as exc:  # a read, and never worth losing the outcome over
+                    print(
+                        f"⚠️ timeout spend lookup failed for "
+                        f"{resolved_live_run_id}: {exc}",
+                        flush=True,
+                    )
+            _finalize_slot(
+                resolved_live_run_id,
+                error=None,
+                runs_count=0,
+                timed_out=True,
+                timeout_detail={
+                    # The budget THIS run was given, read from the local bound
+                    # at the call site above -- never re-derived from
+                    # `_backtest_subprocess_timeout` and never hardcoded to
+                    # 3600, so the card cannot report a budget the run did not
+                    # actually have.
+                    "limit_seconds": int(subprocess_timeout),
+                    # A caller that never threads the lane lands here as "byok"
+                    # and therefore claims NO spend -- the safe default, but a
+                    # silent one. A future launch path that forgets the
+                    # `billing_mode` kwarg under-reports a platform-credits
+                    # timeout as free rather than failing loudly, so thread it
+                    # from any new caller of `run_backtest_background`.
+                    "billing_mode": billing_mode or "byok",
+                    "spent_micro": spent_micro,
+                    "model_calls": model_calls,
+                },
+            )
+            # MANDATORY, exactly as in the two arms above: without it the
+            # `finally`'s `if resolved_live_run_id:` finalizes a second time
+            # with `error=None, runs_count=0` and overwrites the timeout with a
+            # fake zero-run success.
+            resolved_live_run_id = None
     except Exception as e:
         summary = _sanitize_backtest_error(
             e,
@@ -1702,10 +1774,21 @@ def run_backtest_background(
                 # The child normally finalizes itself. Repeating this from the
                 # parent also clears reservations when the subprocess is killed
                 # by timeout or exits before its own finally block runs.
+                # `finalize_run` tests `billing_mode is BillingMode.BYOK`, so
+                # the lane must arrive as the enum -- the string this thread
+                # carries would miss that identity check silently and send a
+                # BYOK run into the release path the docstring says it skips.
+                # Matched rather than constructed so an unrecognised value
+                # degrades to None (the pre-existing one-argument behaviour)
+                # instead of raising ValueError out of a `finally`.
+                lane = next(
+                    (mode for mode in BillingMode if mode.value == billing_mode),
+                    None,
+                )
                 LLMExecutionService(
                     providers=get_model_provider_service(),
                     credits=credits_service,
-                ).finalize_run(execution_run_id)
+                ).finalize_run(execution_run_id, billing_mode=lane)
             except LLMExecutionError as exc:
                 print(
                     f"❌ LLM execution cleanup failed: {exc.safe_message}",
@@ -3248,6 +3331,7 @@ def run_backtest_endpoint(
             "assets": selected_assets,
             "decision_source": resolved_decision_source,
             "execution_handoff_payload": execution_handoff_payload,
+            "billing_mode": billing_mode.value if billing_mode is not None else None,
             **({"universe_selection": universe_selection} if universe_selection is not None else {}),
         },
         daemon=True
