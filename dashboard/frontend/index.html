@@ -130,11 +130,22 @@
       }
     </style>
     <script>
-      // Landing is for first-time / logged-out visitors only.
-      // Logged-in users go straight to the dashboard.
+      // ONE LANDING PAGE FOR BOTH AUDIENCES. This used to read "Landing is
+      // for first-time / logged-out visitors only. Logged-in users go straight
+      // to the dashboard." and it did exactly that -- window.location.replace
+      // to /app the moment /api/auth/me came back ok, so a signed-in visitor
+      // could not reach / at all and the two homepages were free to diverge
+      // into two different products.
+      //
+      // The fetch stays, and its job is now the ONLY job it has: decide whether
+      // the cached auth-user is still backed by a live cookie session. Both
+      // answers end on this page; what they change is which CTAs the React
+      // bundle renders, which it reads back out of localStorage.
       document.documentElement.classList.add('landing-auth-pending');
       (function () {
-        var APP_URL = '/app';
+        // No APP_URL here any more: this script's only use for it was the
+        // redirect. The modal script below still declares its own, for the
+        // post-signup navigation that is still correct.
         var AUTH_TOKEN_KEY = 'auth-token';
         var AUTH_USER_KEY = 'auth-user';
         var host = window.location.hostname;
@@ -142,53 +153,126 @@
           ? window.location.origin
           : '';
 
+        // 1200ms IS A DEADLINE FOR THE FETCH, NOT FOR THE HOMEPAGE. A warm
+        // /api/auth/me answers in well under this on Render, so the ordinary
+        // case still corrects the cached profile before first paint and never
+        // flashes signed-in CTAs it has to swap out. What this bounds is the
+        // two cases a bare fetch()+.then/.catch cannot: a free-tier cold start
+        // (30-60s) and a request that never settles at all, which reaches
+        // neither .then nor .catch and used to leave landing-auth-pending on
+        // <html> -- and the page blank under `visibility: hidden` -- forever.
+        var REVEAL_TIMEOUT_MS = 1200;
+
         function clearAuth() {
           try {
             localStorage.removeItem(AUTH_TOKEN_KEY);
             localStorage.removeItem(AUTH_USER_KEY);
           } catch (e) { /* ignore */ }
+          // THE STORAGE EVENT DOES NOT FIRE IN THE TAB THAT WROTE, and this is
+          // that tab. landing/src/lib/session.ts drives every CTA off this key,
+          // so without an explicit notification an expired session keeps being
+          // offered "Test a trading idea" -- a link into an app that will bounce
+          // it straight back to sign in. Kept in sync by name with
+          // LANDING_AUTH_EVENT there; this page has no build step to share the
+          // constant across the split, the same reason 'nav-state' is a literal
+          // below.
+          try {
+            window.dispatchEvent(new Event('landing-auth-change'));
+          } catch (e) { /* ignore */ }
         }
 
+        // IDEMPOTENT ON PURPOSE -- it is now called from up to two places for
+        // one page load (the timer and whichever of .then/.catch settles), and
+        // the second call must be a no-op rather than a second class flip.
+        // `revealed` also stops a late-settling fetch from re-adding anything
+        // after the timer has already painted the page.
+        var revealed = false;
+        var revealTimer = null;
         function showLanding() {
+          if (revealed) return;
+          revealed = true;
+          if (revealTimer !== null) {
+            clearTimeout(revealTimer);
+            revealTimer = null;
+          }
           document.documentElement.classList.remove('landing-auth-pending');
           document.documentElement.classList.add('landing-ready');
         }
 
-        function redirectToDashboard() {
-          window.location.replace(APP_URL);
-        }
+        // `redirectToDashboard()` lived here. Deleted rather than left unused:
+        // an unreferenced one-line helper that navigates away from this page is
+        // an invitation to call it again.
 
-        // Optional ?stay=1 keeps signed-in users on the marketing page.
-        var stayOnLanding = false;
-        try {
-          stayOnLanding = new URLSearchParams(window.location.search).get('stay') === '1';
-        } catch (e) { stayOnLanding = false; }
-
+        // ?stay=1 IS GONE FROM THIS BRANCH, AND THE PARAMETER IS NOW INERT.
+        // It existed to escape the redirect; with the redirect gone every visit
+        // behaves the way ?stay=1 used to, so the flag had nothing left to do --
+        // except the one thing it must not do. Skipping the fetch does not
+        // produce the signed-out page it used to: this branch is only reachable
+        // WITH a cached profile (the !cachedUser test short-circuits first), so it
+        // skipped the revalidation and left that profile standing. A bookmarked
+        // /?stay=1 whose session had since expired rendered "Test a trading
+        // idea" on every visit, forever, linking into an app that bounces the
+        // visitor back to sign in -- and nothing on that URL could ever correct
+        // itself, because the only thing that corrects it is the fetch it
+        // skipped. The parameter still parses harmlessly in any URL that carries
+        // it; it simply no longer changes what happens.
         var cachedUser = null;
         try { cachedUser = localStorage.getItem(AUTH_USER_KEY); } catch (e) { cachedUser = null; }
 
-        if (!cachedUser || stayOnLanding) {
+        if (!cachedUser) {
           showLanding();
           return;
         }
 
+        // ARMED BEFORE THE FETCH, NOT AFTER IT. `fetch` can throw synchronously
+        // on a malformed URL, and a timer armed on the next line would never be
+        // set in that case -- the one failure mode that leaves the page blank
+        // with no promise to settle. Passing the function by reference rather
+        // than wrapping it in `function () { showLanding(); }` keeps this a
+        // timeout on the reveal, not a second code path to keep in sync.
+        revealTimer = setTimeout(showLanding, REVEAL_TIMEOUT_MS);
+
         fetch(API_BASE + '/api/auth/me', {
           credentials: 'include',
         }).then(function (res) {
-          if (res.ok) {
-            redirectToDashboard();
-            return;
+          // 401/403 ONLY, NOT EVERY NON-2xx. Those two are the statuses that
+          // prove the cookie session is gone; a 500 or a 502 proves the backend
+          // is having a bad minute, which on a free-tier instance that
+          // cold-starts in 30-60s is an ordinary first-visit-of-the-day event.
+          // Clearing on those wipes auth-token and auth-user out from under a
+          // visitor holding a perfectly valid session -- swapping every CTA to
+          // "Start Free" and demoting /app's own pre-hydration boot, which reads
+          // the same key. It would also put this branch in direct disagreement
+          // with the .catch below, which refuses to do exactly that for a
+          // network failure and says why.
+          if (res.status === 401 || res.status === 403) {
+            // The cached profile is a ghost. clearAuth() both removes it and
+            // tells the mounted React tree, so the CTAs fall back to signed-out
+            // rather than offering a dashboard this visitor cannot open.
+            //
+            // THIS STILL RUNS AFTER A TIMED-OUT REVEAL, and that is the point of
+            // doing it before showLanding() rather than instead of it. The
+            // timeout only decides WHEN the page becomes visible; it does not
+            // cancel the revalidation, so a slow 401 still corrects the CTAs --
+            // visibly swapping them, which is the honest outcome and strictly
+            // better than a blank page that would have shown the same swap.
+            clearAuth();
           }
-          clearAuth();
           showLanding();
         }).catch(function () {
-          // Network error: keep local session and send them to the app.
-          redirectToDashboard();
+          // NETWORK ERROR KEEPS THE LOCAL SESSION AND SHOWS THE PAGE. It used
+          // to send them to /app on the reasoning that a cached session is
+          // better than none -- a reasonable call when the alternative was a
+          // marketing page they had already converted past. There is no
+          // alternative now: this page IS the signed-in page. Clearing the
+          // profile instead would demote a signed-in visitor to the anonymous
+          // CTAs because a request failed, which is the worse of the two errors.
+          showLanding();
         });
       })();
     </script>
-    <script type="module" crossorigin src="/assets/index-BrJB1vjI.js"></script>
-    <link rel="stylesheet" crossorigin href="/assets/index-DivKYRS2.css">
+    <script type="module" crossorigin src="/assets/index-Cwk1nmHC.js"></script>
+    <link rel="stylesheet" crossorigin href="/assets/index-goeFawbv.css">
   </head>
   <body>
     <div id="root"></div>

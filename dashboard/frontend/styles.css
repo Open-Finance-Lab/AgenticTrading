@@ -8670,8 +8670,28 @@ html[data-nav-page="home"] #homeView .dashboard-bottom-grid .home-module--market
     grid-template-columns: 26px minmax(0, 1.4fr) 96px 78px 62px;
     gap: 8px;
 }
-.home-landing-board .home-module-rank-list li { font-size: 13.5px; }
-.home-landing-board .hm-rank-value { font-size: 12px; }
+/* Type sizes are raised ON THE PROMOTED BOARD ONLY, which is what every
+   selector here being prefixed `.home-landing-board` buys. The same markup is
+   still a one-third-width tile on the dashboard grid, where 12.5px rows are
+   correct for the column they sit in; scoping keeps that tile byte-identical
+   while the hero copy reaches the size the landing page's own body text uses.
+
+   THE ROWS COST NOTHING TO RAISE, and the reason is the rank badge, not luck.
+   `.home-module-rank-list li` is `display: grid; align-items: center`, so its
+   height is its tallest cell -- and `.home-module-rank` is a fixed 22px circle.
+   16 x 1.35 = 21.6 is still under that, so the row stays 22 + 3 + 3 = 28px at
+   13.5px and at 16px alike, and nothing in the 480px panel above has to move.
+   17px would be 22.95 and every row would grow; this is the last free step.
+
+   The head and the badge move 11 -> 12 only. Both sit above a list that is
+   `flex: 1 1 auto; overflow-y: auto` inside a fixed-height panel, so the few
+   px they take come out of the scroll area rather than out of the panel --
+   which is the same reason nothing here needs a matching height re-derivation
+   the way BoardPreview.tsx's reserve constants do. */
+.home-landing-board .hm-rank-table-head { font-size: 12px; }
+.home-landing-board .home-module-rank { font-size: 12px; }
+.home-landing-board .home-module-rank-list li { font-size: 16px; }
+.home-landing-board .hm-rank-value { font-size: 14px; }
 
 /* Live hero (former first screen: network + spotlight) */
 .home-hero {

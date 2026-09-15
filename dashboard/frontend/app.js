@@ -5055,18 +5055,24 @@ async function logoutUser() {
   } finally {
     clearAuthState();
     clearActiveAgentSession();
-    // Signed out, home is the landing page again. index.html sends a visit
-    // carrying a cached auth-user straight to /app ("Landing is for first-time
-    // / logged-out visitors only"); this is the return trip, which was never
-    // built. Without it logout leaves the user on the signed-in shell, whose
-    // home re-renders as the "Guest Account" demo portfolio -- the screen a
-    // never-signed-in visitor gets -- so the only sign anything happened is the
-    // header swapping to "Sign in".
+    // Signed out, home is the landing page again. Without this hop logout
+    // leaves the user on the signed-in shell, whose home re-renders as the
+    // "Guest Account" demo portfolio -- the screen a never-signed-in visitor
+    // gets -- so the only sign anything happened is the header swapping to
+    // "Sign in".
     //
-    // Ordering is load-bearing: the two clears above must run first, or the
-    // landing sees a cached auth-user and bounces straight back to /app.
-    // replace() rather than href so Back cannot restore the shell just left,
-    // and it matches the verb the landing's own redirect uses.
+    // Ordering is load-bearing, and the reason CHANGED when / stopped
+    // redirecting signed-in visitors to /app. It used to be a round trip: the
+    // landing bounced any visit carrying a cached auth-user straight back here,
+    // so clearing second meant returning to the page the user was leaving.
+    // Nothing bounces now. What the landing does instead is READ that cached
+    // auth-user to decide which CTAs to draw -- so clearing second lands the
+    // just-signed-out user on a homepage offering "Test a trading idea" and a
+    // link into the shell they just left, corrected only once /api/auth/me
+    // answers, which on a cold free-tier backend is tens of seconds. Quieter
+    // than the round trip, and harder to diagnose. Same fix.
+    //
+    // replace() rather than href so Back cannot restore the shell just left.
     //
     // Nothing follows it: the old loadAgents() re-fetch and account/admin page
     // hop both dressed a page that is being torn down, and awaiting a request

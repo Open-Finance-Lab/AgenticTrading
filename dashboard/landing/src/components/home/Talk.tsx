@@ -1,7 +1,6 @@
-import { Button } from "@/components/ui/button";
 import { DiscordMock } from "./DiscordMock";
 import { ChatWindow } from "./ChatSimulation";
-import { PRIMARY_LANDING_CTA } from "@/lib/cta";
+import { LandingCTA } from "./LandingCTA";
 
 export function Talk() {
   return (
@@ -20,14 +19,10 @@ export function Talk() {
                 The lucide import went with it — those three icons had no other
                 use in this file, and an unused import is a noUnusedLocals build
                 failure, not a lint nit. */}
-            <Button
-              size="lg"
-              type="button"
-              data-landing-auth={PRIMARY_LANDING_CTA.authMode}
+            <LandingCTA
               className="bg-primary text-primary-foreground hover:bg-primary/90"
-            >
-              {PRIMARY_LANDING_CTA.label}
-            </Button>
+              secondaryClassName="border-border text-foreground hover:bg-muted"
+            />
           </div>
 
           {/* Moved down from the hero, which now shows the board. This is the

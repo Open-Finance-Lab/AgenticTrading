@@ -16,6 +16,13 @@ export type LeaderboardEntry = {
   cumulative_return: number;
   // `null` when the run recorded no final equity -- absent, not $0.
   portfolio_value: number | null;
+  /** Typed nullable even though `get_leaderboard` currently sends
+   *  `run.get("sharpe_ratio") or 0` -- domain/leaderboard/service.py:2161 --
+   *  which collapses an absent ratio onto a real 0.00. The nullable type is
+   *  what lets `finiteNumber` keep rendering the em dash if that `or 0` is
+   *  ever fixed at the source, rather than requiring a second change here.
+   *  Until then a missing ratio does arrive as 0 and does print "0.00". */
+  sharpe_ratio: number | null;
   initial_equity: number;
   equity_curve: EquityPoint[];
 };
@@ -32,10 +39,28 @@ export type BoardSeries = {
 export type BoardStanding = {
   key: string;
   name: string;
+  /** 1-based position IN THIS TABLE, assigned after the sort below -- not the
+   *  server's `entry.rank`, which /app's rank list reads.
+   *
+   *  The two genuinely differ and the server's is the wrong one here.
+   *  `_rank_entries` ranks all twelve published entries; `selectBoardEntries`
+   *  keeps nine. Rendering the server number would print #1, #2, #4, #5 … with
+   *  the gaps belonging to rows this table deliberately never shows, which
+   *  reads as a broken table rather than as a filtered one. Race.tsx has always
+   *  numbered its rows `index + 1` for the same reason. */
+  rank: number;
   ret: string;
   /** The number `ret` was formatted FROM, carried so ranking never has to read
    *  it back out of the display string. See the sort in `buildBoardData`. */
   cumulativeReturn: number;
+  /** Preformatted, `—` when the run recorded no final equity. Carried as a
+   *  string so the em-dash case is decided once, here, beside the `null` that
+   *  causes it -- a consumer handed the raw number would have to re-derive the
+   *  absent/zero distinction that `portfolio_value`'s own comment exists to
+   *  preserve, and the one that gets it wrong publishes "$0". */
+  endingValue: string;
+  /** Preformatted to two decimals, `—` when non-finite. */
+  sharpe: string;
   color: string;
   /** Carried so a consumer can tell "no model results came back" from "the
    *  board is fine". `BoardSeries` answers the same question with
@@ -103,6 +128,45 @@ export function finiteNumber(value: unknown): number {
 export function formatPercent(fraction: number, decimals: number): string {
   if (!Number.isFinite(fraction)) return '—';
   return `${fraction > 0 ? '+' : ''}${(fraction * 100).toFixed(decimals)}%`;
+}
+
+/** Mirrors `homeFormatPortfolioValue` in dashboard/frontend/home-page.js:1793 --
+ *  the rank row this table is ported from -- including the em dash for an
+ *  absent value.
+ *
+ *  ONE BRANCH, NOT TWO. The /app original splits on `n >= 1000`, sending the
+ *  larger case through `Math.round(n).toLocaleString('en-US')` and the smaller
+ *  through `homeFormatMoney(n, 0)`; those two agree on every input, since
+ *  `toLocaleString` with `maximumFractionDigits: 0` rounds exactly as
+ *  `Math.round` does. The split is vestigial and is deliberately not carried
+ *  over -- and NEITHER is `homeFormatMoney`'s own non-finite fallback, which
+ *  returns the string `'$10,000'`. That is a fabricated account value standing
+ *  in for a missing one; it is unreachable there only because
+ *  `homeFormatPortfolioValue` guards with its own NaN check first, and it is
+ *  exactly the class of stand-in this module exists to refuse.
+ *
+ *  `finiteNumber`, not `Number`: `Number(null)` is 0, so the obvious guard
+ *  publishes a run that recorded no final equity as an account that finished at
+ *  $0 -- see `portfolio_value`'s own note on the payload type. */
+export function formatCurrency(value: unknown): string {
+  const n = finiteNumber(value);
+  if (!Number.isFinite(n)) return '—';
+  return `$${Math.round(n).toLocaleString('en-US')}`;
+}
+
+/** Two decimals, em dash when absent.
+ *
+ *  The /app row renders `Number(entry.sharpe_ratio || 0).toFixed(2)`, which
+ *  prints "0.00" for a missing ratio. That is not copied: `|| 0` is the same
+ *  absent-reads-as-zero defect `finiteNumber` was written to remove, and a
+ *  Sharpe of exactly 0.00 is a real claim about a real run. The server does
+ *  currently send `or 0` itself (service.py:2161), so the em dash is not
+ *  reachable today -- it is reachable the moment that is fixed, which is the
+ *  point of putting the rule on this side of the wire too. */
+export function formatSharpe(value: unknown): string {
+  const n = finiteNumber(value);
+  if (!Number.isFinite(n)) return '—';
+  return n.toFixed(2);
 }
 
 /** Every model, plus the two reference baselines -- 9 of the 12 entries the API
@@ -253,9 +317,16 @@ export function buildBoardData(payload: {
     standings.push({
       key: entry.entry_id,
       name,
+      // Overwritten with the 1-based table position once the sort below has
+      // run. Not left optional: a `rank?` would let a consumer render
+      // `undefined` if the assignment were ever moved above the sort, and the
+      // failure would be a silently blank column rather than a type error.
+      rank: 0,
       // Two decimals, matching /app's rank rows and this card's own tooltip.
       ret: formatPercent(finiteNumber(entry.cumulative_return), 2),
       cumulativeReturn: finiteNumber(entry.cumulative_return),
+      endingValue: formatCurrency(entry.portfolio_value),
+      sharpe: formatSharpe(entry.sharpe_ratio),
       color: style.color,
       isModel,
     });
@@ -294,6 +365,13 @@ export function buildBoardData(payload: {
     const bv = Number.isFinite(b.cumulativeReturn) ? b.cumulativeReturn : -Infinity;
     if (av === bv) return 0;
     return bv > av ? 1 : -1;
+  });
+  // AFTER the sort, and that ordering is the whole meaning of the field. Rank
+  // is this row's position among the rows actually rendered; assigning it at
+  // push time would number them in payload order and leave the table showing
+  // #4 above #2.
+  standings.forEach((row, index) => {
+    row.rank = index + 1;
   });
   return { times, series, standings, windowLabel: payload.window?.label || '' };
 }

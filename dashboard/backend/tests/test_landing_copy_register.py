@@ -223,11 +223,20 @@ def test_race_sample_cards_have_no_live_pulse():
     with a real name, and live *market prices* are a real product property.
 
     The positive assertions pin that the cards themselves still ship AND that the
-    bundle text was actually read: "Standings" and "Leaderboard" live only in the
-    JS bundle, so a broken entry-bundle reference cannot turn the negative check
-    vacuous (shown by fault injection during review)."""
+    bundle text was actually read: these strings live only in the JS bundle, so a
+    broken entry-bundle reference cannot turn the negative check vacuous (shown
+    by fault injection during review).
+
+    THE ANCHOR MOVED FROM "Standings" TO "Contender" because the card did. Race's
+    "Competition Standings" card was retired when its table moved into the hero
+    card, and the hero table heads that column "Contender" -- it ranks benchmarks
+    beside models, so it may not call them all AI models (see
+    test_the_standings_table_does_not_present_a_benchmark_as_an_ai_model). The
+    ban itself is unchanged and is still global over the bundle: an animated
+    pulse beside a FIXED historical window is a fresh claim wherever it is
+    rendered, and the hero card is a worse place for it than Race was."""
     text = _shipped_text()
-    assert "Standings" in text and "Leaderboard" in text
+    assert "Contender" in text and "Leaderboard" in text
     assert "animate-ping" not in text
     assert "animate-pulse" not in text or "Competition window" in text, (
         "a pulse on this card must not outlive the window label that dates it"
@@ -431,26 +440,35 @@ def test_no_landing_component_puts_a_user_agent_on_the_board():
     )
 
 
-def test_race_standings_render_the_full_selection_baselines_included():
+def test_the_hero_standings_render_the_full_selection_baselines_included():
     """ADJUDICATED BY THE CONTROLLER, pinned rather than left to drift back: the
-    Race standings table includes buy_hold_djia and djia_index alongside the 7
-    models, unlike /app's home CHART rank list, which is models-only. Three
-    reasons live in the Race.tsx comment beside `standings`: (1) the dashboard's
-    own Competition Leaderboard tab ranks all twelve entries including the
-    baselines -- it is the home CHART rank list that is models-only, and this
-    card is a board, not that list; (2) the chart on this page already draws
-    both baselines as dashed curves, so a row-less curve would be a dangling
-    reference; (3) most of the models lost to buy-and-hold, and a models-only
-    table would silently make the page more flattering than the truth -- the
-    exact failure the copy guards in this file exist to prevent.
+    standings table includes buy_hold_djia and djia_index alongside the models,
+    unlike /app's home CHART rank list, which is models-only. Three reasons,
+    restated in the BoardPreview.tsx comment beside the table: (1) the
+    dashboard's own Competition Leaderboard tab ranks all twelve entries
+    including the baselines -- it is the home CHART rank list that is
+    models-only, and this card is a board, not that list; (2) the chart on this
+    page already draws both baselines as dashed curves, so a row-less curve
+    would be a dangling reference; (3) most of the models lost to buy-and-hold,
+    and a models-only table would silently make the page more flattering than
+    the truth -- the exact failure the copy guards in this file exist to
+    prevent.
+
+    THE TABLE MOVED FROM Race.tsx INTO THE HERO CARD and this guard moved with
+    it. It was written against Race because Race was where the ranking lived;
+    the hero card carried a chip strip and Race carried the table. The hero card
+    carries the table now and Race carries none, so scanning Race for
+    ``standings.map`` would pin an empty invariant on a file that no longer
+    renders a row -- green forever, guarding nothing. The ruling is unchanged;
+    only the file that has to obey it moved.
 
     `selectBoardEntries` (pinned separately in
     test_select_board_entries_returns_nine_of_twelve_models_first_then_baselines,
     test_landing_live_board.py) already seeds `board.data.standings` with both
-    baselines; what this guard pins is that Race.tsx does not narrow that list
-    back down before rendering it -- e.g. a `standings.filter((s) => ...)`
-    inserted ahead of the `.map` would compile cleanly and pass every other
-    guard in this file while silently dropping the baseline rows.
+    baselines; what this guard pins is that the render does not narrow that list
+    back down -- e.g. a `standings.filter((s) => ...)` inserted ahead of the
+    `.map` would compile cleanly and pass every other guard in this file while
+    silently dropping the baseline rows.
 
     THE BAN IS ON THE OPERATION, NOT ON A RECEIVER NAMED `standings`. Requiring
     `standings` to be the immediate receiver pinned one spelling of the edit and
@@ -459,25 +477,44 @@ def test_race_standings_render_the_full_selection_baselines_included():
     []).filter(...)`, whose receiver is `)` -- rebinding first
     (`standings0.filter(...)`), and `board.data.standings.slice(0, 7)`. The
     ternary form was reproduced end to end: `npm run typecheck` clean and the
-    five landing suites at 116 passed, with the models-only table the controller
-    ruled against. That ruling matters because buy-and-hold beat six of the
-    seven models: a models-only table makes the page more flattering than the
-    truth, which is the exact failure every copy guard in this file exists to
-    prevent.
+    five landing suites green, with the models-only table the controller ruled
+    against.
 
-    Race.tsx renders exactly one collection, so a blanket ban costs nothing
-    here. If this component ever needs a legitimate `.filter`/`.slice`, that is
-    a change to the adjudicated ruling -- argue with this docstring first, do
-    not widen the regex. Comments are stripped so the prose above (and Race.tsx's
-    own "do not add a filter here" note) cannot trip it."""
-    source = _BLOCK_COMMENT.sub("", _RACE_TSX.read_text(encoding="utf-8"))
-    assert "standings.map(" in source, "Race.tsx no longer maps the full standings array"
+    WHOLE-FILE, AND AN EARLIER DRAFT OF THIS CASE SCOPED IT TO THE TABLE AND
+    FAILED OPEN. The reasoning for narrowing was that Race.tsx rendered exactly
+    one collection so a file-wide ban cost nothing there, while BoardPreview.tsx
+    also owns the chart and might legitimately need those methods on `series` or
+    `times`. Both halves were true and the conclusion was still wrong: the scan
+    started at the table header, and `standings` is DERIVED about 370 lines
+    above it. The one edit this case exists to catch --
+    `const standings = (data?.standings ?? []).filter((s) => s.isModel)` --
+    sits outside the scanned region. Reproduced end to end: that one line drops
+    both baselines from the table, leaves the chart's two dashed curves unnamed,
+    keeps `tableCoverage` self-consistent because it reads the same narrowed
+    array, and left the three landing modules at 107 passed.
+
+    The chart's need was hypothetical and the file still contains zero
+    `.filter(`/`.slice(` calls, so the whole-file ban costs nothing today. If a
+    chart-side call is ever genuinely needed, exclude that call site by name --
+    do not re-narrow the window and reopen 370 lines. Comments are stripped so
+    neither this prose nor the component's own "do not add a filter here" note
+    can trip it."""
+    source = _BLOCK_COMMENT.sub(
+        "", (_LANDING_HOME / "BoardPreview.tsx").read_text(encoding="utf-8")
+    )
+    assert 'data-testid="board-rank-head"' in source, (
+        "the standings table header is gone from BoardPreview.tsx — the ranking "
+        "moved again, and this guard has to move with it"
+    )
+    assert "standings.map(" in source, (
+        "BoardPreview.tsx no longer maps the full standings array"
+    )
     narrowing = re.search(r"\.\s*(filter|slice)\(", source)
     assert not narrowing, (
-        f"Race.tsx narrows a collection before rendering it "
-        f"({narrowing.group(0)!r} at offset {narrowing.start() if narrowing else -1}); "
-        f"the baseline rows the controller ruled must stay on the board are the "
-        f"only thing this component can narrow away"
+        f"BoardPreview.tsx narrows a collection before rendering it "
+        f"({narrowing.group(0)!r} at offset {narrowing.start()}); the baseline "
+        f"rows the controller ruled must stay on the board are the only thing "
+        f"this component can narrow away"
     )
 
 
@@ -526,30 +563,58 @@ def test_the_race_headline_is_derived_from_the_board_it_sits_beside():
 def test_the_standings_table_does_not_present_a_benchmark_as_an_ai_model():
     """The table deliberately ranks buy_hold_djia and djia_index alongside the
     models (pinned above), and most of the models lost to buy-and-hold -- so on
-    the live board the `#1` row IS a benchmark. It was rendered in the brand
-    accent (`bg-primary/10`, `text-primary`), under a column headed "AI model",
-    beneath a heading reading "What the AI models actually returned", with nothing
-    marking it as a reference curve. The chart distinguishes those two with a dash
-    pattern; the table had no equivalent, so three signals at once told a visitor
-    the passive index was the leading AI model.
+    the live board the `#1` row IS a benchmark. In Race it was rendered in the
+    brand accent, under a column headed "AI model", beneath a heading reading
+    "What the AI models actually returned", with nothing marking it as a
+    reference curve. The chart distinguishes those two with a dash pattern; the
+    table had no equivalent, so three signals at once told a visitor the passive
+    index was the leading AI model.
 
-    The accent is NOT what this bans. That buy-and-hold came first is the honest,
-    unflattering fact this card exists to show, and moving the highlight to the
-    best model would be the flattery every guard in this file is against. What is
-    banned is the column header calling every row an AI model, with no per-row
-    tag to say otherwise.
+    What is banned is the column header calling every row an AI model, with no
+    per-row tag to say otherwise.
 
-    `baselines-only` got a caption for this exact confusion when the PR landed;
-    the `full` branch, which is the one that actually ships, did not."""
-    source = _BLOCK_COMMENT.sub("", _RACE_TSX.read_text(encoding="utf-8"))
-    header = re.search(r'col-span-7">([^<]+)</div>', source)
-    assert header, "the standings header row's model column is gone"
-    assert header.group(1).strip().lower() != "ai model", (
-        "the column holds benchmarks too; heading it 'AI model' publishes "
-        "buy-and-hold as the leading model"
+    THE PRESSURE WENT UP WHEN THE TABLE MOVED INTO THE HERO CARD, which is why
+    this guard follows it rather than being retired with Race's table. /app's
+    rank list -- the visual this one is ported from -- heads that column "AI
+    Model", and it is right to: `isHomeModelEntry` filters its rows to models.
+    Copying the markup without copying that filter is the single most likely
+    way this regresses, and it would land the false header on the page's
+    highest-traffic surface, above the fold, in the first thing a visitor sees.
+
+    The `#1` accent is NOT what this bans, in either card. That buy-and-hold
+    came first is the honest, unflattering fact the board exists to show, and
+    moving the highlight to the best model would be the flattery every guard in
+    this file is against."""
+    source = _BLOCK_COMMENT.sub(
+        "", (_LANDING_HOME / "BoardPreview.tsx").read_text(encoding="utf-8")
     )
-    assert "item.isModel" in source, (
-        "nothing in a row distinguishes a benchmark from a model"
+    head = re.search(
+        r'data-testid="board-rank-head"(.*?)</div>', source, re.S
+    )
+    assert head, "the standings header row is gone"
+    labels = [
+        text.strip()
+        for text in re.findall(r">([^<>{}]+)<", head.group(1))
+        if text.strip()
+    ]
+    assert labels, "the standings header row has no column labels"
+    assert not any(label.lower() == "ai model" for label in labels), (
+        f"the column holds benchmarks too; heading it 'AI model' publishes "
+        f"buy-and-hold as the leading model. Found {labels}"
+    )
+    assert "Contender" in labels, (
+        f"the mixed field needs a word that covers both; found {labels}"
+    )
+    # POLARITY, NOT PRESENCE. `"item.isModel" in source` and
+    # `"Benchmark" in source` are both satisfied by the inverted ternary
+    # `{!item.isModel ? null : <span>Benchmark</span>}`, which tags all seven
+    # models and leaves buy_hold_djia -- the actual #1 row -- untagged under the
+    # medal accent. That is this case's own failure, wearing its own assertions.
+    # The tag belongs on the FALSE arm: a row is tagged when it is NOT a model.
+    assert re.search(r"item\.isModel\s*\?\s*null\s*:", source), (
+        "the Benchmark tag must hang off the false arm of `item.isModel` — an "
+        "inverted ternary tags every AI model and leaves the benchmarks bare, "
+        "which is this guard's own failure mode with its assertions still green"
     )
     assert "Benchmark" in source, "the per-row benchmark tag is gone"
     assert "Benchmark" in _shipped_text(), (

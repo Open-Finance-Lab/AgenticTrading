@@ -1,4 +1,3 @@
-import { Button } from "@/components/ui/button";
 import { ArrowUpRight, ArrowDownRight, Clock } from "lucide-react";
 import {
   LineChart,
@@ -11,7 +10,7 @@ import {
   Legend,
   ReferenceLine,
 } from "recharts";
-import { PRIMARY_LANDING_CTA } from "@/lib/cta";
+import { LandingCTA } from "./LandingCTA";
 import { STORY_AGENT_NAME, STORY_DECISIONS, STORY_SPECS } from "./storyline";
 
 const C0 = STORY_SPECS.initialCapitalNum;
@@ -358,14 +357,10 @@ export function Test() {
         </div>
 
         <div>
-          <Button
-            size="lg"
-            type="button"
-            data-landing-auth={PRIMARY_LANDING_CTA.authMode}
+          <LandingCTA
             className="bg-primary text-primary-foreground glow-primary hover:bg-primary/90"
-          >
-            {PRIMARY_LANDING_CTA.label}
-          </Button>
+            secondaryClassName="border-border text-foreground hover:bg-muted"
+          />
         </div>
       </div>
     </section>
