@@ -60,7 +60,7 @@ CREATE TABLE IF NOT EXISTS analytics_events (
             'credential_invalid', 'credential_missing', 'provider_timeout',
             'provider_unavailable', 'provider_quota_exhausted',
             'credits_unavailable',
-            'model_not_allowed', 'internal_error'
+            'model_not_allowed', 'internal_error', 'run_timeout'
         )
     ),
     country_code TEXT CHECK (country_code IS NULL OR length(country_code) = 2),
@@ -235,7 +235,8 @@ class PostgresAnalyticsStore:
                             'credential_invalid', 'credential_missing',
                             'provider_timeout', 'provider_unavailable',
                             'provider_quota_exhausted', 'credits_unavailable',
-                            'model_not_allowed', 'internal_error'
+                            'model_not_allowed', 'internal_error',
+                            'run_timeout'
                         )
                     )
                     """

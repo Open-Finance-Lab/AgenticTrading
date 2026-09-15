@@ -459,9 +459,30 @@ def test_sqlite_migrates_legacy_error_category_constraint(tmp_path):
         "Legacy Analytics User",
         "SecurePass1!",
     )
+    # Also strip any category added after provider_quota_exhausted (currently
+    # just run_timeout): the migration sentinel keys on the LAST category
+    # added, so a fixture missing provider_quota_exhausted but still naming a
+    # later category would misread as already-migrated and this test would
+    # stop testing the migration -- silently, since a skipped rebuild and a
+    # correct one both leave `created is True` for every OTHER category.
     legacy_ddl = ANALYTICS_SQLITE_DDL.replace(
         "'provider_unavailable', 'provider_quota_exhausted',\n            'credits_unavailable',",
         "'provider_unavailable', 'credits_unavailable',",
+    ).replace(
+        "'model_not_allowed', 'internal_error', 'run_timeout'",
+        "'model_not_allowed', 'internal_error'",
+    )
+    # Each replace must actually land -- a no-op replace (anchor drifted)
+    # would leave the target category in the fixture and this test would
+    # stop testing the migration without failing. Update the anchor above to
+    # match the new DDL text; do not delete these assertions.
+    assert "provider_quota_exhausted" not in legacy_ddl, (
+        "the provider_quota_exhausted replace found no anchor -- update it "
+        "to match the new DDL text, or this test silently asserts nothing"
+    )
+    assert "run_timeout" not in legacy_ddl, (
+        "the run_timeout replace found no anchor -- update it to match the "
+        "new DDL text, or this test silently asserts nothing"
     )
     with sqlite3.connect(db_path) as conn:
         conn.executescript(legacy_ddl)
@@ -483,9 +504,28 @@ def test_sqlite_migrates_legacy_error_category_constraint(tmp_path):
 
 def test_sqlite_defers_error_category_migration_until_users_table_exists(tmp_path):
     db_path = tmp_path / "analytics-before-users.db"
+    # See the comment in test_sqlite_migrates_legacy_error_category_constraint:
+    # this fixture must also predate every category added after
+    # provider_quota_exhausted, or the last-category-keyed sentinel misreads
+    # it as already migrated.
     legacy_ddl = ANALYTICS_SQLITE_DDL.replace(
         "'provider_unavailable', 'provider_quota_exhausted',\n            'credits_unavailable',",
         "'provider_unavailable', 'credits_unavailable',",
+    ).replace(
+        "'model_not_allowed', 'internal_error', 'run_timeout'",
+        "'model_not_allowed', 'internal_error'",
+    )
+    # Each replace must actually land -- a no-op replace (anchor drifted)
+    # would leave the target category in the fixture and this test would
+    # stop testing the migration without failing. Update the anchor above to
+    # match the new DDL text; do not delete these assertions.
+    assert "provider_quota_exhausted" not in legacy_ddl, (
+        "the provider_quota_exhausted replace found no anchor -- update it "
+        "to match the new DDL text, or this test silently asserts nothing"
+    )
+    assert "run_timeout" not in legacy_ddl, (
+        "the run_timeout replace found no anchor -- update it to match the "
+        "new DDL text, or this test silently asserts nothing"
     )
     with sqlite3.connect(db_path) as conn:
         conn.executescript(legacy_ddl)
@@ -508,6 +548,66 @@ def test_sqlite_defers_error_category_migration_until_users_table_exists(tmp_pat
         error_category="provider_quota_exhausted",
     )
 
+    assert store.append_event(event).created is True
+
+
+def test_sqlite_accepts_run_timeout_category(sqlite_contract):
+    store, _admin_id, user_id = sqlite_contract
+    event = event_record(
+        user_id,
+        event_id="10000000-0000-4000-8000-000000000007",
+        event_name="backtest_failed",
+        event_group="run",
+        event_source="server",
+        source_event_id="run:timeout-contract",
+        session_id=None,
+        page_view=None,
+        error_category="run_timeout",
+    )
+    assert store.append_event(event).event.error_category == "run_timeout"
+
+
+def test_sqlite_migrates_a_database_stuck_on_the_previous_category_set(tmp_path):
+    """The sentinel trap, pinned.
+
+    `_migrate_error_category_constraint` skips the table rebuild when the live
+    CHECK already names the LAST category added. Leave that sentinel on
+    `provider_quota_exhausted` while adding `run_timeout` and every EXISTING
+    SQLite database keeps its old CHECK -- rejecting the new category at write
+    time -- while a fresh database accepts it. Green tests, broken prod. The
+    only way to see it is to build a database at the previous generation, which
+    is what this does.
+    """
+    db_path = tmp_path / "analytics-pre-run-timeout.db"
+    users = UserStore(db_path=db_path)
+    user = users.create_user(
+        "pre-run-timeout@example.test",
+        "Pre Run Timeout User",
+        "SecurePass1!",
+    )
+    previous_ddl = ANALYTICS_SQLITE_DDL.replace(
+        "'model_not_allowed', 'internal_error', 'run_timeout'",
+        "'model_not_allowed', 'internal_error'",
+    )
+    assert previous_ddl != ANALYTICS_SQLITE_DDL, (
+        "the replace found no anchor -- update it to match the new DDL text, "
+        "or this test silently asserts nothing"
+    )
+    with sqlite3.connect(db_path) as conn:
+        conn.executescript(previous_ddl)
+
+    store = AnalyticsStore(db_path=db_path)
+    event = event_record(
+        int(user["id"]),
+        event_id="10000000-0000-4000-8000-000000000008",
+        event_name="backtest_failed",
+        event_group="run",
+        event_source="server",
+        source_event_id="run:timeout-migration",
+        session_id=None,
+        page_view=None,
+        error_category="run_timeout",
+    )
     assert store.append_event(event).created is True
 
 
