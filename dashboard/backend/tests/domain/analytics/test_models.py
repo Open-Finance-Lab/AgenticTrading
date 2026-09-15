@@ -85,8 +85,20 @@ def test_allowlists_are_closed_and_versioned():
         "credits_unavailable",
         "model_not_allowed",
         "internal_error",
+        "run_timeout",
     } <= ALLOWED_ERROR_CATEGORIES
     assert ALLOWED_FRONTEND_EVENT_NAMES < ALLOWED_EVENT_NAMES
+
+
+def test_run_timeout_is_its_own_error_category():
+    """A budget exhaustion must be distinguishable from a crash.
+
+    Before this, `_finalize_slot_locked` hardcoded `internal_error` for every
+    non-None error, so the product's own analytics could not tell "we ran out of
+    the hour we gave ourselves" from "something threw".
+    """
+    assert "run_timeout" in ALLOWED_ERROR_CATEGORIES
+    assert "internal_error" in ALLOWED_ERROR_CATEGORIES
 
 
 @pytest.mark.parametrize(
