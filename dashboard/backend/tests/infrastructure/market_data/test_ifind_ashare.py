@@ -522,8 +522,9 @@ def test_minimum_bars_never_exceeds_the_weekday_derived_bar_count():
     around 22 that the ~4-5 real trading days in it (16-20 bars) cannot reach.
     An earlier name claimed the floor never exceeds what "any legal window can
     actually return", which reads as coverage of exactly that case. It is not.
-    A CN trading calendar is the only thing that would close it; see the
-    _MINIMUM_BAR_COMPLETENESS comment for why this module does not carry one.
+    A CN trading calendar is the only thing that would close it; see issue
+    #483 and the _MINIMUM_BAR_COMPLETENESS comment for why not to just lower
+    the fraction instead.
     """
     from dashboard.backend.api.routers.backtests import MAX_BACKTEST_DAYS
     from dashboard.backend.infrastructure.market_data.ifind_ashare import (

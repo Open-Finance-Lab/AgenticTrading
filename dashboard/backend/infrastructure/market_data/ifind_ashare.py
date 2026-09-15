@@ -45,7 +45,10 @@ ASHARE_SESSIONS_PER_TRADING_DAY = 4
 # would put a second, unversioned holiday table in the codebase next to the
 # exchange's own. Lowering the fraction instead would trade a visible false
 # refusal for a silent acceptance of a genuinely truncated reply, which is
-# the trade this guard exists to refuse. Tracked as a follow-up on #474.
+# the trade this guard exists to refuse. Tracked as issue #483, which
+# carries the measured windows: the refusals cluster at 11-13 day spans,
+# NOT at the full 14, where the window picks up enough weekdays on either
+# side of the closure to clear its own floor.
 _MINIMUM_BAR_COMPLETENESS = 0.5
 # One full session day. Keeps a very short window from deriving a floor of
 # zero, which would disable the check entirely.
