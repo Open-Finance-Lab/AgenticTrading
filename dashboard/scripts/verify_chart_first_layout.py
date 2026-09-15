@@ -71,6 +71,25 @@ def clamp(lo: float, preferred: float, hi: float) -> float:
     return max(lo, min(preferred, hi))
 
 
+def _px(value) -> float | None:
+    """Parse a computed CSS length like ``"520px"`` into a float.
+
+    Returns ``None`` rather than raising for an absent or unparseable value,
+    because the caller has a *check* to report for that case and a traceback
+    here would abort the whole sweep at one viewport -- losing the other five
+    viewports' results to a missing custom property.
+    """
+    if not value:
+        return None
+    text = str(value).strip()
+    if text.endswith("px"):
+        text = text[:-2]
+    try:
+        return float(text)
+    except ValueError:
+        return None
+
+
 def measure_landing(page, width: int, height: int) -> None:
     # `load`, NOT `networkidle`: both surfaces poll in the background, so there is
     # no guarantee the network ever goes idle for 500ms. `networkidle` passed at
@@ -121,32 +140,55 @@ def measure_landing(page, width: int, height: int) -> None:
         const chartBox = rc && rc.parentElement;
         const column = card && card.closest('div[class*="basis-2/3"], div[class*="lg:basis-2/3"]');
         const container = column && column.closest('.container');
-        // A testid, not `.flex-nowrap`. The class was the thing under test, so
-        // the selector went stale the moment the strip was fixed -- and a
-        // querySelector that finds nothing makes this check SKIP, which prints
-        // as a clean run.
-        const chips = card && card.querySelector('[data-testid="board-chip-strip"]');
+        // THE CHIP STRIP IS GONE -- it became the scrollable standings table
+        // (BoardPreview.tsx). Both testids below are pinned in that file; a
+        // querySelector that finds nothing makes its check FAIL rather than
+        // skip, for the reason the deleted strip selector proved: a stale
+        // selector that merely stops matching prints as a clean run.
+        const list = card && card.querySelector('[data-testid="board-rank-list"]');
+        const head = card && card.querySelector('[data-testid="board-rank-head"]');
         const r = (el) => el ? el.getBoundingClientRect() : null;
-        const stripBox = chips ? chips.getBoundingClientRect() : null;
+        const listBox = r(list);
         return {
             card: r(card),
             chart: r(chartBox),
             column: r(column),
             container: r(container),
-            // Per-chip containment, not scrollWidth. Once the strip wraps it
-            // can never overflow horizontally, so the old scrollWidth test
-            // would pass forever regardless of what is visible; what matters is
-            // that all five entries are inside the box.
-            chips: chips ? {
-                total: chips.children.length,
-                inside: Array.from(chips.children).filter(c => {
+            // HORIZONTAL CONTAINMENT ONLY, and VERTICAL FULLY-VISIBLE COUNT
+            // SEPARATELY. The list is deliberately `overflow-y: auto` with a
+            // clamped max-height, so rows BELOW the fold of its own scroll box
+            // are correct, not a defect -- the old per-chip test demanded every
+            // child sit inside the box on both axes, which this element can
+            // never satisfy and which would redden on a working layout. What
+            // still has to hold is that no row spills sideways (the grid's
+            // columns are the thing that breaks) and that enough rows are
+            // visible without scrolling for the list to read as a ranking.
+            list: list ? {
+                total: list.children.length,
+                withinX: Array.from(list.children).filter(c => {
                     const b = c.getBoundingClientRect();
                     return b.width > 0 && b.height > 0
-                        && b.left >= stripBox.left - 0.5 && b.right <= stripBox.right + 0.5
-                        && b.top >= stripBox.top - 0.5 && b.bottom <= stripBox.bottom + 0.5;
+                        && b.left >= listBox.left - 0.5 && b.right <= listBox.right + 0.5;
                 }).length,
+                fullyVisible: Array.from(list.children).filter(c => {
+                    const b = c.getBoundingClientRect();
+                    return b.height > 0
+                        && b.top >= listBox.top - 0.5 && b.bottom <= listBox.bottom + 0.5;
+                }).length,
+                scrolls: list.scrollHeight > list.clientHeight + 1,
             } : null,
+            head: r(head),
             innerHeight: window.innerHeight,
+            // READ FROM THE PAGE, NOT RESTATED HERE. These constants moved
+            // twice (730/460 -> 650/510 -> 650/520) and this script carried
+            // the FIRST pair the whole time -- a guard that is wrong in the
+            // permissive direction reports a card hanging below the fold as a
+            // clean run, because its "expected" was computed from a reserve
+            // nothing uses. Resolving the custom property means the breakpoint
+            // logic lives in exactly one place: the markup.
+            chartReserve: chartBox
+                ? getComputedStyle(chartBox).getPropertyValue('--board-chart-reserve').trim()
+                : null,
             // getComputedStyle, never the `hidden` attribute: PR #357's clipping
             // bug was invisible to attribute probes.
             cardDisplay: card ? getComputedStyle(card).display : null,
@@ -173,23 +215,37 @@ def measure_landing(page, width: int, height: int) -> None:
         f"bottom={bottom:.1f} innerHeight={m['innerHeight']}",
     )
 
-    # The chart's own clamp. The reserve is breakpoint-dependent -- 390px beside
-    # the copy, 590px stacked -- because the card's non-chart height is 218-241px
-    # at lg+ and 443px at phone width, where the title, chip and caption wrap and
-    # the chip strip runs to five rows.
-    reserve = 390.0 if width >= LG else 590.0
     # Reported as a FAILURE when the container is absent, never skipped: a
     # missing chart is the single worst outcome this pass exists to catch, and a
     # silent skip would render it as a clean run.
     check(m["chart"] is not None, "/ chart container found", str(bool(m["chart"])))
     if m["chart"]:
-        expected = clamp(260.0, height - reserve, 520.0)
-        actual = m["chart"]["height"]
+        # THE RESERVE COMES FROM THE PAGE. It used to be two literals here
+        # (390/590) restating what BoardPreview.tsx sets -- and they were never
+        # updated through two rounds of re-derivation, so from the day the chip
+        # strip became a table this "expected" was computed against a number no
+        # stylesheet contained. That direction of error is the dangerous one: a
+        # card hanging 100px below the fold still matched its own wrong
+        # expectation and printed green. Reading the custom property keeps the
+        # breakpoint rule (`lg:` vs base) in the markup, which is the only place
+        # that can be authoritative about it.
+        reserve = _px(m.get("chartReserve"))
+        # FAIL, NEVER SKIP, when the property is missing: an unresolvable
+        # custom property means the clamp below it evaluated to `auto` too, so
+        # there is nothing left to check and everything left to report.
         check(
-            abs(actual - expected) <= 2.0,
-            "/ chart height matches its clamp",
-            f"actual={actual:.1f} expected={expected:.1f}",
+            reserve is not None,
+            "/ --board-chart-reserve resolves",
+            f"value={m.get('chartReserve')!r}",
         )
+        if reserve is not None:
+            expected = clamp(260.0, height - reserve, 520.0)
+            actual = m["chart"]["height"]
+            check(
+                abs(actual - expected) <= 2.0,
+                "/ chart height matches its clamp",
+                f"actual={actual:.1f} expected={expected:.1f} reserve={reserve:.0f}",
+            )
 
     # Column width. THE DENOMINATOR IS THE CONTAINER, NOT THE VIEWPORT: this
     # same layout is 66.7% of the container but only 63.0-65.9% of the viewport,
@@ -206,17 +262,31 @@ def measure_landing(page, width: int, height: int) -> None:
             f" container={m['container']['width']:.0f}",
         )
 
-    # EVERY viewport, not just 1440. This ran at one width -- the one the strip
-    # was designed against -- so it could not see that the strip was dropping
-    # one to four of its five chips across the whole lg band and every phone.
-    # The strip is the chart's only legend; a missing chip is a drawn curve
-    # nothing on the page names.
-    check(m["chips"] is not None, "/ chip strip found", str(bool(m["chips"])))
-    if m["chips"]:
+    # EVERY viewport, not just 1440. The predecessor of this block ran at one
+    # width -- the one the chip strip was designed against -- so it could not
+    # see the strip dropping one to four of its five chips across the whole lg
+    # band and every phone. The standings table inherited both the legend job
+    # and that lesson.
+    check(m["list"] is not None, "/ standings list found", str(bool(m["list"])))
+    check(m["head"] is not None, "/ standings header found", str(bool(m["head"])))
+    if m["list"]:
+        # HORIZONTAL ONLY. Vertical overflow is the design (the list scrolls);
+        # a row wider than its own box is the grid breaking.
         check(
-            m["chips"]["inside"] == m["chips"]["total"] and m["chips"]["total"] == 5,
-            "/ every chip is visible inside the strip",
-            f"{m['chips']['inside']}/{m['chips']['total']} inside",
+            m["list"]["withinX"] == m["list"]["total"] and m["list"]["total"] > 0,
+            "/ every standings row fits the list horizontally",
+            f"{m['list']['withinX']}/{m['list']['total']} within",
+        )
+        # THREE, not all of them, and not four. The list's max-height clamps to
+        # 96px at its floor, which is two rows and most of a third at the 28px
+        # row pitch; demanding more would redden the shortest viewports the
+        # clamp is designed to serve, and demanding all of them would contradict
+        # the scrollbar this element deliberately has.
+        check(
+            m["list"]["fullyVisible"] >= 3,
+            "/ at least 3 standings rows visible without scrolling",
+            f"{m['list']['fullyVisible']} of {m['list']['total']} fully visible"
+            f" (scrolls={m['list']['scrolls']})",
         )
 
 

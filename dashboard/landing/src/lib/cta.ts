@@ -84,3 +84,21 @@ export const LANDING_DISCORD_CTA = {
   label: "Join our Discord community",
   href: "https://discord.gg/9HnQ6XDG98",
 } as const;
+
+/** The one signed-in control that is neither a modal trigger nor a link.
+ *
+ *  IT HAS NO `authMode` AND NO `href`, and both absences are deliberate. No
+ *  `authMode`, because rule 1 above bans `data-landing-auth` on anything a
+ *  signed-in visitor sees. No `href`, because signing out is a POST with a
+ *  side effect and a link that performs one is wrong in every way that matters
+ *  — it is prefetchable, middle-clickable into a second tab, and reachable by
+ *  a crawler. `AccountControl.tsx` renders it as a `<button type="button">`.
+ *
+ *  Rule 2 still applies with full force even though this is not a link: "Sign
+ *  out" is not "Start Free" or "Get Started", and must not be renamed into
+ *  either, or index.html's LABEL FALLBACK would open the signup modal on top of
+ *  a sign-out click. `test_frontend_bundle_integrity.py` pins that for every
+ *  signed-in CTA constant in this file, link or not. */
+export const LANDING_SIGN_OUT_CTA = {
+  label: "Sign out",
+} as const;

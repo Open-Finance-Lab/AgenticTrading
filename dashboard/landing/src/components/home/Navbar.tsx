@@ -6,6 +6,7 @@ import {
   SIGNED_IN_PRIMARY_CTA,
 } from "@/lib/cta";
 import { useSignedIn } from "@/lib/session";
+import { AccountControl } from "./AccountControl";
 
 const NAV_LINKS = [
   { href: "#why", label: "Why" },
@@ -42,6 +43,29 @@ export function Navbar() {
           band — so `lg:` is the first safe breakpoint. Login stays reachable
           below it via the modal's own "Already have an account?" switch.
         */}
+        {/* THE SIGNED-IN COUNTERPART TO "Sign in", AND IT SITS IN THE SAME
+            BAND FOR THE SAME REASON. `.landing-header` overlays the brand, so
+            this cluster's width is paid for out of "Agentic Trading Lab" rather
+            than out of layout — and at ~2px of collision threshold per px of
+            width (measured above), "Signed in as <name> · Sign out" is far more
+            than the 65px that already moved the threshold to ~814px. Below
+            `lg` it would garble the brand on every phone and on iPad portrait.
+
+            SO THE CONTROL IS NOT NAVBAR-ONLY. Hiding it here below `lg` would
+            leave a phone-sized signed-in visitor with no way out of the page
+            again, which is the exact gap this component exists to close, so
+            FooterCTA.tsx mounts the same component at EVERY width. The navbar
+            copy is the convenience; the footer copy is the guarantee.
+
+            The wrapper carries the breakpoint rather than `className` doing it:
+            AccountControl's own root is `flex`, and `hidden lg:flex` passed
+            alongside it would put two display utilities on one element and
+            leave which wins to Tailwind's layer ordering. */}
+        {signedIn ? (
+          <div className="hidden lg:block">
+            <AccountControl />
+          </div>
+        ) : null}
         {signedIn ? null : (
           <button
             type="button"

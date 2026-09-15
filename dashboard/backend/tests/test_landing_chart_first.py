@@ -154,13 +154,13 @@ def test_the_landing_chart_uses_its_own_measured_clamp():
     band -- and the arithmetic is spelled out in the component beside the
     constants:
 
-        lg+     510 = ceil10(136 cardTop + 362.95 non-chart @1024x768) + 10
-        below   650 = ceil10(132 cardTop + 504.45 non-chart @360x800)  + 10
+        lg+     520 = ceil10(136 cardTop + 364.15 non-chart @1024x768) + 10
+        below   650 = ceil10(132 cardTop + 505.65 non-chart @360x800)  + 10
 
     Each starts from the measured figure it replaces (313.75 and 583.25), takes
     out the chip strip's height at that width (four rows / 120px at 1024, eight
     rows / 248px at 360, plus a 32px caption block in both) and puts back the
-    table's, which does not vary by width: 20px caption + 25.2px head + 156px
+    table's, which does not vary by width: 20px caption + 26.4px head + 156px
     list. THAT INVARIANCE IS THE POINT. The strip's height was a function of how
     many entries the roster had and how wide the card was, so every roster
     change and every re-measurement at a new width moved these constants --
@@ -172,16 +172,37 @@ def test_the_landing_chart_uses_its_own_measured_clamp():
     pretend otherwise. cardTop and the header block carry over from the browser
     measurements above; the strip heights removed and the table height added are
     computed from pitches stated in the source (24px + 8px for the strip, and
-    13.5px/1.35 + 3px padding-block = 24.2px + 8px for the rows). Re-measure at
-    1024x768 and 360x800 when a browser is available and correct both numbers if
-    they disagree.
+    a 28px row + 8px gap for the list). THE ROW PITCH IS THE BADGE, NOT THE
+    TEXT, and an earlier draft of this docstring got that wrong -- it said
+    "13.5px/1.35 + 3px padding-block = 24.2px", which is neither the text box
+    (18.2 + 6 = 24.2 is arithmetically fine) nor the row: the <li> is a grid
+    with ``items-center``, so its height is its TALLEST cell, and the 22px rank
+    badge beats the text at 13.5px and still beats it at 16px (21.6). The row
+    is 22 + 3 + 3 = 28px, and was 28px before the type bump too -- which is why
+    raising the rows cost the list nothing. Re-measure at 1024x768 and 360x800
+    when a browser is available and correct both numbers if they disagree.
 
-    The fit that binds is still 1024x768 and still by ~10px: the chart floors at
-    260 there (768 - 510 = 258), so the card needs 136 + 362.95 + 260 = 758.95
-    against 768.
+    THE TYPE BUMP MOVED EXACTLY ONE CONSTANT, and only through the head. Rows
+    13.5 -> 16 changed no height at all (badge dominance, above). The head
+    12 -> 14.4 -- ``text-[11px]`` -> ``text-[12px]`` against a pinned
+    ``leading-[1.2]`` -- added 1.2px, enough to carry the lg figure across a
+    ceil10 boundary (500.15 rounds up to 510, +10 = 520) and not enough to
+    carry the base one (637.65 rounds up to 640 either way).
+
+    THE FIT IS NO LONGER A SINGLE TIGHT POINT. Pairing the list's own clamp
+    with the chart's -- ``clamp(96, 100dvh - 632, 148)`` against
+    ``clamp(260, 100dvh - 520, 520)`` -- leaves exactly one of the two in its
+    linear middle at any viewport from 728 to 1040 tall, so the card's bottom
+    tracks the viewport 1:1 and the slack is a CONSTANT 19.85px across that
+    whole band, 1024x768 included (list 136, chart floored at 260, card
+    748.15 against 768). Raising the reserve alone could not have produced
+    that: at 768 the chart is already on its floor, so the reserve is not in
+    the expression there and the list clamp is the only lever -- which is why
+    ``calc(100dvh-620px)`` became ``calc(100dvh-632px)`` while the base
+    reserve did not move.
 
     The 260px FLOOR is what binds on a phone, not either reserve -- unchanged,
-    and now less severe: 504.45 of non-chart against the old 583.25 pulls ~79px
+    and now less severe: 505.65 of non-chart against the old 583.25 pulls ~78px
     of the card back above the fold, because a table that scrolls does not wrap
     the way a strip did. Still below the fold, still deliberate. The floor is
     pinned here so a future "fix" that shrinks it to chase the fold has to argue
@@ -219,7 +240,7 @@ def test_the_landing_chart_uses_its_own_measured_clamp():
         "the base reserve must be unprefixed, or the clamp is invalid below "
         "that breakpoint and the chart region computes to 0"
     )
-    assert "lg:[--board-chart-reserve:510px]" in board, "the side-by-side reserve"
+    assert "lg:[--board-chart-reserve:520px]" in board, "the side-by-side reserve"
     assert "56vh" not in _BOARD, "the first draft's clamp fails at four viewports"
     assert "h-[210px]" not in _BOARD and "md:h-[240px]" not in _BOARD
 
@@ -412,11 +433,17 @@ def test_the_hero_card_carries_the_full_ranking_table_and_scrolls_it():
     assert "overflow-y-auto" in classes, "the standings list must scroll, not clip"
     # PINNED WHOLE, like the two reserves, because all three numbers are derived
     # and derived together: 148 is the height the lg reserve was computed
-    # against, and 620 is chosen so the list starts giving height back exactly
-    # at the viewport where the fit runs out (100dvh - 620 == 148 at 768). A
-    # bare "has some max-h" check would pass on any of them being edited alone,
+    # against, and 632 is chosen so that the list is ALREADY giving height back
+    # at 768 -- `100dvh - 632` is 136 there, one row and change short of the
+    # cap. 620 put the crossover exactly at 768 (100dvh - 620 == 148), which
+    # meant the tightest supported viewport was also the one viewport where
+    # neither clamp had any give: the card cleared the fold by 9px there and by
+    # more everywhere else. Staggering the two clamps by 12px is what flattens
+    # that into a constant 19.85px of slack from 728 to 1040 -- see the
+    # derivation in BoardPreview.tsx and in this module's clamp case. A bare
+    # "has some max-h" check would pass on any of them being edited alone,
     # which is the only way they can go wrong.
-    assert "max-h-[clamp(96px,calc(100dvh-620px),148px)]" in classes, (
+    assert "max-h-[clamp(96px,calc(100dvh-632px),148px)]" in classes, (
         f"the list must keep its derived height clamp — see the derivation in "
         f"BoardPreview.tsx and in this module's clamp case; found {classes!r}"
     )
@@ -503,6 +530,15 @@ def test_the_standings_table_waits_for_the_fetch_before_claiming_the_board_is_em
         "as a successful empty response"
     )
     assert empty != -1, "the genuinely-empty branch is gone"
+    # ALL THREE DEAD-END BRANCHES END THE SAME WAY. The loading line is the one
+    # state that resolves itself; the other two do not, and a reader given no
+    # next step on two of three is being told the page is broken in a way they
+    # cannot act on. The error branch always carried "Reload to try again." and
+    # the empty one did not, for no reason beyond the order they were written.
+    assert table.count("Reload to try again.") == 2, (
+        "the error and empty branches must both name the recovery step; only "
+        "the loading state resolves on its own"
+    )
     assert loading < empty and error < empty, (
         "the status branches must be tested BEFORE the coverage branch, or an "
         "in-flight request renders the copy that claims it already succeeded"
@@ -513,6 +549,33 @@ def test_the_standings_table_waits_for_the_fetch_before_claiming_the_board_is_em
     assert 'board.status === "ready" && tableCoverage === "baselines-only"' in board, (
         "the 'no AI model results came back' line asserts a completed request; "
         "it must not render for one that has not completed"
+    )
+
+    # THE COLUMN HEADER IS A CLAIM TOO, and it sat OUTSIDE every branch above --
+    # which is the same defect one element higher up, and the one this test's
+    # own <ol>-scoped search could not see. "# | Contender | Ending value |
+    # Return | Sharpe" painted over the loading shimmer, over the error line,
+    # and over "the standings came back empty": a five-column frame asserting a
+    # ranking that is not under it.
+    #
+    # lib/leaderboard.ts bans this by name in its own docstring ("Race drew its
+    # Rank/AI model/Return header over zero rows"), so it is a re-run of a
+    # documented defect, not a new judgement call.
+    #
+    # `tableCoverage`, NOT `coverage`: the two answer different questions (the
+    # chart's caption uses `coverage`), and gating the head on the chart's rule
+    # would put it back over a list printing its own empty message.
+    head = board.index('data-testid="board-rank-head"')
+    gate = board.rfind('board.status === "ready" && tableCoverage !== "empty"', 0, head)
+    assert gate != -1, (
+        "the standings column header must be gated on a ready, non-empty "
+        "board — unbranched, it draws a five-column frame over the loading "
+        "shimmer, over the error message and over the empty-board copy"
+    )
+    # Nothing between the gate and the head but the opening <div>: a gate that
+    # governs some ancestor several branches away is not this element's gate.
+    assert head - gate < 400, (
+        "the gate must be the header's own conditional, not a distant ancestor's"
     )
 
 
@@ -656,10 +719,24 @@ def test_the_two_surfaces_agree_on_the_numbers_that_must_agree():
     # two different facts about two different treatments, agreeing on nothing.
     # It could not do better, because / had a chip strip and /app had a table;
     # there was no shared number to pin. / now draws the same table, so the
-    # shared number exists and is 13.5px -- styles.css sets it for the promoted
+    # shared number exists and is 16px -- styles.css sets it for the promoted
     # hero card specifically (`.home-landing-board .home-module-rank-list li`),
-    # and the React rows take it as an arbitrary value because Tailwind's scale
-    # has no half-pixel step.
+    # and the React rows take it as `text-[16px]` rather than `text-base`.
+    #
+    # `text-[16px]` AND NOT `text-base`, WHICH IS THE SAME FONT SIZE. The two
+    # differ in what else they set: `text-base` also sets
+    # `line-height: 1.5rem` = 24px, which is past the 22px rank badge that
+    # currently decides the row height, so it would grow every row from 28px to
+    # 30px and silently invalidate the 156px list figure both reserves are
+    # derived from. The arbitrary value sets font-size and nothing else, and
+    # `leading-[1.35]` beside it keeps the line box at 21.6 -- under the badge,
+    # which is why this bump cost no height at all.
+    #
+    # THE BUMP IS SCOPED ON THE /app SIDE and unscoped here, which is not an
+    # asymmetry: every selector in that styles.css block is prefixed
+    # `.home-landing-board` because the same markup is still a one-third-width
+    # dashboard tile elsewhere, where 12.5px is right for the column. This file
+    # IS the promoted card, so it has no narrow twin to protect.
     #
     # The swatch assertion stays and gains its counterpart: the colour-to-name
     # link is what both surfaces would silently lose if a row stopped carrying
@@ -667,11 +744,28 @@ def test_the_two_surfaces_agree_on_the_numbers_that_must_agree():
     styles_css = (
         Path(__file__).resolve().parents[2] / "frontend" / "styles.css"
     ).read_text(encoding="utf-8")
-    assert "text-[13.5px]" in _BOARD, "the landing rows must keep the /app row size"
-    assert ".home-landing-board .home-module-rank-list li { font-size: 13.5px; }" in styles_css, (
-        "the /app hero card's row size moved; the landing's text-[13.5px] now "
+    assert "text-[16px]" in _BOARD, "the landing rows must keep the /app row size"
+    assert "text-base" not in _BOARD, (
+        "`text-base` is the same font-size with a 24px line-height, which "
+        "exceeds the 22px rank badge and grows every row from 28px to 30px -- "
+        "invalidating the 156px list height both reserves are derived from"
+    )
+    assert ".home-landing-board .home-module-rank-list li { font-size: 16px; }" in styles_css, (
+        "the /app hero card's row size moved; the landing's text-[16px] now "
         "disagrees with it"
     )
+    # THE HEAD AND THE BADGE TOO, because a row raised without them re-opens
+    # exactly the readability gap the bump closed -- 11px column labels over
+    # 16px rows read as a different component. Both are pinned on both surfaces
+    # for the same reason the row size is: the two tables are one design.
+    assert "text-[12px] leading-[1.2]" in _BOARD, (
+        "the standings head must keep its size AND its pinned line-height -- "
+        "`text-[12px]` sets font-size only, so without `leading-[1.2]` the row "
+        "inherits preflight's 1.5 and stands 18px instead of 14.4"
+    )
+    assert ".home-landing-board .hm-rank-table-head { font-size: 12px; }" in styles_css
+    assert ".home-landing-board .home-module-rank { font-size: 12px; }" in styles_css
+    assert ".home-landing-board .hm-rank-value { font-size: 14px; }" in styles_css
     assert "hm-rank-swatch" in home_js
     assert "backgroundColor: item.color" in _BOARD, (
         "the landing rows must carry the curve's own colour, as /app's do"

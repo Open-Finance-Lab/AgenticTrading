@@ -377,23 +377,44 @@ def test_no_signed_in_cta_is_hijacked_by_the_delegated_handler():
     blocks = _CTA_CONST_BLOCK.findall(cta)
     assert blocks, "cta.ts declares no CTA constants — re-point this guard"
 
-    # A signed-in CTA is one that NAVIGATES: it carries an href. A signed-out one
-    # carries an authMode and stays on the page. That distinction is the file's
-    # own, stated in its comments, and it is what makes "which CTAs must not be
-    # hijacked" answerable without listing them here by name.
-    signed_in = {name: body for name, body in blocks if "href:" in body}
+    # A SIGNED-OUT CTA IS THE ONE WITH AN authMode; everything else in this file
+    # is shown to a signed-in visitor. That is the inverse of how this guard
+    # first drew the line, and the inversion matters.
+    #
+    # It used to select `"href:" in body`, reasoning that a signed-in CTA is one
+    # that NAVIGATES. True of the two that existed then, and the selector went
+    # quietly wrong the moment a third arrived: `LANDING_SIGN_OUT_CTA` has no
+    # href on purpose -- signing out is a POST with a side effect, so it renders
+    # as a `<button type="button">`, not a link. An href-keyed filter therefore
+    # skipped the one signed-in control that is NOT a link, and the label
+    # fallback in index.html does not care whether it hit a button or an anchor.
+    # Renaming it to "Get Started" would have opened a signup modal on top of a
+    # sign-out click, with this test green.
+    #
+    # Selecting by the ABSENCE of authMode has no such hole: a constant is
+    # either a modal trigger or it is not, that property is the file's own
+    # stated distinction, and a new signed-in constant of any shape -- link,
+    # button, or something not yet invented -- is covered by default rather
+    # than by remembering to widen a selector.
+    signed_in = {name: body for name, body in blocks if "authMode" not in body}
     assert signed_in, (
-        "cta.ts declares no href-bearing CTA. Either the signed-in CTAs were "
-        "removed — in which case the landing has gone back to serving one "
+        "cta.ts declares no CTA without an authMode. Either the signed-in CTAs "
+        "were removed — in which case the landing has gone back to serving one "
         "audience — or they moved, and this guard is vacuous."
+    )
+    assert any("href:" in body for body in signed_in.values()), (
+        "no signed-in CTA navigates anywhere; the primary signed-in link is gone"
     )
 
     bundle = _entry_bundle_text()
     for name, body in signed_in.items():
+        # The attribute rule, which is the handler's PRIMARY match and hits
+        # before any label comparison. Now a tautology given the selector above
+        # — kept deliberately, as the assertion that FAILS if that selector is
+        # ever widened back to something href-shaped.
         assert "authMode" not in body, (
-            f"{name} carries both an href and an authMode. The delegated handler "
-            f"will preventDefault() the navigation and open the signup modal "
-            f"instead."
+            f"{name} carries an authMode. The delegated handler will "
+            f"preventDefault() it and open the signup modal instead."
         )
         labels = _CTA_LABEL.findall(body)
         assert labels, f"{name} has no label"

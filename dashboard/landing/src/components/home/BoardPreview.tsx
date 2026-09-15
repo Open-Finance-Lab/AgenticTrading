@@ -248,7 +248,18 @@ export function BoardPreview() {
   const rows = useMemo(() => toRows(data?.times ?? [], series), [data, series]);
 
   return (
-    <div className="bg-card border border-card-border rounded-xl shadow-2xl overflow-hidden flex flex-col">
+    // `data-testid` ON THE ROOT BECAUSE THE MEASUREMENT PASS ALREADY QUERIES IT.
+    // dashboard/scripts/verify_chart_first_layout.py selects
+    // `[data-testid="board-preview"]` and, finding nothing, falls back to
+    // guessing the card by its `.rounded-xl` class -- a fallback that goes stale
+    // in SILENCE, because a class-based guess keeps matching some element and
+    // keeps reporting a height for it. The reserves derived below are checked
+    // against whatever that guess returns, so the one script able to catch an
+    // over-optimistic reserve was measuring an element nobody had pinned.
+    <div
+      className="bg-card border border-card-border rounded-xl shadow-2xl overflow-hidden flex flex-col"
+      data-testid="board-preview"
+    >
       <div className="px-5 pt-5 pb-4 border-b border-border">
         {/* WRAPS, and the chip may not out-size the row. Both halves are one
             fix for one measured defect, and it is the window label above that
@@ -314,16 +325,27 @@ export function BoardPreview() {
 
             lg+ (measured at 1024x768, where the strip took FOUR rows)
               out: strip 120 (4 rows x 24 + 3 x 8) + caption 32 = 152
-              in : caption 20 + head 25.2 (13.2 + mt-3 12) + list 156
-                   (148 + mt-2 8) = 201.2
-              nonChart 313.75 - 152 + 201.2 = 362.95
-              reserve = ceil10(136 + 362.95) + 10 = 510
+              in : caption 20 + head 26.4 (14.4 + mt-3 12) + list 156
+                   (148 + mt-2 8) = 202.4
+              nonChart 313.75 - 152 + 202.4 = 364.15
+              reserve = ceil10(136 + 364.15) + 10 = 520
 
             below (measured at 360x800, where the strip took EIGHT rows)
               out: strip 248 (8 x 24 + 7 x 8) + caption 52 = 300
-              in : caption 40 + head 25.2 + list 156 = 221.2
-              nonChart 583.25 - 300 + 221.2 = 504.45
-              reserve = ceil10(132 + 504.45) + 10 = 650
+              in : caption 40 + head 26.4 + list 156 = 222.4
+              nonChart 583.25 - 300 + 222.4 = 505.65
+              reserve = ceil10(132 + 505.65) + 10 = 650  (unchanged)
+
+            THE TYPE BUMP COST THE ROWS NOTHING AND THE HEAD 1.2px. Raising the
+            row from 13.5px to 16px moved no height at all, because the row is
+            as tall as its 22px badge and 16 x 1.35 = 21.6 is still under it
+            (see the badge-dominance note below) -- the list block is 156 on
+            both sides of the change. Only the head moved, 13.2 -> 14.4, and
+            1.2px is enough to cross a ceil10 boundary at lg (500.15 rounds up
+            to 510, +10 = 520) and not enough to cross one below (637.65 rounds
+            up to 640 either way). A one-band move out of a 1.2px input is
+            exactly what the trailing +10 exists to absorb, which is why only
+            one of the two constants here changed.
 
             THE CAPTION WRAPS AT 360 AND DOES NOT AT 1024, which is why the two
             bands do not share an `in` figure. "Return over the competition
@@ -337,29 +359,59 @@ export function BoardPreview() {
             real height now, so re-measuring one of them cannot introduce 20px
             of error into a constant whose step is 10.
 
-            THE HEAD'S LINE-HEIGHT IS PINNED, NOT INHERITED. `text-[11px]`
-            compiles to `font-size: 11px` and nothing else, so the row used to
-            take Tailwind preflight's `html { line-height: 1.5 }` and stand
-            16.5px tall against the 13.2 this derivation assumes -- enough to
-            move the lg constant a full ceil10 step to 520. `leading-[1.2]` on
-            that row makes 13.2 a property of the markup rather than of a
-            default that can change under it.
+            THE HEAD'S LINE-HEIGHT IS PINNED, NOT INHERITED. `text-[12px]`
+            compiles to `font-size: 12px` and nothing else, so the row would
+            otherwise take Tailwind preflight's `html { line-height: 1.5 }` and
+            stand 18px tall against the 14.4 this derivation assumes -- 3.6px,
+            which is three times the 1.2px that already moved the lg constant a
+            full ceil10 step. `leading-[1.2]` on that row makes 14.4 a property
+            of the markup rather than of a default that can change under it.
+            The same reasoning is why the ROW below is `text-[16px]` and not
+            `text-base`: the two set the same font-size, but `text-base` also
+            sets `line-height: 1.5rem` = 24px -- past the 22px badge, so it
+            would silently make every row 30px instead of 28 and put the list
+            18px over the height this block derives for it.
 
-          The fit that binds is 1024x768, and it is the same 10px it always was:
-          the chart floors at 260 there (768 - 510 = 258), so the card needs
-          136 + 362.95 + 260 = 758.95 against 768. At 900 tall the chart takes
-          390 and the card ends 11px above the fold; at 1080 the chart caps at
-          520 and there is 61px to spare.
+          THE FIT IS NOW FLAT AT 19.85px RATHER THAN ONE TIGHT POINT, and the
+          list clamp is what buys that. Card bottom at >=lg is
+
+            136 + 208.15 + (list + 8) + chart
+              list  = clamp(96, 100dvh - 632, 148)
+              chart = clamp(260, 100dvh - 520, 520)
+
+          and from 728 to 1040 tall EXACTLY ONE of those two clamps is in its
+          linear middle while the other sits on a bound, so the sum tracks the
+          viewport 1:1 and the slack is a constant 19.85px:
+
+            768  list 136, chart 260 (floored) -> 748.15   19.85 above the fold
+            780  list 148 (capped), chart 260  -> 760.15   19.85
+            800  list 148, chart 280           -> 780.15   19.85
+            1040 list 148, chart 520 (capped)  -> 1020.15  19.85
+            1080 list 148, chart 520           -> 1020.15  59.85
+
+          1024x768 is therefore no longer the one viewport the card only just
+          clears; it clears by the same margin as every other. RAISING THE
+          RESERVE ALONE COULD NOT HAVE DONE THIS: at 768 the chart is already on
+          its 260 floor, so the reserve is not in the expression there at all,
+          and the only lever at that viewport is the list's own clamp. That is
+          why 620 became 632 (768 - 632 = 136, one row and change less list)
+          while the base reserve did not move. Below 728 both clamps sit on
+          their lower bounds, the expression stops tracking the viewport, and
+          the card hangs again -- that band belongs to the 260px-floor note
+          further down and always has.
 
           ⚠ DERIVED ARITHMETICALLY FROM THE MEASURED FIGURES ABOVE, NOT
           RE-MEASURED IN A BROWSER. The two inputs that carry over unchanged —
           cardTop and the header block — are measurements; the strip heights
           removed and the table height added are computed from the pitches this
-          file and styles.css already state (24px row + 8px gap; 13.5px/1.35
+          file and styles.css already state (24px row + 8px gap; 16px/1.35
           text; 22px rank badge + 3px padding-block top and bottom = 28px
           row). THE ROW IS AS TALL AS ITS BADGE, NOT AS ITS TEXT: the row is a
           grid with items-center, so its height is the tallest cell, and the
-          22px badge beats the 18.2px line of 13.5px/1.35 text. Nine rows are
+          22px badge beats the 21.6px line of 16px/1.35 text. That 0.4px of
+          headroom is the whole reason the readability bump was free, and it is
+          equally the reason the next one will not be: 17px/1.35 is 22.95 and
+          every row grows. Nine rows are
           therefore 9 x 28 + 8 x 8 = 316px, and the 148px viewport shows four
           rows and a sliver of the fifth. RE-MEASURE at 1024x768 and 360x800 at
           the next opportunity and correct these two numbers if they disagree.
@@ -417,7 +469,7 @@ export function BoardPreview() {
           broken build. */}
       <div
         ref={chartRef}
-        className="w-full px-3 pt-4 [--board-chart-reserve:650px] lg:[--board-chart-reserve:510px]"
+        className="w-full px-3 pt-4 [--board-chart-reserve:650px] lg:[--board-chart-reserve:520px]"
         style={{
           height: "clamp(260px, calc(100dvh - var(--board-chart-reserve)), 520px)",
         }}
@@ -565,21 +617,41 @@ export function BoardPreview() {
             accent and the section heading behind the claim that the passive
             index is the leading AI model. /app's header can say "AI Model"
             because /app's list contains only models. */}
-        <div
-          className={`${RANK_GRID} mt-3 text-[11px] leading-[1.2] text-muted-foreground px-0.5`}
-          data-testid="board-rank-head"
-        >
-          <span>#</span>
-          <span>Contender</span>
-          <span className="hidden sm:block text-right">Ending value</span>
-          <span className="text-right">Return</span>
-          <span
-            className="hidden sm:block text-right"
-            title="Risk-adjusted return, annualized from hourly results."
+        {/* THE HEAD IS INSIDE THE STATUS BRANCH, not above it. It used to sit
+            outside every branch, so the five-column frame "# | Contender |
+            Ending value | Return | Sharpe" was painted over the loading
+            shimmer, over the error message and over the empty-board message —
+            a confident frame with nothing under it, which is precisely the
+            failure the branches inside the <ol> below exist to remove and which
+            lib/leaderboard.ts's own docstring bans by name ("Race drew its
+            Rank/AI model/Return header over zero rows").
+
+            `tableCoverage`, NOT `coverage`. The two answer genuinely different
+            questions — see the note where they are computed — and the table's
+            branch must be decided by the table's rule, or this head reappears
+            over a list that is itself printing "the standings came back empty".
+
+            WITHHOLDING IT MAKES THE CARD SHORTER THAN THE DERIVATION BELOW
+            ASSUMES, which is the safe direction: the reserves are computed with
+            the 26.4px head block present, so a state that drops it has 26.4px
+            MORE fold slack, never less. */}
+        {board.status === "ready" && tableCoverage !== "empty" ? (
+          <div
+            className={`${RANK_GRID} mt-3 text-[12px] leading-[1.2] text-muted-foreground px-0.5`}
+            data-testid="board-rank-head"
           >
-            Sharpe
-          </span>
-        </div>
+            <span>#</span>
+            <span>Contender</span>
+            <span className="hidden sm:block text-right">Ending value</span>
+            <span className="text-right">Return</span>
+            <span
+              className="hidden sm:block text-right"
+              title="Risk-adjusted return, annualized from hourly results."
+            >
+              Sharpe
+            </span>
+          </div>
+        ) : null}
 
         {board.status === "ready" && tableCoverage === "baselines-only" ? (
           // The reachable half, and the one that looks plausible: the LLM
@@ -651,7 +723,7 @@ export function BoardPreview() {
             as a list, which is the platform most of this page's mobile screen
             reader traffic is on. */}
         <ol
-          className="board-rank-scroll mt-2 max-h-[clamp(96px,calc(100dvh-620px),148px)] overflow-y-auto overflow-x-hidden list-none m-0 p-0 flex flex-col gap-2"
+          className="board-rank-scroll mt-2 max-h-[clamp(96px,calc(100dvh-632px),148px)] overflow-y-auto overflow-x-hidden list-none m-0 p-0 flex flex-col gap-2"
           role="list"
           aria-label="Competition standings"
           data-testid="board-rank-list"
@@ -668,14 +740,14 @@ export function BoardPreview() {
           ) : tableCoverage === "empty" ? (
             <li className="px-0.5 py-4 text-sm text-muted-foreground">
               The standings came back empty. The request succeeded and carried no entries —
-              nothing here is a result.
+              nothing here is a result. Reload to try again.
             </li>
           ) : (
             standings.map((item) => (
-              <li key={item.key} className={`${RANK_GRID} text-[13.5px] leading-[1.35] py-[3px]`}>
+              <li key={item.key} className={`${RANK_GRID} text-[16px] leading-[1.35] py-[3px]`}>
                 <span
-                  className={`w-[22px] h-[22px] rounded-full grid place-items-center text-[11px] font-bold ${
-                    item.rank <= MEDAL_CLASS.length
+                  className={`w-[22px] h-[22px] rounded-full grid place-items-center text-[12px] font-bold ${
+                    item.rank >= 1 && item.rank <= MEDAL_CLASS.length
                       ? MEDAL_CLASS[item.rank - 1]
                       : "bg-muted text-muted-foreground"
                   }`}
@@ -703,7 +775,7 @@ export function BoardPreview() {
                     </span>
                   )}
                 </span>
-                <span className="hidden sm:block text-right font-mono text-xs text-muted-foreground tabular-nums">
+                <span className="hidden sm:block text-right font-mono text-sm text-muted-foreground tabular-nums">
                   {item.endingValue}
                 </span>
                 <span className={`text-right font-mono font-bold tabular-nums ${returnTone(item)}`}>

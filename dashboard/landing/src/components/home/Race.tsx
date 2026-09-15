@@ -93,6 +93,20 @@ function headlineSentence(standings: BoardStanding[]): string {
   return `${opening} ${countWord(ahead)} finished ahead of ${both}.`;
 }
 
+/** Gated on the same `standings` array, for the same reason `headlineSentence`
+ *  is: loading, an error and a 200 carrying no rows all reach this with
+ *  nothing on screen to point at. Those branches used to live in the table
+ *  this section owned; they moved into BoardPreview.tsx along with the rows,
+ *  but the CLAIM that the rows are ranked "at the top of this page" stayed
+ *  behind and needs its own present/future-tense fallback rather than
+ *  asserting a table that may not be there. */
+function boardPointerSentence(standings: BoardStanding[]): string {
+  if (!standings.length) {
+    return "The board at the top of this page ranks every contender, benchmarks included, as soon as it loads.";
+  }
+  return "Every contender is ranked in the board at the top of this page, benchmarks included.";
+}
+
 export function Race() {
   const board = useLeaderboard();
   // The ONLY thing this section still derives from the board, and the whole
@@ -127,9 +141,12 @@ export function Race() {
                 the sentence itemised two things a mobile reader cannot find on
                 the page it points at. The ranking and the benchmarks are there
                 at every width. */}
-            <p className="text-foreground/70 mb-6">
-              Every contender is ranked in the board at the top of this page, benchmarks included.
-            </p>
+            {/* GATED, because "is ranked" is a claim about rows that are on the
+                screen. Loading, an error and a 200 with no entries all reach
+                this paragraph, and in all three the board above is showing its
+                own message instead of a ranking — the assertion sent a reader
+                back up the page to look for something that is not there. */}
+            <p className="text-foreground/70 mb-6">{boardPointerSentence(standings)}</p>
             {/* "Live" names the direction the board runs, not brokered execution, and
                 Season 0 is a shakedown with no nightly advance deployed yet. Both are
                 stated on the board's own About card; saying it here too keeps the

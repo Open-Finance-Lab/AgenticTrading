@@ -153,6 +153,16 @@
           ? window.location.origin
           : '';
 
+        // 1200ms IS A DEADLINE FOR THE FETCH, NOT FOR THE HOMEPAGE. A warm
+        // /api/auth/me answers in well under this on Render, so the ordinary
+        // case still corrects the cached profile before first paint and never
+        // flashes signed-in CTAs it has to swap out. What this bounds is the
+        // two cases a bare fetch()+.then/.catch cannot: a free-tier cold start
+        // (30-60s) and a request that never settles at all, which reaches
+        // neither .then nor .catch and used to leave landing-auth-pending on
+        // <html> -- and the page blank under `visibility: hidden` -- forever.
+        var REVEAL_TIMEOUT_MS = 1200;
+
         function clearAuth() {
           try {
             localStorage.removeItem(AUTH_TOKEN_KEY);
@@ -171,7 +181,20 @@
           } catch (e) { /* ignore */ }
         }
 
+        // IDEMPOTENT ON PURPOSE -- it is now called from up to two places for
+        // one page load (the timer and whichever of .then/.catch settles), and
+        // the second call must be a no-op rather than a second class flip.
+        // `revealed` also stops a late-settling fetch from re-adding anything
+        // after the timer has already painted the page.
+        var revealed = false;
+        var revealTimer = null;
         function showLanding() {
+          if (revealed) return;
+          revealed = true;
+          if (revealTimer !== null) {
+            clearTimeout(revealTimer);
+            revealTimer = null;
+          }
           document.documentElement.classList.remove('landing-auth-pending');
           document.documentElement.classList.add('landing-ready');
         }
@@ -201,6 +224,14 @@
           return;
         }
 
+        // ARMED BEFORE THE FETCH, NOT AFTER IT. `fetch` can throw synchronously
+        // on a malformed URL, and a timer armed on the next line would never be
+        // set in that case -- the one failure mode that leaves the page blank
+        // with no promise to settle. Passing the function by reference rather
+        // than wrapping it in `function () { showLanding(); }` keeps this a
+        // timeout on the reveal, not a second code path to keep in sync.
+        revealTimer = setTimeout(showLanding, REVEAL_TIMEOUT_MS);
+
         fetch(API_BASE + '/api/auth/me', {
           credentials: 'include',
         }).then(function (res) {
@@ -218,6 +249,13 @@
             // The cached profile is a ghost. clearAuth() both removes it and
             // tells the mounted React tree, so the CTAs fall back to signed-out
             // rather than offering a dashboard this visitor cannot open.
+            //
+            // THIS STILL RUNS AFTER A TIMED-OUT REVEAL, and that is the point of
+            // doing it before showLanding() rather than instead of it. The
+            // timeout only decides WHEN the page becomes visible; it does not
+            // cancel the revalidation, so a slow 401 still corrects the CTAs --
+            // visibly swapping them, which is the honest outcome and strictly
+            // better than a blank page that would have shown the same swap.
             clearAuth();
           }
           showLanding();
@@ -233,8 +271,8 @@
         });
       })();
     </script>
-    <script type="module" crossorigin src="/assets/index-kvUodFKo.js"></script>
-    <link rel="stylesheet" crossorigin href="/assets/index-DWeazkdN.css">
+    <script type="module" crossorigin src="/assets/index-Cwk1nmHC.js"></script>
+    <link rel="stylesheet" crossorigin href="/assets/index-goeFawbv.css">
   </head>
   <body>
     <div id="root"></div>

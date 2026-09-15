@@ -1,3 +1,4 @@
+import { AccountControl } from "./AccountControl";
 import { LandingCTA } from "./LandingCTA";
 
 export function FooterCTA() {
@@ -15,6 +16,20 @@ export function FooterCTA() {
             secondaryClassName="w-full sm:w-auto border-border text-foreground hover:bg-muted text-base h-12 px-8"
           />
         </div>
+
+        {/* AT EVERY WIDTH, unlike the navbar's copy, and that is the whole
+            reason this second mount exists. Navbar.tsx hides its AccountControl
+            below `lg` because `.landing-header` overlays the brand and the
+            cluster's width is paid for in garbled chrome — which would leave a
+            signed-in visitor on a phone with no way to end the session on the
+            page that shows them as signed in, the gap the component was written
+            to close. The footer is a plain centred block with no overlay and no
+            width hazard, so it can carry the guarantee.
+
+            It renders `null` when signed out, so the anonymous footer keeps its
+            exact current spacing — the margin below rides on this element, not
+            on the block above it. */}
+        <AccountControl className="justify-center mt-8" />
 
         <div className="mt-24 pt-8 border-t border-border flex flex-col md:flex-row justify-between items-center text-sm text-muted-foreground">
           <div>

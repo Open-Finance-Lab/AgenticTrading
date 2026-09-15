@@ -193,3 +193,43 @@ def test_the_landing_does_not_bounce_a_signed_in_visitor_back_to_the_app():
         "clearing the cached profile must notify the mounted bundle — the "
         "storage event does not fire in the tab that wrote"
     )
+    # BOTH SIDES OF THE SPLIT, and this half is why the assertion above was not
+    # enough on its own. `/app` has no build step, so this event name is a bare
+    # string literal here and a `const` in the bundle's source; nothing in the
+    # toolchain relates the two. A rename on either side leaves the other
+    # compiling, passing, and deaf -- the gate would clear an expired profile
+    # and every CTA would keep offering the dashboard until a reload. Reading
+    # the React side by its own name is what turns a one-sided ban into a
+    # contract.
+    session_ts = (
+        Path(__file__).resolve().parents[2] / "landing" / "src" / "lib" / "session.ts"
+    ).read_text(encoding="utf-8")
+    assert 'LANDING_AUTH_EVENT = "landing-auth-change"' in session_ts, (
+        "index.html dispatches 'landing-auth-change' as a literal; session.ts "
+        "must still listen for that exact name — there is no build step to "
+        "share the constant across the split"
+    )
+
+    # THE REVEAL HAS A DEADLINE. `html.landing-auth-pending body` is
+    # `visibility: hidden`, so the page is BLANK until something removes that
+    # class -- and the only things that removed it were the fetch's own `.then`
+    # and `.catch`. A request that never settles reaches neither. On the free
+    # tier that is not hypothetical: the instance cold-starts in 30-60 seconds,
+    # and a visitor holding a cached profile got a white screen for all of it.
+    #
+    # The timeout bounds the BLANKNESS, not the revalidation: `clearAuth()`
+    # still runs when a slow 401 lands, so the CTAs still correct themselves --
+    # visibly, which is strictly better than correcting them behind a blank
+    # page.
+    assert "setTimeout(showLanding" in gate, (
+        "the reveal must have a timeout — otherwise a fetch that never settles "
+        "leaves the page blank under `visibility: hidden` forever"
+    )
+    assert "clearTimeout(" in gate, (
+        "the timer must be cleared when the fetch wins, or it fires into an "
+        "already-revealed page"
+    )
+    assert re.search(r"if\s*\(revealed\)\s*return;", gate), (
+        "showLanding() is now called from up to two places for one page load; "
+        "the second must be a no-op rather than a second class flip"
+    )
