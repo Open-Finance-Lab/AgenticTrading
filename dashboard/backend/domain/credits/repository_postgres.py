@@ -328,6 +328,9 @@ CREATE TABLE IF NOT EXISTS credit_llm_usage_entries (
 
 CREATE INDEX IF NOT EXISTS idx_credit_llm_usage_user_id
 ON credit_llm_usage_entries(user_id, id DESC);
+
+CREATE INDEX IF NOT EXISTS idx_credit_llm_usage_user_run
+ON credit_llm_usage_entries(user_id, run_id);
 """
 
 
@@ -1374,6 +1377,29 @@ class PostgresCreditsStore:
                 cur.execute("UPDATE credit_llm_reservations SET status = 'released', failure_reason = %s, updated_at = %s WHERE run_id = %s AND status = 'open'", (reason, _utcnow_iso(), run_id))
                 cur.execute("SELECT * FROM credit_llm_reservations WHERE run_id = %s ORDER BY call_index, attempt_index, reservation_id", (run_id,))
                 return [self._llm_reservation_result(cur, row) for row in cur.fetchall()]
+
+    def sum_run_llm_spend(self, user_id: int, run_id: str) -> tuple[int, int]:
+        """Settled LLM spend for one run: ``(micro_credits, distinct_calls)``.
+
+        Twin of ``CreditsStore.sum_run_llm_spend``; see that docstring for why
+        ``:recovery:`` entries are included rather than filtered.
+        """
+        _positive_integer(user_id, "user_id")
+        run_id = _required_text(run_id, "run_id", max_length=128)
+        with self._get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT
+                        COALESCE(SUM(-amount_micro), 0) AS spent_micro,
+                        COUNT(DISTINCT call_index) AS call_count
+                    FROM credit_llm_usage_entries
+                    WHERE user_id = %s AND run_id = %s
+                    """,
+                    (user_id, run_id),
+                )
+                row = cur.fetchone()
+        return (int(row["spent_micro"] or 0), int(row["call_count"] or 0))
 
     def create_or_get_order(
         self,
