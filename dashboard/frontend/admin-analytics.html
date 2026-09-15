@@ -701,9 +701,24 @@
     '1M':{labels:['Aug 12','Aug 19','Aug 26','Sep 2','Sep 9'],platform:[7,9,12,15,18],byok:[3,4,5,6,8]},
     '1Y':{labels:['Oct','Nov','Dec','Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep'],platform:[12,14,18,16,22,27,31,35,39,44,48,54],byok:[5,6,8,7,10,12,14,16,18,21,23,26]}
   };
-  function draw(key){var data=series[key]||series['1W'],max=Math.max.apply(null,data.platform.concat(data.byok)),html='<div class="credit-axis"><span>Higher usage</span><span>Selected range · '+key+'</span></div>';
-    data.labels.forEach(function(label,i){html+='<div class="credit-day"><span class="credit-stem" style="height:'+Math.max(12,data.platform[i]/max*124)+'px"><b>'+data.platform[i]+'</b></span><span class="credit-stem violet" style="height:'+Math.max(10,data.byok[i]/max*124)+'px"><b>'+data.byok[i]+'</b></span><span class="credit-date">'+label+'</span></div>';});
-    html+='<div class="credit-legend"><span><i></i>Platform Credits</span><span><i class="violet"></i>BYOK runs</span></div>';chart.className='credits-paired';chart.style.gridTemplateColumns='repeat('+data.labels.length+',minmax(0,1fr))';chart.style.height=data.labels.length>8?'184px':'164px';chart.innerHTML=html;chart.setAttribute('aria-label','Platform Credits and BYOK runs by date for '+key);}
+  function draw(key){
+    if(!Object.prototype.hasOwnProperty.call(series,key))key='1W';
+    var data=series[key],max=Math.max.apply(null,data.platform.concat(data.byok));
+    function node(tag,className,text){var el=document.createElement(tag);if(className)el.className=className;if(text!==undefined)el.textContent=String(text);return el;}
+    var content=document.createDocumentFragment(),axis=node('div','credit-axis');
+    axis.append(node('span','','Higher usage'),node('span','','Selected range · '+key));content.append(axis);
+    data.labels.forEach(function(label,i){
+      var day=node('div','credit-day');
+      [data.platform[i],data.byok[i]].forEach(function(value,index){
+        var stem=node('span',index?'credit-stem violet':'credit-stem');
+        stem.style.height=Math.max(index?10:12,value/max*124)+'px';stem.append(node('b','',value));day.append(stem);
+      });
+      day.append(node('span','credit-date',label));content.append(day);
+    });
+    var legend=node('div','credit-legend');
+    ['Platform Credits','BYOK runs'].forEach(function(label,index){var item=node('span');item.append(node('i',index?'violet':''),document.createTextNode(label));legend.append(item);});
+    content.append(legend);chart.className='credits-paired';chart.style.gridTemplateColumns='repeat('+data.labels.length+',minmax(0,1fr))';chart.style.height=data.labels.length>8?'184px':'164px';chart.replaceChildren(content);chart.setAttribute('aria-label','Platform Credits and BYOK runs by date for '+key);
+  }
   draw(window.selectedRange||'1W');
   document.querySelectorAll('.range button').forEach(function(button){button.addEventListener('click',function(){draw(button.textContent);});});
 })();
