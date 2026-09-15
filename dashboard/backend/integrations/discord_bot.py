@@ -70,10 +70,16 @@ def selected_agent_for(user_id: str) -> Optional[dict[str, Any]]:
 # (the /backtest routes require a valid UUID X-Session-Id).
 _SESSION_NAMESPACE = uuid.UUID("8f1b2c3d-0000-4000-8000-a9b8c7d6e5f4")
 
-# Background watchers: poll longer than Discord's ~15m interaction token so
-# results still post to the channel when the API's 30m backtest budget is used.
+# Background watchers must outlive the server's own backtest budget, not just
+# Discord's ~15m interaction token -- a watcher that gives up first can never
+# see the server's terminal verdict (timed_out/cancelled/error/success), only
+# ever its own "still running" guess. The server's pipeline budget is
+# PIPELINE_SUBPROCESS_TIMEOUT_SECONDS (3600s) plus SUBPROCESS_TIMEOUT_OVERHEAD_SECONDS
+# (600s) of load/baseline/persistence overhead in dashboard/backend/api/routers/
+# backtests.py, so this window mirrors the browser poller's same choice
+# (BACKTEST_POLL_MAX_SECONDS in app.js): 3600 + 600 = 4200s = 70 minutes.
 _POLL_INTERVAL_SEC = 5
-_MAX_POLLS = 360  # 30 minutes
+_MAX_POLLS = 840  # 70 minutes = (3600 + 600) / 5
 _active_watchers: set[str] = set()
 
 
@@ -605,8 +611,15 @@ async def watch_and_deliver_backtest(
             if status.get("success") or status.get("runs_count"):
                 break
         else:
+            # Reaching here now means something different than it used to: the
+            # watcher outlives the server's own budget (see _MAX_POLLS above),
+            # so the server's timed_out/cancelled/error/success verdict should
+            # already have arrived via one of the branches above. Landing in
+            # the for/else means no terminal answer ever came at all -- not
+            # that the server is merely still working within its own window.
+            watch_minutes = _MAX_POLLS * _POLL_INTERVAL_SEC // 60
             terminal_error = (
-                "Backtest is still running after 30 minutes. "
+                f"Backtest is still running after {watch_minutes} minutes. "
                 "Check the dashboard later, or ask an admin to inspect the API worker."
             )
 
