@@ -237,8 +237,8 @@ def test_watcher_reports_a_timed_out_run_instead_of_waiting_out_the_budget(
     job_store, monkeypatch
 ):
     """The loop knew only running/error/success, so a `timed_out` payload fell
-    through with neither continue nor break -- 360 polls later the for/else
-    delivered "still running after 30 minutes" for an outcome the server had
+    through with neither continue nor break -- 840 polls later the for/else
+    delivered "still running after 70 minutes" for an outcome the server had
     already reported on the second poll."""
     live_run_id = "agent_20260914_timeout01"
     job = job_store.create_job(
@@ -281,7 +281,7 @@ def test_watcher_reports_a_timed_out_run_instead_of_waiting_out_the_budget(
     assert len(poster.calls) == 1
     content = poster.calls[0]["content"]
     assert "60-minute limit" in content
-    assert "still running after 30 minutes" not in content
+    assert "still running after 70 minutes" not in content
 
 
 def test_watcher_reports_a_cancelled_run_instead_of_waiting_out_the_budget(
@@ -322,4 +322,45 @@ def test_watcher_reports_a_cancelled_run_instead_of_waiting_out_the_budget(
     assert len(poster.calls) == 1
     content = poster.calls[0]["content"]
     assert "cancelled" in content.lower()
-    assert "still running after 30 minutes" not in content
+    assert "still running after 70 minutes" not in content
+
+
+def test_the_watcher_outlives_the_server_budget_it_watches():
+    """Two constants, two different jobs -- and the reason they must not
+    reconverge (the same failure class as issue #474 item 5, but for the
+    Discord watcher rather than the browser poller).
+
+    The server's own backtest budget is ``PIPELINE_SUBPROCESS_TIMEOUT_SECONDS``
+    plus ``SUBPROCESS_TIMEOUT_OVERHEAD_SECONDS``; no pipeline backtest can time
+    out before that. ``_MAX_POLLS * _POLL_INTERVAL_SEC`` is how long the Discord
+    watcher keeps polling before giving up and printing its own "still running"
+    guess. If the watcher's window is not longer than the server's budget, the
+    watcher always exits through the for/else *before* the server ever reaches
+    its own ``timed_out`` verdict -- which means the ``timed_out`` branch in
+    ``watch_and_deliver_backtest`` is unreachable in production. It is reachable
+    only via ``resume_open_backtest_jobs()`` after a bot restart mid-run.
+
+    The other watcher tests in this module inject a ``timed_out`` payload
+    directly on the second fake poll, which proves the branch's *logic* is
+    correct but cannot catch this: they never let real wall-clock timing decide
+    whether the branch is ever reached at all. Only comparing the two
+    constants -- imported live from the server module, not copied -- can catch
+    that regression, the same way ``test_the_client_outlives_the_server_budget_
+    it_draws`` in ``test_ifind_ashare_frontend.py`` pins it for the browser
+    poller. If this test fails, the ``timed_out`` branch this module tests
+    elsewhere has gone back to being dead code.
+    """
+    from dashboard.backend.api.routers.backtests import (
+        PIPELINE_SUBPROCESS_TIMEOUT_SECONDS,
+        SUBPROCESS_TIMEOUT_OVERHEAD_SECONDS,
+    )
+
+    watch_seconds = bot._MAX_POLLS * bot._POLL_INTERVAL_SEC
+
+    assert watch_seconds > PIPELINE_SUBPROCESS_TIMEOUT_SECONDS, (
+        "the Discord watcher must keep polling past the server's own budget, "
+        "or it can never receive the server's terminal verdict"
+    )
+    assert watch_seconds == (
+        PIPELINE_SUBPROCESS_TIMEOUT_SECONDS + SUBPROCESS_TIMEOUT_OVERHEAD_SECONDS
+    )
