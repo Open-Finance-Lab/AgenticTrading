@@ -134,7 +134,7 @@ def test_fetches_fixed_universe_once_and_passes_payload_to_adapter():
                 "expected_symbols": A_SHARE_DEMO_6_SYMBOLS,
                 "start": START,
                 "end": END,
-                "min_bars": 50,
+                "min_bars": 44,
             },
         )
     ]
@@ -470,3 +470,77 @@ def test_ifind_provider_import_is_lazy_and_has_no_network_or_fallback_imports():
     )
 
     assert result.returncode == 0, result.stderr
+
+
+def test_minimum_bars_for_a_full_14_day_window_is_half_of_10_weekdays():
+    from dashboard.backend.infrastructure.market_data.ifind_ashare import (
+        minimum_bars_for_window,
+    )
+
+    # 2026-04-06 -> 2026-04-20 is 10 weekdays; expected = 10 * 4 = 40; floor = 20.
+    assert minimum_bars_for_window(date(2026, 4, 6), date(2026, 4, 20)) == 20
+
+
+def test_minimum_bars_for_the_30_day_spy_window_is_44():
+    from dashboard.backend.infrastructure.market_data.ifind_ashare import (
+        minimum_bars_for_window,
+    )
+
+    # 2026-04-01 -> 2026-05-01 is 22 weekdays; expected = 22 * 4 = 88; floor = 44.
+    assert minimum_bars_for_window(date(2026, 4, 1), date(2026, 5, 1)) == 44
+
+
+def test_minimum_bars_for_a_one_day_window_is_raised_to_the_absolute_floor():
+    from dashboard.backend.infrastructure.market_data.ifind_ashare import (
+        minimum_bars_for_window,
+    )
+
+    # 1 weekday -> expected = 4; int(4 * 0.5) = 2, raised to the absolute floor of 4.
+    assert minimum_bars_for_window(date(2026, 4, 6), date(2026, 4, 7)) == 4
+
+
+def test_minimum_bars_for_a_weekend_only_window_is_raised_to_the_absolute_floor():
+    from dashboard.backend.infrastructure.market_data.ifind_ashare import (
+        minimum_bars_for_window,
+    )
+
+    # 0 weekdays -> expected = 0; raised to the absolute floor of 4.
+    assert minimum_bars_for_window(date(2026, 4, 11), date(2026, 4, 13)) == 4
+
+
+def test_minimum_bars_never_exceeds_the_weekday_derived_bar_count():
+    """Regression: every window legal under MAX_BACKTEST_DAYS must derive a
+    floor its own WEEKDAY count can meet.
+
+    Fails loudly if someone raises _MINIMUM_BAR_COMPLETENESS above 1.0 or
+    restores a flat constant -- either of those reintroduces the defect this
+    change exists to fix: a floor no legal window's real bar count can clear.
+
+    ⚠ The name is narrow on purpose. This sweeps WEEKDAYS, so it cannot fail
+    for the case the module comment admits and does not fix: a legal window
+    across a week-long closure (National Day, Spring Festival) derives a floor
+    around 22 that the ~4-5 real trading days in it (16-20 bars) cannot reach.
+    An earlier name claimed the floor never exceeds what "any legal window can
+    actually return", which reads as coverage of exactly that case. It is not.
+    A CN trading calendar is the only thing that would close it; see the
+    _MINIMUM_BAR_COMPLETENESS comment for why this module does not carry one.
+    """
+    from dashboard.backend.api.routers.backtests import MAX_BACKTEST_DAYS
+    from dashboard.backend.infrastructure.market_data.ifind_ashare import (
+        minimum_bars_for_window,
+    )
+
+    base = date(2026, 4, 6)  # a Monday
+    for offset in range(7):
+        start = base + timedelta(days=offset)
+        end = start + timedelta(days=MAX_BACKTEST_DAYS)
+        weekdays = sum(
+            1
+            for day_offset in range((end - start).days)
+            if (start + timedelta(days=day_offset)).weekday() < 5
+        )
+        floor = minimum_bars_for_window(start, end)
+        assert floor <= weekdays * 4, (
+            f"start={start} weekdays={weekdays} floor={floor} exceeds what "
+            f"the window can return ({weekdays * 4} bars)"
+        )

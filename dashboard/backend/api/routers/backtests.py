@@ -71,6 +71,9 @@ from dashboard.backend.infrastructure.market_data.profiles import (
     get_market_profile,
     resolve_decision_source,
 )
+from dashboard.backend.infrastructure.market_data.ifind_ashare import (
+    ASHARE_SESSIONS_PER_TRADING_DAY,
+)
 from dashboard.backend.infrastructure.llm.execution.errors import LLMExecutionError
 from dashboard.backend.infrastructure.llm.execution.service import LLMExecutionService
 from dashboard.backend.infrastructure.llm.execution.handoff import (
@@ -80,6 +83,7 @@ from dashboard.backend.infrastructure.llm.execution.models import (
     BillingMode,
     LLMRunEvidence,
 )
+from dashboard.backend.infrastructure.llm.pipeline_runner import split_pipeline
 from dashboard.backend.domain.model_providers.execution_catalog import (
     UnsupportedExecutionModel,
 )
@@ -1908,6 +1912,237 @@ def _enforce_ai_hedge_fund_window(start_date: str, end_date: str) -> None:
 
 
 # ============================================================================
+# Pipeline LLM window preflight (issue #474, item 1)
+# ============================================================================
+#
+# The hosted guard above can invert its own budget because the hosted path
+# ENFORCES a per-step timeout: _backtest_subprocess_timeout multiplies
+# resolve_step_timeout_seconds() by a day count, and
+# _ai_hedge_fund_trading_days_ceiling() inverts that same product, which is why
+# its docstring can say the bound and the budget cannot disagree.
+#
+# Nothing enforces a per-bar ceiling on the pipeline path. run_pipeline_decision
+# issues one model call per pipeline decision step per hourly bar, each with up
+# to one retry, and the only wall-clock bound anywhere is the 60s httpx read
+# timeout every provider adapter takes by default. A refusal built on that worst
+# case -- 3000 / (60 * 4) = about 12 bars, under two trading days -- would refuse
+# essentially every run. So the number below is a CALIBRATED ESTIMATE of typical
+# per-call latency, not an inverted ceiling, and the 3600s timeout stays the real
+# backstop: a slow reasoning model can still exhaust the budget and be killed.
+# What this preflight removes is the obviously uncompletable case, before any
+# spend and while the user still has the dates on screen.
+#
+# ⚠ The safe direction is INVERTED relative to _backtest_subprocess_timeout.
+# That function over-provisions on purpose, because it sizes a BUDGET. This one
+# computes a REFUSAL: under-estimating the work lets a marginal run through and
+# the timeout catches it, while over-estimating refuses a run that would have
+# succeeded -- on the declared onboarding task, where a new user gets one pass.
+# Do not "tighten" these estimates toward the worst case.
+
+# Hourly decision bars in one trading day, by market.
+#
+# US is the widest session: ``_market_hours_only`` keeps roughly 09:30 through
+# 16:00. CN runs two shorter ones (09:30-11:30 and 13:00-15:00) and costs four.
+#
+# This was ONE number for both, taken from the wider market, on the reasoning
+# that a per-profile table here would be a second place for the bar cadence to
+# be wrong. That reasoning was right about the risk and wrong about the remedy:
+# billing CN at seven bars overstates an A-share run by ~75%, and this guard
+# computes a REFUSAL, so overstating refuses runs that would have finished --
+# the direction the banner above explicitly tells us not to move in. The
+# shipped A-share prefill (11 trading days) with a three-step pipeline
+# estimated 11 x 7 x 3 = 231 calls against a 200 budget and 422'd; its true
+# cost is 11 x 4 x 3 = 132.
+#
+# The duplication worry is answered by not duplicating: the CN number is
+# imported from ``infrastructure/market_data/ifind_ashare.py``, where the same
+# four-bar session already backs ``minimum_bars_for_window``. There is one
+# literal here, for the US default, and markets without their own session
+# constant fall back to it -- still the wider market, so still the conservative
+# answer for anything unrecognised.
+PIPELINE_DECISION_BARS_PER_TRADING_DAY = 7
+_PIPELINE_DECISION_BARS_BY_SOURCE = {
+    IFIND_ASHARE: ASHARE_SESSIONS_PER_TRADING_DAY,
+}
+
+
+def _pipeline_decision_bars_per_trading_day(data_source: Optional[str]) -> int:
+    """Return hourly decision bars one trading day costs on ``data_source``."""
+    return _PIPELINE_DECISION_BARS_BY_SOURCE.get(
+        data_source or "", PIPELINE_DECISION_BARS_PER_TRADING_DAY
+    )
+
+
+def _estimated_pipeline_llm_calls(
+    start_date: str,
+    end_date: str,
+    pipeline: Optional[List[Dict[str, Any]]],
+    data_source: Optional[str] = None,
+) -> int:
+    """Upper-bound the model calls a pipeline LLM backtest will make.
+
+    Decision steps run inside the hourly loop; post-trade steps run once at a
+    trading-day boundary (``run_post_trade_analysis``). Counting post-trade
+    steps per bar would overstate such a pipeline by about 7x and refuse
+    windows that finish comfortably.
+
+    ``max(1, ...)`` is load-bearing: ``split_pipeline(None)`` returns two empty
+    lists, and the single-prompt path -- the most common run there is -- would
+    otherwise estimate zero calls and skip the guard entirely.
+    """
+    trading_days = _estimated_decision_days(start_date, end_date)
+    if trading_days <= 0:
+        # _validate_backtest_params already answered a bad range with a 422
+        # before this runs. Returning 0 keeps this from becoming a second,
+        # competing date validator with its own error surface.
+        return 0
+    decision_steps, post_trade_steps = split_pipeline(pipeline)
+    bars = trading_days * _pipeline_decision_bars_per_trading_day(data_source)
+    return bars * max(1, len(decision_steps)) + trading_days * len(post_trade_steps)
+
+
+# Typical wall-clock for one model call on this deployment. NOT enforced
+# anywhere -- see the banner above. 15s is calibrated for a model that spends a
+# little time reasoning; a fast completion model finishes in a few seconds and a
+# slow reasoning model can exceed the 60s httpx read timeout, which is why this
+# is an operator dial rather than a literal.
+#
+# Consequence worth knowing before changing it: at 15s the shipped modal default
+# window (7 weekdays, 49 US bars) is comfortable at the modal's own default of
+# ONE pipeline step, but the same window with four decision steps costs 196 of
+# the 200 available calls -- it passes by four.
+#
+# Four is not the modal's number; it is this repo's own illustration of a
+# realistic step count, taken from the "four-module pipeline" copy at
+# app.html:1462. That panel is the separate *Trading Algo* surface, which posts
+# to /api/algo/execute and never reaches this guard, so read it as evidence
+# about pipeline shapes users are invited to build, not as a window this bound
+# governs.
+#
+# Either way, a near-miss like that is not an argument for a smaller number
+# here; it is evidence that the fixed 3600s budget is undersized for a pipeline
+# of that shape (issue #474, item 5).
+_DEFAULT_PIPELINE_SECONDS_PER_LLM_CALL = 15
+# A value this high already refuses almost every window (200 -> 10 calls). Past
+# it the setting stops expressing latency and starts silently disabling the
+# lane, which deserves its own explicit switch rather than a large number here.
+_MAX_PIPELINE_SECONDS_PER_LLM_CALL = 300
+
+
+def _pipeline_seconds_per_llm_call() -> int:
+    """Seconds one model call is assumed to take on this deployment.
+
+    Parsed defensively for the reason CLAUDE.md records about this very module:
+    an operator-set integer read with a bare ``int()`` at module scope once
+    killed app boot on a typo. Junk, zero, negative and out-of-range values log
+    and fall back -- the whole app must not fail to start because one optional
+    estimate was mistyped in a web form. Zero is refused specifically because it
+    would turn ``_max_pipeline_llm_calls`` into a ``ZeroDivisionError`` at the
+    top of the request path.
+    """
+    default = _DEFAULT_PIPELINE_SECONDS_PER_LLM_CALL
+    raw = os.getenv("PIPELINE_SECONDS_PER_LLM_CALL")
+    if raw is None or not str(raw).strip():
+        return default
+    try:
+        value = int(str(raw).strip())
+    except (TypeError, ValueError):
+        print(
+            "PIPELINE_SECONDS_PER_LLM_CALL is not an integer "
+            f"({raw!r}); using {default}",
+            flush=True,
+        )
+        return default
+    if value < 1 or value > _MAX_PIPELINE_SECONDS_PER_LLM_CALL:
+        print(
+            f"PIPELINE_SECONDS_PER_LLM_CALL is out of range ({value}; allowed "
+            f"1-{_MAX_PIPELINE_SECONDS_PER_LLM_CALL}); using {default}",
+            flush=True,
+        )
+        return default
+    return value
+
+
+PIPELINE_SECONDS_PER_LLM_CALL = _pipeline_seconds_per_llm_call()
+
+
+def _max_pipeline_llm_calls() -> int:
+    """Model calls the fixed parent budget has room for.
+
+    Read through a function rather than frozen into a module constant so a test
+    that monkeypatches ``PIPELINE_SECONDS_PER_LLM_CALL`` sees its own value --
+    the same reason ``_enforce_ai_hedge_fund_window`` reads its module-level
+    limit at call time instead of closing over it.
+    """
+    usable = max(
+        0,
+        PIPELINE_SUBPROCESS_TIMEOUT_SECONDS - SUBPROCESS_TIMEOUT_OVERHEAD_SECONDS,
+    )
+    return usable // max(1, PIPELINE_SECONDS_PER_LLM_CALL)
+
+
+def _enforce_pipeline_llm_window(
+    runtime_type: str,
+    decision_source: str,
+    start_date: str,
+    end_date: str,
+    pipeline: Optional[List[Dict[str, Any]]],
+    data_source: Optional[str] = None,
+) -> None:
+    """Refuse a pipeline LLM run the fixed parent budget cannot finish.
+
+    Only 422, never 503: unlike the hosted guard there is no "turned off here"
+    state to report, and every refusal this raises is one the caller can act on
+    -- by shortening the window or by removing pipeline steps.
+
+    Both exits are named because the bound is a PRODUCT of the two. A user whose
+    window is already short and whose pipeline is wide is told to shorten the
+    window by a message that names only dates, and has no way to discover the
+    real lever. ``MAX_BACKTEST_DAYS`` is the calendar half of this bound; this
+    is the half that knows what the window costs.
+    """
+    if runtime_type != PIPELINE_RUNTIME_TYPE:
+        return
+    if decision_source != LLM_DECISION_SOURCE:
+        return
+    estimated = _estimated_pipeline_llm_calls(
+        start_date, end_date, pipeline, data_source
+    )
+    allowed = _max_pipeline_llm_calls()
+    if estimated <= allowed:
+        return
+
+    trading_days = _estimated_decision_days(start_date, end_date)
+    bars_per_day = _pipeline_decision_bars_per_trading_day(data_source)
+    decision_steps, post_trade_steps = split_pipeline(pipeline)
+    steps = max(1, len(decision_steps))
+    minutes = PIPELINE_SUBPROCESS_TIMEOUT_SECONDS // 60
+    # The product names the per-bar steps only. A post-trade step fires once a
+    # trading day, not once a bar, so with one in the pipeline the breakdown
+    # multiplies out to LESS than the total printed beside it -- and a user who
+    # checks the arithmetic concludes a correct refusal is a bug. Empty string
+    # when there is no post-trade step, so the common case reads exactly as
+    # before.
+    post_trade_note = (
+        f", plus {len(post_trade_steps)} post-trade step(s) once per trading day"
+        if post_trade_steps
+        else ""
+    )
+    raise HTTPException(
+        status_code=422,
+        detail=(
+            f"This run needs about {estimated} model calls "
+            f"({trading_days} trading days x "
+            f"{bars_per_day} hourly bars x "
+            f"{steps} pipeline step(s){post_trade_note}), and a backtest has "
+            f"room for about {allowed} within its {minutes}-minute limit. "
+            "Shorten the date range, or use fewer pipeline steps, and run it "
+            "again."
+        ),
+    )
+
+
+# ============================================================================
 # Running the child (issues #273 and #308)
 # ============================================================================
 #
@@ -2283,7 +2518,15 @@ class BacktestRunRequest(BaseModel):
 # params or a JSON body, so validation runs on the merged effective values in the
 # handler rather than only on the Pydantic body.
 MAX_STRATEGY_PROMPT_CHARS = 4000
-MAX_BACKTEST_DAYS = 31
+# Two weeks, matching the fortnight the Live Trading Leaderboard's seasons use
+# so the product has one window vocabulary. It was 31, set when the fixed
+# parent budget was the only bound: a 31-day window is ~22 weekdays x ~7 hourly
+# bars = ~154 decision bars, and a pipeline multiplies that by its step count,
+# so the UI permitted a window roughly 3x the modal default against a constant
+# budget with no preflight (issue #474 item 1). This bound is the calendar half
+# of the answer; _enforce_pipeline_llm_window below is the work-volume half,
+# because window length alone does not say how much a run costs.
+MAX_BACKTEST_DAYS = 14
 MAX_PIPELINE_STEPS = 20
 MAX_PIPELINE_JSON_CHARS = 32000
 MAX_BACKTEST_ASSETS = 30
@@ -2748,6 +2991,22 @@ def run_backtest_endpoint(
 
     # Validate before taking rate-limit capacity or scheduling the worker.
     _validate_backtest_params(start_date, end_date, strategy_prompt, model, pipeline)
+
+    # After the date validation above, so this never has to be a second date
+    # validator, and before the rate limiter, the slot ledger and the billing
+    # preflight below -- for the reason _enforce_ai_hedge_fund_window is placed
+    # ahead of its credential lookup: a run this deployment cannot finish is
+    # refused whether or not the caller's credentials are good, and there is no
+    # reason to spend a rate-limit token, a concurrency slot or a trip to the
+    # secret store to say so.
+    _enforce_pipeline_llm_window(
+        runtime_type,
+        resolved_decision_source,
+        start_date,
+        end_date,
+        pipeline,
+        data_source,
+    )
 
     if not _backtest_rate_limiter.allow(client_key(request)):
         raise HTTPException(

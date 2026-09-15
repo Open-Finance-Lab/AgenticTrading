@@ -42,9 +42,20 @@ def response_to_frames(
     expected_symbols: Sequence[str],
     start: datetime | date,
     end: datetime | date,
-    min_bars: int = 50,
+    min_bars: int,
 ) -> dict[str, pd.DataFrame]:
-    """Convert one official iFinD response into symbol-keyed OHLCV frames."""
+    """Convert one official iFinD response into symbol-keyed OHLCV frames.
+
+    ``min_bars`` is deliberately **required**. It used to default to 50, which
+    was the flat floor this module and ``ifind_ashare.minimum_bars_for_window``
+    both hardcoded independently -- the duplication that let the engine's copy
+    outlive the provider's being fixed. Now that the floor is derived from the
+    requested window, any default here is a third copy of a number that no
+    longer has a single correct value: a caller that omitted it would silently
+    get the retired ~13-trading-day floor back, which ``MAX_BACKTEST_DAYS`` (14
+    calendar days, at most 10 weekdays) makes unreachable. Forcing the caller to
+    say what the window costs is what keeps the floor in one place.
+    """
     symbols = _validate_expected_symbols(expected_symbols)
     start_timestamp = _normalize_boundary(start, "start")
     end_timestamp = _normalize_boundary(end, "end")

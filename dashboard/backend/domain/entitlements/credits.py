@@ -15,8 +15,8 @@ resource the operator never bought. Those surfaces are bounded instead by
 concurrency control rather than a budget; the two entitlements deliberately do
 not overlap.
 
-**Granularity.** Per run, not per LLM call. A 31-day run does cost more than a
-one-day run, but ``MAX_BACKTEST_DAYS`` bounds that ratio at ~31x, and the
+**Granularity.** Per run, not per LLM call. A 14-day run does cost more than a
+one-day run, but ``MAX_BACKTEST_DAYS`` bounds that ratio at ~14x, and the
 alternative -- reserving an estimate at accept and settling against the real
 ``llm_calls`` at finish -- buys precision that nothing here can currently use:
 there is no invoice, no per-model price applied to a balance, and no user-facing

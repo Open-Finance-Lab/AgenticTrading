@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 import pandas as pd
@@ -19,7 +19,37 @@ DateInput = str | date | datetime
 Adapter = Callable[..., dict[str, pd.DataFrame]]
 MarketRuleAdapter = Callable[..., object]
 _MARKET_TIMEZONE = ZoneInfo("Asia/Shanghai")
-_MINIMUM_BARS = 50
+# A-share cash equities trade four 60m bars a session: 09:30-11:30 and
+# 13:00-15:00. The floor below is expressed against that, not as a flat count.
+#
+# Public because the pipeline call-volume preflight in
+# ``api/routers/backtests.py`` asks the same question -- how many decision bars
+# does one trading day cost on this market -- and answering it with its own
+# literal is what made that guard refuse legal A-share windows: it billed CN at
+# the US session's seven bars, overstating a three-step pipeline by ~75%.
+ASHARE_SESSIONS_PER_TRADING_DAY = 4
+# Half the weekday-derived expectation. It has to absorb exchange holidays --
+# Qingming and Labour Day both fall inside the windows this universe ships
+# with -- and a weekday count cannot see them, so a stricter fraction would
+# refuse good data every May. Half still catches the failure this guard exists
+# for: an empty, one-day, or wholesale-truncated upstream reply.
+#
+# ⚠ Half is calibrated against the one- and two-day closures, and it does NOT
+# cover the week-long ones. National Day (Oct 1-7) and Spring Festival each
+# shut the exchange for most of a trading week, so a window that is legal
+# under MAX_BACKTEST_DAYS and whose data is perfectly good can still land
+# under this floor and be refused as incomplete -- a false refusal, not a
+# missed detection, so it fails in the safe direction and says so loudly
+# rather than charting a short curve as real. The honest fix is a CN trading
+# calendar, which this module deliberately does not carry: inventing one here
+# would put a second, unversioned holiday table in the codebase next to the
+# exchange's own. Lowering the fraction instead would trade a visible false
+# refusal for a silent acceptance of a genuinely truncated reply, which is
+# the trade this guard exists to refuse. Tracked as a follow-up on #474.
+_MINIMUM_BAR_COMPLETENESS = 0.5
+# One full session day. Keeps a very short window from deriving a floor of
+# zero, which would disable the check entirely.
+_ABSOLUTE_MINIMUM_BARS = ASHARE_SESSIONS_PER_TRADING_DAY
 
 
 class IFindUniverseError(ValueError):
@@ -28,6 +58,29 @@ class IFindUniverseError(ValueError):
 
 class IFindDateInputError(ValueError):
     """Raised when provider date inputs cannot form a half-open date window."""
+
+
+def minimum_bars_for_window(start: date, end: date) -> int:
+    """Return the fewest valid bars a complete response may hold.
+
+    Derived from the requested half-open window rather than fixed, because a
+    flat count is simultaneously a hidden minimum window (it was 50, i.e. ~13
+    trading days) and unreachable once MAX_BACKTEST_DAYS fell to 14 -- a
+    14-day window holds at most 10 weekdays, or 40 bars.
+
+    Public because the same depth question is asked twice on this path, at two
+    layers: here, against one upstream response, and again in
+    ``domain/backtesting/engine.py``'s ``_validate_ifind_loaded_data``, against
+    the assembled per-symbol frames. Both used to hardcode 50 independently,
+    which is how the second one outlived the first being fixed.
+    """
+    weekdays = sum(
+        1
+        for offset in range((end - start).days)
+        if (start + timedelta(days=offset)).weekday() < 5
+    )
+    expected = weekdays * ASHARE_SESSIONS_PER_TRADING_DAY
+    return max(_ABSOLUTE_MINIMUM_BARS, int(expected * _MINIMUM_BAR_COMPLETENESS))
 
 
 class IFindAshareProvider:
@@ -77,7 +130,7 @@ class IFindAshareProvider:
             expected_symbols=canonical_symbols,
             start=start_date,
             end=end_date,
-            min_bars=_MINIMUM_BARS,
+            min_bars=minimum_bars_for_window(start_date, end_date),
         )
 
     def fetch_usd_cny(

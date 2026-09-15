@@ -45,6 +45,16 @@ ATL 已能通过 iFinD 获取 A 股 60 分钟历史行情并完成回测，但�
 
 该判断必须排在通用的响应格式错误判断之前。
 
+> **⚠ 本节已于 2026-09-14（PR #477）被取代 / Superseded 2026-09-14 (PR #477).**
+> 保留原文作为当时的设计记录，**不要照此实现**。50 根 K 线的固定下限已被
+> `minimum_bars_for_window()` 取代——下限随请求窗口伸缩，后端因此改说
+> `minimum=20` / `fewer than 20 bars`，上面三个字面量全部失效。
+> 文案中的补救措施同样已经错误：`MAX_BACKTEST_DAYS`（14 天）会直接拒绝
+> “about one month”的窗口，而放宽窗口本身只会**抬高**下限。
+> 现行契约见 `dashboard/frontend/app.js::formatBacktestError`：按消息**形态**
+> 匹配（`valid bars` / `minimum=` / `fewer than <n> bars`），并提示避开长假
+> （国庆、春节）或检查数据权限。排序要求不变。
+
 ### 0 交易结果
 
 回测成功但没有成交时，Trading Log 显示：

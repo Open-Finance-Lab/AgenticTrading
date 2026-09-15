@@ -2,12 +2,18 @@
 
 from __future__ import annotations
 
+import json
 import re
+import shutil
+import subprocess
+from datetime import date, datetime, time
 from pathlib import Path
+from types import SimpleNamespace
+from zoneinfo import ZoneInfo
 
 import pytest
 
-from dashboard.backend.tests._frontend_source import fn_body, strip_comments
+from dashboard.backend.tests._frontend_source import fn_body, js_const, strip_comments
 
 
 _FRONTEND = Path(__file__).resolve().parents[2] / "frontend"
@@ -111,7 +117,7 @@ def test_ifind_mode_applies_one_month_dates_without_changing_capital(html, js):
         js,
     )
     assert re.search(
-        r"IFIND_ASHARE_END_DATE\s*=\s*['\"]2026-05-01['\"]",
+        r"IFIND_ASHARE_END_DATE\s*=\s*['\"]2026-04-15['\"]",
         js,
     )
     assert "previousStartDate" in js
@@ -330,9 +336,6 @@ def test_ifind_errors_are_mapped_to_short_actionable_messages(js):
         "403",
         "503",
         "429",
-        "50 bars",
-        "minimum=50",
-        "valid bars",
         "authentication",
         "response format",
     ):
@@ -340,6 +343,170 @@ def test_ifind_errors_are_mapped_to_short_actionable_messages(js):
     assert re.search(r"formatBacktestError\(\s*error", js)
     assert "The selected AI provider is not configured" in js
     assert js.index("llm provider client is unavailable") < js.index("status === 503")
+
+
+# ===========================================================================
+# The bar-shortfall arm, executed against the REAL producer messages
+# ===========================================================================
+#
+# This used to be four more markers in the list above -- "50 bars",
+# "minimum=50" -- asserted to be PRESENT IN THE FILE. They stayed green through
+# the change that made every one of them unreachable: the floor moved from a
+# flat 50 to minimum_bars_for_window(), so the adapter began saying
+# "minimum=20" and the engine "fewer than 20 bars", and the mapper's arms
+# matched neither. The user was still told to widen to "about one month", a
+# window MAX_BACKTEST_DAYS now refuses outright.
+#
+# Two things are therefore deliberate here:
+#
+# 1. The messages are PROVOKED from the real adapter and the real engine, never
+#    typed as literals. A fixture written from the mapper's own expectations
+#    tests the mapper against itself and cannot fail when the producer is
+#    renamed -- the trap CLAUDE.md's "fail-closed is not fail-visible" section
+#    names. Rename either producer's wording and these fail.
+# 2. The assertions are on the MAPPED OUTPUT of the real function, run under
+#    node, not on source text. /app has no build step, so executing it is the
+#    only way to learn whether an arm actually fires.
+
+
+_ASHARE_SYMBOL = "600519.SH"
+_WINDOW_START = "2026-04-01"
+_WINDOW_END = "2026-04-15"
+
+
+def _real_adapter_shortfall_message() -> str:
+    """The message the adapter itself raises when a reply is too shallow."""
+    from dashboard.backend.infrastructure.market_data.ifind_adapter import (
+        IFindBarValidationError,
+        response_to_frames,
+    )
+    from dashboard.backend.infrastructure.market_data.ifind_ashare import (
+        minimum_bars_for_window,
+    )
+
+    cn = ZoneInfo("Asia/Shanghai")
+    start = date.fromisoformat(_WINDOW_START)
+    end = date.fromisoformat(_WINDOW_END)
+    payload = {
+        "errorcode": 0,
+        "errmsg": "",
+        "tables": [
+            {
+                "thscode": _ASHARE_SYMBOL,
+                "time": [f"{_WINDOW_START} 10:30:00"],
+                "table": {
+                    "open": ["100.00"],
+                    "high": ["101.00"],
+                    "low": ["99.00"],
+                    "close": ["100.50"],
+                    "volume": ["10000"],
+                },
+            }
+        ],
+    }
+    with pytest.raises(IFindBarValidationError) as excinfo:
+        response_to_frames(
+            payload,
+            expected_symbols=(_ASHARE_SYMBOL,),
+            start=datetime.combine(start, time(0, 0), tzinfo=cn),
+            end=datetime.combine(end, time(0, 0), tzinfo=cn),
+            min_bars=minimum_bars_for_window(start, end),
+        )
+    return str(excinfo.value)
+
+
+def _real_engine_shortfall_message() -> str:
+    """The message the engine raises for the same condition, one layer up."""
+    import pandas as pd
+
+    from dashboard.backend.domain.backtesting.engine import (
+        HourlyBacktester,
+        MarketDataUnavailableError,
+    )
+
+    frame = pd.DataFrame(
+        {"open": [100.0], "high": [101.0], "low": [99.0], "close": [100.5], "volume": [1.0]},
+        index=pd.DatetimeIndex(
+            [pd.Timestamp(f"{_WINDOW_START} 10:30:00", tz="Asia/Shanghai")],
+            name="timestamp",
+        ),
+    )
+    # The validator reads four attributes and nothing else, so an unbound call
+    # against a stand-in is enough to get the genuine string without booting a
+    # backtester (which would need a provider, credentials and a tape).
+    stand_in = SimpleNamespace(
+        symbols=(_ASHARE_SYMBOL,),
+        all_data={_ASHARE_SYMBOL: frame},
+        start_date=_WINDOW_START,
+        end_date=_WINDOW_END,
+    )
+    with pytest.raises(MarketDataUnavailableError) as excinfo:
+        HourlyBacktester._validate_ifind_loaded_data(stand_in)
+    return str(excinfo.value)
+
+
+def _map_backtest_error(message: str) -> str:
+    """Run the real formatBacktestError over ``message`` under node."""
+    script = "\n".join(
+        [
+            js_const("IFIND_ASHARE_SOURCE"),
+            "const window = {};",
+            fn_body("function formatBacktestError("),
+            "process.stdout.write(JSON.stringify(formatBacktestError("
+            f"{json.dumps({'message': message})}, IFIND_ASHARE_SOURCE)));",
+        ]
+    )
+    result = subprocess.run(
+        ["node", "-e", script], capture_output=True, text=True, timeout=30
+    )
+    assert result.returncode == 0, result.stderr
+    return json.loads(result.stdout)
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node is not installed")
+@pytest.mark.parametrize(
+    "producer",
+    [_real_adapter_shortfall_message, _real_engine_shortfall_message],
+    ids=["adapter", "engine"],
+)
+def test_real_bar_shortfall_messages_reach_the_shortfall_arm(producer):
+    raw = producer()
+    mapped = _map_backtest_error(raw)
+
+    # The engine's message used to land here -- a failure that carried an
+    # actionable hint arriving with none.
+    assert "check the backend log" not in mapped.lower()
+    assert "too few valid bars" in mapped.lower()
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node is not installed")
+@pytest.mark.parametrize(
+    "producer",
+    [_real_adapter_shortfall_message, _real_engine_shortfall_message],
+    ids=["adapter", "engine"],
+)
+def test_the_shortfall_message_does_not_advise_an_illegal_remedy(producer):
+    """Widening is refused by MAX_BACKTEST_DAYS *and* raises the floor."""
+    mapped = _map_backtest_error(producer()).lower()
+
+    assert "wider" not in mapped
+    assert "one month" not in mapped
+    # No floor may be quoted at all: it is derived per window now, so any
+    # number printed here is right for one window and wrong for every other.
+    assert not re.search(r"\d+\s*(valid\s*)?bars", mapped)
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node is not installed")
+def test_the_shortfall_arm_is_not_keyed_on_a_floor_value():
+    """The arm must survive the floor moving, which is what broke it before."""
+    for floor in (20, 44, 50, 137):
+        adapter_shaped = f"symbol={_ASHARE_SYMBOL} has 3 valid bars; minimum={floor}"
+        engine_shaped = (
+            f"iFinD symbols have fewer than {floor} bars: "
+            f"{{'{_ASHARE_SYMBOL}': 3}}"
+        )
+        for raw in (adapter_shaped, engine_shaped):
+            assert "too few valid bars" in _map_backtest_error(raw).lower()
 
 
 def test_backtest_launch_failure_remains_visible_instead_of_loading_history(js):
@@ -382,3 +549,30 @@ def test_ifind_fixed_universe_has_stable_responsive_layout(css):
         re.S,
     )
     assert re.search(r"\.ifind-symbol-item\s*\{[^}]*min-width\s*:\s*0", css, re.S)
+
+
+def test_the_ifind_prefill_window_is_runnable_under_the_server_cap(js):
+    """The auto-applied A-share window must be one the server will accept.
+
+    Pinning the two date literals -- which the test above does -- says nothing
+    about whether they are legal. That is exactly how this broke: lowering
+    MAX_BACKTEST_DAYS from 31 to 14 left this prefill at 30 days, so choosing
+    the iFinD A-share source wrote an unrunnable window into the form and the
+    next click answered 422. The literal test stayed green throughout.
+
+    Asserted against the imported server constant rather than a copy of it, so
+    the two cannot drift apart again.
+    """
+    from datetime import date
+
+    from dashboard.backend.api.routers.backtests import MAX_BACKTEST_DAYS
+
+    start = re.search(r"IFIND_ASHARE_START_DATE\s*=\s*['\"]([\d-]+)['\"]", js)
+    end = re.search(r"IFIND_ASHARE_END_DATE\s*=\s*['\"]([\d-]+)['\"]", js)
+    assert start and end, "iFinD prefill date constants not found in app.js"
+
+    span = (date.fromisoformat(end.group(1)) - date.fromisoformat(start.group(1))).days
+    assert 0 < span <= MAX_BACKTEST_DAYS, (
+        f"iFinD prefill window is {span} days, but the server refuses anything "
+        f"over {MAX_BACKTEST_DAYS}"
+    )

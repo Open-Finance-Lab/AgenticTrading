@@ -40,12 +40,12 @@ from dashboard.scripts import backtest_hourly_agent
 
 
 START = date(2026, 4, 1)
-END = date(2026, 5, 1)
+END = date(2026, 4, 15)
 
 
 def _official_payload(
     symbols=A_SHARE_DEMO_6_SYMBOLS,
-    count: int = 60,
+    count: int = 40,
 ) -> dict:
     timestamps = []
     current = START
@@ -504,7 +504,7 @@ def test_ifind_llm_request_reaches_engine_database_and_chart_without_fallback(
     assert backtests_router.backtest_status["error"] is None
     assert fake_ifind.calls == [(symbols, START, END)]
     assert [call[3] for call in fake_ifind.fx_calls] == ["RMB", "MHB"]
-    assert len(fake_execution.requests) == 60
+    assert len(fake_execution.requests) == 40
     assert all(
         request.model_id == "openai/gpt-5.5"
         for request in fake_execution.requests
@@ -532,9 +532,9 @@ def test_ifind_llm_request_reaches_engine_database_and_chart_without_fallback(
     assert agent_run["metadata"]["fx_start_rate"] == pytest.approx(7.0)
     assert agent_run["metadata"]["native_initial_capital"] == pytest.approx(7_000)
     assert agent_run["llm_model"] == "openai/gpt-5.5"
-    assert agent_run["llm_calls"] == 60
-    assert agent_run["input_tokens"] == 60 * 12
-    assert agent_run["output_tokens"] == 60 * 2
+    assert agent_run["llm_calls"] == 40
+    assert agent_run["input_tokens"] == 40 * 12
+    assert agent_run["output_tokens"] == 40 * 2
     assert agent_run["est_cost_usd"] > 0
     assert agent_run["baseline_djia_run_id"] is None
     assert agent_run["baseline_buyhold_run_id"] == buyhold_run["run_id"]
@@ -646,7 +646,7 @@ def test_ifind_offline_response_reaches_engine_database_and_chart(
     assert [call[3] for call in fake_client.fx_calls] == ["RMB", "MHB"]
     frames = observed["frames"]
     assert tuple(frames) == symbols
-    assert all(len(frame) == 60 for frame in frames.values())
+    assert all(len(frame) == 40 for frame in frames.values())
     assert all(str(frame.index.tz) == "Asia/Shanghai" for frame in frames.values())
     assert all(
         list(frame.columns) == ["open", "high", "low", "close", "volume"]
@@ -684,7 +684,7 @@ def test_ifind_offline_response_reaches_engine_database_and_chart(
         "fx_start_rate": 7.0,
         "fx_end_rate": 7.0,
         "fx_market_start_date": "2026-04-01",
-        "fx_market_end_date": "2026-04-21",
+        "fx_market_end_date": "2026-04-14",
         "fx_observation_start_date": "2026-03-31",
         "fx_observation_end_date": "2026-03-31",
         "native_initial_capital": 7_000.0,
@@ -694,7 +694,10 @@ def test_ifind_offline_response_reaches_engine_database_and_chart(
             "enabled": True,
             "source": "ifind_http",
             "version": "ifind-ashare-closing-rules-v1",
-            "observations": len(symbols) * 15,
+            # One closing-rule observation per symbol per trading day, so this
+            # tracks the window: START..END holds 10 weekdays, not the 15 the
+            # pre-14-day-cap window did.
+            "observations": len(symbols) * 10,
             "scope": "full_day_suspension_and_closing_limits_and_corporate_action_gaps",
         },
     }

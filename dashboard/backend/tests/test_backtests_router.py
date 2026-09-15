@@ -17,6 +17,7 @@ from datetime import datetime
 import pytest
 import pytz
 import requests
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 from dashboard.backend.app import app
@@ -1710,3 +1711,414 @@ def test_run_metadata_deferral_scalars_are_none_for_legacy_runs():
     response = bt._run_metadata_response(_run_record())
     assert response.t1_deferred_events is None
     assert response.t1_deferred_shares is None
+
+
+def test_backtest_window_cap_is_two_weeks():
+    """A dashboard backtest is capped at a fortnight (issue #474 item 1).
+
+    31 days was set when the parent budget was the only bound and nothing
+    counted LLM calls. A 31-day window is ~22 weekdays x ~7 hourly bars = ~154
+    decision bars, and a multi-step pipeline multiplies that by its step count
+    -- far past what the fixed 3600s budget can finish. Two weeks matches the
+    fortnight the Live Trading Leaderboard's seasons already use, so the
+    product has one window vocabulary rather than two.
+    """
+    assert bt.MAX_BACKTEST_DAYS == 14
+
+
+def test_pipeline_call_estimate_counts_one_call_per_bar_with_no_pipeline():
+    """A single-prompt LLM run calls the model once per hourly bar.
+
+    ``max(1, len(decision_steps))`` is what makes the no-pipeline path cost
+    anything at all -- ``split_pipeline(None)`` returns two empty lists, and a
+    bare multiplication would estimate zero calls for the most common run
+    there is.
+    """
+    # 2026-04-15 (Wed) -> 2026-04-23 (Thu) is 7 weekdays.
+    assert bt._estimated_decision_days("2026-04-15", "2026-04-23") == 7
+    assert (
+        bt._estimated_pipeline_llm_calls("2026-04-15", "2026-04-23", None)
+        == 7 * bt.PIPELINE_DECISION_BARS_PER_TRADING_DAY
+    )
+
+
+def test_pipeline_call_estimate_multiplies_by_decision_steps():
+    """Each decision step is its own model call, per bar.
+
+    ``run_pipeline_decision`` loops the decision steps inside the hourly loop,
+    so a four-module pipeline costs 4x a single prompt over the same window --
+    which is the whole reason window length alone cannot bound a run.
+    """
+    pipeline = [{"label": f"Step {i}"} for i in range(4)]
+    assert (
+        bt._estimated_pipeline_llm_calls("2026-04-15", "2026-04-23", pipeline)
+        == 7 * bt.PIPELINE_DECISION_BARS_PER_TRADING_DAY * 4
+    )
+
+
+def test_pipeline_call_estimate_charges_post_trade_steps_per_day_not_per_bar():
+    """Post-trade steps fire at a day boundary, not every bar.
+
+    ``engine.py`` calls ``run_post_trade_analysis`` once per trading day, so
+    counting them per bar would overstate a post-trade pipeline by ~7x and
+    refuse windows that finish comfortably.
+    """
+    days = 7
+    bars = days * bt.PIPELINE_DECISION_BARS_PER_TRADING_DAY
+    decision_only = [{"label": "Signal"}]
+    with_post_trade = decision_only + [{"presetKey": "post_trade_analysis"}]
+
+    assert (
+        bt._estimated_pipeline_llm_calls("2026-04-15", "2026-04-23", decision_only)
+        == bars
+    )
+    assert (
+        bt._estimated_pipeline_llm_calls("2026-04-15", "2026-04-23", with_post_trade)
+        == bars + days
+    )
+
+
+def test_pipeline_call_estimate_is_zero_for_an_unusable_range():
+    """Unparseable or inverted dates estimate zero rather than raising.
+
+    ``_validate_backtest_params`` already 422s those before the guard runs, so
+    this only has to avoid becoming a second, competing date validator with its
+    own error surface.
+    """
+    assert bt._estimated_pipeline_llm_calls("not-a-date", "also-bad", None) == 0
+    assert bt._estimated_pipeline_llm_calls("2026-04-23", "2026-04-15", None) == 0
+
+
+def test_pipeline_seconds_per_call_default_and_derived_call_budget():
+    """15s/call over the usable budget leaves 200 calls.
+
+    Usable is the parent budget minus the overhead constant, because data load,
+    baseline generation and persistence sit outside the decision loop and their
+    share is already reserved.
+    """
+    assert bt._DEFAULT_PIPELINE_SECONDS_PER_LLM_CALL == 15
+    assert bt.PIPELINE_SECONDS_PER_LLM_CALL == 15
+
+    usable = (
+        bt.PIPELINE_SUBPROCESS_TIMEOUT_SECONDS
+        - bt.SUBPROCESS_TIMEOUT_OVERHEAD_SECONDS
+    )
+    assert usable == 3000
+    assert bt._max_pipeline_llm_calls() == 200
+
+
+@pytest.mark.parametrize("raw", ["", "   ", "abc", "12.5", "0", "-4", "301"])
+def test_pipeline_seconds_per_call_falls_back_on_junk(monkeypatch, raw):
+    """A mistyped env value logs and falls back; it never kills app boot.
+
+    CLAUDE.md records that a bare int() at module scope in this very module once
+    took the whole app down on a typo. 0 is refused specifically because it
+    would make the call budget a ZeroDivisionError rather than a bound.
+    """
+    monkeypatch.setenv("PIPELINE_SECONDS_PER_LLM_CALL", raw)
+    assert (
+        bt._pipeline_seconds_per_llm_call()
+        == bt._DEFAULT_PIPELINE_SECONDS_PER_LLM_CALL
+    )
+
+
+def test_pipeline_seconds_per_call_honours_a_valid_override(monkeypatch):
+    """An operator who has measured real latency tunes this without a deploy."""
+    monkeypatch.setenv("PIPELINE_SECONDS_PER_LLM_CALL", "30")
+    assert bt._pipeline_seconds_per_llm_call() == 30
+
+    monkeypatch.setenv("PIPELINE_SECONDS_PER_LLM_CALL", "1")
+    assert bt._pipeline_seconds_per_llm_call() == 1
+
+    monkeypatch.setenv("PIPELINE_SECONDS_PER_LLM_CALL", "300")
+    assert bt._pipeline_seconds_per_llm_call() == 300
+
+
+def test_pipeline_window_guard_allows_the_shipped_default_window():
+    """The modal's own pre-filled window must not 422 on the onboarding path.
+
+    2026-04-15 -> 2026-04-23 with the advertised four-module pipeline is 196 of
+    200 calls. It passes by four -- deliberately pinned, so that anyone who
+    shrinks the budget or raises the per-call estimate sees exactly which run
+    they just made illegal.
+    """
+    pipeline = [{"label": f"Step {i}"} for i in range(4)]
+    assert (
+        bt._enforce_pipeline_llm_window(
+            "pipeline", "llm", "2026-04-15", "2026-04-23", pipeline
+        )
+        is None
+    )
+
+
+def test_pipeline_window_guard_refuses_a_wide_pipeline_over_a_legal_window():
+    """A window inside MAX_BACKTEST_DAYS can still be uncompletable.
+
+    This is the case MAX_BACKTEST_DAYS cannot express: 14 calendar days is
+    legal, but four decision steps over it is 280 calls against a 200-call
+    budget. Window length alone does not say how much a run costs.
+    """
+    pipeline = [{"label": f"Step {i}"} for i in range(4)]
+    with pytest.raises(HTTPException) as excinfo:
+        bt._enforce_pipeline_llm_window(
+            "pipeline", "llm", "2026-04-06", "2026-04-19", pipeline
+        )
+    assert excinfo.value.status_code == 422
+
+
+def test_pipeline_window_guard_names_both_levers_and_both_numbers():
+    """A refusal naming one lever is a dead end for a user blocked by the other.
+
+    The bound is a product of window length and pipeline width, so the message
+    has to offer both exits -- and name the estimate AND the budget, the way
+    _enforce_ai_hedge_fund_window names the bound and the request.
+    """
+    pipeline = [{"label": f"Step {i}"} for i in range(4)]
+    with pytest.raises(HTTPException) as excinfo:
+        bt._enforce_pipeline_llm_window(
+            "pipeline", "llm", "2026-04-06", "2026-04-19", pipeline
+        )
+    detail = excinfo.value.detail
+    assert "280" in detail          # what this request needs
+    assert "200" in detail          # what the deployment allows
+    assert "shorten" in detail.lower()
+    assert "step" in detail.lower()
+
+
+def test_pipeline_window_guard_allows_a_single_prompt_over_the_full_window():
+    """The no-pipeline path costs one call per bar and fits the full fortnight.
+
+    70 calls of 200. Lowering MAX_BACKTEST_DAYS must not be read as having
+    made the simple path marginal too.
+    """
+    assert (
+        bt._enforce_pipeline_llm_window(
+            "pipeline", "llm", "2026-04-06", "2026-04-19", None
+        )
+        is None
+    )
+
+
+def test_pipeline_window_guard_ignores_runs_it_does_not_govern():
+    """Rule-based runs and the hosted runtime are out of scope.
+
+    A rule-based run makes no model calls at all, and the hosted path has its
+    own window bound sized from its own enforced per-step timeout. Applying a
+    pipeline-shaped estimate to either would refuse runs on arithmetic that
+    does not describe them.
+    """
+    wide = [{"label": f"Step {i}"} for i in range(4)]
+    assert (
+        bt._enforce_pipeline_llm_window(
+            "pipeline", "rule_based", "2026-04-06", "2026-04-19", wide
+        )
+        is None
+    )
+    assert (
+        bt._enforce_pipeline_llm_window(
+            "ai_hedge_fund", "llm", "2026-04-06", "2026-04-19", wide
+        )
+        is None
+    )
+
+
+def test_pipeline_window_guard_tracks_the_operator_override(monkeypatch):
+    """Raising the per-call estimate shrinks what is runnable, immediately."""
+    pipeline = [{"label": f"Step {i}"} for i in range(4)]
+    monkeypatch.setattr(bt, "PIPELINE_SECONDS_PER_LLM_CALL", 30)
+    assert bt._max_pipeline_llm_calls() == 100
+    with pytest.raises(HTTPException) as excinfo:
+        bt._enforce_pipeline_llm_window(
+            "pipeline", "llm", "2026-04-15", "2026-04-23", pipeline
+        )
+    assert excinfo.value.status_code == 422
+
+
+def test_backtest_run_refuses_an_uncompletable_pipeline_window(client):
+    """The 422 arrives before the rate limiter, the slot ledger and any spend.
+
+    A refusal that costs a rate-limit token or a concurrency slot punishes the
+    user for a request the server was always going to decline -- and one that
+    arrives after the billing preflight has touched the credential store has
+    already done work on a run that cannot happen.
+    """
+    response = client.post(
+        "/backtest/run",
+        json={
+            "start_date": "2026-04-06",
+            "end_date": "2026-04-19",
+            "decision_source": "llm",
+            "model": "claude-haiku-4-5-20251001",
+            "billing_mode": "byok",
+            "pipeline": [{"label": f"Step {i}"} for i in range(4)],
+        },
+        headers=_sess(),
+    )
+    assert response.status_code == 422
+    detail = response.json()["detail"]
+    assert "280" in detail
+    assert "shorten" in detail.lower()
+
+
+def test_backtest_run_still_refuses_an_over_long_window_on_dates_alone(client):
+    """MAX_BACKTEST_DAYS keeps its own distinct message.
+
+    The two bounds answer different questions and a user who picked a
+    three-week window should be told the window is too long, not handed call
+    arithmetic about a pipeline they may not have configured.
+    """
+    response = client.post(
+        "/backtest/run",
+        json={
+            "start_date": "2026-04-01",
+            "end_date": "2026-04-30",
+            "decision_source": "llm",
+            "model": "claude-haiku-4-5-20251001",
+            "billing_mode": "byok",
+        },
+        headers=_sess(),
+    )
+    assert response.status_code == 422
+    assert "max 14 days" in response.json()["detail"]
+
+
+def test_pipeline_refusal_breakdown_accounts_for_post_trade_steps():
+    """The shown arithmetic must reconcile with the total printed beside it.
+
+    The breakdown is a product of per-bar terms, but a post-trade step fires
+    once a trading day. Without naming it the message multiplies out to LESS
+    than the total it quotes, so a user who checks the sum concludes a correct
+    refusal is a bug -- and the one lever the message does not mention is the
+    one that would fix their run.
+    """
+    days = 10
+    bars_per_day = bt.PIPELINE_DECISION_BARS_PER_TRADING_DAY
+    pipeline = [{"label": f"Step {i}"} for i in range(4)] + [
+        {"presetKey": "post_trade_analysis"}
+    ]
+    expected = days * bars_per_day * 4 + days
+
+    with pytest.raises(HTTPException) as excinfo:
+        bt._enforce_pipeline_llm_window(
+            bt.PIPELINE_RUNTIME_TYPE,
+            bt.LLM_DECISION_SOURCE,
+            "2026-04-06",
+            "2026-04-19",
+            pipeline,
+        )
+
+    detail = excinfo.value.detail
+    assert str(expected) in detail
+    assert f"{days} trading days x {bars_per_day} hourly bars x 4 pipeline step(s)" in detail
+    assert "plus 1 post-trade step(s) once per trading day" in detail
+    # The breakdown now reconciles: the per-bar product plus the per-day term
+    # equals the quoted total.
+    assert days * bars_per_day * 4 + days == expected
+
+
+def test_pipeline_refusal_breakdown_is_unchanged_without_post_trade_steps():
+    """The common case keeps the exact wording it shipped with."""
+    with pytest.raises(HTTPException) as excinfo:
+        bt._enforce_pipeline_llm_window(
+            bt.PIPELINE_RUNTIME_TYPE,
+            bt.LLM_DECISION_SOURCE,
+            "2026-04-06",
+            "2026-04-19",
+            [{"label": f"Step {i}"} for i in range(4)],
+        )
+
+    detail = excinfo.value.detail
+    assert "280" in detail
+    assert "post-trade" not in detail
+    assert "plus" not in detail
+
+
+# ===========================================================================
+# The bar cadence is per market (the A-share false refusal)
+# ===========================================================================
+#
+# PIPELINE_DECISION_BARS_PER_TRADING_DAY was one number for both markets,
+# taken from the wider one. This guard computes a REFUSAL, so billing CN's
+# four-bar session at seven overstated an A-share run by ~75% and refused
+# windows that would have finished -- the direction the banner above the
+# constants explicitly rules out.
+
+
+def test_a_share_runs_are_billed_at_the_a_share_session_length():
+    """CN trades four 60m bars a day, not the US session's seven."""
+    from dashboard.backend.infrastructure.market_data.ifind_ashare import (
+        ASHARE_SESSIONS_PER_TRADING_DAY,
+    )
+
+    assert bt._pipeline_decision_bars_per_trading_day(bt.IFIND_ASHARE) == (
+        ASHARE_SESSIONS_PER_TRADING_DAY
+    )
+    assert ASHARE_SESSIONS_PER_TRADING_DAY < bt.PIPELINE_DECISION_BARS_PER_TRADING_DAY
+
+
+@pytest.mark.parametrize("source", [None, "", "alpaca", "vnpy_simulation", "unknown"])
+def test_unrecognised_markets_keep_the_wider_us_cadence(source):
+    """Falling back to the wider market keeps an unknown source conservative."""
+    assert bt._pipeline_decision_bars_per_trading_day(source) == (
+        bt.PIPELINE_DECISION_BARS_PER_TRADING_DAY
+    )
+
+
+def test_the_shipped_a_share_prefill_is_not_refused_at_three_pipeline_steps():
+    """The regression this fix exists for, on the A-share onboarding path.
+
+    The prefill window with a three-step pipeline estimated 11 x 7 x 3 = 231
+    against a 200 budget and 422'd. Its real cost is 11 x 4 x 3 = 132.
+    """
+    pipeline = [{"label": f"Step {index}"} for index in range(3)]
+
+    assert (
+        bt._estimated_pipeline_llm_calls(
+            "2026-04-01", "2026-04-15", pipeline, bt.IFIND_ASHARE
+        )
+        <= bt._max_pipeline_llm_calls()
+    )
+    # Not a no-op guard: the same window on the US cadence is still refused,
+    # so this passes because the cadence moved, not because the budget is roomy.
+    assert (
+        bt._estimated_pipeline_llm_calls("2026-04-01", "2026-04-15", pipeline, "alpaca")
+        > bt._max_pipeline_llm_calls()
+    )
+
+    bt._enforce_pipeline_llm_window(
+        bt.PIPELINE_RUNTIME_TYPE,
+        bt.LLM_DECISION_SOURCE,
+        "2026-04-01",
+        "2026-04-15",
+        pipeline,
+        bt.IFIND_ASHARE,
+    )
+
+
+def test_the_refusal_breakdown_quotes_the_market_it_refused():
+    """A CN refusal that prints 7 bars/day is arithmetic the user cannot check."""
+    pipeline = [{"label": f"Step {index}"} for index in range(40)]
+
+    with pytest.raises(HTTPException) as excinfo:
+        bt._enforce_pipeline_llm_window(
+            bt.PIPELINE_RUNTIME_TYPE,
+            bt.LLM_DECISION_SOURCE,
+            "2026-04-01",
+            "2026-04-15",
+            pipeline,
+            bt.IFIND_ASHARE,
+        )
+
+    detail = excinfo.value.detail
+    bars = bt._pipeline_decision_bars_per_trading_day(bt.IFIND_ASHARE)
+    assert f"x {bars} hourly bars x" in detail
+    assert f"x {bt.PIPELINE_DECISION_BARS_PER_TRADING_DAY} hourly bars x" not in detail
+
+
+def test_omitting_the_data_source_preserves_the_previous_estimate():
+    """Callers that predate the parameter must be unaffected."""
+    pipeline = [{"label": "Step 1"}, {"presetKey": "post_trade_analysis"}]
+
+    assert bt._estimated_pipeline_llm_calls(
+        "2026-04-06", "2026-04-19", pipeline
+    ) == bt._estimated_pipeline_llm_calls("2026-04-06", "2026-04-19", pipeline, "alpaca")
