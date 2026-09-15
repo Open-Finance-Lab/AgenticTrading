@@ -285,6 +285,7 @@ def _patch(progress_js: str, then_progress_js: str | None = None, elapsed_ms: in
     script = "\n".join(
         [
             js_const("BACKTEST_POLL_MAX_SECONDS"),
+            js_const("BACKTEST_BUDGET_SECONDS"),
             js_const("BACKTEST_STALE_SECONDS"),
             f"const MAP = {{a1: {{runId: 'run-1', startedAt: Date.now() - {elapsed_ms}}}}};",
             "let liveBacktestRunId = 'run-1';",
@@ -506,6 +507,7 @@ def _run_panel(options_js: str) -> dict:
     script = "\n".join(
         [
             js_const("BACKTEST_POLL_MAX_SECONDS"),
+            js_const("BACKTEST_BUDGET_SECONDS"),
             js_const("BACKTEST_STALE_SECONDS"),
             "const els = {",
             "  backtestRunElapsed: { textContent: '' },",
@@ -576,16 +578,33 @@ def test_run_panel_prefers_step_percent_over_the_elapsed_guess():
 
 def test_run_panel_falls_back_to_the_elapsed_guess():
     panel = _run_panel("{elapsedSeconds: 60, message: 'x'}")
-    assert panel["width"] == "2%"  # 60 / 3600
+    assert panel["width"] == "2%"  # 60 / BACKTEST_BUDGET_SECONDS
 
 
-def test_frontend_backtest_observation_window_is_sixty_minutes():
+def test_frontend_progress_bar_is_drawn_against_the_server_budget():
+    """The denominator, executed rather than read.
+
+    `updateBacktestRunProgress`'s `maxSeconds` default answers "how far through
+    its budget is this run?", so it must be the server's number and not the
+    client's watching window. The two were one constant; separating them is
+    what stops raising the poll ceiling from silently shrinking every bar.
+    """
+    assert (
+        _node(
+            js_const("BACKTEST_BUDGET_SECONDS")
+            + "console.log(JSON.stringify(BACKTEST_BUDGET_SECONDS));"
+        )
+        == 3600
+    )
+
+
+def test_frontend_keeps_polling_past_the_server_budget():
     assert (
         _node(
             js_const("BACKTEST_POLL_MAX_SECONDS")
             + "console.log(JSON.stringify(BACKTEST_POLL_MAX_SECONDS));"
         )
-        == 3600
+        == 4200
     )
 
 
@@ -601,6 +620,7 @@ def _resolve_entry(
     script = "\n".join(
         [
             js_const("BACKTEST_POLL_MAX_SECONDS"),
+            js_const("BACKTEST_BUDGET_SECONDS"),
             f"const MAP = {map_js};",
             clock,
             "function readRunningBacktests() { return MAP; }",
@@ -620,6 +640,7 @@ def _list_entries(map_js: str, now_ms: int) -> dict:
     script = "\n".join(
         [
             js_const("BACKTEST_POLL_MAX_SECONDS"),
+            js_const("BACKTEST_BUDGET_SECONDS"),
             f"const MAP = {map_js};",
             f"Date.now = () => {now_ms};",
             "function readRunningBacktests() { return MAP; }",
@@ -667,25 +688,29 @@ def test_progress_is_withheld_when_no_run_is_identified():
     assert entry.get("step") is None
 
 
-def test_running_entry_is_retained_until_the_sixty_minute_ceiling():
+def test_running_entry_is_retained_until_the_poll_ceiling():
+    # The GC boundary is BACKTEST_POLL_MAX_SECONDS (4200s / 70 minutes), not
+    # the server's 3600s budget -- the poll ceiling deliberately outlives it
+    # (issue #474 item 5) so an entry must not be reaped before the server has
+    # had its chance to answer.
     entry = _resolve_entry(
         "{'agent-A': {runId: 'run-1', startedAt: 0}}",
         "'run-1'",
         "null",
         "agent-A",
-        now_ms=3_599_000,
+        now_ms=4_199_000,
     )
     assert entry["runId"] == "run-1"
-    assert entry["elapsedSeconds"] == 3599
+    assert entry["elapsedSeconds"] == 4199
 
 
-def test_running_entry_is_cleared_after_the_sixty_minute_ceiling():
+def test_running_entry_is_cleared_after_the_poll_ceiling():
     entry = _resolve_entry(
         "{'agent-A': {runId: 'run-1', startedAt: 0}}",
         "'run-1'",
         "null",
         "agent-A",
-        now_ms=3_600_001,
+        now_ms=4_200_001,
     )
     assert entry is None
 
@@ -694,7 +719,7 @@ def test_running_list_sweeps_only_entries_past_the_ceiling():
     result = _list_entries(
         "{'keep': {runId: 'run-keep', startedAt: 1},"
         " 'drop': {runId: 'run-drop', startedAt: -1}}",
-        now_ms=3_600_000,
+        now_ms=4_200_000,
     )
     assert [run["runId"] for run in result["runs"]] == ["run-keep"]
     assert "drop" not in result["map"]
@@ -808,6 +833,7 @@ def test_progress_reaches_each_concurrent_agent():
     script = "\n".join(
         [
             js_const("BACKTEST_POLL_MAX_SECONDS"),
+            js_const("BACKTEST_BUDGET_SECONDS"),
             (
                 "const MAP = {"
                 " 'agent-A': {runId: 'run-1', startedAt: Date.now() - 30000},"

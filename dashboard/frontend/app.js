@@ -17,7 +17,17 @@ const SELECTED_BACKTEST_RUN_KEY = 'selected-backtest-run-id';
 // literal (no build step to share this constant across the landing/app split).
 const NAV_STATE_KEY = 'nav-state';
 const DISCORD_SERVER_URL = 'https://discord.gg/9HnQ6XDG98';
-const BACKTEST_POLL_MAX_SECONDS = 3600; // 60 minutes at 1-second polling intervals
+// Two numbers, deliberately not one. The budget is the SERVER's -- it mirrors
+// PIPELINE_SUBPROCESS_TIMEOUT_SECONDS and is what the progress bar is drawn
+// against, so the bar answers "how far through its budget is this run?". The
+// poll ceiling is how long this page keeps WATCHING, and it has to be longer:
+// they were the same value, so the poller gave up at the same instant the
+// server began finalizing and the server's own verdict was written after the
+// client stopped looking (issue #474 item 5). The margin is the repo's own
+// SUBPROCESS_TIMEOUT_OVERHEAD_SECONDS. Pinned to both server constants by
+// test_ifind_ashare_frontend.py.
+const BACKTEST_BUDGET_SECONDS = 3600;   // mirrors PIPELINE_SUBPROCESS_TIMEOUT_SECONDS
+const BACKTEST_POLL_MAX_SECONDS = 4200; // budget + SUBPROCESS_TIMEOUT_OVERHEAD_SECONDS
 
 function initSession() {
   // Stable browser identity — never changes when switching agents.
@@ -8198,7 +8208,7 @@ function showBacktestRunProgress(
 function updateBacktestRunProgress({
     elapsedSeconds,
     message = '',
-    maxSeconds = BACKTEST_POLL_MAX_SECONDS,
+    maxSeconds = BACKTEST_BUDGET_SECONDS,
     stepPct = null,
     progress = null,
 } = {}) {
@@ -8799,7 +8809,13 @@ function ensureBacktestPolling() {
                     showBacktestRunProgress(true, { isError: true });
                     updateBacktestRunProgress({
                         elapsedSeconds: maxAttempts,
-                        message: 'Timed out after 60 minutes. The backtest may still be running in the background.',
+                        // Not "timed out": the ceiling now sits above the
+                        // server's budget, so a real timeout arrives as a
+                        // `timed_out` status ten minutes before this. Getting
+                        // here means no terminal answer ever came -- a crash, a
+                        // redeploy, a dropped connection. No number in it, so
+                        // it cannot drift from a constant again.
+                        message: 'Lost contact with this backtest. It may still be running — check the Backtest tab later.',
                     });
                 }
                 liveBacktestChartActive = false;
