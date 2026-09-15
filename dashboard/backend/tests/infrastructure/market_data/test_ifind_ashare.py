@@ -508,13 +508,22 @@ def test_minimum_bars_for_a_weekend_only_window_is_raised_to_the_absolute_floor(
     assert minimum_bars_for_window(date(2026, 4, 11), date(2026, 4, 13)) == 4
 
 
-def test_minimum_bars_never_exceeds_what_any_legal_window_can_actually_return():
+def test_minimum_bars_never_exceeds_the_weekday_derived_bar_count():
     """Regression: every window legal under MAX_BACKTEST_DAYS must derive a
-    floor a real response can actually meet.
+    floor its own WEEKDAY count can meet.
 
     Fails loudly if someone raises _MINIMUM_BAR_COMPLETENESS above 1.0 or
     restores a flat constant -- either of those reintroduces the defect this
     change exists to fix: a floor no legal window's real bar count can clear.
+
+    ⚠ The name is narrow on purpose. This sweeps WEEKDAYS, so it cannot fail
+    for the case the module comment admits and does not fix: a legal window
+    across a week-long closure (National Day, Spring Festival) derives a floor
+    around 22 that the ~4-5 real trading days in it (16-20 bars) cannot reach.
+    An earlier name claimed the floor never exceeds what "any legal window can
+    actually return", which reads as coverage of exactly that case. It is not.
+    A CN trading calendar is the only thing that would close it; see the
+    _MINIMUM_BAR_COMPLETENESS comment for why this module does not carry one.
     """
     from dashboard.backend.api.routers.backtests import MAX_BACKTEST_DAYS
     from dashboard.backend.infrastructure.market_data.ifind_ashare import (

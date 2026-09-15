@@ -7456,14 +7456,26 @@ function formatBacktestError(error, dataSource = null) {
     }
     if (status === 503) return 'iFinD A-share access is not configured (503). Ask the server operator to finish API setup.';
     if (status === 429 || lower.includes('429')) return 'iFinD is rate limited (429). Wait briefly, then run again.';
+    // Match the SHAPE of the two backend shortfall messages, never the floor.
+    // These arms used to spell out 50 four ways, because the floor was a flat
+    // 50 in both places that raise here. It is now derived from the requested
+    // window (minimum_bars_for_window), so every literal went stale at once:
+    // the adapter says "symbol=X has 12 valid bars; minimum=20" and the engine
+    // says "iFinD symbols have fewer than 20 bars: {...}", and only the first
+    // still matched -- on 'valid bars' -- while the engine's fell through to
+    // the generic catch-all at the bottom.
     if (
-        lower.includes('50 bars')
-        || lower.includes('fewer than 50')
-        || lower.includes('at least 50')
-        || lower.includes('minimum=50')
-        || lower.includes('valid bars')
+        lower.includes('valid bars')
+        || lower.includes('minimum=')
+        || /fewer than \d+ bars/.test(lower)
     ) {
-        return 'iFinD returned fewer than 50 valid bars. Use a wider date range (about one month) or check data permissions.';
+        // "Use a wider date range" was the old advice and is now actively
+        // wrong twice over: a window over MAX_BACKTEST_DAYS is refused before
+        // it reaches the tape at all, and widening RAISES the floor, because
+        // the floor scales with the window. What actually causes this on a
+        // legal window is a long exchange closure the weekday-derived floor
+        // cannot see (National Day, Spring Festival).
+        return 'iFinD returned too few valid bars for that window. Pick a window that avoids a long exchange holiday (National Day, Spring Festival), or check data permissions.';
     }
     if (lower.includes('authentication') || lower.includes('credential') || lower.includes('permission') || lower.includes('token')) {
         return 'iFinD authentication or data permission failed. Ask the server operator to check the account.';
@@ -9987,6 +9999,23 @@ async function runBacktest() {
         );
         return;
     }
+    // There is deliberately NO mirror of the server's second window bound, the
+    // pipeline call-volume guard (_enforce_pipeline_llm_window). It is now the
+    // likelier of the two 422s, so the omission is not an oversight:
+    //
+    // MAX_BACKTEST_DAYS is mirrorable because it is a fixed constant. The call
+    // budget is not — it is derived from PIPELINE_SECONDS_PER_LLM_CALL, an
+    // operator dial (1..300) this page cannot read, and the estimate also needs
+    // the market's bars-per-trading-day and the decision/post-trade split. A
+    // hardcoded copy would disagree with the server in BOTH directions the
+    // moment an operator tunes the dial: refusing runs the server would accept,
+    // and promising ones it will refuse. A client-side check that is wrong is
+    // worse than the 422, which is always right and names both levers.
+    //
+    // The 422 reaches the user through showBacktestLaunchFailure (progress
+    // panel, plus an alert on the My Agents tab). If this ever does need to be
+    // caught pre-flight, publish the budget from the server — do not re-derive
+    // it here.
 
     const assets = getSelectedAssets();
     const stockPoolRequest = getSelectedStockPoolRequest();

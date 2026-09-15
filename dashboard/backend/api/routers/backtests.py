@@ -71,6 +71,9 @@ from dashboard.backend.infrastructure.market_data.profiles import (
     get_market_profile,
     resolve_decision_source,
 )
+from dashboard.backend.infrastructure.market_data.ifind_ashare import (
+    ASHARE_SESSIONS_PER_TRADING_DAY,
+)
 from dashboard.backend.infrastructure.llm.execution.errors import LLMExecutionError
 from dashboard.backend.infrastructure.llm.execution.service import LLMExecutionService
 from dashboard.backend.infrastructure.llm.execution.handoff import (
@@ -1905,16 +1908,44 @@ def _enforce_ai_hedge_fund_window(start_date: str, end_date: str) -> None:
 # succeeded -- on the declared onboarding task, where a new user gets one pass.
 # Do not "tighten" these estimates toward the worst case.
 
-# Hourly decision bars in one trading day. US is the widest session
-# (_market_hours_only keeps roughly 09:30 through 16:00); CN runs two shorter
-# sessions and costs less. One number for both, taken from the wider market,
-# because a per-profile table here would be a second place for the bar cadence
-# to be wrong and every profile already pins a 60m decision timeframe.
+# Hourly decision bars in one trading day, by market.
+#
+# US is the widest session: ``_market_hours_only`` keeps roughly 09:30 through
+# 16:00. CN runs two shorter ones (09:30-11:30 and 13:00-15:00) and costs four.
+#
+# This was ONE number for both, taken from the wider market, on the reasoning
+# that a per-profile table here would be a second place for the bar cadence to
+# be wrong. That reasoning was right about the risk and wrong about the remedy:
+# billing CN at seven bars overstates an A-share run by ~75%, and this guard
+# computes a REFUSAL, so overstating refuses runs that would have finished --
+# the direction the banner above explicitly tells us not to move in. The
+# shipped A-share prefill with a three-step pipeline estimated 231 calls
+# against a 200 budget and 422'd; its true cost is about 120.
+#
+# The duplication worry is answered by not duplicating: the CN number is
+# imported from ``infrastructure/market_data/ifind_ashare.py``, where the same
+# four-bar session already backs ``minimum_bars_for_window``. There is one
+# literal here, for the US default, and markets without their own session
+# constant fall back to it -- still the wider market, so still the conservative
+# answer for anything unrecognised.
 PIPELINE_DECISION_BARS_PER_TRADING_DAY = 7
+_PIPELINE_DECISION_BARS_BY_SOURCE = {
+    IFIND_ASHARE: ASHARE_SESSIONS_PER_TRADING_DAY,
+}
+
+
+def _pipeline_decision_bars_per_trading_day(data_source: Optional[str]) -> int:
+    """Return hourly decision bars one trading day costs on ``data_source``."""
+    return _PIPELINE_DECISION_BARS_BY_SOURCE.get(
+        data_source or "", PIPELINE_DECISION_BARS_PER_TRADING_DAY
+    )
 
 
 def _estimated_pipeline_llm_calls(
-    start_date: str, end_date: str, pipeline: Optional[List[Dict[str, Any]]]
+    start_date: str,
+    end_date: str,
+    pipeline: Optional[List[Dict[str, Any]]],
+    data_source: Optional[str] = None,
 ) -> int:
     """Upper-bound the model calls a pipeline LLM backtest will make.
 
@@ -1934,7 +1965,7 @@ def _estimated_pipeline_llm_calls(
         # competing date validator with its own error surface.
         return 0
     decision_steps, post_trade_steps = split_pipeline(pipeline)
-    bars = trading_days * PIPELINE_DECISION_BARS_PER_TRADING_DAY
+    bars = trading_days * _pipeline_decision_bars_per_trading_day(data_source)
     return bars * max(1, len(decision_steps)) + trading_days * len(post_trade_steps)
 
 
@@ -1945,10 +1976,20 @@ def _estimated_pipeline_llm_calls(
 # is an operator dial rather than a literal.
 #
 # Consequence worth knowing before changing it: at 15s the shipped modal default
-# window (7 weekdays, 49 bars) running the four-module pipeline advertised at
-# app.html:1462 costs 196 of the 200 available calls -- it passes by four. That
-# is not an argument for a smaller number here; it is evidence that the fixed
-# 3600s budget is undersized for the advertised product (issue #474, item 5).
+# window (7 weekdays, 49 US bars) is comfortable at the modal's own default of
+# ONE pipeline step, but the same window with four decision steps costs 196 of
+# the 200 available calls -- it passes by four.
+#
+# Four is not the modal's number; it is this repo's own illustration of a
+# realistic step count, taken from the "four-module pipeline" copy at
+# app.html:1462. That panel is the separate *Trading Algo* surface, which posts
+# to /api/algo/execute and never reaches this guard, so read it as evidence
+# about pipeline shapes users are invited to build, not as a window this bound
+# governs.
+#
+# Either way, a near-miss like that is not an argument for a smaller number
+# here; it is evidence that the fixed 3600s budget is undersized for a pipeline
+# of that shape (issue #474, item 5).
 _DEFAULT_PIPELINE_SECONDS_PER_LLM_CALL = 15
 # A value this high already refuses almost every window (200 -> 10 calls). Past
 # it the setting stops expressing latency and starts silently disabling the
@@ -2014,6 +2055,7 @@ def _enforce_pipeline_llm_window(
     start_date: str,
     end_date: str,
     pipeline: Optional[List[Dict[str, Any]]],
+    data_source: Optional[str] = None,
 ) -> None:
     """Refuse a pipeline LLM run the fixed parent budget cannot finish.
 
@@ -2031,12 +2073,15 @@ def _enforce_pipeline_llm_window(
         return
     if decision_source != LLM_DECISION_SOURCE:
         return
-    estimated = _estimated_pipeline_llm_calls(start_date, end_date, pipeline)
+    estimated = _estimated_pipeline_llm_calls(
+        start_date, end_date, pipeline, data_source
+    )
     allowed = _max_pipeline_llm_calls()
     if estimated <= allowed:
         return
 
     trading_days = _estimated_decision_days(start_date, end_date)
+    bars_per_day = _pipeline_decision_bars_per_trading_day(data_source)
     decision_steps, post_trade_steps = split_pipeline(pipeline)
     steps = max(1, len(decision_steps))
     minutes = PIPELINE_SUBPROCESS_TIMEOUT_SECONDS // 60
@@ -2056,7 +2101,7 @@ def _enforce_pipeline_llm_window(
         detail=(
             f"This run needs about {estimated} model calls "
             f"({trading_days} trading days x "
-            f"{PIPELINE_DECISION_BARS_PER_TRADING_DAY} hourly bars x "
+            f"{bars_per_day} hourly bars x "
             f"{steps} pipeline step(s){post_trade_note}), and a backtest has "
             f"room for about {allowed} within its {minutes}-minute limit. "
             "Shorten the date range, or use fewer pipeline steps, and run it "
@@ -2921,7 +2966,12 @@ def run_backtest_endpoint(
     # reason to spend a rate-limit token, a concurrency slot or a trip to the
     # secret store to say so.
     _enforce_pipeline_llm_window(
-        runtime_type, resolved_decision_source, start_date, end_date, pipeline
+        runtime_type,
+        resolved_decision_source,
+        start_date,
+        end_date,
+        pipeline,
+        data_source,
     )
 
     if not _backtest_rate_limiter.allow(client_key(request)):

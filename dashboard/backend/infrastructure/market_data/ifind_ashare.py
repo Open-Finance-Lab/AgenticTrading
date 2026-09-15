@@ -21,7 +21,13 @@ MarketRuleAdapter = Callable[..., object]
 _MARKET_TIMEZONE = ZoneInfo("Asia/Shanghai")
 # A-share cash equities trade four 60m bars a session: 09:30-11:30 and
 # 13:00-15:00. The floor below is expressed against that, not as a flat count.
-_SESSIONS_PER_TRADING_DAY = 4
+#
+# Public because the pipeline call-volume preflight in
+# ``api/routers/backtests.py`` asks the same question -- how many decision bars
+# does one trading day cost on this market -- and answering it with its own
+# literal is what made that guard refuse legal A-share windows: it billed CN at
+# the US session's seven bars, overstating a three-step pipeline by ~75%.
+ASHARE_SESSIONS_PER_TRADING_DAY = 4
 # Half the weekday-derived expectation. It has to absorb exchange holidays --
 # Qingming and Labour Day both fall inside the windows this universe ships
 # with -- and a weekday count cannot see them, so a stricter fraction would
@@ -43,7 +49,7 @@ _SESSIONS_PER_TRADING_DAY = 4
 _MINIMUM_BAR_COMPLETENESS = 0.5
 # One full session day. Keeps a very short window from deriving a floor of
 # zero, which would disable the check entirely.
-_ABSOLUTE_MINIMUM_BARS = _SESSIONS_PER_TRADING_DAY
+_ABSOLUTE_MINIMUM_BARS = ASHARE_SESSIONS_PER_TRADING_DAY
 
 
 class IFindUniverseError(ValueError):
@@ -73,7 +79,7 @@ def minimum_bars_for_window(start: date, end: date) -> int:
         for offset in range((end - start).days)
         if (start + timedelta(days=offset)).weekday() < 5
     )
-    expected = weekdays * _SESSIONS_PER_TRADING_DAY
+    expected = weekdays * ASHARE_SESSIONS_PER_TRADING_DAY
     return max(_ABSOLUTE_MINIMUM_BARS, int(expected * _MINIMUM_BAR_COMPLETENESS))
 
 

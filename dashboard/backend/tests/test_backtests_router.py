@@ -2031,3 +2031,94 @@ def test_pipeline_refusal_breakdown_is_unchanged_without_post_trade_steps():
     assert "280" in detail
     assert "post-trade" not in detail
     assert "plus" not in detail
+
+
+# ===========================================================================
+# The bar cadence is per market (the A-share false refusal)
+# ===========================================================================
+#
+# PIPELINE_DECISION_BARS_PER_TRADING_DAY was one number for both markets,
+# taken from the wider one. This guard computes a REFUSAL, so billing CN's
+# four-bar session at seven overstated an A-share run by ~75% and refused
+# windows that would have finished -- the direction the banner above the
+# constants explicitly rules out.
+
+
+def test_a_share_runs_are_billed_at_the_a_share_session_length():
+    """CN trades four 60m bars a day, not the US session's seven."""
+    from dashboard.backend.infrastructure.market_data.ifind_ashare import (
+        ASHARE_SESSIONS_PER_TRADING_DAY,
+    )
+
+    assert bt._pipeline_decision_bars_per_trading_day(bt.IFIND_ASHARE) == (
+        ASHARE_SESSIONS_PER_TRADING_DAY
+    )
+    assert ASHARE_SESSIONS_PER_TRADING_DAY < bt.PIPELINE_DECISION_BARS_PER_TRADING_DAY
+
+
+@pytest.mark.parametrize("source", [None, "", "alpaca", "vnpy_simulation", "unknown"])
+def test_unrecognised_markets_keep_the_wider_us_cadence(source):
+    """Falling back to the wider market keeps an unknown source conservative."""
+    assert bt._pipeline_decision_bars_per_trading_day(source) == (
+        bt.PIPELINE_DECISION_BARS_PER_TRADING_DAY
+    )
+
+
+def test_the_shipped_a_share_prefill_is_not_refused_at_three_pipeline_steps():
+    """The regression this fix exists for, on the A-share onboarding path.
+
+    The prefill window with a three-step pipeline estimated 11 x 7 x 3 = 231
+    against a 200 budget and 422'd. Its real cost is 11 x 4 x 3 = 132.
+    """
+    pipeline = [{"label": f"Step {index}"} for index in range(3)]
+
+    assert (
+        bt._estimated_pipeline_llm_calls(
+            "2026-04-01", "2026-04-15", pipeline, bt.IFIND_ASHARE
+        )
+        <= bt._max_pipeline_llm_calls()
+    )
+    # Not a no-op guard: the same window on the US cadence is still refused,
+    # so this passes because the cadence moved, not because the budget is roomy.
+    assert (
+        bt._estimated_pipeline_llm_calls("2026-04-01", "2026-04-15", pipeline, "alpaca")
+        > bt._max_pipeline_llm_calls()
+    )
+
+    bt._enforce_pipeline_llm_window(
+        bt.PIPELINE_RUNTIME_TYPE,
+        bt.LLM_DECISION_SOURCE,
+        "2026-04-01",
+        "2026-04-15",
+        pipeline,
+        bt.IFIND_ASHARE,
+    )
+
+
+def test_the_refusal_breakdown_quotes_the_market_it_refused():
+    """A CN refusal that prints 7 bars/day is arithmetic the user cannot check."""
+    pipeline = [{"label": f"Step {index}"} for index in range(40)]
+
+    with pytest.raises(HTTPException) as excinfo:
+        bt._enforce_pipeline_llm_window(
+            bt.PIPELINE_RUNTIME_TYPE,
+            bt.LLM_DECISION_SOURCE,
+            "2026-04-01",
+            "2026-04-15",
+            pipeline,
+            bt.IFIND_ASHARE,
+        )
+
+    detail = excinfo.value.detail
+    bars = bt._pipeline_decision_bars_per_trading_day(bt.IFIND_ASHARE)
+    assert f"x {bars} hourly bars x" in detail
+    assert f"x {bt.PIPELINE_DECISION_BARS_PER_TRADING_DAY} hourly bars x" not in detail
+
+
+def test_omitting_the_data_source_preserves_the_previous_estimate():
+    """Callers that predate the parameter must be unaffected."""
+    pipeline = [{"label": "Step 1"}, {"presetKey": "post_trade_analysis"}]
+
+    assert bt._estimated_pipeline_llm_calls(
+        "2026-04-06", "2026-04-19", pipeline
+    ) == bt._estimated_pipeline_llm_calls("2026-04-06", "2026-04-19", pipeline, "alpaca")
