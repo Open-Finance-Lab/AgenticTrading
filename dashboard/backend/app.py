@@ -288,6 +288,25 @@ async def startup_event():
         )
 
     try:
+        from dashboard.backend.domain.analytics.instrumentation import (
+            disable_synchronous_projection,
+        )
+
+        # PR 0: analytics_service now builds with project_snapshots=False, so
+        # record_server_event no longer recomputes synchronously. Without
+        # this call, instrumentation.py's own fallback guard -- written for a
+        # caller-supplied service that never learned to project -- would
+        # still call recalculate_user_snapshots per accepted event, moving
+        # the burner one module over instead of killing it.
+        disable_synchronous_projection()
+        print("🧹 Analytics snapshot projection left off the request path")
+    except Exception as e:
+        print(
+            "WARNING: analytics.snapshot_projection_disable_failed "
+            f"category={type(e).__name__}"
+        )
+
+    try:
         from dashboard.backend.domain.runs.service import start_reaper
         start_reaper()
         print("🧹 Run reaper started")
