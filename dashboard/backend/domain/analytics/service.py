@@ -241,7 +241,12 @@ def _build_analytics_service() -> AnalyticsService:
         store=analytics_store,
         state_store=state_store,
         value_store=ValueAnalyticsStore(analytics_store),
-        project_snapshots=True,
+        # PR 0 (burner kill): the live singleton no longer recomputes a
+        # snapshot synchronously inside record_server_event. Task 3 of the
+        # same plan disarms instrumentation.py's own fallback recalculator,
+        # which otherwise steps in for exactly this state (see that task --
+        # flipping this flag alone is not sufficient).
+        project_snapshots=False,
     )
 
 
