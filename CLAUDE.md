@@ -243,6 +243,10 @@ test passing period `"live"` or season `3` passes anyway).
 
 `infrastructure/llm/validator.py` is a hard security boundary: LLM trading responses must be JSON-only matching the trading schema — `tool_calls`/`function_calls` are rejected, portfolio constraints enforced, decisions logged. Do not loosen this to allow tool/web access from agent responses.
 
+### Admin layer (analytics, `/admin`)
+
+One design governs the administrator layer: `docs/superpowers/specs/2026-09-15-admin-layer-redesign-design.md`, with per-PR plans at `docs/superpowers/plans/2026-09-15-admin-layer-redesign-pr*.md`. It supersedes the 2026-08-26 → 2026-09-13 admin analytics specs (the two it absorbed are deleted; the two it kept are narrowed in place). Read it before touching `domain/analytics/`, `api/routers/admin_analytics.py`, `admin-tabs.js` or the admin page. Three facts it establishes that are easy to get wrong from the code alone: `/admin-analytics` is a static mock whose one redirect in `admin-tabs.js` made the wired in-app dashboard (`js/admin-analytics-value.js`, nine live `/api/admin/analytics/*` endpoints) unreachable; both 2026-09-11 outage burners (`states.py` 15-minute stale window on the 60-second reaper, `service.py` `project_snapshots=True`) are live until PR 0 lands; and `ValueAnalyticsStore` has no Postgres twin, which the parity guard cannot see, until PR T lands.
+
 ### External agents & Agent-Environment Protocol (`/api/v1`)
 
 - **Protocol Run API** (`api/routers/runs.py` → `domain/runs/*`): an external agent authenticates with its Agent API key (`X-API-Key`) and drives a backtest step-by-step (`POST /api/v1/runs`, poll steps, submit decisions). Each step has a decision deadline (default 60s); a late decision auto-holds that step rather than failing the run. A server-wide active-run backstop (`MAX_ACTIVE_RUNS_GLOBAL`, default 100; 0 disables) rejects creates on both surfaces with 429 + `Retry-After` once at capacity.

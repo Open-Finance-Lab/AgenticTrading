@@ -4,6 +4,18 @@
 
 Approved direction: independent `user_group` dimension, six visible values.
 
+## Relation to the admin layer design (2026-09-15)
+
+The 2026-09-12 design's free-text `cohort` axis was never built and is struck;
+`user_group` is the sole third categorical axis beside role and tier. The
+group badge precedence — `admin` if the role is admin, else the `user_group`
+unless it is `unknown`, else `paid` when the tier is anything but `unpaid`,
+else `free` — is computed server-side by `resolve_group_badge` and never in
+JavaScript. "September intake" is the activation week of the retention grid,
+not a stored label. See
+`docs/superpowers/specs/2026-09-15-admin-layer-redesign-design.md` (§1, §6.2,
+D9–D11).
+
 ## Goal
 
 Give ATL administrators a plain, reliable answer to “where did these users
