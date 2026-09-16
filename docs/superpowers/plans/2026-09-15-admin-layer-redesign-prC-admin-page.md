@@ -2,13 +2,13 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Replace the three coexisting admin analytics surfaces (the synthetic `/admin-analytics` mock, the in-app value overview, and the hidden in-app legacy overview) with one standalone page at `/admin` built from the mock's *surviving* elements (design §8.2), wired to the nine live `/api/admin/analytics/*` endpoints plus `GET /api/admin/stats`, on the repo's testable IIFE + `?v=N` convention with no inline scripts — and, in the same PR, re-cut the analytics API contract once (§9 fields on, D15 display fields off the page, declared FastAPI query parameters, `_query_values()` gone), rename the route, fix the deploy topology, delete the mock and the two wired in-app modules, and drop the Analytics tab from the old console.
+**Goal:** Replace the three coexisting admin analytics surfaces (the synthetic `/admin-analytics` mock, the in-app value overview, and the hidden in-app legacy overview) with one standalone page at `/admin` built from the mock's *surviving* elements (design §8.2), wired to the nine live `/api/admin/analytics/*` endpoints plus `GET /api/admin/stats`, on the repo's testable IIFE + `?v=N` convention with no inline scripts — and, in the same PR, rename the route, fix the deploy topology, delete the mock and the two wired in-app modules, and drop the Analytics tab from the old console. The analytics API contract is **not** re-cut here: the page reads today's nine routes (D18) and renders the §9 fields when a response carries them, "Awaiting data source" when it does not; the re-cut is PR D, after PR B (D19 as amended 2026-09-16).
 
-**Architecture:** Four IIFE modules under `dashboard/frontend/js/` (`admin-shell.js` owns the `/api/auth/me` courtesy gate, hash routing, URL-backed range/filter state, the shared `request()` with per-surface `requestSeq`, the loading/empty/error/stale helpers and both dialogs; `admin-live.js` renders the live-operations row from `GET /api/admin/stats` only; `admin-overview.js` renders the nine overview panels and the five detail routes from the analytics endpoints; `admin-users.js` renders the SQL-filtered users list and the lazy, cursor-paged profile) plus `admin.html` (a shell that carries no data — every value slot is `—`) and `admin.css` (the mock's inline styles externalised and pruned of the funnel and live-detail passes the final DOM never renders). The backend side is a contract re-cut on the existing routers: new response-model fields wired to the service methods PR B shipped, hand-parsed query strings replaced by declared `Query(...)` parameters that keep today's names and today's display-safe 422s, and one added key on `/api/admin/stats`. Every renderer is a pure function from payload to DOM built with `createElement`/`textContent` (never `innerHTML`), so pytest can run it under `node -e` against the committed fixtures in `tests/fixtures/admin_analytics/`.
+**Architecture:** Four IIFE modules under `dashboard/frontend/js/` (`admin-shell.js` owns the `/api/auth/me` courtesy gate, hash routing, URL-backed range/filter state, the shared `request()` with per-surface `requestSeq`, the loading/empty/error/stale helpers and both dialogs; `admin-live.js` renders the live-operations row from `GET /api/admin/stats` only; `admin-overview.js` renders the nine overview panels and the five detail routes from the analytics endpoints; `admin-users.js` renders the SQL-filtered users list and the lazy, cursor-paged profile) plus `admin.html` (a shell that carries no data — every value slot is `—`) and `admin.css` (the mock's inline styles externalised and pruned of the funnel and live-detail passes the final DOM never renders). The backend side is one added key on `/api/admin/stats`; the nine analytics routes are untouched. Every renderer is a pure function from payload to DOM built with `createElement`/`textContent` (never `innerHTML`), so pytest can run it under `node -e` against the committed fixtures in `tests/fixtures/admin_analytics/` (today's shapes) and the target-shape copies in `tests/fixtures/admin_analytics/target/` (today's shapes plus the §9 fields PR D puts on the models — see "Interim contract").
 
 **Tech Stack:** FastAPI + Pydantic v2 (backend), vanilla-JS IIFE modules with no build step, CSS bars and generated SVG (no Chart.js), pytest run from the repo root, Node.js via `subprocess` for the frontend tests (`skipif(shutil.which("node") is None)`), `vercel.json` (Vercel static host) and `app.py` `FileResponse` routes (Render).
 
-**Spec:** `docs/superpowers/specs/2026-09-15-admin-layer-redesign-design.md` — implements §7 in full (§7.1 one page at `/admin`; §7.2 the four modules and the panel-ownership table; §7.3 the gate; §7.4 the harvest map; §7.5 what PR C removes and what the old console keeps; §7.6 the testing contract), §8 in full (§8.1 how the mock renders, §8.2 the survival table, which is this plan's element list, §8.3 the forced additions), §9 (exposing the added fields on the response models and dropping the D15 fields from display), §10.3–10.4 (the contract re-cut and the live-operations route), §13 row **C** including its "Must not" column, and decisions D3–D8, D12, D15–D19. §4.1, §4.2 and §4.6 describe what is being replaced; §15 is the source of the copy the rules dialog and tooltips carry.
+**Spec:** `docs/superpowers/specs/2026-09-15-admin-layer-redesign-design.md` — implements §7 in full (§7.1 one page at `/admin`; §7.2 the four modules and the panel-ownership table; §7.3 the gate; §7.4 the harvest map; §7.5 what PR C removes and what the old console keeps; §7.6 the testing contract), §8 in full (§8.1 how the mock renders, §8.2 the survival table, which is this plan's element list, §8.3 the forced additions), §9 (rendering the added fields wherever a response carries them, and dropping the D15 fields from display; the response models change in PR D), §10.3–10.4 (PR C's no-change rule and the live-operations route), §13 row **C** including its "Must not" column and the 2026-09-16 ordering, and decisions D3–D8, D12, D15–D19. §4.1, §4.2 and §4.6 describe what is being replaced; §15 is the source of the copy the rules dialog and tooltips carry.
 
 ## Global Constraints
 
@@ -16,9 +16,9 @@
 - Run every `pytest` invocation from the repo root.
 - Node-driven frontend tests are `pytest.mark.skipif(shutil.which("node") is None, reason="node is not installed")` — a skip on a machine without `node`, not a pass; install a current LTS Node to actually exercise Tasks 4–10 locally.
 - Every `?v=` bump updates `test_admin_analytics_frontend.py::test_app_lifecycle_and_cache_versions_are_wired` in lockstep (Task 9 rewrites that test to pin the new page's five `?v=1` tags and the bumped `app.js` / `styles.css` / `js/admin-tabs.js` values), and every other pin of the same literal listed in Task 9 Step 1.
-- Both store twins change together and CI's Postgres tier (`ci.yml`, `TEST_POSTGRES_URL`, `@pg_only`) must be green before merge. This plan adds no store method and no table (§13 row C changes routers, response models and the frontend); the constraint binds because PR B's `CreditsStore.sum_ledger_by_day` / `resolve_group_badge` / `top_operational_reasons` paths are exercised for the first time through HTTP here, so a twin that PR B left one-sided surfaces in this PR's Postgres run, not PR B's.
-- Ordering (§13): PR 0, PR T, PR A and PR B are merged before this plan starts. PR B must have run in prod long enough that the read paths have data (§13 "B must not land until A's daily job has written at least eight days"); nothing here depends on that beyond the page showing "Incomplete data" honestly.
-- The nine `/api/admin/analytics/*` routes are re-cut **once** here (D19): fields listed in §9 land, D15 fields stay in the payload but leave the page, parameter names stay exactly `role` (new), `commercial_tier`, `user_group`, `lifecycle_segment`, `operational_state`, `include_internal`, `from`, `to`, `movement_range`, `limit`, `offset`, `cursor`, `section`, `q`, `priority`, `activated`, `last_meaningful_activity_from`, `last_meaningful_activity_to`, `billing_mode`, `provider`, `model`. No other route changes shape.
+- This plan adds no store method, no table and no analytics response-model field (§13 row C changes `app.py`, `middleware.py`, `admin_users.py`, `vercel.json`, the frontend and tests). CI's Postgres tier (`ci.yml`, `TEST_POSTGRES_URL`, `@pg_only`) runs on every PR and must be green before merge as usual; nothing here is the first HTTP exercise of a store twin.
+- Ordering (§13, re-ordered 2026-09-16): **PR 0 is merged before this plan starts** — Task 9 Step 0 checks the cache-buster arithmetic (`app.js?v=132`, `admin-tabs.js?v=8`) and stops if it does not hold. PR T, PR A, PR B and PR D are **not** prerequisites: the page reads today's nine routes and renders the §9 fields when a response carries them ("Interim contract" below). Until PR B lands, the routes it re-sources answer from the snapshot tables and raw scans exactly as `main` does today; until PR D lands, the §9 slots read "Awaiting data source" or `—`.
+- The nine `/api/admin/analytics/*` routes are **not** re-cut here (D18 holds; D19's single re-cut is PR D). No response model, query parameter, validation rule or committed fixture under `tests/fixtures/admin_analytics/*.json` changes. The page sends only names today's `_query_values()` allows — `from`, `to`, `include_internal`, `user_group`, `lifecycle_segment`, `commercial_tier`, `q`, `priority`, `limit`, `offset`, `section`, `cursor` — pinned by Task 10; `role` is not sent. D15 fields stay in the payload and leave the page (Task 8).
 - The group badge is **server-computed** (D11). No frontend file in this plan derives a badge from `role`/`user_group`/`commercial_tier`; the client renders `group_badge` as the string it receives, pinned by Task 10.
 - No inline `<script>` in `admin.html` (D6); no `#live` route (§8.2, D16); no Chart.js on the page (§7.2); Users/Providers/Activity are **not** ported (D5) — the aside links to `/app?view=admin&adminTab=users|providers|activity`.
 - Every UI element built here appears in §8.2 as **keep**, **keep, relabelled** or **added**; nothing marked **cut** is built. Self-review notes state the check.
@@ -27,13 +27,11 @@
 ## File Map
 
 Backend:
-- `dashboard/backend/domain/analytics/query_service.py`: `BillingLaneDay` model; `AnalyticsOverview.billing_lane_mix`.
-- `dashboard/backend/domain/analytics/value_queries.py`: `OperationalReasonCount`, `LedgerDayTotal`; `OperationalAnalyticsResponse.top_operational_reasons`; `CommercialAnalyticsResponse.purchased_by_day` / `consumed_by_day`; `UserValueFilters.role`; `ValueUserListItem` and `ValueUserProfile` gain `user_group`, `role`, `group_badge`, `last_meaningful_activity_at`; the two construction sites populate them.
-- `dashboard/backend/api/routers/admin_analytics.py`: declared `Query(...)` dependencies replace `_query_values()`/`_invalid_query()`; every validation rule and every 422 body stays byte-identical.
+- `dashboard/backend/domain/analytics/*`, `dashboard/backend/api/routers/admin_analytics.py`: **untouched** (D18; the re-cut is PR D).
 - `dashboard/backend/api/routers/admin_users.py`: `admin_stats` gains `max_active_dashboard_backtests`.
 - `dashboard/backend/app.py`: `GET /admin`, `GET /admin.css`, `GET /admin-analytics` → 308.
 - `dashboard/backend/middleware.py`: `EXEMPT_PATHS` gains `/admin`, keeps `/admin-analytics`.
-- `dashboard/backend/tests/fixtures/admin_analytics/{overview,overview_partial_error,operational,commercial,users,user_detail}.json`: new fields; new `admin_stats.json`.
+- `dashboard/backend/tests/fixtures/admin_analytics/target/{overview,overview_partial_error,operational,commercial,users,user_detail}.json` (new): the committed fixtures plus the §9 fields; `admin_stats.json` and `groups.json` (new). No committed fixture is modified.
 
 Frontend:
 - `dashboard/frontend/admin.html` (new), `dashboard/frontend/admin.css` (new).
@@ -46,1099 +44,155 @@ Frontend:
 - Deleted: `dashboard/frontend/admin-analytics.html`, `js/admin-analytics.js`, `js/admin-analytics-value.js`.
 
 Tests:
-- Modified: `test_admin_analytics_api.py`, `test_admin_users.py`, `test_app_composition.py`, `test_vercel_cache_headers.py`, `test_admin_analytics_frontend.py`, `test_admin_tabs_redirect.py` (rewritten), `test_admin_credits_frontend.py`, `test_frontend_fast_boot.py`, `test_credit_format_frontend.py`, `test_analytics_frontend.py`, `test_backtest_comparison_frontend.py`.
-- New: `test_middleware_exemptions.py`, `test_admin_page_shell.py`, `_admin_dom_stub.py`, `test_admin_shell_frontend.py`, `test_admin_live_frontend.py`, `test_admin_overview_frontend.py`, `test_admin_users_frontend.py`, `test_admin_page_modules.py`.
+- Modified: `test_admin_users.py`, `test_app_composition.py`, `test_vercel_cache_headers.py`, `test_admin_analytics_frontend.py`, `test_admin_tabs_redirect.py` (rewritten), `test_admin_credits_frontend.py`, `test_frontend_fast_boot.py`, `test_credit_format_frontend.py`, `test_analytics_frontend.py`, `test_backtest_comparison_frontend.py`.
+- New: `test_admin_target_fixtures.py`, `test_middleware_exemptions.py`, `test_admin_page_shell.py`, `_admin_dom_stub.py`, `test_admin_shell_frontend.py`, `test_admin_live_frontend.py`, `test_admin_overview_frontend.py`, `test_admin_users_frontend.py`, `test_admin_page_modules.py`.
 - Deleted: `test_admin_analytics_value_frontend.py`.
 
 ---
 
-### Task 1: Backend contract re-cut — §9 fields on the response models, declared query parameters, `_query_values()` deleted
+## Interim contract: what the page reads before PR D
+
+This PR ships **before** PR T, PR A, PR B and PR D. The order changed on 2026-09-16: the advisor wants to settle *what to show and how* on a live page before the backend is locked to it, so the re-cut that used to be this plan's Task 1 is now its own PR (D), executed after B. The page therefore reads the nine `/api/admin/analytics/*` routes exactly as `main@c3bbf2ed` (plus PR 0) serves them — D18 holds through this PR — and renders the §9 fields only when a response carries them. Nothing here changes an analytics response model, a query parameter or a store; the one backend change is Task 2's key on `/api/admin/stats`, a route outside the D18 freeze.
+
+Two payload shapes exist for the whole interval, and the tests hold both:
+
+- **Committed fixtures** `tests/fixtures/admin_analytics/*.json` — today's shapes, validated against the committed Pydantic models by `test_fixtures_validate_against_committed_analytics_models`. They stay the conformance oracle through PR B (D18/D20).
+- **Target fixtures** `tests/fixtures/admin_analytics/target/{overview,overview_partial_error,operational,commercial,users,user_detail}.json` — the same files plus the §9 fields, i.e. the shape PR D puts on the models. They are what the advisor is reviewing: the page rendered from them *is* the proposal. Task 1 creates them; PR D folds them into the committed set and deletes the directory.
+
+**The absent-field rule.** A §9 field the route does not serve yet is *absent* from the payload (`!(key in payload)`), which is not the same as served-and-empty (`[]`, `null`). Absent renders the panel's frame, label and headline with the copy **"Awaiting data source"** (`AdminShell.PENDING`) in the slot the field feeds; served-and-empty renders the panel's own empty copy ("No settled purchases in this range." and so on). The distinction is `CLAUDE.md`'s *fail-closed is not fail-visible*: after PR D an absent field is a contract bug, and it must read as one, never as an empty chart. `AdminShell.fieldPending(payload, key)` (Task 5) is the single owner of the test.
+
+| Element (§8.2) | §9 field | Route | Served at `c3bbf2ed`? | Renders until PR D |
+|---|---|---|---|---|
+| Users needing attention — "Blocking signal" note | `top_operational_reasons` | `/operational` | no | the three counts render; the note reads "Awaiting data source" |
+| `#health` — "What is blocking users?" table | `top_operational_reasons` | `/operational` | no | table frame with one "Awaiting data source" row |
+| Credits usage — platform/BYOK lanes chart | `billing_lane_mix` | `/overview` | no | headline (`/commercial.selected_period.consumed_micro`, served) renders; body "Awaiting data source" |
+| Revenue — purchases line | `purchased_by_day` | `/commercial` | no | headline (`selected_period.purchased_micro`, served) renders; body "Awaiting data source" |
+| — (no panel reads it) | `consumed_by_day` | `/commercial` | no | in the target fixture because PR D's model carries it; nothing on the page renders it |
+| `#users` list — group badge column | `group_badge` | `/users` items | no | `—` with the tooltip "Awaiting data source" |
+| `#users` list — last active column | `last_meaningful_activity_at` | `/users` items | no | `—` |
+| `#users/{id}` — identity line badge | `group_badge` | `/users/{id}` | no | `—` with the tooltip |
+| `#users/{id}` — "Last meaningful activity" | `last_meaningful_activity_at` | `/users/{id}` | no, but today's `last_meaningful_activity` carries the same instant | reads `last_meaningful_activity_at ?? last_meaningful_activity`, correct before and after PR D |
+| Live row — slot ceiling | `max_active_dashboard_backtests` | `/api/admin/stats` | added by Task 2 | real |
+| every other element | today's fields | the nine routes | yes | real |
+
+`user_group` and `role` on `/users` items are in the target fixtures because PR D's models carry them; no renderer reads either (the badge is the server's string, D11). The `role` **query parameter** is sent by no module: today's `_query_values()` rejects undeclared keys with a display-safe 422, and the page has no role filter (§8.2 lists Source, Lifecycle stage, Tier and Include internal accounts). Every query name the page does send — `from`, `to`, `include_internal`, `user_group` (on `/groups` and `/users`), `lifecycle_segment`, `commercial_tier`, `q`, `priority`, `limit`, `offset`, `section`, `cursor` — is in the parser's allowed set at `c3bbf2ed` (`admin_analytics.py:127-133`, `196-199`, `211-226`, `367`, `422`, `508`), so no request 422s on today's backend.
+
+What this costs: until PR B lands, the page drives today's raw-scan read paths (`list_events` over the selected window on `/overview`, `/lifecycle`, `/retention` and `/groups`). Admin-only, one viewer, at §2.3 scale — acceptable and named; the read-budget tests arrive with PR A and PR B.
+
+---
+
+### Task 1: Target-shape fixtures — the §9 payloads the page is built against
 
 **Files:**
-- Modify: `dashboard/backend/domain/analytics/query_service.py` — imports (line 8), `FailureCategoryCount` (lines 90-94, add `BillingLaneDay` after it), `AnalyticsOverview` (lines 244-264).
-- Modify: `dashboard/backend/domain/analytics/value_queries.py` — imports (lines 9-27), `CommercialAnalyticsResponse` (lines 253-261), `OperationalAnalyticsResponse` (lines 264-276), `UserValueFilters` (lines 305-350), `ValueUserListItem` (lines 365-377), `ValueUserProfile` (lines 389-395), the `ValueUserListItem(` construction inside `list_users` (lines 1319-1331), `get_user_profile` (lines 1351-1390), `__all__` (lines 1395-1414).
-- Modify: `dashboard/backend/api/routers/admin_analytics.py` — the whole module (596 lines).
-- Modify: `dashboard/backend/tests/fixtures/admin_analytics/overview.json`, `overview_partial_error.json`, `operational.json`, `commercial.json`, `users.json`, `user_detail.json`.
-- Modify: `dashboard/backend/tests/test_admin_analytics_api.py` — `test_admin_user_list_accepts_documented_filters` (lines 703-739), `test_value_routes_reject_unknown_duplicate_and_unsafe_queries` (lines 823-844); new tests appended.
-- Test: `dashboard/backend/tests/test_admin_analytics_api.py`, `dashboard/backend/tests/test_admin_analytics_frontend.py::test_fixtures_validate_against_committed_analytics_models` (unchanged, must stay green).
+- Create: `dashboard/backend/tests/fixtures/admin_analytics/target/overview.json`, `target/overview_partial_error.json`, `target/operational.json`, `target/commercial.json`, `target/users.json`, `target/user_detail.json`.
+- Create: `dashboard/backend/tests/test_admin_target_fixtures.py`.
+- Test: `dashboard/backend/tests/test_admin_target_fixtures.py`; `dashboard/backend/tests/test_admin_analytics_frontend.py::test_fixtures_validate_against_committed_analytics_models` (unchanged, must stay green — the committed fixtures are not touched).
 
 **Interfaces:**
-- Consumes (PR B service methods, named in design §9/§13 row B; PR B's plan file is not in this checkout, so the names below are the ones this plan assumes — verify each with `rg -n "def billing_lane_mix|def top_operational_reasons|def purchased_by_day|def consumed_by_day|def resolve_group_badge" dashboard/backend/domain` before Step 3 and substitute at the single call site named for each):
-  - `AnalyticsQueryService.billing_lane_mix(*, filters: AnalyticsMetricFilters) -> dict[str, dict[str, int]]` — ISO-date key → `{"platform_credits": n, "byok": n}` from rollups `billing_mode` (D14).
-  - `ValueAnalyticsQueryService.top_operational_reasons(*, include_internal: bool, limit: int = 5) -> list[tuple[str, str, int]]` — `(reason_code, state, users)` from `user_daily_facts.operational_reason_code`.
-  - `ValueAnalyticsQueryService.purchased_by_day(*, start: date, end: date, include_internal: bool) -> dict[str, int]` and `consumed_by_day(...)` — ISO-date key → micro amount, via `CreditsStore.sum_ledger_by_day`.
-  - `dashboard.backend.domain.analytics.lifecycle.resolve_group_badge(*, role: str, user_group: UserGroup, tier: CommercialTier) -> str` — the superseded 2026-09-12 plan's Task B5 signature (`git show c3bbf2ed:docs/superpowers/plans/2026-09-12-user-analytics-architecture.md`, line 2336: `resolve_group_badge(*, role, cohort, tier)`) with `cohort` renamed `user_group` per D9; precedence `admin` → `user_group` when not `unknown` → `paid`/`free` (§6.2, D11).
-- Produces:
-  - `BillingLaneDay(day: date, platform_credits: int, byok: int)`; `AnalyticsOverview.billing_lane_mix: list[BillingLaneDay]`.
-  - `OperationalReasonCount(reason_code: str, state: OperationalState, users: int)`; `OperationalAnalyticsResponse.top_operational_reasons: Sequence[OperationalReasonCount]`.
-  - `LedgerDayTotal(day: date, amount_micro: int)`; `CommercialAnalyticsResponse.purchased_by_day` / `consumed_by_day: Sequence[LedgerDayTotal]`.
-  - `UserValueFilters.role: Literal["user", "admin"] | None`.
-  - `ValueUserListItem` and `ValueUserProfile`: `user_group: UserGroup`, `role: Literal["user", "admin"]`, `group_badge: str`, `last_meaningful_activity_at: datetime | None`.
-  - Router: every handler takes its filters through a `Depends(...)` dependency whose parameters are declared `Query(...)`, so each appears in `app.openapi()`; `_query_values` and `_invalid_query` no longer exist; `InvalidAnalyticsQuery` (an `HTTPException` subclass with the fixed detail) replaces the latter.
+- Consumes: the six committed fixtures under `tests/fixtures/admin_analytics/` at `c3bbf2ed` (PR 0 edits none of them).
+- Produces: the six target fixtures, byte-for-byte the committed file plus the §9 hunks below; `TARGET_FIELDS` in `test_admin_target_fixtures.py`, the fixture → added-keys map. Tasks 7 and 8 read the target files through `_admin_dom_stub.target_fixture(name)` (Task 5 adds the helper beside `fixture`).
 
-Two things about the re-cut that a reader of `main@c3bbf2ed` would otherwise get wrong. First, PR B (D20) removed `user_state_counts` from `AnalyticsOverview` and the `status` query parameter (with `UserValueFilters.legacy_status`) from `/users`; the classes quoted below as "before" are the post-PR-B shapes, i.e. `main`'s text minus those two items. If your checkout still shows `user_state_counts` or `legacy_status`, PR B has not merged and this plan is not yet runnable (§13 ordering). Second, the display-safe 422 contract is load-bearing: `app.py:62` registers `validation_error_handler`, which for non-`/api/v2` paths returns `{"detail": exc.errors()}` — and Pydantic's error list **echoes the offending input**. `test_admin_analytics_rejects_invalid_queries_without_echo` asserts the canary never appears in the body. So every parameter is declared as `str | None = Query(default=None, ...)` — a shape FastAPI's own validation can never reject — and the value rules stay in Python, raising `InvalidAnalyticsQuery`. Do not "tidy" `limit: str | None` into `limit: int = Query(50, ge=1, le=100)`: the first out-of-range value would echo through the global handler.
+The target fixtures are copies, not hand-written payloads, so every number the renderer tests assert (`42`, `62.5%`, the `Aug 25`/`Aug 26` labels) is identical in both sets and a test can switch sets without changing its expectations. The hunks are the same ones PR D applies to the committed files (its Task 1 Step 5), written once here and once there on purpose: the two plans run weeks apart in different sessions, and "see the other plan" is the elision this repository's plan discipline forbids.
 
-- [ ] **Step 1: Write the failing tests**
+- [ ] **Step 1: Write the failing test**
 
-In `dashboard/backend/tests/test_admin_analytics_api.py`, replace `test_admin_user_list_accepts_documented_filters` (lines 703-739; PR B already removed its `"status": "active"` param and `legacy_status` assertion) with:
+Create `dashboard/backend/tests/test_admin_target_fixtures.py`:
 
 ```python
-def test_admin_user_list_accepts_documented_filters(admin_analytics_api):
-    api = admin_analytics_api
-    today = datetime.now(timezone.utc).date()
-    response = api["client"].get(
-        "/api/admin/analytics/users",
-        params={
-            "q": "Subject",
-            "role": "user",
-            "lifecycle_segment": "core",
-            "operational_state": "healthy",
-            "commercial_tier": "invested",
-            "user_group": "partner",
-            "activated": "true",
-            "last_meaningful_activity_from": (today - timedelta(days=1)).isoformat(),
-            "last_meaningful_activity_to": today.isoformat(),
-            "priority": "false",
-            "limit": "1",
-            "offset": "0",
-        },
-        headers=api["admin_headers"],
-    )
-
-    assert response.status_code == 200, response.text
-    assert response.json()["total"] == 1
-    item = response.json()["items"][0]
-    assert item["user_id"] == api["subject"]["id"]
-    assert {"user_group", "role", "group_badge", "last_meaningful_activity_at"} <= item.keys()
-    name, call = api["value_query_service"].calls[-1]
-    assert name == "users"
-    assert call["limit"] == 1
-    assert call["offset"] == 0
-    filters = call["filters"]
-    assert filters.role == "user"
-    assert filters.lifecycle_segment == "core"
-    assert filters.operational_state == "healthy"
-    assert filters.commercial_tier == "invested"
-    assert filters.user_group == "partner"
-    assert filters.activated is True
-```
-
-Replace `test_value_routes_reject_unknown_duplicate_and_unsafe_queries` (lines 823-844) with the three tests below. The `{"unknown": "value"}` case and the duplicated-`from` case go: declared parameters are FastAPI's declarative surface (§6.14 row 4), and FastAPI ignores undeclared query keys and reads the last of a repeated key; rejecting them was the hand-rolled parser's behaviour, and the parser is what this task deletes.
-
-```python
-@pytest.mark.parametrize(
-    "path,params",
-    [
-        ("/api/admin/analytics/commercial", {"from": "2026-01-01", "to": "2026-08-01"}),
-        ("/api/admin/analytics/operational", {"provider": "synthetic secret!"}),
-        ("/api/admin/analytics/users", {"commercial_tier": "unsupported"}),
-        ("/api/admin/analytics/users", {"role": "synthetic secret owner"}),
-        ("/api/admin/analytics/users", {"limit": "synthetic secret 999"}),
-        ("/api/admin/analytics/lifecycle", {"movement_range": "synthetic secret"}),
-    ],
-)
-def test_value_routes_reject_unsafe_queries_without_echo(
-    admin_analytics_api,
-    path,
-    params,
-):
-    api = admin_analytics_api
-    response = api["client"].get(path, params=params, headers=api["admin_headers"])
-
-    assert response.status_code == 422
-    assert response.json() == {"detail": "Invalid Analytics query."}
-    assert "synthetic secret" not in response.text
-
-
-def test_undeclared_query_keys_are_ignored_not_rejected(admin_analytics_api):
-    """Declared parameters mean FastAPI owns the query string (design §6.14).
-
-    The hand-rolled parser 422'd on any key it did not know. That was the
-    parser's rule, not the API's; with declared parameters an unknown key is
-    simply not a parameter, and the route answers as if it were absent.
-    """
-    api = admin_analytics_api
-    response = api["client"].get(
-        "/api/admin/analytics/lifecycle",
-        params={"unknown": "value"},
-        headers=api["admin_headers"],
-    )
-    assert response.status_code == 200, response.text
-
-
-def test_analytics_query_parameters_are_declared_in_openapi():
-    schema = app.openapi()
-    expected = {
-        "/api/admin/analytics/overview": {"from", "to", "billing_mode", "provider", "model", "include_internal"},
-        "/api/admin/analytics/lifecycle": {"from", "to", "include_internal", "movement_range"},
-        "/api/admin/analytics/retention": {"from", "to", "include_internal"},
-        "/api/admin/analytics/commercial": {"from", "to", "include_internal"},
-        "/api/admin/analytics/operational": {"from", "to", "include_internal", "billing_mode", "provider", "model"},
-        "/api/admin/analytics/groups": {"from", "to", "include_internal", "user_group"},
-        "/api/admin/analytics/users": {
-            "q", "role", "lifecycle_segment", "operational_state", "commercial_tier",
-            "user_group", "activated", "last_meaningful_activity_from",
-            "last_meaningful_activity_to", "priority", "limit", "offset", "include_internal",
-        },
-        "/api/admin/analytics/users/{user_id}": {"from", "to"},
-        "/api/admin/analytics/users/{user_id}/activity": {"section", "limit", "cursor"},
-    }
-    for path, names in expected.items():
-        parameters = schema["paths"][path]["get"].get("parameters", [])
-        declared = {p["name"] for p in parameters if p["in"] == "query"}
-        assert declared == names, (path, declared)
-    assert "status" not in {
-        p["name"] for p in schema["paths"]["/api/admin/analytics/users"]["get"]["parameters"]
-    }
-
-
-def test_recut_fields_are_on_every_response(admin_analytics_api):
-    api = admin_analytics_api
-    subject_id = api["subject"]["id"]
-    overview = api["client"].get(
-        "/api/admin/analytics/overview", headers=api["admin_headers"]
-    ).json()
-    assert isinstance(overview["billing_lane_mix"], list)
-    for row in overview["billing_lane_mix"]:
-        assert set(row) == {"day", "platform_credits", "byok"}
-    operational = api["client"].get(
-        "/api/admin/analytics/operational", headers=api["admin_headers"]
-    ).json()
-    assert operational["top_operational_reasons"] == [
-        {"reason_code": "no_usable_billing_lane", "state": "blocked", "users": 2},
-        {"reason_code": "credential_invalid", "state": "needs_attention", "users": 4},
-    ]
-    commercial = api["client"].get(
-        "/api/admin/analytics/commercial", headers=api["admin_headers"]
-    ).json()
-    assert commercial["purchased_by_day"] == [{"day": "2026-09-01", "amount_micro": 5000000}, {"day": "2026-09-02", "amount_micro": 7000000}]
-    assert commercial["consumed_by_day"] == [{"day": "2026-09-01", "amount_micro": 1800000}, {"day": "2026-09-02", "amount_micro": 3000000}]
-    profile = api["client"].get(
-        f"/api/admin/analytics/users/{subject_id}", headers=api["admin_headers"]
-    ).json()
-    assert profile["user_group"] == "invited"
-    assert profile["role"] == "user"
-    assert profile["group_badge"] == "invited"
-    assert profile["last_meaningful_activity_at"] == "2026-08-22T11:20:00Z"
-    # D15: the fields stay in the payload (collection is a separate decision, §14);
-    # only their display leaves the page (Task 8 renders none of them).
-    assert {"country_code", "device_category", "browser_family", "top_product_page"} <= profile.keys()
-```
-
-The `overview` assertion is structural because the fixture's real `AnalyticsQueryService` runs over a store with no `model_usage_recorded` rows, so the list may be empty; the value routes go through `FixtureValueQueryService`, whose fixtures gain the exact rows asserted above in Step 3.
-
-- [ ] **Step 2: Run them and confirm the expected failures**
-
-```bash
-python -m pytest dashboard/backend/tests/test_admin_analytics_api.py -v -k "documented_filters or unsafe_queries or undeclared or openapi or recut"
-```
-
-Expected: **FAIL**. `test_admin_user_list_accepts_documented_filters` fails at the request with 422 (`role` is not in `_value_user_filters`' allowed set, so `_query_values` rejects it). `test_undeclared_query_keys_are_ignored_not_rejected` fails with 422 for the same reason. `test_analytics_query_parameters_are_declared_in_openapi` fails at the first path with `declared == set()` (today every handler reads `request.query_params`; nothing is declared). `test_recut_fields_are_on_every_response` fails with `KeyError: 'billing_lane_mix'`. `test_value_routes_reject_unsafe_queries_without_echo[role]` fails with 422 for the wrong reason today (unknown key) — it goes green only once `role` is declared and validated.
-
-- [ ] **Step 3: Add the models and populate them**
-
-`dashboard/backend/domain/analytics/query_service.py`, line 8, change
-
-```python
-from datetime import datetime, timedelta, timezone
-```
-
-to
-
-```python
-from datetime import date, datetime, timedelta, timezone
-```
-
-After `FailureCategoryCount` (lines 90-94) add:
-
-```python
-class BillingLaneDay(BaseModel):
-    """One UTC day of run counts by billing lane, from rollups `billing_mode` (D14)."""
-
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    day: date
-    platform_credits: int = Field(ge=0)
-    byok: int = Field(ge=0)
-```
-
-In `AnalyticsOverview` (post-PR-B shape), change
-
-```python
-    activation_funnel: dict[str, int]
-    top_failure_categories: list[FailureCategoryCount]
-    users_needing_attention: list[AnalyticsUserListItem]
-```
-
-to
-
-```python
-    activation_funnel: dict[str, int]
-    billing_lane_mix: list[BillingLaneDay] = Field(default_factory=list)
-    top_failure_categories: list[FailureCategoryCount]
-    users_needing_attention: list[AnalyticsUserListItem]
-```
-
-At the end of `AnalyticsQueryService.get_overview` (the `return AnalyticsOverview(` call), add the keyword argument, converting PR B's dict to rows sorted by day:
-
-```python
-            billing_lane_mix=[
-                BillingLaneDay(
-                    day=date.fromisoformat(day),
-                    platform_credits=int(lanes.get("platform_credits", 0)),
-                    byok=int(lanes.get("byok", 0)),
-                )
-                for day, lanes in sorted(self.billing_lane_mix(filters=filters).items())
-            ],
-```
-
-Add `"BillingLaneDay"` to `query_service.py`'s `__all__` (the module exports its response models by name; place it alphabetically after `"AnalyticsUserProfile"`).
-
-`dashboard/backend/domain/analytics/value_queries.py`. Extend the `.lifecycle` import (lines 10-17):
-
-```python
-from .lifecycle import (
-    CommercialTier,
-    LifecycleResult,
-    LifecycleSegment,
-    OperationalResult,
-    OperationalState,
-    is_lifecycle_activity,
-    resolve_group_badge,
-)
-```
-
-Before `CommercialAnalyticsResponse` (line 253) add:
-
-```python
-class LedgerDayTotal(BaseModel):
-    """One UTC day of settled ledger movement, from `CreditsStore.sum_ledger_by_day`."""
-
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    day: date
-    amount_micro: int = Field(ge=0)
-
-
-class OperationalReasonCount(BaseModel):
-    """How many users yesterday's facts row put in a non-healthy state for one reason."""
-
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    reason_code: str
-    state: OperationalState
-    users: int = Field(ge=0)
-```
-
-Change `CommercialAnalyticsResponse` (lines 253-261) from
-
-```python
-class CommercialAnalyticsResponse(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    as_of: datetime
-    tier_counts: dict[CommercialTier, int]
-    lifetime_net_purchased_micro: int = Field(ge=0)
-    selected_period: CommercialPeriodSummary
-    current_balances: BalanceTotals
-    availability: SectionAvailability
-```
-
-to
-
-```python
-class CommercialAnalyticsResponse(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    as_of: datetime
-    tier_counts: dict[CommercialTier, int]
-    lifetime_net_purchased_micro: int = Field(ge=0)
-    selected_period: CommercialPeriodSummary
-    current_balances: BalanceTotals
-    purchased_by_day: Sequence[LedgerDayTotal] = Field(default_factory=tuple)
-    consumed_by_day: Sequence[LedgerDayTotal] = Field(default_factory=tuple)
-    availability: SectionAvailability
-```
-
-Change `OperationalAnalyticsResponse` (lines 264-276) so the line
-
-```python
-    top_failure_categories: Sequence[FailureCategoryCount]
-```
-
-becomes
-
-```python
-    top_failure_categories: Sequence[FailureCategoryCount]
-    top_operational_reasons: Sequence[OperationalReasonCount] = Field(default_factory=tuple)
-```
-
-In `UserValueFilters` (line 305 onwards; PR B removed `legacy_status` and its validator branch), change
-
-```python
-    q: str | None = Field(default=None, max_length=100)
-    lifecycle_segment: LifecycleSegment | None = None
-```
-
-to
-
-```python
-    q: str | None = Field(default=None, max_length=100)
-    role: Literal["user", "admin"] | None = None
-    lifecycle_segment: LifecycleSegment | None = None
-```
-
-Change `ValueUserListItem` (lines 365-377) from
-
-```python
-class ValueUserListItem(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    user_id: int = Field(gt=0)
-    display_name: str
-    email: str
-    joined_at: datetime
-    lifecycle: LifecycleResult
-    operational: OperationalResult
-    commercial_tier: CommercialTier
-    lifetime_net_purchased_micro: int = Field(ge=0)
-    priority_group: PriorityGroup
-    profile_path: str
-```
-
-to
-
-```python
-class ValueUserListItem(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    user_id: int = Field(gt=0)
-    display_name: str
-    email: str
-    joined_at: datetime
-    user_group: UserGroup
-    role: Literal["user", "admin"]
-    group_badge: str = Field(min_length=1, max_length=32)
-    last_meaningful_activity_at: datetime | None = None
-    lifecycle: LifecycleResult
-    operational: OperationalResult
-    commercial_tier: CommercialTier
-    lifetime_net_purchased_micro: int = Field(ge=0)
-    priority_group: PriorityGroup
-    profile_path: str
-```
-
-Change `ValueUserProfile` (lines 389-395) from
-
-```python
-class ValueUserProfile(AnalyticsUserProfile):
-    lifecycle: LifecycleResult
-    operational: OperationalResult
-    commercial: CommercialValueFact
-    selected_period_start: date
-    selected_period_end: date
-    recent_lifecycle_transitions: Sequence[LifecycleTransition]
-```
-
-to
-
-```python
-class ValueUserProfile(AnalyticsUserProfile):
-    user_group: UserGroup
-    role: Literal["user", "admin"]
-    group_badge: str = Field(min_length=1, max_length=32)
-    last_meaningful_activity_at: datetime | None = None
-    lifecycle: LifecycleResult
-    operational: OperationalResult
-    commercial: CommercialValueFact
-    selected_period_start: date
-    selected_period_end: date
-    recent_lifecycle_transitions: Sequence[LifecycleTransition]
-```
-
-Populate the list item. PR B moved `list_users` onto SQL, so the construction site has moved from `main`'s lines 1319-1331; find it with `rg -n "ValueUserListItem\(" dashboard/backend/domain/analytics/value_queries.py`. Wherever it is, the row that reaches it carries the `users` columns (`role`, `user_group`) and the user's `snapshot`/facts and `fact` (commercial). Replace
-
-```python
-            selected.append(
-                ValueUserListItem(
-                    user_id=user_id,
-                    display_name=str(user.get("display_name") or ""),
-                    email=str(user.get("email") or ""),
-                    joined_at=_parse_timestamp(user["created_at"]),
-                    lifecycle=_lifecycle(snapshot),
-                    operational=_operational(snapshot),
-                    commercial_tier=fact.commercial_tier,
-                    lifetime_net_purchased_micro=fact.lifetime_net_purchased_micro,
-                    priority_group=group,
-                    profile_path=f"/admin/analytics/users/{user_id}",
-                )
-            )
-```
-
-with
-
-```python
-            role = "admin" if user.get("role") == "admin" else "user"
-            selected.append(
-                ValueUserListItem(
-                    user_id=user_id,
-                    display_name=str(user.get("display_name") or ""),
-                    email=str(user.get("email") or ""),
-                    joined_at=_parse_timestamp(user["created_at"]),
-                    user_group=user_group,
-                    role=role,
-                    group_badge=resolve_group_badge(
-                        role=role, user_group=user_group, tier=fact.commercial_tier
-                    ),
-                    last_meaningful_activity_at=snapshot.last_meaningful_activity_at,
-                    lifecycle=_lifecycle(snapshot),
-                    operational=_operational(snapshot),
-                    commercial_tier=fact.commercial_tier,
-                    lifetime_net_purchased_micro=fact.lifetime_net_purchased_micro,
-                    priority_group=group,
-                    profile_path=f"/admin/analytics/users/{user_id}",
-                )
-            )
-```
-
-and add the `role` predicate beside the existing `user_group` one (in the SQL `WHERE` PR B built, or — if the checkout still filters in Python — immediately after `if filters.user_group is not None and user_group != filters.user_group: continue`):
-
-```python
-            if filters.role is not None and role != filters.role:
-                continue
-```
-
-(`user_group` is already `coerce_user_group(user.get("user_group"))` two lines above the construction on `main`; the SQL version selects the same column.)
-
-Populate the profile. In `get_user_profile` (lines 1351-1390), after
-
-```python
-        snapshot = self.value_store.get_current_snapshot(subject_id)
-        if snapshot is None:
-            raise LookupError("Analytics value snapshot was not found")
-```
-
-(PR B renamed the store read onto `user_activity`; the variable that carries `last_meaningful_activity_at` is what matters) add
-
-```python
-        user = self.user_store.get_user_admin(subject_id)
-        if user is None:
-            raise LookupError("Analytics user was not found")
-        user_group = coerce_user_group(user.get("user_group"))
-        role = "admin" if user.get("role") == "admin" else "user"
-```
-
-and change the return from
-
-```python
-        return ValueUserProfile(
-            **legacy.model_dump(),
-            lifecycle=_lifecycle(snapshot),
-            operational=_operational(snapshot),
-            commercial=commercial,
-            selected_period_start=start,
-            selected_period_end=end,
-            recent_lifecycle_transitions=transitions,
-        )
-```
-
-to
-
-```python
-        return ValueUserProfile(
-            **legacy.model_dump(),
-            user_group=user_group,
-            role=role,
-            group_badge=resolve_group_badge(
-                role=role, user_group=user_group, tier=commercial.commercial_tier
-            ),
-            last_meaningful_activity_at=snapshot.last_meaningful_activity_at,
-            lifecycle=_lifecycle(snapshot),
-            operational=_operational(snapshot),
-            commercial=commercial,
-            selected_period_start=start,
-            selected_period_end=end,
-            recent_lifecycle_transitions=transitions,
-        )
-```
-
-Wire the two remaining §9 fields at the end of `get_operational` and `get_commercial` (their `return OperationalAnalyticsResponse(` / `return CommercialAnalyticsResponse(` calls):
-
-```python
-            top_operational_reasons=[
-                OperationalReasonCount(reason_code=reason_code, state=state, users=users)
-                for reason_code, state, users in self.top_operational_reasons(
-                    include_internal=include_internal
-                )
-            ],
-```
-
-```python
-            purchased_by_day=[
-                LedgerDayTotal(day=date.fromisoformat(day), amount_micro=amount)
-                for day, amount in sorted(
-                    self.purchased_by_day(start=start, end=end, include_internal=include_internal).items()
-                )
-            ],
-            consumed_by_day=[
-                LedgerDayTotal(day=date.fromisoformat(day), amount_micro=amount)
-                for day, amount in sorted(
-                    self.consumed_by_day(start=start, end=end, include_internal=include_internal).items()
-                )
-            ],
-```
-
-Add `"LedgerDayTotal"` and `"OperationalReasonCount"` to `__all__` (alphabetical: after `"GroupAnalyticsResponse"` and after `"OperationalAnalyticsResponse"` respectively).
-
-- [ ] **Step 4: Rewrite the router onto declared parameters**
-
-Replace `dashboard/backend/api/routers/admin_analytics.py` in full with the module below. What it keeps byte-for-byte: every constant, every regex, every validation rule (`_parse_date`'s exact-round-trip check, the 20-character integer guard, the 180-day cap via `MAX_VALUE_RANGE_DAYS`, the `to < from` reversal check, `_exclusive_date_end`'s `OverflowError` → 422), every 422/404/503 detail string, `_record_access`, and the handlers' `try/except → _raise_service_error` shape. What changes: `Request`-reading helpers become dependency functions with `Query(...)` parameters (aliases for `from`; `str | None` for everything so FastAPI's own validation can never echo a value — see the note above Step 1); `_invalid_query()` becomes `raise InvalidAnalyticsQuery()`; `_query_values`, `_user_filters` and the `AnalyticsUserFilters` import are gone (PR A's D24 deleted the dead users-list stack; this rewrite must not re-import it). `_raise_service_error` is shown in its PR A (D24) form — a `print` before the 503 and no `from None`; if PR A's merged body differs in wording, keep PR A's body.
-
-```python
-"""Admin-only, display-safe Analytics query endpoints.
-
-Every query parameter is declared (so it appears in ``app.openapi()``), typed
-``str | None`` on purpose, and validated in Python: the global
-``RequestValidationError`` handler echoes offending input back to the caller,
-and these routes must never echo a value an admin typed (it may be a pasted
-secret). Every validation failure is the one fixed body,
-``{"detail": "Invalid Analytics query."}``.
+"""The target-shape fixtures: today's payloads plus the §9 fields the /admin page renders.
+
+PR C ships before the contract re-cut (design §13, re-ordered 2026-09-16). The
+committed fixtures under fixtures/admin_analytics/ stay today's shapes and are
+validated against the committed models in test_admin_analytics_frontend.py; the
+copies under target/ add the fields PR D puts on the models. This module pins
+that the two sets differ by exactly those fields and nothing else, so neither
+can drift from the other. PR D deletes target/ and this module together — the
+second test below fails on purpose the moment a committed fixture carries a §9
+field, which is that PR's signal to do so.
 """
 
-from __future__ import annotations
-
-import re
-from datetime import date, datetime, time, timedelta, timezone
-from typing import Never
-
-from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import ValidationError
-
-from dashboard.backend.api.auth import require_admin
-from dashboard.backend.domain.analytics.metrics import AnalyticsMetricFilters
-from dashboard.backend.domain.analytics.query_service import (
-    AnalyticsActivityPage,
-    AnalyticsOverview,
-    AnalyticsQueryService,
-    get_analytics_query_service,
-    get_value_analytics_query_service,
-)
-from dashboard.backend.domain.analytics.service import (
-    AnalyticsService,
-    get_analytics_service,
-)
-from dashboard.backend.domain.analytics.value_queries import (
-    CommercialAnalyticsResponse,
-    GroupAnalyticsResponse,
-    LifecycleAnalyticsResponse,
-    MAX_VALUE_RANGE_DAYS,
-    OperationalAnalyticsResponse,
-    PaginatedValueUsers,
-    RetentionAnalyticsResponse,
-    UserValueFilters,
-    ValueAnalyticsQueryService,
-    ValueUserProfile,
-)
-from dashboard.backend.domain.user_groups import parse_user_group
-
-
-router = APIRouter(
-    prefix="/admin/analytics",
-    tags=["admin-analytics"],
-    dependencies=[Depends(require_admin)],
-)
-
-_INVALID_QUERY_DETAIL = "Invalid Analytics query."
-_NOT_FOUND_DETAIL = "Analytics user was not found."
-_UNAVAILABLE_DETAIL = "Analytics is temporarily unavailable."
-_PROVIDER_ID_PATTERN = re.compile(r"^[a-z0-9_]{2,64}$")
-_MODEL_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/\-:]{0,255}$")
-_POSITIVE_INTEGER_PATTERN = re.compile(r"^[0-9]+$")
-_ROLES = {"user", "admin"}
-_ACTIVITY_SECTIONS = {"timeline", "runs", "usage", "sessions"}
-_LIFECYCLE_SEGMENTS = {"new", "onboarding", "growing", "core", "at_risk", "dormant"}
-_OPERATIONAL_STATES = {"blocked", "needs_attention", "healthy"}
-_COMMERCIAL_TIERS = {"unpaid", "starter", "invested", "high_value"}
-_LIFECYCLE_MOVEMENT_RANGES = {"5d", "1w", "1m", "1y"}
-_BILLING_MODES = {"byok", "platform_credits"}
-
-
-class InvalidAnalyticsQuery(HTTPException):
-    """The one 422 these routes ever raise; carries no caller input."""
-
-    def __init__(self) -> None:
-        super().__init__(status_code=422, detail=_INVALID_QUERY_DETAIL)
-
-
-def _parse_date(value: str) -> date:
-    if len(value) != 10:
-        raise InvalidAnalyticsQuery()
-    try:
-        parsed = date.fromisoformat(value)
-    except ValueError:
-        raise InvalidAnalyticsQuery() from None
-    if parsed.isoformat() != value:
-        raise InvalidAnalyticsQuery()
-    return parsed
-
-
-def _utc_midnight(value: date) -> datetime:
-    return datetime.combine(value, time.min, tzinfo=timezone.utc)
-
-
-def _exclusive_date_end(value: date) -> datetime:
-    try:
-        return _utc_midnight(value + timedelta(days=1))
-    except OverflowError:
-        raise InvalidAnalyticsQuery() from None
-
-
-def _parse_bool(value: str) -> bool:
-    normalized = value.lower()
-    if normalized == "true":
-        return True
-    if normalized == "false":
-        return False
-    raise InvalidAnalyticsQuery()
-
-
-def _optional_bool(value: str | None, default: bool) -> bool:
-    return _parse_bool(value) if value is not None else default
-
-
-def _parse_integer(
-    value: str,
-    *,
-    minimum: int,
-    maximum: int | None = None,
-) -> int:
-    if len(value) > 20 or not _POSITIVE_INTEGER_PATTERN.fullmatch(value):
-        raise InvalidAnalyticsQuery()
-    parsed = int(value)
-    if parsed < minimum or (maximum is not None and parsed > maximum):
-        raise InvalidAnalyticsQuery()
-    return parsed
-
-
-def _parse_user_id(value: str) -> int:
-    return _parse_integer(value, minimum=1)
-
-
-def _one_of(value: str | None, allowed: set[str]) -> str | None:
-    if value is not None and value not in allowed:
-        raise InvalidAnalyticsQuery()
-    return value
-
-
-def _provider_id(value: str | None) -> str | None:
-    if value is not None and not _PROVIDER_ID_PATTERN.fullmatch(value):
-        raise InvalidAnalyticsQuery()
-    return value
-
-
-def _model_id(value: str | None) -> str | None:
-    if value is not None and not _MODEL_ID_PATTERN.fullmatch(value):
-        raise InvalidAnalyticsQuery()
-    return value
-
-
-def _user_group(value: str | None):
-    if value is None:
-        return None
-    try:
-        return parse_user_group(value)
-    except ValueError:
-        raise InvalidAnalyticsQuery() from None
-
-
-def _ordered_dates(from_: str | None, to: str | None) -> tuple[date | None, date | None]:
-    from_date = _parse_date(from_) if from_ is not None else None
-    to_date = _parse_date(to) if to is not None else None
-    if from_date is not None and to_date is not None and to_date < from_date:
-        raise InvalidAnalyticsQuery()
-    return from_date, to_date
-
-
-def _overview_filters(
-    from_: str | None = Query(default=None, alias="from"),
-    to: str | None = Query(default=None),
-    billing_mode: str | None = Query(default=None),
-    provider: str | None = Query(default=None),
-    model: str | None = Query(default=None),
-    include_internal: str | None = Query(default=None),
-) -> AnalyticsMetricFilters:
-    now = datetime.now(timezone.utc)
-    from_date, to_date = _ordered_dates(from_, to)
-    end = _exclusive_date_end(to_date) if to_date else now
-    try:
-        start = _utc_midnight(from_date) if from_date else end - timedelta(days=30)
-    except OverflowError:
-        raise InvalidAnalyticsQuery() from None
-    try:
-        return AnalyticsMetricFilters(
-            start=start,
-            end=end,
-            billing_mode=_one_of(billing_mode, _BILLING_MODES),
-            provider_id=_provider_id(provider),
-            model_id=_model_id(model),
-            include_internal=_optional_bool(include_internal, False),
-        )
-    except (ValidationError, ValueError):
-        raise InvalidAnalyticsQuery() from None
-
-
-def _value_dates(from_: str | None, to: str | None) -> tuple[date, date]:
-    today = datetime.now(timezone.utc).date()
-    from_date, to_date = _ordered_dates(from_, to)
-    try:
-        end = (to_date or today) + timedelta(days=1)
-        start = from_date or end - timedelta(days=30)
-    except OverflowError:
-        raise InvalidAnalyticsQuery() from None
-    if end <= start or (end - start).days > MAX_VALUE_RANGE_DAYS:
-        raise InvalidAnalyticsQuery()
-    return start, end
-
-
-class ValueRange:
-    """`from`/`to`/`include_internal` resolved to a validated `[start, end)` window."""
-
-    __slots__ = ("start", "end", "include_internal")
-
-    def __init__(self, start: date, end: date, include_internal: bool) -> None:
-        self.start = start
-        self.end = end
-        self.include_internal = include_internal
-
-
-def _value_range(
-    from_: str | None = Query(default=None, alias="from"),
-    to: str | None = Query(default=None),
-    include_internal: str | None = Query(default=None),
-) -> ValueRange:
-    start, end = _value_dates(from_, to)
-    return ValueRange(start, end, _optional_bool(include_internal, False))
-
-
-def _profile_range(
-    from_: str | None = Query(default=None, alias="from"),
-    to: str | None = Query(default=None),
-) -> tuple[date, date]:
-    return _value_dates(from_, to)
-
-
-def _movement_range(movement_range: str | None = Query(default=None)) -> str:
-    return _one_of(movement_range, _LIFECYCLE_MOVEMENT_RANGES) or "5d"
-
-
-class OperationalDimensions:
-    __slots__ = ("billing_mode", "provider_id", "model_id")
-
-    def __init__(self, billing_mode, provider_id, model_id) -> None:
-        self.billing_mode = billing_mode
-        self.provider_id = provider_id
-        self.model_id = model_id
-
-
-def _operational_dimensions(
-    billing_mode: str | None = Query(default=None),
-    provider: str | None = Query(default=None),
-    model: str | None = Query(default=None),
-) -> OperationalDimensions:
-    return OperationalDimensions(
-        _one_of(billing_mode, _BILLING_MODES),
-        _provider_id(provider),
-        _model_id(model),
-    )
-
-
-def _selected_group(user_group: str | None = Query(default=None)):
-    return _user_group(user_group)
-
-
-class UserListQuery:
-    __slots__ = ("filters", "limit", "offset")
-
-    def __init__(self, filters: UserValueFilters, limit: int, offset: int) -> None:
-        self.filters = filters
-        self.limit = limit
-        self.offset = offset
-
-
-def _value_user_filters(
-    q: str | None = Query(default=None),
-    role: str | None = Query(default=None),
-    lifecycle_segment: str | None = Query(default=None),
-    operational_state: str | None = Query(default=None),
-    commercial_tier: str | None = Query(default=None),
-    user_group: str | None = Query(default=None),
-    activated: str | None = Query(default=None),
-    last_meaningful_activity_from: str | None = Query(default=None),
-    last_meaningful_activity_to: str | None = Query(default=None),
-    priority: str | None = Query(default=None),
-    limit: str | None = Query(default=None),
-    offset: str | None = Query(default=None),
-    include_internal: str | None = Query(default=None),
-) -> UserListQuery:
-    if q is not None and len(q) > 100:
-        raise InvalidAnalyticsQuery()
-    from_date, to_date = _ordered_dates(
-        last_meaningful_activity_from, last_meaningful_activity_to
-    )
-    try:
-        filters = UserValueFilters(
-            q=q,
-            role=_one_of(role, _ROLES),
-            lifecycle_segment=_one_of(lifecycle_segment, _LIFECYCLE_SEGMENTS),
-            operational_state=_one_of(operational_state, _OPERATIONAL_STATES),
-            commercial_tier=_one_of(commercial_tier, _COMMERCIAL_TIERS),
-            user_group=_user_group(user_group),
-            activated=_parse_bool(activated) if activated is not None else None,
-            last_meaningful_activity_from=(
-                _utc_midnight(from_date) if from_date is not None else None
-            ),
-            last_meaningful_activity_to=(
-                _exclusive_date_end(to_date) - timedelta(microseconds=1)
-                if to_date is not None
-                else None
-            ),
-            priority=_optional_bool(priority, False),
-            include_internal=_optional_bool(include_internal, False),
-        )
-    except (ValidationError, ValueError):
-        raise InvalidAnalyticsQuery() from None
-    return UserListQuery(
-        filters,
-        _parse_integer(limit if limit is not None else "50", minimum=1, maximum=100),
-        _parse_integer(offset if offset is not None else "0", minimum=0),
-    )
-
-
-class ActivityQuery:
-    __slots__ = ("section", "limit", "cursor")
-
-    def __init__(self, section: str, limit: int, cursor: str | None) -> None:
-        self.section = section
-        self.limit = limit
-        self.cursor = cursor
-
-
-def _activity_query(
-    section: str | None = Query(default=None),
-    limit: str | None = Query(default=None),
-    cursor: str | None = Query(default=None),
-) -> ActivityQuery:
-    if section not in _ACTIVITY_SECTIONS:
-        raise InvalidAnalyticsQuery()
-    if cursor is not None and (not cursor or len(cursor) > 256):
-        raise InvalidAnalyticsQuery()
-    return ActivityQuery(
-        section,
-        _parse_integer(limit if limit is not None else "50", minimum=1, maximum=100),
-        cursor,
-    )
-
-
-def _raise_service_error(exc: Exception) -> Never:
-    if isinstance(exc, LookupError):
-        raise HTTPException(status_code=404, detail=_NOT_FOUND_DETAIL)
-    if isinstance(exc, (ValidationError, ValueError)):
-        raise HTTPException(status_code=422, detail=_INVALID_QUERY_DETAIL)
-    print(
-        f"ERROR: admin_analytics.service_failure category={type(exc).__name__}",
-        flush=True,
-    )
-    raise HTTPException(status_code=503, detail=_UNAVAILABLE_DETAIL)
-
-
-def _record_access(
-    service: AnalyticsService,
-    *,
-    admin: dict,
-    subject_user_id: int,
-    section: str,
-) -> None:
-    try:
-        service.record_admin_profile_access(
-            actor=admin,
-            subject_user_id=subject_user_id,
-            section=section,
-        )
-    except Exception:
-        raise HTTPException(status_code=503, detail=_UNAVAILABLE_DETAIL) from None
-
-
-@router.get("/overview", response_model=AnalyticsOverview)
-def get_overview(
-    filters: AnalyticsMetricFilters = Depends(_overview_filters),
-    service: AnalyticsQueryService = Depends(get_analytics_query_service),
-):
-    try:
-        return service.get_overview(filters=filters)
-    except Exception as exc:
-        _raise_service_error(exc)
-
-
-@router.get("/lifecycle", response_model=LifecycleAnalyticsResponse)
-def get_lifecycle(
-    window: ValueRange = Depends(_value_range),
-    movement_range: str = Depends(_movement_range),
-    service: ValueAnalyticsQueryService = Depends(get_value_analytics_query_service),
-):
-    try:
-        return service.get_lifecycle(
-            start=window.start,
-            end=window.end,
-            include_internal=window.include_internal,
-            movement_range=movement_range,
-        )
-    except Exception as exc:
-        _raise_service_error(exc)
-
-
-@router.get("/retention", response_model=RetentionAnalyticsResponse)
-def get_retention(
-    window: ValueRange = Depends(_value_range),
-    service: ValueAnalyticsQueryService = Depends(get_value_analytics_query_service),
-):
-    try:
-        return service.get_retention(
-            start=window.start,
-            end=window.end,
-            include_internal=window.include_internal,
-        )
-    except Exception as exc:
-        _raise_service_error(exc)
-
-
-@router.get("/commercial", response_model=CommercialAnalyticsResponse)
-def get_commercial(
-    window: ValueRange = Depends(_value_range),
-    service: ValueAnalyticsQueryService = Depends(get_value_analytics_query_service),
-):
-    try:
-        return service.get_commercial(
-            start=window.start,
-            end=window.end,
-            include_internal=window.include_internal,
-        )
-    except Exception as exc:
-        _raise_service_error(exc)
-
-
-@router.get("/operational", response_model=OperationalAnalyticsResponse)
-def get_operational(
-    window: ValueRange = Depends(_value_range),
-    dimensions: OperationalDimensions = Depends(_operational_dimensions),
-    service: ValueAnalyticsQueryService = Depends(get_value_analytics_query_service),
-):
-    try:
-        return service.get_operational(
-            start=window.start,
-            end=window.end,
-            include_internal=window.include_internal,
-            billing_mode=dimensions.billing_mode,
-            provider_id=dimensions.provider_id,
-            model_id=dimensions.model_id,
-        )
-    except Exception as exc:
-        _raise_service_error(exc)
-
-
-@router.get("/groups", response_model=GroupAnalyticsResponse)
-def get_groups(
-    window: ValueRange = Depends(_value_range),
-    selected_group=Depends(_selected_group),
-    service: ValueAnalyticsQueryService = Depends(get_value_analytics_query_service),
-):
-    try:
-        return service.get_groups(
-            start=window.start,
-            end=window.end,
-            include_internal=window.include_internal,
-            user_group=selected_group,
-        )
-    except Exception as exc:
-        _raise_service_error(exc)
-
-
-@router.get("/users", response_model=PaginatedValueUsers)
-def list_users(
-    query: UserListQuery = Depends(_value_user_filters),
-    service: ValueAnalyticsQueryService = Depends(get_value_analytics_query_service),
-):
-    try:
-        return service.list_users(
-            filters=query.filters, limit=query.limit, offset=query.offset
-        )
-    except Exception as exc:
-        _raise_service_error(exc)
-
-
-@router.get("/users/{user_id}", response_model=ValueUserProfile)
-def get_user_profile(
-    user_id: str,
-    window: tuple[date, date] = Depends(_profile_range),
-    admin: dict = Depends(require_admin),
-    query_service: ValueAnalyticsQueryService = Depends(
-        get_value_analytics_query_service
-    ),
-    analytics_service: AnalyticsService = Depends(get_analytics_service),
-):
-    start, end = window
-    subject_user_id = _parse_user_id(user_id)
-    try:
-        profile = query_service.get_user_profile(
-            user_id=subject_user_id,
-            start=start,
-            end=end,
-        )
-    except Exception as exc:
-        _raise_service_error(exc)
-    _record_access(
-        analytics_service,
-        admin=admin,
-        subject_user_id=subject_user_id,
-        section="overview",
-    )
-    return profile
-
-
-@router.get("/users/{user_id}/activity", response_model=AnalyticsActivityPage)
-def get_user_activity(
-    user_id: str,
-    activity_query: ActivityQuery = Depends(_activity_query),
-    admin: dict = Depends(require_admin),
-    query_service: AnalyticsQueryService = Depends(get_analytics_query_service),
-    analytics_service: AnalyticsService = Depends(get_analytics_service),
-):
-    subject_user_id = _parse_user_id(user_id)
-    try:
-        activity = query_service.get_user_activity(
-            user_id=subject_user_id,
-            section=activity_query.section,
-            limit=activity_query.limit,
-            cursor=activity_query.cursor,
-        )
-    except Exception as exc:
-        _raise_service_error(exc)
-    _record_access(
-        analytics_service,
-        admin=admin,
-        subject_user_id=subject_user_id,
-        section=activity_query.section,
-    )
-    return activity
-
-
-__all__ = ["router"]
+import json
+from pathlib import Path
+
+FIXTURES = Path(__file__).resolve().parent / "fixtures" / "admin_analytics"
+TARGET = FIXTURES / "target"
+
+# fixture name -> [(path to the object that gains keys, keys added by design §9)]
+TARGET_FIELDS = {
+    "overview.json": [((), {"billing_lane_mix"})],
+    "overview_partial_error.json": [((), {"billing_lane_mix"})],
+    "operational.json": [((), {"top_operational_reasons"})],
+    "commercial.json": [((), {"purchased_by_day", "consumed_by_day"})],
+    "users.json": [
+        (("items", 0), {"user_group", "role", "group_badge", "last_meaningful_activity_at"}),
+        (("items", 1), {"user_group", "role", "group_badge", "last_meaningful_activity_at"}),
+    ],
+    "user_detail.json": [((), {"user_group", "role", "group_badge", "last_meaningful_activity_at"})],
+}
+
+
+def _load(path: Path) -> dict:
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _at(payload, json_path):
+    node = payload
+    for step in json_path:
+        node = node[step]
+    return node
+
+
+def test_target_fixtures_exist_for_every_recut_payload():
+    assert sorted(path.name for path in TARGET.glob("*.json")) == sorted(TARGET_FIELDS)
+
+
+def test_target_fixtures_add_exactly_the_section_9_fields():
+    for name, additions in TARGET_FIELDS.items():
+        committed = _load(FIXTURES / name)
+        target = _load(TARGET / name)
+        for json_path, keys in additions:
+            target_node = _at(target, json_path)
+            committed_node = _at(committed, json_path)
+            assert keys <= target_node.keys(), (name, json_path, keys - target_node.keys())
+            assert keys.isdisjoint(committed_node.keys()), (
+                name, json_path, "a committed fixture carries a §9 field: PR D has landed, delete target/ and this module",
+            )
+            for key in keys:
+                target_node.pop(key)
+        assert target == committed, f"{name}: target differs from committed beyond the §9 fields"
+
+
+def test_target_group_badges_are_the_server_precedence_not_a_client_rule():
+    """D11: the fixture records what resolve_group_badge returns; nothing client-side derives it."""
+    users = _load(TARGET / "users.json")
+    badges = {
+        item["user_id"]: (item["role"], item["user_group"], item["commercial_tier"], item["group_badge"])
+        for item in users["items"]
+    }
+    assert badges[101] == ("user", "invited", "invested", "invited")
+    assert badges[102] == ("user", "unknown", "unpaid", "free")
 ```
 
-Handler names are unchanged (`get_overview`, `get_lifecycle`, `get_retention`, `get_commercial`, `get_operational`, `get_groups`, `list_users`, `get_user_profile`, `get_user_activity`), so `EXPECTED_ADMIN_ANALYTICS_ROUTES` in `test_app_composition.py` (lines 70-84) does not change. Run `rg -n "_query_values|_invalid_query|AnalyticsUserFilters|request.query_params" dashboard/backend/api/routers/admin_analytics.py` and confirm zero hits.
+- [ ] **Step 2: Run it and confirm the expected failure**
 
-- [ ] **Step 5: Update the fixtures**
+```bash
+python -m pytest dashboard/backend/tests/test_admin_target_fixtures.py -v
+```
 
-`tests/fixtures/admin_analytics/overview.json` and `overview_partial_error.json`: after the `"activation_funnel": {...}` object add
+Expected: **FAIL** — `test_target_fixtures_exist_for_every_recut_payload` with `[] == ['commercial.json', ...]` (the directory does not exist); the other two with `FileNotFoundError`.
+
+- [ ] **Step 3: Copy the six fixtures and add the §9 hunks to the copies**
+
+```bash
+mkdir -p dashboard/backend/tests/fixtures/admin_analytics/target
+for f in overview overview_partial_error operational commercial users user_detail; do
+  cp dashboard/backend/tests/fixtures/admin_analytics/$f.json dashboard/backend/tests/fixtures/admin_analytics/target/$f.json
+done
+```
+
+Then edit the **target** copies only. The committed files stay byte-identical (`git status --short dashboard/backend/tests/fixtures/admin_analytics/*.json` prints nothing after this step).
+
+`target/overview.json` and `target/overview_partial_error.json`: after the `"activation_funnel": {...}` object add
 
 ```json
   "billing_lane_mix": [
@@ -1147,9 +201,9 @@ Handler names are unchanged (`get_overview`, `get_lifecycle`, `get_retention`, `
   ],
 ```
 
-(in `overview_partial_error.json` use `"billing_lane_mix": [],` — the growth panel is unavailable there).
+(in `target/overview_partial_error.json` use `"billing_lane_mix": [],` — the growth panel is unavailable there).
 
-`operational.json`: after the `"top_failure_categories": [...]` array add
+`target/operational.json`: after the `"top_failure_categories": [...]` array add
 
 ```json
   "top_operational_reasons": [
@@ -1158,7 +212,7 @@ Handler names are unchanged (`get_overview`, `get_lifecycle`, `get_retention`, `
   ],
 ```
 
-`commercial.json`: after the `"current_balances": {...}` object add
+`target/commercial.json`: after the `"current_balances": {...}` object add
 
 ```json
   "purchased_by_day": [
@@ -1171,7 +225,7 @@ Handler names are unchanged (`get_overview`, `get_lifecycle`, `get_retention`, `
   ],
 ```
 
-`users.json`: in item `101` after `"joined_at": "2026-07-01T09:00:00Z",` add
+`target/users.json`: in item `101` after `"joined_at": "2026-07-01T09:00:00Z",` add
 
 ```json
       "user_group": "invited",
@@ -1191,7 +245,7 @@ and in item `102` after its `joined_at` add
 
 (`102` is `unpaid` with `unknown` group, so the server badge is `free` — the fixture records what the server would compute; nothing client-side derives it.)
 
-`user_detail.json`: after `"last_meaningful_activity": "2026-08-22T11:20:00Z",` add
+`target/user_detail.json`: after `"last_meaningful_activity": "2026-08-22T11:20:00Z",` add
 
 ```json
   "user_group": "invited",
@@ -1200,20 +254,21 @@ and in item `102` after its `joined_at` add
   "last_meaningful_activity_at": "2026-08-22T11:20:00Z",
 ```
 
-- [ ] **Step 6: Run the suite for this surface and confirm the pass**
+- [ ] **Step 4: Run it and confirm the pass**
 
 ```bash
-python -m pytest dashboard/backend/tests/test_admin_analytics_api.py dashboard/backend/tests/test_admin_analytics_frontend.py::test_fixtures_validate_against_committed_analytics_models dashboard/backend/tests/test_app_composition.py::test_admin_analytics_router_contract dashboard/backend/tests/domain/analytics -v
+python -m pytest dashboard/backend/tests/test_admin_target_fixtures.py dashboard/backend/tests/test_admin_analytics_frontend.py::test_fixtures_validate_against_committed_analytics_models -v
+git status --short dashboard/backend/tests/fixtures/admin_analytics/
 ```
 
-Expected: **PASS** across the file. `test_admin_analytics_rejects_invalid_queries_without_echo` still passes (its `provider` canary is rejected by `_provider_id`, never by FastAPI). `test_fixtures_validate_against_committed_analytics_models` passes because every fixture now carries the required new fields. `test_admin_analytics_router_contract` passes because the nine `(method, path, name)` triples are unchanged.
+Expected: **PASS** on all four, and `git status` lists only the six new files under `target/` (`??`) — no committed fixture modified. If `test_target_fixtures_add_exactly_the_section_9_fields` fails with `target differs from committed beyond the §9 fields`, a hunk landed at the wrong nesting level or `cp` was run after an edit; re-copy and re-apply.
 
-- [ ] **Step 7: Commit**
+- [ ] **Step 5: Commit**
 
 ```bash
-git add dashboard/backend/domain/analytics/query_service.py dashboard/backend/domain/analytics/value_queries.py dashboard/backend/api/routers/admin_analytics.py dashboard/backend/tests/test_admin_analytics_api.py dashboard/backend/tests/fixtures/admin_analytics/overview.json dashboard/backend/tests/fixtures/admin_analytics/overview_partial_error.json dashboard/backend/tests/fixtures/admin_analytics/operational.json dashboard/backend/tests/fixtures/admin_analytics/commercial.json dashboard/backend/tests/fixtures/admin_analytics/users.json dashboard/backend/tests/fixtures/admin_analytics/user_detail.json
+git add dashboard/backend/tests/fixtures/admin_analytics/target dashboard/backend/tests/test_admin_target_fixtures.py
 git commit -m "$(cat <<'EOF'
-feat: re-cut the admin analytics contract onto declared query parameters
+test: add the target-shape analytics fixtures the /admin page renders
 
 Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
 EOF
@@ -2313,9 +1368,9 @@ EOF
 **Interfaces:**
 - Consumes: `GET /api/auth/me` (`{"user": {"role": ...}}`, 401 when signed out — `api/auth.py:594-618`); `window.CreditFormat.formatCreditsMicro(value)` from `js/credit-format.js` (loaded by `admin.html` after this module; used lazily at render time, never at load).
 - Produces `window.AdminShell` (frozen) with:
-  - constants: `ROUTES`, `RANGE_DAYS`, `LIFECYCLE_LABELS`, `OPERATIONAL_LABELS`, `COMMERCIAL_LABELS`, `USER_GROUP_LABELS`, `LIFECYCLE_RULES`, `OPERATIONAL_RULES`, `SECTION_UNAVAILABLE`, `STALE_NOTICE`, `INCOMPLETE`, `DASH`;
+  - constants: `ROUTES`, `RANGE_DAYS`, `LIFECYCLE_LABELS`, `OPERATIONAL_LABELS`, `COMMERCIAL_LABELS`, `USER_GROUP_LABELS`, `LIFECYCLE_RULES`, `OPERATIONAL_RULES`, `SECTION_UNAVAILABLE`, `STALE_NOTICE`, `INCOMPLETE`, `PENDING`, `DASH`;
   - `state` (`{ route, routeId, range, filters: { group, segment, tier, internal, q, priority }, admin }`);
-  - pure: `parseHash(hash) -> { route, id }`, `rangeDates(range, today: Date) -> { from, to }`, `readUrlState(search) -> { range, filters }`, `buildSearch(range, filters) -> string`, `analyticsParams({ withGroup }) -> URLSearchParams`, `userListParams({ offset, limit }) -> URLSearchParams`, `formatNumber`, `formatPercent`, `formatCredits`, `formatDateOnly`, `formatShortDay`, `formatTimestamp`, `humanize`, `availabilityIncomplete`, `freshnessLegendText(now: Date)`, `rulesEntries() -> [label, rule][]`, `el(tag, className, text)`, `clear(node)`;
+  - pure: `parseHash(hash) -> { route, id }`, `rangeDates(range, today: Date) -> { from, to }`, `readUrlState(search) -> { range, filters }`, `buildSearch(range, filters) -> string`, `analyticsParams({ withGroup }) -> URLSearchParams`, `userListParams({ offset, limit }) -> URLSearchParams`, `formatNumber`, `formatPercent`, `formatCredits`, `formatDateOnly`, `formatShortDay`, `formatTimestamp`, `humanize`, `availabilityIncomplete`, `fieldPending(payload, key) -> boolean`, `freshnessLegendText(now: Date)`, `rulesEntries() -> [label, rule][]`, `el(tag, className, text)`, `clear(node)`;
   - effectful: `request(path)`, `nextSeq(surface)`, `isCurrent(surface, seq)`, `invalidateAll()`, `handleAccessLost(error) -> Promise<boolean>`, `setPanelState(panel, { busy, status, error, stale, empty })`, `openDialog(dialog, opener)`, `closeDialog(dialog)`, `openRules(opener)`, `navigate(hash)`;
   - events on `document`: `admin:route` (`detail: { route, id, range, filters }`) on every hash/popstate/filter change; `admin:retry` (`detail: { panel }`) when a panel's Retry button is pressed.
 
@@ -2360,6 +1415,13 @@ def source(name: str) -> str:
 def fixture(name: str) -> str:
     """The fixture as a JSON literal ready to paste into a scenario."""
     return (FIXTURES / name).read_text(encoding="utf-8")
+
+
+def target_fixture(name: str) -> str:
+    """The target-shape copy (today's payload plus the §9 fields; see the PR C plan's
+    "Interim contract"). PR D folds these into the committed fixtures and deletes both
+    the directory and this helper."""
+    return (FIXTURES / "target" / name).read_text(encoding="utf-8")
 
 
 DOM_STUB = r"""
@@ -2580,6 +1642,16 @@ def test_availability_incomplete_reads_both_payload_shapes():
     assert _eval("window.AdminShell.availabilityIncomplete(null)") is False
 
 
+def test_field_pending_distinguishes_absent_from_served_and_empty():
+    """Interim contract: absent (not served yet) renders PENDING; served-and-empty renders the panel's own copy."""
+    assert _eval("window.AdminShell.PENDING") == "Awaiting data source"
+    assert _eval("window.AdminShell.fieldPending({daily_active_users: []}, 'billing_lane_mix')") is True
+    assert _eval("window.AdminShell.fieldPending({billing_lane_mix: []}, 'billing_lane_mix')") is False
+    assert _eval("window.AdminShell.fieldPending({billing_lane_mix: null}, 'billing_lane_mix')") is False
+    assert _eval("window.AdminShell.fieldPending(null, 'billing_lane_mix')") is False
+    assert _eval("window.AdminShell.fieldPending(undefined, 'billing_lane_mix')") is False
+
+
 def test_rules_dialog_carries_section_15_copy():
     entries = _eval("window.AdminShell.rulesEntries()")
     assert [label for label, _rule in entries] == [
@@ -2737,6 +1809,7 @@ Expected: **ERROR at collection** — `FileNotFoundError` for `dashboard/fronten
   const SECTION_UNAVAILABLE = 'This section is temporarily unavailable.';
   const STALE_NOTICE = 'Showing the last successful response; refresh failed.';
   const INCOMPLETE = 'Incomplete data';
+  const PENDING = 'Awaiting data source';
   const DASH = '—';
   const LOCALE = 'en-US';
 
@@ -2902,6 +1975,16 @@ Expected: **ERROR at collection** — `FileNotFoundError` for `dashboard/fronten
     if (!availability || typeof availability !== 'object') return false;
     if (incompleteItem(availability)) return true;
     return Object.values(availability).some(incompleteItem);
+  }
+
+  function fieldPending(payload, key) {
+    // Interim contract (PR C ships before PR D): a §9 field the route does not
+    // serve yet is *absent* from the payload, which is not served-and-empty.
+    // Absent renders PENDING so the slot is visibly waiting on a data source;
+    // after PR D an absent field is a contract bug and reads the same way
+    // (fail-visible), never as an empty chart. No payload at all is the
+    // caller's loading/error state, not a pending field.
+    return Boolean(payload) && typeof payload === 'object' && !(key in payload);
   }
 
   function freshnessLegendText(now) {
@@ -3159,11 +2242,11 @@ Expected: **ERROR at collection** — `FileNotFoundError` for `dashboard/fronten
 
   const api = {
     ROUTES, RANGE_DAYS, LIFECYCLE_LABELS, OPERATIONAL_LABELS, COMMERCIAL_LABELS, USER_GROUP_LABELS,
-    LIFECYCLE_RULES, OPERATIONAL_RULES, SECTION_UNAVAILABLE, STALE_NOTICE, INCOMPLETE, DASH,
+    LIFECYCLE_RULES, OPERATIONAL_RULES, SECTION_UNAVAILABLE, STALE_NOTICE, INCOMPLETE, PENDING, DASH,
     state, today,
     parseHash, rangeDates, readUrlState, buildSearch, analyticsParams, userListParams,
     formatNumber, formatPercent, formatCredits, formatDateOnly, formatShortDay, formatTimestamp, humanize,
-    availabilityIncomplete, freshnessLegendText, rulesEntries, el, clear,
+    availabilityIncomplete, fieldPending, freshnessLegendText, rulesEntries, el, clear,
     request, nextSeq, isCurrent, invalidateAll, handleAccessLost, gate,
     setPanelState, openDialog, closeDialog, openRules, navigate, setFilters,
   };
@@ -3180,7 +2263,7 @@ Expected: **ERROR at collection** — `FileNotFoundError` for `dashboard/fronten
 python -m pytest dashboard/backend/tests/test_admin_shell_frontend.py -v
 ```
 
-Expected: **PASS** on all twelve tests. `test_formatters_are_display_safe_and_fixed_locale` passes on any machine because every `Intl` call names `en-US` and `timeZone: 'UTC'` explicitly rather than inheriting the host's locale.
+Expected: **PASS** on all thirteen tests. `test_formatters_are_display_safe_and_fixed_locale` passes on any machine because every `Intl` call names `en-US` and `timeZone: 'UTC'` explicitly rather than inheriting the host's locale.
 
 - [ ] **Step 5: Commit**
 
@@ -3426,7 +2509,7 @@ EOF
 - Test: `dashboard/backend/tests/test_admin_overview_frontend.py`, `dashboard/backend/tests/test_admin_analytics_frontend.py::test_fixtures_validate_against_committed_analytics_models`.
 
 **Interfaces:**
-- Consumes: `window.AdminShell`; the six endpoints `GET /api/admin/analytics/{overview,lifecycle,retention,commercial,operational,groups}` with `from`/`to`/`include_internal` (+ `user_group` on `/groups`), payload shapes per Task 1 and `tests/fixtures/admin_analytics/*.json`.
+- Consumes: `window.AdminShell`; the six endpoints `GET /api/admin/analytics/{overview,lifecycle,retention,commercial,operational,groups}` with `from`/`to`/`include_internal` (+ `user_group` on `/groups`), payload shapes = today's routes (D18) plus the §9 fields when a response carries them ("Interim contract"); fixtures `tests/fixtures/admin_analytics/*.json` (today) and `target/*.json` (§9, Task 1).
 - Produces `window.AdminOverview` with pure renderers `renderAttention(operational, lifecycle)`, `renderActiveUsers(overview)`, `renderActivation(overview)`, `renderSources(groups)`, `renderRetention(retention)`, `renderValue(groups)`, `renderLifecycle(lifecycle)`, `renderCredits(commercial, overview)`, `renderRevenue(commercial)` — each `payload → { headline: string, body: element }` — and `detailSources(groups)`, `detailRetention(retention)`, `detailCredits(commercial)`, `detailLifecycle(lifecycle)`, `detailHealth(operational)` — each `payload → element`; plus `PANELS`, `DETAIL_NEEDS`, `state`, `paint(def)`, `loadAll(names)`, `showDetail(route)`.
 
 Panel → source mapping is design §8.2 and §7.2's ownership table: attention ← `/operational.operational_state_counts` + `/operational.top_operational_reasons` + `/lifecycle.segment_counts.at_risk`; active users ← `/overview.daily_active_users` + `active_users_7d`; activation ← `/overview.activation_funnel` + `first_success_conversion` ("% remain" is computed client-side from the counts); sources ← `/groups.groups[].users`; retention ← `/retention.cohorts` + `summary_week_1`; reaching value ← sums of `/groups.successful_run_users` / `repeat_users`; lifecycle ← `/lifecycle.segment_counts`; credits ← `/commercial.selected_period.consumed_micro` + `/overview.billing_lane_mix`; revenue ← `/commercial.selected_period.purchased_micro` + `/commercial.purchased_by_day`. Detail routes: `#sources` ← `/groups` (six-row table with activation per group), `#retention` ← `/retention`, `#credits` ← `/commercial`, `#lifecycle` ← `/lifecycle` + the §15.2 rules, `#health` ← `/operational` (failed runs, success rate, `top_failure_categories`, `top_operational_reasons`; no "Affected users" column). Charts are CSS bars and one generated SVG (the revenue line, harvested from the mock's block 6 `drawRevenue`, with its `\\.0$` regex bug fixed); no Chart.js.
@@ -3462,14 +2545,17 @@ Create `dashboard/backend/tests/test_admin_overview_frontend.py`:
 ```python
 """js/admin-overview.js under node: every panel renderer against the committed fixtures."""
 
-from dashboard.backend.tests._admin_dom_stub import fixture, requires_node, run_node, source
+from dashboard.backend.tests._admin_dom_stub import fixture, requires_node, run_node, source, target_fixture
 
 pytestmark = requires_node
 
 SHELL = source("admin-shell.js")
 CREDIT_FORMAT = source("credit-format.js")
 OVERVIEW = source("admin-overview.js")
-F = {name: fixture(f"{name}.json") for name in (
+# The four payloads that gain §9 fields come from the target-shape copies (Task 1);
+# the absent-field test below deletes those keys again. PR D switches these to `fixture`.
+TARGET = ("overview", "overview_partial_error", "operational", "commercial")
+F = {name: (target_fixture if name in TARGET else fixture)(f"{name}.json") for name in (
     "overview", "overview_partial_error", "operational", "lifecycle", "retention", "commercial", "groups",
 )}
 
@@ -3600,6 +2686,36 @@ def test_attention_counts_and_top_reason():
         "})()"
     )
     assert result == {"headline": "11", "counts": ["2", "4", "5"], "note": "No Usable Billing Lane · 2 users", "link": "#health"}
+
+
+def test_recut_fields_absent_render_awaiting_data_source_not_an_empty_chart():
+    """Interim contract: a §9 field the route does not serve yet is absent, which is not the same as empty."""
+    result = _eval(
+        "(() => {"
+        f"  const overview = {F['overview']}; delete overview.billing_lane_mix;"
+        f"  const commercial = {F['commercial']}; delete commercial.purchased_by_day;"
+        f"  const operational = {F['operational']}; delete operational.top_operational_reasons;"
+        "  const credits = window.AdminOverview.renderCredits(commercial, overview);"
+        "  const revenue = window.AdminOverview.renderRevenue(commercial);"
+        f"  const attention = window.AdminOverview.renderAttention(operational, {F['lifecycle']});"
+        "  const health = window.AdminOverview.detailHealth(operational);"
+        "  const reasons = byTag(health, 'table')[1];"
+        "  const empty = window.AdminOverview.renderRevenue(Object.assign({}, commercial, {purchased_by_day: []}));"
+        "  return {"
+        "    credits: [credits.headline, texts(byClass(credits.body, 'panel-empty'))],"
+        "    revenue: [revenue.headline, texts(byClass(revenue.body, 'panel-empty'))],"
+        "    attention: [attention.headline, texts(byClass(attention.body, 'attention-row').map((row) => byTag(row, 'b')[0])), byClass(attention.body, 'attention-note')[0].children[0].children[1].textContent],"
+        "    health: byTag(reasons, 'tbody')[0].children.map((tr) => texts(tr.children)),"
+        "    empty: texts(byClass(empty.body, 'panel-empty')),"
+        "  };"
+        "})()"
+    )
+    assert result["credits"] == ["4.800000 Credits", ["Awaiting data source"]]
+    assert result["revenue"] == ["12.000000 Credits", ["Awaiting data source"]]
+    assert result["attention"] == ["11", ["2", "4", "5"], "Awaiting data source"]
+    assert result["health"] == [["Awaiting data source"]]
+    # Served-and-empty keeps the panel's own copy: the two states must never collapse into one.
+    assert result["empty"] == ["No settled purchases in this range."]
 
 
 def test_health_detail_has_no_affected_users_column():
@@ -3762,7 +2878,8 @@ Expected: **ERROR at collection** for the overview test (`js/admin-overview.js` 
     const note = s.el('div', 'attention-note');
     const text = s.el('div');
     text.appendChild(s.el('span', '', 'Blocking signal'));
-    text.appendChild(s.el('strong', '', reasons.length
+    // Absent (not served until PR D) is not empty: the note says which.
+    text.appendChild(s.el('strong', '', s.fieldPending(operational, 'top_operational_reasons') ? s.PENDING : reasons.length
       ? `${s.humanize(reasons[0].reason_code)} · ${s.formatNumber(reasons[0].users)} users`
       : 'No blocking signal recorded'));
     note.appendChild(text);
@@ -3954,6 +3071,7 @@ Expected: **ERROR at collection** for the overview test (`js/admin-overview.js` 
     const s = shell();
     const headline = s.formatCredits(commercial?.selected_period?.consumed_micro);
     const days = Array.isArray(overview?.billing_lane_mix) ? overview.billing_lane_mix : [];
+    if (s.fieldPending(overview, 'billing_lane_mix')) return { headline, body: emptyBody(s.PENDING) };
     if (!days.length) return { headline, body: emptyBody('No run activity by billing lane in this range.') };
     const body = s.el('div');
     const chart = s.el('div', 'credits-paired');
@@ -4004,6 +3122,7 @@ Expected: **ERROR at collection** for the overview test (`js/admin-overview.js` 
     const s = shell();
     const headline = s.formatCredits(commercial?.selected_period?.purchased_micro);
     const series = Array.isArray(commercial?.purchased_by_day) ? commercial.purchased_by_day : [];
+    if (s.fieldPending(commercial, 'purchased_by_day')) return { headline, body: emptyBody(s.PENDING) };
     if (!series.length) return { headline, body: emptyBody('No settled purchases in this range.') };
     const values = series.map((row) => (Number(row.amount_micro) || 0) / 1000000);
     const labels = series.map((row) => s.formatShortDay(row.day));
@@ -4253,7 +3372,7 @@ Expected: **ERROR at collection** for the overview test (`js/admin-overview.js` 
     section(root, 'What is blocking users?', 'Operational reasons as of yesterday UTC', table(
       ['Reason', 'State', 'Users'],
       (operational?.top_operational_reasons || []).map((reason) => [s.humanize(reason.reason_code), s.OPERATIONAL_LABELS[reason.state] || s.humanize(reason.state), s.formatNumber(reason.users)]),
-      'No blocking reasons recorded.'
+      s.fieldPending(operational, 'top_operational_reasons') ? s.PENDING : 'No blocking reasons recorded.'
     ));
     return root;
   }
@@ -4395,7 +3514,7 @@ Lifecycle stage and Tier deliberately do not reach these six requests: no analyt
 python -m pytest dashboard/backend/tests/test_admin_overview_frontend.py dashboard/backend/tests/test_admin_analytics_frontend.py::test_fixtures_validate_against_committed_analytics_models -v
 ```
 
-Expected: **PASS** on all twelve overview tests and the fixture validation. `test_paint_marks_partial_availability_as_incomplete_and_never_blanks_a_sibling` shows the two properties §15.6 asks for: `overview_partial_error.json` (growth panel unavailable) still paints the active-users headline `42` with the status "Incomplete data", and the 503 on `/lifecycle` errors exactly the two panels that need it while `panelSources` renders from `/groups`.
+Expected: **PASS** on all thirteen overview tests and the fixture validation. `test_paint_marks_partial_availability_as_incomplete_and_never_blanks_a_sibling` shows the two properties §15.6 asks for: `overview_partial_error.json` (growth panel unavailable) still paints the active-users headline `42` with the status "Incomplete data", and the 503 on `/lifecycle` errors exactly the two panels that need it while `panelSources` renders from `/groups`.
 
 - [ ] **Step 5: Commit**
 
@@ -4419,10 +3538,10 @@ EOF
 - Test: `dashboard/backend/tests/test_admin_users_frontend.py`.
 
 **Interfaces:**
-- Consumes: `window.AdminShell`; `GET /api/admin/analytics/users?{q,user_group,lifecycle_segment,commercial_tier,priority,include_internal,limit,offset}` (Task 1 — items carry `user_group`, `role`, `group_badge`, `last_meaningful_activity_at`); `GET /api/admin/analytics/users/{id}?from&to`; `GET /api/admin/analytics/users/{id}/activity?section&limit=50[&cursor]` (`AnalyticsActivityPage`).
+- Consumes: `window.AdminShell`; `GET /api/admin/analytics/users?{q,user_group,lifecycle_segment,commercial_tier,priority,include_internal,limit,offset}` (items carry `user_group`, `role`, `group_badge`, `last_meaningful_activity_at` once PR D lands; until then the two this module renders are absent and read `—` — "Interim contract"); `GET /api/admin/analytics/users/{id}?from&to`; `GET /api/admin/analytics/users/{id}/activity?section&limit=50[&cursor]` (`AnalyticsActivityPage`).
 - Produces `window.AdminUsers` with pure renderers `groupBadge(badge) -> element`, `signalBadge(kind, value) -> element`, `renderUserRows(payload) -> fragment of <tr>`, `renderPager(payload) -> string`, `renderEvidence(user) -> element`, `activationWeekLabel(activatedAt) -> string`, `renderProfileHeader(profile) -> element`, `renderProfileOverview(profile) -> element`, `renderActivityItems(section, items) -> element`, `accountManagementHref(profile) -> string`; plus `loadList({ offset })`, `openProfile(id)`, `selectSection(section)`, `loadSection(section, { append })`, `state`.
 
-Rules this module carries: the group badge is rendered **verbatim** from `group_badge` (D11) — no precedence logic here, and Task 10 pins that `role === 'admin'` never appears in this file; the D15 fields (`country_code`, `device_category`, `browser_family`, `top_product_page`) stay in the payload and are never read here; the sessions table has three columns (Started · Events · Visible time), not the old six; "Open account management" deep-links to `/app?view=admin&adminTab=users&adminUserQuery=<email>` — the pre-fill `AdminTabs.openAccountManagement` used to perform in-process (Task 9 teaches `admin-tabs.js` to read that parameter). The profile opens at `#users/{id}`, so the browser's Back closes it (the harvested `pushProfileUrl` property, §7.4). Timeline/Runs/Usage/Sessions fetch once on first open and page with `next_cursor` (harvested `selectProfileSection`/`loadProfileSection`, `admin-analytics.js:900-1072`); the Overview tab needs no fetch because the profile payload carries it.
+Rules this module carries: the group badge is rendered **verbatim** from `group_badge` (D11) — no precedence logic here, and an absent `group_badge` renders `—`, never a guessed group; and Task 10 pins that `role === 'admin'` never appears in this file; the D15 fields (`country_code`, `device_category`, `browser_family`, `top_product_page`) stay in the payload and are never read here; the sessions table has three columns (Started · Events · Visible time), not the old six; "Open account management" deep-links to `/app?view=admin&adminTab=users&adminUserQuery=<email>` — the pre-fill `AdminTabs.openAccountManagement` used to perform in-process (Task 9 teaches `admin-tabs.js` to read that parameter). The profile opens at `#users/{id}`, so the browser's Back closes it (the harvested `pushProfileUrl` property, §7.4). Timeline/Runs/Usage/Sessions fetch once on first open and page with `next_cursor` (harvested `selectProfileSection`/`loadProfileSection`, `admin-analytics.js:900-1072`); the Overview tab needs no fetch because the profile payload carries it.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -4433,15 +3552,16 @@ Create `dashboard/backend/tests/test_admin_users_frontend.py`:
 
 import json
 
-from dashboard.backend.tests._admin_dom_stub import fixture, requires_node, run_node, source
+from dashboard.backend.tests._admin_dom_stub import fixture, requires_node, run_node, source, target_fixture
 
 pytestmark = requires_node
 
 SHELL = source("admin-shell.js")
 CREDIT_FORMAT = source("credit-format.js")
 USERS_JS = source("admin-users.js")
-USERS = fixture("users.json")
-PROFILE = fixture("user_detail.json")
+# Target-shape copies (Task 1): today's payloads plus the §9 fields. PR D switches these to `fixture`.
+USERS = target_fixture("users.json")
+PROFILE = target_fixture("user_detail.json")
 SESSIONS = fixture("activity_sessions.json")
 USAGE = fixture("activity_usage.json")
 RUNS = fixture("activity_runs.json")
@@ -4477,6 +3597,33 @@ def test_group_badge_is_rendered_verbatim_from_the_server():
     assert result == ["zzz-not-a-real-badge", "group-badge is-zzz-not-a-real-badge", "admin", "group-badge is-admin"]
     assert "role === 'admin'" not in USERS_JS
     assert "commercial_tier === 'unpaid'" not in USERS_JS
+
+
+def test_rows_and_profile_without_recut_fields_render_dashes_not_guesses():
+    """Interim contract (before PR D): absent group_badge / last_meaningful_activity_at read as —;
+    the profile's activity line falls back to today's last_meaningful_activity, the same instant."""
+    result = _eval(
+        "(() => {"
+        f"  const users = {USERS}; users.items.forEach((item) => {{ delete item.user_group; delete item.role; delete item.group_badge; delete item.last_meaningful_activity_at; }});"
+        f"  const profile = {PROFILE}; delete profile.user_group; delete profile.role; delete profile.group_badge; delete profile.last_meaningful_activity_at;"
+        "  const rows = window.AdminUsers.renderUserRows(users);"
+        "  const badge = byClass(rows.children[0], 'group-badge')[0];"
+        "  const header = window.AdminUsers.renderProfileHeader(profile);"
+        "  return {"
+        "    rows: rows.children.map((tr) => tr.children.map((td) => td.textContent)),"
+        "    badge: [badge.className, badge.getAttribute('title')],"
+        "    identity: byClass(header, 'identity')[0].children[1].children[1].textContent,"
+        "    activity: texts(byTag(header, 'small')).find((text) => text.startsWith('Last meaningful activity')),"
+        "  };"
+        "})()"
+    )
+    assert result["rows"] == [
+        ["Synthetic Adaada.synthetic@example.test", "—", "At risk", "Healthy", "—", "Review evidence"],
+        ["<Synthetic & Grace>grace.synthetic@example.test", "—", "Onboarding", "Blocked", "—", "Review evidence"],
+    ]
+    assert result["badge"] == ["group-badge is-pending", "Awaiting data source"]
+    assert result["identity"] == "ada.synthetic@example.test · — · Activation week of Jun 29, 2026"
+    assert result["activity"].startswith("Last meaningful activity Aug 22, 2026, 11:20 UTC")
 
 
 def test_user_rows_link_to_the_profile_hash_and_escape_nothing_by_hand():
@@ -4720,8 +3867,16 @@ Expected: **ERROR at collection** — `FileNotFoundError` for `js/admin-users.js
 
   // D11: the badge string is the server's `group_badge`; nothing here recomputes it.
   function groupBadge(badge) {
-    const text = String(badge || 'unknown');
-    return shell().el('span', `group-badge is-${text}`, text);
+    const s = shell();
+    if (badge == null) {
+      // Interim contract: `group_badge` is absent until PR D. A dash, never a
+      // guessed group — the server owns the precedence rule (D11).
+      const pending = s.el('span', 'group-badge is-pending', s.DASH);
+      pending.setAttribute('title', s.PENDING);
+      return pending;
+    }
+    const text = String(badge);
+    return s.el('span', `group-badge is-${text}`, text);
   }
 
   function signalBadge(kind, value) {
@@ -4784,7 +3939,7 @@ Expected: **ERROR at collection** — `FileNotFoundError` for `js/admin-users.js
       row.appendChild(td(groupBadge(user.group_badge)));
       row.appendChild(td(signalBadge('lifecycle', user.lifecycle?.segment)));
       row.appendChild(td(signalBadge('operational', user.operational?.state)));
-      row.appendChild(td(s.formatTimestamp(user.last_meaningful_activity_at, 'No activity')));
+      row.appendChild(td(s.fieldPending(user, 'last_meaningful_activity_at') ? s.DASH : s.formatTimestamp(user.last_meaningful_activity_at, 'No activity')));
       const button = s.el('button', 'row-action', 'Review evidence');
       button.setAttribute('type', 'button');
       button.setAttribute('aria-haspopup', 'dialog');
@@ -4945,7 +4100,7 @@ Expected: **ERROR at collection** — `FileNotFoundError` for `js/admin-users.js
     const reason = profile.operational?.state === 'healthy' ? profile.lifecycle?.reason : profile.operational?.reason;
     const evaluated = profile.operational?.calculated_at || profile.lifecycle?.calculated_at;
     panel.appendChild(s.el('p', '', `${reason || 'No reason recorded'} · last evaluated ${s.formatTimestamp(evaluated)}`));
-    panel.appendChild(s.el('small', '', `Last meaningful activity ${s.formatTimestamp(profile.last_meaningful_activity_at, 'none')} · First successful result ${s.formatTimestamp(profile.lifecycle?.activated_at, 'none')}`));
+    panel.appendChild(s.el('small', '', `Last meaningful activity ${s.formatTimestamp(profile.last_meaningful_activity_at ?? profile.last_meaningful_activity, 'none')} · First successful result ${s.formatTimestamp(profile.lifecycle?.activated_at, 'none')}`));
     const account = s.el('a', 'module-link', 'Open account management');
     account.setAttribute('href', accountManagementHref(profile));
     panel.appendChild(account);
@@ -5321,7 +4476,7 @@ Expected: **ERROR at collection** — `FileNotFoundError` for `js/admin-users.js
 python -m pytest dashboard/backend/tests/test_admin_users_frontend.py -v
 ```
 
-Expected: **PASS** on all thirteen tests. Two are the D11/D15 pins in code form: `test_group_badge_is_rendered_verbatim_from_the_server` feeds a badge string no server would emit and gets it back unchanged, and `test_profile_overview_renders_value_facts_and_drops_the_d15_fields` walks every text node of the rendered profile for `US`, `desktop` and `Chrome` (the fixture's region/device/browser values) and finds none.
+Expected: **PASS** on all fourteen tests. Two are the D11/D15 pins in code form: `test_group_badge_is_rendered_verbatim_from_the_server` feeds a badge string no server would emit and gets it back unchanged, and `test_profile_overview_renders_value_facts_and_drops_the_d15_fields` walks every text node of the rendered profile for `US`, `desktop` and `Chrome` (the fixture's region/device/browser values) and finds none.
 
 - [ ] **Step 5: Commit**
 
@@ -5362,7 +4517,7 @@ rg -n 'app\.js\?v=|admin-tabs\.js\?v=|styles\.css\?v=' dashboard/frontend/app.ht
 
 Expected: `styles.css?v=140`, `app.js?v=132`, `js/admin-tabs.js?v=8`. Then proceed with the numbers as written. Two other outcomes:
 
-- `app.js?v=131` / `js/admin-tabs.js?v=7`: PR 0 has not merged into this branch. Stop — this plan is not yet runnable (§13 ordering), exactly as Task 1 stops when `legacy_status` is still present.
+- `app.js?v=131` / `js/admin-tabs.js?v=7`: PR 0 has not merged into this branch. Stop — this plan is not yet runnable (§13 ordering: PR 0 is this plan's one prerequisite).
 - Any other values (an unrelated PR bumped a tag in between): the target is **current + 1** for that tag. Substitute it for `133` / `9` / `141` in **every** occurrence this task writes — the Interfaces line above, `test_app_lifecycle_and_cache_versions_are_wired` in Step 1, the four per-file pin edits at the end of Step 1, and the Step 4 `app.html` edits — before running anything. (Task 10's `test_every_module_admin_html_loads_exists_and_nothing_else_is_loaded` matches `?v=\d+` and Task 4's guard pins only the page's own `?v=1` tags; neither carries the console's numbers.) The tags and the pins move together or `test_app_lifecycle_and_cache_versions_are_wired` fails, which is the point of that test; a pin written from this plan's numbers against a tag written from the checkout's is the one way to make it fail for a reason that is not a bug.
 
 Also record what the four other pin files currently say (`rg -n 'app\.js\?v=|admin-tabs\.js\?v=|styles\.css\?v=' dashboard/backend/tests/`). PR 0's plan re-pins only `test_admin_analytics_frontend.py`; if its run left the other four on `?v=131` / `?v=7`, they are red on the baseline before this task touches them — a pre-existing PR 0 gap, not a regression to chase. The per-file edits at the end of Step 1 name their `c3bbf2ed` text and replace whatever value stands there with this task's.
@@ -5534,9 +4689,9 @@ def test_safe_fixtures_have_no_prohibited_response_fields():
         "provider_response_body", "ip_address", "user_agent",
         "credential_ciphertext", "network_hash", "session_id",
     }
-    for path in sorted(FIXTURES.glob("*.json")):
-        payload = load_fixture(path.name)
-        assert prohibited.isdisjoint(set(walk_keys(payload))), path.name
+    for path in sorted(FIXTURES.rglob("*.json")):  # committed and target/ alike
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        assert prohibited.isdisjoint(set(walk_keys(payload))), str(path.relative_to(FIXTURES))
 
 
 def test_fixtures_match_committed_analytics_shapes():
@@ -5548,7 +4703,9 @@ def test_fixtures_match_committed_analytics_shapes():
     operational = load_fixture("operational.json")
     users = load_fixture("users.json")
     profile = load_fixture("user_detail.json")
-    assert {"daily_active_users", "billing_lane_mix", "availability", "last_updated"} <= overview.keys()
+    # Today's shapes (D18): the §9 fields live in fixtures/admin_analytics/target/ until PR D
+    # folds them in and restores them to these assertions.
+    assert {"daily_active_users", "availability", "last_updated"} <= overview.keys()
     assert partial["availability"]["growth"] == {
         "available": False,
         "error_code": "temporarily_unavailable",
@@ -5556,11 +4713,11 @@ def test_fixtures_match_committed_analytics_shapes():
     assert partial["availability"]["snapshot"]["available"] is True
     assert {"headline", "segment_counts", "weekly_segments", "transitions"} <= lifecycle.keys()
     assert {"cohorts", "summary_week_1", "summary_week_2", "summary_week_4"} <= retention.keys()
-    assert {"tier_counts", "selected_period", "current_balances", "purchased_by_day", "consumed_by_day"} <= commercial.keys()
-    assert {"operational_state_counts", "top_failure_categories", "top_operational_reasons"} <= operational.keys()
+    assert {"tier_counts", "selected_period", "current_balances"} <= commercial.keys()
+    assert {"operational_state_counts", "top_failure_categories"} <= operational.keys()
     assert {"items", "total", "limit", "offset"} == users.keys()
-    assert {"user_group", "role", "group_badge", "last_meaningful_activity_at"} <= users["items"][0].keys()
-    assert {"state", "activation_milestones", "lifecycle", "operational", "commercial", "group_badge"} <= profile.keys()
+    assert {"lifecycle", "operational", "commercial_tier", "priority_group"} <= users["items"][0].keys()
+    assert {"state", "activation_milestones", "lifecycle", "operational", "commercial"} <= profile.keys()
     assert "next_cursor" in load_fixture("activity_timeline.json")
     assert {"users", "agents", "active_dashboard_backtests", "max_active_dashboard_backtests"} <= load_fixture("admin_stats.json").keys()
 
@@ -6206,17 +5363,17 @@ Per design §13 (PR C's "Must not" column) and the decisions it cites:
 - **Inline `<script>` in `admin.html`** — D6: inline scripts are invisible to the only frontend test harness this repository has. Task 4's guard fails on any inline block.
 - **A `#live` route or a live detail page** — §8.2 (the eight run lanes, queue-pressure chart and "Current blockers" are cut: the lanes carry no information beyond the count, there is no queue, and blockers are the daily operational reasons shown in `#health`), D16. Task 10 pins that `ROUTES` has no `live`.
 - **Chart.js on the page** — §7.2: charts stay as the mock draws them (CSS bars and generated SVG) so every renderer is a pure function testable under `node`.
-- **Deciding whether to keep collecting page, country and device** — D15/§14: those event properties stay in the payload (Task 1's test asserts they still arrive) and leave the *display*; the collection decision belongs to the 08-26 document's allowlist and is a follow-up.
+- **Deciding whether to keep collecting page, country and device** — D15/§14: those event properties stay in the payload (today's models carry them and the committed fixtures pin that) and leave the *display*; the collection decision belongs to the 08-26 document's allowlist and is a follow-up.
 - **A server-side gate for `admin.html`** — D7: Vercel serves the same file as a static asset with no session access; a server gate would exist on one host only. The real gate is `require_admin` on every `/api/admin/*` route, which this PR does not change.
 - **Removing `GET /admin-analytics` or its middleware exemption** — §7.1: the 308 lives for one release; dropping the exact-match exemption early would 400 the redirect before it fires. Both go together in a later PR, with `("GET", "/admin-analytics")` leaving `EXPECTED_FULL_CONTRACT` then.
 - **An "online now" tile, a per-run list for the live row, or multi-replica live counters** — §14 follow-ups; each needs a data source or a deployment change this PR does not make.
-- **Any change to the nine routes' semantics beyond the §9 fields and the declared parameters** — D18/D19: the contract is re-cut once, here, and `test_app_composition.py`'s route triples are unchanged.
-- **Rejecting undeclared or duplicated query keys** — the hand-rolled parser's behaviour, not the API's; with declared parameters FastAPI ignores unknown keys and reads the last of a repeated one (§6.14 row 4). Task 1's `test_undeclared_query_keys_are_ignored_not_rejected` pins the new behaviour deliberately.
+- **Any change to the nine routes** — D18: every analytics response is byte-identical to `main` through this PR; D19's single re-cut is PR D (`2026-09-15-admin-layer-redesign-prD-contract-recut.md`), after PR B. `test_app_composition.py`'s route triples are unchanged.
+- **Declared FastAPI query parameters, a `role` filter, or any change to `_query_values()`** — PR D. Until then the hand-rolled parser rejects undeclared and duplicated keys with the display-safe 422, and the page sends only names in its allowed set (Task 10 pins the set; the interim-contract table names the router lines).
 
 ## Acceptance
 
-- [ ] `AnalyticsOverview.billing_lane_mix`, `OperationalAnalyticsResponse.top_operational_reasons`, `CommercialAnalyticsResponse.purchased_by_day` / `consumed_by_day`, and `user_group` / `role` / `group_badge` / `last_meaningful_activity_at` on `ValueUserListItem` and `ValueUserProfile` are on the response models, populated from PR B's service methods, and present in every committed fixture (Task 1).
-- [ ] Every `/api/admin/analytics/*` query parameter is a declared `Query(...)` visible in `app.openapi()` under today's names (plus `role`), `_query_values` and `_invalid_query` are gone, and every validation failure is still the display-safe `{"detail": "Invalid Analytics query."}` with no echo (Task 1).
+- [ ] The six target fixtures under `tests/fixtures/admin_analytics/target/` are the committed fixtures plus exactly the §9 fields, pinned by `test_admin_target_fixtures.py`; no committed fixture, analytics response model, query parameter or store changes anywhere in this PR (Task 1, D18).
+- [ ] Every §9 slot renders "Awaiting data source" (or `—` with that tooltip) when its field is absent from the payload and its real content when present, and served-and-empty still renders each panel's own empty copy (Tasks 5, 7, 8; the interim-contract table is the checklist).
 - [ ] `GET /api/admin/stats` carries `max_active_dashboard_backtests` equal to the parsed constant and keeps its six existing keys (Task 2).
 - [ ] `GET /admin` serves `admin.html`, `GET /admin.css` serves the stylesheet, `GET /admin-analytics` answers 308 to `/admin` preserving the query string; `is_exempt("/admin")` and `is_exempt("/admin-analytics")` are both true and pinned; `vercel.json` has no `/admin`-prefixed rewrite, a permanent `/admin-analytics` → `/admin` redirect, and `/admin` + `/admin.html` must-revalidate rules ordered after the API no-store rule (Task 3).
 - [ ] `admin.html` has five external, pinned, deferred scripts with `admin-shell.js` first, no inline script, no Chart.js, no `styles.css`, and no numeric or percentage literal inside any of its thirteen panel regions (Task 4).
@@ -6224,7 +5381,7 @@ Per design §13 (PR C's "Must not" column) and the decisions it cites:
 - [ ] `AdminShell` routes exactly `#overview #sources #retention #credits #lifecycle #health #users #users/{id}` (unknown and `#live` → `#overview`), keeps range and filters in the URL, guards every surface with `requestSeq`, exits to `/app` on 401/403 and on a non-admin `/api/auth/me`, and owns the rules and evidence dialogs with return-focus (Task 5).
 - [ ] The live row reads `/api/admin/stats` only and shows Total users, Total agents, Backtests running · this instance with the real ceiling and the *this instance* caveat; a failed refresh keeps the last good row and says so (Task 6).
 - [ ] The nine overview panels and five detail routes render from the six analytics endpoints as §8.2 sources them, "% remain" is computed from the counts, one endpoint's failure blanks only the panels that need it, and partial availability reads "Incomplete data" (Task 7).
-- [ ] The users list is SQL-filtered through the declared parameters and shows user · group badge (verbatim) · lifecycle · operational · last active; the profile has Overview / Timeline / Runs / Usage / Sessions with lazy, cursor-paged tabs; Region / Device / Browser / top page are not rendered; "Open account management" deep-links with `adminUserQuery` (Task 8).
+- [ ] The users list is server-filtered through today's parameter names (`_query_values()`'s allowed set; PR B moves the filtering into SQL under the same names) and shows user · group badge (verbatim) · lifecycle · operational · last active; the profile has Overview / Timeline / Runs / Usage / Sessions with lazy, cursor-paged tabs; Region / Device / Browser / top page are not rendered; "Open account management" deep-links with `adminUserQuery` (Task 8).
 - [ ] `admin-tabs.js` has no redirect and no Analytics tab, `DEFAULT_TAB` is `users`, and `adminUserQuery` pre-fills the account search; `app.html` has no analytics panel, legacy block, profile article, analytics dialog or analytics script tag; `app.js` calls neither `AdminAnalytics` nor `AdminAnalyticsValue` and Profile → Admin opens `/admin`; `styles.css` has none of the analytics rule families; `admin-analytics.html`, `js/admin-analytics.js`, `js/admin-analytics-value.js` and `test_admin_analytics_value_frontend.py` are deleted; every `?v=` pin matches (Task 9).
 - [ ] The four modules are read-only, `textContent`-only, single-global IIFEs that hit exactly the named endpoints with exactly the declared query names, never compute a badge, never read a D15 field, never touch storage, and every renderer lifts with `fn_body` (Task 10).
 - [ ] No element §8.2 marks **cut** exists on the page; every element built appears there as keep, keep-relabelled or added.
@@ -6232,9 +5389,10 @@ Per design §13 (PR C's "Must not" column) and the decisions it cites:
 
 ## Self-review notes
 
-- **Spec coverage.** §7.1 → Task 3 (routes, redirect, exemption, `vercel.json`) and Task 4 (the page). §7.2 → Tasks 5–8 (the four modules, one global each, `defer` + `?v=1`, the ownership table's panel→module→route mapping reproduced in Task 7's `PANELS` and `DETAIL_NEEDS` and Task 8's `#users`/`#users/{id}`), plus `admin.css` in Task 4. §7.3 → Task 5 `gate()` with the D7 comment beside it. §7.4 → each row's destination is named in Task 5's preamble (requestSeq, URL state, dialogs, availability, access-lost, rules copy), Task 8's preamble (lazy disclosures, cursor paging), and Task 10 (the two re-pinned tests). §7.5 → Task 9 (every removed item listed, every kept item untouched, `DEFAULT_TAB = 'users'`, Profile → Admin). §7.6 → Task 4 (source-shape guard, including the numeric-literal regex and the `data-panel` region selector), Task 9 (`test_admin_tabs_redirect.py` rewrite, `test_app_composition.py` already in Task 3), Task 3 (`test_middleware_exemptions.py`, `test_vercel_cache_headers.py`), Tasks 5–8 (node-driven fixture tests). §8.1 → Task 4's element list is derived from the *final* DOM (V8 §2/§9), not the markup. §8.2 → the survival check below. §8.3 → Task 4 (Total users, Total agents, real ceiling, *this instance* label). §9 → Task 1 (added fields on models), Task 2 (`max_active_dashboard_backtests`), Task 8 (D15 fields dropped from display, kept in payload — pinned by Task 1's `test_recut_fields_are_on_every_response`). §10.3 → Task 1 (declared params, `_query_values` deleted, names kept, fixtures regenerated); §10.4 → Task 2. §13 row C → every item in its "Content" column maps to a task above; its "Must not" column is the "Not in this PR" list and Task 10's pins. D3/D4 → Task 3 + Task 9 (Profile → Admin → `/admin`). D5 → aside links (Task 4), nothing ported. D6 → Task 4 guard. D7 → Task 5 gate + Task 3 docstring. D8 → harvest recorded per task; deletion in Task 9. D12 → Task 4's row order (live row first, attention beside it, then activity, activation, sources, retention, value, lifecycle, credits, revenue). D15 → Task 8 + Task 10. D16/D17 → Task 6 (stats route only, caveat), Task 2. D18/D19 → Task 1 is the single re-cut. §15 → Task 5's `LIFECYCLE_RULES`/`OPERATIONAL_RULES`/`COMMERCIAL_RULE` and Task 8's badge tooltips.
+- **Spec coverage.** §7.1 → Task 3 (routes, redirect, exemption, `vercel.json`) and Task 4 (the page). §7.2 → Tasks 5–8 (the four modules, one global each, `defer` + `?v=1`, the ownership table's panel→module→route mapping reproduced in Task 7's `PANELS` and `DETAIL_NEEDS` and Task 8's `#users`/`#users/{id}`), plus `admin.css` in Task 4. §7.3 → Task 5 `gate()` with the D7 comment beside it. §7.4 → each row's destination is named in Task 5's preamble (requestSeq, URL state, dialogs, availability, access-lost, rules copy), Task 8's preamble (lazy disclosures, cursor paging), and Task 10 (the two re-pinned tests). §7.5 → Task 9 (every removed item listed, every kept item untouched, `DEFAULT_TAB = 'users'`, Profile → Admin). §7.6 → Task 4 (source-shape guard, including the numeric-literal regex and the `data-panel` region selector), Task 9 (`test_admin_tabs_redirect.py` rewrite, `test_app_composition.py` already in Task 3), Task 3 (`test_middleware_exemptions.py`, `test_vercel_cache_headers.py`), Tasks 5–8 (node-driven fixture tests). §8.1 → Task 4's element list is derived from the *final* DOM (V8 §2/§9), not the markup. §8.2 → the survival check below. §8.3 → Task 4 (Total users, Total agents, real ceiling, *this instance* label). §9 → Task 1 (the target fixtures carry the added fields), Tasks 7–8 (rendered when present, "Awaiting data source" when absent), Task 2 (`max_active_dashboard_backtests`), Task 8 (D15 fields dropped from display, kept in payload — pinned by Task 10's `test_d15_display_fields_are_not_read`); the response models are PR D's. §10.3 → nothing here by design (PR D); §10.4 → Task 2. §13 row C → every item in its "Content" column maps to a task above; its "Must not" column is the "Not in this PR" list and Task 10's pins. D3/D4 → Task 3 + Task 9 (Profile → Admin → `/admin`). D5 → aside links (Task 4), nothing ported. D6 → Task 4 guard. D7 → Task 5 gate + Task 3 docstring. D8 → harvest recorded per task; deletion in Task 9. D12 → Task 4's row order (live row first, attention beside it, then activity, activation, sources, retention, value, lifecycle, credits, revenue). D15 → Task 8 + Task 10. D16/D17 → Task 6 (stats route only, caveat), Task 2. D18/D19 → no analytics route changes shape here; the single re-cut is PR D. §15 → Task 5's `LIFECYCLE_RULES`/`OPERATIONAL_RULES`/`COMMERCIAL_RULE` and Task 8's badge tooltips.
 - **Survival-table check (§8.2), element by element.** Built as **keep**: header, product nav, aside with Analytics subnav and the three console links; range 1W/1M/1Y; Source, Lifecycle stage, Tier (relabelled from Paid/Unpaid, four values), Include internal accounts (relabelled); live row Backtests running · this instance with the real ceiling; Users needing attention with its blocking-reason note from `top_operational_reasons`; Active users; Activation progress with client-side "% remain"; Where users come from (six groups); Users coming back; Users reaching value; User lifecycle; Credits usage (ledger total + `billing_lane_mix` lanes); Revenue (ledger total + `purchased_by_day` line) with the "Admin Grants excluded from revenue" copy; `#sources` six-row table; `#retention`, `#lifecycle` (with the §15 rules table), `#credits` details; `#health` with failed runs, success rate, failure-category table and the operational-reasons table; `#users` list (user · group badge · lifecycle · operational · last active) and `#users/{id}` profile with badges, blocker, milestones and tabs; profile identity line as group badge + activation week (**replaced** row); rules dialog. Built as **added**: Total users, Total agents, the real slot ceiling, the *this instance* caveat, the freshness legend. **Not built (cut):** Sample-data label and footer notice, 1D, Cohort filter, Online now, Queued, Blocked-users live tile, the `#live` detail (lanes, queue chart, blockers), the hidden `.inline-key` legend, the `#health` "Affected users" column, Region/Device/Browser/top page on the profile, the `#usage`/`#revenue` orphan routes. Task 4's `test_cut_elements_are_absent` and Task 10's pins enforce the cut list; nothing on the page lacks a §8.2 row. One labelling choice outside the table: the aside's link to the old console's Users tab reads "Account management" so the page has one "Users" (the analytics list at `#users`) rather than two entries with one name — V8 §7 item 11 recorded exactly that duplication in the mock.
-- **Placeholder scan.** No `TBD`, `TODO`, "similar to Task N", "as in the old plan", or elided body: every code block is the complete file or the complete before/after hunk, written against the worktree at `c3bbf2ed` (`git log -1` while writing). The three places this plan cannot quote the merged text — PR 0's exact `app.js` admin-branch shape, PR B's `list_users` construction site after the SQL rewrite, and the four `?v=` test pins PR 0's plan does not re-pin — show the current `main` text, name the post-merge target text in full, and give the `rg` that finds the site. Nothing points at the superseded 09-12 plan as a live file; its one reused artefact (the `resolve_group_badge` signature) is cited as `git show c3bbf2ed:docs/superpowers/plans/2026-09-12-user-analytics-architecture.md` line 2336 in Task 1's Interfaces via design D9/D11.
-- **Name consistency across tasks.** `BillingLaneDay`, `OperationalReasonCount`, `LedgerDayTotal`, `InvalidAnalyticsQuery` (Task 1) are referenced only there. `max_active_dashboard_backtests` (Task 2) is read by Task 6's `renderTiles` and pinned by Task 10. The element ids in Task 4's Interfaces are the ones Tasks 5–8 target (`filterGroup`, `liveTiles`, `panelAttention` … `panelRevenue`, `usersBody`, `usersRange`, `usersPrev`, `usersNext`, `profile`, `detail`, `rulesList`, `evidenceBody`, `evidenceProfile`, `evidenceAccount`, `freshnessLegend`). `AdminShell`'s exported names in Task 5 are the ones Tasks 6–8 call (`el`, `clear`, `request`, `nextSeq`, `isCurrent`, `handleAccessLost`, `setPanelState`, `analyticsParams`, `userListParams`, `rangeDates`, `formatNumber`, `formatPercent`, `formatCredits`, `formatDateOnly`, `formatShortDay`, `formatTimestamp`, `humanize`, `availabilityIncomplete`, `openDialog`, `openRules`, `setFilters`, `state`, `INCOMPLETE`, `SECTION_UNAVAILABLE`, `DASH`, `LIFECYCLE_LABELS`, `OPERATIONAL_LABELS`, `COMMERCIAL_LABELS`, `LIFECYCLE_RULES`, `OPERATIONAL_RULES`). The `admin:route` / `admin:retry` events dispatched in Task 5 are the ones Tasks 6–8 listen for, with the same `detail` keys. `adminUserQuery` is written by Task 8's `accountManagementHref` and read by Task 9's `onEnter`. The `?v=` numbers (133 / 9 / 141 / 1) are identical in Task 9's tags and every pin Task 9 lists, and in Task 4's guard; they are `c3bbf2ed`'s 131 / 7 / 140 plus PR 0's one bump on the first two plus this task's one bump on all three, and Task 9 Step 0 checks that arithmetic against the checkout before any of them is written.
-- **Verified, not assumed.** The global `RequestValidationError` handler echoes input for non-v2 paths (`api/v2/errors.py:67-85`, registered at `app.py:62`) — the reason Task 1 types every parameter `str | None`. FastAPI/Starlette reads the last value of a repeated query key (`ImmutableMultiDict` construction), the basis of dropping the duplicate-key 422. The API no-store header rule's optional group matches bare `/admin` (regex `(/.*)?`), the basis of Task 3's ordering. `test_admin_console_frontend.py` has no `analytics` assertion (`rg`), so Task 9 leaves it alone. `activated_at = 2026-07-02` is a Thursday and its UTC Monday is 2026-06-29 (Task 8's expectation). `2026-09-15` minus 179 days is `2026-03-20` (Task 5's 1Y expectation).
-- **Open items I could not close from code alone** (also returned as open questions): the exact names/signatures of PR B's service methods (Task 1 assumes `billing_lane_mix`, `top_operational_reasons`, `purchased_by_day`, `consumed_by_day`, `resolve_group_badge(*, role, user_group, tier)` and names the one call site for each); whether PR B kept `FailureCategoryCount.affected_users` as the field name once the count comes from rollups (Task 7 labels the column "Count" and reads `affected_users`); whether PR 0's run re-pinned the four `?v=` tests outside `test_admin_analytics_frontend.py` that its plan does not name (Task 9 Step 0 reads them off the checkout; the tags themselves are settled — 131 / 7 / 140 at `c3bbf2ed`, 132 / 8 / 140 after PR 0); and the Vercel header policy for `/admin` (this plan follows the orchestrator's instruction — must-revalidate, ordered after the no-store rule — where design §7.1 had accepted the accidental no-store).
+- **Placeholder scan.** No `TBD`, `TODO`, "similar to Task N", "as in the old plan", or elided body: every code block is the complete file or the complete before/after hunk, written against the worktree at `c3bbf2ed` (`git log -1` while writing). The two places this plan cannot quote the merged text — PR 0's exact `app.js` admin-branch shape and the four `?v=` test pins PR 0's plan does not re-pin — show the current `main` text, name the post-merge target text in full, and give the `rg` that finds the site. Nothing points at the superseded 09-12 plan as a live file.
+- **Name consistency across tasks.** `TARGET_FIELDS` and `target/` (Task 1) are read by Task 5's `target_fixture` helper and Tasks 7–8's fixture constants; `PENDING` and `fieldPending` (Task 5) are the only owners of the absent-field rule and are read by Tasks 7 and 8, whose pending tests delete the §9 keys from the target payloads rather than loading a third fixture set. `max_active_dashboard_backtests` (Task 2) is read by Task 6's `renderTiles` and pinned by Task 10. The element ids in Task 4's Interfaces are the ones Tasks 5–8 target (`filterGroup`, `liveTiles`, `panelAttention` … `panelRevenue`, `usersBody`, `usersRange`, `usersPrev`, `usersNext`, `profile`, `detail`, `rulesList`, `evidenceBody`, `evidenceProfile`, `evidenceAccount`, `freshnessLegend`). `AdminShell`'s exported names in Task 5 are the ones Tasks 6–8 call (`el`, `clear`, `request`, `nextSeq`, `isCurrent`, `handleAccessLost`, `setPanelState`, `analyticsParams`, `userListParams`, `rangeDates`, `formatNumber`, `formatPercent`, `formatCredits`, `formatDateOnly`, `formatShortDay`, `formatTimestamp`, `humanize`, `availabilityIncomplete`, `fieldPending`, `openDialog`, `openRules`, `setFilters`, `state`, `INCOMPLETE`, `PENDING`, `SECTION_UNAVAILABLE`, `DASH`, `LIFECYCLE_LABELS`, `OPERATIONAL_LABELS`, `COMMERCIAL_LABELS`, `LIFECYCLE_RULES`, `OPERATIONAL_RULES`). The `admin:route` / `admin:retry` events dispatched in Task 5 are the ones Tasks 6–8 listen for, with the same `detail` keys. `adminUserQuery` is written by Task 8's `accountManagementHref` and read by Task 9's `onEnter`. The `?v=` numbers (133 / 9 / 141 / 1) are identical in Task 9's tags and every pin Task 9 lists, and in Task 4's guard; they are `c3bbf2ed`'s 131 / 7 / 140 plus PR 0's one bump on the first two plus this task's one bump on all three, and Task 9 Step 0 checks that arithmetic against the checkout before any of them is written.
+- **Verified, not assumed.** Today's `_query_values()` allowed sets (`admin_analytics.py:127-133`, `196-199`, `211-226`, `367`, `422`, `508`) contain every query name the page sends — the basis of the interim contract's "no request 422s" claim. Today's `ValueUserListItem` has no `group_badge` / `last_meaningful_activity_at` and today's `AnalyticsUserProfile` has `last_meaningful_activity` (`value_queries.py`, `query_service.py:190-208`) — the basis of the two `—` rows and the profile fallback. The API no-store header rule's optional group matches bare `/admin` (regex `(/.*)?`), the basis of Task 3's ordering. `test_admin_console_frontend.py` has no `analytics` assertion (`rg`), so Task 9 leaves it alone. `activated_at = 2026-07-02` is a Thursday and its UTC Monday is 2026-06-29 (Task 8's expectation). `2026-09-15` minus 179 days is `2026-03-20` (Task 5's 1Y expectation).
+- **Re-ordering check (2026-09-16).** The §9 fields the page reads are exactly the rows of the interim-contract table; each has a pending branch in its renderer and a test that exercises it by deleting the key from the target payload, so PR D changes no expectation in Tasks 5–8 beyond swapping `target_fixture` for `fixture`. The Task 9 rewrite of `test_admin_analytics_frontend.py` asserts today's keys on the committed fixtures, so PR B's D20 edit and PR D's fold both land on it without a conflict with this PR. Task 9's deletion of `admin-analytics.js` removes the only sender of `status` (`attentionQuery`, line 582), which PR B's Task 16 was going to delete — PR B's plan is amended to expect it gone.
+- **Open items I could not close from code alone** (also returned as open questions): whether PR B kept `FailureCategoryCount.affected_users` as the field name once the count comes from rollups (Task 7 labels the column "Count" and reads `affected_users`); whether PR 0's run re-pinned the four `?v=` tests outside `test_admin_analytics_frontend.py` that its plan does not name (Task 9 Step 0 reads them off the checkout; the tags themselves are settled — 131 / 7 / 140 at `c3bbf2ed`, 132 / 8 / 140 after PR 0); and the Vercel header policy for `/admin` (this plan follows the orchestrator's instruction — must-revalidate, ordered after the no-store rule — where design §7.1 had accepted the accidental no-store).

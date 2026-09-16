@@ -14,14 +14,14 @@
 
 - Never commit `dashboard/storage/data/backtest.db` — a bare backend import runs `CREATE TABLE IF NOT EXISTS` (and, in this PR, `DROP TABLE IF EXISTS`) against `DATABASE_PATH` and rewrites that tracked seed file; stage files by name (`git add <path> <path>`), never `git add -A`, never a bare `git add -u`. Task 14 drops tables and runs the full suite immediately before committing, which is exactly the moment the seed DB is dirty — check `git status --short` before every `git add` there.
 - Run every `pytest` invocation from the repo root.
-- Node-driven frontend tests are `pytest.mark.skipif(shutil.which("node") is None, ...)`; this PR edits no JavaScript behaviour a node test executes (Task 16 deletes one `params.set('status', …)` line), so the node tier neither passes nor fails on this PR's account — it is listed because the reviewer's first question about a PR that touches `admin-analytics.js` is whether that tier ran.
-- Every `?v=` bump updates `test_admin_analytics_frontend.py::test_app_lifecycle_and_cache_versions_are_wired` in lockstep. Task 16 bumps `js/admin-analytics.js?v=6` → `?v=7` in `app.html:2708` and updates that test plus the three other files that pin the same string (`test_admin_analytics_frontend.py:117`, `test_credit_format_frontend.py:79`, `test_frontend_fast_boot.py:202`) in the same step.
+- Node-driven frontend tests are `pytest.mark.skipif(shutil.which("node") is None, ...)`; this PR edits no JavaScript. PR C (merged before this PR since the 2026-09-16 re-ordering) deleted `admin-analytics.js`, `admin-analytics-value.js` and `admin-analytics.html`, and the `/admin` page's four modules are untouched here. The node tier must still run green: the page's renderer tests (`test_admin_overview_frontend.py`, `test_admin_users_frontend.py`) feed the committed fixtures, which Task 16 edits.
+- No `?v=` bump: this PR changes no frontend file. (Before the re-ordering Task 16 bumped `admin-analytics.js?v`; that module no longer exists.)
 - Both store twins change together: every read method added to `ValueAnalyticsStore` (`value_repository.py`) is added to `PostgresValueAnalyticsStore` (`value_repository_postgres.py`, PR T) in the same task with an identical signature, and `CreditsStore.sum_ledger_by_day` lands on `PostgresCreditsStore` in the same commit. `tests/test_store_twin_parity.py` compares public method sets and signatures; CI's Postgres tier (`.github/workflows/ci.yml`, `TEST_POSTGRES_URL`) must be green before merge (design §13 row B; PR T's absence-direction check also fails on a stale allowlist entry, see Task 17).
-- Contract: byte-identical responses on all nine routes except `user_state_counts` leaving `GET /overview` and `status` leaving `GET /users` (design §10.2, D20). No new field on any response model, no renamed query parameter. `tests/test_admin_analytics_api.py`, `test_admin_analytics_frontend.py`, `test_admin_analytics_value_frontend.py` and the JSON fixtures under `tests/fixtures/admin_analytics/` are the conformance oracle; the "Acceptance" section lists every assertion this plan changes and why.
-- Frontend: the only permitted edit is the dead `status` query in `admin-analytics.js::attentionQuery` (line 582), its cache-buster and its test pin (design §13 row B "Must not: Touch the frontend beyond the dead `status` query").
+- Contract: byte-identical responses on all nine routes except `user_state_counts` leaving `GET /overview` and `status` leaving `GET /users` (design §10.2, D20). No new field on any response model, no renamed query parameter. `tests/test_admin_analytics_api.py`, `test_admin_analytics_frontend.py` (the fixture-shape tests as PR C rewrote them), the `/admin` page's node tests (`test_admin_shell_frontend.py`, `test_admin_live_frontend.py`, `test_admin_overview_frontend.py`, `test_admin_users_frontend.py`) and the JSON fixtures under `tests/fixtures/admin_analytics/` — committed and the `target/` copies PR C added — are the conformance oracle; the "Acceptance" section lists every assertion this plan changes and why.
+- Frontend: none. Design §13 row B's one permitted edit — the dead `status` query in `admin-analytics.js::attentionQuery` — is already done: PR C deleted the module. Task 16's frontend steps are therefore gone; if `rg -n "params.set\('status'" dashboard/frontend/js` prints anything, PR C has not merged and this branch was cut in the wrong order.
 - No `cohort`, anywhere (D9). Where the superseded 2026-09-12 plan (`git show c3bbf2ed:docs/superpowers/plans/2026-09-12-user-analytics-architecture.md`) wrote `cohort`, this plan writes `user_group`; the six long-term rollup metric names are the design's (`*_by_tier`, `*_by_user_group`), not the old plan's `tier_*`/`cohort_*`.
 - Log lines use `print()`, never `logger`; a failure line carries an exception class only (`category={type(exc).__name__[:80]}`), never a message body.
-- Ordering (§13): PR 0, PR T and PR A are merged before this branch is cut; this PR must not merge until the daily job has written at least eight days of `user_daily_facts` in prod (see "Merge preconditions").
+- Ordering (§13, re-ordered 2026-09-16): PR 0, PR C, PR T and PR A are merged before this branch is cut; this PR must not merge until the daily job has written at least eight days of `user_daily_facts` in prod (see "Merge preconditions").
 - Deletion order inside this PR: Tasks 1–13 leave every table and module in place; Tasks 14–17 delete. Each commit in between must serve all nine routes.
 
 ## Merge preconditions
@@ -81,7 +81,7 @@ PR A's plan (`2026-09-15-admin-layer-redesign-prA-rewrite-create.md`) was being 
 **Interfaces:**
 - Consumes: `CommercialTier`, `_OPERATIONAL_REASONS`, `_OPERATIONAL_EVIDENCE`, `OperationalResult` (all existing in `lifecycle.py`).
 - Produces:
-  - `resolve_group_badge(*, role: str, user_group: str, tier: CommercialTier) -> str` (D11, §6.2 precedence: `admin` → the `user_group` when it is not `unknown` → `paid` when tier is not `unpaid` → `free`). Task 11's `get_user_metrics` consumes it; PR C puts it on the payload.
+  - `resolve_group_badge(*, role: str, user_group: str, tier: CommercialTier) -> str` (D11, §6.2 precedence: `admin` → the `user_group` when it is not `unknown` → `paid` when tier is not `unpaid` → `free`). Task 11's `get_user_metrics` consumes it; PR D puts it on the payload.
   - `operational_reason(reason_code: str) -> str` — the display text for a stored `operational_reason_code`. Tasks 3, 5, 8 and 10 consume it.
   - `operational_result_from_code(reason_code: str, *, as_of: datetime) -> OperationalResult` — rebuilds a display-safe `OperationalResult` from a stored code (yesterday's fact row), with the static evidence line where one exists and the reason text otherwise. Tasks 3 and 10 consume it.
 
@@ -1476,7 +1476,7 @@ EOF
 - Consumes: `credit_ledger_entries` (`entry_type`, `amount_micro`, `created_at`) and `credit_llm_usage_entries` (`amount_micro`, `created_at`) — the credits domain's own tables, read by the credits store (§6.14).
 - Produces:
   - `CreditsStore.sum_ledger_by_day(*, start: datetime, end: datetime) -> list[LedgerDayTotal]` on both twins, where `LedgerDayTotal` is a frozen Pydantic model `(day: date, purchased_micro: int, refunded_micro: int, consumed_micro: int)` defined in `dashboard/backend/domain/credits/repository_common.py` (the module both twins already import their shared helpers from — `repository_postgres.py` does not import `repository.py`). Two grouped statements over `[start, end)`; no user id anywhere.
-  - `ValueAnalyticsQueryService.purchased_by_day(*, start: date, end: date) -> dict[str, int]` and `consumed_by_day(*, start: date, end: date) -> dict[str, int]` — ISO date → micro-credits, over the same window. **Not** added to `CommercialAnalyticsResponse`; PR C puts them on the payload (§9).
+  - `ValueAnalyticsQueryService.purchased_by_day(*, start: date, end: date) -> dict[str, int]` and `consumed_by_day(*, start: date, end: date) -> dict[str, int]` — ISO date → micro-credits, over the same window. **Not** added to `CommercialAnalyticsResponse`; PR D puts them on the payload (§9).
 
 The ledger's timestamps are ISO-8601 UTC text (`created_at TEXT NOT NULL`), so the day bucket is `substr(created_at, 1, 10)` on both dialects — no `date_trunc`, no SQLite `date()` function, one expression that means the same thing on both. Refunds are stored with negative `amount_micro`; the sum negates them so the response carries a positive refunded total, matching `list_commercial_values` (`value_repository.py:757-758`). Consumption rows are negative too, for the same reason (`:792`).
 
@@ -1657,7 +1657,7 @@ def test_purchased_and_consumed_by_day_read_the_ledger_once_each():
 
 
 def test_by_day_series_are_not_on_the_commercial_response():
-    """PR C puts them on the payload; PR B holds the shape (design §10.2)."""
+    """PR D puts them on the payload; PR B holds the shape (design §10.2)."""
 
     from dashboard.backend.domain.analytics.value_queries import CommercialAnalyticsResponse
 
@@ -1801,7 +1801,7 @@ Then after `get_commercial` (line 1031):
     def purchased_by_day(self, *, start: date, end: date) -> dict[str, int]:
         """Net purchases (purchases minus refunds) per UTC day, zero-filled.
 
-        Service method only in PR B; PR C adds `purchased_by_day` to
+        Service method only in PR B; PR D adds `purchased_by_day` to
         CommercialAnalyticsResponse (design §9). Net can be negative on a day
         of refunds, which is the honest revenue line.
         """
@@ -1872,7 +1872,7 @@ EOF
 - Produces:
   - `AnalyticsQueryService.__init__(*, store=analytics_store, user_store=None, value_store=None)` — `value_store` defaults to `build_value_analytics_store(analytics_base=store)`.
   - `AnalyticsQueryService.get_overview(...)` — same signature, same `AnalyticsOverview` shape, new sources (below).
-  - `AnalyticsQueryService.billing_lane_mix(*, start: date, end: date) -> dict[str, dict[str, int]]` — per ISO day, `{"platform_credits": n, "byok": n}` model-call counts from the rollups' `event_count` rows for `model_usage_recorded` (D14). Service method only; PR C exposes it. Run events (`backtest_*`) carry no `billing_mode` (`instrumentation.emit_run_event` has no such parameter; only `emit_resource_event`, line 242-272, does), so "lane mix" here means what `AnalyticsUserProfile.billing_lane_mix` has always meant in this codebase: `model_usage_recorded` events per lane.
+  - `AnalyticsQueryService.billing_lane_mix(*, start: date, end: date) -> dict[str, dict[str, int]]` — per ISO day, `{"platform_credits": n, "byok": n}` model-call counts from the rollups' `event_count` rows for `model_usage_recorded` (D14). Service method only; PR D exposes it. Run events (`backtest_*`) carry no `billing_mode` (`instrumentation.emit_run_event` has no such parameter; only `emit_resource_event`, line 242-272, does), so "lane mix" here means what `AnalyticsUserProfile.billing_lane_mix` has always meant in this codebase: `model_usage_recorded` events per lane.
   - `rollup_day` additionally writes one `activation_users` row per activation event name per day (`event_name` dimension, `value_count` = distinct users that day). No DDL change.
   - `rollup_current_day(*, store=None, now=None, include_internal=False)` — same signature; reads `[start of today, now)` only and returns the same `AnalyticsOverviewMetrics` type, whose trailing-context fields (`active_users_7d`, `first_success_conversion`, `repeat_run_rate`) are therefore today-only numbers; nothing in the backend calls this function (`rg rollup_current_day` finds only its definition and `__all__`), so narrowing it is the design's §6.15 item 2 stated as code, not a behaviour change anyone reads.
   - `_legacy_state(operational_state, lifecycle_segment) -> str` in `query_service.py` — the `_legacy_seed` mapping (`value_repository.py:185-208`) as a pure function; feeds the `user_state_counts` bridge until Task 16 and the profile's `state` summary (Task 11).
@@ -2549,7 +2549,7 @@ Replace `get_overview` (648-959) in full:
     def billing_lane_mix(self, *, start: date, end: date) -> dict[str, dict[str, int]]:
         """Model calls per billing lane per UTC day, from the rollups (D14).
 
-        Service method only in PR B; PR C adds it to AnalyticsOverview.
+        Service method only in PR B; PR D adds it to AnalyticsOverview.
         Zero-filled for every day in [start, end) so a chart never has holes.
         """
         if end <= start:
@@ -3482,7 +3482,7 @@ EOF
 - Produces:
   - `get_operational` — same signature, same `OperationalAnalyticsResponse`; `operational_state_counts` from yesterday's fact rows.
   - `OperationalReasonCount(reason_code: str, reason: str, users: int)` — a frozen model in `value_queries.py`, **not** referenced by any response model.
-  - `ValueAnalyticsQueryService.top_operational_reasons(*, day: date, limit: int = 10) -> list[OperationalReasonCount]` — reasons behind `blocked`/`needs_attention` on `day`, most users first (§9 "Added"; PR C exposes it).
+  - `ValueAnalyticsQueryService.top_operational_reasons(*, day: date, limit: int = 10) -> list[OperationalReasonCount]` — reasons behind `blocked`/`needs_attention` on `day`, most users first (§9 "Added"; PR D exposes it).
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -3568,7 +3568,7 @@ Add after `OperationalAnalyticsResponse` (line 276):
 class OperationalReasonCount(BaseModel):
     """One blocking or attention reason and how many users carried it.
 
-    Service-level only in PR B (design §9: PR C puts `top_operational_reasons`
+    Service-level only in PR B (design §9: PR D puts `top_operational_reasons`
     on OperationalAnalyticsResponse in the contract re-cut).
     """
 
@@ -4122,7 +4122,7 @@ EOF
 | `recent_footprint` | the page's first 20 meaningful events (unchanged rule, `is_meaningful_event`) |
 | `primary_billing_lane`, `default_provider`, `country_code`, `device_category`, `browser_family`, `billing_lane_mix`, `top_product_page`, `input_tokens`, `output_tokens` | computed over the page instead of the window — page-bounded; D15 drops the display of the middle four in PR C, and the token totals are per-event on the usage tab |
 
-The page-bounded token totals are the one number here that gets *smaller* rather than moving by a day; that is recorded in the PR body and in the Acceptance section, and PR C's re-cut decides whether the profile keeps them at all (§9 lists them nowhere among the kept fields).
+The page-bounded token totals are the one number here that gets *smaller* rather than moving by a day; that is recorded in the PR body and in the Acceptance section, and PR D's re-cut decides whether the profile keeps them at all (§9 lists them nowhere among the kept fields).
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -5514,16 +5514,14 @@ EOF
 - Modify: `dashboard/backend/domain/analytics/value_queries.py` — `UserValueFilters.legacy_status` (317) and its validator arm (344-352); the `legacy_status=` line in `list_users` (Task 10)
 - Modify: `dashboard/backend/domain/analytics/value_repository.py` — `UserPageQuery.legacy_status`, `_LEGACY_STATUS_PREDICATES`, the `legacy_status` arm of `_users_page_sql` (Task 3)
 - Modify: `dashboard/backend/api/routers/admin_analytics.py` — `_USER_STATES` (53), `"status"` in `_value_user_filters`'s allowed set (215), lines 247-249, `legacy_status=legacy_status` (284)
-- Modify: `dashboard/frontend/js/admin-analytics.js` — line 582 (`params.set('status', …)`)
-- Modify: `dashboard/frontend/app.html` — line 2708: `js/admin-analytics.js?v=6` → `?v=7`
-- Modify: `dashboard/backend/tests/fixtures/admin_analytics/overview.json` (the `user_state_counts` block, lines 27-33) and `overview_partial_error.json` (lines 17-23)
-- Modify: `dashboard/backend/tests/test_admin_analytics_frontend.py` (`"status"` at line 180; `?v=6` at 117 and 248), `test_credit_format_frontend.py:79`, `test_frontend_fast_boot.py:202`, `test_admin_analytics_api.py` (`"status": "active"` at 710; `filters.legacy_status == "active"` at 738), `tests/domain/analytics/test_fact_reads.py` (the legacy loop in `assert_users_page_contract`), `test_value_queries.py` (`legacy_status="active"` in `test_users_list_passes_every_filter_to_sql_unchanged`)
+- Modify: `dashboard/backend/tests/fixtures/admin_analytics/overview.json` (the `user_state_counts` block, lines 27-33) and `overview_partial_error.json` (lines 17-23), **and their copies under `fixtures/admin_analytics/target/`** (PR C's `test_admin_target_fixtures.py` asserts the two sets differ only by the §9 fields)
+- Modify: `dashboard/backend/tests/test_admin_analytics_api.py` (`"status": "active"` at 710; `filters.legacy_status == "active"` at 738), `tests/domain/analytics/test_fact_reads.py` (the legacy loop in `assert_users_page_contract`), `test_value_queries.py` (`legacy_status="active"` in `test_users_list_passes_every_filter_to_sql_unchanged`)
 
 **Interfaces:**
 - Consumes: nothing.
 - Produces: `AnalyticsOverview` without `user_state_counts`; `UserValueFilters` and `UserPageQuery` without `legacy_status`; `GET /users?status=…` answers **422** like any other unknown parameter (`_query_values` rejects unlisted keys, `admin_analytics.py:67-73`). The friction panel's availability keeps its key (`availability["friction"]`) — it now reports the `count_states_for_date` read that `/operational` and `/lifecycle` share, so the availability map's five keys are unchanged.
 
-D20: *A shim faking a dead vocabulary from a live one is worse than the break, because it makes the field look maintained.* Tasks 5 and 3 carried the bridge and the SQL translation only so that every intermediate commit served the full contract; this task removes both. The one frontend edit permitted by §13 row B is the dead sender — `state.attention.status` and the `#adminAnalyticsUserStatus` control it reads (`admin-analytics.js:66, 1103`) stay, because the surviving rule is "one line", not "clean the dead panel", which PR C deletes wholesale (§7.5).
+D20: *A shim faking a dead vocabulary from a live one is worse than the break, because it makes the field look maintained.* Tasks 5 and 3 carried the bridge and the SQL translation only so that every intermediate commit served the full contract; this task removes both. It makes no frontend edit: the dead sender of `status` (`admin-analytics.js::attentionQuery`) went with the whole module when PR C deleted it (§7.5), before this branch was cut.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -5531,7 +5529,7 @@ In `test_admin_analytics_api.py`, append:
 
 ```python
 def test_overview_has_no_five_state_field_and_users_rejects_status(admin_analytics_api):
-    """Design D20: the one permitted contract break before PR C."""
+    """Design D20: the one permitted contract break before PR D."""
     api = admin_analytics_api
 
     overview = api["client"].get("/api/admin/analytics/overview", headers=api["admin_headers"])
@@ -5548,22 +5546,15 @@ def test_overview_has_no_five_state_field_and_users_rejects_status(admin_analyti
     assert "legacy_status" not in UserValueFilters.model_fields
 ```
 
-(add `UserValueFilters` to that module's `value_queries` import). In `test_admin_user_list_accepts_documented_filters` delete `"status": "active",` (710) and `assert filters.legacy_status == "active"` (738). In `test_admin_analytics_frontend.py::test_client_uses_exact_pr2_endpoints_and_query_names` remove `"status"` from the tuple at line 180 and add, after the loop, `assert "params.set('status'" not in source`. In `test_fact_reads.py::assert_users_page_contract` delete the `for legacy, expected in (...)` loop and change `_page_query`'s defaults to drop `legacy_status`. In `test_value_queries.py::test_users_list_passes_every_filter_to_sql_unchanged` drop `legacy_status="active"` from both the `UserValueFilters(...)` and the expected `UserPageQuery(...)`. Update the four `?v=` pins:
-
-```python
-# test_admin_analytics_frontend.py:117 and :248, test_credit_format_frontend.py:79, test_frontend_fast_boot.py:202
-'js/admin-analytics.js?v=7'
-```
-
-(`test_credit_format_frontend.py` pins the `src="…"` form: `'src="js/admin-analytics.js?v=7"'`.) In `overview.json` and `overview_partial_error.json` delete the `"user_state_counts": {...},` block.
+(add `UserValueFilters` to that module's `value_queries` import). In `test_admin_user_list_accepts_documented_filters` delete `"status": "active",` (710) and `assert filters.legacy_status == "active"` (738). In `test_fact_reads.py::assert_users_page_contract` delete the `for legacy, expected in (...)` loop and change `_page_query`'s defaults to drop `legacy_status`. In `test_value_queries.py::test_users_list_passes_every_filter_to_sql_unchanged` drop `legacy_status="active"` from both the `UserValueFilters(...)` and the expected `UserPageQuery(...)`. In `overview.json`, `overview_partial_error.json` **and** `target/overview.json`, `target/overview_partial_error.json` delete the `"user_state_counts": {...},` block (the target copies must lose it too, or `test_admin_target_fixtures.py::test_target_fixtures_add_exactly_the_section_9_fields` fails with `target differs from committed beyond the §9 fields`).
 
 - [ ] **Step 2: Run and confirm the expected failure**
 
 ```bash
-python -m pytest dashboard/backend/tests/test_admin_analytics_api.py dashboard/backend/tests/test_admin_analytics_frontend.py dashboard/backend/tests/test_credit_format_frontend.py dashboard/backend/tests/test_frontend_fast_boot.py -q
+python -m pytest dashboard/backend/tests/test_admin_analytics_api.py dashboard/backend/tests/test_admin_analytics_frontend.py dashboard/backend/tests/test_admin_target_fixtures.py -q
 ```
 
-Expected: **FAIL** — `overview.json()` still carries `user_state_counts`; `/users?status=active` answers 200; the `?v=7` pins do not match `app.html`; `"params.set('status'" not in source` fails.
+Expected: **FAIL** — `overview.json()` still carries `user_state_counts`; `/users?status=active` answers 200. `test_admin_target_fixtures.py` passes (both sets lost the block together); `test_fixtures_validate_against_committed_analytics_models` passes because `user_state_counts` is still an optional-by-omission field on the fixture side — it fails only if the model gains a required field.
 
 - [ ] **Step 3: Remove the vocabulary**
 
@@ -5590,16 +5581,16 @@ with
             availability["friction"] = _availability(False)
 ```
 
-`value_queries.py`: delete `legacy_status: str | None = None` (317) and the `legacy = self.legacy_status ... raise ValueError("legacy_status is unsupported")` arm (344-352) from `UserValueFilters`; delete `legacy_status=filters.legacy_status,` from `list_users`. `value_repository.py`: delete `legacy_status: str | None = None` from `UserPageQuery`, `_LEGACY_STATUS_PREDICATES`, and the `if query.legacy_status is not None:` arm of `_users_page_sql`. `admin_analytics.py`: delete `_USER_STATES` (53), `"status",` from the allowed set (215), lines 247-249, and `legacy_status=legacy_status,` (284) — `_USER_STATES`'s other reader, `_user_filters` (317), was deleted by PR A with the dead legacy list. `admin-analytics.js:582`: delete the line `if (state.attention.status !== 'all') params.set('status', state.attention.status);`. `app.html:2708`: `?v=6` → `?v=7`.
+`value_queries.py`: delete `legacy_status: str | None = None` (317) and the `legacy = self.legacy_status ... raise ValueError("legacy_status is unsupported")` arm (344-352) from `UserValueFilters`; delete `legacy_status=filters.legacy_status,` from `list_users`. `value_repository.py`: delete `legacy_status: str | None = None` from `UserPageQuery`, `_LEGACY_STATUS_PREDICATES`, and the `if query.legacy_status is not None:` arm of `_users_page_sql`. `admin_analytics.py`: delete `_USER_STATES` (53), `"status",` from the allowed set (215), lines 247-249, and `legacy_status=legacy_status,` (284) — `_USER_STATES`'s other reader, `_user_filters` (317), was deleted by PR A with the dead legacy list. No frontend edit: PR C already deleted `admin-analytics.js`, the only sender of `status`.
 
 - [ ] **Step 4: Run and confirm the pass**
 
 ```bash
 python -m pytest dashboard/backend/tests/ -q
-rg -n "user_state_counts|legacy_status|_USER_STATES|user_state_count\b" dashboard/ --glob '!dashboard/frontend/js/admin-analytics.js'
+rg -n "user_state_counts|legacy_status|_USER_STATES|user_state_count\b" dashboard/
 ```
 
-Expected: **PASS**, and the `rg` prints nothing. (`admin-analytics.js` still renders `payload.user_state_counts?.[status] || 0` at line 439 inside the dead legacy overview markup; `?.` and `|| 0` make it render dashes when the field is absent, and PR C deletes the module — the design's one-line rule keeps it out of this PR.)
+Expected: **PASS**, and the `rg` prints nothing (`admin-analytics.js`, the one file that used to render `user_state_counts`, was deleted by PR C; no `/admin` module reads the field — §8.2 cuts it).
 
 - [ ] **Step 5: Commit**
 
@@ -5608,14 +5599,11 @@ git add dashboard/backend/domain/analytics/query_service.py \
         dashboard/backend/domain/analytics/value_queries.py \
         dashboard/backend/domain/analytics/value_repository.py \
         dashboard/backend/api/routers/admin_analytics.py \
-        dashboard/frontend/js/admin-analytics.js \
-        dashboard/frontend/app.html \
         dashboard/backend/tests/fixtures/admin_analytics/overview.json \
         dashboard/backend/tests/fixtures/admin_analytics/overview_partial_error.json \
+        dashboard/backend/tests/fixtures/admin_analytics/target/overview.json \
+        dashboard/backend/tests/fixtures/admin_analytics/target/overview_partial_error.json \
         dashboard/backend/tests/test_admin_analytics_api.py \
-        dashboard/backend/tests/test_admin_analytics_frontend.py \
-        dashboard/backend/tests/test_credit_format_frontend.py \
-        dashboard/backend/tests/test_frontend_fast_boot.py \
         dashboard/backend/tests/domain/analytics/test_fact_reads.py \
         dashboard/backend/tests/domain/analytics/test_value_queries.py
 git status --short
@@ -5695,9 +5683,9 @@ Open the PR as a **draft** titled `refactor: move admin analytics onto daily fac
 
 From the design doc's §13 row B "Must not" column and the decisions behind it:
 
-- **Re-cut the contract.** No field is added to any response model (`billing_lane_mix`, `top_operational_reasons`, `purchased_by_day`, `consumed_by_day`, `group_badge`, `user_group`, `role`, `last_meaningful_activity_at`, `facts_as_of` all wait for PR C — D19: *re-cutting earlier would mean two frontends tracking one moving contract*); no query parameter is renamed or declared as a FastAPI parameter (`_query_values()` stays until PR C); `max_active_dashboard_backtests` is not added to `GET /api/admin/stats`.
-- **Touch the frontend beyond the dead `status` query.** No change to `admin-analytics-value.js`, `admin-analytics.html`, `app.js`, `admin-tabs.js`, `styles.css`, or any `app.html` markup; the `?v=` bump on `admin-analytics.js` is the cache-buster convention for the one line removed. The USER_STATES legend at `admin-analytics.js:436-440` renders dashes against the missing field and goes with the module in PR C (§7.5).
-- **Build on the in-app panel.** §12 item 3: the 09-12 plan's task C6 targeted a surface #467 made unreachable; PR C is written from scratch against §7-§8. Nothing here adds axis filters, a group badge or a cohort field to `app.html`.
+- **Re-cut the contract.** No field is added to any response model (`billing_lane_mix`, `top_operational_reasons`, `purchased_by_day`, `consumed_by_day`, `group_badge`, `user_group`, `role`, `last_meaningful_activity_at`, `facts_as_of` all wait for PR D — D19 as amended 2026-09-16: the page (PR C) already renders them from target-shape fixtures and shows "Awaiting data source" until this PR's service methods reach the payload in PR D); no query parameter is renamed or declared as a FastAPI parameter (`_query_values()` stays until PR D). `max_active_dashboard_backtests` on `GET /api/admin/stats` is PR C's, already merged.
+- **Touch the frontend.** No change to any file under `dashboard/frontend/`. The `/admin` page's four modules read the nine routes under today's names and never read `user_state_counts` (§8.2 cuts it), so D20 reaches the page as a fixture edit only.
+- **Build on the in-app panel.** §12 item 3: the 09-12 plan's task C6 targeted a surface #467 made unreachable; PR C was written from scratch against §7-§8 and has shipped. Nothing here adds axis filters, a group badge or a cohort field anywhere.
 - **`cohort`** in any form (D9): no column, no validator, no filter, no `cohort_*` rollup names.
 - **Delete `rollup_day`, `analytics_daily_rollups`, or `AnalyticsRollupStore`.** The rollups are the permanent table (§11); this PR adds rows to them.
 - **Sweep `user_activity`** (§11): the retention service never touches it, and Task 13 pins that.
@@ -5733,11 +5721,9 @@ Mirrors design §6.10 ("After PR B"), §9, §10.2, §11, §13 row B.
 | same : `test_admin_user_list_accepts_documented_filters` | `status` param and `legacy_status` assertion removed | D20 |
 | same : fixture `admin_analytics_api` and `_fixture` | no `AnalyticsStateStore` / `recalculate_user_snapshot` | `states.py` deleted |
 | same : new tests | one-day scan window; rollup-sourced trailing metrics; `billing_lane_mix`; 30-day sessions; D20 shape check | §6.15 items 2-3, D13, D14, D20 |
-| `test_admin_analytics_frontend.py` : `test_client_uses_exact_pr2_endpoints_and_query_names` | `"status"` removed; asserts the `params.set('status'` line is gone | D20 |
-| same : `test_app_lifecycle_and_cache_versions_are_wired`, `test_admin_analytics_surface_and_module_exist` | `admin-analytics.js?v=6` → `?v=7` | cache-buster for the one deleted line |
-| `test_credit_format_frontend.py`, `test_frontend_fast_boot.py` | the same `?v=7` pin | same |
-| `fixtures/admin_analytics/overview.json`, `overview_partial_error.json` | `user_state_counts` block removed | D20 |
-| `test_admin_analytics_value_frontend.py` | **no change** | it pins `admin-analytics-value.js`, which this PR does not touch |
+| `test_admin_analytics_frontend.py` (as PR C rewrote it) | **no change** | its shape test asserts today's keys, none of them `user_state_counts`; PR C removed the old `test_client_uses_exact_pr2_endpoints_and_query_names` with the module it pinned |
+| `fixtures/admin_analytics/overview.json`, `overview_partial_error.json`, and their `target/` copies | `user_state_counts` block removed | D20; the target copies follow so `test_admin_target_fixtures.py` keeps the two sets in step |
+| the `/admin` node tests (`test_admin_*_frontend.py`, `test_admin_page_modules.py`) | **no change** | no `/admin` module reads `user_state_counts` (§8.2 cut); the renderers are fed the fixtures above and paint the same |
 | `test_repository_contract.py` : `assert_pr2_query_contract` | attention seeded via `upsert_daily_facts`; `evidence_event_ids` assertion removed; `states` import gone | snapshot table dropped |
 
 Value changes with no shape change, for the PR body (one suspect each, D18): trailing overview metrics are as of yesterday; funnel and failure counts sum daily distinct users; `include_internal` no longer adds admins to fact-sourced counts; profile tokens, footprint, provider and client-context fields are computed over the latest 100-event timeline page; per-user `recent_lifecycle_transitions` carry their own day as the period; the users list's priority sort drops the lifetime-purchase tiebreak and lists users without a fact row as `healthy`/`unpaid`.

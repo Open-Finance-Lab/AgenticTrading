@@ -8366,14 +8366,14 @@ Per design §13 row A's "Must not" column, D9, D18/§10.1, §12 item 7 and §13 
 
 - **Any response-shape change.** The nine `/api/admin/analytics/*` routes answer byte-identically to `main`; `test_admin_analytics_api.py`, `test_admin_analytics_frontend.py` and `test_admin_analytics_value_frontend.py` are edited only to delete the dead stack's own construction (Task 13). *Reason (D18):* the existing wired frontend and its tests are a free conformance oracle while the data model underneath is replaced; a moved number has exactly one suspect.
 - **Dropping any table or column**, including `user_analytics_snapshots`' value columns, `user_lifecycle_daily_snapshots`, `states.py`, `lifecycle_backfill.py`, the snapshot repair pass, `run_analytics_maintenance` and the five-state vocabulary. *Reason (§12 item 7):* the 09-12 plan dropped the snapshot tables in its data-model PR while its read-paths PR was the one that stopped reading them, so prod would have read dropped tables in between. PR B rewires every read path and then drops, in the same PR, after PR A's job has written at least eight days of facts.
-- **Any frontend file**, and therefore any `?v=` bump. *Reason (§13 row A; D8/D19):* the page is rebuilt in PR C against a contract re-cut once.
+- **Any frontend file**, and therefore any `?v=` bump. *Reason (§13 row A; D8/D19):* the page was rebuilt in PR C, which ships before this PR (§13, re-ordered 2026-09-16), against today's contract; the one re-cut is PR D.
 - **A `cohort` column, validator, filter or suggestion list** (the 09-12 plan's Task B2 is struck in full). *Reason (D9):* two categorical labels on one user is two owners of one fact; `user_group` shipped in PR #465 and is the sole third axis.
-- **`resolve_group_badge`** (the 09-12 plan's Task B5 step 3). *Reason (D11, §13 row B):* nothing computes it today and PR B adds it beside the read paths that consume it; PR C puts `group_badge` on the payloads.
+- **`resolve_group_badge`** (the 09-12 plan's Task B5 step 3). *Reason (D11, §13 row B):* nothing computes it today and PR B adds it beside the read paths that consume it; PR D puts `group_badge` on the payloads.
 - **Wiring `build_lifecycle_inputs` into any route.** *Reason (§13 row A):* "read-time lifecycle calculator (not yet wired to routes)"; the route move is PR B's.
 - **Re-pointing the retention sweep at `user_daily_facts` / `lifecycle_transitions`, and the long-term rollups by tier and `user_group`** (the 09-12 plan's B9 step 5 and C4). *Reason (§13 row B):* they land with the read-path move; no fact row reaches 180 days before PR B.
 - **Registering the daily job with `register_reaper_sweep`** (the 09-12 plan's B8 step 5). *Reason (D23):* the heartbeat thread must not carry a whole-population batch.
 - **The 09-12 plan's `aggregate_operator_cost_for_day` / `aggregate_ledger_for_day` on `ValueAnalyticsStore`** (B8 step 3). *Reason (§12 item 1, D23):* they are methods on `BacktestDatabase` / `PostgresBacktestDatabase` and `CreditsStore` / `PostgresCreditsStore` (Task 5).
-- **`max_active_dashboard_backtests` on `GET /api/admin/stats`**, `billing_lane_mix`, `top_operational_reasons`, `purchased_by_day`, `get_user_metrics`. *Reason (§9, §13 rows B/C):* PR B computes, PR C exposes.
+- **`max_active_dashboard_backtests` on `GET /api/admin/stats`**, `billing_lane_mix`, `top_operational_reasons`, `purchased_by_day`, `get_user_metrics`. *Reason (§9, §13 rows B/D):* PR B computes, PR D exposes (`max_active_dashboard_backtests` is PR C's, already merged).
 
 ## Acceptance
 
