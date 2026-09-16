@@ -25,8 +25,11 @@
       // `replace`, not `assign`: `/app?view=admin` must not stay in history,
       // or Back reloads it, app.js routes to admin, and we redirect forward
       // again — a loop the user cannot escape with the Back button.
+      // Returns `true` (not the tab string every other path returns) so
+      // `onEnter` can report a navigation was scheduled and its caller can
+      // stop running the loaders that page is already leaving (PR 0).
       window.location.replace('/admin-analytics');
-      return tab;
+      return true;
     }
     const tablist = document.getElementById('adminTabs');
     tablist?.querySelectorAll('[data-admin-tab]').forEach((button) => {
@@ -79,7 +82,7 @@
   function onEnter() {
     bind();
     const requested = new URL(window.location.href).searchParams.get('adminTab');
-    setTab(requested || DEFAULT_TAB);
+    return setTab(requested || DEFAULT_TAB) === true;
   }
 
   function openAccountManagement({ userId, email } = {}) {
