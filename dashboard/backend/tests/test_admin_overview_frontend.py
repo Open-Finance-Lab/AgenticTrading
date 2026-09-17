@@ -239,3 +239,28 @@ def test_paint_marks_partial_availability_as_incomplete_and_never_blanks_a_sibli
     assert result["lifecycle"] == {"headline": "—", "status": "", "error": "This section is temporarily unavailable.", "body": 0}
     assert result["attention"]["error"] == "This section is temporarily unavailable."
     assert result["sources"] == {"headline": "100", "status": "", "error": "", "body": 1}
+
+
+def test_paint_clears_a_stale_headline_and_body_when_its_data_goes_missing():
+    """F1 regression: a route/range change wipes `state.data` for a panel whose
+    fetch then fails. The very next paint() must not leave the previous range's
+    headline and chart on screen at full brightness with only an amber notice --
+    verified consequence: 1W's "42" survived a 1M failure with no stale dimming."""
+    result = _eval(
+        "(() => {"
+        "  const {panel, parts} = panelStub();"
+        "  register('panelAttention', panel);"
+        "  const def = window.AdminOverview.PANELS.find((d) => d.id === 'panelAttention');"
+        f"  window.AdminOverview.state.data = {{operational: {F['operational']}, lifecycle: {F['lifecycle']}}};"
+        "  window.AdminOverview.state.errors = {};"
+        "  window.AdminOverview.paint(def);"
+        "  const before = {headline: parts.headline.textContent, body: parts.body.children.length};"
+        "  window.AdminOverview.state.data = {};"  # the signature change that drops cached data
+        "  window.AdminOverview.paint(def);"
+        "  const after = {headline: parts.headline.textContent, body: parts.body.children.length, error: parts.errorText.textContent, stale: panel.classList.contains('is-stale')};"
+        "  return {before, after};"
+        "})()"
+    )
+    assert result["before"]["headline"] == "11"
+    assert result["before"]["body"] > 0
+    assert result["after"] == {"headline": "—", "body": 0, "error": "This section is temporarily unavailable.", "stale": False}

@@ -70,6 +70,7 @@
               <article class="snapshot-tile runs"><span class="snapshot-label">Backtests running · this instance</span><strong class="snapshot-value" data-live="active_dashboard_backtests">—</strong><small class="snapshot-meta" data-live="slots">—</small></article>
             </div>
             <p class="live-caveat muted" id="liveCaveat">Counters are this instance's process state; a second replica would under-report them.</p>
+            <small class="panel-status muted" data-status hidden></small>
             <p class="panel-error" data-error hidden><span></span> <button type="button" class="retry" data-retry>Retry</button></p>
           </section>
           <section class="panel" id="panelAttention" data-panel="attention" aria-labelledby="attentionTitle" aria-busy="true">
@@ -185,7 +186,7 @@
   <dialog id="evidenceDialog" aria-labelledby="evidenceTitle">
     <div class="dialog-head"><h2 id="evidenceTitle">User evidence</h2><button type="button" data-dialog-close aria-label="Close">×</button></div>
     <div id="evidenceBody"></div>
-    <div class="dialog-actions"><a id="evidenceAccount" class="module-link" href="/app?view=admin&amp;adminTab=users">Open account management</a><a id="evidenceProfile" class="module-link" href="#users" data-dialog-initial-focus>Open full profile</a></div>
+    <div class="dialog-actions"><a id="evidenceAccount" class="module-link" href="/app?view=admin&amp;adminTab=users">Open account management</a><a id="evidenceProfile" class="module-link" href="#users" data-dialog-close data-dialog-initial-focus>Open full profile</a></div>
   </dialog>
 </body>
 </html>

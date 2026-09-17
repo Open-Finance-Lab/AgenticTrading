@@ -240,6 +240,10 @@ def test_api_keys_is_the_primary_credits_tab():
     assert 'id="creditsTabOverview" class="credits-tab"' in tabs
     assert 'data-credits-panel="api-keys">' in APP_HTML
     assert 'data-credits-panel="overview" hidden>' in APP_HTML
+    # Orientation: the Credits page's own nav stays horizontal, unlike the
+    # admin subnav it is sometimes confused with.
+    assert 'class="credits-tabs"' in tabs
+    assert 'aria-orientation="vertical"' not in tabs
 
 
 def test_saved_key_launch_controls_have_room_for_model_and_action():

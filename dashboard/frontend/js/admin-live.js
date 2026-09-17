@@ -3,9 +3,6 @@
   'use strict';
 
   const STATS_PATH = '/api/admin/stats';
-  // Two caveats the row must carry (design D17): the slot ledger is per-process,
-  // and the ceiling is the parsed MAX_ACTIVE_DASHBOARD_BACKTESTS, not a fiction.
-  const CAVEAT = "Counters are this instance's process state; a second replica would under-report them.";
   const state = { data: null };
 
   function shell() {
@@ -72,5 +69,5 @@
     if (event.detail?.panel === 'live') load();
   });
 
-  window.AdminLive = { renderTiles, load, STATS_PATH, CAVEAT };
+  window.AdminLive = { renderTiles, load, STATS_PATH };
 })();

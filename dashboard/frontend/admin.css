@@ -1,7 +1,8 @@
 /* admin.css — the /admin console shell (design §7.2). Externalised from the
-   retired admin-analytics.html mock and pruned to what its final rendered
-   DOM used (design §8.1). This file does not import styles.css: the admin
-   page must not inherit a 15,000-line stylesheet to get a header. */
+   retired admin-analytics.html mock (deleted in PR C; see git history) and
+   pruned to what its final rendered DOM used (design §8.1). This file does
+   not import styles.css: the admin page must not inherit a 15,000-line
+   stylesheet to get a header. */
 :root{color-scheme:dark;--bg:#0a0e27;--surface:#12172b;--line:#2a3041;--line-strong:#384158;--text:#e5e7eb;--muted:#9ca3af;--accent:#00bfff;--green:#42cc8b;--amber:#e6b75c;--red:#f08080;--violet:#8797ff;--steel:#6f86a8;--font-base:-apple-system,BlinkMacSystemFont,"Segoe UI","Helvetica Neue",sans-serif;font-family:var(--font-base);color:var(--text);background:var(--bg)}
 *{box-sizing:border-box}
 body{margin:0;background:var(--bg);color:var(--text);font:14px/1.45 var(--font-base)}
@@ -64,7 +65,7 @@ main{width:100%;max-width:1420px;margin:0 auto;padding:30px 36px 50px}
 .headline-number{display:block;margin-bottom:3px;color:var(--text);font-size:25px;line-height:1;font-weight:650}
 .panel-body{min-height:180px}
 .panel[aria-busy=true] .panel-body{opacity:.55}
-.panel.is-stale .headline-number{color:var(--muted)}
+.panel.is-stale .headline-number,.panel.is-stale .snapshot-value{color:var(--muted)}
 .panel-status{margin:12px 0 0;font-size:11px}
 .panel-error{display:flex;align-items:center;gap:12px;margin:12px 0 0;color:var(--amber);font-size:12px}
 .panel-error .retry{min-height:32px;padding:4px 10px}
@@ -197,13 +198,6 @@ main{width:100%;max-width:1420px;margin:0 auto;padding:30px 36px 50px}
 .revenue-viz .revenue-point-label{fill:var(--text);font-size:10px;font-weight:600;text-anchor:middle}
 .revenue-note{margin:10px 0 0;font-size:11px}
 
-/* System health failure bars (mock line 24) */
-.failure-bars{display:grid;gap:15px}
-.failure-row{display:grid;grid-template-columns:145px 1fr 28px;align-items:center;gap:10px}
-.failure-row span{color:var(--muted);font-size:12px}
-.failure-track{height:10px;overflow:hidden;border-radius:2px;background:#171d31}
-.failure-track i{display:block;width:var(--width);height:100%;background:var(--red);opacity:.85}
-
 /* Detail views, tables, badges (mock line 25) */
 .detail-view{padding-top:4px}
 .breadcrumb{justify-content:flex-start;margin-bottom:22px;color:var(--muted)}
@@ -229,6 +223,7 @@ th:first-child,td:first-child{padding-left:0}
 .group-badge.is-paid{color:var(--green)}
 .group-badge.is-free{color:var(--muted)}
 .group-badge.is-internal{color:var(--violet)}
+.group-badge.is-pending{color:var(--muted)}
 .freshness-legend{padding-top:24px;color:var(--muted);font-size:11px}
 
 /* Users list */
@@ -273,5 +268,5 @@ dialog::backdrop{background:rgba(0,0,0,.64)}
 
 /* Responsive (mock lines 26-27, pruned) */
 @media(max-width:1040px){.product-nav{display:none}.filters{grid-template-columns:repeat(2,minmax(0,1fr))}.overview-row.priority-row{grid-template-columns:1fr;gap:0}.metric-strip{grid-template-columns:repeat(2,1fr)}.detail-metric:nth-child(3){padding-left:0;border-left:0;border-top:1px solid var(--line)}.detail-metric:nth-child(4){border-top:1px solid var(--line)}}
-@media(max-width:680px){header{padding:12px 15px}.brand{font-size:17px}.brand img{width:40px;height:40px}.workspace{grid-template-columns:66px minmax(0,1fr)}aside{padding:18px 6px}aside>strong{display:none}aside a{overflow:hidden;padding:10px 7px;font-size:0;text-align:center}aside a::first-letter{font-size:14px}.analytics-parent span{display:none}.analytics-subnav{margin-left:9px;padding-left:3px}main{padding:24px 16px 40px}.page-head{flex-direction:column;align-items:stretch}.page-actions{flex-direction:row;align-items:center;justify-content:space-between}.live-row .live-head{flex-direction:column;align-items:flex-start}.range button{min-width:38px;padding-inline:7px}.filters{grid-template-columns:1fr}.snapshot-grid{grid-template-columns:1fr}.snapshot-tile+.snapshot-tile{border-left:0;border-top:1px solid var(--line)}.source-wrap{grid-template-columns:1fr;justify-items:center;gap:17px}.source-legend-six{width:100%;gap:10px 14px}.attention-note{align-items:flex-start;flex-direction:column;gap:8px}.retention-chart{grid-template-columns:55px repeat(4,1fr);gap:4px}.lifecycle-legend{grid-template-columns:repeat(2,1fr)}.value-step{grid-template-columns:112px 1fr auto;gap:8px}.value-step>span{white-space:normal}.failure-row{grid-template-columns:120px 1fr 24px}.layered-route{min-width:600px;overflow:visible}.credits-paired{min-width:560px}.priority-row:has(.layered-route),.priority-row:has(.credits-paired){overflow-x:auto}.revenue-viz{height:184px}.revenue-viz svg{height:168px}.metric-strip{grid-template-columns:1fr}.detail-metric,.detail-metric:first-child,.detail-metric:nth-child(3){padding:17px 0;border-left:0;border-top:1px solid var(--line)}.milestones{grid-template-columns:repeat(2,1fr)}}
+@media(max-width:680px){header{padding:12px 15px}.brand{font-size:17px}.brand img{width:40px;height:40px}.workspace{grid-template-columns:66px minmax(0,1fr)}aside{padding:18px 6px}aside>strong{display:none}aside a{overflow:hidden;padding:10px 7px;font-size:0;text-align:center}aside a::first-letter{font-size:14px}.analytics-parent span{display:none}.analytics-subnav{margin-left:9px;padding-left:3px}main{padding:24px 16px 40px}.page-head{flex-direction:column;align-items:stretch}.page-actions{flex-direction:row;align-items:center;justify-content:space-between}.live-row .live-head{flex-direction:column;align-items:flex-start}.range button{min-width:38px;padding-inline:7px}.filters{grid-template-columns:1fr}.snapshot-grid{grid-template-columns:1fr}.snapshot-tile+.snapshot-tile{border-left:0;border-top:1px solid var(--line)}.source-wrap{grid-template-columns:1fr;justify-items:center;gap:17px}.source-legend-six{width:100%;gap:10px 14px}.attention-note{align-items:flex-start;flex-direction:column;gap:8px}.retention-chart{grid-template-columns:55px repeat(4,1fr);gap:4px}.lifecycle-legend{grid-template-columns:repeat(2,1fr)}.value-step{grid-template-columns:112px 1fr auto;gap:8px}.value-step>span{white-space:normal}.layered-route{min-width:600px;overflow:visible}.credits-paired{min-width:560px}.priority-row:has(.layered-route),.priority-row:has(.credits-paired){overflow-x:auto}.revenue-viz{height:184px}.revenue-viz svg{height:168px}.metric-strip{grid-template-columns:1fr}.detail-metric,.detail-metric:first-child,.detail-metric:nth-child(3){padding:17px 0;border-left:0;border-top:1px solid var(--line)}.milestones{grid-template-columns:repeat(2,1fr)}}
 @media(prefers-reduced-motion:reduce){.module-link:after{transition:none}}

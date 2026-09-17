@@ -47,13 +47,6 @@
     return whole ? (Number(part) || 0) / whole : null;
   }
 
-  function usdFromMicro(value) {
-    if (value == null || value === '') return shell().DASH;
-    const numeric = Number(value);
-    if (!Number.isFinite(numeric)) return shell().DASH;
-    return new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(numeric / 1000000);
-  }
-
   function emptyBody(text) {
     const body = shell().el('div');
     body.appendChild(shell().el('p', 'panel-empty', text));
@@ -462,7 +455,7 @@
       rows.map((row) => [
         row.label || s.humanize(row.group), s.formatNumber(row.users), s.formatPercent(ratio(row.users, total)),
         s.formatNumber(row.successful_run_users), s.formatNumber(row.repeat_users), s.formatNumber(row.total_runs),
-        usdFromMicro(row.atl_cost_micro_usd), s.formatNumber(row.paid_users), s.formatPercent(ratio(row.successful_run_users, row.users)),
+        s.usdFromMicro(row.atl_cost_micro_usd), s.formatNumber(row.paid_users), s.formatPercent(ratio(row.successful_run_users, row.users)),
       ]),
       'No account sources recorded.'
     ));
@@ -513,7 +506,7 @@
         ['Purchased Credits', s.formatCredits(period.purchased_micro), 'Selected period'],
         ['Refunds', s.formatCredits(period.refunded_micro), 'Selected period'],
         ['Admin Grants', s.formatCredits(period.admin_grant_activity_micro), 'Excluded from revenue'],
-        ['Platform model cost', usdFromMicro(period.platform_model_cost_micro_usd), 'Platform Credits lane'],
+        ['Platform model cost', s.usdFromMicro(period.platform_model_cost_micro_usd), 'Platform Credits lane'],
         ['Lifetime net purchased', s.formatCredits(commercial?.lifetime_net_purchased_micro), 'Lifetime'],
       ],
       'No ledger activity.'
@@ -612,6 +605,10 @@
     const missing = def.needs.filter((name) => !state.data[name]);
     const failed = def.needs.some((name) => state.errors[name]);
     if (missing.length) {
+      const headline = panel.querySelector('[data-headline]');
+      if (headline) headline.textContent = s.DASH;
+      const body = panel.querySelector('[data-body]');
+      if (body) s.clear(body);
       s.setPanelState(panel, { busy: false, error: s.SECTION_UNAVAILABLE });
       return;
     }

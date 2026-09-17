@@ -6,7 +6,7 @@
   const PAGE_SIZE = 50;
   const SECTIONS = ['overview', 'timeline', 'runs', 'usage', 'sessions'];
   const SECTION_LABELS = Object.freeze({ overview: 'Overview', timeline: 'Timeline', runs: 'Runs', usage: 'Usage', sessions: 'Sessions' });
-  // Harvested from admin-analytics.js:35-50.
+  // Harvested from the retired admin-analytics.js:35-50 (deleted in PR C; see git history).
   const EVENT_LABELS = Object.freeze({
     account_signed_up: 'Account signed up',
     credential_verified: 'Credential verified',
@@ -36,7 +36,6 @@
   const state = {
     list: { offset: 0, total: 0, items: [], loaded: false },
     profile: { userId: null, detail: null, section: 'overview', sections: {} },
-    evidenceUser: null,
   };
 
   function shell() {
@@ -77,13 +76,6 @@
       node.setAttribute('aria-label', `${labelFor(kind, value)}: ${rules[value]}`);
     }
     return node;
-  }
-
-  function usdFromMicro(value) {
-    if (value == null || value === '') return shell().DASH;
-    const numeric = Number(value);
-    if (!Number.isFinite(numeric)) return shell().DASH;
-    return new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(numeric / 1000000);
   }
 
   function formatVisibleTime(value) {
@@ -214,7 +206,6 @@
 
   function openEvidence(user, opener) {
     const s = shell();
-    state.evidenceUser = user;
     const body = document.getElementById('evidenceBody');
     if (body) {
       s.clear(body);
@@ -380,7 +371,7 @@
       ['Input tokens', s.formatNumber(profile.input_tokens)],
       ['Output tokens', s.formatNumber(profile.output_tokens)],
       ['Total tokens', Number.isFinite(totalTokens) ? s.formatNumber(totalTokens) : s.DASH],
-      ['ATL platform model cost', usdFromMicro(Number(profile.platform_model_cost_usd) * 1000000)],
+      ['ATL platform model cost', s.usdFromMicro(Number(profile.platform_model_cost_usd) * 1000000)],
       ['ATL Credits debited', s.formatCredits(profile.credits_debited_micro)],
       ...Object.entries(profile.billing_lane_mix || {}).map(([lane, count]) => [
         lane === 'byok' ? 'BYOK usage — no ATL Credits debit' : s.humanize(lane), s.formatNumber(count),
@@ -482,7 +473,7 @@
           [item.provider_id, item.model_id].filter(Boolean).join(' · ') || s.DASH,
           byok ? 'BYOK — no ATL charge' : (item.billing_mode ? s.humanize(item.billing_mode) : s.DASH),
           s.formatNumber(item.input_tokens), s.formatNumber(item.output_tokens),
-          byok || item.cost_micro_usd == null ? s.DASH : usdFromMicro(item.cost_micro_usd),
+          byok || item.cost_micro_usd == null ? s.DASH : s.usdFromMicro(item.cost_micro_usd),
           byok || item.amount_micro == null ? s.DASH : s.formatCredits(item.amount_micro),
         ];
       }));

@@ -23,11 +23,8 @@
   const COMMERCIAL_LABELS = Object.freeze({
     unpaid: 'Unpaid', starter: 'Starter', invested: 'Invested', high_value: 'High value',
   });
-  const USER_GROUP_LABELS = Object.freeze({
-    internal: 'Internal', invited: 'Invited', organic: 'Organic',
-    competition: 'Competition', partner: 'Partner', unknown: 'Unknown',
-  });
-  // Copy is design §15.2-§15.4; harvested from admin-analytics-value.js (§7.4).
+  // Copy is design §15.2-§15.4; harvested from the retired admin-analytics-value.js
+  // (§7.4; deleted in PR C, see git history).
   const LIFECYCLE_RULES = Object.freeze({
     new: 'Account is 0–6 UTC days old and has no successful backtest.',
     onboarding: 'No successful backtest yet; the account is no longer New and is not inactive.',
@@ -171,6 +168,13 @@
     return formatted === DASH ? DASH : `${formatted} Credits`;
   }
 
+  function usdFromMicro(value) {
+    if (value == null || value === '') return DASH;
+    const numeric = Number(value);
+    if (!Number.isFinite(numeric)) return DASH;
+    return new Intl.NumberFormat(LOCALE, { style: 'currency', currency: 'USD' }).format(numeric / 1000000);
+  }
+
   function formatDateOnly(value, fallback = DASH) {
     if (!value) return fallback;
     const date = new Date(`${value}T00:00:00Z`);
@@ -264,6 +268,13 @@
     Object.keys(state.seq).forEach((surface) => { state.seq[surface] += 1; });
   }
 
+  // Every call site does `if (await s.handleAccessLost(error)) return;` and then
+  // writes to the DOM with no re-check of isCurrent(). That is only safe because
+  // this function is `async` but contains no internal `await`: awaiting it costs
+  // exactly one microtask tick, and the microtask queue always drains before the
+  // next macrotask (hashchange/popstate), so no route change can land in between.
+  // Adding any real `await` in here (a token refresh, another fetch) reopens a
+  // stale-write window at every call site at once -- fix it here, not there.
   async function handleAccessLost(error) {
     if (error?.status !== 401 && error?.status !== 403) return false;
     invalidateAll();
@@ -385,10 +396,6 @@
     announce();
   }
 
-  function navigate(hash) {
-    window.location.hash = String(hash).replace(/^#/, '');
-  }
-
   function syncControls() {
     document.querySelectorAll('.range button[data-range]').forEach((button) => {
       button.setAttribute('aria-pressed', button.dataset.range === state.range ? 'true' : 'false');
@@ -477,14 +484,14 @@
   }
 
   const api = {
-    ROUTES, RANGE_DAYS, LIFECYCLE_LABELS, OPERATIONAL_LABELS, COMMERCIAL_LABELS, USER_GROUP_LABELS,
+    ROUTES, RANGE_DAYS, LIFECYCLE_LABELS, OPERATIONAL_LABELS, COMMERCIAL_LABELS,
     LIFECYCLE_RULES, OPERATIONAL_RULES, SECTION_UNAVAILABLE, STALE_NOTICE, INCOMPLETE, PENDING, DASH,
     state, today,
     parseHash, rangeDates, readUrlState, buildSearch, analyticsParams, userListParams,
-    formatNumber, formatPercent, formatCredits, formatDateOnly, formatShortDay, formatTimestamp, humanize,
+    formatNumber, formatPercent, formatCredits, usdFromMicro, formatDateOnly, formatShortDay, formatTimestamp, humanize,
     availabilityIncomplete, fieldPending, freshnessLegendText, rulesEntries, el, clear,
     request, nextSeq, isCurrent, invalidateAll, handleAccessLost, gate,
-    setPanelState, openDialog, closeDialog, openRules, navigate, setFilters,
+    setPanelState, openDialog, closeDialog, openRules, setFilters,
   };
   window.AdminShell = api;
   document.addEventListener('DOMContentLoaded', boot);

@@ -84,6 +84,17 @@ def test_every_value_slot_is_a_dash_placeholder():
     assert metas == ["—"]
 
 
+def test_live_panel_carries_a_status_node_for_its_stale_notice():
+    """F2 regression: the live row is the only panel `setPanelState` targets that
+    had no `[data-status]` node, so a stale reading (design D17) rendered no
+    notice at all -- a stale counter was pixel-identical to a fresh one. (The
+    node's own text-content and numeric-literal rules are still covered by
+    test_panel_regions_carry_no_numeric_or_percentage_literal /
+    test_every_value_slot_is_a_dash_placeholder above.)"""
+    regions = dict(PANEL_REGION.findall(ADMIN_HTML))
+    assert "data-status" in regions["live"]
+
+
 def test_filter_bar_and_range_match_the_survival_table():
     filters_start = ADMIN_HTML.index('<form class="filters"')
     filters_end = ADMIN_HTML.index("</form>", filters_start)
