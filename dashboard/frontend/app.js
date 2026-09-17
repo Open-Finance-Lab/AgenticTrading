@@ -5034,14 +5034,6 @@ function updateAuthUI() {
     window.AdminCredits.syncAuth(user);
   }
 
-  if (window.AdminAnalytics) {
-    window.AdminAnalytics.syncAuth(user);
-  }
-
-  if (window.AdminAnalyticsValue) {
-    window.AdminAnalyticsValue.syncAuth(user);
-  }
-
   if (typeof window.refreshHomeModules === 'function') {
     window.refreshHomeModules();
   }
@@ -5404,14 +5396,14 @@ function initAuthUI(options = {}) {
   });
   document.getElementById('accountMenuAdminBtn')?.addEventListener('click', () => {
     closeAccountMenu();
-    navigateToPage('admin');
+    // Profile → Admin lands on the standalone console (design D3, D4). The old
+    // in-app console stays reachable at ?view=admin for account management,
+    // providers and the grant audit trail until the follow-up port (D5).
+    window.location.assign('/admin');
   });
   document.getElementById('adminRefreshBtn')?.addEventListener('click', () => {
     loadAdminStats();
     loadAdminUsers();
-    if (window.AdminAnalytics) {
-      window.AdminAnalytics.refresh();
-    }
     if (window.AdminModelProviders) {
       window.AdminModelProviders.onEnter();
     }
@@ -10839,23 +10831,12 @@ function navigateToPage(page, options = {}) {
         } else if (page === 'admin') {
             currentMode = 'admin';
             if (adminView) adminView.style.display = 'block';
-            // AdminTabs.onEnter() runs first: window.location.replace() only
-            // *schedules* the /admin-analytics redirect, so without this
-            // early return every onEnter() below (plus the stats/user-list
-            // loads) still ran, in the same tick, into a page that was
-            // already leaving (PR 0 -- kills the "phantom fetch").
-            if (window.AdminTabs && window.AdminTabs.onEnter()) {
-                return;
-            }
             // Stats load on entry and on explicit refresh — not on every
             // pager click, which only changes the user page.
             loadAdminStats();
             loadAdminUsers();
-            if (window.AdminAnalytics) {
-                window.AdminAnalytics.onEnter();
-            }
-            if (window.AdminAnalyticsValue) {
-                window.AdminAnalyticsValue.onEnter();
+            if (window.AdminTabs) {
+                window.AdminTabs.onEnter();
             }
             if (window.AdminModelProviders) {
                 window.AdminModelProviders.onEnter();

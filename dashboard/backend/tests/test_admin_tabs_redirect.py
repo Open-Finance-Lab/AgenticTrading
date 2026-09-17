@@ -1,16 +1,16 @@
-"""The Analytics-tab redirect fires only on admin intent, never on page load.
+"""Entering the admin view never navigates away; the Analytics tab is gone.
 
-PR #467 moved the admin Analytics tab to the standalone /admin-analytics page by
-redirecting from the tab controller's `setTab`. But `setTab('analytics')` is also
-what the controller runs on every `/app` DOMContentLoaded and on every popstate,
-purely to initialise hidden panel state — so after #467 *every* view of the app
-bounced to /admin-analytics the moment it loaded. Those lifecycle calls must set
-panel state without leaving the page; only entering the admin view (the Admin
-menu item, or a `?view=admin` deep link routed by app.js) or clicking the
-Analytics tab may redirect.
+PR #467 sent the console's Analytics tab to a standalone mock via
+`window.location.replace('/admin-analytics')` from `setTab`, and PR #468 gated
+that redirect on admin intent after it had bounced every /app load. PR C
+(design §7.5) removes the tab and the redirect: the analytics page is reached
+from Profile → Admin in app.js, and this controller only switches the Users,
+Providers and Activity panels. It also reads `adminUserQuery`, the pre-fill the
+/admin profile's "Open account management" link carries, and hands it to
+`openAccountManagement` the way the in-process evidence dialog used to.
 
-The controller is an IIFE over `window`/`document`, so it runs under node against
-a minimal DOM stub that records every navigation.
+The controller is an IIFE over `window`/`document`, so it runs under node
+against a minimal DOM stub that records every navigation.
 """
 
 import json
@@ -30,14 +30,17 @@ pytestmark = pytest.mark.skipif(
 
 _STUB = r"""
 const nav = [];
+const submitted = [];
 const docListeners = {};
 const winListeners = {};
+const input = { value: '', focus() {} };
+const form = { dispatchEvent(event) { submitted.push(event.type); return true; } };
 globalThis.CustomEvent = class { constructor(type, init) { this.type = type; this.detail = init && init.detail; } };
 globalThis.Event = class { constructor(type) { this.type = type; } };
 globalThis.document = {
   addEventListener(name, fn) { (docListeners[name] ||= []).push(fn); },
   dispatchEvent() {},
-  getElementById() { return null; },
+  getElementById(id) { return id === 'adminCreditsUserQuery' ? input : id === 'adminCreditsUserSearch' ? form : null; },
   querySelectorAll() { return []; },
 };
 globalThis.window = {
@@ -54,69 +57,53 @@ const setHref = (h) => { window.location.href = h; };
 """
 
 
-def _run(scenario: str) -> list:
-    script = "\n".join([_STUB, ADMIN_TABS_JS, scenario, "console.log(JSON.stringify(nav));"])
+def _run(scenario: str) -> dict:
+    script = "\n".join([
+        _STUB, ADMIN_TABS_JS, scenario,
+        "console.log(JSON.stringify({nav, submitted, query: input.value}));",
+    ])
     result = subprocess.run(["node", "-e", script], capture_output=True, text=True, timeout=30)
     assert result.returncode == 0, result.stderr
     return json.loads(result.stdout.strip().splitlines()[-1])
 
 
-def _run_on_enter(url: str) -> tuple[list, bool]:
-    scenario = (
-        "fire(docListeners, 'DOMContentLoaded');"
-        f"setHref('{url}');"
-        "const entered = window.AdminTabs.onEnter();"
-        "console.log(JSON.stringify({nav, entered}));"
-    )
-    script = "\n".join([_STUB, ADMIN_TABS_JS, scenario])
-    result = subprocess.run(["node", "-e", script], capture_output=True, text=True, timeout=30)
-    assert result.returncode == 0, result.stderr
-    payload = json.loads(result.stdout.strip().splitlines()[-1])
-    return payload["nav"], payload["entered"]
+def test_page_load_never_navigates():
+    assert _run("fire(docListeners, 'DOMContentLoaded');")["nav"] == []
 
 
-def test_page_load_on_a_non_admin_view_does_not_redirect():
-    assert _run("fire(docListeners, 'DOMContentLoaded');") == []
-
-
-def test_popstate_does_not_redirect():
-    # app.js owns view routing on popstate; a back/forward that lands on the
-    # admin view reaches onEnter through navigateToPage, not through here.
-    assert _run("fire(docListeners, 'DOMContentLoaded'); fire(winListeners, 'popstate');") == []
-
-
-def test_entering_admin_view_redirects_to_the_analytics_page():
-    nav = _run(
+def test_entering_the_admin_view_never_navigates():
+    result = _run(
         "fire(docListeners, 'DOMContentLoaded');"
         "setHref('https://atl.example/app?view=admin');"
         "window.AdminTabs.onEnter();"
     )
-    assert nav == [["replace", "/admin-analytics"]]
+    assert result["nav"] == []
+    assert result["submitted"] == []
 
 
-def test_entering_admin_view_on_another_tab_stays_in_the_console():
-    nav = _run(
+@pytest.mark.parametrize("tab", ["users", "providers", "activity", "analytics", "grant-pool"])
+def test_entering_on_any_tab_stays_in_the_console(tab):
+    result = _run(
         "fire(docListeners, 'DOMContentLoaded');"
-        "setHref('https://atl.example/app?view=admin&adminTab=providers');"
+        f"setHref('https://atl.example/app?view=admin&adminTab={tab}');"
         "window.AdminTabs.onEnter();"
     )
-    assert nav == []
+    assert result["nav"] == []
 
 
-def test_redirect_replaces_history_so_back_does_not_loop():
-    # `assign` leaves `/app?view=admin` behind /admin-analytics; Back reloads it,
-    # app.js routes to admin, and the user is redirected forward again forever.
-    assert "window.location.assign('/admin-analytics')" not in ADMIN_TABS_JS
-    assert "window.location.replace('/admin-analytics')" in ADMIN_TABS_JS
+def test_default_tab_is_users_and_analytics_is_not_a_tab():
+    assert "DEFAULT_TAB = 'users'" in ADMIN_TABS_JS
+    assert "'analytics'" not in ADMIN_TABS_JS
+    assert "admin-analytics" not in ADMIN_TABS_JS
+    assert "window.location.replace" not in ADMIN_TABS_JS
+    assert "window.location.assign" not in ADMIN_TABS_JS
+    assert "value === 'grant-pool' ? 'users' : value" in ADMIN_TABS_JS
 
 
-def test_on_enter_returns_true_when_it_schedules_the_redirect():
-    nav, entered = _run_on_enter("https://atl.example/app?view=admin")
-    assert nav == [["replace", "/admin-analytics"]]
-    assert entered is True
-
-
-def test_on_enter_returns_false_on_the_providers_tab():
-    nav, entered = _run_on_enter("https://atl.example/app?view=admin&adminTab=providers")
-    assert nav == []
-    assert entered is False
+def test_admin_user_query_prefills_account_management():
+    result = _run(
+        "fire(docListeners, 'DOMContentLoaded');"
+        "setHref('https://atl.example/app?view=admin&adminTab=users&adminUserQuery=ada%40example.test');"
+        "window.AdminTabs.onEnter();"
+    )
+    assert result == {"nav": [], "submitted": ["submit"], "query": "ada@example.test"}
