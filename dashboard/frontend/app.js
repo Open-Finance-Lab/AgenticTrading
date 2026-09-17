@@ -10839,13 +10839,18 @@ function navigateToPage(page, options = {}) {
         } else if (page === 'admin') {
             currentMode = 'admin';
             if (adminView) adminView.style.display = 'block';
+            // AdminTabs.onEnter() runs first: window.location.replace() only
+            // *schedules* the /admin-analytics redirect, so without this
+            // early return every onEnter() below (plus the stats/user-list
+            // loads) still ran, in the same tick, into a page that was
+            // already leaving (PR 0 -- kills the "phantom fetch").
+            if (window.AdminTabs && window.AdminTabs.onEnter()) {
+                return;
+            }
             // Stats load on entry and on explicit refresh — not on every
             // pager click, which only changes the user page.
             loadAdminStats();
             loadAdminUsers();
-            if (window.AdminTabs) {
-                window.AdminTabs.onEnter();
-            }
             if (window.AdminAnalytics) {
                 window.AdminAnalytics.onEnter();
             }

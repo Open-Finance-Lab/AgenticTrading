@@ -15,6 +15,7 @@ from dashboard.backend.domain.analytics.states import (
     calculate_user_value_snapshot,
     calculate_user_state,
     recalculate_user_snapshot,
+    repair_stale_snapshots,
     repair_stale_value_snapshots,
 )
 from dashboard.backend.domain.analytics.value_repository import (
@@ -547,6 +548,39 @@ def test_future_previous_projection_timestamps_are_ignored(tmp_path):
     assert snapshot.activated_at is None
     assert snapshot.last_meaningful_activity_at is None
     assert snapshot.lifecycle_reason_code == "at_risk_never_activated"
+
+
+def test_repair_stale_snapshots_uses_a_24_hour_default_window(tmp_path):
+    _service, state_store = _fixture(tmp_path)
+    with state_store.base_store._get_connection() as conn:
+        conn.execute(
+            "INSERT INTO users VALUES (2, 'second@example.test', 'Second', 'x', 'user', ?)",
+            ((NOW - timedelta(days=2)).isoformat(),),
+        )
+    state_store.upsert_snapshot(
+        UserAnalyticsSnapshot(
+            user_id=1,
+            status="onboarding",
+            reason_code="no_successful_run",
+            human_readable_reason="The user has not completed a successful backtest yet.",
+            calculated_at=NOW - timedelta(hours=23),
+        )
+    )
+    state_store.upsert_snapshot(
+        UserAnalyticsSnapshot(
+            user_id=2,
+            status="onboarding",
+            reason_code="no_successful_run",
+            human_readable_reason="The user has not completed a successful backtest yet.",
+            calculated_at=NOW - timedelta(hours=25),
+        )
+    )
+
+    repaired = repair_stale_snapshots(now=NOW, limit=10, store=state_store)
+
+    assert repaired == 1
+    assert state_store.get_snapshot(1).calculated_at == NOW - timedelta(hours=23)
+    assert state_store.get_snapshot(2).calculated_at == NOW
 
 
 def test_utc_day_transition_repairs_current_and_daily_value_snapshots(tmp_path):

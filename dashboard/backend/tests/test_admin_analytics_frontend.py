@@ -244,10 +244,10 @@ def test_app_lifecycle_and_cache_versions_are_wired():
     assert "window.AdminAnalyticsValue.syncAuth(user)" in APP_JS
     assert "window.AdminAnalyticsValue.onEnter()" in APP_JS
     assert 'styles.css?v=140' in APP_HTML
-    assert 'app.js?v=131' in APP_HTML
+    assert 'app.js?v=132' in APP_HTML
     assert 'js/admin-analytics.js?v=6' in APP_HTML
     assert 'js/admin-analytics-value.js?v=5' in APP_HTML
-    assert 'js/admin-tabs.js?v=7' in APP_HTML
+    assert 'js/admin-tabs.js?v=8' in APP_HTML
 
 
 def test_credit_costs_use_the_shared_exact_formatter():
@@ -269,3 +269,12 @@ def test_scoped_responsive_accessible_styles_exist():
     assert "@media (max-width: 900px)" in STYLES
     assert "@media (max-width: 600px)" in STYLES
     assert "@media (prefers-reduced-motion: reduce)" in STYLES
+
+
+def test_admin_branch_checks_admin_tabs_on_enter_before_loading_stats():
+    body = fn_body("function navigateToPage(")
+    admin_branch_start = body.index("page === 'admin'")
+    on_enter_index = body.index("window.AdminTabs.onEnter()", admin_branch_start)
+    load_stats_index = body.index("loadAdminStats()", admin_branch_start)
+    assert on_enter_index < load_stats_index
+    assert "return" in body[admin_branch_start:load_stats_index]

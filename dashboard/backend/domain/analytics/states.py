@@ -718,7 +718,7 @@ def repair_stale_snapshots(
     *,
     now: datetime | None = None,
     limit: int = 100,
-    stale_after: timedelta = timedelta(minutes=15),
+    stale_after: timedelta = timedelta(hours=24),
     store: AnalyticsStateStore | None = None,
 ) -> int:
     current = now or datetime.now(timezone.utc)

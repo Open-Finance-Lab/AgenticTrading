@@ -63,6 +63,26 @@ def register_snapshot_recalculator(callback: Any) -> None:
     _snapshot_recalculator = callback
 
 
+def disable_synchronous_projection() -> None:
+    """Make this module's own snapshot-recompute fallback inert.
+
+    ``_emit``'s guard below fires whenever the service handling an event does
+    not itself project a snapshot (``not getattr(service, "project_snapshots",
+    False)``) -- a safety net for a caller-supplied service that never
+    learned to project. That is exactly the state PR 0 puts the live
+    singleton into (``service.py::_build_analytics_service`` now builds with
+    ``project_snapshots=False``), so without this call the fallback --
+    calling ``states.recalculate_user_snapshots`` per accepted event -- fires
+    on every real request, reproducing the exact synchronous recompute PR 0
+    exists to kill, just one module over. Registering a no-op keeps the
+    mechanism itself intact (``test_stored_event_recalculates_snapshot_
+    best_effort`` pins it directly, against its own stub service, and does
+    not go through this default) while retiring it for the singleton every
+    production event actually flows through.
+    """
+    register_snapshot_recalculator(lambda user_id: None)
+
+
 def _recalculate_snapshot(user_id: int, event_name: str) -> None:
     if event_name not in SNAPSHOT_RELEVANT_EVENTS:
         return

@@ -145,9 +145,9 @@ def test_admin_tabs_have_four_tabs_in_usage_order_and_legacy_alias():
     assert nav_markup.index('data-admin-tab="users"') < nav_markup.index('data-admin-tab="providers"')
     assert nav_markup.index('data-admin-tab="providers"') < nav_markup.index('data-admin-tab="activity"')
     assert "value === 'grant-pool' ? 'users' : value" in ADMIN_TABS_JS
-    assert "setTab(requested || DEFAULT_TAB);" in ADMIN_TABS_JS
+    assert "setTab(requested || DEFAULT_TAB) === true" in ADMIN_TABS_JS
 
 
 def test_admin_visual_assets_use_fresh_cache_versions():
     assert 'js/admin-credits.js?v=6' in APP_HTML
-    assert 'js/admin-tabs.js?v=7' in APP_HTML
+    assert 'js/admin-tabs.js?v=8' in APP_HTML

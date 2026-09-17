@@ -226,3 +226,31 @@ def test_snapshot_failure_never_escapes_or_logs_exception_text(
     output = capsys.readouterr().out
     assert "snapshot-secret-canary" not in output
     assert "category=RuntimeError" in output
+
+
+def test_disable_synchronous_projection_makes_the_fallback_a_no_op(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        "dashboard.backend.domain.analytics.states.recalculate_user_snapshots",
+        lambda *a, **k: calls.append((a, k)),
+    )
+    monkeypatch.setattr(instrumentation, "_snapshot_recalculator", None)
+
+    instrumentation.disable_synchronous_projection()
+
+    class NonProjectingService:
+        project_snapshots = False
+
+        def try_record_server_event(self, **kwargs):
+            return AppendEventResult.model_construct(event=None, created=True)
+
+    monkeypatch.setattr(instrumentation, "get_analytics_service", lambda: NonProjectingService())
+
+    instrumentation.emit_agent_event(
+        event_name="agent_created",
+        user_id=7,
+        agent_id="agent-1",
+        occurred_at=NOW,
+    )
+
+    assert calls == []

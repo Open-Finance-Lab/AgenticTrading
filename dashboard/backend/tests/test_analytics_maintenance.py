@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import inspect
 from datetime import date, datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
+import dashboard.backend.app as app_module
 import dashboard.backend.domain.analytics.maintenance as maintenance
 
 
@@ -123,3 +125,8 @@ def test_app_registers_analytics_maintenance_through_reaper():
 
     assert "register_reaper_sweep(run_analytics_maintenance)" in source
     assert "analytics.maintenance_registration_failed" in source
+
+
+def test_startup_disables_synchronous_snapshot_projection():
+    source = inspect.getsource(app_module.startup_event)
+    assert source.count("disable_synchronous_projection()") == 1

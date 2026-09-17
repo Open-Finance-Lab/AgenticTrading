@@ -6,10 +6,12 @@ import logging
 import math
 import os
 import re
+import sqlite3
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 from urllib.parse import urlencode
 
+import psycopg
 from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException, Request
 from fastapi.responses import JSONResponse, RedirectResponse
 from pydantic import BaseModel, Field, field_validator
@@ -404,6 +406,36 @@ def _session_token(
     return _extract_bearer_token(authorization) or read_session_token(request)
 
 
+# Exception classes that mean "the account database is unreachable" -- a down
+# Postgres primary, an exhausted connection pool, or a locked local SQLite
+# file. psycopg_pool.PoolTimeout is not listed separately: it subclasses
+# psycopg.OperationalError (pinned by test_pool_timeout_is_covered_by_the_
+# operational_error_arm in test_auth_store_unavailable.py), so one arm
+# already covers a pool checkout that timed out, a refused connection, and a
+# quota rejection alike.
+_USER_STORE_OUTAGE: tuple[type[BaseException], ...] = (
+    sqlite3.OperationalError,
+    psycopg.OperationalError,
+)
+_STORE_UNAVAILABLE_DETAIL = "Service temporarily unavailable"
+
+
+def _store_unavailable(exc: BaseException, *, route: str) -> HTTPException:
+    """Build the 503 for a user-store outage; the caller owns the ``raise``.
+
+    Built and returned, never raised here: a helper that raises trips
+    CodeQL's py/mixed-returns the same way reset_password's ``_failure``
+    below does, and that guard is why this repository already avoids the
+    pattern. The log line carries only the exception's class -- a psycopg
+    error's string form embeds the connection DSN.
+    """
+    print(
+        "ERROR: auth.user_store_unavailable "
+        f"route={route} category={type(exc).__name__[:80]}"
+    )
+    return HTTPException(status_code=503, detail=_STORE_UNAVAILABLE_DETAIL)
+
+
 def get_current_user(
     request: Request,
     authorization: Optional[str] = Header(default=None),
@@ -411,7 +443,10 @@ def get_current_user(
     token = _session_token(request, authorization)
     if not token:
         raise HTTPException(status_code=401, detail="Not authenticated")
-    user = users_module.user_store.get_user_for_token(token)
+    try:
+        user = users_module.user_store.get_user_for_token(token)
+    except _USER_STORE_OUTAGE as exc:
+        raise _store_unavailable(exc, route="get_current_user") from None
     if not user:
         raise HTTPException(status_code=401, detail="Invalid or expired session")
     return user
@@ -511,6 +546,8 @@ async def signup(payload: SignupRequest, request: Request):
             display_name=payload.display_name,
             password=payload.password,
         )
+    except _USER_STORE_OUTAGE as exc:
+        raise _store_unavailable(exc, route="signup") from None
     except ValueError as exc:
         if str(exc) == "email_already_registered":
             # This 409 tells an anonymous caller that an address has an account,
@@ -564,9 +601,12 @@ async def login(payload: LoginRequest, request: Request):
     # single-threaded stall any unauthenticated caller can drive, and the
     # limiters above cannot close it -- rotating X-Browser-Id buys a fresh
     # budget. Matches how the OAuth calls further down already offload.
-    user = await asyncio.to_thread(
-        users_module.user_store.authenticate, payload.email, payload.password
-    )
+    try:
+        user = await asyncio.to_thread(
+            users_module.user_store.authenticate, payload.email, payload.password
+        )
+    except _USER_STORE_OUTAGE as exc:
+        raise _store_unavailable(exc, route="login") from None
     if not user:
         _LOGIN_IP_LIMITER.record(ip_key)
         email_key = f"login:email:{payload.email}"
@@ -604,11 +644,14 @@ def me(
     # second one. The fallback covers a store whose session query has not been
     # taught the join -- it returns None rather than silently reporting
     # defaults for a user who has real quotas.
-    entitlements = users_module.entitlements_from_session_row(
-        current_user, current_user["id"]
-    )
-    if entitlements is None:
-        entitlements = users_module.user_store.get_entitlements(current_user["id"])
+    try:
+        entitlements = users_module.entitlements_from_session_row(
+            current_user, current_user["id"]
+        )
+        if entitlements is None:
+            entitlements = users_module.user_store.get_entitlements(current_user["id"])
+    except _USER_STORE_OUTAGE as exc:
+        raise _store_unavailable(exc, route="me") from None
     user_payload["entitlements"] = entitlements
     response = JSONResponse({"user": user_payload})
     # Migration bridge: a browser signed in before the HttpOnly-cookie change

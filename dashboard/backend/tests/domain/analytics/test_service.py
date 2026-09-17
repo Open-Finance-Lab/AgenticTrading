@@ -206,3 +206,34 @@ def test_subject_exclusion_and_profile_access_require_admin_actor():
     assert setting["actor_user_id"] == 7
     assert access["admin_user_id"] == 7
     assert access["subject_user_id"] == 42
+
+
+def test_built_singleton_does_not_synchronously_project_snapshots(monkeypatch):
+    from dashboard.backend.domain.analytics import service as service_module
+    from dashboard.backend.domain.analytics import states as states_module
+
+    store = RecordingStore()
+    monkeypatch.setattr(service_module, "analytics_store", store)
+    calls = []
+    monkeypatch.setattr(
+        states_module,
+        "recalculate_user_snapshots",
+        lambda *args, **kwargs: calls.append((args, kwargs)),
+    )
+
+    built = service_module._build_analytics_service()
+
+    assert built.project_snapshots is False
+
+    result = built.record_server_event(
+        event_name="backtest_completed",
+        user_id=42,
+        source_event_id="run:backtest_completed:run-1",
+        source_record_type="run",
+        source_record_id="run-1",
+        occurred_at=NOW,
+        received_at=NOW,
+    )
+
+    assert result.created is True
+    assert calls == []

@@ -61,6 +61,20 @@ def _run(scenario: str) -> list:
     return json.loads(result.stdout.strip().splitlines()[-1])
 
 
+def _run_on_enter(url: str) -> tuple[list, bool]:
+    scenario = (
+        "fire(docListeners, 'DOMContentLoaded');"
+        f"setHref('{url}');"
+        "const entered = window.AdminTabs.onEnter();"
+        "console.log(JSON.stringify({nav, entered}));"
+    )
+    script = "\n".join([_STUB, ADMIN_TABS_JS, scenario])
+    result = subprocess.run(["node", "-e", script], capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout.strip().splitlines()[-1])
+    return payload["nav"], payload["entered"]
+
+
 def test_page_load_on_a_non_admin_view_does_not_redirect():
     assert _run("fire(docListeners, 'DOMContentLoaded');") == []
 
@@ -94,3 +108,15 @@ def test_redirect_replaces_history_so_back_does_not_loop():
     # app.js routes to admin, and the user is redirected forward again forever.
     assert "window.location.assign('/admin-analytics')" not in ADMIN_TABS_JS
     assert "window.location.replace('/admin-analytics')" in ADMIN_TABS_JS
+
+
+def test_on_enter_returns_true_when_it_schedules_the_redirect():
+    nav, entered = _run_on_enter("https://atl.example/app?view=admin")
+    assert nav == [["replace", "/admin-analytics"]]
+    assert entered is True
+
+
+def test_on_enter_returns_false_on_the_providers_tab():
+    nav, entered = _run_on_enter("https://atl.example/app?view=admin&adminTab=providers")
+    assert nav == []
+    assert entered is False
