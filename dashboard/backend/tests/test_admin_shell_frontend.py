@@ -186,7 +186,14 @@ def test_set_panel_state_covers_loading_empty_error_and_stale():
         "  const stale = [panel.classList.contains('is-stale'), parts.status.textContent, parts.status.hidden];"
         "  shell.setPanelState(panel, {busy: false, status: shell.INCOMPLETE});"
         "  const incomplete = [panel.classList.contains('is-stale'), parts.status.textContent, parts.error.hidden];"
-        "  return {loading, errored, stale, incomplete};"
+        "  shell.setPanelState(panel, {busy: false, empty: true});"
+        "  const emptyDefault = {"
+        "    body: parts.body.children.map((child) => ({tag: child.tagName, class: child.className, text: child.textContent})),"
+        "    ariaBusy: panel.getAttribute('aria-busy'), statusHidden: parts.status.hidden, errorHidden: parts.error.hidden,"
+        "  };"
+        "  shell.setPanelState(panel, {busy: false, empty: 'No credits usage in this range.'});"
+        "  const emptyCustom = parts.body.children.map((child) => ({tag: child.tagName, class: child.className, text: child.textContent}));"
+        "  return {loading, errored, stale, incomplete, emptyDefault, emptyCustom};"
         "})()"
     )
     assert result == {
@@ -194,6 +201,14 @@ def test_set_panel_state_covers_loading_empty_error_and_stale():
         "errored": ["false", False, "This section is temporarily unavailable."],
         "stale": [True, "Showing the last successful response; refresh failed.", False],
         "incomplete": [False, "Incomplete data", True],
+        # `empty` clears the body and replaces it with a single paragraph -- true uses the
+        # default copy, a string overrides it -- while the loading/error affordances stay
+        # hidden (this call passes neither `error` nor `stale`, both defaulting off).
+        "emptyDefault": {
+            "body": [{"tag": "P", "class": "panel-empty", "text": "Nothing to show for this range."}],
+            "ariaBusy": "false", "statusHidden": True, "errorHidden": True,
+        },
+        "emptyCustom": [{"tag": "P", "class": "panel-empty", "text": "No credits usage in this range."}],
     }
 
 
