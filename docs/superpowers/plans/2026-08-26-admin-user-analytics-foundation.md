@@ -1,5 +1,7 @@
 # Admin User Analytics Foundation Implementation Plan
 
+> **Executed.** Kept as the record of why the shipped code looks as it does. The current design is docs/superpowers/specs/2026-09-15-admin-layer-redesign-design.md.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Build the privacy-safe Analytics foundation: durable event storage, strict validation and idempotency, authenticated page-event ingestion, pseudonymous sessions, subject exclusions, Admin profile-access auditing, and bounded retention.

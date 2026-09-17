@@ -1,5 +1,7 @@
 # Admin Footprint and User Analytics — PR 2 Implementation Plan
 
+> **Executed.** Kept as the record of why the shipped code looks as it does. The current design is docs/superpowers/specs/2026-09-15-admin-layer-redesign-design.md.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Add server-authoritative instrumentation, metric computation, daily rollups, explainable user-state snapshots, an idempotent 180-day authoritative backfill, and read-only Admin Analytics query APIs without shipping the Admin Analytics UI.
