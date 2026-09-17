@@ -3,7 +3,8 @@
 Extracted (Phase 2A) verbatim from ``TechnicalIndicators`` in
 ``dashboard/scripts/backtest_hourly_agent.py``. Feature names, dataframe column
 names, NaN behavior, minimum-history assumptions, indicator parameters, and the
-returned dataframe shape are unchanged.
+returned dataframe shape are preserved. Fallback aggregates use only prices
+through the current row, rather than the full backtest window.
 """
 
 import pandas as pd
@@ -60,6 +61,11 @@ class TechnicalIndicators:
             # Still calculate what we can
 
         try:
+            # The entire backtest window is supplied at once. Fallbacks must
+            # therefore aggregate only the prefix available at each timestamp.
+            # These remain approximations, not fully warmed-up indicators.
+            observed = df["close"].expanding(min_periods=1)
+            fallback_mean = observed.mean()
             # RSI (14-period requires 14+ bars)
             if len(df) >= 14:
                 rsi = ta.rsi(df["close"], length=14)
@@ -100,36 +106,36 @@ class TechnicalIndicators:
                     if bbu_cols:
                         df["bb_upper"] = bbands[bbu_cols[0]]
                     else:
-                        df["bb_upper"] = df["close"].max()
+                        df["bb_upper"] = observed.max()
                     if bbl_cols:
                         df["bb_lower"] = bbands[bbl_cols[0]]
                     else:
-                        df["bb_lower"] = df["close"].min()
+                        df["bb_lower"] = observed.min()
                 else:
-                    df["bb_upper"] = df["close"].max()
-                    df["bb_lower"] = df["close"].min()
+                    df["bb_upper"] = observed.max()
+                    df["bb_lower"] = observed.min()
             else:
-                df["bb_upper"] = df["close"].max()
-                df["bb_lower"] = df["close"].min()
+                df["bb_upper"] = observed.max()
+                df["bb_lower"] = observed.min()
 
             # SMAs
             if len(df) >= 20:
                 sma20 = ta.sma(df["close"], length=20)
-                df["sma20"] = sma20 if sma20 is not None else df["close"].mean()
+                df["sma20"] = sma20 if sma20 is not None else fallback_mean
             else:
-                df["sma20"] = df["close"].mean()
+                df["sma20"] = fallback_mean
 
             if len(df) >= 50:
                 sma50 = ta.sma(df["close"], length=50)
-                df["sma50"] = sma50 if sma50 is not None else df["close"].mean()
+                df["sma50"] = sma50 if sma50 is not None else fallback_mean
             else:
-                df["sma50"] = df["close"].mean()
+                df["sma50"] = fallback_mean
 
         except Exception as e:
             print(f"Warning: Error calculating indicators: {e}")
             # Fill in defaults
             for col in ["rsi_14", "macd", "macd_signal", "bb_upper", "bb_lower", "sma20", "sma50"]:
                 if col not in df.columns:
-                    df[col] = df["close"].mean() if col != "rsi_14" else 50.0
+                    df[col] = df["close"].expanding(min_periods=1).mean() if col != "rsi_14" else 50.0
 
         return df
