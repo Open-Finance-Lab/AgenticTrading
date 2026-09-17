@@ -22,14 +22,18 @@ EXPECTED_SCRIPTS = [
     "js/admin-users.js?v=1",
 ]
 
-# Both halves are CodeQL py/bad-tag-filter findings, and both are real holes in
-# a guard whose whole job is "no inline script anywhere in this page": tag names
-# are case-insensitive, so without re.I the pattern cannot see `<SCRIPT>`; and an
-# end tag may carry whitespace before `>`, so without `\s*` it cannot see
-# `</script >`. Pinned by test_the_inline_script_guard_sees_tags_html_allows.
-SCRIPT_TAG = re.compile(r"<script\b([^>]*)>(.*?)</script\s*>", re.S | re.I)
+# This guard's whole job is "no inline script anywhere in this page", so a
+# spelling of <script> it cannot find is a hole rather than a style nit. CodeQL
+# py/bad-tag-filter named three, one per round: tag names are case-insensitive
+# (`<SCRIPT>`), an end tag may pad before `>` (`</script >`), and an end tag may
+# carry ignored attributes (`</script foo=bar>`). `\b[^>]*>` covers the last two
+# at once while still rejecting `</scriptfoo>`, which is not an end tag at all.
+# test_the_inline_script_guard_sees_tags_html_allows pins every spelling, because
+# admin.html is lowercase and tightly closed -- nothing else here can catch a
+# regression.
+SCRIPT_TAG = re.compile(r"<script\b([^>]*)>(.*?)</script\b[^>]*>", re.S | re.I)
 PANEL_REGION = re.compile(
-    r'<section\b[^>]*\bdata-panel="([^"]+)"[^>]*>(.*?)</section\s*>', re.S | re.I
+    r'<section\b[^>]*\bdata-panel="([^"]+)"[^>]*>(.*?)</section\b[^>]*>', re.S | re.I
 )
 TAG = re.compile(r"<[^>]+>")
 # A standalone number: not glued to a letter, underscore, hash, dot or dash on
@@ -48,19 +52,27 @@ def test_every_script_is_external_and_none_is_inline():
 
 
 def test_the_inline_script_guard_sees_tags_html_allows():
-    """The guard proves a negative -- that no inline script exists -- so a spelling
-    of `<script>` it cannot find is a hole, not a style nit. CodeQL flagged two:
-    the case-sensitive tag name, then the end tag's optional whitespace. This page
-    is lowercase throughout, so only a direct test of the pattern can catch either
-    one coming back."""
+    """The guard proves a negative -- that no inline script exists -- so any spelling
+    of `<script>` it cannot find is a hole. CodeQL named three across three rounds,
+    each one only after the previous was fixed, so this walks the pattern over all of
+    them at once instead of one per CI cycle. The page is lowercase and tightly
+    closed, so nothing else in this file can catch a regression here."""
     for markup in (
+        "<script>alert(1)</script>",
         "<SCRIPT>alert(1)</SCRIPT>",
         "<script>alert(1)</script >",
-        "<Script >alert(1)</Script\t>",
+        "<script>alert(1)</script\t\n bar>",
+        "<script\t\n bar>alert(1)</script>",
+        "<script src='a' defer>alert(1)</script>",
+        "<ScRiPt>alert(1)</sCrIpT foo=bar>",
     ):
         tags = SCRIPT_TAG.findall(markup)
         assert tags, markup
         assert tags[0][1] == "alert(1)", (markup, tags)
+    # `</scriptfoo>` is a different tag, not a padded end tag: `\b` is what keeps
+    # `[^>]*` from swallowing the rest of the name.
+    for markup in ("<script>alert(1)</scriptfoo>", "<scriptfoo>alert(1)</script>"):
+        assert not SCRIPT_TAG.findall(markup), markup
 
 
 def test_gate_module_loads_first_and_every_script_is_pinned():
