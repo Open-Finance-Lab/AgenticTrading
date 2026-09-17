@@ -85,15 +85,32 @@ def test_admin_overrides_follow_the_api_no_store_rule():
     assert api_no_store < order.index("/admin.html")
 
 
-def test_no_rewrite_claims_the_admin_page():
+ADMIN_API_REWRITE = "/admin/runs/:path*"
+
+
+def test_no_rewrite_can_claim_the_admin_page():
     """`/admin/:path*` → Render is gone (design §7.1).
 
     Whether `:path*` also matches the bare `/admin` differs between
-    path-to-regexp versions; with the rewrite present, the page's reachability
+    path-to-regexp versions; with that rewrite present, the page's reachability
     on Vercel depended on a router version nobody controls.
+
+    The invariant is "nothing may claim the page", not "no source may start with
+    /admin". The blunt prefix ban was the same rule written one notch too wide:
+    it also unproxied `DELETE /admin/runs/{run_id}`, which api/routers/admin.py
+    registers directly on the app outside `/api` and which the API no-store
+    header rule above was written for. A required literal segment after /admin
+    is what makes the narrow rewrite safe -- no matcher version can fold the
+    bare `/admin` into a pattern that demands `/runs/` next.
     """
-    for entry in VERCEL["rewrites"]:
-        assert not entry["source"].startswith("/admin"), entry
+    admin_sources = [e["source"] for e in VERCEL["rewrites"] if e["source"].startswith("/admin")]
+    assert admin_sources == [ADMIN_API_REWRITE]
+    assert ADMIN_API_REWRITE.split("/")[2] == "runs"
+
+
+def test_the_admin_runs_debug_route_stays_proxied_to_render():
+    entry = next(e for e in VERCEL["rewrites"] if e["source"] == ADMIN_API_REWRITE)
+    assert entry["destination"] == "https://agentictrading.onrender.com/admin/runs/:path*"
 
 
 def test_admin_analytics_redirects_permanently_to_admin():

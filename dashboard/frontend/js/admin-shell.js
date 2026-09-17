@@ -163,7 +163,13 @@
     return new Intl.NumberFormat(LOCALE, { style: 'percent', maximumFractionDigits: 1 }).format(numeric);
   }
 
+  // Guarded the way the retired admin-analytics-value.js:292 guarded this same
+  // call, and the way app.js's formatBacktestTimeoutMessage now does (d7a8a541):
+  // a blocked or 404ing credit-format.js must not throw out of a renderer. DASH
+  // rather than a local six-decimal fallback -- this function already owns a "no
+  // number" answer, and a second copy of the formatter is how the two drift.
   function formatCredits(value) {
+    if (!window.CreditFormat?.formatCreditsMicro) return DASH;
     const formatted = window.CreditFormat.formatCreditsMicro(value);
     return formatted === DASH ? DASH : `${formatted} Credits`;
   }
@@ -181,6 +187,20 @@
     return Number.isFinite(date.getTime())
       ? new Intl.DateTimeFormat(LOCALE, { dateStyle: 'medium', timeZone: 'UTC' }).format(date)
       : fallback;
+  }
+
+  // `selected_period_end` is a *half-open* boundary: admin_analytics.py's
+  // _value_range_from_values sets `end = to + 1 day` and value_queries.py:1388
+  // publishes it verbatim, so printing it as written renders an 8-day "week" and
+  // a 181-day "year". Converted for display only: the exclusive end is what
+  // MAX_VALUE_RANGE_DAYS is measured against, so the contract is right and the
+  // rendering was wrong.
+  function formatLastIncludedDay(value, fallback = DASH) {
+    if (!value) return fallback;
+    const date = new Date(`${value}T00:00:00Z`);
+    if (!Number.isFinite(date.getTime())) return fallback;
+    date.setUTCDate(date.getUTCDate() - 1);
+    return new Intl.DateTimeFormat(LOCALE, { dateStyle: 'medium', timeZone: 'UTC' }).format(date);
   }
 
   function formatShortDay(value, fallback = DASH) {
@@ -311,8 +331,13 @@
     panel.classList.toggle('is-stale', Boolean(stale));
     const statusNode = panel.querySelector('[data-status]');
     if (statusNode) {
-      const text = stale ? STALE_NOTICE : status;
-      statusNode.textContent = text || '';
+      // Both notices, not the stronger one: `stale ? STALE_NOTICE : status` made
+      // "stale" and "stale *and* known-incomplete" render identically, which is
+      // the absent-vs-broken collapse the fail-closed-is-not-fail-visible rule is
+      // about. paint() passes the two together whenever a panel renders partial
+      // rollups whose sibling endpoint also failed.
+      const text = [stale ? STALE_NOTICE : '', status].filter(Boolean).join(' · ');
+      statusNode.textContent = text;
       statusNode.hidden = !text;
     }
     const errorNode = panel.querySelector('[data-error]');
@@ -377,12 +402,37 @@
     if (node) node.hidden = !visible;
   }
 
+  // A same-document hash traversal (Back/Forward between two #routes) fires BOTH
+  // popstate and hashchange, so binding route() to each ran the whole route twice:
+  // every panel fetch doubled, and one Back onto #users/{id} wrote two admin
+  // profile-access audit rows (_record_access, admin_analytics.py:559) for a single
+  // view. nextSeq/isCurrent suppresses the duplicate *render*, never the duplicate
+  // *request*, so the dedupe belongs in front of route(). Keyed on the whole
+  // location, not the hash: a traversal restores the entry's query string too, and
+  // that is what readUrlIntoState reads. Order-independent by construction --
+  // whichever event arrives first does the work and the other one no-ops.
+  let renderedLocation = null;
+
+  function locationKey() {
+    return `${window.location.pathname}${window.location.search}${window.location.hash}`;
+  }
+
+  function handleLocationChange() {
+    if (locationKey() === renderedLocation) return;
+    readUrlIntoState();
+    syncControls();
+    route();
+  }
+
   function route() {
     const parsed = parseHash(window.location.hash);
     if (window.location.hash && parsed.route === 'overview' && window.location.hash !== '#overview') {
       window.location.hash = 'overview';
       return;
     }
+    // Recorded after the normalisation redirect above, which deliberately leaves
+    // the key stale so the hashchange it triggers is not swallowed.
+    renderedLocation = locationKey();
     state.route = parsed.route;
     state.routeId = parsed.id;
     showView('overview', parsed.route === 'overview');
@@ -478,8 +528,8 @@
     if (!admin) return;
     readUrlIntoState();
     syncControls();
-    window.addEventListener('hashchange', route);
-    window.addEventListener('popstate', () => { readUrlIntoState(); syncControls(); route(); });
+    window.addEventListener('hashchange', handleLocationChange);
+    window.addEventListener('popstate', handleLocationChange);
     route();
   }
 
@@ -488,7 +538,7 @@
     LIFECYCLE_RULES, OPERATIONAL_RULES, SECTION_UNAVAILABLE, STALE_NOTICE, INCOMPLETE, PENDING, DASH,
     state, today,
     parseHash, rangeDates, readUrlState, buildSearch, analyticsParams, userListParams,
-    formatNumber, formatPercent, formatCredits, usdFromMicro, formatDateOnly, formatShortDay, formatTimestamp, humanize,
+    formatNumber, formatPercent, formatCredits, usdFromMicro, formatDateOnly, formatLastIncludedDay, formatShortDay, formatTimestamp, humanize,
     availabilityIncomplete, fieldPending, freshnessLegendText, rulesEntries, el, clear,
     request, nextSeq, isCurrent, invalidateAll, handleAccessLost, gate,
     setPanelState, openDialog, closeDialog, openRules, setFilters,

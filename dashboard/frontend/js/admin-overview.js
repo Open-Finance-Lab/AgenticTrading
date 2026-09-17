@@ -598,6 +598,18 @@
     return `${ENDPOINTS[name]}?${s.analyticsParams({ withGroup: name === 'groups' })}`;
   }
 
+  // Blanks a panel down to its placeholder and names the failure. The headline and
+  // body are cleared explicitly so a failed refresh can never leave the previous
+  // range's numbers on screen at full brightness under an error notice.
+  function markPanelUnavailable(panel) {
+    const s = shell();
+    const headline = panel.querySelector('[data-headline]');
+    if (headline) headline.textContent = s.DASH;
+    const body = panel.querySelector('[data-body]');
+    if (body) s.clear(body);
+    s.setPanelState(panel, { busy: false, error: s.SECTION_UNAVAILABLE });
+  }
+
   function paint(def) {
     const s = shell();
     const panel = document.getElementById(def.id);
@@ -605,11 +617,7 @@
     const missing = def.needs.filter((name) => !state.data[name]);
     const failed = def.needs.some((name) => state.errors[name]);
     if (missing.length) {
-      const headline = panel.querySelector('[data-headline]');
-      if (headline) headline.textContent = s.DASH;
-      const body = panel.querySelector('[data-body]');
-      if (body) s.clear(body);
-      s.setPanelState(panel, { busy: false, error: s.SECTION_UNAVAILABLE });
+      markPanelUnavailable(panel);
       return;
     }
     const result = def.render(state.data);
@@ -640,7 +648,21 @@
         state.errors[name] = s.SECTION_UNAVAILABLE;
       }
     }
-    PANELS.forEach((def) => paint(def));
+    // Contained per panel. A bare forEach over an unguarded paint() meant one
+    // renderer's throw aborted the loop and left every panel after it pinned at
+    // aria-busy="true" with no error and no body -- a spinner that never resolves,
+    // which is the one state this page must not publish. The reachable case was
+    // formatCredits dereferencing a missing window.CreditFormat (now guarded in the
+    // shell): renderCredits is PANELS index 7, so it stranded panelRevenue behind it.
+    PANELS.forEach((def) => {
+      try {
+        paint(def);
+      } catch (error) {
+        console.error(`[admin] panel ${def.name} failed to render`, error);
+        const panel = document.getElementById(def.id);
+        if (panel) markPanelUnavailable(panel);
+      }
+    });
   }
 
   const DETAILS = Object.freeze({
@@ -659,6 +681,15 @@
     const needs = DETAIL_NEEDS[route];
     const missing = needs.filter((name) => !state.data[name]);
     if (missing.length) {
+      // Cleared and marked busy *before* the await, not after it. route() reveals
+      // #detail the moment the hash changes, so clearing only once the response had
+      // landed left the previous detail page -- breadcrumb, h1, metric strip, tables
+      // -- fully painted under the new route's subnav highlight for the whole
+      // request, with no busy state. openProfile and loadAll both already did this;
+      // showDetail was the one path that did not.
+      s.clear(target);
+      target.setAttribute('aria-busy', 'true');
+      target.appendChild(s.el('p', 'panel-status muted', 'Loading…'));
       const results = await Promise.allSettled(missing.map((name) => s.request(pathFor(name))));
       if (!s.isCurrent('detail', seq)) return;
       for (const [index, name] of missing.entries()) {
@@ -671,11 +702,22 @@
       }
     }
     s.clear(target);
+    target.setAttribute('aria-busy', 'false');
     if (needs.some((name) => !state.data[name])) {
       target.appendChild(s.el('p', 'panel-error', s.SECTION_UNAVAILABLE));
       return;
     }
-    target.appendChild(DETAILS[route](state.data));
+    try {
+      target.appendChild(DETAILS[route](state.data));
+    } catch (error) {
+      // Same containment as the panel loop above: #detail has already been cleared
+      // at this point, so an uncaught throw here would publish an empty page rather
+      // than a named failure.
+      console.error(`[admin] detail ${route} failed to render`, error);
+      s.clear(target);
+      target.appendChild(s.el('p', 'panel-error', s.SECTION_UNAVAILABLE));
+      return;
+    }
     if (needs.some((name) => s.availabilityIncomplete(state.data[name]?.availability))) {
       target.appendChild(s.el('p', 'panel-status muted', s.INCOMPLETE));
     }

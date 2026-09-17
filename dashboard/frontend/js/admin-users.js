@@ -341,7 +341,9 @@
     const value = s.el('section', 'detail-section');
     value.appendChild(s.el('h3', '', 'User value summary'));
     value.appendChild(definitions([
-      ['Selected period', `${s.formatDateOnly(profile.selected_period_start)} – ${s.formatDateOnly(profile.selected_period_end)}`],
+      // `selected_period_end` is exclusive (end = to + 1 day); formatLastIncludedDay
+      // renders the last day actually in the window, so 1W reads as seven days.
+      ['Selected period', `${s.formatDateOnly(profile.selected_period_start)} – ${s.formatLastIncludedDay(profile.selected_period_end)}`],
       ['Activated', s.formatTimestamp(lifecycle.activated_at, 'Not activated')],
       ['Active days (30d)', s.formatNumber(lifecycle.active_days_30d)],
       ['Successful backtests (30d)', s.formatNumber(lifecycle.successful_backtests_30d)],

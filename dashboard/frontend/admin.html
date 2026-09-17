@@ -41,17 +41,21 @@
       <a href="/app?view=admin&amp;adminTab=activity">Activity</a>
     </aside>
     <main>
-      <section id="overview" aria-label="Analytics overview">
-        <div class="page-head">
-          <div><h1>Overview</h1><p class="muted">User activity, acquisition and attention</p></div>
-          <div class="page-actions">
-            <div class="range" role="group" aria-label="Date range">
-              <button type="button" data-range="1W" aria-pressed="true">1W</button>
-              <button type="button" data-range="1M" aria-pressed="false">1M</button>
-              <button type="button" data-range="1Y" aria-pressed="false">1Y</button>
-            </div>
-            <small>UTC</small>
+      <!-- Page-level controls, deliberately outside #overview. route() hides that
+           section on the six other routes, and every one of them still reads these
+           values: the range scopes the five detail routes and the user profile, and
+           Lifecycle stage / Tier scope the user list the "Open users" links lead to.
+           Nested inside #overview they went invisible while staying in effect, so a
+           stage picked on Overview silently narrowed the users table with no control
+           anywhere on that page to see it or clear it. -->
+      <div class="page-controls" id="pageControls">
+        <div class="page-actions">
+          <div class="range" role="group" aria-label="Date range">
+            <button type="button" data-range="1W" aria-pressed="true">1W</button>
+            <button type="button" data-range="1M" aria-pressed="false">1M</button>
+            <button type="button" data-range="1Y" aria-pressed="false">1Y</button>
           </div>
+          <small>UTC</small>
         </div>
         <form class="filters" id="filters" aria-label="Analytics filters">
           <label class="filter-field"><span>Source</span><select id="filterGroup" name="group"><option value="">All sources</option><option value="internal">Internal</option><option value="invited">Invited</option><option value="organic">Organic</option><option value="competition">Competition</option><option value="partner">Partner</option><option value="unknown">Unknown</option></select></label>
@@ -60,7 +64,11 @@
           <label class="check-field"><input type="checkbox" id="filterInternal" name="internal">Include internal accounts</label>
           <p class="filter-note muted">Lifecycle stage and Tier narrow the user lists; Source also narrows the sources panels.</p>
         </form>
-
+      </div>
+      <section id="overview" aria-label="Analytics overview">
+        <div class="page-head">
+          <div><h1>Overview</h1><p class="muted">User activity, acquisition and attention</p></div>
+        </div>
         <div class="overview-row priority-row">
           <section class="panel live-row" data-panel="live" aria-labelledby="liveTitle" aria-busy="true">
             <div class="live-head"><div class="live-title"><i class="live-dot" aria-hidden="true"></i><div><h2 id="liveTitle">Live operations</h2><small>This instance</small></div></div><small id="liveUpdated">—</small></div>

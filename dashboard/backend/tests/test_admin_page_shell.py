@@ -115,6 +115,32 @@ def test_filter_bar_and_range_match_the_survival_table():
     assert ranges == ["1W", "1M", "1Y"]
 
 
+def test_range_and_filters_live_outside_the_overview_section():
+    """They govern every route, so they must not sit inside the one section
+    `route()` hides.
+
+    `showView('overview', parsed.route === 'overview')` sets `#overview.hidden`
+    on the six other routes. With the range group and the filter form nested
+    inside it, a Lifecycle stage picked on Overview went invisible while
+    `userListParams` kept sending `lifecycle_segment`: the users table was
+    silently narrowed, and its toolbar (search + priority) offers nothing to see
+    or clear it with. The detail routes had the matching defect -- they render
+    "Selected range · 1W · UTC" as a label for a control the operator could only
+    reach by navigating back to Overview.
+    """
+    controls_start = ADMIN_HTML.index('<div class="page-controls" id="pageControls">')
+    overview_start = ADMIN_HTML.index('<section id="overview"')
+    assert controls_start < overview_start
+    toolbar = ADMIN_HTML[controls_start:overview_start]
+    from_overview_on = ADMIN_HTML[overview_start:]
+    for control in (
+        'id="filters"', 'id="filterGroup"', 'id="filterSegment"',
+        'id="filterTier"', 'id="filterInternal"', 'data-range=',
+    ):
+        assert control in toolbar, control
+        assert control not in from_overview_on, control
+
+
 def test_cut_elements_are_absent():
     for token in (
         "Sample data", "synthetic", "Sample snapshot", "Online now", "Queued",

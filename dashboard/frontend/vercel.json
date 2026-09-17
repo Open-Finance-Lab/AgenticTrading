@@ -26,6 +26,7 @@
   "rewrites": [
     { "source": "/app", "destination": "/app.html" },
     { "source": "/api/:path*", "destination": "https://agentictrading.onrender.com/api/:path*" },
+    { "source": "/admin/runs/:path*", "destination": "https://agentictrading.onrender.com/admin/runs/:path*" },
     { "source": "/paper/:path*", "destination": "https://agentictrading.onrender.com/paper/:path*" },
     { "source": "/backtest/:path*", "destination": "https://agentictrading.onrender.com/backtest/:path*" },
     { "source": "/runs/:path*", "destination": "https://agentictrading.onrender.com/runs/:path*" },

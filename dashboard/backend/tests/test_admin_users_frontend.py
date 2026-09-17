@@ -149,6 +149,10 @@ def test_profile_overview_renders_value_facts_and_drops_the_d15_fields():
         "})()"
     )
     facts = dict(result["facts"])
+    # The fixture's selected_period_end is 2026-09-01, and that field is a *half-open*
+    # boundary (admin_analytics.py sets `end = to + 1 day`). Rendered verbatim it
+    # claimed a period one day longer than the one that was queried.
+    assert facts["Selected period"] == "Aug 1, 2026 – Aug 31, 2026"
     assert facts["Activated"] == "Jul 2, 2026, 10:00 UTC"
     assert facts["Active days (30d)"] == "2"
     assert facts["Successful backtests (30d)"] == "2"

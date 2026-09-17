@@ -212,6 +212,74 @@ def test_set_panel_state_covers_loading_empty_error_and_stale():
     }
 
 
+def test_a_stale_panel_that_is_also_incomplete_says_both():
+    """`stale ? STALE_NOTICE : status` published the weaker of two true warnings.
+
+    paint() passes both whenever a panel renders partially-available rollups whose
+    sibling endpoint also failed, so the one case where the data on screen is both
+    out of date *and* known-incomplete showed only that it was out of date.
+    """
+    result = _eval(
+        "(() => {"
+        "  const {panel, parts} = panelStub();"
+        "  const shell = window.AdminShell;"
+        "  shell.setPanelState(panel, {busy: false, status: shell.INCOMPLETE, stale: true});"
+        "  return [parts.status.textContent, parts.status.hidden, panel.classList.contains('is-stale')];"
+        "})()"
+    )
+    assert result == [
+        "Showing the last successful response; refresh failed. · Incomplete data",
+        False,
+        True,
+    ]
+
+
+def test_credits_formatter_survives_a_failed_credit_format_load():
+    """js/credit-format.js is a separate <script>; a 404, a CSP block or an
+    ad-blocker leaves window.CreditFormat undefined. Unguarded, the dereference
+    threw out of whichever renderer called it -- see the panel-containment test
+    in test_admin_overview_frontend.py for what that cost."""
+    assert _eval("(() => { delete window.CreditFormat; return window.AdminShell.formatCredits(4800000); })()") == "—"
+
+
+def test_a_half_open_period_end_renders_as_the_last_day_inside_it():
+    """`selected_period_end` is `to + 1 day` (admin_analytics.py's
+    _value_range_from_values), published verbatim by value_queries.py:1388. Read
+    as an inclusive date it makes the 1W range an eight-day week."""
+    assert _eval("window.AdminShell.formatLastIncludedDay('2026-09-18')") == "Sep 17, 2026"
+    assert _eval("window.AdminShell.formatLastIncludedDay('2026-09-01')") == "Aug 31, 2026"
+    assert _eval("window.AdminShell.formatLastIncludedDay(null)") == "—"
+    assert _eval("window.AdminShell.formatLastIncludedDay('', 'No period')") == "No period"
+    assert _eval("window.AdminShell.formatLastIncludedDay('not-a-date')") == "—"
+
+
+def test_one_history_traversal_routes_exactly_once():
+    """A same-document hash traversal fires popstate *and* hashchange, so binding
+    route() to both ran every navigation twice: doubled panel fetches, and a Back
+    onto #users/{id} wrote two admin profile-access audit rows for one view
+    (_record_access, admin_analytics.py:559). nextSeq/isCurrent guards the render,
+    never the request, so this has to be checked at the routing boundary."""
+    result = _eval(
+        "(async () => {"
+        "  fetchQueue.push({ok: true, status: 200, body: {user: {role: 'admin'}}});"
+        "  let routes = 0;"
+        "  document.addEventListener('admin:route', () => { routes += 1; });"
+        "  window.location.hash = '#users';"
+        "  document.dispatchEvent(new Event('DOMContentLoaded'));"
+        "  await new Promise((resolve) => setTimeout(resolve, 0));"
+        "  const boot = routes;"
+        "  window.location.hash = '#overview';"
+        "  winListeners.popstate.forEach((fn) => fn());"
+        "  winListeners.hashchange.forEach((fn) => fn());"
+        "  const traversal = routes - boot;"
+        "  window.location.hash = '#health';"
+        "  winListeners.hashchange.forEach((fn) => fn());"
+        "  return {boot, traversal, nextNavigation: routes - boot - traversal, route: window.AdminShell.state.route};"
+        "})()"
+    )
+    assert result == {"boot": 1, "traversal": 1, "nextNavigation": 1, "route": "health"}
+
+
 def test_dialogs_return_focus_to_the_opener():
     result = _eval(
         "(() => {"

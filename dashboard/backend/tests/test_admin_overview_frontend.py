@@ -241,6 +241,69 @@ def test_paint_marks_partial_availability_as_incomplete_and_never_blanks_a_sibli
     assert result["sources"] == {"headline": "100", "status": "", "error": "", "body": 1}
 
 
+def test_one_failing_renderer_does_not_strand_the_panels_behind_it():
+    """A bare `PANELS.forEach(paint)` over an unguarded paint() meant any throw
+    aborted the loop, leaving every later panel at aria-busy="true" with no body
+    and no error -- a spinner that never resolves. The reachable case was
+    formatCredits dereferencing a missing window.CreditFormat: renderCredits is
+    PANELS index 7, so it stranded panelRevenue behind it."""
+    result = _eval(
+        "(async () => {"
+        "  const stubs = {};"
+        "  window.AdminOverview.PANELS.forEach((def) => { stubs[def.id] = panelStub(); register(def.id, stubs[def.id].panel); });"
+        "  const credits = window.AdminOverview.PANELS.find((def) => def.id === 'panelCredits');"
+        "  credits.render = () => { throw new TypeError('renderer blew up'); };"
+        f"  fetchQueue.push({{ok: true, status: 200, body: {F['overview']}}});"
+        f"  fetchQueue.push({{ok: true, status: 200, body: {F['lifecycle']}}});"
+        f"  fetchQueue.push({{ok: true, status: 200, body: {F['retention']}}});"
+        f"  fetchQueue.push({{ok: true, status: 200, body: {F['commercial']}}});"
+        f"  fetchQueue.push({{ok: true, status: 200, body: {F['operational']}}});"
+        f"  fetchQueue.push({{ok: true, status: 200, body: {F['groups']}}});"
+        "  await window.AdminOverview.loadAll(['overview', 'lifecycle', 'retention', 'commercial', 'operational', 'groups']);"
+        "  const read = (id) => ({headline: stubs[id].parts.headline.textContent, error: stubs[id].parts.errorText.textContent, busy: stubs[id].panel.getAttribute('aria-busy')});"
+        "  return {credits: read('panelCredits'), revenue: read('panelRevenue'), attention: read('panelAttention')};"
+        "})()"
+    )
+    # The panel whose renderer threw reports the failure it actually had...
+    assert result["credits"] == {"headline": "—", "error": "This section is temporarily unavailable.", "busy": "false"}
+    # ...and the panel *after* it in PANELS still paints, rather than spinning forever.
+    assert result["revenue"] == {"headline": "12.000000 Credits", "error": "", "busy": "false"}
+    assert result["attention"]["headline"] == "11"
+
+
+def test_show_detail_clears_the_previous_route_before_it_fetches():
+    """route() reveals #detail the moment the hash changes. Clearing only after
+    Promise.allSettled resolved left the *previous* detail page -- breadcrumb, h1,
+    metric strip, tables -- fully painted under the new route's subnav highlight,
+    with no busy state, for the whole request."""
+    result = _eval(
+        "(async () => {"
+        "  const detail = document.createElement('div');"
+        "  register('detail', detail);"
+        f"  fetchQueue.push({{ok: true, status: 200, body: {F['groups']}}});"
+        "  await window.AdminOverview.showDetail('sources');"
+        "  const first = {h1: texts(byTag(detail, 'h1')), busy: detail.getAttribute('aria-busy')};"
+        "  let release;"
+        "  const held = new Promise((resolve) => { release = resolve; });"
+        "  globalThis.fetch = () => held;"
+        "  const inFlight = window.AdminOverview.showDetail('retention');"
+        "  await new Promise((resolve) => setTimeout(resolve, 0));"
+        "  const during = {h1: texts(byTag(detail, 'h1')), busy: detail.getAttribute('aria-busy'), text: detail.textContent};"
+        f"  release({{ok: true, status: 200, json: () => Promise.resolve({F['retention']})}});"
+        "  await inFlight;"
+        "  const after = {h1: texts(byTag(detail, 'h1')), busy: detail.getAttribute('aria-busy')};"
+        "  return {first, during, after};"
+        "})()"
+    )
+    assert result["first"]["h1"] == ["User sources"]
+    # Mid-flight: the old page is gone and the wait is announced, not disguised.
+    assert result["during"]["h1"] == []
+    assert result["during"]["busy"] == "true"
+    assert "Loading" in result["during"]["text"]
+    assert result["after"]["h1"] == ["Retention"]
+    assert result["after"]["busy"] == "false"
+
+
 def test_paint_clears_a_stale_headline_and_body_when_its_data_goes_missing():
     """F1 regression: a route/range change wipes `state.data` for a panel whose
     fetch then fails. The very next paint() must not leave the previous range's
