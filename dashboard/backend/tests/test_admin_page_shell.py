@@ -22,9 +22,12 @@ EXPECTED_SCRIPTS = [
     "js/admin-users.js?v=1",
 ]
 
-SCRIPT_TAG = re.compile(r"<script\b([^>]*)>(.*?)</script>", re.S)
+# re.I because HTML tag names are case-insensitive: without it this guard
+# cannot see a `<SCRIPT>` tag at all, which is the one thing it exists to
+# forbid (CodeQL py/bad-tag-filter).
+SCRIPT_TAG = re.compile(r"<script\b([^>]*)>(.*?)</script>", re.S | re.I)
 PANEL_REGION = re.compile(
-    r'<section\b[^>]*\bdata-panel="([^"]+)"[^>]*>(.*?)</section>', re.S
+    r'<section\b[^>]*\bdata-panel="([^"]+)"[^>]*>(.*?)</section>', re.S | re.I
 )
 TAG = re.compile(r"<[^>]+>")
 # A standalone number: not glued to a letter, underscore, hash, dot or dash on

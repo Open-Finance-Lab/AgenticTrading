@@ -1,7 +1,5 @@
 """js/admin-users.js under node: list rows, profile, activity tabs, evidence — against the fixtures."""
 
-import json
-
 from dashboard.backend.tests._admin_dom_stub import fixture, requires_node, run_node, source, target_fixture
 
 pytestmark = requires_node
