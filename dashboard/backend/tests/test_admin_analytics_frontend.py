@@ -9,6 +9,7 @@ from dashboard.backend.domain.analytics.query_service import (
 )
 from dashboard.backend.domain.analytics.value_queries import (
     CommercialAnalyticsResponse,
+    GroupAnalyticsResponse,
     LifecycleAnalyticsResponse,
     OperationalAnalyticsResponse,
     PaginatedValueUsers,
@@ -91,6 +92,7 @@ def test_fixtures_validate_against_committed_analytics_models():
     RetentionAnalyticsResponse.model_validate(load_fixture("retention.json"))
     CommercialAnalyticsResponse.model_validate(load_fixture("commercial.json"))
     OperationalAnalyticsResponse.model_validate(load_fixture("operational.json"))
+    GroupAnalyticsResponse.model_validate(load_fixture("groups.json"))
     PaginatedValueUsers.model_validate(load_fixture("users.json"))
     ValueUserProfile.model_validate(load_fixture("user_detail.json"))
     for name in (

@@ -1,0 +1,13 @@
+{
+  "as_of": "2026-09-03T12:00:00Z",
+  "groups": [
+    {"group": "internal", "label": "Internal", "users": 22, "successful_run_users": 14, "repeat_users": 8, "total_runs": 120, "atl_cost_micro_usd": 8400000, "paid_users": 3},
+    {"group": "invited", "label": "Invited", "users": 18, "successful_run_users": 10, "repeat_users": 4, "total_runs": 61, "atl_cost_micro_usd": 3100000, "paid_users": 2},
+    {"group": "organic", "label": "Organic", "users": 22, "successful_run_users": 9, "repeat_users": 3, "total_runs": 44, "atl_cost_micro_usd": 2600000, "paid_users": 1},
+    {"group": "competition", "label": "Competition", "users": 12, "successful_run_users": 7, "repeat_users": 2, "total_runs": 30, "atl_cost_micro_usd": 1500000, "paid_users": 1},
+    {"group": "partner", "label": "Partner", "users": 18, "successful_run_users": 8, "repeat_users": 3, "total_runs": 39, "atl_cost_micro_usd": 2200000, "paid_users": 0},
+    {"group": "unknown", "label": "Unknown", "users": 8, "successful_run_users": 4, "repeat_users": 0, "total_runs": 11, "atl_cost_micro_usd": 600000, "paid_users": 0}
+  ],
+  "selected_user_group": null,
+  "availability": {"available": true, "stale": false, "status": "ready", "coverage_start": "2026-08-01", "coverage_end": "2026-08-31"}
+}
