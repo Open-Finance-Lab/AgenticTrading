@@ -81,6 +81,7 @@ docs/_build/
 # PyBuilder
 .pybuilder/
 target/
+!dashboard/backend/tests/fixtures/admin_analytics/target/
 
 # Jupyter Notebook
 .ipynb_checkpoints

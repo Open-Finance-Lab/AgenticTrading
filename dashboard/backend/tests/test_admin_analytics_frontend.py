@@ -1,4 +1,4 @@
-"""Frontend and PR 2 response contracts for the read-only Admin Analytics UI."""
+"""Fixture contracts for the admin analytics API, plus the console's cache-buster pins."""
 
 import json
 from pathlib import Path
@@ -9,25 +9,20 @@ from dashboard.backend.domain.analytics.query_service import (
 )
 from dashboard.backend.domain.analytics.value_queries import (
     CommercialAnalyticsResponse,
+    GroupAnalyticsResponse,
     LifecycleAnalyticsResponse,
     OperationalAnalyticsResponse,
     PaginatedValueUsers,
     RetentionAnalyticsResponse,
     ValueUserProfile,
 )
-from dashboard.backend.tests._frontend_source import (
-    APP_HTML,
-    APP_JS,
-    STYLES,
-    fn_body,
-)
+from dashboard.backend.tests._frontend_source import APP_HTML, APP_JS, STYLES
 
 
 ROOT = Path(__file__).resolve().parents[2]
 FRONTEND = ROOT / "frontend"
 FIXTURES = Path(__file__).resolve().parent / "fixtures" / "admin_analytics"
-ANALYTICS_JS_PATH = FRONTEND / "js" / "admin-analytics.js"
-ADMIN_TABS_JS_PATH = FRONTEND / "js" / "admin-tabs.js"
+ADMIN_HTML = (FRONTEND / "admin.html").read_text(encoding="utf-8")
 
 
 def load_fixture(name: str) -> dict:
@@ -44,10 +39,6 @@ def walk_keys(value):
             yield from walk_keys(child)
 
 
-def analytics_source() -> str:
-    return ANALYTICS_JS_PATH.read_text(encoding="utf-8")
-
-
 def test_safe_fixtures_have_no_prohibited_response_fields():
     prohibited = {
         "api_key", "auth_token", "password", "verification_code",
@@ -55,9 +46,9 @@ def test_safe_fixtures_have_no_prohibited_response_fields():
         "provider_response_body", "ip_address", "user_agent",
         "credential_ciphertext", "network_hash", "session_id",
     }
-    for path in sorted(FIXTURES.glob("*.json")):
-        payload = load_fixture(path.name)
-        assert prohibited.isdisjoint(set(walk_keys(payload))), path.name
+    for path in sorted(FIXTURES.rglob("*.json")):  # committed and target/ alike
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        assert prohibited.isdisjoint(set(walk_keys(payload))), str(path.relative_to(FIXTURES))
 
 
 def test_fixtures_match_committed_analytics_shapes():
@@ -69,6 +60,8 @@ def test_fixtures_match_committed_analytics_shapes():
     operational = load_fixture("operational.json")
     users = load_fixture("users.json")
     profile = load_fixture("user_detail.json")
+    # Today's shapes (D18): the §9 fields live in fixtures/admin_analytics/target/ until PR D
+    # folds them in and restores them to these assertions.
     assert {"daily_active_users", "availability", "last_updated"} <= overview.keys()
     assert partial["availability"]["growth"] == {
         "available": False,
@@ -80,8 +73,10 @@ def test_fixtures_match_committed_analytics_shapes():
     assert {"tier_counts", "selected_period", "current_balances"} <= commercial.keys()
     assert {"operational_state_counts", "top_failure_categories"} <= operational.keys()
     assert {"items", "total", "limit", "offset"} == users.keys()
+    assert {"lifecycle", "operational", "commercial_tier", "priority_group"} <= users["items"][0].keys()
     assert {"state", "activation_milestones", "lifecycle", "operational", "commercial"} <= profile.keys()
     assert "next_cursor" in load_fixture("activity_timeline.json")
+    assert {"users", "agents", "active_dashboard_backtests", "max_active_dashboard_backtests"} <= load_fixture("admin_stats.json").keys()
 
 
 def test_fixtures_validate_against_committed_analytics_models():
@@ -91,6 +86,7 @@ def test_fixtures_validate_against_committed_analytics_models():
     RetentionAnalyticsResponse.model_validate(load_fixture("retention.json"))
     CommercialAnalyticsResponse.model_validate(load_fixture("commercial.json"))
     OperationalAnalyticsResponse.model_validate(load_fixture("operational.json"))
+    GroupAnalyticsResponse.model_validate(load_fixture("groups.json"))
     PaginatedValueUsers.model_validate(load_fixture("users.json"))
     ValueUserProfile.model_validate(load_fixture("user_detail.json"))
     for name in (
@@ -109,172 +105,69 @@ def test_byok_fixture_never_reports_atl_cost():
     assert byok["amount_micro"] is None
 
 
-def test_admin_analytics_surface_and_module_exist():
-    assert 'id="adminTabAnalytics"' in APP_HTML
-    assert 'id="adminPanelAnalytics"' in APP_HTML
-    assert 'id="adminAnalyticsOverview"' in APP_HTML
-    assert 'id="adminAnalyticsProfile"' in APP_HTML
-    assert 'js/admin-analytics.js?v=6' in APP_HTML
-    assert ANALYTICS_JS_PATH.exists()
-    assert ".admin-analytics-overview" in STYLES
-    assert ".admin-analytics-profile" in STYLES
+def test_in_app_analytics_surface_is_gone():
+    """PR C (design §7.5): one analytics surface, at /admin."""
+    for marker in (
+        'id="adminTabAnalytics"', 'id="adminPanelAnalytics"', 'id="adminAnalyticsOverview"',
+        'id="adminAnalyticsProfile"', 'id="adminAnalyticsRulesDialog"', 'id="adminAnalyticsEvidenceDialog"',
+        "admin-analytics-legacy-overview", "js/admin-analytics.js", "js/admin-analytics-value.js",
+    ):
+        assert marker not in APP_HTML, marker
+    assert not (FRONTEND / "admin-analytics.html").exists()
+    assert not (FRONTEND / "js" / "admin-analytics.js").exists()
+    assert not (FRONTEND / "js" / "admin-analytics-value.js").exists()
+    for call in (
+        "window.AdminAnalytics.syncAuth(user)", "window.AdminAnalytics.onEnter()",
+        "window.AdminAnalytics.refresh()", "window.AdminAnalyticsValue.syncAuth(user)",
+        "window.AdminAnalyticsValue.onEnter()",
+    ):
+        assert call not in APP_JS, call
 
 
-def test_admin_rail_is_accessible_default_and_url_backed():
-    tabs = ADMIN_TABS_JS_PATH.read_text(encoding="utf-8")
+def test_admin_rail_has_three_tabs_defaulting_to_users():
     admin_start = APP_HTML.index('id="adminView"')
     nav_start = APP_HTML.index('<nav id="adminTabs"', admin_start)
     nav_end = APP_HTML.index("</nav>", nav_start)
     nav_markup = APP_HTML[nav_start:nav_end]
-    expected = ["analytics", "users", "providers", "activity"]
-    assert nav_markup.count("data-admin-tab=") == 4
+    expected = ["users", "providers", "activity"]
+    assert nav_markup.count("data-admin-tab=") == 3
     assert [nav_markup.index(f'data-admin-tab="{value}"') for value in expected] == sorted(
         nav_markup.index(f'data-admin-tab="{value}"') for value in expected
     )
     assert 'aria-orientation="vertical"' in nav_markup
-    assert 'class="admin-workspace"' in APP_HTML
-    assert nav_markup.count('aria-label=') == 5
-    assert nav_markup.count('<svg aria-hidden="true">') == 4
-    assert "DEFAULT_TAB = 'analytics'" in tabs
-    assert "value === 'grant-pool' ? 'users' : value" in tabs
-    for key in ("ArrowUp", "ArrowDown", "Home", "End"):
-        assert key in tabs
-    assert "ArrowLeft" not in tabs
-    assert "ArrowRight" not in tabs
-    assert "admin:tabchange" in tabs
-    assert "openAccountManagement" in tabs
+    assert 'id="adminTabUsers" class="admin-tab is-active"' in nav_markup
+    assert '<section id="adminPanelUsers" class="admin-tab-panel" role="tabpanel" aria-labelledby="adminTabUsers" data-admin-panel="users">' in APP_HTML
 
 
-def test_account_management_clears_every_analytics_profile_param():
-    """Leaving analytics for a user's account must not leave a profile behind.
-
-    `analyticsProfile` was added alongside `analyticsUser` but not to this list,
-    so the only thing clearing it was the caller happening to close the profile
-    first. A stale one here lands on a URL the overview guard refuses to load.
-    """
-    tabs = ADMIN_TABS_JS_PATH.read_text(encoding="utf-8")
-    body = fn_body("function openAccountManagement(", tabs)
-    for key in ("analyticsUser", "analyticsProfile", "analyticsSection"):
-        assert f"searchParams.delete('{key}')" in body
-
-
-def test_credits_navigation_remains_horizontal():
-    start = APP_HTML.index('<nav id="creditsTabs"')
-    end = APP_HTML.index("</nav>", start)
-    markup = APP_HTML[start:end]
-
-    assert 'class="credits-tabs"' in markup
-    assert 'aria-orientation="vertical"' not in markup
-
-
-def test_client_uses_exact_pr2_endpoints_and_query_names():
-    source = analytics_source()
-    for endpoint in (
-        "/api/admin/analytics/overview",
-        "/api/admin/analytics/users",
-        "/activity",
-    ):
-        assert endpoint in source
-    for query_name in (
-        "from", "to", "billing_mode", "provider", "model",
-        "include_internal", "q", "status", "last_activity_from",
-        "last_activity_to", "sort", "order", "limit", "offset",
-        "section", "cursor",
-    ):
-        assert query_name in source
-    assert "start_date" not in source
-    assert "params.set('provider_id'" not in source
-    assert "params.set('model_id'" not in source
-
-
-def test_client_owns_url_state_partial_errors_and_independent_sections():
-    source = analytics_source()
-    for key in (
-        "analyticsStart", "analyticsEnd", "analyticsBilling",
-        "analyticsProvider", "analyticsModel", "analyticsInternal",
-        "analyticsUser", "analyticsSection",
-    ):
-        assert key in source
-    assert "This metric is temporarily unavailable." in source
-    assert "This section is temporarily unavailable." in source
-    assert "More activity is temporarily unavailable." in source
-    assert "Promise.allSettled" in source
-    assert "nextCursor" in source
-    assert "requestSeq" in source
-    assert "URLSearchParams" in source
-    assert "history.replaceState" in source
-    assert "localStorage" not in source
-
-
-def test_profile_markup_and_keyboard_contracts_are_present():
-    for element_id in (
-        "adminAnalyticsProfileBack", "adminAnalyticsProfileTitle",
-        "adminAnalyticsOpenAccount", "adminAnalyticsProfileTabs",
-        "adminAnalyticsSectionOverview", "adminAnalyticsSectionTimeline",
-        "adminAnalyticsSectionRuns", "adminAnalyticsSectionUsage",
-        "adminAnalyticsSectionSessions",
-    ):
-        assert f'id="{element_id}"' in APP_HTML
-    source = analytics_source()
-    assert "data-analytics-section-tab" in APP_HTML
-    assert "aria-selected" in APP_HTML
-    for key in ("ArrowRight", "ArrowLeft", "Home", "End"):
-        assert key in source
-    assert "preventDefault()" in source
-
-
-def test_analytics_is_read_only_and_uses_safe_dom_rendering():
-    source = analytics_source()
-    assert "innerHTML" not in source
-    assert "textContent" in source
-    assert "method: 'GET'" in source
-    for method in ("POST", "PATCH", "PUT", "DELETE"):
-        assert f"method: '{method}'" not in source
-    for prohibited in (
-        "api_key", "session_id", "network_hash", "provider_response_body",
-        "credential_ciphertext", "prompt", "strategy", "portfolio",
-    ):
-        assert prohibited not in source
+def test_profile_menu_admin_entry_opens_the_admin_page():
+    start = APP_JS.index("document.getElementById('accountMenuAdminBtn')?.addEventListener('click'")
+    handler = APP_JS[start:start + 600]
+    assert "window.location.assign('/admin')" in handler
+    assert "navigateToPage('admin')" not in handler
 
 
 def test_app_lifecycle_and_cache_versions_are_wired():
-    assert "window.AdminAnalytics.syncAuth(user)" in APP_JS
-    assert "window.AdminAnalytics.onEnter()" in APP_JS
-    assert "window.AdminAnalytics.refresh()" in APP_JS
-    assert "window.AdminAnalyticsValue.syncAuth(user)" in APP_JS
-    assert "window.AdminAnalyticsValue.onEnter()" in APP_JS
-    assert 'styles.css?v=140' in APP_HTML
-    assert 'app.js?v=132' in APP_HTML
-    assert 'js/admin-analytics.js?v=6' in APP_HTML
-    assert 'js/admin-analytics-value.js?v=5' in APP_HTML
-    assert 'js/admin-tabs.js?v=8' in APP_HTML
-
-
-def test_credit_costs_use_the_shared_exact_formatter():
-    source = analytics_source()
-    assert "window.CreditFormat.formatCreditsMicro(value)" in source
-    assert "numeric / 1000000" not in source
-
-
-def test_scoped_responsive_accessible_styles_exist():
-    for selector in (
-        ".admin-workspace", ".admin-rail",
-        ".admin-analytics-overview", ".admin-analytics-filters",
-        ".admin-analytics-snapshot-grid", ".admin-analytics-trend",
-        ".admin-analytics-state-badge", ".admin-analytics-attention-table",
-        ".admin-analytics-profile-layout", ".admin-analytics-profile-tabs",
-        ".admin-analytics-activity-table", ":focus-visible",
+    # Lockstep owner for the console's bumped tags and the /admin page's pins:
+    # every bump edits this test in the same change (Global Constraints).
+    assert 'styles.css?v=141' in APP_HTML
+    assert 'app.js?v=133' in APP_HTML
+    assert 'js/admin-tabs.js?v=9' in APP_HTML
+    for tag in (
+        'href="admin.css?v=1"',
+        'src="js/admin-shell.js?v=1"',
+        'src="js/credit-format.js?v=1"',
+        'src="js/admin-live.js?v=1"',
+        'src="js/admin-overview.js?v=1"',
+        'src="js/admin-users.js?v=1"',
     ):
-        assert selector in STYLES
-    assert "@media (max-width: 900px)" in STYLES
-    assert "@media (max-width: 600px)" in STYLES
-    assert "@media (prefers-reduced-motion: reduce)" in STYLES
+        assert tag in ADMIN_HTML, tag
 
 
-def test_admin_branch_checks_admin_tabs_on_enter_before_loading_stats():
-    body = fn_body("function navigateToPage(")
-    admin_branch_start = body.index("page === 'admin'")
-    on_enter_index = body.index("window.AdminTabs.onEnter()", admin_branch_start)
-    load_stats_index = body.index("loadAdminStats()", admin_branch_start)
-    assert on_enter_index < load_stats_index
-    assert "return" in body[admin_branch_start:load_stats_index]
+def test_analytics_style_families_left_styles_css():
+    for family in (
+        ".admin-analytics-", ".admin-value-", ".admin-priority-", ".admin-lifecycle-",
+        ".admin-group-", ".admin-help-btn", ".admin-profile-evidence-grid", ".admin-commercial-tier-grid",
+    ):
+        assert family not in STYLES, family
+    for kept in (".admin-workspace", ".admin-rail", ".admin-tab:focus-visible", ".admin-rail button"):
+        assert kept in STYLES, kept

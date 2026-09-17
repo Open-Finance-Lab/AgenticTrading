@@ -2,8 +2,11 @@
 (function () {
   'use strict';
 
-  const DEFAULT_TAB = 'analytics';
-  const ALLOWED_TABS = new Set(['analytics', 'users', 'providers', 'activity']);
+  // Analytics lives on the standalone /admin page (design §7.5). This console
+  // keeps Users (account management + grant pool), Providers and Activity until
+  // the follow-up port (D5). Nothing here navigates away from /app any more.
+  const DEFAULT_TAB = 'users';
+  const ALLOWED_TABS = new Set(['users', 'providers', 'activity']);
   let initialized = false;
 
   function normalizeTab(value) {
@@ -11,26 +14,8 @@
     return ALLOWED_TABS.has(normalizedValue) ? normalizedValue : DEFAULT_TAB;
   }
 
-  // `leave` gates the hand-off to the standalone /admin-analytics page. It is
-  // true only on admin *intent* — entering the admin view, clicking the tab.
-  // The page-load and popstate calls below pass false: they run on every /app
-  // load to initialise hidden panel state, and a redirect there bounced every
-  // view of the app to /admin-analytics (PR #467 regression).
-  function setTab(value, { updateUrl = true, leave = true } = {}) {
+  function setTab(value, { updateUrl = true } = {}) {
     const tab = normalizeTab(value);
-    if (tab === 'analytics' && leave) {
-      // The Analytics tab now lives on the standalone /admin-analytics page
-      // (preview with synthetic data). Leave the in-app panel in place but
-      // never show it; providers/users/activity still render here.
-      // `replace`, not `assign`: `/app?view=admin` must not stay in history,
-      // or Back reloads it, app.js routes to admin, and we redirect forward
-      // again — a loop the user cannot escape with the Back button.
-      // Returns `true` (not the tab string every other path returns) so
-      // `onEnter` can report a navigation was scheduled and its caller can
-      // stop running the loaders that page is already leaving (PR 0).
-      window.location.replace('/admin-analytics');
-      return true;
-    }
     const tablist = document.getElementById('adminTabs');
     tablist?.querySelectorAll('[data-admin-tab]').forEach((button) => {
       const selected = button.dataset.adminTab === tab;
@@ -75,22 +60,14 @@
     });
     window.addEventListener('popstate', () => {
       const requested = new URL(window.location.href).searchParams.get('adminTab');
-      setTab(requested || DEFAULT_TAB, { updateUrl: false, leave: false });
+      setTab(requested || DEFAULT_TAB, { updateUrl: false });
     });
-  }
-
-  function onEnter() {
-    bind();
-    const requested = new URL(window.location.href).searchParams.get('adminTab');
-    return setTab(requested || DEFAULT_TAB) === true;
   }
 
   function openAccountManagement({ userId, email } = {}) {
     setTab('users');
     const url = new URL(window.location.href);
-    url.searchParams.delete('analyticsUser');
-    url.searchParams.delete('analyticsProfile');
-    url.searchParams.delete('analyticsSection');
+    url.searchParams.delete('adminUserQuery');
     window.history.replaceState(window.history.state, '', url);
     const input = document.getElementById('adminCreditsUserQuery');
     const form = document.getElementById('adminCreditsUserSearch');
@@ -99,12 +76,22 @@
     input?.focus();
   }
 
+  function onEnter() {
+    bind();
+    const params = new URL(window.location.href).searchParams;
+    setTab(params.get('adminTab') || DEFAULT_TAB);
+    // The /admin profile deep-links here with the account to look up, the
+    // hand-off its in-process predecessor (the evidence dialog) used to make.
+    const query = params.get('adminUserQuery');
+    if (query) openAccountManagement({ email: query });
+  }
+
   // Page load only initialises panel state; app.js routes `?view=admin` to
-  // navigateToPage('admin') → onEnter, which is where the redirect belongs.
+  // navigateToPage('admin') → onEnter.
   function init() {
     bind();
     const requested = new URL(window.location.href).searchParams.get('adminTab');
-    setTab(requested || DEFAULT_TAB, { leave: false });
+    setTab(requested || DEFAULT_TAB);
   }
 
   window.AdminTabs = { onEnter, openAccountManagement, setTab };

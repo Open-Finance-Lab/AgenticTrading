@@ -1,0 +1,200 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ATL Admin</title>
+  <link rel="icon" href="favicon.svg">
+  <link rel="stylesheet" href="admin.css?v=1">
+  <!-- No inline scripts (design D6): pytest can only execute frontend code it
+       can lift from an external file. admin-shell.js loads first because it
+       owns the /api/auth/me gate and the router the other modules listen to;
+       all five are deferred, so they run in this order before DOMContentLoaded. -->
+  <script src="js/admin-shell.js?v=1" defer></script>
+  <script src="js/credit-format.js?v=1" defer></script>
+  <script src="js/admin-live.js?v=1" defer></script>
+  <script src="js/admin-overview.js?v=1" defer></script>
+  <script src="js/admin-users.js?v=1" defer></script>
+</head>
+<body>
+  <header>
+    <a class="brand" href="#overview"><img src="images/atltransparent.png" alt="ATL">Agentic Trading Lab</a>
+    <nav class="product-nav" aria-label="Product"><a href="/app">Home</a><a href="/app?view=playground&amp;playgroundTab=agents">My Agents</a><a href="/app?view=competition">Competition</a><a href="/app?view=community">Community</a></nav>
+  </header>
+  <div class="workspace">
+    <aside>
+      <strong>Administration</strong>
+      <a class="analytics-parent" id="analyticsParent" href="#overview" aria-expanded="true">Analytics <span aria-hidden="true">⌄</span></a>
+      <nav class="analytics-subnav" id="analyticsSubnav" aria-label="Analytics modules">
+        <a class="active" href="#overview" data-route="overview">Overview</a>
+        <a href="#sources" data-route="sources">User sources</a>
+        <a href="#retention" data-route="retention">Retention</a>
+        <a href="#credits" data-route="credits">Credits &amp; revenue</a>
+        <a href="#lifecycle" data-route="lifecycle">User lifecycle</a>
+        <a href="#health" data-route="health">System health</a>
+        <a href="#users" data-route="users">Users</a>
+      </nav>
+      <!-- Account management, Providers and Activity stay in the old console
+           until the follow-up port (design D5, §7.5). -->
+      <a href="/app?view=admin&amp;adminTab=users">Account management</a>
+      <a href="/app?view=admin&amp;adminTab=providers">Providers</a>
+      <a href="/app?view=admin&amp;adminTab=activity">Activity</a>
+    </aside>
+    <main>
+      <!-- Page-level controls, deliberately outside #overview. route() hides that
+           section on the six other routes, and every one of them still reads these
+           values: the range scopes the five detail routes and the user profile, and
+           Lifecycle stage / Tier scope the user list the "Open users" links lead to.
+           Nested inside #overview they went invisible while staying in effect, so a
+           stage picked on Overview silently narrowed the users table with no control
+           anywhere on that page to see it or clear it. -->
+      <div class="page-controls" id="pageControls">
+        <div class="page-actions">
+          <div class="range" role="group" aria-label="Date range">
+            <button type="button" data-range="1W" aria-pressed="true">1W</button>
+            <button type="button" data-range="1M" aria-pressed="false">1M</button>
+            <button type="button" data-range="1Y" aria-pressed="false">1Y</button>
+          </div>
+          <small>UTC</small>
+        </div>
+        <form class="filters" id="filters" aria-label="Analytics filters">
+          <label class="filter-field"><span>Source</span><select id="filterGroup" name="group"><option value="">All sources</option><option value="internal">Internal</option><option value="invited">Invited</option><option value="organic">Organic</option><option value="competition">Competition</option><option value="partner">Partner</option><option value="unknown">Unknown</option></select></label>
+          <label class="filter-field"><span>Lifecycle stage</span><select id="filterSegment" name="segment"><option value="">All lifecycle stages</option><option value="new">New</option><option value="onboarding">Onboarding</option><option value="growing">Growing</option><option value="core">Core</option><option value="at_risk">At risk</option><option value="dormant">Dormant</option></select></label>
+          <label class="filter-field"><span>Tier</span><select id="filterTier" name="tier"><option value="">All tiers</option><option value="unpaid">Unpaid</option><option value="starter">Starter</option><option value="invested">Invested</option><option value="high_value">High value</option></select></label>
+          <label class="check-field"><input type="checkbox" id="filterInternal" name="internal">Include internal accounts</label>
+          <p class="filter-note muted">Lifecycle stage and Tier narrow the user lists; Source also narrows the sources panels.</p>
+        </form>
+      </div>
+      <section id="overview" aria-label="Analytics overview">
+        <div class="page-head">
+          <div><h1>Overview</h1><p class="muted">User activity, acquisition and attention</p></div>
+        </div>
+        <div class="overview-row priority-row">
+          <section class="panel live-row" data-panel="live" aria-labelledby="liveTitle" aria-busy="true">
+            <div class="live-head"><div class="live-title"><i class="live-dot" aria-hidden="true"></i><div><h2 id="liveTitle">Live operations</h2><small>This instance</small></div></div><small id="liveUpdated">—</small></div>
+            <div class="snapshot-grid" id="liveTiles">
+              <article class="snapshot-tile"><span class="snapshot-label">Total users</span><strong class="snapshot-value" data-live="users">—</strong></article>
+              <article class="snapshot-tile"><span class="snapshot-label">Total agents</span><strong class="snapshot-value" data-live="agents">—</strong></article>
+              <article class="snapshot-tile runs"><span class="snapshot-label">Backtests running · this instance</span><strong class="snapshot-value" data-live="active_dashboard_backtests">—</strong><small class="snapshot-meta" data-live="slots">—</small></article>
+            </div>
+            <p class="live-caveat muted" id="liveCaveat">Counters are this instance's process state; a second replica would under-report them.</p>
+            <small class="panel-status muted" data-status hidden></small>
+            <p class="panel-error" data-error hidden><span></span> <button type="button" class="retry" data-retry>Retry</button></p>
+          </section>
+          <section class="panel" id="panelAttention" data-panel="attention" aria-labelledby="attentionTitle" aria-busy="true">
+            <div class="section-head"><div><h2 id="attentionTitle">Users needing attention</h2><small>As of yesterday UTC</small></div><div class="section-meta"><strong class="headline-number" data-headline>—</strong><small>affected users</small></div></div>
+            <div class="panel-body" data-body></div>
+            <p class="panel-status muted" data-status hidden></p>
+            <p class="panel-error" data-error hidden><span></span> <button type="button" class="retry" data-retry>Retry</button></p>
+            <a class="module-link" href="#users">Open users</a>
+          </section>
+        </div>
+
+        <div class="overview-row priority-row">
+          <section class="panel" id="panelActiveUsers" data-panel="active-users" aria-labelledby="activeUsersTitle" aria-busy="true">
+            <div class="section-head"><div><h2 id="activeUsersTitle">Active users</h2><small>Daily · selected range</small></div><div class="section-meta"><strong class="headline-number" data-headline>—</strong><small>active in the last seven days</small></div></div>
+            <div class="panel-body" data-body></div>
+            <p class="panel-status muted" data-status hidden></p>
+            <p class="panel-error" data-error hidden><span></span> <button type="button" class="retry" data-retry>Retry</button></p>
+            <a class="module-link" href="#users">Open active users</a>
+          </section>
+          <section class="panel" id="panelActivation" data-panel="activation" aria-labelledby="activationTitle" aria-busy="true">
+            <div class="section-head"><div><h2 id="activationTitle">Activation progress</h2><small>From account creation to first successful result</small></div><div class="section-meta"><strong class="headline-number" data-headline>—</strong><small>overall activation</small></div></div>
+            <div class="panel-body" data-body></div>
+            <p class="panel-status muted" data-status hidden></p>
+            <p class="panel-error" data-error hidden><span></span> <button type="button" class="retry" data-retry>Retry</button></p>
+            <a class="module-link" href="#sources">Open activation progress</a>
+          </section>
+        </div>
+
+        <div class="overview-row priority-row">
+          <section class="panel" id="panelSources" data-panel="sources" aria-labelledby="sourcesTitle" aria-busy="true">
+            <div class="section-head"><div><h2 id="sourcesTitle">Where users come from</h2><small>Account source · lifetime</small></div><div class="section-meta"><strong class="headline-number" data-headline>—</strong><small>identified users</small></div></div>
+            <div class="panel-body" data-body></div>
+            <p class="panel-status muted" data-status hidden></p>
+            <p class="panel-error" data-error hidden><span></span> <button type="button" class="retry" data-retry>Retry</button></p>
+            <a class="module-link" href="#sources">Open source analysis</a>
+          </section>
+          <section class="panel" id="panelRetention" data-panel="retention" aria-labelledby="retentionTitle" aria-busy="true">
+            <div class="section-head"><div><h2 id="retentionTitle">Users coming back</h2><small>First-success cohorts</small></div><div class="section-meta"><strong class="headline-number" data-headline>—</strong><small>week-one return</small></div></div>
+            <div class="panel-body" data-body></div>
+            <p class="panel-status muted" data-status hidden></p>
+            <p class="panel-error" data-error hidden><span></span> <button type="button" class="retry" data-retry>Retry</button></p>
+            <a class="module-link" href="#retention">Open retention</a>
+          </section>
+        </div>
+
+        <div class="overview-row priority-row">
+          <section class="panel" id="panelValue" data-panel="value" aria-labelledby="valueTitle" aria-busy="true">
+            <div class="section-head"><div><h2 id="valueTitle">Users reaching value</h2><small>Successful-result depth · selected range</small></div><div class="section-meta"><strong class="headline-number" data-headline>—</strong><small>users with a result</small></div></div>
+            <div class="panel-body" data-body></div>
+            <p class="panel-status muted" data-status hidden></p>
+            <p class="panel-error" data-error hidden><span></span> <button type="button" class="retry" data-retry>Retry</button></p>
+            <a class="module-link" href="#lifecycle">Open user lifecycle</a>
+          </section>
+          <section class="panel" id="panelLifecycle" data-panel="lifecycle" aria-labelledby="lifecycleTitle" aria-busy="true">
+            <div class="section-head"><div><h2 id="lifecycleTitle">User lifecycle</h2><small>Current distribution</small></div><div class="section-meta"><strong class="headline-number" data-headline>—</strong><small>classified users</small></div></div>
+            <div class="panel-body" data-body></div>
+            <p class="panel-status muted" data-status hidden></p>
+            <p class="panel-error" data-error hidden><span></span> <button type="button" class="retry" data-retry>Retry</button></p>
+            <a class="module-link" href="#lifecycle">Open lifecycle</a>
+          </section>
+        </div>
+
+        <div class="overview-row priority-row">
+          <section class="panel" id="panelCredits" data-panel="credits" aria-labelledby="creditsTitle" aria-busy="true">
+            <div class="section-head"><div><h2 id="creditsTitle">Credits usage</h2><small class="selected-range">Selected range</small></div><div class="section-meta"><strong class="headline-number" data-headline>—</strong><small>ATL Credits settled</small></div></div>
+            <div class="panel-body" data-body></div>
+            <p class="panel-status muted" data-status hidden></p>
+            <p class="panel-error" data-error hidden><span></span> <button type="button" class="retry" data-retry>Retry</button></p>
+          </section>
+          <section class="panel" id="panelRevenue" data-panel="revenue" aria-labelledby="revenueTitle" aria-busy="true">
+            <div class="section-head"><div><h2 id="revenueTitle">Revenue</h2><small class="selected-range">Selected range</small></div><div class="section-meta"><strong class="headline-number" data-headline>—</strong><small>purchased Credits</small></div></div>
+            <div class="panel-body" data-body></div>
+            <p class="revenue-note muted">Admin Grants excluded from revenue</p>
+            <p class="panel-status muted" data-status hidden></p>
+            <p class="panel-error" data-error hidden><span></span> <button type="button" class="retry" data-retry>Retry</button></p>
+          </section>
+        </div>
+        <div class="shared-link-row"><a class="module-link" href="#credits">Open Credits &amp; revenue</a></div>
+      </section>
+
+      <section id="detail" class="detail-view" data-panel="detail" hidden aria-live="polite"></section>
+
+      <section id="usersView" class="detail-view" data-panel="users" hidden aria-labelledby="usersTitle">
+        <nav class="breadcrumb" aria-label="Breadcrumb"><a href="#overview">Analytics</a><span>/</span><span>Users</span></nav>
+        <div class="page-head"><div><h1 id="usersTitle" tabindex="-1">Users</h1><p class="muted">Every account with its group, lifecycle stage and operational state</p></div></div>
+        <div class="users-toolbar">
+          <form id="usersSearch" role="search" aria-label="Search users"><input id="usersQuery" type="search" name="q" maxlength="100" placeholder="Search by email or display name" autocomplete="off"><button type="submit">Search</button></form>
+          <label class="check-field"><input type="checkbox" id="usersPriority">Priority users only</label>
+        </div>
+        <div class="table-wrap">
+          <table class="users-table">
+            <thead><tr><th scope="col">User</th><th scope="col">Group</th><th scope="col">Lifecycle</th><th scope="col">Operational</th><th scope="col">Last active (UTC)</th><th scope="col"><span class="visually-hidden">Actions</span></th></tr></thead>
+            <tbody id="usersBody"></tbody>
+          </table>
+        </div>
+        <p class="panel-status muted" data-status hidden></p>
+        <p class="panel-error" data-error hidden><span></span> <button type="button" class="retry" data-retry>Retry</button></p>
+        <div class="pager"><span id="usersRange"></span><button type="button" id="usersPrev" disabled>Previous</button><button type="button" id="usersNext" disabled>Next</button></div>
+      </section>
+
+      <section id="profile" class="detail-view" data-panel="profile" hidden aria-live="polite"></section>
+
+      <footer id="freshnessLegend" class="freshness-legend">Daily figures complete through — UTC; live tiles are this instance's process state</footer>
+    </main>
+  </div>
+
+  <dialog id="rulesDialog" aria-labelledby="rulesTitle">
+    <div class="dialog-head"><h2 id="rulesTitle">How states are determined</h2><button type="button" data-dialog-close aria-label="Close">×</button></div>
+    <dl id="rulesList" class="rules-list"></dl>
+    <div class="dialog-actions"><button type="button" data-dialog-close data-dialog-initial-focus>Close</button></div>
+  </dialog>
+
+  <dialog id="evidenceDialog" aria-labelledby="evidenceTitle">
+    <div class="dialog-head"><h2 id="evidenceTitle">User evidence</h2><button type="button" data-dialog-close aria-label="Close">×</button></div>
+    <div id="evidenceBody"></div>
+    <div class="dialog-actions"><a id="evidenceAccount" class="module-link" href="/app?view=admin&amp;adminTab=users">Open account management</a><a id="evidenceProfile" class="module-link" href="#users" data-dialog-close data-dialog-initial-focus>Open full profile</a></div>
+  </dialog>
+</body>
+</html>
