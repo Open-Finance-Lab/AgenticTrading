@@ -400,15 +400,39 @@ async def serve_strategy_viewer():
     return FileResponse(frontend_path / "strategy.html")
 
 
-@app.get("/admin-analytics", include_in_schema=False)
-async def serve_admin_analytics():
-    """Serve the standalone admin analytics page (preview: synthetic sample data).
+@app.get("/admin", include_in_schema=False)
+async def serve_admin():
+    """Serve the admin console shell (dashboard/frontend/admin.html).
 
-    The admin console's Analytics tab redirects here; the page gates itself
-    client-side on an admin session via /api/auth/me. Vercel serves the same
-    file through ``cleanUrls``; this route is for the Render origin.
+    The HTML carries no data: every number arrives from a require_admin-gated
+    /api/admin/* route after js/admin-shell.js has probed /api/auth/me. That
+    probe is a courtesy redirect, not the gate -- Vercel serves this same file
+    as a static asset with no session access, so a server-side gate here would
+    exist on one host only (design D7). This route is for the Render origin;
+    Vercel serves the file through ``cleanUrls``.
     """
-    return FileResponse(frontend_path / "admin-analytics.html")
+    return FileResponse(frontend_path / "admin.html")
+
+
+@app.get("/admin.css", include_in_schema=False)
+async def serve_admin_css():
+    """Serve admin.css beside /styles.css (every static file is an explicit route)."""
+    return FileResponse(frontend_path / "admin.css", media_type="text/css")
+
+
+@app.get("/admin-analytics", include_in_schema=False)
+async def redirect_admin_analytics(request: Request):
+    """308 /admin-analytics → /admin for one release, then this route goes.
+
+    Preserve the query string the way /app/ → /app does: the page keeps its
+    range and filters in the query (``?range=1M&group=organic``), and a bare
+    redirect would drop them. The hash (``#users/42``) never reaches the
+    server; browsers carry it across a redirect whose Location has none.
+    """
+    target = "/admin"
+    if request.url.query:
+        target = f"{target}?{request.url.query}"
+    return RedirectResponse(url=target, status_code=308)
 
 @app.get("/styles.css", include_in_schema=False)
 async def serve_styles():

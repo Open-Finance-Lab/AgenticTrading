@@ -60,3 +60,45 @@ def test_existing_overrides_unchanged():
 def test_catch_all_keeps_csp():
     catch_all = next(e for e in VERCEL["headers"] if e["source"] == "/(.*)")
     assert any(h["key"] == "Content-Security-Policy" for h in catch_all["headers"])
+
+
+def test_admin_shell_must_revalidate_like_every_other_shell():
+    for source in ("/admin", "/admin.html"):
+        assert _cache_control(source) == "public, max-age=0, must-revalidate", source
+
+
+def test_admin_overrides_follow_the_api_no_store_rule():
+    """The API no-store rule's optional group matches the bare /admin.
+
+    `/(api|...|admin|...)(/.*)?` was written for `/admin/runs/{id}`; with the
+    trailing group optional it also matches `/admin` itself. Last match wins per
+    key, so the shell's override only overrides while it sits *after* that
+    rule. Moving it earlier silently restores no-store with every
+    `_cache_control` assertion above still green.
+    """
+    order = [entry["source"] for entry in VERCEL["headers"]]
+    api_no_store = order.index(
+        "/(api|paper|backtest|runs|config|admin|ticker|health|compare)(/.*)?"
+    )
+    assert order.index("/(.*)") < order.index("/admin")
+    assert api_no_store < order.index("/admin")
+    assert api_no_store < order.index("/admin.html")
+
+
+def test_no_rewrite_claims_the_admin_page():
+    """`/admin/:path*` → Render is gone (design §7.1).
+
+    Whether `:path*` also matches the bare `/admin` differs between
+    path-to-regexp versions; with the rewrite present, the page's reachability
+    on Vercel depended on a router version nobody controls.
+    """
+    for entry in VERCEL["rewrites"]:
+        assert not entry["source"].startswith("/admin"), entry
+
+
+def test_admin_analytics_redirects_permanently_to_admin():
+    redirects = VERCEL["redirects"]
+    entry = next(e for e in redirects if e["source"] == "/admin-analytics")
+    assert entry["destination"] == "/admin"
+    assert entry["permanent"] is True
+    assert not any(e["source"] == "/admin-analytics" for e in VERCEL["headers"])

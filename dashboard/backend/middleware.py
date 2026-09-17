@@ -27,7 +27,8 @@ EXEMPT_PATHS = {
     '/compare',  # Public equity comparison (browser-friendly links)
     '/runs',  # Public backtest run listing
     '/strategy',  # Public strategy viewer page (shared links, no session needed)
-    '/admin-analytics',  # Static admin analytics page; gates itself client-side on /api/auth/me
+    '/admin',  # Admin console shell; gates itself client-side on /api/auth/me (design D7)
+    '/admin-analytics',  # 308 → /admin for one release; the exemption must outlive the redirect route
 }
 
 EXEMPT_EXTENSIONS = {'.js', '.css', '.png', '.jpg', '.gif', '.svg', '.woff', '.woff2', '.ttf'}
