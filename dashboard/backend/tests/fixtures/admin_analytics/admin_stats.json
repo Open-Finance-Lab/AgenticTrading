@@ -1,0 +1,9 @@
+{
+  "users": 412,
+  "admins": 3,
+  "agents": 4380,
+  "active_dashboard_backtests": 2,
+  "max_active_dashboard_backtests": 5,
+  "credits_metering_enabled": false,
+  "default_credits": 100
+}

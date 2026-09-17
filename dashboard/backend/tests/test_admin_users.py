@@ -312,6 +312,16 @@ def test_admin_stats_endpoint(isolated_auth):
     assert body["admins"] == 1
     assert body["agents"] >= 1
     assert "active_dashboard_backtests" in body
+    # The live row's real slot ceiling (design D17): the parsed constant, not
+    # the mock's "24 slots". Exposed here because this is the live-operations
+    # route (D16); the analytics routes never carry sub-day numbers.
+    from dashboard.backend.api.routers.backtests import MAX_ACTIVE_DASHBOARD_BACKTESTS
+
+    assert body["max_active_dashboard_backtests"] == MAX_ACTIVE_DASHBOARD_BACKTESTS
+    assert set(body) == {
+        "users", "admins", "agents", "active_dashboard_backtests",
+        "max_active_dashboard_backtests", "credits_metering_enabled", "default_credits",
+    }
 
 
 def test_admin_patch_entitlements_and_role(isolated_auth):

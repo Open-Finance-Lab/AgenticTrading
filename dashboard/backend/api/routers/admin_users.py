@@ -176,7 +176,10 @@ def _audit(event: str, **fields: object) -> None:
 @admin_router.get("/stats")
 def admin_stats(_admin: dict = Depends(require_admin)):
     """Site-wide counters for the admin console header."""
-    from dashboard.backend.api.routers.backtests import count_active_dashboard_backtests
+    from dashboard.backend.api.routers.backtests import (
+        MAX_ACTIVE_DASHBOARD_BACKTESTS,
+        count_active_dashboard_backtests,
+    )
     from dashboard.backend.domain.agents.repository import agent_store
     from dashboard.backend.domain.entitlements import credits
 
@@ -186,6 +189,10 @@ def admin_stats(_admin: dict = Depends(require_admin)):
         "admins": counts["admins"],
         "agents": agent_store.count_agents(),
         "active_dashboard_backtests": count_active_dashboard_backtests(),
+        # Per-process slot ceiling (`MAX_ACTIVE_DASHBOARD_BACKTESTS`, default 5).
+        # The /admin live row prints "running / ceiling"; a second replica would
+        # under-report both, which the row's caveat says (design D17).
+        "max_active_dashboard_backtests": MAX_ACTIVE_DASHBOARD_BACKTESTS,
         # Whether the Credits column an admin is about to edit does anything.
         # Shipped from the server rather than assumed by the console: metering
         # is an env var on the backend, so the frontend has no other way to
