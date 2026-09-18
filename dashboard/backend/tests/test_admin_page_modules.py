@@ -15,6 +15,8 @@ from dashboard.backend.tests._frontend_source import fn_body
 FRONTEND = Path(__file__).resolve().parents[2] / "frontend"
 NAMES = ("admin-shell.js", "admin-live.js", "admin-overview.js", "admin-users.js")
 ABSORBED_MODULES = ("admin-bridge.js", "admin-credits.js", "admin-model-providers.js")
+# The D5 layout re-creates the app chrome on /admin: ticker strip + account chip.
+CHROME_MODULES = ("admin-ticker.js", "admin-chrome.js")
 MODULES = {name: (FRONTEND / "js" / name).read_text(encoding="utf-8") for name in NAMES}
 ALL = "\n".join(MODULES.values())
 ADMIN_HTML = (FRONTEND / "admin.html").read_text(encoding="utf-8")
@@ -39,7 +41,7 @@ def test_every_module_admin_html_loads_exists_and_nothing_else_is_loaded():
     # D5 absorbed the old console's modules too: admin-bridge.js stands in for
     # the app.js globals they consumed, and admin-credits/admin-model-providers
     # keep their own routers, stores and mutations behind the same gate.
-    assert set(srcs) == set(NAMES) | set(ABSORBED_MODULES) | {"credit-format.js"}
+    assert set(srcs) == set(NAMES) | set(ABSORBED_MODULES) | set(CHROME_MODULES) | {"credit-format.js"}
     for name in srcs:
         assert (FRONTEND / "js" / name).exists(), name
 

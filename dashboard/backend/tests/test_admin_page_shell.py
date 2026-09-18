@@ -15,15 +15,18 @@ ADMIN_HTML = (FRONTEND / "admin.html").read_text(encoding="utf-8")
 ADMIN_CSS = (FRONTEND / "admin.css").read_text(encoding="utf-8")
 
 EXPECTED_SCRIPTS = [
-    "js/admin-shell.js?v=1",
+    "js/admin-shell.js?v=2",
     "js/credit-format.js?v=1",
-    "js/admin-live.js?v=1",
+    # App chrome for the D5 layout: the ticker strip and the account chip.
+    "js/admin-ticker.js?v=1",
+    "js/admin-chrome.js?v=1",
+    "js/admin-live.js?v=2",
     "js/admin-overview.js?v=1",
-    "js/admin-users.js?v=1",
+    "js/admin-users.js?v=2",
     # Absorbed old-console modules (design D5) and their app.js stand-in.
     "js/admin-bridge.js?v=1",
-    "js/admin-credits.js?v=1",
-    "js/admin-model-providers.js?v=1",
+    "js/admin-credits.js?v=2",
+    "js/admin-model-providers.js?v=2",
 ]
 
 # This guard's whole job is "no inline script anywhere in this page", so a
@@ -82,13 +85,13 @@ def test_the_inline_script_guard_sees_tags_html_allows():
 def test_gate_module_loads_first_and_every_script_is_pinned():
     srcs = re.findall(r'<script src="([^"]+)" defer></script>', ADMIN_HTML)
     assert srcs == EXPECTED_SCRIPTS
-    assert srcs[0] == "js/admin-shell.js?v=1"
+    assert srcs[0].startswith("js/admin-shell.js?v=")
     for src in srcs:
         assert "?v=" in src, src
 
 
 def test_stylesheet_is_admin_css_and_the_page_does_not_inherit_styles_css():
-    assert '<link rel="stylesheet" href="admin.css?v=1">' in ADMIN_HTML
+    assert re.search(r'<link rel="stylesheet" href="admin.css\?v=\d+">', ADMIN_HTML)
     assert "styles.css" not in ADMIN_HTML
     assert "@import" not in ADMIN_CSS
     assert "cdn.jsdelivr.net" not in ADMIN_HTML
@@ -201,7 +204,7 @@ def test_subnav_routes_match_the_shell_router_and_the_aside_links_back():
     # the aside routes to them here instead of handing off to the old console,
     # and no /app?view=admin link survives in the markup.
     for route in ("account", "providers", "activity"):
-        assert f'<a href="#{route}" data-route="{route}">' in ADMIN_HTML, route
+        assert f'href="#{route}" data-route="{route}"' in ADMIN_HTML, route
     assert "/app?view=admin" not in ADMIN_HTML
 
 

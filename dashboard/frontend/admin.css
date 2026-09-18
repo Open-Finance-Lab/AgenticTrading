@@ -24,21 +24,20 @@ small,.muted{color:var(--muted)}
 strong{font-variant-numeric:tabular-nums}
 .visually-hidden{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
 
-/* Header, aside, main (mock lines 10-12) */
-header{display:flex;align-items:center;justify-content:space-between;gap:20px;min-height:80px;padding:14px 28px;background:var(--surface);border-bottom:1px solid var(--line)}
-.brand{display:flex;align-items:center;gap:12px;font-size:22px;font-weight:700}
-.brand img{width:48px;height:48px;object-fit:contain}
-.product-nav{display:flex;gap:25px;color:var(--muted)}
-.workspace{display:grid;grid-template-columns:196px minmax(0,1fr);min-height:calc(100vh - 80px)}
-aside{padding:24px 16px;border-right:1px solid var(--line)}
-aside>strong{display:block;margin:0 12px 20px}
-aside a{display:block;margin-bottom:4px;padding:10px 12px;border-radius:6px;color:var(--muted)}
-aside a:hover{background:#101c31}
-.analytics-parent{display:flex;align-items:center;justify-content:space-between;color:var(--accent);background:#132c41}
-.analytics-subnav{margin:0 0 14px 15px;padding-left:8px;border-left:1px solid var(--line)}
-.analytics-subnav a{padding:7px 10px;font-size:12px}
-.analytics-subnav a.active{color:var(--accent);background:#102536}
-main{width:100%;max-width:1420px;margin:0 auto;padding:30px 36px 50px}
+/* Page chrome (design D5 layout): the app-style header, ticker and the old
+   console's icon rail come from admin-console.css; this file only positions
+   the page around them. The old shell chrome (header/brand/product-nav/
+   workspace/aside) is gone with the markup it styled. */
+.admin-console-page{max-width:1560px;margin:0 auto;padding:26px 36px 60px}
+.admin-rail{position:static}
+.admin-rail .analytics-subnav{margin:2px 6px 10px 12px;padding-left:8px;border-left:1px solid var(--line)}
+.admin-rail .analytics-subnav a{display:block;padding:6px 10px;font-size:12px;border-radius:6px;color:var(--muted)}
+.admin-rail .analytics-subnav a:hover{color:var(--accent);background:#101c31}
+.admin-rail .analytics-subnav a.active{color:var(--accent);background:#102536}
+.admin-rail .admin-rail-caret{margin-left:auto;font-size:11px;color:var(--muted)}
+.admin-rail a.admin-tab{text-decoration:none}
+.admin-rail a.admin-tab.is-active{color:var(--text);background:rgba(103,232,249,.12);box-shadow:inset 0 0 0 1px rgba(103,232,249,.12)}
+.admin-rail a.admin-tab.is-active::before{opacity:1;transform:scaleY(1)}
 .page-head,.section-head,.live-head,.breadcrumb{display:flex;align-items:center;justify-content:space-between;gap:16px}
 .page-head p{margin:0}
 .page-actions{display:flex;align-items:center;gap:10px}
@@ -273,11 +272,8 @@ dialog::backdrop{background:rgba(0,0,0,.64)}
 @media(max-width:680px){header{padding:12px 15px}.brand{font-size:17px}.brand img{width:40px;height:40px}.workspace{grid-template-columns:66px minmax(0,1fr)}aside{padding:18px 6px}aside>strong{display:none}aside a{overflow:hidden;padding:10px 7px;font-size:0;text-align:center}aside a::first-letter{font-size:14px}.analytics-parent span{display:none}.analytics-subnav{margin-left:9px;padding-left:3px}main{padding:24px 16px 40px}.page-head{flex-direction:column;align-items:stretch}.page-controls{justify-items:stretch}.page-actions{flex-direction:row;align-items:center;justify-content:space-between}.live-row .live-head{flex-direction:column;align-items:flex-start}.range button{min-width:38px;padding-inline:7px}.filters{grid-template-columns:1fr}.snapshot-grid{grid-template-columns:1fr}.snapshot-tile+.snapshot-tile{border-left:0;border-top:1px solid var(--line)}.source-wrap{grid-template-columns:1fr;justify-items:center;gap:17px}.source-legend-six{width:100%;gap:10px 14px}.attention-note{align-items:flex-start;flex-direction:column;gap:8px}.retention-chart{grid-template-columns:55px repeat(4,1fr);gap:4px}.lifecycle-legend{grid-template-columns:repeat(2,1fr)}.value-step{grid-template-columns:112px 1fr auto;gap:8px}.value-step>span{white-space:normal}.layered-route{min-width:600px;overflow:visible}.credits-paired{min-width:560px}.priority-row:has(.layered-route),.priority-row:has(.credits-paired){overflow-x:auto}.revenue-viz{height:184px}.revenue-viz svg{height:168px}.metric-strip{grid-template-columns:1fr}.detail-metric,.detail-metric:first-child,.detail-metric:nth-child(3){padding:17px 0;border-left:0;border-top:1px solid var(--line)}.milestones{grid-template-columns:repeat(2,1fr)}}
 @media(prefers-reduced-motion:reduce){.module-link:after{transition:none}}
 
-/* Absorbed old-console sections (design D5): the aside's Account management /
-   Providers / Activity links are routes now, with the same active treatment as
-   the analytics subnav; the shared credits status line stays quiet when empty;
-   the [data-stat] strip keeps its old-console spacing. */
-aside a[data-route].active{color:var(--accent);background:#102536}
+/* Absorbed old-console sections (design D5): the shared credits status line
+   stays quiet when empty; the [data-stat] strip keeps its old-console spacing. */
 .credits-status:empty{display:none}
-main .admin-stats{margin:18px 0 22px}
-main .admin-credits-status{margin:0 0 14px}
+.admin-workspace-content .admin-stats{margin:18px 0 22px}
+.admin-workspace-content .admin-credits-status{margin:0 0 14px}

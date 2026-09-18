@@ -333,6 +333,8 @@
       }
       state.admin = true;
       state.user = user;
+      // The chrome (account chip) renders off this once the gate has spoken.
+      document.dispatchEvent(new CustomEvent('admin:gate-ready', { detail: { user } }));
       return true;
     } catch (_error) {
       window.location.replace('/app');
@@ -469,9 +471,18 @@
     if (controls) controls.hidden = onConsole;
     const legend = document.getElementById('freshnessLegend');
     if (legend) legend.hidden = onConsole;
-    document.querySelectorAll('aside a[data-route]').forEach((link) => {
+    // The old-console icon rail: Analytics is active across its seven routes,
+    // each absorbed section across its own; its subnav only makes sense inside
+    // the analytics family.
+    const rail = document.getElementById('adminNavRail');
+    rail?.querySelectorAll('a[data-route]').forEach((link) => {
       link.classList.toggle('active', link.dataset.route === parsed.route);
+      link.classList.toggle('is-active', link.dataset.route === parsed.route);
     });
+    const parent = document.getElementById('adminRailAnalytics');
+    parent?.classList.toggle('is-active', !onConsole);
+    const subnav = document.getElementById('analyticsSubnav');
+    if (subnav) subnav.hidden = onConsole;
     window.scrollTo(0, 0);
     announce();
   }
@@ -525,13 +536,6 @@
     document.getElementById('filterTier')?.addEventListener('change', (event) => setFilters({ tier: event.target.value }));
     document.getElementById('filterInternal')?.addEventListener('change', (event) => setFilters({ internal: Boolean(event.target.checked) }));
     document.getElementById('filters')?.addEventListener('submit', (event) => event.preventDefault());
-    document.getElementById('analyticsParent')?.addEventListener('click', (event) => {
-      event.preventDefault();
-      const subnav = document.getElementById('analyticsSubnav');
-      if (!subnav) return;
-      subnav.hidden = !subnav.hidden;
-      event.currentTarget.setAttribute('aria-expanded', String(!subnav.hidden));
-    });
     document.querySelectorAll('[data-retry]').forEach((button) => {
       button.addEventListener('click', () => {
         const panel = button.closest('[data-panel]');

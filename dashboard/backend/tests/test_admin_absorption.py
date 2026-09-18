@@ -29,7 +29,7 @@ CONSOLE_ROUTES = ("account", "providers", "activity")
 def test_admin_html_carries_the_absorbed_sections():
     for route in CONSOLE_ROUTES:
         assert f'data-panel="{route}"' in ADMIN_HTML, route
-        assert f'<a href="#{route}" data-route="{route}">' in ADMIN_HTML, route
+        assert f'href="#{route}" data-route="{route}"' in ADMIN_HTML, route
     for module_id in (
         "accountView", "providersView", "activityView",
         "adminCreditsSection", "adminGrantPoolForm", "adminCreditsUserQuery",
@@ -53,7 +53,7 @@ def test_admin_console_css_exists_and_is_loaded():
     # A sample of the ported component families the absorbed markup needs.
     for selector in (".admin-stats", ".admin-credits-pool-ring", ".admin-provider-grid", ".auth-btn", ".credits-status"):
         assert selector in rules, selector
-    assert '<link rel="stylesheet" href="admin-console.css?v=1">' in ADMIN_HTML
+    assert re.search(r'<link rel="stylesheet" href="admin-console.css\?v=\d+">', ADMIN_HTML)
     # The shell keeps its own stylesheet; the page still does not import the
     # app-wide styles.css (design §7.2).
     assert "styles.css" not in ADMIN_HTML
