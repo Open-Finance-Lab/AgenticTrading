@@ -6,6 +6,9 @@
   <title>ATL Admin</title>
   <link rel="icon" href="favicon.svg">
   <link rel="stylesheet" href="admin.css?v=4">
+  <!-- The absorbed sections (N2/PR2) and the app chrome: component styles
+       extracted from styles.css, which this page still must not inherit. -->
+  <link rel="stylesheet" href="admin-console.css?v=2">
   <!-- No inline scripts (design D6): pytest can only execute frontend code it
        can lift from an external file. admin-shell.js loads first because it
        owns the /api/auth/me gate and the router the other modules listen to;
