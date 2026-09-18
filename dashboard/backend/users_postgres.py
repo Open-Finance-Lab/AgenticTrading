@@ -26,6 +26,7 @@ from dashboard.backend.users import (
     CREDITS_REFUND_POSTGRES,
     CREDITS_SEED_POSTGRES,
     CREDITS_SPEND_POSTGRES,
+    DEFAULT_USER_GROUP,
     EMAIL_CHANGE_TTL_MINUTES,
     ENTITLEMENTS_UPSERT_POSTGRES,
     RESET_CODE_MAX_ATTEMPTS,
@@ -119,6 +120,29 @@ class PostgresUserStore:
                     """
                     ALTER TABLE users
                     ADD COLUMN IF NOT EXISTS user_group TEXT NOT NULL DEFAULT 'unknown'
+                    """
+                )
+                # ADD COLUMN IF NOT EXISTS above is skipped outright once the
+                # column exists, so it cannot restate a default -- the deployed
+                # catalog keeps whatever the column was created with however the
+                # line above reads. This says it again where Postgres will
+                # actually apply it. Catalog-only and idempotent, so it is a
+                # no-op while the two agree; it is what makes editing the
+                # default above take effect at all when they ever disagree.
+                cur.execute(
+                    """
+                    ALTER TABLE users
+                    ALTER COLUMN user_group SET DEFAULT 'unknown'
+                    """
+                )
+                # Twin of the SQLite repair in users.py::_init_schema -- see the
+                # comment there for why NOT IN rather than a list of bad values.
+                # The deployed table is the one that can actually hold junk;
+                # SQLite only ever sees it in a local checkout.
+                cur.execute(
+                    """
+                    UPDATE users SET user_group = 'unknown'
+                    WHERE user_group NOT IN ('internal', 'invited', 'organic', 'competition', 'partner', 'unknown')
                     """
                 )
                 cur.execute(
@@ -232,11 +256,18 @@ class PostgresUserStore:
                 with conn.cursor() as cur:
                     cur.execute(
                         """
-                        INSERT INTO users (email, display_name, password_hash, role, created_at)
-                        VALUES (%s, %s, %s, 'user', %s)
+                        INSERT INTO users (email, display_name, password_hash, role, created_at, user_group)
+                        VALUES (%s, %s, %s, 'user', %s, %s)
                         RETURNING *
                         """,
-                        (normalized_email, display_name.strip(), hash_password(password), _utcnow_iso()),
+                        (
+                            normalized_email,
+                            display_name.strip(),
+                            hash_password(password),
+                            _utcnow_iso(),
+                            # Explicit for the same reason as the SQLite twin.
+                            DEFAULT_USER_GROUP,
+                        ),
                     )
                     row = cur.fetchone()
         except psycopg.errors.UniqueViolation as exc:
