@@ -15,7 +15,7 @@ ADMIN_HTML = (FRONTEND / "admin.html").read_text(encoding="utf-8")
 ADMIN_CSS = (FRONTEND / "admin.css").read_text(encoding="utf-8")
 
 EXPECTED_SCRIPTS = [
-    "js/admin-shell.js?v=5",
+    "js/admin-shell.js?v=6",
     "js/credit-format.js?v=1",
     # The app chrome's ticker (D5 layout pass) rides after the formatters.
     "js/admin-ticker.js?v=2",
@@ -83,7 +83,7 @@ def test_the_inline_script_guard_sees_tags_html_allows():
 def test_gate_module_loads_first_and_every_script_is_pinned():
     srcs = re.findall(r'<script src="([^"]+)" defer></script>', ADMIN_HTML)
     assert srcs == EXPECTED_SCRIPTS
-    assert srcs[0] == "js/admin-shell.js?v=5"
+    assert srcs[0] == "js/admin-shell.js?v=6"
     for src in srcs:
         assert "?v=" in src, src
 
@@ -159,7 +159,8 @@ def test_range_and_filters_live_outside_the_overview_section():
     """They govern every route, so they must not sit inside the one section
     `route()` hides.
 
-    `showView('overview', parsed.route === 'overview')` sets `#overview.hidden`
+    `showView('overviewView', parsed.route === 'overview')` sets
+    `#overviewView.hidden`
     on the six other routes. With the range group and the filter form nested
     inside it, a Lifecycle stage picked on Overview went invisible while
     `userListParams` kept sending `lifecycle_segment`: the users table was
@@ -169,7 +170,7 @@ def test_range_and_filters_live_outside_the_overview_section():
     reach by navigating back to Overview.
     """
     controls_start = ADMIN_HTML.index('<div class="page-controls" id="pageControls">')
-    overview_start = ADMIN_HTML.index('<section id="overview"')
+    overview_start = ADMIN_HTML.index('<section id="overviewView"')
     assert controls_start < overview_start
     toolbar = ADMIN_HTML[controls_start:overview_start]
     from_overview_on = ADMIN_HTML[overview_start:]
@@ -361,3 +362,45 @@ def test_the_flat_text_list_rules_are_gone():
     assert "aside a:hover{" not in ADMIN_CSS
     assert "aside a::first-letter" not in ADMIN_CSS
     assert ".analytics-parent{" not in ADMIN_CSS
+
+
+def test_route_names_never_collide_with_element_ids():
+    """A route name that is also an element id makes the browser scroll.
+
+    The rail and the analytics subnav are real anchors -- `href="#overview"`,
+    `href="#providers"` -- because reaching a route has to work before any
+    script runs and at every viewport width. That means the hash is a *fragment*
+    as well as a route: if some element carries the same id, the browser scrolls
+    it to the top of the viewport on click, dragging the header and the ticker
+    off screen, and it does so before `route()` is reached.
+
+    `route()` ends with `window.scrollTo(0, 0)`, which hides the damage whenever
+    the route actually changes. It does not run when the clicked route is the
+    one already showing: same hash, no `hashchange`, no `route()`. Clicking
+    Overview while on Overview therefore left the page scrolled down with no
+    code having decided to scroll it -- reported from the browser, invisible to
+    every test here, because the sections `<section id="overview">` and
+    `<section id="providers">` were the two ids that matched a route name.
+
+    Suffixing those ids (`overviewView`, `providersView`) is what keeps the two
+    namespaces disjoint. This pins the property rather than the two names, so a
+    route added later cannot silently re-open it.
+    """
+    shell_js = (FRONTEND / "js" / "admin-shell.js").read_text(encoding="utf-8")
+    routes = set()
+    for const in ("ANALYTICS_ROUTES", "CONSOLE_ROUTES"):
+        match = re.search(rf"const {const} = \[(.*?)\];", shell_js, re.S)
+        assert match, const
+        routes |= set(re.findall(r"'([^']+)'", match.group(1)))
+    # Guards the guard: if the constants are ever renamed this must fail loudly
+    # rather than compare an empty set against everything and pass.
+    assert {"overview", "providers", "users", "account", "activity"} <= routes, routes
+
+    element_ids = set(re.findall(r'\bid="([A-Za-z0-9_-]+)"', ADMIN_HTML))
+    assert element_ids, "no ids parsed from admin.html"
+
+    collisions = sorted(routes & element_ids)
+    assert collisions == [], (
+        "these route names are also element ids, so clicking their rail link "
+        f"scrolls the page instead of only switching views: {collisions}"
+    )

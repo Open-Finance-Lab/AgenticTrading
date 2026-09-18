@@ -626,11 +626,21 @@
     renderedLocation = locationKey();
     state.route = parsed.route;
     state.routeId = parsed.id;
-    showView('overview', parsed.route === 'overview');
+    // Every view id carries a suffix so that NO id equals a route name. The
+    // rail and subnav are real anchors (href="#overview"), so a hash that also
+    // names an element makes the browser scroll that element to the top of the
+    // viewport before this router ever runs -- and when the clicked route is
+    // the one already showing, no hashchange fires, route() never runs, and the
+    // scrollTo(0, 0) below never gets the chance to undo it. The page just sat
+    // there with the header and ticker scrolled off screen. `overview` and
+    // `providers` were the only two ids that collided; the suffix is what keeps
+    // the set disjoint, so do not "tidy" these back to bare route names.
+    // Pinned by test_route_names_never_collide_with_element_ids.
+    showView('overviewView', parsed.route === 'overview');
     showView('detail', DETAIL_ROUTES.includes(parsed.route));
     showView('usersView', parsed.route === 'users' && !parsed.id);
     showView('profile', parsed.route === 'users' && Boolean(parsed.id));
-    showView('providers', parsed.route === 'providers');
+    showView('providersView', parsed.route === 'providers');
     showView('accountView', parsed.route === 'account');
     showView('activityView', parsed.route === 'activity');
     state.routeQuery = parsed.query;
