@@ -9,7 +9,10 @@
   // is how the two drift. There is deliberately no live-operations route -- the
   // live row has no detail page (§8.2, D16).
   const ANALYTICS_ROUTES = ['overview', 'sources', 'retention', 'credits', 'lifecycle', 'health', 'users'];
-  const ROUTES = [...ANALYTICS_ROUTES, 'providers'];
+  // The absorbed old-console sections (design N2/PR2) are routes like providers,
+  // minus the analytics chrome: no range, no filters, no freshness legend.
+  const CONSOLE_ROUTES = ['providers', 'account', 'activity'];
+  const ROUTES = [...ANALYTICS_ROUTES, ...CONSOLE_ROUTES];
   const DETAIL_ROUTES = ['sources', 'retention', 'credits', 'lifecycle', 'health'];
   // 1D is cut (§8.2): no cross-user source finer than a day exists. 1Y is 180
   // inclusive days because the value routes reject a window wider than
@@ -59,6 +62,7 @@
   const state = {
     route: 'overview',
     routeId: null,
+    routeQuery: {},
     range: '1W',
     filters: { group: '', segment: '', tier: '', internal: false, q: '', priority: false },
     admin: false,
@@ -89,11 +93,16 @@
 
   function parseHash(hash) {
     const raw = String(hash || '').replace(/^#/, '');
-    const [head, tail] = raw.split('/');
+    const [path, queryString] = raw.split('?');
+    // A plain object, not the URLSearchParams instance: the only consumer reads
+    // named keys (the ?user= hand-off), and a plain object survives JSON in the
+    // node harness instead of collapsing to {}.
+    const query = Object.fromEntries(new URLSearchParams(queryString || ''));
+    const [head, tail] = path.split('/');
     if (head === 'users') {
-      return { route: 'users', id: /^\d+$/.test(tail || '') ? tail : null };
+      return { route: 'users', id: /^\d+$/.test(tail || '') ? tail : null, query };
     }
-    return { route: ROUTES.includes(head) ? head : 'overview', id: null };
+    return { route: ROUTES.includes(head) ? head : 'overview', id: null, query };
   }
 
   function rangeDates(range, now) {
@@ -489,7 +498,10 @@
 
   function announce() {
     document.dispatchEvent(new CustomEvent('admin:route', {
-      detail: { route: state.route, id: state.routeId, range: state.range, filters: { ...state.filters } },
+      detail: {
+        route: state.route, id: state.routeId, range: state.range,
+        filters: { ...state.filters }, query: { ...state.routeQuery },
+      },
     }));
   }
 
@@ -619,12 +631,17 @@
     showView('usersView', parsed.route === 'users' && !parsed.id);
     showView('profile', parsed.route === 'users' && Boolean(parsed.id));
     showView('providers', parsed.route === 'providers');
+    showView('accountView', parsed.route === 'account');
+    showView('activityView', parsed.route === 'activity');
+    state.routeQuery = parsed.query;
     // The range group, the filter form and the freshness legend all describe
-    // *daily analytics* figures. On Providers they describe nothing on screen,
-    // and a range control that scopes nothing is worse than no control -- it
-    // invites the operator to believe the registry is being filtered.
-    showView('pageControls', parsed.route !== 'providers');
-    showView('freshnessLegend', parsed.route !== 'providers');
+    // *daily analytics* figures. On the absorbed console sections they describe
+    // nothing on screen, and a range control that scopes nothing is worse than
+    // no control -- it invites the operator to believe the registry is being
+    // filtered.
+    const onConsole = CONSOLE_ROUTES.includes(parsed.route);
+    showView('pageControls', !onConsole);
+    showView('freshnessLegend', !onConsole);
     document.querySelectorAll('#analyticsSubnav a[data-route]').forEach((link) => {
       link.classList.toggle('active', link.dataset.route === parsed.route);
     });
@@ -682,6 +699,9 @@
     document.getElementById('filterTier')?.addEventListener('change', (event) => setFilters({ tier: event.target.value }));
     document.getElementById('filterInternal')?.addEventListener('change', (event) => setFilters({ internal: Boolean(event.target.checked) }));
     document.getElementById('filters')?.addEventListener('submit', (event) => event.preventDefault());
+    // One honest reload: every route's loaders re-run, the gate re-verifies,
+    // and stale module state cannot survive the click.
+    document.getElementById('adminRefreshBtn')?.addEventListener('click', () => window.location.reload());
     // No preventDefault. The anchor's own href is #overview (ANALYTICS_ROUTES[0]),
     // and reaching analytics has to work at every viewport width; the disclosure
     // is an enhancement layered on a working link, never the sole affordance.

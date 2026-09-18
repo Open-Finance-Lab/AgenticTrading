@@ -1,4 +1,8 @@
-/** Admin Grant Credits console. Secrets never belong on this surface. */
+/** Admin Grant Credits console. Secrets never belong on this surface.
+ *
+ * Absorbed into /admin (design N2/PR2): reads go through AdminShell.request(),
+ * every mutation through AdminShell.write() — the page's one CSRF-bearing write
+ * path — and access loss through AdminShell.handleAccessLost(). */
 (function () {
   'use strict';
 
@@ -33,14 +37,15 @@
   }
 
   function isAdmin() {
-    return window.getStoredAuthUser && window.getStoredAuthUser()?.role === 'admin';
+    return window.AdminShell?.state?.admin === true;
   }
 
-  function request(path, options = {}) {
-    if (!window.API || typeof window.API.request !== 'function') {
-      return Promise.reject(new Error('Admin API is not ready yet.'));
-    }
-    return window.API.request(path, options);
+  function request(path) {
+    return window.AdminShell.request(path);
+  }
+
+  function write(path, { method, body } = {}) {
+    return window.AdminShell.write(path, { method, body });
   }
 
   function setStatus(message, tone = '') {
@@ -115,11 +120,10 @@
     while (node.firstChild) node.removeChild(node.firstChild);
   }
 
-  function handleAccessLost(error) {
-    if (error?.status !== 401 && error?.status !== 403) return false;
-    setStatus('Admin access is no longer available.', 'error');
-    if (typeof navigateToPage === 'function') navigateToPage('home');
-    return true;
+  async function handleAccessLost(error) {
+    const lost = await window.AdminShell.handleAccessLost(error);
+    if (lost) setStatus('Admin access is no longer available.', 'error');
+    return lost;
   }
 
   function setPoolRingSegment(id, ratio, offset = 0) {
@@ -266,8 +270,8 @@
       const roleCell = document.createElement('td');
       roleCell.className = 'admin-credits-role';
       const role = user.role === 'admin' ? 'admin' : 'user';
-      const currentUser = window.getStoredAuthUser?.();
-      const isSelf = currentUser && Number(currentUser.id) === Number(user.id);
+      const currentUser = window.AdminShell?.state?.user;
+      const isSelf = currentUser && user.email && currentUser.email === user.email;
       if (isSelf) {
         roleCell.appendChild(textNode('span', 'admin-role-locked', `${role} (you)`));
       } else {
@@ -360,7 +364,7 @@
     groupSelect.disabled = true;
     try {
       setStatus(`Updating group for ${subject}…`, 'pending');
-      const data = await request(`/api/admin/users/${Number(user.id)}`, {
+      const data = await write(`/api/admin/users/${Number(user.id)}`, {
         method: 'PATCH',
         body: JSON.stringify({ user_group: nextGroup }),
       });
@@ -384,7 +388,7 @@
       state.usersRequestSeq += 1;
       groupSelect.value = previousGroup;
       setGroupError(groupSelect, error.message || 'Group update failed.');
-      if (!handleAccessLost(error)) setStatus(error.message || 'Group update failed.', 'error');
+      if (!(await handleAccessLost(error))) setStatus(error.message || 'Group update failed.', 'error');
     } finally {
       groupSelect.disabled = false;
     }
@@ -394,11 +398,11 @@
     if (!window.confirm(`Reinstate ${userName(user)} after refund review?`)) return;
     try {
       setStatus('Restoring account access…', 'pending');
-      await request(`/api/admin/credits/accounts/${Number(user.id)}/reinstate`, { method: 'POST' });
+      await write(`/api/admin/credits/accounts/${Number(user.id)}/reinstate`, { method: 'POST' });
       setStatus(`${userName(user)} is active again.`, 'success');
       await refresh();
     } catch (error) {
-      if (!handleAccessLost(error)) setStatus(error.message || 'Account could not be reinstated.', 'error');
+      if (!(await handleAccessLost(error))) setStatus(error.message || 'Account could not be reinstated.', 'error');
     }
   }
 
@@ -491,7 +495,7 @@
     const results = await Promise.allSettled([loadPool(), loadUsers(), loadActivity()]);
     const failed = results.find((result) => result.status === 'rejected');
     if (failed) {
-      if (handleAccessLost(failed.reason)) return;
+      if (await handleAccessLost(failed.reason)) return;
       setStatus(failed.reason?.message || 'Grant Credits data could not be loaded.', 'error');
       return;
     }
@@ -507,7 +511,7 @@
       if (!reason) throw new Error('Reason is required.');
       if (button) button.disabled = true;
       setStatus(`${operation === 'fund' ? 'Funding' : 'Reducing'} Grant Pool…`, 'pending');
-      await request(`/api/admin/credits/grant-pool/${operation}`, {
+      await write(`/api/admin/credits/grant-pool/${operation}`, {
         method: 'POST',
         body: JSON.stringify({
           client_request_id: uuid(),
@@ -520,7 +524,7 @@
       setStatus(`Grant Pool ${operation === 'fund' ? 'funded' : 'reduced'}.`, 'success');
       await refresh();
     } catch (error) {
-      if (!handleAccessLost(error)) setStatus(error.message || 'Grant Pool mutation failed.', 'error');
+      if (!(await handleAccessLost(error))) setStatus(error.message || 'Grant Pool mutation failed.', 'error');
     } finally {
       if (button) button.disabled = false;
     }
@@ -592,7 +596,7 @@
       if (operation === 'reclaim' && !window.confirm(`Reclaim Grant Credits from ${userName(user)}?`)) return;
       amountInput.disabled = true;
       setStatus(`${operation === 'assign' ? 'Assigning' : 'Reclaiming'} Grant Credits…`, 'pending');
-      await request(`/api/admin/credits/grants/${operation}`, {
+      await write(`/api/admin/credits/grants/${operation}`, {
         method: 'POST',
         body: JSON.stringify({
           client_request_id: uuid(),
@@ -606,7 +610,7 @@
       setStatus(`Grant Credits ${operation === 'assign' ? 'assigned' : 'reclaimed'} for ${userName(user)}.`, 'success');
       await refresh();
     } catch (error) {
-      if (!handleAccessLost(error)) setStatus(error.message || 'Grant mutation failed.', 'error');
+      if (!(await handleAccessLost(error))) setStatus(error.message || 'Grant mutation failed.', 'error');
     } finally {
       amountInput.disabled = false;
     }
@@ -628,7 +632,7 @@
     roleSelect.disabled = true;
     try {
       setStatus(`${action}ing ${subject}…`, 'pending');
-      const data = await request(`/api/admin/users/${Number(user.id)}`, {
+      const data = await write(`/api/admin/users/${Number(user.id)}`, {
         method: 'PATCH',
         body: JSON.stringify({ role: nextRole }),
       });
@@ -636,17 +640,9 @@
       user.role = updatedUser.role === 'admin' ? 'admin' : nextRole;
       roleSelect.value = user.role;
       setStatus(`${subject} is now ${user.role}.`, 'success');
-      const currentUser = window.getStoredAuthUser?.();
-      if (currentUser && Number(currentUser.id) === Number(user.id) && typeof applyUpdatedUser === 'function') {
-        applyUpdatedUser({
-          ...currentUser,
-          ...updatedUser,
-          role: user.role,
-        });
-      }
     } catch (error) {
       roleSelect.value = previousRole;
-      if (!handleAccessLost(error)) setStatus(error.message || 'Role update failed.', 'error');
+      if (!(await handleAccessLost(error))) setStatus(error.message || 'Role update failed.', 'error');
     } finally {
       roleSelect.disabled = false;
     }
@@ -660,26 +656,26 @@
     });
     element('adminCreditsUserSearch')?.addEventListener('submit', (event) => {
       event.preventDefault();
-      loadUsers({ offset: 0 }).catch((error) => {
-        if (!handleAccessLost(error)) setStatus(error.message || 'User search failed.', 'error');
+      loadUsers({ offset: 0 }).catch(async (error) => {
+        if (!(await handleAccessLost(error))) setStatus(error.message || 'User search failed.', 'error');
       });
     });
     element('adminCreditsUsersPrevBtn')?.addEventListener('click', () => {
-      loadUsers({ offset: state.usersOffset - state.usersLimit }).catch((error) => {
-        if (!handleAccessLost(error)) setStatus(error.message || 'Previous account page failed.', 'error');
+      loadUsers({ offset: state.usersOffset - state.usersLimit }).catch(async (error) => {
+        if (!(await handleAccessLost(error))) setStatus(error.message || 'Previous account page failed.', 'error');
       });
     });
     element('adminCreditsUsersNextBtn')?.addEventListener('click', () => {
-      loadUsers({ offset: state.usersOffset + state.usersLimit }).catch((error) => {
-        if (!handleAccessLost(error)) setStatus(error.message || 'Next account page failed.', 'error');
+      loadUsers({ offset: state.usersOffset + state.usersLimit }).catch(async (error) => {
+        if (!(await handleAccessLost(error))) setStatus(error.message || 'Next account page failed.', 'error');
       });
     });
     element('adminGrantReasonForm')?.addEventListener('submit', confirmAssignReason);
     element('adminGrantReasonClose')?.addEventListener('click', closeAssignReasonDialog);
     element('adminGrantReasonCancel')?.addEventListener('click', closeAssignReasonDialog);
     element('adminCreditsActivityMoreBtn')?.addEventListener('click', () => {
-      loadActivity({ append: true }).catch((error) => {
-        if (!handleAccessLost(error)) setStatus(error.message || 'Activity could not be loaded.', 'error');
+      loadActivity({ append: true }).catch(async (error) => {
+        if (!(await handleAccessLost(error))) setStatus(error.message || 'Activity could not be loaded.', 'error');
       });
     });
   }
@@ -690,9 +686,8 @@
       state.initialized = true;
       bindEvents();
     }
-    window.AdminTabs?.onEnter();
-    refresh().catch((error) => {
-      if (!handleAccessLost(error)) setStatus(error.message || 'Grant Credits data could not be loaded.', 'error');
+    refresh().catch(async (error) => {
+      if (!(await handleAccessLost(error))) setStatus(error.message || 'Grant Credits data could not be loaded.', 'error');
     });
   }
 
@@ -708,5 +703,20 @@
   window.AdminCredits = { onEnter, syncAuth };
   document.addEventListener('DOMContentLoaded', () => {
     if (document.documentElement.dataset.navPage === 'admin') onEnter();
+  });
+  // Absorbed into /admin (design D5): the shell announces the route; this
+  // module enters on it and honors the #account?user=… hand-off that replaces
+  // the old ?adminUserQuery deep link. On /app the admin:route event never
+  // fires, so the legacy console keeps its DOMContentLoaded entry above.
+  document.addEventListener('admin:route', (event) => {
+    const detail = event.detail || {};
+    if (detail.route !== 'account' && detail.route !== 'activity') return;
+    onEnter();
+    const handoff = detail.query?.user;
+    if (detail.route !== 'account' || !handoff) return;
+    const input = element('adminCreditsUserQuery');
+    const form = element('adminCreditsUserSearch');
+    if (input) input.value = String(handoff).slice(0, 120);
+    form?.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
   });
 })();

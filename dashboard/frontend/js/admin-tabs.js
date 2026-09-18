@@ -49,9 +49,16 @@
       panel.hidden = panel.dataset.adminPanel !== tab;
     });
     if (updateUrl && window.history?.replaceState) {
-      const url = new URL(window.location.href);
-      url.searchParams.set('adminTab', tab);
-      window.history.replaceState(window.history.state, '', url);
+      // Only the admin view owns this param. setTab also runs from init() on
+      // every /app load — including one the role gate bounced to home — and
+      // writing there smeared adminTab=… onto unrelated pages' URLs.
+      const adminView = document.getElementById('adminView');
+      const adminActive = adminView && adminView.style.display !== 'none';
+      if (adminActive) {
+        const url = new URL(window.location.href);
+        url.searchParams.set('adminTab', tab);
+        window.history.replaceState(window.history.state, '', url);
+      }
     }
     document.dispatchEvent(new CustomEvent('admin:tabchange', { detail: { tab } }));
     return tab;

@@ -7,6 +7,8 @@ configures middleware, registers routers, wires startup hooks, and serves the
 frontend. Backend API route bodies live in ``dashboard.backend.api.routers.*``.
 """
 
+from urllib.parse import quote
+
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
@@ -327,8 +329,23 @@ async def serve_root():
 
 
 @app.get("/app", include_in_schema=False)
-async def serve_app():
-    """Serve the main dashboard application."""
+async def serve_app(request: Request):
+    """Serve the main dashboard application.
+
+    The admin console moved to /admin (design D5), so the old ?view=admin deep
+    links hand off to the absorbed section instead of rendering the legacy
+    console. 307 rather than 308: the query string is not preserved verbatim —
+    adminTab becomes a hash route and adminUserQuery becomes the #account
+    ?user= hand-off.
+    """
+    if request.query_params.get("view") == "admin":
+        tab = request.query_params.get("adminTab") or "users"
+        route = {"users": "account", "providers": "providers", "activity": "activity"}.get(tab, "account")
+        target = f"/admin#{route}"
+        user_query = request.query_params.get("adminUserQuery")
+        if user_query:
+            target += f"?user={quote(str(user_query), safe='')}"
+        return RedirectResponse(url=target, status_code=307)
     return FileResponse(frontend_path / "app.html")
 
 
@@ -418,6 +435,12 @@ async def serve_admin():
 async def serve_admin_css():
     """Serve admin.css beside /styles.css (every static file is an explicit route)."""
     return FileResponse(frontend_path / "admin.css", media_type="text/css")
+
+
+@app.get("/admin-console.css", include_in_schema=False)
+async def serve_admin_console_css():
+    """Serve the absorbed old-console component styles (design D5)."""
+    return FileResponse(frontend_path / "admin-console.css", media_type="text/css")
 
 
 @app.get("/admin-analytics", include_in_schema=False)

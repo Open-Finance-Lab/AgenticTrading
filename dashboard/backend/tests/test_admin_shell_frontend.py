@@ -27,16 +27,27 @@ def _eval(expression: str, *setup: str) -> object:
 def test_hash_router_knows_the_analytics_routes_plus_providers_and_the_profile():
     assert _eval("window.AdminShell.ROUTES") == [
         "overview", "sources", "retention", "credits", "lifecycle", "health", "users", "providers",
+        # The absorbed console routes (design N2/PR2).
+        "account", "activity",
     ]
-    assert _eval("window.AdminShell.parseHash('')") == {"route": "overview", "id": None}
-    assert _eval("window.AdminShell.parseHash('#health')") == {"route": "health", "id": None}
-    assert _eval("window.AdminShell.parseHash('#providers')") == {"route": "providers", "id": None}
-    assert _eval("window.AdminShell.parseHash('#users')") == {"route": "users", "id": None}
-    assert _eval("window.AdminShell.parseHash('#users/42')") == {"route": "users", "id": "42"}
-    assert _eval("window.AdminShell.parseHash('#users/abc')") == {"route": "users", "id": None}
+    assert _eval("window.AdminShell.parseHash('')") == {"route": "overview", "id": None, "query": {}}
+    assert _eval("window.AdminShell.parseHash('#health')") == {"route": "health", "id": None, "query": {}}
+    assert _eval("window.AdminShell.parseHash('#providers')") == {"route": "providers", "id": None, "query": {}}
+    assert _eval("window.AdminShell.parseHash('#account')") == {"route": "account", "id": None, "query": {}}
+    assert _eval("window.AdminShell.parseHash('#activity')") == {"route": "activity", "id": None, "query": {}}
+    assert _eval("window.AdminShell.parseHash('#users')") == {"route": "users", "id": None, "query": {}}
+    assert _eval("window.AdminShell.parseHash('#users/42')") == {"route": "users", "id": "42", "query": {}}
+    assert _eval("window.AdminShell.parseHash('#users/abc')") == {"route": "users", "id": None, "query": {}}
+    # The absorbed console routes carry their ?user= hand-off in the hash query
+    # (a plain object: the only consumers read named keys).
+    assert _eval("window.AdminShell.parseHash('#account')") == {"route": "account", "id": None, "query": {}}
+    assert _eval("window.AdminShell.parseHash('#account?user=ada%40example.test')") == {
+        "route": "account", "id": None, "query": {"user": "ada@example.test"},
+    }
+    assert _eval("window.AdminShell.parseHash('#activity')") == {"route": "activity", "id": None, "query": {}}
     # No #live route (design §8.2, D16) and no orphan routes: unknown → overview.
     for unknown in ("#live", "#usage", "#revenue", "#profiles", "#funnel", "#nonsense"):
-        assert _eval(f"window.AdminShell.parseHash('{unknown}')") == {"route": "overview", "id": None}, unknown
+        assert _eval(f"window.AdminShell.parseHash('{unknown}')") == {"route": "overview", "id": None, "query": {}}, unknown
 
 
 def test_providers_lights_its_own_rail_entry_not_analytics():

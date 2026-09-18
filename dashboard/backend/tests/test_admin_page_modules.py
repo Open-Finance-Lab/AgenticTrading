@@ -20,7 +20,11 @@ FRONTEND = Path(__file__).resolve().parents[2] / "frontend"
 # pass. Deleting the verb list and dropping api_key from the prohibited names
 # would have left two tests that run, pass, and protect nothing.
 READ_MODULES = ("admin-shell.js", "admin-live.js", "admin-overview.js", "admin-users.js")
-WRITE_MODULES = {"admin-providers.js": {"PUT", "POST", "DELETE"}}
+WRITE_MODULES = {
+    "admin-providers.js": {"PUT", "POST", "DELETE"},
+    # The absorbed credits console mutates groups, roles, grants and the pool.
+    "admin-credits.js": {"PATCH", "POST"},
+}
 NAMES = READ_MODULES + tuple(WRITE_MODULES)
 MODULES = {name: (FRONTEND / "js" / name).read_text(encoding="utf-8") for name in NAMES}
 # The write-module scans below run on the stripped copy. A write module's header
@@ -37,6 +41,7 @@ GLOBALS = {
     "admin-overview.js": "AdminOverview",
     "admin-users.js": "AdminUsers",
     "admin-providers.js": "AdminProviders",
+    "admin-credits.js": "AdminCredits",
 }
 
 CREDENTIAL = re.compile(r"\w*(?:api_key|secret|credential|token|password)\w*", re.I)
@@ -55,7 +60,7 @@ def test_each_module_is_an_iife_exposing_exactly_one_global():
 
 def test_every_module_admin_html_loads_exists_and_nothing_else_is_loaded():
     srcs = re.findall(r'<script src="js/([^?"]+)\?v=\d+" defer></script>', ADMIN_HTML)
-    assert set(srcs) == set(NAMES) | {"credit-format.js"}
+    assert set(srcs) == set(NAMES) | {"credit-format.js"} | {"admin-ticker.js"}
     for name in srcs:
         assert (FRONTEND / "js" / name).exists(), name
 
@@ -127,6 +132,11 @@ def test_credential_names_in_a_write_module_appear_only_as_request_body_keys():
     for name in WRITE_MODULES:
         code = CODE[name]
         occurrences = [line for line in code.splitlines() if "api_key" in line]
+        if name == "admin-credits.js":
+            # Grants move Credits, never credentials: there is no api_key line
+            # to police, and the prohibition below still applies.
+            assert occurrences == [], (name, occurrences)
+            continue
         assert len(occurrences) == 1, (name, occurrences)
         assert "JSON.stringify(" in occurrences[0], (name, occurrences[0].strip())
         for prohibited in (

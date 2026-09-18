@@ -201,7 +201,9 @@
 
   function accountManagementHref(user) {
     const query = user?.email || (user?.user_id != null ? String(user.user_id) : '');
-    return `/app?view=admin&adminTab=users${query ? `&adminUserQuery=${encodeURIComponent(query)}` : ''}`;
+    // Account management lives on this page since D5; the ?user= hash query is
+    // the hand-off that used to ride to /app as adminUserQuery.
+    return `#account${query ? `?user=${encodeURIComponent(query)}` : ''}`;
   }
 
   function openEvidence(user, opener) {

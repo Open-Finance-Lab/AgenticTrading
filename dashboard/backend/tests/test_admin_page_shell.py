@@ -17,10 +17,14 @@ ADMIN_CSS = (FRONTEND / "admin.css").read_text(encoding="utf-8")
 EXPECTED_SCRIPTS = [
     "js/admin-shell.js?v=5",
     "js/credit-format.js?v=1",
+    # The app chrome's ticker (D5 layout pass) rides after the formatters.
+    "js/admin-ticker.js?v=2",
     "js/admin-live.js?v=1",
     "js/admin-overview.js?v=1",
     "js/admin-users.js?v=1",
     "js/admin-providers.js?v=1",
+    # The absorbed credits console (design N2/PR2).
+    "js/admin-credits.js?v=2",
 ]
 
 # This guard's whole job is "no inline script anywhere in this page", so a
@@ -102,6 +106,8 @@ def test_panel_regions_carry_no_numeric_or_percentage_literal():
     assert names == [
         "live", "attention", "active-users", "activation", "sources", "retention",
         "value", "lifecycle", "credits", "revenue", "detail", "users", "profile", "providers",
+        # The absorbed credits console's two routes (design N2/PR2).
+        "account", "activity",
     ]
     for name, body in regions:
         text = TAG.sub(" ", body)
@@ -191,14 +197,12 @@ def test_subnav_routes_match_the_shell_router_and_the_aside_links_back():
     hrefs = re.findall(r'href="(#[a-z]+)"', ADMIN_HTML[start:end])
     assert hrefs == ["#overview", "#sources", "#retention", "#credits", "#lifecycle", "#health", "#users"]
     assert "#live" not in ADMIN_HTML
-    for href in (
-        "/app?view=admin&amp;adminTab=users",
-        "/app?view=admin&amp;adminTab=activity",
-    ):
-        assert href in ADMIN_HTML, href
-    # Providers is no longer an outbound link; it is a route on this page (§8).
-    assert "adminTab=providers" not in ADMIN_HTML
+    # N2/PR2: no console entry links out any more — Account Management and
+    # Activity joined Providers as routes on this page.
+    assert "adminTab=" not in ADMIN_HTML
+    assert 'data-rail="account" href="#account"' in ADMIN_HTML
     assert 'data-rail="providers" href="#providers"' in ADMIN_HTML
+    assert 'data-rail="activity" href="#activity"' in ADMIN_HTML
 
 
 def test_freshness_legend_replaces_the_sample_notice():
@@ -229,7 +233,12 @@ def test_pruned_css_carries_none_of_the_dead_mock_passes():
 
 RAIL_ICONS = ("icon-chart", "icon-users", "icon-network", "icon-activity")
 HEADER_ICONS = ("icon-github", "icon-discord", "icon-chevron-right")
-SPRITE_ICONS = RAIL_ICONS + ("icon-refresh", "icon-x", "icon-check-circle") + HEADER_ICONS
+SPRITE_ICONS = (
+    RAIL_ICONS
+    + ("icon-refresh", "icon-x", "icon-check-circle")
+    + HEADER_ICONS
+    + ("icon-wallet", "icon-search", "icon-minus")  # absorbed credits console
+)
 
 
 def test_the_rail_is_anchors_with_icons_not_a_tablist():
@@ -241,7 +250,7 @@ def test_the_rail_is_anchors_with_icons_not_a_tablist():
     end = ADMIN_HTML.index("</aside>", start)
     rail = ADMIN_HTML[start:end]
     entries = re.findall(r'<a class="admin-tab[^"]*"[^>]*data-rail="([a-z-]+)"[^>]*>(.*?)</a>', rail, re.S)
-    assert [name for name, _ in entries] == ["analytics", "account-management", "providers", "activity"]
+    assert [name for name, _ in entries] == ["analytics", "account", "providers", "activity"]
     for name, body in entries:
         assert "<use href=\"#icon-" in body, name          # every entry has an icon
         assert re.search(r"<span>[^<]+</span>", body), name  # ...and a text label
@@ -287,8 +296,9 @@ def test_the_account_menu_exists_and_carries_no_identity_text():
     # is how an admin gets *back* here from /app, so it has to read the same on
     # both. Unhidden, unlike /app's, because only admins reach this page at all.
     assert '<a class="account-menu-item" href="/admin">Admin</a>' in menu
-    # The rest of N7 stands: no price-scroll strip.
-    assert "ticker" not in ADMIN_HTML.lower()
+    # N7's no-ticker half is superseded by the 09-18 layout pass: the operator
+    # asked for the app header's strip on this page too (admin-ticker.js).
+    assert 'id="tickerTrack"' in ADMIN_HTML
 
 
 def test_every_styles_css_token_name_used_here_is_also_declared_here():

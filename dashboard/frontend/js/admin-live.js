@@ -42,6 +42,13 @@
     }
     const updated = document.getElementById('liveUpdated');
     if (updated) updated.textContent = `Updated ${s.formatTimestamp(new Date().toISOString())}`;
+    // The Account management section absorbed from the old console (D5) keeps
+    // its [data-stat] strip; same payload, same strict-number rendering as
+    // app.js's loadAdminStats used over there.
+    document.querySelectorAll('[data-stat]').forEach((node) => {
+      const value = stats?.[node.getAttribute('data-stat')];
+      node.textContent = typeof value === 'number' && Number.isFinite(value) ? String(value) : s.DASH;
+    });
   }
 
   async function load() {
@@ -63,7 +70,8 @@
   }
 
   document.addEventListener('admin:route', (event) => {
-    if (event.detail?.route === 'overview') load();
+    const route = event.detail?.route;
+    if (route === 'overview' || route === 'account') load();
   });
   document.addEventListener('admin:retry', (event) => {
     if (event.detail?.panel === 'live') load();
