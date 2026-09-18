@@ -140,9 +140,34 @@ onboarding agents. Pinned by `tests/test_portfolio_scope_sync.py`.
 
 **The panel and the grid legitimately show different counts.** The legend is
 portfolio-wide (a pie that dropped agents would not add up); the grid is
-search-filtered, market-chip-filtered and capped at `AGENT_GRID_PAGE_SIZE` (5)
-per shelf. `describeAgentGridVisibility()` publishes what the grid actually
-painted and `allocationGridNoteHtml()` renders the reconciling line.
+search-filtered, market-chip-filtered and capped at a per-shelf page.
+`describeAgentGridVisibility()` publishes what the grid actually painted and
+`allocationGridNoteHtml()` renders the reconciling line.
+
+**That page cap is not one number — it is measured off the CSS grid.** It used
+to be a flat `AGENT_GRID_PAGE_SIZE = 5`, which counted *items* while
+`repeat(auto-fill, minmax(300px, 1fr))` laid out *tracks*: at 4 columns — the
+band covering 1366/1440/1536 — the fifth card sat alone on a second row, and a
+lone card under a full row reads as "the rest are on the next page" on a page
+that is already complete. `styles.css` now **pins** the columns with a ladder
+(4 → 3 → 2 → 1 at 1280/960/640), `agentGridColumnCount()` reads that count back
+off `getComputedStyle().gridTemplateColumns`, and `agentGridPageSizeFor()`
+sizes the page to whole rows of it — 8/6/8/8 down the ladder, so
+`pageSize % cols === 0` always. Edit a breakpoint and the page size follows;
+**do not mirror the ladder in JS** (`matchMedia` here is a second copy that
+drifts). Two traps the guards in `tests/test_agent_grid_pagination.py` pin:
+
+- **Never add `grid-template-rows` to the agents grid.** "Two rows per page"
+  comes from *implicit* rows, which only materialize for cards that exist —
+  that is what lets a page holding ≤4 agents collapse to exactly one row.
+  Declared tracks hold the second row open and blank on a short page.
+- **A hidden grid cannot be measured**, and `loadAgents()` paints these shelves
+  while the panel is still hidden (`showPlaygroundPanel` does it on the
+  Backtest subtab too). `getComputedStyle` returns the *specified* value there
+  (`"repeat(4, minmax(0, 1fr))"`), not px tracks, so the reader accepts a
+  measurement only when every token is a px length and `renderAgentCards`
+  records the measurement — **not** the fallback — so a hidden paint stays
+  distinguishable and the resize guard can correct it.
 
 Two rules make that line trustworthy, and both are **measured during the render**
 (`renderAgentCategories` → `agentGridVisibilityFrom`), not inferred afterwards:

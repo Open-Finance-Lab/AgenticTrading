@@ -638,7 +638,17 @@ const MOCK_AGENTS = [
 // Holds the most recently loaded agents so the toolbar can re-filter without refetching.
 let allAgents = [];
 let agentViewMode = 'grid';
-const AGENT_GRID_PAGE_SIZE = 5;
+/* Cards per shelf page at the widest layout: 4 columns x 2 rows.
+ *
+ * Not the page size itself -- see agentGridPageSizeFor, which turns this into
+ * a whole number of rows for whatever column count the CSS ladder is actually
+ * on. The old constant WAS the page size (a flat 5) and that is precisely what
+ * produced the widow: it counted items while the grid laid out tracks. */
+const AGENT_GRID_TARGET_PAGE_SIZE = 8;
+
+/* Fallback column count when the grid cannot be measured -- see
+ * agentGridColumnCount. Matches the widest rung of the CSS ladder. */
+const AGENT_GRID_FALLBACK_COLUMNS = 4;
 
 // Legacy runtime -> market, for an uncategorized agent whose runtime already
 // implies one. Every agent cloned before shelving shipped carries
@@ -774,6 +784,13 @@ function shelfIdSuffix(shelfKey) {
 /** Per-shelf page index (0-based), keyed by AGENT_SHELVES' `key`. Reset on search change. */
 let agentGridPage = Object.fromEntries(AGENT_SHELVES.map((shelf) => [shelf.key, 0]));
 
+/** Columns each shelf was last PAINTED at, keyed the same way.
+ *
+ * Only the resize handler reads it, and only to answer "did the ladder
+ * actually step?" -- see setupAgentGridResizeHandler for why the answer has to
+ * be a comparison rather than an unconditional re-render. */
+let agentGridColumns = Object.fromEntries(AGENT_SHELVES.map((shelf) => [shelf.key, 0]));
+
 /** An agent the Capital Allocation legend draws a row for.
  *
  * Mirrors buildAgentAllocationData's `cash_allocation > 0` filter in
@@ -832,12 +849,75 @@ function describeAgentGridVisibility() {
 }
 window.describeAgentGridVisibility = describeAgentGridVisibility;
 
-function agentGridPageCount(total) {
-  return Math.max(1, Math.ceil(total / AGENT_GRID_PAGE_SIZE));
+/** How many cards fit on one page of a grid `columns` wide.
+ *
+ * Whole rows only: `agentGridPageSizeFor(cols) % cols === 0` for every rung of
+ * the ladder, which is the entire point. A page that ends mid-row leaves a
+ * widow card sitting alone under a full row, and a lone card under a gap reads
+ * as "the rest are on the next page" even when the page is full.
+ *
+ *   cols 4 -> 8  (2 rows x 4 -- the shipped desktop layout)
+ *   cols 3 -> 6  (2 rows x 3; 8 here would be 3 + 3 + 2, the widow again)
+ *   cols 2 -> 8  (4 rows x 2)
+ *   cols 1 -> 8  (8 rows x 1)
+ *
+ * The max(2, ...) floor is why the two narrow rungs hold 8 rather than 2 rows'
+ * worth: two rows of one card is not a page, it is a reason to tap "next" four
+ * times. Two rows is the target wherever two rows means something.
+ *
+ * Pure -- no DOM -- so the guards can run it under node. */
+function agentGridPageSizeFor(columns) {
+  const cols = Math.max(1, Math.floor(Number(columns) || 0));
+  return cols * Math.max(2, Math.floor(AGENT_GRID_TARGET_PAGE_SIZE / cols));
 }
 
-function normalizeAgentGridPage(categoryKey, total) {
-  const maxPage = agentGridPageCount(total) - 1;
+/** Columns the CSS ladder is rendering `grid` at, or 0 if it cannot be read.
+ *
+ * Read back off the computed style rather than mirrored from the breakpoints
+ * in JS, so the page size cannot drift out of step with styles.css -- edit a
+ * breakpoint there and this follows. Deliberately not matchMedia for the same
+ * reason: that would be a second copy of the ladder.
+ *
+ * `gridTemplateColumns` resolves to used pixel tracks ("289px 289px ...") only
+ * for a grid that is actually laid out. On a hidden page -- and every shelf is
+ * hidden until you navigate to My Agents -- it returns the SPECIFIED value
+ * instead ("repeat(4, minmax(0, 1fr))"), which naively split on whitespace
+ * counts as 2 tokens and would paginate the whole shelf into pairs. So a
+ * measurement counts only when every token is a px length.
+ *
+ * 0 rather than the fallback, so callers can tell "could not measure" from "is
+ * four columns wide" -- renderAgentCards stores this, and the resize guard
+ * needs the difference. agentGridColumnCount applies the fallback. */
+function agentGridMeasuredColumns(grid) {
+  if (!grid || typeof window === 'undefined' || !window.getComputedStyle) return 0;
+  let template = '';
+  try {
+    template = window.getComputedStyle(grid).gridTemplateColumns || '';
+  } catch (err) {
+    return 0;
+  }
+  const tokens = template.trim().split(/\s+/).filter(Boolean);
+  if (!tokens.length || !tokens.every((token) => /^[\d.]+px$/.test(token))) return 0;
+  return tokens.length;
+}
+
+/** Columns to paginate `grid` at -- the measurement, or the widest rung. */
+function agentGridColumnCount(grid) {
+  return agentGridMeasuredColumns(grid) || AGENT_GRID_FALLBACK_COLUMNS;
+}
+
+/** Cards per page for the shelf drawn into `grid`. */
+function agentGridPageSize(grid) {
+  return agentGridPageSizeFor(agentGridColumnCount(grid));
+}
+
+function agentGridPageCount(total, pageSize) {
+  const size = Math.max(1, Math.floor(Number(pageSize) || 0));
+  return Math.max(1, Math.ceil(total / size));
+}
+
+function normalizeAgentGridPage(categoryKey, total, pageSize) {
+  const maxPage = agentGridPageCount(total, pageSize) - 1;
   const page = agentGridPage[categoryKey] || 0;
   agentGridPage[categoryKey] = Math.min(Math.max(page, 0), maxPage);
   return agentGridPage[categoryKey];
@@ -1556,6 +1636,42 @@ function setAgentViewMode(mode) {
   });
   document.getElementById('agentViewGrid')?.classList.toggle('active', agentViewMode === 'grid');
   document.getElementById('agentViewList')?.classList.toggle('active', agentViewMode === 'list');
+  // List view is a single column (.agents-grid--list), so the class toggle
+  // above changes the page size. Toggling it without repainting left the cards
+  // already on screen paginated for the OTHER view -- 8 stacked full-width
+  // rows, or 4 columns holding one page's worth of a 1-column shelf. Keep the
+  // page index: switching how the shelf is drawn should not scroll you back to
+  // the top of it.
+  applyAgentFilters(false);
+}
+
+let agentGridResizeTimer = null;
+
+/* Repaint the shelves when the CSS ladder steps to a different column count.
+ *
+ * Guarded on the column count CHANGING, not on the resize firing, and that
+ * guard is load-bearing twice over. Dragging a window edge emits a resize
+ * event per frame while the ladder holds at one rung for hundreds of pixels,
+ * so the common case has to cost nothing. And a repaint changes the grid's
+ * own height, which is exactly the kind of thing that can feed back into
+ * another layout pass -- an unconditional re-render here is how you get a
+ * render loop that only reproduces on someone else's machine.
+ *
+ * Mirrors setupTickerResizeHandler's debounce, the only other resize listener
+ * on this page. */
+function setupAgentGridResizeHandler() {
+  window.addEventListener('resize', () => {
+    if (agentGridResizeTimer) clearTimeout(agentGridResizeTimer);
+    agentGridResizeTimer = setTimeout(() => {
+      const stepped = AGENT_SHELVES.some((shelf) => {
+        const grid = document.getElementById(`agentsGrid${shelfIdSuffix(shelf.key)}`);
+        if (!grid || !grid.offsetParent) return false; // hidden page: nothing painted to fix
+        return agentGridColumnCount(grid) !== agentGridColumns[shelf.key];
+      });
+      if (!stepped) return;
+      applyAgentFilters(false);
+    }, 150);
+  });
 }
 
 function isDemoAgent(agentId) {
@@ -1675,7 +1791,14 @@ function bindAgentCardMenus(grid) {
   });
 }
 
-function renderAgentGridFooter(categoryKey, total, page, pageCount) {
+/* The pager label names the RANGE on screen, not the page ordinal.
+ *
+ * "Page 2 of 3" told you where you were in a sequence but nothing about how
+ * much of the shelf you had seen, and the page size now moves with the column
+ * ladder, so the same ordinal covers a different number of agents at different
+ * widths. "Showing 9-16 of 21 agents" is true at every rung and answers the
+ * question the widow bug made people ask -- how many are left. */
+function renderAgentGridFooter(categoryKey, total, page, pageCount, pageSize) {
   const footerId = `agentsGridFooter${shelfIdSuffix(categoryKey)}`;
   const footer = document.getElementById(footerId);
   if (!footer) return;
@@ -1687,19 +1810,33 @@ function renderAgentGridFooter(categoryKey, total, page, pageCount) {
   footer.hidden = false;
   const atStart = page <= 0;
   const atEnd = page >= pageCount - 1;
+  const first = page * pageSize + 1;
+  const last = Math.min(total, (page + 1) * pageSize);
   footer.innerHTML = `
     <button type="button" class="agents-grid-footer-btn agents-grid-footer-btn--nav" data-agent-grid-prev="${categoryKey}" aria-label="Previous page" ${atStart ? 'disabled' : ''}>←</button>
-    <span class="agents-grid-footer-count">Page ${page + 1} of ${pageCount} · ${total} total</span>
+    <span class="agents-grid-footer-count">Showing ${first}–${last} <span class="agents-grid-footer-total">of ${total} agents</span></span>
     <button type="button" class="agents-grid-footer-btn agents-grid-footer-btn--nav" data-agent-grid-next="${categoryKey}" aria-label="Next page" ${atEnd ? 'disabled' : ''}>→</button>`;
 }
 
 function renderAgentCards(grid, agents, categoryKey) {
   grid.innerHTML = '';
   const total = agents.length;
-  const pageCount = agentGridPageCount(total);
-  const page = normalizeAgentGridPage(categoryKey, total);
-  const start = page * AGENT_GRID_PAGE_SIZE;
-  const visibleAgents = agents.slice(start, start + AGENT_GRID_PAGE_SIZE);
+  // Measured per render, per shelf, AFTER the clear -- the tracks are pinned
+  // by the CSS ladder, so they exist whether or not the grid holds cards.
+  const pageSize = agentGridPageSize(grid);
+  // The MEASURED count, not the fallback: loadAgents() paints these shelves
+  // while the panel is still hidden (showPlaygroundPanel does it on the
+  // Backtest subtab too), and a hidden paint has to stay distinguishable from
+  // a real 4-column one. Recording 0 makes the resize guard below treat the
+  // first measurable layout as a step and repaint. The ordinary correction is
+  // simpler -- entering My Agents calls loadAgents(), which re-renders with
+  // the panel visible -- this is the backstop for a shelf that somehow
+  // reaches the screen without one.
+  agentGridColumns[categoryKey] = agentGridMeasuredColumns(grid);
+  const pageCount = agentGridPageCount(total, pageSize);
+  const page = normalizeAgentGridPage(categoryKey, total, pageSize);
+  const start = page * pageSize;
+  const visibleAgents = agents.slice(start, start + pageSize);
 
   const defaultId = getDefaultAgentId();
 
@@ -1752,7 +1889,7 @@ function renderAgentCards(grid, agents, categoryKey) {
 
   bindAgentCardMenus(grid);
 
-  renderAgentGridFooter(categoryKey, total, page, pageCount);
+  renderAgentGridFooter(categoryKey, total, page, pageCount, pageSize);
 
   grid.querySelectorAll('.agent-configure-btn').forEach((btn) => {
     btn.addEventListener('click', () => {
@@ -6224,6 +6361,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     // phase settles, so wiring early cannot reorder the claim invariant. ----
     initNavigation();
     setupTickerResizeHandler();
+    setupAgentGridResizeHandler();
     setupTickerScrollControls();
     populateSupportedModelSelects();
 

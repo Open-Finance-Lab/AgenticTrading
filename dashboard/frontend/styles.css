@@ -8895,20 +8895,33 @@ html[data-nav-page="home"] #homeView .dashboard-bottom-grid .home-module--market
     padding: 8px 14px;
 }
 
+/* The pager label. 13px in --text-secondary (#9ca3af) on --bg-card was the
+ * smallest, lowest-contrast text on the page and the only thing telling you
+ * where you are in the shelf, so it reads as decoration rather than state.
+ * The range itself carries --text-primary; only the "of N agents" tail stays
+ * secondary, so the eye lands on the numbers. min-width holds the longer
+ * "Showing 1-8 of 21 agents" copy without the arrows shifting between pages --
+ * tabular-nums keeps the digits from doing the same within a page. */
 .agents-grid-footer-count {
-    font-size: 13px;
-    color: var(--text-secondary);
+    font-size: 14px;
+    font-weight: 500;
+    color: var(--text-primary);
     font-variant-numeric: tabular-nums;
-    min-width: 140px;
+    min-width: 190px;
     text-align: center;
+}
+
+.agents-grid-footer-count .agents-grid-footer-total {
+    color: var(--text-secondary);
+    font-weight: 400;
 }
 
 .agents-grid-footer-btn {
     border: 1px solid var(--border-color);
     border-radius: 8px;
     background: transparent;
-    color: var(--text-secondary);
-    font-size: 13px;
+    color: var(--text-primary);
+    font-size: 14px;
     font-weight: 600;
     cursor: pointer;
     transition: color 0.15s ease, border-color 0.15s ease, background 0.15s ease;
@@ -8926,8 +8939,10 @@ html[data-nav-page="home"] #homeView .dashboard-bottom-grid .home-module--market
     border-radius: 999px;
 }
 
+/* 0.35 put the glyph and its border under the 3:1 WCAG non-text contrast
+ * floor -- a disabled arrow has to read as "disabled", not as "absent". */
 .agents-grid-footer-btn--nav:disabled {
-    opacity: 0.35;
+    opacity: 0.45;
     cursor: not-allowed;
 }
 
@@ -9159,9 +9174,63 @@ html[data-nav-page="home"] #homeView .dashboard-bottom-grid .home-module--market
 }
 
 /* Status-aware agent cards (PAPER / BACKTESTED / DRAFT) */
+
+/* Pinned column ladder -- the page size in app.js is MEASURED off this.
+ *
+ * This was repeat(auto-fill, minmax(300px, 1fr)), which floated the column
+ * count with the viewport while the page cap counted a fixed 5 ITEMS. Those
+ * are different units, and they disagreed over the widths people actually use:
+ * auto-fill gives 4 columns for any viewport from ~1323px to ~1638px --
+ * 1366, 1440, 1536, 1600 -- and 5 % 4 leaves one card alone on a second row.
+ * A lone card under a full row reads as "the rest are on the next page" on a
+ * page that is already complete. That is the widow this replaces.
+ *
+ * Pinning the tracks makes the column count a number both sides can agree on:
+ * agentGridColumnCount() reads it back off the computed style and
+ * agentGridPageSizeFor() sizes the page to whole rows, so pageSize % cols is
+ * always 0 no matter which rung is active. Edit a breakpoint here and the page
+ * size follows by itself -- do not hardcode the column count in JS.
+ *
+ * The rungs are the stock breakpoints already used in this file, chosen so the
+ * two commonest laptop widths (1280, 1366) both get the full 4x2 layout.
+ * Measured card widths at each rung -- the grid is viewport minus ~75px, being
+ * the scrollbar, .page-view's 12px sides and .agents-category's 18px sides:
+ *   1280 -> 289px    960 -> 284px    640 -> 274px
+ *
+ * Those sit a little under the 300px minmax floor this rule used to carry.
+ * That floor was auto-fill's input, not a content requirement, and honouring
+ * it literally would push the 4-column rung out to ~1330px -- which hands a
+ * 1280 laptop 3 columns and takes away the 4x2 layout on one of the two
+ * screens it most needs to be right on. minmax(0, 1fr) keeps a long agent name
+ * from pushing the track wider instead.
+ *
+ * NEVER add grid-template-rows here. Two rows per page comes from IMPLICIT
+ * rows, which only materialize for cards that exist -- that is what lets a
+ * page holding <= 4 agents collapse to exactly one row's height. Declaring the
+ * tracks up front holds the second row open on a short page, which is the
+ * "giant blank" this layout exists to avoid. Pinned by
+ * tests/test_agent_grid_pagination.py. */
 .agents-section .agents-grid:not(.agents-grid--list) {
-    grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+    grid-template-columns: repeat(4, minmax(0, 1fr));
     gap: 16px;
+}
+
+@media (max-width: 1279px) {
+    .agents-section .agents-grid:not(.agents-grid--list) {
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+    }
+}
+
+@media (max-width: 959px) {
+    .agents-section .agents-grid:not(.agents-grid--list) {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+}
+
+@media (max-width: 639px) {
+    .agents-section .agents-grid:not(.agents-grid--list) {
+        grid-template-columns: minmax(0, 1fr);
+    }
 }
 
 .agents-grid {
