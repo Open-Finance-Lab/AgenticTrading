@@ -50,6 +50,8 @@ from typing import NamedTuple
 
 import pytest
 
+from dashboard.backend.domain.user_groups import DEFAULT_USER_GROUP, USER_GROUPS
+
 # (sqlite module, sqlite class, postgres module, postgres class)
 _TWINS = [
     (
@@ -940,10 +942,33 @@ def test_user_store_twins_explicitly_migrate_user_group():
     assert "user_group" in postgres_schema.migrated["users"]
 
     folded_postgres = re.sub(r"\s+", " ", postgres_source)
+    folded_sqlite = re.sub(r"\s+", " ", sqlite_source)
     assert (
         "ALTER TABLE users ADD COLUMN IF NOT EXISTS user_group "
-        "TEXT NOT NULL DEFAULT 'unknown'"
+        f"TEXT NOT NULL DEFAULT '{DEFAULT_USER_GROUP}'"
     ) in folded_postgres
+
+    # The two statements that make the Python constants the owners of this
+    # column, pinned in both twins. Neither is decoration.
+    #
+    # ADD COLUMN IF NOT EXISTS is skipped entirely once the column exists, so it
+    # can never restate a default -- the deployed catalog keeps whatever the
+    # column was created with, however the line above reads. SET DEFAULT is
+    # where Postgres actually applies it. And a row holding a value
+    # parse_user_group() rejects stays put forever otherwise, because every read
+    # path coerces it out of sight.
+    #
+    # Both are written as plain SQL strings for the same reason the DDL is: this
+    # guard reads source text, and an f-string collapses to nothing it can see.
+    assert (
+        f"ALTER TABLE users ALTER COLUMN user_group SET DEFAULT '{DEFAULT_USER_GROUP}'"
+    ) in folded_postgres
+    repair = (
+        f"UPDATE users SET user_group = '{DEFAULT_USER_GROUP}' "
+        f"WHERE user_group NOT IN ({', '.join(repr(group) for group in USER_GROUPS)})"
+    )
+    assert repair in folded_postgres, repair
+    assert repair in folded_sqlite, repair
 
 
 def test_credits_postgres_migrates_every_column_added_by_sqlite_rebuild():

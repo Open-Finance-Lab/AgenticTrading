@@ -9,6 +9,7 @@ from fastapi.testclient import TestClient
 
 from dashboard.backend import users as users_module
 from dashboard.backend.app import app
+from dashboard.backend.domain.user_groups import DEFAULT_USER_GROUP
 from dashboard.backend.domain.credits.models import GrantPoolSummary
 from dashboard.backend.domain.credits.repository import CreditsStore
 from dashboard.backend.domain.credits.service import CreditsService
@@ -191,7 +192,7 @@ def test_admin_user_search_composes_identity_with_bucket_projection(
             "email": "needle@example.com",
             "display_name": "needle",
             "role": "user",
-            "user_group": "unknown",
+            "user_group": DEFAULT_USER_GROUP,
             "balance": {
                 "grant_committed_micro": 0,
                 "purchased_committed_micro": 0,
