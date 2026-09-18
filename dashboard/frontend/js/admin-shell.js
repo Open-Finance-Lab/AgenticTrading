@@ -2,9 +2,14 @@
 (function () {
   'use strict';
 
-  // Design §7.2: one page, seven routes plus the profile (#users/{id}). There is
-  // deliberately no live-operations route -- the live row has no detail page (§8.2, D16).
-  const ROUTES = ['overview', 'sources', 'retention', 'credits', 'lifecycle', 'health', 'users'];
+  // Design §7.2: seven analytics routes plus the profile (#users/{id}), and --
+  // since the 09-17 consolidation -- Providers alongside them. Split rather than
+  // one list because route() has to ask "is this an analytics route?" to light
+  // the rail's Analytics entry, and a second hand-maintained copy of the seven
+  // is how the two drift. There is deliberately no live-operations route -- the
+  // live row has no detail page (§8.2, D16).
+  const ANALYTICS_ROUTES = ['overview', 'sources', 'retention', 'credits', 'lifecycle', 'health', 'users'];
+  const ROUTES = [...ANALYTICS_ROUTES];
   const DETAIL_ROUTES = ['sources', 'retention', 'credits', 'lifecycle', 'health'];
   // 1D is cut (§8.2): no cross-user source finer than a day exists. 1Y is 180
   // inclusive days because the value routes reject a window wider than
@@ -490,6 +495,59 @@
     route();
   }
 
+  // N1: the rail navigates by hash, so its entries are anchors carrying
+  // aria-current="page" -- not role="tab"/aria-selected, which would tell
+  // assistive technology this is an in-place panel swap when the URL actually
+  // changes and #users/{id} is a real, linkable, back-button-able location.
+  // Removed rather than set to "false": aria-current="false" is a value that is
+  // *present*, and screen readers announce the attribute, not its truthiness.
+  function syncRail(route) {
+    document.querySelectorAll('#adminRail a[data-rail]').forEach((link) => {
+      const target = link.dataset.rail;
+      const active = target === route || (target === 'analytics' && ANALYTICS_ROUTES.includes(route));
+      if (active) link.setAttribute('aria-current', 'page');
+      else link.removeAttribute('aria-current');
+      link.classList.toggle('is-active', active);
+    });
+  }
+
+  function renderAccountMenu() {
+    const wrap = document.getElementById('accountMenuWrap');
+    const account = state.user;
+    if (!wrap || !account) return;
+    const label = account.display_name || account.email || '';
+    const nameNode = document.getElementById('accountMenuName');
+    const emailNode = document.getElementById('accountMenuEmail');
+    const labelNode = document.getElementById('accountLabel');
+    const avatarNode = document.getElementById('accountAvatar');
+    if (nameNode) nameNode.textContent = label;
+    if (emailNode) emailNode.textContent = account.email || '';
+    if (labelNode) labelNode.textContent = label;
+    if (avatarNode) avatarNode.textContent = (label.trim()[0] || '?').toUpperCase();
+    wrap.hidden = false;
+  }
+
+  function setAccountMenuOpen(open) {
+    const menu = document.getElementById('accountMenu');
+    const button = document.getElementById('accountBtn');
+    if (!menu || !button) return;
+    menu.hidden = !open;
+    button.setAttribute('aria-expanded', String(open));
+  }
+
+  async function logout() {
+    try {
+      await write('/api/auth/logout', { method: 'POST' });
+    } catch (_error) {
+      // Deliberately swallowed. The session may already be gone (401), or the
+      // server may be cold (5xx); either way, leaving an admin sitting on a
+      // console they can no longer read is worse than a redirect that turns out
+      // to have been redundant. The cookie is HttpOnly, so there is nothing
+      // this page could clear locally as a consolation.
+    }
+    window.location.assign('/app');
+  }
+
   function route() {
     const parsed = parseHash(window.location.hash);
     if (window.location.hash && parsed.route === 'overview' && window.location.hash !== '#overview') {
@@ -508,6 +566,7 @@
     document.querySelectorAll('#analyticsSubnav a[data-route]').forEach((link) => {
       link.classList.toggle('active', link.dataset.route === parsed.route);
     });
+    syncRail(parsed.route);
     window.scrollTo(0, 0);
     announce();
   }
@@ -568,6 +627,22 @@
       subnav.hidden = !subnav.hidden;
       event.currentTarget.setAttribute('aria-expanded', String(!subnav.hidden));
     });
+    document.getElementById('accountBtn')?.addEventListener('click', (event) => {
+      event.stopPropagation();
+      setAccountMenuOpen(document.getElementById('accountMenu')?.hidden !== false);
+    });
+    document.getElementById('accountMenuLogoutBtn')?.addEventListener('click', () => { logout(); });
+    document.addEventListener('click', (event) => {
+      const wrap = document.getElementById('accountMenuWrap');
+      // `typeof … === 'function'` rather than an optional call: the node DOM stub
+      // has no contains(), and `wrap?.contains?.(t)` returning undefined would
+      // read as "outside" and close a menu the test just opened.
+      if (wrap && typeof wrap.contains === 'function' && wrap.contains(event.target)) return;
+      setAccountMenuOpen(false);
+    });
+    document.addEventListener('keydown', (event) => {
+      if (event.key === 'Escape') setAccountMenuOpen(false);
+    });
     document.querySelectorAll('[data-retry]').forEach((button) => {
       button.addEventListener('click', () => {
         const panel = button.closest('[data-panel]');
@@ -592,6 +667,7 @@
     bindControls();
     const admin = await gate();
     if (!admin) return;
+    renderAccountMenu();
     readUrlIntoState();
     syncControls();
     window.addEventListener('hashchange', handleLocationChange);
@@ -608,6 +684,7 @@
     availabilityIncomplete, fieldPending, freshnessLegendText, rulesEntries, el, clear,
     request, write, user, nextSeq, isCurrent, invalidateAll, handleAccessLost, gate,
     setPanelState, openDialog, closeDialog, openRules, setFilters,
+    syncRail, renderAccountMenu, logout,
   };
   window.AdminShell = api;
   document.addEventListener('DOMContentLoaded', boot);

@@ -47,8 +47,15 @@ def test_rendering_is_text_content_only():
         assert "textContent" in source, name
 
 
-def test_every_request_is_a_credentialed_get_made_by_the_shell():
-    assert set(re.findall(r"method:\s*'(\w+)'", ALL)) == {"GET"}
+def test_every_request_is_a_credentialed_get_except_the_shells_own_write_path():
+    """Every request through request()/gate() is a GET. The one exception is
+    logout() (design §7, the 09-17 nav consolidation), and it does not issue a
+    fetch of its own -- it goes through write(), the shell's single
+    CSRF-bearing write path (N4), which is exactly the seam this test's other
+    assertions exist to keep singular."""
+    assert set(re.findall(r"method:\s*'(\w+)'", ALL)) == {"GET", "POST"}
+    assert ALL.count("method: 'POST'") == 1
+    assert "write('/api/auth/logout', { method: 'POST' })" in MODULES["admin-shell.js"]
     for name, source in MODULES.items():
         if name == "admin-shell.js":
             # request(), gate() and write() -- the third is the page's single
@@ -59,7 +66,7 @@ def test_every_request_is_a_credentialed_get_made_by_the_shell():
         else:
             assert "fetch(" not in source, name
             assert "XMLHttpRequest" not in source, name
-    for verb in ("POST", "PATCH", "PUT", "DELETE"):
+    for verb in ("PATCH", "PUT", "DELETE"):
         assert f"method: '{verb}'" not in ALL
 
 

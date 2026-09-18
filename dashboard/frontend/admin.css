@@ -29,15 +29,9 @@ header{display:flex;align-items:center;justify-content:space-between;gap:20px;mi
 .brand{display:flex;align-items:center;gap:12px;font-size:22px;font-weight:700}
 .brand img{width:48px;height:48px;object-fit:contain}
 .product-nav{display:flex;gap:25px;color:var(--muted)}
-.workspace{display:grid;grid-template-columns:196px minmax(0,1fr);min-height:calc(100vh - 80px)}
-aside{padding:24px 16px;border-right:1px solid var(--line)}
-aside>strong{display:block;margin:0 12px 20px}
-aside a{display:block;margin-bottom:4px;padding:10px 12px;border-radius:6px;color:var(--muted)}
-aside a:hover{background:#101c31}
-.analytics-parent{display:flex;align-items:center;justify-content:space-between;color:var(--accent);background:#132c41}
-.analytics-subnav{margin:0 0 14px 15px;padding-left:8px;border-left:1px solid var(--line)}
-.analytics-subnav a{padding:7px 10px;font-size:12px}
-.analytics-subnav a.active{color:var(--accent);background:#102536}
+.workspace{display:grid;grid-template-columns:224px minmax(0,1fr);min-height:calc(100vh - 80px)}
+aside{padding:24px 14px}
+aside>strong{display:block;margin:0 4px 14px;color:var(--muted);font-size:11px;font-weight:700;letter-spacing:.04em;text-transform:uppercase}
 main{width:100%;max-width:1420px;margin:0 auto;padding:30px 36px 50px}
 .page-head,.section-head,.live-head,.breadcrumb{display:flex;align-items:center;justify-content:space-between;gap:16px}
 .page-head p{margin:0}
@@ -268,7 +262,48 @@ dialog::backdrop{background:rgba(0,0,0,.64)}
 .dialog-actions{display:flex;justify-content:flex-end;gap:14px;margin-top:18px}
 .dialog-actions .module-link{margin-top:0}
 
+/* —— Navigation rail (design §6) ——
+   The application's idiom, retyped against this file's tokens. styles.css's
+   .admin-rail/.admin-tab family is the source; its border/text/surface
+   custom-property names do not exist here (see the token map in CLAUDE.md
+   §4.2), so this is a retype and never a copy. The active bar is
+   var(--accent) because that IS this page's cyan -- styles.css's cyan
+   literal is the same role in the other palette. */
+.admin-rail{position:sticky;top:24px;display:flex;flex-direction:column;gap:5px;margin:0;padding:7px;border:1px solid var(--line);border-radius:12px;background:linear-gradient(180deg,rgba(0,191,255,.055),transparent 42%),var(--surface);box-shadow:0 16px 38px rgba(2,8,23,.2)}
+.admin-tab{position:relative;display:flex;align-items:center;gap:10px;width:100%;min-height:43px;padding:9px 11px;border:0;border-radius:8px;background:transparent;color:var(--muted);font-size:13px;font-weight:600;white-space:nowrap}
+.admin-tab svg{flex:0 0 auto;width:18px;height:18px;fill:none;stroke:currentColor;stroke-width:1.8}
+.admin-tab::before{content:"";position:absolute;inset:9px auto 9px -7px;width:2px;border-radius:999px;background:var(--accent);opacity:0;transform:scaleY(.35);transition:opacity 140ms ease,transform 140ms ease}
+.admin-tab:hover,.admin-tab:focus-visible{color:var(--text);background:rgba(148,163,184,.12)}
+.admin-tab.is-active{color:var(--text);background:rgba(0,191,255,.12);box-shadow:inset 0 0 0 1px rgba(0,191,255,.12)}
+.admin-tab.is-active::before{opacity:1;transform:scaleY(1)}
+.admin-tab-caret{margin-left:auto;font-style:normal;font-size:12px}
+/* The subnav rises from 12px to the rail's 13px (§6) and keeps its indent. */
+.analytics-subnav{margin:2px 0 6px 25px;padding-left:10px;border-left:1px solid var(--line)}
+.analytics-subnav a{display:block;margin-bottom:2px;padding:7px 10px;border-radius:6px;color:var(--muted);font-size:13px}
+.analytics-subnav a:hover{color:var(--text);background:rgba(148,163,184,.12)}
+.analytics-subnav a.active{color:var(--accent);background:rgba(0,191,255,.12)}
+
+/* —— Header account menu (design §7) ——
+   Retyped from styles.css's .account-menu* family. Note what is NOT here:
+   styles.css needs a `.account-menu-item[hidden]{display:none!important}`
+   override because its author `display:block` beats the UA's [hidden] rule.
+   This file has a global `[hidden]{display:none!important}` at :18, which
+   already carries the !important, so the override would be dead weight. */
+.account-menu-wrap{position:relative}
+.account-btn{display:inline-flex;align-items:center;gap:8px;max-width:200px;min-height:38px;padding:6px 12px;border:1px solid var(--line);border-radius:6px;background:var(--surface);color:var(--text);cursor:pointer}
+.account-btn:hover{border-color:var(--accent);color:var(--accent)}
+.account-avatar{display:inline-grid;place-items:center;width:24px;height:24px;flex:0 0 24px;border-radius:50%;background:#153c48;color:var(--accent);font-size:12px;font-weight:700}
+.account-label{overflow:hidden;max-width:118px;font-size:14px;font-weight:600;text-overflow:ellipsis;white-space:nowrap}
+.account-caret{color:var(--muted);font-size:10px}
+.account-menu{position:absolute;top:calc(100% + 6px);right:0;z-index:60;display:flex;flex-direction:column;gap:2px;min-width:220px;padding:6px;border:1px solid var(--line);border-radius:8px;background:var(--surface);box-shadow:0 10px 28px rgba(0,0,0,.35)}
+.account-menu-identity{display:flex;flex-direction:column;gap:2px;margin-bottom:4px;padding:8px 10px;border-bottom:1px solid var(--line)}
+.account-menu-name{color:var(--text);font-size:12px;font-weight:700}
+.account-menu-email{color:var(--muted);font-size:11px;word-break:break-all}
+.account-menu-item{display:block;width:100%;min-height:0;padding:8px 10px;border:0;border-radius:6px;background:transparent;color:var(--text);font-size:12px;font-weight:600;text-align:left;cursor:pointer}
+.account-menu-item:hover{color:var(--text);background:rgba(148,163,184,.12)}
+.account-menu-item--danger,.account-menu-item--danger:hover{color:var(--red)}
+
 /* Responsive (mock lines 26-27, pruned) */
 @media(max-width:1040px){.product-nav{display:none}.filters{grid-template-columns:repeat(2,minmax(0,1fr))}.overview-row.priority-row{grid-template-columns:1fr;gap:0}.metric-strip{grid-template-columns:repeat(2,1fr)}.detail-metric:nth-child(3){padding-left:0;border-left:0;border-top:1px solid var(--line)}.detail-metric:nth-child(4){border-top:1px solid var(--line)}}
-@media(max-width:680px){header{padding:12px 15px}.brand{font-size:17px}.brand img{width:40px;height:40px}.workspace{grid-template-columns:66px minmax(0,1fr)}aside{padding:18px 6px}aside>strong{display:none}aside a{overflow:hidden;padding:10px 7px;font-size:0;text-align:center}aside a::first-letter{font-size:14px}.analytics-parent span{display:none}.analytics-subnav{margin-left:9px;padding-left:3px}main{padding:24px 16px 40px}.page-head{flex-direction:column;align-items:stretch}.page-controls{justify-items:stretch}.page-actions{flex-direction:row;align-items:center;justify-content:space-between}.live-row .live-head{flex-direction:column;align-items:flex-start}.range button{min-width:38px;padding-inline:7px}.filters{grid-template-columns:1fr}.snapshot-grid{grid-template-columns:1fr}.snapshot-tile+.snapshot-tile{border-left:0;border-top:1px solid var(--line)}.source-wrap{grid-template-columns:1fr;justify-items:center;gap:17px}.source-legend-six{width:100%;gap:10px 14px}.attention-note{align-items:flex-start;flex-direction:column;gap:8px}.retention-chart{grid-template-columns:55px repeat(4,1fr);gap:4px}.lifecycle-legend{grid-template-columns:repeat(2,1fr)}.value-step{grid-template-columns:112px 1fr auto;gap:8px}.value-step>span{white-space:normal}.layered-route{min-width:600px;overflow:visible}.credits-paired{min-width:560px}.priority-row:has(.layered-route),.priority-row:has(.credits-paired){overflow-x:auto}.revenue-viz{height:184px}.revenue-viz svg{height:168px}.metric-strip{grid-template-columns:1fr}.detail-metric,.detail-metric:first-child,.detail-metric:nth-child(3){padding:17px 0;border-left:0;border-top:1px solid var(--line)}.milestones{grid-template-columns:repeat(2,1fr)}}
+@media(max-width:680px){header{padding:12px 15px}.brand{font-size:17px}.brand img{width:40px;height:40px}.workspace{grid-template-columns:64px minmax(0,1fr)}aside{padding:18px 6px}aside>strong{display:none}.admin-rail{padding:5px}.admin-tab{justify-content:center;min-height:42px;padding:9px}.admin-tab span,.admin-tab-caret{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap;border:0}.analytics-subnav{display:none}main{padding:24px 16px 40px}.page-head{flex-direction:column;align-items:stretch}.page-controls{justify-items:stretch}.page-actions{flex-direction:row;align-items:center;justify-content:space-between}.live-row .live-head{flex-direction:column;align-items:flex-start}.range button{min-width:38px;padding-inline:7px}.filters{grid-template-columns:1fr}.snapshot-grid{grid-template-columns:1fr}.snapshot-tile+.snapshot-tile{border-left:0;border-top:1px solid var(--line)}.source-wrap{grid-template-columns:1fr;justify-items:center;gap:17px}.source-legend-six{width:100%;gap:10px 14px}.attention-note{align-items:flex-start;flex-direction:column;gap:8px}.retention-chart{grid-template-columns:55px repeat(4,1fr);gap:4px}.lifecycle-legend{grid-template-columns:repeat(2,1fr)}.value-step{grid-template-columns:112px 1fr auto;gap:8px}.value-step>span{white-space:normal}.layered-route{min-width:600px;overflow:visible}.credits-paired{min-width:560px}.priority-row:has(.layered-route),.priority-row:has(.credits-paired){overflow-x:auto}.revenue-viz{height:184px}.revenue-viz svg{height:168px}.metric-strip{grid-template-columns:1fr}.detail-metric,.detail-metric:first-child,.detail-metric:nth-child(3){padding:17px 0;border-left:0;border-top:1px solid var(--line)}.milestones{grid-template-columns:repeat(2,1fr)}}
 @media(prefers-reduced-motion:reduce){.module-link:after{transition:none}}

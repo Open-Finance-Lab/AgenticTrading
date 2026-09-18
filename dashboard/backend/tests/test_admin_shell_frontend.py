@@ -403,3 +403,94 @@ def test_losing_access_drops_the_retained_user():
         "})()"
     )
     assert result == {"user": None, "nav": [["replace", "/app"]]}
+
+
+def test_the_account_menu_renders_only_after_the_gate_resolves():
+    result = _eval(
+        "(async () => {"
+        "  const wrap = register('accountMenuWrap', new Node('div'));"
+        "  const name = register('accountMenuName', new Node('span'));"
+        "  const email = register('accountMenuEmail', new Node('span'));"
+        "  const label = register('accountLabel', new Node('span'));"
+        "  const avatar = register('accountAvatar', new Node('span'));"
+        "  wrap.hidden = true;"
+        "  const before = wrap.hidden;"
+        "  fetchQueue.push({ok: true, status: 200, body: {user: {role: 'admin',"
+        "    display_name: 'Ada Admin', email: 'ada@example.test'}}});"
+        "  await window.AdminShell.gate();"
+        "  window.AdminShell.renderAccountMenu();"
+        "  return {before, after: wrap.hidden, name: name.textContent, email: email.textContent,"
+        "          label: label.textContent, avatar: avatar.textContent};"
+        "})()"
+    )
+    assert result == {
+        "before": True, "after": False,
+        "name": "Ada Admin", "email": "ada@example.test",
+        "label": "Ada Admin", "avatar": "A",
+    }
+
+
+def test_an_account_with_no_display_name_falls_back_to_the_email():
+    result = _eval(
+        "(async () => {"
+        "  register('accountMenuWrap', new Node('div'));"
+        "  const name = register('accountMenuName', new Node('span'));"
+        "  const avatar = register('accountAvatar', new Node('span'));"
+        "  fetchQueue.push({ok: true, status: 200, body: {user: {role: 'admin', email: 'bo@example.test'}}});"
+        "  await window.AdminShell.gate();"
+        "  window.AdminShell.renderAccountMenu();"
+        "  return {name: name.textContent, avatar: avatar.textContent};"
+        "})()"
+    )
+    assert result == {"name": "bo@example.test", "avatar": "B"}
+
+
+def test_logout_writes_then_leaves_and_leaves_even_when_the_write_fails():
+    """A failed logout still leaves the page: the session may already be gone,
+    and stranding an admin on a console they can no longer read is worse than a
+    redirect that turns out to be redundant."""
+    ok = _eval(
+        "(async () => {"
+        "  fetchQueue.push({ok: true, status: 204, body: null});"
+        "  await window.AdminShell.logout();"
+        "  return {method: fetchCalls[0][1].method, url: fetchCalls[0][0], nav};"
+        "})()",
+        "globalThis.document.cookie = 'atl_csrf=t';",
+    )
+    assert ok == {"method": "POST", "url": "/api/auth/logout", "nav": [["assign", "/app"]]}
+    failed = _eval(
+        "(async () => {"
+        "  fetchQueue.push({ok: false, status: 500, body: {detail: 'boom'}});"
+        "  await window.AdminShell.logout();"
+        "  return nav;"
+        "})()",
+        "globalThis.document.cookie = 'atl_csrf=t';",
+    )
+    assert failed == [["assign", "/app"]]
+
+
+def test_the_rail_marks_the_active_entry_with_aria_current_not_aria_selected():
+    """N1. Every analytics route lights the one Analytics entry; a sibling route
+    lights its own. aria-current is removed rather than set to "false", which is
+    a value assistive technology treats as present."""
+    result = _eval(
+        "(() => {"
+        "  const made = {};"
+        "  const entries = ['analytics', 'account-management', 'providers', 'activity'].map((rail) => {"
+        "    const a = new Node('a'); a.dataset.rail = rail; made[rail] = a; return a;"
+        "  });"
+        "  document.querySelectorAll = (selector) => (selector.includes('data-rail') ? entries : []);"
+        "  const seen = {};"
+        "  ['overview', 'users', 'health'].forEach((route) => {"
+        "    window.location.hash = '#' + route;"
+        "    window.AdminShell.syncRail(route);"
+        "    seen[route] = Object.fromEntries(entries.map((a) => [a.dataset.rail,"
+        "      [a.getAttribute('aria-current'), a.classList.contains('is-active')]]));"
+        "  });"
+        "  return seen;"
+        "})()"
+    )
+    for route in ("overview", "users", "health"):
+        assert result[route]["analytics"] == ["page", True], route
+        for other in ("account-management", "providers", "activity"):
+            assert result[route][other] == [None, False], (route, other)
