@@ -4305,6 +4305,45 @@ async function _handleAdminAccessLost() {
   if (currentPage === 'admin') navigateToPage('home');
 }
 
+// The mirror image of _handleAdminAccessLost: the cached role says not-admin,
+// but the cache is only a snapshot of the last login. An account promoted
+// after its last sign-in — or a session whose cookie outlived the cache —
+// still passes /api/auth/me, which is exactly how the standalone /admin
+// console (admin-shell.js gates on the server) links here for Account
+// management, Providers and Activity. Ask the server once; if it says admin,
+// heal the cache and take the navigation this gate just bounced.
+let _adminAccessVerifyInFlight = false;
+async function _reverifyAdminAccess(options = {}) {
+  if (_adminAccessVerifyInFlight) return;
+  _adminAccessVerifyInFlight = true;
+  try {
+    const data = await AuthAPI.me();
+    const user = data && data.user;
+    if (user && user.role === 'admin') {
+      applyUpdatedUser(user);
+      // Only retry when the healed cache actually reads back as admin — a
+      // browser whose localStorage writes fail would otherwise re-enter the
+      // bounce path and loop this verification forever.
+      if (getStoredAuthUser()?.role === 'admin' && !userHasNavigated) {
+        navigateToPage('admin', options);
+        // The provisional home bounce scrubbed the admin view's query params
+        // (buildNavigationUrl drops adminTab elsewhere); restore the
+        // deep-linked subpage the way AdminTabs.onEnter would have applied it.
+        if (options.adminTab && window.AdminTabs) window.AdminTabs.setTab(options.adminTab);
+        if (options.adminUserQuery && window.AdminTabs?.openAccountManagement) {
+          window.AdminTabs.openAccountManagement({ email: options.adminUserQuery });
+        }
+      }
+    }
+    // Not admin or 401: the provisional home view this bounce already
+    // rendered is the right destination.
+  } catch (_error) {
+    clearAuthState();
+  } finally {
+    _adminAccessVerifyInFlight = false;
+  }
+}
+
 // Monotonic ticket for loadAdminUsers: pager clicks can overlap, responses
 // land in any order, and only the newest request may own the table —
 // otherwise a slow page 1 arriving late repaints over page 2 while the pager
@@ -10386,6 +10425,11 @@ function buildNavigationUrl(state) {
     const params = new URLSearchParams(window.location.search);
     params.set('view', viewParamForNavState(state));
     params.delete('mode');
+    // adminTab is the admin console's subpage key; leaving it in place on
+    // every later navigation made a bounced ?view=admin deep link smear
+    // "adminTab=users" across unrelated URLs (/app?view=home&adminTab=users).
+    // AdminTabs owns that param and rewrites it on the admin view itself.
+    if (state.page !== 'admin') params.delete('adminTab');
     const clean = params.toString();
     return `${window.location.pathname}${clean ? `?${clean}` : ''}${window.location.hash}`;
 }
@@ -10734,7 +10778,23 @@ function navigateToPage(page, options = {}) {
     // by the APIs' 403 via _handleAdminAccessLost.
     if (page === 'admin') {
         const authUser = getStoredAuthUser();
-        if (!authUser || authUser.role !== 'admin') page = 'home';
+        if (!authUser || authUser.role !== 'admin') {
+            // A missing/stale cache is not the verdict — the cookie session
+            // may still be admin (promoted after last sign-in, or the cache
+            // was wiped while the session survived). The standalone /admin
+            // console links here off a server-verified session, so bouncing
+            // purely on the cache severs those links. Keep the instant home
+            // fallback — guests must not stare at empty console chrome behind
+            // a slow /me — but re-check with the server and honor its answer.
+            const adminParams = new URLSearchParams(window.location.search);
+            _reverifyAdminAccess({
+                ...options,
+                history: 'replace',
+                adminTab: adminParams.get('adminTab'),
+                adminUserQuery: adminParams.get('adminUserQuery'),
+            });
+            page = 'home';
+        }
     }
 
     const historyMode = options.history || 'push';
