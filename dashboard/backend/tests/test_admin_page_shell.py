@@ -231,8 +231,11 @@ def test_pruned_css_carries_none_of_the_dead_mock_passes():
 RAIL_ICONS = ("icon-chart", "icon-users", "icon-network", "icon-activity")
 HEADER_ICONS = ("icon-github", "icon-discord", "icon-chevron-right")
 # The ported Account Management view: #icon-wallet on the Grant Pool form heading,
-# #icon-search on the account search submit.
-CREDITS_ICONS = ("icon-wallet", "icon-search")
+# #icon-search on the account search submit, and #icon-minus -- which only
+# admin-credits.js:318 references, by injecting it into each Reclaim button. The
+# sprite test scans <use> literals in the HTML, so a runtime-only reference is
+# invisible to it and must be named here or it ships as a blank box.
+CREDITS_ICONS = ("icon-wallet", "icon-search", "icon-minus")
 SPRITE_ICONS = (
     RAIL_ICONS + ("icon-refresh", "icon-x", "icon-check-circle") + HEADER_ICONS + CREDITS_ICONS
 )

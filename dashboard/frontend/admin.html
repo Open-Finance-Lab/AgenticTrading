@@ -38,6 +38,10 @@
     <symbol id="icon-github" viewBox="0 0 24 24" fill="currentColor"><path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0 0 24 12c0-6.63-5.37-12-12-12z"/></symbol>
     <symbol id="icon-chevron-right" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="m9 18 6-6-6-6"/></symbol>
     <symbol id="icon-wallet" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M20 7V5a2 2 0 0 0-2-2H5a3 3 0 0 0 0 6h15v10a2 2 0 0 1-2 2H5a3 3 0 0 1-3-3V6"/><path d="M16 13h4"/></symbol>
+    <!-- Referenced only from admin-credits.js:318 (appendIcon on the Reclaim
+         button), never from a <use> in this file, so the sprite test's scan of
+         HTML <use> literals cannot see it. Named in CREDITS_ICONS instead. -->
+    <symbol id="icon-minus" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14"/></symbol>
     <symbol id="icon-search" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></symbol>
   </svg>
   <!-- Header. A retyped copy of app.html's universal top bar, not a variant of
@@ -331,10 +335,16 @@
            (dead -- it is `hidden` in app.html with nothing anywhere unhiding it).
            Element IDs are unchanged from app.html so admin-credits.js binds to
            them without a rename; none of them collided with anything here. -->
+      <!-- Outside BOTH views, as it was outside both tab panels in app.html.
+           admin-credits.js raises status here from the Activity route too (the
+           failing "Load more", handleAccessLost, refresh) -- nested inside
+           #accountManagementView those writes land in a hidden subtree and the
+           live region never announces, so a failure on Activity would be
+           silent. Empty at rest, so it renders nothing on the other routes. -->
+      <p id="adminCreditsStatus" class="credits-status admin-credits-status" role="status" aria-live="polite"></p>
       <section id="accountManagementView" class="detail-view" data-panel="account-management" hidden aria-labelledby="accountManagementTitle">
         <div class="page-head"><div><h1 id="accountManagementTitle" tabindex="-1">Account Management</h1><p class="muted">Fund the platform pool, allocate Grant Credits, and manage account roles</p></div><span class="credits-admin-badge">Admin only</span></div>
-        <p id="adminCreditsStatus" class="credits-status admin-credits-status" role="status" aria-live="polite"></p>
-        <section id="adminCreditsSection" class="admin-credits-console" aria-labelledby="adminCreditsHeading">
+        <div id="adminCreditsSection" class="admin-credits-console">
           <div class="admin-credits-heading">
             <div>
               <p class="credits-section-kicker">Credits administration</p>
@@ -392,7 +402,7 @@
               </form>
             </div>
           </div>
-        </section>
+        </div>
         <div class="admin-credits-users">
           <div class="admin-credits-subheading">
             <!-- "Accounts", not app.html's "Account Management": that view had no
@@ -413,7 +423,7 @@
             </table>
           </div>
           <div class="admin-credits-pager" aria-label="Account pages">
-            <span id="adminCreditsUsersRange" class="admin-credits-pager-range" aria-live="polite">Showing 0 of 0</span>
+            <span id="adminCreditsUsersRange" class="admin-credits-pager-range" aria-live="polite">Showing — of —</span>
             <div class="admin-credits-pager-buttons">
               <button id="adminCreditsUsersPrevBtn" class="auth-btn auth-btn-secondary" type="button" disabled>Previous</button>
               <button id="adminCreditsUsersNextBtn" class="auth-btn auth-btn-secondary" type="button" disabled>Next</button>
