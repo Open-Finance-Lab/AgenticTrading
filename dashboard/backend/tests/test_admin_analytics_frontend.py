@@ -159,6 +159,7 @@ def test_app_lifecycle_and_cache_versions_are_wired():
         'src="js/admin-live.js?v=1"',
         'src="js/admin-overview.js?v=1"',
         'src="js/admin-users.js?v=1"',
+        'src="js/admin-providers.js?v=1"',
     ):
         assert tag in ADMIN_HTML, tag
 

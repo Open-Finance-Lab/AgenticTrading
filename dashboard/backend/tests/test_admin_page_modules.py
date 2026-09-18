@@ -10,19 +10,39 @@ badge, and none of the D15 display fields read.
 import re
 from pathlib import Path
 
-from dashboard.backend.tests._frontend_source import fn_body
+from dashboard.backend.tests._frontend_source import fn_body, strip_comments
 
 FRONTEND = Path(__file__).resolve().parents[2] / "frontend"
-NAMES = ("admin-shell.js", "admin-live.js", "admin-overview.js", "admin-users.js")
+# Design N3: the read-only property is kept and its subject is narrowed. The
+# analytics modules stay pinned GET-only and free of credential field names.
+# Write modules are enumerated by name with their EXACT permitted verb set --
+# exact, not a subset, so adding a verb is a test failure rather than a silent
+# pass. Deleting the verb list and dropping api_key from the prohibited names
+# would have left two tests that run, pass, and protect nothing.
+READ_MODULES = ("admin-shell.js", "admin-live.js", "admin-overview.js", "admin-users.js")
+WRITE_MODULES = {"admin-providers.js": {"PUT", "POST", "DELETE"}}
+NAMES = READ_MODULES + tuple(WRITE_MODULES)
 MODULES = {name: (FRONTEND / "js" / name).read_text(encoding="utf-8") for name in NAMES}
-ALL = "\n".join(MODULES.values())
+# The write-module scans below run on the stripped copy. A write module's header
+# explains the rules it obeys, and every one of those sentences names a
+# credential -- `strip_comments` is what keeps the guard asserting about the
+# code rather than about the prose describing the code.
+CODE = {name: strip_comments(source) for name, source in MODULES.items()}
+READS = {name: MODULES[name] for name in READ_MODULES}
+ALL = "\n".join(READS.values())
 ADMIN_HTML = (FRONTEND / "admin.html").read_text(encoding="utf-8")
 GLOBALS = {
     "admin-shell.js": "AdminShell",
     "admin-live.js": "AdminLive",
     "admin-overview.js": "AdminOverview",
     "admin-users.js": "AdminUsers",
+    "admin-providers.js": "AdminProviders",
 }
+
+CREDENTIAL = re.compile(r"\w*(?:api_key|secret|credential|token|password)\w*", re.I)
+SINK_ASSIGN = re.compile(r"\.(?:textContent|innerHTML|value)\s*=\s*(?P<rhs>[^;]+);")
+SINK_CALL = re.compile(r"\.(?:setAttribute|append|appendChild|replaceChildren|createTextNode)\s*\(")
+EMPTY_RHS = {"''", '""', "``"}
 
 
 def test_each_module_is_an_iife_exposing_exactly_one_global():
@@ -52,11 +72,17 @@ def test_every_request_is_a_credentialed_get_except_the_shells_own_write_path():
     logout() (design §7, the 09-17 nav consolidation), and it does not issue a
     fetch of its own -- it goes through write(), the shell's single
     CSRF-bearing write path (N4), which is exactly the seam this test's other
-    assertions exist to keep singular."""
+    assertions exist to keep singular.
+
+    Rescoped to READS (design N3): admin-providers.js is this page's first real
+    write module and asserts its own exact verb set below
+    (test_write_modules_declare_their_exact_verbs). Folding it into ALL here
+    would blur "read module" back into "any module on the page", which is
+    exactly the property this rescope exists to keep narrow rather than widen."""
     assert set(re.findall(r"method:\s*'(\w+)'", ALL)) == {"GET", "POST"}
     assert ALL.count("method: 'POST'") == 1
     assert "write('/api/auth/logout', { method: 'POST' })" in MODULES["admin-shell.js"]
-    for name, source in MODULES.items():
+    for name, source in READS.items():
         if name == "admin-shell.js":
             # request(), gate() and write() -- the third is the page's single
             # write path (N4) and is deliberately a separate named function so
@@ -66,8 +92,64 @@ def test_every_request_is_a_credentialed_get_except_the_shells_own_write_path():
         else:
             assert "fetch(" not in source, name
             assert "XMLHttpRequest" not in source, name
+            # A read module that reaches for the write path is a read module no
+            # longer, and nothing else in this file would notice.
+            assert "AdminShell.write" not in source, name
+            assert "shell().write" not in source, name
     for verb in ("PATCH", "PUT", "DELETE"):
         assert f"method: '{verb}'" not in ALL
+
+
+def test_only_the_shell_owns_fetch():
+    for name, code in CODE.items():
+        if name == "admin-shell.js":
+            continue
+        assert "fetch(" not in code, name
+        assert "XMLHttpRequest" not in code, name
+    # request() stays GET-hardcoded and gains no options bag (N4). The exact
+    # signature, not just the name: `request(path, options = {})` would satisfy
+    # a substring check while being precisely the change N4 forbids.
+    assert "async function request(path) {" in CODE["admin-shell.js"]
+    assert "method: 'GET'" in CODE["admin-shell.js"]
+
+
+def test_write_modules_declare_their_exact_verbs():
+    """Exact, not a subset: a module that grows a verb has grown a capability,
+    and the point of enumerating them is that the growth is visible here."""
+    for name, permitted in WRITE_MODULES.items():
+        code = CODE[name]
+        found = set(re.findall(r"method:\s*'(\w+)'", code))
+        assert found == permitted, (name, found, permitted)
+        assert "AdminShell" in code or "shell()" in code, name
+
+
+def test_credential_names_in_a_write_module_appear_only_as_request_body_keys():
+    for name in WRITE_MODULES:
+        code = CODE[name]
+        occurrences = [line for line in code.splitlines() if "api_key" in line]
+        assert len(occurrences) == 1, (name, occurrences)
+        assert "JSON.stringify(" in occurrences[0], (name, occurrences[0].strip())
+        for prohibited in (
+            "session_id", "network_hash", "provider_response_body",
+            "credential_ciphertext", "prompt", "strategy", "portfolio", "raw_user_agent",
+        ):
+            assert prohibited not in code, (name, prohibited)
+        assert "localStorage" not in code, name
+        assert "sessionStorage" not in code, name
+
+
+def test_no_credential_field_reaches_a_dom_sink():
+    """The pin a write surface needs and a read surface never did. A line may
+    name a credential, or it may write to the DOM; not both. Clearing a field
+    (`= ''`) is exempt -- that is the control, not the leak."""
+    for name in WRITE_MODULES:
+        for number, line in enumerate(CODE[name].splitlines(), start=1):
+            if not CREDENTIAL.search(line):
+                continue
+            assigned = SINK_ASSIGN.search(line)
+            if assigned:
+                assert assigned.group("rhs").strip() in EMPTY_RHS, (name, number, line.strip())
+            assert not SINK_CALL.search(line), (name, number, line.strip())
 
 
 def test_the_write_path_carries_the_csrf_double_submit_header():
