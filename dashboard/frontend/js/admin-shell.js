@@ -733,6 +733,38 @@
       subnav.hidden = atDestination ? !subnav.hidden : false;
       event.currentTarget.setAttribute('aria-expanded', String(!subnav.hidden));
     });
+    // A rail or subnav click on the route already showing is a navigation that
+    // goes nowhere: the hash does not move, so no hashchange fires and route()
+    // -- whose last act is scrollTo(0, 0) -- never runs. While the view ids
+    // still collided with the route names the browser scrolled anyway, to the
+    // wrong place, and that was the reported bug; suffixing the ids removed the
+    // scroll and with it the only thing this click did at all. The rail is
+    // position:static (admin.css), so it is the operator's obvious "back to the
+    // top" affordance once the page has moved, and every *other* rail entry
+    // does land them there via route(). This makes the two agree instead of
+    // leaving one entry inert. Delegated rather than bound per anchor because
+    // it must keep working if the rail is ever re-rendered.
+    document.addEventListener('click', (event) => {
+      if (event.defaultPrevented || event.button || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+      // `typeof … === 'function'` rather than an optional call, for the same
+      // reason as the account-menu handler below: the node DOM stub has no
+      // closest(), and `target?.closest?.(sel)` returning undefined would read
+      // as "no rail link" and silently skip the assertion a test just set up.
+      const target = event.target;
+      if (!target || typeof target.closest !== 'function') return;
+      const link = target.closest('#adminRail a[data-rail], #analyticsSubnav a[data-route]');
+      // #analyticsParent is deliberately exempt: standing on its own
+      // destination its click already means the disclosure above, not a
+      // navigation, and a disclosure toggle that also jumped the page would be
+      // the surprise this handler exists to remove.
+      if (!link || link.id === 'analyticsParent') return;
+      // The whole hash, not the parsed route: on #users/42 the Users entry's
+      // #users *is* a real navigation, and so is #account from
+      // #account?user=…. Only a byte-identical hash is the no-op meant here,
+      // and in exactly that case route() is guaranteed not to run.
+      if (link.getAttribute('href') !== window.location.hash) return;
+      window.scrollTo(0, 0);
+    });
     document.getElementById('authAccountBtn')?.addEventListener('click', (event) => {
       event.stopPropagation();
       setAccountMenuOpen(document.getElementById('accountMenu')?.hidden !== false);
@@ -801,7 +833,10 @@
     availabilityIncomplete, fieldPending, freshnessLegendText, rulesEntries, el, clear,
     request, write, user, nextSeq, isCurrent, invalidateAll, handleAccessLost, gate,
     setPanelState, openDialog, closeDialog, openRules, setFilters,
-    syncRail, renderAccountMenu, logout,
+    // Exported for the node harness only: boot() is the sole caller in the
+    // browser, and the listeners it registers are the one part of this module
+    // no exported pure function can reach.
+    syncRail, renderAccountMenu, logout, bindControls,
   };
   window.AdminShell = api;
   document.addEventListener('DOMContentLoaded', boot);

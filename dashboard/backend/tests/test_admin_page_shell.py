@@ -10,12 +10,14 @@ numeric or percentage literal inside any panel region (placeholders are "--").
 import re
 from pathlib import Path
 
+from dashboard.backend.tests._frontend_source import strip_comments
+
 FRONTEND = Path(__file__).resolve().parents[2] / "frontend"
 ADMIN_HTML = (FRONTEND / "admin.html").read_text(encoding="utf-8")
 ADMIN_CSS = (FRONTEND / "admin.css").read_text(encoding="utf-8")
 
 EXPECTED_SCRIPTS = [
-    "js/admin-shell.js?v=6",
+    "js/admin-shell.js?v=7",
     "js/credit-format.js?v=1",
     # The app chrome's ticker (D5 layout pass) rides after the formatters.
     "js/admin-ticker.js?v=2",
@@ -83,7 +85,7 @@ def test_the_inline_script_guard_sees_tags_html_allows():
 def test_gate_module_loads_first_and_every_script_is_pinned():
     srcs = re.findall(r'<script src="([^"]+)" defer></script>', ADMIN_HTML)
     assert srcs == EXPECTED_SCRIPTS
-    assert srcs[0] == "js/admin-shell.js?v=6"
+    assert srcs[0] == "js/admin-shell.js?v=7"
     for src in srcs:
         assert "?v=" in src, src
 
@@ -383,20 +385,19 @@ def test_route_names_never_collide_with_element_ids():
     `<section id="providers">` were the two ids that matched a route name.
 
     Suffixing those ids (`overviewView`, `providersView`) is what keeps the two
-    namespaces disjoint. This pins the property rather than the two names, so a
-    route added later cannot silently re-open it.
+    namespaces disjoint. This pins the property rather than the two names: both
+    sides are resolved from the source the browser actually runs -- the routes
+    out of `ROUTES` itself, spreads followed (`_shell_routes`), the ids out of
+    admin.html *and* the modules that mint their own (`_reachable_element_ids`)
+    -- so a route or an id added later cannot silently re-open it.
     """
     shell_js = (FRONTEND / "js" / "admin-shell.js").read_text(encoding="utf-8")
-    routes = set()
-    for const in ("ANALYTICS_ROUTES", "CONSOLE_ROUTES"):
-        match = re.search(rf"const {const} = \[(.*?)\];", shell_js, re.S)
-        assert match, const
-        routes |= set(re.findall(r"'([^']+)'", match.group(1)))
+    routes = _shell_routes(shell_js)
     # Guards the guard: if the constants are ever renamed this must fail loudly
     # rather than compare an empty set against everything and pass.
     assert {"overview", "providers", "users", "account", "activity"} <= routes, routes
 
-    element_ids = set(re.findall(r'\bid="([A-Za-z0-9_-]+)"', ADMIN_HTML))
+    element_ids, id_prefixes = _reachable_element_ids()
     assert element_ids, "no ids parsed from admin.html"
 
     collisions = sorted(routes & element_ids)
@@ -404,3 +405,73 @@ def test_route_names_never_collide_with_element_ids():
         "these route names are also element ids, so clicking their rail link "
         f"scrolls the page instead of only switching views: {collisions}"
     )
+    # An id a module builds as `prefix-${x}` can equal a route only if that
+    # route starts with the static prefix, so that is the exact test -- and it
+    # needs no special case for an id assembled entirely from an expression,
+    # since every route starts with "".
+    reachable = sorted(
+        f"{prefix}${{…}} can render as {route!r}"
+        for prefix in id_prefixes
+        for route in routes
+        if route.startswith(prefix)
+    )
+    assert reachable == [], (
+        "a module builds an element id that can collide with a route name: "
+        f"{reachable}"
+    )
+
+
+def _array_literal(source: str, name: str) -> str:
+    """The body of `const <name> = [ … ];` in `source`."""
+    match = re.search(rf"const {re.escape(name)} = \[(.*?)\];", source, re.S)
+    assert match, f"{name} is not a `const … = [ … ];` array in admin-shell.js"
+    return match.group(1)
+
+
+def _shell_routes(shell_js: str) -> set[str]:
+    """Every route `parseHash` accepts, resolved out of `ROUTES` itself.
+
+    Reading `ANALYTICS_ROUTES` and `CONSOLE_ROUTES` by name -- which is what the
+    first version of this guard did -- under-approximates by construction.
+    `parseHash` validates against `ROUTES`, which *spreads* those two, so a third
+    list spread in beside them (`const ROUTES = [...ANALYTICS_ROUTES,
+    ...CONSOLE_ROUTES, ...BILLING_ROUTES];`) is real routes this guard would
+    never see: `<section id="billing">` next to `href="#billing"` would reopen
+    the scroll bug with the suite green. The `<=` sentinel above does not catch
+    that -- it catches a *rename* of a scanned constant, not an addition beside
+    it. Following the spreads instead picks the new list up the day it lands.
+    """
+    body = _array_literal(shell_js, "ROUTES")
+    routes = set(re.findall(r"'([^']+)'", body))
+    for const in re.findall(r"\.\.\.([A-Za-z_$][\w$]*)", body):
+        routes |= set(re.findall(r"'([^']+)'", _array_literal(shell_js, const)))
+    # Whatever is left once the quoted literals and the resolved spreads are
+    # removed is a route source this parser cannot follow -- a bare identifier,
+    # a call. Fail loudly rather than hand back a set quietly missing it, which
+    # is the same silent under-approximation this helper exists to end.
+    residue = re.sub(
+        r"\.\.\.[A-Za-z_$][\w$]*|'[^']*'|[\s,]", "", strip_comments(body)
+    )
+    assert residue == "", f"ROUTES holds something this guard cannot resolve: {residue!r}"
+    return routes
+
+
+def _reachable_element_ids() -> tuple[set[str], set[str]]:
+    """Ids the live /admin DOM can carry: `(exact, dynamic prefixes)`.
+
+    admin.html alone is an under-approximation for the same reason as above: the
+    hazard is any id in the *rendered* document, and the modules mint ids of
+    their own (`profileSection-…`, `admin-credits-group-error-…`). None of them
+    collides today; nothing pinned that until this read them.
+    """
+    exact = set(re.findall(r'\bid="([A-Za-z0-9_-]+)"', ADMIN_HTML))
+    prefixes: set[str] = set()
+    for path in sorted((FRONTEND / "js").glob("admin-*.js")):
+        source = strip_comments(path.read_text(encoding="utf-8"))
+        for quoted in re.findall(r"\.id = ('[^']*'|\"[^\"]*\"|`[^`]*`)", source):
+            literal = quoted[1:-1]
+            if quoted[0] == "`" and "${" in literal:
+                prefixes.add(literal.split("${", 1)[0])
+            else:
+                exact.add(literal)
+    return exact, prefixes
