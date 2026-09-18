@@ -51,13 +51,26 @@ def test_every_request_is_a_credentialed_get_made_by_the_shell():
     assert set(re.findall(r"method:\s*'(\w+)'", ALL)) == {"GET"}
     for name, source in MODULES.items():
         if name == "admin-shell.js":
-            assert source.count("fetch(") == 2  # request() and gate()
+            # request(), gate() and write() -- the third is the page's single
+            # write path (N4) and is deliberately a separate named function so
+            # this file can tell readers from writers by grep.
+            assert source.count("fetch(") == 3
             assert "credentials: 'include'" in source
         else:
             assert "fetch(" not in source, name
             assert "XMLHttpRequest" not in source, name
     for verb in ("POST", "PATCH", "PUT", "DELETE"):
         assert f"method: '{verb}'" not in ALL
+
+
+def test_the_write_path_carries_the_csrf_double_submit_header():
+    """CsrfMiddleware 403s an unsafe method that carries a session cookie without
+    a matching X-CSRF-Token. A fetch-stubbed behaviour test cannot see that, so
+    the header is pinned in source too."""
+    shell = MODULES["admin-shell.js"]
+    assert "X-CSRF-Token" in shell
+    assert "__Host-atl_csrf" in shell and "'atl_csrf'" in shell
+    assert "document.cookie" in shell
 
 
 def test_exact_endpoints_and_query_names():
@@ -99,7 +112,7 @@ def test_group_badge_is_never_computed_client_side():
         for forbidden in ("role === 'admin'", "=== 'unpaid'", "'paid'", "'free'", "user_group ===", "!== 'unknown'"):
             assert forbidden not in source, (name, forbidden)
     # The shell's gate is the one place `role` is compared, and only against 'admin' for the redirect.
-    assert MODULES["admin-shell.js"].count("user.role !== 'admin'") == 1
+    assert MODULES["admin-shell.js"].count("account.role !== 'admin'") == 1
 
 
 def test_d15_display_fields_are_not_read():

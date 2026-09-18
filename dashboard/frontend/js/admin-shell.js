@@ -52,6 +52,7 @@
     range: '1W',
     filters: { group: '', segment: '', tier: '', internal: false, q: '', priority: false },
     admin: false,
+    user: null,
     seq: {},
   };
   const returnFocus = new Map();
@@ -275,6 +276,58 @@
     return response.json();
   }
 
+  // The /app copy of this is app.js's readCsrfToken(); /admin is a separate
+  // document with no access to it, so the two are deliberate twins rather than
+  // a shared helper -- linking them would mean importing app.js, which is the
+  // 15,000-line inheritance this page exists to avoid. Both cookie names because
+  // cookie_secure() picks __Host-atl_csrf in prod and atl_csrf in dev
+  // (backend/csrf.py:51-52); reading one name works in exactly one environment.
+  // `document.cookie || ''` is load-bearing, not defensive noise: the node test
+  // stub has no cookie property at all.
+  function readCsrfToken() {
+    try {
+      const raw = document.cookie || '';
+      for (const name of ['atl_csrf', '__Host-atl_csrf']) {
+        const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        const match = raw.match(new RegExp(`(?:^|; )${escaped}=([^;]*)`));
+        if (match) return decodeURIComponent(match[1]);
+      }
+    } catch (_error) { /* a document with no cookie access is a no-token document */ }
+    return null;
+  }
+
+  // The page's ONE write path (design N4). Deliberately a second, differently
+  // named function rather than an options bag on request(): "does this module
+  // write?" has to stay answerable by grep, because that is exactly what
+  // test_admin_page_modules.py asserts over the module set. An options bag would
+  // make the two indistinguishable in source and leave the guard asserting
+  // nothing.
+  //
+  // CsrfMiddleware requires the double-submit header on every unsafe method that
+  // carries a session cookie, and /api/auth/logout is not exempt, so a write
+  // without this header is a 403 in production that no fetch-stubbed test can
+  // see. The header is omitted rather than sent empty when there is no cookie:
+  // an empty token claims one we do not have.
+  async function write(path, { method, body } = {}) {
+    const token = readCsrfToken();
+    const headers = { Accept: 'application/json', 'Content-Type': 'application/json' };
+    if (token) headers['X-CSRF-Token'] = token;
+    const init = { method, credentials: 'include', headers };
+    if (body !== undefined) init.body = body;
+    const response = await fetch(path, init);
+    if (!response.ok) {
+      const payload = await response.json().catch(() => null);
+      const detail = payload?.detail || payload?.error;
+      const error = new Error(
+        typeof detail === 'string' ? detail : `Request failed with status ${response.status}`,
+      );
+      error.status = response.status;
+      throw error;
+    }
+    if (response.status === 204) return null;
+    return response.json().catch(() => null);
+  }
+
   function nextSeq(surface) {
     state.seq[surface] = (state.seq[surface] || 0) + 1;
     return state.seq[surface];
@@ -299,6 +352,7 @@
     if (error?.status !== 401 && error?.status !== 403) return false;
     invalidateAll();
     state.admin = false;
+    state.user = null;
     window.location.replace('/app');
     return true;
   }
@@ -312,17 +366,29 @@
     try {
       const response = await fetch('/api/auth/me', { method: 'GET', credentials: 'include', headers: { Accept: 'application/json' } });
       const body = response.ok ? await response.json() : null;
-      const user = body && body.user;
-      if (!user || user.role !== 'admin') {
+      const account = body && body.user;
+      if (!account || account.role !== 'admin') {
+        state.user = null;
         window.location.replace('/app');
         return false;
       }
       state.admin = true;
+      // N8: kept, not discarded. The account menu needs the display name and
+      // the email, and this request has already been paid for -- the next reader
+      // should not add a second /api/auth/me for the same two strings. Only
+      // these two fields are retained: nothing on this page renders a role or
+      // an id, and a wider copy is a wider thing to leak into a DOM sink.
+      state.user = { display_name: account.display_name || '', email: account.email || '' };
       return true;
     } catch (_error) {
+      state.user = null;
       window.location.replace('/app');
       return false;
     }
+  }
+
+  function user() {
+    return state.user;
   }
 
   function setPanelState(panel, { busy = false, status = '', error = '', stale = false, empty = false } = {}) {
@@ -540,7 +606,7 @@
     parseHash, rangeDates, readUrlState, buildSearch, analyticsParams, userListParams,
     formatNumber, formatPercent, formatCredits, usdFromMicro, formatDateOnly, formatLastIncludedDay, formatShortDay, formatTimestamp, humanize,
     availabilityIncomplete, fieldPending, freshnessLegendText, rulesEntries, el, clear,
-    request, nextSeq, isCurrent, invalidateAll, handleAccessLost, gate,
+    request, write, user, nextSeq, isCurrent, invalidateAll, handleAccessLost, gate,
     setPanelState, openDialog, closeDialog, openRules, setFilters,
   };
   window.AdminShell = api;

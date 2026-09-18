@@ -293,3 +293,113 @@ def test_dialogs_return_focus_to_the_opener():
         "})()"
     )
     assert result == {"opened": True, "closed": True, "returned": True}
+
+
+def test_write_sends_the_verb_the_body_and_the_csrf_double_submit_header():
+    """The /app copy of this lives in app.js's csrfHeaders(); /admin cannot reach it,
+    so the shell carries its own reader. Without the header CsrfMiddleware answers 403
+    to every provider write and to logout -- and a fetch stub would never notice."""
+    result = _eval(
+        "(async () => {"
+        "  fetchQueue.push({ok: true, status: 200, body: {saved: true}});"
+        "  const saved = await window.AdminShell.write('/api/admin/model-providers/x', "
+        "    {method: 'PUT', body: JSON.stringify({display_name: 'X'})});"
+        "  const [url, options] = fetchCalls[0];"
+        "  return {saved, url, method: options.method, credentials: options.credentials,"
+        "          csrf: options.headers['X-CSRF-Token'], type: options.headers['Content-Type'],"
+        "          body: options.body};"
+        "})()",
+        "globalThis.document.cookie = 'other=1; atl_csrf=tok%20en; more=2';",
+    )
+    assert result == {
+        "saved": {"saved": True},
+        "url": "/api/admin/model-providers/x",
+        "method": "PUT",
+        "credentials": "include",
+        "csrf": "tok en",
+        "type": "application/json",
+        "body": '{"display_name":"X"}',
+    }
+
+
+def test_write_reads_the_host_prefixed_csrf_cookie_production_sets():
+    """cookie_secure() picks __Host-atl_csrf in prod and atl_csrf in dev
+    (backend/csrf.py:51-52). Reading only one name works in exactly one of them."""
+    result = _eval(
+        "(async () => {"
+        "  fetchQueue.push({ok: true, status: 204, body: null});"
+        "  const body = await window.AdminShell.write('/api/auth/logout', {method: 'POST'});"
+        "  return {body, csrf: fetchCalls[0][1].headers['X-CSRF-Token'], sent: 'body' in fetchCalls[0][1]};"
+        "})()",
+        "globalThis.document.cookie = '__Host-atl_csrf=prodtoken';",
+    )
+    assert result == {"body": None, "csrf": "prodtoken", "sent": False}
+
+
+def test_write_without_a_csrf_cookie_omits_the_header_rather_than_sending_empty():
+    """An empty header is not the same request as no header: csrf_tokens_match()
+    rejects both, but only the absent one lets the middleware fall through to the
+    cookie-less agent lane it was written for. Sending '' claims a token we lack."""
+    result = _eval(
+        "(async () => {"
+        "  fetchQueue.push({ok: true, status: 200, body: {}});"
+        "  await window.AdminShell.write('/api/admin/x', {method: 'POST', body: '{}'});"
+        "  return {present: 'X-CSRF-Token' in fetchCalls[0][1].headers};"
+        "})()",
+        "globalThis.document.cookie = '';",
+    )
+    assert result == {"present": False}
+
+
+def test_write_throws_the_servers_detail_with_its_status():
+    result = _eval(
+        "(async () => {"
+        "  fetchQueue.push({ok: false, status: 403, body: {detail: 'CSRF token missing or invalid'}});"
+        "  try { await window.AdminShell.write('/api/admin/x', {method: 'DELETE', body: '{}'}); }"
+        "  catch (error) { return {message: error.message, status: error.status}; }"
+        "  return 'did not throw';"
+        "})()",
+        "globalThis.document.cookie = 'atl_csrf=t';",
+    )
+    assert result == {"message": "CSRF token missing or invalid", "status": 403}
+
+
+def test_gate_retains_the_user_it_already_fetched():
+    """N8: the account menu needs the display name and email, and the page has
+    already paid for /api/auth/me. A second call for the same body is the thing
+    this pin exists to stop."""
+    granted = _eval(
+        "(async () => {"
+        "  fetchQueue.push({ok: true, status: 200, body: {user: {role: 'admin',"
+        "    display_name: 'Ada Admin', email: 'ada@example.test'}}});"
+        "  const admin = await window.AdminShell.gate();"
+        "  return {admin, user: window.AdminShell.user(), calls: fetchCalls.length};"
+        "})()"
+    )
+    assert granted == {
+        "admin": True,
+        "user": {"display_name": "Ada Admin", "email": "ada@example.test"},
+        "calls": 1,
+    }
+    refused = _eval(
+        "(async () => {"
+        "  fetchQueue.push({ok: true, status: 200, body: {user: {role: 'user', email: 'bo@example.test'}}});"
+        "  await window.AdminShell.gate();"
+        "  return window.AdminShell.user();"
+        "})()"
+    )
+    assert refused is None
+
+
+def test_losing_access_drops_the_retained_user():
+    """handleAccessLost redirects, but a redirect is not instantaneous: anything
+    that reads user() in the same tick must not still see the identity."""
+    result = _eval(
+        "(async () => {"
+        "  fetchQueue.push({ok: true, status: 200, body: {user: {role: 'admin', display_name: 'A', email: 'a@x.test'}}});"
+        "  await window.AdminShell.gate();"
+        "  await window.AdminShell.handleAccessLost({status: 401});"
+        "  return {user: window.AdminShell.user(), nav};"
+        "})()"
+    )
+    assert result == {"user": None, "nav": [["replace", "/app"]]}
