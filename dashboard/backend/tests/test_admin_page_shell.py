@@ -26,7 +26,7 @@ EXPECTED_SCRIPTS = [
     "js/admin-users.js?v=1",
     "js/admin-providers.js?v=1",
     # The absorbed credits console (design N2/PR2).
-    "js/admin-credits.js?v=2",
+    "js/admin-credits.js?v=3",
 ]
 
 # This guard's whole job is "no inline script anywhere in this page", so a
@@ -364,6 +364,73 @@ def test_the_flat_text_list_rules_are_gone():
     assert "aside a:hover{" not in ADMIN_CSS
     assert "aside a::first-letter" not in ADMIN_CSS
     assert ".analytics-parent{" not in ADMIN_CSS
+
+
+# Tags whose implicit ARIA role is strong enough to carry an accessible name.
+# Anything else needs an explicit role= before `aria-labelledby` means anything.
+_ROLE_BEARING_TAGS = frozenset(
+    {"section", "nav", "main", "aside", "form", "dialog", "table", "fieldset", "figure"}
+)
+# Case-insensitive, and the tag is lowercased before the set lookup, for the same
+# reason SCRIPT_TAG above is: this guard proves a *negative*, so a spelling of a
+# tag it cannot see is a hole rather than a style nit. HTML tag names are
+# case-insensitive, so `<DIV aria-labelledby=…>` is the same defect and must not
+# read as clean merely because this page happens to be written in lowercase.
+_LABELLED_TAG = re.compile(r"<([A-Za-z]+)([^>]*)>")
+
+
+def test_every_aria_labelledby_node_can_actually_carry_the_name():
+    """`aria-labelledby` is inert on a generic element.
+
+    A <div> has no implicit role, so a screen reader exposes neither a region
+    nor the name the attribute points at: the markup reads as labelled and
+    announces as nothing. That is what the Grant Pool block became when its
+    <section> was demoted to a <div> to stop a nested </section> truncating
+    PANEL_REGION -- the truncation fix was right, but it took the landmark with
+    it. role="group" keeps both.
+    """
+    offenders = []
+    for tag, attrs in _LABELLED_TAG.findall(ADMIN_HTML):
+        if "aria-labelledby=" not in attrs.lower():
+            continue
+        if tag.lower() in _ROLE_BEARING_TAGS or "role=" in attrs.lower():
+            continue
+        label = re.search(r'aria-labelledby="([^"]*)"', attrs, re.I)
+        offenders.append(f"<{tag}> labelled by {label.group(1) if label else '?'}")
+    assert offenders == []
+
+
+def test_the_aria_labelledby_guard_sees_tags_html_allows():
+    """Companion to test_the_inline_script_guard_sees_tags_html_allows, and there
+    for the same reason: the guard above can only report what its pattern
+    matches, and admin.html is uniformly lowercase, so nothing in this file would
+    notice if the pattern stopped seeing a legal spelling."""
+    def offenders(markup: str) -> list[str]:
+        found = []
+        for tag, attrs in _LABELLED_TAG.findall(markup):
+            if "aria-labelledby=" not in attrs.lower():
+                continue
+            if tag.lower() in _ROLE_BEARING_TAGS or "role=" in attrs.lower():
+                continue
+            found.append(tag)
+        return found
+
+    for markup in (
+        '<div aria-labelledby="h">',
+        '<DIV ARIA-LABELLEDBY="h">',
+        '<div\n  aria-labelledby="h">',
+        '<span class="x" aria-labelledby="h" hidden>',
+    ):
+        assert offenders(markup), markup
+    for markup in (
+        '<section aria-labelledby="h">',
+        '<SECTION aria-labelledby="h">',
+        '<div role="group" aria-labelledby="h">',
+        '<div ROLE="group" aria-labelledby="h">',
+        '<div aria-label="h">',
+        "<div>",
+    ):
+        assert not offenders(markup), markup
 
 
 def test_route_names_never_collide_with_element_ids():

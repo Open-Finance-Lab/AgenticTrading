@@ -9,10 +9,7 @@ this branch added — the credits console's two routes, the hand-off query, the
 ticker, and the redirects.
 """
 
-import re
 from pathlib import Path
-
-import pytest
 
 from dashboard.backend.tests._admin_dom_stub import requires_node, run_node, source
 
@@ -100,3 +97,53 @@ def test_profile_deep_link_handoff_spells_one_contract():
     assert "?user=${encodeURIComponent(query)}" in users_js
     assert 'id="evidenceAccount"' in ADMIN_HTML and 'href="#account"' in ADMIN_HTML
     assert "query?.user" in source("admin-credits.js")
+
+
+def _status_after(scenario: str) -> object:
+    """Load admin-credits.js over a registered status node, then run `scenario`.
+
+    The module is an IIFE that only registers listeners at load, so nothing
+    touches window.AdminShell until a handler runs -- which is why a route the
+    module ignores needs no shell stub.
+    """
+    return run_node(
+        # admin-credits.js destructures window.CreditFormat at load, so the
+        # formatter has to precede it here exactly as it does in the page.
+        source("credit-format.js"),
+        source("admin-credits.js"),
+        "const status = register('adminCreditsStatus', new Node('p'));",
+        # The class list the page actually ships (admin.html / app.html).
+        "status.className = 'credits-status admin-credits-status';",
+        "status.textContent = 'Grant Pool funded.';",
+        scenario,
+        "console.log(JSON.stringify({ text: status.textContent,"
+        " classes: status.className.split(' ').filter(Boolean).sort() }));",
+    )
+
+
+def test_status_line_is_cleared_when_the_shell_routes_away():
+    """#adminCreditsStatus lives outside both absorbed sections, because the two
+    of them share it (Account search/pagination and Activity load both write it).
+
+    Outside means no view can hide it: on /app the enclosing #adminView was
+    display:none, so a message died with the view. Here only the module can
+    retire its own message, and the route event is the only signal it gets.
+    Without this, "Grant Pool funded." stays painted at the top of <main> on
+    Overview, Providers and Activity -- attached to nothing on screen, and
+    announced by aria-live as current.
+    """
+    result = _status_after(
+        "document.dispatchEvent(new CustomEvent('admin:route',"
+        " { detail: { route: 'overview', query: {} } }));"
+    )
+    assert result["text"] == ""
+
+
+def test_status_writes_keep_the_layout_class_the_markup_ships():
+    """setStatus assigns className outright, so every write re-states the whole
+    list. The markup ships two classes and only `credits-status` was being
+    re-stated, which dropped `.admin-credits-status`'s margin on the first
+    write -- on /admin (admin.css) and /app (styles.css) alike.
+    """
+    result = _status_after("window.AdminCredits.syncAuth({ role: 'user' });")
+    assert result["classes"] == ["admin-credits-status", "credits-status"]

@@ -21,7 +21,7 @@
   <script src="js/admin-overview.js?v=1" defer></script>
   <script src="js/admin-users.js?v=1" defer></script>
   <script src="js/admin-providers.js?v=1" defer></script>
-  <script src="js/admin-credits.js?v=2" defer></script>
+  <script src="js/admin-credits.js?v=3" defer></script>
 </head>
 <body>
   <!-- Icon sprite (design §6). Markup, not script, so the no-inline-script
@@ -355,7 +355,10 @@
             <div class="admin-stat"><span class="admin-stat-value" data-stat="agents">—</span><span class="admin-stat-label">Agents</span></div>
             <div class="admin-stat"><span class="admin-stat-value" data-stat="active_dashboard_backtests">—</span><span class="admin-stat-label">Running backtests</span></div>
         </div>
-            <div id="adminCreditsSection" class="admin-credits-console" aria-labelledby="adminCreditsHeading">
+            <!-- A <div> rather than a <section> so PANEL_REGION's scan is not truncated by a
+                 nested </section>; role="group" is what keeps aria-labelledby meaningful here,
+                 since a bare <div> exposes no role for the name to attach to. -->
+            <div id="adminCreditsSection" class="admin-credits-console" role="group" aria-labelledby="adminCreditsHeading">
             <div class="admin-credits-heading">
                 <div>
                     <p class="credits-section-kicker">Credits administration</p>
