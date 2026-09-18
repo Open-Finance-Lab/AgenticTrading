@@ -5,26 +5,64 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>ATL Admin</title>
   <link rel="icon" href="favicon.svg">
-  <link rel="stylesheet" href="admin.css?v=1">
+  <link rel="stylesheet" href="admin.css?v=3">
   <!-- No inline scripts (design D6): pytest can only execute frontend code it
        can lift from an external file. admin-shell.js loads first because it
        owns the /api/auth/me gate and the router the other modules listen to;
-       all five are deferred, so they run in this order before DOMContentLoaded. -->
-  <script src="js/admin-shell.js?v=1" defer></script>
+       all six are deferred, so they run in this order before DOMContentLoaded. -->
+  <script src="js/admin-shell.js?v=4" defer></script>
   <script src="js/credit-format.js?v=1" defer></script>
   <script src="js/admin-live.js?v=1" defer></script>
   <script src="js/admin-overview.js?v=1" defer></script>
   <script src="js/admin-users.js?v=1" defer></script>
+  <script src="js/admin-providers.js?v=1" defer></script>
 </head>
 <body>
+  <!-- Icon sprite (design §6). Markup, not script, so the no-inline-script
+       guard (D6) is unaffected. Seven symbols, not the five the design named:
+       the ported providers panel also references #icon-check-circle on both
+       submit buttons and #icon-x on the revoke action, and a <use> with no
+       matching <symbol> renders an empty box without raising. -->
+  <svg xmlns="http://www.w3.org/2000/svg" style="position:absolute;width:0;height:0;overflow:hidden" aria-hidden="true">
+    <symbol id="icon-chart" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3v18h18"/><path d="m19 9-5 5-4-4-3 3"/></symbol>
+    <symbol id="icon-users" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></symbol>
+    <symbol id="icon-network" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><rect x="16" y="16" width="6" height="6" rx="1"/><rect x="2" y="16" width="6" height="6" rx="1"/><rect x="9" y="2" width="6" height="6" rx="1"/><path d="M5 16v-3a1 1 0 0 1 1-1h12a1 1 0 0 1 1 1v3"/><path d="M12 12V8"/></symbol>
+    <symbol id="icon-activity" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M22 12h-2.48a2 2 0 0 0-1.93 1.46l-2.35 8.36a.25.25 0 0 1-.48 0L9.24 2.18a.25.25 0 0 0-.48 0l-2.35 8.36A2 2 0 0 1 4.49 12H2"/></symbol>
+    <symbol id="icon-refresh" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M20 11a8.1 8.1 0 0 0-15.5-2M4 4v5h5"/><path d="M4 13a8.1 8.1 0 0 0 15.5 2M20 20v-5h-5"/></symbol>
+    <symbol id="icon-x" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></symbol>
+    <symbol id="icon-check-circle" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></symbol>
+  </svg>
   <header>
     <a class="brand" href="#overview"><img src="images/atltransparent.png" alt="ATL">Agentic Trading Lab</a>
     <nav class="product-nav" aria-label="Product"><a href="/app">Home</a><a href="/app?view=playground&amp;playgroundTab=agents">My Agents</a><a href="/app?view=competition">Competition</a><a href="/app?view=community">Community</a></nav>
+    <!-- Design §7. Hidden until gate() resolves: before that the page knows no
+         identity, and a placeholder name is a different account's name for the
+         duration of the probe. No Admin item and no price-scroll strip (N7). -->
+    <div id="accountMenuWrap" class="account-menu-wrap" hidden>
+      <button id="accountBtn" class="account-btn" type="button" aria-haspopup="true" aria-expanded="false" aria-label="Account menu">
+        <span id="accountAvatar" class="account-avatar" aria-hidden="true"></span>
+        <span id="accountLabel" class="account-label"></span>
+        <span class="account-caret" aria-hidden="true">▾</span>
+      </button>
+      <div id="accountMenu" class="account-menu" hidden>
+        <div class="account-menu-identity">
+          <span id="accountMenuName" class="account-menu-name"></span>
+          <span id="accountMenuEmail" class="account-menu-email"></span>
+        </div>
+        <a class="account-menu-item" href="/app?view=account">Account</a>
+        <a class="account-menu-item" href="/app?view=credits">Credits &amp; Billing</a>
+        <button id="accountMenuLogoutBtn" class="account-menu-item account-menu-item--danger" type="button">Log out</button>
+        <!-- Only rendered when the logout POST failed and the session is
+             therefore still live. role=alert because the operator is about to
+             walk away believing the opposite. -->
+        <p id="accountMenuLogoutError" class="account-menu-error" role="alert" hidden></p>
+      </div>
+    </div>
   </header>
   <div class="workspace">
-    <aside>
+    <aside id="adminRail" class="admin-rail" aria-label="Administration">
       <strong>Administration</strong>
-      <a class="analytics-parent" id="analyticsParent" href="#overview" aria-expanded="true">Analytics <span aria-hidden="true">⌄</span></a>
+      <a class="admin-tab analytics-parent" id="analyticsParent" data-rail="analytics" href="#overview" aria-expanded="true"><svg aria-hidden="true"><use href="#icon-chart"/></svg><span>Analytics</span><i class="admin-tab-caret" aria-hidden="true">⌄</i></a>
       <nav class="analytics-subnav" id="analyticsSubnav" aria-label="Analytics modules">
         <a class="active" href="#overview" data-route="overview">Overview</a>
         <a href="#sources" data-route="sources">User sources</a>
@@ -34,11 +72,11 @@
         <a href="#health" data-route="health">System health</a>
         <a href="#users" data-route="users">Users</a>
       </nav>
-      <!-- Account management, Providers and Activity stay in the old console
-           until the follow-up port (design D5, §7.5). -->
-      <a href="/app?view=admin&amp;adminTab=users">Account management</a>
-      <a href="/app?view=admin&amp;adminTab=providers">Providers</a>
-      <a href="/app?view=admin&amp;adminTab=activity">Activity</a>
+      <!-- Account Management and Activity stay in the old console until PR2
+           (design N2: they are one 712-line module and port together). -->
+      <a class="admin-tab" data-rail="account-management" href="/app?view=admin&amp;adminTab=users"><svg aria-hidden="true"><use href="#icon-users"/></svg><span>Account Management</span></a>
+      <a class="admin-tab" data-rail="providers" href="#providers"><svg aria-hidden="true"><use href="#icon-network"/></svg><span>Providers</span></a>
+      <a class="admin-tab" data-rail="activity" href="/app?view=admin&amp;adminTab=activity"><svg aria-hidden="true"><use href="#icon-activity"/></svg><span>Activity</span></a>
     </aside>
     <main>
       <!-- Page-level controls, deliberately outside #overview. route() hides that
@@ -180,6 +218,40 @@
       </section>
 
       <section id="profile" class="detail-view" data-panel="profile" hidden aria-live="polite"></section>
+
+      <section id="providers" class="detail-view" data-panel="providers" hidden aria-labelledby="providersTitle">
+        <div class="page-head"><div><h1 id="providersTitle" tabindex="-1">Providers</h1><p class="muted">The approved model-provider registry and the platform credential</p></div><span class="credits-admin-badge">Admin only</span></div>
+        <div class="admin-provider-grid">
+          <div class="admin-provider-list-wrap">
+            <div class="admin-provider-list-head">
+              <span class="credits-section-kicker">Approved registry</span>
+              <button id="adminProviderRefreshBtn" class="credits-icon-btn" type="button" aria-label="Refresh providers" title="Refresh providers"><svg aria-hidden="true"><use href="#icon-refresh"/></svg></button>
+            </div>
+            <div id="adminProviderList" class="admin-provider-list" aria-live="polite"><p class="credits-muted">Loading providers…</p></div>
+          </div>
+          <form id="adminProviderForm" class="admin-provider-form">
+            <p class="credits-section-kicker">Provider registry</p>
+            <label class="credits-key-field" for="adminProviderId"><span>Provider ID</span><input id="adminProviderId" type="text" maxlength="64" pattern="[a-z0-9_]{2,64}" autocomplete="off" required></label>
+            <label class="credits-key-field" for="adminProviderDisplayName"><span>Display name</span><input id="adminProviderDisplayName" type="text" maxlength="100" autocomplete="off" required></label>
+            <label class="credits-key-field" for="adminProviderAdapter"><span>Adapter</span><select id="adminProviderAdapter" class="control-select" autocomplete="off"><option value="openai_compatible">OpenAI-compatible</option><option value="openrouter">OpenRouter</option><option value="openai">OpenAI</option><option value="anthropic">Anthropic</option><option value="gemini">Gemini</option></select></label>
+            <label class="credits-key-field" for="adminProviderBaseUrl"><span>Approved base URL</span><input id="adminProviderBaseUrl" type="url" maxlength="500" placeholder="https://provider.example/v1" autocomplete="off" required></label>
+            <div class="admin-provider-checks"><label><input id="adminProviderByok" type="checkbox" checked> BYOK enabled</label><label><input id="adminProviderPlatform" type="checkbox"> Platform enabled</label></div>
+            <label class="credits-key-field" for="adminProviderStatus"><span>Status</span><select id="adminProviderStatus" class="control-select"><option value="enabled">Enabled</option><option value="disabled">Disabled</option></select></label>
+            <label class="credits-key-field" for="adminProviderReason"><span>Reason</span><input id="adminProviderReason" type="text" maxlength="500" value="Provider registry update." autocomplete="off" required></label>
+            <button class="auth-btn auth-btn-primary" type="submit"><svg aria-hidden="true"><use href="#icon-check-circle"/></svg><span>Save provider</span></button>
+            <p id="adminProviderStatusMessage" class="credits-status" role="status" aria-live="polite"></p>
+          </form>
+        </div>
+        <div class="admin-platform-key-area">
+          <div class="admin-provider-heading"><div><p class="credits-section-kicker">Platform credential</p><h3>ATL model access</h3></div></div>
+          <form id="adminPlatformKeyForm" class="admin-platform-key-form">
+            <label class="credits-key-field" for="adminPlatformProvider"><span>Provider</span><select id="adminPlatformProvider" class="control-select" required><option value="">Select a provider</option></select></label>
+            <label class="credits-key-field" for="adminPlatformKeySecret"><span>API key</span><input id="adminPlatformKeySecret" type="password" maxlength="4096" autocomplete="new-password" spellcheck="false" required></label>
+            <button class="auth-btn auth-btn-primary" type="submit"><svg aria-hidden="true"><use href="#icon-check-circle"/></svg><span>Save and verify</span></button>
+          </form>
+          <p id="adminPlatformKeyStatus" class="credits-status" role="status" aria-live="polite"></p>
+        </div>
+      </section>
 
       <footer id="freshnessLegend" class="freshness-legend">Daily figures complete through — UTC; live tiles are this instance's process state</footer>
     </main>

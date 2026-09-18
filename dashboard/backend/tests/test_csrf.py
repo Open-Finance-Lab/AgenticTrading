@@ -8,7 +8,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from dashboard.backend.app import app
-from dashboard.backend.csrf import csrf_cookie_name
+from dashboard.backend.csrf import CSRF_FAILURE_CODE, csrf_cookie_name
 from dashboard.backend.users import UserStore
 
 
@@ -62,6 +62,34 @@ def test_disallowed_origin_is_rejected(csrf_client):
     blocked = csrf_client.post("/api/auth/logout", headers=headers)
     assert blocked.status_code == 403
     assert "Cross-origin" in blocked.json()["detail"]
+
+
+def test_both_refusals_carry_the_machine_readable_code(csrf_client):
+    """A browser cannot tell this middleware's 403 from require_admin's "Admin
+    only" by status alone, and the two mean opposite things: one says retry the
+    request, the other says the role is gone and the page should be left. The
+    /admin shell branches on this code (js/admin-shell.js's CSRF_FAILURE_CODE)
+    rather than on `detail`, which is copy and will be reworded."""
+    _signup(csrf_client)
+
+    missing_token = csrf_client.post(
+        "/api/auth/logout", headers={"Origin": "http://testserver"}
+    )
+    assert missing_token.status_code == 403
+    assert missing_token.json()["code"] == CSRF_FAILURE_CODE
+
+    bad_origin = csrf_client.post(
+        "/api/auth/logout",
+        headers=_csrf_headers(csrf_client, origin="https://evil.example"),
+    )
+    assert bad_origin.status_code == 403
+    assert bad_origin.json()["code"] == CSRF_FAILURE_CODE
+
+    # The contrast that gives the code its meaning: a 403 the *route* raised
+    # carries no code, so the client still treats it as access lost.
+    role_refused = csrf_client.get("/api/admin/stats")
+    assert role_refused.status_code in (401, 403)
+    assert "code" not in role_refused.json()
 
 
 def test_x_api_key_alone_skips_csrf(csrf_client):

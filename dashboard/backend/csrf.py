@@ -8,6 +8,10 @@ Mutating requests that carry the account session cookie must present:
 
 ``X-API-Key`` agent traffic and cookie-less Bearer scripts skip this gate.
 Login/signup (no session cookie yet) still reject disallowed Origin/Referer.
+
+Both refusals carry ``code: CSRF_FAILURE_CODE`` beside ``detail`` so a browser
+can tell them from the other 403 it can receive -- ``require_admin``'s
+"Admin only", which *is* a role change and should send the operator away.
 """
 
 from __future__ import annotations
@@ -26,6 +30,15 @@ from dashboard.backend.auth_cookies import cookie_secure, read_session_token
 _HOST_CSRF = "__Host-atl_csrf"
 _DEV_CSRF = "atl_csrf"
 CSRF_HEADER = "x-csrf-token"
+
+# Both refusals below are 403, and so is ``require_admin``'s "Admin only" --
+# the status alone cannot tell a browser whether its *role* changed or its
+# *request* was malformed. A client that guesses treats a stale CSRF cookie as
+# a demotion and redirects the operator off the page mid-edit. This code is the
+# discriminator: it is emitted only by this middleware, so a caller matching it
+# exactly (never on the ``detail`` prose, which is copy and will be reworded)
+# knows the session is still good and the request is the thing to retry.
+CSRF_FAILURE_CODE = "csrf_failed"
 _SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS", "TRACE"})
 
 # Login/signup must stay reachable for a browser holding a *stale* session
@@ -176,7 +189,7 @@ class CsrfMiddleware(BaseHTTPMiddleware):
         if not origin_allowed(request):
             return JSONResponse(
                 status_code=403,
-                content={"detail": "Cross-origin request blocked"},
+                content={"detail": "Cross-origin request blocked", "code": CSRF_FAILURE_CODE},
             )
 
         if request.url.path in _CSRF_EXEMPT_PATHS:
@@ -189,7 +202,7 @@ class CsrfMiddleware(BaseHTTPMiddleware):
             if not csrf_tokens_match(request):
                 return JSONResponse(
                     status_code=403,
-                    content={"detail": "CSRF token missing or invalid"},
+                    content={"detail": "CSRF token missing or invalid", "code": CSRF_FAILURE_CODE},
                 )
             return await call_next(request)
 

@@ -5026,10 +5026,6 @@ function updateAuthUI() {
     window.CreditsPage.syncAuth(user);
   }
 
-  if (window.AdminModelProviders) {
-    window.AdminModelProviders.syncAuth(user);
-  }
-
   if (window.AdminCredits) {
     window.AdminCredits.syncAuth(user);
   }
@@ -5397,16 +5393,13 @@ function initAuthUI(options = {}) {
   document.getElementById('accountMenuAdminBtn')?.addEventListener('click', () => {
     closeAccountMenu();
     // Profile → Admin lands on the standalone console (design D3, D4). The old
-    // in-app console stays reachable at ?view=admin for account management,
-    // providers and the grant audit trail until the follow-up port (D5).
+    // in-app console stays reachable at ?view=admin for account management and
+    // the grant audit trail until the follow-up port (D5).
     window.location.assign('/admin');
   });
   document.getElementById('adminRefreshBtn')?.addEventListener('click', () => {
     loadAdminStats();
     loadAdminUsers();
-    if (window.AdminModelProviders) {
-      window.AdminModelProviders.onEnter();
-    }
     if (window.AdminCredits) {
       window.AdminCredits.onEnter();
     }
@@ -10837,9 +10830,6 @@ function navigateToPage(page, options = {}) {
             loadAdminUsers();
             if (window.AdminTabs) {
                 window.AdminTabs.onEnter();
-            }
-            if (window.AdminModelProviders) {
-                window.AdminModelProviders.onEnter();
             }
             if (window.AdminCredits) {
                 window.AdminCredits.onEnter();
