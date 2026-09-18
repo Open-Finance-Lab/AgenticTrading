@@ -4,6 +4,21 @@
    not import styles.css: the admin page must not inherit a 15,000-line
    stylesheet to get a header. */
 :root{color-scheme:dark;--bg:#0a0e27;--surface:#12172b;--line:#2a3041;--line-strong:#384158;--text:#e5e7eb;--muted:#9ca3af;--accent:#00bfff;--green:#42cc8b;--amber:#e6b75c;--red:#f08080;--violet:#8797ff;--steel:#6f86a8;--font-mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace;--font-base:-apple-system,BlinkMacSystemFont,"Segoe UI","Helvetica Neue",sans-serif;font-family:var(--font-base);color:var(--text);background:var(--bg)}
+
+/* styles.css token names, carrying styles.css's *values* — not this file's
+   nearest equivalent. The universal header below is retyped verbatim from
+   styles.css, and it only stays one header if `var(--bg-surface)` means here
+   what it means there. Rewriting the ported declarations onto --surface/--line
+   is how two copies of one header quietly become two headers: #12172b vs
+   #0f1328 and #2a3041 vs #1f2937 read as "the admin page has its own bar",
+   which is the report this port exists to answer. Three of the seven happen to
+   match a token this file already had (--text/--muted/--accent); they are
+   still declared, because the port's correctness must not depend on a
+   coincidence between two palettes that are separately maintained.
+   --header-height is measured, not chosen: 10px padding x2 + the 64px logo +
+   the 1px bottom border. .workspace subtracts it, and used to hardcode the old
+   bar's 80px. */
+:root{--bg-surface:#0f1328;--bg-card:#131a35;--bg-hover:#1a2047;--text-primary:#e5e7eb;--text-secondary:#9ca3af;--border-color:#1f2937;--info-color:#00bfff;--header-height:85px}
 *{box-sizing:border-box}
 body{margin:0;background:var(--bg);color:var(--text);font:14px/1.45 var(--font-base)}
 button,select,input{font:inherit}
@@ -24,12 +39,53 @@ small,.muted{color:var(--muted)}
 strong{font-variant-numeric:tabular-nums}
 .visually-hidden{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
 
-/* Header, aside, main (mock lines 10-12) */
-header{display:flex;align-items:center;justify-content:space-between;gap:20px;min-height:80px;padding:14px 28px;background:var(--surface);border-bottom:1px solid var(--line)}
-.brand{display:flex;align-items:center;gap:12px;font-size:22px;font-weight:700}
-.brand img{width:48px;height:48px;object-fit:contain}
-.product-nav{display:flex;gap:25px;color:var(--muted)}
-.workspace{display:grid;grid-template-columns:224px minmax(0,1fr);min-height:calc(100vh - 80px)}
+/* —— Universal top bar ——
+   Retyped from styles.css (the .header family at :95-391, .mode-toggle/.mode-btn
+   at :649-682, .primary-nav/.nav-menu-toggle at :5826-5840, the account dropdown
+   at :10595-10692, and the responsive blocks below). Ported rather than
+   imported: styles.css is 13,752 lines and collides with this file on .auth-btn,
+   .account-menu*, .credits-* and the bare button/a rules, so importing it to get
+   a header would restyle the whole console.
+
+   Only the rules the ported markup actually matches are here. Deliberately NOT
+   ported: .header-center / .market-info / .info-* (no such nodes), .beta-badge,
+   .title-with-badge, .title-section p, .auth-btn* and .auth-controls (no
+   #authSignInBtn on this page — see admin.html's delta 3).
+
+   Two resets the port needs and /app does not: this file gives every bare
+   `button` a 40px floor at :10, so .auth-account-btn and .nav-menu-toggle would
+   stand ~10px taller here than there. min-height:0 restores the app metric. */
+.header{display:grid;grid-template-columns:auto auto auto;align-items:center;gap:12px;padding:10px 24px;background-color:var(--bg-surface);border-bottom:1px solid var(--border-color);position:relative}
+.header-left{grid-column:1;grid-row:1;justify-self:start;z-index:2;display:flex;align-items:center;gap:12px;flex-wrap:nowrap}
+.header-github-link{display:inline-flex;align-items:center;gap:8px;min-width:0;flex-shrink:0;color:var(--text-secondary);font-size:15px;font-weight:600;text-decoration:none;transition:color .15s ease}
+.header-github-link:hover{color:var(--text-primary)}
+.header-github-icon{width:20px;height:20px;flex-shrink:0}
+.header-github-name{white-space:nowrap}
+.header-discord-btn{display:inline-flex;align-items:center;gap:10px;flex-shrink:0;padding:9px 16px 9px 14px;border:1px solid rgba(34,211,238,.55);border-radius:8px;background:rgba(12,28,52,.92);box-shadow:0 0 14px rgba(34,211,238,.18),inset 0 0 0 1px rgba(34,211,238,.06);color:#f8fafc;font-size:15px;font-weight:600;text-decoration:none;white-space:nowrap;transition:border-color .15s ease,box-shadow .15s ease,background-color .15s ease}
+.header-discord-btn:hover{border-color:rgba(34,211,238,.85);background:rgba(16,36,64,.96);box-shadow:0 0 18px rgba(34,211,238,.32),inset 0 0 0 1px rgba(34,211,238,.1);color:#fff}
+.header-discord-btn__icon{width:20px;height:20px;flex-shrink:0;color:#5865f2;fill:currentColor}
+.header-discord-btn__label{line-height:1;letter-spacing:.01em}
+.header-discord-btn__arrow{width:16px;height:16px;flex-shrink:0;color:#fff;opacity:.92;margin-left:2px}
+.header-brand{grid-column:2;grid-row:1;justify-self:center;display:flex;align-items:center;gap:12px;color:inherit;text-decoration:none;cursor:pointer;pointer-events:auto}
+a.header-brand:hover .title-section h1{color:var(--info-color)}
+.logo-container{display:flex;align-items:center;justify-content:center;width:64px;height:64px;flex:0 0 auto;border-radius:16px;overflow:hidden;background:#07182d}
+.logo-icon{display:block;width:100%;height:100%;object-fit:cover;transform:scale(1.22)}
+.title-section{display:flex;flex-direction:column;gap:0}
+.title-section h1{margin:0;font-family:Inter,-apple-system,BlinkMacSystemFont,"Segoe UI","Helvetica Neue",sans-serif;font-size:32px;font-weight:700;line-height:1.2;letter-spacing:.3px;color:var(--text-primary);white-space:nowrap;-webkit-font-smoothing:antialiased;-moz-osx-font-smoothing:grayscale}
+.header-right{grid-column:3;grid-row:1;justify-self:end;z-index:2;display:flex;align-items:center;gap:10px;flex-wrap:nowrap}
+.nav-menu-toggle{display:none;min-height:0;padding:6px 10px;border:1px solid var(--border-color);border-radius:4px;background:var(--bg-card);color:var(--text-primary);cursor:pointer;font-size:16px;line-height:1}
+.mode-toggle{display:flex;gap:4px;flex-shrink:0;padding:4px;border:1px solid var(--border-color);border-radius:6px;background-color:var(--bg-card)}
+.primary-nav{flex-shrink:1;min-width:0;flex-wrap:wrap}
+.mode-btn{padding:8px 16px;border:none;border-radius:3px;background-color:transparent;color:var(--text-secondary);cursor:pointer;font-size:14px;font-weight:600;white-space:nowrap;transition:all .15s}
+.mode-btn.active{background-color:var(--info-color);color:#fff}
+.mode-btn:hover:not(.active){color:var(--text-primary);background-color:var(--bg-hover)}
+.header-account{display:inline-flex;align-items:center;gap:0;flex-shrink:0;min-width:0;white-space:nowrap}
+.auth-account-btn{display:inline-flex;align-items:center;max-width:160px;min-width:0;min-height:0;padding:7px 12px;border:1px solid var(--border-color);border-radius:6px;background:var(--bg-card);color:var(--text-primary);cursor:pointer;font:inherit}
+.auth-account-btn:hover{border-color:var(--info-color);color:var(--info-color)}
+.auth-user-label{overflow:hidden;max-width:100px;min-width:0;color:inherit;font-size:14px;font-weight:600;text-overflow:ellipsis;white-space:nowrap}
+
+/* Workspace, aside, main (mock lines 10-12) */
+.workspace{display:grid;grid-template-columns:224px minmax(0,1fr);min-height:calc(100vh - var(--header-height))}
 aside{padding:24px 14px}
 aside>strong{display:block;margin:0 4px 14px;color:var(--muted);font-size:11px;font-weight:700;letter-spacing:.04em;text-transform:uppercase}
 main{width:100%;max-width:1420px;margin:0 auto;padding:30px 36px 50px}
@@ -285,24 +341,30 @@ dialog::backdrop{background:rgba(0,0,0,.64)}
 .analytics-subnav a.active{color:var(--accent);background:rgba(0,191,255,.12)}
 
 /* —— Header account menu (design §7) ——
-   Retyped from styles.css's .account-menu* family. Note what is NOT here:
-   styles.css needs a `.account-menu-item[hidden]{display:none!important}`
-   override because its author `display:block` beats the UA's [hidden] rule.
-   This file has a global `[hidden]{display:none!important}` at :18, which
-   already carries the !important, so the override would be dead weight. */
+   Retyped from styles.css's .account-menu* family, on styles.css's tokens for
+   the reason the :root alias block gives. Two deliberate divergences:
+
+   1. styles.css needs a `.account-menu-item[hidden]{display:none!important}`
+      override because its author `display:block` beats the UA's [hidden] rule.
+      This file has a global `[hidden]{display:none!important}` at :18, which
+      already carries the !important, so the override would be dead weight.
+   2. The two :hover rules restate a colour styles.css leaves to inheritance.
+      This file's generic `a:hover,button:hover{color:var(--accent)}` (:16) has
+      specificity 0,1,1 and would repaint both menu entries and the Log out item
+      accent-blue on hover — /app repaints neither. Naming the colour at 0,2,0
+      beats the generic rule, and the --danger pair after it (equal specificity,
+      later in source) keeps Log out red, which is what /app computes. */
 .account-menu-wrap{position:relative}
-.account-btn{display:inline-flex;align-items:center;gap:8px;max-width:200px;min-height:38px;padding:6px 12px;border:1px solid var(--line);border-radius:6px;background:var(--surface);color:var(--text);cursor:pointer}
-.account-btn:hover{border-color:var(--accent);color:var(--accent)}
-.account-avatar{display:inline-grid;place-items:center;width:24px;height:24px;flex:0 0 24px;border-radius:50%;background:#153c48;color:var(--accent);font-size:12px;font-weight:700}
-.account-label{overflow:hidden;max-width:118px;font-size:14px;font-weight:600;text-overflow:ellipsis;white-space:nowrap}
-.account-caret{color:var(--muted);font-size:10px}
-.account-menu{position:absolute;top:calc(100% + 6px);right:0;z-index:60;display:flex;flex-direction:column;gap:2px;min-width:220px;padding:6px;border:1px solid var(--line);border-radius:8px;background:var(--surface);box-shadow:0 10px 28px rgba(0,0,0,.35)}
-.account-menu-identity{display:flex;flex-direction:column;gap:2px;margin-bottom:4px;padding:8px 10px;border-bottom:1px solid var(--line)}
-.account-menu-name{color:var(--text);font-size:12px;font-weight:700}
-.account-menu-email{color:var(--muted);font-size:11px;word-break:break-all}
-.account-menu-item{display:block;width:100%;min-height:0;padding:8px 10px;border:0;border-radius:6px;background:transparent;color:var(--text);font-size:12px;font-weight:600;text-align:left;cursor:pointer}
-.account-menu-item:hover{color:var(--text);background:rgba(148,163,184,.12)}
-.account-menu-item--danger,.account-menu-item--danger:hover{color:var(--red)}
+.auth-avatar{display:inline-flex;align-items:center;justify-content:center;width:24px;height:24px;flex:0 0 auto;border-radius:50%;overflow:hidden;background:var(--bg-hover);color:var(--text-primary);font-size:12px;font-weight:700}
+.auth-avatar img{display:block;width:100%;height:100%;object-fit:cover}
+.auth-caret{color:var(--text-secondary);font-size:10px}
+.account-menu{position:absolute;top:calc(100% + 6px);right:0;z-index:60;display:flex;flex-direction:column;gap:2px;min-width:200px;padding:6px;border:1px solid var(--border-color);border-radius:8px;background:var(--bg-surface);box-shadow:0 10px 28px rgba(0,0,0,.35)}
+.account-menu-identity{display:flex;flex-direction:column;gap:2px;margin-bottom:4px;padding:8px 10px;border-bottom:1px solid var(--border-color)}
+.account-menu-name{color:var(--text-primary);font-size:12px;font-weight:700}
+.account-menu-email{color:var(--text-secondary);font-size:11px;word-break:break-all}
+.account-menu-item{display:block;box-sizing:border-box;width:100%;min-height:0;padding:8px 10px;border:none;border-radius:6px;background:transparent;color:var(--text-primary);font-size:12px;font-weight:600;text-align:left;text-decoration:none;cursor:pointer}
+.account-menu-item:hover{color:var(--text-primary);background:var(--bg-hover)}
+.account-menu-item--danger,.account-menu-item--danger:hover{color:#f87171}
 .account-menu-error{margin:4px 10px 8px;color:var(--red);font-size:11px;line-height:1.4}
 
 /* —— Providers (design §8, §8.1) ——
@@ -371,6 +433,30 @@ dialog::backdrop{background:rgba(0,0,0,.64)}
 .credits-status.is-pending{color:var(--amber)}
 
 /* Responsive (mock lines 26-27, pruned) */
-@media(max-width:1040px){.product-nav{display:none}.filters{grid-template-columns:repeat(2,minmax(0,1fr))}.overview-row.priority-row{grid-template-columns:1fr;gap:0}.metric-strip{grid-template-columns:repeat(2,1fr)}.detail-metric:nth-child(3){padding-left:0;border-left:0;border-top:1px solid var(--line)}.detail-metric:nth-child(4){border-top:1px solid var(--line)}.admin-provider-grid{grid-template-columns:1fr}.admin-platform-key-form{grid-template-columns:repeat(2,minmax(0,1fr))}.admin-platform-key-form .auth-btn{grid-column:1/-1}}
-@media(max-width:680px){header{padding:12px 15px}.brand{font-size:17px}.brand img{width:40px;height:40px}.workspace{grid-template-columns:64px minmax(0,1fr)}aside{padding:18px 6px}aside>strong{display:none}.admin-rail{padding:5px}.admin-tab{justify-content:center;min-height:42px;padding:9px}.admin-tab span,.admin-tab-caret{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap;border:0}.analytics-subnav{display:none}main{padding:24px 16px 40px}.page-head{flex-direction:column;align-items:stretch}.page-controls{justify-items:stretch}.page-actions{flex-direction:row;align-items:center;justify-content:space-between}.live-row .live-head{flex-direction:column;align-items:flex-start}.range button{min-width:38px;padding-inline:7px}.filters{grid-template-columns:1fr}.snapshot-grid{grid-template-columns:1fr}.snapshot-tile+.snapshot-tile{border-left:0;border-top:1px solid var(--line)}.source-wrap{grid-template-columns:1fr;justify-items:center;gap:17px}.source-legend-six{width:100%;gap:10px 14px}.attention-note{align-items:flex-start;flex-direction:column;gap:8px}.retention-chart{grid-template-columns:55px repeat(4,1fr);gap:4px}.lifecycle-legend{grid-template-columns:repeat(2,1fr)}.value-step{grid-template-columns:112px 1fr auto;gap:8px}.value-step>span{white-space:normal}.layered-route{min-width:600px;overflow:visible}.credits-paired{min-width:560px}.priority-row:has(.layered-route),.priority-row:has(.credits-paired){overflow-x:auto}.revenue-viz{height:184px}.revenue-viz svg{height:168px}.metric-strip{grid-template-columns:1fr}.detail-metric,.detail-metric:first-child,.detail-metric:nth-child(3){padding:17px 0;border-left:0;border-top:1px solid var(--line)}.milestones{grid-template-columns:repeat(2,1fr)}.admin-platform-key-form{grid-template-columns:1fr}}
+/* —— Universal top bar, responsive ——
+   Retyped from styles.css's header breakpoints (1440/1340/1280/1100/1024/900 in
+   the .header block, plus the 900 nav-collapse at :10041 and the 600 padding at
+   :3077), in styles.css's own order so the cascade between them is the app's.
+   Each width is the measured overflow point of the *signed-in* header there;
+   see the commentary at styles.css:2938-2950 for why they are not re-derivable
+   from the signed-out one. Rules for nodes this page does not have
+   (.header-center, .market-info, .decision-table, …) are dropped. */
+@media(max-width:1440px){.header-github-name{display:none}}
+@media(max-width:1340px){.header-discord-btn{padding:7px 10px;gap:8px;font-size:11px}.header-discord-btn__label{display:none}.header-discord-btn__arrow{display:none}}
+@media(max-width:1280px){.title-section h1{font-size:26px}.auth-account-btn{max-width:120px}.auth-user-label{max-width:96px}}
+@media(max-width:1100px){.mode-btn{padding:7px 12px;font-size:13px}.title-section h1{font-size:22px}.auth-account-btn{max-width:100px}.auth-user-label{max-width:80px}}
+@media(max-width:1024px){.auth-user-label{display:none}.header{padding:10px 12px}}
+/* .workspace stops subtracting a literal here. The bar is three stacked
+   rows below 900px, so --header-height (the measured *one-row* height) is
+   no longer the bar's height and calc() would reserve ~96px of viewport
+   the header is not occupying -- phantom scroll on every admin page. The
+   old bespoke bar had a fixed min-height at every width, so its literal
+   was exact and this problem is new. There is no second literal worth
+   measuring: the stacked height depends on how the chrome wraps, and
+   min-height is a floor, so dropping it just lets content size the grid. */
+@media(max-width:900px){.workspace{min-height:0}.header{grid-template-columns:1fr;gap:10px}.header-brand{grid-column:1;grid-row:auto;justify-self:center;min-width:0}.header-left{grid-column:1;grid-row:auto;justify-self:center;order:-1;flex-wrap:wrap;justify-content:center}.header-right{grid-column:1;grid-row:auto;justify-self:stretch;width:100%;flex-wrap:wrap;justify-content:flex-end;gap:8px}.header-account{margin-left:auto}.nav-menu-toggle{display:inline-flex}.primary-nav{display:none;width:100%;order:4;flex-direction:column;align-items:stretch}.primary-nav.open{display:flex}.primary-nav .mode-btn{width:100%;text-align:left}}
+@media(max-width:600px){.header{padding:10px 12px}}
+
+@media(max-width:1040px){.filters{grid-template-columns:repeat(2,minmax(0,1fr))}.overview-row.priority-row{grid-template-columns:1fr;gap:0}.metric-strip{grid-template-columns:repeat(2,1fr)}.detail-metric:nth-child(3){padding-left:0;border-left:0;border-top:1px solid var(--line)}.detail-metric:nth-child(4){border-top:1px solid var(--line)}.admin-provider-grid{grid-template-columns:1fr}.admin-platform-key-form{grid-template-columns:repeat(2,minmax(0,1fr))}.admin-platform-key-form .auth-btn{grid-column:1/-1}}
+@media(max-width:680px){.workspace{grid-template-columns:64px minmax(0,1fr)}aside{padding:18px 6px}aside>strong{display:none}.admin-rail{padding:5px}.admin-tab{justify-content:center;min-height:42px;padding:9px}.admin-tab span,.admin-tab-caret{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap;border:0}.analytics-subnav{display:none}main{padding:24px 16px 40px}.page-head{flex-direction:column;align-items:stretch}.page-controls{justify-items:stretch}.page-actions{flex-direction:row;align-items:center;justify-content:space-between}.live-row .live-head{flex-direction:column;align-items:flex-start}.range button{min-width:38px;padding-inline:7px}.filters{grid-template-columns:1fr}.snapshot-grid{grid-template-columns:1fr}.snapshot-tile+.snapshot-tile{border-left:0;border-top:1px solid var(--line)}.source-wrap{grid-template-columns:1fr;justify-items:center;gap:17px}.source-legend-six{width:100%;gap:10px 14px}.attention-note{align-items:flex-start;flex-direction:column;gap:8px}.retention-chart{grid-template-columns:55px repeat(4,1fr);gap:4px}.lifecycle-legend{grid-template-columns:repeat(2,1fr)}.value-step{grid-template-columns:112px 1fr auto;gap:8px}.value-step>span{white-space:normal}.layered-route{min-width:600px;overflow:visible}.credits-paired{min-width:560px}.priority-row:has(.layered-route),.priority-row:has(.credits-paired){overflow-x:auto}.revenue-viz{height:184px}.revenue-viz svg{height:168px}.metric-strip{grid-template-columns:1fr}.detail-metric,.detail-metric:first-child,.detail-metric:nth-child(3){padding:17px 0;border-left:0;border-top:1px solid var(--line)}.milestones{grid-template-columns:repeat(2,1fr)}.admin-platform-key-form{grid-template-columns:1fr}}
 @media(prefers-reduced-motion:reduce){.module-link:after{transition:none}}
