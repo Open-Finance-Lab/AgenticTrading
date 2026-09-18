@@ -222,8 +222,17 @@ Land the remainder as two sections keyed the way the shell's other views are:
   `:622-623`: the range group and filter form describe daily analytics figures and
   scope nothing on these two pages.
 
-`admin.html` rail: `admin.html:77` and `:79` become `href="#account-management"` and
-`href="#activity"`, and the `PR2` comment at `:75-76` goes.
+`admin.html` rail: **the two rail hrefs do NOT flip in this chunk.** They stay
+pointed at `/app?view=admin&adminTab=…` and the `PR2` comment at `:75-76` is
+replaced with one saying why. Every merge to `main` auto-deploys prod, and
+`admin-credits.js` is not rewired until C3 — so flipping them here would ship a
+rail entry that opens a permanently empty table, which is a worse answer than the
+cross-surface jump it replaces. The routes and markup land here; the rail starts
+advertising them in C3.
+
+Three links carry the old target, not two — `#evidenceAccount` in the evidence
+dialog (`admin.html`, "Open account management") is the third, and it is the one
+a whole-file grep for `admin-tab` misses. All three flip together in C3.
 
 CSS: port the `.admin-credits-*` / `.admin-stat*` / `.admin-grant-reason-dialog`
 families from `styles.css` into `admin.css`, same discipline as §0.
@@ -234,6 +243,17 @@ families from `styles.css` into `admin.css`, same discipline as §0.
 
 The six seams in the Findings table. Drop the file's `DOMContentLoaded` tail and
 enter on `admin:route` for the two new routes, matching `admin-live.js`'s shape.
+
+Add `<script src="js/admin-credits.js?v=N" defer>` to `admin.html` (after
+`credit-format.js`, which it destructures `window.CreditFormat` from), and bump
+every pin the cache-buster table lists for that file.
+
+**Then flip the three `/app?view=admin` links C2 deliberately left pointed at the
+old console** — the rail's Account Management (`data-rail="account-management"`)
+and Activity (`data-rail="activity"`) entries, and `#evidenceAccount` in the
+evidence dialog — to `#account-management` / `#activity`, deleting the C2 comment
+above the rail entries that explains why they waited. This is the edit that
+actually closes the user-reported bug; C2 only built the destination.
 
 Verify under the DOM stub (`tests/_admin_dom_stub.py`), not by reading: the module
 is an IIFE over `window`/`document` and `node` is present in CI.
