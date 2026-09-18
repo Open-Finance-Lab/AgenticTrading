@@ -64,6 +64,93 @@ def test_providers_lights_its_own_rail_entry_not_analytics():
     assert result == {"analytics": None, "account-management": None, "providers": "page", "activity": None}
 
 
+def test_clicking_the_rail_entry_already_showing_scrolls_back_to_the_top():
+    """The one rail click `route()` cannot serve, served explicitly.
+
+    Every rail entry ends in `route()`, whose last act is `scrollTo(0, 0)` --
+    every entry except the one for the route already showing, where the hash
+    does not move, no `hashchange` fires and `route()` never runs. That click
+    used to scroll anyway, to the wrong place, because the hash was also a
+    fragment naming a real `<section>`; suffixing those ids (`overviewView`)
+    took the wrong scroll away and left the entry doing nothing at all. The
+    rail is `position:static`, so it is the obvious "back to the top" handle
+    once the page has moved -- this is what makes that entry agree with its
+    neighbours instead of being inert.
+
+    Only a byte-identical hash counts. `#users` clicked from `#users/42`, and
+    `#account` from `#account?user=…`, are real navigations `route()` will
+    handle; `#analyticsParent` is exempt because at its own destination its
+    click already means the disclosure.
+    """
+    scenario = r"""
+      window.AdminShell.bindControls();
+      function anchor(attrs) {
+        const a = new Node('a');
+        Object.entries(attrs).forEach(([key, value]) => {
+          if (key === 'id') a.id = value; else a.setAttribute(key, value);
+        });
+        // The stub has no selector engine, so every probe hands the handler a
+        // link that *is* in the rail. What is under test is which hrefs it
+        // then acts on, not the selector.
+        a.closest = () => a;
+        return a;
+      }
+      const scrolled = {};
+      function probe(name, hash, attrs) {
+        const calls = [];
+        window.scrollTo = (x, y) => calls.push([x, y]);
+        window.location.hash = hash;
+        document.dispatchEvent({ type: 'click', target: anchor(attrs) });
+        scrolled[name] = calls;
+      }
+      probe('same_rail_route', '#providers', { href: '#providers', 'data-rail': 'providers' });
+      probe('same_subnav_route', '#health', { href: '#health', 'data-route': 'health' });
+      probe('other_route', '#overview', { href: '#providers', 'data-rail': 'providers' });
+      probe('list_from_profile', '#users/42', { href: '#users', 'data-route': 'users' });
+      probe('account_from_handoff', '#account?user=ada%40example.test', { href: '#account', 'data-rail': 'account' });
+      probe('analytics_disclosure', '#overview', { href: '#overview', 'data-rail': 'analytics', id: 'analyticsParent' });
+    """
+    assert _eval("scrolled", scenario) == {
+        "same_rail_route": [[0, 0]],
+        "same_subnav_route": [[0, 0]],
+        "other_route": [],
+        "list_from_profile": [],
+        "account_from_handoff": [],
+        "analytics_disclosure": [],
+    }
+
+
+def test_a_modified_rail_click_is_left_to_the_browser():
+    """Cmd/ctrl/middle click opens the route in a new tab; scrolling this one is wrong."""
+    scenario = r"""
+      window.AdminShell.bindControls();
+      const scrolled = {};
+      function probe(name, extra) {
+        const calls = [];
+        window.scrollTo = (x, y) => calls.push([x, y]);
+        window.location.hash = '#providers';
+        const a = new Node('a');
+        a.setAttribute('href', '#providers');
+        a.setAttribute('data-rail', 'providers');
+        a.closest = () => a;
+        document.dispatchEvent({ type: 'click', target: a, ...extra });
+        scrolled[name] = calls;
+      }
+      probe('plain', {});
+      probe('middle', { button: 1 });
+      probe('meta', { metaKey: true });
+      probe('ctrl', { ctrlKey: true });
+      probe('shift', { shiftKey: true });
+      probe('alt', { altKey: true });
+      probe('already_handled', { defaultPrevented: true });
+    """
+    assert _eval("scrolled", scenario) == {
+        "plain": [[0, 0]],
+        "middle": [], "meta": [], "ctrl": [], "shift": [], "alt": [],
+        "already_handled": [],
+    }
+
+
 def test_range_maps_to_inclusive_utc_dates_within_the_180_day_cap():
     today = "new Date('2026-09-15T13:00:00Z')"
     assert _eval(f"window.AdminShell.rangeDates('1W', {today})") == {"from": "2026-09-09", "to": "2026-09-15"}

@@ -14,7 +14,7 @@
        can lift from an external file. admin-shell.js loads first because it
        owns the /api/auth/me gate and the router the other modules listen to;
        all are deferred, so they run in this order before DOMContentLoaded. -->
-  <script src="js/admin-shell.js?v=5" defer></script>
+  <script src="js/admin-shell.js?v=7" defer></script>
   <script src="js/credit-format.js?v=1" defer></script>
   <script src="js/admin-ticker.js?v=2" defer></script>
   <script src="js/admin-live.js?v=1" defer></script>
@@ -194,7 +194,7 @@
           <p class="filter-note muted">Lifecycle stage and Tier narrow the user lists; Source also narrows the sources panels.</p>
         </form>
       </div>
-      <section id="overview" aria-label="Analytics overview">
+      <section id="overviewView" aria-label="Analytics overview">
         <div class="page-head">
           <div><h1>Overview</h1><p class="muted">User activity, acquisition and attention</p></div>
         </div>
@@ -310,7 +310,7 @@
 
       <section id="profile" class="detail-view" data-panel="profile" hidden aria-live="polite"></section>
 
-      <section id="providers" class="detail-view" data-panel="providers" hidden aria-labelledby="providersTitle">
+      <section id="providersView" class="detail-view" data-panel="providers" hidden aria-labelledby="providersTitle">
         <div class="page-head"><div><h1 id="providersTitle" tabindex="-1">Providers</h1><p class="muted">The approved model-provider registry and the platform credential</p></div><span class="credits-admin-badge">Admin only</span></div>
         <div class="admin-provider-grid">
           <div class="admin-provider-list-wrap">
