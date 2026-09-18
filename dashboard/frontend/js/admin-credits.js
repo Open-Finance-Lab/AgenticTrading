@@ -54,8 +54,11 @@
     status.textContent = message || '';
     // Assigning className re-states the whole list, so the layout class the
     // markup ships beside `credits-status` has to be re-stated here too --
-    // otherwise the first write drops it and the spacing it carries
-    // (.admin-credits-status in admin.css and styles.css) goes with it.
+    // otherwise the first write drops it and the spacing it carries goes with
+    // it: `.admin-credits-status` in admin-console.css (/admin) and styles.css
+    // (/app). Not admin.css, whose copy is scoped to `.admin-workspace-content`
+    // -- a wrapper app.html has and admin.html never got, so that rule matches
+    // nothing on /admin.
     status.className = `credits-status admin-credits-status${tone ? ` is-${tone}` : ''}`;
   }
 
