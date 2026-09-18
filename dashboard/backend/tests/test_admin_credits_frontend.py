@@ -39,15 +39,14 @@ def test_admin_grant_console_is_integrated_into_admin_users_panel():
     assert 'id="adminPanelGrantPool"' not in admin_markup
     assert 'id="adminTabGrantPool"' not in admin_markup
     assert 'data-admin-tab="grant-pool"' not in admin_markup
+    assert 'data-admin-tab="providers"' not in admin_markup
     assert 'data-admin-tab="users"' in admin_markup
-    assert 'data-admin-tab="providers"' in admin_markup
     assert 'data-admin-tab="activity"' in admin_markup
     nav_start = admin_markup.index('<nav id="adminTabs"')
     nav_end = admin_markup.index('</nav>', nav_start)
     nav_markup = admin_markup[nav_start:nav_end]
-    assert nav_markup.count('data-admin-tab=') == 3
-    assert nav_markup.index('data-admin-tab="users"') < nav_markup.index('data-admin-tab="providers"')
-    assert nav_markup.index('data-admin-tab="providers"') < nav_markup.index('data-admin-tab="activity"')
+    assert nav_markup.count('data-admin-tab=') == 2
+    assert nav_markup.index('data-admin-tab="users"') < nav_markup.index('data-admin-tab="activity"')
     assert admin_markup.index('id="adminStats"') < admin_markup.index('id="adminCreditsSection"')
     assert admin_markup.index('id="adminCreditsSection"') < admin_markup.index('class="admin-credits-users"')
     assert 'id="adminGrantPoolAmount" type="number" step="0.000001"' in admin_markup
@@ -134,17 +133,16 @@ def test_admin_tabs_default_to_users_and_are_url_backed():
     assert "aria-selected" in ADMIN_TABS_JS
 
 
-def test_admin_tabs_have_three_tabs_in_usage_order_and_legacy_alias():
+def test_admin_tabs_have_two_tabs_in_usage_order_and_legacy_alias():
     admin_start = APP_HTML.index('id="adminView"')
     nav_start = APP_HTML.index('<nav id="adminTabs"', admin_start)
     nav_end = APP_HTML.index('</nav>', nav_start)
     nav_markup = APP_HTML[nav_start:nav_end]
-    assert nav_markup.count('data-admin-tab=') == 3
-    assert nav_markup.index('data-admin-tab="users"') < nav_markup.index('data-admin-tab="providers"')
-    assert nav_markup.index('data-admin-tab="providers"') < nav_markup.index('data-admin-tab="activity"')
+    assert nav_markup.count('data-admin-tab=') == 2
+    assert nav_markup.index('data-admin-tab="users"') < nav_markup.index('data-admin-tab="activity"')
     assert "value === 'grant-pool' ? 'users' : value" in ADMIN_TABS_JS
 
 
 def test_admin_visual_assets_use_fresh_cache_versions():
     assert 'js/admin-credits.js?v=6' in APP_HTML
-    assert 'js/admin-tabs.js?v=9' in APP_HTML
+    assert 'js/admin-tabs.js?v=12' in APP_HTML

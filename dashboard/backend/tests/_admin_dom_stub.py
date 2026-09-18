@@ -71,7 +71,16 @@ class Node {
   }
   get className() { return [...this._classes].join(' '); }
   set className(value) { this._classes = new Set(String(value).split(/\s+/).filter(Boolean)); }
-  get textContent() { return this.children.length ? this.children.map((child) => child.textContent).join('') : this._text; }
+  // `_text` is the text assigned directly to this node (`.textContent = '…'`);
+  // `children` are nodes appended afterward. A real DOM's `.textContent =`
+  // setter creates one actual text-node child, so a later `appendChild` adds
+  // *alongside* it rather than displacing it -- an icon button built as
+  // `el(tag, cls, label)` then `appendChild(icon)` (admin-providers.js's
+  // `appendIcon`) still reports the label in its textContent. Concatenating
+  // here rather than switching on `children.length` is what keeps that true;
+  // for every existing caller `_text` and `children` are never both non-empty
+  // at once, so this is additive and changes no prior result.
+  get textContent() { return this._text + this.children.map((child) => child.textContent).join(''); }
   set textContent(value) { this.children = []; this._text = String(value); }
   get firstChild() { return this.children[0] || null; }
   get isConnected() { return true; }

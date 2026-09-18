@@ -2787,39 +2787,6 @@ a.header-brand:hover .title-section h1 {
     -webkit-tap-highlight-color: rgba(103, 232, 249, 0.12);
 }
 
-/* The old console's way back to the standalone /admin Analytics console.
-   Sits above the tab rail as its own card so the two admin surfaces read as
-   one system: /admin links here for Users/Providers/Activity, this links
-   back for Overview/Sources/Retention/... */
-.admin-rail-col {
-    position: sticky;
-    top: 84px;
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
-    align-self: start;
-}
-
-.admin-rail-col .admin-rail {
-    position: static;
-}
-
-.admin-analytics-link {
-    text-decoration: none;
-    color: var(--text-primary);
-    background:
-        linear-gradient(180deg, rgba(103, 232, 249, 0.055), transparent 42%),
-        var(--bg-card);
-    border: 1px solid var(--border-color);
-    border-radius: 12px;
-    box-shadow: 0 16px 38px rgba(2, 8, 23, 0.2);
-    padding: 7px;
-}
-
-.admin-analytics-link svg {
-    color: #67e8f9;
-}
-
 /* Final Backtest feed overrides stay scoped so legacy decision-table rules
    cannot reintroduce a wide table or page-level overflow. */
 .playground-backtest-panel .trading-log-card {
@@ -12799,201 +12766,6 @@ table.sr-only {
     margin-top: 20px;
 }
 
-/* Admin provider controls stay separate from the user key vault. The section
-   is an unframed console band; only the editable tools and repeated rows are
-   framed so the registry remains easy to scan. */
-.admin-provider-section {
-    margin-top: 24px;
-    padding: 24px 0 8px;
-    border-top: 1px solid var(--border-color);
-}
-
-.admin-provider-heading {
-    display: flex;
-    align-items: flex-end;
-    justify-content: space-between;
-    gap: 12px;
-    margin-bottom: 16px;
-}
-
-.admin-provider-section h3 {
-    margin: 0;
-    color: var(--text-primary);
-    font-size: 16px;
-    font-weight: 700;
-    letter-spacing: 0;
-}
-
-.admin-provider-grid {
-    display: grid;
-    grid-template-columns: minmax(300px, 1.12fr) minmax(300px, 0.88fr);
-    gap: 24px;
-    align-items: start;
-}
-
-.admin-provider-list-wrap,
-.admin-provider-form,
-.admin-platform-key-form {
-    min-width: 0;
-    padding: 16px;
-    border: 1px solid var(--border-color);
-    border-radius: 6px;
-    background: var(--bg-card);
-}
-
-.admin-provider-list-head {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 12px;
-    min-height: 34px;
-}
-
-.admin-provider-list-head .credits-section-kicker {
-    margin-bottom: 0;
-}
-
-.admin-provider-list {
-    margin-top: 8px;
-    border-top: 1px solid var(--border-color);
-}
-
-.admin-provider-row {
-    padding: 13px 0;
-    border-bottom: 1px solid rgba(148, 163, 184, 0.12);
-}
-
-.admin-provider-row:last-child {
-    border-bottom: 0;
-}
-
-.admin-provider-row-head {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 10px;
-}
-
-.admin-provider-row-head strong {
-    min-width: 0;
-    overflow: hidden;
-    color: var(--text-primary);
-    font-size: 13px;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-}
-
-.admin-provider-state {
-    display: inline-flex;
-    align-items: center;
-    min-height: 20px;
-    padding: 2px 7px;
-    border: 1px solid var(--border-color);
-    border-radius: 4px;
-    color: var(--text-muted);
-    font-size: 10px;
-    font-weight: 700;
-    text-transform: capitalize;
-    white-space: nowrap;
-}
-
-.admin-provider-state.is-enabled {
-    border-color: rgba(74, 222, 128, 0.38);
-    color: #4ade80;
-}
-
-.admin-provider-state.is-disabled {
-    border-color: rgba(248, 113, 113, 0.42);
-    color: #f87171;
-}
-
-.admin-provider-row-meta,
-.admin-provider-credential {
-    margin: 6px 0 0;
-    color: var(--text-muted);
-    font-family: var(--font-mono);
-    font-size: 10px;
-    line-height: 1.45;
-    overflow-wrap: anywhere;
-}
-
-.admin-provider-credential {
-    color: var(--text-secondary);
-}
-
-.admin-provider-row-actions {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 6px;
-    margin-top: 10px;
-}
-
-.admin-provider-form {
-    display: grid;
-    gap: 13px;
-}
-
-.admin-provider-form > .credits-section-kicker {
-    margin-bottom: -2px;
-}
-
-.admin-provider-checks {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 12px 18px;
-    color: var(--text-secondary);
-    font-size: 11px;
-}
-
-.admin-provider-checks label {
-    display: inline-flex;
-    align-items: center;
-    gap: 7px;
-}
-
-.admin-provider-checks input {
-    accent-color: #22d3ee;
-}
-
-.admin-platform-key-area {
-    margin-top: 24px;
-    padding-top: 24px;
-    border-top: 1px solid var(--border-color);
-}
-
-.admin-platform-key-area .admin-provider-heading {
-    margin-bottom: 12px;
-}
-
-.admin-platform-key-form {
-    display: grid;
-    grid-template-columns: minmax(180px, 0.7fr) minmax(240px, 1fr) auto;
-    gap: 12px;
-    align-items: end;
-}
-
-.admin-provider-form > .auth-btn,
-.admin-platform-key-form > .auth-btn {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    justify-self: start;
-    width: max-content;
-    gap: 8px;
-    min-height: 36px;
-    padding: 7px 12px;
-    white-space: nowrap;
-}
-
-.admin-provider-form .auth-btn svg,
-.admin-platform-key-form .auth-btn svg {
-    width: 15px;
-    height: 15px;
-    flex: 0 0 15px;
-    fill: none;
-    stroke: currentColor;
-}
-
 @media (max-width: 760px) {
     .credits-balance-band {
         align-items: flex-start;
@@ -13019,18 +12791,6 @@ table.sr-only {
 
     .credits-custom-row p {
         grid-column: 2;
-    }
-
-    .admin-provider-grid {
-        grid-template-columns: 1fr;
-    }
-
-    .admin-platform-key-form {
-        grid-template-columns: repeat(2, minmax(0, 1fr));
-    }
-
-    .admin-platform-key-form .auth-btn {
-        grid-column: 1 / -1;
     }
 }
 
@@ -13109,37 +12869,6 @@ table.sr-only {
 
     .credits-refund-actions .auth-btn {
         flex: 1;
-    }
-
-    .admin-provider-section {
-        margin-top: 16px;
-        padding-top: 20px;
-    }
-
-    .admin-provider-heading {
-        align-items: flex-start;
-        flex-direction: column;
-        gap: 8px;
-    }
-
-    .admin-provider-list-wrap,
-    .admin-provider-form,
-    .admin-platform-key-form {
-        padding: 14px;
-    }
-
-    .admin-platform-key-form {
-        grid-template-columns: 1fr;
-    }
-
-    .admin-platform-key-form .auth-btn {
-        grid-column: auto;
-        width: 100%;
-    }
-
-    .admin-provider-row-head {
-        align-items: flex-start;
-        flex-direction: column;
     }
 }
 
@@ -13394,15 +13123,7 @@ table.sr-only {
         gap: 12px;
     }
 
-    .admin-rail-col {
-        top: 72px;
-    }
-
     .admin-rail {
-        padding: 5px;
-    }
-
-    .admin-analytics-link {
         padding: 5px;
     }
 

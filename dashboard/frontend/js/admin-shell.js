@@ -2,18 +2,27 @@
 (function () {
   'use strict';
 
-  // Design §7.2: one page, seven routes plus the profile (#users/{id}). There is
-  // deliberately no live-operations route -- the live row has no detail page (§8.2, D16).
-  // D5 absorbed the old console's three tabs, which are plain sections rather
-  // than analytics surfaces: no range/filters, their own modules.
-  const ROUTES = ['overview', 'sources', 'retention', 'credits', 'lifecycle', 'health', 'users'];
-  const CONSOLE_ROUTES = ['account', 'providers', 'activity'];
-  const ALL_ROUTES = [...ROUTES, ...CONSOLE_ROUTES];
+  // Design §7.2: seven analytics routes plus the profile (#users/{id}), and --
+  // since the 09-17 consolidation -- Providers alongside them. Split rather than
+  // one list because route() has to ask "is this an analytics route?" to light
+  // the rail's Analytics entry, and a second hand-maintained copy of the seven
+  // is how the two drift. There is deliberately no live-operations route -- the
+  // live row has no detail page (§8.2, D16).
+  const ANALYTICS_ROUTES = ['overview', 'sources', 'retention', 'credits', 'lifecycle', 'health', 'users'];
+  // The absorbed old-console sections (design N2/PR2) are routes like providers,
+  // minus the analytics chrome: no range, no filters, no freshness legend.
+  const CONSOLE_ROUTES = ['providers', 'account', 'activity'];
+  const ROUTES = [...ANALYTICS_ROUTES, ...CONSOLE_ROUTES];
   const DETAIL_ROUTES = ['sources', 'retention', 'credits', 'lifecycle', 'health'];
   // 1D is cut (§8.2): no cross-user source finer than a day exists. 1Y is 180
   // inclusive days because the value routes reject a window wider than
   // MAX_VALUE_RANGE_DAYS (180) measured as (end - start).days with end = to + 1.
   const RANGE_DAYS = Object.freeze({ '1W': 7, '1M': 30, '1Y': 180 });
+  // Must equal CSRF_FAILURE_CODE in backend/csrf.py. A second literal rather
+  // than an import because /admin has no build step and no module graph; the
+  // pairing is held by test_admin_page_shell.py, which reads both files and
+  // asserts the two strings match.
+  const CSRF_FAILURE_CODE = 'csrf_failed';
   const USER_GROUPS = ['internal', 'invited', 'organic', 'competition', 'partner', 'unknown'];
   const LIFECYCLE_SEGMENTS = ['new', 'onboarding', 'growing', 'core', 'at_risk', 'dormant'];
   const COMMERCIAL_TIERS = ['unpaid', 'starter', 'invested', 'high_value'];
@@ -85,16 +94,13 @@
   function parseHash(hash) {
     const raw = String(hash || '').replace(/^#/, '');
     const [path, queryString] = raw.split('?');
-    // A plain object, not the URLSearchParams instance: the only consumers read
-    // named keys (announce's detail, the ?user= hand-off), and a plain object
-    // round-trips through JSON in the node harness instead of collapsing to {}.
+    // A plain object, not the URLSearchParams instance: the only consumer reads
+    // named keys (the ?user= hand-off), and a plain object survives JSON in the
+    // node harness instead of collapsing to {}.
     const query = Object.fromEntries(new URLSearchParams(queryString || ''));
     const [head, tail] = path.split('/');
     if (head === 'users') {
       return { route: 'users', id: /^\d+$/.test(tail || '') ? tail : null, query };
-    }
-    if (CONSOLE_ROUTES.includes(head)) {
-      return { route: head, id: null, query };
     }
     return { route: ROUTES.includes(head) ? head : 'overview', id: null, query };
   }
@@ -289,6 +295,69 @@
     return response.json();
   }
 
+  // The /app copy of this is app.js's readCsrfToken(); /admin is a separate
+  // document with no access to it, so the two are deliberate twins rather than
+  // a shared helper -- linking them would mean importing app.js, which is the
+  // 15,000-line inheritance this page exists to avoid. Both cookie names because
+  // cookie_secure() picks __Host-atl_csrf in prod and atl_csrf in dev
+  // (backend/csrf.py:51-52); reading one name works in exactly one environment.
+  // __Host-atl_csrf first, matching read_csrf_cookie's own order
+  // (backend/csrf.py:79, unconditional -- not gated on cookie_secure()): if both
+  // cookies are present with different values, the double-submit compare only
+  // passes when this page's precedence matches the backend's, and the backend
+  // checks the host-prefixed name first.
+  // `document.cookie || ''` is load-bearing, not defensive noise: the node test
+  // stub has no cookie property at all.
+  function readCsrfToken() {
+    try {
+      const raw = document.cookie || '';
+      for (const name of ['__Host-atl_csrf', 'atl_csrf']) {
+        const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        const match = raw.match(new RegExp(`(?:^|; )${escaped}=([^;]*)`));
+        if (match) return decodeURIComponent(match[1]);
+      }
+    } catch (_error) { /* a document with no cookie access is a no-token document */ }
+    return null;
+  }
+
+  // The page's ONE write path (design N4). Deliberately a second, differently
+  // named function rather than an options bag on request(): "does this module
+  // write?" has to stay answerable by grep, because that is exactly what
+  // test_admin_page_modules.py asserts over the module set. An options bag would
+  // make the two indistinguishable in source and leave the guard asserting
+  // nothing.
+  //
+  // CsrfMiddleware requires the double-submit header on every unsafe method that
+  // carries a session cookie, and /api/auth/logout is not exempt, so a write
+  // without this header is a 403 in production that no fetch-stubbed test can
+  // see. The header is omitted rather than sent empty when there is no cookie:
+  // an empty token claims one we do not have.
+  async function write(path, { method, body } = {}) {
+    const token = readCsrfToken();
+    const headers = { Accept: 'application/json', 'Content-Type': 'application/json' };
+    if (token) headers['X-CSRF-Token'] = token;
+    const init = { method, credentials: 'include', headers };
+    if (body !== undefined) init.body = body;
+    const response = await fetch(path, init);
+    if (!response.ok) {
+      const payload = await response.json().catch(() => null);
+      const detail = payload?.detail || payload?.error;
+      const error = new Error(
+        typeof detail === 'string' ? detail : `Request failed with status ${response.status}`,
+      );
+      error.status = response.status;
+      // Carried separately from the message because handleAccessLost branches
+      // on it: `detail` is operator-facing copy that will be reworded, `code`
+      // is the contract (backend/csrf.py's CSRF_FAILURE_CODE). Only `write`
+      // reads it -- CsrfMiddleware returns before its checks for safe methods,
+      // so a GET through `request` can never carry one.
+      if (typeof payload?.code === 'string') error.code = payload.code;
+      throw error;
+    }
+    if (response.status === 204) return null;
+    return response.json().catch(() => null);
+  }
+
   function nextSeq(surface) {
     state.seq[surface] = (state.seq[surface] || 0) + 1;
     return state.seq[surface];
@@ -310,9 +379,19 @@
   // Adding any real `await` in here (a token refresh, another fetch) reopens a
   // stale-write window at every call site at once -- fix it here, not there.
   async function handleAccessLost(error) {
+    // 403 is overloaded: require_admin sends it when the role is gone, and
+    // CsrfMiddleware sends it when the double-submit token or the Origin did
+    // not check out (backend/csrf.py). Only the first is access loss. Reading
+    // both as access loss redirected an admin off the console mid-edit for a
+    // cookie that had merely expired -- losing the unsaved form -- and, because
+    // the session was still live, dropped them on /app still signed in, with
+    // nothing on screen explaining why. The caller's existing `if (lost) return;`
+    // then falls through to its own setStatus, which surfaces the refusal.
+    if (error?.status === 403 && error?.code === CSRF_FAILURE_CODE) return false;
     if (error?.status !== 401 && error?.status !== 403) return false;
     invalidateAll();
     state.admin = false;
+    state.user = null;
     window.location.replace('/app');
     return true;
   }
@@ -326,20 +405,29 @@
     try {
       const response = await fetch('/api/auth/me', { method: 'GET', credentials: 'include', headers: { Accept: 'application/json' } });
       const body = response.ok ? await response.json() : null;
-      const user = body && body.user;
-      if (!user || user.role !== 'admin') {
+      const account = body && body.user;
+      if (!account || account.role !== 'admin') {
+        state.user = null;
         window.location.replace('/app');
         return false;
       }
       state.admin = true;
-      state.user = user;
-      // The chrome (account chip) renders off this once the gate has spoken.
-      document.dispatchEvent(new CustomEvent('admin:gate-ready', { detail: { user } }));
+      // N8: kept, not discarded. The account menu needs the display name and
+      // the email, and this request has already been paid for -- the next reader
+      // should not add a second /api/auth/me for the same two strings. Only
+      // these two fields are retained: nothing on this page renders a role or
+      // an id, and a wider copy is a wider thing to leak into a DOM sink.
+      state.user = { display_name: account.display_name || '', email: account.email || '' };
       return true;
     } catch (_error) {
+      state.user = null;
       window.location.replace('/app');
       return false;
     }
+  }
+
+  function user() {
+    return state.user;
   }
 
   function setPanelState(panel, { busy = false, status = '', error = '', stale = false, empty = false } = {}) {
@@ -444,6 +532,85 @@
     route();
   }
 
+  // N1: the rail navigates by hash, so its entries are anchors carrying
+  // aria-current="page" -- not role="tab"/aria-selected, which would tell
+  // assistive technology this is an in-place panel swap when the URL actually
+  // changes and #users/{id} is a real, linkable, back-button-able location.
+  // Removed rather than set to "false": aria-current="false" is a value that is
+  // *present*, and screen readers announce the attribute, not its truthiness.
+  function syncRail(route) {
+    document.querySelectorAll('#adminRail a[data-rail]').forEach((link) => {
+      const target = link.dataset.rail;
+      const active = target === route || (target === 'analytics' && ANALYTICS_ROUTES.includes(route));
+      if (active) link.setAttribute('aria-current', 'page');
+      else link.removeAttribute('aria-current');
+      link.classList.toggle('is-active', active);
+    });
+  }
+
+  function renderAccountMenu() {
+    const wrap = document.getElementById('accountMenuWrap');
+    const account = state.user;
+    if (!wrap || !account) return;
+    const label = account.display_name || account.email || '';
+    const nameNode = document.getElementById('accountMenuName');
+    const emailNode = document.getElementById('accountMenuEmail');
+    const labelNode = document.getElementById('accountLabel');
+    const avatarNode = document.getElementById('accountAvatar');
+    if (nameNode) nameNode.textContent = label;
+    if (emailNode) emailNode.textContent = account.email || '';
+    if (labelNode) labelNode.textContent = label;
+    if (avatarNode) avatarNode.textContent = (label.trim()[0] || '?').toUpperCase();
+    wrap.hidden = false;
+  }
+
+  function setAccountMenuOpen(open) {
+    const menu = document.getElementById('accountMenu');
+    const button = document.getElementById('accountBtn');
+    if (!menu || !button) return;
+    menu.hidden = !open;
+    button.setAttribute('aria-expanded', String(open));
+  }
+
+  // A failed logout must not navigate. The redirect *is* the only signal the
+  // operator gets that they are signed out, so taking it after the POST failed
+  // reports a logout that did not happen -- and the cost is not cosmetic: on a
+  // shared machine they close the tab believing the session is dead while the
+  // cookie is still live and still admin. The old code swallowed every error on
+  // the grounds that stranding an admin on a console they can no longer read is
+  // worse, which is true of exactly one status: 401, where the session the
+  // cookie names is already gone. That one IS a logout, so it joins the success
+  // path. Everything else (5xx, an offline browser, a CSRF refusal) means the
+  // session survived, and the honest move is to say so and stay put so Log out
+  // can be pressed again.
+  async function logout() {
+    const notice = document.getElementById('accountMenuLogoutError');
+    const showNotice = (text) => {
+      if (!notice) return;
+      notice.textContent = text;
+      notice.hidden = !text;
+    };
+    showNotice('');
+    try {
+      await write('/api/auth/logout', { method: 'POST' });
+    } catch (error) {
+      if (error?.status !== 401) {
+        showNotice(`${error?.message || 'Log out failed.'} You are still signed in.`);
+        // The menu is where the notice lives and where the retry button is; a
+        // failure that renders behind a closed menu is a failure nobody sees.
+        setAccountMenuOpen(true);
+        return;
+      }
+    }
+    // replace, not assign: a logged-out browser must not be able to Back into
+    // a painted console. assign leaves /admin in history and eligible for
+    // bfcache, and a bfcache restore repaints the fully-drawn admin shell --
+    // user emails, credit balances, provider rows -- without re-running gate(),
+    // because a bfcache restore executes no scripts at all. replace drops the
+    // /admin entry outright, so Back cannot reach it.
+    window.location.replace('/app');
+  }
+
   function route() {
     const parsed = parseHash(window.location.hash);
     if (window.location.hash && parsed.route === 'overview' && window.location.hash !== '#overview') {
@@ -455,34 +622,26 @@
     renderedLocation = locationKey();
     state.route = parsed.route;
     state.routeId = parsed.id;
-    state.routeQuery = parsed.query;
-    const onConsole = CONSOLE_ROUTES.includes(parsed.route);
     showView('overview', parsed.route === 'overview');
     showView('detail', DETAIL_ROUTES.includes(parsed.route));
     showView('usersView', parsed.route === 'users' && !parsed.id);
     showView('profile', parsed.route === 'users' && Boolean(parsed.id));
+    showView('providers', parsed.route === 'providers');
     showView('accountView', parsed.route === 'account');
-    showView('providersView', parsed.route === 'providers');
     showView('activityView', parsed.route === 'activity');
-    // The analytics range/filters don't scope anything on the absorbed console
-    // sections; hiding them there keeps those pages honest about what they
-    // show. The analytics routes — including the users list — keep them.
-    const controls = document.getElementById('pageControls');
-    if (controls) controls.hidden = onConsole;
-    const legend = document.getElementById('freshnessLegend');
-    if (legend) legend.hidden = onConsole;
-    // The old-console icon rail: Analytics is active across its seven routes,
-    // each absorbed section across its own; its subnav only makes sense inside
-    // the analytics family.
-    const rail = document.getElementById('adminNavRail');
-    rail?.querySelectorAll('a[data-route]').forEach((link) => {
+    state.routeQuery = parsed.query;
+    // The range group, the filter form and the freshness legend all describe
+    // *daily analytics* figures. On the absorbed console sections they describe
+    // nothing on screen, and a range control that scopes nothing is worse than
+    // no control -- it invites the operator to believe the registry is being
+    // filtered.
+    const onConsole = CONSOLE_ROUTES.includes(parsed.route);
+    showView('pageControls', !onConsole);
+    showView('freshnessLegend', !onConsole);
+    document.querySelectorAll('#analyticsSubnav a[data-route]').forEach((link) => {
       link.classList.toggle('active', link.dataset.route === parsed.route);
-      link.classList.toggle('is-active', link.dataset.route === parsed.route);
     });
-    const parent = document.getElementById('adminRailAnalytics');
-    parent?.classList.toggle('is-active', !onConsole);
-    const subnav = document.getElementById('analyticsSubnav');
-    if (subnav) subnav.hidden = onConsole;
+    syncRail(parsed.route);
     window.scrollTo(0, 0);
     announce();
   }
@@ -536,6 +695,46 @@
     document.getElementById('filterTier')?.addEventListener('change', (event) => setFilters({ tier: event.target.value }));
     document.getElementById('filterInternal')?.addEventListener('change', (event) => setFilters({ internal: Boolean(event.target.checked) }));
     document.getElementById('filters')?.addEventListener('submit', (event) => event.preventDefault());
+    // One honest reload: every route's loaders re-run, the gate re-verifies,
+    // and stale module state cannot survive the click.
+    document.getElementById('adminRefreshBtn')?.addEventListener('click', () => window.location.reload());
+    // No preventDefault. The anchor's own href is #overview (ANALYTICS_ROUTES[0]),
+    // and reaching analytics has to work at every viewport width; the disclosure
+    // is an enhancement layered on a working link, never the sole affordance.
+    // Suppressing the navigation made this entry do *nothing* below 680px, where
+    // admin.css hides .analytics-subnav outright -- and since Providers became an
+    // in-page sibling route, an operator sitting on #providers at phone width had
+    // no in-page route back to analytics at all.
+    document.getElementById('analyticsParent')?.addEventListener('click', (event) => {
+      const subnav = document.getElementById('analyticsSubnav');
+      if (!subnav) return;
+      // Collapse only where the href changes nothing else. Standing on the
+      // destination itself the navigation is a no-op, so the click can only mean
+      // the disclosure -- that is where desktop collapse still lives. Anywhere
+      // else, including a sibling analytics route like #health, the href is
+      // about to move the route, and shutting the module list on the way in is
+      // not what that click asked for. ANALYTICS_ROUTES[0] rather than a second
+      // 'overview' literal: the anchor's href is the same one owner.
+      const atDestination = state.route === ANALYTICS_ROUTES[0] && !state.routeId;
+      subnav.hidden = atDestination ? !subnav.hidden : false;
+      event.currentTarget.setAttribute('aria-expanded', String(!subnav.hidden));
+    });
+    document.getElementById('accountBtn')?.addEventListener('click', (event) => {
+      event.stopPropagation();
+      setAccountMenuOpen(document.getElementById('accountMenu')?.hidden !== false);
+    });
+    document.getElementById('accountMenuLogoutBtn')?.addEventListener('click', () => { logout(); });
+    document.addEventListener('click', (event) => {
+      const wrap = document.getElementById('accountMenuWrap');
+      // `typeof … === 'function'` rather than an optional call: the node DOM stub
+      // has no contains(), and `wrap?.contains?.(t)` returning undefined would
+      // read as "outside" and close a menu the test just opened.
+      if (wrap && typeof wrap.contains === 'function' && wrap.contains(event.target)) return;
+      setAccountMenuOpen(false);
+    });
+    document.addEventListener('keydown', (event) => {
+      if (event.key === 'Escape') setAccountMenuOpen(false);
+    });
     document.querySelectorAll('[data-retry]').forEach((button) => {
       button.addEventListener('click', () => {
         const panel = button.closest('[data-panel]');
@@ -560,6 +759,7 @@
     bindControls();
     const admin = await gate();
     if (!admin) return;
+    renderAccountMenu();
     readUrlIntoState();
     syncControls();
     window.addEventListener('hashchange', handleLocationChange);
@@ -574,8 +774,9 @@
     parseHash, rangeDates, readUrlState, buildSearch, analyticsParams, userListParams,
     formatNumber, formatPercent, formatCredits, usdFromMicro, formatDateOnly, formatLastIncludedDay, formatShortDay, formatTimestamp, humanize,
     availabilityIncomplete, fieldPending, freshnessLegendText, rulesEntries, el, clear,
-    request, nextSeq, isCurrent, invalidateAll, handleAccessLost, gate,
+    request, write, user, nextSeq, isCurrent, invalidateAll, handleAccessLost, gate,
     setPanelState, openDialog, closeDialog, openRules, setFilters,
+    syncRail, renderAccountMenu, logout,
   };
   window.AdminShell = api;
   document.addEventListener('DOMContentLoaded', boot);

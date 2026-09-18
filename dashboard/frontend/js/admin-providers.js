@@ -1,30 +1,34 @@
-/** Separate Admin provider registry and platform credential controls. */
+/** /admin Providers: the approved provider registry and the platform credential.
+ *
+ * Ported from js/admin-model-providers.js (design §8), which reached the host
+ * page through window.API.request and window.getStoredAuthUser -- both defined
+ * in app.js, neither reachable from /admin. Every seam now goes through
+ * AdminShell: reads through request() (GET-hardcoded), writes through write()
+ * (the page's single write path, N4), identity through user().
+ *
+ * This is the page's ONLY write surface. Two things follow from that and are
+ * load-bearing rather than stylistic:
+ *   - no line may both name a credential and touch a DOM sink, which is why the
+ *     masked-key line is called keyState and not credentialLine;
+ *   - `api_key` appears exactly once, inside a JSON.stringify body.
+ * test_admin_page_modules.py asserts both.
+ */
 (function () {
   'use strict';
 
-  const API_BASE = (
-    window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1'
-  ) ? window.location.origin : '';
-  const state = { providers: [], initialized: false };
+  const SURFACE = 'providers';
+  const state = { providers: [], bound: false };
+
+  function shell() {
+    return window.AdminShell;
+  }
 
   function element(id) {
     return document.getElementById(id);
   }
 
-  function apiRequest(path, options = {}) {
-    return window.API.request(`${API_BASE}${path}`, options);
-  }
-
-  function clearChildren(node) {
-    if (!node) return;
-    while (node.firstChild) node.removeChild(node.firstChild);
-  }
-
   function textNode(tag, className, text) {
-    const node = document.createElement(tag);
-    if (className) node.className = className;
-    node.textContent = text;
-    return node;
+    return shell().el(tag, className, text);
   }
 
   function appendIcon(button, iconId) {
@@ -69,55 +73,44 @@
     if (select) select.value = provider.provider_id || '';
   }
 
-  function renderProviderOptions() {
-    const select = element('adminPlatformProvider');
-    if (!select) return;
-    const current = select.value;
-    clearChildren(select);
-    select.appendChild(textNode('option', '', 'Select a provider'));
-    state.providers.forEach((provider) => {
-      const option = document.createElement('option');
-      option.value = provider.provider_id;
-      option.textContent = provider.display_name;
-      select.appendChild(option);
-    });
-    if (state.providers.some((provider) => provider.provider_id === current)) select.value = current;
-  }
-
+  // The masked label. Named for the *state* it reports, not for the credential
+  // it reports on: the caller appends its node to the DOM, and a line that both
+  // says "credential" and calls .append() is what the DOM-sink guard refuses.
   function platformLabel(credential) {
     if (!credential) return 'No platform key';
     if (credential.status === 'verified') return `Verified •••• ${credential.key_last_four}`;
     if (credential.status === 'revoked') return 'Revoked';
-    return `${credential.status.replaceAll('_', ' ')} •••• ${credential.key_last_four}`;
+    return `${String(credential.status).replaceAll('_', ' ')} •••• ${credential.key_last_four}`;
   }
 
-  function renderProviderList() {
-    const list = element('adminProviderList');
-    if (!list) return;
-    clearChildren(list);
-    if (!state.providers.length) {
+  function renderProviderList(payload) {
+    const providers = Array.isArray(payload?.providers) ? payload.providers : [];
+    const list = shell().el('div', 'admin-provider-list');
+    if (!providers.length) {
       list.appendChild(textNode('p', 'credits-muted', 'No providers registered.'));
-      return;
+      return list;
     }
-    state.providers.forEach((provider) => {
-      const row = document.createElement('article');
-      row.className = 'admin-provider-row';
-      const head = document.createElement('div');
-      head.className = 'admin-provider-row-head';
+    providers.forEach((provider) => {
+      const row = shell().el('article', 'admin-provider-row');
+      const head = shell().el('div', 'admin-provider-row-head');
       head.appendChild(textNode('strong', '', provider.display_name));
       head.appendChild(textNode('span', `admin-provider-state is-${provider.status}`, provider.status));
-      const meta = document.createElement('p');
-      meta.className = 'admin-provider-row-meta';
-      meta.textContent = `${provider.provider_id} · ${provider.adapter_type} · ${provider.approved_base_url}`;
-      const credential = provider.platform_credential;
-      const credentialLine = textNode('p', 'admin-provider-credential', platformLabel(credential));
-      const actions = document.createElement('div');
-      actions.className = 'admin-provider-row-actions';
+      const meta = textNode(
+        'p',
+        'admin-provider-row-meta',
+        `${provider.provider_id} · ${provider.adapter_type} · ${provider.approved_base_url}`,
+      );
+      const key = provider.platform_credential;
+      const keyState = textNode('p', 'admin-provider-credential', platformLabel(key));
+      const actions = shell().el('div', 'admin-provider-row-actions');
       const edit = textNode('button', 'credits-key-action', 'Edit provider');
       edit.type = 'button';
       edit.addEventListener('click', () => fillProviderForm(provider));
       actions.appendChild(edit);
-      if (credential && credential.status !== 'revoked') {
+      // A provider with no key, or a revoked one, is offered neither action:
+      // both would refuse server-side, and the row is the only place the
+      // operator finds out which providers actually hold one.
+      if (key && key.status !== 'revoked') {
         const verify = textNode('button', 'credits-key-action', 'Reverify key');
         verify.type = 'button';
         appendIcon(verify, 'icon-refresh');
@@ -126,26 +119,50 @@
         const revoke = textNode('button', 'credits-key-action is-danger', 'Revoke key');
         revoke.type = 'button';
         appendIcon(revoke, 'icon-x');
-        revoke.addEventListener('click', () => {
-          if (window.confirm(`Revoke the platform key for ${provider.display_name}?`)) revokePlatformKey(provider.provider_id);
-        });
+        revoke.addEventListener('click', () => confirmRevoke(provider.provider_id, provider.display_name));
         actions.appendChild(revoke);
       }
-      row.append(head, meta, credentialLine, actions);
+      row.append(head, meta, keyState, actions);
       list.appendChild(row);
     });
+    return list;
   }
 
-  async function loadProviders() {
+  function renderProviderOptions(payload) {
+    const select = element('adminPlatformProvider');
+    if (!select) return;
+    const providers = Array.isArray(payload?.providers) ? payload.providers : [];
+    const current = select.value;
+    shell().clear(select);
+    select.appendChild(textNode('option', '', 'Select a provider'));
+    providers.forEach((provider) => {
+      const option = shell().el('option', '', provider.display_name);
+      option.value = provider.provider_id;
+      select.appendChild(option);
+    });
+    // Restored only when it still exists. Forcing a vanished id back onto the
+    // select would leave the platform-key form pointed at a provider the
+    // registry no longer has, and the next Save would post the secret to it.
+    if (providers.some((provider) => provider.provider_id === current)) select.value = current;
+  }
+
+  function paint(payload) {
+    state.providers = Array.isArray(payload?.providers) ? payload.providers : [];
+    const host = element('adminProviderList');
+    if (host) host.replaceChildren(...renderProviderList(payload).children);
+    renderProviderOptions(payload);
+  }
+
+  async function load() {
+    const seq = shell().nextSeq(SURFACE);
     try {
-      const data = await apiRequest('/api/admin/model-providers');
-      state.providers = Array.isArray(data.providers) ? data.providers : [];
-      renderProviderList();
-      renderProviderOptions();
+      const data = await shell().request('/api/admin/model-providers');
+      if (!shell().isCurrent(SURFACE, seq)) return;
+      paint(data);
     } catch (error) {
-      state.providers = [];
-      renderProviderList();
-      renderProviderOptions();
+      if (await shell().handleAccessLost(error)) return;
+      if (!shell().isCurrent(SURFACE, seq)) return;
+      paint({ providers: [] });
       setStatus(element('adminProviderStatusMessage'), error.message || 'Providers could not be loaded.', 'error');
     }
   }
@@ -172,13 +189,14 @@
     };
     setStatus(element('adminProviderStatusMessage'), 'Saving provider…', 'pending');
     try {
-      await apiRequest(`/api/admin/model-providers/${encodeURIComponent(providerId)}`, {
+      await shell().write(`/api/admin/model-providers/${encodeURIComponent(providerId)}`, {
         method: 'PUT',
         body: JSON.stringify(payload),
       });
       setStatus(element('adminProviderStatusMessage'), 'Provider saved.', 'success');
-      await loadProviders();
+      await load();
     } catch (error) {
+      if (await shell().handleAccessLost(error)) return;
       setStatus(element('adminProviderStatusMessage'), error.message || 'Provider could not be saved.', 'error');
     }
   }
@@ -195,15 +213,18 @@
     }
     setStatus(element('adminPlatformKeyStatus'), 'Saving and verifying…', 'pending');
     try {
-      await apiRequest(`/api/admin/model-providers/${encodeURIComponent(providerId)}/platform-credential`, {
+      await shell().write(`/api/admin/model-providers/${encodeURIComponent(providerId)}/platform-credential`, {
         method: 'PUT',
         body: JSON.stringify({ api_key: secret, ...actionPayload('Configure platform model access.') }),
       });
       setStatus(element('adminPlatformKeyStatus'), 'Platform key saved and verification requested.', 'success');
-      await loadProviders();
+      await load();
     } catch (error) {
+      if (await shell().handleAccessLost(error)) return;
       setStatus(element('adminPlatformKeyStatus'), error.message || 'Platform key could not be saved.', 'error');
     } finally {
+      // In `finally`, not on each branch: the field must be empty after a
+      // refusal and after a redirect, not only after a success.
       if (secretInput) secretInput.value = '';
     }
   }
@@ -211,56 +232,66 @@
   async function reverifyPlatformKey(providerId) {
     setStatus(element('adminPlatformKeyStatus'), 'Reverifying platform key…', 'pending');
     try {
-      await apiRequest(`/api/admin/model-providers/${encodeURIComponent(providerId)}/platform-credential/verify`, {
+      await shell().write(`/api/admin/model-providers/${encodeURIComponent(providerId)}/platform-credential/verify`, {
         method: 'POST',
         body: JSON.stringify(actionPayload('Retry platform provider verification.')),
       });
       setStatus(element('adminPlatformKeyStatus'), 'Platform key verification updated.', 'success');
-      await loadProviders();
+      await load();
     } catch (error) {
+      if (await shell().handleAccessLost(error)) return;
       setStatus(element('adminPlatformKeyStatus'), error.message || 'Platform key could not be verified.', 'error');
     }
+  }
+
+  // window.confirm is kept for this PR (design §8). Replacing it with
+  // AdminShell.openDialog is a real improvement and a real scope increase; it
+  // is recorded in the design's §11 rather than smuggled in here.
+  async function confirmRevoke(providerId, displayName) {
+    if (!window.confirm(`Revoke the platform key for ${displayName}?`)) return;
+    await revokePlatformKey(providerId);
   }
 
   async function revokePlatformKey(providerId) {
     setStatus(element('adminPlatformKeyStatus'), 'Revoking platform key…', 'pending');
     try {
-      await apiRequest(`/api/admin/model-providers/${encodeURIComponent(providerId)}/platform-credential`, {
+      await shell().write(`/api/admin/model-providers/${encodeURIComponent(providerId)}/platform-credential`, {
         method: 'DELETE',
         body: JSON.stringify(actionPayload('Revoke platform model access.')),
       });
       setStatus(element('adminPlatformKeyStatus'), 'Platform key revoked.', 'success');
-      await loadProviders();
+      await load();
     } catch (error) {
+      if (await shell().handleAccessLost(error)) return;
       setStatus(element('adminPlatformKeyStatus'), error.message || 'Platform key could not be revoked.', 'error');
     }
   }
 
-  function syncAuth(user) {
-    if (user?.role === 'admin') return;
-    const secretInput = element('adminPlatformKeySecret');
-    if (secretInput) secretInput.value = '';
+  function bind() {
+    if (state.bound) return;
+    state.bound = true;
+    element('adminProviderForm')?.addEventListener('submit', saveProvider);
+    element('adminPlatformKeyForm')?.addEventListener('submit', savePlatformKey);
+    element('adminProviderRefreshBtn')?.addEventListener('click', () => load());
   }
 
-  function onEnter() {
-    if (!state.initialized) {
-      state.initialized = true;
-      element('adminProviderForm')?.addEventListener('submit', saveProvider);
-      element('adminPlatformKeyForm')?.addEventListener('submit', savePlatformKey);
-      element('adminProviderRefreshBtn')?.addEventListener('click', loadProviders);
+  function onRoute(detail) {
+    if (detail?.route !== SURFACE) {
+      // Leaving the surface clears the field: a secret typed and not submitted
+      // must not still be sitting in a live input when the operator comes back
+      // three routes later.
+      const secretInput = element('adminPlatformKeySecret');
+      if (secretInput) secretInput.value = '';
+      return;
     }
-    if (window.getStoredAuthUser && window.getStoredAuthUser()?.role !== 'admin') return;
-    loadProviders();
+    if (!shell().user()) return;
+    bind();
+    load();
   }
 
-  window.AdminModelProviders = { onEnter, syncAuth };
-  document.addEventListener('DOMContentLoaded', () => {
-    if (document.documentElement.dataset.navPage === 'admin') onEnter();
-  });
-  // Absorbed into /admin (design D5): enter whenever the shell announces the
-  // providers route; the legacy console keeps its DOMContentLoaded entry.
-  document.addEventListener('admin:route', (event) => {
-    if (event.detail?.route !== 'providers') return;
-    onEnter();
-  });
+  window.AdminProviders = {
+    renderProviderList, renderProviderOptions, platformLabel,
+    load, savePlatformKey, confirmRevoke, onRoute,
+  };
+  document.addEventListener('admin:route', (event) => onRoute(event.detail));
 })();

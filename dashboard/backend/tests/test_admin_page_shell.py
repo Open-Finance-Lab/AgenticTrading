@@ -15,18 +15,16 @@ ADMIN_HTML = (FRONTEND / "admin.html").read_text(encoding="utf-8")
 ADMIN_CSS = (FRONTEND / "admin.css").read_text(encoding="utf-8")
 
 EXPECTED_SCRIPTS = [
-    "js/admin-shell.js?v=2",
+    "js/admin-shell.js?v=4",
     "js/credit-format.js?v=1",
-    # App chrome for the D5 layout: the ticker strip and the account chip.
+    # The app chrome's ticker (D5 layout pass) rides after the formatters.
     "js/admin-ticker.js?v=2",
-    "js/admin-chrome.js?v=1",
-    "js/admin-live.js?v=2",
+    "js/admin-live.js?v=1",
     "js/admin-overview.js?v=1",
-    "js/admin-users.js?v=2",
-    # Absorbed old-console modules (design D5) and their app.js stand-in.
-    "js/admin-bridge.js?v=1",
+    "js/admin-users.js?v=1",
+    "js/admin-providers.js?v=1",
+    # The absorbed credits console (design N2/PR2).
     "js/admin-credits.js?v=2",
-    "js/admin-model-providers.js?v=2",
 ]
 
 # This guard's whole job is "no inline script anywhere in this page", so a
@@ -85,13 +83,13 @@ def test_the_inline_script_guard_sees_tags_html_allows():
 def test_gate_module_loads_first_and_every_script_is_pinned():
     srcs = re.findall(r'<script src="([^"]+)" defer></script>', ADMIN_HTML)
     assert srcs == EXPECTED_SCRIPTS
-    assert srcs[0].startswith("js/admin-shell.js?v=")
+    assert srcs[0] == "js/admin-shell.js?v=4"
     for src in srcs:
         assert "?v=" in src, src
 
 
 def test_stylesheet_is_admin_css_and_the_page_does_not_inherit_styles_css():
-    assert re.search(r'<link rel="stylesheet" href="admin.css\?v=\d+">', ADMIN_HTML)
+    assert '<link rel="stylesheet" href="admin.css?v=3">' in ADMIN_HTML
     assert "styles.css" not in ADMIN_HTML
     assert "@import" not in ADMIN_CSS
     assert "cdn.jsdelivr.net" not in ADMIN_HTML
@@ -107,10 +105,9 @@ def test_panel_regions_carry_no_numeric_or_percentage_literal():
     names = [name for name, _body in regions]
     assert names == [
         "live", "attention", "active-users", "activation", "sources", "retention",
-        "value", "lifecycle", "credits", "revenue", "detail", "users", "profile",
-        # The absorbed old-console sections (design D5) are panels too and obey
-        # the same no-literal rule: every number arrives from an endpoint.
-        "account", "providers", "activity",
+        "value", "lifecycle", "credits", "revenue", "detail", "users", "profile", "providers",
+        # The absorbed credits console's two routes (design N2/PR2).
+        "account", "activity",
     ]
     for name, body in regions:
         text = TAG.sub(" ", body)
@@ -200,12 +197,12 @@ def test_subnav_routes_match_the_shell_router_and_the_aside_links_back():
     hrefs = re.findall(r'href="(#[a-z]+)"', ADMIN_HTML[start:end])
     assert hrefs == ["#overview", "#sources", "#retention", "#credits", "#lifecycle", "#health", "#users"]
     assert "#live" not in ADMIN_HTML
-    # D5: Account management, Providers and Activity absorbed into this page —
-    # the aside routes to them here instead of handing off to the old console,
-    # and no /app?view=admin link survives in the markup.
-    for route in ("account", "providers", "activity"):
-        assert f'href="#{route}" data-route="{route}"' in ADMIN_HTML, route
-    assert "/app?view=admin" not in ADMIN_HTML
+    # N2/PR2: no console entry links out any more — Account Management and
+    # Activity joined Providers as routes on this page.
+    assert "adminTab=" not in ADMIN_HTML
+    assert 'data-rail="account" href="#account"' in ADMIN_HTML
+    assert 'data-rail="providers" href="#providers"' in ADMIN_HTML
+    assert 'data-rail="activity" href="#activity"' in ADMIN_HTML
 
 
 def test_freshness_legend_replaces_the_sample_notice():
@@ -232,3 +229,90 @@ def test_pruned_css_carries_none_of_the_dead_mock_passes():
         "@media(prefers-reduced-motion:reduce)",
     ):
         assert selector in ADMIN_CSS, selector
+
+
+RAIL_ICONS = ("icon-chart", "icon-users", "icon-network", "icon-activity")
+SPRITE_ICONS = RAIL_ICONS + (
+    "icon-refresh", "icon-x", "icon-check-circle",
+    # The absorbed sections and the app chrome reference these.
+    "icon-wallet", "icon-search", "icon-minus",
+    "icon-github", "icon-discord", "icon-chevron-right",
+)
+
+
+def test_the_rail_is_anchors_with_icons_not_a_tablist():
+    """N1: /admin navigates by hash and #users/{id} is a real linkable location,
+    so the rail imitates the legacy rail's look and not its ARIA. role="tab" on a
+    control that changes the URL misreports the interaction, and an anchor gets
+    middle-click, copy-link and keyboard handling with no JavaScript."""
+    start = ADMIN_HTML.index('<aside id="adminRail"')
+    end = ADMIN_HTML.index("</aside>", start)
+    rail = ADMIN_HTML[start:end]
+    entries = re.findall(r'<a class="admin-tab[^"]*"[^>]*data-rail="([a-z-]+)"[^>]*>(.*?)</a>', rail, re.S)
+    assert [name for name, _ in entries] == ["analytics", "account", "providers", "activity"]
+    for name, body in entries:
+        assert "<use href=\"#icon-" in body, name          # every entry has an icon
+        assert re.search(r"<span>[^<]+</span>", body), name  # ...and a text label
+    assert 'role="tab"' not in rail
+    assert "aria-selected" not in rail
+    # Checked against the four top-level entry bodies, not the whole `rail`
+    # blob: the (unchanged) analytics subnav nested inside the same <aside>
+    # legitimately contains a "Users" link to the #users route, so a whole-
+    # block substring check collides with it. The guard's actual target is
+    # the account-management entry's label.
+    labels = [re.search(r"<span>([^<]+)</span>", body).group(1) for _, body in entries]
+    assert "Account Management" in labels
+    assert "Users" not in labels
+
+
+def test_the_sprite_defines_every_symbol_the_page_references():
+    """A <use href="#icon-x"> with no matching <symbol> renders an empty box and
+    raises nothing -- the one failure mode a source-shape guard can actually catch."""
+    defined = set(re.findall(r'<symbol id="([a-z-]+)"', ADMIN_HTML))
+    assert defined == set(SPRITE_ICONS), defined
+    referenced = set(re.findall(r'<use href="#([a-z-]+)"', ADMIN_HTML))
+    assert referenced <= defined, referenced - defined
+    # The sprite is markup, not script, so D6's no-inline-script guard is untouched.
+    assert "<script" not in ADMIN_HTML[ADMIN_HTML.index("<svg") : ADMIN_HTML.index("</svg>")]
+
+
+def test_the_account_menu_exists_and_carries_no_identity_text():
+    """The menu renders only after the gate resolves. A name baked into the markup
+    would be a different account's name for the duration of the probe."""
+    start = ADMIN_HTML.index('<div id="accountMenuWrap"')
+    end = ADMIN_HTML.index("</header>", start)
+    menu = ADMIN_HTML[start:end]
+    for control in ("accountBtn", "accountMenu", "accountMenuName", "accountMenuEmail", "accountMenuLogoutBtn"):
+        assert f'id="{control}"' in menu, control
+    assert '<span id="accountMenuName" class="account-menu-name"></span>' in menu
+    assert '<span id="accountMenuEmail" class="account-menu-email"></span>' in menu
+    assert 'href="/app?view=account"' in menu
+    assert 'href="/app?view=credits"' in menu
+    # No Admin item — it would link to the page it is on. (The N7 "no ticker"
+    # note is superseded: the 09-18 layout pass brought the app header's ticker
+    # strip to this page at the operator's request.)
+    assert ">Admin<" not in menu
+
+
+def test_the_rail_css_is_retyped_against_admin_tokens_not_copied():
+    """admin.css does not import styles.css and the two use different token
+    names (design §4.2), so a rule that arrived by copy-paste is a rule that
+    renders unstyled. These are styles.css token names; none may appear here."""
+    for foreign in ("--border-color", "--text-primary", "--text-secondary", "--bg-card", "--info-color", "#67e8f9"):
+        assert foreign not in ADMIN_CSS, foreign
+    for retyped in (".admin-rail", ".admin-tab", ".admin-tab svg", ".admin-tab.is-active::before",
+                    ".account-menu", ".account-menu-item", ".account-menu-item--danger"):
+        assert retyped in ADMIN_CSS, retyped
+    assert "min-height:43px" in ADMIN_CSS      # the legacy pill height
+    assert "font-size:13px;font-weight:600" in ADMIN_CSS
+    assert "width:18px;height:18px" in ADMIN_CSS
+
+
+def test_the_flat_text_list_rules_are_gone():
+    """The old aside styled every anchor with one `aside a` rule and shrank the
+    labels to font-size:0 on phones. Leaving either behind lets a stale rule win
+    over the rail by source order."""
+    assert "aside a{" not in ADMIN_CSS
+    assert "aside a:hover{" not in ADMIN_CSS
+    assert "aside a::first-letter" not in ADMIN_CSS
+    assert ".analytics-parent{" not in ADMIN_CSS
