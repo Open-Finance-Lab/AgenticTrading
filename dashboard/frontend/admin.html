@@ -56,14 +56,21 @@
            is hidden until the role is known; only admins ever reach this page.
         6. #accountMenuLogoutError is /admin-only (PR #488): the console is
            precisely the page you must not be left sitting on believing you
-           signed out. -->
+           signed out.
+        7. The Discord anchor drops #openDiscordBtn and data-discord-link. Those
+           are not decoration: app.js reads both to preventDefault and run the
+           account-linking OAuth flow (openDiscordWithAccount). Carried across
+           they would promise a flow nothing on this page implements, and the
+           button would fall through to the plain public invite -- the same
+           dead-control failure the #navMenuToggle handler was ported to avoid,
+           except here the honest fix is to stop claiming the behaviour. -->
   <header class="header">
     <div class="header-left">
       <a class="header-github-link" href="https://github.com/Open-Finance-Lab/AgenticTrading" target="_blank" rel="noopener noreferrer" aria-label="AgenticTrading on GitHub">
         <svg class="ui-icon header-github-icon" aria-hidden="true"><use href="#icon-github"/></svg>
         <span class="header-github-name">AgenticTrading</span>
       </a>
-      <a id="openDiscordBtn" class="header-discord-btn" data-discord-link href="https://discord.gg/9HnQ6XDG98" target="_blank" rel="noopener noreferrer">
+      <a class="header-discord-btn" href="https://discord.gg/9HnQ6XDG98" target="_blank" rel="noopener noreferrer">
         <svg class="header-discord-btn__icon" aria-hidden="true"><use href="#icon-discord"/></svg>
         <span class="header-discord-btn__label">Discord Community</span>
         <svg class="header-discord-btn__arrow" aria-hidden="true"><use href="#icon-chevron-right"/></svg>

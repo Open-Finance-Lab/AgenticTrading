@@ -314,7 +314,11 @@ def test_every_styles_css_token_name_used_here_is_also_declared_here():
         )
     )
     assert js_set, "admin-overview.js sets no custom properties — update the exemption"
-    declared = set(re.findall(r"(--[a-z0-9-]+)\s*:", ADMIN_CSS)) | js_set
+    # Comments stripped first: this file explains its tokens in prose, and a
+    # `--foo:` inside /* */ would count as a declaration and re-open exactly
+    # the copy-paste hole this assertion replaced the old name-ban with.
+    code = re.sub(r"/\*.*?\*/", "", ADMIN_CSS, flags=re.DOTALL)
+    declared = set(re.findall(r"(--[a-z0-9-]+)\s*:", code)) | js_set
     used = set(re.findall(r"var\((--[a-z0-9-]+)", ADMIN_CSS))
     assert used <= declared, sorted(used - declared)
     # The alias block itself: these carry styles.css's values, not this file's

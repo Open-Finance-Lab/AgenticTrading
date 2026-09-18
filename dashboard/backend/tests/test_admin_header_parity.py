@@ -73,6 +73,19 @@ def _canonicalise(block: str) -> str:
         )
     text = text.replace("</button>", "</NAV>").replace("</a>", "</NAV>")
 
+    # Delta 7: /admin's Discord anchor drops #openDiscordBtn and
+    # data-discord-link -- app.js's opt-in markers for the account-linking OAuth
+    # flow, which does not exist on this page. Normalised here rather than left
+    # out, because markup that merely *looks* the same is what this file is for.
+    text = _sub_one_of(
+        text,
+        (
+            '<a class="header-discord-btn" href="https://discord.gg/9HnQ6XDG98" target="_blank" rel="noopener noreferrer">',
+            '<a id="openDiscordBtn" class="header-discord-btn" data-discord-link href="https://discord.gg/9HnQ6XDG98" target="_blank" rel="noopener noreferrer">',
+        ),
+        "<DISCORD>",
+    )
+
     # Delta 3: no #authSignInBtn on /admin -- gate() bounces a non-admin before
     # the page paints, so the signed-out branch is unreachable there. One-sided,
     # so it may be absent; `test_the_one_sided_deltas_are_on_the_side_they_claim`
@@ -137,7 +150,7 @@ def test_the_deltas_are_real_deltas_and_not_a_vacuous_pass():
     admin = _canonicalise(_header_block(ADMIN_HTML))
     for marker in (
         "header-github-link",
-        "header-discord-btn",
+        "<DISCORD>",
         "header-brand",
         "logo-container",
         "Agentic Trading Lab",
