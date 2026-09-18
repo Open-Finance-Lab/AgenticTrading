@@ -555,8 +555,12 @@
     const label = account.display_name || account.email || '';
     const nameNode = document.getElementById('accountMenuName');
     const emailNode = document.getElementById('accountMenuEmail');
-    const labelNode = document.getElementById('accountLabel');
-    const avatarNode = document.getElementById('accountAvatar');
+    // authUserLabel / authAvatar / authAccountBtn, not the standalone mock's
+    // accountLabel / accountAvatar / accountBtn: the header is now a retyped
+    // copy of app.html's, and identical IDs are what lets
+    // test_admin_header_parity.py compare the two blocks at all.
+    const labelNode = document.getElementById('authUserLabel');
+    const avatarNode = document.getElementById('authAvatar');
     if (nameNode) nameNode.textContent = label;
     if (emailNode) emailNode.textContent = account.email || '';
     if (labelNode) labelNode.textContent = label;
@@ -566,7 +570,7 @@
 
   function setAccountMenuOpen(open) {
     const menu = document.getElementById('accountMenu');
-    const button = document.getElementById('accountBtn');
+    const button = document.getElementById('authAccountBtn');
     if (!menu || !button) return;
     menu.hidden = !open;
     button.setAttribute('aria-expanded', String(open));
@@ -719,9 +723,20 @@
       subnav.hidden = atDestination ? !subnav.hidden : false;
       event.currentTarget.setAttribute('aria-expanded', String(!subnav.hidden));
     });
-    document.getElementById('accountBtn')?.addEventListener('click', (event) => {
+    document.getElementById('authAccountBtn')?.addEventListener('click', (event) => {
       event.stopPropagation();
       setAccountMenuOpen(document.getElementById('accountMenu')?.hidden !== false);
+    });
+    // app.js owns this toggle on /app and does not load here, so the ported
+    // header would paint a hamburger below 900px that opens nothing -- the one
+    // width band where the nav is *only* reachable through it. Same contract as
+    // app.js's: flip .open on #primaryNav and mirror it into aria-expanded.
+    document.getElementById('navMenuToggle')?.addEventListener('click', () => {
+      const nav = document.getElementById('primaryNav');
+      const toggle = document.getElementById('navMenuToggle');
+      if (!nav || !toggle) return;
+      const isOpen = nav.classList.toggle('open');
+      toggle.setAttribute('aria-expanded', isOpen ? 'true' : 'false');
     });
     document.getElementById('accountMenuLogoutBtn')?.addEventListener('click', () => { logout(); });
     document.addEventListener('click', (event) => {

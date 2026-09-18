@@ -15,7 +15,7 @@ ADMIN_HTML = (FRONTEND / "admin.html").read_text(encoding="utf-8")
 ADMIN_CSS = (FRONTEND / "admin.css").read_text(encoding="utf-8")
 
 EXPECTED_SCRIPTS = [
-    "js/admin-shell.js?v=4",
+    "js/admin-shell.js?v=5",
     "js/credit-format.js?v=1",
     # The app chrome's ticker (D5 layout pass) rides after the formatters.
     "js/admin-ticker.js?v=2",
@@ -83,13 +83,13 @@ def test_the_inline_script_guard_sees_tags_html_allows():
 def test_gate_module_loads_first_and_every_script_is_pinned():
     srcs = re.findall(r'<script src="([^"]+)" defer></script>', ADMIN_HTML)
     assert srcs == EXPECTED_SCRIPTS
-    assert srcs[0] == "js/admin-shell.js?v=4"
+    assert srcs[0] == "js/admin-shell.js?v=5"
     for src in srcs:
         assert "?v=" in src, src
 
 
 def test_stylesheet_is_admin_css_and_the_page_does_not_inherit_styles_css():
-    assert '<link rel="stylesheet" href="admin.css?v=3">' in ADMIN_HTML
+    assert '<link rel="stylesheet" href="admin.css?v=4">' in ADMIN_HTML
     assert "styles.css" not in ADMIN_HTML
     assert "@import" not in ADMIN_CSS
     assert "cdn.jsdelivr.net" not in ADMIN_HTML
@@ -232,11 +232,12 @@ def test_pruned_css_carries_none_of_the_dead_mock_passes():
 
 
 RAIL_ICONS = ("icon-chart", "icon-users", "icon-network", "icon-activity")
-SPRITE_ICONS = RAIL_ICONS + (
-    "icon-refresh", "icon-x", "icon-check-circle",
-    # The absorbed sections and the app chrome reference these.
-    "icon-wallet", "icon-search", "icon-minus",
-    "icon-github", "icon-discord", "icon-chevron-right",
+HEADER_ICONS = ("icon-github", "icon-discord", "icon-chevron-right")
+SPRITE_ICONS = (
+    RAIL_ICONS
+    + ("icon-refresh", "icon-x", "icon-check-circle")
+    + HEADER_ICONS
+    + ("icon-wallet", "icon-search", "icon-minus")  # absorbed credits console
 )
 
 
@@ -282,24 +283,68 @@ def test_the_account_menu_exists_and_carries_no_identity_text():
     start = ADMIN_HTML.index('<div id="accountMenuWrap"')
     end = ADMIN_HTML.index("</header>", start)
     menu = ADMIN_HTML[start:end]
-    for control in ("accountBtn", "accountMenu", "accountMenuName", "accountMenuEmail", "accountMenuLogoutBtn"):
+    for control in ("authAccountBtn", "accountMenu", "accountMenuName", "accountMenuEmail", "accountMenuLogoutBtn"):
         assert f'id="{control}"' in menu, control
     assert '<span id="accountMenuName" class="account-menu-name"></span>' in menu
     assert '<span id="accountMenuEmail" class="account-menu-email"></span>' in menu
     assert 'href="/app?view=account"' in menu
     assert 'href="/app?view=credits"' in menu
-    # No Admin item — it would link to the page it is on. (The N7 "no ticker"
-    # note is superseded: the 09-18 layout pass brought the app header's ticker
-    # strip to this page at the operator's request.)
-    assert ">Admin<" not in menu
+    # N7 said no Admin item, on the grounds that it would link to the page it is
+    # on. The header port overrides that half: the menu is now a retyped copy of
+    # app.html's, and dropping one entry is exactly the kind of drift the parity
+    # guard exists to prevent. Self-referential is the lesser cost -- the entry
+    # is how an admin gets *back* here from /app, so it has to read the same on
+    # both. Unhidden, unlike /app's, because only admins reach this page at all.
+    assert '<a class="account-menu-item" href="/admin">Admin</a>' in menu
+    # N7's no-ticker half is superseded by the 09-18 layout pass: the operator
+    # asked for the app header's strip on this page too (admin-ticker.js).
+    assert 'id="tickerTrack"' in ADMIN_HTML
 
 
-def test_the_rail_css_is_retyped_against_admin_tokens_not_copied():
-    """admin.css does not import styles.css and the two use different token
-    names (design §4.2), so a rule that arrived by copy-paste is a rule that
-    renders unstyled. These are styles.css token names; none may appear here."""
-    for foreign in ("--border-color", "--text-primary", "--text-secondary", "--bg-card", "--info-color", "#67e8f9"):
-        assert foreign not in ADMIN_CSS, foreign
+def test_every_styles_css_token_name_used_here_is_also_declared_here():
+    """admin.css does not import styles.css, so a `var(--foo)` copy-pasted from
+    there is a rule that renders unstyled unless this file declares --foo too.
+
+    This used to ban styles.css's token names outright. The header port made
+    that ban wrong in the one direction that matters: the universal top bar is
+    retyped verbatim *on styles.css's token names*, deliberately, because
+    substituting this file's nearest equivalent (#12172b for #0f1328, #2a3041
+    for #1f2937) is precisely how two copies of one header become two headers.
+    So the guard moved from the name to the declaration -- which is the property
+    the old assertion was really protecting, and is now checked for every token
+    rather than the six that were listed."""
+    # Set per element at runtime by admin-overview.js's style.setProperty calls,
+    # so they are legitimately used-but-not-declared here. Asserted against the
+    # JS rather than hardcoded: a renamed property must break one of the two
+    # sides, not quietly widen the exemption.
+    js_set = set(
+        re.findall(
+            r"setProperty\('(--[a-z0-9-]+)'",
+            (FRONTEND / "js" / "admin-overview.js").read_text(encoding="utf-8"),
+        )
+    )
+    assert js_set, "admin-overview.js sets no custom properties — update the exemption"
+    # Comments stripped first: this file explains its tokens in prose, and a
+    # `--foo:` inside /* */ would count as a declaration and re-open exactly
+    # the copy-paste hole this assertion replaced the old name-ban with.
+    code = re.sub(r"/\*.*?\*/", "", ADMIN_CSS, flags=re.DOTALL)
+    declared = set(re.findall(r"(--[a-z0-9-]+)\s*:", code)) | js_set
+    used = set(re.findall(r"var\((--[a-z0-9-]+)", ADMIN_CSS))
+    assert used <= declared, sorted(used - declared)
+    # The alias block itself: these carry styles.css's values, not this file's
+    # nearest equivalent, and the header is unrecognisable if they drift.
+    for token, value in (
+        ("--bg-surface", "#0f1328"),
+        ("--bg-card", "#131a35"),
+        ("--bg-hover", "#1a2047"),
+        ("--text-primary", "#e5e7eb"),
+        ("--text-secondary", "#9ca3af"),
+        ("--border-color", "#1f2937"),
+        ("--info-color", "#00bfff"),
+    ):
+        assert f"{token}:{value}" in ADMIN_CSS, token
+    # Never copied: a literal that belongs to no token on either side.
+    assert "#67e8f9" not in ADMIN_CSS
     for retyped in (".admin-rail", ".admin-tab", ".admin-tab svg", ".admin-tab.is-active::before",
                     ".account-menu", ".account-menu-item", ".account-menu-item--danger"):
         assert retyped in ADMIN_CSS, retyped

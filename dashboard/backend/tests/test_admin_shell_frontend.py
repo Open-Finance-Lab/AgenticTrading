@@ -171,7 +171,7 @@ def test_request_seq_guard_and_access_loss():
 _ACCOUNT_MENU_DOM = (
     "register('accountMenuLogoutError', new Node('p'));"
     "register('accountMenu', new Node('div'));"
-    "register('accountBtn', new Node('button'));"
+    "register('authAccountBtn', new Node('button'));"
 )
 
 
@@ -612,8 +612,8 @@ def test_the_account_menu_renders_only_after_the_gate_resolves():
         "  const wrap = register('accountMenuWrap', new Node('div'));"
         "  const name = register('accountMenuName', new Node('span'));"
         "  const email = register('accountMenuEmail', new Node('span'));"
-        "  const label = register('accountLabel', new Node('span'));"
-        "  const avatar = register('accountAvatar', new Node('span'));"
+        "  const label = register('authUserLabel', new Node('span'));"
+        "  const avatar = register('authAvatar', new Node('span'));"
         "  wrap.hidden = true;"
         "  const before = wrap.hidden;"
         "  fetchQueue.push({ok: true, status: 200, body: {user: {role: 'admin',"
@@ -636,7 +636,7 @@ def test_an_account_with_no_display_name_falls_back_to_the_email():
         "(async () => {"
         "  register('accountMenuWrap', new Node('div'));"
         "  const name = register('accountMenuName', new Node('span'));"
-        "  const avatar = register('accountAvatar', new Node('span'));"
+        "  const avatar = register('authAvatar', new Node('span'));"
         "  fetchQueue.push({ok: true, status: 200, body: {user: {role: 'admin', email: 'bo@example.test'}}});"
         "  await window.AdminShell.gate();"
         "  window.AdminShell.renderAccountMenu();"
