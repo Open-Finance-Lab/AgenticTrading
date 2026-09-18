@@ -190,18 +190,26 @@
     if (!track) return;
     stopScroll();
     const width = marqueeWidth();
-    let repeats = Math.max(3, Math.ceil((width + 80) / Math.max(quotes.length, 1) * TICKER_ESTIMATED_ITEM_WIDTH));
+    // One repeat ≈ quotes.length tiles of ~140px; the set must be wider than
+    // the marquee plus a seam. Division LAST: `(w+80)/n*140` reads the same
+    // but multiplies after dividing — that bug once asked for 27,000 repeats
+    // and shipped ~380,000 live DOM nodes to the page.
+    const singlePassWidth = Math.max(quotes.length, 1) * TICKER_ESTIMATED_ITEM_WIDTH;
+    let repeats = Math.max(3, Math.ceil((width + 80) / singlePassWidth));
     let setHtml = buildSet(quotes, repeats);
     track.innerHTML =
       `<div class="ticker-set">${setHtml}</div>` +
       `<div class="ticker-set" aria-hidden="true">${setHtml}</div>`;
-    const firstSet = track.querySelector('.ticker-set');
+    // Re-query each pass: the captured node is detached by innerHTML and its
+    // offsetWidth reads 0 forever, which would run the loop to the cap.
+    let firstSet = track.querySelector('.ticker-set');
     while (firstSet && firstSet.offsetWidth < width + 40 && repeats < 24) {
       repeats += 1;
       setHtml = buildSet(quotes, repeats);
       track.innerHTML =
         `<div class="ticker-set">${setHtml}</div>` +
         `<div class="ticker-set" aria-hidden="true">${setHtml}</div>`;
+      firstSet = track.querySelector('.ticker-set');
     }
     track.dataset.tickerReady = '1';
     scheduleStart();

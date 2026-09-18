@@ -18,7 +18,7 @@ EXPECTED_SCRIPTS = [
     "js/admin-shell.js?v=2",
     "js/credit-format.js?v=1",
     # App chrome for the D5 layout: the ticker strip and the account chip.
-    "js/admin-ticker.js?v=1",
+    "js/admin-ticker.js?v=2",
     "js/admin-chrome.js?v=1",
     "js/admin-live.js?v=2",
     "js/admin-overview.js?v=1",
