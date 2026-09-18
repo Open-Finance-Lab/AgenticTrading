@@ -6,15 +6,22 @@
   <title>ATL Admin</title>
   <link rel="icon" href="favicon.svg">
   <link rel="stylesheet" href="admin.css?v=1">
+  <link rel="stylesheet" href="admin-console.css?v=1">
   <!-- No inline scripts (design D6): pytest can only execute frontend code it
        can lift from an external file. admin-shell.js loads first because it
        owns the /api/auth/me gate and the router the other modules listen to;
-       all five are deferred, so they run in this order before DOMContentLoaded. -->
+       all are deferred, so they run in this order before DOMContentLoaded. -->
   <script src="js/admin-shell.js?v=1" defer></script>
   <script src="js/credit-format.js?v=1" defer></script>
   <script src="js/admin-live.js?v=1" defer></script>
   <script src="js/admin-overview.js?v=1" defer></script>
   <script src="js/admin-users.js?v=1" defer></script>
+  <!-- The absorbed old-console modules (design D5) talk to window.API and
+       window.getStoredAuthUser, which app.js provided on /app; admin-bridge.js
+       stands in for both here. -->
+  <script src="js/admin-bridge.js?v=1" defer></script>
+  <script src="js/admin-credits.js?v=1" defer></script>
+  <script src="js/admin-model-providers.js?v=1" defer></script>
 </head>
 <body>
   <header>
@@ -34,11 +41,12 @@
         <a href="#health" data-route="health">System health</a>
         <a href="#users" data-route="users">Users</a>
       </nav>
-      <!-- Account management, Providers and Activity stay in the old console
-           until the follow-up port (design D5, §7.5). -->
-      <a href="/app?view=admin&amp;adminTab=users">Account management</a>
-      <a href="/app?view=admin&amp;adminTab=providers">Providers</a>
-      <a href="/app?view=admin&amp;adminTab=activity">Activity</a>
+      <!-- Account management, Providers and Activity absorbed from the old
+           console (design D5): the whole administrator layer now lives on one
+           page behind one gate. -->
+      <a href="#account" data-route="account">Account management</a>
+      <a href="#providers" data-route="providers">Providers</a>
+      <a href="#activity" data-route="activity">Activity</a>
     </aside>
     <main>
       <!-- Page-level controls, deliberately outside #overview. route() hides that
@@ -181,6 +189,174 @@
 
       <section id="profile" class="detail-view" data-panel="profile" hidden aria-live="polite"></section>
 
+      <!-- ===== Absorbed old-console sections (design D5) ===== -->
+      <p id="adminCreditsStatus" class="credits-status admin-credits-status" role="status" aria-live="polite"></p>
+
+      <section id="accountView" class="detail-view" data-panel="account" hidden aria-labelledby="accountTitle">
+        <div class="page-head"><div><h1 id="accountTitle" tabindex="-1">Account management</h1><p class="muted">Grant Credits, accounts, and the platform pool</p></div></div>
+        <div id="adminStats" class="admin-stats" aria-label="Site stats">
+            <div class="admin-stat"><span class="admin-stat-value" data-stat="users">—</span><span class="admin-stat-label">Users</span></div>
+            <div class="admin-stat"><span class="admin-stat-value" data-stat="admins">—</span><span class="admin-stat-label">Admins</span></div>
+            <div class="admin-stat"><span class="admin-stat-value" data-stat="agents">—</span><span class="admin-stat-label">Agents</span></div>
+            <div class="admin-stat"><span class="admin-stat-value" data-stat="active_dashboard_backtests">—</span><span class="admin-stat-label">Running backtests</span></div>
+        </div>
+            <section id="adminCreditsSection" class="admin-credits-console" aria-labelledby="adminCreditsHeading">
+            <div class="admin-credits-heading">
+                <div>
+                    <p class="credits-section-kicker">Credits administration</p>
+                    <h3 id="adminCreditsHeading">Grant Pool</h3>
+                    <p class="admin-credits-summary-copy">Fund the platform pool, allocate Grant Credits to an account, and keep every movement auditable.</p>
+                </div>
+                <div class="admin-credits-heading-actions">
+                    <span class="credits-admin-badge">Admin only</span>
+                    <button id="adminCreditsRefreshBtn" class="credits-icon-btn" type="button" aria-label="Refresh Grant Credits" title="Refresh Grant Credits">
+                        <svg aria-hidden="true"><use href="#icon-refresh"/></svg>
+                    </button>
+                </div>
+            </div>
+
+            <div class="admin-credits-pool-layout">
+            <div id="adminCreditsPoolSummary" class="admin-credits-summary" aria-label="Grant Pool summary">
+                <div class="admin-credits-pool-ring" role="img" aria-label="Grant Pool allocation">
+                    <svg viewBox="0 0 220 220" aria-hidden="true">
+                        <circle class="admin-credits-pool-ring-track" cx="110" cy="110" r="78"></circle>
+                        <circle id="adminCreditsPoolRingAvailable" class="admin-credits-pool-ring-available" cx="110" cy="110" r="78"></circle>
+                        <circle id="adminCreditsPoolRingAllocated" class="admin-credits-pool-ring-allocated" cx="110" cy="110" r="78"></circle>
+                    </svg>
+                    <div class="admin-credits-pool-ring-center">
+                        <span>Total Pool</span>
+                        <strong id="adminCreditsPoolTotal">—</strong>
+                        <small>Credits</small>
+                    </div>
+                </div>
+                <div class="admin-credits-pool-legend" aria-label="Grant Pool allocation details">
+                    <div class="admin-credits-pool-legend-row">
+                        <span class="admin-credits-pool-swatch is-available" aria-hidden="true"></span>
+                        <span class="admin-credits-pool-legend-label">Available</span>
+                        <strong id="adminCreditsPoolAvailable">—</strong>
+                    </div>
+                    <div class="admin-credits-pool-legend-row">
+                        <span class="admin-credits-pool-swatch is-allocated" aria-hidden="true"></span>
+                        <span class="admin-credits-pool-legend-label">Allocated</span>
+                        <strong id="adminCreditsAllocated">—</strong>
+                    </div>
+                </div>
+            </div>
+
+            <div class="admin-credits-actions">
+                <form id="adminGrantPoolForm" class="admin-credits-form">
+                    <div class="admin-credits-form-heading">
+                        <div>
+                            <p class="credits-section-kicker">Pool adjustment</p>
+                            <h4>Adjust Grant Pool</h4>
+                        </div>
+                        <svg aria-hidden="true"><use href="#icon-wallet"/></svg>
+                    </div>
+                    <label class="credits-key-field" for="adminGrantPoolAmount"><span>Credits (+ add, − remove)</span><input id="adminGrantPoolAmount" type="number" step="0.000001" inputmode="decimal" autocomplete="off" placeholder="0.000000" required></label>
+                    <label class="credits-key-field" for="adminGrantPoolReason"><span>Reason</span><input id="adminGrantPoolReason" type="text" maxlength="500" placeholder="Budget approval reference" required></label>
+                    <button class="auth-btn auth-btn-primary" type="submit"><svg aria-hidden="true"><use href="#icon-check-circle"/></svg><span>Apply adjustment</span></button>
+                </form>
+            </div>
+            </div>
+            </section>
+            <div class="admin-credits-users">
+                <div class="admin-credits-subheading">
+                    <h4 id="adminCreditsUsersHeading">Account Management</h4>
+                    <span id="adminCreditsUserCount" class="admin-credits-count" aria-live="polite"></span>
+                </div>
+                <form id="adminCreditsUserSearch" class="admin-credits-search" role="search">
+                    <label class="sr-only" for="adminCreditsUserQuery">Search users</label>
+                    <input id="adminCreditsUserQuery" type="search" maxlength="120" placeholder="Search by email or display name" autocomplete="off">
+                    <button class="credits-icon-btn" type="submit" aria-label="Search users" title="Search users"><svg aria-hidden="true"><use href="#icon-search"/></svg></button>
+                </form>
+                <div class="admin-credits-table-wrap">
+                    <table class="admin-credits-users-table" aria-label="Grant Credits user allocation">
+                        <thead><tr><th scope="col">Account</th><th scope="col">Group</th><th scope="col">Role</th><th scope="col">Status</th><th scope="col">Grant</th><th scope="col">Purchased</th><th scope="col">Total</th><th scope="col">Amount</th><th scope="col"><span class="sr-only">Actions</span></th></tr></thead>
+                        <tbody id="adminCreditsUsersBody"><tr><td colspan="9" class="admin-empty">Search for an account to allocate Grant Credits.</td></tr></tbody>
+                    </table>
+                </div>
+                <div class="admin-credits-pager" aria-label="Account pages">
+                    <span id="adminCreditsUsersRange" class="admin-credits-pager-range" aria-live="polite">Showing 0 of 0</span>
+                    <div class="admin-credits-pager-buttons">
+                        <button id="adminCreditsUsersPrevBtn" class="auth-btn auth-btn-secondary" type="button" disabled>Previous</button>
+                        <button id="adminCreditsUsersNextBtn" class="auth-btn auth-btn-secondary" type="button" disabled>Next</button>
+                    </div>
+                </div>
+            </div>
+      </section>
+
+      <section id="providersView" class="detail-view" data-panel="providers" hidden aria-labelledby="providersTitle">
+        <div class="page-head"><div><h1 id="providersTitle" tabindex="-1">Providers</h1><p class="muted">Approved model providers and platform credentials</p></div></div>
+        <section id="adminModelProvidersSection" class="admin-provider-section" aria-labelledby="adminModelProvidersHeading">
+            <div class="admin-provider-heading">
+                <div>
+                    <p class="credits-section-kicker">Provider control</p>
+                    <h3 id="adminModelProvidersHeading">Model providers</h3>
+                </div>
+                <span class="credits-admin-badge">Admin only</span>
+            </div>
+            <div class="admin-provider-grid">
+                <div class="admin-provider-list-wrap">
+                    <div class="admin-provider-list-head">
+                        <span class="credits-section-kicker">Approved registry</span>
+                        <button id="adminProviderRefreshBtn" class="credits-icon-btn" type="button" aria-label="Refresh providers" title="Refresh providers">
+                            <svg aria-hidden="true"><use href="#icon-refresh"/></svg>
+                        </button>
+                    </div>
+                    <div id="adminProviderList" class="admin-provider-list" aria-live="polite">
+                        <p class="credits-muted">Loading providers…</p>
+                    </div>
+                </div>
+                <form id="adminProviderForm" class="admin-provider-form">
+                    <p class="credits-section-kicker">Provider registry</p>
+                    <label class="credits-key-field" for="adminProviderId"><span>Provider ID</span><input id="adminProviderId" type="text" maxlength="64" pattern="[a-z0-9_]{2,64}" autocomplete="off" required></label>
+                    <label class="credits-key-field" for="adminProviderDisplayName"><span>Display name</span><input id="adminProviderDisplayName" type="text" maxlength="100" autocomplete="off" required></label>
+                    <label class="credits-key-field" for="adminProviderAdapter"><span>Adapter</span><select id="adminProviderAdapter" class="control-select" autocomplete="off"><option value="openai_compatible">OpenAI-compatible</option><option value="openrouter">OpenRouter</option><option value="openai">OpenAI</option><option value="anthropic">Anthropic</option><option value="gemini">Gemini</option></select></label>
+                    <label class="credits-key-field" for="adminProviderBaseUrl"><span>Approved base URL</span><input id="adminProviderBaseUrl" type="url" maxlength="500" placeholder="https://provider.example/v1" autocomplete="off" required></label>
+                    <div class="admin-provider-checks"><label><input id="adminProviderByok" type="checkbox" checked> BYOK enabled</label><label><input id="adminProviderPlatform" type="checkbox"> Platform enabled</label></div>
+                    <label class="credits-key-field" for="adminProviderStatus"><span>Status</span><select id="adminProviderStatus" class="control-select"><option value="enabled">Enabled</option><option value="disabled">Disabled</option></select></label>
+                    <label class="credits-key-field" for="adminProviderReason"><span>Reason</span><input id="adminProviderReason" type="text" maxlength="500" value="Provider registry update." autocomplete="off" required></label>
+                    <button class="auth-btn auth-btn-primary" type="submit"><svg aria-hidden="true"><use href="#icon-check-circle"/></svg><span>Save provider</span></button>
+                    <p id="adminProviderStatusMessage" class="credits-status" role="status" aria-live="polite"></p>
+                </form>
+            </div>
+            <div class="admin-platform-key-area">
+                <div class="admin-provider-heading">
+                    <div>
+                        <p class="credits-section-kicker">Platform credential</p>
+                        <h3>ATL model access</h3>
+                    </div>
+                </div>
+                <form id="adminPlatformKeyForm" class="admin-platform-key-form">
+                    <label class="credits-key-field" for="adminPlatformProvider"><span>Provider</span><select id="adminPlatformProvider" class="control-select" required><option value="">Select a provider</option></select></label>
+                    <label class="credits-key-field" for="adminPlatformKeySecret"><span>API key</span><input id="adminPlatformKeySecret" type="password" maxlength="4096" autocomplete="new-password" spellcheck="false" required></label>
+                    <button class="auth-btn auth-btn-primary" type="submit"><svg aria-hidden="true"><use href="#icon-check-circle"/></svg><span>Save and verify</span></button>
+                </form>
+                <p id="adminPlatformKeyStatus" class="credits-status" role="status" aria-live="polite"></p>
+            </div>
+        </section>
+      </section>
+
+      <section id="activityView" class="detail-view" data-panel="activity" hidden aria-labelledby="activityTitle">
+        <div class="page-head"><div><h1 id="activityTitle" tabindex="-1">Activity</h1><p class="muted">Every Grant Credits movement, auditable</p></div></div>
+            <div class="admin-credits-activity">
+                <div class="admin-credits-subheading">
+                    <div>
+                        <p class="credits-section-kicker">Audit trail</p>
+                        <h4>Grant Activity</h4>
+                    </div>
+                    <button id="adminCreditsActivityMoreBtn" class="auth-btn auth-btn-secondary" type="button" hidden>Load more</button>
+                </div>
+                <div class="admin-credits-table-wrap">
+                    <table class="admin-credits-activity-table" aria-label="Grant Credits activity">
+                        <thead><tr><th scope="col">Time</th><th scope="col">Operation</th><th scope="col">Account</th><th scope="col">Amount</th><th scope="col">Source</th><th scope="col">Reason</th></tr></thead>
+                        <tbody id="adminCreditsActivityBody"><tr><td colspan="6" class="admin-empty">No Grant activity yet.</td></tr></tbody>
+                    </table>
+                </div>
+            </div>
+      </section>
+      <!-- ===== end absorbed sections ===== -->
+
       <footer id="freshnessLegend" class="freshness-legend">Daily figures complete through — UTC; live tiles are this instance's process state</footer>
     </main>
   </div>
@@ -194,7 +370,39 @@
   <dialog id="evidenceDialog" aria-labelledby="evidenceTitle">
     <div class="dialog-head"><h2 id="evidenceTitle">User evidence</h2><button type="button" data-dialog-close aria-label="Close">×</button></div>
     <div id="evidenceBody"></div>
-    <div class="dialog-actions"><a id="evidenceAccount" class="module-link" href="/app?view=admin&amp;adminTab=users">Open account management</a><a id="evidenceProfile" class="module-link" href="#users" data-dialog-close data-dialog-initial-focus>Open full profile</a></div>
+    <div class="dialog-actions"><a id="evidenceAccount" class="module-link" href="#account" data-dialog-close>Open account management</a><a id="evidenceProfile" class="module-link" href="#users" data-dialog-close data-dialog-initial-focus>Open full profile</a></div>
   </dialog>
+
+  <dialog id="adminGrantReasonDialog" class="credits-refund-dialog admin-grant-reason-dialog" aria-labelledby="adminGrantReasonTitle">
+    <form id="adminGrantReasonForm">
+      <div class="credits-refund-head">
+        <div>
+          <p class="credits-section-kicker">Grant allocation</p>
+          <h2 id="adminGrantReasonTitle">Confirm Assign</h2>
+        </div>
+        <button id="adminGrantReasonClose" class="credits-icon-btn" type="button" aria-label="Close assign confirmation" title="Close">
+          <svg aria-hidden="true"><use href="#icon-x"/></svg>
+        </button>
+      </div>
+      <p id="adminGrantReasonSummary" class="credits-refund-order"></p>
+      <label class="credits-key-field" for="adminGrantReason"><span>Reason</span><input id="adminGrantReason" type="text" maxlength="500" value="Approved Grant allocation." required></label>
+      <p id="adminGrantReasonStatus" class="credits-status" role="status" aria-live="polite"></p>
+      <div class="credits-refund-actions">
+        <button id="adminGrantReasonCancel" class="auth-btn auth-btn-secondary" type="button">Cancel</button>
+        <button id="adminGrantReasonSubmit" class="auth-btn auth-btn-primary" type="submit">Assign Credits</button>
+      </div>
+    </form>
+  </dialog>
+
+  <!-- Icon sprite: the absorbed sections and their modules reference app.html's
+       sprite by id, so the symbols they use are mirrored here. -->
+  <svg xmlns="http://www.w3.org/2000/svg" style="display:none" aria-hidden="true">
+    <symbol id="icon-refresh" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M20 11a8.1 8.1 0 0 0-15.5-2M4 4v5h5"/><path d="M4 13a8.1 8.1 0 0 0 15.5 2M20 20v-5h-5"/></symbol>
+    <symbol id="icon-wallet" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M20 7V5a2 2 0 0 0-2-2H5a3 3 0 0 0 0 6h15v10a2 2 0 0 1-2 2H5a3 3 0 0 1-3-3V6"/><path d="M16 13h4"/></symbol>
+    <symbol id="icon-check-circle" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><path d="m9 11 3 3L22 4"/></symbol>
+    <symbol id="icon-search" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></symbol>
+    <symbol id="icon-x" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></symbol>
+    <symbol id="icon-minus" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14"/></symbol>
+  </svg>
 </body>
 </html>

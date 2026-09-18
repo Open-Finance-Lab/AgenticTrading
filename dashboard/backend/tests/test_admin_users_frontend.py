@@ -129,7 +129,9 @@ def test_profile_header_carries_badges_activation_week_and_milestones():
         "Agent createdJul 1, 2026, 11:00 UTC", "Backtest completedJul 2, 2026, 10:00 UTC",
     ]
     assert result["tabs"] == ["Overview", "Timeline", "Runs", "Usage", "Sessions"]
-    assert "/app?view=admin&adminTab=users&adminUserQuery=ada.synthetic%40example.test" in result["account"]
+    # D5: account management lives on this page; the hand-off rides in the
+    # hash query the shell parses and AdminCredits applies to its search form.
+    assert "#account?user=ada.synthetic%40example.test" in result["account"]
 
 
 def test_activation_week_is_the_utc_monday():

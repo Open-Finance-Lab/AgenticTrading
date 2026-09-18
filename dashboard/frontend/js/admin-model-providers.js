@@ -257,4 +257,10 @@
   document.addEventListener('DOMContentLoaded', () => {
     if (document.documentElement.dataset.navPage === 'admin') onEnter();
   });
+  // Absorbed into /admin (design D5): enter whenever the shell announces the
+  // providers route; the legacy console keeps its DOMContentLoaded entry.
+  document.addEventListener('admin:route', (event) => {
+    if (event.detail?.route !== 'providers') return;
+    onEnter();
+  });
 })();

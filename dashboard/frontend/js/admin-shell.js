@@ -4,7 +4,11 @@
 
   // Design §7.2: one page, seven routes plus the profile (#users/{id}). There is
   // deliberately no live-operations route -- the live row has no detail page (§8.2, D16).
+  // D5 absorbed the old console's three tabs, which are plain sections rather
+  // than analytics surfaces: no range/filters, their own modules.
   const ROUTES = ['overview', 'sources', 'retention', 'credits', 'lifecycle', 'health', 'users'];
+  const CONSOLE_ROUTES = ['account', 'providers', 'activity'];
+  const ALL_ROUTES = [...ROUTES, ...CONSOLE_ROUTES];
   const DETAIL_ROUTES = ['sources', 'retention', 'credits', 'lifecycle', 'health'];
   // 1D is cut (§8.2): no cross-user source finer than a day exists. 1Y is 180
   // inclusive days because the value routes reject a window wider than
@@ -49,9 +53,11 @@
   const state = {
     route: 'overview',
     routeId: null,
+    routeQuery: {},
     range: '1W',
     filters: { group: '', segment: '', tier: '', internal: false, q: '', priority: false },
     admin: false,
+    user: null,
     seq: {},
   };
   const returnFocus = new Map();
@@ -78,11 +84,19 @@
 
   function parseHash(hash) {
     const raw = String(hash || '').replace(/^#/, '');
-    const [head, tail] = raw.split('/');
+    const [path, queryString] = raw.split('?');
+    // A plain object, not the URLSearchParams instance: the only consumers read
+    // named keys (announce's detail, the ?user= hand-off), and a plain object
+    // round-trips through JSON in the node harness instead of collapsing to {}.
+    const query = Object.fromEntries(new URLSearchParams(queryString || ''));
+    const [head, tail] = path.split('/');
     if (head === 'users') {
-      return { route: 'users', id: /^\d+$/.test(tail || '') ? tail : null };
+      return { route: 'users', id: /^\d+$/.test(tail || '') ? tail : null, query };
     }
-    return { route: ROUTES.includes(head) ? head : 'overview', id: null };
+    if (CONSOLE_ROUTES.includes(head)) {
+      return { route: head, id: null, query };
+    }
+    return { route: ROUTES.includes(head) ? head : 'overview', id: null, query };
   }
 
   function rangeDates(range, now) {
@@ -318,6 +332,7 @@
         return false;
       }
       state.admin = true;
+      state.user = user;
       return true;
     } catch (_error) {
       window.location.replace('/app');
@@ -393,7 +408,10 @@
 
   function announce() {
     document.dispatchEvent(new CustomEvent('admin:route', {
-      detail: { route: state.route, id: state.routeId, range: state.range, filters: { ...state.filters } },
+      detail: {
+        route: state.route, id: state.routeId, range: state.range,
+        filters: { ...state.filters }, query: { ...state.routeQuery },
+      },
     }));
   }
 
@@ -435,11 +453,23 @@
     renderedLocation = locationKey();
     state.route = parsed.route;
     state.routeId = parsed.id;
+    state.routeQuery = parsed.query;
+    const onConsole = CONSOLE_ROUTES.includes(parsed.route);
     showView('overview', parsed.route === 'overview');
     showView('detail', DETAIL_ROUTES.includes(parsed.route));
     showView('usersView', parsed.route === 'users' && !parsed.id);
     showView('profile', parsed.route === 'users' && Boolean(parsed.id));
-    document.querySelectorAll('#analyticsSubnav a[data-route]').forEach((link) => {
+    showView('accountView', parsed.route === 'account');
+    showView('providersView', parsed.route === 'providers');
+    showView('activityView', parsed.route === 'activity');
+    // The analytics range/filters don't scope anything on the absorbed console
+    // sections; hiding them there keeps those pages honest about what they
+    // show. The analytics routes — including the users list — keep them.
+    const controls = document.getElementById('pageControls');
+    if (controls) controls.hidden = onConsole;
+    const legend = document.getElementById('freshnessLegend');
+    if (legend) legend.hidden = onConsole;
+    document.querySelectorAll('aside a[data-route]').forEach((link) => {
       link.classList.toggle('active', link.dataset.route === parsed.route);
     });
     window.scrollTo(0, 0);

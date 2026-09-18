@@ -14,6 +14,7 @@ from dashboard.backend.tests._frontend_source import fn_body
 
 FRONTEND = Path(__file__).resolve().parents[2] / "frontend"
 NAMES = ("admin-shell.js", "admin-live.js", "admin-overview.js", "admin-users.js")
+ABSORBED_MODULES = ("admin-bridge.js", "admin-credits.js", "admin-model-providers.js")
 MODULES = {name: (FRONTEND / "js" / name).read_text(encoding="utf-8") for name in NAMES}
 ALL = "\n".join(MODULES.values())
 ADMIN_HTML = (FRONTEND / "admin.html").read_text(encoding="utf-8")
@@ -35,9 +36,26 @@ def test_each_module_is_an_iife_exposing_exactly_one_global():
 
 def test_every_module_admin_html_loads_exists_and_nothing_else_is_loaded():
     srcs = re.findall(r'<script src="js/([^?"]+)\?v=\d+" defer></script>', ADMIN_HTML)
-    assert set(srcs) == set(NAMES) | {"credit-format.js"}
+    # D5 absorbed the old console's modules too: admin-bridge.js stands in for
+    # the app.js globals they consumed, and admin-credits/admin-model-providers
+    # keep their own routers, stores and mutations behind the same gate.
+    assert set(srcs) == set(NAMES) | set(ABSORBED_MODULES) | {"credit-format.js"}
     for name in srcs:
         assert (FRONTEND / "js" / name).exists(), name
+
+
+def test_absorbed_modules_still_own_their_mutating_requests():
+    """The four analytics modules are read-only (§13 row C); the absorbed old
+    console never was. Pin the difference instead of pretending it away: the
+    absorbed modules keep their mutating verbs, the bridge stays transport-only."""
+    bridge = (FRONTEND / "js" / "admin-bridge.js").read_text(encoding="utf-8")
+    assert "fetch(" in bridge
+    assert not re.findall(r"method:\s*'(\w+)'", bridge)
+    for name in ABSORBED_MODULES[1:]:  # the bridge carries no verbs of its own
+        source = (FRONTEND / "js" / name).read_text(encoding="utf-8")
+        verbs = set(re.findall(r"method:\s*'(\w+)'", source))
+        assert verbs, name
+        assert verbs <= {"POST", "PATCH", "PUT", "DELETE"}, (name, verbs)
 
 
 def test_rendering_is_text_content_only():

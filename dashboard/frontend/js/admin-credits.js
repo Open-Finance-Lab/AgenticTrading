@@ -709,4 +709,19 @@
   document.addEventListener('DOMContentLoaded', () => {
     if (document.documentElement.dataset.navPage === 'admin') onEnter();
   });
+  // Absorbed into /admin (design D5): the shell announces the route; this
+  // module enters on it and honors the #account?user=… hand-off that replaces
+  // the old ?adminUserQuery deep link. On /app the admin:route event never
+  // fires, so the legacy console keeps its DOMContentLoaded entry above.
+  document.addEventListener('admin:route', (event) => {
+    const detail = event.detail || {};
+    if (detail.route !== 'account' && detail.route !== 'activity') return;
+    onEnter();
+    const handoff = detail.user || detail.query?.user;
+    if (detail.route !== 'account' || !handoff) return;
+    const input = element('adminCreditsUserQuery');
+    const form = element('adminCreditsUserSearch');
+    if (input) input.value = String(handoff).slice(0, 120);
+    form?.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+  });
 })();

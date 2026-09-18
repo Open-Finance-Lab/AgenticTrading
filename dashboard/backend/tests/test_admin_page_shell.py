@@ -20,6 +20,10 @@ EXPECTED_SCRIPTS = [
     "js/admin-live.js?v=1",
     "js/admin-overview.js?v=1",
     "js/admin-users.js?v=1",
+    # Absorbed old-console modules (design D5) and their app.js stand-in.
+    "js/admin-bridge.js?v=1",
+    "js/admin-credits.js?v=1",
+    "js/admin-model-providers.js?v=1",
 ]
 
 # This guard's whole job is "no inline script anywhere in this page", so a
@@ -101,6 +105,9 @@ def test_panel_regions_carry_no_numeric_or_percentage_literal():
     assert names == [
         "live", "attention", "active-users", "activation", "sources", "retention",
         "value", "lifecycle", "credits", "revenue", "detail", "users", "profile",
+        # The absorbed old-console sections (design D5) are panels too and obey
+        # the same no-literal rule: every number arrives from an endpoint.
+        "account", "providers", "activity",
     ]
     for name, body in regions:
         text = TAG.sub(" ", body)
@@ -190,12 +197,12 @@ def test_subnav_routes_match_the_shell_router_and_the_aside_links_back():
     hrefs = re.findall(r'href="(#[a-z]+)"', ADMIN_HTML[start:end])
     assert hrefs == ["#overview", "#sources", "#retention", "#credits", "#lifecycle", "#health", "#users"]
     assert "#live" not in ADMIN_HTML
-    for href in (
-        "/app?view=admin&amp;adminTab=users",
-        "/app?view=admin&amp;adminTab=providers",
-        "/app?view=admin&amp;adminTab=activity",
-    ):
-        assert href in ADMIN_HTML, href
+    # D5: Account management, Providers and Activity absorbed into this page —
+    # the aside routes to them here instead of handing off to the old console,
+    # and no /app?view=admin link survives in the markup.
+    for route in ("account", "providers", "activity"):
+        assert f'<a href="#{route}" data-route="{route}">' in ADMIN_HTML, route
+    assert "/app?view=admin" not in ADMIN_HTML
 
 
 def test_freshness_legend_replaces_the_sample_notice():

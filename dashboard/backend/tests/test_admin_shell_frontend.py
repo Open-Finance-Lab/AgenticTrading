@@ -27,14 +27,21 @@ def test_hash_router_knows_exactly_the_seven_routes_and_the_profile():
     assert _eval("window.AdminShell.ROUTES") == [
         "overview", "sources", "retention", "credits", "lifecycle", "health", "users",
     ]
-    assert _eval("window.AdminShell.parseHash('')") == {"route": "overview", "id": None}
-    assert _eval("window.AdminShell.parseHash('#health')") == {"route": "health", "id": None}
-    assert _eval("window.AdminShell.parseHash('#users')") == {"route": "users", "id": None}
-    assert _eval("window.AdminShell.parseHash('#users/42')") == {"route": "users", "id": "42"}
-    assert _eval("window.AdminShell.parseHash('#users/abc')") == {"route": "users", "id": None}
+    assert _eval("window.AdminShell.parseHash('')") == {"route": "overview", "id": None, "query": {}}
+    assert _eval("window.AdminShell.parseHash('#health')") == {"route": "health", "id": None, "query": {}}
+    assert _eval("window.AdminShell.parseHash('#users')") == {"route": "users", "id": None, "query": {}}
+    assert _eval("window.AdminShell.parseHash('#users/42')") == {"route": "users", "id": "42", "query": {}}
+    assert _eval("window.AdminShell.parseHash('#users/abc')") == {"route": "users", "id": None, "query": {}}
+    # D5 absorbed console routes carry their ?user= hand-off in the hash query.
+    assert _eval("window.AdminShell.parseHash('#account')") == {"route": "account", "id": None, "query": {}}
+    assert _eval("window.AdminShell.parseHash('#account?user=ada%40example.test')") == {
+        "route": "account", "id": None, "query": {"user": "ada@example.test"},
+    }
+    assert _eval("window.AdminShell.parseHash('#providers')") == {"route": "providers", "id": None, "query": {}}
+    assert _eval("window.AdminShell.parseHash('#activity')") == {"route": "activity", "id": None, "query": {}}
     # No #live route (design §8.2, D16) and no orphan routes: unknown → overview.
     for unknown in ("#live", "#usage", "#revenue", "#profiles", "#funnel", "#nonsense"):
-        assert _eval(f"window.AdminShell.parseHash('{unknown}')") == {"route": "overview", "id": None}, unknown
+        assert _eval(f"window.AdminShell.parseHash('{unknown}')") == {"route": "overview", "id": None, "query": {}}, unknown
 
 
 def test_range_maps_to_inclusive_utc_dates_within_the_180_day_cap():

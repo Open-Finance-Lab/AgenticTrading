@@ -10488,6 +10488,21 @@ function resolveInitialNavigation() {
     const hash = window.location.hash.replace('#', '');
     const legacy = view || hash;
 
+    // The admin console moved to /admin (design D5). Vercel serves /app as a
+    // static file with no session access, so the server 307 in app.py cannot
+    // run there — this client-side hand-off is the only one that exists on the
+    // static host. Covers typed URLs, stale bookmarks and any link still
+    // carrying ?view=admin.
+    if (view === 'admin') {
+        const adminTab = params.get('adminTab');
+        const route = adminTab === 'providers' ? 'providers'
+            : adminTab === 'activity' ? 'activity'
+            : 'account';
+        const userQuery = params.get('adminUserQuery');
+        window.location.replace(`/admin#${route}${userQuery ? `?user=${encodeURIComponent(userQuery)}` : ''}`);
+        return { page: 'home' };
+    }
+
     // Discord / share deep links land on the backtest playground.
     if (params.get('agent_id') || params.get('run_id')) {
         return { page: 'playground', playgroundTab: 'backtest' };
