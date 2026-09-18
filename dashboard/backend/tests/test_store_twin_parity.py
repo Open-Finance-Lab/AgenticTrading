@@ -107,12 +107,6 @@ _TWINS = [
         "PostgresStrategyStore",
     ),
     (
-        "dashboard.backend.domain.analytics.repository",
-        "AnalyticsStore",
-        "dashboard.backend.domain.analytics.repository_postgres",
-        "PostgresAnalyticsStore",
-    ),
-    (
         "dashboard.backend.users",
         "UserStore",
         "dashboard.backend.users_postgres",
@@ -127,6 +121,23 @@ _TWINS = [
 ]
 
 _TWIN_IDS = [pg_cls for _, _, _, pg_cls in _TWINS]
+
+
+def test_twins_registry_has_no_duplicate_pairs():
+    """`_TWINS` listed the AnalyticsStore pair twice (lines 55-60 and 109-114).
+
+    Harmless today -- both instances of a duplicate tuple pass or fail
+    together -- but it is the exact list PR T's absence-direction check and
+    every future twin extends, so a reader counting entries gets 12 when
+    there are 11 distinct stores. `_TWIN_IDS` uses the postgres class name
+    as the parametrize id, so a duplicate also means two test instances
+    sharing one id in every parametrized case above.
+    """
+    assert len(_TWINS) == len(set(_TWINS)), (
+        f"_TWINS has {len(_TWINS) - len(set(_TWINS))} duplicate tuple(s); "
+        "each store pair belongs in the registry exactly once."
+    )
+
 
 # tests/ -> backend/ -> dashboard/ -> repo root
 _REPO_ROOT = Path(__file__).resolve().parents[3]
