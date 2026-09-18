@@ -2787,6 +2787,39 @@ a.header-brand:hover .title-section h1 {
     -webkit-tap-highlight-color: rgba(103, 232, 249, 0.12);
 }
 
+/* The old console's way back to the standalone /admin Analytics console.
+   Sits above the tab rail as its own card so the two admin surfaces read as
+   one system: /admin links here for Users/Providers/Activity, this links
+   back for Overview/Sources/Retention/... */
+.admin-rail-col {
+    position: sticky;
+    top: 84px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    align-self: start;
+}
+
+.admin-rail-col .admin-rail {
+    position: static;
+}
+
+.admin-analytics-link {
+    text-decoration: none;
+    color: var(--text-primary);
+    background:
+        linear-gradient(180deg, rgba(103, 232, 249, 0.055), transparent 42%),
+        var(--bg-card);
+    border: 1px solid var(--border-color);
+    border-radius: 12px;
+    box-shadow: 0 16px 38px rgba(2, 8, 23, 0.2);
+    padding: 7px;
+}
+
+.admin-analytics-link svg {
+    color: #67e8f9;
+}
+
 /* Final Backtest feed overrides stay scoped so legacy decision-table rules
    cannot reintroduce a wide table or page-level overflow. */
 .playground-backtest-panel .trading-log-card {
@@ -13361,8 +13394,15 @@ table.sr-only {
         gap: 12px;
     }
 
-    .admin-rail {
+    .admin-rail-col {
         top: 72px;
+    }
+
+    .admin-rail {
+        padding: 5px;
+    }
+
+    .admin-analytics-link {
         padding: 5px;
     }
 

@@ -2137,11 +2137,16 @@
         <p id="adminSuccess" class="account-success" hidden></p>
 
         <div class="admin-workspace">
+        <div class="admin-rail-col">
+        <a id="adminAnalyticsLink" class="admin-tab admin-analytics-link" href="/admin" title="Analytics (opens the /admin console)">
+            <svg aria-hidden="true"><use href="#icon-activity"/></svg><span>Analytics</span>
+        </a>
         <nav id="adminTabs" class="admin-tabs admin-rail" aria-label="Admin sections" role="tablist" aria-orientation="vertical">
             <button id="adminTabUsers" class="admin-tab is-active" type="button" role="tab" aria-label="Users" title="Users" aria-selected="true" aria-controls="adminPanelUsers" tabindex="0" data-admin-tab="users"><svg aria-hidden="true"><use href="#icon-users"/></svg><span>Users</span></button>
             <button id="adminTabProviders" class="admin-tab" type="button" role="tab" aria-label="Providers" title="Providers" aria-selected="false" aria-controls="adminPanelProviders" tabindex="-1" data-admin-tab="providers"><svg aria-hidden="true"><use href="#icon-network"/></svg><span>Providers</span></button>
             <button id="adminTabActivity" class="admin-tab" type="button" role="tab" aria-label="Activity" title="Activity" aria-selected="false" aria-controls="adminPanelActivity" tabindex="-1" data-admin-tab="activity"><svg aria-hidden="true"><use href="#icon-activity"/></svg><span>Activity</span></button>
         </nav>
+        </div>
         <div class="admin-workspace-content">
         <p id="adminCreditsStatus" class="credits-status admin-credits-status" role="status" aria-live="polite"></p>
 
