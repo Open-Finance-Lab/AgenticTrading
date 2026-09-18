@@ -15,7 +15,7 @@ ADMIN_HTML = (FRONTEND / "admin.html").read_text(encoding="utf-8")
 ADMIN_CSS = (FRONTEND / "admin.css").read_text(encoding="utf-8")
 
 EXPECTED_SCRIPTS = [
-    "js/admin-shell.js?v=3",
+    "js/admin-shell.js?v=4",
     "js/credit-format.js?v=1",
     "js/admin-live.js?v=1",
     "js/admin-overview.js?v=1",
@@ -79,7 +79,7 @@ def test_the_inline_script_guard_sees_tags_html_allows():
 def test_gate_module_loads_first_and_every_script_is_pinned():
     srcs = re.findall(r'<script src="([^"]+)" defer></script>', ADMIN_HTML)
     assert srcs == EXPECTED_SCRIPTS
-    assert srcs[0] == "js/admin-shell.js?v=3"
+    assert srcs[0] == "js/admin-shell.js?v=4"
     for src in srcs:
         assert "?v=" in src, src
 

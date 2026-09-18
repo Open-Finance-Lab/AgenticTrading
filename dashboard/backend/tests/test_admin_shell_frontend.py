@@ -1,6 +1,7 @@
 """js/admin-shell.js under node: router, URL state, formatters, guards, dialogs."""
 
 import json
+from pathlib import Path
 
 from dashboard.backend.tests._admin_dom_stub import requires_node, run_node, source
 
@@ -152,6 +153,135 @@ def test_request_seq_guard_and_access_loss():
         "})()"
     )
     assert result == {"stale": False, "fresh": True, "afterInvalidate": False, "lost": True, "kept": False, "nav": [["replace", "/app"]]}
+
+
+# Enough of the account menu for logout() to find its notice and reopen the
+# menu it renders into.
+_ACCOUNT_MENU_DOM = (
+    "register('accountMenuLogoutError', new Node('p'));"
+    "register('accountMenu', new Node('div'));"
+    "register('accountBtn', new Node('button'));"
+)
+
+
+def test_a_csrf_403_is_not_access_loss_but_a_role_403_still_is():
+    """403 is overloaded: require_admin sends it when the role is gone, and
+    CsrfMiddleware sends it when the double-submit token or the Origin did not
+    check out. Only the first is access loss. Reading both as access loss
+    redirected an admin off the console mid-edit over an expired CSRF cookie --
+    losing the unsaved form -- and, the session still being live, landed them on
+    /app still signed in with nothing on screen explaining the bounce."""
+    result = _eval(
+        "(async () => {"
+        "  const shell = window.AdminShell;"
+        "  const csrf = await shell.handleAccessLost({status: 403, code: 'csrf_failed'});"
+        "  const navAfterCsrf = nav.slice();"
+        "  const role = await shell.handleAccessLost({status: 403});"
+        "  const unauthenticated = await shell.handleAccessLost({status: 401});"
+        "  const server = await shell.handleAccessLost({status: 500, code: 'csrf_failed'});"
+        "  return {csrf, navAfterCsrf, role, unauthenticated, server, nav};"
+        "})()"
+    )
+    assert result == {
+        "csrf": False,
+        # The discriminator is the code, not the status: nothing navigated.
+        "navAfterCsrf": [],
+        "role": True,
+        "unauthenticated": True,
+        # A code on a status that is not 403 changes nothing either way.
+        "server": False,
+        "nav": [["replace", "/app"], ["replace", "/app"]],
+    }
+
+
+def test_the_csrf_code_matches_the_backends_constant():
+    """The two literals are a cross-file contract with no import between them --
+    /admin has no build step -- so this is the only thing holding them together.
+    Matching on `detail` instead would bind the client to operator-facing copy."""
+    csrf_py = (
+        Path(__file__).resolve().parents[1] / "csrf.py"
+    ).read_text(encoding="utf-8")
+    assert 'CSRF_FAILURE_CODE = "csrf_failed"' in csrf_py
+    assert "const CSRF_FAILURE_CODE = 'csrf_failed';" in SHELL
+    # Both refusals carry it; a 403 from only one of them is the half-fixed case.
+    assert csrf_py.count('"code": CSRF_FAILURE_CODE') == 2
+
+
+def test_write_carries_the_servers_error_code_onto_the_error():
+    result = _eval(
+        "(async () => {"
+        "  fetchQueue.push({ok: false, status: 403, body: {detail: 'CSRF token missing or invalid', code: 'csrf_failed'}});"
+        "  fetchQueue.push({ok: false, status: 403, body: {detail: 'Admin only'}});"
+        "  const seen = [];"
+        "  for (let i = 0; i < 2; i += 1) {"
+        "    try { await window.AdminShell.write('/api/admin/x', {method: 'POST', body: '{}'}); }"
+        "    catch (error) { seen.push({status: error.status, code: error.code ?? null, message: error.message}); }"
+        "  }"
+        "  for (const entry of seen) entry.lost = await window.AdminShell.handleAccessLost(entry);"
+        "  return seen;"
+        "})()",
+        "globalThis.document.cookie = 'atl_csrf=t';",
+    )
+    assert result == [
+        {"status": 403, "code": "csrf_failed", "message": "CSRF token missing or invalid", "lost": False},
+        {"status": 403, "code": None, "message": "Admin only", "lost": True},
+    ]
+
+
+def test_a_failed_logout_says_so_and_does_not_navigate():
+    """The redirect is the only signal the operator gets that they are signed
+    out, so taking it after the POST failed reports a logout that did not
+    happen. The cost is not cosmetic: they close the tab believing the session
+    is dead while the cookie is still live and still admin."""
+    result = _eval(
+        "(async () => {"
+        "  fetchQueue.push({ok: false, status: 503, body: {detail: 'Service unavailable'}});"
+        "  await window.AdminShell.logout();"
+        "  const notice = document.getElementById('accountMenuLogoutError');"
+        "  return {nav, text: notice.textContent, hidden: notice.hidden,"
+        "          menuOpen: document.getElementById('accountMenu').hidden === false};"
+        "})()",
+        _ACCOUNT_MENU_DOM,
+        "globalThis.document.cookie = 'atl_csrf=t';",
+    )
+    assert result == {
+        "nav": [],
+        "text": "Service unavailable You are still signed in.",
+        "hidden": False,
+        # The notice lives inside the menu; rendering it behind a closed menu
+        # is the same as not rendering it.
+        "menuOpen": True,
+    }
+
+
+def test_a_401_logout_is_a_logout_and_still_leaves():
+    """The one failure that *is* a success: the session the cookie names is
+    already gone, so stranding the operator on a console they can no longer
+    read would be the worse answer. This is the case the old blanket catch was
+    right about, kept."""
+    result = _eval(
+        "(async () => {"
+        "  fetchQueue.push({ok: false, status: 401, body: {detail: 'Not authenticated'}});"
+        "  await window.AdminShell.logout();"
+        "  return {nav, hidden: document.getElementById('accountMenuLogoutError').hidden};"
+        "})()",
+        _ACCOUNT_MENU_DOM,
+        "globalThis.document.cookie = 'atl_csrf=t';",
+    )
+    assert result == {"nav": [["replace", "/app"]], "hidden": True}
+
+
+def test_a_successful_logout_replaces_rather_than_assigns():
+    result = _eval(
+        "(async () => {"
+        "  fetchQueue.push({ok: true, status: 204, body: null});"
+        "  await window.AdminShell.logout();"
+        "  return nav;"
+        "})()",
+        _ACCOUNT_MENU_DOM,
+        "globalThis.document.cookie = 'atl_csrf=t';",
+    )
+    assert result == [["replace", "/app"]]
 
 
 def test_request_is_a_credentialed_get_that_throws_with_status():
@@ -505,16 +635,21 @@ def test_an_account_with_no_display_name_falls_back_to_the_email():
     assert result == {"name": "bo@example.test", "avatar": "B"}
 
 
-def test_logout_writes_then_leaves_and_leaves_even_when_the_write_fails():
-    """A failed logout still leaves the page: the session may already be gone,
-    and stranding an admin on a console they can no longer read is worse than a
-    redirect that turns out to be redundant."""
+def test_logout_posts_then_leaves_but_only_when_the_post_actually_logged_out():
+    """This case used to assert the opposite of its second half -- that a 500
+    still redirects -- on the reasoning that stranding an admin on a console
+    they can no longer read is worse than a redundant redirect. That reasoning
+    holds for exactly one status, 401, where the session really is gone; it is
+    covered by its own case below. For every other failure the session survived
+    the call, so redirecting reports a logout that did not happen, and the
+    operator walks away from a live admin cookie believing otherwise."""
     ok = _eval(
         "(async () => {"
         "  fetchQueue.push({ok: true, status: 204, body: null});"
         "  await window.AdminShell.logout();"
         "  return {method: fetchCalls[0][1].method, url: fetchCalls[0][0], nav};"
         "})()",
+        _ACCOUNT_MENU_DOM,
         "globalThis.document.cookie = 'atl_csrf=t';",
     )
     assert ok == {"method": "POST", "url": "/api/auth/logout", "nav": [["replace", "/app"]]}
@@ -522,11 +657,13 @@ def test_logout_writes_then_leaves_and_leaves_even_when_the_write_fails():
         "(async () => {"
         "  fetchQueue.push({ok: false, status: 500, body: {detail: 'boom'}});"
         "  await window.AdminShell.logout();"
-        "  return nav;"
+        "  const notice = document.getElementById('accountMenuLogoutError');"
+        "  return {nav, text: notice.textContent};"
         "})()",
+        _ACCOUNT_MENU_DOM,
         "globalThis.document.cookie = 'atl_csrf=t';",
     )
-    assert failed == [["replace", "/app"]]
+    assert failed == {"nav": [], "text": "boom You are still signed in."}
 
 
 def test_logout_uses_replace_so_back_cannot_restore_the_signed_in_shell():

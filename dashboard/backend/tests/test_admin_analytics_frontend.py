@@ -132,6 +132,11 @@ def test_admin_rail_has_two_tabs_defaulting_to_account_management():
     nav_end = APP_HTML.index("</nav>", nav_start)
     nav_markup = APP_HTML[nav_start:nav_end]
     expected = ["users", "activity"]
+    # Assert the set *and* its order in one go. This was a bare assignment that
+    # nothing read (CodeQL py/unused-local-variable), so the tab names it names
+    # were pinned by nothing -- the count below would have passed just as
+    # happily on two tabs called something else entirely.
+    assert [chunk.split('"')[0] for chunk in nav_markup.split('data-admin-tab="')[1:]] == expected
     assert nav_markup.count("data-admin-tab=") == 2
     assert nav_markup.index('data-admin-tab="users"') < nav_markup.index('data-admin-tab="activity"')
     assert 'data-admin-tab="providers"' not in nav_markup
@@ -158,10 +163,10 @@ def test_app_lifecycle_and_cache_versions_are_wired():
     # every bump edits this test in the same change (Global Constraints).
     assert 'styles.css?v=142' in APP_HTML
     assert 'app.js?v=134' in APP_HTML
-    assert 'js/admin-tabs.js?v=11' in APP_HTML
+    assert 'js/admin-tabs.js?v=12' in APP_HTML
     for tag in (
         'href="admin.css?v=3"',
-        'src="js/admin-shell.js?v=3"',
+        'src="js/admin-shell.js?v=4"',
         'src="js/credit-format.js?v=1"',
         'src="js/admin-live.js?v=1"',
         'src="js/admin-overview.js?v=1"',

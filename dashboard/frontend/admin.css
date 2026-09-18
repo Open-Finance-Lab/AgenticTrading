@@ -303,6 +303,7 @@ dialog::backdrop{background:rgba(0,0,0,.64)}
 .account-menu-item{display:block;width:100%;min-height:0;padding:8px 10px;border:0;border-radius:6px;background:transparent;color:var(--text);font-size:12px;font-weight:600;text-align:left;cursor:pointer}
 .account-menu-item:hover{color:var(--text);background:rgba(148,163,184,.12)}
 .account-menu-item--danger,.account-menu-item--danger:hover{color:var(--red)}
+.account-menu-error{margin:4px 10px 8px;color:var(--red);font-size:11px;line-height:1.4}
 
 /* —— Providers (design §8, §8.1) ——
    Six class families retyped from styles.css against this file's tokens. The

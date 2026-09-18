@@ -125,6 +125,33 @@ def test_a_stale_providers_bookmark_redirects_on_page_load():
     assert result["nav"] == [["replace", "/admin#providers"]]
 
 
+def test_a_retired_tab_does_not_hop_off_a_page_the_operator_is_not_on():
+    """`init` runs off DOMContentLoaded on *every* /app load, so it sees
+    `adminTab` whatever view is showing. Ungated, a shared link or a stale
+    bookmark carrying `adminTab=providers` yanked a visitor off Community to
+    /admin -- and, since this fires before any identity is known, it did so for
+    signed-out visitors too, who gate() then bounced straight back. PR #468
+    gated this file's earlier retired-tab redirect on the same parameter for
+    the same reason; the hop is owed to someone opening the admin console, not
+    to every URL that happens to carry the query."""
+    for href in (
+        "https://atl.example/app?adminTab=providers",
+        "https://atl.example/app?view=community&adminTab=providers",
+        "https://atl.example/app?view=playground&playgroundTab=agents&adminTab=providers",
+    ):
+        result = _run(f"setHref('{href}');fire(docListeners, 'DOMContentLoaded');")
+        assert result["nav"] == [], href
+
+
+def test_the_gate_is_intent_not_role_and_reads_the_view_parameter():
+    """Spelled out because the gate cannot be a role check and a later reader
+    will reach for one: `init` has no session at DOMContentLoaded. `view=admin`
+    is the only evidence of admin intent available that early."""
+    body = ADMIN_TABS_JS[ADMIN_TABS_JS.index("function init("):]
+    assert "params.get('view') !== 'admin'" in body
+    assert body.index("retiredDestination(requested)") < body.index("setTab(requested")
+
+
 def test_a_providers_url_redirects_before_it_paints_a_different_tab():
     """The redirect short-circuits setTab rather than following it: painting
     Account Management first and navigating afterwards flashes the wrong panel

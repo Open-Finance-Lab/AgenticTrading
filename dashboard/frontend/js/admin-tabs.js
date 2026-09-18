@@ -110,9 +110,28 @@
 
   // Page load only initialises panel state; app.js routes `?view=admin` to
   // navigateToPage('admin') → onEnter.
+  //
+  // The one thing init must not do is navigate off a page the operator did not
+  // ask to leave. It runs off DOMContentLoaded on *every* /app load, so an
+  // `adminTab` left in the URL by a shared link or an old bookmark reached the
+  // retired-tab hop while the visitor was reading Community -- and, since this
+  // fires before any identity is known, it did so for signed-out visitors too,
+  // bouncing them to /admin only for gate() to bounce them straight back.
+  // Gating on `view=admin` is the same fix PR #468 applied to this file's
+  // earlier retired-tab redirect, and for the same reason: the hop is a
+  // courtesy owed to someone opening the admin console, not to every /app URL
+  // that happens to carry the parameter. Role cannot be the gate here -- this
+  // controller has no session at DOMContentLoaded -- but intent can. (Spelling
+  // that older destination out is what a pinned guard in
+  // test_admin_tabs_redirect.py forbids, so it stays unnamed here.)
   function init() {
     bind();
-    const requested = new URL(window.location.href).searchParams.get('adminTab');
+    const params = new URL(window.location.href).searchParams;
+    const requested = params.get('adminTab');
+    if (retiredDestination(requested) && params.get('view') !== 'admin') {
+      setTab(DEFAULT_TAB);
+      return;
+    }
     setTab(requested || DEFAULT_TAB);
   }
 

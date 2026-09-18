@@ -15,6 +15,11 @@
   // inclusive days because the value routes reject a window wider than
   // MAX_VALUE_RANGE_DAYS (180) measured as (end - start).days with end = to + 1.
   const RANGE_DAYS = Object.freeze({ '1W': 7, '1M': 30, '1Y': 180 });
+  // Must equal CSRF_FAILURE_CODE in backend/csrf.py. A second literal rather
+  // than an import because /admin has no build step and no module graph; the
+  // pairing is held by test_admin_page_shell.py, which reads both files and
+  // asserts the two strings match.
+  const CSRF_FAILURE_CODE = 'csrf_failed';
   const USER_GROUPS = ['internal', 'invited', 'organic', 'competition', 'partner', 'unknown'];
   const LIFECYCLE_SEGMENTS = ['new', 'onboarding', 'growing', 'core', 'at_risk', 'dormant'];
   const COMMERCIAL_TIERS = ['unpaid', 'starter', 'invested', 'high_value'];
@@ -332,6 +337,12 @@
         typeof detail === 'string' ? detail : `Request failed with status ${response.status}`,
       );
       error.status = response.status;
+      // Carried separately from the message because handleAccessLost branches
+      // on it: `detail` is operator-facing copy that will be reworded, `code`
+      // is the contract (backend/csrf.py's CSRF_FAILURE_CODE). Only `write`
+      // reads it -- CsrfMiddleware returns before its checks for safe methods,
+      // so a GET through `request` can never carry one.
+      if (typeof payload?.code === 'string') error.code = payload.code;
       throw error;
     }
     if (response.status === 204) return null;
@@ -359,6 +370,15 @@
   // Adding any real `await` in here (a token refresh, another fetch) reopens a
   // stale-write window at every call site at once -- fix it here, not there.
   async function handleAccessLost(error) {
+    // 403 is overloaded: require_admin sends it when the role is gone, and
+    // CsrfMiddleware sends it when the double-submit token or the Origin did
+    // not check out (backend/csrf.py). Only the first is access loss. Reading
+    // both as access loss redirected an admin off the console mid-edit for a
+    // cookie that had merely expired -- losing the unsaved form -- and, because
+    // the session was still live, dropped them on /app still signed in, with
+    // nothing on screen explaining why. The caller's existing `if (lost) return;`
+    // then falls through to its own setStatus, which surfaces the refusal.
+    if (error?.status === 403 && error?.code === CSRF_FAILURE_CODE) return false;
     if (error?.status !== 401 && error?.status !== 403) return false;
     invalidateAll();
     state.admin = false;
@@ -540,15 +560,35 @@
     button.setAttribute('aria-expanded', String(open));
   }
 
+  // A failed logout must not navigate. The redirect *is* the only signal the
+  // operator gets that they are signed out, so taking it after the POST failed
+  // reports a logout that did not happen -- and the cost is not cosmetic: on a
+  // shared machine they close the tab believing the session is dead while the
+  // cookie is still live and still admin. The old code swallowed every error on
+  // the grounds that stranding an admin on a console they can no longer read is
+  // worse, which is true of exactly one status: 401, where the session the
+  // cookie names is already gone. That one IS a logout, so it joins the success
+  // path. Everything else (5xx, an offline browser, a CSRF refusal) means the
+  // session survived, and the honest move is to say so and stay put so Log out
+  // can be pressed again.
   async function logout() {
+    const notice = document.getElementById('accountMenuLogoutError');
+    const showNotice = (text) => {
+      if (!notice) return;
+      notice.textContent = text;
+      notice.hidden = !text;
+    };
+    showNotice('');
     try {
       await write('/api/auth/logout', { method: 'POST' });
-    } catch (_error) {
-      // Deliberately swallowed. The session may already be gone (401), or the
-      // server may be cold (5xx); either way, leaving an admin sitting on a
-      // console they can no longer read is worse than a redirect that turns out
-      // to have been redundant. The cookie is HttpOnly, so there is nothing
-      // this page could clear locally as a consolation.
+    } catch (error) {
+      if (error?.status !== 401) {
+        showNotice(`${error?.message || 'Log out failed.'} You are still signed in.`);
+        // The menu is where the notice lives and where the retry button is; a
+        // failure that renders behind a closed menu is a failure nobody sees.
+        setAccountMenuOpen(true);
+        return;
+      }
     }
     // replace, not assign: a logged-out browser must not be able to Back into
     // a painted console. assign leaves /admin in history and eligible for
