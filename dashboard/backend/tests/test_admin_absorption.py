@@ -9,10 +9,7 @@ this branch added — the credits console's two routes, the hand-off query, the
 ticker, and the redirects.
 """
 
-import re
 from pathlib import Path
-
-import pytest
 
 from dashboard.backend.tests._admin_dom_stub import requires_node, run_node, source
 
