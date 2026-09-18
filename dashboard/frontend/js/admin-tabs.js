@@ -2,12 +2,22 @@
 (function () {
   'use strict';
 
-  // Analytics lives on the standalone /admin page (design §7.5). This console
-  // keeps Users (account management + grant pool), Providers and Activity until
-  // the follow-up port (D5). Nothing here navigates away from /app any more.
+  // Analytics lives on the standalone /admin page (design §7.5), and Providers
+  // joined it in the 09-17 consolidation (N2). This console keeps Users (account
+  // management + grant pool) and Activity until the follow-up port -- they are
+  // one 712-line module and move together.
   const DEFAULT_TAB = 'users';
-  const ALLOWED_TABS = new Set(['users', 'providers', 'activity']);
+  const ALLOWED_TABS = new Set(['users', 'activity']);
+  // N5: an explicit hop, not a silent fallback. normalizeTab would otherwise
+  // coerce this to DEFAULT_TAB and land the operator on Account Management with
+  // nothing on screen saying the tab they asked for lives elsewhere now. assign
+  // rather than replace: the entry they came from stays in history.
+  const RETIRED_TABS = Object.freeze({ providers: '/admin#providers' });
   let initialized = false;
+
+  function retiredDestination(value) {
+    return Object.hasOwn(RETIRED_TABS, value) ? RETIRED_TABS[value] : null;
+  }
 
   function normalizeTab(value) {
     const normalizedValue = value === 'grant-pool' ? 'users' : value;
@@ -15,6 +25,11 @@
   }
 
   function setTab(value, { updateUrl = true } = {}) {
+    const retired = retiredDestination(value);
+    if (retired) {
+      window.location.assign(retired);
+      return value;
+    }
     const tab = normalizeTab(value);
     const tablist = document.getElementById('adminTabs');
     tablist?.querySelectorAll('[data-admin-tab]').forEach((button) => {

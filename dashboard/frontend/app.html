@@ -13,7 +13,7 @@
          because every API call is a CORS request. -->
     <link rel="preconnect" href="https://agentictrading.onrender.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="styles.css?v=141">
+    <link rel="stylesheet" href="styles.css?v=142">
     <!-- defer: ~200KB that was render-blocking. Deferred scripts execute in
          document order (this one first, the body-end ones after), all before
          DOMContentLoaded, so Chart is defined before any chart renders. -->
@@ -2129,7 +2129,7 @@
         <div class="page-header">
             <div>
                 <h2 class="page-title">Admin</h2>
-                <p class="page-description">Read platform analytics and manage Grant Credits, accounts, approved providers, and the audit trail.</p>
+                <p class="page-description">Read platform analytics and manage Grant Credits, accounts, and the audit trail.</p>
             </div>
             <button id="adminRefreshBtn" class="auth-btn auth-btn-secondary" type="button">Refresh</button>
         </div>
@@ -2138,8 +2138,7 @@
 
         <div class="admin-workspace">
         <nav id="adminTabs" class="admin-tabs admin-rail" aria-label="Admin sections" role="tablist" aria-orientation="vertical">
-            <button id="adminTabUsers" class="admin-tab is-active" type="button" role="tab" aria-label="Users" title="Users" aria-selected="true" aria-controls="adminPanelUsers" tabindex="0" data-admin-tab="users"><svg aria-hidden="true"><use href="#icon-users"/></svg><span>Users</span></button>
-            <button id="adminTabProviders" class="admin-tab" type="button" role="tab" aria-label="Providers" title="Providers" aria-selected="false" aria-controls="adminPanelProviders" tabindex="-1" data-admin-tab="providers"><svg aria-hidden="true"><use href="#icon-network"/></svg><span>Providers</span></button>
+            <button id="adminTabUsers" class="admin-tab is-active" type="button" role="tab" aria-label="Account Management" title="Account Management" aria-selected="true" aria-controls="adminPanelUsers" tabindex="0" data-admin-tab="users"><svg aria-hidden="true"><use href="#icon-users"/></svg><span>Account Management</span></button>
             <button id="adminTabActivity" class="admin-tab" type="button" role="tab" aria-label="Activity" title="Activity" aria-selected="false" aria-controls="adminPanelActivity" tabindex="-1" data-admin-tab="activity"><svg aria-hidden="true"><use href="#icon-activity"/></svg><span>Activity</span></button>
         </nav>
         <div class="admin-workspace-content">
@@ -2263,57 +2262,6 @@
         </div>
         </section>
 
-        <section id="adminPanelProviders" class="admin-tab-panel" role="tabpanel" aria-labelledby="adminTabProviders" data-admin-panel="providers" hidden>
-        <section id="adminModelProvidersSection" class="admin-provider-section" aria-labelledby="adminModelProvidersHeading">
-            <div class="admin-provider-heading">
-                <div>
-                    <p class="credits-section-kicker">Provider control</p>
-                    <h3 id="adminModelProvidersHeading">Model providers</h3>
-                </div>
-                <span class="credits-admin-badge">Admin only</span>
-            </div>
-            <div class="admin-provider-grid">
-                <div class="admin-provider-list-wrap">
-                    <div class="admin-provider-list-head">
-                        <span class="credits-section-kicker">Approved registry</span>
-                        <button id="adminProviderRefreshBtn" class="credits-icon-btn" type="button" aria-label="Refresh providers" title="Refresh providers">
-                            <svg aria-hidden="true"><use href="#icon-refresh"/></svg>
-                        </button>
-                    </div>
-                    <div id="adminProviderList" class="admin-provider-list" aria-live="polite">
-                        <p class="credits-muted">Loading providers…</p>
-                    </div>
-                </div>
-                <form id="adminProviderForm" class="admin-provider-form">
-                    <p class="credits-section-kicker">Provider registry</p>
-                    <label class="credits-key-field" for="adminProviderId"><span>Provider ID</span><input id="adminProviderId" type="text" maxlength="64" pattern="[a-z0-9_]{2,64}" autocomplete="off" required></label>
-                    <label class="credits-key-field" for="adminProviderDisplayName"><span>Display name</span><input id="adminProviderDisplayName" type="text" maxlength="100" autocomplete="off" required></label>
-                    <label class="credits-key-field" for="adminProviderAdapter"><span>Adapter</span><select id="adminProviderAdapter" class="control-select" autocomplete="off"><option value="openai_compatible">OpenAI-compatible</option><option value="openrouter">OpenRouter</option><option value="openai">OpenAI</option><option value="anthropic">Anthropic</option><option value="gemini">Gemini</option></select></label>
-                    <label class="credits-key-field" for="adminProviderBaseUrl"><span>Approved base URL</span><input id="adminProviderBaseUrl" type="url" maxlength="500" placeholder="https://provider.example/v1" autocomplete="off" required></label>
-                    <div class="admin-provider-checks"><label><input id="adminProviderByok" type="checkbox" checked> BYOK enabled</label><label><input id="adminProviderPlatform" type="checkbox"> Platform enabled</label></div>
-                    <label class="credits-key-field" for="adminProviderStatus"><span>Status</span><select id="adminProviderStatus" class="control-select"><option value="enabled">Enabled</option><option value="disabled">Disabled</option></select></label>
-                    <label class="credits-key-field" for="adminProviderReason"><span>Reason</span><input id="adminProviderReason" type="text" maxlength="500" value="Provider registry update." autocomplete="off" required></label>
-                    <button class="auth-btn auth-btn-primary" type="submit"><svg aria-hidden="true"><use href="#icon-check-circle"/></svg><span>Save provider</span></button>
-                    <p id="adminProviderStatusMessage" class="credits-status" role="status" aria-live="polite"></p>
-                </form>
-            </div>
-            <div class="admin-platform-key-area">
-                <div class="admin-provider-heading">
-                    <div>
-                        <p class="credits-section-kicker">Platform credential</p>
-                        <h3>ATL model access</h3>
-                    </div>
-                </div>
-                <form id="adminPlatformKeyForm" class="admin-platform-key-form">
-                    <label class="credits-key-field" for="adminPlatformProvider"><span>Provider</span><select id="adminPlatformProvider" class="control-select" required><option value="">Select a provider</option></select></label>
-                    <label class="credits-key-field" for="adminPlatformKeySecret"><span>API key</span><input id="adminPlatformKeySecret" type="password" maxlength="4096" autocomplete="new-password" spellcheck="false" required></label>
-                    <button class="auth-btn auth-btn-primary" type="submit"><svg aria-hidden="true"><use href="#icon-check-circle"/></svg><span>Save and verify</span></button>
-                </form>
-                <p id="adminPlatformKeyStatus" class="credits-status" role="status" aria-live="polite"></p>
-            </div>
-        </section>
-        </section>
-
         <section id="adminPanelActivity" class="admin-tab-panel" role="tabpanel" aria-labelledby="adminTabActivity" data-admin-panel="activity" hidden>
             <div class="admin-credits-activity">
                 <div class="admin-credits-subheading">
@@ -2391,14 +2339,13 @@
     <script src="market-events/MarketEventFeed.js" defer></script>
     <script src="js/portfolio.js?v=18" defer></script>
     <script src="js/backtest-comparison.js?v=1" defer></script>
-    <script src="app.js?v=133" defer></script>
+    <script src="app.js?v=134" defer></script>
     <script src="js/analytics.js?v=1" defer></script>
     <script src="js/agent-editor.js?v=31" defer></script>
     <script src="js/credit-format.js?v=1" defer></script>
     <script src="js/credits.js?v=8" defer></script>
-    <script src="js/admin-model-providers.js?v=1" defer></script>
     <script src="js/admin-credits.js?v=6" defer></script>
-    <script src="js/admin-tabs.js?v=9" defer></script>
+    <script src="js/admin-tabs.js?v=10" defer></script>
     <script src="js/leaderboard.js?v=33" defer></script>
     <script src="home-page.js?v=50" defer></script>
     <!-- Load order: must come after app.js (API/API_BASE/escapeHtml) and

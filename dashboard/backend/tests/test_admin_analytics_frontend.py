@@ -124,18 +124,25 @@ def test_in_app_analytics_surface_is_gone():
         assert call not in APP_JS, call
 
 
-def test_admin_rail_has_three_tabs_defaulting_to_users():
+def test_admin_rail_has_two_tabs_defaulting_to_account_management():
+    """Providers moved to /admin in the 09-17 consolidation (design N2); Account
+    Management and Activity are one module and port together in PR2."""
     admin_start = APP_HTML.index('id="adminView"')
     nav_start = APP_HTML.index('<nav id="adminTabs"', admin_start)
     nav_end = APP_HTML.index("</nav>", nav_start)
     nav_markup = APP_HTML[nav_start:nav_end]
-    expected = ["users", "providers", "activity"]
-    assert nav_markup.count("data-admin-tab=") == 3
-    assert [nav_markup.index(f'data-admin-tab="{value}"') for value in expected] == sorted(
-        nav_markup.index(f'data-admin-tab="{value}"') for value in expected
-    )
+    expected = ["users", "activity"]
+    assert nav_markup.count("data-admin-tab=") == 2
+    assert nav_markup.index('data-admin-tab="users"') < nav_markup.index('data-admin-tab="activity"')
+    assert 'data-admin-tab="providers"' not in nav_markup
     assert 'aria-orientation="vertical"' in nav_markup
     assert 'id="adminTabUsers" class="admin-tab is-active"' in nav_markup
+    # N6: label-only. The tab id, the data attribute, the panel id and the
+    # query value are all still "users", so no URL breaks and admin-tabs.js
+    # needs no new normalisation.
+    assert "<span>Account Management</span>" in nav_markup
+    assert "<span>Users</span>" not in nav_markup
+    assert 'aria-label="Account Management"' in nav_markup
     assert '<section id="adminPanelUsers" class="admin-tab-panel" role="tabpanel" aria-labelledby="adminTabUsers" data-admin-panel="users">' in APP_HTML
 
 
@@ -149,9 +156,9 @@ def test_profile_menu_admin_entry_opens_the_admin_page():
 def test_app_lifecycle_and_cache_versions_are_wired():
     # Lockstep owner for the console's bumped tags and the /admin page's pins:
     # every bump edits this test in the same change (Global Constraints).
-    assert 'styles.css?v=141' in APP_HTML
-    assert 'app.js?v=133' in APP_HTML
-    assert 'js/admin-tabs.js?v=9' in APP_HTML
+    assert 'styles.css?v=142' in APP_HTML
+    assert 'app.js?v=134' in APP_HTML
+    assert 'js/admin-tabs.js?v=10' in APP_HTML
     for tag in (
         'href="admin.css?v=2"',
         'src="js/admin-shell.js?v=2"',
@@ -172,3 +179,18 @@ def test_analytics_style_families_left_styles_css():
         assert family not in STYLES, family
     for kept in (".admin-workspace", ".admin-rail", ".admin-tab:focus-visible", ".admin-rail button"):
         assert kept in STYLES, kept
+
+
+def test_the_provider_families_left_styles_css_with_their_markup():
+    """Dead CSS for markup that no longer exists is how a 14,000-line stylesheet
+    is grown. The families move to admin.css in the same PR as the panel."""
+    for family in (".admin-provider-", ".admin-platform-key-"):
+        assert family not in STYLES, family
+    for kept in (".admin-workspace", ".admin-rail", ".admin-tab:focus-visible", ".admin-rail button"):
+        assert kept in STYLES, kept
+
+
+def test_the_old_provider_module_is_gone_from_the_page_and_the_tree():
+    assert "admin-model-providers" not in APP_HTML
+    assert "AdminModelProviders" not in APP_JS
+    assert not (FRONTEND / "js" / "admin-model-providers.js").exists()
