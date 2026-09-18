@@ -9,7 +9,7 @@
   <!-- No inline scripts (design D6): pytest can only execute frontend code it
        can lift from an external file. admin-shell.js loads first because it
        owns the /api/auth/me gate and the router the other modules listen to;
-       all five are deferred, so they run in this order before DOMContentLoaded. -->
+       all six are deferred, so they run in this order before DOMContentLoaded. -->
   <script src="js/admin-shell.js?v=3" defer></script>
   <script src="js/credit-format.js?v=1" defer></script>
   <script src="js/admin-live.js?v=1" defer></script>

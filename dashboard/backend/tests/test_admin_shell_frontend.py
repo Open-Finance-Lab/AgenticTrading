@@ -351,6 +351,22 @@ def test_write_reads_the_host_prefixed_csrf_cookie_production_sets():
     assert result == {"body": None, "csrf": "prodtoken", "sent": False}
 
 
+def test_write_prefers_the_host_prefixed_cookie_when_both_are_present():
+    """read_csrf_cookie (backend/csrf.py:79) checks __Host-atl_csrf before
+    atl_csrf, unconditionally -- not gated on cookie_secure(). If both cookies
+    exist on one host with different values, this page's precedence has to
+    match the backend's or the double-submit compare fails on every write."""
+    result = _eval(
+        "(async () => {"
+        "  fetchQueue.push({ok: true, status: 204, body: null});"
+        "  const body = await window.AdminShell.write('/api/auth/logout', {method: 'POST'});"
+        "  return {body, csrf: fetchCalls[0][1].headers['X-CSRF-Token']};"
+        "})()",
+        "globalThis.document.cookie = 'atl_csrf=devtoken; __Host-atl_csrf=hosttoken';",
+    )
+    assert result == {"body": None, "csrf": "hosttoken"}
+
+
 def test_write_without_a_csrf_cookie_omits_the_header_rather_than_sending_empty():
     """An empty header is not the same request as no header: csrf_tokens_match()
     rejects both, but only the absent one lets the middleware fall through to the
@@ -501,7 +517,7 @@ def test_logout_writes_then_leaves_and_leaves_even_when_the_write_fails():
         "})()",
         "globalThis.document.cookie = 'atl_csrf=t';",
     )
-    assert ok == {"method": "POST", "url": "/api/auth/logout", "nav": [["assign", "/app"]]}
+    assert ok == {"method": "POST", "url": "/api/auth/logout", "nav": [["replace", "/app"]]}
     failed = _eval(
         "(async () => {"
         "  fetchQueue.push({ok: false, status: 500, body: {detail: 'boom'}});"
@@ -510,7 +526,17 @@ def test_logout_writes_then_leaves_and_leaves_even_when_the_write_fails():
         "})()",
         "globalThis.document.cookie = 'atl_csrf=t';",
     )
-    assert failed == [["assign", "/app"]]
+    assert failed == [["replace", "/app"]]
+
+
+def test_logout_uses_replace_so_back_cannot_restore_the_signed_in_shell():
+    """assign would leave /admin in history and eligible for bfcache: Back could
+    then repaint the fully-drawn admin console -- user emails, credit balances,
+    provider rows -- without gate() ever re-running, since a bfcache restore
+    executes no scripts. replace drops the /admin entry outright."""
+    body = SHELL[SHELL.index("async function logout()"):SHELL.index("function route()")]
+    assert "window.location.assign" not in body
+    assert "window.location.replace('/app')" in body
 
 
 def test_the_rail_marks_the_active_entry_with_aria_current_not_aria_selected():

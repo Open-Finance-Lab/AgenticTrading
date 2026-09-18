@@ -287,12 +287,17 @@
   // 15,000-line inheritance this page exists to avoid. Both cookie names because
   // cookie_secure() picks __Host-atl_csrf in prod and atl_csrf in dev
   // (backend/csrf.py:51-52); reading one name works in exactly one environment.
+  // __Host-atl_csrf first, matching read_csrf_cookie's own order
+  // (backend/csrf.py:79, unconditional -- not gated on cookie_secure()): if both
+  // cookies are present with different values, the double-submit compare only
+  // passes when this page's precedence matches the backend's, and the backend
+  // checks the host-prefixed name first.
   // `document.cookie || ''` is load-bearing, not defensive noise: the node test
   // stub has no cookie property at all.
   function readCsrfToken() {
     try {
       const raw = document.cookie || '';
-      for (const name of ['atl_csrf', '__Host-atl_csrf']) {
+      for (const name of ['__Host-atl_csrf', 'atl_csrf']) {
         const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
         const match = raw.match(new RegExp(`(?:^|; )${escaped}=([^;]*)`));
         if (match) return decodeURIComponent(match[1]);
@@ -545,7 +550,13 @@
       // to have been redundant. The cookie is HttpOnly, so there is nothing
       // this page could clear locally as a consolation.
     }
-    window.location.assign('/app');
+    // replace, not assign: a logged-out browser must not be able to Back into
+    // a painted console. assign leaves /admin in history and eligible for
+    // bfcache, and a bfcache restore repaints the fully-drawn admin shell --
+    // user emails, credit balances, provider rows -- without re-running gate(),
+    // because a bfcache restore executes no scripts at all. replace drops the
+    // /admin entry outright, so Back cannot reach it.
+    window.location.replace('/app');
   }
 
   function route() {

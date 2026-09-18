@@ -2011,11 +2011,11 @@ def test_default_tab_is_users_and_analytics_is_not_a_tab():
     assert "DEFAULT_TAB = 'users'" in ADMIN_TABS_JS
     assert "'analytics'" not in ADMIN_TABS_JS
     assert "admin-analytics" not in ADMIN_TABS_JS
-    # window.location.replace is still banned -- a *replace* would destroy the
+    # window.location.replace is still banned -- a *replace* would destroy the  # CORRECTED 2026-09-18 (finding I1): location.replace() drops the CURRENT entry, not the referrer -- shipped code uses replace. (prose continues on :2015)
     # history entry the operator came from. assign is the one navigation this
     # controller may make, and only for the retired Providers tab (N5).
-    assert "window.location.replace" not in ADMIN_TABS_JS
-    assert ADMIN_TABS_JS.count("window.location.assign") == 1
+    assert "window.location.replace" not in ADMIN_TABS_JS  # CORRECTED 2026-09-18 (finding I1): location.replace() drops the CURRENT entry, not the referrer -- shipped code uses replace.
+    assert ADMIN_TABS_JS.count("window.location.assign") == 1  # CORRECTED 2026-09-18 (finding I1): location.replace() drops the CURRENT entry, not the referrer -- shipped code uses replace.
     assert "value === 'grant-pool' ? 'users' : value" in ADMIN_TABS_JS
 ```
 
@@ -2155,7 +2155,7 @@ Replace `:5-15`:
   // N5: an explicit hop, not a silent fallback. normalizeTab would otherwise
   // coerce this to DEFAULT_TAB and land the operator on Account Management with
   // nothing on screen saying the tab they asked for lives elsewhere now. assign
-  // rather than replace: the entry they came from stays in history.
+  // rather than replace: the entry they came from stays in history.  // CORRECTED 2026-09-18 (finding I1): location.replace() drops the CURRENT entry, not the referrer -- shipped code uses replace.
   const RETIRED_TABS = Object.freeze({ providers: '/admin#providers' });
   let initialized = false;
 
@@ -2175,7 +2175,7 @@ In `setTab`, short-circuit before any painting:
   function setTab(value, { updateUrl = true } = {}) {
     const retired = retiredDestination(value);
     if (retired) {
-      window.location.assign(retired);
+      window.location.assign(retired);  // CORRECTED 2026-09-18 (finding I1): location.replace() drops the CURRENT entry, not the referrer -- shipped code uses replace.
       return value;
     }
     const tab = normalizeTab(value);
