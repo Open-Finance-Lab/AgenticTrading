@@ -52,7 +52,11 @@
     const status = element('adminCreditsStatus');
     if (!status) return;
     status.textContent = message || '';
-    status.className = `credits-status${tone ? ` is-${tone}` : ''}`;
+    // Assigning className re-states the whole list, so the layout class the
+    // markup ships beside `credits-status` has to be re-stated here too --
+    // otherwise the first write drops it and the spacing it carries
+    // (.admin-credits-status in admin.css and styles.css) goes with it.
+    status.className = `credits-status admin-credits-status${tone ? ` is-${tone}` : ''}`;
   }
 
   function uuid() {
@@ -710,7 +714,19 @@
   // fires, so the legacy console keeps its DOMContentLoaded entry above.
   document.addEventListener('admin:route', (event) => {
     const detail = event.detail || {};
-    if (detail.route !== 'account' && detail.route !== 'activity') return;
+    if (detail.route !== 'account' && detail.route !== 'activity') {
+      // #adminCreditsStatus sits outside both absorbed sections because the two
+      // of them share it, which also means no view can hide it the way /app's
+      // display:none #adminView did. Retiring the message is therefore this
+      // module's job, and the route event is the only signal it gets; left
+      // alone, "Grant Pool funded." stays painted at the top of <main> on
+      // Overview and Providers, and aria-live keeps announcing it as current.
+      // Emptying is enough to remove it from the flow -- `.credits-status:empty`
+      // is display:none (admin.css). Re-entry needs no matching clear: onEnter
+      // always runs refresh(), which opens with its own setStatus.
+      setStatus('');
+      return;
+    }
     onEnter();
     const handoff = detail.query?.user;
     if (detail.route !== 'account' || !handoff) return;
