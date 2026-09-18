@@ -100,7 +100,7 @@ def test_entering_the_admin_view_never_navigates():
         # -- a different page than the one the operator asked for, with nothing
         # on screen saying so. The /admin-analytics -> /admin 308 is the
         # precedent for paying this courtesy.
-        ("providers", [["assign", "/admin#providers"]]),
+        ("providers", [["replace", "/admin#providers"]]),
     ],
 )
 def test_entering_on_a_tab_stays_in_the_console_unless_the_tab_has_moved(tab, expected_nav):
@@ -110,6 +110,19 @@ def test_entering_on_a_tab_stays_in_the_console_unless_the_tab_has_moved(tab, ex
         "window.AdminTabs.onEnter();"
     )
     assert result["nav"] == expected_nav
+
+
+def test_a_stale_providers_bookmark_redirects_on_page_load():
+    """The only way a real operator reaches this redirect. Nobody calls setTab by
+    hand; they follow a link or a bookmark still naming ?adminTab=providers, and
+    `init` runs it off DOMContentLoaded before `onEnter` is ever reached. The
+    sweep above enters through onEnter, so without this case the entry point that
+    actually happens in a browser is covered by nothing."""
+    result = _run(
+        "setHref('https://atl.example/app?view=admin&adminTab=providers');"
+        "fire(docListeners, 'DOMContentLoaded');"
+    )
+    assert result["nav"] == [["replace", "/admin#providers"]]
 
 
 def test_a_providers_url_redirects_before_it_paints_a_different_tab():
@@ -127,11 +140,15 @@ def test_default_tab_is_users_and_analytics_is_not_a_tab():
     assert "DEFAULT_TAB = 'users'" in ADMIN_TABS_JS
     assert "'analytics'" not in ADMIN_TABS_JS
     assert "admin-analytics" not in ADMIN_TABS_JS
-    # window.location.replace is still banned -- a *replace* would destroy the
-    # history entry the operator came from. assign is the one navigation this
-    # controller may make, and only for the retired Providers tab (N5).
-    assert "window.location.replace" not in ADMIN_TABS_JS
-    assert ADMIN_TABS_JS.count("window.location.assign") == 1
+    # window.location.assign is banned and replace is the one navigation this
+    # controller may make, only for the retired Providers tab (N5). replace
+    # drops the *current* entry -- the retired ?adminTab=providers URL -- and
+    # leaves the entry the operator came from, one further back, untouched.
+    # assign kept the retired URL reachable by Back, which either re-ran the
+    # redirect or restored the pre-redirect console from bfcache showing Account
+    # Management, the silent fallback N5 exists to prevent.
+    assert "window.location.assign" not in ADMIN_TABS_JS
+    assert ADMIN_TABS_JS.count("window.location.replace") == 1
     assert "value === 'grant-pool' ? 'users' : value" in ADMIN_TABS_JS
 
 

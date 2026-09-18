@@ -265,8 +265,9 @@ dialog::backdrop{background:rgba(0,0,0,.64)}
 /* —— Navigation rail (design §6) ——
    The application's idiom, retyped against this file's tokens. styles.css's
    .admin-rail/.admin-tab family is the source; its border/text/surface
-   custom-property names do not exist here (see the token map in CLAUDE.md
-   §4.2), so this is a retype and never a copy. The active bar is
+   custom-property names do not exist here (see the token map in
+   docs/superpowers/specs/2026-09-17-admin-nav-consolidation-design.md §4.2),
+   so this is a retype and never a copy. The active bar is
    var(--accent) because that IS this page's cyan -- styles.css's cyan
    literal is the same role in the other palette. */
 .admin-rail{position:sticky;top:24px;display:flex;flex-direction:column;gap:5px;margin:0;padding:7px;border:1px solid var(--line);border-radius:12px;background:linear-gradient(180deg,rgba(0,191,255,.055),transparent 42%),var(--surface);box-shadow:0 16px 38px rgba(2,8,23,.2)}

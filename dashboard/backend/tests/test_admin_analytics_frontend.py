@@ -158,10 +158,10 @@ def test_app_lifecycle_and_cache_versions_are_wired():
     # every bump edits this test in the same change (Global Constraints).
     assert 'styles.css?v=142' in APP_HTML
     assert 'app.js?v=134' in APP_HTML
-    assert 'js/admin-tabs.js?v=10' in APP_HTML
+    assert 'js/admin-tabs.js?v=11' in APP_HTML
     for tag in (
-        'href="admin.css?v=2"',
-        'src="js/admin-shell.js?v=2"',
+        'href="admin.css?v=3"',
+        'src="js/admin-shell.js?v=3"',
         'src="js/credit-format.js?v=1"',
         'src="js/admin-live.js?v=1"',
         'src="js/admin-overview.js?v=1"',

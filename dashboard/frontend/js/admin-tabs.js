@@ -10,8 +10,15 @@
   const ALLOWED_TABS = new Set(['users', 'activity']);
   // N5: an explicit hop, not a silent fallback. normalizeTab would otherwise
   // coerce this to DEFAULT_TAB and land the operator on Account Management with
-  // nothing on screen saying the tab they asked for lives elsewhere now. assign
-  // rather than replace: the entry they came from stays in history.
+  // nothing on screen saying the tab they asked for lives elsewhere now.
+  // replace, not assign: a retired URL must not stay a reachable history entry.
+  // replace drops the *current* one -- the ?adminTab=providers URL being
+  // navigated away from -- and leaves the entry before it, the one the operator
+  // actually came from, untouched. assign kept the retired URL in history, so
+  // Back either re-ran this redirect with no way out of it, or restored the old
+  // console from bfcache still showing Account Management: setTab returns before
+  // it paints, so the bfcache copy is the silent fallback this hop exists to
+  // prevent.
   const RETIRED_TABS = Object.freeze({ providers: '/admin#providers' });
   let initialized = false;
 
@@ -27,7 +34,7 @@
   function setTab(value, { updateUrl = true } = {}) {
     const retired = retiredDestination(value);
     if (retired) {
-      window.location.assign(retired);
+      window.location.replace(retired);
       return value;
     }
     const tab = normalizeTab(value);

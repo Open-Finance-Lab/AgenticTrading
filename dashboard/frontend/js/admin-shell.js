@@ -627,11 +627,25 @@
     document.getElementById('filterTier')?.addEventListener('change', (event) => setFilters({ tier: event.target.value }));
     document.getElementById('filterInternal')?.addEventListener('change', (event) => setFilters({ internal: Boolean(event.target.checked) }));
     document.getElementById('filters')?.addEventListener('submit', (event) => event.preventDefault());
+    // No preventDefault. The anchor's own href is #overview (ANALYTICS_ROUTES[0]),
+    // and reaching analytics has to work at every viewport width; the disclosure
+    // is an enhancement layered on a working link, never the sole affordance.
+    // Suppressing the navigation made this entry do *nothing* below 680px, where
+    // admin.css hides .analytics-subnav outright -- and since Providers became an
+    // in-page sibling route, an operator sitting on #providers at phone width had
+    // no in-page route back to analytics at all.
     document.getElementById('analyticsParent')?.addEventListener('click', (event) => {
-      event.preventDefault();
       const subnav = document.getElementById('analyticsSubnav');
       if (!subnav) return;
-      subnav.hidden = !subnav.hidden;
+      // Collapse only where the href changes nothing else. Standing on the
+      // destination itself the navigation is a no-op, so the click can only mean
+      // the disclosure -- that is where desktop collapse still lives. Anywhere
+      // else, including a sibling analytics route like #health, the href is
+      // about to move the route, and shutting the module list on the way in is
+      // not what that click asked for. ANALYTICS_ROUTES[0] rather than a second
+      // 'overview' literal: the anchor's href is the same one owner.
+      const atDestination = state.route === ANALYTICS_ROUTES[0] && !state.routeId;
+      subnav.hidden = atDestination ? !subnav.hidden : false;
       event.currentTarget.setAttribute('aria-expanded', String(!subnav.hidden));
     });
     document.getElementById('accountBtn')?.addEventListener('click', (event) => {

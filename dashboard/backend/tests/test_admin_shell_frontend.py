@@ -379,6 +379,35 @@ def test_write_throws_the_servers_detail_with_its_status():
     assert result == {"message": "CSRF token missing or invalid", "status": 403}
 
 
+def test_write_falls_back_to_the_status_when_the_body_names_no_message():
+    """The other half of the error path. `detail` present and a string is the
+    happy refusal above; these three are what the same server actually sends when
+    something goes wrong outside the handler -- an HTML 502 from the edge (the
+    body parses to nothing), a 500 whose JSON names the failure under some other
+    key, and FastAPI's own 422, whose `detail` is a *list*. Without the
+    `typeof detail === 'string'` guard that last one renders "[object Object]" at
+    the operator, which is the branch no test reached."""
+    for status, body, expected in (
+        (502, "null", "Request failed with status 502"),
+        (500, "{message: 'boom'}", "Request failed with status 500"),
+        (422, "{detail: [{loc: ['body', 'api_key'], msg: 'field required'}]}",
+         "Request failed with status 422"),
+        # `error` is the second key write() reads and the first test only covered
+        # `detail`; a server that names the refusal here must still reach the UI.
+        (409, "{error: 'Provider already exists'}", "Provider already exists"),
+    ):
+        result = _eval(
+            "(async () => {"
+            f"  fetchQueue.push({{ok: false, status: {status}, body: {body}}});"
+            "  try { await window.AdminShell.write('/api/admin/x', {method: 'POST', body: '{}'}); }"
+            "  catch (error) { return {message: error.message, status: error.status}; }"
+            "  return 'did not throw';"
+            "})()",
+            "globalThis.document.cookie = 'atl_csrf=t';",
+        )
+        assert result == {"message": expected, "status": status}, status
+
+
 def test_gate_retains_the_user_it_already_fetched():
     """N8: the account menu needs the display name and email, and the page has
     already paid for /api/auth/me. A second call for the same body is the thing
@@ -509,3 +538,58 @@ def test_the_rail_marks_the_active_entry_with_aria_current_not_aria_selected():
         assert result[route]["analytics"] == ["page", True], route
         for other in ("account-management", "providers", "activity"):
             assert result[route][other] == [None, False], (route, other)
+
+
+def test_the_analytics_rail_entry_navigates_at_every_viewport_width():
+    """admin.css's 680px block sets `.analytics-subnav{display:none}`, so a click
+    that only toggles the disclosure changes nothing visible at phone width. The
+    handler used to `preventDefault()` unconditionally, which left the rail's
+    Analytics entry doing literally nothing there -- and since Providers became an
+    in-page sibling route, an operator sitting on #providers had no in-page route
+    back to analytics at all. The anchor's own href (#overview, ANALYTICS_ROUTES[0])
+    is the affordance that has to survive, so it is never suppressed; the
+    disclosure is layered on top of a working link, not in place of one.
+    """
+    result = _eval(
+        "(() => {"
+        "  const parent = register('analyticsParent', new Node('a'));"
+        "  const subnav = register('analyticsSubnav', new Node('nav'));"
+        "  document.dispatchEvent(new Event('DOMContentLoaded'));"
+        "  const click = () => {"
+        "    let suppressed = false;"
+        "    parent.listeners.click[0]({currentTarget: parent,"
+        "      preventDefault() { suppressed = true; }});"
+        "    return {suppressed, hidden: subnav.hidden, expanded: parent.getAttribute('aria-expanded')};"
+        "  };"
+        "  window.AdminShell.state.route = 'providers';"
+        "  window.AdminShell.state.routeId = null;"
+        "  subnav.hidden = true;"
+        "  const fromProviders = click();"
+        "  window.AdminShell.state.route = 'health';"
+        "  const fromSiblingModule = click();"
+        "  window.AdminShell.state.route = 'users';"
+        "  window.AdminShell.state.routeId = '42';"
+        "  const fromProfile = click();"
+        "  window.AdminShell.state.route = 'overview';"
+        "  window.AdminShell.state.routeId = null;"
+        "  const collapse = click();"
+        "  const expand = click();"
+        "  return {fromProviders, fromSiblingModule, fromProfile, collapse, expand};"
+        "})()"
+    )
+    # Never suppressed, on any route: the href is what carries the operator to
+    # analytics, and it is the only part of this entry that works below 680px.
+    assert [step["suppressed"] for step in result.values()] == [False] * 5
+    # Anywhere but the destination the href is about to move the route, so the
+    # click expands rather than toggling the module list shut on the way in.
+    # #health and #users/42 are the cases a bare "is this an analytics route?"
+    # test gets wrong: the rail lights Analytics for both, but the href still
+    # changes the route, so neither is a no-op.
+    opened = {"suppressed": False, "hidden": False, "expanded": "true"}
+    assert result["fromProviders"] == opened
+    assert result["fromSiblingModule"] == opened
+    assert result["fromProfile"] == opened
+    # Standing on #overview the navigation changes nothing, so the click is the
+    # disclosure. This is desktop collapse, preserved.
+    assert result["collapse"] == {"suppressed": False, "hidden": True, "expanded": "false"}
+    assert result["expand"] == opened

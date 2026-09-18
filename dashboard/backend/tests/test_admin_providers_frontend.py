@@ -134,7 +134,9 @@ def test_the_provider_select_keeps_the_operators_choice_across_a_refresh():
     assert "providers.some((provider) => provider.provider_id === current)" in PROVIDERS_CODE
 
 
-def test_reads_go_through_the_shell_get_and_writes_through_the_shell_write():
+def test_reads_go_through_the_shell_get():
+    """Renamed: it only ever exercised load(). The writes are covered by the two
+    tests below, which execute them rather than matching `method:` literals."""
     result = _eval(
         "(async () => {"
         f"  fetchQueue.push({{ok: true, status: 200, body: {PROVIDERS}}});"
@@ -145,6 +147,104 @@ def test_reads_go_through_the_shell_get_and_writes_through_the_shell_write():
         "})()"
     )
     assert result == [["/api/admin/model-providers", "GET"]]
+
+
+SECRET = "sk-platform-do-not-leak"
+
+
+def test_the_platform_key_write_carries_the_secret_only_in_a_json_body():
+    """The one call in this module that carries a credential (savePlatformKey).
+    Nothing executed it before: the source-shape guard pins the string `api_key`
+    to a line that also says `JSON.stringify(`, which cannot tell a body from a
+    query string, and the URL and verb were pinned by a `method: 'PUT'` literal
+    that would ship green if either were wrong."""
+    result = _eval(
+        "(async () => {"
+        "  const secretInput = register('adminPlatformKeySecret', new Node('input'));"
+        "  const select = register('adminPlatformProvider', new Node('select'));"
+        "  register('adminPlatformKeyStatus', new Node('p'));"
+        "  register('adminProviderList', new Node('div'));"
+        f"  secretInput.value = '{SECRET}';"
+        "  select.value = 'openrouter';"
+        "  fetchQueue.push({ok: true, status: 200, body: {status: 'pending_verification'}});"
+        f"  fetchQueue.push({{ok: true, status: 200, body: {PROVIDERS}}});"
+        "  await window.AdminProviders.savePlatformKey({preventDefault() {}});"
+        "  const [url, options] = fetchCalls[0];"
+        "  return {url, method: options.method, credentials: options.credentials,"
+        "          csrf: options.headers['X-CSRF-Token'], bodyType: typeof options.body,"
+        "          sentKey: JSON.parse(options.body).api_key,"
+        "          headerText: Object.values(options.headers).join(' | '),"
+        "          left: secretInput.value,"
+        "          reload: [fetchCalls[1][0], fetchCalls[1][1].method]};"
+        "})()",
+        "globalThis.document.cookie = 'atl_csrf=tok';",
+    )
+    assert result["url"] == "/api/admin/model-providers/openrouter/platform-credential"
+    assert result["method"] == "PUT"
+    assert result["credentials"] == "include"
+    # Only AdminShell.write attaches the double-submit header. A raw fetch() here
+    # would be a 403 in production that no fetch-stubbed test could otherwise see.
+    assert result["csrf"] == "tok"
+    # The secret travels as a JSON body and nowhere a proxy, a referrer or a
+    # server access log would record it.
+    assert result["bodyType"] == "string"
+    assert result["sentKey"] == SECRET
+    assert SECRET not in result["url"]
+    assert SECRET not in result["headerText"]
+    # ...and it does not survive in the live input afterwards.
+    assert result["left"] == ""
+    assert result["reload"] == ["/api/admin/model-providers", "GET"]
+
+
+def test_every_write_call_site_reaches_its_own_url_and_verb_through_the_shell():
+    """All four re-pointed call sites, driven through the affordances that reach
+    them: the registry form, the platform-key form, and the two row buttons. A
+    wrong URL or verb in any of them used to ship green, because the only thing
+    holding them was a string literal in a source-shape scan."""
+    result = _eval(
+        "(async () => {"
+        "  ['adminProviderId', 'adminProviderDisplayName', 'adminProviderAdapter',"
+        "   'adminProviderBaseUrl', 'adminProviderStatus', 'adminProviderReason',"
+        "   'adminPlatformKeySecret'].forEach((id) => { register(id, new Node('input')).value = ''; });"
+        "  register('adminProviderByok', new Node('input')).checked = true;"
+        "  register('adminProviderPlatform', new Node('input')).checked = true;"
+        "  ['adminProviderStatusMessage', 'adminPlatformKeyStatus'].forEach("
+        "    (id) => register(id, new Node('p')));"
+        "  const host = register('adminProviderList', new Node('div'));"
+        "  const form = register('adminProviderForm', new Node('form'));"
+        "  register('adminPlatformKeyForm', new Node('form'));"
+        "  register('adminProviderRefreshBtn', new Node('button'));"
+        "  const select = register('adminPlatformProvider', new Node('select'));"
+        f"  for (let i = 0; i < 12; i += 1) fetchQueue.push({{ok: true, status: 200, body: {PROVIDERS}}});"
+        "  window.AdminShell.state.user = {email: 'ada@example.test'};"
+        "  window.AdminProviders.onRoute({route: 'providers'});"
+        "  await new Promise((resolve) => setTimeout(resolve, 0));"
+        "  elements['adminProviderId'].value = 'openrouter';"
+        "  await form.listeners.submit[0]({preventDefault() {}});"
+        "  elements['adminPlatformKeySecret'].value = 'sk-sweep';"
+        "  select.value = 'openrouter';"
+        "  await window.AdminProviders.savePlatformKey({preventDefault() {}});"
+        "  const reverify = byTag(host, 'BUTTON').find((b) => b.textContent === 'Reverify key');"
+        "  await reverify.listeners.click[0]();"
+        "  window.confirm = () => true;"
+        "  await window.AdminProviders.confirmRevoke('openrouter', 'OpenRouter');"
+        "  return {calls: fetchCalls.map(([url, o]) => [o.method, url]),"
+        "          signed: fetchCalls.filter(([, o]) => o.method !== 'GET')"
+        "            .every(([, o]) => o.headers['X-CSRF-Token'] === 'tok')};"
+        "})()",
+        "globalThis.document.cookie = 'atl_csrf=tok';",
+    )
+    read = ["GET", "/api/admin/model-providers"]
+    credential = "/api/admin/model-providers/openrouter/platform-credential"
+    assert result["calls"] == [
+        read,
+        ["PUT", "/api/admin/model-providers/openrouter"], read,
+        ["PUT", credential], read,
+        ["POST", f"{credential}/verify"], read,
+        ["DELETE", credential], read,
+    ]
+    # Every write, not just the one above, goes through AdminShell.write (N4).
+    assert result["signed"] is True
 
 
 def test_the_platform_key_secret_is_cleared_on_every_exit():
