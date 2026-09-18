@@ -253,7 +253,7 @@ Insert immediately after `request()` (which ends at `:276`), before `nextSeq`:
   function readCsrfToken() {
     try {
       const raw = document.cookie || '';
-      for (const name of ['atl_csrf', '__Host-atl_csrf']) {
+      for (const name of ['atl_csrf', '__Host-atl_csrf']) {  // CORRECTED 2026-09-18 (finding I6): ships as ['__Host-atl_csrf', 'atl_csrf'] to match backend/csrf.py:79 precedence.
         const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
         const match = raw.match(new RegExp(`(?:^|; )${escaped}=([^;]*)`));
         if (match) return decodeURIComponent(match[1]);
@@ -917,7 +917,7 @@ Add the account-menu controller, after `syncRail`:
       // to have been redundant. The cookie is HttpOnly, so there is nothing
       // this page could clear locally as a consolation.
     }
-    window.location.assign('/app');
+    window.location.assign('/app');  // CORRECTED 2026-09-18 (finding I5): logout() ships as replace('/app') -- assign leaves the painted console restorable from bfcache, where gate() never re-runs.
   }
 ```
 
