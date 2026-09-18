@@ -15,7 +15,7 @@ ADMIN_HTML = (FRONTEND / "admin.html").read_text(encoding="utf-8")
 ADMIN_CSS = (FRONTEND / "admin.css").read_text(encoding="utf-8")
 
 EXPECTED_SCRIPTS = [
-    "js/admin-shell.js?v=5",
+    "js/admin-shell.js?v=6",
     "js/credit-format.js?v=1",
     "js/admin-live.js?v=1",
     "js/admin-overview.js?v=1",
@@ -79,13 +79,13 @@ def test_the_inline_script_guard_sees_tags_html_allows():
 def test_gate_module_loads_first_and_every_script_is_pinned():
     srcs = re.findall(r'<script src="([^"]+)" defer></script>', ADMIN_HTML)
     assert srcs == EXPECTED_SCRIPTS
-    assert srcs[0] == "js/admin-shell.js?v=5"
+    assert srcs[0] == "js/admin-shell.js?v=6"
     for src in srcs:
         assert "?v=" in src, src
 
 
 def test_stylesheet_is_admin_css_and_the_page_does_not_inherit_styles_css():
-    assert '<link rel="stylesheet" href="admin.css?v=4">' in ADMIN_HTML
+    assert '<link rel="stylesheet" href="admin.css?v=5">' in ADMIN_HTML
     assert "styles.css" not in ADMIN_HTML
     assert "@import" not in ADMIN_CSS
     assert "cdn.jsdelivr.net" not in ADMIN_HTML
@@ -102,6 +102,7 @@ def test_panel_regions_carry_no_numeric_or_percentage_literal():
     assert names == [
         "live", "attention", "active-users", "activation", "sources", "retention",
         "value", "lifecycle", "credits", "revenue", "detail", "users", "profile", "providers",
+        "account-management", "activity",
     ]
     for name, body in regions:
         text = TAG.sub(" ", body)
@@ -229,7 +230,12 @@ def test_pruned_css_carries_none_of_the_dead_mock_passes():
 
 RAIL_ICONS = ("icon-chart", "icon-users", "icon-network", "icon-activity")
 HEADER_ICONS = ("icon-github", "icon-discord", "icon-chevron-right")
-SPRITE_ICONS = RAIL_ICONS + ("icon-refresh", "icon-x", "icon-check-circle") + HEADER_ICONS
+# The ported Account Management view: #icon-wallet on the Grant Pool form heading,
+# #icon-search on the account search submit.
+CREDITS_ICONS = ("icon-wallet", "icon-search")
+SPRITE_ICONS = (
+    RAIL_ICONS + ("icon-refresh", "icon-x", "icon-check-circle") + HEADER_ICONS + CREDITS_ICONS
+)
 
 
 def test_the_rail_is_anchors_with_icons_not_a_tablist():
@@ -333,8 +339,16 @@ def test_every_styles_css_token_name_used_here_is_also_declared_here():
         ("--info-color", "#00bfff"),
     ):
         assert f"{token}:{value}" in ADMIN_CSS, token
-    # Never copied: a literal that belongs to no token on either side.
-    assert "#67e8f9" not in ADMIN_CSS
+    # #67e8f9 is a raw accent cyan styles.css hardcodes in ~10 unrelated rules and
+    # that no token on either side carries, so reaching for it is always either a
+    # substitution or a copy from somewhere this page does not render. There is
+    # exactly ONE legitimate occurrence: styles.css:13361 sets it on the Grant Pool
+    # form's wallet icon as a bare literal itself, and copying that declaration
+    # verbatim is what keeps the two consoles the same colour. Pinned by count and
+    # by the whole declaration rather than banned outright -- a second copy, or the
+    # same literal migrating into another rule, still fails here.
+    assert ADMIN_CSS.count("#67e8f9") == 1
+    assert ".admin-credits-form-heading>svg{width:20px;height:20px;flex:0 0 20px;color:#67e8f9}" in ADMIN_CSS
     for retyped in (".admin-rail", ".admin-tab", ".admin-tab svg", ".admin-tab.is-active::before",
                     ".account-menu", ".account-menu-item", ".account-menu-item--danger"):
         assert retyped in ADMIN_CSS, retyped
@@ -351,3 +365,66 @@ def test_the_flat_text_list_rules_are_gone():
     assert "aside a:hover{" not in ADMIN_CSS
     assert "aside a::first-letter" not in ADMIN_CSS
     assert ".analytics-parent{" not in ADMIN_CSS
+
+
+ADMIN_CREDITS_JS = (FRONTEND / "js" / "admin-credits.js").read_text(encoding="utf-8")
+
+
+def test_the_ported_console_carries_every_id_admin_credits_js_looks_up():
+    """The Account Management and Activity markup moved here from app.html, but the
+    module that fills it is rewired onto AdminShell in the next chunk. Until then
+    nothing at runtime would notice a node that failed to make the trip -- the
+    module's own lookups return null and its renderers no-op, on a page no test
+    loads it into.
+
+    So the required set is DERIVED from admin-credits.js rather than retyped: a
+    node dropped in the move, an id renamed on one side only, or a new lookup added
+    upstream all fail here, and none of them can be fixed by editing this list.
+    """
+    required = set(re.findall(r"element\('([A-Za-z]+)'\)", ADMIN_CREDITS_JS))
+    # The two ring segments are reached through setPoolRingSegment(id, ...), not
+    # element(id) directly, so the pattern above cannot see them.
+    required |= set(re.findall(r"setPoolRingSegment\('([A-Za-z]+)'", ADMIN_CREDITS_JS))
+    assert len(required) == 27, sorted(required)
+    present = set(re.findall(r'\sid="([A-Za-z]+)"', ADMIN_HTML))
+    assert required <= present, sorted(required - present)
+
+
+def test_the_two_ported_views_are_hidden_sections_the_router_owns():
+    """Both arrive `hidden`, like every other detail view: the shell's route() is
+    what reveals one, and a section that shipped visible would stack under Overview
+    on first paint."""
+    for view, panel in (("accountManagementView", "account-management"), ("activityView", "activity")):
+        pattern = rf'<section id="{view}" class="detail-view" data-panel="{panel}" hidden\b'
+        assert re.search(pattern, ADMIN_HTML), view
+    shell = (FRONTEND / "js" / "admin-shell.js").read_text(encoding="utf-8")
+    assert "showView('accountManagementView', parsed.route === 'account-management');" in shell
+    assert "showView('activityView', parsed.route === 'activity');" in shell
+    # The range group and the freshness legend are suppressed off the shared list,
+    # never off a per-route literal -- see CONSOLE_ROUTES in admin-shell.js.
+    assert shell.count("!CONSOLE_ROUTES.includes(parsed.route)") == 2
+    assert "parsed.route !== 'providers'" not in shell
+
+
+def test_the_refund_dialog_stayed_on_the_app():
+    """#adminGrantReasonDialog belongs to the admin view and came across.
+    #creditsRefundDialog belongs to Credits & Billing and did not -- copying it
+    here would give one dialog id two owners across two documents."""
+    assert 'id="adminGrantReasonDialog"' in ADMIN_HTML
+    # The id attribute, not the bare name: the markup comment beside the ported
+    # dialog names #creditsRefundDialog to explain why it was left behind, and a
+    # substring ban would read its own rationale as the defect.
+    assert 'id="creditsRefundDialog"' not in ADMIN_HTML
+
+
+def test_the_dropped_panels_did_not_come_across():
+    """Four parts of app.html's #adminView were deliberately left behind. Each is
+    superseded here, and a later chunk re-adding one would be reintroducing a
+    second owner for a figure this page already renders."""
+    for dropped in ("adminStats", "adminLegacyUsersPanel", "adminUsersBody",
+                    "adminRefreshBtn", "adminTabs"):
+        assert f'id="{dropped}"' not in ADMIN_HTML, dropped
+    # ...and their CSS did not either.
+    for dead in (".admin-stats{", ".admin-stat{", ".admin-legacy-users{",
+                 ".admin-users-table{", ".admin-workspace{", ".admin-tab-panel{"):
+        assert dead not in ADMIN_CSS, dead

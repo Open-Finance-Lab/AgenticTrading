@@ -9,7 +9,14 @@
   // is how the two drift. There is deliberately no live-operations route -- the
   // live row has no detail page (§8.2, D16).
   const ANALYTICS_ROUTES = ['overview', 'sources', 'retention', 'credits', 'lifecycle', 'health', 'users'];
-  const ROUTES = [...ANALYTICS_ROUTES, 'providers'];
+  // The rail's non-Analytics entries. Deliberately a named list rather than three
+  // literals: every one of these routes must ALSO be suppressed from the range
+  // group and the freshness legend in route(), and a route added to ROUTES but
+  // forgotten there ships a date picker that scopes nothing on screen -- which is
+  // worse than no picker, because it invites the operator to believe the page is
+  // filtered. One list, read in both places, cannot drift apart.
+  const CONSOLE_ROUTES = ['providers', 'account-management', 'activity'];
+  const ROUTES = [...ANALYTICS_ROUTES, ...CONSOLE_ROUTES];
   const DETAIL_ROUTES = ['sources', 'retention', 'credits', 'lifecycle', 'health'];
   // 1D is cut (§8.2): no cross-user source finer than a day exists. 1Y is 180
   // inclusive days because the value routes reject a window wider than
@@ -619,12 +626,16 @@
     showView('usersView', parsed.route === 'users' && !parsed.id);
     showView('profile', parsed.route === 'users' && Boolean(parsed.id));
     showView('providers', parsed.route === 'providers');
+    showView('accountManagementView', parsed.route === 'account-management');
+    showView('activityView', parsed.route === 'activity');
     // The range group, the filter form and the freshness legend all describe
-    // *daily analytics* figures. On Providers they describe nothing on screen,
-    // and a range control that scopes nothing is worse than no control -- it
-    // invites the operator to believe the registry is being filtered.
-    showView('pageControls', parsed.route !== 'providers');
-    showView('freshnessLegend', parsed.route !== 'providers');
+    // *daily analytics* figures. On the console routes they describe nothing on
+    // screen, and a range control that scopes nothing is worse than no control --
+    // it invites the operator to believe the registry, the account list or the
+    // audit trail is being filtered. The Grant tables page themselves and are
+    // not date-scoped at all.
+    showView('pageControls', !CONSOLE_ROUTES.includes(parsed.route));
+    showView('freshnessLegend', !CONSOLE_ROUTES.includes(parsed.route));
     document.querySelectorAll('#analyticsSubnav a[data-route]').forEach((link) => {
       link.classList.toggle('active', link.dataset.route === parsed.route);
     });
@@ -763,7 +774,7 @@
   }
 
   const api = {
-    ROUTES, RANGE_DAYS, LIFECYCLE_LABELS, OPERATIONAL_LABELS, COMMERCIAL_LABELS,
+    ROUTES, CONSOLE_ROUTES, RANGE_DAYS, LIFECYCLE_LABELS, OPERATIONAL_LABELS, COMMERCIAL_LABELS,
     LIFECYCLE_RULES, OPERATIONAL_RULES, SECTION_UNAVAILABLE, STALE_NOTICE, INCOMPLETE, PENDING, DASH,
     state, today,
     parseHash, rangeDates, readUrlState, buildSearch, analyticsParams, userListParams,

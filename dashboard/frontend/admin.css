@@ -18,7 +18,8 @@
    --header-height is measured, not chosen: 10px padding x2 + the 64px logo +
    the 1px bottom border. .workspace subtracts it, and used to hardcode the old
    bar's 80px. */
-:root{--bg-surface:#0f1328;--bg-card:#131a35;--bg-hover:#1a2047;--text-primary:#e5e7eb;--text-secondary:#9ca3af;--border-color:#1f2937;--info-color:#00bfff;--header-height:85px}
+/* Five more aliases folded into the block below (--bg-primary/--bg-input/--text-muted/--danger-color/--warning-color): same rule as above, needed verbatim by the ported Grant Credits console further down this file. */
+:root{--bg-surface:#0f1328;--bg-card:#131a35;--bg-hover:#1a2047;--text-primary:#e5e7eb;--text-secondary:#9ca3af;--border-color:#1f2937;--info-color:#00bfff;--header-height:85px;--bg-primary:#0a0e27;--bg-input:#0a0e27;--text-muted:#6b7280;--danger-color:#ff4141;--warning-color:#ffa500}
 *{box-sizing:border-box}
 body{margin:0;background:var(--bg);color:var(--text);font:14px/1.45 var(--font-base)}
 button,select,input{font:inherit}
@@ -460,3 +461,114 @@ dialog::backdrop{background:rgba(0,0,0,.64)}
 @media(max-width:1040px){.filters{grid-template-columns:repeat(2,minmax(0,1fr))}.overview-row.priority-row{grid-template-columns:1fr;gap:0}.metric-strip{grid-template-columns:repeat(2,1fr)}.detail-metric:nth-child(3){padding-left:0;border-left:0;border-top:1px solid var(--line)}.detail-metric:nth-child(4){border-top:1px solid var(--line)}.admin-provider-grid{grid-template-columns:1fr}.admin-platform-key-form{grid-template-columns:repeat(2,minmax(0,1fr))}.admin-platform-key-form .auth-btn{grid-column:1/-1}}
 @media(max-width:680px){.workspace{grid-template-columns:64px minmax(0,1fr)}aside{padding:18px 6px}aside>strong{display:none}.admin-rail{padding:5px}.admin-tab{justify-content:center;min-height:42px;padding:9px}.admin-tab span,.admin-tab-caret{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap;border:0}.analytics-subnav{display:none}main{padding:24px 16px 40px}.page-head{flex-direction:column;align-items:stretch}.page-controls{justify-items:stretch}.page-actions{flex-direction:row;align-items:center;justify-content:space-between}.live-row .live-head{flex-direction:column;align-items:flex-start}.range button{min-width:38px;padding-inline:7px}.filters{grid-template-columns:1fr}.snapshot-grid{grid-template-columns:1fr}.snapshot-tile+.snapshot-tile{border-left:0;border-top:1px solid var(--line)}.source-wrap{grid-template-columns:1fr;justify-items:center;gap:17px}.source-legend-six{width:100%;gap:10px 14px}.attention-note{align-items:flex-start;flex-direction:column;gap:8px}.retention-chart{grid-template-columns:55px repeat(4,1fr);gap:4px}.lifecycle-legend{grid-template-columns:repeat(2,1fr)}.value-step{grid-template-columns:112px 1fr auto;gap:8px}.value-step>span{white-space:normal}.layered-route{min-width:600px;overflow:visible}.credits-paired{min-width:560px}.priority-row:has(.layered-route),.priority-row:has(.credits-paired){overflow-x:auto}.revenue-viz{height:184px}.revenue-viz svg{height:168px}.metric-strip{grid-template-columns:1fr}.detail-metric,.detail-metric:first-child,.detail-metric:nth-child(3){padding:17px 0;border-left:0;border-top:1px solid var(--line)}.milestones{grid-template-columns:repeat(2,1fr)}.admin-platform-key-form{grid-template-columns:1fr}}
 @media(prefers-reduced-motion:reduce){.module-link:after{transition:none}}
+
+/* —— Account Management + Activity (design §8.2) ——
+   The markup at app.html:2145-2236/2265-2281/2286-2305 is moving onto this
+   page; /admin never loads styles.css, so every rule it depends on is
+   retyped here. Sources: .sr-only (styles.css:11817), .admin-empty /
+   .admin-role-locked (:13015-13025), and the .credits-refund-* dialog family
+   (:11856, :12017, :12725-12766) shared with the OTHER refund dialog
+   (#creditsRefundDialog) that is staying on app.html. That other dialog also
+   owns .credits-refund-btn/.credits-order-status/.credits-refund-field,
+   which this page's markup never uses — deliberately not ported.
+   .admin-grant-reason-dialog carries no rule of its own in styles.css
+   (confirmed by grep); none is invented here either. */
+.sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}
+.admin-empty{color:var(--text-secondary);text-align:center;padding:24px 12px}
+.admin-role-locked{color:var(--text-secondary);font-size:12px;font-weight:600}
+.credits-refund-dialog{width:min(440px,calc(100vw - 32px));margin:auto;padding:0;border:1px solid var(--border-color);border-radius:8px;background:var(--bg-card);color:var(--text-primary);box-shadow:0 24px 80px rgba(0,0,0,.6)}
+.credits-refund-dialog::backdrop{background:rgba(3,7,18,.78)}
+.credits-refund-dialog form{padding:20px}
+/* styles.css declares this selector twice (:11856 and :12744, the second
+   overriding align-items); merged into one rule here, values unchanged. */
+.credits-refund-head{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;margin-bottom:16px}
+/* Also declared twice in styles.css (:12017 and :12749, no overlapping
+   properties between the two); merged into one rule here, values unchanged. */
+.credits-refund-order{margin:7px 0 0;color:var(--text-secondary);font-size:12px;line-height:1.5;letter-spacing:0;padding:9px 10px;border-left:2px solid var(--warning-color);background:rgba(245,158,11,.06);font-family:var(--font-mono);overflow-wrap:anywhere}
+.credits-refund-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:20px}
+
+/* —— Grant Credits console (design §8.2) ——
+   Retyped verbatim from styles.css's "Admin Grant Credits console" block
+   (:13150-13648, including its two @media blocks). .admin-stats/.admin-stat*
+   /.admin-legacy-users/.admin-table-wrap/.admin-pager*/.admin-users-table/
+   .admin-th-note/.admin-workspace*/.admin-tabs/.admin-tab-panel are the
+   panels this port drops and are deliberately not here — see the port task
+   note; admin.css already owns .admin-rail/.admin-tab from PR #490. */
+.admin-credits-console{margin:28px 0;padding:24px 0 8px;border-top:1px solid var(--border-color)}
+.admin-credits-heading,.admin-credits-subheading,.admin-credits-form-heading{display:flex;align-items:flex-start;justify-content:space-between;gap:16px}
+.admin-credits-heading h3,.admin-credits-subheading h4,.admin-credits-form-heading h4{margin:2px 0 0;color:var(--text-primary)}
+.admin-credits-heading h3{font-size:22px}
+.admin-credits-subheading h4,.admin-credits-form-heading h4{font-size:16px}
+.admin-credits-summary-copy{max-width:620px;margin:8px 0 0;color:var(--text-secondary);font-size:13px;line-height:1.5}
+.admin-credits-pool-layout{display:grid;grid-template-columns:minmax(0,1.45fr) minmax(320px,.75fr);align-items:stretch;gap:16px;margin:20px 0 24px}
+.admin-credits-heading-actions{display:flex;align-items:center;gap:10px;flex:0 0 auto}
+.admin-credits-summary{display:grid;grid-template-columns:minmax(212px,250px) minmax(0,1fr);align-items:center;gap:28px;height:100%;margin:0;padding:22px 24px;border:1px solid var(--border-color);border-radius:8px;background:var(--bg-card)}
+.admin-credits-pool-ring{position:relative;width:212px;height:212px}
+.admin-credits-pool-ring svg{display:block;width:100%;height:100%;transform:rotate(-90deg)}
+.admin-credits-pool-ring circle{fill:none;stroke-width:18}
+.admin-credits-pool-ring-track{stroke:rgba(148,163,184,.18)}
+.admin-credits-pool-ring-available{stroke:#4ade80;stroke-linecap:round;transition:stroke-dasharray 240ms ease,stroke-dashoffset 240ms ease}
+.admin-credits-pool-ring-allocated{stroke:#f87171;stroke-linecap:round;transition:stroke-dasharray 240ms ease,stroke-dashoffset 240ms ease}
+.admin-credits-pool-ring-center{position:absolute;inset:0;display:grid;align-content:center;justify-items:center;pointer-events:none;text-align:center}
+.admin-credits-pool-ring-center span{color:var(--text-secondary);font-size:10px;letter-spacing:.1em;text-transform:uppercase}
+.admin-credits-pool-ring-center strong{margin-top:5px;color:var(--text-primary);font-family:var(--font-mono);font-size:20px;font-weight:700;overflow-wrap:anywhere}
+.admin-credits-pool-ring-center small{margin-top:3px;color:var(--text-muted);font-size:11px}
+.admin-credits-pool-legend{display:grid;gap:12px;min-width:0}
+.admin-credits-pool-legend-row{display:grid;grid-template-columns:10px minmax(0,1fr) auto;align-items:center;gap:10px;min-height:48px;padding-bottom:12px;border-bottom:1px solid rgba(148,163,184,.16)}
+.admin-credits-pool-legend-row:last-child{padding-bottom:0;border-bottom:0}
+.admin-credits-pool-swatch{width:10px;height:10px;border-radius:2px}
+.admin-credits-pool-swatch.is-available{background:#4ade80}
+.admin-credits-pool-swatch.is-allocated{background:#f87171}
+.admin-credits-pool-legend-label{color:var(--text-secondary);font-size:13px}
+.admin-credits-pool-legend-row strong{color:var(--text-primary);font-family:var(--font-mono);font-size:16px;font-weight:700;overflow-wrap:anywhere;text-align:right}
+.admin-credits-actions{display:grid;grid-template-columns:minmax(0,1fr);gap:12px;margin:0}
+.admin-credits-form{display:grid;height:100%;box-sizing:border-box;gap:11px;padding:16px;border:1px solid var(--border-color);border-radius:8px;background:rgba(15,23,42,.28)}
+.admin-credits-form-heading{align-items:center;margin-bottom:2px}
+.admin-credits-form-heading>svg{width:20px;height:20px;flex:0 0 20px;color:#67e8f9}
+.admin-credits-form .auth-btn{display:inline-flex;align-items:center;gap:8px;justify-content:center;width:100%}
+.admin-credits-form .auth-btn svg{width:15px;height:15px;flex:0 0 15px;fill:none;stroke:currentColor}
+.admin-credits-users,.admin-credits-activity{margin-top:24px}
+.admin-credits-count{color:var(--text-secondary);font-size:12px}
+.admin-credits-search{display:flex;gap:8px;margin:12px 0 10px}
+/* This file gives every bare input[type=search] a 40px min-height floor
+   (:29); .admin-credits-search input never had one in styles.css and sits
+   beside the 34px .credits-icon-btn search button, so the floor would make
+   it visibly taller than the button next to it. */
+.admin-credits-search input{min-width:0;flex:1;min-height:0;padding:9px 11px;border:1px solid var(--border-color);border-radius:5px;background:var(--bg-input);color:var(--text-primary);font:inherit}
+.admin-credits-table-wrap{overflow-x:auto;border:1px solid var(--border-color);border-radius:8px;background:var(--bg-card)}
+.admin-credits-pager{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;margin-top:12px}
+.admin-credits-pager-range{color:var(--text-secondary);font-size:13px}
+.admin-credits-pager-buttons{display:flex;gap:8px}
+.admin-credits-pager-buttons .auth-btn[disabled]{opacity:.5;cursor:not-allowed}
+.admin-credits-users-table,.admin-credits-activity-table{width:100%;min-width:760px;border-collapse:collapse;font-size:12px}
+.admin-credits-users-table{min-width:900px}
+.admin-credits-users-table th,.admin-credits-users-table td,.admin-credits-activity-table th,.admin-credits-activity-table td{padding:10px 12px;border-bottom:1px solid rgba(148,163,184,.14);text-align:left;vertical-align:middle}
+.admin-credits-users-table th,.admin-credits-activity-table th{color:var(--text-secondary);font-weight:600;white-space:nowrap}
+.admin-credits-users-table tr:last-child td,.admin-credits-activity-table tr:last-child td{border-bottom:none}
+.admin-credits-account strong,.admin-credits-account span{display:block}
+.admin-credits-account strong{color:var(--text-primary);font-weight:600}
+.admin-credits-account span,.admin-credits-time,.admin-credits-reason{color:var(--text-secondary)}
+.admin-credits-account span{margin-top:3px;font-size:11px}
+.admin-credits-role{white-space:nowrap}
+.admin-status-active,.admin-status-restricted{display:block;font-size:11px;font-weight:700;text-transform:capitalize}
+.admin-status-active{color:#86efac}
+.admin-status-restricted{color:#fda4af}
+.admin-credits-status-detail{display:block;margin-top:3px;color:var(--text-secondary);font-size:10px;white-space:nowrap}
+/* Same 40px floor as the search input above, this time from the bare
+   `select` rule (:28); these sit 6px-padded inside a dense table row, so the
+   floor would blow the row height out. Applies to both selects below. */
+.admin-credits-role-select{width:94px;min-width:0;min-height:0;padding:6px 8px;border:1px solid var(--border-color);border-radius:6px;background:var(--bg-primary);color:var(--text-primary);font:inherit;font-size:12px}
+.admin-credits-group{white-space:nowrap}
+.admin-credits-group-select{width:132px;min-width:118px;max-width:160px;min-height:0;padding:6px 8px;border:1px solid var(--border-color);border-radius:6px;background:var(--bg-primary);color:var(--text-primary);font:inherit;font-size:12px}
+.admin-credits-role-select:focus,.admin-credits-group-select:focus{outline:none;border-color:var(--info-color);box-shadow:0 0 0 2px rgba(0,191,255,.12)}
+.admin-credits-group-select:disabled{cursor:wait;opacity:.62}
+.admin-credits-group-error{display:block;max-width:160px;margin-top:4px;color:var(--danger-color);font-size:10px;line-height:1.35;white-space:normal}
+.admin-credits-number,.admin-credits-activity-amount{color:var(--text-primary);font-family:var(--font-mono);white-space:nowrap}
+.admin-credits-activity-amount.is-positive{color:#86efac}
+.admin-credits-activity-amount.is-negative{color:#fda4af}
+.admin-credits-amount-input{width:112px;min-width:96px;padding:7px 8px;border:1px solid var(--border-color);border-radius:5px;background:var(--bg-input);color:var(--text-primary);font:12px var(--font-mono)}
+.admin-credits-row-actions{display:flex;gap:6px;white-space:nowrap}
+.admin-credits-row-actions .credits-key-action{min-height:30px;padding:5px 8px}
+.admin-credits-status{margin-top:14px}
+@media(max-width:820px){.admin-credits-pool-layout{grid-template-columns:1fr}.admin-credits-summary,.admin-credits-actions{grid-template-columns:1fr}.admin-credits-pool-legend{width:100%}}
+@media(max-width:600px){.admin-credits-heading,.admin-credits-subheading{flex-direction:column}.admin-credits-heading-actions{align-self:stretch;justify-content:space-between}.admin-credits-summary{grid-template-columns:1fr}.admin-credits-pool-ring{width:190px;height:190px}}

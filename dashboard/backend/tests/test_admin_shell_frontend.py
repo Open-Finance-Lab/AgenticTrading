@@ -26,11 +26,22 @@ def _eval(expression: str, *setup: str) -> object:
 
 def test_hash_router_knows_the_analytics_routes_plus_providers_and_the_profile():
     assert _eval("window.AdminShell.ROUTES") == [
-        "overview", "sources", "retention", "credits", "lifecycle", "health", "users", "providers",
+        "overview", "sources", "retention", "credits", "lifecycle", "health", "users",
+        "providers", "account-management", "activity",
+    ]
+    # The non-Analytics entries are a named list because route() reads the same one
+    # to suppress the range group and the freshness legend. Asserted against the
+    # tail of ROUTES rather than retyped, so adding a console route to only one of
+    # the two places cannot pass.
+    assert _eval("window.AdminShell.CONSOLE_ROUTES") == [
+        "providers", "account-management", "activity",
     ]
     assert _eval("window.AdminShell.parseHash('')") == {"route": "overview", "id": None}
     assert _eval("window.AdminShell.parseHash('#health')") == {"route": "health", "id": None}
     assert _eval("window.AdminShell.parseHash('#providers')") == {"route": "providers", "id": None}
+    # Hyphenated routes survive parseHash's split('/') intact.
+    assert _eval("window.AdminShell.parseHash('#account-management')") == {"route": "account-management", "id": None}
+    assert _eval("window.AdminShell.parseHash('#activity')") == {"route": "activity", "id": None}
     assert _eval("window.AdminShell.parseHash('#users')") == {"route": "users", "id": None}
     assert _eval("window.AdminShell.parseHash('#users/42')") == {"route": "users", "id": "42"}
     assert _eval("window.AdminShell.parseHash('#users/abc')") == {"route": "users", "id": None}
@@ -51,6 +62,36 @@ def test_providers_lights_its_own_rail_entry_not_analytics():
         "})()"
     )
     assert result == {"analytics": None, "account-management": None, "providers": "page", "activity": None}
+
+
+RAILS = ["analytics", "account-management", "providers", "activity"]
+
+
+def _sync_rail(route: str) -> object:
+    """Run syncRail(route) against the four rail entries and report which lit."""
+    return _eval(
+        "(() => {"
+        "  const made = ['analytics', 'account-management', 'providers', 'activity'].map((rail) => {"
+        "    const a = new Node('a'); a.dataset.rail = rail; return a;"
+        "  });"
+        "  document.querySelectorAll = (selector) => (selector.includes('data-rail') ? made : []);"
+        f"  window.AdminShell.syncRail('{route}');"
+        "  return Object.fromEntries(made.map((a) => [a.dataset.rail, a.getAttribute('aria-current')]));"
+        "})()"
+    )
+
+
+def test_each_rail_entry_lights_only_itself():
+    """The complement of the test above. Account Management and Activity share the
+    rail's flat `.admin-tab` styling with Analytics, whose entry lights for any of
+    its seven sub-routes -- so the thing worth pinning is that the broad match stays
+    broad in exactly one place and narrow everywhere else."""
+    for route in ("account-management", "activity", "providers"):
+        assert _sync_rail(route) == {r: ("page" if r == route else None) for r in RAILS}, route
+    # ...and Analytics still lights for a sub-route while the other three stay dark.
+    assert _sync_rail("retention") == {
+        "analytics": "page", "account-management": None, "providers": None, "activity": None,
+    }
 
 
 def test_range_maps_to_inclusive_utc_dates_within_the_180_day_cap():

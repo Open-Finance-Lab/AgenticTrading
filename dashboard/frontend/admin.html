@@ -5,12 +5,12 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>ATL Admin</title>
   <link rel="icon" href="favicon.svg">
-  <link rel="stylesheet" href="admin.css?v=4">
+  <link rel="stylesheet" href="admin.css?v=5">
   <!-- No inline scripts (design D6): pytest can only execute frontend code it
        can lift from an external file. admin-shell.js loads first because it
        owns the /api/auth/me gate and the router the other modules listen to;
        all six are deferred, so they run in this order before DOMContentLoaded. -->
-  <script src="js/admin-shell.js?v=5" defer></script>
+  <script src="js/admin-shell.js?v=6" defer></script>
   <script src="js/credit-format.js?v=1" defer></script>
   <script src="js/admin-live.js?v=1" defer></script>
   <script src="js/admin-overview.js?v=1" defer></script>
@@ -19,12 +19,13 @@
 </head>
 <body>
   <!-- Icon sprite (design §6). Markup, not script, so the no-inline-script
-       guard (D6) is unaffected. Ten symbols, not the five the design named:
+       guard (D6) is unaffected. Twelve symbols, not the five the design named:
        the ported providers panel also references #icon-check-circle on both
-       submit buttons and #icon-x on the revoke action, and the universal
-       header adds #icon-github, #icon-discord and #icon-chevron-right. A <use>
-       with no matching <symbol> renders an empty box without raising, so a
-       missed one is silent -- test_admin_header_parity.py checks the set. -->
+       submit buttons and #icon-x on the revoke action, the universal header
+       adds #icon-github, #icon-discord and #icon-chevron-right, and the ported
+       Grant Pool form and account search add #icon-wallet and #icon-search. A
+       <use> with no matching <symbol> renders an empty box without raising, so
+       a missed one is silent -- test_admin_header_parity.py checks the set. -->
   <svg xmlns="http://www.w3.org/2000/svg" style="position:absolute;width:0;height:0;overflow:hidden" aria-hidden="true">
     <symbol id="icon-chart" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3v18h18"/><path d="m19 9-5 5-4-4-3 3"/></symbol>
     <symbol id="icon-users" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></symbol>
@@ -36,6 +37,8 @@
     <symbol id="icon-discord" viewBox="0 0 24 24" fill="currentColor"><path d="M20.317 4.37a19.791 19.791 0 0 0-4.885-1.515.074.074 0 0 0-.079.037c-.21.375-.444.864-.608 1.25a18.27 18.27 0 0 0-5.487 0 12.64 12.64 0 0 0-.617-1.25.077.077 0 0 0-.079-.037A19.736 19.736 0 0 0 3.677 4.37a.07.07 0 0 0-.032.027C.533 9.046-.32 13.58.099 18.057a.082.082 0 0 0 .031.057 19.9 19.9 0 0 0 5.993 3.03.078.078 0 0 0 .084-.028 14.09 14.09 0 0 0 1.226-1.994.076.076 0 0 0-.041-.106 13.107 13.107 0 0 1-1.872-.892.077.077 0 0 1-.008-.128 10.2 10.2 0 0 0 .372-.292.074.074 0 0 1 .077-.01c3.928 1.793 8.18 1.793 12.062 0a.074.074 0 0 1 .078.01c.12.098.246.198.373.292a.077.077 0 0 1-.006.127 12.299 12.299 0 0 1-1.873.892.077.077 0 0 0-.041.107c.36.698.772 1.362 1.225 1.993a.076.076 0 0 0 .084.028 19.839 19.839 0 0 0 6.002-3.03.077.077 0 0 0 .032-.054c.5-5.177-.838-9.674-3.549-13.66a.061.061 0 0 0-.031-.03zM8.02 15.33c-1.183 0-2.157-1.085-2.157-2.419 0-1.333.956-2.419 2.157-2.419 1.21 0 2.176 1.096 2.157 2.42 0 1.333-.956 2.418-2.157 2.418zm7.975 0c-1.183 0-2.157-1.085-2.157-2.419 0-1.333.955-2.419 2.157-2.419 1.21 0 2.176 1.096 2.157 2.42 0 1.333-.946 2.418-2.157 2.418z"/></symbol>
     <symbol id="icon-github" viewBox="0 0 24 24" fill="currentColor"><path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0 0 24 12c0-6.63-5.37-12-12-12z"/></symbol>
     <symbol id="icon-chevron-right" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="m9 18 6-6-6-6"/></symbol>
+    <symbol id="icon-wallet" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M20 7V5a2 2 0 0 0-2-2H5a3 3 0 0 0 0 6h15v10a2 2 0 0 1-2 2H5a3 3 0 0 1-3-3V6"/><path d="M16 13h4"/></symbol>
+    <symbol id="icon-search" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></symbol>
   </svg>
   <!-- Header. A retyped copy of app.html's universal top bar, not a variant of
        it: the console is a page of the same product and must not announce
@@ -133,8 +136,14 @@
         <a href="#health" data-route="health">System health</a>
         <a href="#users" data-route="users">Users</a>
       </nav>
-      <!-- Account Management and Activity stay in the old console until PR2
-           (design N2: they are one 712-line module and port together). -->
+      <!-- The #account-management and #activity routes and their markup landed
+           in this chunk, but admin-credits.js -- the 712-line module that fills
+           both tables -- is still bound to /app and is rewired in the next one.
+           These two hrefs therefore stay pointed at the old console until it
+           lands: every merge to main auto-deploys prod, and a rail entry that
+           opens a permanently empty table is a worse answer than the
+           cross-surface jump it replaces. Flipping them to "#account-management"
+           and "#activity" is the first edit of that chunk. -->
       <a class="admin-tab" data-rail="account-management" href="/app?view=admin&amp;adminTab=users"><svg aria-hidden="true"><use href="#icon-users"/></svg><span>Account Management</span></a>
       <a class="admin-tab" data-rail="providers" href="#providers"><svg aria-hidden="true"><use href="#icon-network"/></svg><span>Providers</span></a>
       <a class="admin-tab" data-rail="activity" href="/app?view=admin&amp;adminTab=activity"><svg aria-hidden="true"><use href="#icon-activity"/></svg><span>Activity</span></a>
@@ -314,9 +323,150 @@
         </div>
       </section>
 
+      <!-- Ported from app.html's #adminView. Four parts of that view did NOT
+           come across: its page-header/#adminError/#adminSuccess/#adminRefreshBtn
+           (this page has its own chrome and per-panel retry), the #adminTabs nav
+           (the rail replaces it), #adminStats (admin-live.js already renders the
+           same /api/admin/stats counters on Overview), and #adminLegacyUsersPanel
+           (dead -- it is `hidden` in app.html with nothing anywhere unhiding it).
+           Element IDs are unchanged from app.html so admin-credits.js binds to
+           them without a rename; none of them collided with anything here. -->
+      <section id="accountManagementView" class="detail-view" data-panel="account-management" hidden aria-labelledby="accountManagementTitle">
+        <div class="page-head"><div><h1 id="accountManagementTitle" tabindex="-1">Account Management</h1><p class="muted">Fund the platform pool, allocate Grant Credits, and manage account roles</p></div><span class="credits-admin-badge">Admin only</span></div>
+        <p id="adminCreditsStatus" class="credits-status admin-credits-status" role="status" aria-live="polite"></p>
+        <section id="adminCreditsSection" class="admin-credits-console" aria-labelledby="adminCreditsHeading">
+          <div class="admin-credits-heading">
+            <div>
+              <p class="credits-section-kicker">Credits administration</p>
+              <h3 id="adminCreditsHeading">Grant Pool</h3>
+              <p class="admin-credits-summary-copy">Fund the platform pool, allocate Grant Credits to an account, and keep every movement auditable.</p>
+            </div>
+            <div class="admin-credits-heading-actions">
+              <span class="credits-admin-badge">Admin only</span>
+              <button id="adminCreditsRefreshBtn" class="credits-icon-btn" type="button" aria-label="Refresh Grant Credits" title="Refresh Grant Credits">
+                <svg aria-hidden="true"><use href="#icon-refresh"/></svg>
+              </button>
+            </div>
+          </div>
+
+          <div class="admin-credits-pool-layout">
+            <div id="adminCreditsPoolSummary" class="admin-credits-summary" aria-label="Grant Pool summary">
+              <div class="admin-credits-pool-ring" role="img" aria-label="Grant Pool allocation">
+                <svg viewBox="0 0 220 220" aria-hidden="true">
+                  <circle class="admin-credits-pool-ring-track" cx="110" cy="110" r="78"></circle>
+                  <circle id="adminCreditsPoolRingAvailable" class="admin-credits-pool-ring-available" cx="110" cy="110" r="78"></circle>
+                  <circle id="adminCreditsPoolRingAllocated" class="admin-credits-pool-ring-allocated" cx="110" cy="110" r="78"></circle>
+                </svg>
+                <div class="admin-credits-pool-ring-center">
+                  <span>Total Pool</span>
+                  <strong id="adminCreditsPoolTotal">—</strong>
+                  <small>Credits</small>
+                </div>
+              </div>
+              <div class="admin-credits-pool-legend" aria-label="Grant Pool allocation details">
+                <div class="admin-credits-pool-legend-row">
+                  <span class="admin-credits-pool-swatch is-available" aria-hidden="true"></span>
+                  <span class="admin-credits-pool-legend-label">Available</span>
+                  <strong id="adminCreditsPoolAvailable">—</strong>
+                </div>
+                <div class="admin-credits-pool-legend-row">
+                  <span class="admin-credits-pool-swatch is-allocated" aria-hidden="true"></span>
+                  <span class="admin-credits-pool-legend-label">Allocated</span>
+                  <strong id="adminCreditsAllocated">—</strong>
+                </div>
+              </div>
+            </div>
+
+            <div class="admin-credits-actions">
+              <form id="adminGrantPoolForm" class="admin-credits-form">
+                <div class="admin-credits-form-heading">
+                  <div>
+                    <p class="credits-section-kicker">Pool adjustment</p>
+                    <h4>Adjust Grant Pool</h4>
+                  </div>
+                  <svg aria-hidden="true"><use href="#icon-wallet"/></svg>
+                </div>
+                <label class="credits-key-field" for="adminGrantPoolAmount"><span>Credits (+ add, − remove)</span><input id="adminGrantPoolAmount" type="number" step="0.000001" inputmode="decimal" autocomplete="off" placeholder="0.000000" required></label>
+                <label class="credits-key-field" for="adminGrantPoolReason"><span>Reason</span><input id="adminGrantPoolReason" type="text" maxlength="500" placeholder="Budget approval reference" required></label>
+                <button class="auth-btn auth-btn-primary" type="submit"><svg aria-hidden="true"><use href="#icon-check-circle"/></svg><span>Apply adjustment</span></button>
+              </form>
+            </div>
+          </div>
+        </section>
+        <div class="admin-credits-users">
+          <div class="admin-credits-subheading">
+            <!-- "Accounts", not app.html's "Account Management": that view had no
+                 page title, this one does, and two identical headings at different
+                 levels read as two sections to a screen reader. -->
+            <h4 id="adminCreditsUsersHeading">Accounts</h4>
+            <span id="adminCreditsUserCount" class="admin-credits-count" aria-live="polite"></span>
+          </div>
+          <form id="adminCreditsUserSearch" class="admin-credits-search" role="search">
+            <label class="sr-only" for="adminCreditsUserQuery">Search users</label>
+            <input id="adminCreditsUserQuery" type="search" maxlength="120" placeholder="Search by email or display name" autocomplete="off">
+            <button class="credits-icon-btn" type="submit" aria-label="Search users" title="Search users"><svg aria-hidden="true"><use href="#icon-search"/></svg></button>
+          </form>
+          <div class="admin-credits-table-wrap">
+            <table class="admin-credits-users-table" aria-label="Grant Credits user allocation">
+              <thead><tr><th scope="col">Account</th><th scope="col">Group</th><th scope="col">Role</th><th scope="col">Status</th><th scope="col">Grant</th><th scope="col">Purchased</th><th scope="col">Total</th><th scope="col">Amount</th><th scope="col"><span class="sr-only">Actions</span></th></tr></thead>
+              <tbody id="adminCreditsUsersBody"><tr><td colspan="9" class="admin-empty">Search for an account to allocate Grant Credits.</td></tr></tbody>
+            </table>
+          </div>
+          <div class="admin-credits-pager" aria-label="Account pages">
+            <span id="adminCreditsUsersRange" class="admin-credits-pager-range" aria-live="polite">Showing 0 of 0</span>
+            <div class="admin-credits-pager-buttons">
+              <button id="adminCreditsUsersPrevBtn" class="auth-btn auth-btn-secondary" type="button" disabled>Previous</button>
+              <button id="adminCreditsUsersNextBtn" class="auth-btn auth-btn-secondary" type="button" disabled>Next</button>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section id="activityView" class="detail-view" data-panel="activity" hidden aria-labelledby="activityTitle">
+        <div class="page-head"><div><h1 id="activityTitle" tabindex="-1">Activity</h1><p class="muted">Every Grant Credits movement, newest first</p></div><span class="credits-admin-badge">Admin only</span></div>
+        <div class="admin-credits-activity">
+          <div class="admin-credits-subheading">
+            <div>
+              <p class="credits-section-kicker">Audit trail</p>
+              <h4>Grant Activity</h4>
+            </div>
+            <button id="adminCreditsActivityMoreBtn" class="auth-btn auth-btn-secondary" type="button" hidden>Load more</button>
+          </div>
+          <div class="admin-credits-table-wrap">
+            <table class="admin-credits-activity-table" aria-label="Grant Credits activity">
+              <thead><tr><th scope="col">Time</th><th scope="col">Operation</th><th scope="col">Account</th><th scope="col">Amount</th><th scope="col">Source</th><th scope="col">Reason</th></tr></thead>
+              <tbody id="adminCreditsActivityBody"><tr><td colspan="6" class="admin-empty">No Grant activity yet.</td></tr></tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
       <footer id="freshnessLegend" class="freshness-legend">Daily figures complete through — UTC; live tiles are this instance's process state</footer>
     </main>
   </div>
+
+  <!-- Ported from app.html:2286-2305. app.html's OTHER dialog, #creditsRefundDialog,
+       stays there: it belongs to the Credits & Billing page, not the admin view. -->
+  <dialog id="adminGrantReasonDialog" class="credits-refund-dialog admin-grant-reason-dialog" aria-labelledby="adminGrantReasonTitle">
+    <form id="adminGrantReasonForm">
+      <div class="credits-refund-head">
+        <div>
+          <p class="credits-section-kicker">Grant allocation</p>
+          <h2 id="adminGrantReasonTitle">Confirm Assign</h2>
+        </div>
+        <button id="adminGrantReasonClose" class="credits-icon-btn" type="button" aria-label="Close assign confirmation" title="Close">
+          <svg aria-hidden="true"><use href="#icon-x"/></svg>
+        </button>
+      </div>
+      <p id="adminGrantReasonSummary" class="credits-refund-order"></p>
+      <label class="credits-key-field" for="adminGrantReason"><span>Reason</span><input id="adminGrantReason" type="text" maxlength="500" value="Approved Grant allocation." required></label>
+      <p id="adminGrantReasonStatus" class="credits-status" role="status" aria-live="polite"></p>
+      <div class="credits-refund-actions">
+        <button id="adminGrantReasonCancel" class="auth-btn auth-btn-secondary" type="button">Cancel</button>
+        <button id="adminGrantReasonSubmit" class="auth-btn auth-btn-primary" type="submit">Assign Credits</button>
+      </div>
+    </form>
+  </dialog>
 
   <dialog id="rulesDialog" aria-labelledby="rulesTitle">
     <div class="dialog-head"><h2 id="rulesTitle">How states are determined</h2><button type="button" data-dialog-close aria-label="Close">×</button></div>
