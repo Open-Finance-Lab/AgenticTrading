@@ -281,6 +281,7 @@ EXPECTED_FULL_CONTRACT = {
     ("GET", "/strategy"),
     ("GET", "/admin"),
     ("GET", "/admin.css"),
+    ("GET", "/admin-console.css"),
     ("GET", "/admin-analytics"),
     ("GET", "/styles.css"),
     ("GET", "/ticker"),
