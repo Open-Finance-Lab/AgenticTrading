@@ -311,7 +311,7 @@ def test_the_providers_section_is_flat_so_the_panel_guard_can_see_all_of_it():
     <section data-panel> wrapping an inner <section> matches only as far as the
     inner closing tag and the numeric-literal guard silently scans a fragment.
     The port flattens the app.html wrapper to a <div> for exactly that reason."""
-    start = ADMIN_HTML.index('<section id="providers"')
+    start = ADMIN_HTML.index('<section id="providersView"')
     end = ADMIN_HTML.index("</section>", start)
     markup = ADMIN_HTML[start:end]
     assert "<section" not in markup[1:]
