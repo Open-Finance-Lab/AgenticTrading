@@ -200,6 +200,129 @@ def test_every_postgres_twin_module_is_registered():
 
 
 # --------------------------------------------------------------------------
+# Absence-direction check: a dialect branch outside a registered twin
+# --------------------------------------------------------------------------
+#
+# The registry above and the rglob discovery test are both existence-first:
+# they start from a *_postgres.py file or a _TWINS entry and check it is
+# complete. Neither can catch a class that branches SQLite-vs-Postgres
+# inline -- exactly what ValueAnalyticsStore did until PR T -- because such
+# a class owns no *_postgres.py file to discover. This test starts from the
+# other end: every dialect-branch idiom in the backend, asking "is this
+# inside a registered twin?" A hit outside one is either a twin extraction
+# that has not happened yet, or a non-twin helper reading a table a
+# registered twin already owns. Either way it needs a name below with a
+# reason -- silence here is exactly how ValueAnalyticsStore's 21 branches
+# went unnoticed for as long as they did.
+_DIALECT_BRANCH_PATTERN = re.compile(
+    r"is_postgres|hasattr\([^)]*[\"']database_url[\"']"
+)
+
+_DIALECT_BRANCH_ALLOWLIST: dict[str, str] = {
+    "dashboard/backend/domain/analytics/value_repository.py": (
+        "list_commercial_values and list_credit_activity branch on the "
+        "injected credits_base's own dialect (hasattr(self.credits_base, "
+        "'database_url')), not on ValueAnalyticsStore's -- a caller can (and "
+        "in tests does) pair either analytics_base with either credits_base. "
+        "PostgresValueAnalyticsStore carries the identical branch for the "
+        "same reason (see value_repository_postgres.py's module docstring); "
+        "both are correct, not a missing extraction. A third hit lives in "
+        "build_value_analytics_store's own selection branch "
+        "(hasattr(resolved_analytics_base, 'database_url')): that factory's "
+        "whole job is to pick SQLite vs. Postgres, and it must do so by "
+        "reading the resolved analytics_base object rather than an "
+        "os.getenv(...) check, because it receives an already-constructed "
+        "base and must follow that object's dialect -- reading the "
+        "environment instead would hand a caller who injects a Postgres "
+        "base the SQLite twin whenever the var happens to be unset. That "
+        "makes this a dialect selection, the same idiom every other "
+        "store's _build_*_store() performs on os.getenv(...) directly, not "
+        "a missing extraction."
+    ),
+    "dashboard/backend/domain/analytics/states.py": (
+        "AnalyticsStateStore dialect-branches over the already-twinned "
+        "AnalyticsStore/PostgresAnalyticsStore base_store for the legacy "
+        "user_analytics_snapshots table, not a store of its own. Admin "
+        "layer redesign PR A (docs/superpowers/specs/"
+        "2026-09-15-admin-layer-redesign-design.md §6.5) deletes the "
+        "five-state columns and repair path this class serves, which "
+        "removes or shrinks this branch -- tracked there, not in PR T."
+    ),
+    "dashboard/backend/domain/analytics/rollups.py": (
+        "AnalyticsRollupStore dialect-branches over the already-twinned "
+        "AnalyticsStore/PostgresAnalyticsStore base_store for "
+        "analytics_daily_rollups, a table that pair already declares and "
+        "parity-checks (repository.py:100-117 / repository_postgres.py:96-113). "
+        "Not a store of its own; out of scope for PR T."
+    ),
+    "dashboard/backend/domain/analytics/query_service.py": (
+        "AnalyticsQueryService dialect-branches over the already-twinned "
+        "AnalyticsStore/PostgresAnalyticsStore base_store for the legacy "
+        "overview/users query surface. Not a store of its own; that surface "
+        "is rewritten in admin layer redesign PR A/PR B (design doc §6.10), "
+        "which is where this branch is next touched."
+    ),
+    "dashboard/backend/domain/analytics/lifecycle_backfill.py": (
+        "LifecycleBackfillSource dialect-branches over the already-twinned "
+        "analytics_base for the historical 8-week lifecycle reconstruction "
+        "job. Not a store of its own; admin layer redesign PR A's daily job "
+        "and migration (design doc §6.9) replace this reconstruction path."
+    ),
+    "dashboard/backend/domain/analytics/backfill.py": (
+        "_query_all dialect-branches over injected credits/agent stores for "
+        "the authoritative-history backfill; admin layer redesign PR A "
+        "moves those two ledger and run reads onto CreditsStore/"
+        "PostgresCreditsStore and the run-history store (design doc §12 "
+        "item 1), which removes this branch. _existing_source_event_ids "
+        "separately dialect-branches over the already-twinned analytics_store "
+        "to deduplicate against analytics_events, the analytics domain's own "
+        "table -- a different case, out of scope for PR T."
+    ),
+}
+
+
+def test_dialect_branches_outside_a_registered_twin_are_allowlisted():
+    """A store that inlines SQLite/Postgres branching owns no *_postgres.py
+    file, so test_every_postgres_twin_module_is_registered above cannot see
+    it -- that test starts from files on disk, and there is no second file
+    for a branch like this. This test starts from the branch instead, across
+    every non-test module, and requires each hit to be named here.
+
+    ValueAnalyticsStore had 21 such branches until PR T split it into a real
+    twin. Nothing before this test would have caught it going in, and
+    nothing would catch the next one either.
+    """
+    backend = _REPO_ROOT / "dashboard" / "backend"
+    registered_postgres_paths = {
+        _module_source_path(postgres_mod) for _, _, postgres_mod, _ in _TWINS
+    }
+    hits: set[str] = set()
+    for path in backend.rglob("*.py"):
+        if "tests" in path.parts:
+            continue
+        if path in registered_postgres_paths:
+            continue
+        source = path.read_text(encoding="utf-8")
+        if _DIALECT_BRANCH_PATTERN.search(source):
+            hits.add(str(path.relative_to(_REPO_ROOT)))
+
+    unlisted = sorted(hits - set(_DIALECT_BRANCH_ALLOWLIST))
+    assert not unlisted, (
+        "Dialect-branch idiom (is_postgres / hasattr(*, 'database_url')) "
+        "found outside a registered twin, with no allowlist entry. Either "
+        "extract a real Postgres twin and add it to _TWINS, or add this "
+        f"file to _DIALECT_BRANCH_ALLOWLIST with a reason: {unlisted}"
+    )
+
+    stale = sorted(set(_DIALECT_BRANCH_ALLOWLIST) - hits)
+    assert not stale, (
+        "_DIALECT_BRANCH_ALLOWLIST names file(s) with no dialect-branch "
+        "idiom left in them -- the exemption is stale and silently widens "
+        f"this guard for whatever gets added there next: {stale}"
+    )
+
+
+# --------------------------------------------------------------------------
 # Axis 1: call signatures
 # --------------------------------------------------------------------------
 
