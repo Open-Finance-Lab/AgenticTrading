@@ -210,12 +210,21 @@ def test_every_postgres_twin_module_is_registered():
 # inline -- exactly what ValueAnalyticsStore did until PR T -- because such
 # a class owns no *_postgres.py file to discover. This test starts from the
 # other end: every occurrence of the two known dialect-branch idioms --
-# `is_postgres`, and a `hasattr` check for `database_url` -- asking "is this
-# inside a registered twin?" A hit outside one is either a twin extraction
-# that has not happened yet, or a non-twin helper reading a table a
-# registered twin already owns. Either way it needs a name below with a
-# reason -- silence here is exactly how ValueAnalyticsStore's 21 branches
-# went unnoticed for as long as they did.
+# `is_postgres`, and a `hasattr` check for `database_url` -- across every
+# non-test module under dashboard/backend. Each hit is a twin extraction
+# that has not happened yet, a non-twin helper reading a table a registered
+# twin already owns, or a deliberate branch on some *other* store's dialect.
+# All three need a name below with a reason -- silence here is exactly how
+# ValueAnalyticsStore's 21 branches went unnoticed for as long as they did.
+#
+# Registered *_postgres.py twins are scanned too, and deliberately so. They
+# were exempt until the fix for PR #498's review: being a registered twin
+# says the file is the Postgres *side* of a pair, which is no reason for it
+# to contain a dialect *branch* -- a well-formed twin just writes `%s` and
+# tests nothing. The exemption meant value_repository_postgres.py's own
+# branches needed no reason while the identical ones in its SQLite twin got
+# a long one, and it left the single blind spot this whole test exists to
+# close: a genuinely missing extraction added inside a registered twin.
 #
 # The match is textual, not semantic, and that limit is worth stating rather
 # than leaving a reader to assume otherwise: a branch written a third way --
@@ -256,7 +265,23 @@ _DIALECT_BRANCH_ALLOWLIST: dict[str, str] = {
         "base the SQLite twin whenever the var happens to be unset. That "
         "makes this a dialect selection, the same idiom every other "
         "store's _build_*_store() performs on os.getenv(...) directly, not "
-        "a missing extraction."
+        "a missing extraction. A fourth hit is ValueAnalyticsStore.__init__'s "
+        "guard (PR #498 review), which refuses a Postgres analytics_base "
+        "rather than silently emitting `?` placeholders against it; it reads "
+        "the same attribute the factory dispatches on, on purpose, so guard "
+        "and factory cannot disagree about which twin a base belongs to."
+    ),
+    "dashboard/backend/domain/analytics/value_repository_postgres.py": (
+        "The Postgres twin's two hits are the same credits_base branch its "
+        "SQLite counterpart carries (list_commercial_values and "
+        "list_credit_activity read the *injected* credits store's dialect, "
+        "not this class's -- see the module docstring), plus "
+        "PostgresValueAnalyticsStore.__init__'s mirror of the guard "
+        "described in the value_repository.py entry above: it refuses an "
+        "analytics_base with no database_url, because `or analytics_store` "
+        "otherwise resolves to the SQLite singleton under pytest and every "
+        "`%s` query in the file would reach sqlite3. None is a missing "
+        "extraction: this file *is* the extraction."
     ),
     "dashboard/backend/domain/analytics/states.py": (
         "AnalyticsStateStore dialect-branches over the already-twinned "
@@ -319,16 +344,16 @@ def test_dialect_branches_outside_a_registered_twin_are_allowlisted():
     ValueAnalyticsStore had 21 such branches until PR T split it into a real
     twin. Nothing before this test would have caught it going in, and
     nothing would catch the next one either.
+
+    The name says "outside a registered twin" for the case that motivated
+    it; the scan itself no longer excludes registered ``*_postgres.py``
+    twins (see the note above the allowlist), so a branch inside one needs
+    an entry exactly like a branch anywhere else.
     """
     backend = _REPO_ROOT / "dashboard" / "backend"
-    registered_postgres_paths = {
-        _module_source_path(postgres_mod) for _, _, postgres_mod, _ in _TWINS
-    }
     hits: set[str] = set()
     for path in backend.rglob("*.py"):
         if "tests" in path.parts:
-            continue
-        if path in registered_postgres_paths:
             continue
         source = path.read_text(encoding="utf-8")
         if _DIALECT_BRANCH_PATTERN.search(source):
@@ -337,9 +362,11 @@ def test_dialect_branches_outside_a_registered_twin_are_allowlisted():
     unlisted = sorted(hits - set(_DIALECT_BRANCH_ALLOWLIST))
     assert not unlisted, (
         "Dialect-branch idiom (is_postgres / hasattr(*, 'database_url')) "
-        "found outside a registered twin, with no allowlist entry. Either "
-        "extract a real Postgres twin and add it to _TWINS, or add this "
-        f"file to _DIALECT_BRANCH_ALLOWLIST with a reason: {unlisted}"
+        "found with no allowlist entry. Registered *_postgres.py twins are "
+        "scanned too: being the Postgres side of a pair is not a reason to "
+        "branch on a dialect. Either extract a real Postgres twin and add "
+        "it to _TWINS, or add this file to _DIALECT_BRANCH_ALLOWLIST with a "
+        f"reason: {unlisted}"
     )
 
     stale = sorted(set(_DIALECT_BRANCH_ALLOWLIST) - hits)
@@ -1261,4 +1288,154 @@ def test_credits_twins_and_postgres_migration_reject_blank_operation_keys():
     assert (
         "ADD CONSTRAINT credit_ledger_entries_operation_key_check "
         "CHECK (length(trim(operation_key)) > 0)" in postgres_sql
+    )
+
+
+# --------------------------------------------------------------------------
+# Axis 4: method bodies duplicated across a twin pair
+# --------------------------------------------------------------------------
+#
+# Every axis above compares *shape* -- signatures, columns, index order --
+# because shape is cheap to compare. What actually drifts is behaviour. A
+# method copied verbatim into both twins has no dialect difference to justify
+# it, so the next fix applied to one copy and not the other ships a
+# Postgres-only behaviour divergence with a fully green suite: the signature
+# axis still matches, the column axis still matches, and nothing reads a body.
+#
+# PR T is what made this worth guarding. Extracting PostgresValueAnalyticsStore
+# duplicated 321 lines across five methods holding no SQL and no dialect
+# branching of their own -- more than every other twin in this registry
+# combined, the next largest being 17 lines -- because that split was
+# deliberately scoped to "change no query". The duplication is therefore a
+# known, accepted cost, not an oversight; what was missing is anything that
+# notices when a copy stops matching.
+#
+# The declaration below is deliberately two-way, and that is what keeps it
+# from rotting the way a one-way allowlist does:
+#
+#   * A declared method whose two copies stop matching fails as a divergence
+#     -- the behaviour drift above, caught at the commit that introduces it.
+#   * A method that *becomes* identical without being declared fails as new
+#     duplication, so a twin cannot quietly accumulate more copied code than
+#     it admits to.
+#
+# Comparison is `ast.unparse`, not source text: it ignores comments and
+# formatting and compares the code that actually runs. Two copies that differ
+# only in a comment are still one behaviour in two places, which is precisely
+# what this axis is about.
+#
+# Shrinking an entry is always safe -- de-duplicate onto a shared mixin or
+# helper and delete the name. Growing one is the decision that deserves the
+# thought.
+_DUPLICATED_BODIES: dict[str, frozenset[str]] = {
+    "PostgresAnalyticsStore": frozenset(),
+    "PostgresModelProviderStore": frozenset({"revoke_user_credential"}),
+    "PostgresCreditsStore": frozenset(
+        {
+            "_validate_utc_boundary",
+            "assign_grant",
+            "fund_grant_pool",
+            "get_balance_micro",
+            "reclaim_grant",
+            "reduce_grant_pool",
+        }
+    ),
+    "PostgresAgentCredentialStore": frozenset(),
+    "PostgresAgentStore": frozenset(),
+    "PostgresAgentVersionStore": frozenset(),
+    "BrokerConnectionStorePostgres": frozenset(),
+    "PostgresPortfolioStore": frozenset(),
+    "PostgresStrategyStore": frozenset(),
+    "PostgresUserStore": frozenset(
+        {
+            "_email_change_expiry",
+            "_password_reset_expiry",
+            "authenticate",
+            "get_user_admin",
+        }
+    ),
+    "PostgresBacktestDatabase": frozenset(),
+    # PR T. None of these five contain SQL or branch on this class's own
+    # dialect, which is why they could be copied unchanged; list_commercial_values
+    # and list_credit_activity branch on the *injected credits_base*, a
+    # different store's dialect (see value_repository_postgres.py's module
+    # docstring). PR A adds ~12 methods to this pair -- anything it copies
+    # verbatim lands here rather than passing unremarked.
+    "PostgresValueAnalyticsStore": frozenset(
+        {
+            "_analytics_connection",
+            "_run_health",
+            "get_operational_facts",
+            "list_commercial_values",
+            "list_credit_activity",
+        }
+    ),
+}
+
+
+def _method_code(module_name: str, class_name: str) -> dict[str, str]:
+    """Normalised source of each method, keyed by name.
+
+    Parsed from disk rather than imported: this mirrors the column axis, and
+    an import error here would abort collection for the whole session.
+    """
+    source = _module_source_path(module_name).read_text(encoding="utf-8")
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.ClassDef) and node.name == class_name:
+            return {
+                item.name: ast.unparse(item)
+                for item in node.body
+                if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef))
+            }
+    raise AssertionError(f"{class_name} not found in {module_name}")
+
+
+def test_every_twin_declares_its_duplicated_bodies():
+    """The registry and this declaration must not drift apart.
+
+    A twin added to ``_TWINS`` with no entry here would be exempt from the
+    body axis while looking covered -- the same silence the dialect-branch
+    allowlist exists to prevent.
+    """
+    missing = sorted(set(_TWIN_IDS) - set(_DUPLICATED_BODIES))
+    extra = sorted(set(_DUPLICATED_BODIES) - set(_TWIN_IDS))
+    assert not missing and not extra, (
+        f"_DUPLICATED_BODIES is missing {missing} and has stale entries "
+        f"{extra}; every pair in _TWINS needs a declaration, even an empty "
+        "frozenset()."
+    )
+
+
+@pytest.mark.parametrize(
+    "sqlite_mod,sqlite_cls,postgres_mod,postgres_cls", _TWINS, ids=_TWIN_IDS
+)
+def test_duplicated_bodies_match_their_declaration(
+    sqlite_mod, sqlite_cls, postgres_mod, postgres_cls
+):
+    sqlite_code = _method_code(sqlite_mod, sqlite_cls)
+    postgres_code = _method_code(postgres_mod, postgres_cls)
+
+    actual = frozenset(
+        name
+        for name in set(sqlite_code) & set(postgres_code)
+        if sqlite_code[name] == postgres_code[name]
+    )
+    declared = _DUPLICATED_BODIES[postgres_cls]
+
+    diverged = sorted(declared - actual)
+    assert not diverged, (
+        f"{postgres_cls}: {diverged} are declared identical to {sqlite_cls} "
+        "but no longer are. A dialect-free method fixed on one twin only is "
+        "a Postgres-only behaviour divergence that every other axis here "
+        "passes. Either apply the change to both copies, or de-duplicate the "
+        "method and drop it from _DUPLICATED_BODIES -- do not simply remove "
+        "the name to quiet this."
+    )
+
+    undeclared = sorted(actual - declared)
+    assert not undeclared, (
+        f"{postgres_cls}: {undeclared} are now byte-identical to "
+        f"{sqlite_cls} but undeclared. Duplicated bodies drift silently, so "
+        "either share the implementation between the twins or add the "
+        "name(s) to _DUPLICATED_BODIES with a reason."
     )
