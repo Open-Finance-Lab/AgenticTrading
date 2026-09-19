@@ -234,13 +234,13 @@ class AnalyticsService:
 
 def _build_analytics_service() -> AnalyticsService:
     from .states import AnalyticsStateStore
-    from .value_repository import ValueAnalyticsStore
+    from .value_repository import build_value_analytics_store
 
     state_store = AnalyticsStateStore(analytics_store)
     return AnalyticsService(
         store=analytics_store,
         state_store=state_store,
-        value_store=ValueAnalyticsStore(analytics_store),
+        value_store=build_value_analytics_store(analytics_store),
         # PR 0 (burner kill): the live singleton no longer recomputes a
         # snapshot synchronously inside record_server_event. Task 3 of the
         # same plan disarms instrumentation.py's own fallback recalculator,
