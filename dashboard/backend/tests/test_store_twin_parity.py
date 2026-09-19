@@ -107,12 +107,6 @@ _TWINS = [
         "PostgresStrategyStore",
     ),
     (
-        "dashboard.backend.domain.analytics.repository",
-        "AnalyticsStore",
-        "dashboard.backend.domain.analytics.repository_postgres",
-        "PostgresAnalyticsStore",
-    ),
-    (
         "dashboard.backend.users",
         "UserStore",
         "dashboard.backend.users_postgres",
@@ -124,9 +118,46 @@ _TWINS = [
         "dashboard.backend.database_postgres",
         "PostgresBacktestDatabase",
     ),
+    (
+        "dashboard.backend.domain.analytics.value_repository",
+        "ValueAnalyticsStore",
+        "dashboard.backend.domain.analytics.value_repository_postgres",
+        "PostgresValueAnalyticsStore",
+    ),
 ]
 
 _TWIN_IDS = [pg_cls for _, _, _, pg_cls in _TWINS]
+
+
+def test_twins_registry_has_no_duplicate_pairs():
+    """`_TWINS` listed the AnalyticsStore pair twice (the tuple that sat
+    between `StrategyStore` and `UserStore`).
+
+    Harmless today -- both instances of a duplicate tuple pass or fail
+    together -- but it is the exact list PR T's absence-direction check and
+    every future twin extends, so a reader counting entries gets 12 when
+    there are 11 distinct stores. `_TWIN_IDS` uses the postgres class name
+    as the parametrize id, so a duplicate also means two test instances
+    sharing one id in every parametrized case above.
+    """
+    assert len(_TWINS) == len(set(_TWINS)), (
+        f"_TWINS has {len(_TWINS) - len(set(_TWINS))} duplicate tuple(s); "
+        "each store pair belongs in the registry exactly once."
+    )
+
+
+def test_value_analytics_store_pair_is_registered():
+    """PR T's whole point: a store with no *_postgres.py file is invisible
+    to test_every_postgres_twin_module_is_registered, which starts from
+    files on disk. This asserts the registry side directly.
+    """
+    assert (
+        "dashboard.backend.domain.analytics.value_repository",
+        "ValueAnalyticsStore",
+        "dashboard.backend.domain.analytics.value_repository_postgres",
+        "PostgresValueAnalyticsStore",
+    ) in _TWINS
+
 
 # tests/ -> backend/ -> dashboard/ -> repo root
 _REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -166,6 +197,183 @@ def test_every_postgres_twin_module_is_registered():
         "Postgres twin module(s) not covered by the parity tests in this file. "
         "Add each to _TWINS with its SQLite counterpart, or the twin ships "
         f"with no drift guard at all: {unregistered}"
+    )
+
+
+# --------------------------------------------------------------------------
+# Absence-direction check: a dialect branch outside a registered twin
+# --------------------------------------------------------------------------
+#
+# The registry above and the rglob discovery test are both existence-first:
+# they start from a *_postgres.py file or a _TWINS entry and check it is
+# complete. Neither can catch a class that branches SQLite-vs-Postgres
+# inline -- exactly what ValueAnalyticsStore did until PR T -- because such
+# a class owns no *_postgres.py file to discover. This test starts from the
+# other end: every occurrence of the two known dialect-branch idioms --
+# `is_postgres`, and a `hasattr` check for `database_url` -- across every
+# non-test module under dashboard/backend. Each hit is a twin extraction
+# that has not happened yet, a non-twin helper reading a table a registered
+# twin already owns, or a deliberate branch on some *other* store's dialect.
+# All three need a name below with a reason -- silence here is exactly how
+# ValueAnalyticsStore's 21 branches went unnoticed for as long as they did.
+#
+# Registered *_postgres.py twins are scanned too, and deliberately so. They
+# were exempt until the fix for PR #498's review: being a registered twin
+# says the file is the Postgres *side* of a pair, which is no reason for it
+# to contain a dialect *branch* -- a well-formed twin just writes `%s` and
+# tests nothing. The exemption meant value_repository_postgres.py's own
+# branches needed no reason while the identical ones in its SQLite twin got
+# a long one, and it left the single blind spot this whole test exists to
+# close: a genuinely missing extraction added inside a registered twin.
+#
+# The match is textual, not semantic, and that limit is worth stating rather
+# than leaving a reader to assume otherwise: a branch written a third way --
+# an `isinstance(store, PostgresAnalyticsStore)` test, a
+# `getattr(store, "database_url", None)` default -- evades this scan. Both
+# matched forms are what every dialect branch in the tree uses today, so
+# this guard covers the established idiom; it is not a proof that no
+# dialect branch can ever hide again.
+#
+# The allowlist below is keyed by *file*, which bounds it the same way: a
+# new dialect branch added to a file that already has an entry trips
+# neither assertion -- not `unlisted`, because the file is listed, and not
+# `stale`, because the file still has hits. Only a branch in an unlisted
+# file is caught. A per-entry hit count would close that and is deliberately
+# not used: it churns on every unrelated edit to these files, so it would be
+# updated reflexively and stop meaning anything. What each reason can do
+# instead is name the branching symbols, as `backfill.py`'s does.
+_DIALECT_BRANCH_PATTERN = re.compile(
+    r"is_postgres|hasattr\([^)]*[\"']database_url[\"']"
+)
+
+_DIALECT_BRANCH_ALLOWLIST: dict[str, str] = {
+    "dashboard/backend/domain/analytics/value_repository.py": (
+        "list_commercial_values and list_credit_activity branch on the "
+        "injected credits_base's own dialect (hasattr(self.credits_base, "
+        "'database_url')), not on ValueAnalyticsStore's -- a caller can (and "
+        "in tests does) pair either analytics_base with either credits_base. "
+        "PostgresValueAnalyticsStore carries the identical branch for the "
+        "same reason (see value_repository_postgres.py's module docstring); "
+        "both are correct, not a missing extraction. A third hit lives in "
+        "build_value_analytics_store's own selection branch "
+        "(hasattr(resolved_analytics_base, 'database_url')): that factory's "
+        "whole job is to pick SQLite vs. Postgres, and it must do so by "
+        "reading the resolved analytics_base object rather than an "
+        "os.getenv(...) check, because it receives an already-constructed "
+        "base and must follow that object's dialect -- reading the "
+        "environment instead would hand a caller who injects a Postgres "
+        "base the SQLite twin whenever the var happens to be unset. That "
+        "makes this a dialect selection, the same idiom every other "
+        "store's _build_*_store() performs on os.getenv(...) directly, not "
+        "a missing extraction. A fourth hit is ValueAnalyticsStore.__init__'s "
+        "guard (PR #498 review), which refuses a Postgres analytics_base "
+        "rather than silently emitting `?` placeholders against it; it reads "
+        "the same attribute the factory dispatches on, on purpose, so guard "
+        "and factory cannot disagree about which twin a base belongs to."
+    ),
+    "dashboard/backend/domain/analytics/value_repository_postgres.py": (
+        "The Postgres twin's two hits are the same credits_base branch its "
+        "SQLite counterpart carries (list_commercial_values and "
+        "list_credit_activity read the *injected* credits store's dialect, "
+        "not this class's -- see the module docstring), plus "
+        "PostgresValueAnalyticsStore.__init__'s mirror of the guard "
+        "described in the value_repository.py entry above: it refuses an "
+        "analytics_base with no database_url, because `or analytics_store` "
+        "otherwise resolves to the SQLite singleton under pytest and every "
+        "`%s` query in the file would reach sqlite3. None is a missing "
+        "extraction: this file *is* the extraction."
+    ),
+    "dashboard/backend/domain/analytics/states.py": (
+        "AnalyticsStateStore dialect-branches over the already-twinned "
+        "AnalyticsStore/PostgresAnalyticsStore base_store for the legacy "
+        "user_analytics_snapshots table, not a store of its own -- the "
+        "branched methods also read users (get_user; that table belongs to "
+        "another registered twin, UserStore/PostgresUserStore, so this is a "
+        "cross-domain read, not a missing extraction) and, via "
+        "list_stale_user_ids, analytics_subject_settings and "
+        "user_lifecycle_daily_snapshots. Admin layer redesign PR A/PR B "
+        "(docs/superpowers/specs/2026-09-15-admin-layer-redesign-design.md "
+        "§6.5) deletes the five-state columns and repair path this class "
+        "serves, which removes or shrinks this branch -- tracked there, not "
+        "in PR T."
+    ),
+    "dashboard/backend/domain/analytics/rollups.py": (
+        "AnalyticsRollupStore dialect-branches over the already-twinned "
+        "AnalyticsStore/PostgresAnalyticsStore base_store for "
+        "analytics_daily_rollups, a table that pair already declares and "
+        "parity-checks (repository.py:100-117 / repository_postgres.py:96-113). "
+        "Not a store of its own; out of scope for PR T."
+    ),
+    "dashboard/backend/domain/analytics/query_service.py": (
+        "AnalyticsQueryStore dialect-branches over the already-twinned "
+        "AnalyticsStore/PostgresAnalyticsStore base_store for the legacy "
+        "overview/users query surface. Note the class: AnalyticsQueryService, "
+        "further down the same file, is a wrapper holding an "
+        "AnalyticsQueryStore and does not itself branch -- an auditor "
+        "grepping for the service name will not find the branch. Not a store "
+        "of its own; that surface is rewritten in admin layer redesign PR A/"
+        "PR B (design doc §6.10), which is where this branch is next touched."
+    ),
+    "dashboard/backend/domain/analytics/lifecycle_backfill.py": (
+        "LifecycleBackfillSource dialect-branches over the already-twinned "
+        "analytics_base for the historical 8-week lifecycle reconstruction "
+        "job. Not a store of its own; admin layer redesign PR A's daily job "
+        "and migration (design doc §6.9) replace this reconstruction path."
+    ),
+    "dashboard/backend/domain/analytics/backfill.py": (
+        "_query_all dialect-branches over injected credits/agent stores for "
+        "the authoritative-history backfill; admin layer redesign PR A "
+        "moves those two ledger and run reads onto CreditsStore/"
+        "PostgresCreditsStore and the run-history store (design doc §12 "
+        "item 1), which removes this branch. _existing_source_event_ids "
+        "separately dialect-branches over the already-twinned analytics_store "
+        "to deduplicate against analytics_events, the analytics domain's own "
+        "table -- a different case, out of scope for PR T."
+    ),
+}
+
+
+def test_dialect_branches_outside_a_registered_twin_are_allowlisted():
+    """A store that inlines SQLite/Postgres branching owns no *_postgres.py
+    file, so test_every_postgres_twin_module_is_registered above cannot see
+    it -- that test starts from files on disk, and there is no second file
+    for a branch like this. This test starts from the branch instead, across
+    every non-test module under ``dashboard/backend``, and requires each hit
+    to be named here.
+
+    ValueAnalyticsStore had 21 such branches until PR T split it into a real
+    twin. Nothing before this test would have caught it going in, and
+    nothing would catch the next one either.
+
+    The name says "outside a registered twin" for the case that motivated
+    it; the scan itself no longer excludes registered ``*_postgres.py``
+    twins (see the note above the allowlist), so a branch inside one needs
+    an entry exactly like a branch anywhere else.
+    """
+    backend = _REPO_ROOT / "dashboard" / "backend"
+    hits: set[str] = set()
+    for path in backend.rglob("*.py"):
+        if "tests" in path.parts:
+            continue
+        source = path.read_text(encoding="utf-8")
+        if _DIALECT_BRANCH_PATTERN.search(source):
+            hits.add(str(path.relative_to(_REPO_ROOT)))
+
+    unlisted = sorted(hits - set(_DIALECT_BRANCH_ALLOWLIST))
+    assert not unlisted, (
+        "Dialect-branch idiom (is_postgres / hasattr(*, 'database_url')) "
+        "found with no allowlist entry. Registered *_postgres.py twins are "
+        "scanned too: being the Postgres side of a pair is not a reason to "
+        "branch on a dialect. Either extract a real Postgres twin and add "
+        "it to _TWINS, or add this file to _DIALECT_BRANCH_ALLOWLIST with a "
+        f"reason: {unlisted}"
+    )
+
+    stale = sorted(set(_DIALECT_BRANCH_ALLOWLIST) - hits)
+    assert not stale, (
+        "_DIALECT_BRANCH_ALLOWLIST names file(s) with no dialect-branch "
+        "idiom left in them -- the exemption is stale and silently widens "
+        f"this guard for whatever gets added there next: {stale}"
     )
 
 
@@ -305,6 +513,32 @@ def _name(raw: str) -> str:
     return raw.strip().strip('"').lower()
 _SQL_STRING = re.compile(r"'(?:[^']|'')*'")
 _IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+# Twins whose class owns no table of its own: it reads and writes tables
+# declared by a *different*, already-registered twin through an injected
+# connection, rather than declaring CREATE TABLE/CREATE INDEX itself. For
+# such a pair, test_postgres_twin_schema_columns_match_sqlite's non-vacuity
+# assert ("no CREATE TABLE parsed from ...") would fail on every entry, not
+# because a column drifted but because there is nothing to parse -- exactly
+# the false positive that assert exists to prevent for a store that *does*
+# own tables. Each entry names which already-registered pair actually owns
+# the schema, so this cannot silently swallow a future twin that adds its
+# own DDL. The other three DDL-adjacent tests in this file
+# (test_ddl_parser_sees_every_create_index,
+# test_postgres_twin_indexes_a_migrated_column_only_after_adding_it,
+# test_postgres_twin_repeats_every_sqlite_lazy_migration) need no matching
+# entry: each is vacuously true for zero DDL statements by construction, and
+# that vacuity is not a blind spot the way the non-vacuity assert would be.
+_NO_OWN_DDL_TWINS: dict[str, str] = {
+    "PostgresValueAnalyticsStore": (
+        "ValueAnalyticsStore/PostgresValueAnalyticsStore own no CREATE TABLE "
+        "or CREATE INDEX: both read and write user_analytics_snapshots, "
+        "user_lifecycle_daily_snapshots and analytics_projection_jobs "
+        "through an injected analytics_base connection, and that base is "
+        "AnalyticsStore/PostgresAnalyticsStore -- already a registered pair "
+        "above, whose own schema-column test covers those tables."
+    ),
+}
+
 # Tables a Postgres twin deliberately never creates, keyed by twin class name.
 # The default is that both twins declare the same tables -- a divergence is
 # normally the #227 bug -- so every entry needs its reason recorded here, and
@@ -818,6 +1052,20 @@ def test_postgres_twin_schema_columns_match_sqlite(
     Compares column *names* only: types legitimately differ per dialect
     (REAL/DOUBLE PRECISION, INTEGER/BOOLEAN, TIMESTAMP/TEXT).
     """
+    if postgres_cls in _NO_OWN_DDL_TWINS:
+        sqlite_ddl = _parse_ddl(
+            _module_source_path(sqlite_mod).read_text(encoding="utf-8")
+        ).declared
+        postgres_ddl = _parse_ddl(
+            _module_source_path(postgres_mod).read_text(encoding="utf-8")
+        ).declared
+        assert not sqlite_ddl and not postgres_ddl, (
+            f"_NO_OWN_DDL_TWINS exempts {postgres_cls} as owning no DDL, but "
+            f"CREATE TABLE was parsed from it (sqlite={sorted(sqlite_ddl)} "
+            f"postgres={sorted(postgres_ddl)}). Remove the entry so the column "
+            f"parity check runs."
+        )
+        pytest.skip(_NO_OWN_DDL_TWINS[postgres_cls])
     sqlite_path = _module_source_path(sqlite_mod)
     postgres_path = _module_source_path(postgres_mod)
     assert sqlite_path.is_file(), f"twin registry points at a missing {sqlite_path}"
@@ -1040,4 +1288,154 @@ def test_credits_twins_and_postgres_migration_reject_blank_operation_keys():
     assert (
         "ADD CONSTRAINT credit_ledger_entries_operation_key_check "
         "CHECK (length(trim(operation_key)) > 0)" in postgres_sql
+    )
+
+
+# --------------------------------------------------------------------------
+# Axis 4: method bodies duplicated across a twin pair
+# --------------------------------------------------------------------------
+#
+# Every axis above compares *shape* -- signatures, columns, index order --
+# because shape is cheap to compare. What actually drifts is behaviour. A
+# method copied verbatim into both twins has no dialect difference to justify
+# it, so the next fix applied to one copy and not the other ships a
+# Postgres-only behaviour divergence with a fully green suite: the signature
+# axis still matches, the column axis still matches, and nothing reads a body.
+#
+# PR T is what made this worth guarding. Extracting PostgresValueAnalyticsStore
+# duplicated 321 lines across five methods holding no SQL and no dialect
+# branching of their own -- more than every other twin in this registry
+# combined, the next largest being 17 lines -- because that split was
+# deliberately scoped to "change no query". The duplication is therefore a
+# known, accepted cost, not an oversight; what was missing is anything that
+# notices when a copy stops matching.
+#
+# The declaration below is deliberately two-way, and that is what keeps it
+# from rotting the way a one-way allowlist does:
+#
+#   * A declared method whose two copies stop matching fails as a divergence
+#     -- the behaviour drift above, caught at the commit that introduces it.
+#   * A method that *becomes* identical without being declared fails as new
+#     duplication, so a twin cannot quietly accumulate more copied code than
+#     it admits to.
+#
+# Comparison is `ast.unparse`, not source text: it ignores comments and
+# formatting and compares the code that actually runs. Two copies that differ
+# only in a comment are still one behaviour in two places, which is precisely
+# what this axis is about.
+#
+# Shrinking an entry is always safe -- de-duplicate onto a shared mixin or
+# helper and delete the name. Growing one is the decision that deserves the
+# thought.
+_DUPLICATED_BODIES: dict[str, frozenset[str]] = {
+    "PostgresAnalyticsStore": frozenset(),
+    "PostgresModelProviderStore": frozenset({"revoke_user_credential"}),
+    "PostgresCreditsStore": frozenset(
+        {
+            "_validate_utc_boundary",
+            "assign_grant",
+            "fund_grant_pool",
+            "get_balance_micro",
+            "reclaim_grant",
+            "reduce_grant_pool",
+        }
+    ),
+    "PostgresAgentCredentialStore": frozenset(),
+    "PostgresAgentStore": frozenset(),
+    "PostgresAgentVersionStore": frozenset(),
+    "BrokerConnectionStorePostgres": frozenset(),
+    "PostgresPortfolioStore": frozenset(),
+    "PostgresStrategyStore": frozenset(),
+    "PostgresUserStore": frozenset(
+        {
+            "_email_change_expiry",
+            "_password_reset_expiry",
+            "authenticate",
+            "get_user_admin",
+        }
+    ),
+    "PostgresBacktestDatabase": frozenset(),
+    # PR T. None of these five contain SQL or branch on this class's own
+    # dialect, which is why they could be copied unchanged; list_commercial_values
+    # and list_credit_activity branch on the *injected credits_base*, a
+    # different store's dialect (see value_repository_postgres.py's module
+    # docstring). PR A adds ~12 methods to this pair -- anything it copies
+    # verbatim lands here rather than passing unremarked.
+    "PostgresValueAnalyticsStore": frozenset(
+        {
+            "_analytics_connection",
+            "_run_health",
+            "get_operational_facts",
+            "list_commercial_values",
+            "list_credit_activity",
+        }
+    ),
+}
+
+
+def _method_code(module_name: str, class_name: str) -> dict[str, str]:
+    """Normalised source of each method, keyed by name.
+
+    Parsed from disk rather than imported: this mirrors the column axis, and
+    an import error here would abort collection for the whole session.
+    """
+    source = _module_source_path(module_name).read_text(encoding="utf-8")
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.ClassDef) and node.name == class_name:
+            return {
+                item.name: ast.unparse(item)
+                for item in node.body
+                if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef))
+            }
+    raise AssertionError(f"{class_name} not found in {module_name}")
+
+
+def test_every_twin_declares_its_duplicated_bodies():
+    """The registry and this declaration must not drift apart.
+
+    A twin added to ``_TWINS`` with no entry here would be exempt from the
+    body axis while looking covered -- the same silence the dialect-branch
+    allowlist exists to prevent.
+    """
+    missing = sorted(set(_TWIN_IDS) - set(_DUPLICATED_BODIES))
+    extra = sorted(set(_DUPLICATED_BODIES) - set(_TWIN_IDS))
+    assert not missing and not extra, (
+        f"_DUPLICATED_BODIES is missing {missing} and has stale entries "
+        f"{extra}; every pair in _TWINS needs a declaration, even an empty "
+        "frozenset()."
+    )
+
+
+@pytest.mark.parametrize(
+    "sqlite_mod,sqlite_cls,postgres_mod,postgres_cls", _TWINS, ids=_TWIN_IDS
+)
+def test_duplicated_bodies_match_their_declaration(
+    sqlite_mod, sqlite_cls, postgres_mod, postgres_cls
+):
+    sqlite_code = _method_code(sqlite_mod, sqlite_cls)
+    postgres_code = _method_code(postgres_mod, postgres_cls)
+
+    actual = frozenset(
+        name
+        for name in set(sqlite_code) & set(postgres_code)
+        if sqlite_code[name] == postgres_code[name]
+    )
+    declared = _DUPLICATED_BODIES[postgres_cls]
+
+    diverged = sorted(declared - actual)
+    assert not diverged, (
+        f"{postgres_cls}: {diverged} are declared identical to {sqlite_cls} "
+        "but no longer are. A dialect-free method fixed on one twin only is "
+        "a Postgres-only behaviour divergence that every other axis here "
+        "passes. Either apply the change to both copies, or de-duplicate the "
+        "method and drop it from _DUPLICATED_BODIES -- do not simply remove "
+        "the name to quiet this."
+    )
+
+    undeclared = sorted(actual - declared)
+    assert not undeclared, (
+        f"{postgres_cls}: {undeclared} are now byte-identical to "
+        f"{sqlite_cls} but undeclared. Duplicated bodies drift silently, so "
+        "either share the implementation between the twins or add the "
+        "name(s) to _DUPLICATED_BODIES with a reason."
     )

@@ -48,7 +48,7 @@ and fall back to the overview when no parent history entry is available.
 
 - `dashboard/backend/domain/analytics/lifecycle.py`: pure meaningful-activity, lifecycle, operational, commercial-tier, and cohort-date rules with no I/O.
 - `dashboard/backend/domain/analytics/states.py`: dual-axis current snapshot calculation and compatibility projection to the legacy five-state fields.
-- `dashboard/backend/domain/analytics/value_repository.py`: SQLite/PostgreSQL-neutral daily lifecycle history and batched read-only Credits/user facts.
+- `dashboard/backend/domain/analytics/value_repository.py`: SQLite/PostgreSQL-neutral daily lifecycle history and batched read-only Credits/user facts. *(No longer neutral as of PR T, #498, 2026-09-19: this file is the SQLite twin and emits `?` placeholders only; the Postgres half is `value_repository_postgres.py` and the pair is built through `build_value_analytics_store()`. Both constructors refuse a base of the wrong dialect.)*
 - `dashboard/backend/domain/analytics/lifecycle_backfill.py`: bounded historical reconstruction, quality propagation, anonymous aggregation, and resumable cursor.
 - `dashboard/backend/domain/analytics/value_queries.py`: lifecycle, retention, commercial, operational, priority-user, and enriched-profile response models and query composition.
 - `dashboard/backend/domain/analytics/query_service.py`: retain legacy overview/activity implementation; delegate new user filters/profile enrichment to `value_queries.py` without adding new aggregation logic.

@@ -1,19 +1,11 @@
-"""Persistence primitives for the user-value Analytics projection.
+"""PostgreSQL twin of the user-value Analytics projection store.
 
-This module deliberately keeps the Credits ledger authoritative.  Analytics
-stores only calculated lifecycle history and reads commercial facts in batches.
-
-SQLite twin. The PostgreSQL twin is ``value_repository_postgres.py``
-(``PostgresValueAnalyticsStore``); ``build_value_analytics_store()`` below
-selects between them the same way ``repository.py``'s ``_build_analytics_store()``
-selects between ``AnalyticsStore`` and ``PostgresAnalyticsStore``. Every method
-that reads or writes this store's own tables (``user_analytics_snapshots``,
-``user_lifecycle_daily_snapshots``, ``analytics_projection_jobs``) has exactly
-one code path here; the two methods that branch on a *different* store's
-dialect (``list_commercial_values``, ``list_credit_activity``, both reading
-``self.credits_base``) are unchanged and identical on both twins, because that
-branch was never about which twin this class is -- a caller can pair either
-``analytics_base`` with either ``credits_base``, and both twins must handle it.
+See ``value_repository.py`` for the SQLite twin and its module docstring,
+which explains which methods branch on this class's own dialect (all
+rewritten below, one path each) versus a *different* store's dialect
+(``list_commercial_values``, ``list_credit_activity`` -- unchanged here,
+and identical to the SQLite twin, because that branch was never about
+which twin this class is).
 """
 
 from __future__ import annotations
@@ -22,297 +14,41 @@ import json
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Literal, Mapping, Sequence
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
-
-from .lifecycle import (
-    CommercialTier,
-    LifecycleSegment,
-    OperationalState,
+from .repository_common import positive_limit, positive_user_id, utc_iso
+from .value_repository import (
+    _ACTIVE_RUN_STATUSES,
+    _TERMINAL_RUN_STATUSES,
+    LIFECYCLE_ROLLUP_METRICS,
+    LIFECYCLE_SEGMENTS,
+    MAX_USER_BATCH,
+    RUN_SAFE_DEADLINE,
+    CommercialValueFact,
+    CurrentOperationalFacts,
+    ProjectionJob,
+    UserLifecycleDailySnapshot,
+    UserValueSnapshot,
+    _current_snapshot_from_row,
+    _fetchall,
+    _ids,
+    _legacy_seed,
+    _object_value,
+    _optional_timestamp,
+    _projection_job_name,
+    _row_value,
+    _timestamp,
+    _user_clause,
+    _utc,
+    _validate_window,
+    analytics_store,
     commercial_tier,
 )
-from .repository import analytics_store
-from .repository_common import positive_limit, positive_user_id, utc_iso
 
 
-MAX_USER_BATCH = 500
-RUN_SAFE_DEADLINE = timedelta(minutes=60)
-LIFECYCLE_SEGMENTS = frozenset(
-    {"new", "onboarding", "growing", "core", "at_risk", "dormant"}
-)
-LIFECYCLE_ROLLUP_METRICS = frozenset(
-    {"lifecycle_segment_count", "lifecycle_transition"}
-)
-_ACTIVE_RUN_STATUSES = frozenset({"created", "loading", "running"})
-_TERMINAL_RUN_STATUSES = frozenset(
-    {"completed", "failed", "cancelled", "closed", "timed_out"}
-)
+class PostgresValueAnalyticsStore:
+    """PostgreSQL value projection storage.
 
-
-def _utc(value: datetime, name: str = "timestamp") -> datetime:
-    if value.tzinfo is None or value.utcoffset() is None:
-        raise ValueError(f"{name} must include a timezone")
-    return value.astimezone(timezone.utc)
-
-
-def _timestamp(value: object) -> datetime:
-    parsed = datetime.fromisoformat(str(value))
-    if parsed.tzinfo is None or parsed.utcoffset() is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
-    return parsed.astimezone(timezone.utc)
-
-
-def _row_value(row: Any, name: str, default: Any = None) -> Any:
-    if isinstance(row, dict):
-        return row.get(name, default)
-    try:
-        return row[name]
-    except (IndexError, KeyError, TypeError):
-        return default
-
-
-def _object_value(value: object, name: str, default: Any = 0) -> Any:
-    if isinstance(value, Mapping):
-        return value.get(name, default)
-    return getattr(value, name, default)
-
-
-def _optional_timestamp(value: object) -> datetime | None:
-    if value in (None, ""):
-        return None
-    try:
-        return _timestamp(value)
-    except (TypeError, ValueError):
-        return None
-
-
-class UserValueSnapshot(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    user_id: int = Field(gt=0)
-    lifecycle_segment: LifecycleSegment
-    lifecycle_reason_code: str = Field(min_length=1, max_length=100)
-    lifecycle_reason: str = Field(min_length=1, max_length=500)
-    lifecycle_evidence: Sequence[str] = Field(default_factory=tuple, max_length=10)
-    operational_state: OperationalState
-    operational_reason_code: str = Field(min_length=1, max_length=100)
-    operational_reason: str = Field(min_length=1, max_length=500)
-    operational_evidence: Sequence[str] = Field(default_factory=tuple, max_length=10)
-    activated_at: datetime | None = None
-    last_meaningful_activity_at: datetime | None = None
-    inactive_days: int = Field(ge=0)
-    active_days_30d: int = Field(ge=0, le=30)
-    successful_backtests_30d: int = Field(ge=0)
-    calculated_at: datetime
-
-    @field_validator("activated_at", "last_meaningful_activity_at", "calculated_at")
-    @classmethod
-    def require_timezone(cls, value: datetime | None) -> datetime | None:
-        return _utc(value) if value is not None else None
-
-
-class UserLifecycleDailySnapshot(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    snapshot_date: date
-    user_id: int = Field(gt=0)
-    lifecycle_segment: LifecycleSegment
-    lifecycle_reason_code: str = Field(min_length=1, max_length=100)
-    data_quality: Literal["complete", "partial"]
-    calculated_at: datetime
-
-    @field_validator("calculated_at")
-    @classmethod
-    def require_timezone(cls, value: datetime) -> datetime:
-        return _utc(value)
-
-
-class CommercialValueFact(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    user_id: int = Field(gt=0)
-    lifetime_net_purchased_micro: int = Field(ge=0)
-    commercial_tier: CommercialTier
-    purchased_micro: int = Field(ge=0)
-    refunded_micro: int = Field(ge=0)
-    consumed_micro: int = Field(ge=0)
-    admin_grant_activity_micro: int = Field(ge=0)
-    grant_available_micro: int = Field(ge=0)
-    purchased_available_micro: int = Field(ge=0)
-    total_available_micro: int = Field(ge=0)
-
-
-class CurrentOperationalFacts(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    user_id: int = Field(gt=0)
-    account_restricted: bool = False
-    usable_billing_lane: bool = True
-    selected_provider_enabled: bool = True
-    default_credential_status: Literal[
-        "verified", "invalid", "verification_unavailable", "missing"
-    ] = "verified"
-    failed_terminal_runs_24h: int = Field(default=0, ge=0)
-    run_beyond_safe_deadline: bool = False
-
-
-class ProjectionJob(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    job_name: str = Field(min_length=1, max_length=100)
-    window_start: date
-    window_end: date
-    cursor: str | None = None
-    status: Literal["pending", "running", "complete"]
-    updated_at: datetime
-
-    @field_validator("updated_at")
-    @classmethod
-    def require_timezone(cls, value: datetime) -> datetime:
-        return _utc(value)
-
-    @model_validator(mode="after")
-    def validate_window(self) -> "ProjectionJob":
-        if self.window_end < self.window_start:
-            raise ValueError("window_end must not precede window_start")
-        return self
-
-
-def _ids(user_ids: Sequence[int]) -> list[int]:
-    if not isinstance(user_ids, (list, tuple)):
-        raise ValueError("user_ids must be a list or tuple")
-    values = list(dict.fromkeys(positive_user_id(item) for item in user_ids))
-    if len(values) > MAX_USER_BATCH:
-        raise ValueError(f"user_ids must contain at most {MAX_USER_BATCH} users")
-    return values
-
-
-def _validate_window(start: datetime, end: datetime) -> tuple[datetime, datetime]:
-    window_start = _utc(start, "start")
-    window_end = _utc(end, "end")
-    if window_end <= window_start:
-        raise ValueError("end must be later than start")
-    return window_start, window_end
-
-
-def _legacy_seed(snapshot: UserValueSnapshot) -> tuple[str, str, str]:
-    """Seed compatibility fields only when no legacy projection exists yet."""
-
-    if snapshot.operational_state == "blocked":
-        status = "blocked"
-        reason_code = snapshot.operational_reason_code
-        reason = snapshot.operational_reason
-    elif snapshot.operational_state == "needs_attention":
-        status = "needs_attention"
-        reason_code = snapshot.operational_reason_code
-        reason = snapshot.operational_reason
-    elif snapshot.lifecycle_segment == "dormant":
-        status = "dormant"
-        reason_code = snapshot.lifecycle_reason_code
-        reason = snapshot.lifecycle_reason
-    elif snapshot.lifecycle_segment in {"new", "onboarding"}:
-        status = "onboarding"
-        reason_code = snapshot.lifecycle_reason_code
-        reason = snapshot.lifecycle_reason
-    else:
-        status = "active"
-        reason_code = snapshot.lifecycle_reason_code
-        reason = snapshot.lifecycle_reason
-    return status, reason_code, reason
-
-
-def _current_snapshot_from_row(row: Any) -> UserValueSnapshot | None:
-    """Shared by both twins.
-
-    Moved out of the class (was ``ValueAnalyticsStore._current_snapshot_from_row``,
-    a ``@staticmethod``) so ``value_repository_postgres.py`` can import it
-    directly, mirroring how ``repository_postgres.py`` imports bare functions
-    (``_row_to_event``) from ``repository.py``. No caller outside this module
-    referenced the staticmethod, so this is not a behaviour change.
-    """
-    if row is None or _row_value(row, "lifecycle_segment") is None:
-        return None
-
-    def seq(name: str) -> tuple[str, ...]:
-        try:
-            value = json.loads(_row_value(row, name, "[]"))
-            if not isinstance(value, list) or not all(
-                isinstance(item, str) for item in value
-            ):
-                return ()
-            return tuple(value)
-        except (TypeError, ValueError, json.JSONDecodeError):
-            return ()
-
-    return UserValueSnapshot(
-        user_id=int(_row_value(row, "user_id")),
-        lifecycle_segment=_row_value(row, "lifecycle_segment"),
-        lifecycle_reason_code=_row_value(row, "lifecycle_reason_code"),
-        lifecycle_reason=_row_value(row, "lifecycle_reason"),
-        lifecycle_evidence=seq("lifecycle_evidence_json"),
-        operational_state=_row_value(row, "operational_state") or "healthy",
-        operational_reason_code=(
-            _row_value(row, "operational_reason_code") or "no_supported_issue"
-        ),
-        operational_reason=(
-            _row_value(row, "operational_reason")
-            or "No supported current operational issue was detected."
-        ),
-        operational_evidence=seq("operational_evidence_json"),
-        activated_at=_optional_timestamp(_row_value(row, "activated_at")),
-        last_meaningful_activity_at=_optional_timestamp(
-            _row_value(row, "last_meaningful_activity_at")
-        ),
-        inactive_days=int(_row_value(row, "inactive_days", 0)),
-        active_days_30d=int(_row_value(row, "active_days_30d", 0)),
-        successful_backtests_30d=int(
-            _row_value(row, "successful_backtests_30d", 0)
-        ),
-        calculated_at=_timestamp(_row_value(row, "calculated_at")),
-    )
-
-
-def _fetchall(conn: Any, postgres: bool, sql: str, params: Sequence[Any]):
-    """Shared by both twins.
-
-    Still dialect-parameterised: it serves ``list_commercial_values``/
-    ``list_credit_activity``, which branch on the *credits* store's dialect,
-    never on this class's own -- see the module docstring.
-    """
-    if postgres:
-        with conn.cursor() as cur:
-            cur.execute(sql, params)
-            return cur.fetchall()
-    return conn.execute(sql, params).fetchall()
-
-
-def _user_clause(ids: list[int], postgres: bool) -> tuple[str, list[Any]]:
-    """Shared by both twins; see ``_fetchall`` above."""
-    if postgres:
-        return "user_id = ANY(%s)", [ids]
-    placeholders = ", ".join("?" for _ in ids)
-    return f"user_id IN ({placeholders})", list(ids)
-
-
-def _projection_job_name(value: object) -> str:
-    """Shared by both twins; see ``_current_snapshot_from_row`` above."""
-    if (
-        not isinstance(value, str)
-        or not value
-        or value != value.strip()
-        or len(value) > 100
-    ):
-        raise ValueError("job_name must be a trimmed non-empty string")
-    return value
-
-
-class ValueAnalyticsStore:
-    """SQLite value projection storage.
-
-    See ``value_repository_postgres.py`` for the PostgreSQL twin;
-    ``build_value_analytics_store()`` below picks between them.
-
-    ``credits_base`` and the optional operational stores are injectable to keep
-    contract tests synthetic and to avoid importing production singletons.
+    See ``value_repository.py`` for the SQLite twin;
+    ``build_value_analytics_store()`` there picks between them.
     """
 
     def __init__(
@@ -323,21 +59,22 @@ class ValueAnalyticsStore:
         agent_base: Any | None = None,
         run_base: Any | None = None,
     ) -> None:
-        # The mirror of PostgresValueAnalyticsStore's guard, and the reason
-        # this class needs one at all: until PR T it served both dialects, so
-        # `ValueAnalyticsStore(postgres_base)` was correct and is still the
-        # natural thing to write. It now emits `?` placeholders, which raise
-        # psycopg.errors.SyntaxError on the Postgres deployment *only* -- CI
-        # and local runs are both SQLite, so a caller that reintroduced it
-        # would keep a green suite all the way to prod.
+        # `or analytics_store` keeps this signature identical to the SQLite
+        # twin's. The parity tests do pin the signatures, but they compare
+        # *public* methods only -- both build their name list from `dir(cls)`
+        # and skip `name.startswith("_")` -- so neither sees `__init__`, and a
+        # pinned signature would say nothing about this body in any case.
+        # Unguarded, the fallback resolves to whichever dialect the module
+        # singleton happens to be: Postgres on prod, SQLite locally and under
+        # pytest, where every `%s` query below would reach sqlite3 and fail at
+        # the first cursor rather than here. Hence the explicit check.
         self.analytics_base = analytics_base or analytics_store
-        if hasattr(self.analytics_base, "database_url"):
+        if not hasattr(self.analytics_base, "database_url"):
             raise TypeError(
-                "ValueAnalyticsStore is the SQLite twin and emits `?` "
-                "placeholders, but the resolved analytics base is "
-                "PostgreSQL. Build the pair through "
-                "build_value_analytics_store(), which resolves the base and "
-                "returns the matching twin."
+                "PostgresValueAnalyticsStore requires a PostgreSQL analytics "
+                "base, but the resolved base exposes no database_url. Build "
+                "the pair through build_value_analytics_store(), which "
+                "resolves the base and returns the matching twin."
             )
         if credits_base is None:
             from dashboard.backend.domain.credits.repository import credits_store
@@ -425,22 +162,26 @@ class ValueAnalyticsStore:
             calculated_at=excluded.calculated_at
         """
         with self._analytics_connection() as conn:
-            conn.execute(
-                f"""
-                INSERT INTO user_analytics_snapshots ({columns})
-                VALUES ({", ".join(["?"] * len(values))})
-                ON CONFLICT(user_id) DO UPDATE SET {updates}
-                """,
-                values,
-            )
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"""
+                    INSERT INTO user_analytics_snapshots ({columns})
+                    VALUES ({", ".join(["%s"] * len(values))})
+                    ON CONFLICT(user_id) DO UPDATE SET {updates}
+                    """,
+                    values,
+                )
         return snapshot
 
     def get_current_snapshot(self, user_id: int) -> UserValueSnapshot | None:
         subject = positive_user_id(user_id)
         with self._analytics_connection() as conn:
-            row = conn.execute(
-                "SELECT * FROM user_analytics_snapshots WHERE user_id=?", (subject,)
-            ).fetchone()
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT * FROM user_analytics_snapshots WHERE user_id=%s",
+                    (subject,),
+                )
+                row = cur.fetchone()
         return _current_snapshot_from_row(row)
 
     def list_current_snapshots(
@@ -453,17 +194,18 @@ class ValueAnalyticsStore:
         result: dict[int, UserValueSnapshot] = {}
         for offset in range(0, len(ids), MAX_USER_BATCH):
             chunk = ids[offset : offset + MAX_USER_BATCH]
-            clause = f"user_id IN ({', '.join('?' for _ in chunk)})"
             with self._analytics_connection() as conn:
-                rows = conn.execute(
-                    f"""
-                    SELECT *
-                    FROM user_analytics_snapshots
-                    WHERE {clause} AND lifecycle_segment IS NOT NULL
-                    ORDER BY user_id
-                    """,
-                    chunk,
-                ).fetchall()
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        SELECT *
+                        FROM user_analytics_snapshots
+                        WHERE user_id = ANY(%s) AND lifecycle_segment IS NOT NULL
+                        ORDER BY user_id
+                        """,
+                        [chunk],
+                    )
+                    rows = cur.fetchall()
             for row in rows:
                 user_id = int(_row_value(row, "user_id"))
                 snapshot = _current_snapshot_from_row(row)
@@ -487,7 +229,7 @@ class ValueAnalyticsStore:
             INSERT INTO user_lifecycle_daily_snapshots (
                 snapshot_date, user_id, lifecycle_segment,
                 lifecycle_reason_code, data_quality, calculated_at
-            ) VALUES (?, ?, ?, ?, ?, ?)
+            ) VALUES (%s, %s, %s, %s, %s, %s)
             ON CONFLICT(snapshot_date, user_id) DO UPDATE SET
                 lifecycle_segment=excluded.lifecycle_segment,
                 lifecycle_reason_code=excluded.lifecycle_reason_code,
@@ -495,7 +237,8 @@ class ValueAnalyticsStore:
                 calculated_at=excluded.calculated_at
         """
         with self._analytics_connection() as conn:
-            conn.execute(sql, values)
+            with conn.cursor() as cur:
+                cur.execute(sql, values)
         return snapshot
 
     def list_daily_snapshots(
@@ -513,18 +256,20 @@ class ValueAnalyticsStore:
         params: list[Any] = [start.isoformat(), end.isoformat()]
         clause = ""
         if ids:
-            clause = f" AND user_id IN ({','.join('?' for _ in ids)})"
-            params.extend(ids)
+            clause = " AND user_id = ANY(%s)"
+            params.append(ids)
         sql = f"""
             SELECT *
             FROM user_lifecycle_daily_snapshots
-            WHERE snapshot_date >= ?
-              AND snapshot_date < ?
+            WHERE snapshot_date >= %s
+              AND snapshot_date < %s
               {clause}
             ORDER BY snapshot_date, user_id
         """
         with self._analytics_connection() as conn:
-            rows = conn.execute(sql, params).fetchall()
+            with conn.cursor() as cur:
+                cur.execute(sql, params)
+                rows = cur.fetchall()
         return [
             UserLifecycleDailySnapshot(
                 snapshot_date=date.fromisoformat(str(_row_value(row, "snapshot_date"))),
@@ -608,28 +353,29 @@ class ValueAnalyticsStore:
                     utc_iso(row.updated_at),
                 )
             )
-        placeholders = ", ".join(["?"] * len(columns))
+        placeholders = ", ".join(["%s"] * len(columns))
         metrics = ["lifecycle_segment_count"]
         if replace_transitions:
             metrics.append("lifecycle_transition")
-        metric_placeholders = ", ".join(["?"] * len(metrics))
+        metric_placeholders = ", ".join(["%s"] * len(metrics))
         with self._analytics_connection() as conn:
-            conn.execute(
-                f"""
-                DELETE FROM analytics_daily_rollups
-                WHERE rollup_date = ?
-                  AND metric_name IN ({metric_placeholders})
-                """,
-                (day.isoformat(), *metrics),
-            )
-            if payloads:
-                conn.executemany(
+            with conn.cursor() as cur:
+                cur.execute(
                     f"""
-                    INSERT INTO analytics_daily_rollups ({', '.join(columns)})
-                    VALUES ({placeholders})
+                    DELETE FROM analytics_daily_rollups
+                    WHERE rollup_date = %s
+                      AND metric_name IN ({metric_placeholders})
                     """,
-                    payloads,
+                    (day.isoformat(), *metrics),
                 )
+                if payloads:
+                    cur.executemany(
+                        f"""
+                        INSERT INTO analytics_daily_rollups ({', '.join(columns)})
+                        VALUES ({placeholders})
+                        """,
+                        payloads,
+                    )
 
     def list_expiring_daily_dates(
         self,
@@ -643,12 +389,14 @@ class ValueAnalyticsStore:
         sql = """
             SELECT DISTINCT snapshot_date
             FROM user_lifecycle_daily_snapshots
-            WHERE snapshot_date < ?
+            WHERE snapshot_date < %s
             ORDER BY snapshot_date
-            LIMIT ?
+            LIMIT %s
         """
         with self._analytics_connection() as conn:
-            rows = conn.execute(sql, (before.isoformat(), page_size)).fetchall()
+            with conn.cursor() as cur:
+                cur.execute(sql, (before.isoformat(), page_size))
+                rows = cur.fetchall()
         return [
             date.fromisoformat(str(_row_value(row, "snapshot_date"))) for row in rows
         ]
@@ -657,14 +405,16 @@ class ValueAnalyticsStore:
         if not isinstance(day, date) or isinstance(day, datetime):
             raise ValueError("day must be a date")
         with self._analytics_connection() as conn:
-            cursor = conn.execute(
-                """
-                DELETE FROM user_lifecycle_daily_snapshots
-                WHERE snapshot_date = ?
-                """,
-                (day.isoformat(),),
-            )
-            return max(0, int(cursor.rowcount))
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    DELETE FROM user_lifecycle_daily_snapshots
+                    WHERE snapshot_date = %s
+                    RETURNING user_id
+                    """,
+                    (day.isoformat(),),
+                )
+                return len(cur.fetchall())
 
     def has_daily_before(self, before: date) -> bool:
         if not isinstance(before, date) or isinstance(before, datetime):
@@ -672,11 +422,13 @@ class ValueAnalyticsStore:
         sql = """
             SELECT 1
             FROM user_lifecycle_daily_snapshots
-            WHERE snapshot_date < ?
+            WHERE snapshot_date < %s
             LIMIT 1
         """
         with self._analytics_connection() as conn:
-            row = conn.execute(sql, (before.isoformat(),)).fetchone()
+            with conn.cursor() as cur:
+                cur.execute(sql, (before.isoformat(),))
+                row = cur.fetchone()
         return row is not None
 
     def list_commercial_values(
@@ -1005,10 +757,12 @@ class ValueAnalyticsStore:
     def get_projection_job(self, job_name: str) -> ProjectionJob | None:
         name = _projection_job_name(job_name)
         with self._analytics_connection() as conn:
-            row = conn.execute(
-                "SELECT * FROM analytics_projection_jobs WHERE job_name=?",
-                (name,),
-            ).fetchone()
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT * FROM analytics_projection_jobs WHERE job_name=%s",
+                    (name,),
+                )
+                row = cur.fetchone()
         if row is None:
             return None
         return ProjectionJob(
@@ -1033,7 +787,7 @@ class ValueAnalyticsStore:
         sql = """
             INSERT INTO analytics_projection_jobs (
                 job_name, window_start, window_end, cursor, status, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?)
+            ) VALUES (%s, %s, %s, %s, %s, %s)
             ON CONFLICT(job_name) DO UPDATE SET
                 window_start=excluded.window_start,
                 window_end=excluded.window_end,
@@ -1042,53 +796,6 @@ class ValueAnalyticsStore:
                 updated_at=excluded.updated_at
         """
         with self._analytics_connection() as conn:
-            conn.execute(sql, values)
+            with conn.cursor() as cur:
+                cur.execute(sql, values)
         return job
-
-
-def build_value_analytics_store(
-    analytics_base: Any | None = None,
-    credits_base: Any | None = None,
-    provider_base: Any | None = None,
-    agent_base: Any | None = None,
-    run_base: Any | None = None,
-):
-    """Pick the SQLite or PostgreSQL value-analytics twin.
-
-    Mirrors ``repository.py``'s ``_build_analytics_store()``: the decision is
-    made from the resolved ``analytics_base`` alone -- the same object every
-    caller already passes, or, if none, the same ``analytics_store`` singleton
-    that decision is based on. ``credits_base``/``provider_base``/
-    ``agent_base``/``run_base`` are forwarded unexamined; their own dialect,
-    if any, is handled inside ``list_commercial_values``/``list_credit_activity``
-    on either twin, independently of this choice.
-    """
-    resolved_analytics_base = analytics_base or analytics_store
-    if hasattr(resolved_analytics_base, "database_url"):
-        from .value_repository_postgres import PostgresValueAnalyticsStore
-
-        return PostgresValueAnalyticsStore(
-            resolved_analytics_base,
-            credits_base=credits_base,
-            provider_base=provider_base,
-            agent_base=agent_base,
-            run_base=run_base,
-        )
-    return ValueAnalyticsStore(
-        resolved_analytics_base,
-        credits_base=credits_base,
-        provider_base=provider_base,
-        agent_base=agent_base,
-        run_base=run_base,
-    )
-
-
-__all__ = [
-    "CommercialValueFact",
-    "CurrentOperationalFacts",
-    "ProjectionJob",
-    "UserLifecycleDailySnapshot",
-    "UserValueSnapshot",
-    "ValueAnalyticsStore",
-    "build_value_analytics_store",
-]

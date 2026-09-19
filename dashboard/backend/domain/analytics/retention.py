@@ -9,7 +9,7 @@ from datetime import datetime, timedelta, timezone
 from .models import RetentionResult
 from .repository import analytics_store
 from .rollups import rollup_lifecycle_day
-from .value_repository import ValueAnalyticsStore
+from .value_repository import build_value_analytics_store
 
 
 RAW_EVENT_RETENTION_DAYS = 180
@@ -30,7 +30,7 @@ class AnalyticsRetentionService:
         self,
         *,
         store,
-        value_store: ValueAnalyticsStore | None = None,
+        value_store=None,
         batch_size: int = RETENTION_BATCH_SIZE,
         max_batches: int = MAX_BATCHES_PER_RUN,
     ) -> None:
@@ -171,7 +171,7 @@ class AnalyticsRetentionCoordinator:
 
 analytics_retention_service = AnalyticsRetentionService(
     store=analytics_store,
-    value_store=ValueAnalyticsStore(
+    value_store=build_value_analytics_store(
         analytics_store,
         credits_base=object(),
         provider_base=object(),

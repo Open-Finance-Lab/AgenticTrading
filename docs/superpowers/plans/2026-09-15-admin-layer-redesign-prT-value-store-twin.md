@@ -2742,15 +2742,66 @@ Per design doc §13 (PR T's "Must not" column: "Change any query, response or ta
 
 ## Acceptance
 
-- [ ] `ValueAnalyticsStore` (`value_repository.py`) contains zero `is_postgres` branches and zero `hasattr(self.analytics_base, "database_url")` checks; its two `hasattr(self.credits_base, "database_url")` checks (in `list_commercial_values`/`list_credit_activity`) remain, unchanged, and are allowlisted with a reason.
-- [ ] `PostgresValueAnalyticsStore` (`value_repository_postgres.py`) exposes the same 14 public methods and constructor signature as `ValueAnalyticsStore`.
-- [ ] `build_value_analytics_store()` exists in `value_repository.py` and is the sole construction path at every production call site (`service.py`, `states.py` ×3, `lifecycle_backfill.py` ×2, `retention.py`, `value_queries.py`).
-- [ ] `_TWINS` in `test_store_twin_parity.py` has no duplicate tuples and registers the `ValueAnalyticsStore`/`PostgresValueAnalyticsStore` pair (12 distinct entries total).
-- [ ] `test_postgres_twin_schema_columns_match_sqlite` tolerates the new pair via a documented `_NO_OWN_DDL_TWINS` exemption, not a weakened assertion.
-- [ ] A new absence-direction test scans the backend for `is_postgres`/`hasattr(*, "database_url")` outside a registered twin and requires every hit to be named in `_DIALECT_BRANCH_ALLOWLIST` with a reason; the allowlist has no stale entries.
-- [ ] No query, response shape, or table changed anywhere in this PR.
-- [ ] `CLAUDE.md`'s Persistence bullet names the new twin.
-- [ ] CI's Postgres tier is green on this branch before merge.
+- [~] `ValueAnalyticsStore` (`value_repository.py`) contains zero `is_postgres` branches and zero `hasattr(self.analytics_base, "database_url")` checks; **amended — as shipped there is exactly one such check, the constructor's dialect guard (`value_repository.py:334`), added in the 2026-09-19 review round and allowlisted with its own reason. The criterion was written against branches that *choose SQL*; this one refuses a base outright and emits no SQL at all. It is deliberately spelled `hasattr` inline so the absence-direction scan still sees it.** its two `hasattr(self.credits_base, "database_url")` checks (in `list_commercial_values`/`list_credit_activity`) remain, unchanged, and are allowlisted with a reason.
+- [x] `PostgresValueAnalyticsStore` (`value_repository_postgres.py`) exposes the same 14 public methods and constructor signature as `ValueAnalyticsStore`.
+- [x] `build_value_analytics_store()` exists in `value_repository.py` and is the sole construction path at every production call site (`service.py`, `states.py` ×3, `lifecycle_backfill.py` ×2, `retention.py`, `value_queries.py`).
+- [x] `_TWINS` in `test_store_twin_parity.py` has no duplicate tuples and registers the `ValueAnalyticsStore`/`PostgresValueAnalyticsStore` pair (12 distinct entries total).
+- [x] `test_postgres_twin_schema_columns_match_sqlite` tolerates the new pair via a documented `_NO_OWN_DDL_TWINS` exemption, not a weakened assertion.
+- [x] A new absence-direction test scans the backend for `is_postgres`/`hasattr(*, "database_url")` outside a registered twin and requires every hit to be named in `_DIALECT_BRANCH_ALLOWLIST` with a reason; the allowlist has no stale entries.
+- [x] No query, response shape, or table changed anywhere in this PR.
+- [x] `CLAUDE.md`'s Persistence bullet names the new twin.
+- [x] CI's Postgres tier is green on this branch before merge. *(run `35453354752`: 5065 passed / 51 skipped, against 4968 / 163 locally — the 112-skip delta is the `@pg_only` tier executing, which is the check that matters, since the marker fails open.)*
+
+## As shipped
+
+PR **#498** (`refactor/value-analytics-store-twin`), 2026-09-19. Five commits; the last reverts the
+fourth. Read this section before PR A: two of the three additions below fail a build that follows
+the plan text alone.
+
+**Added beyond the plan, in the review round.** Each closes a hole the plan's own guards could not
+see:
+
+1. **A fourth parity axis** — `_DUPLICATED_BODIES` and `test_duplicated_bodies_match_their_declaration`
+   in `test_store_twin_parity.py`. Task 2 copied **321 lines across five methods** into the new twin
+   (`_analytics_connection`, `_run_health`, `get_operational_facts`, `list_commercial_values`,
+   `list_credit_activity`) — more duplication than every other pair in `_TWINS` combined, the next
+   largest being 17 lines — because the split was scoped to "change no query". Nothing read a method
+   body, so a later fix applied to one copy only would have shipped a Postgres-only divergence with
+   the signature, column and index axes all green. The axis compares by `ast.unparse` and is
+   two-way: a declared pair that stops matching fails as `diverged`, and a pair that *becomes*
+   identical without a declaration fails as `undeclared`. **PR A adds ~12 methods to this pair and
+   will hit the second case** for any body holding no placeholder.
+2. **Constructor dialect guards on both twins.** No parity axis inspects `__init__` — both build
+   their name list from `dir(cls)` and skip `_`-prefixed names — so `ValueAnalyticsStore(postgres_base)`
+   stayed the natural thing to write and raised nothing until the first `?` placeholder reached
+   psycopg. CI and local runs are both SQLite, so that call keeps a green suite all the way to prod.
+   Both constructors now raise `TypeError`, naming the factory and quoting no part of the connection
+   string; `test_value_repository_postgres.py` pins all three cases.
+3. **The absence-direction scan no longer exempts registered twins.** Task 4 skipped any file whose
+   path was already in `_TWINS`, which made the new `value_repository_postgres.py` the one file the
+   check could not see — a guard blind to exactly the class it was added for. Being the Postgres side
+   of a pair is not a reason to branch on a dialect. The test keeps its name
+   (`test_dialect_branches_outside_a_registered_twin_are_allowlisted`) because three unmerged plans
+   cite it; the docstring and failure message carry the corrected rule.
+
+**Deferred, with a verified reason.** The split left the consumer modules' `value_store` parameters
+untyped: they take either twin, so the `ValueAnalyticsStore` annotation became wrong and was dropped
+rather than widened. The natural fix — a `ValueAnalyticsStoreLike` union alias — was implemented
+(`ed192fca`) and **reverted** (`2b5f0738`): it produced **24 `py/unsafe-cyclic-import` alerts at
+error severity** and failed the CodeQL gate. CodeQL was right. Naming the twin at module scope in
+`value_repository.py` puts the import above the definitions of `MAX_USER_BATCH`,
+`UserValueSnapshot`, `_utc` and 21 other names the twin imports straight back out — a genuine
+`ImportError` if `TYPE_CHECKING` were ever true, and CodeQL does not treat a `TYPE_CHECKING` block
+as non-executing. A local Tarjan SCC pass over the import graph showed no position in the module is
+safe: `value_repository`, `value_repository_postgres`, `states`, `rollups`, `service`,
+`instrumentation` and `model_providers.service` are **one strongly-connected component, and it
+predates this PR**. Typing the interface needs that SCC broken, or the shared models moved to a leaf
+module. **Do it before PR A widens both twins**, not after.
+
+**CodeQL.** All 26 alerts this branch introduced are `fixed`. Four `py/cyclic-import` alerts remain
+open at `note` severity, unchanged from the pre-review tip and each mirroring a pattern already open
+and accepted on `main` (`users_postgres.py:24` → `users.py`, alert #1250, the identical twin idiom).
+They were left rather than dismissed, so this branch and `main` stay consistent.
 
 ## Self-review notes
 

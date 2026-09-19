@@ -23,7 +23,7 @@ from .rollups import AnalyticsRollupStore
 from .value_repository import (
     UserLifecycleDailySnapshot,
     UserValueSnapshot,
-    ValueAnalyticsStore,
+    build_value_analytics_store,
 )
 
 
@@ -550,7 +550,7 @@ def _calculate_user_value_snapshot(
     *,
     now: datetime,
     state_store: AnalyticsStateStore,
-    value_store: ValueAnalyticsStore,
+    value_store,
 ) -> UserValueSnapshot:
     subject_id = positive_user_id(user_id)
     user = state_store.get_user(subject_id)
@@ -663,11 +663,11 @@ def calculate_user_value_snapshot(
     *,
     now: datetime | None = None,
     state_store: AnalyticsStateStore | None = None,
-    value_store: ValueAnalyticsStore | None = None,
+    value_store=None,
 ) -> UserValueSnapshot:
     current = _require_utc(now or datetime.now(timezone.utc), "now")
     states = state_store or AnalyticsStateStore()
-    values = value_store or ValueAnalyticsStore(states.base_store)
+    values = value_store or build_value_analytics_store(states.base_store)
     snapshot = _calculate_user_value_snapshot(
         user_id,
         now=current,
@@ -682,13 +682,13 @@ def recalculate_user_snapshots(
     *,
     now: datetime | None = None,
     state_store: AnalyticsStateStore | None = None,
-    value_store: ValueAnalyticsStore | None = None,
+    value_store=None,
 ) -> tuple[UserAnalyticsSnapshot, UserValueSnapshot]:
     """Recalculate legacy and dual-axis projections from the same evidence."""
 
     current = _require_utc(now or datetime.now(timezone.utc), "now")
     states = state_store or AnalyticsStateStore()
-    values = value_store or ValueAnalyticsStore(states.base_store)
+    values = value_store or build_value_analytics_store(states.base_store)
     legacy = calculate_user_state(user_id, now=current, store=states)
     value = _calculate_user_value_snapshot(
         user_id,
@@ -747,11 +747,11 @@ def repair_stale_value_snapshots(
     now: datetime | None = None,
     limit: int = 100,
     state_store: AnalyticsStateStore | None = None,
-    value_store: ValueAnalyticsStore | None = None,
+    value_store=None,
 ) -> int:
     current = _require_utc(now or datetime.now(timezone.utc), "now")
     states = state_store or AnalyticsStateStore()
-    values = value_store or ValueAnalyticsStore(states.base_store)
+    values = value_store or build_value_analytics_store(states.base_store)
     user_ids = states.list_stale_user_ids(
         now=current,
         limit=limit,
