@@ -208,12 +208,21 @@ def test_every_postgres_twin_module_is_registered():
 # complete. Neither can catch a class that branches SQLite-vs-Postgres
 # inline -- exactly what ValueAnalyticsStore did until PR T -- because such
 # a class owns no *_postgres.py file to discover. This test starts from the
-# other end: every dialect-branch idiom in the backend, asking "is this
+# other end: every occurrence of the two known dialect-branch idioms --
+# `is_postgres`, and a `hasattr` check for `database_url` -- asking "is this
 # inside a registered twin?" A hit outside one is either a twin extraction
 # that has not happened yet, or a non-twin helper reading a table a
 # registered twin already owns. Either way it needs a name below with a
 # reason -- silence here is exactly how ValueAnalyticsStore's 21 branches
 # went unnoticed for as long as they did.
+#
+# The match is textual, not semantic, and that limit is worth stating rather
+# than leaving a reader to assume otherwise: a branch written a third way --
+# an `isinstance(store, PostgresAnalyticsStore)` test, a
+# `getattr(store, "database_url", None)` default -- evades this scan. Both
+# matched forms are what every dialect branch in the tree uses today, so
+# this guard covers the established idiom; it is not a proof that no
+# dialect branch can ever hide again.
 _DIALECT_BRANCH_PATTERN = re.compile(
     r"is_postgres|hasattr\([^)]*[\"']database_url[\"']"
 )
@@ -256,11 +265,14 @@ _DIALECT_BRANCH_ALLOWLIST: dict[str, str] = {
         "Not a store of its own; out of scope for PR T."
     ),
     "dashboard/backend/domain/analytics/query_service.py": (
-        "AnalyticsQueryService dialect-branches over the already-twinned "
+        "AnalyticsQueryStore dialect-branches over the already-twinned "
         "AnalyticsStore/PostgresAnalyticsStore base_store for the legacy "
-        "overview/users query surface. Not a store of its own; that surface "
-        "is rewritten in admin layer redesign PR A/PR B (design doc §6.10), "
-        "which is where this branch is next touched."
+        "overview/users query surface. Note the class: AnalyticsQueryService, "
+        "further down the same file, is a wrapper holding an "
+        "AnalyticsQueryStore and does not itself branch -- an auditor "
+        "grepping for the service name will not find the branch. Not a store "
+        "of its own; that surface is rewritten in admin layer redesign PR A/"
+        "PR B (design doc §6.10), which is where this branch is next touched."
     ),
     "dashboard/backend/domain/analytics/lifecycle_backfill.py": (
         "LifecycleBackfillSource dialect-branches over the already-twinned "
