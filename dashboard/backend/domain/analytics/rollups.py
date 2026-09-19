@@ -19,6 +19,7 @@ from .repository_common import utc_iso
 from .value_repository import (
     LIFECYCLE_ROLLUP_METRICS,
     UserLifecycleDailySnapshot,
+    ValueAnalyticsStoreLike,
 )
 
 
@@ -470,7 +471,7 @@ def _snapshot_quality(rows: Sequence[UserLifecycleDailySnapshot]) -> str:
 def rollup_lifecycle_day(
     day: date,
     *,
-    store,
+    store: ValueAnalyticsStoreLike,
 ) -> tuple[DailyRollup, ...]:
     """Persist anonymous lifecycle counts and changed-segment transitions."""
 

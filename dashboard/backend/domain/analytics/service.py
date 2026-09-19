@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
 from .models import (
@@ -16,6 +16,9 @@ from .models import (
 )
 from .repository import analytics_store
 from .repository_common import positive_user_id
+
+if TYPE_CHECKING:  # value_repository is imported lazily below, not here
+    from .value_repository import ValueAnalyticsStoreLike
 
 
 def _aware_utc(value: datetime, field_name: str) -> datetime:
@@ -40,7 +43,7 @@ class AnalyticsService:
         store,
         *,
         state_store=None,
-        value_store=None,
+        value_store: ValueAnalyticsStoreLike | None = None,
         project_snapshots: bool = False,
     ):
         if not isinstance(project_snapshots, bool):
