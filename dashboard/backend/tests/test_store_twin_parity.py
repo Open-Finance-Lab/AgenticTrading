@@ -224,6 +224,15 @@ def test_every_postgres_twin_module_is_registered():
 # matched forms are what every dialect branch in the tree uses today, so
 # this guard covers the established idiom; it is not a proof that no
 # dialect branch can ever hide again.
+#
+# The allowlist below is keyed by *file*, which bounds it the same way: a
+# new dialect branch added to a file that already has an entry trips
+# neither assertion -- not `unlisted`, because the file is listed, and not
+# `stale`, because the file still has hits. Only a branch in an unlisted
+# file is caught. A per-entry hit count would close that and is deliberately
+# not used: it churns on every unrelated edit to these files, so it would be
+# updated reflexively and stop meaning anything. What each reason can do
+# instead is name the branching symbols, as `backfill.py`'s does.
 _DIALECT_BRANCH_PATTERN = re.compile(
     r"is_postgres|hasattr\([^)]*[\"']database_url[\"']"
 )
