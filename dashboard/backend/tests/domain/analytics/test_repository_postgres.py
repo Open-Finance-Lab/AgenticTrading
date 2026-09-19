@@ -22,7 +22,9 @@ from dashboard.backend.domain.analytics.rollups import AnalyticsRollupStore, Dai
 from dashboard.backend.domain.analytics.value_repository import (
     ProjectionJob,
     UserLifecycleDailySnapshot,
-    ValueAnalyticsStore,
+)
+from dashboard.backend.domain.analytics.value_repository_postgres import (
+    PostgresValueAnalyticsStore,
 )
 from dashboard.backend.tests._postgres_testing import require_local_postgres_url
 from dashboard.backend.tests.domain.analytics.test_repository_contract import (
@@ -216,7 +218,7 @@ def test_postgres_user_value_projection_round_trip(
     tmp_path,
 ):
     analytics, _admin_id, user_id = postgres_contract_store
-    value_store = ValueAnalyticsStore(
+    value_store = PostgresValueAnalyticsStore(
         analytics,
         SyntheticCreditsStore(tmp_path / "postgres-value-credits.db"),
         provider_base=SyntheticProviderStore({}, []),

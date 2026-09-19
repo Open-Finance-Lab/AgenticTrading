@@ -16,7 +16,7 @@ from .rollups import AnalyticsRollupStore
 from .value_repository import (
     ProjectionJob,
     UserLifecycleDailySnapshot,
-    ValueAnalyticsStore,
+    build_value_analytics_store,
 )
 
 
@@ -139,11 +139,11 @@ class LifecycleBackfillSource:
         self,
         *,
         analytics_base=None,
-        value_store: ValueAnalyticsStore | None = None,
+        value_store=None,
         complete_from: date | None = None,
     ) -> None:
         self.analytics_base = analytics_base or analytics_store
-        self.value_store = value_store or ValueAnalyticsStore(self.analytics_base)
+        self.value_store = value_store or build_value_analytics_store(self.analytics_base)
         self.rollups = AnalyticsRollupStore(self.analytics_base)
         self.complete_from = complete_from
         self.is_postgres = hasattr(self.analytics_base, "database_url")
@@ -290,7 +290,7 @@ def backfill_lifecycle_history(
     cursor: str | None = None,
     now: datetime | None = None,
     source: LifecycleBackfillSourceContract,
-    store: ValueAnalyticsStore,
+    store,
 ) -> LifecycleBackfillReport:
     days = _window_days(start, end)
     current = _utc(now or datetime.now(UTC), "now")
@@ -400,10 +400,10 @@ def run_lifecycle_backfill_batch(
     now: datetime | None = None,
     batch_size: int = 100,
     source: LifecycleBackfillSourceContract | None = None,
-    store: ValueAnalyticsStore | None = None,
+    store=None,
 ) -> LifecycleBackfillReport:
     current = _utc(now or datetime.now(UTC), "now")
-    values = store or ValueAnalyticsStore()
+    values = store or build_value_analytics_store()
     history_source = source or LifecycleBackfillSource(
         analytics_base=values.analytics_base,
         value_store=values,
