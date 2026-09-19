@@ -130,7 +130,8 @@ _TWIN_IDS = [pg_cls for _, _, _, pg_cls in _TWINS]
 
 
 def test_twins_registry_has_no_duplicate_pairs():
-    """`_TWINS` listed the AnalyticsStore pair twice (lines 55-60 and 109-114).
+    """`_TWINS` listed the AnalyticsStore pair twice (the tuple that sat
+    between `StrategyStore` and `UserStore`).
 
     Harmless today -- both instances of a duplicate tuple pass or fail
     together -- but it is the exact list PR T's absence-direction check and
@@ -251,11 +252,16 @@ _DIALECT_BRANCH_ALLOWLIST: dict[str, str] = {
     "dashboard/backend/domain/analytics/states.py": (
         "AnalyticsStateStore dialect-branches over the already-twinned "
         "AnalyticsStore/PostgresAnalyticsStore base_store for the legacy "
-        "user_analytics_snapshots table, not a store of its own. Admin "
-        "layer redesign PR A (docs/superpowers/specs/"
-        "2026-09-15-admin-layer-redesign-design.md §6.5) deletes the "
-        "five-state columns and repair path this class serves, which "
-        "removes or shrinks this branch -- tracked there, not in PR T."
+        "user_analytics_snapshots table, not a store of its own -- the "
+        "branched methods also read users (get_user; that table belongs to "
+        "another registered twin, UserStore/PostgresUserStore, so this is a "
+        "cross-domain read, not a missing extraction) and, via "
+        "list_stale_user_ids, analytics_subject_settings and "
+        "user_lifecycle_daily_snapshots. Admin layer redesign PR A/PR B "
+        "(docs/superpowers/specs/2026-09-15-admin-layer-redesign-design.md "
+        "§6.5) deletes the five-state columns and repair path this class "
+        "serves, which removes or shrinks this branch -- tracked there, not "
+        "in PR T."
     ),
     "dashboard/backend/domain/analytics/rollups.py": (
         "AnalyticsRollupStore dialect-branches over the already-twinned "
@@ -298,7 +304,8 @@ def test_dialect_branches_outside_a_registered_twin_are_allowlisted():
     file, so test_every_postgres_twin_module_is_registered above cannot see
     it -- that test starts from files on disk, and there is no second file
     for a branch like this. This test starts from the branch instead, across
-    every non-test module, and requires each hit to be named here.
+    every non-test module under ``dashboard/backend``, and requires each hit
+    to be named here.
 
     ValueAnalyticsStore had 21 such branches until PR T split it into a real
     twin. Nothing before this test would have caught it going in, and
@@ -1010,6 +1017,18 @@ def test_postgres_twin_schema_columns_match_sqlite(
     (REAL/DOUBLE PRECISION, INTEGER/BOOLEAN, TIMESTAMP/TEXT).
     """
     if postgres_cls in _NO_OWN_DDL_TWINS:
+        sqlite_ddl = _parse_ddl(
+            _module_source_path(sqlite_mod).read_text(encoding="utf-8")
+        ).declared
+        postgres_ddl = _parse_ddl(
+            _module_source_path(postgres_mod).read_text(encoding="utf-8")
+        ).declared
+        assert not sqlite_ddl and not postgres_ddl, (
+            f"_NO_OWN_DDL_TWINS exempts {postgres_cls} as owning no DDL, but "
+            f"CREATE TABLE was parsed from it (sqlite={sorted(sqlite_ddl)} "
+            f"postgres={sorted(postgres_ddl)}). Remove the entry so the column "
+            f"parity check runs."
+        )
         pytest.skip(_NO_OWN_DDL_TWINS[postgres_cls])
     sqlite_path = _module_source_path(sqlite_mod)
     postgres_path = _module_source_path(postgres_mod)

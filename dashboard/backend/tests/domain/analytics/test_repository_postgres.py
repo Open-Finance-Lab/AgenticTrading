@@ -247,6 +247,7 @@ def test_postgres_user_value_projection_round_trip(
     value_store.save_projection_job(job)
 
     assert value_store.get_current_snapshot(user_id) == snapshot
+    assert value_store.list_current_snapshots([user_id]) == {user_id: snapshot}
     assert value_store.list_daily_snapshots(
         start=NOW.date(),
         end=NOW.date() + timedelta(days=1),

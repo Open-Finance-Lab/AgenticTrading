@@ -59,6 +59,15 @@ class PostgresValueAnalyticsStore:
         agent_base: Any | None = None,
         run_base: Any | None = None,
     ) -> None:
+        # The `or analytics_store` fallback is the *SQLite* module singleton
+        # when no Postgres URL is configured, so a bare
+        # `PostgresValueAnalyticsStore()` would run `%s` queries through
+        # sqlite3. It exists only so this constructor's signature matches the
+        # SQLite twin's (test_postgres_twin_signatures_match_sqlite and
+        # test_postgres_value_analytics_store_matches_sqlite_public_surface
+        # both pin it) -- build this twin only through
+        # build_value_analytics_store(), which always resolves a real
+        # Postgres base before constructing it.
         self.analytics_base = analytics_base or analytics_store
         if credits_base is None:
             from dashboard.backend.domain.credits.repository import credits_store
