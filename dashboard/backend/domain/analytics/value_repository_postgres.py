@@ -59,16 +59,23 @@ class PostgresValueAnalyticsStore:
         agent_base: Any | None = None,
         run_base: Any | None = None,
     ) -> None:
-        # The `or analytics_store` fallback is the *SQLite* module singleton
-        # when no Postgres URL is configured, so a bare
-        # `PostgresValueAnalyticsStore()` would run `%s` queries through
-        # sqlite3. It exists only so this constructor's signature matches the
-        # SQLite twin's (test_postgres_twin_signatures_match_sqlite and
-        # test_postgres_value_analytics_store_matches_sqlite_public_surface
-        # both pin it) -- build this twin only through
-        # build_value_analytics_store(), which always resolves a real
-        # Postgres base before constructing it.
+        # `or analytics_store` keeps this signature identical to the SQLite
+        # twin's. The parity tests do pin the signatures, but they compare
+        # *public* methods only -- both build their name list from `dir(cls)`
+        # and skip `name.startswith("_")` -- so neither sees `__init__`, and a
+        # pinned signature would say nothing about this body in any case.
+        # Unguarded, the fallback resolves to whichever dialect the module
+        # singleton happens to be: Postgres on prod, SQLite locally and under
+        # pytest, where every `%s` query below would reach sqlite3 and fail at
+        # the first cursor rather than here. Hence the explicit check.
         self.analytics_base = analytics_base or analytics_store
+        if not hasattr(self.analytics_base, "database_url"):
+            raise TypeError(
+                "PostgresValueAnalyticsStore requires a PostgreSQL analytics "
+                "base, but the resolved base exposes no database_url. Build "
+                "the pair through build_value_analytics_store(), which "
+                "resolves the base and returns the matching twin."
+            )
         if credits_base is None:
             from dashboard.backend.domain.credits.repository import credits_store
 

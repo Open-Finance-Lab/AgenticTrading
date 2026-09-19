@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import json
 from datetime import date, datetime, timedelta, timezone
-from typing import Any, Literal, Mapping, Sequence
+from typing import TYPE_CHECKING, Any, Literal, Mapping, Sequence, TypeAlias, Union
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -32,6 +32,9 @@ from .lifecycle import (
 )
 from .repository import analytics_store
 from .repository_common import positive_limit, positive_user_id, utc_iso
+
+if TYPE_CHECKING:  # the twin imports from this module; runtime would cycle
+    from .value_repository_postgres import PostgresValueAnalyticsStore
 
 
 MAX_USER_BATCH = 500
@@ -323,7 +326,22 @@ class ValueAnalyticsStore:
         agent_base: Any | None = None,
         run_base: Any | None = None,
     ) -> None:
+        # The mirror of PostgresValueAnalyticsStore's guard, and the reason
+        # this class needs one at all: until PR T it served both dialects, so
+        # `ValueAnalyticsStore(postgres_base)` was correct and is still the
+        # natural thing to write. It now emits `?` placeholders, which raise
+        # psycopg.errors.SyntaxError on the Postgres deployment *only* -- CI
+        # and local runs are both SQLite, so a caller that reintroduced it
+        # would keep a green suite all the way to prod.
         self.analytics_base = analytics_base or analytics_store
+        if hasattr(self.analytics_base, "database_url"):
+            raise TypeError(
+                "ValueAnalyticsStore is the SQLite twin and emits `?` "
+                "placeholders, but the resolved analytics base is "
+                "PostgreSQL. Build the pair through "
+                "build_value_analytics_store(), which resolves the base and "
+                "returns the matching twin."
+            )
         if credits_base is None:
             from dashboard.backend.domain.credits.repository import credits_store
 
@@ -1031,13 +1049,30 @@ class ValueAnalyticsStore:
         return job
 
 
+#: Either value-analytics twin, as the factory returns and every caller holds.
+#:
+#: The two classes share one public surface by construction --
+#: test_store_twin_parity.py pins the method set, the signatures and the
+#: bodies declared identical -- but they are separate classes, so a bare
+#: ``ValueAnalyticsStore`` annotation is wrong for half the callers and
+#: dropping the annotation entirely (which the twin split did) loses the
+#: interface just as PR A is about to add ~12 methods to both sides.
+#:
+#: A Protocol would also type this, and is the wrong tool while both twins
+#: are concrete and enumerable: it would have to restate every method and
+#: then drift from them silently.
+ValueAnalyticsStoreLike: TypeAlias = Union[
+    ValueAnalyticsStore, "PostgresValueAnalyticsStore"
+]
+
+
 def build_value_analytics_store(
     analytics_base: Any | None = None,
     credits_base: Any | None = None,
     provider_base: Any | None = None,
     agent_base: Any | None = None,
     run_base: Any | None = None,
-):
+) -> ValueAnalyticsStoreLike:
     """Pick the SQLite or PostgreSQL value-analytics twin.
 
     Mirrors ``repository.py``'s ``_build_analytics_store()``: the decision is
@@ -1075,5 +1110,6 @@ __all__ = [
     "UserLifecycleDailySnapshot",
     "UserValueSnapshot",
     "ValueAnalyticsStore",
+    "ValueAnalyticsStoreLike",
     "build_value_analytics_store",
 ]
