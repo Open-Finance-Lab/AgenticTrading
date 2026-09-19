@@ -118,6 +118,12 @@ _TWINS = [
         "dashboard.backend.database_postgres",
         "PostgresBacktestDatabase",
     ),
+    (
+        "dashboard.backend.domain.analytics.value_repository",
+        "ValueAnalyticsStore",
+        "dashboard.backend.domain.analytics.value_repository_postgres",
+        "PostgresValueAnalyticsStore",
+    ),
 ]
 
 _TWIN_IDS = [pg_cls for _, _, _, pg_cls in _TWINS]
@@ -137,6 +143,19 @@ def test_twins_registry_has_no_duplicate_pairs():
         f"_TWINS has {len(_TWINS) - len(set(_TWINS))} duplicate tuple(s); "
         "each store pair belongs in the registry exactly once."
     )
+
+
+def test_value_analytics_store_pair_is_registered():
+    """PR T's whole point: a store with no *_postgres.py file is invisible
+    to test_every_postgres_twin_module_is_registered, which starts from
+    files on disk. This asserts the registry side directly.
+    """
+    assert (
+        "dashboard.backend.domain.analytics.value_repository",
+        "ValueAnalyticsStore",
+        "dashboard.backend.domain.analytics.value_repository_postgres",
+        "PostgresValueAnalyticsStore",
+    ) in _TWINS
 
 
 # tests/ -> backend/ -> dashboard/ -> repo root
@@ -316,6 +335,32 @@ def _name(raw: str) -> str:
     return raw.strip().strip('"').lower()
 _SQL_STRING = re.compile(r"'(?:[^']|'')*'")
 _IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+# Twins whose class owns no table of its own: it reads and writes tables
+# declared by a *different*, already-registered twin through an injected
+# connection, rather than declaring CREATE TABLE/CREATE INDEX itself. For
+# such a pair, test_postgres_twin_schema_columns_match_sqlite's non-vacuity
+# assert ("no CREATE TABLE parsed from ...") would fail on every entry, not
+# because a column drifted but because there is nothing to parse -- exactly
+# the false positive that assert exists to prevent for a store that *does*
+# own tables. Each entry names which already-registered pair actually owns
+# the schema, so this cannot silently swallow a future twin that adds its
+# own DDL. The other three DDL-adjacent tests in this file
+# (test_ddl_parser_sees_every_create_index,
+# test_postgres_twin_indexes_a_migrated_column_only_after_adding_it,
+# test_postgres_twin_repeats_every_sqlite_lazy_migration) need no matching
+# entry: each is vacuously true for zero DDL statements by construction, and
+# that vacuity is not a blind spot the way the non-vacuity assert would be.
+_NO_OWN_DDL_TWINS: dict[str, str] = {
+    "PostgresValueAnalyticsStore": (
+        "ValueAnalyticsStore/PostgresValueAnalyticsStore own no CREATE TABLE "
+        "or CREATE INDEX: both read and write user_analytics_snapshots, "
+        "user_lifecycle_daily_snapshots and analytics_projection_jobs "
+        "through an injected analytics_base connection, and that base is "
+        "AnalyticsStore/PostgresAnalyticsStore -- already a registered pair "
+        "above, whose own schema-column test covers those tables."
+    ),
+}
+
 # Tables a Postgres twin deliberately never creates, keyed by twin class name.
 # The default is that both twins declare the same tables -- a divergence is
 # normally the #227 bug -- so every entry needs its reason recorded here, and
@@ -829,6 +874,8 @@ def test_postgres_twin_schema_columns_match_sqlite(
     Compares column *names* only: types legitimately differ per dialect
     (REAL/DOUBLE PRECISION, INTEGER/BOOLEAN, TIMESTAMP/TEXT).
     """
+    if postgres_cls in _NO_OWN_DDL_TWINS:
+        pytest.skip(_NO_OWN_DDL_TWINS[postgres_cls])
     sqlite_path = _module_source_path(sqlite_mod)
     postgres_path = _module_source_path(postgres_mod)
     assert sqlite_path.is_file(), f"twin registry points at a missing {sqlite_path}"
