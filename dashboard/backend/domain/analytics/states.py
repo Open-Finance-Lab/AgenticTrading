@@ -23,7 +23,6 @@ from .rollups import AnalyticsRollupStore
 from .value_repository import (
     UserLifecycleDailySnapshot,
     UserValueSnapshot,
-    ValueAnalyticsStoreLike,
     build_value_analytics_store,
 )
 
@@ -551,7 +550,7 @@ def _calculate_user_value_snapshot(
     *,
     now: datetime,
     state_store: AnalyticsStateStore,
-    value_store: ValueAnalyticsStoreLike,
+    value_store,
 ) -> UserValueSnapshot:
     subject_id = positive_user_id(user_id)
     user = state_store.get_user(subject_id)
@@ -664,7 +663,7 @@ def calculate_user_value_snapshot(
     *,
     now: datetime | None = None,
     state_store: AnalyticsStateStore | None = None,
-    value_store: ValueAnalyticsStoreLike | None = None,
+    value_store=None,
 ) -> UserValueSnapshot:
     current = _require_utc(now or datetime.now(timezone.utc), "now")
     states = state_store or AnalyticsStateStore()
@@ -683,7 +682,7 @@ def recalculate_user_snapshots(
     *,
     now: datetime | None = None,
     state_store: AnalyticsStateStore | None = None,
-    value_store: ValueAnalyticsStoreLike | None = None,
+    value_store=None,
 ) -> tuple[UserAnalyticsSnapshot, UserValueSnapshot]:
     """Recalculate legacy and dual-axis projections from the same evidence."""
 
@@ -748,7 +747,7 @@ def repair_stale_value_snapshots(
     now: datetime | None = None,
     limit: int = 100,
     state_store: AnalyticsStateStore | None = None,
-    value_store: ValueAnalyticsStoreLike | None = None,
+    value_store=None,
 ) -> int:
     current = _require_utc(now or datetime.now(timezone.utc), "now")
     states = state_store or AnalyticsStateStore()

@@ -29,7 +29,6 @@ from .value_repository import (
     CommercialValueFact,
     UserLifecycleDailySnapshot,
     UserValueSnapshot,
-    ValueAnalyticsStoreLike,
     build_value_analytics_store,
 )
 from dashboard.backend.domain.user_groups import (
@@ -482,7 +481,7 @@ class ValueAnalyticsQueryService:
         *,
         store: Any = analytics_store,
         user_store: Any | None = None,
-        value_store: ValueAnalyticsStoreLike | None = None,
+        value_store=None,
         query_store: AnalyticsQueryStore | None = None,
         legacy_service: AnalyticsQueryService | None = None,
     ) -> None:
