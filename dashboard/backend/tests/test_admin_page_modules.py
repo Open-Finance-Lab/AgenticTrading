@@ -10,6 +10,11 @@ badge, and none of the D15 display fields read.
 import re
 from pathlib import Path
 
+from dashboard.backend.domain.user_groups import (
+    DEFAULT_USER_GROUP,
+    USER_GROUP_LABELS,
+    USER_GROUPS,
+)
 from dashboard.backend.tests._frontend_source import fn_body, strip_comments
 
 FRONTEND = Path(__file__).resolve().parents[2] / "frontend"
@@ -256,3 +261,55 @@ def test_renderers_can_be_lifted_with_fn_body():
         fn_body(signature, MODULES["admin-users.js"])
     body = fn_body("function renderTiles(", MODULES["admin-live.js"])
     assert "max_active_dashboard_backtests" in body
+
+
+def test_client_group_taxonomies_match_the_python_source_of_truth():
+    """Six hand-maintained copies across four files; this keeps them one list.
+
+    /admin and /app have no build step, so the taxonomy in
+    backend/domain/user_groups.py is re-typed in admin-shell.js (filter state),
+    admin-credits.js (the editor select and its fallback), admin-overview.js
+    (two swatch maps) and admin.html (the filter markup). Nothing at runtime
+    notices when one copy is missed: a stale option writes a value the API
+    rejects, a stale swatch map silently paints a slice steel. The pairing is
+    asserted here -- the same move test_admin_page_shell.py makes for
+    CSRF_FAILURE_CODE.
+
+    Read off CODE (comments stripped), because several of those copies carry a
+    comment naming the groups they mirror.
+    """
+    expected = list(USER_GROUPS)
+    expected_labels = [USER_GROUP_LABELS[group] for group in expected]
+
+    shell_list = re.search(r"const USER_GROUPS = \[([^\]]*)\];", CODE["admin-shell.js"])
+    assert shell_list, "admin-shell.js no longer declares USER_GROUPS"
+    assert re.findall(r"'([^']+)'", shell_list.group(1)) == expected
+
+    options = re.search(
+        r"const USER_GROUP_OPTIONS = Object\.freeze\(\[(.*?)\]\);",
+        CODE["admin-credits.js"],
+        re.S,
+    )
+    assert options, "admin-credits.js no longer declares USER_GROUP_OPTIONS"
+    pairs = re.findall(r"\['([^']+)', '([^']+)'\]", options.group(1))
+    assert [value for value, _ in pairs] == expected
+    assert [label for _, label in pairs] == expected_labels
+    # The fallback is a named group, not "the first option": coercing to
+    # expected[0] would file every unclassified account as Internal.
+    assert f"const DEFAULT_USER_GROUP = '{DEFAULT_USER_GROUP}';" in CODE["admin-credits.js"]
+
+    for name in ("GROUP_CLASSES", "GROUP_COLORS"):
+        block = re.search(
+            rf"const {name} = Object\.freeze\(\{{(.*?)\}}\);",
+            CODE["admin-overview.js"],
+            re.S,
+        )
+        assert block, f"admin-overview.js no longer declares {name}"
+        assert re.findall(r"(\w+):", block.group(1)) == expected, name
+
+    select = re.search(r'<select id="filterGroup"[^>]*>(.*?)</select>', ADMIN_HTML, re.S)
+    assert select, "admin.html no longer ships the group filter"
+    markup = re.findall(r'<option value="([^"]*)">([^<]*)</option>', select.group(1))
+    assert markup[0] == ("", "All sources"), markup[0]
+    assert [value for value, _ in markup[1:]] == expected
+    assert [label for _, label in markup[1:]] == expected_labels

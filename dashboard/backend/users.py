@@ -23,7 +23,11 @@ import bcrypt
 
 from dashboard.backend.database import DB_PATH
 from dashboard.backend.db_url import describe_database_url
-from dashboard.backend.domain.user_groups import coerce_user_group, parse_user_group
+from dashboard.backend.domain.user_groups import (
+    DEFAULT_USER_GROUP,
+    coerce_user_group,
+    parse_user_group,
+)
 from dashboard.backend.session_tokens import (
     absolute_expiry,
     hash_session_token,
@@ -757,6 +761,18 @@ class UserStore:
             cursor.execute(
                 "ALTER TABLE users ADD COLUMN user_group TEXT NOT NULL DEFAULT 'unknown'"
             )
+        # Repair any row holding a value parse_user_group() rejects. Reads
+        # coerce, so such a row is invisible on screen and the only thing that
+        # would ever fix it is an admin happening to re-save that one account.
+        # NOT IN the current taxonomy rather than a list of known-bad strings,
+        # so hand-edited junk -- and any future retirement of a group -- lands
+        # here too. Idempotent, and a no-op on every boot after the first.
+        cursor.execute(
+            """
+            UPDATE users SET user_group = 'unknown'
+            WHERE user_group NOT IN ('internal', 'invited', 'organic', 'competition', 'partner', 'unknown')
+            """
+        )
         cursor.execute(
             """
             CREATE UNIQUE INDEX IF NOT EXISTS idx_users_discord_user_id
@@ -846,10 +862,21 @@ class UserStore:
         try:
             cursor.execute(
                 """
-                INSERT INTO users (email, display_name, password_hash, role)
-                VALUES (?, ?, ?, 'user')
+                INSERT INTO users (email, display_name, password_hash, role, user_group)
+                VALUES (?, ?, ?, 'user', ?)
                 """,
-                (normalized_email, display_name.strip(), hash_password(password)),
+                (
+                    normalized_email,
+                    display_name.strip(),
+                    hash_password(password),
+                    # Named explicitly rather than left to the column DEFAULT.
+                    # ALTER TABLE ... ADD COLUMN is skipped outright once the
+                    # column exists, so it can never restate a default: the
+                    # deployed table's catalog keeps whatever it was created
+                    # with, forever, however this file reads. Saying the value
+                    # here is what makes the Python constant the owner.
+                    DEFAULT_USER_GROUP,
+                ),
             )
             conn.commit()
             user_id = cursor.lastrowid

@@ -26,7 +26,7 @@ EXPECTED_SCRIPTS = [
     "js/admin-users.js?v=1",
     "js/admin-providers.js?v=1",
     # The absorbed credits console (design N2/PR2).
-    "js/admin-credits.js?v=3",
+    "js/admin-credits.js?v=4",
 ]
 
 # This guard's whole job is "no inline script anywhere in this page", so a

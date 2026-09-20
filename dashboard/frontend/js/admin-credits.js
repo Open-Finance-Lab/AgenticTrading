@@ -8,6 +8,13 @@
 
   const { formatCredits, formatCreditsMicro } = window.CreditFormat;
   const ADMIN_CREDITS_USERS_PAGE_SIZE = 25;
+  // Must equal USER_GROUPS / USER_GROUP_LABELS in backend/domain/user_groups.py,
+  // in that order. A second literal rather than an import because /admin and
+  // /app have no build step; the pairing is held by test_admin_page_modules.py
+  // (test_client_group_taxonomies_match_the_python_source_of_truth), which reads
+  // this file, admin-shell.js, admin-overview.js and admin.html against the
+  // Python taxonomy. DEFAULT_USER_GROUP mirrors the Python constant of the same
+  // name -- the group a row falls back to, not merely the first option.
   const USER_GROUP_OPTIONS = Object.freeze([
     ['internal', 'Internal'],
     ['invited', 'Invited'],
@@ -16,6 +23,7 @@
     ['partner', 'Partner'],
     ['unknown', 'Unknown'],
   ]);
+  const DEFAULT_USER_GROUP = 'unknown';
 
   const state = {
     initialized: false,
@@ -188,7 +196,7 @@
     const normalized = String(value || '').trim().toLowerCase();
     return USER_GROUP_OPTIONS.some(([optionValue]) => optionValue === normalized)
       ? normalized
-      : 'unknown';
+      : DEFAULT_USER_GROUP;
   }
 
   function userGroupLabel(value) {

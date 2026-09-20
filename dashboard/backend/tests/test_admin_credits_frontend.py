@@ -144,5 +144,5 @@ def test_admin_tabs_have_two_tabs_in_usage_order_and_legacy_alias():
 
 
 def test_admin_visual_assets_use_fresh_cache_versions():
-    assert 'js/admin-credits.js?v=7' in APP_HTML
+    assert 'js/admin-credits.js?v=8' in APP_HTML
     assert 'js/admin-tabs.js?v=12' in APP_HTML

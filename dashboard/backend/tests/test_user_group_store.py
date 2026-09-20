@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+from dashboard.backend.domain.user_groups import DEFAULT_USER_GROUP
 from dashboard.backend.users import MAX_CREDITS_CAP, UserStore
 
 
@@ -51,12 +52,71 @@ def test_existing_users_table_gets_unknown_group_column(tmp_path: Path):
     assert column["dflt_value"] == "'unknown'"
 
 
-def test_new_users_default_to_unknown_only_in_admin_projection(store: UserStore):
+@pytest.mark.parametrize("junk", ["organic ", "PARTNER", "friends", ""])
+def test_rows_holding_an_unparseable_group_are_repaired_on_the_next_boot(
+    tmp_path: Path, junk: str
+):
+    """The data half of making the Python constant the owner of this column.
+
+    Without this repair the column keeps a value parse_user_group() rejects, and
+    the only thing that would ever fix it is an admin happening to re-save that
+    one account. Reads coerce, so the bad row is invisible on screen -- which is
+    exactly why it has to be repaired in the store rather than left to the read
+    path.
+    """
+    path = tmp_path / "junk.db"
+    UserStore(db_path=path)
+    conn = sqlite3.connect(path)
+    conn.execute(
+        "INSERT INTO users (id, email, display_name, password_hash, role, user_group) "
+        "VALUES (1, 'junk@example.test', 'Junk', 'hash', 'user', ?)",
+        (junk,),
+    )
+    conn.commit()
+    conn.close()
+
+    reopened = UserStore(db_path=path)
+
+    stored = reopened._get_connection()
+    try:
+        row = stored.execute("SELECT user_group FROM users WHERE id = 1").fetchone()
+    finally:
+        stored.close()
+    assert row["user_group"] == DEFAULT_USER_GROUP
+
+
+def test_a_canonical_group_survives_the_repair(tmp_path: Path):
+    path = tmp_path / "kept.db"
+    store = UserStore(db_path=path)
+    user = store.create_user("kept@example.test", "Kept", "SecurePass1!")
+    store.apply_admin_patch(user["id"], user_group="competition")
+
+    reopened = UserStore(db_path=path)
+    assert reopened.get_user_admin(user["id"])["user_group"] == "competition"
+
+
+def test_new_users_are_written_into_the_default_group_not_left_to_the_column(
+    store: UserStore,
+):
+    """create_user names the group explicitly (see users.py for why).
+
+    Reading the stored row rather than the admin projection is the point: the
+    projection coerces, so it would report the default even if the INSERT had
+    written nothing and a stale column DEFAULT had supplied something else.
+    """
     created = store.create_user("group@example.test", "Group", "SecurePass1!")
 
     assert "user_group" not in created
-    assert store.get_user_admin(created["id"])["user_group"] == "unknown"
-    assert store.list_users_admin()[0]["user_group"] == "unknown"
+    conn = store._get_connection()
+    try:
+        row = conn.execute(
+            "SELECT user_group FROM users WHERE id = ?", (created["id"],)
+        ).fetchone()
+    finally:
+        conn.close()
+    assert row["user_group"] == DEFAULT_USER_GROUP
+    assert store.get_user_admin(created["id"])["user_group"] == DEFAULT_USER_GROUP
+    assert store.list_users_admin()[0]["user_group"] == DEFAULT_USER_GROUP
 
 
 def test_store_patch_updates_group_and_entitlements_atomically(store: UserStore):
