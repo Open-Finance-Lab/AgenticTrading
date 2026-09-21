@@ -3150,10 +3150,10 @@ Schema DDL per store, from the `<store> backend: schema init …` lines. The **p
 
 | child schema DDL at import (Task 6 Step 8) | before — `origin/main`, probe arg `before` | after — this branch, probe arg `after` |
 |---|---|---|
-| twins constructed | 6 of 11 guarded | _(count the `schema init skipped` lines)_ |
-| statements | 107 | |
-| `_init_schema` calls | 6 | |
-| `db_url.schema_init_seconds()` | n/a (pre-Task-5 build) | |
+| twins constructed | 6 of 11 guarded | **6** (counted from the `schema init skipped` lines, not inferred from the statement count) |
+| statements | 107 | **0** |
+| `_init_schema` calls | 6 | **0** |
+| `db_url.schema_init_seconds()` | n/a (pre-Task-5 build) | **0.0000** |
 
 The two probe arguments are not symmetric and must not be made so: `before` pops `ATL_BACKTEST_WORKER`, `after` sets it to `1`. `origin/main` has no guard to arm, so the flag there would change nothing while implying it had; this branch has nothing *but* the flag to distinguish a child from a parent. And the `twins constructed` cell of the after column is read off the six skip lines, not off the statement count — the counter keys on frames named `_init_schema`, so a twin that skipped its DDL and a twin that was never built produce the same `0`.
 
