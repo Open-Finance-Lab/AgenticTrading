@@ -9,7 +9,6 @@ from uuid import uuid4
 import pytest
 
 from dashboard.backend.domain.analytics.metrics import AnalyticsMetricFilters
-import dashboard.backend.domain.analytics.repository as analytics_repository
 from dashboard.backend.domain.analytics.models import (
     ALLOWED_ERROR_CATEGORIES,
     AnalyticsEventRecord,
@@ -652,8 +651,7 @@ def test_sqlite_migration_fires_for_a_category_no_sentinel_was_bumped_for(
     # is what a new category actually looks like to the migration.
     ALLOWED_ERROR_CATEGORIES.add(future)
     monkeypatch.setattr(
-        analytics_repository,
-        "ANALYTICS_SQLITE_DDL",
+        "dashboard.backend.domain.analytics.repository.ANALYTICS_SQLITE_DDL",
         ANALYTICS_SQLITE_DDL.replace(
             "'internal_error'", f"'internal_error', '{future}'"
         ),

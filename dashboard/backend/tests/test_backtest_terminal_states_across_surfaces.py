@@ -16,6 +16,7 @@ this PR reached two of the three.
 """
 
 import re
+from html.parser import HTMLParser
 
 import pytest
 
@@ -32,6 +33,35 @@ DISCORD_SOURCE = (BACKEND / "integrations" / "discord_bot.py").read_text(
 STRATEGY_HTML = (FRONTEND / "strategy.html").read_text(encoding="utf-8")
 
 
+class _InlineScriptCollector(HTMLParser):
+    """Collect the bodies of inline ``<script>`` elements.
+
+    A parser rather than a regex. `<script>(.*?)</script>` is the shape
+    CodeQL's `py/bad-tag-filter` exists to flag -- it misses `<SCRIPT>`, misses
+    a tag carrying attributes, and is defeated by a `>` inside one -- and the
+    stdlib parser is shorter than a regex that would satisfy the rule while
+    being correct by construction instead of by patch. `HTMLParser` lowercases
+    tag names and enters CDATA mode for `script`, so the body arrives raw.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._depth = 0
+        self.bodies: list[str] = []
+
+    def handle_starttag(self, tag, attrs):  # noqa: D102 - HTMLParser hook
+        if tag == "script":
+            self._depth += 1
+
+    def handle_endtag(self, tag):  # noqa: D102 - HTMLParser hook
+        if tag == "script" and self._depth:
+            self._depth -= 1
+
+    def handle_data(self, data):  # noqa: D102 - HTMLParser hook
+        if self._depth:
+            self.bodies.append(data)
+
+
 def _strategy_poll_loop() -> str:
     """The `strategy.html` poll loop, comments stripped.
 
@@ -39,9 +69,10 @@ def _strategy_poll_loop() -> str:
     beside it; an un-stripped scan would be satisfied by the prose explaining
     the fix and would go on passing if the code were reverted.
     """
-    scripts = re.findall(r"<script>(.*?)</script>", STRATEGY_HTML, re.DOTALL)
-    assert scripts, "strategy.html has no inline <script> block"
-    return strip_comments("\n".join(scripts))
+    collector = _InlineScriptCollector()
+    collector.feed(STRATEGY_HTML)
+    assert collector.bodies, "strategy.html has no inline <script> body"
+    return strip_comments("\n".join(collector.bodies))
 
 
 def _discord_watcher_body() -> str:
