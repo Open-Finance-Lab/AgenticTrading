@@ -7906,11 +7906,92 @@ function resolveProgressAgeSeconds(running) {
  * "stuck" -- we know the file is old, not that the run died, and a long model
  * step looks exactly like this.
  */
-function formatProgressStaleness(secondsSinceUpdate) {
+function formatProgressStaleness(secondsSinceUpdate, phase) {
     const gap = Number(secondsSinceUpdate);
     if (!Number.isFinite(gap) || gap < BACKTEST_STALE_SECONDS) return null;
     const minutes = Math.floor(gap / 60);
-    return `No progress for ${minutes}m — long model steps can do this.`;
+    // The cause clause names what is actually running. Declared inside the
+    // function rather than beside BACKTEST_PHASE_LABELS on purpose: it has
+    // exactly one reader, and fn_body carries it into every node harness for
+    // free -- a second top-level const would have to be hand-added to five
+    // script builders, which is the ReferenceError this task already pays off
+    // once. hasOwnProperty for the same reason formatBacktestPhase uses it:
+    // `causes['constructor']` is a truthy function on a plain literal, and
+    // this string goes straight into the sentence.
+    const causes = {
+        loading_bars: 'a wide bar window can do this',
+        indicators: 'a wide bar window can do this',
+        saving: 'writing results can do this',
+    };
+    const named =
+        typeof phase === 'string'
+        && Object.prototype.hasOwnProperty.call(causes, phase);
+    const cause = named ? causes[phase] : 'long model steps can do this';
+    return `No progress for ${minutes}m — ${cause}.`;
+}
+
+/**
+ * Short labels for the pre-loop phases the child publishes (engine.py
+ * PROGRESS_PHASES). The Backtest panel prints the server's own sentence; the
+ * agent card has one short line, so it gets these. The phase *names* are the
+ * contract between the two; each surface owns only its wording. `running` is
+ * empty on purpose: a step count owns that line. `starting` is empty for a
+ * different reason -- nothing publishes it. The child's first write happens
+ * inside load_data, after the imports that dominate the launch, so `starting`
+ * exists only as the retroactive gap name in `phases[]`. Listed rather than
+ * deleted so this table still enumerates every phase name the engine knows;
+ * empty so advanceBacktestProgress keeps refusing such a tick and the card
+ * keeps the startup-staleness notice, which is the true sentence there.
+ */
+const BACKTEST_PHASE_LABELS = {
+    starting: '',
+    loading_bars: 'Loading market data',
+    indicators: 'Calculating indicators',
+    first_decision: 'Waiting on first decision',
+    running: '',
+    saving: 'Saving results',
+};
+
+function formatBacktestPhase(phase) {
+    // hasOwnProperty, not `LABELS[phase] || ''`. A plain object literal answers
+    // for every key on Object.prototype, and `LABELS['constructor']` is a
+    // *function* -- truthy, so advanceBacktestProgress's phase guard would
+    // accept the tick and deriveRunningProgress would interpolate a function
+    // body into the card's detail line. The phase arrives from a JSON file
+    // written by a subprocess, so "no caller would pass that" is not an
+    // argument available here.
+    if (typeof phase !== 'string') return '';
+    return Object.prototype.hasOwnProperty.call(BACKTEST_PHASE_LABELS, phase)
+        ? BACKTEST_PHASE_LABELS[phase]
+        : '';
+}
+
+/**
+ * The Backtest panel's bar percentage, from the RAW /backtest/status payload.
+ *
+ * One owner because there are two callers -- attachToLiveBacktest and the 1s
+ * poller -- and they were byte-identical inline copies, which is how both came
+ * to carry the same defect: they gated on `total > 0` and never on `step > 0`.
+ * Since Task 1 the progress file exists before the first step, so
+ * `first_decision` publishes `{step: 0, total_steps: N}`; the old test returned
+ * a finite 0, updateBacktestRunProgress takes any finite percentage as
+ * authoritative over its elapsed-based creep, and the bar snapped to a flat 0%
+ * and stopped moving until the first real step. An empty track with the
+ * indeterminate sweep switched off reads as broken, which is the same judgement
+ * deriveRunningProgress already encodes for the card (`determinate` requires
+ * `step > 0`) -- this is that rule, on the surface that had its own copy.
+ *
+ * Deliberately NOT shared with deriveRunningProgress: that one reads the
+ * *folded* entry (`totalSteps`, camelCase) and also owns `pct`, the ETA and
+ * `determinate`. Same rule, two payload shapes; merging them would mean one
+ * function that has to know which shape it was handed.
+ */
+function backtestStepPercent(progress) {
+    const step = Number(progress?.step);
+    const total = Number(progress?.total_steps);
+    return Number.isFinite(step) && step > 0 && Number.isFinite(total) && total > 0
+        ? (100 * step / total)
+        : null;
 }
 
 /**
@@ -7936,11 +8017,15 @@ function formatStartupStaleness(elapsedSeconds) {
 /** Whichever staleness notice applies to this running entry, or null. */
 function resolveRunningNotice(running) {
     const step = Number(running.step);
-    if (!Number.isFinite(step) || step <= 0) {
+    // A child that publishes phases rewrites the file at every transition, so
+    // its mtime ages exactly like a step's: a long phase reads as "No
+    // progress for Nm", which is the true statement. Only a child that has
+    // published nothing at all falls back to the elapsed-based notice.
+    if ((!Number.isFinite(step) || step <= 0) && !formatBacktestPhase(running.phase)) {
         return formatStartupStaleness(running.elapsedSeconds);
     }
     const age = resolveProgressAgeSeconds(running);
-    return age === null ? null : formatProgressStaleness(age);
+    return age === null ? null : formatProgressStaleness(age, running.phase);
 }
 
 /**
@@ -7960,7 +8045,50 @@ function resolveRunningNotice(running) {
 function advanceBacktestProgress(previous, progress, now) {
     const step = Number(progress?.step);
     const total = Number(progress?.total_steps);
-    if (!Number.isFinite(step) || step <= 0) return null;
+    if (!Number.isFinite(step) || step <= 0) {
+        // A pre-loop phase folds so the card can name it, but without an ETA
+        // anchor: firstStep/firstStepAt stay absent so the first real step
+        // still sets the rate, and the launch-biased ETA this branch exists
+        // to prevent cannot return. A payload with no nameable phase is the
+        // pre-confirmation entry this function has always refused.
+        if (!formatBacktestPhase(progress?.phase)) return null;
+        // A late phase tick -- `saving`, arriving after the loop has
+        // published -- must not be folded as a fresh start. This function
+        // *replaces* the stored entry, and a bare phase payload carries step 0
+        // and an empty curve, so accepting it wholesale blanks the sparkline,
+        // the equity label and the determinate bar at the finish line of every
+        // run. Carry the phase onto what is already there instead. The age is
+        // refreshed because the file really was just rewritten -- keeping the
+        // old one would start the staleness notice against a fresh write.
+        //
+        // Task 1 already stops the engine emitting such a payload (a terminal
+        // phase write carries the loop's numbers forward). This is the second
+        // lock, for any other writer, and the two are not interchangeable: the
+        // Backtest panel's own bar is computed from the raw payload
+        // (`stepPct`, :8600 and :8432) and never reaches this function.
+        const previousStep = previous ? Number(previous.step) : NaN;
+        if (Number.isFinite(previousStep) && previousStep > 0) {
+            const lateAge = Number(progress?.progress_age_seconds);
+            return {
+                ...previous,
+                phase: String(progress.phase),
+                ageSeconds: Number.isFinite(lateAge) ? lateAge : null,
+                ageAt: now,
+            };
+        }
+        const phaseAge = Number(progress?.progress_age_seconds);
+        const phaseStartedAt = Number(progress?.phase_started_at);
+        return {
+            step: 0,
+            totalSteps: Number.isFinite(total) ? total : 0,
+            phase: String(progress.phase),
+            phaseStartedAt: Number.isFinite(phaseStartedAt) ? phaseStartedAt : null,
+            equityCurve: [],
+            openingEquity: null,
+            ageSeconds: Number.isFinite(phaseAge) ? phaseAge : null,
+            ageAt: now,
+        };
+    }
     const anchorStep = previous ? Number(previous.firstStep) : NaN;
     const anchorAt = previous ? Number(previous.firstStepAt) : NaN;
     const keepAnchor =
@@ -7988,6 +8116,15 @@ function advanceBacktestProgress(previous, progress, now) {
     return {
         step,
         totalSteps: total,
+        // Carried on the ordinary path too, so the card can name `saving` --
+        // which since Task 1 arrives with the loop's real step count rather
+        // than zeros, and therefore never takes the step-0 branch above.
+        // Spread conditionally rather than `phase: … ?? null`: a payload that
+        // names no phase must leave no key at all, which is what
+        // test_first_real_step_anchors_after_a_phase_tick pins, and which is
+        // also the honest render -- "this tick said nothing about the phase"
+        // is not "the phase is null".
+        ...(typeof progress?.phase === 'string' ? { phase: progress.phase } : null),
         equityCurve,
         // The run's opening equity, read *before* the tail trim above and
         // carried separately because the trim destroys it. The card's gain
@@ -8083,12 +8220,24 @@ function deriveRunningProgress(running) {
                   .filter(Boolean)
                   .join(' · ')
             : '',
-        stepLabel: determinate ? `${step}/${total}` : '',
+        stepLabel: determinate ? `${step}/${total}` : (total > 0 ? `0/${total}` : ''),
         // Deliberately excludes elapsed: the head already renders it one line
         // above, and printing "3:05" beside "3:05 elapsed" is the kind of noise
         // this change exists to remove. Built from raw values; escaping happens
         // once at each interpolation site.
-        detail: [determinate ? `${pct}%` : null, eta].filter(Boolean).join(' · '),
+        detail: [
+            // The label first, the percentage as its fallback -- not the other
+            // way round. `running`'s label is empty, so a mid-loop tick still
+            // reads `35%` exactly as today, and the pre-loop phases are
+            // indeterminate anyway. The case this ordering exists for is
+            // `saving`: since Task 1 it arrives carrying the loop's final
+            // numbers, so `determinate` is true and a percentage that has
+            // stopped moving would win the line for the whole
+            // baseline/persistence tail, beside a run that is plainly still
+            // working.
+            formatBacktestPhase(running.phase) || (determinate ? `${pct}%` : null),
+            eta,
+        ].filter(Boolean).join(' · '),
         notice: resolveRunningNotice(running) || '',
     };
 }
@@ -8548,15 +8697,18 @@ function attachToLiveBacktest(runId, progress = null, launchConfig = null) {
     if (progress) {
         updateLiveBacktestChart(progress);
         updateLiveTradingLog(progress);
-        const step = Number(progress.step);
-        const total = Number(progress.total_steps);
-        const stepPct = Number.isFinite(step) && Number.isFinite(total) && total > 0
-            ? (100 * step / total)
-            : null;
+        const stepPct = backtestStepPercent(progress);
         updateBacktestRunProgress({
             message: stepPct != null
-                ? `Backtest running… step ${step}/${total} (${Math.round(stepPct)}%)`
-                : 'Backtest is running…',
+                ? `Backtest running… step ${progress.step}/${progress.total_steps} (${Math.round(stepPct)}%)`
+                // The phase, not the bare generic, and not "step 0/49": this
+                // is the dropdown / deep-link / reload-mid-run path, so it is
+                // the first thing a returning user sees, and with the poller
+                // a second away it must not contradict what that writes next.
+                // `formatBacktestPhase` returns '' for `running` and
+                // `starting`, so the generic still covers every case that has
+                // no phase to name.
+                : (formatBacktestPhase(progress.phase) || 'Backtest is running…'),
             stepPct,
         });
     } else if (!alreadyLive) {
@@ -8716,11 +8868,7 @@ function ensureBacktestPolling() {
                     if (liveId && !liveBacktestRunId && (!pinnedRunId || pinnedRunId === liveId)) {
                         liveBacktestRunId = liveId;
                     }
-                    const step = Number(status.progress?.step);
-                    const total = Number(status.progress?.total_steps);
-                    const stepPct = Number.isFinite(step) && Number.isFinite(total) && total > 0
-                        ? (100 * step / total)
-                        : null;
+                    const stepPct = backtestStepPercent(status.progress);
                     // Assigned BEFORE refreshRunningAgentCards() below, which reads
                     // it through getAgentBacktestRunning(). Painting first would
                     // show the previous tick's step on the card while the Backtest

@@ -31,6 +31,7 @@ import subprocess
 import pytest
 
 from dashboard.backend.tests._frontend_source import (
+    APP_JS,
     FRONTEND,
     css_blocks,
     fn_body,
@@ -48,6 +49,8 @@ _REDUCED_MOTION = "@media (prefers-reduced-motion: reduce)"
 #: list is a ReferenceError, but a helper *stubbed* in one list quietly tests the
 #: stub. One list means every harness runs the same shipped code.
 _PROGRESS_HELPERS = (
+    "function formatBacktestPhase(",
+    "function backtestStepPercent(",
     "function formatBacktestEta(",
     "function resolveBacktestEta(",
     "function resolveProgressAgeSeconds(",
@@ -76,6 +79,7 @@ def _render(running_js: str) -> str:
     script = "\n".join(
         [
             js_const("BACKTEST_STALE_SECONDS"),
+            js_const("BACKTEST_PHASE_LABELS"),
             "function escapeHtml(s) { return String(s); }",
             "function renderAgentAllocatedCapitalHero() { return ''; }",
             "function formatBacktestElapsed(s) { return String(s); }",
@@ -294,6 +298,7 @@ def _patch(progress_js: str, then_progress_js: str | None = None, elapsed_ms: in
             js_const("BACKTEST_POLL_MAX_SECONDS"),
             js_const("BACKTEST_BUDGET_SECONDS"),
             js_const("BACKTEST_STALE_SECONDS"),
+            js_const("BACKTEST_PHASE_LABELS"),
             f"const MAP = {{a1: {{runId: 'run-1', startedAt: Date.now() - {elapsed_ms}}}}};",
             "let liveBacktestRunId = 'run-1';",
             "let liveBacktestProgress = null;",
@@ -448,6 +453,8 @@ def _advance(previous_js: str, progress_js: str, now: int) -> dict:
             # harness runs the shipped function, so it owes it the shipped
             # constant.
             js_const("LIVE_SPARK_MAX_POINTS"),
+            js_const("BACKTEST_PHASE_LABELS"),
+            fn_body("function formatBacktestPhase("),
             fn_body("function advanceBacktestProgress("),
             f"console.log(JSON.stringify("
             f"advanceBacktestProgress({previous_js}, {progress_js}, {now})));",
@@ -516,6 +523,7 @@ def _run_panel(options_js: str) -> dict:
             js_const("BACKTEST_POLL_MAX_SECONDS"),
             js_const("BACKTEST_BUDGET_SECONDS"),
             js_const("BACKTEST_STALE_SECONDS"),
+            js_const("BACKTEST_PHASE_LABELS"),
             "const els = {",
             "  backtestRunElapsed: { textContent: '' },",
             "  backtestRunProgressMessage: { textContent: '' },",
@@ -1029,3 +1037,130 @@ def test_poll_dispatch_takes_the_timeout_branch_before_the_error_branch():
         "the finishedFocused dispatch must test cancelled, then timed_out, then "
         "error -- the server sends no `error` key for either of the first two"
     )
+
+
+def test_card_names_the_phase_before_the_first_step():
+    html = _render(
+        "{step: 0, totalSteps: 49, phase: 'first_decision',"
+        " ageSeconds: 2, ageAt: Date.now(), elapsedSeconds: 40}"
+    )
+    assert "Waiting on first decision" in html
+    assert "0/49" in html
+    assert "Still starting up" not in html
+    # The `0/N` label must not drag the bar along with it. `determinate` is
+    # gated on `step > 0` (app.js:8005) and this task does not touch that, so
+    # the assertion holds structurally -- but the case that pins indeterminacy
+    # today, test_card_falls_back_to_indeterminate_before_the_first_step,
+    # predates this work and renders a payload with no phase and no bar count.
+    # The shape this task *introduces* -- phase set, total known, step 0 -- is
+    # unpinned without this line, and it is the shape the design's user-facing
+    # promise leans on. A determinate bar here is an empty track with the
+    # indeterminate sweep switched off (app.js:6299-6303): it reads as broken
+    # rather than as starting.
+    assert "is-determinate" not in html
+
+
+def test_card_keeps_the_startup_notice_when_nothing_was_published():
+    html = _render("{elapsedSeconds: 1000}")
+    assert "Still starting up" in html
+
+
+def test_a_long_phase_reads_as_no_progress_not_as_starting():
+    html = _render(
+        "{step: 0, totalSteps: 0, phase: 'loading_bars',"
+        " ageSeconds: 1000, ageAt: Date.now(), elapsedSeconds: 1010}"
+    )
+    assert "Loading market data" in html
+    assert "No progress for" in html
+    assert "Still starting up" not in html
+    # ...and does not blame a model that has not been called yet. This is the
+    # whole reason the notice takes the phase: routing a pre-model phase into
+    # "long model steps can do this" is the same unsupported claim the spec's
+    # copy rule bans ("The card never says 'deterministic'"), pointed the other
+    # way. A wedged Alpaca/iFinD fetch is the case that produces it.
+    assert "long model steps" not in html
+    assert "a wide bar window can do this" in html
+
+
+def test_the_starting_phase_has_no_label_so_the_card_keeps_the_startup_notice():
+    """The empty label is what keeps the honest sentence. Were `starting` ever
+    published with a label, the fold would accept it and resolveRunningNotice
+    would route off formatStartupStaleness ("Still starting up — no steps
+    reported after Nm", true during imports) onto formatProgressStaleness ("No
+    progress for Nm", false in every clause it could pick before the child has
+    even reached load_data)."""
+    html = _render("{elapsedSeconds: 1000, phase: 'starting'}")
+    assert "Still starting up" in html
+    assert "No progress for" not in html
+
+
+def test_the_card_names_saving_instead_of_a_frozen_percentage():
+    """`saving` now arrives carrying the loop's final numbers (Task 1), so the
+    card is determinate and `99%` would win the detail line -- a number that
+    has stopped moving, beside a run that is demonstrably still working. The
+    phase label outranks the percentage for exactly the phases that have one;
+    `running`'s label is empty, so a mid-loop tick still reads `35%`."""
+    html = _render(
+        "{step: 49, totalSteps: 49, phase: 'saving',"
+        " ageSeconds: 1, ageAt: Date.now(), elapsedSeconds: 600}"
+    )
+    assert "49/49" in html
+    assert "Saving results" in html
+
+
+def _step_percent(payload_js: str) -> object:
+    return _node(
+        fn_body("function backtestStepPercent(")
+        + f"console.log(JSON.stringify(backtestStepPercent({payload_js})));"
+    )
+
+
+def test_step_percent_is_null_until_a_real_step():
+    """`0/49` is a label, not a percentage.
+
+    Until Task 1 no progress file existed before the first step, so the two
+    raw-payload sites saw no `progress` at all, `Number(undefined)` was NaN,
+    and the panel bar kept its elapsed-based creep. Now `first_decision`
+    publishes `{step: 0, total_steps: 49}` -- and a `total > 0` test alone
+    returns a finite 0, which updateBacktestRunProgress takes as authoritative
+    over the creep (app.js:8228-8231) and writes as `width: 0%`. An empty
+    track with the sweep switched off is the *reads as broken* state the whole
+    task exists to avoid.
+    """
+    assert _step_percent("{step: 0, total_steps: 49}") is None
+    assert _step_percent("{step: 0, total_steps: 0}") is None
+    assert _step_percent("{}") is None
+    assert _step_percent("null") is None
+    # ...and a real step is unaffected: this helper replaced two identical
+    # inline copies, so the ordinary path must be byte-for-byte what it was.
+    assert _step_percent("{step: 84, total_steps: 240}") == 35.0
+
+
+def test_run_panel_keeps_the_elapsed_bar_at_step_zero():
+    """The consumer end of the same rule, driven through the real
+    updateBacktestRunProgress rather than asserted on the helper's return
+    value -- because the defect was never in the arithmetic, it was in what
+    the consumer does with a finite 0."""
+    panel = _run_panel(
+        "{elapsedSeconds: 60, message: 'Waiting on the first model decision…',"
+        " stepPct: backtestStepPercent({step: 0, total_steps: 49})}"
+    )
+    assert panel["width"] == "2%"  # 60 / 3600, the elapsed fallback
+    assert "step 0/49" not in panel["message"]
+
+
+def test_both_raw_payload_surfaces_share_the_step_percent_rule():
+    """A source-shape guard, because neither call site is liftable:
+    attachToLiveBacktest is DOM-bound and the poller lives inside an async
+    tick. Two byte-identical inline copies are how both acquired the
+    `total > 0` defect in the first place, so what is worth pinning is that
+    there is one owner left -- not that each copy was fixed."""
+    source = strip_comments(APP_JS)
+    # Exactly the two inline copies, and deliberately NOT the bare
+    # `Number.isFinite(step) && Number.isFinite(total) && total > 0`: that
+    # substring also sits inside deriveRunningProgress's `determinate` line
+    # (app.js:8005), which is correct code this task does not touch, so a
+    # guard written that way fails on the shipped tree for the wrong reason.
+    assert "const stepPct = Number.isFinite(" not in source
+    # definition + attachToLiveBacktest + the 1s poller
+    assert source.count("backtestStepPercent(") == 3
