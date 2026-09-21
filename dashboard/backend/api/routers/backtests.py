@@ -1446,6 +1446,61 @@ def count_active_dashboard_backtests() -> int:
     return 1 if backtest_status.get("running") else 0
 
 
+#: Sentence per pre-loop phase (engine.py PROGRESS_PHASES). Built here rather
+#: than in the browser for the same reason the staleness age is: both ends of
+#: the phase clock are read in this process. Four entries against
+#: PROGRESS_PHASES' six; two names are absent on purpose. `running` -- a step
+#: count owns that sentence. `starting` -- nothing can publish it: the child's
+#: first write is publish_phase("loading_bars") inside load_data, and the whole
+#: launch (parent setup, Popen, interpreter, pandas, the module-level store
+#: singletons) happens before HourlyBacktester exists. `starting` is the
+#: retroactive name of that gap in `phases[]`, and the card keeps its existing
+#: "Starting backtest…" plus the startup-staleness notice while it lasts.
+#: Adding a sentence here does not make the card say it.
+PROGRESS_PHASE_MESSAGES = {
+    "loading_bars": "Loading market data…",
+    "indicators": "Calculating indicators…",
+    "first_decision": "Waiting on the first model decision…",
+    "saving": "Saving results…",
+}
+
+_PROGRESS_DEFAULT_MESSAGE = (
+    "Backtest is running… (multi-step agent pipeline; may take several minutes)"
+)
+
+
+def _progress_message(progress: Optional[Dict[str, Any]]) -> str:
+    """The one sentence the card prints for a running backtest.
+
+    A real step wins: once the loop has published, the phase is `running` and
+    the count is the news. Before that, the phase names what the child is
+    doing. A payload with neither (an older child, or a phase this build does
+    not know) gets the generic sentence rather than a guess.
+    """
+    if not progress:
+        return _PROGRESS_DEFAULT_MESSAGE
+    step = int(progress.get("step") or 0)
+    total = int(progress.get("total_steps") or 0)
+    phase = str(progress.get("phase") or "")
+    # `saving` is the one phase that outranks the step count, because it is the
+    # one published AFTER the loop -- and since Task 1 a terminal phase write
+    # carries the loop's final numbers forward instead of zeroing them. Leave
+    # the count first and the panel freezes on "step 49/49 (99%)" for the whole
+    # baseline/persistence tail while the run is demonstrably doing something
+    # else, and the "Saving results…" entry below becomes unreachable: a
+    # sentence in a table that nothing can ever print, which is the same defect
+    # the `starting` guards in the tests exist to prevent.
+    if phase != "saving" and step > 0 and total > 0:
+        pct = min(99, round(100 * step / total))
+        return f"Backtest running… step {step}/{total} ({pct}%)"
+    message = PROGRESS_PHASE_MESSAGES.get(phase)
+    if message is None:
+        return _PROGRESS_DEFAULT_MESSAGE
+    if total > 0 and phase == "first_decision":
+        return f"{message} ({total} decision bars queued)"
+    return message
+
+
 def _read_progress_file(progress_file: Optional[str]) -> Optional[Dict[str, Any]]:
     """Load incremental equity snapshots written by the backtest subprocess.
 
@@ -3591,13 +3646,7 @@ def get_backtest_status(
         # legacy reader's fall-back to the global mirror would answer with
         # whichever sibling run touched it last.
         progress = _read_progress_file(slot.get("progress_file"))
-        message = "Backtest is running… (multi-step agent pipeline; may take several minutes)"
-        if progress:
-            step = int(progress.get("step") or 0)
-            total = int(progress.get("total_steps") or 0)
-            if total > 0:
-                pct = min(99, round(100 * step / total))
-                message = f"Backtest running… step {step}/{total} ({pct}%)"
+        message = _progress_message(progress)
         payload = {
             "running": True,
             "message": message,

@@ -1491,6 +1491,32 @@ def test_backtest_status_includes_live_progress(tmp_path):
     assert 0 <= body["progress"]["progress_age_seconds"] < 30
 
 
+def test_backtest_status_names_the_pre_loop_phase(tmp_path):
+    progress_file = tmp_path / "progress.json"
+    progress_file.write_text(json.dumps({
+        "run_id": "agent_phase",
+        "step": 0,
+        "total_steps": 49,
+        "equity_curve": [],
+        "phase": "first_decision",
+        "phase_started_at": time.time(),
+        "phases": [{"name": "loading_bars", "started_at": 1.0, "ended_at": 2.0}],
+    }), encoding="utf-8")
+    bt.backtest_status.update({
+        "running": True,
+        "error": None,
+        "started_at": time.time(),
+        "progress_file": str(progress_file),
+        "live_run_id": "agent_phase",
+    })
+    resp = TestClient(app).get("/backtest/status", headers=_sess())
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["message"] == "Waiting on the first model decision… (49 decision bars queued)"
+    assert body["progress"]["phase"] == "first_decision"
+    assert body["progress"]["phases"][0]["name"] == "loading_bars"
+
+
 def test_get_run_trades_endpoint(client, monkeypatch):
     session_id = str(uuid.uuid4())
     run_id = "agent_test_trades"
