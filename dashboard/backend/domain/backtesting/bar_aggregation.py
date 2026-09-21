@@ -126,7 +126,7 @@ def aggregate_bars(
     # (_weighted_vwap ~1.9s, group.apply(pd.to_numeric) ~1.3s, plus a
     # DataFrame and a pd.date_range built for each of 1,470 buckets). End to
     # end this buys ~11%. It also lands in `loading_bars`, not `indicators`:
-    # aggregate_bars_by_symbol is called from load_data (engine.py:723). The
+    # aggregate_bars_by_symbol is called from load_data (engine.py:989). The
     # per-bucket logic below is byte-for-byte what it was; only how rows find
     # their bucket changed.
     keep: list[bool] = []

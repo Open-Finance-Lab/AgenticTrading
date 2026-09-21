@@ -716,12 +716,12 @@ class HourlyBacktester:
             self._progress_phases.append(finished)
             # stdout as well as the file, and from here rather than from
             # main(). The parent unlinks the progress file the moment the run
-            # ends (`backtests.py:1810`, inside run_backtest_background's
-            # `finally` at `:1771`), so `phases[]` can only be read by racing a
+            # ends (`backtests.py:1993`, inside run_backtest_background's
+            # `finally` at `:1954`), so `phases[]` can only be read by racing a
             # live poll; the child's stdout is captured head+tail
-            # (SUBPROCESS_LOG_HEAD_CHARS / _TAIL_CHARS, 32k each, `:2299-2300`)
+            # (SUBPROCESS_LOG_HEAD_CHARS / _TAIL_CHARS, 32k each, `:2482-2483`)
             # and dumped into the parent's log under
-            # `=== BACKTEST SCRIPT OUTPUT ===` (`:1628`), where it keeps. It is
+            # `=== BACKTEST SCRIPT OUTPUT ===` (`:1773`), where it keeps. It is
             # also the ONLY phase record a CLI run, the external-run session or
             # the algo service has -- none of them writes a progress file.
             # main() could not do this job: it cannot see `first_decision` open
@@ -780,11 +780,11 @@ class HourlyBacktester:
         real regression rather than a cosmetic one. `saving` fires at the end
         of a 49-bar run: a payload of `step: 0, equity_curve: []` snaps the
         Backtest panel's bar from 99% to 0 -- `stepPct` is computed straight
-        off this file's `step`/`total_steps` (`app.js:8600`, the 1s poller;
-        `attachToLiveBacktest` at `:8432` holds a byte-identical second copy,
+        off this file's `step`/`total_steps` (`app.js:8879`, the 1s poller;
+        `attachToLiveBacktest` at `:8700` holds a byte-identical second copy,
         which Task 4 replaces with one shared helper) and never passes through
         the fold, so no frontend guard can reach it -- and the My
-        Agents fold *replaces* its stored entry (`app.js:8609`), blanking the
+        Agents fold *replaces* its stored entry (`app.js:8886`), blanking the
         sparkline, the equity label and `49/49` for the whole
         baseline/persistence tail, with nothing red anywhere. So a phase write
         carries the last published payload forward and changes only the phase
@@ -800,7 +800,7 @@ class HourlyBacktester:
         # `getattr`, not `self.progress_file`. Step 6 makes this method the
         # first statement of `load_data`, and `load_data` is documented as
         # usable on an instance built with `__new__` (its own comment,
-        # engine.py:647-648) -- so this read is now the first attribute such a
+        # engine.py:913-914) -- so this read is now the first attribute such a
         # caller touches. `progress_file` is assigned in `__init__` and is not
         # a class attribute, so on that instance it is *absent*, and a bare
         # read raises AttributeError rather than returning None. Verified by
