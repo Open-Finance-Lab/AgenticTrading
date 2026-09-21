@@ -896,14 +896,46 @@ def test_timeout_card_names_the_limit_the_cost_and_both_levers():
     """Three facts, in the order a user needs them: what happened, what it cost,
     what to change. The third line names BOTH levers, matching the 422 that
     refuses an over-long pipeline window -- a user who meets both refusals
-    should hear one story."""
+    should hear one story.
+
+    The call COUNT is rendered, not merely consulted. It was computed by
+    `sum_run_llm_spend`, carried through `timeout_detail` and serialized into
+    `/backtest/status` while no surface read it -- an unread field in a
+    money-adjacent payload. It is also what makes the amount checkable by the
+    person being charged."""
     message = _timeout_message(
         "{limit_seconds: 3600, billing_mode: 'platform_credits',"
         " spent_micro: 42318, model_calls: 2}"
     )
     assert message == (
         "Stopped at the 60-minute limit. "
-        "Model calls completed before the stop cost 0.042318 Credits. "
+        "2 model calls completed before the stop cost 0.042318 Credits. "
+        "Shorten the date range, or use fewer pipeline steps, then run it again."
+    )
+
+
+def test_timeout_card_says_one_model_call_not_one_model_calls():
+    """A count that is rendered has to read as English at 1."""
+    message = _timeout_message(
+        "{limit_seconds: 3600, billing_mode: 'platform_credits',"
+        " spent_micro: 9, model_calls: 1}"
+    )
+    assert "1 model call completed before the stop cost 0.000009 Credits." in message
+
+
+def test_timeout_card_omits_the_cost_line_when_no_call_ever_settled():
+    """`spent_micro: 0` is a reachable platform-credits payload -- a run that
+    timed out before the first call settled -- and a guard that only rejects
+    null/undefined let it through as "Model calls completed … cost 0.000000
+    Credits", asserting calls that did not happen. That is the same false claim
+    the BYOK omission exists to prevent, in the other direction."""
+    message = _timeout_message(
+        "{limit_seconds: 3600, billing_mode: 'platform_credits',"
+        " spent_micro: 0, model_calls: 0}"
+    )
+    assert "Credits" not in message
+    assert message == (
+        "Stopped at the 60-minute limit. "
         "Shorten the date range, or use fewer pipeline steps, then run it again."
     )
 

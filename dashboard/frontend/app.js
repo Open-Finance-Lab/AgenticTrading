@@ -26,8 +26,26 @@ const DISCORD_SERVER_URL = 'https://discord.gg/9HnQ6XDG98';
 // client stopped looking (issue #474 item 5). The margin is the repo's own
 // SUBPROCESS_TIMEOUT_OVERHEAD_SECONDS. Pinned to both server constants by
 // test_ifind_ashare_frontend.py.
+// ⚠ The margin covers the PIPELINE runtime, the only one whose budget is a
+// fixed constant. A hosted (AI Hedge Fund) run is sized per trading day by
+// `_backtest_subprocess_timeout` and may be granted up to
+// MAX_SUBPROCESS_TIMEOUT_SECONDS (14400) -- four times this ceiling. At the
+// shipped MAX_AI_HEDGE_FUND_TRADING_DAYS (10) the derived budget lands back on
+// 3600 and the margin holds, but an operator who raises that bound makes this
+// poller report "lost contact" for a healthy run. Raising the ceiling is not
+// the fix (it would keep a tab polling for four hours); the fix is for the
+// RUNNING status payload to publish the run's own budget, which today appears
+// only once the run has already timed out. Tracked with issue #474 item 5.
 const BACKTEST_BUDGET_SECONDS = 3600;   // mirrors PIPELINE_SUBPROCESS_TIMEOUT_SECONDS
 const BACKTEST_POLL_MAX_SECONDS = 4200; // budget + SUBPROCESS_TIMEOUT_OVERHEAD_SECONDS
+// One sentence for one condition, reached two ways -- the per-run poll-failure
+// budget running out, and the whole poller hitting its ceiling. They were two
+// strings giving different instructions ("Reload to check." vs "check the
+// Backtest tab later") for the same situation, and the copy register pinned
+// only one of them, so the other was free to drift. No number in it, so it
+// cannot drift from a constant either.
+const BACKTEST_LOST_CONTACT_MESSAGE =
+    'Lost contact with this backtest. It may still be running — check the Backtest tab later.';
 
 function initSession() {
   // Stable browser identity — never changes when switching agents.
@@ -8173,22 +8191,34 @@ function formatBacktestTimeoutMessage(timeout) {
             : 'Stopped at the time limit.',
     ];
     const spentMicro = timeout ? timeout.spent_micro : null;
+    const modelCalls = Number(timeout && timeout.model_calls);
     // Guarded the same way admin-analytics-value.js's `credits()` guards this
     // same call (js/admin-analytics-value.js:292) -- but omitting the line
     // entirely when the formatter is unavailable, not falling back to a second
     // implementation of its six-decimal math. A wrong number is worse than no
     // number, and this function already has a rule for "no number": the BYOK
     // omission just below.
+    //
+    // Gated on calls having actually SETTLED, not merely on `spent_micro`
+    // being a number. Zero reaches here for real: a platform-credits run that
+    // times out before the first call settles reports `spent_micro: 0,
+    // model_calls: 0`, and "Model calls completed … cost 0.000000 Credits"
+    // then asserts calls that did not happen -- the same false claim the BYOK
+    // omission exists to prevent, in the other direction. Rendering the count
+    // rather than merely consulting it is what makes the amount checkable by
+    // the person being charged.
     if (
         spentMicro !== null &&
         spentMicro !== undefined &&
+        Number.isFinite(modelCalls) &&
+        modelCalls > 0 &&
         window.CreditFormat?.formatCreditsMicro
     ) {
         // Omitted entirely on BYOK rather than rendered as zero: BYOK never
         // touches the ATL ledger, so "0.000000 Credits" is a claim about a row
         // that does not exist.
         lines.push(
-            `Model calls completed before the stop cost ${window.CreditFormat.formatCreditsMicro(spentMicro)} Credits.`,
+            `${modelCalls} model call${modelCalls === 1 ? '' : 's'} completed before the stop cost ${window.CreditFormat.formatCreditsMicro(spentMicro)} Credits.`,
         );
     }
     // Both levers, matching the 422 that refuses an over-long pipeline window.
@@ -8657,7 +8687,7 @@ function ensureBacktestPolling() {
                         liveBacktestProgress = null;
                         liveBacktestChartActive = false;
                     }
-                    const lostMessage = 'Lost contact with the backtest — it may still be running. Reload to check.';
+                    const lostMessage = BACKTEST_LOST_CONTACT_MESSAGE;
                     if (wasViewed) {
                         setBacktestCancelTarget(null);
                         showBacktestRunProgress(true, { isError: true });
@@ -8747,13 +8777,24 @@ function ensureBacktestPolling() {
                     const announcedHere = liveId
                         ? backtestCancelsAnnouncedLocally.delete(liveId)
                         : false;
-                    if (
-                        status.cancelled
-                        && !announcedHere
-                        && !viewingLive
-                        && liveId !== liveBacktestRunId
-                    ) {
+                    const unwatched = !viewingLive && liveId !== liveBacktestRunId;
+                    if (status.cancelled && !announcedHere && unwatched) {
                         showAppToast('Backtest cancelled.');
+                    } else if (status.timed_out && unwatched) {
+                        // The billed outcome had the silence and the free one
+                        // had the acknowledgement. `finishedFocused` is only
+                        // populated for the pinned run, so a background run
+                        // that ran out of budget cleared its My Agents card
+                        // and told the user nothing at all -- not that it
+                        // stopped, not why, and not that Credits were spent.
+                        // Pointed at the tab because that is where the amount
+                        // is; a toast is the wrong place for a number this
+                        // one has to be exact.
+                        //
+                        // No `announcedHere` guard: that map records cancels
+                        // THIS tab issued, and nothing announces a timeout
+                        // locally.
+                        showAppToast('Backtest stopped at the time limit — open the Backtest tab for details.');
                     }
                     // Armed here, between the registry clear above and the
                     // roster refresh below, because that is exactly the window
@@ -8905,9 +8946,10 @@ function ensureBacktestPolling() {
                         // server's budget, so a real timeout arrives as a
                         // `timed_out` status ten minutes before this. Getting
                         // here means no terminal answer ever came -- a crash, a
-                        // redeploy, a dropped connection. No number in it, so
-                        // it cannot drift from a constant again.
-                        message: 'Lost contact with this backtest. It may still be running — check the Backtest tab later.',
+                        // redeploy, a dropped connection. Shared with the
+                        // poll-failure path above, which is the same condition
+                        // reached by a different route.
+                        message: BACKTEST_LOST_CONTACT_MESSAGE,
                     });
                 }
                 liveBacktestChartActive = false;

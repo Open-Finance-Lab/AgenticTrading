@@ -20,12 +20,14 @@ from dashboard.backend.domain.chat.service import (
     reset_agent_conversation,
     synthesize_strategy_prompt,
 )
+from dashboard.backend.domain.credits.models import format_credits
 from dashboard.backend.infrastructure.llm.token_cost import is_free_model
 from dashboard.backend.integrations.discord_jobs import (
     STATUS_COMPLETED,
     STATUS_FAILED,
     STATUS_NOTIFIED,
     STATUS_NOTIFY_FAILED,
+    STATUS_STOPPED,
     STATUS_WATCHING,
     get_job_store,
 )
@@ -78,9 +80,70 @@ _SESSION_NAMESPACE = uuid.UUID("8f1b2c3d-0000-4000-8000-a9b8c7d6e5f4")
 # (600s) of load/baseline/persistence overhead in dashboard/backend/api/routers/
 # backtests.py, so this window mirrors the browser poller's same choice
 # (BACKTEST_POLL_MAX_SECONDS in app.js): 3600 + 600 = 4200s = 70 minutes.
+#
+# ⚠ That covers the PIPELINE runtime, which is the only one with a fixed
+# budget. A hosted (AI Hedge Fund) run is sized per trading day by
+# `_backtest_subprocess_timeout` and may be granted up to
+# MAX_SUBPROCESS_TIMEOUT_SECONDS (14400s) -- four times this window. At the
+# shipped MAX_AI_HEDGE_FUND_TRADING_DAYS (10) the derived budget lands back on
+# 3600s and the margin holds, but an operator who raises that bound makes this
+# watcher give up on a healthy run again. Widening the window is not the fix
+# (it would pin a watcher for four hours); the fix is for the status payload to
+# publish the run's own budget while it is RUNNING, which it currently does
+# only once the run has already timed out. Tracked with issue #474 item 5.
 _POLL_INTERVAL_SEC = 5
 _MAX_POLLS = 840  # 70 minutes = (3600 + 600) / 5
 _active_watchers: set[str] = set()
+
+
+def _format_timeout_notice(detail: dict[str, Any]) -> str:
+    """The three sentences a timed-out backtest owes its user, for Discord.
+
+    A deliberate near-twin of `formatBacktestTimeoutMessage` in app.js, and the
+    numbers in it are NOT re-implemented here:
+
+    * The amount goes through `format_credits`, the module that already owns
+      exact micro-Credit rendering for every other backend surface. The
+      `spent_micro / 1_000_000:.6f` this replaced was float division on an
+      integer ledger -- inexact in general and simply wrong above 2**53
+      micro-Credits. (`format_credits` still omits the thousands separator the
+      JS formatter adds; that divergence is app-wide and pre-dates this
+      feature, so it is not forked here.)
+    * The minutes are rounded HALF-UP, matching JavaScript's `Math.round`.
+      Python's built-in `round` is banker's rounding, so a 150-second budget
+      rendered "2-minute limit" in Discord and "3-minute limit" on the card.
+
+    Every field is read defensively -- `bool` is excluded explicitly because it
+    is an `int` subclass, and a JSON `true` must not be formatted as a duration
+    or an amount of money.
+    """
+
+    def _whole_number(value: Any) -> Optional[int]:
+        return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+    limit_seconds = _whole_number(detail.get("limit_seconds"))
+    parts = [
+        f"Stopped at the {(limit_seconds + 30) // 60}-minute limit."
+        if limit_seconds and limit_seconds > 0
+        else "Stopped at the time limit."
+    ]
+    spent_micro = _whole_number(detail.get("spent_micro"))
+    model_calls = _whole_number(detail.get("model_calls"))
+    # Gated on calls actually having settled, not merely on the field being
+    # present. A platform-credits run that times out before the first call
+    # settles reports `spent_micro: 0`, and "Model calls completed … cost
+    # 0.000000 Credits" asserts calls that did not happen -- the same claim the
+    # BYOK omission exists to avoid. Naming the count is what makes the amount
+    # checkable.
+    if spent_micro is not None and model_calls:
+        parts.append(
+            f"{model_calls} model call{'' if model_calls == 1 else 's'} completed "
+            f"before the stop cost {format_credits(spent_micro)} Credits."
+        )
+    parts.append(
+        "Shorten the date range, or use fewer pipeline steps, then run it again."
+    )
+    return " ".join(parts)
 
 
 def api_base() -> str:
@@ -545,6 +608,13 @@ async def watch_and_deliver_backtest(
         store.update(job_id, status=STATUS_WATCHING)
         headers = {"X-Session-Id": job.session_id}
         terminal_error: Optional[str] = None
+        # A run the server STOPPED, kept out of `terminal_error` on purpose.
+        # Both share one delivery below, but a stop is posted as "Backtest
+        # stopped" and filed as STATUS_STOPPED: `_finalize_slot`'s docstring,
+        # the status route, app.js and styles.css each state that a cancel and
+        # a timeout are not failures, and routing them through the failure text
+        # made this the one surface that told the user otherwise.
+        terminal_stop: Optional[str] = None
 
         for i in range(_MAX_POLLS):
             await asyncio.sleep(_POLL_INTERVAL_SEC)
@@ -566,42 +636,27 @@ async def watch_and_deliver_backtest(
                     )
                 continue
 
-            if status.get("timed_out"):
-                # The server stopped this run at its own wall-clock budget and
-                # said so. Without this branch the payload matched none of the
-                # three shapes below, fell through with neither continue nor
-                # break, and the for/else delivered "still running after 30
-                # minutes" -- half an hour after the answer was available.
-                detail = status.get("timeout") or {}
-                limit_seconds = detail.get("limit_seconds")
-                minutes = (
-                    round(int(limit_seconds) / 60)
-                    if isinstance(limit_seconds, int) and limit_seconds > 0
-                    else None
-                )
-                parts = [
-                    f"Stopped at the {minutes}-minute limit."
-                    if minutes
-                    else "Stopped at the time limit."
-                ]
-                spent_micro = detail.get("spent_micro")
-                if isinstance(spent_micro, int):
-                    parts.append(
-                        f"Model calls completed before the stop cost "
-                        f"{spent_micro / 1_000_000:.6f} Credits."
-                    )
-                parts.append(
-                    "Shorten the date range, or use fewer pipeline steps, "
-                    "then run it again."
-                )
-                terminal_error = " ".join(parts)
+            if status.get("cancelled"):
+                # Ahead of `timed_out`, matching the status route's branch
+                # order (`get_backtest_status`) and the poll dispatch in
+                # app.js. Two router tests pin that order precisely because a
+                # slot could one day carry both flags -- the cancel wins, being
+                # the owner's own action rather than the budget that would have
+                # stopped the run anyway. Three surfaces, one order; this was
+                # the only one testing them the other way round.
+                #
+                # The branch itself closes a gap this surface has had since the
+                # cancel route shipped: the payload matched none of the shapes
+                # below, fell through with neither continue nor break, and the
+                # for/else delivered "still running" long after the answer was
+                # available.
+                terminal_stop = "Backtest cancelled."
                 break
 
-            if status.get("cancelled"):
-                # The same gap, which this surface has had since the cancel
-                # route shipped. Fixed here because this change is what made it
-                # visible, and leaving it would be shipping a bug we just read.
-                terminal_error = "Backtest cancelled."
+            if status.get("timed_out"):
+                # The server stopped this run at its own wall-clock budget and
+                # said so. Same gap as the cancel above, same fix.
+                terminal_stop = _format_timeout_notice(status.get("timeout") or {})
                 break
 
             if status.get("error"):
@@ -612,29 +667,43 @@ async def watch_and_deliver_backtest(
                 break
         else:
             # Reaching here now means something different than it used to: the
-            # watcher outlives the server's own budget (see _MAX_POLLS above),
-            # so the server's timed_out/cancelled/error/success verdict should
-            # already have arrived via one of the branches above. Landing in
-            # the for/else means no terminal answer ever came at all -- not
-            # that the server is merely still working within its own window.
+            # watcher outlives the PIPELINE runtime's budget (see _MAX_POLLS
+            # above), so for that runtime the server's
+            # timed_out/cancelled/error/success verdict should already have
+            # arrived via one of the branches. The copy stays hedged rather
+            # than asserting a crash, because the hosted runtime's budget is
+            # sized per trading day and can legitimately exceed this window --
+            # there, a run reaching here may still be perfectly healthy.
             watch_minutes = _MAX_POLLS * _POLL_INTERVAL_SEC // 60
             terminal_error = (
-                f"Backtest is still running after {watch_minutes} minutes. "
+                f"No result after {watch_minutes} minutes of watching. "
+                "The backtest may still be running. "
                 "Check the dashboard later, or ask an admin to inspect the API worker."
             )
 
-        if terminal_error:
-            store.update(job_id, status=STATUS_FAILED, error=terminal_error)
-            fail_text = f"**Backtest failed** · `{job.label}`\n{terminal_error}"
+        if terminal_error or terminal_stop:
+            # One delivery, two vocabularies. A stopped run is not a failed
+            # one: it is filed as STATUS_STOPPED (terminal, and absent from
+            # _OPEN_STATUSES exactly like STATUS_FAILED, so a restart does not
+            # resume it) and posted under a heading that says what happened
+            # rather than blaming the user.
+            stopped = terminal_stop is not None
+            detail_text = terminal_stop if stopped else terminal_error
+            heading = "Backtest stopped" if stopped else "Backtest failed"
+            store.update(
+                job_id,
+                status=STATUS_STOPPED if stopped else STATUS_FAILED,
+                error=detail_text,
+            )
             try:
                 await _post_channel_result(
                     channel_id=job.channel_id,
                     discord_user_id=job.discord_user_id,
-                    content=fail_text,
+                    content=f"**{heading}** · `{job.label}`\n{detail_text}",
                 )
                 await _edit_ack(
                     interaction,
-                    f"Backtest failed (`{job.label}`). Details posted in-channel.",
+                    f"{heading} (`{job.label}`). Details posted in-channel.",
                 )
                 store.update(job_id, status=STATUS_NOTIFIED, notified_at=time.time())
             except Exception as exc:

@@ -13,7 +13,12 @@ from typing import Any, Iterator
 from dashboard.backend.database import DB_PATH
 from dashboard.backend.db_url import describe_database_url
 
-from .models import AnalyticsEventRecord, AppendEventResult, RetentionResult
+from .models import (
+    ALLOWED_ERROR_CATEGORIES,
+    AnalyticsEventRecord,
+    AppendEventResult,
+    RetentionResult,
+)
 from .repository_common import (
     AnalyticsIdempotencyConflictError,
     AnalyticsStoreError,
@@ -322,13 +327,19 @@ class AnalyticsStore:
             "WHERE type = 'table' AND name = 'analytics_events'"
         ).fetchone()
         table_sql = str(row[0] or "").lower() if row else ""
-        # Keyed on the LAST category added, not on any stable marker: a database
-        # whose CHECK already names it is current, and anything older needs the
-        # table rebuilt. BUMP THIS EVERY TIME A CATEGORY IS ADDED. Leave it
-        # behind and existing databases keep the previous CHECK -- rejecting the
-        # new value at write time while a fresh database accepts it, so the
-        # whole suite stays green and only prod breaks.
-        if "run_timeout" in table_sql:
+        # Derived from the category set itself, never from a hand-maintained
+        # sentinel. This was keyed on the last category added ("does the CHECK
+        # already name `provider_quota_exhausted`?"), which made schema
+        # currency depend on a human remembering to bump a literal in this
+        # file every time `ALLOWED_ERROR_CATEGORIES` grew. Forget it once and
+        # existing databases keep the previous CHECK -- rejecting the new value
+        # at write time while a fresh database accepts it, so the whole suite
+        # stays green and only prod breaks. Asking the question the migration
+        # actually cares about ("does the live CHECK admit everything we are
+        # allowed to write?") removes the manual step, and matching on the
+        # QUOTED name keeps it from passing on a column or category that merely
+        # contains one.
+        if all(f"'{category}'" in table_sql for category in ALLOWED_ERROR_CATEGORIES):
             return
 
         # Index names are schema-global, so remove the old table's indexes

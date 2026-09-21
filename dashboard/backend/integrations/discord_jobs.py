@@ -24,6 +24,15 @@ STATUS_PENDING = "pending"
 STATUS_WATCHING = "watching"
 STATUS_COMPLETED = "completed"
 STATUS_FAILED = "failed"
+# A run the SERVER stopped -- cancelled by its owner, or halted at its own
+# wall-clock budget. Deliberately not `STATUS_FAILED`: the rest of this feature
+# (`_finalize_slot`'s docstring, the status route's branch order, app.js's
+# four-state panel, `.is-timed-out` in styles.css) draws the same line four
+# times, that neither outcome is the user's error, and a job store that files
+# them under "failed" makes Discord the one surface that disagrees. Like
+# `STATUS_FAILED` it is terminal and absent from `_OPEN_STATUSES`, so a restart
+# does not resume it.
+STATUS_STOPPED = "stopped"
 STATUS_NOTIFIED = "notified"
 STATUS_NOTIFY_FAILED = "notify_failed"
 

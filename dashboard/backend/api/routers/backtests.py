@@ -37,6 +37,7 @@ from threading import Thread as _StreamReaderThread
 # ...and likewise the cancel route's SIGKILL escalation, which must still run
 # when a test has swapped the launch seam out.
 from threading import Thread as _CancelWatchdogThread
+from threading import Thread as _SpendLookupThread
 from typing import Any, Dict, List, Literal, NamedTuple, Optional, Tuple
 
 import pytz
@@ -939,7 +940,9 @@ def _finalize_slot_locked(
     slot = _active_slots.pop(live_run_id, None)
     if not slot:
         finished = _recent_slots.get(live_run_id)
-        if finished is not None and finished.get("cancelled"):
+        if finished is not None and (
+            finished.get("cancelled") or finished.get("timed_out")
+        ):
             # A cancel finalized this run while its worker was still
             # unwinding — a window of microseconds, but a real one, since
             # the route deliberately finalizes rather than waiting for the
@@ -947,6 +950,15 @@ def _finalize_slot_locked(
             # overwrite it AND, because the branch below writes the legacy
             # mirror unconditionally, would stamp this run's outcome onto
             # whichever run that mirror currently describes.
+            #
+            # ``timed_out`` is listed for the same reason and reaches this
+            # guard by a second route: the timeout arm finalizes and only then
+            # clears ``resolved_live_run_id``, so anything raising in between
+            # (``_emit_slot_run_event`` reaches the analytics store) lands in
+            # the ``finally`` with the id still set and finalizes again, with
+            # ``error=None, runs_count=0``. A guard that enumerates terminal
+            # states one at a time reopens this hazard for every state added
+            # after it -- list the new one here.
             return None
         backtest_status["running"] = False
         backtest_status["started_at"] = None
@@ -1227,10 +1239,10 @@ def _slot_visible_to(
     return session_id in (slot.get("session_id"), slot.get("owner_session"))
 
 
-def _slot_cancellable_by(
+def _slot_owned_by(
     slot: Dict[str, Any], *, session_id: str, user_id: Optional[int]
 ) -> bool:
-    """Is this caller entitled to STOP this run?
+    """Did this caller START this run?
 
     Strictly narrower than ``_slot_visible_to``, and deliberately NOT that
     function with a different name. The read rule accepts the slot's
@@ -1241,16 +1253,72 @@ def _slot_cancellable_by(
     ``user_id`` branch is skipped whenever the caller sends no auth. Read access
     to a run you started is one thing; ending one you did not is another.
 
-    Cancel keys on who *started* it: the account when the run has one, and
+    Ownership keys on who *started* it: the account when the run has one, and
     otherwise ``owner_session`` -- the caller's own browser session, which no
     response publishes. For every run outside the built-in-agent case the two
     session ids are equal, so nothing about ordinary ownership changes.
+
+    Two callers, one rule, on purpose: cancelling a run and being told what it
+    cost are both things only its owner may do, and a second copy of this
+    predicate would let one of them drift wider than the other.
     """
     if user_id is not None and slot.get("user_id") is not None:
         return int(slot["user_id"]) == int(user_id)
     if not session_id:
         return False
     return session_id == slot.get("owner_session")
+
+
+def _slot_cancellable_by(
+    slot: Dict[str, Any], *, session_id: str, user_id: Optional[int]
+) -> bool:
+    """Is this caller entitled to STOP this run? Ownership, see ``_slot_owned_by``."""
+    return _slot_owned_by(slot, session_id=session_id, user_id=user_id)
+
+
+# Facts about somebody's ATL Credits account. Visible in ``timeout_detail``
+# only to the caller who started the run -- everyone the weaker READ rule lets
+# through still learns the run timed out and what its budget was, which is what
+# their UI branches on, but not what it charged whom.
+_TIMEOUT_DETAIL_OWNER_ONLY_FIELDS = ("spent_micro", "model_calls", "billing_mode")
+
+# How long the timeout arm will wait for the settled-spend aggregate before
+# finalizing without it. Deliberately small relative to the hour the run just
+# spent: the number it fetches is a disclosure, and the finalize it delays is
+# what releases a global concurrency slot and stops the poller reporting a dead
+# child as running. `except Exception` covers a query that FAILS; only a
+# deadline covers one that never returns, and nothing else in this path does --
+# `db_pool`'s POOL_TIMEOUT_SECONDS bounds connection checkout, not the query.
+TIMEOUT_SPEND_LOOKUP_SECONDS = 10
+
+
+def _status_snapshot_for(
+    slot: Dict[str, Any], *, session_id: str, user_id: Optional[int]
+) -> Dict[str, Any]:
+    """``_slot_snapshot``, minus anything a non-owner must not read.
+
+    ``_slot_visible_to`` is deliberately weaker than ownership (see
+    ``_slot_owned_by``): for a built-in agent it admits any caller holding the
+    agent's ``session_id``, a value this very route publishes to every visitor.
+    That was a tolerable trade while the payload carried progress and elapsed
+    time. ``timeout_detail`` carries what the run COST -- so an anonymous
+    visitor who ran the same built-in agent once could otherwise poll with the
+    published id and read a signed-in stranger's Credits charge out of
+    ``_recent_slots``.
+
+    Redacted here rather than at either call site because both the exact-id
+    lookup and the session scan return through this function, and a redaction
+    applied to one of them is not a redaction.
+    """
+    snapshot = _slot_snapshot(slot)
+    detail = snapshot.get("timeout_detail")
+    if detail and not _slot_owned_by(slot, session_id=session_id, user_id=user_id):
+        snapshot["timeout_detail"] = {
+            key: value
+            for key, value in detail.items()
+            if key not in _TIMEOUT_DETAIL_OWNER_ONLY_FIELDS
+        }
+    return snapshot
 
 
 def _resolve_status_slot(
@@ -1292,7 +1360,7 @@ def _resolve_status_slot(
                 slot, session_id=session_id, user_id=user_id
             ):
                 raise HTTPException(status_code=404, detail="Backtest run not found")
-            return _slot_snapshot(slot)
+            return _status_snapshot_for(slot, session_id=session_id, user_id=user_id)
         # Prefer an active run owned by this backtest session. Matched on
         # session identity only, not on user_id: this branch answers "what is
         # THIS browser doing?", and widening it to the account would surface a
@@ -1303,10 +1371,10 @@ def _resolve_status_slot(
                 slot.get("session_id"),
                 slot.get("owner_session"),
             ):
-                return _slot_snapshot(slot)
+                return _status_snapshot_for(slot, session_id=session_id, user_id=user_id)
         for slot in reversed(list(_recent_slots.values())):
             if session_id in (slot.get("session_id"), slot.get("owner_session")):
-                return _slot_snapshot(slot)
+                return _status_snapshot_for(slot, session_id=session_id, user_id=user_id)
     return None
 
 
@@ -1720,14 +1788,52 @@ def run_backtest_background(
                 # settled row was written by the child as it went. The hold for
                 # the call that was interrupted is released, not charged --
                 # excluding it is the right answer, not a rounding error.
-                try:
-                    spent_micro, model_calls = credits_service.sum_run_llm_spend(
-                        timeout_user_id, resolved_live_run_id
-                    )
-                except Exception as exc:  # a read, and never worth losing the outcome over
+                #
+                # Run on a DAEMON thread joined with a deadline, not inline.
+                # `except Exception` answers a query that raises; it cannot
+                # answer one that never returns, and this one reaches Postgres
+                # with no statement timeout anywhere beneath it. Inline, a
+                # resuming Neon instance or a lock wait blocks the worker
+                # BEFORE `_finalize_slot`, so the slot stays `running` forever:
+                # one of the five `MAX_ACTIVE_DASHBOARD_BACKTESTS` global slots
+                # and one of the owner's quota held by a dead child, the poller
+                # still reporting "Backtest is running…", and the `finally`'s
+                # `finalize_run` never releasing the run's reservations. The
+                # outcome must not depend on a disclosure being fetchable.
+                lookup: Dict[str, Any] = {}
+
+                def _read_settled_spend() -> None:
+                    try:
+                        lookup["value"] = credits_service.sum_run_llm_spend(
+                            timeout_user_id, resolved_live_run_id
+                        )
+                    except Exception as exc:  # noqa: BLE001 - reported below
+                        lookup["error"] = exc
+
+                reader = _SpendLookupThread(target=_read_settled_spend, daemon=True)
+                reader.start()
+                reader.join(timeout=TIMEOUT_SPEND_LOOKUP_SECONDS)
+                if "value" in lookup:
+                    spent_micro, model_calls = lookup["value"]
+                elif "error" in lookup:
+                    # A read, and never worth losing the outcome over.
                     print(
                         f"⚠️ timeout spend lookup failed for "
-                        f"{resolved_live_run_id}: {exc}",
+                        f"{resolved_live_run_id}: {lookup['error']}",
+                        flush=True,
+                    )
+                else:
+                    # Still running past the deadline. The thread is a daemon
+                    # and is abandoned rather than joined: leaking one blocked
+                    # thread holding a pooled connection is strictly cheaper
+                    # than stranding a concurrency slot for the life of the
+                    # process. Logged unconditionally -- this is the wholesale
+                    # boundary where "no spend to report" and "could not read
+                    # the spend" would otherwise become the same card.
+                    print(
+                        f"⚠️ timeout spend lookup exceeded "
+                        f"{TIMEOUT_SPEND_LOOKUP_SECONDS}s for "
+                        f"{resolved_live_run_id}; finalizing without it",
                         flush=True,
                     )
             _finalize_slot(
@@ -3331,7 +3437,20 @@ def run_backtest_endpoint(
             "assets": selected_assets,
             "decision_source": resolved_decision_source,
             "execution_handoff_payload": execution_handoff_payload,
-            "billing_mode": billing_mode.value if billing_mode is not None else None,
+            # Only the lane the LLM preflight above actually validated.
+            # `billing_mode` is a request field that reaches this scope on
+            # EVERY run, including a rule-based one that never entered that
+            # block, and the worker's timeout arm keys its Credits lookup on
+            # it -- so threading it unconditionally let
+            # `{"decision_source": "rule_based", "billing_mode":
+            # "platform_credits"}` put a Credits sentence on the timeout card
+            # of a run that never touched a model. `execution_handoff_payload`
+            # is the evidence the block ran; nothing else assigns it.
+            "billing_mode": (
+                billing_mode.value
+                if execution_handoff_payload is not None and billing_mode is not None
+                else None
+            ),
             **({"universe_selection": universe_selection} if universe_selection is not None else {}),
         },
         daemon=True

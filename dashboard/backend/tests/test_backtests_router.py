@@ -10,6 +10,7 @@
 import inspect
 import json
 import subprocess
+import threading
 import time
 import uuid
 from datetime import datetime
@@ -1012,7 +1013,9 @@ def test_pipeline_timeout_finalizes_execution_and_slot_once(monkeypatch):
     assert finalized_slots == [(run_id, 0)]
 
 
-def _drive_pipeline_timeout(monkeypatch, *, run_id, billing_mode, user_id=None):
+def _drive_pipeline_timeout(
+    monkeypatch, *, run_id, billing_mode, user_id=None, spend_lookup=None
+):
     """Run the real worker to a parent timeout and return the finalized slot.
 
     Shared by the two lane cases below rather than copied: the setup is eight
@@ -1038,12 +1041,12 @@ def _drive_pipeline_timeout(monkeypatch, *, run_id, billing_mode, user_id=None):
 
     monkeypatch.setattr(subprocess, "Popen", lambda cmd, **kwargs: child)
     monkeypatch.setattr(bt, "LLMExecutionService", FakeExecutionService)
-    monkeypatch.setattr(bt, "get_model_provider_service", lambda: object())
+    monkeypatch.setattr(bt, "get_model_provider_service", object)
     monkeypatch.setattr(bt, "run_backtest_background", _REAL_RUN_BACKTEST_BACKGROUND)
     monkeypatch.setattr(
         bt.credits_service,
         "sum_run_llm_spend",
-        lambda uid, rid: (42_318, 2),
+        spend_lookup or (lambda uid, rid: (42_318, 2)),
     )
 
     bt.run_backtest_background(
@@ -2409,6 +2412,192 @@ def test_status_omits_the_timeout_block_when_no_detail_was_recorded(client):
 
     assert body["timed_out"] is True
     assert "timeout" not in body
+
+
+def _timed_out_slot_with_cost(*, run_id, session_id, owner_session=None, user_id=None):
+    """Finalize a run as timed out carrying a full, owner-only `timeout_detail`."""
+    assert (
+        bt._try_acquire_backtest_slot(
+            live_run_id=run_id,
+            session_id=session_id,
+            owner_session=owner_session,
+            user_id=user_id,
+        )
+        is None
+    )
+    bt._finalize_slot(
+        run_id,
+        error=None,
+        runs_count=0,
+        timed_out=True,
+        timeout_detail={
+            "limit_seconds": 3600,
+            "billing_mode": "platform_credits",
+            "spent_micro": 42_318,
+            "model_calls": 2,
+        },
+    )
+
+
+def test_status_withholds_the_run_cost_from_a_caller_who_did_not_start_it(client):
+    """`_slot_visible_to` is deliberately weaker than ownership, and this route
+    is what makes that weakness reachable.
+
+    For a built-in agent the read rule admits anyone holding the slot's
+    `session_id` -- the AGENT's session, which the running branch of this very
+    route hands back to every visitor who runs that agent (see
+    `_slot_cancellable_by`'s docstring, which documents the gap). That was a
+    tolerable trade while the payload carried progress and elapsed time.
+    `timeout_detail` carries what the run CHARGED, so an anonymous visitor who
+    ran the same built-in agent once could poll with the published id and read
+    a signed-in stranger's Credits spend out of `_recent_slots`.
+
+    The outcome itself stays public -- every poller branches on `timed_out`,
+    and blinding them would break the built-in-agent card on purpose -- so only
+    the account-level facts are withheld.
+    """
+    agent_session = str(uuid.uuid4())
+    _timed_out_slot_with_cost(
+        run_id="agent_timeout_shared_session",
+        session_id=agent_session,
+        owner_session=str(uuid.uuid4()),
+        user_id=4242,
+    )
+
+    stranger = client.get(
+        "/backtest/status?live_run_id=agent_timeout_shared_session",
+        headers={"X-Session-Id": agent_session},
+    ).json()
+
+    # Still told what happened, and against which budget.
+    assert stranger["timed_out"] is True
+    assert stranger["timeout"] == {"limit_seconds": 3600}
+    assert "42318" not in json.dumps(stranger)
+
+
+def test_status_gives_the_run_cost_to_the_session_that_started_the_run(client):
+    """The redaction above must not blind the owner. An anonymous run stays
+    bound to the browser session that started it, and that caller is exactly
+    who the disclosure is for."""
+    owner_session = str(uuid.uuid4())
+    _timed_out_slot_with_cost(
+        run_id="agent_timeout_owner_reads_cost", session_id=owner_session
+    )
+
+    body = client.get(
+        "/backtest/status?live_run_id=agent_timeout_owner_reads_cost",
+        headers={"X-Session-Id": owner_session},
+    ).json()
+
+    assert body["timeout"]["spent_micro"] == 42_318
+    assert body["timeout"]["model_calls"] == 2
+    assert body["timeout"]["billing_mode"] == "platform_credits"
+
+
+def test_a_second_finalize_cannot_overwrite_a_timeout():
+    """The already-finalized guard enumerated only `cancelled`.
+
+    The timeout arm finalizes and only THEN clears `resolved_live_run_id`, so
+    anything raising in between -- `_emit_slot_run_event` reaches the analytics
+    store -- lands in the worker's `finally` with the id still set and
+    finalizes the same run a second time with `error=None, runs_count=0`. With
+    `timed_out` missing from the guard that call fell through into the branch
+    that rewrites the legacy mirror unconditionally, stamping this run's
+    outcome onto whichever unrelated run that mirror currently describes.
+    """
+    session_id = str(uuid.uuid4())
+    run_id = "agent_timeout_double_finalize"
+    _timed_out_slot_with_cost(run_id=run_id, session_id=session_id)
+
+    # What the legacy mirror describes now is a DIFFERENT, still-live run.
+    bt.backtest_status.update(
+        {"running": True, "live_run_id": "agent_unrelated_live", "runs_count": 7}
+    )
+
+    bt._finalize_slot(run_id, error=None, runs_count=0)
+
+    assert bt._recent_slots[run_id]["timed_out"] is True
+    assert bt._recent_slots[run_id]["timeout_detail"]["spent_micro"] == 42_318
+    assert bt.backtest_status["live_run_id"] == "agent_unrelated_live"
+    assert bt.backtest_status["running"] is True
+    assert bt.backtest_status["runs_count"] == 7
+
+
+def test_a_hanging_spend_lookup_cannot_strand_the_slot(monkeypatch):
+    """`except Exception` answers a query that raises; only a deadline answers
+    one that never returns.
+
+    `sum_run_llm_spend` reaches Postgres with no statement timeout beneath it
+    (`db_pool`'s POOL_TIMEOUT_SECONDS bounds connection checkout, not the
+    query). Run inline, a resuming Neon instance blocks the worker BEFORE
+    `_finalize_slot`: the slot stays `running` forever, holding one of the five
+    global backtest slots and one of the owner's quota for a child that is
+    already dead, while the poller keeps reporting it as in flight.
+
+    The outcome must not depend on the disclosure being fetchable, so the
+    finalize happens either way and the amount is simply absent.
+    """
+    monkeypatch.setattr(bt, "TIMEOUT_SPEND_LOOKUP_SECONDS", 0.2)
+    released = threading.Event()
+
+    def _never_returns(_user_id, _run_id):
+        released.wait(30)
+        return (42_318, 2)
+
+    try:
+        slot = _drive_pipeline_timeout(
+            monkeypatch,
+            run_id="agent_timeout_slow_lookup",
+            billing_mode="platform_credits",
+            user_id=4242,
+            spend_lookup=_never_returns,
+        )
+
+        assert slot["running"] is False
+        assert slot["timed_out"] is True
+        assert slot["timeout_detail"] == {
+            "limit_seconds": 3600,
+            "billing_mode": "platform_credits",
+            "spent_micro": None,
+            "model_calls": None,
+        }
+        assert "agent_timeout_slow_lookup" not in bt._active_slots
+    finally:
+        # Let the abandoned daemon thread finish rather than leaving it parked
+        # for the rest of the session.
+        released.set()
+
+
+def test_billing_mode_is_not_threaded_for_a_run_the_llm_preflight_never_saw(
+    client, monkeypatch
+):
+    """`billing_mode` is a request field that reaches the thread kwargs on
+    EVERY run, but it is only validated inside the
+    `decision_source='llm' and runtime_type=='pipeline'` block.
+
+    Threaded unconditionally, `{"decision_source": "rule_based",
+    "billing_mode": "platform_credits"}` made the worker's timeout arm run a
+    Credits lookup -- and put a Credits sentence on the timeout card -- for a
+    run that never touched a model.
+    """
+    spy = _Spy()
+    monkeypatch.setattr(bt, "run_backtest_background", spy)
+
+    resp = client.post(
+        "/backtest/run",
+        json={
+            "start_date": "2026-05-01",
+            "end_date": "2026-05-02",
+            "decision_source": "rule_based",
+            "billing_mode": "platform_credits",
+        },
+        headers=_sess(),
+    )
+
+    assert resp.status_code == 200
+    assert spy.calls == 1
+    assert spy.last_kwargs["execution_handoff_payload"] is None
+    assert spy.last_kwargs["billing_mode"] is None
 
 
 def test_timed_out_run_emits_backtest_failed_with_the_timeout_reason(monkeypatch):

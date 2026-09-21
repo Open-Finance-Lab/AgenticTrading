@@ -364,3 +364,156 @@ def test_the_watcher_outlives_the_server_budget_it_watches():
     assert watch_seconds == (
         PIPELINE_SUBPROCESS_TIMEOUT_SECONDS + SUBPROCESS_TIMEOUT_OVERHEAD_SECONDS
     )
+
+
+def test_a_stopped_run_is_not_posted_as_a_failure(job_store, monkeypatch):
+    """A cancel and a timeout are not failures, and this was the one surface
+    saying they were.
+
+    `_finalize_slot`'s docstring, the status route's own branch, app.js's
+    four-state panel and `.is-timed-out` in styles.css all make the same
+    argument -- a cancel is the owner's deliberate action and a timeout is the
+    product running out of the budget it set itself. Routing both through
+    `terminal_error` posted "**Backtest failed**" and filed the job as
+    STATUS_FAILED, which is exactly the lie the rest of the feature exists to
+    stop.
+    """
+    live_run_id = "agent_20260914_stopped01"
+    job = job_store.create_job(
+        discord_user_id="42",
+        channel_id=99,
+        session_id="sess-stopped",
+        label="st0pped",
+        live_run_id=live_run_id,
+    )
+    poster = _PostRecorder()
+    _install_common(monkeypatch, poster)
+
+    async def fake_api_get(path: str, *, headers=None, timeout: int = 30):
+        return {
+            "running": False,
+            "timed_out": True,
+            "live_run_id": live_run_id,
+            "timeout": {
+                "limit_seconds": 3600,
+                "billing_mode": "platform_credits",
+                "spent_micro": 42_318,
+                "model_calls": 2,
+            },
+        }
+
+    monkeypatch.setattr(bot, "api_get", fake_api_get)
+
+    asyncio.run(bot.watch_and_deliver_backtest(job.job_id))
+
+    content = poster.calls[0]["content"]
+    assert content.startswith("**Backtest stopped**")
+    assert "Backtest failed" not in content
+    # The job is terminal and absent from _OPEN_STATUSES exactly like
+    # STATUS_FAILED, so a bot restart does not resume it -- but it is not
+    # counted as a failure either.
+    assert job_store.get(job.job_id).status == STATUS_NOTIFIED
+    assert not job_store.list_open()
+
+
+def test_a_real_error_is_still_posted_as_a_failure(job_store, monkeypatch):
+    """The stopped/failed split must not swallow genuine failures."""
+    job = job_store.create_job(
+        discord_user_id="42",
+        channel_id=99,
+        session_id="sess-err",
+        label="brok3n",
+        live_run_id="agent_20260914_err01",
+    )
+    poster = _PostRecorder()
+    _install_common(monkeypatch, poster)
+
+    async def fake_api_get(path: str, *, headers=None, timeout: int = 30):
+        return {"running": False, "error": "Backtest failed (code 1)"}
+
+    monkeypatch.setattr(bot, "api_get", fake_api_get)
+
+    asyncio.run(bot.watch_and_deliver_backtest(job.job_id))
+
+    assert poster.calls[0]["content"].startswith("**Backtest failed**")
+
+
+def test_the_watcher_prefers_cancelled_over_timed_out(job_store, monkeypatch):
+    """Three surfaces, one branch order.
+
+    `test_status_prefers_cancelled_over_timed_out_when_a_slot_carries_both` and
+    the poll dispatch in app.js both resolve a slot carrying both flags as the
+    cancel -- the owner's own action outranks the budget that would have
+    stopped the run anyway. This watcher tested `timed_out` first, so the one
+    future state the router test exists to catch would have been reported
+    differently here than in the browser.
+    """
+    job = job_store.create_job(
+        discord_user_id="42",
+        channel_id=99,
+        session_id="sess-both",
+        label="b0th",
+        live_run_id="agent_20260914_both01",
+    )
+    poster = _PostRecorder()
+    _install_common(monkeypatch, poster)
+
+    async def fake_api_get(path: str, *, headers=None, timeout: int = 30):
+        return {
+            "running": False,
+            "cancelled": True,
+            "timed_out": True,
+            "timeout": {"limit_seconds": 3600},
+        }
+
+    monkeypatch.setattr(bot, "api_get", fake_api_get)
+
+    asyncio.run(bot.watch_and_deliver_backtest(job.job_id))
+
+    assert "Backtest cancelled." in poster.calls[0]["content"]
+    assert "limit" not in poster.calls[0]["content"]
+
+
+def test_the_discord_timeout_notice_does_not_reimplement_credit_formatting():
+    """The amount goes through `format_credits`, the module that already owns
+    exact micro-Credit rendering for every other backend surface.
+
+    The `spent_micro / 1_000_000:.6f` this replaced was float division on an
+    integer ledger: inexact in general, and simply wrong above 2**53
+    micro-Credits, where the float cannot represent the integer at all.
+    """
+    huge = 2**53 + 1
+    notice = bot._format_timeout_notice(
+        {"limit_seconds": 3600, "spent_micro": huge, "model_calls": 3}
+    )
+
+    assert "9007199254.740993 Credits" in notice
+    assert "3 model calls completed" in notice
+
+
+def test_the_discord_timeout_notice_rounds_minutes_the_way_javascript_does():
+    """Python's `round` is banker's rounding and JavaScript's `Math.round` is
+    half-up, so a 150-second budget printed "2-minute limit" in Discord and
+    "3-minute limit" on the card for the same run."""
+    notice = bot._format_timeout_notice({"limit_seconds": 150})
+    assert notice.startswith("Stopped at the 3-minute limit.")
+
+
+def test_the_discord_timeout_notice_omits_the_cost_when_nothing_settled():
+    """`spent_micro: 0, model_calls: 0` is a reachable platform-credits payload
+    -- a run that timed out before its first call settled. Rendering it claims
+    calls that did not happen."""
+    notice = bot._format_timeout_notice(
+        {"limit_seconds": 3600, "billing_mode": "platform_credits",
+         "spent_micro": 0, "model_calls": 0}
+    )
+    assert "Credits" not in notice
+
+
+def test_the_discord_timeout_notice_never_formats_a_boolean_as_money():
+    """`bool` is an `int` subclass, and these fields arrive from JSON."""
+    notice = bot._format_timeout_notice(
+        {"limit_seconds": True, "spent_micro": True, "model_calls": True}
+    )
+    assert notice.startswith("Stopped at the time limit.")
+    assert "Credits" not in notice

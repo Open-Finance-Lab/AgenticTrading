@@ -9,7 +9,11 @@ from uuid import uuid4
 import pytest
 
 from dashboard.backend.domain.analytics.metrics import AnalyticsMetricFilters
-from dashboard.backend.domain.analytics.models import AnalyticsEventRecord
+import dashboard.backend.domain.analytics.repository as analytics_repository
+from dashboard.backend.domain.analytics.models import (
+    ALLOWED_ERROR_CATEGORIES,
+    AnalyticsEventRecord,
+)
 from dashboard.backend.domain.analytics.query_service import (
     AnalyticsQueryService,
     AnalyticsUserFilters,
@@ -609,6 +613,67 @@ def test_sqlite_migrates_a_database_stuck_on_the_previous_category_set(tmp_path)
         error_category="run_timeout",
     )
     assert store.append_event(event).created is True
+
+
+def test_sqlite_migration_fires_for_a_category_no_sentinel_was_bumped_for(
+    tmp_path, monkeypatch
+):
+    """The sentinel above is derived from the category set, not hand-maintained.
+
+    It used to be a literal naming the LAST category added, so schema currency
+    depended on a human editing this module every time
+    `ALLOWED_ERROR_CATEGORIES` grew -- and the failure mode of forgetting is
+    invisible: fresh databases (every test database) accept the new value while
+    every EXISTING database keeps the old CHECK and rejects it at write time.
+    Whole suite green, only prod broken.
+
+    The test above pins the migration for TODAY's category, which a literal
+    sentinel also passes. This one introduces a category the source has never
+    heard of and bumps nothing, so only a derived guard can make it pass.
+    """
+    future = "future_category_no_sentinel"
+    db_path = tmp_path / "analytics-current-generation.db"
+    users = UserStore(db_path=db_path)
+    user = users.create_user(
+        "future-category@example.test",
+        "Future Category User",
+        "SecurePass1!",
+    )
+    # Built at TODAY's generation: exactly the state in which a literal
+    # sentinel returns early and skips the rebuild.
+    with sqlite3.connect(db_path) as conn:
+        conn.executescript(ANALYTICS_SQLITE_DDL)
+
+    assert ANALYTICS_SQLITE_DDL.count("'internal_error'") == 1, (
+        "the DDL anchor below is no longer unique -- update it, or this test "
+        "silently asserts nothing"
+    )
+    # The set object is shared by import with `repository`, so growing it here
+    # is what a new category actually looks like to the migration.
+    ALLOWED_ERROR_CATEGORIES.add(future)
+    monkeypatch.setattr(
+        analytics_repository,
+        "ANALYTICS_SQLITE_DDL",
+        ANALYTICS_SQLITE_DDL.replace(
+            "'internal_error'", f"'internal_error', '{future}'"
+        ),
+    )
+    try:
+        store = AnalyticsStore(db_path=db_path)
+        event = event_record(
+            int(user["id"]),
+            event_id="10000000-0000-4000-8000-000000000009",
+            event_name="backtest_failed",
+            event_group="run",
+            event_source="server",
+            source_event_id="run:future-category",
+            session_id=None,
+            page_view=None,
+            error_category=future,
+        )
+        assert store.append_event(event).created is True
+    finally:
+        ALLOWED_ERROR_CATEGORIES.discard(future)
 
 
 def test_sqlite_runs_shared_event_contracts(sqlite_contract):
