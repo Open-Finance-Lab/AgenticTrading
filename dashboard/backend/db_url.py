@@ -163,6 +163,20 @@ def init_schema_unless_worker(label: str, init_schema: Callable[[], None]) -> No
     ``label`` is the token that store's factory already prints in its
     ``<label> backend: postgres (...)`` boot line, so ``grep 'backend:'`` reads
     as one story.
+
+    **What is skipped is wider than the name.** ``_init_schema`` is DDL in
+    eight of the eleven twins, but three of them also run data statements
+    inside it -- the credits twin seeds the default grant pool and backfills
+    two ledger columns, the model-providers twin scrubs ``api_key_enc`` on
+    revoked credentials and seeds the provider registry, and the user twin
+    repairs ``users.user_group`` values outside the allowed set. This call
+    skips those in a child too. They are safe to skip **because the parent
+    applied them at boot before spawning anything**, which is a property of
+    how dashboard backtests are launched rather than of this function: a
+    worker that ever ran without a parent ahead of it would not have them.
+    ``tests/test_backtest_worker_schema_skip.py`` keeps that set declared, so
+    a fourth one cannot arrive unnoticed -- read it before adding a migration
+    to any guarded ``_init_schema``.
     """
     global _schema_init_seconds
     if schema_init_skipped():

@@ -195,6 +195,16 @@ from dashboard.backend import db_url
 #: part of; without it, `starting` cannot say which part.
 IMPORTS_DONE_AT = time.time()
 
+#: The DDL total as of that same instant. Read here rather than in main()
+#: because it is attributed to the CHILD_ENTERED_AT -> IMPORTS_DONE_AT window,
+#: and `db_url.schema_init_seconds()` is a process-global counter that keeps
+#: running: any store constructed after this line -- a lazily built singleton,
+#: a future import moved into main() -- would be charged to a window that had
+#: already closed, making `schema_init_seconds` exceed the interval it claims
+#: to decompose. Snapshotting it beside the stamp makes the pair honest by
+#: construction instead of by the current import order happening to cooperate.
+IMPORTS_SCHEMA_INIT_SECONDS = db_url.schema_init_seconds()
+
 
 # ============================================================================
 # Main
@@ -488,17 +498,19 @@ def main():
         runtime_config=runtime_config,
         execution_client=execution_client,
         launched_at=args.launched_at,
-        # Read here rather than inside the engine on purpose. These marks
-        # describe an interval that ended before the engine existed, and the
-        # third one Task 5 adds (`db_url.schema_init_seconds()`) is
-        # process-global: an engine that read it for itself would report the
-        # PARENT's boot DDL as this run's schema cost on every in-process path
-        # (the external-run session, the algo service, the suite). Handed in,
-        # an in-process engine passes nothing and the key is simply absent.
+        # All three are module-scope constants rather than reads taken here,
+        # on purpose. They describe an interval that ended before the engine
+        # existed, and the third (`db_url.schema_init_seconds()`) is a
+        # process-global counter that never resets: an engine that read it for
+        # itself would report the PARENT's boot DDL as this run's schema cost
+        # on every in-process path (the external-run session, the algo
+        # service, the suite), and reading it *here* would charge this window
+        # for any store built after the imports finished. Handed in, an
+        # in-process engine passes nothing and the key is simply absent.
         startup_clock={
             "child_entered_at": CHILD_ENTERED_AT,
             "imports_done_at": IMPORTS_DONE_AT,
-            "schema_init_seconds": db_url.schema_init_seconds(),
+            "schema_init_seconds": IMPORTS_SCHEMA_INIT_SECONDS,
         },
         **({"universe_selection": universe_selection} if universe_selection is not None else {}),
     )

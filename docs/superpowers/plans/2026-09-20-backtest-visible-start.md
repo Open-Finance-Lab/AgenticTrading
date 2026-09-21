@@ -1,5 +1,11 @@
 # Backtest Visible Start (Track A) Implementation Plan
 
+> **Status: IMPLEMENTED — shipped as PR #501 (`feat/backtest-visible-start`).**
+> The unticked boxes below are an artefact of how the plan was executed, not
+> work outstanding; they were never maintained during the run. Read the tree,
+> not this file, for what the branch actually does. Kept for its rationale and
+> its measurements, which the code does not restate.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** A dashboard backtest's card names what the child is doing from the first poll tick *after the child reaches `load_data`*. The window before that — parent setup, `Popen`, interpreter start, pandas, and 7 of the repo's 12 module-level store singletons — is **measured** as a retroactive `starting` phase rather than narrated, because no writer exists that early (spec, *Why `starting` is measured and not narrated*). The child also stops repeating the parent's schema DDL, and every pre-loop phase is measured by the same payload that drives the card.

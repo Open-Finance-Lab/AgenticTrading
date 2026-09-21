@@ -1,5 +1,18 @@
 # Backtest Pinned Sampling (Track B) Implementation Plan
 
+> **Status: NOT IMPLEMENTED — this file is a design, not a record of shipped work.**
+> Nothing under `dashboard/` implements it: there is no `sampling` field on
+> `CatalogModel` (`domain/model_providers/execution_catalog.py`) and no
+> `llm_sampling` key anywhere in the backend or the frontend. Verified
+> 2026-09-21. The unticked boxes below are therefore accurate — every task is
+> outstanding.
+>
+> Track B was sequenced behind Track A
+> (`2026-09-20-backtest-visible-start.md`, shipped as PR #501); that gate has
+> now cleared, so the branch can be cut. Update this line when it lands, and
+> do not infer status from the checkboxes — Track A shipped with all 56 of
+> its own still unticked.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Every model call a dashboard backtest makes carries a pinned sampling policy chosen per catalog model, the run records what it asked for, the results panel shows it, and a rerun of one configuration is measured against the first run.

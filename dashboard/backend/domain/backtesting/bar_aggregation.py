@@ -127,11 +127,18 @@ def aggregate_bars(
     # DataFrame and a pd.date_range built for each of 1,470 buckets). End to
     # end this buys ~11%. It also lands in `loading_bars`, not `indicators`:
     # aggregate_bars_by_symbol is called from load_data (engine.py:989). The
-    # per-bucket logic below is byte-for-byte what it was; only how rows find
-    # their bucket changed.
+    # per-bucket arithmetic below -- quality counts, OHLCV, turnover, vwap -- is
+    # byte-for-byte what it was; only how a row finds its bucket, and how that
+    # bucket's end is looked up, changed.
     keep: list[bool] = []
     starts: list[pd.Timestamp] = []
-    ends: list[pd.Timestamp] = []
+    # One entry per bucket, not one per source bar. `bucket_end` is a pure
+    # function of `bucket_start` -- min(start + decision, session_end) -- and a
+    # start belongs to exactly one session, because sessions on a date do not
+    # overlap and the date is part of the start. The previous shape built an
+    # `ends` list and a `_bucket_end` column as long as the kept rows, then read
+    # `.iloc[0]` of each group and discarded the rest.
+    ends_by_start: dict[pd.Timestamp, pd.Timestamp] = {}
     for timestamp in local.index:
         session = _session_for_timestamp(timestamp, windows)
         if session is None:
@@ -150,16 +157,33 @@ def aggregate_bars(
             continue
         keep.append(True)
         starts.append(bucket_start)
-        ends.append(bucket_end)
+        # Checked, not assumed. Collapsing one end per bucket is only sound
+        # while the mapping really is a function; a market whose windows put
+        # two sessions on the same bucket start would otherwise silently take
+        # whichever end arrived first and mis-size that bucket's expected bar
+        # count. One dict op either way, and a wrong number here is invisible
+        # downstream -- it lands as a quality count, not as a crash.
+        if ends_by_start.setdefault(bucket_start, bucket_end) != bucket_end:
+            raise BarAggregationError(
+                "two sessions produced decision bucket "
+                f"{bucket_start} with different ends "
+                f"({ends_by_start[bucket_start]} and {bucket_end}); "
+                "bucket_end is no longer a function of bucket_start"
+            )
 
-    kept = local.loc[keep].copy()
-    kept["_bucket_start"] = starts
-    kept["_bucket_end"] = ends
+    # Boolean-mask `.loc` already returns a new frame, and grouping on an
+    # external key array never writes to it, so the defensive `.copy()` -- a
+    # third full copy of the bars, after `_as_local_index`'s `frame.copy()` and
+    # its `sort_index()` -- bought nothing here. Positional alignment holds
+    # because `starts` gains exactly one entry for every True appended to
+    # `keep`.
+    kept = local.loc[keep]
+    bucket_keys = pd.DatetimeIndex(starts)
 
     records: list[dict] = []
-    for bucket_start, bucket in kept.groupby("_bucket_start", sort=True):
-        bucket_end = bucket["_bucket_end"].iloc[0]
-        group = bucket.drop(columns=["_bucket_start", "_bucket_end"]).sort_index()
+    for bucket_start, group in kept.groupby(bucket_keys, sort=True):
+        bucket_end = ends_by_start[bucket_start]
+        group = group.sort_index()
         expected = int(
             (bucket_end - bucket_start).total_seconds() // (source_minutes * 60)
         )
