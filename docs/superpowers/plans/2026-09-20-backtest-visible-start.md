@@ -3169,8 +3169,8 @@ How to read these, because they are not all the same kind of number:
 They do not say what this plan assumed when it was written, and the honest reading
 is worth more than the tidy one.
 
-**The dark window is ~21 s, and `loading_bars` is 86% of it** — 18.15 s of 21.20 s
-rule-based, 18.67 s of 21.56 s on the LLM arm, against 2.59 s / 2.45 s for the whole
+**The dark window is ~21 s, and `loading_bars` is ~86% of it** — 18.15 s of 21.20 s
+rule-based (85.6%) and 18.67 s of 21.56 s on the LLM arm (86.6%), against 2.59 s / 2.45 s for the whole
 of imports-and-stores. Both arms agree to within half a second on every pre-loop
 phase, which is what makes the split trustworthy: they share no process, no code path
 into the engine, and no launcher.
@@ -3185,8 +3185,10 @@ Three consequences follow, and the last one is the one to act on.
   Counting statements instead of trusting this wall clock is precisely why Step 8 exists;
   a local before/after would have reported a saving of nothing and been believed.
 - **The aggregation gate fired and the rewrite worked, and it still was not the fix.**
-  4.58 s → 4.13 s (controller re-ran both arms on a quiet machine from separate worktrees
-  and got 4.62 s → 4.11 s — the same answer). ~10% of one function that is itself a
+  4.58 s → 4.13 s. Four independent measurement sets (implementer, controller ×2, reviewer)
+  put the before arm at **4.57–4.95 s** and the after arm at **4.07–4.32 s** — a consistent
+  ~10–14% improvement, with the before arm visibly the noisier of the two, so read the
+  single-pair figure as a midpoint rather than a precise delta. ~10% of one function that is itself a
   fraction of `loading_bars`. The row walk was ~0.8 s of a ~9.2 s profile, so removing it
   was worth doing and was never going to be the fix; `_weighted_vwap` and the per-bucket
   work carry the rest and are deliberately untouched.
