@@ -17,7 +17,7 @@ from __future__ import annotations
 import secrets
 from typing import Any, Optional
 
-from dashboard.backend.db_url import require_postgres_url
+from dashboard.backend.db_url import init_schema_unless_worker, require_postgres_url
 from dashboard.backend.domain.strategies.repository import (
     _CODE_LENGTH,
     _now_iso,
@@ -30,7 +30,7 @@ class PostgresStrategyStore:
 
     def __init__(self, database_url: str):
         self.database_url = require_postgres_url(database_url)
-        self._init_schema()
+        init_schema_unless_worker("strategy_store", self._init_schema)
 
     def _get_connection(self):
         # Pooled checkout: same context-manager transaction semantics as

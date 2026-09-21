@@ -187,6 +187,7 @@ from dashboard.backend.infrastructure.llm.execution.errors import LLMExecutionEr
 from dashboard.backend.infrastructure.llm.execution.service import LLMExecutionService
 from dashboard.backend.domain.credits.service import credits_service
 from dashboard.backend.domain.model_providers.service import get_model_provider_service
+from dashboard.backend import db_url
 
 #: Wall clock once every import above has run -- pandas, three SDKs, and the
 #: seven store singletons those imports construct as a side effect (six of them
@@ -497,6 +498,7 @@ def main():
         startup_clock={
             "child_entered_at": CHILD_ENTERED_AT,
             "imports_done_at": IMPORTS_DONE_AT,
+            "schema_init_seconds": db_url.schema_init_seconds(),
         },
         **({"universe_selection": universe_selection} if universe_selection is not None else {}),
     )

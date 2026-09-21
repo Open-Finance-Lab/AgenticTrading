@@ -13,7 +13,7 @@ from __future__ import annotations
 import json
 from typing import Any, Dict, List, Optional
 
-from dashboard.backend.db_url import require_postgres_url
+from dashboard.backend.db_url import init_schema_unless_worker, require_postgres_url
 from dashboard.backend.domain.agents.version_repository import (
     _new_version_id,
     _public_version,
@@ -27,7 +27,7 @@ class PostgresAgentVersionStore:
 
     def __init__(self, database_url: str):
         self.database_url = require_postgres_url(database_url)
-        self._init_schema()
+        init_schema_unless_worker("agent_version_store", self._init_schema)
 
     def _get_connection(self):
         # Pooled checkout: same context-manager transaction semantics as

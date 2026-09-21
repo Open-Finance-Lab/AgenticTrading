@@ -156,3 +156,13 @@ def test_script_accepts_launched_at(tmp_path):
     )
     assert result.returncode == 0, result.stderr
     assert "--launched-at" in result.stdout
+
+
+def test_child_env_is_marked_as_a_backtest_worker(monkeypatch):
+    monkeypatch.delenv("ATL_BACKTEST_WORKER", raising=False)
+    run_id = f"agent_launch_phase_test_{uuid.uuid4().hex[:8]}"
+    _acquire(run_id, "session-id")
+    captured = _launch(monkeypatch, run_id)
+    assert captured["env"]["ATL_BACKTEST_WORKER"] == "1"
+    # The parent's own environment is untouched: the flag is for the child.
+    assert "ATL_BACKTEST_WORKER" not in os.environ

@@ -99,6 +99,7 @@ from dashboard.backend.domain.backtesting.provenance import (
     run_decision_provenance,
 )
 from dashboard.backend.domain.credits.service import credits_service
+from dashboard.backend.db_url import BACKTEST_WORKER_ENV
 from dashboard.backend.api.rate_limit import FixedWindowRateLimiter, client_key
 from dashboard.backend.domain.agents.service import agent_service
 from dashboard.backend.domain.agents.credential_store import (
@@ -1671,6 +1672,11 @@ def run_backtest_background(
         print(f"📁 Can write to {db_path.parent}: {os.access(db_path.parent, os.W_OK)}", flush=True)
         
         env = os.environ.copy()
+        # The child must not repeat this process's schema DDL (db_url.
+        # schema_init_skipped). Set on the copy only: the parent is not a
+        # worker, and a value that leaked into os.environ would make the next
+        # uvicorn reload skip DDL it actually needs.
+        env[BACKTEST_WORKER_ENV] = "1"
         if runtime_type == AI_HEDGE_FUND_RUNTIME_TYPE:
             # A Financial Datasets key is agent-owner material, never a platform
             # fallback. Isolate it only for the hosted runtime; pipeline

@@ -16,6 +16,9 @@ scrubbers is four chances for one of them to leak a password into a log.
 
 from __future__ import annotations
 
+import os
+import time
+from collections.abc import Callable
 from urllib.parse import urlsplit
 
 # psycopg reads a connection string as a URL only when it starts with one of
@@ -88,3 +91,85 @@ def describe_database_url(database_url: str) -> str:
     if ":" in host:
         host = f"[{host}]"
     return f"{host}{port}/{dbname}"
+
+
+#: Set by `api/routers/backtests.py` in a dashboard backtest child's
+#: environment and nowhere else.
+BACKTEST_WORKER_ENV = "ATL_BACKTEST_WORKER"
+
+
+def schema_init_skipped() -> bool:
+    """True inside a dashboard backtest child, which must not repeat DDL.
+
+    The parent ran every store's ``_init_schema`` at import, so the schema
+    exists by the time it spawns anything; a child that ran it again paid a
+    fresh pooled connection and a batch of DDL round trips per store to Neon
+    before reading a single bar. Named for the process role rather than the
+    DDL so no operator sets it globally, and so later child-only behaviour
+    (turning the analytics snapshot projection off, for one) has a home.
+    Only the literal ``1`` arms it.
+    """
+    return os.environ.get(BACKTEST_WORKER_ENV, "").strip() == "1"
+
+
+#: Seconds this process has spent inside store ``_init_schema()`` calls.
+#: Process-global and never reset: it is read once, by the backtest child's
+#: script, just before it builds the engine. Do not read it from a request
+#: path -- in a long-lived parent it is the whole boot's DDL, not this call's.
+_schema_init_seconds = 0.0
+
+
+def schema_init_seconds() -> float:
+    """Total DDL time this process has paid, for the ``starting`` record.
+
+    It is what makes that phase attributable: ``starting`` is one interval
+    covering process spawn, pandas and three SDK imports, and the seven store
+    singletons those imports construct as a side effect (six of them Postgres
+    twins, which are the six that run DDL) -- and a single number that moves
+    for any of those reasons cannot say whether removing the DDL helped. In a
+    worker it is
+    ``0.0`` -- present and zero, which is the evidence the flag fired, not a
+    missing field.
+    """
+    return _schema_init_seconds
+
+
+def init_schema_unless_worker(label: str, init_schema: Callable[[], None]) -> None:
+    """Run ``init_schema`` unless this process is a dashboard backtest child.
+
+    Defined once rather than cloned into each twin's ``__init__`` -- the same
+    call this module's header makes for describe_database_url, for a sharper
+    version of the same reason. Eleven hand-copied
+    ``if schema_init_skipped(): print(...) else: self._init_schema()`` blocks
+    are eleven chances for one to invert its condition or lose its log line,
+    and the two failures are asymmetric. An inverted guard fails in the
+    *parent*: it stops running a ``CREATE TABLE IF NOT EXISTS`` that would
+    have been free, and the first symptom is an UndefinedTable or
+    UndefinedColumn on the deployed database, from a store nobody edited. A
+    lost log line makes "the child skipped DDL" and "this twin was never
+    constructed" the same empty stdout. One condition, one line, one place to
+    read them.
+
+    **Both directions print, and the ran-it direction prints its cost.** A skip
+    line alone would leave "the flag reached the child" and "this build has no
+    guard at all" producing the same silence in a log. And the timing is the
+    only pre-change number the deploy that removes the cost can still produce:
+    the parent runs this same DDL against the same databases at boot and is
+    never a worker, so the parent's boot log *is* the baseline the child's skip
+    is measured against. Locally every store resolves to its SQLite twin and
+    never reaches here at all, which is why no local before/after of the flag
+    means anything.
+
+    ``label`` is the token that store's factory already prints in its
+    ``<label> backend: postgres (...)`` boot line, so ``grep 'backend:'`` reads
+    as one story.
+    """
+    global _schema_init_seconds
+    if schema_init_skipped():
+        print(f"{label} backend: schema init skipped (backtest worker)", flush=True)
+        return
+    started = time.perf_counter()
+    init_schema()
+    elapsed = time.perf_counter() - started
+    _schema_init_seconds += elapsed
+    print(f"{label} backend: schema init {elapsed:.2f}s", flush=True)

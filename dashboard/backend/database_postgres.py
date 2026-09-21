@@ -49,14 +49,14 @@ from dashboard.backend.database import (
     TRADE_OPTIONAL_AUDIT_FIELDS,
     as_timestamp_text,
 )
-from dashboard.backend.db_url import require_postgres_url
+from dashboard.backend.db_url import init_schema_unless_worker, require_postgres_url
 
 
 class PostgresBacktestDatabase:
     def __init__(self, database_url: str):
         self.database_url = require_postgres_url(database_url)
         self._sqlite = BacktestDatabase()   # hot half: idempotency_keys stays local
-        self._init_schema()
+        init_schema_unless_worker("run history", self._init_schema)
 
     def _get_connection(self):
         # Pooled checkout: same context-manager transaction semantics as
