@@ -8699,16 +8699,24 @@ function attachToLiveBacktest(runId, progress = null, launchConfig = null) {
         updateLiveTradingLog(progress);
         const stepPct = backtestStepPercent(progress);
         updateBacktestRunProgress({
-            message: stepPct != null
-                ? `Backtest running… step ${progress.step}/${progress.total_steps} (${Math.round(stepPct)}%)`
-                // The phase, not the bare generic, and not "step 0/49": this
-                // is the dropdown / deep-link / reload-mid-run path, so it is
-                // the first thing a returning user sees, and with the poller
-                // a second away it must not contradict what that writes next.
-                // `formatBacktestPhase` returns '' for `running` and
-                // `starting`, so the generic still covers every case that has
-                // no phase to name.
-                : (formatBacktestPhase(progress.phase) || 'Backtest is running…'),
+            // The phase outranks the count, and that ordering is the whole
+            // point: this is the dropdown / deep-link / reload-mid-run path,
+            // so it is the first thing a returning user sees, and with the
+            // poller a second away it must not contradict what that writes
+            // next. `_progress_message` applies the same precedence server
+            // side (`if phase != "saving" and step > 0 and total > 0`), and
+            // the count alone cannot express `saving`: a finished loop has
+            // step == total_steps, so a count-first order renders
+            // "step 49/49 (100%)" against the poller's "Saving results…".
+            //
+            // Safe by construction for every other phase, because
+            // `formatBacktestPhase` returns '' for `running`, for `starting`
+            // and for an absent or unknown phase -- so mid-loop this is
+            // byte-identical to the count-first form it replaced.
+            message: formatBacktestPhase(progress.phase)
+                || (stepPct != null
+                    ? `Backtest running… step ${progress.step}/${progress.total_steps} (${Math.round(stepPct)}%)`
+                    : 'Backtest is running…'),
             stepPct,
         });
     } else if (!alreadyLive) {
