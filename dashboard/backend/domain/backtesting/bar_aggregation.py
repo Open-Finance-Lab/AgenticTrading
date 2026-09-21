@@ -117,11 +117,25 @@ def aggregate_bars(
 
     local = _as_local_index(frame, timezone)
     windows = _session_windows(market)
-    buckets: dict[pd.Timestamp, list[pd.Series]] = {}
-    bucket_ends: dict[pd.Timestamp, pd.Timestamp] = {}
-    for timestamp, row in local.iterrows():
+    # Walk the index, not the rows: iterrows builds a Series per source bar,
+    # and the onboarding shape has ~16k of them (7 weekdays x 78 five-minute
+    # bars x 30 symbols). That is the cheapest thing here to remove, not the
+    # expensive one, and the comment first drafted for this block claimed the
+    # opposite. Measured 2026-09-21 under cProfile: iterrows is ~0.8s of this
+    # function's ~9.2s cumulative, while the per-bucket work carries the rest
+    # (_weighted_vwap ~1.9s, group.apply(pd.to_numeric) ~1.3s, plus a
+    # DataFrame and a pd.date_range built for each of 1,470 buckets). End to
+    # end this buys ~11%. It also lands in `loading_bars`, not `indicators`:
+    # aggregate_bars_by_symbol is called from load_data (engine.py:723). The
+    # per-bucket logic below is byte-for-byte what it was; only how rows find
+    # their bucket changed.
+    keep: list[bool] = []
+    starts: list[pd.Timestamp] = []
+    ends: list[pd.Timestamp] = []
+    for timestamp in local.index:
         session = _session_for_timestamp(timestamp, windows)
         if session is None:
+            keep.append(False)
             continue
         session_start, session_end = session
         elapsed_minutes = int((timestamp - session_start).total_seconds() // 60)
@@ -132,15 +146,20 @@ def aggregate_bars(
         )
         # A source bar can only belong to a decision bucket that has not ended.
         if bucket_start >= bucket_end:
+            keep.append(False)
             continue
-        buckets.setdefault(bucket_start, []).append(row)
-        bucket_ends[bucket_start] = bucket_end
+        keep.append(True)
+        starts.append(bucket_start)
+        ends.append(bucket_end)
+
+    kept = local.loc[keep].copy()
+    kept["_bucket_start"] = starts
+    kept["_bucket_end"] = ends
 
     records: list[dict] = []
-    for bucket_start in sorted(buckets):
-        group = pd.DataFrame(buckets[bucket_start])
-        group = group.sort_index()
-        bucket_end = bucket_ends[bucket_start]
+    for bucket_start, bucket in kept.groupby("_bucket_start", sort=True):
+        bucket_end = bucket["_bucket_end"].iloc[0]
+        group = bucket.drop(columns=["_bucket_start", "_bucket_end"]).sort_index()
         expected = int(
             (bucket_end - bucket_start).total_seconds() // (source_minutes * 60)
         )
