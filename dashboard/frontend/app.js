@@ -8077,12 +8077,18 @@ function advanceBacktestProgress(previous, progress, now) {
             };
         }
         const phaseAge = Number(progress?.progress_age_seconds);
-        const phaseStartedAt = Number(progress?.phase_started_at);
+        // `phase_started_at` is deliberately NOT folded. It is a raw *server*
+        // wall clock, while every elapsed figure this card prints is derived
+        // from `progress_age_seconds` -- computed server side precisely so a
+        // skewed client clock, or a laptop resumed from sleep, cannot report a
+        // phase as having started in the future. Folding it put that trap one
+        // `Date.now() / 1000 - phaseStartedAt` away from being real, in a field
+        // nothing read, set on only one of this function's three exits. Use
+        // `ageSeconds` below; see resolveProgressAgeSeconds' docblock.
         return {
             step: 0,
             totalSteps: Number.isFinite(total) ? total : 0,
             phase: String(progress.phase),
-            phaseStartedAt: Number.isFinite(phaseStartedAt) ? phaseStartedAt : null,
             equityCurve: [],
             openingEquity: null,
             ageSeconds: Number.isFinite(phaseAge) ? phaseAge : null,
@@ -8649,7 +8655,12 @@ function prepareLiveBacktestView(launchConfig = null) {
 }
 
 /** Switch the Backtest surface onto an in-flight run (chart + log + config). */
-function attachToLiveBacktest(runId, progress = null, launchConfig = null) {
+function attachToLiveBacktest(
+    runId,
+    progress = null,
+    launchConfig = null,
+    { serverMessage = '' } = {},
+) {
     if (!runId) return;
     backtestSurfaceRequestSeq += 1;
     liveBacktestLaunchPending = false;
@@ -8699,27 +8710,49 @@ function attachToLiveBacktest(runId, progress = null, launchConfig = null) {
         updateLiveTradingLog(progress);
         const stepPct = backtestStepPercent(progress);
         updateBacktestRunProgress({
-            // The phase outranks the count, and that ordering is the whole
-            // point: this is the dropdown / deep-link / reload-mid-run path,
-            // so it is the first thing a returning user sees, and with the
-            // poller a second away it must not contradict what that writes
-            // next. `_progress_message` applies the same precedence server
-            // side (`if phase != "saving" and step > 0 and total > 0`), and
-            // the count alone cannot express `saving`: a finished loop has
-            // step == total_steps, so a count-first order renders
-            // "step 49/49 (100%)" against the poller's "Saving results…".
+            // The server's own sentence, byte-identical to what the 1s poller
+            // writes into this same node. That is the ownership rule
+            // BACKTEST_PHASE_LABELS' docblock states: the phase *names* are the
+            // contract between the two surfaces, the Backtest panel prints the
+            // server's sentence, and the agent card owns the short labels.
             //
-            // Safe by construction for every other phase, because
-            // `formatBacktestPhase` returns '' for `running`, for `starting`
-            // and for an absent or unknown phase -- so mid-loop this is
-            // byte-identical to the count-first form it replaced.
-            message: formatBacktestPhase(progress.phase)
+            // This used to call `formatBacktestPhase` -- the card's vocabulary
+            // -- on the panel. Attaching to a run in `first_decision` therefore
+            // wrote "Waiting on first decision" and the poller replaced it with
+            // "Waiting on the first model decision… (49 decision bars queued)"
+            // about a second later: one node changing its own wording, on the
+            // dropdown / deep-link / reload-mid-run path that is the first
+            // thing a returning user sees.
+            //
+            // The count stays as the fallback for a status payload with no
+            // message (an older server, or a status fetch that threw). It
+            // cannot bring back the `saving` inversion the phase-first ordering
+            // was added to fix, because `_progress_message` already applies
+            // that precedence server side.
+            message: serverMessage
                 || (stepPct != null
                     ? `Backtest running… step ${progress.step}/${progress.total_steps} (${Math.round(stepPct)}%)`
                     : 'Backtest is running…'),
             stepPct,
         });
-    } else if (!alreadyLive) {
+    }
+    // Outside the `if`, and keyed on the records rather than on the payload.
+    // Publishing the phase before the bar loop made `progress` truthy for the
+    // whole pre-loop window -- ~18s of a ~21s launch, almost all of it
+    // `loading_bars` -- which is precisely when this branch used to run. That
+    // payload carries no `trades` and no `order_events`: it is `dict(last)`
+    // over an empty `last` (engine.py `publish_phase`). So
+    // `updateLiveTradingLog` early-returns on it and the log was left neither
+    // repainted nor cleared, leaving the previously viewed run's fills on
+    // screen under a header reading "Loading market data…", as though they
+    // belonged to the run just starting.
+    //
+    // Keyed on `hasTradingLogRecords` and not on `progress` so it cannot rot
+    // the same way again: the question is "did anything paint the log?", and
+    // that is the same predicate the painter itself returns on. `alreadyLive`
+    // still suppresses the clear, because there the fills on screen are this
+    // very run's.
+    if (!alreadyLive && !hasTradingLogRecords(progress)) {
         clearTradingLog('Backtest running… orders will appear here.');
     }
     ensureBacktestPolling();
@@ -9506,8 +9539,20 @@ function clearTradingLog(message = 'Waiting for orders…') {
     renderTradingLog([], { emptyMessage: message });
 }
 
+/**
+ * Does this progress payload carry anything the trading log can render?
+ *
+ * One owner, because two callers branch on it: `updateLiveTradingLog` below,
+ * which paints, and `attachToLiveBacktest`, which must clear the previously
+ * viewed run's fills when the answer is no. A pre-loop phase payload answers
+ * false -- it carries neither key.
+ */
+function hasTradingLogRecords(progress) {
+    return Array.isArray(progress?.order_events) || Array.isArray(progress?.trades);
+}
+
 function updateLiveTradingLog(progress) {
-    if (!Array.isArray(progress?.order_events) && !Array.isArray(progress?.trades)) return;
+    if (!hasTradingLogRecords(progress)) return;
     renderTradingLog(resolveTradingLogRecords(progress), {
         truncatedCount: resolveTradingLogTruncation(progress),
     });
@@ -11864,6 +11909,7 @@ async function loadData({ liveRunId = null } = {}) {
 
             let runningId = liveBacktestRunId || null;
             let statusProgress = null;
+            let statusMessage = '';
             try {
                 // `liveRunId` is the run the caller is opening, when it knows.
                 // Without it this asks "what is the newest thing this browser is
@@ -11875,6 +11921,7 @@ async function loadData({ liveRunId = null } = {}) {
                     runningId = status.live_run_id;
                     liveBacktestRunId = runningId;
                     statusProgress = status.progress || null;
+                    statusMessage = status.message || '';
                     ensureBacktestPolling();
                 } else if (!status?.running) {
                     liveBacktestRunId = null;
@@ -11899,6 +11946,7 @@ async function loadData({ liveRunId = null } = {}) {
                     runningId,
                     statusProgress,
                     getBacktestLaunchConfig(runningId),
+                    { serverMessage: statusMessage },
                 );
                 return;
             }

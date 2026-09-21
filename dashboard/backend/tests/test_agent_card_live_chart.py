@@ -139,7 +139,13 @@ def test_fold_accepts_a_phase_tick_without_a_step():
     assert folded["step"] == 0
     assert folded["totalSteps"] == 49
     assert folded["phase"] == "first_decision"
-    assert folded["phaseStartedAt"] == 1700000000
+    # NOT folded, deliberately. `phase_started_at` is a raw server wall clock;
+    # every elapsed figure the card prints derives from `progress_age_seconds`
+    # instead, computed server side so a skewed client clock cannot report a
+    # phase as having started in the future. It was carried here, read by
+    # nothing, and set on only one of the fold's three exits -- a trap one
+    # `Date.now() / 1000 - phaseStartedAt` away from being real.
+    assert "phaseStartedAt" not in folded
     assert folded["ageSeconds"] == 4
     assert folded["equityCurve"] == []
     assert "firstStep" not in folded
