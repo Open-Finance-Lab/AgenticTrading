@@ -20,6 +20,15 @@ import uuid
 from bisect import bisect_left
 from datetime import date, datetime, time
 from math import ceil
+# `from time import ...`, not `import time`: line 21's
+# `from datetime import date, datetime, time` binds the bare name `time` to
+# `datetime.time`, which this module *calls as a constructor* for the A-share
+# session bounds (`time(9, 30) <= local_time <= time(11, 30)`, :1209-1210). A
+# plain `import time` above it is rebound by that later line, so `time.time()`
+# raises AttributeError; below it, those four session bounds silently become
+# calls on the time module instead. Green on every US run either way, red only
+# on an A-share one.
+from time import time as wall_clock
 from typing import Any, Dict, List, Optional, Tuple
 
 from dashboard.backend.database import db
@@ -135,6 +144,18 @@ REJECTED_ORDER_SAMPLE_LIMIT = 200
 LIVE_PROGRESS_REJECTED_ORDER_LIMIT = 50
 LIVE_PROGRESS_ORDER_EVENT_LIMIT = 50
 
+#: Every phase the child publishes to the progress file, in the order a run
+#: passes through them. `running` is set by `_publish_live_progress`; the rest
+#: by `publish_phase`. The status route and the card key on these names.
+PROGRESS_PHASES = (
+    "starting",
+    "loading_bars",
+    "indicators",
+    "first_decision",
+    "running",
+    "saving",
+)
+
 
 def _unfilled_order_events(order_events) -> List[Dict]:
     """Return only the order outcomes ``trades`` cannot already reconstruct.
@@ -201,6 +222,8 @@ class HourlyBacktester:
         pool_mode: Optional[str] = None,
         universe_selection: Optional[Dict] = None,
         source_timeframe: Optional[str] = None,
+        launched_at: Optional[float] = None,
+        startup_clock: Optional[Dict[str, float]] = None,
     ):
         # Validate and swap dates if they're in the wrong order
         from datetime import datetime as dt_parser
@@ -236,6 +259,7 @@ class HourlyBacktester:
         self.execution_client = execution_client
         self.live_run_id = (live_run_id or "").strip() or None
         self.progress_file = (progress_file or "").strip() or None
+        self._init_progress_phases(launched_at, startup_clock)
         self.data_source = data_source
         self.runtime_type = normalize_runtime_type(runtime_type)
         self.runtime_config = normalize_runtime_config(
@@ -585,11 +609,254 @@ class HourlyBacktester:
             serialized.append(item)
         return serialized
 
+    # -- Progress phases -----------------------------------------------------
+    #
+    # `_publish_live_progress` is the only writer once the bar loop starts;
+    # before it, nothing wrote anything, and the card sat on its launch
+    # sentence for the whole start (imports, six stores' DDL, the bar fetch,
+    # aggregation, indicators, then bar 1's full pipeline). Each phase write
+    # carries the phase in progress plus the finished ones with timestamps, so
+    # the same payload that drives the card is the measurement of the start.
+    # Every accessor tolerates an instance built with __new__ (tests, legacy
+    # tools) that never ran _init_progress_phases -- and `publish_phase`
+    # additionally tolerates `progress_file` being *absent* rather than None,
+    # because Step 6 makes it the first statement of `load_data`, which is
+    # documented as usable on exactly such an instance.
+
+    def _init_progress_phases(
+        self,
+        launched_at: Optional[float] = None,
+        startup_clock: Optional[Dict[str, float]] = None,
+    ) -> None:
+        """Open the implicit `starting` phase at the parent's launch time.
+
+        The parent alone can see the gap between spawning the child and the
+        child's first write (imports, store startup); passing its clock in is
+        how that gap becomes a measured phase instead of a missing one. A
+        caller that passes nothing (the CLI without --launched-at, tests,
+        `__new__` instances) opens no phase at all, so the first
+        `publish_phase` records no `starting` entry rather than inventing one
+        from the child's own clock -- which would measure zero and read as a
+        start that cost nothing.
+
+        `starting` is deliberately ONE phase name -- the card has nothing
+        useful to say about spawn vs imports vs stores, and a name the status
+        route must translate is a name the frontend must learn. But one
+        undifferentiated number cannot justify an optimisation either: it lumps
+        process spawn, pandas and three SDK imports, seven store constructions
+        (six of them Postgres twins, and only those six run DDL) and that DDL
+        into a single figure that moves for reasons nobody can attribute. So
+        the *record* is split even though the *phase* is not.
+        With the script's two stamps and its reading of db_url's accumulator,
+        the `starting` entry yields four numbers from one run:
+
+            spawn + interpreter    = child_entered_at - started_at
+            imports incl. stores   = imports_done_at - child_entered_at
+            of which schema DDL    = schema_init_seconds   (0.0 in a worker)
+            preflight remainder    = ended_at - imports_done_at
+
+        Undo the split and the Final verification table can say that `starting`
+        got shorter but not which of those four moved -- which is the same as
+        not knowing whether removing the DDL did anything.
+
+        A mark nobody passed is *absent*, not zero: an in-process engine gets a
+        plain three-key record. `schema_init_seconds` is the one exception --
+        present and 0.0 in a worker, because that zero is the evidence the flag
+        fired, not a gap.
+        """
+        # `is not None`, not truthiness: 0.0 is a launch time, and argparse's
+        # `type=float` hands it over intact. A falsy gate dropped the whole
+        # `starting` phase for `--launched-at 0` -- deleting the one number
+        # this plan exists to produce, with nothing in the file to say so.
+        # Deliberately NOT range-checked: `starting` is never a live phase, so
+        # an absurd clock lands only in `phases[]`, where it reads as an
+        # absurdly long row -- visible, and therefore fixable. A bounds check
+        # would turn that back into a silent absence, which is the one outcome
+        # this repo never accepts (see IFIND_ALLOW_CORPORATE_ACTION_GAPS in
+        # CLAUDE.md: a labelled wrong number, never a silent one). The other
+        # malformed forms cannot reach here at all -- argparse's `type=float`
+        # rejects an empty string and a BSD `date +%s.%N`'s trailing "N" at the
+        # CLI boundary, loudly.
+        self._progress_phase: Optional[str] = (
+            "starting" if launched_at is not None else None
+        )
+        self._progress_phase_started_at: Optional[float] = (
+            float(launched_at) if launched_at is not None else None
+        )
+        extra: Dict = {}
+        for key in ("child_entered_at", "imports_done_at", "schema_init_seconds"):
+            value = (startup_clock or {}).get(key)
+            if value is not None:
+                extra[key] = float(value)
+        self._progress_phase_extra: Dict = extra
+        self._progress_phases: List[Dict] = []
+        self._progress_total_steps: int = 0
+
+    def _set_progress_phase(
+        self, name: str, *, total_steps: Optional[int] = None
+    ) -> bool:
+        """Close the current phase and open ``name``. True if the phase moved."""
+        if name not in PROGRESS_PHASES:
+            raise ValueError(f"unknown progress phase: {name!r}")
+        if not hasattr(self, "_progress_phases"):
+            self._init_progress_phases()
+        if total_steps is not None:
+            self._progress_total_steps = int(total_steps)
+        if self._progress_phase == name:
+            return False
+        now = wall_clock()
+        if self._progress_phase is not None:
+            finished = {
+                "name": self._progress_phase,
+                "started_at": self._progress_phase_started_at,
+                "ended_at": now,
+            }
+            if self._progress_phase == "starting":
+                finished.update(getattr(self, "_progress_phase_extra", {}))
+            self._progress_phases.append(finished)
+            # stdout as well as the file, and from here rather than from
+            # main(). The parent unlinks the progress file the moment the run
+            # ends (`backtests.py:1810`, inside run_backtest_background's
+            # `finally` at `:1771`), so `phases[]` can only be read by racing a
+            # live poll; the child's stdout is captured head+tail
+            # (SUBPROCESS_LOG_HEAD_CHARS / _TAIL_CHARS, 32k each, `:2299-2300`)
+            # and dumped into the parent's log under
+            # `=== BACKTEST SCRIPT OUTPUT ===` (`:1628`), where it keeps. It is
+            # also the ONLY phase record a CLI run, the external-run session or
+            # the algo service has -- none of them writes a progress file.
+            # main() could not do this job: it cannot see `first_decision` open
+            # and close inside run_agent_backtest, and a second elapsed clock in
+            # the script is the two-owners pattern this repo already documents.
+            # `is None`, not `or`: `started_at` is 0.0 for the very launch
+            # clock this plan exists to measure, and `0.0 or now` would print
+            # that phase as having cost nothing -- the same falsy-zero trap
+            # _init_progress_phases's gate is about, one line further on.
+            opened = finished["started_at"]
+            elapsed = finished["ended_at"] - (now if opened is None else opened)
+            print(f"⏱  phase {name} (after {finished['name']} {elapsed:.2f}s)", flush=True)
+            if finished["name"] == "starting" and {
+                "child_entered_at",
+                "imports_done_at",
+            } <= finished.keys():
+                # Printed on this transition, not saved for a summary at the
+                # end: `saving` fires before the agent's insert_run with two
+                # baseline runs still to print, so a closing table can land in
+                # the truncated middle of the parent's bounded capture. These
+                # lines are at the head.
+                print(
+                    f"     spawn+interpreter "
+                    f"{finished['child_entered_at'] - finished['started_at']:.2f}s"
+                    f" | imports+stores "
+                    f"{finished['imports_done_at'] - finished['child_entered_at']:.2f}s"
+                    f" (schema DDL {finished.get('schema_init_seconds', 0.0):.2f}s)"
+                    f" | preflight "
+                    f"{finished['ended_at'] - finished['imports_done_at']:.2f}s",
+                    flush=True,
+                )
+        else:
+            print(f"⏱  phase {name}", flush=True)
+        self._progress_phase = name
+        self._progress_phase_started_at = now
+        return True
+
+    def _progress_phase_fields(self) -> Dict:
+        if not hasattr(self, "_progress_phases"):
+            self._init_progress_phases()
+        return {
+            "phase": self._progress_phase,
+            "phase_started_at": self._progress_phase_started_at,
+            "phases": list(self._progress_phases),
+        }
+
+    def publish_phase(self, name: str, *, total_steps: Optional[int] = None) -> None:
+        """Record a phase transition and, with a progress file, publish it.
+
+        **Before** the loop there is nothing to carry, so the payload is the
+        skeleton `step: 0` / `equity_curve: []`, and every existing reader of
+        the file (chart, trading log, ETA anchor) keeps its early return while
+        only the message and the bar count change.
+
+        **After** the loop there is, and writing that skeleton over it was a
+        real regression rather than a cosmetic one. `saving` fires at the end
+        of a 49-bar run: a payload of `step: 0, equity_curve: []` snaps the
+        Backtest panel's bar from 99% to 0 -- `stepPct` is computed straight
+        off this file's `step`/`total_steps` (`app.js:8600`, the 1s poller;
+        `attachToLiveBacktest` at `:8432` holds a byte-identical second copy,
+        which Task 4 replaces with one shared helper) and never passes through
+        the fold, so no frontend guard can reach it -- and the My
+        Agents fold *replaces* its stored entry (`app.js:8609`), blanking the
+        sparkline, the equity label and `49/49` for the whole
+        baseline/persistence tail, with nothing red anywhere. So a phase write
+        carries the last published payload forward and changes only the phase
+        fields and the bar count: the file never says less than it last said.
+
+        The carry is what makes the fix hold at the source. Task 4 Step 6 adds
+        a second, independent guard in the browser for any writer that still
+        publishes a bare phase tick after real progress; neither is a substitute
+        for the other, because the panel's bar bypasses the fold and the fold
+        outlives this engine's payload shape.
+        """
+        self._set_progress_phase(name, total_steps=total_steps)
+        # `getattr`, not `self.progress_file`. Step 6 makes this method the
+        # first statement of `load_data`, and `load_data` is documented as
+        # usable on an instance built with `__new__` (its own comment,
+        # engine.py:647-648) -- so this read is now the first attribute such a
+        # caller touches. `progress_file` is assigned in `__init__` and is not
+        # a class attribute, so on that instance it is *absent*, and a bare
+        # read raises AttributeError rather than returning None. Verified by
+        # running it. The one such caller in the suite is
+        # test_market_data_errors.py::test_engine_load_data_empty_raises_not_exits,
+        # which sets five attributes and not this one; it would report an
+        # AttributeError naming neither this task nor its own subject, in
+        # place of the MarketDataUnavailableError it asserts.
+        if not getattr(self, "progress_file", None):
+            return
+        last = getattr(self, "_progress_last_payload", None) or {}
+        payload = dict(last)
+        payload.update(
+            {
+                "run_id": self.live_run_id,
+                # `last.get(...)`, not `self._progress_...`: the step and the
+                # curve belong to the loop, and re-deriving them here would be
+                # a second owner for numbers _publish_live_progress already
+                # published. Absent (pre-loop) they default to the skeleton.
+                "step": int(last.get("step") or 0),
+                "total_steps": self._progress_total_steps,
+                "equity_curve": last.get("equity_curve") or [],
+                **self._progress_phase_fields(),
+            }
+        )
+        self._write_progress_payload(payload)
+
+    def _write_progress_payload(self, payload: Dict) -> None:
+        from pathlib import Path
+
+        # Remembered before the write, not after it: this is the payload this
+        # process intends the file to hold, and a phase published after a failed
+        # write must still carry the loop's numbers rather than silently fall
+        # back to the skeleton. One reference to data the manager already holds.
+        self._progress_last_payload: Dict = payload
+        try:
+            Path(self.progress_file).write_text(json.dumps(payload), encoding="utf-8")
+        except OSError as exc:
+            print(f"   ⚠️  Could not write live progress: {exc}")
+
     def _publish_live_progress(self, step: int, total_steps: int, manager) -> None:
         """Write incremental equity curve snapshots for live dashboard charting."""
+        # Above the early return, not below it. The phase clock is state, not a
+        # side effect of writing, and the progress file is only one of its
+        # readers. Below the return an engine with no progress file -- every
+        # CLI run, the external-run session, the algo service -- never leaves
+        # `first_decision`, so `publish_phase("saving")` closes a
+        # `first_decision` spanning the entire bar loop: the one number this
+        # phase exists to produce, published as hours instead of seconds, in
+        # the row of the table that is supposed to justify the whole track.
+        # `publish_phase` is already the right way round; this is the only
+        # asymmetry. `_set_progress_phase`'s hasattr guard self-initialises, so
+        # a `__new__`-built instance is unaffected.
+        self._set_progress_phase("running", total_steps=total_steps)
         if not self.progress_file:
             return
-        from pathlib import Path
 
         curve = manager.get_equity_curve()
         serialized = []
@@ -636,14 +903,13 @@ class HourlyBacktester:
                 unfilled_order_events[-LIVE_PROGRESS_ORDER_EVENT_LIMIT:]
             ),
             "order_events_count": len(unfilled_order_events),
+            **self._progress_phase_fields(),
         }
-        try:
-            Path(self.progress_file).write_text(json.dumps(payload), encoding="utf-8")
-        except OSError as exc:
-            print(f"   ⚠️  Could not write live progress: {exc}")
-    
+        self._write_progress_payload(payload)
+
     def load_data(self):
         """Fetch source bars and build the strategy's decision-bar dataset."""
+        self.publish_phase("loading_bars")
         # Keep the error path usable for legacy callers that construct an
         # instance with ``__new__`` (or inject a loader) before initialization.
         symbols = getattr(self, "symbols", ())
@@ -875,6 +1141,7 @@ class HourlyBacktester:
     
     def calculate_indicators(self):
         """Calculate technical indicators for all symbols."""
+        self.publish_phase("indicators")
         print("\n📈 Calculating technical indicators...")
         count = 0
         for symbol, df in self.all_data.items():
@@ -1421,6 +1688,7 @@ class HourlyBacktester:
             + "...\n"
         )
         total_steps = len(all_timestamps)
+        self.publish_phase("first_decision", total_steps=total_steps)
         # Declare the run length so a strict-LLM run can absorb a small number
         # of unusable responses instead of discarding hours of work on the
         # first one. Left unset the budget is 0 (fatal on the first strike).
@@ -1745,6 +2013,7 @@ class HourlyBacktester:
             _unfilled_order_events(manager.order_events)
         )
         self.transaction_cost_totals = dict(manager.transaction_cost_totals)
+        self.publish_phase("saving")
         db.insert_run(
             run_id=run_id,
             session_id=self.session_id,
