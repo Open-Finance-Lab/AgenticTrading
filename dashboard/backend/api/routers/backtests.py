@@ -1567,11 +1567,21 @@ def run_backtest_background(
         progress_file = str(
             Path(tempfile.gettempdir()) / f"backtest_progress_{resolved_live_run_id}.json"
         )
+        # One reading, spent twice: the slot's `started_at` (what the card's
+        # elapsed counter counts from) and the child's `--launched-at` below.
+        # Stamped HERE rather than at the argv line so `starting` covers the
+        # whole window the card cannot narrate -- this function's own setup,
+        # Popen, interpreter start, and the child's module imports. Two
+        # time.time() calls would leave everything between here and :1594
+        # (venv probe, env copy, temp-file writes, argv build) inside the
+        # card's elapsed clock but outside the one phase duration this plan
+        # exists to produce, which is the direction that under-reports.
+        launched_at = time.time()
         _update_slot(
             resolved_live_run_id,
             running=True,
             error=None,
-            started_at=time.time(),
+            started_at=launched_at,
             progress_file=progress_file,
             session_id=session_id,
         )
@@ -1659,7 +1669,13 @@ def run_backtest_background(
         if execution_handoff_payload:
             cmd += ["--execution-handoff-stdin"]
 
-        cmd += ["--run-id", resolved_live_run_id, "--progress-file", progress_file]
+        cmd += [
+            "--run-id", resolved_live_run_id,
+            "--progress-file", progress_file,
+            # The child cannot see the gap before its own first write; this is
+            # how that gap becomes its measured `starting` phase.
+            "--launched-at", f"{launched_at:.3f}",
+        ]
 
         # Simulation capital is independent of the agent's portfolio sleeve.
         cmd += ["--initial-capital", str(resolve_initial_capital(initial_capital))]
