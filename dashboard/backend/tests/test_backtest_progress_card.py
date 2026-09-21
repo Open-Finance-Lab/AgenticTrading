@@ -1164,3 +1164,50 @@ def test_both_raw_payload_surfaces_share_the_step_percent_rule():
     assert "const stepPct = Number.isFinite(" not in source
     # definition + attachToLiveBacktest + the 1s poller
     assert source.count("backtestStepPercent(") == 3
+
+
+def test_the_card_labels_every_phase_the_engine_publishes():
+    """The cross-language guard the Python halves already have and the JS half did not.
+
+    `PROGRESS_PHASES` is pinned as an exact tuple in
+    `tests/backtesting/test_engine_progress_phases.py`, and
+    `PROGRESS_PHASE_MESSAGES` is pinned as a subset of it in
+    `tests/test_backtest_progress_status.py`. `BACKTEST_PHASE_LABELS` is the
+    third declaration of that same vocabulary, in a third language, with no
+    shared source -- and nothing compared it to the other two. The only other
+    JS test touching this table pins prototype safety (`hasOwnProperty`), not
+    membership.
+
+    What the gap costs, which is why this is a test and not a comment: add a
+    pre-loop phase to `PROGRESS_PHASES` and forget app.js, and
+    `formatBacktestPhase` returns `''` -> `advanceBacktestProgress` returns
+    `null` -> the poller overwrites the stored entry with that null, and the
+    card falls back to "Starting backtest…" for the whole of the new phase.
+    Nothing throws, nothing logs, and the suite stays green. That is this
+    repo's own *fail-closed is not fail-visible* shape: "the phase is new" and
+    "the phase is broken" render identically.
+
+    Read as text rather than executed under node on purpose -- membership is a
+    property of the source, so this stays green on a machine with no `node`
+    (where the executing cases in this module skip, taking their coverage with
+    them).
+    """
+    from dashboard.backend.domain.backtesting.engine import PROGRESS_PHASES
+
+    declaration = js_const("BACKTEST_PHASE_LABELS")
+    labelled = set(re.findall(r"^\s*(\w+):", declaration, re.MULTILINE))
+
+    missing = set(PROGRESS_PHASES) - labelled
+    assert not missing, (
+        f"app.js BACKTEST_PHASE_LABELS has no entry for {sorted(missing)}. "
+        "Add one -- '' if the phase should render no label, as `starting` and "
+        "`running` deliberately do. An absent key is not the same as an empty "
+        "one: absent blanks the card back to 'Starting backtest…' with nothing "
+        "red anywhere."
+    )
+    extra = labelled - set(PROGRESS_PHASES)
+    assert not extra, (
+        f"app.js BACKTEST_PHASE_LABELS labels {sorted(extra)}, which the engine "
+        "never publishes. Either the phase was removed from PROGRESS_PHASES and "
+        "this entry is dead, or it is a typo that will never match."
+    )
