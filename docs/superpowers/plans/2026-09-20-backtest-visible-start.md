@@ -3112,15 +3112,15 @@ Phase durations in seconds, from `phases[]` in each run's progress file (`measur
 
 | measurement | local, rule-based | local, LLM | prod, first run after deploy |
 |---|---|---|---|
-| spawn + interpreter (`child_entered_at − started_at`) | | | |
-| imports incl. stores (`imports_done_at − child_entered_at`) | | | |
+| spawn + interpreter (`child_entered_at − started_at`) | 0.03 | 0.01 | |
+| imports incl. stores (`imports_done_at − child_entered_at`) | 2.59 | 2.45 | |
 | — of which schema DDL (`schema_init_seconds`) | n/a (sqlite) | n/a (sqlite) | 0.00 (worker — see below) |
-| preflight remainder (`ended_at − imports_done_at`) | | | |
-| **starting** (parent's launch stamp → the child's first `publish_phase`, total) | | | |
-| loading_bars | | | |
-| indicators | | | |
-| first_decision | | | |
-| aggregation gate (Task 6 Step 3) | fired / not fired — _before_ → _after_ | n/a | n/a |
+| preflight remainder (`ended_at − imports_done_at`) | 0.08 | 0.09 (**floor** — see below) | |
+| **starting** (parent's launch stamp → the child's first `publish_phase`, total) | **2.70** | **2.55** | |
+| loading_bars | **18.15** | **18.67** | |
+| indicators | 0.35 | 0.34 | |
+| first_decision | 0.32 | **13.80** | |
+| aggregation gate (Task 6 Step 3) | **fired** — 4.58s → 4.13s | n/a | n/a |
 
 `first_decision` has a real number in the rule-based column: `run_agent_backtest` publishes the phase at `engine.py:1423` regardless of `decision_source`. It is short there, which is itself the point of comparison.
 
@@ -3163,6 +3163,45 @@ How to read these, because they are not all the same kind of number:
 - **The prod child's zero is a check, not a saving.** It says the flag fired. The saving is the parent-boot column.
 - **The parent's figures are a proxy.** Same statements, same databases, same Render-to-Neon path; different process warmth. Comparable in shape, not to the second. One sample, no variance estimate.
 - **Connection setup is in none of the DDL figures** — it sits inside `imports incl. stores`, and a guarded child that never queries during import opens no pool at all. If that row dwarfs the DDL row, the dark start is imports, not schema, and the next optimisation is not more DDL work. Write that conclusion down if the numbers say it; measuring first was what earned the right to reach it.
+
+### What the local numbers actually say (measured 2026-09-21)
+
+They do not say what this plan assumed when it was written, and the honest reading
+is worth more than the tidy one.
+
+**The dark window is ~21 s, and `loading_bars` is 86% of it** — 18.15 s of 21.20 s
+rule-based, 18.67 s of 21.56 s on the LLM arm, against 2.59 s / 2.45 s for the whole
+of imports-and-stores. Both arms agree to within half a second on every pre-loop
+phase, which is what makes the split trustworthy: they share no process, no code path
+into the engine, and no launcher.
+
+Three consequences follow, and the last one is the one to act on.
+
+- **The DDL guard's local saving is zero, and that is not a disappointment — it is the
+  measurement working.** Every store here resolves to its SQLite twin, so
+  `init_schema_unless_worker` is never reached and `schema DDL` is `n/a (sqlite)`, never
+  `0.00`. The guard's payoff is the **107 statements over 6 `_init_schema` calls** the
+  Step 8 probe counted, which on Render are Neon round trips rather than local no-ops.
+  Counting statements instead of trusting this wall clock is precisely why Step 8 exists;
+  a local before/after would have reported a saving of nothing and been believed.
+- **The aggregation gate fired and the rewrite worked, and it still was not the fix.**
+  4.58 s → 4.13 s (controller re-ran both arms on a quiet machine from separate worktrees
+  and got 4.62 s → 4.11 s — the same answer). ~10% of one function that is itself a
+  fraction of `loading_bars`. The row walk was ~0.8 s of a ~9.2 s profile, so removing it
+  was worth doing and was never going to be the fix; `_weighted_vwap` and the per-bucket
+  work carry the rest and are deliberately untouched.
+- **The next optimisation is bar loading, not schema and not aggregation.** `loading_bars`
+  is where the user's dark window lives, and nothing in Track A touches it. That is a
+  correct outcome for a plan whose job was to make the window *visible* rather than
+  short — but it means "the start is slow" now has a measured owner, and it is not the
+  one this plan set out to blame. File it against bar fetching/caching; do not reach for
+  more DDL work.
+
+`first_decision` is the other number that moved: **0.32 s rule-based against 13.80 s on
+the LLM arm** (deepseek/deepseek-v4-pro through the CommonStack gateway). That gap is the
+entire argument for naming the phase — it is 13.8 s in which a card showing `0%` and an
+elapsed timer is indistinguishable from a hung run.
+
 
 Full suite: `pytest dashboard/backend/tests/ -q` → _result_.
 Seed DB: clean (`git status --short dashboard/storage/data/backtest.db` empty, after Task 6 Steps 1 and 8 as well as at the end). Both of those steps redirect `DATABASE_PATH` at a scratch file precisely because they would otherwise write real runs into a tracked one — check anyway; the redirect is the fix, the check is the proof.
