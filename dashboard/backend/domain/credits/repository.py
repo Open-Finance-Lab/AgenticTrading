@@ -559,6 +559,12 @@ class CreditsStore:
             ON credit_llm_usage_entries(user_id, id DESC)
             """
         )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_credit_llm_usage_user_run
+            ON credit_llm_usage_entries(user_id, run_id)
+            """
+        )
 
     @classmethod
     def _migrate_llm_reservation_constraint_in_transaction(
@@ -1646,6 +1652,42 @@ class CreditsStore:
                 self._llm_reservation_result_in_transaction(conn, row)
                 for row in rows
             ]
+
+    def sum_run_llm_spend(self, user_id: int, run_id: str) -> tuple[int, int]:
+        """Settled LLM spend for one run: ``(micro_credits, distinct_calls)``.
+
+        The spend comes back POSITIVE. ``credit_llm_usage_entries.amount_micro``
+        is stored negative (its CHECK enforces ``< 0``) and every other reader in
+        this module negates on the way out; see
+        ``_llm_reservation_result_in_transaction``.
+
+        ``:recovery:`` entries are deliberately INCLUDED, which is the opposite
+        of what that method and the activity feed do. They are answering "what
+        did this one reservation settle for"; this answers "what was the account
+        charged". ``_settle`` records ``outstanding_micro = actual_micro -
+        debit_micro`` -- the part of a call's real cost that could not be debited
+        for want of funds -- and a recovery row is the FIRST debit of that
+        remainder, not a second debit of money already counted. Filtering it
+        would under-report a charge to the person being charged, which is the
+        one direction a disclosure must never round.
+
+        Scoped by ``user_id`` as well as ``run_id`` so a guessed run id cannot
+        report someone else's spend.
+        """
+        _positive_integer(user_id, "user_id")
+        run_id = _required_text(run_id, "run_id", max_length=128)
+        with self._get_connection() as conn:
+            row = conn.execute(
+                """
+                SELECT
+                    COALESCE(SUM(-amount_micro), 0) AS spent_micro,
+                    COUNT(DISTINCT call_index) AS call_count
+                FROM credit_llm_usage_entries
+                WHERE user_id = ? AND run_id = ?
+                """,
+                (user_id, run_id),
+            ).fetchone()
+        return (int(row["spent_micro"] or 0), int(row["call_count"] or 0))
 
     def create_or_get_order(
         self,

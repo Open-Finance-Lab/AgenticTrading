@@ -201,7 +201,26 @@ def test_backtest_hint_uses_strategy_and_limit():
     assert "Multi-step strategies can take several minutes (limit: 10 minutes)." not in _HTML
     assert "Chat with Claude; backtests use Alpaca historical data and multi-step runs can take several minutes." in _HTML
     assert "about 3–10 minutes" not in _HTML
-    assert "Timed out after 60 minutes." in _JS
+    # The poll ceiling now sits ABOVE the server budget, so reaching it no
+    # longer means the run timed out -- the server's own `timed_out` verdict
+    # arrives ten minutes earlier. Reaching it means no terminal answer ever
+    # arrived: a crash, a redeploy, a dropped connection. The replacement
+    # carries no number, which removes the drift risk permanently.
+    assert (
+        "Lost contact with this backtest. It may still be running — check the "
+        "Backtest tab later."
+    ) in _JS
+    # One condition, one sentence, one literal. This is reached two ways -- the
+    # per-run poll-failure budget running out, and the whole poller hitting its
+    # ceiling -- and they were two different strings giving two different
+    # instructions ("Reload to check." against "check the Backtest tab later")
+    # for the same situation. Only one of them was pinned here, so the other
+    # was free to drift. Counting the literal is what stops a second copy
+    # reappearing unpinned; `in _JS` alone cannot.
+    assert _JS.count("Lost contact with this backtest.") == 1
+    assert "Lost contact with the backtest" not in _JS
+    assert "Reload to check." not in _JS
+    assert "Timed out after 60 minutes." not in _JS
     assert "Timed out after 10 minutes." not in _JS
     assert "Multi-step agent pipelines" not in _HTML
 

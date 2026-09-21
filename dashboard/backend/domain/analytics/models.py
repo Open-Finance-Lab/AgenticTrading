@@ -65,6 +65,12 @@ ALLOWED_ERROR_CATEGORIES = {
     "credits_unavailable",
     "model_not_allowed",
     "internal_error",
+    # The parent's own wall-clock budget ran out, not the provider's. A run
+    # that hit this returned nothing AND was billed for what settled first, so
+    # it stays a failure -- `backtest_failed`, outcome `failed` -- and this
+    # field carries the reason. `provider_timeout` is a different fact with a
+    # different remedy.
+    "run_timeout",
 }
 
 EVENT_GROUP_BY_NAME = {

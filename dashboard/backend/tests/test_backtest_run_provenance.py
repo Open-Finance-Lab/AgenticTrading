@@ -18,6 +18,7 @@ the in-process H6 guard that would have caught it never sees the run.
 
 import copy
 import json
+import re
 import shutil
 import subprocess
 import uuid
@@ -889,11 +890,15 @@ def test_a_finished_panel_stops_advertising_a_run_in_flight():
     body = strip_comments(fn_body("function showBacktestRunProgress"))
     assert "'Backtest complete'" in body
     # The three in-flight elements hide off one `terminal` flag, which a
-    # cancelled run (issue #273) joined after this guard was written. Pinning
-    # the flag's definition plus its two readers keeps the contract this test
-    # exists for -- isFinished still reaches the track and the hint -- without
-    # pinning one expression's spelling, which the third state had to rewrite.
-    assert "const terminal = !!isError || !!isCancelled || !!isFinished;" in body
+    # cancelled run (issue #273) and a timed-out run (issue #474) both joined
+    # after this guard was written. Pin the flag's definition plus its two
+    # readers -- isFinished still reaches the track and the hint -- without
+    # pinning the whole expression's spelling, which each new state rewrites.
+    terminal_def = re.search(r"const terminal = ([^;]+);", body)
+    assert terminal_def, "showBacktestRunProgress must define `const terminal`"
+    assert re.search(r"\bisFinished\b", terminal_def.group(1)), (
+        "`terminal` must still be derived from isFinished"
+    )
     assert "track.hidden = terminal" in body
     assert "hint.hidden = terminal" in body
     assert "elapsed.hidden = !!isError" in body

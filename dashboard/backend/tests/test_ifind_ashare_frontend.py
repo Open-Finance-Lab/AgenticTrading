@@ -576,3 +576,39 @@ def test_the_ifind_prefill_window_is_runnable_under_the_server_cap(js):
         f"iFinD prefill window is {span} days, but the server refuses anything "
         f"over {MAX_BACKTEST_DAYS}"
     )
+
+
+def test_the_client_outlives_the_server_budget_it_draws(js):
+    """Two constants, two different jobs -- and the reason they must not
+    reconverge (issue #474 item 5).
+
+    `BACKTEST_BUDGET_SECONDS` is the progress bar's denominator, so it has to BE
+    the server's budget. `BACKTEST_POLL_MAX_SECONDS` is how long the client
+    watches, so it has to be LONGER -- otherwise the poller gives up at the same
+    instant the server starts finalizing, and the verdict is written after the
+    client stopped looking. They were one constant holding one value, which made
+    that failure invisible.
+
+    Asserted against the imported server constants rather than copies, so the
+    client cannot drift from the budget it is drawing.
+    """
+    import re as _re
+
+    from dashboard.backend.api.routers.backtests import (
+        PIPELINE_SUBPROCESS_TIMEOUT_SECONDS,
+        SUBPROCESS_TIMEOUT_OVERHEAD_SECONDS,
+    )
+
+    budget = _re.search(r"const BACKTEST_BUDGET_SECONDS = (\d+);", js)
+    ceiling = _re.search(r"const BACKTEST_POLL_MAX_SECONDS = (\d+);", js)
+    assert budget and ceiling, "both backtest window constants must exist in app.js"
+
+    assert int(budget.group(1)) == PIPELINE_SUBPROCESS_TIMEOUT_SECONDS
+    assert int(ceiling.group(1)) > int(budget.group(1)), (
+        "the client must keep polling past the server's budget, or it can never "
+        "receive the server's own verdict"
+    )
+    assert (
+        int(ceiling.group(1))
+        == PIPELINE_SUBPROCESS_TIMEOUT_SECONDS + SUBPROCESS_TIMEOUT_OVERHEAD_SECONDS
+    )

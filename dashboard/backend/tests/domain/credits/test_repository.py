@@ -1136,3 +1136,98 @@ def test_cross_user_order_read_is_hidden_and_admin_list_is_paginated(tmp_path):
     second = store.list_orders_for_admin(limit=1, cursor=first["next_cursor"])
     assert len(first["items"]) == len(second["items"]) == 1
     assert first["items"][0]["id"] != second["items"][0]["id"]
+
+
+def test_sum_run_llm_spend_totals_settled_calls_for_one_run(tmp_path):
+    """Positive micro-Credits and a distinct call count, scoped to one run."""
+    store = _store(tmp_path)
+    _pending_order(store, amount_usd_cents=1000, credits_micro=10_000_000)
+    _pay_order(store, amount_usd_cents=1000)
+
+    _settle_activity_call(store, run_id="run-a", call_index=0, actual_micro=25_000)
+    _settle_activity_call(store, run_id="run-a", call_index=1, actual_micro=17_318)
+    _settle_activity_call(store, run_id="run-b", call_index=0, actual_micro=900_000)
+
+    assert store.sum_run_llm_spend(1, "run-a") == (42_318, 2)
+    # A run with no settled calls is (0, 0), not an error -- the caller uses
+    # this to say "nothing had settled yet", which is a real outcome.
+    assert store.sum_run_llm_spend(1, "run-never-ran") == (0, 0)
+
+
+def test_sum_run_llm_spend_is_scoped_to_the_owning_account(tmp_path):
+    """A guessed run id must not report another account's spend."""
+    store = _store(tmp_path)
+    _pending_order(store, amount_usd_cents=1000, credits_micro=10_000_000)
+    _pay_order(store, amount_usd_cents=1000)
+    _settle_activity_call(store, run_id="run-a", call_index=0, actual_micro=25_000)
+
+    assert store.sum_run_llm_spend(1, "run-a") == (25_000, 1)
+    assert store.sum_run_llm_spend(2, "run-a") == (0, 0)
+
+
+def test_sum_run_llm_spend_includes_recovery_entries(tmp_path):
+    """A recovery row is the FIRST debit of money settle could not charge.
+
+    `_settle` records `outstanding_micro = actual_micro - debit_micro` -- the
+    part of a call's real cost that could not be debited for want of funds --
+    and the recovery entry debits exactly that remainder later. Excluding it
+    (which `_llm_reservation_result_in_transaction` and the activity feed both
+    do, for their own different questions) would under-report a charge to the
+    person being charged.
+
+    Written against the table directly rather than by driving an overage
+    through the webhook: this test is about the aggregate's filter, and a
+    fixture that has to arrange a shortfall to assert a SQL predicate stops
+    being readable as a statement about that predicate.
+    """
+    store = _store(tmp_path)
+    _pending_order(store, amount_usd_cents=1000, credits_micro=10_000_000)
+    _pay_order(store, amount_usd_cents=1000)
+    settled = _settle_activity_call(
+        store, run_id="run-a", call_index=0, actual_micro=25_000
+    )
+
+    with sqlite3.connect(store.db_path) as conn:
+        conn.execute(
+            """
+            INSERT INTO credit_llm_usage_entries (
+                user_id, reservation_id, run_id, call_index, bucket,
+                amount_micro, operation_key, evidence_json, created_at
+            ) VALUES (?, ?, ?, ?, 'purchased', ?, ?, '{"t":"test"}', ?)
+            """,
+            (
+                1,
+                settled["reservation_id"],
+                "run-a",
+                0,
+                -4_000,
+                f"{settled['reservation_id']}:recovery:test:purchased",
+                "2026-09-14T00:00:00+00:00",
+            ),
+        )
+
+    # 25_000 settled + 4_000 recovered. Still ONE call: the recovery pays off
+    # the same call_index, so counting it again would inflate the count.
+    assert store.sum_run_llm_spend(1, "run-a") == (29_000, 1)
+
+
+def test_sum_run_llm_spend_rejects_blank_identifiers(tmp_path):
+    store = _store(tmp_path)
+    with pytest.raises(ValueError):
+        store.sum_run_llm_spend(1, "   ")
+    with pytest.raises(ValueError):
+        store.sum_run_llm_spend(0, "run-a")
+
+
+def test_credit_llm_usage_entries_are_indexed_by_user_and_run(tmp_path):
+    """Without this index the new aggregate table-scans a table that grows
+    with every LLM call ever made."""
+    store = _store(tmp_path)
+    with sqlite3.connect(store.db_path) as conn:
+        names = {
+            row[0]
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'index'"
+            ).fetchall()
+        }
+    assert "idx_credit_llm_usage_user_run" in names
