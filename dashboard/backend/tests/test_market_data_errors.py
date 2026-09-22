@@ -36,11 +36,14 @@ def test_alpaca_loader_missing_credentials_raises_not_exits(monkeypatch, tmp_pat
         bars_mod.AlpacaDataLoader()
 
 
-def test_baseline_fetch_missing_credentials_raises_not_exits(monkeypatch, tmp_path):
-    _clear_creds(monkeypatch, tmp_path, bg_mod)
-    generator = bg_mod.BaselineGenerator()
-    with pytest.raises(bars_mod.MarketDataUnavailableError):
-        generator._ensure_credentials()
+# `test_baseline_fetch_missing_credentials_raises_not_exits` lived here and
+# called `BaselineGenerator._ensure_credentials()` directly. That method, and
+# the `_fetch_bars_for_symbol` it served, had no production caller and are
+# deleted -- so the case was pinning the B0 "raise, don't sys.exit" contract on
+# a path nothing could reach. The contract itself is unchanged and still
+# covered, on the path that is live, by
+# `test_alpaca_loader_missing_credentials_raises_not_exits` above: every
+# baseline caller now reaches Alpaca through `AlpacaDataLoader`.
 
 
 def test_engine_load_data_empty_raises_not_exits():

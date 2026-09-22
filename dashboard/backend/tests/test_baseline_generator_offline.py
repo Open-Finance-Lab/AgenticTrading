@@ -15,9 +15,6 @@ from dashboard.backend.domain.backtesting.market_rules import (
     DailyMarketRule,
     MarketRuleCalendar,
 )
-from dashboard.backend.infrastructure.market_data.alpaca_bars import (
-    MarketDataUnavailableError,
-)
 from dashboard.backend.infrastructure.market_data.profiles import (
     ASHARE_TRANSACTION_COST_PROFILE,
 )
@@ -85,11 +82,36 @@ def sample_cn_bars() -> dict[str, pd.DataFrame]:
     }
 
 
-def test_constructor_and_supplied_bar_calculations_do_not_load_credentials(monkeypatch):
-    def fail_if_called(*args, **kwargs):
-        raise AssertionError("Alpaca credentials must not be loaded")
+def test_the_generator_has_no_credential_or_fetch_surface_at_all():
+    """Stronger than the monkeypatch guard this replaces.
 
-    monkeypatch.setattr(BaselineGenerator, "_load_credentials", fail_if_called)
+    That version asserted `_load_credentials` was never *called*; the whole
+    credential path and `_fetch_bars_for_symbol` are now gone, so "this class
+    cannot reach Alpaca" is structural rather than asserted. Kept as a guard
+    because the deleted path had no production caller for a long time before
+    anyone noticed -- a second, independent route to bars is exactly the thing
+    that grows back quietly.
+    """
+    generator = BaselineGenerator()
+    forbidden = {
+        "_load_credentials",
+        "_ensure_credentials",
+        "_fetch_bars_for_symbol",
+        "api_key",
+        "secret_key",
+        "headers",
+    }
+    assert forbidden.isdisjoint(dir(generator)), (
+        "BaselineGenerator grew a credential or fetch surface again. Baselines "
+        "are computed from bars the caller already holds; fetching belongs to "
+        "AlpacaDataLoader, which owns the SIP clamp, the IEX retry, the feed "
+        "stamps and the on-disk bar cache."
+    )
+
+
+def test_supplied_bar_calculations_need_no_credentials(monkeypatch):
+    monkeypatch.delenv("ALPACA_API_KEY", raising=False)
+    monkeypatch.delenv("ALPACA_SECRET_KEY", raising=False)
     generator = BaselineGenerator()
     bars = sample_bars()
 
@@ -104,17 +126,6 @@ def test_constructor_and_supplied_bar_calculations_do_not_load_credentials(monke
     assert index
     assert buyhold[0]["equity"] > 0
     assert index[0]["equity"] > 0
-
-
-def test_real_alpaca_fetch_loads_credentials_lazily(monkeypatch, tmp_path):
-    monkeypatch.delenv("ALPACA_API_KEY", raising=False)
-    monkeypatch.delenv("ALPACA_SECRET_KEY", raising=False)
-    monkeypatch.setattr(baseline_module, "CREDENTIALS_DIR", tmp_path)
-
-    generator = BaselineGenerator()
-
-    with pytest.raises(MarketDataUnavailableError, match="credentials"):
-        generator._fetch_bars_for_symbol("AAPL", "2026-04-01", "2026-04-02")
 
 
 def test_cn_baselines_keep_shanghai_session_timestamps():
