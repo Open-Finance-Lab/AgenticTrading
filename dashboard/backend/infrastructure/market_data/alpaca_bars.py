@@ -415,7 +415,22 @@ class AlpacaDataLoader:
             "feed": getattr(feed, "value", str(feed)),
             "source_timeframe": self.source_timeframe,
             "requested_end": requested_end,
-            "effective_end": effective_end,
+            # ISO string, never a datetime. `_effective_end` returns a datetime
+            # on the SIP path and a str on the IEX one, and the bar cache's
+            # sidecar stringifies whatever it is given (`bar_cache._jsonable`,
+            # pinned by test_bar_cache.py's sidecar test). Normalising here is
+            # what makes a restored `last_fetch` byte-identical to a live one
+            # instead of merely equivalent: without it this single field's TYPE
+            # depended on whether the call was a cache hit, so a reader doing
+            # date arithmetic on it would work on a miss and raise on a hit --
+            # the failure mode that is hardest to reproduce, since it needs a
+            # warm instance. The only consumer today interpolates it into a
+            # warning string (`leaderboard/baselines.py:55`).
+            "effective_end": (
+                effective_end.isoformat()
+                if isinstance(effective_end, datetime)
+                else effective_end
+            ),
             "sip_fallback_to_iex": sip_fallback_to_iex,
             "end_clamped": end_clamped,
         }

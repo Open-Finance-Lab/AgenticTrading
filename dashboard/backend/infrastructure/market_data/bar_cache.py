@@ -684,7 +684,35 @@ def write_many(
 #: bytes_this_process_wrote_since]``. Process-local on purpose -- a shared
 #: index file would be a third thing to keep atomic -- which is why the time
 #: bound in ``_maybe_enforce_size_cap`` exists.
+#:
+#: Bounded because nothing else bounds it. In every deployed configuration
+#: ``cache_dir()`` resolves once for the life of the process and this holds
+#: exactly one key; it grows only where ``ATL_BAR_CACHE_DIR`` moves at runtime,
+#: which today means a test suite handing each case its own ``tmp_path``. The
+#: bound is cheap insurance rather than a fix for a live leak, and dropping an
+#: entry is safe in a way dropping a cache entry is not: this state only
+#: decides whether the NEXT write can skip a directory scan, so a missing entry
+#: costs one scan -- the same scan it would have taken with no state at all --
+#: and can never produce a wrong answer or a missed eviction.
+_MAX_SCAN_STATE_DIRS = 8
 _scan_state: Dict[str, List[float]] = {}
+
+
+def _remember_scan(directory: Path, scanned_at: float, total: float) -> List[float]:
+    """Record a completed scan, evicting the stalest directories over the bound.
+
+    Returns the state list so the caller can keep amending it: the entry it
+    just wrote is the newest and so the last thing eviction would reach, but
+    holding the reference means an eviction that did reach it degrades to a
+    detached write instead of a ``KeyError`` on the next line.
+    """
+    state = [scanned_at, float(total), 0.0]
+    _scan_state[str(directory)] = state
+    if len(_scan_state) > _MAX_SCAN_STATE_DIRS:
+        stalest = sorted(_scan_state, key=lambda key: _scan_state[key][0])
+        for key in stalest[: len(_scan_state) - _MAX_SCAN_STATE_DIRS]:
+            _scan_state.pop(key, None)
+    return state
 
 
 def enforce_size_cap(*, protect: Iterable[Path] = ()) -> int:
@@ -779,7 +807,7 @@ def enforce_size_cap(*, protect: Iterable[Path] = ()) -> int:
                 meta_path,
             )
         )
-    _scan_state[str(directory)] = [now, float(total), 0.0]
+    state = _remember_scan(directory, now, total)
     if total <= cap:
         return 0
     entries.sort(key=lambda item: item[:2])
@@ -792,7 +820,7 @@ def enforce_size_cap(*, protect: Iterable[Path] = ()) -> int:
         _discard(parquet_path, meta_path)
         total -= size
         removed += 1
-    _scan_state[str(directory)][1] = float(total)
+    state[1] = float(total)
     print(
         f"📦 bar cache: evicted {removed} entries to stay under "
         f"{cap // (1024 * 1024)}MB",
