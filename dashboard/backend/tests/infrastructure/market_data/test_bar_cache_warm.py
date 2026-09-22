@@ -215,6 +215,24 @@ def test_unconfigured_credentials_skip_the_warm_without_raising(monkeypatch, cap
     assert "skipped" in capsys.readouterr().out
 
 
+def test_the_warm_timeframe_matches_the_profile_it_warms():
+    """WARM_SOURCE_TIMEFRAME is a copy of the (ALPACA, "djia_30") profile's
+    source_timeframe, and the source timeframe is part of the cache key.
+    Change the profile without this and the warm keeps fetching 5m windows
+    every deploy, writing entries no run can key into. Unlike the route
+    dates one bullet above, there is no layering excuse: profiles.py is a
+    sibling in this very package."""
+    from dashboard.backend.infrastructure.market_data.profiles import (
+        ALPACA,
+        get_market_profile,
+    )
+
+    assert (
+        bar_cache_warm.WARM_SOURCE_TIMEFRAME
+        == get_market_profile(ALPACA, "djia_30").source_timeframe
+    )
+
+
 def test_the_warm_error_line_matches_the_live_call_detector():
     """SOURCE-SHAPE GUARD. The proof that this suite makes zero billable
     Alpaca calls is a `-s` run grepped for `bar cache warm:`. app.py's own

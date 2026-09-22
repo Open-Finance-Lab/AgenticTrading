@@ -512,6 +512,25 @@ def test_the_size_cap_evicts_the_least_recently_used_entries(cache_dir, monkeypa
     assert set(hits) == {"S2", "S3"}
 
 
+def test_a_read_protects_an_entry_from_eviction(cache_dir, monkeypatch):
+    """MUTATION TEST: drop the os.utime pair in read_many and this fails.
+
+    mtime is the LRU clock and enforce_size_cap has no other hotness signal,
+    so without the touch eviction degrades to FIFO by write time -- and the
+    three warm default windows, read on every backtest and never rewritten,
+    become the FIRST victims under cap pressure. That inverts the policy this
+    module documents. The inverse case (a touch must not keep a stale entry
+    alive) is asserted separately and passes either way."""
+    bar_cache.write_many({"HOT": _frame(rows=200)}, last_fetch=LAST_FETCH, **KEY)
+    time.sleep(0.01)  # HOT is written first, so only the read can make it newest
+    bar_cache.write_many({"COLD": _frame(rows=200)}, last_fetch=LAST_FETCH, **KEY)
+    bar_cache.read_many(["HOT"], **KEY)
+    _tiny_cap(monkeypatch, cache_dir, keep_entries=1)
+    assert bar_cache.enforce_size_cap() == 1
+    hits, _ = bar_cache.read_many(["HOT", "COLD"], **KEY)
+    assert set(hits) == {"HOT"}
+
+
 def test_a_write_never_evicts_its_own_batch(cache_dir, monkeypatch):
     """MUTATION TEST: drop the `protect=` argument from write_many's eviction
     call and this must fail. Under cap pressure the trailing pass would

@@ -611,6 +611,19 @@ def test_a_fake_loader_drives_every_phase_in_order(tmp_path, monkeypatch):
         "starting",
         "loading_bars",
     ]
+    # MUTATION TEST: delete `record_phase_metric("fetch_seconds", ...)` from
+    # load_data and this fails. That line is the only PRODUCTION write of the
+    # fetch/aggregate split -- the measurement the design gates "is caching
+    # the aggregated output worth a second change?" on -- and every other
+    # case covering the metric calls `record_phase_metric` by hand on an
+    # `object.__new__` instance, so not one of them can see the engine drop it.
+    loading_bars = after_indicators["phases"][1]
+    assert "fetch_seconds" in loading_bars, (
+        "engine.load_data must record the fetch/aggregate split"
+    )
+    assert 0.0 <= loading_bars["fetch_seconds"] <= (
+        loading_bars["ended_at"] - loading_bars["started_at"]
+    )
 
     run_id, equity_curve = backtester.run_agent_backtest()
     assert run_id and equity_curve
