@@ -5,12 +5,14 @@ The child's first progress write can only account for the gap before it
 rides argv beside --run-id, so a run's `starting` phase is measured rather
 than missing.
 """
+import ast
 import math
 import os
 import subprocess
 import sys
 import time
 import uuid
+from pathlib import Path
 
 import pytest
 
@@ -166,3 +168,93 @@ def test_child_env_is_marked_as_a_backtest_worker(monkeypatch):
     assert captured["env"]["ATL_BACKTEST_WORKER"] == "1"
     # The parent's own environment is untouched: the flag is for the child.
     assert "ATL_BACKTEST_WORKER" not in os.environ
+
+
+_SCRIPT = (
+    Path(__file__).resolve().parents[2] / "scripts" / "backtest_hourly_agent.py"
+)
+
+
+def _script_module():
+    return ast.parse(_SCRIPT.read_text(encoding="utf-8"))
+
+
+def _assignment(tree, name):
+    for node in tree.body:
+        if isinstance(node, ast.Assign) and any(
+            isinstance(t, ast.Name) and t.id == name for t in node.targets
+        ):
+            return node
+    return None
+
+
+def test_the_child_hands_over_a_steady_pair_beside_the_wall_stamps():
+    """SOURCE-SHAPE GUARD. `starting` is split into four numbers, and two of
+    them -- `imports+stores` and `preflight` -- describe intervals that begin
+    and end inside the child. The engine measures those on the steady clock,
+    but only if the child hands the marks over; without them it falls back to
+    differencing the wall stamps, which is the #509 hazard it just stopped
+    doing everywhere else.
+
+    That fallback is deliberate (a caller with only the three stamps still
+    gets a number) and therefore SILENT: delete `child_entered_steady` from
+    the dict below and every runtime test still passes while the breakdown
+    line quietly goes back to a clock that can step backwards. Only a guard on
+    the source can see it.
+    """
+    tree = _script_module()
+    call = None
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call) and any(
+            kw.arg == "startup_clock" for kw in node.keywords
+        ):
+            call = node
+            break
+    assert call is not None, "the launch script must hand the engine a startup_clock"
+    payload = next(kw.value for kw in call.keywords if kw.arg == "startup_clock")
+    assert isinstance(payload, ast.Dict), "startup_clock must be a literal dict"
+    keys = {k.value for k in payload.keys if isinstance(k, ast.Constant)}
+    assert keys == {
+        "child_entered_at",
+        "imports_done_at",
+        "schema_init_seconds",
+        "child_entered_steady",
+        "imports_done_steady",
+    }
+
+
+@pytest.mark.parametrize(
+    "name", ["CHILD_ENTERED_STEADY", "IMPORTS_DONE_STEADY"]
+)
+def test_the_steady_marks_are_monotonic_reads(name):
+    """`time.time()` here would be the bug wearing the fix's name."""
+    node = _assignment(_script_module(), name)
+    assert node is not None, f"{name} must be a module-level constant"
+    call = node.value
+    assert isinstance(call, ast.Call)
+    assert isinstance(call.func, ast.Attribute) and call.func.attr == "monotonic", (
+        f"{name} must be a time.monotonic() read -- a wall-clock one would "
+        f"reintroduce the step it exists to exclude"
+    )
+
+
+def test_the_steady_marks_bracket_the_imports():
+    """Position, not just presence: the pair measures the import window, so
+    one mark has to precede every import and the other has to follow the last
+    of them. Both below the imports and `imports+stores` reads as free; both
+    above and it swallows the module body.
+    """
+    tree = _script_module()
+    entered = _assignment(tree, "CHILD_ENTERED_STEADY")
+    done = _assignment(tree, "IMPORTS_DONE_STEADY")
+    imports = [
+        node.lineno
+        for node in tree.body
+        if isinstance(node, (ast.Import, ast.ImportFrom))
+        # `import time` is the one that must precede the first mark: the mark
+        # is a call on it.
+        and not (isinstance(node, ast.Import) and node.names[0].name == "time")
+    ]
+    assert imports
+    assert entered.lineno < min(imports)
+    assert done.lineno > max(imports)

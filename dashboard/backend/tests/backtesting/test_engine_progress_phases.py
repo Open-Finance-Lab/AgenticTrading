@@ -351,6 +351,14 @@ def test_the_starting_record_splits_what_the_child_could_not_write(tmp_path):
     assert starting["child_entered_at"] == launched_at + 0.4
     assert starting["imports_done_at"] == launched_at + 3.1
     assert starting["schema_init_seconds"] == 0.0
+    # The two in-child splits are recorded as durations beside the stamps, so
+    # nobody has to difference the stamps to get them. No steady marks were
+    # handed over here, so both fall back to that difference -- which is what
+    # the numbers below are.
+    assert starting["imports_seconds"] == pytest.approx(2.7)
+    assert starting["preflight_seconds"] == pytest.approx(
+        starting["ended_at"] - starting["imports_done_at"]
+    )
     # Only `starting` carries them: it alone describes an interval the child
     # could not write to. Anywhere else they would be three constants repeated.
     # `duration_seconds` is the one key every record carries -- it is the
@@ -680,9 +688,15 @@ def test_a_fake_loader_drives_every_phase_in_order(tmp_path, monkeypatch):
     assert "fetch_seconds" in loading_bars, (
         "engine.load_data must record the fetch/aggregate split"
     )
-    assert 0.0 <= loading_bars["fetch_seconds"] <= (
-        loading_bars["ended_at"] - loading_bars["started_at"]
-    )
+    # Bounded by `duration_seconds`, NOT by `ended_at - started_at`. Those two
+    # instants are wall-clock stamps while `fetch_seconds` is a steady-clock
+    # delta, so differencing them here would make this a cross-clock
+    # comparison: a backward NTP step during `loading_bars` -- the precise
+    # condition `duration_seconds` exists for -- turns the right-hand side
+    # negative and fails this assertion for a reason that has nothing to do
+    # with its subject. It is also the re-derivation CLAUDE.md's two-clock
+    # contract forbids, in the file that is supposed to pin it.
+    assert 0.0 <= loading_bars["fetch_seconds"] <= loading_bars["duration_seconds"]
 
     run_id, equity_curve = backtester.run_agent_backtest()
     assert run_id and equity_curve
@@ -781,6 +795,8 @@ def test_a_startup_clock_without_a_launch_time_does_not_leak_onto_loading_bars()
             "child_entered_at": 1.0,
             "imports_done_at": 3.0,
             "schema_init_seconds": 0.0,
+            "child_entered_steady": 100.0,
+            "imports_done_steady": 102.0,
         },
     )
     engine.publish_phase("loading_bars")
@@ -790,9 +806,24 @@ def test_a_startup_clock_without_a_launch_time_does_not_leak_onto_loading_bars()
     assert not {"child_entered_at", "imports_done_at", "schema_init_seconds"} & set(
         by_name["loading_bars"]
     )
+    # The steady marks are gated by the same `launched_at is not None` check,
+    # and they never reach `phases[]` at all -- raw `monotonic()` readings have
+    # a per-process epoch, so publishing one would put a meaningless float in
+    # the file an operator reads. Only the durations derived from them ship.
+    assert engine._progress_startup_steady == {}
+    assert not {
+        "child_entered_steady",
+        "imports_done_steady",
+        "imports_seconds",
+        "preflight_seconds",
+    } & set(by_name["loading_bars"])
 
 
 def test_the_starting_breakdown_line_is_unchanged(capsys):
+    """The line's shape, and the fallback that survives a child without the
+    steady marks: a CLI run built before they existed, or any caller handing
+    over the three stamps alone. `imports+stores` then comes off the stamps
+    exactly as it always did -- absent beats silently zero."""
     engine = object.__new__(HourlyBacktester)
     engine._init_progress_phases(
         launched_at=0.0,
@@ -807,6 +838,51 @@ def test_the_starting_breakdown_line_is_unchanged(capsys):
     assert "spawn+interpreter 1.00s" in out
     assert "imports+stores 2.00s" in out
     assert "schema DDL 0.00s" in out
+
+
+def test_a_wall_clock_step_cannot_distort_the_in_child_starting_splits(capsys):
+    """REGRESSION (#509, the second half). The first sweep moved every phase
+    DURATION onto the steady clock but left the `starting` breakdown line
+    differencing wall stamps, on the reasoning that `starting` is a
+    cross-process phase. Only one of its four numbers is: `spawn+interpreter`
+    reaches back to the parent's `--launched-at`, while `imports+stores` and
+    `preflight` both begin and end inside the child.
+
+    So an NTP correction landing mid-import printed a NEGATIVE `imports+stores`
+    -- or, worse, a positive one smaller than the monotonic `schema DDL` figure
+    printed beside it on the same line, which is an internally contradictory
+    measurement nobody would think to distrust.
+    """
+    steady_now = time.monotonic()
+    engine = object.__new__(HourlyBacktester)
+    engine._init_progress_phases(
+        launched_at=0.0,
+        startup_clock={
+            "child_entered_at": 1.0,
+            # A backward correction of a full minute lands mid-import: by the
+            # wall clock the imports now finished before the child started.
+            "imports_done_at": -57.0,
+            "schema_init_seconds": 0.5,
+            "child_entered_steady": steady_now - 3.0,
+            "imports_done_steady": steady_now,
+        },
+    )
+    engine.publish_phase("loading_bars")
+
+    finished = engine._progress_phases[0]
+    assert finished["name"] == "starting"
+    assert finished["imports_seconds"] == pytest.approx(3.0, abs=0.5)
+    assert 0.0 <= finished["preflight_seconds"] < 5.0
+    # `schema DDL` is a share of `imports+stores`, so the one can never exceed
+    # the other. Off the stamps it did.
+    assert finished["schema_init_seconds"] <= finished["imports_seconds"]
+    # The stamps keep the stepped values on purpose: they exist to be
+    # correlated against log lines, which took the same step.
+    assert finished["imports_done_at"] - finished["child_entered_at"] < -50
+
+    out = capsys.readouterr().out
+    assert "imports+stores -" not in out
+    assert "preflight -" not in out
 
 
 def test_closing_loading_bars_prints_the_fetch_split(capsys):
