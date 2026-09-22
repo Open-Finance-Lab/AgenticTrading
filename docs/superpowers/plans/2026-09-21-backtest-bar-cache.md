@@ -208,7 +208,7 @@ def test_describe_names_the_state(cache_dir, monkeypatch):
 - [ ] **Step 3: Run the tests to verify they fail**
 
 Run: `pytest dashboard/backend/tests/infrastructure/market_data/test_bar_cache.py -q`
-Expected: collection error — `ModuleNotFoundError: No module named 'dashboard.backend.infrastructure.market_data.bar_cache'`.
+Expected: collection error — `ImportError: cannot import name 'bar_cache' from 'dashboard.backend.infrastructure.market_data'`. Not `ModuleNotFoundError`: the test body uses the `from <package> import <submodule>` form, and CPython's `_handle_fromlist` swallows the submodule's `ModuleNotFoundError`, after which the failing `IMPORT_FROM` raises `ImportError`.
 
 - [ ] **Step 4: Write the config surface**
 
@@ -2224,7 +2224,7 @@ def test_no_split_line_without_the_metric(capsys):
 - [ ] **Step 2: Run the tests to verify they fail**
 
 Run: `pytest dashboard/backend/tests/backtesting/test_engine_progress_phases.py -q`
-Expected: FAIL with `AttributeError: 'HourlyBacktester' object has no attribute 'record_phase_metric'`.
+Expected: `5 failed, 3 passed`. The five cases that call `record_phase_metric` fail with `AttributeError: 'HourlyBacktester' object has no attribute 'record_phase_metric'`. The other three — `test_the_starting_breakdown_line_is_unchanged`, `test_no_split_line_without_the_metric` and `test_a_startup_clock_without_a_launch_time_does_not_leak_onto_loading_bars` — pass already, because the extras gate and the startup-clock extraction they pin are unchanged until Steps 3 and 4 land. Three green here is the correct RED state, not a failed one: those three are the regression guards the next two steps must not break, and the last two of them are the mutation tests for the extras gate. Do not "fix" them, and do not pull Step 3 or Step 4 code in early to make them fail.
 
 - [ ] **Step 3: Generalise the extras mechanism**
 
@@ -2542,7 +2542,7 @@ def test_app_starts_the_warm_on_a_daemon_thread():
 - [ ] **Step 2: Run the tests to verify they fail**
 
 Run: `pytest dashboard/backend/tests/infrastructure/market_data/test_bar_cache_warm.py -q`
-Expected: collection error — `ModuleNotFoundError: No module named '…bar_cache_warm'`.
+Expected: collection error — `ImportError: cannot import name 'bar_cache_warm' from 'dashboard.backend.infrastructure.market_data'`. Same `from <package> import <submodule>` form as Task 1 Step 3, so `ImportError` rather than `ModuleNotFoundError`; `bar_cache` resolves by now, `bar_cache_warm` does not.
 
 - [ ] **Step 3: Write the warm module**
 
