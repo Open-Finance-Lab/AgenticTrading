@@ -608,10 +608,10 @@ class AlpacaDataLoader:
                 # pre-cache path could not do that: one request, one feed.
                 # Re-request the whole universe uncached so the run is
                 # uniformly degraded instead of silently mixed. No recursion:
-                # `_fetch_bars_uncached` never re-enters this wrapper, and the
-                # answer it returns is refused by `write_many` for the same
-                # reason, so the good SIP entries on disk are left untouched
-                # for when the subscription comes back.
+                # `_fetch_bars_uncached` never re-enters this wrapper, and its
+                # answer is returned straight to the caller, never handed to
+                # `write_many` a second time, so the good SIP entries on disk
+                # are left untouched for when the subscription comes back.
                 print(
                     "📦 bar cache: the live fetch changed tape; re-requesting "
                     f"all {len(symbols)} symbols so one run is priced off "
