@@ -583,19 +583,42 @@ class AlpacaDataLoader:
             # under the SIP key for the TTL. The stamps are per frame and
             # cover every chunk. Whole-batch (`any`) because the cache's rule
             # is whole-batch: a tape mix is wrong for the batch, not a subset.
+            sip_fallback = any(
+                bool(frame.attrs.get(FRAME_ATTR_SIP_FALLBACK))
+                for frame in fetched.values()
+            )
+            end_clamped = any(
+                bool(frame.attrs.get(FRAME_ATTR_END_CLAMPED))
+                for frame in fetched.values()
+            )
             bar_cache.write_many(
                 fetched,
                 last_fetch=self.last_fetch,
-                sip_fallback_to_iex=any(
-                    bool(frame.attrs.get(FRAME_ATTR_SIP_FALLBACK))
-                    for frame in fetched.values()
-                ),
-                end_clamped=any(
-                    bool(frame.attrs.get(FRAME_ATTR_END_CLAMPED))
-                    for frame in fetched.values()
-                ),
+                sip_fallback_to_iex=sip_fallback,
+                end_clamped=end_clamped,
                 **key,
             )
+            if hits and (sip_fallback or end_clamped):
+                # Those refusals govern what gets STORED; they say nothing
+                # about what this call RETURNS. The hits were written under
+                # the CONFIGURED feed's key -- `configured_feed_name()` is the
+                # tape requested, never the one answered -- so they really are
+                # that tape, and merging them with a fallback (or clamped)
+                # answer prices one curve off two tapes for one window. The
+                # pre-cache path could not do that: one request, one feed.
+                # Re-request the whole universe uncached so the run is
+                # uniformly degraded instead of silently mixed. No recursion:
+                # `_fetch_bars_uncached` never re-enters this wrapper, and the
+                # answer it returns is refused by `write_many` for the same
+                # reason, so the good SIP entries on disk are left untouched
+                # for when the subscription comes back.
+                print(
+                    "📦 bar cache: the live fetch changed tape; re-requesting "
+                    f"all {len(symbols)} symbols so one run is priced off "
+                    "one tape",
+                    flush=True,
+                )
+                return self._fetch_bars_uncached(symbols, start, end)
         merged: Dict[str, pd.DataFrame] = {}
         for symbol in symbols:
             frame = fetched.get(symbol)

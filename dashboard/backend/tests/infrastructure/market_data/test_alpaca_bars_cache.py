@@ -307,6 +307,70 @@ def test_an_iex_fallback_in_an_earlier_chunk_refuses_the_whole_batch(
     assert hits == {}
 
 
+def test_a_cached_sip_hit_is_never_merged_with_an_iex_fallback(
+    cached_loader, fake_alpaca, capsys
+):
+    """MUTATION TEST: delete the tape re-request in fetch_bars and this fails.
+
+    `write_many` refuses to STORE an IEX-fallback batch, but that rule governs
+    the write only. AAPL is a genuine SIP entry on disk, MSFT comes back on
+    IEX, and the merge would hand `engine.load_data` two tapes for one window
+    -- a shape the pre-cache path could not produce, because one request meant
+    one feed. The whole universe is re-requested instead: degraded, uniform,
+    comparable.
+    """
+    fake_alpaca["df"] = _bars_df(["AAPL"])
+    cached_loader.fetch_bars(["AAPL"], "2026-05-04", "2026-05-12")
+    assert cached_loader.last_fetch["feed"] == "sip"
+
+    class _SipRefusingClient:
+        """Alpaca after the key is rotated or the subscription lapses: SIP is
+        refused, IEX answers. The cached SIP entry is still valid and still
+        inside its TTL."""
+
+        def __init__(self, *args, **kwargs):
+            self._session = None
+
+        def get_stock_bars(self, request):
+            if getattr(request.feed, "value", request.feed) == "sip":
+                raise RuntimeError("your subscription does not permit this")
+
+            class _Bars:
+                df = _bars_df(list(request.symbol_or_symbols))
+
+            return _Bars()
+
+    cached_loader.client = _SipRefusingClient()
+    result = cached_loader.fetch_bars(["AAPL", "MSFT"], "2026-05-04", "2026-05-12")
+    assert set(result) == {"AAPL", "MSFT"}
+    assert {frame.attrs[FRAME_ATTR_FEED] for frame in result.values()} == {"iex"}
+    assert all(
+        frame.attrs[FRAME_ATTR_SIP_FALLBACK] is True for frame in result.values()
+    )
+    assert "re-requesting" in capsys.readouterr().out
+    # The SIP entry is left on disk: it is a correct entry for its key, and
+    # the subscription may come back before its TTL does.
+    hits, _ = bar_cache.read_many(
+        ["AAPL"],
+        start="2026-05-04",
+        end="2026-05-12",
+        source_timeframe="5m",
+        feed="sip",
+    )
+    assert set(hits) == {"AAPL"}
+
+
+def test_an_all_hit_request_is_untouched_by_the_tape_guard(cached_loader, fake_alpaca):
+    """The guard fires only when a live fetch changed tape. With nothing to
+    fetch there is no second tape, and re-requesting would undo the cache."""
+    fake_alpaca["df"] = _bars_df(["AAPL"])
+    cached_loader.fetch_bars(["AAPL"], "2026-05-04", "2026-05-12")
+    fake_alpaca["requests"].clear()
+    result = cached_loader.fetch_bars(["AAPL"], "2026-05-04", "2026-05-12")
+    assert set(result) == {"AAPL"}
+    assert fake_alpaca["requests"] == []
+
+
 def test_an_unconfigured_client_caches_nothing(cached_loader, tmp_path):
     cached_loader.client = None
     assert cached_loader.fetch_bars(["AAPL"], "2026-05-04", "2026-05-12") == {}
