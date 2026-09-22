@@ -38,6 +38,21 @@ Design notes that are load-bearing:
   ``end_clamped=False`` and would otherwise be stored as complete.
 * Every failure path degrades to "no cache" and never raises. A cache that can
   fail a backtest is worse than no cache.
+
+Known altitude limit, so nobody mistakes the measured win for a general one:
+the key folds ``start`` and ``end`` in VERBATIM, so an entry serves exactly
+one window. A user who runs 05-04..05-12 and then nudges the end to 05-13
+shares nothing -- every symbol is re-fetched, and the second window is stored
+as a second full copy. What this cache speeds up is therefore a window that
+has already been run byte-for-byte: the warmed defaults, a re-run, and the
+DJIA index-baseline fetch inside a single run (same window, so the run's own
+universe is already on disk). It does NOT speed up an arbitrary window a user
+types, which is most of the "loading_bars is ~86% of the dark window" problem.
+Making it general means partitioning on ``(symbol, source_timeframe, feed,
+day)`` so any sub- or super-range composes from the same entries -- a
+different read/write/settlement contract, tracked as a follow-up rather than
+smuggled in here. Do not read the ``fetch_seconds`` numbers this feature
+publishes as evidence that arbitrary windows got faster.
 """
 
 from __future__ import annotations
@@ -97,6 +112,26 @@ _TRUTHY = {"1", "true", "yes", "on"}
 _FALSEY = {"0", "false", "no", "off"}
 
 
+#: ``(name, raw value)`` pairs this process has already complained about.
+#: These readers are called PER FETCH -- ``max_bytes`` twice per write batch --
+#: because ``ATL_BAR_CACHE_DIR`` and the rest must stay live for tests that
+#: point them at ``tmp_path`` after import, so the values cannot be frozen at
+#: import the way ``ALPACA_HTTP_TIMEOUT_SECONDS`` is. Warning every time turned
+#: one typo into a line per fetch forever, into the same child stdout the
+#: parent truncates to ``SUBPROCESS_LOG_HEAD_CHARS`` -- crowding out the
+#: ``⏱ phase …`` lines this feature is measured by. Keyed on the value as well
+#: as the name so a corrected variable still announces itself if it regresses.
+_warned_env: Set[Tuple[str, str]] = set()
+
+
+def _warn_once(name: str, raw: str, message: str) -> None:
+    key = (name, raw)
+    if key in _warned_env:
+        return
+    _warned_env.add(key)
+    print(message, flush=True)
+
+
 def _flag(name: str, *, default: bool) -> bool:
     raw = (os.getenv(name) or "").strip().lower()
     if not raw:
@@ -104,7 +139,9 @@ def _flag(name: str, *, default: bool) -> bool:
     if raw in _TRUTHY:
         return True
     if raw not in _FALSEY:
-        print(f"WARNING: {name}={raw!r} is not a boolean; reading it as off", flush=True)
+        _warn_once(
+            name, raw, f"WARNING: {name}={raw!r} is not a boolean; reading it as off"
+        )
     return False
 
 
@@ -116,16 +153,16 @@ def _bounded_int(name: str, *, default: int, minimum: int, maximum: int) -> int:
     try:
         value = int(raw)
     except ValueError:
-        print(
-            f"WARNING: {name}={raw!r} is not an integer; using {default}",
-            flush=True,
+        _warn_once(
+            name, raw, f"WARNING: {name}={raw!r} is not an integer; using {default}"
         )
         return default
     if not minimum <= value <= maximum:
-        print(
+        _warn_once(
+            name,
+            raw,
             f"WARNING: {name}={value} is outside {minimum}..{maximum}; "
             f"using {default}",
-            flush=True,
         )
         return default
     return value
@@ -142,8 +179,25 @@ def enabled() -> bool:
 
 
 def warm_enabled() -> bool:
-    """Whether ``bar_cache_warm`` pre-fetches on boot. Default ON."""
-    return _flag("ATL_BAR_CACHE_WARM", default=True)
+    """Whether ``bar_cache_warm`` pre-fetches on boot. **Strict opt-in.**
+
+    Unlike :func:`enabled` above, this one SPENDS: it makes three batched
+    Alpaca calls from ``app.py``'s startup hook, and that hook runs on every
+    boot of every deployment -- the Docker image, each self-host and fork, and
+    every ``uvicorn --reload`` restart a developer with keys in
+    ``dashboard/.env`` triggers by saving a file. Defaulting it on armed a
+    billable outbound call on machines whose operator never asked for one, for
+    windows they may never run; CLAUDE.md's ``LEADERBOARD_DAILY_AUTO_DEPLOY``
+    bullet forbids exactly that shape, and the evidence it leaks is that both
+    ``tests/conftest.py`` and ``scripts/loadtest/stress_serve.py`` had to force
+    it off to get a quiet boot.
+
+    Being off costs a cold instance the first visitor's full bar fetch -- the
+    status quo before this feature, and recoverable by setting the flag. Being
+    on by mistake costs money nobody authorised. Set it in the Render
+    dashboard, where the cost is a deployment's decision to make.
+    """
+    return _flag("ATL_BAR_CACHE_WARM", default=False)
 
 
 def cache_dir() -> Path:
@@ -284,6 +338,37 @@ def _discard(*paths: Path) -> None:
             pass
 
 
+def _discard_judged(
+    parquet_path: Path, meta_path: Path, judged: Optional[str]
+) -> None:
+    """Unlink an entry only while its sidecar still holds what we judged.
+
+    :func:`_discard` unlinks by PATH, but every caller of this helper decided
+    to distrust the entry from CONTENT read earlier, and between the two
+    another process can replace both files with a good entry for the same key.
+    The TTL branch is the one that actually happens: the child that expired
+    this entry a moment ago is refreshing exactly it, and up to
+    ``MAX_ACTIVE_DASHBOARD_BACKTESTS`` of them race one key. Unlinking then
+    throws away a fetch someone paid for and leaves the key cold for whoever
+    asks next -- the same failure the half-entry branch in :func:`read_many`
+    spends a grace period to avoid.
+
+    Re-reading first does not make this atomic; it narrows the window from
+    "read, parse, judge, unlink" to "read, unlink", and turns the case that
+    actually costs something -- a refresh that has already landed -- into a
+    no-op. An age guard cannot do this job here: reads touch mtime for LRU,
+    so a hot TTL-expired entry always looks young and would never be cleared
+    at all.
+    """
+    if judged is not None:
+        try:
+            if meta_path.read_text(encoding="utf-8") != judged:
+                return  # refreshed since we read it; no longer ours to judge
+        except OSError:
+            return  # vanished or unreadable: another process is already on it
+    _discard(parquet_path, meta_path)
+
+
 def _discard_if_stale(now: float, *paths: Path) -> bool:
     """Remove ``paths`` only if every one that exists is older than the grace.
 
@@ -421,9 +506,17 @@ def read_many(
                 _discard_if_stale(now, parquet_path, meta_path)
             continue
         try:
-            meta = json.loads(meta_path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            _discard(parquet_path, meta_path)
+            raw_meta = meta_path.read_text(encoding="utf-8")
+        except OSError:
+            # Could not read it, so there is nothing to judge it on -- and the
+            # likely cause is another process already discarding or replacing
+            # it. Leave it: a miss is the answer either way, and the stray
+            # sweep reclaims a survivor nobody owns.
+            continue
+        try:
+            meta = json.loads(raw_meta)
+        except ValueError:
+            _discard_judged(parquet_path, meta_path, raw_meta)
             continue
         if not _meta_matches(
             meta,
@@ -433,11 +526,11 @@ def read_many(
             source_timeframe=source_timeframe,
             feed=feed,
         ):
-            _discard(parquet_path, meta_path)
+            _discard_judged(parquet_path, meta_path, raw_meta)
             continue
         fetched_at = meta.get("fetched_at")
         if not isinstance(fetched_at, (int, float)) or now - float(fetched_at) > ttl:
-            _discard(parquet_path, meta_path)
+            _discard_judged(parquet_path, meta_path, raw_meta)
             continue
         try:
             frame = pd.read_parquet(parquet_path, engine="pyarrow")
@@ -446,7 +539,7 @@ def read_many(
                 f"📦 bar cache: discarding unreadable entry for {symbol}: {exc}",
                 flush=True,
             )
-            _discard(parquet_path, meta_path)
+            _discard_judged(parquet_path, meta_path, raw_meta)
             continue
         # mtime is the LRU clock; the TTL reads `fetched_at` above so touching
         # here cannot keep a stale entry alive forever.
@@ -551,8 +644,23 @@ def write_many(
             # Parquet second: its appearance is the commit point.
             _atomic_write_parquet(parquet_path, frame)
         except Exception as exc:  # noqa: BLE001 - never fail a backtest
+            # Deliberately does NOT discard. These paths may already hold a
+            # perfectly good entry from an earlier run -- this key is being
+            # rewritten, not created -- and unlinking it turned a failed
+            # refresh into a permanent miss. Under the failure most likely to
+            # get here, ENOSPC on the ephemeral disk, every write in the batch
+            # fails and every failure deleted a working entry: the cache
+            # emptied itself exactly when the size cap mattered most.
+            #
+            # Both surviving states are ones this module already serves.
+            # `_atomic_write_text` failing leaves the old pair untouched (it
+            # removes only its own tmp). It succeeding and the parquet failing
+            # leaves the old parquet under a new sidecar -- still the right
+            # bars, since for one key the sidecar varies only in `fetched_at`
+            # and the window is settled -- or, with no old parquet, a half
+            # entry, which `read_many` reads as a miss and the stray sweep
+            # reclaims once no live writer could own it.
             print(f"📦 bar cache: write failed for {symbol}: {exc}", flush=True)
-            _discard(parquet_path, meta_path)
             continue
         written += 1
         written_paths.extend((parquet_path, meta_path))
@@ -586,6 +694,9 @@ def enforce_size_cap(*, protect: Iterable[Path] = ()) -> int:
     7-weekday window at 5m bars is tens of kilobytes of parquet, so the 256MB
     default holds thousands of symbol-windows. It exists so arbitrary user
     windows cannot grow the cache without bound on an ephemeral disk.
+
+    The byte total counts every file this module owns, strays included; only
+    whole entries can be evicted. See the comment on ``total`` below.
 
     ``protect`` is the batch the caller just wrote. It is never evicted, even
     if that leaves the directory over cap until the next pass: an eviction
@@ -631,18 +742,43 @@ def enforce_size_cap(*, protect: Iterable[Path] = ()) -> int:
         is_orphan_meta = (
             path.suffix == ".json" and path.with_suffix(".parquet") not in sizes
         )
-        if (is_tmp or is_orphan_meta) and now - mtime > _STRAY_GRACE_SECONDS:
+        # The mirror image, which the write ordering makes rarer but does not
+        # rule out: `_discard` swallows an OSError per path, so a discard whose
+        # sidecar unlink succeeded and whose parquet unlink failed leaves a
+        # parquet nothing will ever read. `read_many` clears one only if that
+        # exact key is requested again; otherwise it sat here counting against
+        # the cap until LRU eviction happened to reach it.
+        is_orphan_parquet = (
+            path.suffix == ".parquet" and path.with_suffix(".json") not in sizes
+        )
+        if (is_tmp or is_orphan_meta or is_orphan_parquet) and (
+            now - mtime > _STRAY_GRACE_SECONDS
+        ):
             _discard(path)
             del sizes[path]
     entries: List[Tuple[float, str, int, Path, Path]] = []
-    total = 0
+    # The cap bounds BYTES ON DISK, so every file this module owns counts --
+    # including a `*.tmp` or an orphan sidecar still inside the grace above.
+    # Totalling whole entries only meant a stray contributed nothing: a run of
+    # writers killed mid-write (by `PIPELINE_SUBPROCESS_TIMEOUT_SECONDS`, or
+    # by the cancel route) piled up half-written parquets against a cap that
+    # believed the directory was empty. A stray cannot be EVICTED, only aged
+    # out by the sweep above, so counting it buys the room back by evicting
+    # entries instead -- which is what a disk-usage bound should do.
+    total = sum(size for _mtime, size in sizes.values())
     for path, (mtime, size) in sizes.items():
         if path.suffix != ".parquet":
             continue
         meta_path = path.with_suffix(".json")
-        size += sizes.get(meta_path, (0.0, 0))[1]
-        total += size
-        entries.append((mtime, path.name, size, path, meta_path))
+        entries.append(
+            (
+                mtime,
+                path.name,
+                size + sizes.get(meta_path, (0.0, 0))[1],
+                path,
+                meta_path,
+            )
+        )
     _scan_state[str(directory)] = [now, float(total), 0.0]
     if total <= cap:
         return 0

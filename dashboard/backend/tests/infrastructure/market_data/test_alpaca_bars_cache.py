@@ -70,7 +70,17 @@ def fake_alpaca(monkeypatch):
             state["requests"].append(request)
             if state["exc"] is not None:
                 raise state["exc"]
-            return _FakeBars(state["df"])
+            # Answer only for what was ASKED, the way Alpaca does. A fake that
+            # returns its whole frame regardless cannot tell "this symbol has
+            # no bars" from "the response was empty" -- the two cases the
+            # wholly-empty guard in `fetch_bars` exists to separate, since only
+            # the second one means the cached symbols are untrustworthy too.
+            df = state["df"]
+            asked = request.symbol_or_symbols
+            asked = [asked] if isinstance(asked, str) else list(asked)
+            if len(df.index.names) == 2 and not df.empty:
+                df = df[df.index.get_level_values("symbol").isin(asked)]
+            return _FakeBars(df)
 
     monkeypatch.setattr(CLIENT_TARGET, _FakeClient)
     return state
@@ -254,16 +264,49 @@ def test_a_failed_fetch_for_the_misses_fails_the_whole_request(
 def test_a_symbol_alpaca_had_no_bars_for_still_returns_the_hits(
     cached_loader, fake_alpaca
 ):
-    """The failure test keys on last_fetch being None, not on the fetch being
-    empty: a request that succeeded but had nothing for the missing symbol
-    answers with what is on disk, exactly as the old code answered with what
-    Alpaca had."""
+    """A genuinely dataless symbol must not cost its neighbours their bars:
+    the old code asked for both and answered with what Alpaca had."""
     fake_alpaca["df"] = _bars_df(["AAPL"])
     cached_loader.fetch_bars(["AAPL"], "2026-05-04", "2026-05-12")
-    fake_alpaca["df"] = _bars_df([])
+    # AAPL still has bars; NOPE never did. The miss-fetch for NOPE alone comes
+    # back empty, so `fetch_bars` re-asks for both -- and this time the answer
+    # covers AAPL, which is what makes the partial universe legitimate.
     result = cached_loader.fetch_bars(["AAPL", "NOPE"], "2026-05-04", "2026-05-12")
     assert set(result) == {"AAPL"}
     assert cached_loader.last_fetch is not None
+
+
+def test_an_empty_answer_for_the_misses_cannot_publish_a_partial_universe(
+    cached_loader, fake_alpaca
+):
+    """REGRESSION. The guard used to be `not fetched and last_fetch is None`,
+    which fires only on a HARD failure -- every failure exit clears that
+    field, but a 200 answering with no rows leaves it set. So a transient
+    empty answer returned the cached subset alone: five Dow names from an
+    earlier Mag7 run, twenty-five answered with nothing, and `load_data`
+    never raises because the dict is not empty.
+
+    Distinguishing that from the dataless-symbol case above is impossible
+    from the miss-fetch alone, so the re-request decides: here it comes back
+    empty for AAPL too, and the answer is {}."""
+    fake_alpaca["df"] = _bars_df(["AAPL"])
+    cached_loader.fetch_bars(["AAPL"], "2026-05-04", "2026-05-12")
+    # The tape goes quiet for everything -- the shape a transient outage takes
+    # when it answers 200 instead of raising.
+    fake_alpaca["df"] = _bars_df([])
+    result = cached_loader.fetch_bars(["AAPL", "MSFT"], "2026-05-04", "2026-05-12")
+    assert result == {}, "a cached subset was published as the whole universe"
+
+
+def test_a_wholly_empty_miss_fetch_is_not_re_requested_when_nothing_was_cached(
+    cached_loader, fake_alpaca
+):
+    """The re-request exists to re-cover the CACHED symbols. With no hits the
+    call just made already was the pre-cache call, so re-issuing it would only
+    bill the same request twice."""
+    fake_alpaca["df"] = _bars_df([])
+    assert cached_loader.fetch_bars(["AAPL", "MSFT"], "2026-05-04", "2026-05-12") == {}
+    assert len(fake_alpaca["requests"]) == 1
 
 
 def test_an_iex_fallback_in_an_earlier_chunk_refuses_the_whole_batch(

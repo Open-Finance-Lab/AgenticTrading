@@ -20,12 +20,14 @@ os.environ.pop("CONTENT_DATABASE_URL", None)
 os.environ.pop("USERS_DATABASE_URL", None)
 # The app's startup hook warms the bar cache through the REAL
 # AlpacaDataLoader, bound inside bar_cache_warm -- neither name the
-# FakeAlpacaLoader patches below replace is consulted -- and the warm defaults
-# ON outside the test suite, whose conftest this script never loads. app.py has
-# already read dashboard/.env by then, which is where onboarding tells
-# developers to put their Alpaca keys. Unset, this script makes three billable
-# Alpaca calls at boot, writes ~65 entries under dashboard/storage/data/, and
-# runs a fetch thread against the very stack it is measuring.
+# FakeAlpacaLoader patches below replace is consulted. The warm is strict
+# opt-in, so this is belt-and-braces rather than the only thing standing
+# between a load test and a billable call; it is pinned anyway because an
+# operator who armed ATL_BAR_CACHE_WARM in their shell would otherwise have
+# this script make three real Alpaca calls at boot (app.py has already read
+# dashboard/.env, where onboarding tells developers to put their keys), write
+# ~65 entries under dashboard/storage/data/, and run a fetch thread against
+# the very stack it is measuring.
 os.environ["ATL_BAR_CACHE_WARM"] = "0"
 os.environ["ATL_BAR_CACHE_DIR"] = os.path.join(ARTIFACTS, "bar_cache")
 sys.path.insert(0, os.getcwd())

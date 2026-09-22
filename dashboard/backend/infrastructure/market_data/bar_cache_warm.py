@@ -7,8 +7,12 @@ is precisely the user this cache exists for. Runs on a daemon thread from
 
 Cost, named rather than discovered later: three batched Alpaca calls per
 deploy, and merging to ``main`` auto-deploys prod via the CI hook. Negligible
-quota, but it is a new recurring outbound call. A failure is logged and
-swallowed -- a cold cache is the status quo, not an outage.
+quota, but it is a new recurring outbound call -- which is why
+``ATL_BAR_CACHE_WARM`` is **strict opt-in** and this module does nothing until
+an operator sets it. Default-on billed the Docker image, every fork and
+self-host, and every ``uvicorn --reload`` save on a developer machine holding
+keys. A failure is logged and swallowed -- a cold cache is the status quo,
+not an outage.
 
 This module is separate from ``bar_cache`` for one reason: it imports
 ``AlpacaDataLoader``, which imports ``bar_cache``. Keeping the loader out of
@@ -18,7 +22,7 @@ This module is separate from ``bar_cache`` for one reason: it imports
 from __future__ import annotations
 
 import json
-from typing import List, Tuple
+from typing import List, Set, Tuple
 
 from dashboard.backend.infrastructure.llm.validator import DJIA_30
 from dashboard.backend.infrastructure.market_data import bar_cache
@@ -82,13 +86,17 @@ def warm_windows() -> List[Tuple[List[str], str, str]]:
     return windows
 
 
-def _entries_on_disk(symbols, *, start: str, end: str, feed: str) -> int:
-    """How many of these symbol-windows a later run would actually hit.
+def _entries_on_disk(symbols, *, start: str, end: str, feed: str) -> Set[str]:
+    """Which of these symbols a later run would actually hit, as a set.
 
     A ``stat`` per file rather than a parquet read: the question is whether
     the entry exists, and an entry is both files or neither.
+
+    A SET, not a count, because both callers below need identity rather than
+    quantity -- one to tell this window's own writes from an earlier window's,
+    the other to avoid counting a shared symbol twice.
     """
-    stored = 0
+    stored: Set[str] = set()
     for symbol in symbols:
         try:
             paths = bar_cache.entry_paths(
@@ -99,7 +107,7 @@ def _entries_on_disk(symbols, *, start: str, end: str, feed: str) -> int:
                 feed=feed,
             )
             if all(path.exists() for path in paths):
-                stored += 1
+                stored.add(str(symbol))
         except OSError:  # a cold cache is the status quo, never an outage
             continue
     return stored
@@ -126,8 +134,22 @@ def warm_bar_cache() -> int:
     except Exception as exc:  # noqa: BLE001 - a cold cache is the status quo
         print(f"📦 bar cache warm: skipped ({exc})", flush=True)
         return 0
-    warmed = 0
+    # The (symbol, window) keys confirmed on disk. A SET because the first two
+    # windows share a `start`/`end` and therefore share keys for every symbol
+    # in both -- `warm_windows`' own comment says the Mag7 names are hits when
+    # the Dow window runs. Adding the per-window counts reported those symbols
+    # twice: 67 "ready" for ~62 entries, a number that overstates by an amount
+    # depending on the defaults file.
+    ready: Set[Tuple[str, str, str]] = set()
     for symbols, start, end in warm_windows():
+        wanted = {str(symbol) for symbol in symbols}
+        # Sampled BEFORE the fetch so this window is judged on its own writes.
+        # Counting the directory afterwards asked the wrong question: window
+        # two found the overlap window one had stored and reported a non-zero
+        # `stored`, so the alarm below could not fire for it even when all
+        # twenty-five of its own writes were refused -- the alarm silenced by
+        # exactly the case it was added to catch.
+        before = _entries_on_disk(symbols, start=start, end=end, feed=feed)
         try:
             frames = loader.fetch_bars(list(symbols), start, end)
         except Exception as exc:  # noqa: BLE001
@@ -136,21 +158,24 @@ def warm_bar_cache() -> int:
                 flush=True,
             )
             continue
-        # Count what is STORED, not what came back. `fetch_bars` returns its
-        # frames whether or not `write_many` accepted a byte of them -- the
-        # int it returns is discarded at the call site -- so on an account
-        # with no SIP entitlement every window falls back to IEX, every write
-        # is refused, three billable calls are made per deploy forever, and
-        # the line below used to report a full warm. "Ran and cached nothing"
+        # What is STORED, not what came back. `fetch_bars` returns its frames
+        # whether or not `write_many` accepted a byte of them -- the int it
+        # returns is discarded at the call site -- so on an account with no
+        # SIP entitlement every window falls back to IEX, every write is
+        # refused, three billable calls are made per deploy forever, and the
+        # line below used to report a full warm. "Ran and cached nothing"
         # must not print the sentence that means it worked.
-        stored = _entries_on_disk(symbols, start=start, end=end, feed=feed)
-        if frames and not stored:
+        after = _entries_on_disk(symbols, start=start, end=end, feed=feed)
+        if frames and before != wanted and after == before:
+            # Something was missing, a fetch answered for it, and disk did not
+            # move. `before != wanted` is what keeps an already-warm window
+            # (nothing to store, nothing stored) from tripping the alarm.
             print(
                 f"📦 bar cache warm: {start}..{end} fetched {len(frames)} "
                 "symbols and stored none -- see the refusal above; this "
                 "window will be re-fetched on every deploy until it is fixed",
                 flush=True,
             )
-        warmed += stored
-    print(f"📦 bar cache warm: {warmed} symbol-windows ready", flush=True)
-    return warmed
+        ready.update((symbol, start, end) for symbol in after)
+    print(f"📦 bar cache warm: {len(ready)} symbol-windows ready", flush=True)
+    return len(ready)

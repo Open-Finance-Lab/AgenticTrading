@@ -174,9 +174,63 @@ def test_warm_fetches_every_window_at_the_intraday_source_timeframe(
     # Derived, not a literal 3: the window list is the one owner of the count.
     assert len(calls) == len(bar_cache_warm.warm_windows())
     assert {timeframe for timeframe, *_ in calls} == {"5m"}
-    # Against what the cache ACCEPTED, not what the loader returned: the two
-    # agree here only because every window is settled and on the right tape.
-    assert warmed == sum(written) > 0
+    # DISTINCT symbol-windows, derived from the window list rather than
+    # summed per window: windows one and two share a start/end, so every
+    # symbol in both is one entry counted twice by a running total. The fake
+    # loader writes each window whole (it does not consult the cache), which
+    # is what makes `sum(written)` the overstated figure here.
+    expected = {
+        (symbol, start, end)
+        for symbols, start, end in bar_cache_warm.warm_windows()
+        for symbol in symbols
+    }
+    assert warmed == len(expected) > 0
+    assert warmed < sum(written), "the windows no longer overlap; pick another pair"
+
+
+def test_an_overlapping_window_cannot_silence_the_stored_none_alarm(
+    warm_cache_dir, monkeypatch, capsys
+):
+    """REGRESSION. The alarm used to read the directory AFTER the fetch and
+    ask only whether anything was there. Window two shares its start/end with
+    window one, so it found window one's entries and reported a non-zero
+    `stored` -- the alarm could not fire for it even with all twenty-five of
+    its own writes refused. It is now judged on the entries IT added."""
+    calls, written = [], []
+    stores = iter([True, False, False])
+
+    class _Selective:
+        """Stores window one, refuses every window after it."""
+
+        def __init__(self):
+            self.source_timeframe = "60m"
+            self._store = True
+
+        def configure_source_timeframe(self, value):
+            self.source_timeframe = value
+
+        def fetch_bars(self, symbols, start, end):
+            store = next(stores)
+            calls.append((tuple(symbols), start, end))
+            frames = {symbol: _frame() for symbol in symbols}
+            written.append(
+                bar_cache.write_many(
+                    frames,
+                    start=start,
+                    end=end,
+                    source_timeframe=self.source_timeframe,
+                    feed="sip",
+                    last_fetch={"feed": "sip", "source_timeframe": self.source_timeframe},
+                    sip_fallback_to_iex=not store,
+                )
+            )
+            return frames
+
+    monkeypatch.setattr(bar_cache_warm, "AlpacaDataLoader", _Selective)
+    bar_cache_warm.warm_bar_cache()
+    out = capsys.readouterr().out
+    first_start, first_end = bar_cache_warm.warm_windows()[1][1:]
+    assert f"{first_start}..{first_end} fetched" in out and "stored none" in out
 
 
 def test_the_warm_reports_what_it_stored_not_what_it_fetched(
@@ -263,11 +317,14 @@ def test_the_warm_error_line_matches_the_live_call_detector():
     Unreachable today is an accident of the current code; a safety proof a
     future edit can blind for free should not stay blindable."""
     source = (BACKEND_DIR / "app.py").read_text(encoding="utf-8")
-    start = source.index("def warm_bar_cache_background")
+    start = source.index("def bar_cache_background")
     body = source[start : source.index("threading.Thread", start)]
     logged = re.findall(r'print\(\s*f?"([^"]*)"', body)
     assert logged, "the warm's background wrapper stopped logging"
-    assert all("bar cache warm:" in line for line in logged), logged
+    # "bar cache:" is the prefix both halves share -- the sweep logs under it
+    # too, and the detector greps the shorter string.
+    assert all("bar cache" in line for line in logged), logged
+    assert any("bar cache warm:" in line for line in logged), logged
 
 
 def test_app_starts_the_warm_on_a_daemon_thread():
@@ -278,6 +335,43 @@ def test_app_starts_the_warm_on_a_daemon_thread():
     # three other daemon threads, so a bare substring check would pass with
     # the warm thread missing entirely.
     assert re.search(
-        r"Thread\(\s*target=warm_bar_cache_background,\s*daemon=True\s*\)", source
+        r"Thread\(\s*target=bar_cache_background,\s*daemon=True\s*\)", source
     )
     assert "bar_cache.describe()" in source
+
+
+def test_the_startup_bar_cache_block_cannot_abort_the_rest_of_the_hook():
+    """SOURCE-SHAPE GUARD. `startup_event` has no handler of its own, so an
+    unguarded statement skips everything below it -- `recover_orphaned_runs`
+    and `register_reaper_sweep(reap_v2_runs)`, which between them leave
+    orphaned protocol runs `running` forever and abandoned v2 runs holding
+    their concurrency slots. The import is not inert: it pulls in pandas, and
+    `alpaca_bars` imports `bar_cache`, so the cycle edge is live."""
+    source = (BACKEND_DIR / "app.py").read_text(encoding="utf-8")
+    block = source[
+        source.index("# Wrapped like every other block in this hook") : source.index(
+            "def bar_cache_background"
+        )
+    ]
+    assert "bar_cache.describe()" in block
+    assert "try:" in block and "except Exception" in block
+    describe_at = block.index("bar_cache.describe()")
+    assert block.index("try:") < describe_at < block.index("except Exception")
+
+
+def test_the_boot_sweep_runs_whether_or_not_the_warm_is_armed():
+    """SOURCE-SHAPE GUARD. The stray sweep and the LRU pass otherwise fire
+    only from inside `write_many`, so a deployment whose writes all fail
+    stops reclaiming the `*.tmp` files its killed writers leave behind --
+    exactly when reclaiming matters. Boot is the one moment guaranteed to
+    arrive without a successful write in front of it, so the sweep must not
+    sit behind the opt-in warm flag."""
+    source = (BACKEND_DIR / "app.py").read_text(encoding="utf-8")
+    body = source[
+        source.index("def bar_cache_background") : source.index(
+            "Thread(target=bar_cache_background"
+        )
+    ]
+    assert "enforce_size_cap()" in body
+    assert body.index("enforce_size_cap()") < body.index("warm_bar_cache")
+    assert "warm_enabled" not in body, "the sweep must not be gated on the warm flag"

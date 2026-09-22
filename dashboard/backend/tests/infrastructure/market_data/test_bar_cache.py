@@ -25,6 +25,14 @@ def cache_dir(tmp_path, monkeypatch):
     return tmp_path / "bar_cache"
 
 
+@pytest.fixture(autouse=True)
+def _forget_env_warnings(monkeypatch):
+    """The env readers warn once per (name, value) per PROCESS, so without
+    this the first test to trip a given value would silence every later one
+    and these assertions would depend on collection order."""
+    monkeypatch.setattr(bar_cache, "_warned_env", set())
+
+
 def _frame(rows=3, start="2026-05-04T13:30:00Z"):
     index = pd.date_range(start, periods=rows, freq="5min", tz="UTC")
     index.name = "timestamp"
@@ -61,8 +69,22 @@ def test_cache_is_enabled_by_default(monkeypatch):
     assert bar_cache.enabled() is True
 
 
-def test_warm_is_enabled_by_default(monkeypatch):
+def test_warm_is_strict_opt_in(monkeypatch):
+    """The cache itself defaults ON; the WARM does not, because it is the only
+    part that spends. Default-on billed three Alpaca calls per boot on the
+    Docker image, every fork and self-host, and every `uvicorn --reload` save
+    -- the shape CLAUDE.md's LEADERBOARD_DAILY_AUTO_DEPLOY bullet forbids."""
     monkeypatch.delenv("ATL_BAR_CACHE_WARM", raising=False)
+    # conftest pins ATL_BAR_CACHE=0 for the suite; drop it so the contrast
+    # between the two defaults is what this asserts.
+    monkeypatch.delenv("ATL_BAR_CACHE", raising=False)
+    assert bar_cache.warm_enabled() is False
+    assert bar_cache.enabled() is True, "the read/write cache is still default-on"
+
+
+@pytest.mark.parametrize("value", ["1", "true", "yes", "on", "ON", " 1 "])
+def test_only_an_explicit_truthy_value_arms_the_warm(monkeypatch, value):
+    monkeypatch.setenv("ATL_BAR_CACHE_WARM", value)
     assert bar_cache.warm_enabled() is True
 
 
@@ -730,3 +752,171 @@ def test_write_many_rescans_once_the_interval_has_elapsed(cache_dir, monkeypatch
     state[0] -= 2 * bar_cache._SWEEP_INTERVAL_SECONDS
     bar_cache.write_many({"S1": _frame(rows=200)}, last_fetch=LAST_FETCH, **KEY)
     assert len(scans) == 2
+
+
+# --- discards refer to content, not to paths -------------------------------
+
+
+def test_a_failed_write_leaves_the_entry_that_was_already_there(
+    cache_dir, monkeypatch, capsys
+):
+    """REGRESSION. The failure path used to `_discard(parquet, meta)`, which
+    unlinks whatever is at those paths -- including a good entry from an
+    earlier run, since this key is being REWRITTEN. Under ENOSPC every write
+    in the batch fails and every failure deleted one, so the cache emptied
+    itself exactly when the cap mattered most."""
+    assert bar_cache.write_many({"AAPL": _frame()}, last_fetch=LAST_FETCH, **KEY) == 1
+    hits, _ = bar_cache.read_many(["AAPL"], **KEY)
+    assert set(hits) == {"AAPL"}
+
+    def _boom(*_args, **_kwargs):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(bar_cache, "_atomic_write_text", _boom)
+    assert bar_cache.write_many({"AAPL": _frame(rows=5)}, last_fetch=LAST_FETCH, **KEY) == 0
+    assert "write failed" in capsys.readouterr().out
+    hits, metas = bar_cache.read_many(["AAPL"], **KEY)
+    assert set(hits) == {"AAPL"}, "a failed refresh destroyed a working entry"
+    assert len(hits["AAPL"]) == 3, "the surviving entry should be the old one"
+    assert metas["AAPL"] == LAST_FETCH
+
+
+def test_a_half_written_entry_from_a_failed_write_is_a_miss_not_a_crash(
+    cache_dir, monkeypatch
+):
+    """The sidecar lands first, so a parquet failure with nothing already on
+    disk leaves a half entry. That is a state `read_many` already answers as
+    a miss and the stray sweep reclaims -- which is what makes not discarding
+    safe."""
+
+    def _boom(*_args, **_kwargs):
+        raise ValueError("pyarrow said no")
+
+    monkeypatch.setattr(bar_cache, "_atomic_write_parquet", _boom)
+    assert bar_cache.write_many({"AAPL": _frame()}, last_fetch=LAST_FETCH, **KEY) == 0
+    parquet_path, meta_path = bar_cache.entry_paths("AAPL", **KEY)
+    assert meta_path.exists() and not parquet_path.exists()
+    assert bar_cache.read_many(["AAPL"], **KEY) == ({}, {})
+
+
+def test_an_expired_entry_refreshed_by_another_process_is_not_unlinked(
+    cache_dir, monkeypatch
+):
+    """REGRESSION. `_discard` unlinks by PATH after a decision made from
+    content read earlier. Up to MAX_ACTIVE_DASHBOARD_BACKTESTS children race
+    one key, and the TTL branch is where it bites: the child that expired this
+    entry is refreshing exactly it, and the unlink threw away the fetch it
+    just paid for."""
+    monkeypatch.setenv("ATL_BAR_CACHE_TTL_DAYS", "1")
+    assert bar_cache.write_many({"AAPL": _frame()}, last_fetch=LAST_FETCH, **KEY) == 1
+    parquet_path, meta_path = bar_cache.entry_paths("AAPL", **KEY)
+    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    meta["fetched_at"] = time.time() - 10 * 86400
+    meta_path.write_text(json.dumps(meta), encoding="utf-8")
+
+    real_read_text = type(meta_path).read_text
+
+    def _refresh_between_judging_and_unlinking(self, *args, **kwargs):
+        text = real_read_text(self, *args, **kwargs)
+        if self == meta_path and json.loads(text)["fetched_at"] < time.time() - 86400:
+            # Stand in for the other child landing its refresh in the window
+            # between this one reading the sidecar and acting on it.
+            fresh = dict(meta, fetched_at=time.time())
+            real_write = type(meta_path).write_text
+            real_write(meta_path, json.dumps(fresh), encoding="utf-8")
+        return text
+
+    monkeypatch.setattr(type(meta_path), "read_text", _refresh_between_judging_and_unlinking)
+    bar_cache.read_many(["AAPL"], **KEY)
+    monkeypatch.undo()
+    assert parquet_path.exists(), "another process's refresh was unlinked"
+    assert meta_path.exists()
+
+
+def test_an_entry_that_is_still_expired_when_acted_on_is_cleared(cache_dir, monkeypatch):
+    """The other direction: re-reading must not turn TTL eviction off. An age
+    guard would have -- reads touch mtime for LRU, so a hot expired entry
+    always looks young."""
+    monkeypatch.setenv("ATL_BAR_CACHE_TTL_DAYS", "1")
+    assert bar_cache.write_many({"AAPL": _frame()}, last_fetch=LAST_FETCH, **KEY) == 1
+    parquet_path, meta_path = bar_cache.entry_paths("AAPL", **KEY)
+    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    meta["fetched_at"] = time.time() - 10 * 86400
+    meta_path.write_text(json.dumps(meta), encoding="utf-8")
+    os.utime(parquet_path, None)  # freshly read: young mtime, old fetched_at
+    os.utime(meta_path, None)
+    assert bar_cache.read_many(["AAPL"], **KEY) == ({}, {})
+    assert not parquet_path.exists() and not meta_path.exists()
+
+
+# --- the cap bounds bytes on disk ------------------------------------------
+
+
+def test_a_stray_tmp_counts_toward_the_cap(cache_dir):
+    """REGRESSION. The byte total summed `.parquet` entries only, so a
+    `*.tmp` from a writer killed mid-write (the backtest timeout, the cancel
+    route) was scanned, stat'd and counted as zero -- accumulating against a
+    cap that believed the directory was empty."""
+    assert bar_cache.write_many({"AAPL": _frame()}, last_fetch=LAST_FETCH, **KEY) == 1
+    parquet_path, _meta = bar_cache.entry_paths("AAPL", **KEY)
+    stray = cache_dir / (parquet_path.name + "ABCDEF.tmp")
+    stray.write_bytes(b"\0" * (3 * 1024 * 1024))
+    assert bar_cache._is_owned(stray.name), "the sweep would not even see it"
+    # Cap below the stray alone: the entry must be evicted to make room for a
+    # file the pass cannot evict itself.
+    os.environ["ATL_BAR_CACHE_MAX_MB"] = "1"
+    try:
+        assert bar_cache.enforce_size_cap() == 1
+    finally:
+        os.environ.pop("ATL_BAR_CACHE_MAX_MB", None)
+    assert not parquet_path.exists()
+    assert stray.exists(), "a young stray belongs to a live writer"
+
+
+def test_a_stale_orphan_parquet_is_reclaimed(cache_dir):
+    """REGRESSION. The stray sweep reclaimed orphan `.json` sidecars but had
+    no `.parquet` counterpart, though `_discard` swallows an OSError per path
+    and so can leave exactly that."""
+    assert bar_cache.write_many({"AAPL": _frame()}, last_fetch=LAST_FETCH, **KEY) == 1
+    parquet_path, meta_path = bar_cache.entry_paths("AAPL", **KEY)
+    meta_path.unlink()  # the half of a discard that succeeded
+    old = time.time() - bar_cache._STRAY_GRACE_SECONDS - 60
+    os.utime(parquet_path, (old, old))
+    bar_cache.enforce_size_cap()
+    assert not parquet_path.exists()
+
+
+def test_a_young_orphan_parquet_is_left_for_its_writer(cache_dir):
+    assert bar_cache.write_many({"AAPL": _frame()}, last_fetch=LAST_FETCH, **KEY) == 1
+    parquet_path, meta_path = bar_cache.entry_paths("AAPL", **KEY)
+    meta_path.unlink()
+    bar_cache.enforce_size_cap()
+    assert parquet_path.exists()
+
+
+# --- environment readers ---------------------------------------------------
+
+
+def test_a_junk_value_warns_once_per_process_not_once_per_fetch(monkeypatch, capsys):
+    """REGRESSION. These readers run per fetch -- `max_bytes` twice per write
+    batch -- and cannot be frozen at import, because tests repoint
+    ATL_BAR_CACHE_DIR after it. Warning every time turned one typo into a
+    line per fetch forever, into the same child stdout the parent truncates
+    to SUBPROCESS_LOG_HEAD_CHARS, crowding out the `⏱ phase …` lines this
+    feature is measured by."""
+    monkeypatch.setenv("ATL_BAR_CACHE_MAX_MB", "256MB")
+    for _ in range(5):
+        assert bar_cache.max_bytes() == 256 * 1024 * 1024
+    out = capsys.readouterr().out
+    assert out.count("is not an integer") == 1, out
+    # A different bad value is a different fact and still announces itself.
+    monkeypatch.setenv("ATL_BAR_CACHE_MAX_MB", "lots")
+    bar_cache.max_bytes()
+    assert capsys.readouterr().out.count("is not an integer") == 1
+
+
+def test_a_junk_flag_warns_once_per_process(monkeypatch, capsys):
+    monkeypatch.setenv("ATL_BAR_CACHE", "maybe")
+    for _ in range(5):
+        assert bar_cache.enabled() is False
+    assert capsys.readouterr().out.count("is not a boolean") == 1

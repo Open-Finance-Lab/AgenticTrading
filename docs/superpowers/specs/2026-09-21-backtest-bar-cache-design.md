@@ -393,6 +393,31 @@ blocking: **#507** (`_discard` unlinks by path after the decision to distrust),
 **#509** (phase durations use `time.time`, so a clock step distorts them),
 **#510** (`_scan_state` has no key eviction — no production impact today).
 
+**#507 is now partly closed in-branch.** The second review pass found the same
+path-versus-content gap on four more `read_many` branches and on `write_many`'s failure
+exit, so both are fixed here: `_discard_judged` re-reads the sidecar and unlinks only
+while it still holds what was judged, and a failed write no longer discards at all (it
+could be deleting a *pre-existing* entry — under ENOSPC, every one of them). What #507
+still names is the residue: re-reading narrows the window, it does not make the unlink
+atomic. Closing it properly needs an fd-based or lock-based scheme, which is a bigger
+change than this PR should carry.
+
+### Not filed — the altitude limit, for a human to decide on
+
+The cache key folds `start`/`end` in verbatim, so an entry serves exactly one window and
+nudging an end date by a day shares nothing and stores a second full copy. The measured
+win is therefore real but *narrow*: the three warmed windows, a byte-identical re-run,
+and the DJIA index-baseline fetch inside a single run. It does **not** speed up an
+arbitrary window a user types, which is most of the "loading_bars is ~86% of the dark
+window" problem this track exists for. Making it general means partitioning on
+`(symbol, source_timeframe, feed, day)` so any sub- or super-range composes from the same
+entries — a different read/write/settlement contract, and a different PR.
+
+Recorded here and in `bar_cache.py`'s module docstring rather than filed, because filing
+it assigns the work. It is named now so nobody later reads the `fetch_seconds` numbers
+this feature publishes as evidence that arbitrary windows got faster, and so the decision
+to build the general version is taken deliberately rather than discovered.
+
 ## 13. Line anchors
 
 Every file reference in this document is **advisory**. `main` moves, and eleven

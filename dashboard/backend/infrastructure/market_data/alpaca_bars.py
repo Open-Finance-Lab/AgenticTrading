@@ -561,19 +561,41 @@ class AlpacaDataLoader:
             return {symbol: hits[symbol] for symbol in symbols if symbol in hits}
 
         fetched = self._fetch_bars_uncached(misses, start, end)
-        if not fetched and self.last_fetch is None:
-            # Every failure exit of `_fetch_bars_uncached` clears `last_fetch`
-            # and returns {}; a request that merely had no bars for a symbol
-            # leaves `last_fetch` set. Before the cache a call either returned
-            # what Alpaca had or {} -- and `engine.load_data` raises on {}.
-            # Returning the hits alone here would let a DJIA_30 run after a
-            # Mag7 run proceed on the five names already on disk: a 5-symbol
-            # "Dow", an index baseline priced off five names, and frequency
-            # verification quietly downgraded to evidence="configured".
-            # (For a >100-symbol call `last_fetch` is the last chunk's, so a
-            # failed final chunk with earlier chunks intact still merges --
-            # exactly the pre-cache behaviour.)
-            return {}
+        if not fetched:
+            # The live request produced nothing for ANY missed symbol, so this
+            # call cannot cover the universe it was asked for. Two causes look
+            # identical from here -- the request failed, or those symbols have
+            # no bars -- and `last_fetch` separates only SOME of them: every
+            # failure exit of `_fetch_bars_uncached` clears it, but a 200 that
+            # answers with no rows leaves it set. Gating on that field was
+            # therefore a gate on the hard failures alone, and a transient
+            # empty answer walked straight through it: five Dow names cached
+            # by an earlier Mag7 run, a 25-symbol request that answers with no
+            # bars, and the run proceeds on a five-symbol "Dow" -- an index
+            # baseline priced off five names, published.
+            #
+            # The information needed to tell those apart is gone, because the
+            # request no longer covers the cached symbols. Pre-cache it did:
+            # one request, every symbol, and a total-empty answer meant {} and
+            # a raise from `engine.load_data` no matter which cause produced
+            # it. So reproduce that call instead of guessing -- the same move
+            # the tape-change branch below makes, for the same reason. An
+            # outage still yields {}; a genuinely dataless symbol still yields
+            # its neighbours, which a bare `return {}` here would have taken
+            # away. No recursion: `_fetch_bars_uncached` never re-enters this
+            # wrapper, and its answer goes straight to the caller, so the
+            # entries on disk are left untouched.
+            if not hits:
+                # `misses` was the whole universe, so the call just made IS
+                # the pre-cache call. Re-issuing it would only bill it twice.
+                return {}
+            print(
+                "📦 bar cache: the live fetch returned nothing; re-requesting "
+                f"all {len(symbols)} symbols so a partial universe cannot be "
+                "mistaken for a complete one",
+                flush=True,
+            )
+            return self._fetch_bars_uncached(symbols, start, end)
         if fetched:
             # The refusal flags come from the FRAMES, not from `last_fetch`.
             # `last_fetch` describes the last request the loader made, which
