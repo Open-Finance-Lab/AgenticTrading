@@ -1,9 +1,11 @@
 # Backtest Bar Cache — Design
 
-> **Status: DESIGN ONLY — nothing under `dashboard/` implements this.** Verified
-> 2026-09-21: no `bar_cache` module exists, and `AlpacaDataLoader.fetch_bars`
-> calls the Alpaca SDK directly with no cache in between. Written against
-> `main` at `1167ae97` (PR #501, Track A).
+> **Status: IMPLEMENTED** on `feat/backtest-bar-cache`.
+> `infrastructure/market_data/bar_cache.py` is the module,
+> `AlpacaDataLoader.fetch_bars` is now a cache-aware wrapper, and the raw SDK
+> call it used to make lives in `_fetch_bars_uncached`. Written as design only
+> against `main` at `1167ae97` (PR #501, Track A); where this document and the
+> shipped code disagree, the code is current.
 
 **Goal:** a repeated `(symbol, window, timeframe, feed)` bar request is served from
 disk instead of from Alpaca, across process boundaries, without ever serving a

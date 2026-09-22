@@ -278,6 +278,23 @@ def test_a_valid_override_is_honoured_for_max_bytes_and_ttl(monkeypatch):
     assert bar_cache.ttl_seconds() == 3 * 86400.0
 
 
+def test_the_design_doc_does_not_call_this_unimplemented():
+    """SOURCE-SHAPE GUARD. CLAUDE.md's ATL_BAR_CACHE bullet ends by pointing
+    at this spec, so its status banner is the first thing every future agent
+    sent there reads -- and it said "DESIGN ONLY -- nothing under dashboard/
+    implements this" on the branch that implements it, inviting a reader to
+    re-implement the cache or to treat the module as dead. A document is only
+    as trustworthy as the thing that notices it went stale."""
+    from dashboard.backend.paths import REPO_ROOT
+
+    spec = REPO_ROOT / "docs" / "superpowers" / "specs"
+    spec = spec / "2026-09-21-backtest-bar-cache-design.md"
+    banner = spec.read_text(encoding="utf-8").split("\n\n", 2)[1]
+    assert "Status:" in banner, "the spec's status banner moved"
+    assert "DESIGN ONLY" not in banner, banner
+    assert "no `bar_cache` module exists" not in banner, banner
+
+
 # --- the refusal rules (design section 5) ----------------------------------
 
 
