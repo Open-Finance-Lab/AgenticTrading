@@ -18,6 +18,16 @@ os.environ["DATABASE_PATH"] = os.path.join(ARTIFACTS, "stress.db")
 # Ambient prod/dev URLs must never leak into a load test.
 os.environ.pop("CONTENT_DATABASE_URL", None)
 os.environ.pop("USERS_DATABASE_URL", None)
+# The app's startup hook warms the bar cache through the REAL
+# AlpacaDataLoader, bound inside bar_cache_warm -- neither name the
+# FakeAlpacaLoader patches below replace is consulted -- and the warm defaults
+# ON outside the test suite, whose conftest this script never loads. app.py has
+# already read dashboard/.env by then, which is where onboarding tells
+# developers to put their Alpaca keys. Unset, this script makes three billable
+# Alpaca calls at boot, writes ~65 entries under dashboard/storage/data/, and
+# runs a fetch thread against the very stack it is measuring.
+os.environ["ATL_BAR_CACHE_WARM"] = "0"
+os.environ["ATL_BAR_CACHE_DIR"] = os.path.join(ARTIFACTS, "bar_cache")
 sys.path.insert(0, os.getcwd())
 
 import numpy as np  # noqa: E402

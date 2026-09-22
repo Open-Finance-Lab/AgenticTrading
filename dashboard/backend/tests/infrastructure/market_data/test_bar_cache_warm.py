@@ -9,7 +9,7 @@ import pytest
 
 from dashboard.backend.infrastructure.llm.validator import DJIA_30
 from dashboard.backend.infrastructure.market_data import bar_cache, bar_cache_warm
-from dashboard.backend.paths import BACKEND_DIR, CONFIG_DIR
+from dashboard.backend.paths import BACKEND_DIR, CONFIG_DIR, REPO_ROOT
 
 
 def _defaults():
@@ -89,6 +89,28 @@ def test_the_suite_never_warms():
     an offline suite, and real money."""
     assert os.environ.get("ATL_BAR_CACHE_WARM") == "0"
     assert bar_cache.warm_enabled() is False
+
+
+def test_the_load_test_harness_never_warms_and_never_writes_into_the_repo():
+    """SOURCE-SHAPE GUARD. `stress_serve.py` patches the Alpaca loader and
+    then runs the real app in-process -- but the startup hook warms through
+    the REAL `AlpacaDataLoader` bound inside `bar_cache_warm`, so neither
+    patched name is consulted, and the warm defaults ON outside the suite
+    (whose conftest a standalone script never loads). Unset, the script makes
+    three billable Alpaca calls at boot and writes entries under
+    `dashboard/storage/data/`, against a docstring promising it measures "OUR
+    stack ... not Alpaca's API" with "all artifacts ... never the repo tree"."""
+    script = REPO_ROOT / "dashboard" / "scripts" / "loadtest" / "stress_serve.py"
+    source = script.read_text(encoding="utf-8")
+    assert re.search(r'environ\["ATL_BAR_CACHE_WARM"\]\s*=\s*"0"', source)
+    assert re.search(
+        r'environ\["ATL_BAR_CACHE_DIR"\]\s*=\s*os\.path\.join\(ARTIFACTS', source
+    )
+    # Before the first backend import, like every other env line up there:
+    # after it, modules that read these at import time have already read them.
+    first_import = re.search(r"^import dashboard\.backend", source, re.M)
+    assert first_import, "stress_serve.py stopped importing the backend"
+    assert source.index("ATL_BAR_CACHE_WARM") < first_import.start()
 
 
 def test_warm_bar_cache_is_a_no_op_when_disabled(monkeypatch):
