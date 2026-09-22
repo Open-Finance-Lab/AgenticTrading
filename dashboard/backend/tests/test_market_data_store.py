@@ -3,7 +3,7 @@ cache, LRU eviction (T1 of the 2026-07-24 agent-scale spec)."""
 
 import threading
 import time
-from datetime import datetime
+from datetime import datetime, time as clock_time
 
 import numpy as np
 import pandas as pd
@@ -85,6 +85,111 @@ def test_key_isolation_by_date_range():
     b = mds.get_dataset(SYMS, "2026-04-13", "2026-04-14", loader_factory=_CountingLoader)
     assert a is not b
     assert _CountingLoader.calls == 2
+
+
+def test_symbol_order_is_not_part_of_the_key():
+    """REGRESSION (#512). The key held `tuple(symbols)`, so the same universe
+    in a different order missed the single-flight cache and the dataset was
+    built and held TWICE -- two loaded bar windows for one universe, against
+    the memory ceiling MAX_ACTIVE_DASHBOARD_BACKTESTS is sized for. Never a
+    wrong number, just a duplicate, which is why nothing caught it.
+    """
+    a = mds.get_dataset(["AAPL", "MSFT"], "2026-04-15", "2026-04-16",
+                        loader_factory=_CountingLoader)
+    b = mds.get_dataset(["MSFT", "AAPL"], "2026-04-15", "2026-04-16",
+                        loader_factory=_CountingLoader)
+    assert a is b
+    assert _CountingLoader.calls == 1
+    # peek reaches the same entry, so the v2 fast path is not order-sensitive
+    # either -- it is the caller most likely to build its list differently.
+    assert mds.peek(["MSFT", "AAPL"], "2026-04-15", "2026-04-16") is a
+
+
+def test_two_markets_do_not_collide_on_one_entry():
+    """REGRESSION (#511). The key had no market dimension while
+    `_build_dataset` hardcoded US rules, so the same symbols over the same
+    window on two markets were one entry -- computed under whichever market
+    built first, and then served to the other.
+    """
+    us = mds.get_dataset(SYMS, "2026-04-15", "2026-04-16",
+                         loader_factory=_CountingLoader, market="US",
+                         timezone="US/Eastern")
+    assert mds.peek(SYMS, "2026-04-15", "2026-04-16", market="US") is us
+    # The resident US dataset is NOT handed to a CN caller, which is the whole
+    # defect: it would have been served bars bucketed on ET sessions.
+    assert mds.peek(SYMS, "2026-04-15", "2026-04-16", market="CN") is None
+    assert mds._dataset_key(SYMS, "2026-04-15", "2026-04-16", "60m", "60m",
+                            "US") != mds._dataset_key(
+        SYMS, "2026-04-15", "2026-04-16", "60m", "60m", "CN")
+
+
+def test_a_cn_build_of_us_bars_refuses_instead_of_filtering_them_as_et():
+    """The behavioural consequence of threading the market through, and the
+    reason the key change alone would not have been enough.
+
+    These synthetic bars are US regular trading hours. Asked for them as a CN
+    market, the build now finds no in-session timestamps and raises. Before, it
+    filtered them against 09:30-16:00 ET regardless of the market asked for and
+    returned a perfectly ordinary-looking dataset -- US bars, US sessions,
+    published under a CN run.
+    """
+    with pytest.raises(RuntimeError, match="No trading hours"):
+        mds.get_dataset(SYMS, "2026-04-15", "2026-04-16",
+                        loader_factory=_CountingLoader, market="CN",
+                        timezone="Asia/Shanghai")
+
+
+def test_trading_timestamps_follow_the_market_sessions():
+    """The fourth US assumption, and the one that mattered most: the in-session
+    filter carried its own copy of 09:30-16:00 ET as a literal. For a CN
+    profile that window is 21:30-04:00 CST, so every A-share bar was dropped --
+    after the aggregation had correctly bucketed them on CN sessions. The
+    bounds now come from `bar_aggregation.session_windows`, one owner.
+    """
+    bars = _synth_bars()
+    us = mds._build_trading_timestamps(bars, market="US", timezone="US/Eastern")
+    assert us, "US bars must survive the US session filter"
+
+    # Same UTC bars read as CN: US RTH lands overnight in Shanghai, outside
+    # both CN sessions, so none of them is in-session.
+    cn = mds._build_trading_timestamps(bars, market="CN", timezone="Asia/Shanghai")
+    assert cn == []
+
+    # And a genuinely CN-session bar passes the CN filter but not the US one.
+    idx = pd.DatetimeIndex(
+        [pd.Timestamp("2026-04-15 10:30", tz="Asia/Shanghai")], name="timestamp"
+    )
+    frame = pd.DataFrame(
+        {"open": [1.0], "high": [1.0], "low": [1.0], "close": [1.0],
+         "volume": [1.0]},
+        index=idx,
+    )
+    cn_bars = {"600000.SH": frame}
+    assert mds._build_trading_timestamps(
+        cn_bars, market="CN", timezone="Asia/Shanghai"
+    ) == list(idx)
+    assert mds._build_trading_timestamps(
+        cn_bars, market="US", timezone="US/Eastern"
+    ) == []
+
+
+def test_the_session_filter_and_the_aggregation_share_one_owner():
+    """Guard against the copy coming back. Two owners of the session bounds is
+    what made the CN case drop every bar while each half looked correct.
+    """
+    from dashboard.backend.domain.backtesting import bar_aggregation
+
+    # `clock_time`, not `time`: this module imports the time MODULE, and
+    # `from datetime import time` would rebind it -- the exact shadowing
+    # engine.py:23-31 has a comment block about.
+    assert mds.session_windows is bar_aggregation.session_windows
+    assert bar_aggregation.session_windows("CN") == (
+        (clock_time(9, 30), clock_time(11, 30)),
+        (clock_time(13, 0), clock_time(15, 0)),
+    )
+    assert bar_aggregation.session_windows("US") == (
+        (clock_time(9, 30), clock_time(16, 0)),
+    )
 
 
 def test_peek_is_nonblocking_and_only_returns_resident():

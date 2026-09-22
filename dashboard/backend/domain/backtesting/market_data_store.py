@@ -2,8 +2,9 @@
 
 One dataset (indicator-enriched decision bars + source bars + trading
 timestamps + price caches) per ``(symbols, start_date, end_date,
-source_timeframe, decision_timeframe, equity_metadata_source)`` key, shared by
-every session with that config. READ-ONLY CONTRACT: every consumer treats the dataset frames,
+source_timeframe, decision_timeframe, equity_metadata_source, market)`` key,
+shared by every session with that config. ``symbols`` is sorted, so the same
+universe in a different order is one entry and not two. READ-ONLY CONTRACT: every consumer treats the dataset frames,
 timestamps and caches as immutable — verified convention across the engine,
 baselines, and PortfolioManager. Never mutate a dataset.
 
@@ -34,6 +35,7 @@ import pytz
 from dashboard.backend.domain.backtesting.features import TechnicalIndicators
 from dashboard.backend.domain.backtesting.bar_aggregation import (
     aggregate_bars_by_symbol,
+    session_windows,
     summarize_aggregation_quality,
 )
 from dashboard.backend.infrastructure.market_data.alpaca_bars import AlpacaDataLoader
@@ -59,8 +61,6 @@ from dashboard.backend.infrastructure.market_data.frequency import (
 # 1000-tier refinement; the size print below keeps a pathological mix visible.
 MARKET_DATA_CACHE_MAX_ENTRIES = int(os.getenv("MARKET_DATA_CACHE_MAX_ENTRIES", "4"))
 NEGATIVE_TTL_SECONDS = 30.0
-
-_ET_TZ = pytz.timezone("US/Eastern")
 
 _now = time.monotonic  # indirection so tests can advance the clock
 
@@ -125,20 +125,47 @@ _cache_lock = threading.Lock()
 _cache: "OrderedDict[Tuple, _Entry]" = OrderedDict()
 
 
+#: What this store assumed unconditionally before the market became a
+#: parameter, and therefore what a caller that passes nothing still gets. Kept
+#: as the default rather than made required so the in-process test doubles and
+#: the legacy callers that predate the market dimension are unaffected: the
+#: three shipped call sites all hold a `MarketProfile` and pass it.
+DEFAULT_MARKET = "US"
+DEFAULT_TIMEZONE = "US/Eastern"
+
+
 def _dataset_key(
     symbols,
     start_date,
     end_date,
     source_timeframe: str = "60m",
     decision_timeframe: str = "60m",
+    market: str = DEFAULT_MARKET,
 ) -> Tuple:
     return (
-        tuple(symbols),
+        # SORTED, not as passed. The same universe in a different order is the
+        # same dataset, and keying on the order meant the single-flight cache
+        # missed: the dataset was built and held TWICE, two loaded bar windows
+        # for one universe, in the process whose memory ceiling
+        # MAX_ACTIVE_DASHBOARD_BACKTESTS is sized against. Never a wrong
+        # number, just a duplicate. Not reachable while every caller passes a
+        # stable config order; it becomes reachable the moment one builds the
+        # list from a set, a dict's keys or user input. The key is
+        # process-local, so there is no stored key to migrate.
+        tuple(sorted(symbols)),
         str(start_date),
         str(end_date),
         normalize_bar_timeframe(source_timeframe),
         normalize_bar_timeframe(decision_timeframe),
         str(configured_dataset_path() or ""),
+        # The market selects the session bounds everything downstream is
+        # bucketed against -- 09:30-16:00 ET versus 09:30-11:30 + 13:00-15:00
+        # CST. Without it the same symbols over the same window on two markets
+        # collide on one entry, and the survivor is whichever market happened
+        # to build first. Added together with the threading below, never alone:
+        # a key that separates two markets while both are computed under US
+        # rules just stores the same wrong answer twice.
+        str(market),
     )
 
 
@@ -149,6 +176,7 @@ def peek(
     *,
     source_timeframe: str = "60m",
     decision_timeframe: str = "60m",
+    market: str = DEFAULT_MARKET,
 ) -> Optional[MarketDataset]:
     """Non-blocking: the resident dataset, or None (miss / build in flight /
     negative-cached failure). The only store call allowed under _create_lock."""
@@ -160,6 +188,7 @@ def peek(
                 end_date,
                 source_timeframe,
                 decision_timeframe,
+                market,
             )
         )
         if entry is None or entry.dataset is None:
@@ -171,14 +200,23 @@ def peek(
 def get_dataset(symbols, start_date, end_date,
                 loader_factory: Optional[Callable[[], Any]] = None,
                 *, source_timeframe: str = "60m",
-                decision_timeframe: str = "60m") -> MarketDataset:
-    """Blocking single-flight build-or-wait. NEVER call under _create_lock."""
+                decision_timeframe: str = "60m",
+                market: str = DEFAULT_MARKET,
+                timezone: str = DEFAULT_TIMEZONE) -> MarketDataset:
+    """Blocking single-flight build-or-wait. NEVER call under _create_lock.
+
+    ``market``/``timezone`` come from the session's ``MarketProfile``. Only
+    ``market`` is in the key: the timezone is a function of it (a profile
+    pairing "CN" with US/Eastern is a malformed profile, not a second dataset),
+    and adding a derived field to a cache key buys misses rather than safety.
+    """
     key = _dataset_key(
         symbols,
         start_date,
         end_date,
         source_timeframe,
         decision_timeframe,
+        market,
     )
     factory = loader_factory or AlpacaDataLoader
     while True:
@@ -206,6 +244,8 @@ def get_dataset(symbols, start_date, end_date,
                     factory,
                     source_timeframe=source_timeframe,
                     decision_timeframe=decision_timeframe,
+                    market=market,
+                    timezone=timezone,
                 )
             except BaseException as exc:
                 with _cache_lock:
@@ -249,6 +289,8 @@ def _build_dataset(
     *,
     source_timeframe: str,
     decision_timeframe: str,
+    market: str = DEFAULT_MARKET,
+    timezone: str = DEFAULT_TIMEZONE,
 ) -> MarketDataset:
     loader = factory()
     requested_source = normalize_bar_timeframe(source_timeframe)
@@ -283,8 +325,8 @@ def _build_dataset(
             source_data,
             source_timeframe=actual_source,
             decision_timeframe=requested_decision,
-            market="US",
-            timezone="US/Eastern",
+            market=market,
+            timezone=timezone,
         )
         data_quality = summarize_aggregation_quality(aggregated_data)
         all_data = {
@@ -298,23 +340,32 @@ def _build_dataset(
         raise RuntimeError("No completed decision bars returned from Alpaca")
     for symbol, df in all_data.items():
         all_data[symbol] = TechnicalIndicators.calculate_indicators(df)
+    # Passed the profile's timezone for the same reason `engine.py` does: the
+    # enrichment reads each bar's LOCAL date to pick which yearly metadata
+    # partition to load, so a CST session bucketed as ET straddles a day
+    # boundary. It is a no-op unless a US equity metadata dataset is
+    # configured, which is what keeps it harmless on a non-US market.
     all_data, equity_metadata = load_and_enrich_us_equity_bars(
         all_data,
-        timezone="US/Eastern",
+        timezone=timezone,
     )
-    timestamps = _build_trading_timestamps(all_data)
+    timestamps = _build_trading_timestamps(
+        all_data, market=market, timezone=timezone
+    )
     if not timestamps:
         raise RuntimeError("No trading hours in the selected date range")
     price_cache = _build_price_cache(all_data, timestamps)
     source_timestamps = _build_trading_timestamps(
         source_data,
         min_symbol_coverage=0.0,
+        market=market,
+        timezone=timezone,
     )
     source_price_cache = _build_price_cache(source_data, source_timestamps)
     execution_timestamps = _build_execution_timestamps(
         timestamps,
         source_timestamps,
-        timezone="US/Eastern",
+        timezone=timezone,
     )
     if any(execution_timestamp is None for execution_timestamp in execution_timestamps):
         timestamps = [
@@ -385,8 +436,15 @@ def _build_trading_timestamps(
     all_data: Dict[str, pd.DataFrame],
     *,
     min_symbol_coverage: float = 0.8,
+    market: str = DEFAULT_MARKET,
+    timezone: str = DEFAULT_TIMEZONE,
 ) -> List[Any]:
-    """Return in-session timestamps meeting the requested symbol coverage."""
+    """Return in-session timestamps meeting the requested symbol coverage.
+
+    The session bounds come from ``bar_aggregation.session_windows`` rather
+    than a literal here, so this filter and the aggregation that produced the
+    bars cannot disagree about when the market is open.
+    """
     all_timestamps: set = set()
     for df in all_data.values():
         all_timestamps.update(df.index)
@@ -400,16 +458,15 @@ def _build_trading_timestamps(
             filtered.append(ts)
     ordered = filtered
 
+    windows = session_windows(market)
+    local_tz = pytz.timezone(timezone)
     market_hours = []
     for ts in ordered:
-        ts_et = ts.astimezone(_ET_TZ)
-        hour, minute = ts_et.hour, ts_et.minute
-        is_market = (
-            (hour > 9 and hour < 16)
-            or (hour == 9 and minute >= 30)
-            or (hour == 16 and minute == 0)
-        )
-        if is_market:
+        local_time = ts.astimezone(local_tz).time()
+        # Inclusive at both ends, matching the literal this replaced: it
+        # admitted 16:00 exactly (the close), because a decision bar is stamped
+        # at the END of its bucket and the last US bucket ends at the close.
+        if any(start <= local_time <= end for start, end in windows):
             market_hours.append(ts)
     return market_hours
 

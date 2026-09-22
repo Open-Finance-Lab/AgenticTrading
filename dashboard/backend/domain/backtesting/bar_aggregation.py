@@ -37,7 +37,17 @@ _QUALITY_COUNT_COLUMNS = (
 )
 
 
-def _session_windows(market: str) -> tuple[tuple[time, time], ...]:
+def session_windows(market: str) -> tuple[tuple[time, time], ...]:
+    """The market's trading sessions, in its own local time.
+
+    Public because ``market_data_store`` filters its decision timestamps to
+    in-session bars and must agree with the aggregation exactly. It carried its
+    own copy of the US bounds as a literal, which is the two-owners shape this
+    repo keeps getting bitten by: the copy was not merely a duplicate, it was
+    unconditional, so a CN profile aggregated on 09:30-11:30 + 13:00-15:00 CST
+    and was then filtered against 09:30-16:00 *ET* -- a window that in CST is
+    21:30-04:00, i.e. every bar dropped.
+    """
     canonical = str(market or "US").strip().upper()
     if canonical == "CN":
         return ((time(9, 30), time(11, 30)), (time(13, 0), time(15, 0)))
@@ -116,7 +126,7 @@ def aggregate_bars(
         return frame.copy()
 
     local = _as_local_index(frame, timezone)
-    windows = _session_windows(market)
+    windows = session_windows(market)
     # Walk the index, not the rows: iterrows builds a Series per source bar,
     # and the onboarding shape has ~16k of them (7 weekdays x 78 five-minute
     # bars x 30 symbols). That is the cheapest thing here to remove, not the
