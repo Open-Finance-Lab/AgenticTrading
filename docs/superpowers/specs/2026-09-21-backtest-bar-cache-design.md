@@ -151,9 +151,27 @@ only when every one of these is true:**
 |---|---|
 | the frame carries `alpaca_end_clamped=True` | A SIP request reaching into the last `ALPACA_SIP_DELAY_MINUTES` (default 15) has its `end` capped to now−15m. The **same requested window returns a shorter frame depending on when you ask.** Storing it under the full window's key makes that truncation permanent for the life of the instance. |
 | the frame carries `alpaca_sip_fallback=True` | The IEX-on-refusal retry re-requests with the **original unclamped `end`** and never sets `end_clamped`, so the result looks pristine while being a different tape at ~2.5% of volume. |
+| the window has not **settled** — its `end` is less than 24 hours in the past | The two flags above only fire on the SIP-on-Basic path. `_effective_end` returns `(end, False)` for IEX, and `clamp_end_for_sip` returns `end` unchanged under `ALPACA_ALLOW_RECENT_SIP=1` or a zero delay — so a request whose end is still ahead of the clock comes back **partial with `end_clamped=False`**. `baselines.py` passes `end_date+1` and `backtests.py` has no future-date check, so that shape reaches the loader. Alpaca's `end` is exclusive and filters on each bar's opening timestamp, so a date-only `end` of `D` covers bars through `D-1`'s session; a day's margin covers the longest supported source bar plus every feed delay without the cache learning timeframe arithmetic. The price is that a window ending yesterday is served cold until tomorrow — a shape none of the default windows takes. |
 | the client is unconfigured (`if not self.client: return {}`) | Otherwise "Alpaca is not configured" is cached as "this symbol has no data." |
 | the symbol is absent from the response | Same reason: a missing symbol is not a negative fact worth persisting. |
 | the data source is not Alpaca | See below. |
+
+**The clamp and fallback flags are read off the frames, not off `last_fetch`.**
+`_record_fetch` runs once per request, and for a >100-symbol call that is once per
+100-symbol chunk — so `last_fetch` describes only the *last* chunk. With chunk one on
+IEX fallback and chunk two on SIP it reads `sip_fallback_to_iex=False`, and a refusal
+keyed on it would store the IEX frames under the SIP key for the TTL. The `.attrs`
+stamps are per frame and cover every chunk; the wrapper folds them with `any()`,
+whole-batch, because the rule is whole-batch.
+
+**A failed miss-fetch still fails the request.** Before the cache a call returned what
+Alpaca had or `{}`, and `engine.load_data` raises on `{}`. With five Dow names on disk
+and Alpaca down for the other twenty-five, returning the hits alone would run a
+five-symbol "Dow" with an index baseline priced off five names and the frequency
+verification quietly downgraded to `evidence="configured"`. The wrapper returns `{}`
+when the uncached fetch returned nothing *and* left `last_fetch` unset — the loader's
+failure signature — and otherwise merges, which for a request that merely had no bars
+for a symbol is exactly the old answer.
 
 **A TTL on top**, default **7 days**, bounds exposure to a vendor revising bars for
 an already-closed date. Nothing in the market-data layer handles retroactive
@@ -194,12 +212,32 @@ front of every reviewer. `bar_cache/` is a fresh, wholly ignored sibling.
   Up to `MAX_ACTIVE_DASHBOARD_BACKTESTS` (default 5) children run concurrently on one
   instance and will race the same key. `os.replace` is atomic on POSIX, so a reader
   sees either the old entry or the complete new one, never a partial parquet.
+- **An entry is two files, and a half-entry is left to its writer.** The sidecar
+  lands first, the parquet second (the commit point). A reader that finds one
+  without the other has a miss — but it must not *clear* it on sight: a concurrent
+  child is legitimately between its two `os.replace` calls, and unlinking its sidecar
+  destroys that write. Under contention every child would pay the fetch and the key
+  could stay cold indefinitely. Only a half-entry older than a **one-hour grace**
+  (`_STRAY_GRACE_SECONDS`, shared with the temp-file sweep) is cleared, by the reader
+  that trips over it or by the eviction pass.
 - **Eviction:** a total size cap, **default 256 MB**, with LRU eviction by mtime, so
   arbitrary user windows cannot grow the cache without bound. The default is
   deliberately generous relative to the data: one symbol over a 7-weekday window at
   5m bars is roughly 550 rows across six columns, which is tens of kilobytes of
   parquet — so 256 MB holds thousands of symbol-windows. It is a runaway bound, not
-  a working-set estimate.
+  a working-set estimate. Two consequences of that framing:
+  - **The pass never evicts the batch that triggered it.** Filesystem mtimes are
+    coarse, so entries written within one tick tie, and a pure LRU order could pick
+    the symbols just fetched as the victims — a paid fetch that never becomes a hit.
+    The just-written paths are protected; among the rest, ties break on name so the
+    victim is deterministic.
+  - **The full directory scan is O(entries) and does not run on every write.** The
+    writing process keeps a running estimate (bytes at its last scan plus what it has
+    written since) and rescans only when that could have crossed the cap, or when the
+    last scan is older than **60 seconds** (`_SWEEP_INTERVAL_SECONDS`) — the time
+    bound exists because other processes' writes are invisible to the estimate. The
+    cap is therefore enforced within a minute of being crossed, not on the byte,
+    which is what a runaway bound needs and a quota would not tolerate.
 - **Read failures are misses.** A corrupt, truncated or unreadable entry is deleted
   and treated as a miss, never raised. A cache must not be able to fail a backtest.
 
@@ -209,10 +247,15 @@ ever measured one child's resident set (issue #475).
 
 ## 7. Configuration and observability
 
-- **`ATL_BAR_CACHE`** — enabled by default, disabled with `0`/`false`/`no`/`off`.
-  Default-on is deliberate: an opt-in cache that is off in prod delivers nothing, and
-  the §5 exclusion rules make it fail safe. The blast radius is one deploy, because
-  the store is ephemeral.
+- **`ATL_BAR_CACHE`** — enabled by default when unset; on for `1`/`true`/`yes`/`on`,
+  **off for anything else** — a recognised `0`/`false`/`no`/`off` silently, junk with
+  a `WARNING`. The vocabulary is `allow_recent_sip`'s, in the same package, and so is
+  the "anything else is off" rule; the warning is the only addition. Junk reads as
+  off rather than as the default because the only reason to set a kill switch is to
+  turn it off, and a typo'd kill switch that stayed on would defeat the switch at
+  exactly the moment someone reached for it. Default-on is deliberate: an opt-in
+  cache that is off in prod delivers nothing, and the §5 exclusion rules make it fail
+  safe. The blast radius is one deploy, because the store is ephemeral.
 - A **startup log line** naming the choice, matching the existing convention
   (`run history backend: postgres (…)` / `… sqlite (ephemeral on Render)`):
   `bar cache: enabled (<dir>, cap <N>MB)` or `bar cache: disabled`.
@@ -222,10 +265,18 @@ ever measured one child's resident set (issue #475).
 
 ## 8. Warm-on-boot
 
-A background thread at startup pre-fetches the two default windows:
+A background thread at startup pre-fetches the three default windows:
 
 - `dashboard/config/defaults.json` — Mag7, 2026-05-04 → 2026-05-12 (the onboarding modal)
-- the `POST /backtest/run` endpoint default — 2026-05-01 → 2026-05-07
+- `DJIA_30` over that **same** window — fact A in §1: every default run also fetches
+  the full Dow for the index baseline, on the ordinary path, after
+  `publish_phase("saving")`, and `engine.py`'s index-baseline block passes
+  `self.start_date`/`self.end_date` verbatim, so it is the same key. Five of the
+  thirty names are already hits from the first window; twenty-five are requested.
+  Without this the default run's *visible* wait ends warm and its uncounted tail
+  still runs cold.
+- the `POST /backtest/run` endpoint default — `DJIA_30`, 2026-05-01 → 2026-05-07 (a
+  bare request resolves to the `djia_30` profile)
 
 Without it, a cold instance charges the first visitor full price, which defeats the
 stated audience (prod users on the live dashboard).
@@ -233,9 +284,11 @@ stated audience (prod users on the live dashboard).
 It is a startup hook on the **parent web process** (`app.py`), not on the backtest
 child — the child never runs `app.py`, so there is nothing to suppress there.
 
-**Cost, named rather than discovered later:** two batched Alpaca calls per deploy,
-and merging to `main` auto-deploys prod via the CI hook. Negligible quota, but it is
-a new recurring outbound call. It runs on a background thread so it cannot delay
+**Cost, named rather than discovered later:** three batched Alpaca calls per deploy
+(this said two until 2026-09-21, before the index-baseline window was counted), and
+merging to `main` auto-deploys prod via the CI hook. Negligible quota, but it is a
+new recurring outbound call. The window list is the one owner of the count — tests
+assert `len(warm_windows())`, never a literal. It runs on a background thread so it cannot delay
 boot or fail the health check, and a failure is logged and swallowed — a cold cache
 is the status quo, not an outage.
 
@@ -264,16 +317,29 @@ All offline; no test makes a live network call.
 
 - Hit, miss and expiry against a fake loader returning canned bars.
 - **Mutation-tested both directions** on the §5 rules: a response stamped
-  `end_clamped=True` is **not** written, and a response stamped
-  `sip_fallback_to_iex=True` is **not** written. Each test must be shown to fail
-  when the guard is removed — a guard never seen to fail is a comment.
+  `end_clamped=True` is **not** written, a response stamped
+  `sip_fallback_to_iex=True` is **not** written, and a window whose `end` has not
+  settled is **not** written — including through the real `fetch_bars` on `iex`,
+  where no flag fires. Each test must be shown to fail when the guard is removed — a
+  guard never seen to fail is a comment.
+- The flags are derived from the frames: a >100-symbol request whose first chunk
+  fell back to IEX and whose last did not stores nothing, although `last_fetch` says
+  no fallback happened.
+- A failed miss-fetch returns `{}` even with hits on disk; a successful fetch that
+  merely had no bars for a symbol still returns the hits.
 - A hit restores `last_fetch` and all three `.attrs` stamps.
 - A mixed hit/miss request fetches **only** the missing symbols and returns the full
   set.
-- Concurrent writers: two writers racing one key leave a readable entry.
+- Concurrent writers: two writers racing one key leave a readable entry; a fresh
+  half-entry is a miss but is left for its writer; a stale one is cleared.
+- Eviction: LRU order is asserted with mtimes set *after* all writes (coarse mtimes
+  tie otherwise); a write never evicts its own batch; the full scan is skipped when
+  the estimate cannot have crossed the cap and re-run once the interval elapses.
 - A corrupt entry is treated as a miss and removed, and the fetch still succeeds.
 - The unconfigured-client path caches nothing.
 - Key sensitivity: changing `ALPACA_DATA_FEED` or `source_timeframe` misses.
+- Phase metrics: a metric recorded with no phase open lands nowhere, and a startup
+  clock passed without a launch time does not surface on `loading_bars`.
 
 ## 11. Risks
 
