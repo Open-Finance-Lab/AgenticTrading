@@ -28,6 +28,7 @@ from dashboard.backend.paths import CREDENTIALS_DIR
 from dashboard.backend.infrastructure.market_data.frequency import (
     normalize_bar_timeframe,
 )
+from dashboard.backend.infrastructure.market_data import bar_cache
 
 # Basic plan may query SIP historical bars, but not the most recent window.
 # Docs: https://docs.alpaca.markets/docs/market-data-faq
@@ -491,9 +492,12 @@ class AlpacaDataLoader:
                 print(f"  ⚠️  {symbol}: No data available")
         return data
 
-    def fetch_bars(self, symbols: List[str], start: str, end: str) -> Dict[str, pd.DataFrame]:
+    def fetch_bars(
+        self, symbols: List[str], start: str, end: str
+    ) -> Dict[str, pd.DataFrame]:
         """
-        Fetch OHLCV data from Alpaca API at ``source_timeframe``.
+        Fetch OHLCV data at ``source_timeframe``, serving what the on-disk bar
+        cache already holds and requesting only the rest.
 
         Args:
             symbols: List of stock symbols
@@ -502,13 +506,178 @@ class AlpacaDataLoader:
 
         Returns:
             {symbol: DataFrame with timestamp, open, high, low, close, volume}
+
+        The cache is resolved HERE, above the >100-symbol batch recursion in
+        :meth:`_fetch_bars_uncached`. Below it, the cache would run once per
+        100-symbol chunk and the chunking -- not the cache -- would decide what
+        gets fetched. Above it, the recursion just sees a shorter list.
+
+        Keying per symbol rather than per request is what makes the index
+        baseline cheap: after a Mag7 run the DJIA_30 fetch (same window, same
+        timeframe, same feed) finds five of its thirty names on disk. A
+        per-request key would miss that entirely, because the symbol lists
+        differ.
+        """
+        symbols = list(symbols)
+        # Hoisted above the batch recursion. With no client every chunk
+        # returned {} anyway, so the result is identical; the warning now
+        # prints once instead of once per chunk. Kept ahead of the cache so an
+        # unconfigured loader never reads or writes an entry.
+        if not self.client:
+            print("⚠️ Alpaca not configured — skipping bar fetch")
+            self.last_fetch = None
+            return {}
+        if not symbols or not bar_cache.enabled():
+            return self._fetch_bars_uncached(symbols, start, end)
+
+        # `configured_feed_name`, not `_resolve_data_feed`: the key needs the
+        # name, not the SDK enum, and both raise AlpacaFeedConfigError on a
+        # typo'd feed at the same point in the call as before.
+        key = {
+            "start": str(start),
+            "end": str(end),
+            # A mutable instance attribute set by `configure_source_timeframe`,
+            # so it must be read at call time.
+            "source_timeframe": self.source_timeframe,
+            "feed": configured_feed_name(),
+        }
+        hits, metas = bar_cache.read_many(symbols, **key)
+        misses = [symbol for symbol in symbols if symbol not in hits]
+        if hits:
+            print(
+                f"📦 bar cache: {len(hits)}/{len(symbols)} symbols on disk, "
+                f"fetching {len(misses)}"
+            )
+        if not misses:
+            # No live fetch happened, so `last_fetch` would still describe some
+            # earlier request. `load_data` and `market_data_store._build_dataset`
+            # read it to verify the source timeframe with evidence="fetch";
+            # leaving it stale silently downgrades that to evidence="configured".
+            # Any hit's sidecar will do -- for one key they are identical, since
+            # every field is either a key component or a flag the cache refuses
+            # to store.
+            first = next(symbol for symbol in symbols if symbol in metas)
+            self.last_fetch = dict(metas[first])
+            return {symbol: hits[symbol] for symbol in symbols if symbol in hits}
+
+        fetched = self._fetch_bars_uncached(misses, start, end)
+        if not fetched:
+            # The live request produced nothing for ANY missed symbol, so this
+            # call cannot cover the universe it was asked for. Two causes look
+            # identical from here -- the request failed, or those symbols have
+            # no bars -- and `last_fetch` separates only SOME of them: every
+            # failure exit of `_fetch_bars_uncached` clears it, but a 200 that
+            # answers with no rows leaves it set. Gating on that field was
+            # therefore a gate on the hard failures alone, and a transient
+            # empty answer walked straight through it: five Dow names cached
+            # by an earlier Mag7 run, a 25-symbol request that answers with no
+            # bars, and the run proceeds on a five-symbol "Dow" -- an index
+            # baseline priced off five names, published.
+            #
+            # The information needed to tell those apart is gone, because the
+            # request no longer covers the cached symbols. Pre-cache it did:
+            # one request, every symbol, and a total-empty answer meant {} and
+            # a raise from `engine.load_data` no matter which cause produced
+            # it. So reproduce that call instead of guessing -- the same move
+            # the tape-change branch below makes, for the same reason. An
+            # outage still yields {}; a genuinely dataless symbol still yields
+            # its neighbours, which a bare `return {}` here would have taken
+            # away. No recursion: `_fetch_bars_uncached` never re-enters this
+            # wrapper, and its answer goes straight to the caller, so the
+            # entries on disk are left untouched.
+            #
+            # The cost, so nobody removes this without pricing it: a universe
+            # containing a permanently dataless symbol (a delisted or typo'd
+            # ticker) reaches here on every call, so it pays one extra batched
+            # request each time -- twice per backtest, since `load_data` and
+            # the index baseline are the only callers. That is the deliberate
+            # direction. The alternative reading, "a 200 with no rows means
+            # those symbols have no data", is right for the typo and silently
+            # wrong for an upstream anomaly, and the wrong case publishes a
+            # leaderboard curve priced off a fraction of its universe.
+            if not hits:
+                # `misses` was the whole universe, so the call just made IS
+                # the pre-cache call. Re-issuing it would only bill it twice.
+                return {}
+            print(
+                "📦 bar cache: the live fetch returned nothing; re-requesting "
+                f"all {len(symbols)} symbols so a partial universe cannot be "
+                "mistaken for a complete one",
+                flush=True,
+            )
+            return self._fetch_bars_uncached(symbols, start, end)
+        if fetched:
+            # The refusal flags come from the FRAMES, not from `last_fetch`.
+            # `last_fetch` describes the last request the loader made, which
+            # for a >100-symbol call is only the last 100-symbol chunk: with
+            # chunk one on IEX fallback and chunk two on SIP it reads
+            # sip_fallback_to_iex=False, and the IEX frames would be stored
+            # under the SIP key for the TTL. The stamps are per frame and
+            # cover every chunk. Whole-batch (`any`) because the cache's rule
+            # is whole-batch: a tape mix is wrong for the batch, not a subset.
+            sip_fallback = any(
+                bool(frame.attrs.get(FRAME_ATTR_SIP_FALLBACK))
+                for frame in fetched.values()
+            )
+            end_clamped = any(
+                bool(frame.attrs.get(FRAME_ATTR_END_CLAMPED))
+                for frame in fetched.values()
+            )
+            bar_cache.write_many(
+                fetched,
+                last_fetch=self.last_fetch,
+                sip_fallback_to_iex=sip_fallback,
+                end_clamped=end_clamped,
+                **key,
+            )
+            if hits and (sip_fallback or end_clamped):
+                # Those refusals govern what gets STORED; they say nothing
+                # about what this call RETURNS. The hits were written under
+                # the CONFIGURED feed's key -- `configured_feed_name()` is the
+                # tape requested, never the one answered -- so they really are
+                # that tape, and merging them with a fallback (or clamped)
+                # answer prices one curve off two tapes for one window. The
+                # pre-cache path could not do that: one request, one feed.
+                # Re-request the whole universe uncached so the run is
+                # uniformly degraded instead of silently mixed. No recursion:
+                # `_fetch_bars_uncached` never re-enters this wrapper, and its
+                # answer is returned straight to the caller, never handed to
+                # `write_many` a second time, so the good SIP entries on disk
+                # are left untouched for when the subscription comes back.
+                print(
+                    "📦 bar cache: the live fetch changed tape; re-requesting "
+                    f"all {len(symbols)} symbols so one run is priced off "
+                    "one tape",
+                    flush=True,
+                )
+                return self._fetch_bars_uncached(symbols, start, end)
+        merged: Dict[str, pd.DataFrame] = {}
+        for symbol in symbols:
+            frame = fetched.get(symbol)
+            if frame is None:
+                frame = hits.get(symbol)
+            if frame is not None:
+                merged[symbol] = frame
+        return merged
+
+    def _fetch_bars_uncached(
+        self, symbols: List[str], start: str, end: str
+    ) -> Dict[str, pd.DataFrame]:
+        """Today's fetch, unchanged: batch, request, stamp, record.
+
+        Called only by :meth:`fetch_bars`, which has already removed every
+        symbol the on-disk cache could serve. The >100 recursion therefore
+        recurses into THIS method, never back into the wrapper -- otherwise the
+        cache would resolve once per chunk.
         """
         # A full catalog can contain thousands of tickers. Bound URL length and
         # response size per request while preserving every selected symbol.
         if len(symbols) > 100:
             data = {}
             for offset in range(0, len(symbols), 100):
-                data.update(self.fetch_bars(symbols[offset:offset + 100], start, end))
+                data.update(
+                    self._fetch_bars_uncached(symbols[offset:offset + 100], start, end)
+                )
             return data
         if not self.client:
             print("⚠️ Alpaca not configured — skipping bar fetch")

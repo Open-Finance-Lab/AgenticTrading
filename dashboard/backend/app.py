@@ -227,6 +227,58 @@ async def startup_event():
 
     threading.Thread(target=init_daily_leaderboard, daemon=True).start()
 
+    # On-disk bar cache: name the state at boot, matching the
+    # `<store> backend: …` convention, then warm the default windows on a
+    # daemon thread so a cold instance does not charge the first visitor the
+    # full bar fetch. Non-blocking by construction: it must never delay boot
+    # or fail the health check.
+    # Wrapped like every other block in this hook, and for the same reason:
+    # `startup_event` has no handler of its own, so anything raising here
+    # skips everything BELOW it -- `recover_orphaned_runs` (protocol runs
+    # orphaned by the previous process stay `running` forever) and
+    # `register_reaper_sweep(reap_v2_runs)` (abandoned v2 runs keep holding
+    # their concurrency slots). This was the one unguarded statement in the
+    # hook, and the import is not inert: it pulls in pandas and `paths`, and
+    # `alpaca_bars` already imports `bar_cache`, so the cycle edge is live.
+    try:
+        from dashboard.backend.infrastructure.market_data import bar_cache
+
+        print(bar_cache.describe())
+    except Exception as e:  # noqa: BLE001 - a cold cache is the status quo
+        print(f"⚠️ bar cache: error: {e}")
+
+    def bar_cache_background():
+        """Background: reclaim last process's strays, then warm if armed."""
+        try:
+            from dashboard.backend.infrastructure.market_data import bar_cache
+
+            # The stray sweep and the LRU pass otherwise run ONLY from inside
+            # `write_many`, so a deployment whose writes all fail stops
+            # reclaiming the `*.tmp` files its killed writers leave behind --
+            # the state where reclaiming matters most. Boot is the one moment
+            # guaranteed to arrive without a successful write in front of it,
+            # and on a mounted `ATL_BAR_CACHE_DIR` it is where the previous
+            # process's leftovers are. Cheap: one `scandir` over a directory
+            # holding tens of entries.
+            if bar_cache.enabled():
+                bar_cache.enforce_size_cap()
+        except Exception as e:  # noqa: BLE001 - eviction must never fail boot
+            print(f"⚠️ bar cache: sweep error: {e}")
+        try:
+            from dashboard.backend.infrastructure.market_data.bar_cache_warm import (
+                warm_bar_cache,
+            )
+
+            warm_bar_cache()
+        except Exception as e:  # noqa: BLE001 - a cold cache is the status quo
+            # "bar cache warm:", lowercase, like every other line this
+            # feature prints: the live-call detector greps that exact string
+            # to prove the suite makes no billable Alpaca calls, and a line
+            # it does not match is a proof this handler can blind.
+            print(f"⚠️ bar cache warm: error: {e}")
+
+    threading.Thread(target=bar_cache_background, daemon=True).start()
+
     # Protocol run lifecycle: fail runs orphaned by the previous process (their
     # in-memory engine sessions did not survive the restart) and start the
     # background reaper that drains/evicts abandoned runs. Kept in separate

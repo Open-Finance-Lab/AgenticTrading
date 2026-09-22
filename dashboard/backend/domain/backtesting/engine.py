@@ -684,10 +684,18 @@ class HourlyBacktester:
             float(launched_at) if launched_at is not None else None
         )
         extra: Dict = {}
-        for key in ("child_entered_at", "imports_done_at", "schema_init_seconds"):
-            value = (startup_clock or {}).get(key)
-            if value is not None:
-                extra[key] = float(value)
+        # Seed the startup clock only when `starting` is actually open.
+        # backtest_hourly_agent.py always passes `startup_clock` but
+        # `launched_at` only from --launched-at, which a bare CLI run omits;
+        # today the orphaned keys are dropped because `starting` never closes,
+        # and once extras merge into whichever phase closes they would
+        # otherwise land on `loading_bars` -- a spawn time and a DDL cost on
+        # the phase that did neither.
+        if launched_at is not None:
+            for key in ("child_entered_at", "imports_done_at", "schema_init_seconds"):
+                value = (startup_clock or {}).get(key)
+                if value is not None:
+                    extra[key] = float(value)
         self._progress_phase_extra: Dict = extra
         self._progress_phases: List[Dict] = []
         self._progress_total_steps: int = 0
@@ -711,8 +719,14 @@ class HourlyBacktester:
                 "started_at": self._progress_phase_started_at,
                 "ended_at": now,
             }
-            if self._progress_phase == "starting":
-                finished.update(getattr(self, "_progress_phase_extra", {}))
+            # Extras belong to whichever phase was open, not to `starting`
+            # alone. `_init_progress_phases` seeds them for `starting` -- and
+            # ONLY when it actually opens that phase, see below;
+            # `record_phase_metric` adds them for any later phase, and only
+            # while one is open. Cleared on every transition so a number can
+            # never be reported against the wrong phase.
+            finished.update(getattr(self, "_progress_phase_extra", {}))
+            self._progress_phase_extra = {}
             self._progress_phases.append(finished)
             # stdout as well as the file, and from here rather than from
             # main(). The parent unlinks the progress file the moment the run
@@ -753,6 +767,20 @@ class HourlyBacktester:
                     f"{finished['ended_at'] - finished['imports_done_at']:.2f}s",
                     flush=True,
                 )
+            elif finished["name"] == "loading_bars" and "fetch_seconds" in finished:
+                # The design's measurement gate: with a warm cache the residual
+                # here IS the aggregation cost, directly -- no synthetic
+                # benchmark, no subtraction. It decides whether caching the
+                # AGGREGATED output is worth a second change or whether the
+                # fetch was the whole story. `elapsed` is the phase total,
+                # already computed above with the `is None` guard that keeps a
+                # 0.0 start time from reading as a phase that cost nothing.
+                fetch_seconds = float(finished["fetch_seconds"])
+                print(
+                    f"     fetch {fetch_seconds:.2f}s"
+                    f" | aggregate+verify {elapsed - fetch_seconds:.2f}s",
+                    flush=True,
+                )
         else:
             print(f"⏱  phase {name}", flush=True)
         self._progress_phase = name
@@ -767,6 +795,30 @@ class HourlyBacktester:
             "phase_started_at": self._progress_phase_started_at,
             "phases": list(self._progress_phases),
         }
+
+    def record_phase_metric(self, key: str, value: float) -> None:
+        """Attach a number to the phase that is currently open.
+
+        The phase *name* stays one word -- the card has nothing useful to say
+        about fetch versus aggregate, and a name the status route must
+        translate is a name the frontend must learn. But one undifferentiated
+        number cannot justify an optimisation either, which is the same
+        argument `_init_progress_phases` makes for splitting `starting` into
+        four. So the record is split even though the phase is not.
+
+        Tolerates an instance built with `__new__` that never ran
+        `_init_progress_phases`, like every other accessor here.
+
+        With no phase open the number has no owner and is dropped: the
+        alternative is handing it to whichever phase closes first, which is
+        the same misattribution `_init_progress_phases` guards against for
+        the startup clock.
+        """
+        if not hasattr(self, "_progress_phase_extra"):
+            self._init_progress_phases()
+        if self._progress_phase is None:
+            return
+        self._progress_phase_extra[str(key)] = float(value)
 
     def publish_phase(self, name: str, *, total_steps: Optional[int] = None) -> None:
         """Record a phase transition and, with a progress file, publish it.
@@ -917,9 +969,15 @@ class HourlyBacktester:
             f"   Universe: {len(symbols)} symbols ({', '.join(symbols[:8])}"
             f"{'…' if len(symbols) > 8 else ''})"
         )
+        fetch_started_at = wall_clock()
         self.source_data = self.data_loader.fetch_bars(
             symbols, self.start_date, self.end_date
         )
+        # Everything after this point in `loading_bars` -- the frequency
+        # verification and, in intraday mode, `aggregate_bars_by_symbol` -- is
+        # the half the phase name hides. Recorded here so the number survives
+        # in `phases[]` as well as on stdout.
+        self.record_phase_metric("fetch_seconds", wall_clock() - fetch_started_at)
         if not self.source_data:
             # Raise, don't sys.exit(1): this runs inside server threads
             # (external runs, algo service) where SystemExit evades
