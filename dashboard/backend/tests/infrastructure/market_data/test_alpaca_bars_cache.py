@@ -143,8 +143,10 @@ def test_a_cache_hit_restores_last_fetch(cached_loader, fake_alpaca):
 
 #: Every field ``AlpacaDataLoader._record_fetch`` puts in ``last_fetch``
 #: (``alpaca_bars.py:414``), with the reason serving it from a sidecar is
-#: sound. ``write_many`` stores this dict (``bar_cache.py``) and a hit restores
-#: it (``alpaca_bars.py:560``), so a value written once is served to a DIFFERENT
+#: sound. ``write_many`` stores this dict (``bar_cache.py``) and a TOTAL hit
+#: restores it (``fetch_bars``'s ``if not misses:`` branch,
+#: ``alpaca_bars.py:575``; a MIXED hit re-records it live from the fetch of
+#: the misses instead), so a value written once is served to a DIFFERENT
 #: PROCESS for the whole TTL. That is safe only while every field is:
 #:
 #:   KEYED   -- a component of the cache key ``{start, end, source_timeframe,
@@ -192,21 +194,49 @@ def test_last_fetch_carries_only_keyed_or_refused_fields(cached_loader, fake_alp
     )
 
 
-def test_a_cache_hit_reproduces_last_fetch_exactly(cached_loader, fake_alpaca):
+def test_a_cache_hit_reproduces_last_fetch_exactly(
+    cached_loader, fake_alpaca, tmp_path, monkeypatch
+):
     """The behavioural half of the guard above: a served copy must be
-    indistinguishable from a live one for the same key.
+    indistinguishable from a live one for the same KEY.
 
-    This is what actually catches a field that is neither keyed nor refused --
-    a `fetched_at`, a retry count, a chunk list all differ between the two
-    calls and show up here, even if someone classifies them wrongly above.
+    The symbol list is deliberately not in that key -- which is what makes the
+    index baseline cheap -- so the entry read here is written by a DIFFERENT
+    request than the one it serves: a two-symbol fetch warms it, a one-symbol
+    fetch reads it, and the comparison is against a live loader on a cold
+    cache.
+
+    Two identical calls could not catch a request-dependent field at all.
+    `write_many` stores `last_fetch` verbatim and a hit returns it verbatim,
+    so the restored dict IS the stored dict: comparing it against the call
+    that stored it compares a value with itself, and a `symbol_count`, a
+    `fetched_at` or a per-chunk symbol list all match. What that shape does
+    pin is the JSON round-trip through the sidecar (a `datetime` field comes
+    back a `str`), which this comparison still covers -- the served half
+    round-trips either way.
     """
-    fake_alpaca["df"] = _bars_df(["AAPL"])
-    cached_loader.fetch_bars(["AAPL"], "2026-05-04", "2026-05-12")
-    live = dict(cached_loader.last_fetch)
+    fake_alpaca["df"] = _bars_df(["AAPL", "MSFT"])
+    cached_loader.fetch_bars(["AAPL", "MSFT"], "2026-05-04", "2026-05-12")
     cached_loader.last_fetch = None
-    cached_loader.fetch_bars(["AAPL"], "2026-05-04", "2026-05-12")
-    assert len(fake_alpaca["requests"]) == 1  # the second call was served from disk
-    assert cached_loader.last_fetch == live
+    served = cached_loader.fetch_bars(["AAPL"], "2026-05-04", "2026-05-12")
+    assert len(fake_alpaca["requests"]) == 1  # a TOTAL hit: the restore branch
+    assert set(served) == {"AAPL"}
+    restored = dict(cached_loader.last_fetch)
+
+    # The same one-symbol request, made live. A second cache dir rather than a
+    # second window: moving the window would move `requested_end` too, and the
+    # two dicts would then differ for a reason that is not the invariant.
+    monkeypatch.setenv("ATL_BAR_CACHE_DIR", str(tmp_path / "cold_bar_cache"))
+    live_loader = AlpacaDataLoader()
+    live_loader.configure_source_timeframe("5m")
+    live_loader.fetch_bars(["AAPL"], "2026-05-04", "2026-05-12")
+    assert len(fake_alpaca["requests"]) == 2
+
+    assert restored == live_loader.last_fetch, (
+        "a served last_fetch describes the request that WROTE the entry, not "
+        "the one being served. Every field must be a cache-key component or a "
+        "flag write_many refuses to store -- see _LAST_FETCH_FIELDS."
+    )
 
 
 def test_a_cache_hit_restores_the_attrs_stamps(cached_loader, fake_alpaca):
