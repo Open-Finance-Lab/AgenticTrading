@@ -6,6 +6,18 @@
 > not this file, for what the branch actually does. Kept for its rationale and
 > its measurements, which the code does not restate.
 
+> **Superseded in one place: the phase payload gained `duration_seconds` in
+> PR #517** (the fix for #509). Every code listing below reproduces the
+> implementation as it shipped in #501, where a phase duration was
+> `ended_at − started_at` — a difference of two `time.time()` reads, which an
+> NTP correction distorts and a backward step makes negative. Durations are
+> now measured on `time.monotonic()` and recorded, and `starting` additionally
+> carries `imports_seconds` and `preflight_seconds` for the two of its four
+> splits that have no cross-process endpoint. **The measurement recipe in Task
+> 7 has been updated in place**, because it is the one part of this file an
+> operator still runs; the listings have not. See the spec's payload table and
+> `CLAUDE.md`'s `ATL_BACKTEST_WORKER` bullet for the current contract.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** A dashboard backtest's card names what the child is doing from the first poll tick *after the child reaches `load_data`*. The window before that — parent setup, `Popen`, interpreter start, pandas, and 7 of the repo's 12 module-level store singletons — is **measured** as a retroactive `starting` phase rather than narrated, because no writer exists that early (spec, *Why `starting` is measured and not narrated*). The child also stops repeating the parent's schema DDL, and every pre-loop phase is measured by the same payload that drives the card.
@@ -91,7 +103,7 @@ git switch -c feat/backtest-visible-start origin/main
 - Test: `dashboard/backend/tests/backtesting/test_engine_progress_phases.py` (new)
 
 **Interfaces:**
-- Produces: `HourlyBacktester(..., launched_at: Optional[float] = None, startup_clock: Optional[Dict[str, float]] = None)`; `HourlyBacktester.publish_phase(name: str, *, total_steps: Optional[int] = None) -> None`; `HourlyBacktester._init_progress_phases(launched_at=None, startup_clock=None) -> None`; module constant `PROGRESS_PHASES: tuple[str, ...]`. Progress-file payload gains `phase: str | None`, `phase_started_at: float | None`, `phases: list[{name, started_at, ended_at}]`. A phase write **before** the loop carries `step: 0`, `total_steps: int` (0 until known) and `equity_curve: []`; a phase write **after** it carries the last live payload forward unchanged except for the phase fields — see Step 4 for why the skeleton is destructive there. The `starting` entry alone also carries `child_entered_at`, `imports_done_at` and `schema_init_seconds` when the script supplies them. Every transition additionally prints one `⏱  phase …` line to stdout.
+- Produces: `HourlyBacktester(..., launched_at: Optional[float] = None, startup_clock: Optional[Dict[str, float]] = None)`; `HourlyBacktester.publish_phase(name: str, *, total_steps: Optional[int] = None) -> None`; `HourlyBacktester._init_progress_phases(launched_at=None, startup_clock=None) -> None`; module constant `PROGRESS_PHASES: tuple[str, ...]`. Progress-file payload gains `phase: str | None`, `phase_started_at: float | None`, `phases: list[{name, started_at, ended_at}]` (plus `duration_seconds` as of #517 — see the banner at the top). A phase write **before** the loop carries `step: 0`, `total_steps: int` (0 until known) and `equity_curve: []`; a phase write **after** it carries the last live payload forward unchanged except for the phase fields — see Step 4 for why the skeleton is destructive there. The `starting` entry alone also carries `child_entered_at`, `imports_done_at` and `schema_init_seconds` when the script supplies them. Every transition additionally prints one `⏱  phase …` line to stdout.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -2668,7 +2680,12 @@ for name in ("starting", "loading_bars", "indicators", "first_decision", "runnin
     if ph is None:
         line(name, None)
         continue
-    line(name, ph["ended_at"] - ph["started_at"])
+    # The RECORDED duration, not `ended_at - started_at`. Those two are
+    # wall-clock instants published for correlating a phase against a log
+    # line; differencing them is the distorted number #517 removed, and this
+    # recipe is where an operator would reintroduce it. MISSING here means a
+    # payload written before that PR.
+    line(name, ph.get("duration_seconds"))
     if name != "starting":
         continue
     # The same rule one level down, and this is where the first draft of this
@@ -2682,10 +2699,14 @@ for name in ("starting", "loading_bars", "indicators", "first_decision", "runnin
     # value this plan defines elsewhere as the evidence the worker flag fired.
     # A MISSING costs one grep. A fabricated 0.00 gets copied into a table and
     # believed.
+    # `spawn+interp` alone stays a difference of stamps: its left edge is the
+    # PARENT's clock, so the wall clock is the only shared reference. The
+    # other two intervals begin and end inside the child and are measured on
+    # the steady clock, so they are read, not derived.
     line("  spawn+interp", gap(ph, "child_entered_at", "started_at"))
-    line("  imports+stores", gap(ph, "imports_done_at", "child_entered_at"))
+    line("  imports+stores", ph.get("imports_seconds"))
     line("    schema DDL", ph.get("schema_init_seconds"))
-    line("  preflight", gap(ph, "ended_at", "imports_done_at"))
+    line("  preflight", ph.get("preflight_seconds"))
 print(f'{p["phase"]:15s} (in progress)')
 PY
 ```
@@ -3119,9 +3140,9 @@ Phase durations in seconds, from `phases[]` in each run's progress file (`measur
 | measurement | local, rule-based | local, LLM | prod, first run after deploy |
 |---|---|---|---|
 | spawn + interpreter (`child_entered_at − started_at`) | 0.03 | 0.01 | |
-| imports incl. stores (`imports_done_at − child_entered_at`) | 2.59 | 2.45 | |
+| imports incl. stores (then `imports_done_at − child_entered_at`; now `imports_seconds`) | 2.59 | 2.45 | |
 | — of which schema DDL (`schema_init_seconds`) | n/a (sqlite) | n/a (sqlite) | 0.00 (worker — see below) |
-| preflight remainder (`ended_at − imports_done_at`) | 0.08 | 0.09 (**floor** — see below) | |
+| preflight remainder (then `ended_at − imports_done_at`; now `preflight_seconds`) | 0.08 | 0.09 (**floor** — see below) | |
 | **starting** (parent's launch stamp → the child's first `publish_phase`, total) | **2.70** | **2.55** | |
 | loading_bars | **18.15** | **18.67** | |
 | indicators | 0.35 | 0.34 | |
