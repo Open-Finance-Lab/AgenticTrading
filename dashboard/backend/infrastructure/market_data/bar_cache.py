@@ -54,7 +54,7 @@ from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 
 import pandas as pd
 
-from dashboard.backend.paths import BAR_CACHE_DIR
+from dashboard.backend.paths import BAR_CACHE_DIR, REPO_ROOT
 
 #: Bumped whenever the stored layout changes, so a format change invalidates
 #: every entry at once instead of producing unreadable ones. It is part of the
@@ -148,9 +148,22 @@ def warm_enabled() -> bool:
 
 def cache_dir() -> Path:
     """Where entries live. ``ATL_BAR_CACHE_DIR`` overrides, for an operator
-    pointing at a mounted volume and for tests pointing at ``tmp_path``."""
+    pointing at a mounted volume and for tests pointing at ``tmp_path``.
+
+    A relative override is anchored at ``REPO_ROOT``, matching
+    ``ai_hedge_fund/adapter.py`` and ``strategy_universe.py``. The parent
+    uvicorn runs from the repo root and a backtest child is spawned with
+    ``cwd=DASHBOARD_DIR``, so an unanchored relative value names two
+    different directories and the cross-process cache -- the entire point of
+    the feature -- misses every time, silently, with both processes logging
+    the same text. ``.resolve()`` is NOT the fix: it resolves per process and
+    reproduces the split exactly.
+    """
     override = (os.getenv("ATL_BAR_CACHE_DIR") or "").strip()
-    return Path(override) if override else BAR_CACHE_DIR
+    if not override:
+        return BAR_CACHE_DIR
+    path = Path(override).expanduser()
+    return path if path.is_absolute() else REPO_ROOT / path
 
 
 def max_bytes() -> int:
@@ -233,6 +246,30 @@ def entry_paths(
         ),
     )
     return base.with_suffix(".parquet"), base.with_suffix(".json")
+
+
+#: Exactly what :func:`entry_paths` produces -- ``<SLUG>-<16 hex>`` with a
+#: ``.parquet`` or ``.json`` suffix -- plus the ``*.tmp`` that ``mkstemp``
+#: derives from it by appending random characters to that full name.
+_OWNED_NAME = re.compile(r"[A-Z0-9]{1,12}-[0-9a-f]{16}\.(?:parquet|json)")
+
+
+def _is_owned(name: str) -> bool:
+    """Whether this directory entry is one this module wrote.
+
+    The eviction sweep classifies by SUFFIX and then unlinks, and
+    :func:`cache_dir`'s docstring invites an operator to point
+    ``ATL_BAR_CACHE_DIR`` at a directory of their choosing. Point it at
+    ``dashboard/storage/data`` -- the parent of the default, and populated
+    today -- and an unfiltered sweep deletes ``algo_submissions.json`` and
+    the leaderboard state files as "orphan sidecars" the hour they age out.
+    Checked once on the way in rather than at each unlink, so the stray
+    sweep, the LRU pass and the byte total all inherit it: the cap measures
+    this cache's own footprint, never a neighbour's.
+    """
+    if name.endswith(".tmp"):
+        return _OWNED_NAME.match(name) is not None
+    return _OWNED_NAME.fullmatch(name) is not None
 
 
 def _discard(*paths: Path) -> None:
@@ -551,6 +588,10 @@ def enforce_size_cap(*, protect: Iterable[Path] = ()) -> int:
     """
     directory = cache_dir()
     if not directory.exists():
+        # Only reachable before any write (write_many creates it first), so
+        # saying nothing here makes "nothing to evict" and "swept clean"
+        # the same empty stdout.
+        print(f"📦 bar cache: nothing to evict, {directory} does not exist", flush=True)
         return 0
     now = time.time()
     keep: Set[Path] = {Path(path) for path in protect}
@@ -562,12 +603,17 @@ def enforce_size_cap(*, protect: Iterable[Path] = ()) -> int:
     try:
         with os.scandir(directory) as listing:
             for item in listing:
+                if not _is_owned(item.name):
+                    continue  # not ours: never swept, never evicted, never counted
                 try:
                     stat = item.stat()
                 except OSError:
                     continue
                 sizes[Path(item.path)] = (stat.st_mtime, stat.st_size)
-    except OSError:
+    except OSError as exc:
+        # Every other failure in this module logs; a silent eviction failure
+        # and a clean pass are otherwise indistinguishable.
+        print(f"📦 bar cache: cannot scan {directory}: {exc}", flush=True)
         return 0
     # A crashed writer's leftovers -- a *.tmp mid-write, or a sidecar whose
     # parquet never landed -- match no entry and would never be reclaimed by

@@ -246,6 +246,28 @@ def test_cache_dir_honours_the_env_override(tmp_path, monkeypatch):
     assert bar_cache.cache_dir() == override
 
 
+def test_a_relative_override_is_anchored_at_the_repo_root(monkeypatch, tmp_path):
+    """MUTATION TEST: `return Path(override)` and this fails. The parent
+    uvicorn runs from the repo root and a backtest child is spawned with
+    `cwd=DASHBOARD_DIR`, so an unanchored relative value gives the two
+    processes different directories: a 100% miss rate for the one case the
+    cache exists for, two directories each growing to the cap, and no signal
+    -- both processes log the same unresolved string. `.resolve()` is not the
+    fix either; it resolves per process and reproduces the split exactly."""
+    from pathlib import Path
+
+    from dashboard.backend.paths import DASHBOARD_DIR, REPO_ROOT
+
+    monkeypatch.setenv("ATL_BAR_CACHE_DIR", "bar_cache")
+    resolved = bar_cache.cache_dir()
+    assert resolved.is_absolute()
+    assert resolved == REPO_ROOT / "bar_cache"
+    monkeypatch.chdir(DASHBOARD_DIR)
+    assert bar_cache.cache_dir() == resolved
+    monkeypatch.setenv("ATL_BAR_CACHE_DIR", "~/atl_bar_cache")
+    assert bar_cache.cache_dir() == Path.home() / "atl_bar_cache"
+
+
 def test_a_valid_override_is_honoured_for_max_bytes_and_ttl(monkeypatch):
     """Today only the unset-default and the invalid/out-of-range paths are
     asserted, so a mutant that always returned the default would keep the
@@ -522,7 +544,7 @@ def test_eviction_leaves_no_half_entries(cache_dir, monkeypatch):
 
 def test_stale_temp_files_are_swept(cache_dir):
     bar_cache.write_many({"AAPL": _frame()}, last_fetch=LAST_FETCH, **KEY)
-    orphan = cache_dir / "AAPL-deadbeef.parquet7xk.tmp"
+    orphan = cache_dir / "AAPL-deadbeefdeadbeef.parquet7xk.tmp"
     orphan.write_bytes(b"crashed writer")
     stamp = time.time() - 2 * bar_cache._STRAY_GRACE_SECONDS
     os.utime(orphan, (stamp, stamp))
@@ -554,10 +576,79 @@ def test_a_fresh_temp_file_is_left_alone(cache_dir):
     """A concurrent writer's in-flight temp file must survive another
     process's eviction pass."""
     cache_dir.mkdir(parents=True, exist_ok=True)
-    in_flight = cache_dir / "AAPL-deadbeef.parquetab1.tmp"
+    in_flight = cache_dir / "AAPL-deadbeefdeadbeef.parquetab1.tmp"
     in_flight.write_bytes(b"in flight")
     bar_cache.enforce_size_cap()
     assert in_flight.exists()
+
+
+def test_eviction_never_touches_a_file_this_module_did_not_write(cache_dir):
+    """MUTATION TEST: drop the `_is_owned` filter in enforce_size_cap and this
+    fails. The sweep classifies by SUFFIX and then unlinks, and `cache_dir`'s
+    docstring invites an operator to point ATL_BAR_CACHE_DIR wherever they
+    like. Point it at `dashboard/storage/data` -- the parent of the default,
+    and populated today -- and the first backtest deletes live application
+    state as soon as it is an hour old."""
+    bar_cache.write_many({"AAPL": _frame()}, last_fetch=LAST_FETCH, **KEY)
+    stale = time.time() - 2 * bar_cache._STRAY_GRACE_SECONDS
+    foreign = []
+    for name in (
+        "algo_submissions.json",  # user-submitted trading-algo state
+        "leaderboard_daily_refresh.json",
+        "leaderboard_skip_cache.json",
+        "half-written.tmp",
+        "notes.parquet",
+    ):
+        path = cache_dir / name
+        path.write_bytes(b"not ours")
+        os.utime(path, (stale, stale))
+        foreign.append(path)
+    bar_cache.enforce_size_cap()
+    assert [path for path in foreign if not path.exists()] == []
+    # And the entry that IS ours still reads back.
+    hits, _ = bar_cache.read_many(["AAPL"], **KEY)
+    assert set(hits) == {"AAPL"}
+
+
+def test_a_foreign_file_is_neither_counted_nor_evicted_under_cap_pressure(
+    cache_dir, monkeypatch
+):
+    """The cap measures this cache's own footprint. Counting a neighbour's
+    bytes would evict our own entries to make room for a file we must not
+    touch -- and then unlink the neighbour too, once ours ran out."""
+    for index in range(3):
+        bar_cache.write_many(
+            {f"S{index}": _frame(rows=200)}, last_fetch=LAST_FETCH, **KEY
+        )
+    cap = _tiny_cap(monkeypatch, cache_dir, keep_entries=3)
+    foreign = cache_dir / "algo_submissions.parquet"  # sized past the cap
+    foreign.write_bytes(b"x" * (cap * 2))
+    assert bar_cache.enforce_size_cap() == 0
+    assert foreign.exists()
+    hits, _ = bar_cache.read_many(["S0", "S1", "S2"], **KEY)
+    assert set(hits) == {"S0", "S1", "S2"}
+
+
+def test_an_absent_directory_says_so_rather_than_returning_silently(
+    cache_dir, capsys
+):
+    """A silent 0 and a clean sweep are the same empty stdout."""
+    assert not cache_dir.exists()
+    assert bar_cache.enforce_size_cap() == 0
+    assert str(cache_dir) in capsys.readouterr().out
+
+
+def test_a_scan_failure_is_logged_rather_than_silent(cache_dir, monkeypatch, capsys):
+    """Every other failure in the module logs. A directory this process
+    cannot read means the cap is not being enforced at all."""
+    bar_cache.write_many({"AAPL": _frame()}, last_fetch=LAST_FETCH, **KEY)
+
+    def _refuse(_directory):
+        raise OSError("permission denied")
+
+    monkeypatch.setattr(bar_cache.os, "scandir", _refuse)
+    assert bar_cache.enforce_size_cap() == 0
+    assert "cannot scan" in capsys.readouterr().out
 
 
 def test_write_many_enforces_the_cap(cache_dir, monkeypatch):
