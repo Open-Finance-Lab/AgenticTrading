@@ -277,6 +277,10 @@ def _discard(*paths: Path) -> None:
         try:
             path.unlink()
         except OSError:
+            # The caller has already decided not to trust this entry (stale,
+            # unreadable, or shape-mismatched); a failed unlink just leaves it
+            # on disk as an orphan the next stray sweep (below) will reclaim,
+            # not a reason to fail the backtest that triggered this discard.
             pass
 
 
@@ -450,6 +454,10 @@ def read_many(
             os.utime(parquet_path, None)
             os.utime(meta_path, None)
         except OSError:
+            # A failed touch just means this hit won't push out its LRU
+            # eviction turn as far as it should have -- it can be evicted
+            # sooner than a "true" access time would justify, which costs a
+            # future cache miss, never a wrong or missing hit right now.
             pass
         hits[symbol] = frame
         stored = meta.get("last_fetch")
