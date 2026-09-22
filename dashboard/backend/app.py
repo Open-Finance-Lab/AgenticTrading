@@ -227,6 +227,28 @@ async def startup_event():
 
     threading.Thread(target=init_daily_leaderboard, daemon=True).start()
 
+    # On-disk bar cache: name the state at boot, matching the
+    # `<store> backend: …` convention, then warm the default windows on a
+    # daemon thread so a cold instance does not charge the first visitor the
+    # full bar fetch. Non-blocking by construction: it must never delay boot
+    # or fail the health check.
+    from dashboard.backend.infrastructure.market_data import bar_cache
+
+    print(bar_cache.describe())
+
+    def warm_bar_cache_background():
+        """Background: pre-fetch the default backtest windows."""
+        try:
+            from dashboard.backend.infrastructure.market_data.bar_cache_warm import (
+                warm_bar_cache,
+            )
+
+            warm_bar_cache()
+        except Exception as e:  # noqa: BLE001 - a cold cache is the status quo
+            print(f"⚠️ Bar cache warm error: {e}")
+
+    threading.Thread(target=warm_bar_cache_background, daemon=True).start()
+
     # Protocol run lifecycle: fail runs orphaned by the previous process (their
     # in-memory engine sessions did not survive the restart) and start the
     # background reaper that drains/evicts abandoned runs. Kept in separate
