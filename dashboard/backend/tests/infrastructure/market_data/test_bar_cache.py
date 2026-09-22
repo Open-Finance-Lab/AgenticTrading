@@ -124,3 +124,133 @@ def test_describe_names_the_state(cache_dir, monkeypatch):
     assert bar_cache.describe().startswith("bar cache: enabled (")
     monkeypatch.setenv("ATL_BAR_CACHE", "0")
     assert bar_cache.describe() == "bar cache: disabled"
+
+
+# --- store and restore -----------------------------------------------------
+
+
+def test_write_then_read_returns_an_equal_frame(cache_dir):
+    frame = _frame()
+    assert bar_cache.write_many({"AAPL": frame}, last_fetch=LAST_FETCH, **KEY) == 1
+    hits, metas = bar_cache.read_many(["AAPL"], **KEY)
+    assert set(hits) == {"AAPL"}
+    # check_freq=False: parquet has no slot for DatetimeIndex.freq, so the
+    # fixture's freq="5min" comes back as None. Nothing downstream reads freq
+    # (aggregate_bars_by_symbol resamples from the timestamps), so the values,
+    # dtypes, index name and tz are the contract -- and those are all checked.
+    pd.testing.assert_frame_equal(hits["AAPL"], frame, check_freq=False)
+    assert metas["AAPL"] == LAST_FETCH
+
+
+def test_read_restores_the_three_attrs_stamps(cache_dir):
+    """feed_provenance() reads these back and the engine persists the result
+    into agent_runs.metadata. A hit that loses them is a silent behaviour
+    change, not a speed-up."""
+    frame = _frame()
+    frame.attrs["alpaca_feed"] = "sip"
+    frame.attrs["alpaca_sip_fallback"] = False
+    frame.attrs["alpaca_end_clamped"] = False
+    bar_cache.write_many({"AAPL": frame}, last_fetch=LAST_FETCH, **KEY)
+    hits, _ = bar_cache.read_many(["AAPL"], **KEY)
+    assert hits["AAPL"].attrs == {
+        "alpaca_feed": "sip",
+        "alpaca_sip_fallback": False,
+        "alpaca_end_clamped": False,
+    }
+
+
+def test_read_preserves_the_index_name_and_timezone(cache_dir):
+    frame = _frame()
+    bar_cache.write_many({"AAPL": frame}, last_fetch=LAST_FETCH, **KEY)
+    hits, _ = bar_cache.read_many(["AAPL"], **KEY)
+    assert hits["AAPL"].index.name == "timestamp"
+    assert str(hits["AAPL"].index.dtype) == "datetime64[ns, UTC]"
+
+
+def test_a_miss_returns_nothing_for_that_symbol(cache_dir):
+    bar_cache.write_many({"AAPL": _frame()}, last_fetch=LAST_FETCH, **KEY)
+    hits, metas = bar_cache.read_many(["AAPL", "MSFT"], **KEY)
+    assert set(hits) == {"AAPL"}
+    assert set(metas) == {"AAPL"}
+
+
+@pytest.mark.parametrize(
+    "override",
+    [
+        {"feed": "iex"},
+        {"source_timeframe": "60m"},
+        {"start": "2026-05-05"},
+        {"end": "2026-05-13"},
+    ],
+)
+def test_every_key_dimension_is_load_bearing(cache_dir, override):
+    """Changing any one of them must miss. The feed especially: curves priced
+    off different tapes are not comparable, and omitting it is the exact
+    defect market_data_store's own key has today."""
+    bar_cache.write_many({"AAPL": _frame()}, last_fetch=LAST_FETCH, **KEY)
+    hits, _ = bar_cache.read_many(["AAPL"], **{**KEY, **override})
+    assert hits == {}
+
+
+def test_symbols_are_keyed_individually_so_order_cannot_matter(cache_dir):
+    """Sidesteps market_data_store._dataset_key's order-sensitive
+    tuple(symbols): the same set in a different order is a hit here."""
+    bar_cache.write_many(
+        {"AAPL": _frame(), "MSFT": _frame(rows=4)}, last_fetch=LAST_FETCH, **KEY
+    )
+    hits, _ = bar_cache.read_many(["MSFT", "AAPL"], **KEY)
+    assert set(hits) == {"AAPL", "MSFT"}
+
+
+def test_a_schema_version_bump_invalidates_every_entry(cache_dir, monkeypatch):
+    bar_cache.write_many({"AAPL": _frame()}, last_fetch=LAST_FETCH, **KEY)
+    monkeypatch.setattr(bar_cache, "SCHEMA_VERSION", bar_cache.SCHEMA_VERSION + 1)
+    hits, _ = bar_cache.read_many(["AAPL"], **KEY)
+    assert hits == {}
+
+
+def test_a_datetime_in_last_fetch_is_stored_as_an_iso_string(cache_dir):
+    """`_effective_end` returns a datetime on the SIP path. The sidecar is
+    JSON, so it comes back as a string -- and that is fine: the only readers
+    are `baselines.py`, which prints it, and the two `source_timeframe`
+    checks."""
+    from datetime import datetime, timezone
+
+    last_fetch = dict(
+        LAST_FETCH, effective_end=datetime(2026, 5, 12, tzinfo=timezone.utc)
+    )
+    bar_cache.write_many({"AAPL": _frame()}, last_fetch=last_fetch, **KEY)
+    _, metas = bar_cache.read_many(["AAPL"], **KEY)
+    assert metas["AAPL"]["effective_end"] == "2026-05-12T00:00:00+00:00"
+
+
+def test_writes_are_atomic_and_leave_no_temp_files(cache_dir):
+    bar_cache.write_many({"AAPL": _frame()}, last_fetch=LAST_FETCH, **KEY)
+    assert sorted(p.suffix for p in cache_dir.iterdir()) == [".json", ".parquet"]
+
+
+def test_a_disabled_cache_writes_and_reads_nothing(cache_dir, monkeypatch):
+    monkeypatch.setenv("ATL_BAR_CACHE", "0")
+    assert bar_cache.write_many({"AAPL": _frame()}, last_fetch=LAST_FETCH, **KEY) == 0
+    assert bar_cache.read_many(["AAPL"], **KEY) == ({}, {})
+
+
+# --- carried from Task 1 review ---------------------------------------------
+
+
+def test_cache_dir_honours_the_env_override(tmp_path, monkeypatch):
+    """Today the override branch is unasserted: replacing the whole function
+    body with `return BAR_CACHE_DIR` keeps the suite green."""
+    override = tmp_path / "custom_bar_cache_dir"
+    monkeypatch.setenv("ATL_BAR_CACHE_DIR", str(override))
+    assert bar_cache.cache_dir() == override
+
+
+def test_a_valid_override_is_honoured_for_max_bytes_and_ttl(monkeypatch):
+    """Today only the unset-default and the invalid/out-of-range paths are
+    asserted, so a mutant that always returned the default would keep the
+    suite green."""
+    monkeypatch.setenv("ATL_BAR_CACHE_MAX_MB", "100")
+    assert bar_cache.max_bytes() == 100 * 1024 * 1024
+    monkeypatch.setenv("ATL_BAR_CACHE_TTL_DAYS", "3")
+    assert bar_cache.ttl_seconds() == 3 * 86400.0
