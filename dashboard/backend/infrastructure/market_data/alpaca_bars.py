@@ -585,6 +585,16 @@ class AlpacaDataLoader:
             # away. No recursion: `_fetch_bars_uncached` never re-enters this
             # wrapper, and its answer goes straight to the caller, so the
             # entries on disk are left untouched.
+            #
+            # The cost, so nobody removes this without pricing it: a universe
+            # containing a permanently dataless symbol (a delisted or typo'd
+            # ticker) reaches here on every call, so it pays one extra batched
+            # request each time -- twice per backtest, since `load_data` and
+            # the index baseline are the only callers. That is the deliberate
+            # direction. The alternative reading, "a 200 with no rows means
+            # those symbols have no data", is right for the typo and silently
+            # wrong for an upstream anomaly, and the wrong case publishes a
+            # leaderboard curve priced off a fraction of its universe.
             if not hits:
                 # `misses` was the whole universe, so the call just made IS
                 # the pre-cache call. Re-issuing it would only bill it twice.
