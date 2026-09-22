@@ -360,20 +360,38 @@ All offline; no test makes a live network call.
 - **Default-on changes behaviour for every user on the first deploy.** Mitigated by
   the fail-safe exclusion rules, the kill switch, and the ephemeral store.
 
-## 12. Follow-ups to file when this lands
+## 12. Follow-ups — filed 2026-09-22
 
-1. `market_data_store` hardcodes `market="US", timezone="US/Eastern"` in its
-   aggregation call and has no market dimension in its key — a latent A-share defect
-   on the protocol/v2 path.
-2. `_find_cached_run` (`domain/leaderboard/service.py`) keys a persisted
-   `agent_runs` row without the feed, the same hazard CLAUDE.md warns about.
-3. `market_data_store._dataset_key` uses order-sensitive `tuple(symbols)`.
+All filed against this repo after #506 was opened. Numbers are the issues; read them
+there, not here.
+
+1. `market_data_store` hardcodes `market="US", timezone="US/Eastern"` and has no market
+   dimension in its key — a latent A-share defect on the protocol/v2 path. → **#511**
+   (both halves in one issue: keying without fixing the aggregation buys two entries
+   computed under the same wrong rules).
+2. `_find_cached_run` (`domain/leaderboard/service.py`) keys a persisted `agent_runs` row
+   without the feed. → **NOT FILED, and this entry was wrong.** Re-verified at source:
+   `_warn_on_feed_drift` already exists and runs (`service.py:1177`, `:1447`), and
+   `_resolve_cached_run`'s docstring establishes that refusing a drifted row is *unbounded
+   spend* — a miss makes the entry "pending", which `maybe_schedule_daily_leaderboard_refresh`
+   answers by redeploying every configured LLM entry from a public unauthenticated GET.
+   Warn-never-refuse is the deliberate policy, not an oversight. Filing this would have
+   asked someone to undo a documented spend control.
+3. `market_data_store._dataset_key` uses order-sensitive `tuple(symbols)`. → **#512**
 4. `baseline_generator._fetch_bars_for_symbol` is dead code — referenced only by
-   `tests/test_baseline_generator_offline.py`.
-5. Read `agent_runs.runtime_type` / `decision_source` in prod to settle the
-   LLM-vs-rule-based mix, which is the ceiling on every latency change of this kind
-   (§1-C).
-6. Stale git-tracked CSVs under `dashboard/storage/data/cache/` with no reader.
+   `tests/test_baseline_generator_offline.py`. → **#513**
+5. Read `agent_runs.runtime_type` / `decision_source` in prod to settle the LLM-vs-rule-based
+   mix, which is the ceiling on every latency change of this kind (§1-C). → **#514**
+   (companion to #502: same trip to prod, different data source)
+6. Stale git-tracked CSVs under `dashboard/storage/data/cache/` with no reader. → **#515**
+   (nine files; the only `data/cache` readers are `orchestration/` scripts naming an
+   absolute macOS path, not this directory)
+
+Four more came out of the whole-branch review of the implementation itself, none of them
+blocking: **#507** (`_discard` unlinks by path after the decision to distrust),
+**#508** (nothing pins the `last_fetch` field set the cross-process sidecar relies on),
+**#509** (phase durations use `time.time`, so a clock step distorts them),
+**#510** (`_scan_state` has no key eviction — no production impact today).
 
 ## 13. Line anchors
 
