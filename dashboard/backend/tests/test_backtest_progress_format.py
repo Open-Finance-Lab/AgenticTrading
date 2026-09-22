@@ -34,6 +34,7 @@ _HELPERS = (
     "function resolveProgressAgeSeconds(",
     "function formatProgressStaleness(",
     "function formatStartupStaleness(",
+    "function formatBacktestPhase(",
     "function resolveRunningNotice(",
 )
 
@@ -42,6 +43,7 @@ def _eval(expr: str) -> object:
     script = "\n".join(
         [
             js_const("BACKTEST_STALE_SECONDS"),
+            js_const("BACKTEST_PHASE_LABELS"),
             *[fn_body(signature) for signature in _HELPERS],
             f"console.log(JSON.stringify({expr}));",
         ]

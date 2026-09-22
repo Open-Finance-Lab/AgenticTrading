@@ -15,7 +15,7 @@ import json
 import uuid
 from typing import Any, Dict, List, Optional
 
-from dashboard.backend.db_url import require_postgres_url
+from dashboard.backend.db_url import init_schema_unless_worker, require_postgres_url
 from dashboard.backend.domain.agents.repository import (
     DEFAULT_SCOPES,
     DEFAULT_RUNTIME_TYPE,
@@ -32,7 +32,7 @@ class PostgresAgentStore:
 
     def __init__(self, database_url: str):
         self.database_url = require_postgres_url(database_url)
-        self._init_schema()
+        init_schema_unless_worker("agent_store", self._init_schema)
 
     def _get_connection(self):
         # Pooled checkout: same context-manager transaction semantics as

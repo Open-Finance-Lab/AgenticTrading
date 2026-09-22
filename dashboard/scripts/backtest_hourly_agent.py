@@ -16,6 +16,17 @@ Usage:
     python3 backtest_hourly_agent.py --start 2026-03-01 --end 2026-04-23
 """
 
+import time
+
+#: Wall clock at the first executable statement of this process. With the
+#: parent's `--launched-at` this brackets the cost the child cannot otherwise
+#: see -- fork/exec, interpreter boot, site-packages. Taken before the imports
+#: below because *they* are the next thing to account for, and one mark cannot
+#: tell the two apart. Wall clock, not perf_counter: it has to be comparable
+#: with a timestamp the parent took in another process. `time` is a builtin C
+#: module, so this stamp costs nothing it measures.
+CHILD_ENTERED_AT = time.time()
+
 import sys
 import json
 import argparse
@@ -176,6 +187,23 @@ from dashboard.backend.infrastructure.llm.execution.errors import LLMExecutionEr
 from dashboard.backend.infrastructure.llm.execution.service import LLMExecutionService
 from dashboard.backend.domain.credits.service import credits_service
 from dashboard.backend.domain.model_providers.service import get_model_provider_service
+from dashboard.backend import db_url
+
+#: Wall clock once every import above has run -- pandas, three SDKs, and the
+#: seven store singletons those imports construct as a side effect (six of them
+#: Postgres-capable). The gap to CHILD_ENTERED_AT is the number Task 5 moves a
+#: part of; without it, `starting` cannot say which part.
+IMPORTS_DONE_AT = time.time()
+
+#: The DDL total as of that same instant. Read here rather than in main()
+#: because it is attributed to the CHILD_ENTERED_AT -> IMPORTS_DONE_AT window,
+#: and `db_url.schema_init_seconds()` is a process-global counter that keeps
+#: running: any store constructed after this line -- a lazily built singleton,
+#: a future import moved into main() -- would be charged to a window that had
+#: already closed, making `schema_init_seconds` exceed the interval it claims
+#: to decompose. Snapshotting it beside the stamp makes the pair honest by
+#: construction instead of by the current import order happening to cooperate.
+IMPORTS_SCHEMA_INIT_SECONDS = db_url.schema_init_seconds()
 
 
 # ============================================================================
@@ -222,6 +250,16 @@ def main():
     )
     parser.add_argument("--run-id", default=None, help="Preset run id (used for live progress + DB row)")
     parser.add_argument("--progress-file", default=None, help="Path to write incremental equity snapshots for live dashboard charting")
+    parser.add_argument(
+        "--launched-at",
+        type=float,
+        default=None,
+        help=(
+            "Epoch seconds at which the parent launched this process. The child "
+            "records the gap before its first progress write (imports, store "
+            "startup) as its 'starting' phase."
+        ),
+    )
     parser.add_argument(
         "--data-source",
         default=ALPACA,
@@ -459,6 +497,21 @@ def main():
         runtime_type=args.runtime_type,
         runtime_config=runtime_config,
         execution_client=execution_client,
+        launched_at=args.launched_at,
+        # All three are module-scope constants rather than reads taken here,
+        # on purpose. They describe an interval that ended before the engine
+        # existed, and the third (`db_url.schema_init_seconds()`) is a
+        # process-global counter that never resets: an engine that read it for
+        # itself would report the PARENT's boot DDL as this run's schema cost
+        # on every in-process path (the external-run session, the algo
+        # service, the suite), and reading it *here* would charge this window
+        # for any store built after the imports finished. Handed in, an
+        # in-process engine passes nothing and the key is simply absent.
+        startup_clock={
+            "child_entered_at": CHILD_ENTERED_AT,
+            "imports_done_at": IMPORTS_DONE_AT,
+            "schema_init_seconds": IMPORTS_SCHEMA_INIT_SECONDS,
+        },
         **({"universe_selection": universe_selection} if universe_selection is not None else {}),
     )
     

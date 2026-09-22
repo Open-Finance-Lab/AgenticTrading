@@ -91,6 +91,9 @@ os.environ.pop("MAX_ACTIVE_DASHBOARD_BACKTESTS", None)
 os.environ.pop("AGENT_AUTH_CACHE_TTL_SECONDS", None)
 os.environ.pop("MAX_LEGACY_ACTIVE_PER_SESSION", None)
 os.environ.pop("MAX_LEGACY_ACTIVE_GLOBAL", None)
+# A shell that exported the backtest-worker flag would make every Postgres
+# twin the suite constructs skip DDL and fail on its first query.
+os.environ.pop("ATL_BACKTEST_WORKER", None)
 os.environ.pop("ALPACA_HTTP_TIMEOUT_SECONDS", None)
 os.environ.pop("ALPACA_HTTP_CONNECT_TIMEOUT_SECONDS", None)
 os.environ.pop("LEGACY_SESSION_RETENTION_SECONDS", None)
