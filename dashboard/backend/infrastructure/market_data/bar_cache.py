@@ -514,6 +514,124 @@ def write_many(
         for path in (parquet_path, meta_path):
             try:
                 written_bytes += path.stat().st_size
-            except OSError:
-                pass
+            except OSError as exc:
+                print(f"📦 bar cache: could not stat {path}: {exc}", flush=True)
+    if written:
+        try:
+            _maybe_enforce_size_cap(directory, written_bytes, protect=written_paths)
+        except Exception as exc:  # noqa: BLE001 - eviction must not fail a write
+            print(f"📦 bar cache: eviction failed: {exc}", flush=True)
     return written
+
+
+# --- eviction --------------------------------------------------------------
+
+
+#: Per directory: ``[last_full_scan_at, bytes_on_disk_at_that_scan,
+#: bytes_this_process_wrote_since]``. Process-local on purpose -- a shared
+#: index file would be a third thing to keep atomic -- which is why the time
+#: bound in ``_maybe_enforce_size_cap`` exists.
+_scan_state: Dict[str, List[float]] = {}
+
+
+def enforce_size_cap(*, protect: Iterable[Path] = ()) -> int:
+    """One directory scan: sweep stale strays, then evict LRU until under cap.
+
+    The cap is a runaway bound, not a working-set estimate: one symbol over a
+    7-weekday window at 5m bars is tens of kilobytes of parquet, so the 256MB
+    default holds thousands of symbol-windows. It exists so arbitrary user
+    windows cannot grow the cache without bound on an ephemeral disk.
+
+    ``protect`` is the batch the caller just wrote. It is never evicted, even
+    if that leaves the directory over cap until the next pass: an eviction
+    that discards the symbols just fetched turns a paid fetch into a miss, and
+    with coarse mtimes (entries written within one tick tie) it did exactly
+    that. Ordering among the rest is ``(mtime, name)`` so a tie still evicts
+    deterministically.
+    """
+    directory = cache_dir()
+    if not directory.exists():
+        return 0
+    now = time.time()
+    keep: Set[Path] = {Path(path) for path in protect}
+    cap = max_bytes()
+    # Everything from ONE listing: the parquets, their sidecars, and the
+    # strays. A second glob per kind would double the directory walks on a
+    # pass that already stats every entry.
+    sizes: Dict[Path, Tuple[float, int]] = {}
+    try:
+        with os.scandir(directory) as listing:
+            for item in listing:
+                try:
+                    stat = item.stat()
+                except OSError:
+                    continue
+                sizes[Path(item.path)] = (stat.st_mtime, stat.st_size)
+    except OSError:
+        return 0
+    # A crashed writer's leftovers -- a *.tmp mid-write, or a sidecar whose
+    # parquet never landed -- match no entry and would never be reclaimed by
+    # the LRU pass. A young one belongs to a live writer and is left alone.
+    for path, (mtime, _size) in list(sizes.items()):
+        is_tmp = path.suffix == ".tmp"
+        is_orphan_meta = (
+            path.suffix == ".json" and path.with_suffix(".parquet") not in sizes
+        )
+        if (is_tmp or is_orphan_meta) and now - mtime > _STRAY_GRACE_SECONDS:
+            _discard(path)
+            del sizes[path]
+    entries: List[Tuple[float, str, int, Path, Path]] = []
+    total = 0
+    for path, (mtime, size) in sizes.items():
+        if path.suffix != ".parquet":
+            continue
+        meta_path = path.with_suffix(".json")
+        size += sizes.get(meta_path, (0.0, 0))[1]
+        total += size
+        entries.append((mtime, path.name, size, path, meta_path))
+    _scan_state[str(directory)] = [now, float(total), 0.0]
+    if total <= cap:
+        return 0
+    entries.sort(key=lambda item: item[:2])
+    removed = 0
+    for _mtime, _name, size, parquet_path, meta_path in entries:
+        if total <= cap:
+            break
+        if parquet_path in keep or meta_path in keep:
+            continue
+        _discard(parquet_path, meta_path)
+        total -= size
+        removed += 1
+    _scan_state[str(directory)][1] = float(total)
+    print(
+        f"📦 bar cache: evicted {removed} entries to stay under "
+        f"{cap // (1024 * 1024)}MB",
+        flush=True,
+    )
+    return removed
+
+
+def _maybe_enforce_size_cap(
+    directory: Path, written_bytes: int, *, protect: Iterable[Path]
+) -> None:
+    """Run the full scan only when it could matter.
+
+    This process's running estimate (bytes at the last scan plus what it has
+    written since) says whether *its* writes could have crossed the cap. Other
+    processes' writes are invisible to it, so the scan also runs once the last
+    one is older than ``_SWEEP_INTERVAL_SECONDS``. Net effect: a fetch far
+    under cap costs one ``stat`` of state rather than one per entry, and the
+    cap is enforced within a minute of being crossed rather than on the byte
+    -- which is what a runaway bound needs.
+    """
+    state = _scan_state.get(str(directory))
+    now = time.time()
+    if state is not None:
+        state[2] += float(written_bytes)
+        scanned_at, total_at_scan, written_since = state
+        if (
+            now - scanned_at < _SWEEP_INTERVAL_SECONDS
+            and total_at_scan + written_since <= max_bytes()
+        ):
+            return
+    enforce_size_cap(protect=protect)
