@@ -644,3 +644,113 @@ def test_a_fake_loader_drives_every_phase_in_order(tmp_path, monkeypatch):
     assert final["equity_curve"]
     assert "trades" in final
     assert "order_events_count" in final
+
+
+def test_record_phase_metric_lands_on_the_phase_that_was_open():
+    engine = object.__new__(HourlyBacktester)
+    engine._init_progress_phases(launched_at=100.0)
+    engine.record_phase_metric("fetch_seconds", 12.5)
+    engine.publish_phase("loading_bars")
+    engine.record_phase_metric("fetch_seconds", 3.25)
+    engine.publish_phase("indicators")
+    by_name = {entry["name"]: entry for entry in engine._progress_phases}
+    assert by_name["starting"]["fetch_seconds"] == 12.5
+    assert by_name["loading_bars"]["fetch_seconds"] == 3.25
+
+
+def test_phase_extras_do_not_leak_into_the_next_phase():
+    engine = object.__new__(HourlyBacktester)
+    engine._init_progress_phases(launched_at=0.0)
+    engine.publish_phase("loading_bars")
+    engine.record_phase_metric("fetch_seconds", 1.0)
+    engine.publish_phase("indicators")
+    engine.publish_phase("first_decision")
+    by_name = {entry["name"]: entry for entry in engine._progress_phases}
+    assert "fetch_seconds" in by_name["loading_bars"]
+    assert "fetch_seconds" not in by_name["indicators"]
+
+
+def test_record_phase_metric_tolerates_an_uninitialised_instance():
+    """Every accessor in this block tolerates an instance built with __new__
+    that never ran _init_progress_phases."""
+    engine = object.__new__(HourlyBacktester)
+    engine.record_phase_metric("fetch_seconds", 2.0)
+    engine.publish_phase("loading_bars")  # must not raise
+
+
+def test_a_metric_recorded_with_no_phase_open_lands_nowhere():
+    """MUTATION TEST: drop the `_progress_phase is None` gate in
+    record_phase_metric and this must fail. With no launch time nothing is
+    open before the first publish_phase; a number recorded then has no owner,
+    and generalising the extras merge would otherwise hand it to the first
+    phase that closes -- `loading_bars`, which did not incur it."""
+    engine = object.__new__(HourlyBacktester)
+    engine._init_progress_phases(launched_at=None)
+    engine.record_phase_metric("fetch_seconds", 9.0)
+    engine.publish_phase("loading_bars")
+    engine.publish_phase("indicators")
+    by_name = {entry["name"]: entry for entry in engine._progress_phases}
+    assert "starting" not in by_name
+    assert "fetch_seconds" not in by_name["loading_bars"]
+
+
+def test_a_startup_clock_without_a_launch_time_does_not_leak_onto_loading_bars():
+    """MUTATION TEST: seed `_progress_phase_extra` from `startup_clock`
+    unconditionally in _init_progress_phases and this must fail.
+    backtest_hourly_agent.py always passes startup_clock but launched_at only
+    from --launched-at, which a bare CLI run omits. Today those three keys are
+    simply dropped (`starting` never closes); once extras belong to whichever
+    phase closes, they would surface on `loading_bars` as if it had a spawn
+    time and a schema DDL cost."""
+    engine = object.__new__(HourlyBacktester)
+    engine._init_progress_phases(
+        launched_at=None,
+        startup_clock={
+            "child_entered_at": 1.0,
+            "imports_done_at": 3.0,
+            "schema_init_seconds": 0.0,
+        },
+    )
+    engine.publish_phase("loading_bars")
+    engine.publish_phase("indicators")
+    by_name = {entry["name"]: entry for entry in engine._progress_phases}
+    assert set(by_name) == {"loading_bars"}
+    assert not {"child_entered_at", "imports_done_at", "schema_init_seconds"} & set(
+        by_name["loading_bars"]
+    )
+
+
+def test_the_starting_breakdown_line_is_unchanged(capsys):
+    engine = object.__new__(HourlyBacktester)
+    engine._init_progress_phases(
+        launched_at=0.0,
+        startup_clock={
+            "child_entered_at": 1.0,
+            "imports_done_at": 3.0,
+            "schema_init_seconds": 0.0,
+        },
+    )
+    engine.publish_phase("loading_bars")
+    out = capsys.readouterr().out
+    assert "spawn+interpreter 1.00s" in out
+    assert "imports+stores 2.00s" in out
+    assert "schema DDL 0.00s" in out
+
+
+def test_closing_loading_bars_prints_the_fetch_split(capsys):
+    engine = object.__new__(HourlyBacktester)
+    engine._init_progress_phases(launched_at=0.0)
+    engine.publish_phase("loading_bars")
+    engine.record_phase_metric("fetch_seconds", 0.0)
+    engine.publish_phase("indicators")
+    out = capsys.readouterr().out
+    assert "fetch 0.00s" in out
+    assert "aggregate+verify" in out
+
+
+def test_no_split_line_without_the_metric(capsys):
+    engine = object.__new__(HourlyBacktester)
+    engine._init_progress_phases(launched_at=0.0)
+    engine.publish_phase("loading_bars")
+    engine.publish_phase("indicators")
+    assert "aggregate+verify" not in capsys.readouterr().out
