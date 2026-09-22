@@ -28,7 +28,23 @@ from math import ceil
 # raises AttributeError; below it, those four session bounds silently become
 # calls on the time module instead. Green on every US run either way, red only
 # on an A-share one.
-from time import time as wall_clock
+#
+# Two clocks, deliberately. `wall_clock` stamps INSTANTS an operator or another
+# process reads -- `started_at`/`ended_at` in `phases[]`, which are compared
+# against `--launched-at` and the two stamps the launch script takes. `steady`
+# measures DURATIONS, because `time.time()` is not monotonic: an NTP step
+# between two reads distorts the interval and a backward step makes it
+# negative, and these numbers are published on the card and are the measurement
+# the next latency decision is made on.
+#
+# `starting` is the one phase that cannot move to `steady`, and not for a
+# reason worth working around: `monotonic()` has a per-process epoch, so the
+# parent's reading and the child's are not comparable at all. That phase is
+# `child_entered_at - <the parent's launch time>` -- a genuinely cross-process
+# interval, for which the wall clock is the only shared reference. It is also
+# the phase least exposed to the hazard: it is a single interval bounded by a
+# process spawn, not a loop.
+from time import monotonic as steady_clock, time as wall_clock
 from typing import Any, Dict, List, Optional, Tuple
 
 from dashboard.backend.database import db
@@ -683,6 +699,11 @@ class HourlyBacktester:
         self._progress_phase_started_at: Optional[float] = (
             float(launched_at) if launched_at is not None else None
         )
+        # Deliberately None even when `starting` opens: that phase began in the
+        # PARENT, and a monotonic reading is meaningless across processes.
+        # `_set_progress_phase` reads None as "fall back to the wall-clock
+        # difference", which is correct for exactly and only this phase.
+        self._progress_phase_started_steady: Optional[float] = None
         extra: Dict = {}
         # Seed the startup clock only when `starting` is actually open.
         # backtest_hourly_agent.py always passes `startup_clock` but
@@ -713,6 +734,7 @@ class HourlyBacktester:
         if self._progress_phase == name:
             return False
         now = wall_clock()
+        now_steady = steady_clock()
         if self._progress_phase is not None:
             finished = {
                 "name": self._progress_phase,
@@ -746,7 +768,19 @@ class HourlyBacktester:
             # that phase as having cost nothing -- the same falsy-zero trap
             # _init_progress_phases's gate is about, one line further on.
             opened = finished["started_at"]
-            elapsed = finished["ended_at"] - (now if opened is None else opened)
+            opened_steady = getattr(self, "_progress_phase_started_steady", None)
+            if opened_steady is None:
+                # `starting` (opened in the parent), or a legacy `__new__`
+                # instance predating the steady mark. The wall clock is the
+                # only shared reference across that process boundary.
+                elapsed = finished["ended_at"] - (now if opened is None else opened)
+            else:
+                elapsed = now_steady - opened_steady
+            # Recorded, not just printed: `phases[]` is what an operator reads
+            # off the progress file, and leaving only the two wall-clock
+            # instants there would make them re-derive the distorted number the
+            # steady clock exists to avoid.
+            finished["duration_seconds"] = elapsed
             print(f"⏱  phase {name} (after {finished['name']} {elapsed:.2f}s)", flush=True)
             if finished["name"] == "starting" and {
                 "child_entered_at",
@@ -785,6 +819,7 @@ class HourlyBacktester:
             print(f"⏱  phase {name}", flush=True)
         self._progress_phase = name
         self._progress_phase_started_at = now
+        self._progress_phase_started_steady = now_steady
         return True
 
     def _progress_phase_fields(self) -> Dict:
@@ -969,7 +1004,7 @@ class HourlyBacktester:
             f"   Universe: {len(symbols)} symbols ({', '.join(symbols[:8])}"
             f"{'…' if len(symbols) > 8 else ''})"
         )
-        fetch_started_at = wall_clock()
+        fetch_started_at = steady_clock()
         self.source_data = self.data_loader.fetch_bars(
             symbols, self.start_date, self.end_date
         )
@@ -977,7 +1012,7 @@ class HourlyBacktester:
         # verification and, in intraday mode, `aggregate_bars_by_symbol` -- is
         # the half the phase name hides. Recorded here so the number survives
         # in `phases[]` as well as on stdout.
-        self.record_phase_metric("fetch_seconds", wall_clock() - fetch_started_at)
+        self.record_phase_metric("fetch_seconds", steady_clock() - fetch_started_at)
         if not self.source_data:
             # Raise, don't sys.exit(1): this runs inside server threads
             # (external runs, algo service) where SystemExit evades

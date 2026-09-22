@@ -353,15 +353,74 @@ def test_the_starting_record_splits_what_the_child_could_not_write(tmp_path):
     assert starting["schema_init_seconds"] == 0.0
     # Only `starting` carries them: it alone describes an interval the child
     # could not write to. Anywhere else they would be three constants repeated.
+    # `duration_seconds` is the one key every record carries -- it is the
+    # steady-clock measurement, not a startup-clock stamp.
     backtester.publish_phase("indicators")
     later = _payload(tmp_path)["phases"][1]
     assert later["name"] == "loading_bars"
-    assert set(later) == {"name", "started_at", "ended_at"}
+    assert set(later) == {"name", "started_at", "ended_at", "duration_seconds"}
 
     # An in-process engine passes nothing, so nothing is claimed.
     bare = _bare(tmp_path, launched_at=time.time() - 2)
     bare.publish_phase("loading_bars")
-    assert set(_payload(tmp_path)["phases"][0]) == {"name", "started_at", "ended_at"}
+    assert set(_payload(tmp_path)["phases"][0]) == {
+        "name",
+        "started_at",
+        "ended_at",
+        "duration_seconds",
+    }
+
+
+def test_a_wall_clock_step_cannot_distort_an_in_child_phase_duration(
+    tmp_path, monkeypatch
+):
+    """REGRESSION (#509). Every phase duration used to be a difference of two
+    `time.time()` reads, which is not monotonic: an NTP correction between the
+    two distorts the interval and a backward step makes it NEGATIVE. These
+    numbers are the measurement the next latency decision is made on, so a
+    silently wrong one is worse than a missing one.
+
+    Simulated by stepping the wall clock backwards a full minute mid-run --
+    exactly what an NTP correction on a long-running instance does.
+    """
+    bare = _bare(tmp_path, launched_at=None)
+    bare.publish_phase("loading_bars")
+    fake_now = time.time()
+    monkeypatch.setattr(engine_module, "wall_clock", lambda: fake_now - 60)
+    bare.publish_phase("indicators")
+
+    finished = _payload(tmp_path)["phases"][0]
+    assert finished["name"] == "loading_bars"
+    assert finished["duration_seconds"] >= 0.0
+    assert finished["duration_seconds"] < 5.0
+    # The wall-clock instants keep the stepped value on purpose: they exist to
+    # be correlated against log lines, which took the same step.
+    assert finished["ended_at"] - finished["started_at"] < -50
+
+
+def test_the_starting_phase_is_still_measured_on_the_wall_clock(tmp_path):
+    """`starting` cannot use the steady clock and this is not a shortcut.
+
+    It is `child_entered_at - <the parent's --launched-at>`: a genuinely
+    cross-process interval, and `monotonic()` has a per-process epoch, so the
+    parent's reading and the child's are not comparable at all. The wall clock
+    is the only shared reference, which is why `_init_progress_phases` leaves
+    the steady mark None for exactly this phase.
+    """
+    launched_at = time.time() - 6
+    bare = _bare(tmp_path, launched_at=launched_at)
+    assert bare._progress_phase == "starting"
+    assert bare._progress_phase_started_steady is None
+    bare.publish_phase("loading_bars")
+
+    starting = _payload(tmp_path)["phases"][0]
+    assert starting["name"] == "starting"
+    assert starting["duration_seconds"] == pytest.approx(
+        starting["ended_at"] - starting["started_at"]
+    )
+    assert starting["duration_seconds"] == pytest.approx(6, abs=1)
+    # And the phase opened after it does get a steady mark.
+    assert bare._progress_phase_started_steady is not None
 
 
 def test_every_phase_is_published_where_the_work_happens():
