@@ -4,6 +4,9 @@ import json
 import os
 import re
 
+import pandas as pd
+import pytest
+
 from dashboard.backend.infrastructure.llm.validator import DJIA_30
 from dashboard.backend.infrastructure.market_data import bar_cache, bar_cache_warm
 from dashboard.backend.paths import BACKEND_DIR, CONFIG_DIR
@@ -11,6 +14,73 @@ from dashboard.backend.paths import BACKEND_DIR, CONFIG_DIR
 
 def _defaults():
     return json.loads((CONFIG_DIR / "defaults.json").read_text(encoding="utf-8"))
+
+
+def _frame(rows=3):
+    index = pd.date_range("2026-05-04T13:30:00Z", periods=rows, freq="5min", tz="UTC")
+    index.name = "timestamp"
+    return pd.DataFrame(
+        {
+            "open": [10.0] * rows,
+            "high": [11.0] * rows,
+            "low": [9.0] * rows,
+            "close": [10.5] * rows,
+            "volume": [100] * rows,
+        },
+        index=index,
+    )
+
+
+@pytest.fixture
+def warm_cache_dir(tmp_path, monkeypatch):
+    """Arm the warm against an isolated cache directory. No network: every
+    loader in this module is a fake."""
+    monkeypatch.setenv("ATL_BAR_CACHE", "1")
+    monkeypatch.setenv("ATL_BAR_CACHE_WARM", "1")
+    monkeypatch.setenv("ATL_BAR_CACHE_DIR", str(tmp_path / "bar_cache"))
+    monkeypatch.setenv("ALPACA_DATA_FEED", "sip")
+    monkeypatch.delenv("ATL_BAR_CACHE_MAX_MB", raising=False)
+    monkeypatch.delenv("ATL_BAR_CACHE_TTL_DAYS", raising=False)
+    return tmp_path / "bar_cache"
+
+
+def _writing_loader(calls, written, *, store=True):
+    """A loader that writes through `bar_cache` exactly as the real one does.
+
+    The warm now counts entries on disk, so a fake that only returns frames
+    would measure nothing. `store=False` reproduces the case this whole
+    counting change exists for: every window fetched, every write refused.
+    """
+
+    class _Loader:
+        def __init__(self):
+            self.source_timeframe = "60m"
+
+        def configure_source_timeframe(self, value):
+            self.source_timeframe = value
+
+        def fetch_bars(self, symbols, start, end):
+            calls.append((self.source_timeframe, tuple(symbols), start, end))
+            frames = {symbol: _frame() for symbol in symbols}
+            written.append(
+                bar_cache.write_many(
+                    frames,
+                    start=start,
+                    end=end,
+                    source_timeframe=self.source_timeframe,
+                    feed="sip",
+                    last_fetch={
+                        "feed": "sip",
+                        "source_timeframe": self.source_timeframe,
+                    },
+                    # The real refusal, not a skipped call: an account without
+                    # SIP entitlement answers every window on IEX.
+                    sip_fallback_to_iex=not store,
+                )
+            )
+            return frames
+
+    return _Loader
 
 
 def test_the_suite_never_warms():
@@ -69,48 +139,62 @@ def test_route_defaults_match_the_route_signature():
     assert end.group(1) == bar_cache_warm.ROUTE_DEFAULT_END
 
 
-def test_warm_fetches_every_window_at_the_intraday_source_timeframe(monkeypatch):
+def test_warm_fetches_every_window_at_the_intraday_source_timeframe(
+    warm_cache_dir, monkeypatch
+):
     """The key includes source_timeframe, so warming at the wrong resolution
     warms nothing a real run can use. The default US profile is 5m -> 60m."""
-    calls = []
-
-    class _FakeLoader:
-        def __init__(self):
-            self.source_timeframe = "60m"
-
-        def configure_source_timeframe(self, value):
-            self.source_timeframe = value
-
-        def fetch_bars(self, symbols, start, end):
-            calls.append((self.source_timeframe, tuple(symbols), start, end))
-            return {symbol: object() for symbol in symbols}
-
-    monkeypatch.setenv("ATL_BAR_CACHE", "1")
-    monkeypatch.setenv("ATL_BAR_CACHE_WARM", "1")
-    monkeypatch.setattr(bar_cache_warm, "AlpacaDataLoader", _FakeLoader)
+    calls, written = [], []
+    monkeypatch.setattr(
+        bar_cache_warm, "AlpacaDataLoader", _writing_loader(calls, written)
+    )
     warmed = bar_cache_warm.warm_bar_cache()
     # Derived, not a literal 3: the window list is the one owner of the count.
     assert len(calls) == len(bar_cache_warm.warm_windows())
     assert {timeframe for timeframe, *_ in calls} == {"5m"}
-    assert warmed == sum(len(symbols) for _, symbols, _, _ in calls)
+    # Against what the cache ACCEPTED, not what the loader returned: the two
+    # agree here only because every window is settled and on the right tape.
+    assert warmed == sum(written) > 0
 
 
-def test_a_failing_window_does_not_stop_the_others(monkeypatch, capsys):
-    class _FlakyLoader:
-        def __init__(self):
-            self.calls = 0
+def test_the_warm_reports_what_it_stored_not_what_it_fetched(
+    warm_cache_dir, monkeypatch, capsys
+):
+    """MUTATION TEST: restore `warmed += len(frames)` and this fails.
 
-        def configure_source_timeframe(self, value):
-            pass
+    `fetch_bars` returns its frames whether or not `write_many` accepted a
+    byte of them, and discards the int that would have said so. On an account
+    with no SIP entitlement every window falls back to IEX, every write is
+    refused, three billable Alpaca calls are made per deploy forever -- and
+    the summary line an operator greps used to report a full warm."""
+    calls, written = [], []
+    monkeypatch.setattr(
+        bar_cache_warm,
+        "AlpacaDataLoader",
+        _writing_loader(calls, written, store=False),
+    )
+    warmed = bar_cache_warm.warm_bar_cache()
+    assert calls, "the windows were never fetched"
+    assert written == [0] * len(calls), "the refusal did not fire"
+    assert warmed == 0
+    out = capsys.readouterr().out
+    assert "stored none" in out
+    assert "0 symbol-windows ready" in out
 
+
+def test_a_failing_window_does_not_stop_the_others(
+    warm_cache_dir, monkeypatch, capsys
+):
+    calls, written = [], []
+    base = _writing_loader(calls, written)
+
+    class _FlakyLoader(base):
         def fetch_bars(self, symbols, start, end):
-            self.calls += 1
-            if self.calls == 1:
+            if not calls:
+                calls.append(("raised", tuple(symbols), start, end))
                 raise RuntimeError("alpaca is down")
-            return {symbol: object() for symbol in symbols}
+            return super().fetch_bars(symbols, start, end)
 
-    monkeypatch.setenv("ATL_BAR_CACHE", "1")
-    monkeypatch.setenv("ATL_BAR_CACHE_WARM", "1")
     monkeypatch.setattr(bar_cache_warm, "AlpacaDataLoader", _FlakyLoader)
     assert bar_cache_warm.warm_bar_cache() > 0
     assert "failed" in capsys.readouterr().out
@@ -129,6 +213,21 @@ def test_unconfigured_credentials_skip_the_warm_without_raising(monkeypatch, cap
     monkeypatch.setattr(bar_cache_warm, "AlpacaDataLoader", _no_credentials)
     assert bar_cache_warm.warm_bar_cache() == 0
     assert "skipped" in capsys.readouterr().out
+
+
+def test_the_warm_error_line_matches_the_live_call_detector():
+    """SOURCE-SHAPE GUARD. The proof that this suite makes zero billable
+    Alpaca calls is a `-s` run grepped for `bar cache warm:`. app.py's own
+    handler printed `Bar cache warm error:`, which that grep does not match,
+    so a raise escaping warm_bar_cache would have been invisible to it.
+    Unreachable today is an accident of the current code; a safety proof a
+    future edit can blind for free should not stay blindable."""
+    source = (BACKEND_DIR / "app.py").read_text(encoding="utf-8")
+    start = source.index("def warm_bar_cache_background")
+    body = source[start : source.index("threading.Thread", start)]
+    logged = re.findall(r'print\(\s*f?"([^"]*)"', body)
+    assert logged, "the warm's background wrapper stopped logging"
+    assert all("bar cache warm:" in line for line in logged), logged
 
 
 def test_app_starts_the_warm_on_a_daemon_thread():

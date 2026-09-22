@@ -25,6 +25,7 @@ from dashboard.backend.infrastructure.market_data import bar_cache
 from dashboard.backend.infrastructure.market_data.alpaca_bars import (
     AlpacaDataLoader,
     MarketDataUnavailableError,
+    configured_feed_name,
 )
 from dashboard.backend.paths import CONFIG_DIR
 
@@ -81,6 +82,29 @@ def warm_windows() -> List[Tuple[List[str], str, str]]:
     return windows
 
 
+def _entries_on_disk(symbols, *, start: str, end: str, feed: str) -> int:
+    """How many of these symbol-windows a later run would actually hit.
+
+    A ``stat`` per file rather than a parquet read: the question is whether
+    the entry exists, and an entry is both files or neither.
+    """
+    stored = 0
+    for symbol in symbols:
+        try:
+            paths = bar_cache.entry_paths(
+                symbol,
+                start=start,
+                end=end,
+                source_timeframe=WARM_SOURCE_TIMEFRAME,
+                feed=feed,
+            )
+            if all(path.exists() for path in paths):
+                stored += 1
+        except OSError:  # a cold cache is the status quo, never an outage
+            continue
+    return stored
+
+
 def warm_bar_cache() -> int:
     """Fetch each warm window once. Returns how many symbol-windows are ready."""
     if not bar_cache.enabled() or not bar_cache.warm_enabled():
@@ -94,6 +118,14 @@ def warm_bar_cache() -> int:
         print(f"📦 bar cache warm: skipped ({exc})", flush=True)
         return 0
     loader.configure_source_timeframe(WARM_SOURCE_TIMEFRAME)
+    try:
+        # Part of the cache key, so the count below has to ask about the same
+        # entries a later run would. Read once: an unreadable value here fails
+        # every window's fetch anyway, and this is the cheaper place to say so.
+        feed = configured_feed_name()
+    except Exception as exc:  # noqa: BLE001 - a cold cache is the status quo
+        print(f"📦 bar cache warm: skipped ({exc})", flush=True)
+        return 0
     warmed = 0
     for symbols, start, end in warm_windows():
         try:
@@ -104,6 +136,21 @@ def warm_bar_cache() -> int:
                 flush=True,
             )
             continue
-        warmed += len(frames)
+        # Count what is STORED, not what came back. `fetch_bars` returns its
+        # frames whether or not `write_many` accepted a byte of them -- the
+        # int it returns is discarded at the call site -- so on an account
+        # with no SIP entitlement every window falls back to IEX, every write
+        # is refused, three billable calls are made per deploy forever, and
+        # the line below used to report a full warm. "Ran and cached nothing"
+        # must not print the sentence that means it worked.
+        stored = _entries_on_disk(symbols, start=start, end=end, feed=feed)
+        if frames and not stored:
+            print(
+                f"📦 bar cache warm: {start}..{end} fetched {len(frames)} "
+                "symbols and stored none -- see the refusal above; this "
+                "window will be re-fetched on every deploy until it is fixed",
+                flush=True,
+            )
+        warmed += stored
     print(f"📦 bar cache warm: {warmed} symbol-windows ready", flush=True)
     return warmed

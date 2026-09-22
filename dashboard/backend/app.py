@@ -245,7 +245,11 @@ async def startup_event():
 
             warm_bar_cache()
         except Exception as e:  # noqa: BLE001 - a cold cache is the status quo
-            print(f"⚠️ Bar cache warm error: {e}")
+            # "bar cache warm:", lowercase, like every other line this
+            # feature prints: the live-call detector greps that exact string
+            # to prove the suite makes no billable Alpaca calls, and a line
+            # it does not match is a proof this handler can blind.
+            print(f"⚠️ bar cache warm: error: {e}")
 
     threading.Thread(target=warm_bar_cache_background, daemon=True).start()
 
