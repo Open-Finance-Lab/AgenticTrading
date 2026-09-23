@@ -9,6 +9,13 @@ Run a backtest in the dashboard
 3. In the dialog set the **Period** and **Asset Universe**, then click **Run Backtest**. **Allocated Capital** is shown read-only — it is a saved setting on the agent; **Edit in Configure** opens the editor to change it.
 4. You stay on **My Agents**. The agent's card switches to a live ``Backtesting…`` state with an elapsed timer, and flips to the finished result when the run ends.
 
+A run does not start pricing hours the moment you click. The card names the
+stage it is in while it gets there — ``Loading market data``, then
+``Calculating indicators``, then ``Waiting on first decision`` — and switches
+to a bar count and a percentage (``0/49``, then ``12/49`` and ``35%``) once the
+hour-by-hour loop is running, ending on ``Saving results``. A card resting on
+one of those opening stages is working, not stuck.
+
 Open the **Backtest** tab for the full run — **Trading Performance** charts the
 agent against buy-and-hold and DJIA, next to the trades and the hour-by-hour
 decision log.
