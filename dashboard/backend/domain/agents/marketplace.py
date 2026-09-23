@@ -19,21 +19,46 @@ _MARKETPLACE_PATH = CONFIG_DIR / "marketplace.json"
 
 # Community supermarket rows. Declared order is display order: LLMs first,
 # then Agents. Unknown / omitted values fall through ``_normalize_shelf``.
-MARKETPLACE_SHELVES = ("llms", "open")
+MARKETPLACE_SHELVES = ("llms", "open", "research")
 
 
 def _normalize_shelf(raw: Dict[str, Any]) -> str:
-    """Return ``llms`` or ``open``.
+    """Return ``llms``, ``open`` or ``research``.
 
     Explicit ``shelf`` on the catalog row wins. Otherwise a non-pipeline
     runtime (today: AI Hedge Fund) is an open agent, so a future hosted
     project does not have to remember the field to land on the right row.
+    Research agents (design N2/PR2) are always explicit — they are external
+    services, not runtimes this process hosts.
     """
     explicit = str(raw.get("shelf") or "").strip().lower()
     if explicit in MARKETPLACE_SHELVES:
         return explicit
     runtime_type = str(raw.get("runtime_type") or "pipeline")
     return "open" if runtime_type != "pipeline" else "llms"
+
+
+def shelf_is_research(raw: Dict[str, Any]) -> bool:
+    """True when a catalog row is a research-agent service template."""
+    return _normalize_shelf(raw) == "research"
+
+
+def research_service_config(raw: Dict[str, Any]) -> Dict[str, str]:
+    """Resolve the service base URL for a research template row.
+
+    The URL comes from the environment named by ``service_base_url_env``
+    (deployment-owned) with the catalog's ``service_base_url_default`` as the
+    local-dev fallback — same pattern as every other credential in the app.
+    """
+    import os
+
+    research = raw.get("research") or {}
+    env_name = str(research.get("service_base_url_env") or "").strip()
+    base = os.getenv(env_name, "") if env_name else ""
+    return {
+        "base_url": (base or str(research.get("service_base_url_default") or "")).rstrip("/"),
+        "agent_id": str(research.get("agent_id") or ""),
+    }
 
 
 def _public_template(raw: Dict[str, Any]) -> Dict[str, Any]:
@@ -73,6 +98,19 @@ def _public_template(raw: Dict[str, Any]) -> Dict[str, Any]:
     }
     if repo_url.startswith(("https://github.com/", "http://github.com/")):
         public["repo_url"] = repo_url
+    # Research rows (N2/PR2) project their service pointer and delivery facts
+    # instead of runtime/step fields, which mean nothing for an external
+    # Deep Research service.
+    research = raw.get("research")
+    if shelf_is_research(raw):
+        public["mode"] = "research"
+        public["model_name"] = raw.get("model_name") or "deep-research"
+        public["research"] = {
+            "agent_id": research.get("agent_id"),
+            "estimated_runtime_seconds": int(research.get("estimated_runtime_seconds") or 300),
+            "max_runtime_seconds": int(research.get("max_runtime_seconds") or 1800),
+            "output_formats": list(research.get("output_formats") or []),
+        }
     return public
 
 

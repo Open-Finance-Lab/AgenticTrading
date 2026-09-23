@@ -1031,6 +1031,22 @@
                         <div id="agentsGridFooterOpen" class="agents-grid-footer" hidden></div>
                         <p id="agentsEmptyOpen" class="control-helper" hidden>No open agents yet. Add a ready-made strategy like AI Hedge Fund from Community.</p>
                     </section>
+
+                    <section class="agents-category" data-category="research">
+                        <div class="agents-category-head">
+                            <div class="agents-category-heading">
+                                <span class="agents-category-icon" aria-hidden="true">
+                                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8Z"/><path d="M14 2v6h6"/><path d="M16 13H8"/><path d="M16 17H8"/><path d="M10 9H8"/></svg>
+                                </span>
+                                <h3 class="agents-category-title">Research Agents</h3>
+                                <span id="agentsCountResearch" class="agents-category-count" hidden></span>
+                            </div>
+                            <p class="agents-category-sub">Deep Research agents that produce analyst reports. Add them from Community, fill in a mandate, and get a downloadable report.</p>
+                        </div>
+                        <div id="agentsGridResearch" class="agents-grid"></div>
+                        <p id="agentsEmptyResearch" class="control-helper" hidden>No research agents yet. Add one from Community.</p>
+                    </section>
+
                     <!-- Locked shelves. Crypto is a display-only price ticker
                          (quotes.py, never wired to the engine) and futures exist
                          nowhere in the repo, so these rows are inert on purpose:
@@ -1766,6 +1782,43 @@
 
     <!-- Community -- Agent Supermarket is its first section, not the whole page:
          the nav button says "Community", so the page has to say it too. -->
+    
+    <!-- Research workbench (design N2/PR2): the "point open" surface for a
+         research agent cloned from Community. A JS-toggled view, not a nav
+         page — it always opens from a My Agents card, so Back returns there. -->
+    <div id="researchWorkbenchView" class="page-view research-workbench-view" style="display: none;">
+        <div class="research-workbench">
+            <button id="researchBackBtn" class="research-back-btn" type="button">← Back to My Agents</button>
+            <div class="research-agent-head">
+                <h2 id="researchAgentName">—</h2>
+                <p id="researchAgentDesc" class="research-agent-desc"></p>
+                <p id="researchAgentMeta" class="research-agent-meta"></p>
+            </div>
+            <div class="research-columns">
+                <section class="research-form-card">
+                    <h3>New research run</h3>
+                    <form id="researchRunForm">
+                        <div id="researchFormFields"></div>
+                        <label class="research-email-row"><input type="checkbox" id="researchEmailMe" checked> Email me when the report is ready</label>
+                        <p id="researchFormError" class="research-error" hidden></p>
+                        <button id="researchSubmitBtn" class="auth-btn auth-btn-primary" type="submit">Start research</button>
+                    </form>
+                </section>
+                <section class="research-side">
+                    <h3>Runs</h3>
+                    <div id="researchRunsList" class="research-runs-list"><p class="control-helper">Loading…</p></div>
+                </section>
+            </div>
+            <section id="researchResultArea" class="research-result" hidden>
+                <div class="research-result-head">
+                    <h3>Report</h3>
+                    <div id="researchDownloadBtns" class="research-download-btns"></div>
+                </div>
+                <article id="researchReportBody" class="research-report-body"></article>
+            </section>
+        </div>
+    </div>
+
     <div id="communityView" class="page-view community-view" style="display: none;">
         <div class="page-header">
             <div>

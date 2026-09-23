@@ -54,6 +54,8 @@ def test_every_catalog_model_matches_a_vendor_prefix():
     "AI-powered" with no chip and no badge, which is otherwise invisible."""
     prefixes = [row[1] for row in _vendor_rows()]
     for template in _CATALOG:
+        if template.get("shelf") == "research":
+            continue  # external Deep Research service (N2/PR2): no ATL-owned model
         model = template["model_name"].lower()
         assert any(model.startswith(p) for p in prefixes), (
             f"{template['template_id']} runs {model!r}, which matches no MODEL_VENDORS prefix"

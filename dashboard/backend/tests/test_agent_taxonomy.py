@@ -124,6 +124,12 @@ def test_no_template_is_left_on_the_retired_prompting_llms_slug():
     import dashboard.backend.domain.agents.marketplace as marketplace_mod
 
     marketplace_mod.reload_marketplace_catalog()
-    slugs = {t.get("category") for t in marketplace_mod.list_marketplace_templates()}
+    # Research rows (N2/PR2) carry no category: they are not market-trading
+    # templates, so the taxonomy guard scopes to the trading shelves only.
+    slugs = {
+        t.get("category")
+        for t in marketplace_mod.list_marketplace_templates()
+        if t.get("shelf") != "research"
+    }
     assert "prompting_llms" not in slugs
     assert slugs <= AGENT_CATEGORIES

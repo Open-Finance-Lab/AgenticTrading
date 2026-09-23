@@ -850,7 +850,8 @@ def test_marketplace_listing_is_ordered_by_shelf_not_by_slug():
     assert llms, "the LLM shelf is empty"
     assert opens, "the Agents shelf is empty"
     assert templates[0]["shelf"] == "llms"
-    assert templates[-1]["shelf"] == "open"
+    # The research shelf (N2/PR2) is declared after the two trading shelves.
+    assert templates[-1]["shelf"] == "research"
     assert [t["name"] for t in opens][0] == "AI Hedge Fund"
     assert {t["template_id"] for t in opens} >= {
         "ai-hedge-fund",

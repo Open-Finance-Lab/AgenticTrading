@@ -13749,3 +13749,46 @@ table.sr-only {
         padding: 14px 16px;
     }
 }
+
+/* ===== Research agents (design N2/PR2) ===== */
+.research-card-facts{display:flex;flex-wrap:wrap;gap:8px 18px;margin:10px 0 0;color:var(--text-muted, #94a3b8);font-size:12.5px}
+.research-back-btn{margin-bottom:14px}
+.research-agent-head h2{margin-bottom:6px}
+.research-agent-desc,.research-agent-meta{margin:0 0 4px;color:var(--text-muted, #94a3b8)}
+.research-columns{display:grid;grid-template-columns:minmax(0,1.2fr) minmax(240px,0.8fr);gap:26px;margin-top:18px}
+.research-form-card,.research-side{background:rgba(15,27,55,.5);border:1px solid rgba(148,163,184,.16);border-radius:12px;padding:20px}
+.research-form-card h3,.research-side h3{margin:0 0 14px;font-size:15px}
+.research-field{display:grid;gap:6px;margin-bottom:14px}
+.research-field span{font-size:12.5px;color:var(--text-muted, #94a3b8)}
+.research-field input,.research-field textarea,.research-field select{width:100%;padding:9px 11px;border-radius:8px;border:1px solid rgba(148,163,184,.28);background:rgba(2,8,23,.45);color:inherit;font:inherit}
+.research-field textarea{resize:vertical}
+.research-field-desc{font-size:11px;opacity:.65}
+.research-required{color:#f08080}
+.research-email-row{display:flex;align-items:center;gap:8px;margin:4px 0 14px;font-size:13px;color:var(--text-muted, #94a3b8)}
+.research-error{color:#f08080;font-size:12.5px;margin:0 0 10px}
+.research-runs-list{display:grid;gap:8px}
+.research-run-row{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:9px 12px;border:1px solid rgba(148,163,184,.14);border-radius:8px;cursor:pointer;font-size:12.5px}
+.research-run-row:hover{border-color:rgba(103,232,249,.4)}
+.research-run-status.is-completed{color:#42cc8b}
+.research-run-status.is-running,.research-run-status.is-queued{color:#e6b75c}
+.research-run-status.is-failed{color:#f08080}
+.research-run-date{opacity:.6;font-variant-numeric:tabular-nums}
+.research-result{margin-top:26px}
+.research-result-head{display:flex;align-items:center;justify-content:space-between;gap:16px;margin-bottom:12px}
+.research-download-btns{display:flex;gap:8px;flex-wrap:wrap}
+.research-download-btns .auth-btn{text-decoration:none;display:inline-flex;align-items:center}
+.research-report-body{background:rgba(15,27,55,.5);border:1px solid rgba(148,163,184,.16);border-radius:12px;padding:26px 30px;line-height:1.65}
+.research-report-body h1,.research-report-body h2,.research-report-body h3,.research-report-body h4{margin:1.1em 0 .4em;line-height:1.25}
+.research-report-body h1{font-size:24px}.research-report-body h2{font-size:19px}.research-report-body h3{font-size:16px}
+.research-report-body table{width:100%;border-collapse:collapse;margin:12px 0;font-size:13px}
+.research-report-body th,.research-report-body td{border:1px solid rgba(148,163,184,.22);padding:7px 10px;text-align:left}
+.research-report-body code{background:rgba(2,8,23,.6);padding:2px 6px;border-radius:4px;font-size:12.5px}
+.research-report-body blockquote{margin:10px 0;padding:6px 14px;border-left:3px solid rgba(103,232,249,.5);opacity:.85}
+.research-report-body a{color:#67e8f9}
+.research-agent-card{cursor:default;display:grid;gap:8px}
+.research-agent-card-head{display:flex;align-items:center;justify-content:space-between;gap:10px}
+.research-agent-card-head h4{margin:0;font-size:15px}
+.research-agent-card-desc{margin:0;font-size:12.5px;color:var(--text-muted, #94a3b8)}
+.research-agent-card-meta{margin:0;font-size:11.5px;opacity:.7}
+.research-open-btn{margin-top:4px}
+@media(max-width:900px){.research-columns{grid-template-columns:1fr}}

@@ -47,6 +47,8 @@ _LEADERBOARD = json.loads(
 def test_every_template_runs_a_supported_or_hosted_model(template):
     if template.get("runtime_type"):
         return  # hosted runtime: its model is not user-selectable
+    if template.get("shelf") == "research":
+        return  # external Deep Research service (N2/PR2): no ATL-owned model
     assert template["model_name"] in (_SUPPORTED_SLUGS | _LEADERBOARD_ONLY_SLUGS), (
         f"{template['template_id']} runs {template['model_name']!r}, "
         "which is not in SUPPORTED_MODELS or the leaderboard"
@@ -151,7 +153,11 @@ def test_catalog_rows_declare_a_supermarket_shelf():
 
 def test_catalog_covers_every_pickable_vendor():
     """The facet is decorative if most of its chips are empty."""
-    vendors = {t["model_name"].split("/", 1)[0] for t in _CATALOG}
+    vendors = {
+        t["model_name"].split("/", 1)[0]
+        for t in _CATALOG
+        if t.get("shelf") != "research"
+    }
     assert {"anthropic", "openai", "google", "deepseek", "qwen"} <= vendors
 
 
@@ -160,4 +166,6 @@ def test_catalog_includes_both_markets():
     Agents shelf, so the China A-Share chip ships again without a hardcoded
     chip list.
     """
-    assert {t.get("category") for t in _CATALOG} == {"us_stocks", "cn_ashares"}
+    assert {
+        t.get("category") for t in _CATALOG if t.get("shelf") != "research"
+    } == {"us_stocks", "cn_ashares"}
