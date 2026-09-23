@@ -12,7 +12,10 @@ from typing import Any, Dict, List, Optional
 import pandas as pd
 import pytz
 
-from dashboard.backend.infrastructure.market_data.sessions import is_in_session
+from dashboard.backend.infrastructure.market_data.sessions import (
+    frames_open_stamped_minutes,
+    is_in_session,
+)
 
 _ET = pytz.timezone("US/Eastern")
 
@@ -62,20 +65,36 @@ def timestamps_in_reference(
     return [ts for ts in timestamps if ref_start <= timestamp_date(ts) < contest]
 
 
-def filter_market_hours(timestamps: List[Any]) -> List[Any]:
-    """Keep only regular US market-hours timestamps (9:30–16:00 ET)."""
+def filter_market_hours(
+    timestamps: List[Any], *, open_stamped_minutes: Optional[int] = None
+) -> List[Any]:
+    """Keep only regular US market-hours timestamps (9:30–16:00 ET).
+
+    ``open_stamped_minutes`` is the bars' span when they are stamped at their
+    open, as the board's raw Alpaca hourly bars are: those keep 10:00 through
+    15:00, the bars lying wholly inside the session.
+    """
     return [
         ts for ts in timestamps
-        if is_in_session(ts, market="US", timezone=_ET.zone)
+        if is_in_session(
+            ts,
+            market="US",
+            timezone=_ET.zone,
+            open_stamped_minutes=open_stamped_minutes,
+        )
     ]
 
 
 def market_timestamps(bars_subset: Dict[str, pd.DataFrame]) -> List[Any]:
-    """Sorted, market-hours-only union of timestamps across the given symbols."""
+    """Sorted, market-hours-only union of timestamps across the given symbols,
+    filtered under the stamp convention the bars' loader recorded."""
     all_ts = set()
     for df in bars_subset.values():
         all_ts.update(df.index)
-    return filter_market_hours(sorted(all_ts))
+    return filter_market_hours(
+        sorted(all_ts),
+        open_stamped_minutes=frames_open_stamped_minutes(bars_subset),
+    )
 
 
 def build_price_cache(

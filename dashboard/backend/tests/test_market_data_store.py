@@ -11,6 +11,9 @@ import pytest
 
 from dashboard.backend.domain.backtesting import market_data_store as mds
 from dashboard.backend.infrastructure.market_data.frequency import FrequencyConfigError
+from dashboard.backend.infrastructure.market_data.sessions import (
+    FRAME_ATTR_OPEN_STAMPED_MINUTES,
+)
 
 
 def _synth_bars(symbols=("AAPL", "MSFT"), start="2026-04-15", end="2026-04-16"):
@@ -480,6 +483,7 @@ def test_minute_dataset_exposes_dropped_bucket_quality():
             index=timestamps,
         )
     }
+    bars["AAPL"].attrs[FRAME_ATTR_OPEN_STAMPED_MINUTES] = 5
 
     class _MinuteLoader:
         source_timeframe = "60m"

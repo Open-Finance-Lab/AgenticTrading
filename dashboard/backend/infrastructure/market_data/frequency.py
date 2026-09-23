@@ -206,6 +206,12 @@ def build_verified_intraday_contract(
         {
             "aggregation": "session_anchored_completed_bars",
             "fill_policy": "next_source_bar_open",
+            # The session's last decision has no next source bar inside the
+            # session, so it fills at the close of the bar ending then instead
+            # of on an after-hours bar (``bar_aggregation.plan_execution_fills``).
+            # True of every contract built here: aggregation accepts only
+            # open-stamped source bars, the one kind that planner serves.
+            "session_close_fill": "last_source_bar_close",
             "verification_status": "verified",
         }
     )

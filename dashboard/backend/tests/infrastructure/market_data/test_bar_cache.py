@@ -215,8 +215,8 @@ def test_every_key_dimension_is_load_bearing(cache_dir, override):
 
 
 def test_symbols_are_keyed_individually_so_order_cannot_matter(cache_dir):
-    """Sidesteps market_data_store._dataset_key's order-sensitive
-    tuple(symbols): the same set in a different order is a hit here."""
+    """One entry per symbol, so the order a caller lists them in never
+    reaches a key: the same set in a different order is a hit here."""
     bar_cache.write_many(
         {"AAPL": _frame(), "MSFT": _frame(rows=4)}, last_fetch=LAST_FETCH, **KEY
     )

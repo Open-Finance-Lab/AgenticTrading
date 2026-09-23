@@ -1,17 +1,23 @@
 from datetime import datetime
 
 import pandas as pd
+import pytest
 import pytz
 
 from dashboard.backend.domain.backtesting.bar_aggregation import (
+    BarAggregationError,
     aggregate_bars,
     summarize_aggregation_quality,
+)
+from dashboard.backend.infrastructure.market_data.sessions import (
+    FRAME_ATTR_OPEN_STAMPED_MINUTES,
 )
 
 
 def _bars(timestamps):
+    """5m bars stamped at their open, as Alpaca's loader returns them."""
     prices = list(range(100, 100 + len(timestamps)))
-    return pd.DataFrame(
+    frame = pd.DataFrame(
         {
             "open": prices,
             "high": [price + 1 for price in prices],
@@ -22,6 +28,8 @@ def _bars(timestamps):
         },
         index=pd.DatetimeIndex(timestamps),
     )
+    frame.attrs[FRAME_ATTR_OPEN_STAMPED_MINUTES] = 5
+    return frame
 
 
 def test_us_bars_are_anchored_to_0930_and_labeled_at_bucket_end():
@@ -207,3 +215,39 @@ def test_quality_summary_counts_usable_and_rejected_buckets():
     assert summary["dropped_decision_bars"] == 1
     assert summary["missing_source_bars"] == 1
     assert summary["symbols"]["AAPL"]["dropped_decision_bars"] == 1
+
+
+def test_aggregation_refuses_bars_not_stamped_at_their_open():
+    """Bucketing reads a source stamp as its bar's open; a close-stamped (or
+    unlabelled) frame would land every bar one bucket late, silently."""
+    eastern = pytz.timezone("US/Eastern")
+    timestamps = pd.date_range(
+        eastern.localize(datetime(2026, 3, 2, 9, 30)),
+        eastern.localize(datetime(2026, 3, 2, 10, 25)),
+        freq="5min",
+    )
+    unlabelled = _bars(timestamps)
+    unlabelled.attrs.pop(FRAME_ATTR_OPEN_STAMPED_MINUTES)
+    wrong_span = _bars(timestamps)
+    wrong_span.attrs[FRAME_ATTR_OPEN_STAMPED_MINUTES] = 1
+    for frame in (unlabelled, wrong_span):
+        with pytest.raises(BarAggregationError, match="stamped at their open"):
+            aggregate_bars(frame, source_timeframe="5m", decision_timeframe="60m")
+
+
+def test_aggregated_bars_are_stamped_at_their_close():
+    """The source's open-stamp label must not ride along into the decision
+    bars: every session filter downstream would read 10:30 as 10:30-11:30."""
+    eastern = pytz.timezone("US/Eastern")
+    timestamps = pd.date_range(
+        eastern.localize(datetime(2026, 3, 2, 9, 30)),
+        eastern.localize(datetime(2026, 3, 2, 10, 25)),
+        freq="5min",
+    )
+    source = _bars(timestamps)
+    source.attrs["alpaca_feed"] = "sip"
+
+    result = aggregate_bars(source, source_timeframe="5m", decision_timeframe="60m")
+
+    assert FRAME_ATTR_OPEN_STAMPED_MINUTES not in result.attrs
+    assert result.attrs["alpaca_feed"] == "sip"

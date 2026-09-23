@@ -15,7 +15,8 @@ can import it: domain, the backend-root baseline generator and ``api/`` alike.
 
 from __future__ import annotations
 
-from datetime import datetime, time
+from datetime import datetime, time, timedelta
+from typing import Any, Mapping
 
 import pytz
 
@@ -65,8 +66,11 @@ def market_for_timezone(timezone: str) -> str:
 def time_in_session(local_time: time, market: object) -> bool:
     """Whether a wall-clock time in the market's own zone is in session.
 
-    Minute resolution, inclusive at both ends: a decision bar is stamped at the
-    END of its bucket, so the last US bucket is stamped 16:00 and must survive.
+    Minute resolution, inclusive at both ends. This is the rule for a bar
+    stamped at the END of its bucket -- an aggregated decision bar, or an
+    iFinD bar -- so the last US bucket is stamped 16:00 and must survive. A bar
+    stamped at its OPEN (every Alpaca bar) is a different question; pass
+    ``open_stamped_minutes`` to :func:`is_in_session` for it.
     Seconds are dropped because every copy this replaced that the live US path
     ran on (`hour == 16 and minute == 0`) admitted the whole 16:00 minute; bars
     are minute-aligned, so nothing real sits inside that minute either way.
@@ -75,17 +79,86 @@ def time_in_session(local_time: time, market: object) -> bool:
     return any(start <= minute <= end for start, end in session_windows(market))
 
 
-def is_in_session(timestamp: datetime, *, market: object, timezone: str) -> bool:
-    """:func:`time_in_session` for a timestamp in any zone.
+#: ``DataFrame.attrs`` key a loader sets on every frame whose bars it stamps at
+#: their OPEN, holding the bar span in minutes. Absent means stamped at the
+#: close -- an aggregated decision bar, an iFinD bar, a legacy double. It lives
+#: on the frame because the convention is a fact about the data, not about
+#: whoever is filtering it: passing it by hand let the protocol baseline worker,
+#: which builds its backtester without loading anything, filter aggregated
+#: close-stamped bars under the raw-bar rule and drop every 16:00 close.
+FRAME_ATTR_OPEN_STAMPED_MINUTES = "bar_open_stamped_minutes"
 
-    A naive timestamp is read as market-local time, matching
-    ``bar_aggregation._as_local_index``; ``astimezone`` on a naive pandas
-    ``Timestamp`` raises instead, which made the filter and the aggregation
-    disagree on exactly the data a local-time feed returns.
+
+def frames_open_stamped_minutes(frames: Mapping[str, Any]) -> int | None:
+    """The span the loader stamped on ``frames``, or ``None`` if their bars are
+    stamped at the close. Empty frames carry no bars and are ignored.
+
+    Raises ``ValueError`` on a mix: no one rule filters both conventions, and
+    choosing one would silently misfilter the other half of the universe.
     """
+    spans = {
+        frame.attrs.get(FRAME_ATTR_OPEN_STAMPED_MINUTES)
+        for frame in frames.values()
+        if len(frame)
+    }
+    if len(spans) > 1:
+        raise ValueError(
+            f"bars mix stamp conventions (open-stamped spans {sorted(spans, key=str)})"
+        )
+    return spans.pop() if spans else None
+
+
+def market_local(timestamp: datetime, timezone: str) -> datetime:
+    """``timestamp`` in the market's zone. A naive timestamp is read as
+    market-local time, matching ``bar_aggregation._as_local_index``;
+    ``astimezone`` on a naive pandas ``Timestamp`` raises instead, which made
+    the filter and the aggregation disagree on exactly the data a local-time
+    feed returns."""
     zone = pytz.timezone(timezone)
     if timestamp.tzinfo is None:
-        local = zone.localize(timestamp)
-    else:
-        local = timestamp.astimezone(zone)
-    return time_in_session(local.time(), market)
+        return zone.localize(timestamp)
+    return timestamp.astimezone(zone)
+
+
+def is_in_session(
+    timestamp: datetime,
+    *,
+    market: object,
+    timezone: str,
+    open_stamped_minutes: int | None = None,
+) -> bool:
+    """:func:`time_in_session` for a timestamp in any zone.
+
+    ``open_stamped_minutes`` says the timestamp is a bar's OPEN and the bar
+    spans that many minutes (read it off the frames with
+    :func:`frames_open_stamped_minutes`). Such a bar is in session only when it
+    lies wholly inside one: it opens at or after the session starts and closes
+    at or before it ends. Alpaca stamps bars at their open and serves extended
+    hours, so the close-stamp rule kept its 16:00 bar -- 16:00-16:05, or
+    16:00-17:00, after hours. Clock-aligned hourly bars straddle the 09:30
+    open, and that 09:00 bar is out too: its open, high, low and volume include
+    half an hour of pre-market trading, so admitting it would price the day's
+    first fill off a pre-market print.
+    """
+    local = market_local(timestamp, timezone)
+    if open_stamped_minutes is None:
+        return time_in_session(local.time(), market)
+    close = local + timedelta(minutes=open_stamped_minutes)
+    if close.date() != local.date():
+        return False
+    open_minute = local.time().replace(second=0, microsecond=0)
+    close_minute = close.time().replace(second=0, microsecond=0)
+    return any(
+        start <= open_minute and close_minute <= end
+        for start, end in session_windows(market)
+    )
+
+
+def is_session_close(timestamp: datetime, *, market: object, timezone: str) -> bool:
+    """Whether ``timestamp`` falls in the minute a session ends (16:00 ET,
+    11:30 and 15:00 CST): the stamp of a final bucket, which no in-session
+    source bar opens at."""
+    minute = market_local(timestamp, timezone).time().replace(
+        second=0, microsecond=0
+    )
+    return any(minute == end for _start, end in session_windows(market))

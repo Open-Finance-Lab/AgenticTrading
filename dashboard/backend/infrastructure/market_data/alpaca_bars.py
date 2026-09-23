@@ -27,8 +27,12 @@ import pandas as pd
 from dashboard.backend.paths import CREDENTIALS_DIR
 from dashboard.backend.infrastructure.market_data.frequency import (
     normalize_bar_timeframe,
+    timeframe_minutes,
 )
 from dashboard.backend.infrastructure.market_data import bar_cache
+from dashboard.backend.infrastructure.market_data.sessions import (
+    FRAME_ATTR_OPEN_STAMPED_MINUTES,
+)
 
 # Basic plan may query SIP historical bars, but not the most recent window.
 # Docs: https://docs.alpaca.markets/docs/market-data-faq
@@ -532,7 +536,23 @@ class AlpacaDataLoader:
         timeframe, same feed) finds five of its thirty names on disk. A
         per-request key would miss that entirely, because the symbol lists
         differ.
+
+        Every returned frame is stamped with
+        ``sessions.FRAME_ATTR_OPEN_STAMPED_MINUTES``: Alpaca stamps a bar at its
+        OPEN, and the session filters downstream read that off the frame rather
+        than off whoever holds it. Stamped here, above the cache, so a hit
+        carries it exactly as a live fetch does.
         """
+        frames = self._fetch_bars_resolved(symbols, start, end)
+        span = timeframe_minutes(self.source_timeframe)
+        for frame in frames.values():
+            frame.attrs[FRAME_ATTR_OPEN_STAMPED_MINUTES] = span
+        return frames
+
+    def _fetch_bars_resolved(
+        self, symbols: List[str], start: str, end: str
+    ) -> Dict[str, pd.DataFrame]:
+        """:meth:`fetch_bars` before stamping: cache hits plus a live fetch."""
         symbols = list(symbols)
         # Hoisted above the batch recursion. With no client every chunk
         # returned {} anyway, so the result is identical; the warning now

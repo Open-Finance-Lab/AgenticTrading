@@ -12,6 +12,9 @@ from dashboard.backend.infrastructure.market_data.alpaca_bars import (
     FRAME_ATTR_SIP_FALLBACK,
     MarketDataUnavailableError,
 )
+from dashboard.backend.infrastructure.market_data.sessions import (
+    FRAME_ATTR_OPEN_STAMPED_MINUTES,
+)
 
 
 class _MinuteLoader:
@@ -72,6 +75,7 @@ def _make_minute_bars():
         index=pd.DatetimeIndex(timestamps),
     )
     frame.attrs[FRAME_ATTR_FEED] = "sip"
+    frame.attrs[FRAME_ATTR_OPEN_STAMPED_MINUTES] = 5
     frame.attrs[FRAME_ATTR_SIP_FALLBACK] = False
     frame.attrs[FRAME_ATTR_END_CLAMPED] = True
     return {"AAPL": frame}
@@ -115,9 +119,10 @@ def test_minute_source_keeps_hourly_decisions_and_5m_execution(monkeypatch):
     backtester.calculate_indicators()
     run_id, equity_curve = backtester.run_agent_backtest()
 
-    # Seven completed hourly buckets exist per day, but the 16:00 bucket has
-    # no next source bar and is intentionally not an executable decision.
-    assert len(decisions) == 60
+    # Seven completed hourly buckets per day, all executable: the 16:00
+    # bucket has no next in-session source bar, so it fills at the 15:55
+    # bar's close rather than being dropped.
+    assert len(decisions) == 70
     assert len(equity_curve) == 780
     assert run_id.startswith("agent_")
 
@@ -129,6 +134,7 @@ def test_minute_source_keeps_hourly_decisions_and_5m_execution(monkeypatch):
     assert frequency["source_timeframe"] == "5m"
     assert frequency["decision_frequency"] == "1h"
     assert frequency["fill_policy"] == "next_source_bar_open"
+    assert frequency["session_close_fill"] == "last_source_bar_close"
     assert frequency["verification_status"] == "verified"
     quality = fake_db.runs[0]["metadata"]["market_data_quality"]
     assert quality["policy"] == "drop_incomplete_decision_bars"

@@ -17,7 +17,6 @@ be extracted in a later phase.
 import inspect
 import json
 import uuid
-from bisect import bisect_left
 from datetime import date, datetime
 from math import ceil
 # `from time import ...`, not `import time`. This module used to import
@@ -69,7 +68,9 @@ from dashboard.backend.domain.backtesting.currency import (
 )
 from dashboard.backend.domain.backtesting.features import TechnicalIndicators
 from dashboard.backend.domain.backtesting.bar_aggregation import (
+    ExecutionFill,
     aggregate_bars_by_symbol,
+    plan_execution_fills,
     summarize_aggregation_quality,
 )
 from dashboard.backend.domain.backtesting.metrics import (
@@ -120,7 +121,10 @@ from dashboard.backend.infrastructure.market_data.frequency import (
     timeframe_minutes,
     verify_source_timeframe,
 )
-from dashboard.backend.infrastructure.market_data.sessions import is_in_session
+from dashboard.backend.infrastructure.market_data.sessions import (
+    frames_open_stamped_minutes,
+    is_in_session,
+)
 from dashboard.backend.infrastructure.market_data.profiles import (
     IFIND_ASHARE,
     LLM_DECISION_SOURCE,
@@ -1623,33 +1627,62 @@ class HourlyBacktester:
             return self._require_currency_context().to_reporting(manager.cash, timestamp)
         return float(manager.cash)
 
-    def _market_hours_only(self, timestamps):
+    def _market_hours_only(self, timestamps, bars):
         """Filter timestamps using the selected market's local sessions.
 
         Through ``market_data.sessions``, the same owner the dataset store and
         the aggregation use, so the dashboard and protocol paths cannot count
-        different steps for one window.
+        different steps for one window. The stamp convention is read off
+        ``bars``, the frames the timestamps came from: raw Alpaca bars are
+        stamped at their open, aggregated decision bars at their close.
         """
         profile = self._effective_profile()
+        open_stamped_minutes = frames_open_stamped_minutes(bars)
         return [
             timestamp
             for timestamp in timestamps
             if is_in_session(
-                timestamp, market=profile.market, timezone=profile.timezone
+                timestamp,
+                market=profile.market,
+                timezone=profile.timezone,
+                open_stamped_minutes=open_stamped_minutes,
             )
         ]
 
-    def _market_day_key(self, timestamp) -> str:
-        """Return a trading-day key in the market's local timezone."""
-        import pytz
+    def _plan_executions(self, decision_timestamps):
+        """``(decisions, valuation bars, {decision: ExecutionFill})`` for the
+        run loop.
 
-        market_tz = pytz.timezone(self._effective_profile().timezone)
-        local = (
-            market_tz.localize(timestamp)
-            if timestamp.tzinfo is None
-            else timestamp.astimezone(market_tz)
+        Hourly mode fills and values on the decision bar itself, priced off its
+        market data (the bar's close). Minute mode values on every in-session
+        source bar and fills through ``plan_execution_fills``; a decision it
+        cannot fill is not a step.
+        """
+        if not self.intraday_mode:
+            return (
+                list(decision_timestamps),
+                list(decision_timestamps),
+                {
+                    timestamp: ExecutionFill(timestamp, "close", timestamp)
+                    for timestamp in decision_timestamps
+                },
+            )
+        raw_timestamps = self._market_hours_only(
+            self._timestamps_for_data(self.source_data), self.source_data
         )
-        return local.date().isoformat()
+        profile = self._effective_profile()
+        fills = plan_execution_fills(
+            decision_timestamps,
+            raw_timestamps,
+            source_minutes=timeframe_minutes(self.source_timeframe),
+            market=profile.market,
+            timezone=profile.timezone,
+        )
+        return (
+            [timestamp for timestamp in decision_timestamps if timestamp in fills],
+            raw_timestamps,
+            fills,
+        )
 
     def _run_daily_post_trade(
         self,
@@ -1777,7 +1810,7 @@ class HourlyBacktester:
         
         all_timestamps = filtered
         
-        all_timestamps = self._market_hours_only(all_timestamps)
+        all_timestamps = self._market_hours_only(all_timestamps, self.all_data)
         prior_market_dates = (
             _prior_market_date_by_decision_date(all_timestamps)
             if self.runtime_type == AI_HEDGE_FUND_RUNTIME_TYPE
@@ -1795,40 +1828,9 @@ class HourlyBacktester:
                 f"failed step(s) before aborting\n"
             )
 
-        raw_timestamps = all_timestamps
-        execution_plan = {timestamp: timestamp for timestamp in all_timestamps}
-        if self.intraday_mode:
-            raw_timestamps = self._market_hours_only(
-                self._timestamps_for_data(self.source_data)
-            )
-            raw_by_market_day: Dict[str, List[Any]] = {}
-            for source_timestamp in raw_timestamps:
-                raw_by_market_day.setdefault(
-                    self._market_day_key(source_timestamp), []
-                ).append(source_timestamp)
-            execution_plan = {}
-            for timestamp in all_timestamps:
-                same_day_sources = raw_by_market_day.get(
-                    self._market_day_key(timestamp), []
-                )
-                source_index = bisect_left(same_day_sources, timestamp)
-                next_source_timestamp = (
-                    same_day_sources[source_index]
-                    if (
-                        source_index < len(same_day_sources)
-                        and same_day_sources[source_index] == timestamp
-                    )
-                    else None
-                )
-                # The final partial session bucket (e.g. 15:30–16:00 ET) has
-                # no following source bar at 16:00 and cannot be executed.
-                if next_source_timestamp is not None:
-                    execution_plan[timestamp] = next_source_timestamp
-            all_timestamps = [
-                timestamp
-                for timestamp in all_timestamps
-                if timestamp in execution_plan
-            ]
+        all_timestamps, raw_timestamps, execution_plan = self._plan_executions(
+            all_timestamps
+        )
 
         print(
             f"   Trading {len(all_timestamps)} hourly decision bars during "
@@ -1970,7 +1972,10 @@ class HourlyBacktester:
             # In minute mode, execute at the next source bar's open. The
             # decision bar closes at ``timestamp``; the source bar opening at
             # that same instant is the first non-look-ahead fill opportunity.
-            execution_timestamp = execution_plan[timestamp]
+            # A session's final bucket fills at the close of the source bar
+            # ending then instead (``plan_execution_fills``).
+            fill = execution_plan[timestamp]
+            execution_timestamp = fill.bar
             execution_market_data = market_data
             execution_fallback_prices = {
                 symbol: values[execution_timestamp]
@@ -1985,9 +1990,9 @@ class HourlyBacktester:
                     execution_timestamp,
                 )
                 execution_prices = {
-                    symbol: row["open"]
+                    symbol: row[fill.price_field]
                     for symbol, row in execution_market_data.items()
-                    if "open" in row
+                    if fill.price_field in row
                 }
 
             # Execute trades (only if real data available)
@@ -1995,7 +2000,7 @@ class HourlyBacktester:
             manager.execute_actions(
                 decision["actions"],
                 execution_market_data,
-                execution_timestamp,
+                fill.filled_at,
                 fallback_prices=execution_fallback_prices,
                 execution_prices=execution_prices,
             )
