@@ -91,9 +91,11 @@ def _default_rollup() -> Callable[..., Any]:
 
 
 def _default_retention():
-    from .retention import analytics_retention_coordinator
+    # One literal mention of the coordinator: the source-pin in
+    # test_daily_job.py counts it.
+    from .retention import analytics_retention_coordinator as _coordinator
 
-    return analytics_retention_coordinator
+    return _coordinator
 
 
 def _end_of_day(day: date) -> datetime:

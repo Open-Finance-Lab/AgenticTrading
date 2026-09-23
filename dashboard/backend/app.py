@@ -314,18 +314,6 @@ async def startup_event():
     except Exception as e:
         print(f"⚠️ legacy session sweep registration error: {e}")
 
-    try:
-        from dashboard.backend.domain.analytics.retention import (
-            analytics_retention_coordinator,
-        )
-        from dashboard.backend.domain.runs.service import register_reaper_sweep
-        register_reaper_sweep(analytics_retention_coordinator.run_if_due)
-        print("🧹 Analytics retention sweep registered with the reaper")
-    except Exception as e:
-        print(
-            "WARNING: analytics.retention_registration_failed "
-            f"category={type(e).__name__}"
-        )
 
     try:
         from dashboard.backend.domain.analytics.maintenance import (
@@ -359,6 +347,25 @@ async def startup_event():
             "WARNING: analytics.snapshot_projection_disable_failed "
             f"category={type(e).__name__}"
         )
+
+    try:
+        # Admin layer redesign PR A (design D23, SS6.9): the daily-facts job
+        # runs on its own thread, not as a reaper sweep -- a whole-population
+        # batch across three databases on the heartbeat thread would let a
+        # slow analytics night mark live runs as orphaned. The worker also
+        # owns rollup_day and the retention coordinator now, and runs the
+        # idempotent user_activity seed + history copy once before ticking.
+        from dashboard.backend.domain.analytics.daily_job import (
+            start_daily_facts_worker,
+        )
+        from dashboard.backend.domain.analytics.facts_migration import (
+            run_startup_migrations,
+        )
+        run_startup_migrations()
+        start_daily_facts_worker()
+        print("📊 Analytics daily-facts worker started")
+    except Exception as e:
+        print(f"⚠️ Analytics daily-facts worker start error: {e}")
 
     try:
         from dashboard.backend.domain.runs.service import start_reaper
