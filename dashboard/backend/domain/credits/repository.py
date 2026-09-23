@@ -5,9 +5,9 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -270,6 +270,117 @@ CREATE TABLE IF NOT EXISTS credit_promotion_grants (
 
 def _dict(row: sqlite3.Row | None) -> dict[str, Any] | None:
     return dict(row) if row is not None else None
+
+
+def _utc_text(value: datetime, name: str) -> str:
+    """ISO-8601 UTC text, the format every ``created_at`` in this ledger uses."""
+    if value.tzinfo is None or value.utcoffset() is None:
+        raise ValueError(f"{name} must include a timezone")
+    return value.astimezone(timezone.utc).isoformat()
+
+
+def _day_bounds(day: date) -> tuple[str, str]:
+    start = datetime.combine(day, datetime.min.time(), tzinfo=timezone.utc)
+    return _utc_text(start, "day"), _utc_text(start + timedelta(days=1), "day")
+
+
+def _unique_user_ids(user_ids: Sequence[int]) -> list[int]:
+    if not isinstance(user_ids, (list, tuple)):
+        raise ValueError("user_ids must be a list or tuple")
+    return list(
+        dict.fromkeys(_positive_integer(user_id, "user_id") for user_id in user_ids)
+    )
+
+
+def _assemble_commercial_ledger(
+    ids: list[int], lifetime_rows, period_rows, usage_rows
+) -> dict[int, dict[str, int]]:
+    lifetime = {
+        int(row["user_id"]): (
+            int(row["purchased_micro"] or 0),
+            int(row["refunded_micro"] or 0),
+        )
+        for row in lifetime_rows
+    }
+    period = {
+        int(row["user_id"]): (
+            int(row["purchased_micro"] or 0),
+            int(row["refunded_micro"] or 0),
+            int(row["grant_activity_micro"] or 0),
+        )
+        for row in period_rows
+    }
+    usage = {int(row["user_id"]): int(row["consumed_micro"] or 0) for row in usage_rows}
+    result: dict[int, dict[str, int]] = {}
+    for user_id in ids:
+        lifetime_purchased, lifetime_refunded = lifetime.get(user_id, (0, 0))
+        purchased, refunded, grant_activity = period.get(user_id, (0, 0, 0))
+        result[user_id] = {
+            "lifetime_purchased_micro": lifetime_purchased,
+            "lifetime_refunded_micro": lifetime_refunded,
+            "purchased_micro": purchased,
+            "refunded_micro": refunded,
+            "grant_activity_micro": grant_activity,
+            "consumed_micro": usage.get(user_id, 0),
+        }
+    return result
+
+
+def _assemble_ledger_day(usage_rows, lifetime_rows, purchase_rows) -> dict[int, dict[str, Any]]:
+    result: dict[int, dict[str, Any]] = {}
+
+    def entry(user_id: int) -> dict[str, Any]:
+        return result.setdefault(
+            user_id,
+            {
+                "own_spend_micro": 0,
+                "lifetime_net_purchased_micro": 0,
+                "last_activity_at": None,
+            },
+        )
+
+    def later(current: str | None, candidate: Any) -> str | None:
+        if candidate is None:
+            return current
+        text = str(candidate)
+        return text if current is None or text > current else current
+
+    for row in usage_rows:
+        record = entry(int(row["user_id"]))
+        record["own_spend_micro"] = max(0, int(row["consumed_micro"] or 0))
+        record["last_activity_at"] = later(record["last_activity_at"], row["last_usage_at"])
+    for row in lifetime_rows:
+        record = entry(int(row["user_id"]))
+        record["lifetime_net_purchased_micro"] = max(
+            0, int(row["purchased_micro"] or 0) - int(row["refunded_micro"] or 0)
+        )
+    for row in purchase_rows:
+        record = entry(int(row["user_id"]))
+        record["last_activity_at"] = later(
+            record["last_activity_at"], row["last_purchase_at"]
+        )
+    return result
+
+
+def _assemble_billing_states(account_rows, outstanding_rows) -> dict[int, dict[str, Any]]:
+    outstanding = {
+        int(row["user_id"]): int(row["outstanding_micro"] or 0) for row in outstanding_rows
+    }
+    result: dict[int, dict[str, Any]] = {}
+    for row in account_rows:
+        user_id = int(row["user_id"])
+        reason = row["restriction_reason"]
+        if row["status"] == "restricted" and reason not in {
+            "llm_overage",
+            "refund_reconciliation",
+        }:
+            reason = "refund_reconciliation"
+        result[user_id] = {
+            "account_status": row["status"],
+            "restriction_reason": reason,
+            "outstanding_credits_micro": outstanding.get(user_id, 0),
+        }
+    return result
 
 
 class CreditsStore:
@@ -1020,6 +1131,206 @@ class CreditsStore:
         with self._get_connection() as conn:
             rows = conn.execute("SELECT id FROM users ORDER BY id").fetchall()
         return [int(row["id"]) for row in rows]
+
+    def aggregate_commercial_ledger(
+        self,
+        user_ids: Sequence[int],
+        *,
+        start: datetime,
+        end: datetime,
+    ) -> dict[int, dict[str, int]]:
+        """Lifetime and windowed ledger totals for many users, three statements.
+
+        The exact SQL ``domain/analytics/value_repository.py::list_commercial_values``
+        ran against this store's connection until PR A; moved here so the
+        analytics package reads the ledger through the credits domain instead
+        of opening its connection (design SS6.14). The window is
+        ``[start, end)`` in ISO-8601 UTC text, the format ``created_at`` holds.
+        """
+        ids = _unique_user_ids(user_ids)
+        if not ids:
+            return {}
+        placeholders = ", ".join("?" for _ in ids)
+        window = [_utc_text(start, "start"), _utc_text(end, "end")]
+        with self._get_connection() as conn:
+            lifetime_rows = conn.execute(
+                f"""
+                SELECT user_id,
+                       COALESCE(SUM(CASE WHEN entry_type = 'purchase'
+                           THEN amount_micro ELSE 0 END), 0) AS purchased_micro,
+                       COALESCE(SUM(CASE WHEN entry_type = 'refund'
+                           THEN -amount_micro ELSE 0 END), 0) AS refunded_micro
+                FROM credit_ledger_entries
+                WHERE user_id IN ({placeholders})
+                  AND entry_type IN ('purchase', 'refund')
+                GROUP BY user_id
+                """,
+                ids,
+            ).fetchall()
+            period_rows = conn.execute(
+                f"""
+                SELECT user_id,
+                       COALESCE(SUM(CASE WHEN entry_type = 'purchase'
+                           THEN amount_micro ELSE 0 END), 0) AS purchased_micro,
+                       COALESCE(SUM(CASE WHEN entry_type = 'refund'
+                           THEN -amount_micro ELSE 0 END), 0) AS refunded_micro,
+                       COALESCE(SUM(CASE
+                           WHEN entry_type = 'admin_grant_assign' THEN amount_micro
+                           WHEN entry_type = 'admin_grant_reclaim' THEN -amount_micro
+                           ELSE 0 END), 0) AS grant_activity_micro
+                FROM credit_ledger_entries
+                WHERE user_id IN ({placeholders})
+                  AND created_at >= ?
+                  AND created_at < ?
+                GROUP BY user_id
+                """,
+                [*ids, *window],
+            ).fetchall()
+            usage_rows = conn.execute(
+                f"""
+                SELECT user_id,
+                       COALESCE(SUM(-amount_micro), 0) AS consumed_micro
+                FROM credit_llm_usage_entries
+                WHERE user_id IN ({placeholders})
+                  AND created_at >= ?
+                  AND created_at < ?
+                GROUP BY user_id
+                """,
+                [*ids, *window],
+            ).fetchall()
+        return _assemble_commercial_ledger(ids, lifetime_rows, period_rows, usage_rows)
+
+    def list_credit_activity_timestamps(
+        self,
+        user_ids: Sequence[int],
+        *,
+        start: datetime,
+        end: datetime,
+    ) -> dict[int, list[str]]:
+        """``created_at`` of every purchase and consumption inside ``[start, end)``.
+
+        Purchases and model consumption are the two ledger movements that count
+        as meaningful activity (design SS15.1); refunds and admin grants are
+        not the user's own action. Text, not datetimes: the caller parses.
+        """
+        ids = _unique_user_ids(user_ids)
+        result: dict[int, list[str]] = {user_id: [] for user_id in ids}
+        if not ids:
+            return result
+        placeholders = ", ".join("?" for _ in ids)
+        params = [*ids, _utc_text(start, "start"), _utc_text(end, "end")]
+        with self._get_connection() as conn:
+            purchase_rows = conn.execute(
+                f"""
+                SELECT user_id, created_at
+                FROM credit_ledger_entries
+                WHERE user_id IN ({placeholders})
+                  AND entry_type = 'purchase'
+                  AND created_at >= ?
+                  AND created_at < ?
+                """,
+                params,
+            ).fetchall()
+            usage_rows = conn.execute(
+                f"""
+                SELECT user_id, created_at
+                FROM credit_llm_usage_entries
+                WHERE user_id IN ({placeholders})
+                  AND created_at >= ?
+                  AND created_at < ?
+                """,
+                params,
+            ).fetchall()
+        for row in (*purchase_rows, *usage_rows):
+            result[int(row["user_id"])].append(str(row["created_at"]))
+        return result
+
+    def aggregate_ledger_for_day(self, day: date) -> dict[int, dict[str, Any]]:
+        """Own spend on ``day`` plus lifetime net purchases, per user.
+
+        The daily job's ledger step (design SS6.9 step 4). Three statements,
+        none parameterised by a user id: the day's consumption grouped by
+        user, the lifetime purchase-minus-refund total grouped by user (what
+        ``commercial_tier()`` consumes, so the stored tier is correct as of the
+        end of the day), and the latest purchase inside the day. The
+        ``last_activity_at`` it yields is how a dropped ``credits_settled``
+        event is prevented from leaving a paying user looking inactive.
+        """
+        day_start, day_end = _day_bounds(day)
+        with self._get_connection() as conn:
+            usage_rows = conn.execute(
+                """
+                SELECT user_id,
+                       COALESCE(SUM(-amount_micro), 0) AS consumed_micro,
+                       MAX(created_at) AS last_usage_at
+                FROM credit_llm_usage_entries
+                WHERE created_at >= ? AND created_at < ?
+                GROUP BY user_id
+                """,
+                (day_start, day_end),
+            ).fetchall()
+            lifetime_rows = conn.execute(
+                """
+                SELECT user_id,
+                       COALESCE(SUM(CASE WHEN entry_type = 'purchase'
+                           THEN amount_micro ELSE 0 END), 0) AS purchased_micro,
+                       COALESCE(SUM(CASE WHEN entry_type = 'refund'
+                           THEN -amount_micro ELSE 0 END), 0) AS refunded_micro
+                FROM credit_ledger_entries
+                WHERE entry_type IN ('purchase', 'refund')
+                GROUP BY user_id
+                """
+            ).fetchall()
+            purchase_rows = conn.execute(
+                """
+                SELECT user_id, MAX(created_at) AS last_purchase_at
+                FROM credit_ledger_entries
+                WHERE entry_type = 'purchase'
+                  AND created_at >= ? AND created_at < ?
+                GROUP BY user_id
+                """,
+                (day_start, day_end),
+            ).fetchall()
+        return _assemble_ledger_day(usage_rows, lifetime_rows, purchase_rows)
+
+    def list_account_billing_states(
+        self,
+        user_ids: Sequence[int] | None = None,
+    ) -> dict[int, dict[str, Any]]:
+        """Billing state for many accounts (``None`` = every account) in two queries.
+
+        The batched twin of ``get_account_billing_state``: same columns, same
+        restriction-reason normalisation, no account row created as a side
+        effect. A user with no ``credit_accounts`` row is simply absent, which
+        the caller reads as an unrestricted account -- the same answer the
+        single-user reader gives after it lazily creates the row.
+        """
+        clause = ""
+        params: list[Any] = []
+        if user_ids is not None:
+            ids = _unique_user_ids(user_ids)
+            if not ids:
+                return {}
+            clause = f" WHERE user_id IN ({', '.join('?' for _ in ids)})"
+            params = list(ids)
+        with self._get_connection() as conn:
+            account_rows = conn.execute(
+                f"SELECT user_id, status, restriction_reason FROM credit_accounts{clause}",
+                params,
+            ).fetchall()
+            outstanding_rows = conn.execute(
+                f"""
+                SELECT user_id,
+                       COALESCE(SUM(
+                           MAX(outstanding_micro - outstanding_recovered_micro, 0)
+                       ), 0) AS outstanding_micro
+                FROM credit_llm_reservations
+                WHERE status = 'settled'{clause.replace(' WHERE ', ' AND ')}
+                GROUP BY user_id
+                """,
+                params,
+            ).fetchall()
+        return _assemble_billing_states(account_rows, outstanding_rows)
 
     def grant_promotion_credits(
         self,

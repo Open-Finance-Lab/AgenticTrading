@@ -33,7 +33,6 @@ from .value_repository import (
     UserLifecycleDailySnapshot,
     UserValueSnapshot,
     _current_snapshot_from_row,
-    _fetchall,
     _ids,
     _legacy_seed,
     _object_value,
@@ -41,7 +40,6 @@ from .value_repository import (
     _projection_job_name,
     _row_value,
     _timestamp,
-    _user_clause,
     _utc,
     _validate_window,
     analytics_store,
@@ -597,92 +595,16 @@ class PostgresValueAnalyticsStore:
         if not ids:
             return {}
 
-        lifetime_by_user: dict[int, tuple[int, int]] = {}
-        period_by_user: dict[int, tuple[int, int, int]] = {}
-        usage_by_user: dict[int, int] = {}
-        if hasattr(self.credits_base, "_get_connection"):
-            postgres = hasattr(self.credits_base, "database_url")
-            user_clause, user_params = _user_clause(ids, postgres)
-            placeholder = "%s" if postgres else "?"
-            window_params = [
-                *user_params,
-                utc_iso(window_start),
-                utc_iso(window_end),
-            ]
-            with self.credits_base._get_connection() as conn:
-                lifetime_rows = _fetchall(
-                    conn,
-                    postgres,
-                    f"""
-                    SELECT user_id,
-                           COALESCE(SUM(CASE WHEN entry_type = 'purchase'
-                               THEN amount_micro ELSE 0 END), 0) AS purchased_micro,
-                           COALESCE(SUM(CASE WHEN entry_type = 'refund'
-                               THEN -amount_micro ELSE 0 END), 0) AS refunded_micro
-                    FROM credit_ledger_entries
-                    WHERE {user_clause}
-                      AND entry_type IN ('purchase', 'refund')
-                    GROUP BY user_id
-                    """,
-                    user_params,
-                )
-                period_rows = _fetchall(
-                    conn,
-                    postgres,
-                    f"""
-                    SELECT user_id,
-                           COALESCE(SUM(CASE WHEN entry_type = 'purchase'
-                               THEN amount_micro ELSE 0 END), 0) AS purchased_micro,
-                           COALESCE(SUM(CASE WHEN entry_type = 'refund'
-                               THEN -amount_micro ELSE 0 END), 0) AS refunded_micro,
-                           COALESCE(SUM(CASE
-                               WHEN entry_type = 'admin_grant_assign' THEN amount_micro
-                               WHEN entry_type = 'admin_grant_reclaim' THEN -amount_micro
-                               ELSE 0 END), 0) AS grant_activity_micro
-                    FROM credit_ledger_entries
-                    WHERE {user_clause}
-                      AND created_at >= {placeholder}
-                      AND created_at < {placeholder}
-                    GROUP BY user_id
-                    """,
-                    window_params,
-                )
-                usage_rows = _fetchall(
-                    conn,
-                    postgres,
-                    f"""
-                    SELECT user_id,
-                           COALESCE(SUM(-amount_micro), 0) AS consumed_micro
-                    FROM credit_llm_usage_entries
-                    WHERE {user_clause}
-                      AND created_at >= {placeholder}
-                      AND created_at < {placeholder}
-                    GROUP BY user_id
-                    """,
-                    window_params,
-                )
-            lifetime_by_user = {
-                int(_row_value(row, "user_id")): (
-                    max(int(_row_value(row, "purchased_micro", 0)), 0),
-                    max(int(_row_value(row, "refunded_micro", 0)), 0),
-                )
-                for row in lifetime_rows
-            }
-            period_by_user = {
-                int(_row_value(row, "user_id")): (
-                    max(int(_row_value(row, "purchased_micro", 0)), 0),
-                    max(int(_row_value(row, "refunded_micro", 0)), 0),
-                    max(int(_row_value(row, "grant_activity_micro", 0)), 0),
-                )
-                for row in period_rows
-            }
-            usage_by_user = {
-                int(_row_value(row, "user_id")): max(
-                    int(_row_value(row, "consumed_micro", 0)), 0
-                )
-                for row in usage_rows
-            }
-
+        # The ledger is read through the credits domain (design SS6.14). The
+        # guard mirrors the old ``hasattr(self.credits_base, "_get_connection")``
+        # one: retention.py constructs this store with ``credits_base=object()``.
+        ledger = (
+            self.credits_base.aggregate_commercial_ledger(
+                ids, start=window_start, end=window_end
+            )
+            if hasattr(self.credits_base, "aggregate_commercial_ledger")
+            else {}
+        )
         balances = (
             self.credits_base.get_balance_projections(ids)
             if hasattr(self.credits_base, "get_balance_projections")
@@ -690,10 +612,13 @@ class PostgresValueAnalyticsStore:
         )
         result: dict[int, CommercialValueFact] = {}
         for user_id in ids:
-            lifetime_purchased, lifetime_refunded = lifetime_by_user.get(
-                user_id, (0, 0)
-            )
-            purchased, refunded, grant_activity = period_by_user.get(user_id, (0, 0, 0))
+            totals = ledger.get(user_id, {})
+            lifetime_purchased = max(int(totals.get("lifetime_purchased_micro", 0)), 0)
+            lifetime_refunded = max(int(totals.get("lifetime_refunded_micro", 0)), 0)
+            purchased = max(int(totals.get("purchased_micro", 0)), 0)
+            refunded = max(int(totals.get("refunded_micro", 0)), 0)
+            grant_activity = max(int(totals.get("grant_activity_micro", 0)), 0)
+            consumed = max(int(totals.get("consumed_micro", 0)), 0)
             net_purchased = max(lifetime_purchased - lifetime_refunded, 0)
             balance = balances.get(user_id, {})
             result[user_id] = CommercialValueFact(
@@ -702,7 +627,7 @@ class PostgresValueAnalyticsStore:
                 commercial_tier=commercial_tier(net_purchased),
                 purchased_micro=purchased,
                 refunded_micro=refunded,
-                consumed_micro=usage_by_user.get(user_id, 0),
+                consumed_micro=consumed,
                 admin_grant_activity_micro=grant_activity,
                 grant_available_micro=max(
                     int(_object_value(balance, "grant_available_micro")), 0
@@ -715,7 +640,6 @@ class PostgresValueAnalyticsStore:
                 ),
             )
         return result
-
     def list_credit_activity(
         self,
         user_ids: Sequence[int],
@@ -725,48 +649,15 @@ class PostgresValueAnalyticsStore:
     ) -> dict[int, Sequence[datetime]]:
         ids = _ids(user_ids)
         window_start, window_end = _validate_window(start, end)
-        result: dict[int, list[datetime]] = {user_id: [] for user_id in ids}
-        if not ids or not hasattr(self.credits_base, "_get_connection"):
+        if not ids or not hasattr(self.credits_base, "list_credit_activity_timestamps"):
             return {user_id: () for user_id in ids}
-
-        postgres = hasattr(self.credits_base, "database_url")
-        user_clause, user_params = _user_clause(ids, postgres)
-        placeholder = "%s" if postgres else "?"
-        params = [*user_params, utc_iso(window_start), utc_iso(window_end)]
-        with self.credits_base._get_connection() as conn:
-            purchase_rows = _fetchall(
-                conn,
-                postgres,
-                f"""
-                SELECT user_id, created_at
-                FROM credit_ledger_entries
-                WHERE {user_clause}
-                  AND entry_type = 'purchase'
-                  AND created_at >= {placeholder}
-                  AND created_at < {placeholder}
-                """,
-                params,
-            )
-            usage_rows = _fetchall(
-                conn,
-                postgres,
-                f"""
-                SELECT user_id, created_at
-                FROM credit_llm_usage_entries
-                WHERE {user_clause}
-                  AND created_at >= {placeholder}
-                  AND created_at < {placeholder}
-                """,
-                params,
-            )
-        for row in (*purchase_rows, *usage_rows):
-            user_id = int(_row_value(row, "user_id"))
-            if user_id in result:
-                result[user_id].append(_timestamp(_row_value(row, "created_at")))
+        stamps = self.credits_base.list_credit_activity_timestamps(
+            ids, start=window_start, end=window_end
+        )
         return {
-            user_id: tuple(sorted(timestamps)) for user_id, timestamps in result.items()
+            user_id: tuple(sorted(_timestamp(value) for value in stamps.get(user_id, ())))
+            for user_id in ids
         }
-
     def _run_health(self, user_id: int, now: datetime) -> tuple[int, bool]:
         if self.agent_base is None or self.run_base is None:
             return 0, False

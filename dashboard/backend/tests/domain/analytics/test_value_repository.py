@@ -93,6 +93,101 @@ class SyntheticCreditsStore:
         )
 
 
+    def aggregate_commercial_ledger(self, user_ids, *, start, end):
+        ids = list(dict.fromkeys(int(user_id) for user_id in user_ids))
+        placeholders = ", ".join("?" for _ in ids)
+        window = [start.isoformat(), end.isoformat()]
+        with self._get_connection() as conn:
+            lifetime = conn.execute(
+                f"""
+                SELECT user_id,
+                       COALESCE(SUM(CASE WHEN entry_type = 'purchase'
+                           THEN amount_micro ELSE 0 END), 0) AS purchased_micro,
+                       COALESCE(SUM(CASE WHEN entry_type = 'refund'
+                           THEN -amount_micro ELSE 0 END), 0) AS refunded_micro
+                FROM credit_ledger_entries
+                WHERE user_id IN ({placeholders}) AND entry_type IN ('purchase', 'refund')
+                GROUP BY user_id
+                """,
+                ids,
+            ).fetchall()
+            period = conn.execute(
+                f"""
+                SELECT user_id,
+                       COALESCE(SUM(CASE WHEN entry_type = 'purchase'
+                           THEN amount_micro ELSE 0 END), 0) AS purchased_micro,
+                       COALESCE(SUM(CASE WHEN entry_type = 'refund'
+                           THEN -amount_micro ELSE 0 END), 0) AS refunded_micro,
+                       COALESCE(SUM(CASE
+                           WHEN entry_type = 'admin_grant_assign' THEN amount_micro
+                           WHEN entry_type = 'admin_grant_reclaim' THEN -amount_micro
+                           ELSE 0 END), 0) AS grant_activity_micro
+                FROM credit_ledger_entries
+                WHERE user_id IN ({placeholders}) AND created_at >= ? AND created_at < ?
+                GROUP BY user_id
+                """,
+                [*ids, *window],
+            ).fetchall()
+            usage = conn.execute(
+                f"""
+                SELECT user_id, COALESCE(SUM(-amount_micro), 0) AS consumed_micro
+                FROM credit_llm_usage_entries
+                WHERE user_id IN ({placeholders}) AND created_at >= ? AND created_at < ?
+                GROUP BY user_id
+                """,
+                [*ids, *window],
+            ).fetchall()
+        by_user = {
+            user_id: {
+                "lifetime_purchased_micro": 0,
+                "lifetime_refunded_micro": 0,
+                "purchased_micro": 0,
+                "refunded_micro": 0,
+                "grant_activity_micro": 0,
+                "consumed_micro": 0,
+            }
+            for user_id in ids
+        }
+        for row in lifetime:
+            by_user[int(row["user_id"])].update(
+                lifetime_purchased_micro=int(row["purchased_micro"]),
+                lifetime_refunded_micro=int(row["refunded_micro"]),
+            )
+        for row in period:
+            by_user[int(row["user_id"])].update(
+                purchased_micro=int(row["purchased_micro"]),
+                refunded_micro=int(row["refunded_micro"]),
+                grant_activity_micro=int(row["grant_activity_micro"]),
+            )
+        for row in usage:
+            by_user[int(row["user_id"])]["consumed_micro"] = int(row["consumed_micro"])
+        return by_user
+
+    def list_credit_activity_timestamps(self, user_ids, *, start, end):
+        ids = list(dict.fromkeys(int(user_id) for user_id in user_ids))
+        placeholders = ", ".join("?" for _ in ids)
+        params = [*ids, start.isoformat(), end.isoformat()]
+        result = {user_id: [] for user_id in ids}
+        with self._get_connection() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT user_id, created_at FROM credit_ledger_entries
+                WHERE user_id IN ({placeholders}) AND entry_type = 'purchase'
+                  AND created_at >= ? AND created_at < ?
+                """,
+                params,
+            ).fetchall()
+            rows += conn.execute(
+                f"""
+                SELECT user_id, created_at FROM credit_llm_usage_entries
+                WHERE user_id IN ({placeholders}) AND created_at >= ? AND created_at < ?
+                """,
+                params,
+            ).fetchall()
+        for row in rows:
+            result[int(row["user_id"])].append(str(row["created_at"]))
+        return result
+
 class SyntheticProviderStore:
     def __init__(self, credentials, providers):
         self.credentials = credentials

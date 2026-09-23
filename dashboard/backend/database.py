@@ -10,6 +10,7 @@ import sqlite3
 import json
 import os
 from pathlib import Path
+from datetime import date, timedelta
 from typing import List, Dict, Optional, Any
 
 from dashboard.backend.paths import DEFAULT_DB_PATH
@@ -927,6 +928,42 @@ class BacktestDatabase:
         conn.close()
 
         return [self._parse_run_row(dict(row)) for row in rows]
+
+    def aggregate_operator_cost_for_day(self, day: date) -> Dict[int, int]:
+        """Operator-funded model cost per owner for runs updated on ``day``, in micro-USD.
+
+        The daily job's run step (design SS6.9 step 3): one statement grouped
+        by ``owner_user_id``, parameterised by two day bounds and nothing else.
+        Rows with a NULL owner -- everything before Task 2's column, and every
+        scheduled leaderboard deploy -- are skipped rather than attributed to
+        anyone. ``updated_at`` is CURRENT_TIMESTAMP text
+        ("YYYY-MM-DD HH:MM:SS", UTC) on both twins, so the bounds are text of
+        the same shape and compare correctly.
+
+        ``est_cost_usd`` is a float; converted with ``round(value * 1_000_000)``
+        and clamped at zero so a negative stored value cannot violate
+        ``user_daily_facts.operator_cost_micro``'s CHECK.
+        """
+        start = f"{day.isoformat()} 00:00:00"
+        end = f"{(day + timedelta(days=1)).isoformat()} 00:00:00"
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT owner_user_id, COALESCE(SUM(est_cost_usd), 0) AS cost_usd
+            FROM agent_runs
+            WHERE owner_user_id IS NOT NULL
+              AND updated_at >= ? AND updated_at < ?
+            GROUP BY owner_user_id
+            """,
+            (start, end),
+        )
+        rows = cursor.fetchall()
+        conn.close()
+        return {
+            int(row["owner_user_id"]): max(0, round(float(row["cost_usd"] or 0) * 1_000_000))
+            for row in rows
+        }
 
     def insert_trades(self, run_id: str, trades: List[Dict[str, Any]]) -> None:
         """Batch insert trade records for a backtest run."""

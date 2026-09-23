@@ -42,6 +42,7 @@ domain/runs/repository.py and are untouched.
 from __future__ import annotations
 
 import json
+from datetime import date, timedelta
 from typing import Any, Dict, List, Optional
 
 from dashboard.backend.database import (
@@ -1025,6 +1026,28 @@ class PostgresBacktestDatabase:
                 )
                 rows = cur.fetchall()
         return [BacktestDatabase._parse_run_row(row) for row in rows]
+
+    def aggregate_operator_cost_for_day(self, day: date) -> Dict[int, int]:
+        """See the SQLite twin."""
+        start = f"{day.isoformat()} 00:00:00"
+        end = f"{(day + timedelta(days=1)).isoformat()} 00:00:00"
+        with self._get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT owner_user_id, COALESCE(SUM(est_cost_usd), 0) AS cost_usd
+                    FROM agent_runs
+                    WHERE owner_user_id IS NOT NULL
+                      AND updated_at >= %s AND updated_at < %s
+                    GROUP BY owner_user_id
+                    """,
+                    (start, end),
+                )
+                rows = cur.fetchall()
+        return {
+            int(row["owner_user_id"]): max(0, round(float(row["cost_usd"] or 0) * 1_000_000))
+            for row in rows
+        }
 
     def get_trades(self, run_id: str) -> List[Dict]:
         """Get all trades for a run.
