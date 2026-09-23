@@ -1655,6 +1655,9 @@ function applyAgentFilters(resetPagination = true) {
     agentGridPage = Object.fromEntries(AGENT_SHELVES.map((shelf) => [shelf.key, 0]));
   }
   renderAgentCategories(getFilteredAgents());
+  // Research Agents is a sibling shelf whose rows come from the research API,
+  // not from /agents — refreshed on the same trigger.
+  if (typeof renderResearchShelf === 'function') renderResearchShelf();
 }
 
 function setAgentViewMode(mode) {
@@ -2859,6 +2862,7 @@ let marketplaceContestMeta = {
 const MARKETPLACE_SHELVES = [
   { key: 'llms', title: 'LLMs', sub: 'LLMs tested on the ATL leaderboard' },
   { key: 'open', title: 'Agents', sub: 'Ready-made trading agents' },
+  { key: 'research', title: 'Research Agents', sub: 'Deep Research agents that produce analyst reports' },
 ];
 /** 'all' or one of MARKET_LABELS' keys. Set by the chip row and by the Prompted
  * Models shelf's empty-state Community button (via navigateToPage's options). */
@@ -2989,7 +2993,7 @@ function marketplaceEmptyHtml({ searching, categoryFilter }) {
 
 function templateMarketplaceShelf(template) {
   const explicit = String(template?.shelf || '').toLowerCase();
-  if (explicit === 'llms' || explicit === 'open') return explicit;
+  if (explicit === 'llms' || explicit === 'open' || explicit === 'research') return explicit;
   // Mirrors the backend's _normalize_shelf fallback: any hosted runtime is an
   // open agent, with no per-runtime special case to remember.
   return template?.mode === 'runtime' ? 'open' : 'llms';
@@ -3273,7 +3277,50 @@ function marketplaceRepoLabel(template) {
 }
 
 /** Compact leaderboard-first card. Shared by both supermarket shelves. */
+function buildResearchMarketplaceCardHtml(template) {
+  // Mirrors the trading card's wrapper classes (agent-card / agent-card-cta /
+  // agent-card-actions) — the blue CTA and card chrome hang off those, and a
+  // bare button with marketplace-clone-btn alone renders unstyled.
+  const research = template.research || {};
+  const runtimeMin = Math.max(1, Math.round((research.estimated_runtime_seconds || 300) / 60));
+  const formats = (research.output_formats || []).join(' / ') || 'Markdown';
+  const description = String(template.description || '').trim();
+  const repoUrl = String(template.repo_url || '').trim();
+  const repoLabel = marketplaceRepoLabel(template);
+  const repoExtra = repoUrl
+    ? `<a class="marketplace-repo-btn" href="${escapeHtml(repoUrl)}" target="_blank" rel="noopener noreferrer" aria-label="Open ${escapeHtml(repoLabel)} on GitHub">
+            <svg class="ui-icon marketplace-repo-icon" aria-hidden="true"><use href="#icon-github"></use></svg>
+            <span>${escapeHtml(repoLabel)}</span>
+          </a>`
+    : '';
+  return `
+    <div class="section-card agent-card marketplace-card marketplace-card--research">
+      <div class="agent-card-top">
+        <div class="agent-card-identity">
+          ${agentRobotIcon()}
+          <div class="agent-card-identity-text">
+            <h3 class="agent-name">${escapeHtml(template.name)}</h3>
+            <p class="agent-card-submeta">${escapeHtml(template.author || 'Community')} · Deep Research</p>
+          </div>
+        </div>
+        <span class="marketplace-mode-chip">Research</span>
+      </div>
+      ${description ? `<p class="marketplace-card-description">${escapeHtml(description)}</p>` : ''}
+      ${repoExtra}
+      <div class="research-card-facts">
+        <span><svg class="ui-icon research-fact-icon" aria-hidden="true"><use href="#icon-clock"></use></svg> ~${runtimeMin} min per run</span>
+        <span><svg class="ui-icon research-fact-icon" aria-hidden="true"><use href="#icon-file-text"></use></svg> ${escapeHtml(formats)}</span>
+      </div>
+      <div class="agent-card-actions agent-card-actions--status">
+        <button class="agent-card-cta marketplace-clone-btn" type="button" data-template-id="${escapeHtml(template.template_id)}"${researchAddedIds.has(template.template_id) ? ' disabled' : ''}>${researchAddedIds.has(template.template_id) ? 'Added ✓' : 'Add to My Agents'}</button>
+      </div>
+    </div>`;
+}
+
 function buildMarketplaceCardHtml(template) {
+  if (templateMarketplaceShelf(template) === 'research') {
+    return buildResearchMarketplaceCardHtml(template);
+  }
   const stats = marketplacePerformanceFor(template);
   const isOpen = templateMarketplaceShelf(template) === 'open';
   const cloneLabel = 'Add to My Agents';
@@ -3422,6 +3469,23 @@ function renderMarketplaceGrid() {
       btn.disabled = true;
       const prevLabel = btn.textContent;
       btn.textContent = 'Adding…';
+      if (templateMarketplaceShelf(template) === 'research') {
+        try {
+          const data = await API.post(`${API_BASE}/api/v1/research/agents/${encodeURIComponent(templateId)}/add`, {});
+          researchAddedIds.add(templateId);
+          btn.textContent = 'Added ✓';
+          if (typeof showAppToast === 'function') {
+            showAppToast(data.created
+              ? 'Added to My Agents — open it there to start a research run.'
+              : 'Already in My Agents — open it there to start a research run.');
+          }
+        } catch (error) {
+          alert(error.message || `Couldn't add this template. Please try again.`);
+        } finally {
+          marketplaceCloneInFlight = false;
+        }
+        return;
+      }
       try {
         await cloneMarketplaceTemplate(template);
       } catch (error) {
@@ -3491,6 +3555,15 @@ async function loadMarketplaceLeaderboard() {
  */
 async function loadMarketplace() {
   loadMarketplaceLeaderboard();
+  // Research cards need their added-state for the button, so fetch the
+  // research shelf's add-state alongside the static catalog.
+  (async () => {
+    try {
+      const data = await API.get(`${RESEARCH_API}/agents`);
+      researchAddedIds = new Set((data.agents || []).filter((a) => a.added).map((a) => a.template_id));
+      renderMarketplaceGrid();
+    } catch (_error) { /* guest: buttons stay as plain Add */ }
+  })();
   if (marketplaceTemplates.length) {
     renderMarketplaceGrid();
     return;
@@ -6558,7 +6631,14 @@ document.addEventListener('DOMContentLoaded', async () => {
     // The HttpOnly session cookie is invisible to JS, so the boot signal is
     // the cached auth-user (written on every cookie sign-in) or a pre-cookie
     // legacy localStorage token (upgraded to a cookie by the /me bridge).
-    if (localStorage.getItem(AUTH_TOKEN_KEY) || getStoredAuthUser()) {
+    // Local console (design N2/PR2 local verification): the launchd service
+    // runs with ATL_LOCAL_AUTOLOGIN_EMAIL, so /me answers as the local admin
+    // for every loopback request. Probe unconditionally on loopback — the
+    // "cached auth-user only" shortcut would keep a fresh browser a guest
+    // forever, because there is nothing cached to trigger the first probe.
+    // The hostname gate keeps prod boot (cold-start /me skip) untouched.
+    const localConsole = ['127.0.0.1', 'localhost'].includes(window.location.hostname);
+    if (localStorage.getItem(AUTH_TOKEN_KEY) || getStoredAuthUser() || localConsole) {
         try {
             await refreshAuthUser();
         } catch (error) {
@@ -11352,6 +11432,7 @@ function navigateToPage(page, options = {}) {
     hide(myAlgoView);
     hide(leaderboardView);
     hide(document.getElementById('playgroundAgentsPanel'));
+    hide(document.getElementById('researchWorkbenchView'));
     hide(document.getElementById('competitionParticipantsPanel'));
     hide(document.getElementById('competitionAboutPanel'));
 
@@ -12890,3 +12971,333 @@ async function executeMyTradingAlgo() {
 }
 
 console.log('Frontend loaded - connecting to API at ' + API_BASE);
+
+// ============================================================================
+// Research agents (design N2/PR2) — Community shelf actions, the My Agents
+// "Research Agents" shelf, and the workbench (dynamic form → run → report).
+// ============================================================================
+
+const RESEARCH_API = `${API_BASE}/api/v1/research`;
+let researchAddedIds = new Set();
+let researchWorkbenchTemplateId = null;
+let researchWorkbenchReturnView = null;
+let researchPollTimer = null;
+let researchSubmitInFlight = false;
+
+function stopResearchPolling() {
+  if (researchPollTimer) {
+    clearInterval(researchPollTimer);
+    researchPollTimer = null;
+  }
+}
+
+async function fetchResearchAgents() {
+  const data = await API.get(`${RESEARCH_API}/agents`);
+  return Array.isArray(data?.agents) ? data.agents : [];
+}
+
+function researchStatusLabel(status) {
+  return { queued: 'Queued', running: 'Running…', completed: 'Completed', failed: 'Failed' }[status] || status;
+}
+
+/** The My Agents "Research Agents" shelf: cards for cloned research agents. */
+async function renderResearchShelf() {
+  const grid = document.getElementById('agentsGridResearch');
+  const emptyEl = document.getElementById('agentsEmptyResearch');
+  const countEl = document.getElementById('agentsCountResearch');
+  if (!grid) return;
+  let agents = [];
+  try {
+    agents = await fetchResearchAgents();
+  } catch (error) {
+    // A 401 here just means the visitor is not signed in — the shelf hides
+    // rather than advertising an error for a surface guests cannot use.
+    grid.innerHTML = '';
+    if (emptyEl) emptyEl.hidden = true;
+    const section = grid.closest('.agents-category');
+    if (section) section.style.display = error?.status === 401 ? 'none' : '';
+    return;
+  }
+  const added = agents.filter((agent) => agent.added);
+  if (countEl) {
+    countEl.textContent = String(added.length);
+    countEl.hidden = added.length === 0;
+  }
+  if (!added.length) {
+    grid.innerHTML = '';
+    if (emptyEl) {
+      emptyEl.hidden = false;
+      emptyEl.innerHTML = 'No research agents yet. Add one from <button type="button" class="link-btn" data-goto-community>Community</button>.';
+    }
+    grid.querySelectorAll('[data-goto-community]').forEach((btn) => {
+      btn.addEventListener('click', () => navigateToPage('community'));
+    });
+    return;
+  }
+  if (emptyEl) emptyEl.hidden = true;
+  grid.innerHTML = added.map((agent) => {
+    const runtimeMin = Math.max(1, Math.round(((agent.research || {}).estimated_runtime_seconds || 300) / 60));
+    return `
+      <article class="section-card agent-card research-agent-card" data-template-id="${escapeHtml(agent.template_id)}">
+        <div class="research-agent-card-head">
+          <h4>${escapeHtml(agent.name)}</h4>
+          <span class="marketplace-mode-chip">Research</span>
+        </div>
+        <p class="research-agent-card-desc">${escapeHtml(String(agent.description || '').slice(0, 140))}</p>
+        <p class="research-agent-card-meta">
+          <svg class="ui-icon research-fact-icon" aria-hidden="true"><use href="#icon-clock"></use></svg> ~${runtimeMin} min ·
+          <svg class="ui-icon research-fact-icon" aria-hidden="true"><use href="#icon-file-text"></use></svg> ${escapeHtml(((agent.research || {}).output_formats || []).join(' / '))}
+        </p>
+        <button type="button" class="auth-btn auth-btn-primary research-open-btn">Open workbench</button>
+      </article>`;
+  }).join('');
+  grid.querySelectorAll('.research-agent-card').forEach((card) => {
+    card.querySelector('.research-open-btn')?.addEventListener('click', () => {
+      openResearchWorkbench(card.dataset.templateId);
+    });
+  });
+}
+
+/** The Community research card's Add action (separate from the trading clone:
+ * no runtime copy, no cash allocation — just the user→template link). */
+async function addResearchAgentFromCommunity(templateId) {
+  await API.post(`${RESEARCH_API}/agents/${encodeURIComponent(templateId)}/add`, {});
+  await renderResearchShelf();
+}
+
+/** Minimal, safe Markdown renderer for research reports: escape first, then a
+ * bounded subset (headings, bold/italic/code, links, lists, blockquote, hr,
+ * pipe tables). Enough for the Deep Research report shape; never raw HTML. */
+function renderSimpleMarkdown(markdown) {
+  const lines = String(markdown || '').replace(/\r\n/g, '\n').split('\n');
+  const esc = (s) => escapeHtml(s);
+  const inline = (t) => esc(t)
+    .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
+    .replace(/(^|[^*])\*([^*\n]+)\*/g, '$1<em>$2</em>')
+    .replace(/`([^`]+)`/g, '<code>$1</code>')
+    .replace(/\[([^\]]+)\]\((https?:[^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>');
+  let html = '';
+  let tableRows = [];
+  const flushTable = () => {
+    if (!tableRows.length) return;
+    const [head, ...rest] = tableRows;
+    html += '<table class="research-md-table"><thead><tr>'
+      + head.map((c) => `<th>${inline(c)}</th>`).join('')
+      + '</tr></thead><tbody>'
+      + rest.map((row) => `<tr>${row.map((c) => `<td>${inline(c)}</td>`).join('')}</tr>`).join('')
+      + '</tbody></table>';
+    tableRows = [];
+  };
+  for (const raw of lines) {
+    const line = raw.trimEnd();
+    if (/^\|.*\|$/.test(line.trim())) {
+      const cells = line.trim().slice(1, -1).split('|').map((c) => c.trim());
+      if (cells.every((c) => /^:?-{3,}:?$/.test(c))) continue;
+      tableRows.push(cells);
+      continue;
+    }
+    flushTable();
+    if (!line.trim()) continue;
+    const heading = /^(#{1,4})\s+(.*)$/.exec(line);
+    if (heading) {
+      const level = Math.min(heading[1].length + 1, 5);
+      html += `<h${level}>${inline(heading[2])}</h${level}>`;
+      continue;
+    }
+    if (/^(-{3,}|\*{3,})$/.test(line.trim())) { html += '<hr>'; continue; }
+    const bullet = /^[-*]\s+(.*)$/.exec(line);
+    if (bullet) { html += `<li>${inline(bullet[1])}</li>`; continue; }
+    const ordered = /^\d+[.)]\s+(.*)$/.exec(line);
+    if (ordered) { html += `<li>${inline(ordered[1])}</li>`; continue; }
+    const quote = /^>\s?(.*)$/.exec(line);
+    if (quote) { html += `<blockquote>${inline(quote[1])}</blockquote>`; continue; }
+    html += `<p>${inline(line)}</p>`;
+  }
+  flushTable();
+  return html;
+}
+
+function showResearchWorkbench() {
+  const view = document.getElementById('researchWorkbenchView');
+  if (!view) return;
+  const playground = document.getElementById('playgroundView');
+  researchWorkbenchReturnView = playground && playground.style.display === 'block' ? playground : null;
+  if (playground) playground.style.display = 'none';
+  const backtestPanel = document.querySelector('.playground-backtest-panel')
+    || document.querySelector('.main-container');
+  if (backtestPanel) backtestPanel.style.display = 'none';
+  view.style.display = 'block';
+  window.scrollTo(0, 0);
+}
+
+function hideResearchWorkbench() {
+  stopResearchPolling();
+  const view = document.getElementById('researchWorkbenchView');
+  if (view) view.style.display = 'none';
+  if (researchWorkbenchReturnView) {
+    researchWorkbenchReturnView.style.display = 'block';
+    researchWorkbenchReturnView = null;
+  }
+}
+
+async function openResearchWorkbench(templateId) {
+  stopResearchPolling();
+  researchWorkbenchTemplateId = templateId;
+  showResearchWorkbench();
+  const nameEl = document.getElementById('researchAgentName');
+  const descEl = document.getElementById('researchAgentDesc');
+  const metaEl = document.getElementById('researchAgentMeta');
+  const fieldsEl = document.getElementById('researchFormFields');
+  const resultArea = document.getElementById('researchResultArea');
+  const runsList = document.getElementById('researchRunsList');
+  nameEl.textContent = 'Loading…';
+  descEl.textContent = '';
+  metaEl.textContent = '';
+  fieldsEl.innerHTML = '';
+  resultArea.hidden = true;
+  runsList.innerHTML = '<p class="control-helper">Loading…</p>';
+
+  let manifest;
+  try {
+    manifest = await API.get(`${RESEARCH_API}/agents/${encodeURIComponent(templateId)}/manifest`);
+  } catch (error) {
+    nameEl.textContent = 'Could not load this research agent';
+    descEl.textContent = error.message || '';
+    return;
+  }
+
+  nameEl.textContent = manifest.name || templateId;
+  descEl.textContent = manifest.description || '';
+  const runtimeMin = Math.max(1, Math.round((manifest.estimated_runtime_seconds || 300) / 60));
+  metaEl.innerHTML =
+    '<svg class="ui-icon research-fact-icon" aria-hidden="true"><use href="#icon-clock"></use></svg> '
+    + `~${runtimeMin} min per run · `
+    + '<svg class="ui-icon research-fact-icon" aria-hidden="true"><use href="#icon-file-text"></use></svg> '
+    + `Output: ${escapeHtml((manifest.output_formats || []).join(' / '))}`;
+
+  fieldsEl.innerHTML = (manifest.settings_schema?.fields || []).map((field) => {
+    const value = field.default != null ? String(field.default) : '';
+    const requiredMark = field.required ? ' <span class="research-required">*</span>' : '';
+    let control;
+    if (field.type === 'longtext') {
+      control = `<textarea id="rf_${escapeHtml(field.id)}" rows="3" placeholder="${escapeHtml(field.placeholder || '')}">${escapeHtml(value)}</textarea>`;
+    } else if (field.type === 'select') {
+      control = `<select id="rf_${escapeHtml(field.id)}">${(field.options || []).map((option) => `<option value="${escapeHtml(option)}"${option === value ? ' selected' : ''}>${escapeHtml(option)}</option>`).join('')}</select>`;
+    } else {
+      control = `<input id="rf_${escapeHtml(field.id)}" type="${field.type === 'date' ? 'date' : field.type === 'number' ? 'number' : 'text'}" value="${escapeHtml(value)}" placeholder="${escapeHtml(field.placeholder || '')}">`;
+    }
+    return `<label class="research-field"><span>${escapeHtml(field.label || field.id)}${requiredMark}</span>${control}<small class="research-field-desc">${escapeHtml(field.description || '')}</small></label>`;
+  }).join('');
+
+  const form = document.getElementById('researchRunForm');
+  if (!form.dataset.bound) {
+    form.dataset.bound = '1';
+    form.addEventListener('submit', (event) => {
+      event.preventDefault();
+      submitResearchRun();
+    });
+  }
+  document.getElementById('researchBackBtn').onclick = hideResearchWorkbench;
+  await loadResearchRuns(templateId);
+}
+
+async function loadResearchRuns(templateId) {
+  const runsList = document.getElementById('researchRunsList');
+  if (!runsList) return;
+  try {
+    const data = await API.get(`${RESEARCH_API}/runs`);
+    const runs = (data.runs || []).filter((run) => run.template_id === templateId);
+    if (!runs.length) {
+      runsList.innerHTML = '<p class="control-helper">No runs yet.</p>';
+      return;
+    }
+    runsList.innerHTML = runs.map((run) => `
+      <div class="research-run-row" data-run-id="${escapeHtml(run.run_id)}">
+        <span class="research-run-status is-${escapeHtml(run.status)}">${escapeHtml(researchStatusLabel(run.status))}</span>
+        <span class="research-run-date">${escapeHtml(String(run.created_at || '').slice(0, 16))}</span>
+      </div>`).join('');
+    runsList.querySelectorAll('.research-run-row').forEach((row) => {
+      row.addEventListener('click', () => showCompletedResearchReport(row.dataset.runId));
+    });
+  } catch (error) {
+    runsList.innerHTML = `<p class="control-helper">${escapeHtml(error.message || 'Runs could not be loaded.')}</p>`;
+  }
+}
+
+async function showCompletedResearchReport(runId) {
+  const resultArea = document.getElementById('researchResultArea');
+  const body = document.getElementById('researchReportBody');
+  const downloadBtns = document.getElementById('researchDownloadBtns');
+  resultArea.hidden = false;
+  body.innerHTML = '<p class="control-helper">Loading report…</p>';
+  downloadBtns.innerHTML = '';
+  try {
+    const data = await API.get(`${RESEARCH_API}/runs/${encodeURIComponent(runId)}/report`);
+    body.innerHTML = renderSimpleMarkdown(data.report_markdown);
+    const kinds = [['markdown', 'Markdown'], ['docx', 'Word'], ['pdf', 'PDF'], ['evidence_json', 'Evidence JSON']];
+    downloadBtns.innerHTML = kinds
+      .map(([kind, label]) => `<a class="auth-btn auth-btn-secondary" href="${RESEARCH_API}/runs/${encodeURIComponent(runId)}/artifacts/${kind}" download>${label}</a>`)
+      .join('');
+  } catch (error) {
+    body.innerHTML = `<p class="control-helper">${escapeHtml(error.message || 'Report could not be loaded.')}</p>`;
+  }
+}
+
+async function submitResearchRun() {
+  if (researchSubmitInFlight || !researchWorkbenchTemplateId) return;
+  const templateId = researchWorkbenchTemplateId;
+  const errorEl = document.getElementById('researchFormError');
+  const submitBtn = document.getElementById('researchSubmitBtn');
+  const settings = {};
+  document.querySelectorAll('#researchFormFields [id^="rf_"]').forEach((input) => {
+    const key = input.id.slice(3);
+    const value = String(input.value || '').trim();
+    if (value) settings[key] = value;
+  });
+  const emailMe = document.getElementById('researchEmailMe')?.checked || false;
+  researchSubmitInFlight = true;
+  if (submitBtn) submitBtn.disabled = true;
+  errorEl.hidden = true;
+  try {
+    const data = await API.post(
+      `${RESEARCH_API}/agents/${encodeURIComponent(templateId)}/runs`,
+      { settings, email_me: emailMe },
+    );
+    errorEl.hidden = false;
+    errorEl.textContent = 'Research started — this usually takes a few minutes. You can keep this page open.';
+    const runId = data.run_id;
+    await loadResearchRuns(templateId);
+    stopResearchPolling();
+    researchPollTimer = setInterval(async () => {
+      try {
+        const status = await API.get(`${RESEARCH_API}/runs/${encodeURIComponent(runId)}`);
+        if (status.status === 'completed') {
+          stopResearchPolling();
+          await loadResearchRuns(templateId);
+          await showCompletedResearchReport(runId);
+        } else if (status.status === 'failed') {
+          stopResearchPolling();
+          errorEl.hidden = false;
+          errorEl.textContent = status.error || 'The research run failed.';
+        }
+      } catch (_error) { /* transient — next tick retries */ }
+    }, 10000);
+  } catch (error) {
+    const detail = error?.message || 'Submit failed.';
+    errorEl.hidden = false;
+    errorEl.textContent = typeof detail === 'string' ? detail : 'Submit failed.';
+    try {
+      const fieldErrors = error?.field_errors || {};
+      const first = Object.keys(fieldErrors)[0];
+      if (first) {
+        const input = document.getElementById(`rf_${first}`);
+        input?.focus();
+        errorEl.textContent = `${first}: ${fieldErrors[first]}`;
+      }
+    } catch (_ignored) { /* keep the generic message */ }
+  } finally {
+    researchSubmitInFlight = false;
+    if (submitBtn) submitBtn.disabled = false;
+  }
+}
+

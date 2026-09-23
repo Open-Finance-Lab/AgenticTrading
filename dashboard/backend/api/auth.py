@@ -436,17 +436,60 @@ def _store_unavailable(exc: BaseException, *, route: str) -> HTTPException:
     return HTTPException(status_code=503, detail=_STORE_UNAVAILABLE_DETAIL)
 
 
+def _local_autologin_user(request: Request) -> Optional[dict]:
+    """Local-dev convenience (never active in CI or production).
+
+    When ``ATL_LOCAL_AUTOLOGIN_EMAIL`` is set AND the request originates from
+    loopback, resolve that seeded admin account without a session cookie —
+    so a locally-run console opens pre-authenticated for verification. The
+    env var exists only in the local launchd plist; the loopback check keeps
+    a leaked flag from ever authenticating a network peer, and the role check
+    means a misconfigured email silently disables the feature instead of
+    elevating a stranger.
+    """
+    email = (os.getenv("ATL_LOCAL_AUTOLOGIN_EMAIL") or "").strip()
+    if not email:
+        return None
+    client = request.client.host if request.client else ""
+    if client not in {"127.0.0.1", "::1"}:
+        return None
+    try:
+        user = users_module.user_store.get_user_by_email(email)
+    except _USER_STORE_OUTAGE:
+        return None
+    if not user or user.get("role") != "admin":
+        return None
+    enriched = dict(user)
+    if user.get("id") is not None:
+        try:
+            enriched["entitlements"] = users_module.user_store.get_entitlements(user["id"])
+        except Exception:
+            pass
+    return enriched
+
+
 def get_current_user(
     request: Request,
     authorization: Optional[str] = Header(default=None),
 ) -> dict:
     token = _session_token(request, authorization)
+    user = None
+    if token:
+        try:
+            user = users_module.user_store.get_user_for_token(token)
+        except _USER_STORE_OUTAGE as exc:
+            raise _store_unavailable(exc, route="get_current_user") from None
+    if not user:
+        # The local-console fallback covers BOTH shapes of "no live session":
+        # no cookie at all, and a cookie whose session died (wiped dev DB,
+        # expired row) — the second shape is what a stale browser cookie
+        # produces after the database is swapped, and it must land on the
+        # seeded admin instead of a 401 nothing on the page explains.
+        autologin = _local_autologin_user(request)
+        if autologin is not None:
+            return autologin
     if not token:
         raise HTTPException(status_code=401, detail="Not authenticated")
-    try:
-        user = users_module.user_store.get_user_for_token(token)
-    except _USER_STORE_OUTAGE as exc:
-        raise _store_unavailable(exc, route="get_current_user") from None
     if not user:
         raise HTTPException(status_code=401, detail="Invalid or expired session")
     return user

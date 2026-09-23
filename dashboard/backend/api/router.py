@@ -20,6 +20,7 @@ from dashboard.backend.api.health import router as health_router
 from dashboard.backend.api.routers.leaderboard import router as leaderboard_router
 from dashboard.backend.api.routers.news import router as news_router
 from dashboard.backend.api.routers.portfolio import router as portfolio_router
+from dashboard.backend.api.routers.research import router as research_router
 from dashboard.backend.api.routers.runs import router as runs_router
 from dashboard.backend.api.routers.strategies import router as strategies_router
 from dashboard.backend.api.routers.robinhood_live import router as robinhood_router
@@ -31,6 +32,7 @@ api_router.include_router(auth_router)
 api_router.include_router(admin_users_router)
 api_router.include_router(algo_router)
 api_router.include_router(agents_router)
+api_router.include_router(research_router)
 api_router.include_router(analytics_router)
 api_router.include_router(admin_analytics_router)
 api_router.include_router(discord_router)
