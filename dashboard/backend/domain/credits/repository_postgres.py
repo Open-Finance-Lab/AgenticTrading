@@ -763,19 +763,34 @@ class PostgresCreditsStore:
                 return self._balance_projection_in_transaction(cur, user_id)
 
     def get_balance_projections(
-        self, user_ids: list[int] | tuple[int, ...]
+        self, user_ids: list[int] | tuple[int, ...] | None
     ) -> dict[int, dict[str, int]]:
-        if not isinstance(user_ids, (list, tuple)):
-            raise ValueError("user_ids must be a list or tuple")
-        validated = [_positive_integer(user_id, "user_id") for user_id in user_ids]
-        if not validated:
-            return {}
+        """Balances for many accounts; ``None`` means every account with a row.
 
-        unique_ids = list(dict.fromkeys(validated))
+        ``None`` is the daily job's shape (design SS6.12): the four statements
+        below then carry no ``WHERE user_id = ANY(%s)`` clause at all, so the
+        query count and shape are the same at 200 and 20,000 users.
+        """
+        if user_ids is None:
+            unique_ids = None
+            where = ""
+            params: tuple[Any, ...] = ()
+        else:
+            if not isinstance(user_ids, (list, tuple)):
+                raise ValueError("user_ids must be a list or tuple")
+            validated = [_positive_integer(user_id, "user_id") for user_id in user_ids]
+            if not validated:
+                return {}
+            unique_ids = list(dict.fromkeys(validated))
+            where = "WHERE user_id = ANY(%s)"
+            params = (unique_ids,)
+        reservation_filter = (
+            f"{where} AND status = 'open'" if where else "WHERE status = 'open'"
+        )
         with self._get_connection() as conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    """
+                    f"""
                     SELECT
                         user_id,
                         COALESCE(SUM(
@@ -785,24 +800,24 @@ class PostgresCreditsStore:
                             CASE WHEN bucket = 'purchased' THEN amount_micro ELSE 0 END
                         ), 0) AS purchased_committed_micro
                     FROM credit_ledger_entries
-                    WHERE user_id = ANY(%s)
+                    {where}
                     GROUP BY user_id
                     """,
-                    (unique_ids,),
+                    params,
                 )
                 rows = cur.fetchall()
                 cur.execute(
-                    """
+                    f"""
                     SELECT user_id, COALESCE(SUM(amount_micro), 0) AS grant_micro
                     FROM credit_promotion_grants
-                    WHERE user_id = ANY(%s)
+                    {where}
                     GROUP BY user_id
                     """,
-                    (unique_ids,),
+                    params,
                 )
                 promotion_rows = cur.fetchall()
                 cur.execute(
-                    """
+                    f"""
                     SELECT
                         user_id,
                         COALESCE(SUM(CASE WHEN bucket = 'grant' THEN amount_micro ELSE 0 END), 0)
@@ -810,23 +825,23 @@ class PostgresCreditsStore:
                         COALESCE(SUM(CASE WHEN bucket = 'purchased' THEN amount_micro ELSE 0 END), 0)
                             AS purchased_usage_micro
                     FROM credit_llm_usage_entries
-                    WHERE user_id = ANY(%s)
+                    {where}
                     GROUP BY user_id
                     """,
-                    (unique_ids,),
+                    params,
                 )
                 usage_rows = cur.fetchall()
                 cur.execute(
-                    """
+                    f"""
                     SELECT
                         user_id,
                         COALESCE(SUM(reserved_grant_micro), 0) AS reserved_grant_micro,
                         COALESCE(SUM(reserved_purchased_micro), 0) AS reserved_purchased_micro
                     FROM credit_llm_reservations
-                    WHERE user_id = ANY(%s) AND status = 'open'
+                    {reservation_filter}
                     GROUP BY user_id
                     """,
-                    (unique_ids,),
+                    params,
                 )
                 reservation_rows = cur.fetchall()
 
@@ -856,6 +871,8 @@ class PostgresCreditsStore:
             for row in reservation_rows
         }
         projections: dict[int, dict[str, int]] = {}
+        if unique_ids is None:
+            unique_ids = sorted(set(amounts) | set(usage_amounts) | set(reserved_amounts))
         for user_id in unique_ids:
             grant_micro, purchased_micro = amounts.get(user_id, (0, 0))
             grant_usage, purchased_usage = usage_amounts.get(user_id, (0, 0))

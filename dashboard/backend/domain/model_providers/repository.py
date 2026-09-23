@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 import os
 import json
 import sqlite3
@@ -23,6 +24,8 @@ from .repository_common import (
     serialize_capabilities,
     validate_adapter_type,
     validate_approved_origin,
+    DefaultCredentialFacts,
+    fold_default_credential_rows,
 )
 from .models import ProviderRecord
 
@@ -415,6 +418,47 @@ class ModelProviderStore:
         ).fetchall()
         conn.close()
         return [self._public_provider(row) for row in rows]
+
+    def list_default_credential_facts(
+        self, user_ids: Sequence[int] | None = None
+    ) -> dict[int, DefaultCredentialFacts]:
+        """Each user's default credentials as one row per user (``None`` = everyone).
+
+        Same predicate ``list_user_credentials`` applies (``status <> 'revoked'``)
+        narrowed to ``is_default = 1``, so the per-user reader and this batched
+        one see identical rows. A user with no default credential is absent;
+        the caller reads absence as ``missing``.
+        """
+        clause = ""
+        params: list[Any] = []
+        if user_ids is not None:
+            ids = list(dict.fromkeys(int(user_id) for user_id in user_ids))
+            if not ids:
+                return {}
+            clause = f" AND user_id IN ({', '.join('?' for _ in ids)})"
+            params = ids
+        conn = self._get_connection()
+        rows = conn.execute(
+            "SELECT user_id, provider_id, status FROM user_model_credentials "
+            f"WHERE is_default = 1 AND status <> 'revoked'{clause}",
+            params,
+        ).fetchall()
+        conn.close()
+        return fold_default_credential_rows(rows)
+
+    def list_platform_credential_statuses(self) -> dict[str, str]:
+        """Every provider's platform-credential status. Takes no user id.
+
+        The population-wide half of ``platform_credits_available``: it depends
+        only on the provider row, its platform credential and the environment
+        secret, never on who is asking. One call for the whole job.
+        """
+        conn = self._get_connection()
+        rows = conn.execute(
+            "SELECT provider_id, status FROM platform_model_credentials"
+        ).fetchall()
+        conn.close()
+        return {str(row["provider_id"]): str(row["status"]) for row in rows}
 
     def record_admin_operation(self, **values: Any) -> None:
         conn = self._get_connection()

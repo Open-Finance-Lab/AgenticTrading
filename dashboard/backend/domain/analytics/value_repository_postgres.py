@@ -20,6 +20,7 @@ from .value_repository import (
     _TERMINAL_RUN_STATUSES,
     _RECENT_FACTS_SQL,
     _activity_from_row,
+    _population_operational_signals,
     _recent_totals_from_row,
     LIFECYCLE_ROLLUP_METRICS,
     LIFECYCLE_SEGMENTS,
@@ -44,6 +45,10 @@ from .value_repository import (
     _validate_window,
     analytics_store,
     commercial_tier,
+)
+from .lifecycle import (
+    OperationalSignals,
+    consecutive_failed_terminal_runs,
 )
 
 
@@ -583,6 +588,17 @@ class PostgresValueAnalyticsStore:
             for row in rows
         }
 
+    def list_operational_signals(
+        self,
+        user_ids: Sequence[int],
+        *,
+        now: datetime,
+        population_wide: bool = False,
+    ) -> dict[int, OperationalSignals]:
+        """See the SQLite twin."""
+        return _population_operational_signals(
+            self, user_ids, now=now, population_wide=population_wide
+        )
     def list_commercial_values(
         self,
         user_ids: Sequence[int],
@@ -690,11 +706,9 @@ class PostgresValueAnalyticsStore:
             )
             and now - timedelta(hours=24) <= timestamp <= now
         ]
-        consecutive_failures = 0
-        for run in terminal_24h:
-            if str(run.get("status")) not in {"failed", "timed_out"}:
-                break
-            consecutive_failures += 1
+        consecutive_failures = consecutive_failed_terminal_runs(
+            [str(run.get("status")) for run in terminal_24h]
+        )
 
         beyond_deadline = False
         for run in ordered:

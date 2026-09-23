@@ -346,6 +346,32 @@ def calculate_operational_state(
     )
 
 
+_FAILED_RUN_STATUSES = frozenset({"failed", "timed_out"})
+
+
+def consecutive_failed_terminal_runs(statuses: Sequence[str]) -> int:
+    """Count leading failures in a newest-first sequence of terminal statuses.
+
+    The rule `calculate_operational_state` reports as
+    "three_consecutive_failed_runs", lifted out of `_run_health` so the live
+    profile and the daily job cannot answer it differently. A total count is
+    a different number -- failed, failed, succeeded, failed, failed is 2 here
+    and 4 to a `COUNT(*)` -- and the reason code the UI renders says
+    "consecutive", so the total would be wrong on screen as well as
+    inconsistent between the two paths.
+
+    Pure and sequence-shaped rather than query-shaped on purpose: one caller
+    has rows from a store's list, the other from a cross-database fold, and
+    neither can express this in SQL over its own data alone.
+    """
+    count = 0
+    for status in statuses:
+        if status not in _FAILED_RUN_STATUSES:
+            break
+        count += 1
+    return count
+
+
 def commercial_tier(net_purchased_micro: int) -> CommercialTier:
     """Classify lifetime net purchases; refunds cannot make revenue negative."""
 
@@ -383,5 +409,6 @@ __all__ = [
     "calculate_lifecycle",
     "calculate_operational_state",
     "commercial_tier",
+    "consecutive_failed_terminal_runs",
     "is_lifecycle_activity",
 ]

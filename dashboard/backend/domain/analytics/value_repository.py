@@ -27,8 +27,10 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from .lifecycle import (
     CommercialTier,
     LifecycleSegment,
+    OperationalSignals,
     OperationalState,
     commercial_tier,
+    consecutive_failed_terminal_runs,
 )
 from .repository import analytics_store
 from .repository_common import positive_limit, positive_user_id, utc_iso
@@ -217,6 +219,142 @@ def _recent_totals_from_row(row: Any) -> RecentFactTotals:
             date.fromisoformat(str(last_active)) if last_active else None
         ),
     )
+
+
+PLATFORM_CREDENTIAL_ENVIRONMENT_SECRET = "dashboard.backend.domain.model_providers.service"
+
+
+def _platform_lane_open(providers: Sequence[Mapping[str, Any]], platform_statuses: Mapping[str, str]) -> bool:
+    """The population-wide half of ``platform_credits_available``.
+
+    Mirrors ModelProviderService.list_execution_options (service.py:175-186):
+    an enabled, platform-enabled provider whose platform credential is
+    verified or whose deployment secret is set. No user appears in this
+    expression, which is the whole reason the lane is batchable at all.
+    """
+    from dashboard.backend.domain.model_providers.service import (
+        _environment_platform_secret,
+    )
+
+    for provider in providers:
+        provider_id = str(provider.get("provider_id"))
+        if provider.get("status") != "enabled" or not provider.get("platform_enabled"):
+            continue
+        if platform_statuses.get(provider_id) == "verified":
+            return True
+        if _environment_platform_secret(provider_id):
+            return True
+    return False
+
+
+def _population_operational_signals(
+    store: Any,
+    user_ids: Sequence[int],
+    *,
+    now: datetime,
+    population_wide: bool,
+) -> dict[int, OperationalSignals]:
+    """Shared by both twins: seven owning-store calls, one fold, no per-user query.
+
+    ``user_ids`` is always the set answered for. ``population_wide`` decides
+    how the sources are *read*: False passes the ids as an IN list (the
+    live/batched shape, capped by ``_ids``); True passes ``None`` so every
+    statement is population-wide and the same at any user count -- the daily
+    job's shape. Either way a user with no row in any source is computed from
+    the model's defaults and a zero balance, exactly as ``get_operational_facts``
+    computes them, rather than being dropped.
+    """
+    current = _utc(now, "now")
+    if population_wide:
+        if not isinstance(user_ids, (list, tuple)):
+            raise ValueError("user_ids must be a list or tuple")
+        ids = list(dict.fromkeys(positive_user_id(item) for item in user_ids))
+        query_ids = None
+    else:
+        ids = _ids(user_ids)
+        query_ids = ids
+    if not ids:
+        return {}
+
+    def batched(base: Any, method: str, *args: Any, **kwargs: Any) -> Any:
+        if not hasattr(base, method):
+            return {}
+        result = getattr(base, method)(*args, **kwargs)
+        if not result:
+            # Fail-visible: every OperationalSignals default is permissive, so
+            # a source that silently answers nothing reads as "everyone
+            # healthy". A fresh deploy may legitimately have no rows, which is
+            # why this is a line and not an exception.
+            print(f"WARNING: analytics.operational_signals_empty source={method}")
+        return result
+
+    balances = batched(store.credits_base, "get_balance_projections", query_ids)          # 1
+    billing = batched(store.credits_base, "list_account_billing_states", query_ids)       # 2
+    credentials = batched(store.provider_base, "list_default_credential_facts", query_ids)  # 3
+    providers = (
+        list(store.provider_base.list_all_providers())                                    # 4
+        if hasattr(store.provider_base, "list_all_providers")
+        else []
+    )
+    platform_statuses = batched(store.provider_base, "list_platform_credential_statuses")  # 5
+    owners = batched(store.agent_base, "list_agent_owners", query_ids)                    # 6
+    runs = (
+        store.run_base.list_terminal_runs_since(since=current - timedelta(hours=24))      # 7
+        if hasattr(store.run_base, "list_terminal_runs_since")
+        else {}
+    )
+
+    providers_by_id = {str(row.get("provider_id")): row for row in providers}
+    platform_open = _platform_lane_open(providers, platform_statuses)
+    agents_by_owner: dict[int, list[str]] = {}
+    for agent_id, owner in owners.items():
+        agents_by_owner.setdefault(int(owner), []).append(agent_id)
+
+    signals: dict[int, OperationalSignals] = {}
+    for user_id in ids:
+        facts = credentials.get(user_id)
+        default_ids = facts.default_provider_ids if facts is not None else frozenset()
+        verified_counts = facts.verified_default_provider_counts if facts is not None else {}
+        selected_enabled = all(
+            providers_by_id.get(provider_id, {}).get("status") == "enabled"
+            for provider_id in default_ids
+        )
+        verified_byok = any(
+            row.get("status") == "enabled"
+            and bool(row.get("byok_enabled"))
+            and verified_counts.get(str(row.get("provider_id")), 0) == 1
+            for row in providers
+        )
+        total_available = int(
+            _object_value(balances.get(user_id, {}), "total_available_micro")
+        )
+        platform_lane = total_available > 0 and platform_open
+        pooled = sorted(
+            (
+                pair
+                for agent_id in agents_by_owner.get(user_id, ())
+                for pair in runs.get(agent_id, ())
+                if pair[0] <= current
+            ),
+            key=lambda pair: pair[0],
+            reverse=True,
+        )
+        signals[user_id] = OperationalSignals(
+            user_id=user_id,
+            account_restricted=(
+                billing.get(user_id, {}).get("account_status") == "restricted"
+            ),
+            usable_billing_lane=platform_lane or verified_byok,
+            selected_provider_enabled=selected_enabled,
+            default_credential_status=facts.status if facts is not None else "missing",
+            failed_terminal_runs_24h=consecutive_failed_terminal_runs(
+                [status for _stamp, status in pooled]
+            ),
+            # A live condition about a run happening right now; a fact row for
+            # a completed day cannot meaningfully carry it.
+            run_beyond_safe_deadline=False,
+        )
+    return signals
 
 
 class CommercialValueFact(BaseModel):
@@ -1044,11 +1182,9 @@ class ValueAnalyticsStore:
             )
             and now - timedelta(hours=24) <= timestamp <= now
         ]
-        consecutive_failures = 0
-        for run in terminal_24h:
-            if str(run.get("status")) not in {"failed", "timed_out"}:
-                break
-            consecutive_failures += 1
+        consecutive_failures = consecutive_failed_terminal_runs(
+            [str(run.get("status")) for run in terminal_24h]
+        )
 
         beyond_deadline = False
         for run in ordered:
@@ -1151,6 +1287,27 @@ class ValueAnalyticsStore:
             default_credential_status=credential_status,
             failed_terminal_runs_24h=failures,
             run_beyond_safe_deadline=beyond_deadline,
+        )
+
+    def list_operational_signals(
+        self,
+        user_ids: Sequence[int],
+        *,
+        now: datetime,
+        population_wide: bool = False,
+    ) -> dict[int, OperationalSignals]:
+        """Operational signals for many users, at a fixed query count.
+
+        The per-user twin, ``get_operational_facts``, fans out into roughly
+        five store calls plus one per agent the user owns. That is right for
+        one profile and catastrophic for a population, so the daily job uses
+        this instead, with ``population_wide=True`` so no statement carries an
+        IN list that grows with the population. Both must produce the same
+        answer; the equivalence is pinned by
+        tests/domain/analytics/test_operational_signals.py.
+        """
+        return _population_operational_signals(
+            self, user_ids, now=now, population_wide=population_wide
         )
 
     def get_projection_job(self, job_name: str) -> ProjectionJob | None:

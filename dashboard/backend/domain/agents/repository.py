@@ -16,7 +16,7 @@ import sqlite3
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Sequence
 
 from dashboard.backend.database import DB_PATH
 from dashboard.backend.db_url import describe_database_url
@@ -723,6 +723,34 @@ class AgentStore:
         rows = cursor.fetchall()
         conn.close()
         return [dict(row) for row in rows]
+
+    def list_agent_owners(self, user_ids: Sequence[int] | None = None) -> Dict[str, int]:
+        """agent_id -> owner_user_id for these owners (``None`` = every owned agent).
+
+        `external_agents.owner_user_id` is indexed
+        (`idx_external_agents_owner_user`), and this table is in
+        CONTENT_DATABASE_URL while protocol_runs is in DATABASE_PATH, so this
+        mapping has to come back to Python before the runs can be counted.
+        Rows with a NULL owner are omitted rather than grouped.
+        """
+        clause = ""
+        params: List[Any] = []
+        if user_ids is not None:
+            ids = list(dict.fromkeys(int(user_id) for user_id in user_ids))
+            if not ids:
+                return {}
+            clause = f" AND owner_user_id IN ({', '.join('?' for _ in ids)})"
+            params = ids
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT agent_id, owner_user_id FROM external_agents "
+            f"WHERE owner_user_id IS NOT NULL{clause}",
+            params,
+        )
+        rows = cursor.fetchall()
+        conn.close()
+        return {str(row["agent_id"]): int(row["owner_user_id"]) for row in rows}
 
     def list_owner_scope_agent_ids(self, agent_id: str) -> List[str]:
         """Agent ids that share an owner with ``agent_id``.

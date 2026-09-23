@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import json
 import uuid
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Sequence
 
 from dashboard.backend.db_url import init_schema_unless_worker, require_postgres_url
 from dashboard.backend.domain.agents.repository import (
@@ -643,6 +643,22 @@ class PostgresAgentStore:
                 )
                 rows = cur.fetchall()
         return [dict(row) for row in rows]
+
+    def list_agent_owners(self, user_ids: Sequence[int] | None = None) -> Dict[str, int]:
+        """See the SQLite twin."""
+        sql = "SELECT agent_id, owner_user_id FROM external_agents WHERE owner_user_id IS NOT NULL"
+        params: tuple[Any, ...] = ()
+        if user_ids is not None:
+            ids = list(dict.fromkeys(int(user_id) for user_id in user_ids))
+            if not ids:
+                return {}
+            sql += " AND owner_user_id = ANY(%s)"
+            params = (ids,)
+        with self._get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql, params)
+                rows = cur.fetchall()
+        return {str(row["agent_id"]): int(row["owner_user_id"]) for row in rows}
 
     def list_owner_scope_agent_ids(self, agent_id: str) -> List[str]:
         """Postgres twin of ``AgentStore.list_owner_scope_agent_ids``.
