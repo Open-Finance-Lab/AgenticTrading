@@ -322,6 +322,11 @@ async def startup_event():
 
 frontend_path = FRONTEND_DIR
 
+# HTML/JS/CSS always revalidate: the local console bumps ?v= per change, and
+# browsers heuristic-cache FileResponses that carry no Cache-Control header,
+# which is how Chrome kept serving a pre-autologin app.js (design N2/PR2).
+NO_CACHE = {"Cache-Control": "no-cache"}
+
 @app.get("/", include_in_schema=False)
 async def serve_root():
     """Serve marketing landing page."""
@@ -346,7 +351,7 @@ async def serve_app(request: Request):
         if user_query:
             target += f"?user={quote(str(user_query), safe='')}"
         return RedirectResponse(url=target, status_code=307)
-    return FileResponse(frontend_path / "app.html")
+    return FileResponse(frontend_path / "app.html", headers=NO_CACHE)
 
 
 @app.get("/app/", include_in_schema=False)
@@ -460,12 +465,12 @@ async def redirect_admin_analytics(request: Request):
 @app.get("/styles.css", include_in_schema=False)
 async def serve_styles():
     """Serve styles.css."""
-    return FileResponse(frontend_path / "styles.css", media_type="text/css")
+    return FileResponse(frontend_path / "styles.css", media_type="text/css", headers=NO_CACHE)
 
 @app.get("/app.js", include_in_schema=False)
 async def serve_app_js():
     """Serve app.js."""
-    return FileResponse(frontend_path / "app.js", media_type="text/javascript")
+    return FileResponse(frontend_path / "app.js", media_type="text/javascript", headers=NO_CACHE)
 
 @app.get("/home-page.js", include_in_schema=False)
 async def serve_home_page_js():
