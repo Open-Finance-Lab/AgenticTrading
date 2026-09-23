@@ -13027,11 +13027,9 @@ async function renderResearchShelf() {
     grid.innerHTML = '';
     if (emptyEl) {
       emptyEl.hidden = false;
-      emptyEl.innerHTML = 'No research agents yet. Add one from <button type="button" class="link-btn" data-goto-community>Community</button>.';
+      emptyEl.innerHTML = 'No research agents yet. Add one from '
+        + communityShelfButtonHtml('all') + '.';
     }
-    grid.querySelectorAll('[data-goto-community]').forEach((btn) => {
-      btn.addEventListener('click', () => navigateToPage('community'));
-    });
     return;
   }
   if (emptyEl) emptyEl.hidden = true;

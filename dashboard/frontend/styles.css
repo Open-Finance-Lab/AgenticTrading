@@ -13880,3 +13880,5 @@ table.sr-only {
 @media(max-width:900px){.research-columns{grid-template-columns:1fr}}
 .marketplace-card--research{border-color:rgba(103,232,249,.25)}
 .research-fact-icon{width:14px;height:14px;vertical-align:-2px;margin-right:2px}
+.research-back-btn{display:inline-flex;align-items:center;gap:6px;padding:7px 14px;margin-bottom:16px;border-radius:8px;border:1px solid rgba(148,163,184,.28);background:transparent;color:var(--text-muted,#94a3b8);font:inherit;font-size:13px;cursor:pointer}
+.research-back-btn:hover{color:var(--accent,#67e8f9);border-color:rgba(103,232,249,.4)}
