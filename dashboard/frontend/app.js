@@ -12983,7 +12983,13 @@ let researchWorkbenchTemplateId = null;
 let researchWorkbenchReturnView = null;
 let researchPollTimer = null;
 let researchSubmitInFlight = false;
+document.addEventListener('DOMContentLoaded', () => {
+  document.getElementById('researchBackBtn')?.addEventListener('click', hideResearchWorkbench);
+});
 
+// Back is bound once at init, not per-open: the manifest-failure path returns
+// before openResearchWorkbench would reach its binding, and a dead Back on a
+// failed-to-load workbench is a trapped user.
 function stopResearchPolling() {
   if (researchPollTimer) {
     clearInterval(researchPollTimer);
@@ -13046,12 +13052,25 @@ async function renderResearchShelf() {
           <svg class="ui-icon research-fact-icon" aria-hidden="true"><use href="#icon-clock"></use></svg> ~${runtimeMin} min ·
           <svg class="ui-icon research-fact-icon" aria-hidden="true"><use href="#icon-file-text"></use></svg> ${escapeHtml(((agent.research || {}).output_formats || []).join(' / '))}
         </p>
-        <button type="button" class="auth-btn auth-btn-primary research-open-btn">Open workbench</button>
+        <div class="research-agent-card-actions">
+          <button type="button" class="auth-btn auth-btn-primary research-open-btn">Open workbench</button>
+          <button type="button" class="research-remove-btn" data-remove-template-id="${escapeHtml(agent.template_id)}" data-agent-name="${escapeHtml(agent.name)}">Remove</button>
+        </div>
       </article>`;
   }).join('');
   grid.querySelectorAll('.research-agent-card').forEach((card) => {
     card.querySelector('.research-open-btn')?.addEventListener('click', () => {
       openResearchWorkbench(card.dataset.templateId);
+    });
+    card.querySelector('.research-remove-btn')?.addEventListener('click', async (event) => {
+      const templateId = event.currentTarget.dataset.removeTemplateId;
+      if (!window.confirm(`Remove "${event.currentTarget.dataset.agentName}" from My Agents?\n\nYou can re-add it from Community at any time.`)) return;
+      try {
+        await API.request(`${RESEARCH_API}/agents/${encodeURIComponent(templateId)}/add`, { method: 'DELETE' });
+        await renderResearchShelf();
+      } catch (error) {
+        alert(error.message || 'Remove failed.');
+      }
     });
   });
 }
@@ -13195,7 +13214,6 @@ async function openResearchWorkbench(templateId) {
       submitResearchRun();
     });
   }
-  document.getElementById('researchBackBtn').onclick = hideResearchWorkbench;
   await loadResearchRuns(templateId);
 }
 
