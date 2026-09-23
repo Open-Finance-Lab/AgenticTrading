@@ -1353,6 +1353,89 @@ class ValueAnalyticsStore:
             conn.execute(sql, values)
         return job
 
+    def claim_projection_day(
+        self,
+        job_name: str,
+        *,
+        day: date,
+        now: datetime,
+        stale_after: timedelta = timedelta(hours=2),
+    ) -> bool:
+        """Take the lease on ``day`` for ``job_name``; True for the caller that won.
+
+        Two fields, two questions (design SS6.9). ``cursor`` answers "which
+        day is done" and only ``complete_projection_day`` moves it, so a day
+        is never run twice once it succeeded. ``status`` answers "is someone
+        running it now": the compare-and-set below moves it from
+        ``pending``/``complete`` to ``running`` and stamps ``updated_at``; a
+        second process whose UPDATE matches nothing gets False. A ``running``
+        lease older than ``stale_after`` is a crash, not a worker, and may be
+        taken over -- which is how a job killed mid-day retries on the next
+        tick instead of never.
+
+        The cursor comparison is lexicographic on ISO dates. ``cursor >= day``
+        means the day (or a later one) already completed and the claim is
+        refused without a write.
+        """
+        name = _projection_job_name(job_name)
+        target = day.isoformat()
+        stamp = utc_iso(_utc(now, "now"))
+        stale_before = utc_iso(_utc(now, "now") - stale_after)
+        with self._analytics_connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO analytics_projection_jobs (
+                    job_name, window_start, window_end, cursor, status, updated_at
+                ) VALUES (?, ?, ?, NULL, 'pending', ?)
+                ON CONFLICT(job_name) DO NOTHING
+                """,
+                (name, target, target, stamp),
+            )
+            cursor = conn.execute(
+                """
+                UPDATE analytics_projection_jobs
+                   SET status = 'running', window_end = ?, updated_at = ?
+                 WHERE job_name = ?
+                   AND (cursor IS NULL OR cursor < ?)
+                   AND (
+                        status IN ('pending', 'complete')
+                        OR (status = 'running' AND updated_at < ?)
+                   )
+                """,
+                (target, stamp, name, target, stale_before),
+            )
+            return cursor.rowcount == 1
+
+    def complete_projection_day(self, job_name: str, *, day: date, now: datetime) -> None:
+        """Record ``day`` as done: cursor -> day, status -> complete."""
+        name = _projection_job_name(job_name)
+        with self._analytics_connection() as conn:
+            conn.execute(
+                """
+                UPDATE analytics_projection_jobs
+                   SET cursor = ?, status = 'complete', updated_at = ?
+                 WHERE job_name = ?
+                """,
+                (day.isoformat(), utc_iso(_utc(now, "now")), name),
+            )
+
+    def release_projection_day(self, job_name: str, *, now: datetime) -> None:
+        """Give a failed day back: status -> pending, cursor untouched.
+
+        Called when a step failed, so the next tick's claim retries the same
+        day at once instead of waiting out the stale window.
+        """
+        name = _projection_job_name(job_name)
+        with self._analytics_connection() as conn:
+            conn.execute(
+                """
+                UPDATE analytics_projection_jobs
+                   SET status = 'pending', updated_at = ?
+                 WHERE job_name = ? AND status = 'running'
+                """,
+                (utc_iso(_utc(now, "now")), name),
+            )
+
 
 def build_value_analytics_store(
     analytics_base: Any | None = None,

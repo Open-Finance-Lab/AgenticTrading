@@ -858,3 +858,70 @@ class PostgresValueAnalyticsStore:
             with conn.cursor() as cur:
                 cur.execute(sql, values)
         return job
+
+    def claim_projection_day(
+        self,
+        job_name: str,
+        *,
+        day: date,
+        now: datetime,
+        stale_after: timedelta = timedelta(hours=2),
+    ) -> bool:
+        """See the SQLite twin."""
+        name = _projection_job_name(job_name)
+        target = day.isoformat()
+        stamp = utc_iso(_utc(now, "now"))
+        stale_before = utc_iso(_utc(now, "now") - stale_after)
+        with self._analytics_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO analytics_projection_jobs (
+                        job_name, window_start, window_end, cursor, status, updated_at
+                    ) VALUES (%s, %s, %s, NULL, 'pending', %s)
+                    ON CONFLICT(job_name) DO NOTHING
+                    """,
+                    (name, target, target, stamp),
+                )
+                cur.execute(
+                    """
+                    UPDATE analytics_projection_jobs
+                       SET status = 'running', window_end = %s, updated_at = %s
+                     WHERE job_name = %s
+                       AND (cursor IS NULL OR cursor < %s)
+                       AND (
+                            status IN ('pending', 'complete')
+                            OR (status = 'running' AND updated_at < %s)
+                       )
+                    """,
+                    (target, stamp, name, target, stale_before),
+                )
+                return cur.rowcount == 1
+
+    def complete_projection_day(self, job_name: str, *, day: date, now: datetime) -> None:
+        """See the SQLite twin."""
+        name = _projection_job_name(job_name)
+        with self._analytics_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE analytics_projection_jobs
+                       SET cursor = %s, status = 'complete', updated_at = %s
+                     WHERE job_name = %s
+                    """,
+                    (day.isoformat(), utc_iso(_utc(now, "now")), name),
+                )
+
+    def release_projection_day(self, job_name: str, *, now: datetime) -> None:
+        """See the SQLite twin."""
+        name = _projection_job_name(job_name)
+        with self._analytics_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE analytics_projection_jobs
+                       SET status = 'pending', updated_at = %s
+                     WHERE job_name = %s AND status = 'running'
+                    """,
+                    (utc_iso(_utc(now, "now")), name),
+                )

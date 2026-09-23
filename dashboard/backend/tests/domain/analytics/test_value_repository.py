@@ -570,3 +570,69 @@ def test_non_default_credential_does_not_create_a_usable_billing_lane(tmp_path):
 
     assert facts.usable_billing_lane is False
     assert facts.default_credential_status == "missing"
+
+
+JOB = "analytics_daily_facts"
+DAY = date(2026, 9, 11)
+CLAIM_AT = datetime(2026, 9, 12, 0, 5, tzinfo=timezone.utc)
+
+
+def test_only_one_claim_of_a_day_succeeds(tmp_path):
+    _user_id, analytics, credits = _stores(tmp_path)
+    store = _value_store(analytics, credits)
+
+    first = store.claim_projection_day(JOB, day=DAY, now=CLAIM_AT)
+    second = store.claim_projection_day(JOB, day=DAY, now=CLAIM_AT + timedelta(minutes=1))
+    job = store.get_projection_job(JOB)
+
+    assert first is True
+    assert second is False
+    assert job.status == "running"
+    assert job.cursor is None  # the cursor moves only when the day completes
+
+
+def test_a_crashed_claim_is_reclaimable_after_two_hours(tmp_path):
+    _user_id, analytics, credits = _stores(tmp_path)
+    store = _value_store(analytics, credits)
+    store.claim_projection_day(JOB, day=DAY, now=CLAIM_AT)
+
+    too_soon = store.claim_projection_day(JOB, day=DAY, now=CLAIM_AT + timedelta(hours=1))
+    reclaimed = store.claim_projection_day(JOB, day=DAY, now=CLAIM_AT + timedelta(hours=2, minutes=1))
+
+    assert too_soon is False
+    assert reclaimed is True
+
+
+def test_a_completed_day_is_never_run_again(tmp_path):
+    _user_id, analytics, credits = _stores(tmp_path)
+    store = _value_store(analytics, credits)
+    store.claim_projection_day(JOB, day=DAY, now=CLAIM_AT)
+    store.complete_projection_day(JOB, day=DAY, now=CLAIM_AT + timedelta(minutes=2))
+
+    again = store.claim_projection_day(JOB, day=DAY, now=CLAIM_AT + timedelta(hours=5))
+    earlier = store.claim_projection_day(JOB, day=DAY - timedelta(days=1), now=CLAIM_AT + timedelta(hours=5))
+    next_day = store.claim_projection_day(
+        JOB, day=DAY + timedelta(days=1), now=CLAIM_AT + timedelta(days=1)
+    )
+    job = store.get_projection_job(JOB)
+
+    assert again is False
+    assert earlier is False
+    assert next_day is True
+    assert job.cursor == DAY.isoformat()
+    assert job.status == "running"
+    assert job.window_end == DAY + timedelta(days=1)
+
+
+def test_a_released_claim_can_be_retried_at_once(tmp_path):
+    _user_id, analytics, credits = _stores(tmp_path)
+    store = _value_store(analytics, credits)
+    store.claim_projection_day(JOB, day=DAY, now=CLAIM_AT)
+
+    store.release_projection_day(JOB, now=CLAIM_AT + timedelta(minutes=1))
+    retried = store.claim_projection_day(JOB, day=DAY, now=CLAIM_AT + timedelta(minutes=2))
+    job = store.get_projection_job(JOB)
+
+    assert retried is True
+    assert job.cursor is None
+    assert job.status == "running"
