@@ -66,6 +66,7 @@ from dashboard.backend.infrastructure.market_data.provider import (
     ensure_market_data_source_available,
     validate_market_data_source,
 )
+from dashboard.backend.infrastructure.market_data.sessions import time_in_session
 from dashboard.backend.infrastructure.market_data.profiles import (
     LLM_DECISION_SOURCE,
     MarketProfile,
@@ -177,17 +178,10 @@ def filter_market_hours(
             weekday = ts_local.weekday()
             is_weekday = weekday < 5  # Monday-Friday only
             
-            # Check the configured market's local trading sessions.
-            hour = ts_local.hour
-            minute = ts_local.minute
-            minutes = hour * 60 + minute
-            if market == "CN":
-                is_market_hours = (
-                    9 * 60 + 30 <= minutes <= 11 * 60 + 30
-                    or 13 * 60 <= minutes <= 15 * 60
-                )
-            else:
-                is_market_hours = 9 * 60 + 30 <= minutes <= 16 * 60
+            # Check the configured market's local trading sessions. Only the
+            # bounds are shared: the local-time conversion above stays, since
+            # a naive stored timestamp is read here the way it always was.
+            is_market_hours = time_in_session(ts_local.time(), market)
             
             if is_weekday and is_market_hours:
                 filtered.append(point)

@@ -178,18 +178,133 @@ def test_the_session_filter_and_the_aggregation_share_one_owner():
     what made the CN case drop every bar while each half looked correct.
     """
     from dashboard.backend.domain.backtesting import bar_aggregation
+    from dashboard.backend.infrastructure.market_data import sessions
 
     # `clock_time`, not `time`: this module imports the time MODULE, and
     # `from datetime import time` would rebind it -- the exact shadowing
-    # engine.py:23-31 has a comment block about.
-    assert mds.session_windows is bar_aggregation.session_windows
-    assert bar_aggregation.session_windows("CN") == (
+    # engine.py's import block has a comment about.
+    assert mds.is_in_session is sessions.is_in_session
+    assert bar_aggregation.session_windows is sessions.session_windows
+    assert sessions.session_windows("CN") == (
         (clock_time(9, 30), clock_time(11, 30)),
         (clock_time(13, 0), clock_time(15, 0)),
     )
-    assert bar_aggregation.session_windows("US") == (
+    assert sessions.session_windows("US") == (
         (clock_time(9, 30), clock_time(16, 0)),
     )
+
+
+def test_market_spelling_is_one_key():
+    """`session_windows` canonicalises the market; the key has to as well, or
+    "us", "US " and None -- one set of sessions -- are three builds of one
+    dataset, which is #512 coming back through the new key field."""
+    a = mds.get_dataset(SYMS, "2026-04-15", "2026-04-16",
+                        loader_factory=_CountingLoader, market="US")
+    for spelling in ("us", "US ", None, ""):
+        assert mds.get_dataset(SYMS, "2026-04-15", "2026-04-16",
+                               loader_factory=_CountingLoader,
+                               market=spelling) is a
+        assert mds.peek(SYMS, "2026-04-15", "2026-04-16", market=spelling) is a
+    assert _CountingLoader.calls == 1
+
+
+def test_repeated_symbols_are_one_key():
+    a = mds.get_dataset(["AAPL", "AAPL", "MSFT"], "2026-04-15", "2026-04-16",
+                        loader_factory=_CountingLoader)
+    assert mds.get_dataset(["MSFT", "AAPL"], "2026-04-15", "2026-04-16",
+                           loader_factory=_CountingLoader) is a
+    assert _CountingLoader.calls == 1
+
+
+class _OrderRecordingLoader:
+    """Answers in the REVERSE of the requested order, as a loader is free to."""
+
+    requested = []
+
+    def fetch_bars(self, symbols, start, end):
+        type(self).requested.append(list(symbols))
+        bars = _synth_bars(symbols, start, end)
+        return {symbol: bars[symbol] for symbol in reversed(list(bars))}
+
+
+def test_the_dataset_is_built_in_key_order_not_the_first_callers():
+    """The key makes [MSFT, AAPL] and [AAPL, MSFT] one entry, so the entry's
+    order must not depend on which of them built it: a session without explicit
+    symbols iterates `all_data`, and two identical runs prompted differently
+    depending on build timing."""
+    _OrderRecordingLoader.requested = []
+    ds = mds.get_dataset(["MSFT", "AAPL", "MSFT"], "2026-04-15", "2026-04-16",
+                         loader_factory=_OrderRecordingLoader)
+    assert _OrderRecordingLoader.requested == [["AAPL", "MSFT"]]
+    assert list(ds.all_data) == ["AAPL", "MSFT"]
+    assert list(ds.source_data) == ["AAPL", "MSFT"]
+
+
+def test_market_alone_selects_its_own_timezone():
+    """`timezone` defaulted to US/Eastern independently of `market`, so
+    `market="CN"` alone checked CN sessions on ET clocks. Over these US bars
+    that keeps 09:30-11:30 ET and builds a dataset -- cached under the CN key
+    for every later CN caller. Read on Shanghai clocks, as the market demands,
+    there is no CN session in them at all."""
+    with pytest.raises(RuntimeError, match="No trading hours"):
+        mds.get_dataset(SYMS, "2026-04-15", "2026-04-16",
+                        loader_factory=_CountingLoader, market="CN")
+
+
+def test_a_timezone_disagreeing_with_the_market_is_refused_before_building():
+    with pytest.raises(ValueError, match="does not match market"):
+        mds.get_dataset(SYMS, "2026-04-15", "2026-04-16",
+                        loader_factory=_CountingLoader, market="CN",
+                        timezone="US/Eastern")
+    assert _CountingLoader.calls == 0
+    assert mds.peek(SYMS, "2026-04-15", "2026-04-16", market="CN") is None
+
+
+def test_us_equity_enrichment_runs_only_for_the_us_market(monkeypatch):
+    """The engine gates it on the Alpaca source. Ungated here, a CN build looked
+    A-share symbols up in US metadata and -- with a configured but missing
+    dataset path -- raised EquityMetadataUnavailableError for a build that
+    never needed it."""
+    calls = []
+
+    def _enrich(bars, *, timezone):
+        calls.append(timezone)
+        return dict(bars), {"status": "stub"}
+
+    monkeypatch.setattr(mds, "load_and_enrich_us_equity_bars", _enrich)
+    us = mds.get_dataset(SYMS, "2026-04-15", "2026-04-16",
+                         loader_factory=_CountingLoader, market="US")
+    assert calls == ["US/Eastern"]
+    assert us.equity_metadata == {"status": "stub"}
+
+    # Reaching "No trading hours" proves the build got past enrichment without
+    # calling it; the stub would otherwise have recorded a second call.
+    with pytest.raises(RuntimeError, match="No trading hours"):
+        mds.get_dataset(SYMS, "2026-04-15", "2026-04-16",
+                        loader_factory=_CountingLoader, market="CN")
+    assert calls == ["US/Eastern"]
+
+
+def test_session_filter_reads_naive_bars_as_market_local_time():
+    """`ts.astimezone(tz)` raises on a tz-naive pandas Timestamp, while the
+    aggregation localises naive bars to the market zone -- so on equal source
+    and decision timeframes (aggregation skipped) a local-time feed crashed
+    the filter the aggregation would have handled."""
+    aware = _synth_bars()
+    naive = {
+        symbol: frame.set_axis(
+            frame.index.tz_convert("US/Eastern").tz_localize(None)
+        )
+        for symbol, frame in aware.items()
+    }
+    kept_aware = mds._build_trading_timestamps(
+        aware, market="US", timezone="US/Eastern"
+    )
+    kept_naive = mds._build_trading_timestamps(
+        naive, market="US", timezone="US/Eastern"
+    )
+    assert kept_naive
+    assert [ts.tz_localize("US/Eastern") for ts in kept_naive] == kept_aware
 
 
 def test_peek_is_nonblocking_and_only_returns_resident():

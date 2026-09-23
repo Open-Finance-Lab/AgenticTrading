@@ -23,6 +23,8 @@ from dashboard.backend.infrastructure.market_data.frequency import (
     normalize_bar_timeframe,
     timeframe_minutes,
 )
+# Re-exported: the session bounds have one owner, and it is not this module.
+from dashboard.backend.infrastructure.market_data.sessions import session_windows
 
 
 class BarAggregationError(ValueError):
@@ -35,23 +37,6 @@ _QUALITY_COUNT_COLUMNS = (
     "off_grid_source_bars",
     "invalid_source_bars",
 )
-
-
-def session_windows(market: str) -> tuple[tuple[time, time], ...]:
-    """The market's trading sessions, in its own local time.
-
-    Public because ``market_data_store`` filters its decision timestamps to
-    in-session bars and must agree with the aggregation exactly. It carried its
-    own copy of the US bounds as a literal, which is the two-owners shape this
-    repo keeps getting bitten by: the copy was not merely a duplicate, it was
-    unconditional, so a CN profile aggregated on 09:30-11:30 + 13:00-15:00 CST
-    and was then filtered against 09:30-16:00 *ET* -- a window that in CST is
-    21:30-04:00, i.e. every bar dropped.
-    """
-    canonical = str(market or "US").strip().upper()
-    if canonical == "CN":
-        return ((time(9, 30), time(11, 30)), (time(13, 0), time(15, 0)))
-    return ((time(9, 30), time(16, 0)),)
 
 
 def _as_local_index(frame: pd.DataFrame, timezone: str) -> pd.DataFrame:

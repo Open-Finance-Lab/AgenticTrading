@@ -12,6 +12,8 @@ from typing import Any, Dict, List, Optional
 import pandas as pd
 import pytz
 
+from dashboard.backend.infrastructure.market_data.sessions import is_in_session
+
 _ET = pytz.timezone("US/Eastern")
 
 
@@ -62,18 +64,10 @@ def timestamps_in_reference(
 
 def filter_market_hours(timestamps: List[Any]) -> List[Any]:
     """Keep only regular US market-hours timestamps (9:30–16:00 ET)."""
-    kept = []
-    for ts in timestamps:
-        ts_et = ts.astimezone(_ET)
-        hour, minute = ts_et.hour, ts_et.minute
-        is_market_hours = (
-            (hour > 9 and hour < 16)
-            or (hour == 9 and minute >= 30)
-            or (hour == 16 and minute == 0)
-        )
-        if is_market_hours:
-            kept.append(ts)
-    return kept
+    return [
+        ts for ts in timestamps
+        if is_in_session(ts, market="US", timezone=_ET.zone)
+    ]
 
 
 def market_timestamps(bars_subset: Dict[str, pd.DataFrame]) -> List[Any]:
