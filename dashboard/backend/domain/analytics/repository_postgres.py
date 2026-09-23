@@ -512,6 +512,31 @@ class PostgresAnalyticsStore:
         existing: set[str] = set()
         if not values:
             return existing
+
+    def list_daily_subjects(self) -> list[dict[str, Any]]:
+        """See the SQLite twin."""
+        with self._get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT users.id, users.user_group, users.created_at
+                    FROM users
+                    LEFT JOIN analytics_subject_settings AS settings
+                      ON settings.user_id = users.id
+                    WHERE users.role <> 'admin'
+                      AND COALESCE(settings.excluded, FALSE) = FALSE
+                    ORDER BY users.id
+                    """
+                )
+                rows = cur.fetchall()
+        return [
+            {
+                "id": int(row["id"]),
+                "user_group": row["user_group"],
+                "created_at": row["created_at"],
+            }
+            for row in rows
+        ]
         with self._get_connection() as conn:
             with conn.cursor() as cur:
                 for offset in range(0, len(values), 500):

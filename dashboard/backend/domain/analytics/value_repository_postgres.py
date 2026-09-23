@@ -28,9 +28,13 @@ from .value_repository import (
     RUN_SAFE_DEADLINE,
     CommercialValueFact,
     CurrentOperationalFacts,
+    ActivityUpdate,
+    DayEventTotals,
+    LifecycleTransitionRow,
     ProjectionJob,
     RecentFactTotals,
     UserActivity,
+    UserDailyFact,
     UserLifecycleDailySnapshot,
     UserValueSnapshot,
     _current_snapshot_from_row,
@@ -587,6 +591,121 @@ class PostgresValueAnalyticsStore:
             int(_row_value(row, "user_id")): _recent_totals_from_row(row)
             for row in rows
         }
+
+    def aggregate_events_for_day(self, day: date) -> dict[int, DayEventTotals]:
+        """See the SQLite twin."""
+        start, end = _day_bounds_iso(day)
+        activity = ", ".join("%s" for _ in _ACTIVITY_EVENT_NAMES)
+        sql = _EVENTS_FOR_DAY_SQL.format(activity=activity, p="%s")
+        with self._analytics_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql, [*_ACTIVITY_EVENT_NAMES, start, end])
+                rows = cur.fetchall()
+        return {
+            int(_row_value(row, "user_id")): _events_totals_from_row(row) for row in rows
+        }
+
+    def record_activity_batch(
+        self,
+        updates: Sequence[ActivityUpdate],
+        *,
+        now: datetime,
+    ) -> int:
+        """See the SQLite twin."""
+        if not updates:
+            return 0
+        stamp = utc_iso(_utc(now, "now"))
+        sql = """
+            INSERT INTO user_activity (
+                user_id, activated_at, last_meaningful_activity_at, updated_at
+            ) VALUES (%s, %s::text, %s::text, %s)
+            ON CONFLICT(user_id) DO UPDATE SET
+                activated_at = LEAST(
+                    COALESCE(user_activity.activated_at, EXCLUDED.activated_at),
+                    COALESCE(EXCLUDED.activated_at, user_activity.activated_at)
+                ),
+                last_meaningful_activity_at = GREATEST(
+                    COALESCE(
+                        user_activity.last_meaningful_activity_at,
+                        EXCLUDED.last_meaningful_activity_at
+                    ),
+                    COALESCE(
+                        EXCLUDED.last_meaningful_activity_at,
+                        user_activity.last_meaningful_activity_at
+                    )
+                ),
+                updated_at = EXCLUDED.updated_at
+        """
+        with self._analytics_connection() as conn:
+            with conn.cursor() as cur:
+                cur.executemany(
+                    sql, [_activity_update_values(update, stamp) for update in updates]
+                )
+        return len(updates)
+
+    def upsert_daily_facts(self, rows: Sequence[UserDailyFact]) -> int:
+        """See the SQLite twin. ``active`` is BOOLEAN here."""
+        if not rows:
+            return 0
+        columns = ", ".join(_DAILY_FACT_COLUMNS)
+        placeholders = ", ".join("%s" for _ in _DAILY_FACT_COLUMNS)
+        sql = f"""
+            INSERT INTO user_daily_facts ({columns})
+            VALUES ({placeholders})
+            ON CONFLICT(snapshot_date, user_id) DO UPDATE SET {_DAILY_FACT_UPDATES}
+        """
+        with self._analytics_connection() as conn:
+            with conn.cursor() as cur:
+                cur.executemany(
+                    sql, [_fact_values(row, active_value=bool(row.active)) for row in rows]
+                )
+        return len(rows)
+
+    def append_lifecycle_transitions(
+        self, rows: Sequence[LifecycleTransitionRow]
+    ) -> int:
+        """See the SQLite twin."""
+        if not rows:
+            return 0
+        columns = ", ".join(_TRANSITION_COLUMNS)
+        placeholders = ", ".join("%s" for _ in _TRANSITION_COLUMNS)
+        sql = f"""
+            INSERT INTO lifecycle_transitions ({columns})
+            VALUES ({placeholders})
+            ON CONFLICT(user_id, snapshot_date) DO UPDATE SET {_TRANSITION_UPDATES}
+        """
+        with self._analytics_connection() as conn:
+            with conn.cursor() as cur:
+                cur.executemany(sql, [_transition_values(row) for row in rows])
+        return len(rows)
+
+    def list_facts_for_date(self, day: date) -> list[UserDailyFact]:
+        """See the SQLite twin."""
+        with self._analytics_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT * FROM user_daily_facts WHERE snapshot_date = %s ORDER BY user_id",
+                    (day.isoformat(),),
+                )
+                rows = cur.fetchall()
+        return [_fact_from_row(row) for row in rows]
+
+    def list_days_needing_recompute(self, *, since: date, until: date) -> list[date]:
+        """See the SQLite twin."""
+        if until < since:
+            raise ValueError("until must not precede since")
+        start, _unused = _day_bounds_iso(since)
+        _unused, end = _day_bounds_iso(until)
+        with self._analytics_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(_RECOMPUTE_EVENTS_SQL.format(p="%s"), (start, end))
+                event_rows = cur.fetchall()
+                cur.execute(
+                    _RECOMPUTE_FACTS_SQL.format(p="%s"),
+                    (since.isoformat(), until.isoformat()),
+                )
+                fact_rows = cur.fetchall()
+        return _recompute_days(event_rows, fact_rows)
 
     def list_operational_signals(
         self,

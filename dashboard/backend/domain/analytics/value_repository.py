@@ -29,6 +29,7 @@ from .lifecycle import (
     LifecycleSegment,
     OperationalSignals,
     OperationalState,
+    _LIFECYCLE_ACTIVITY_EVENTS,
     commercial_tier,
     consecutive_failed_terminal_runs,
 )
@@ -219,6 +220,227 @@ def _recent_totals_from_row(row: Any) -> RecentFactTotals:
             date.fromisoformat(str(last_active)) if last_active else None
         ),
     )
+
+
+class DayEventTotals(BaseModel):
+    """One user's run outcomes and activity marks inside one UTC day."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    user_id: int = Field(gt=0)
+    runs_requested: int = Field(default=0, ge=0)
+    runs_completed: int = Field(default=0, ge=0)
+    runs_failed: int = Field(default=0, ge=0)
+    runs_cancelled: int = Field(default=0, ge=0)
+    first_success_at: datetime | None = None
+    last_activity_at: datetime | None = None
+
+    @property
+    def active(self) -> bool:
+        return self.last_activity_at is not None
+
+
+class ActivityUpdate(BaseModel):
+    """One row of a batched ``record_activity``; either timestamp may be absent."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    user_id: int = Field(gt=0)
+    activated_at: datetime | None = None
+    last_activity_at: datetime | None = None
+
+
+class UserDailyFact(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    snapshot_date: date
+    user_id: int = Field(gt=0)
+    lifecycle_segment: LifecycleSegment
+    lifecycle_reason_code: str = Field(min_length=1, max_length=100)
+    operational_state: OperationalState
+    operational_reason_code: str | None = Field(default=None, max_length=100)
+    tier: CommercialTier
+    user_group: str = Field(min_length=1, max_length=32)
+    active: bool = False
+    runs_requested: int = Field(default=0, ge=0)
+    runs_completed: int = Field(default=0, ge=0)
+    runs_failed: int = Field(default=0, ge=0)
+    runs_cancelled: int = Field(default=0, ge=0)
+    operator_cost_micro: int = Field(default=0, ge=0)
+    own_spend_micro: int = Field(default=0, ge=0)
+    data_quality: Literal["complete", "partial"]
+    calculated_at: datetime
+
+    @field_validator("calculated_at")
+    @classmethod
+    def require_timezone(cls, value: datetime) -> datetime:
+        return _utc(value)
+
+
+class LifecycleTransitionRow(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    user_id: int = Field(gt=0)
+    snapshot_date: date
+    from_segment: LifecycleSegment
+    to_segment: LifecycleSegment
+    inactive_days: int = Field(default=0, ge=0)
+    data_quality: Literal["complete", "partial"] = "complete"
+    created_at: datetime
+
+    @field_validator("created_at")
+    @classmethod
+    def require_timezone(cls, value: datetime) -> datetime:
+        return _utc(value)
+
+
+_DAILY_FACT_COLUMNS = (
+    "snapshot_date", "user_id", "lifecycle_segment", "lifecycle_reason_code",
+    "operational_state", "operational_reason_code", "tier", "user_group", "active",
+    "runs_requested", "runs_completed", "runs_failed", "runs_cancelled",
+    "operator_cost_micro", "own_spend_micro", "data_quality", "calculated_at",
+)
+_DAILY_FACT_UPDATES = ", ".join(
+    f"{column} = excluded.{column}" for column in _DAILY_FACT_COLUMNS[2:]
+)
+_TRANSITION_COLUMNS = (
+    "user_id", "snapshot_date", "from_segment", "to_segment", "inactive_days",
+    "data_quality", "created_at",
+)
+_TRANSITION_UPDATES = ", ".join(
+    f"{column} = excluded.{column}" for column in _TRANSITION_COLUMNS[2:]
+)
+_ACTIVITY_EVENT_NAMES = tuple(sorted(_LIFECYCLE_ACTIVITY_EVENTS))
+_EVENTS_FOR_DAY_SQL = """
+    SELECT user_id,
+           SUM(CASE WHEN event_name = 'backtest_requested' THEN 1 ELSE 0 END)
+               AS runs_requested,
+           SUM(CASE WHEN event_name = 'backtest_completed' THEN 1 ELSE 0 END)
+               AS runs_completed,
+           SUM(CASE WHEN event_name = 'backtest_failed' THEN 1 ELSE 0 END)
+               AS runs_failed,
+           SUM(CASE WHEN event_name = 'backtest_cancelled' THEN 1 ELSE 0 END)
+               AS runs_cancelled,
+           MIN(CASE WHEN event_name = 'backtest_completed' THEN occurred_at END)
+               AS first_success_at,
+           MAX(CASE WHEN event_name IN ({activity}) THEN occurred_at END)
+               AS last_activity_at
+    FROM analytics_events
+    WHERE occurred_at >= {p} AND occurred_at < {p}
+    GROUP BY user_id
+"""
+_RECOMPUTE_EVENTS_SQL = """
+    SELECT substr(occurred_at, 1, 10) AS day, MAX(received_at) AS last_received
+    FROM analytics_events
+    WHERE occurred_at >= {p} AND occurred_at < {p}
+    GROUP BY substr(occurred_at, 1, 10)
+"""
+_RECOMPUTE_FACTS_SQL = """
+    SELECT snapshot_date, MIN(calculated_at) AS calculated_at
+    FROM user_daily_facts
+    WHERE snapshot_date >= {p} AND snapshot_date <= {p}
+    GROUP BY snapshot_date
+"""
+
+
+def _day_bounds_iso(day: date) -> tuple[str, str]:
+    start = datetime.combine(day, datetime.min.time(), tzinfo=timezone.utc)
+    return utc_iso(start), utc_iso(start + timedelta(days=1))
+
+
+def _events_totals_from_row(row: Any) -> DayEventTotals:
+    """Shared by both twins."""
+    return DayEventTotals(
+        user_id=int(_row_value(row, "user_id")),
+        runs_requested=int(_row_value(row, "runs_requested", 0) or 0),
+        runs_completed=int(_row_value(row, "runs_completed", 0) or 0),
+        runs_failed=int(_row_value(row, "runs_failed", 0) or 0),
+        runs_cancelled=int(_row_value(row, "runs_cancelled", 0) or 0),
+        first_success_at=_optional_timestamp(_row_value(row, "first_success_at")),
+        last_activity_at=_optional_timestamp(_row_value(row, "last_activity_at")),
+    )
+
+
+def _fact_from_row(row: Any) -> UserDailyFact:
+    """Shared by both twins."""
+    return UserDailyFact(
+        snapshot_date=date.fromisoformat(str(_row_value(row, "snapshot_date"))),
+        user_id=int(_row_value(row, "user_id")),
+        lifecycle_segment=_row_value(row, "lifecycle_segment"),
+        lifecycle_reason_code=_row_value(row, "lifecycle_reason_code"),
+        operational_state=_row_value(row, "operational_state"),
+        operational_reason_code=_row_value(row, "operational_reason_code"),
+        tier=_row_value(row, "tier"),
+        user_group=_row_value(row, "user_group"),
+        active=bool(_row_value(row, "active", 0)),
+        runs_requested=int(_row_value(row, "runs_requested", 0) or 0),
+        runs_completed=int(_row_value(row, "runs_completed", 0) or 0),
+        runs_failed=int(_row_value(row, "runs_failed", 0) or 0),
+        runs_cancelled=int(_row_value(row, "runs_cancelled", 0) or 0),
+        operator_cost_micro=int(_row_value(row, "operator_cost_micro", 0) or 0),
+        own_spend_micro=int(_row_value(row, "own_spend_micro", 0) or 0),
+        data_quality=_row_value(row, "data_quality"),
+        calculated_at=_timestamp(_row_value(row, "calculated_at")),
+    )
+
+
+def _fact_values(row: UserDailyFact, *, active_value: Any) -> tuple[Any, ...]:
+    """Shared by both twins; ``active_value`` is int on SQLite, bool on Postgres."""
+    return (
+        row.snapshot_date.isoformat(),
+        row.user_id,
+        row.lifecycle_segment,
+        row.lifecycle_reason_code,
+        row.operational_state,
+        row.operational_reason_code,
+        row.tier,
+        row.user_group,
+        active_value,
+        row.runs_requested,
+        row.runs_completed,
+        row.runs_failed,
+        row.runs_cancelled,
+        row.operator_cost_micro,
+        row.own_spend_micro,
+        row.data_quality,
+        utc_iso(row.calculated_at),
+    )
+
+
+def _transition_values(row: LifecycleTransitionRow) -> tuple[Any, ...]:
+    return (
+        row.user_id,
+        row.snapshot_date.isoformat(),
+        row.from_segment,
+        row.to_segment,
+        row.inactive_days,
+        row.data_quality,
+        utc_iso(row.created_at),
+    )
+
+
+def _activity_update_values(update: ActivityUpdate, stamp: str) -> tuple[Any, ...]:
+    return (
+        update.user_id,
+        utc_iso(update.activated_at) if update.activated_at is not None else None,
+        utc_iso(update.last_activity_at) if update.last_activity_at is not None else None,
+        stamp,
+    )
+
+
+def _recompute_days(event_rows: Sequence[Any], fact_rows: Sequence[Any]) -> list[date]:
+    """Shared by both twins: days whose newest event landed after their facts."""
+    calculated = {
+        str(_row_value(row, "snapshot_date")): str(_row_value(row, "calculated_at"))
+        for row in fact_rows
+    }
+    stale: list[date] = []
+    for row in event_rows:
+        day = str(_row_value(row, "day"))
+        last_received = _row_value(row, "last_received")
+        if day in calculated and last_received is not None and str(last_received) > calculated[day]:
+            stale.append(date.fromisoformat(day))
+    return sorted(stale, reverse=True)
 
 
 PLATFORM_CREDENTIAL_ENVIRONMENT_SECRET = "dashboard.backend.domain.model_providers.service"
@@ -1436,6 +1658,148 @@ class ValueAnalyticsStore:
                 (utc_iso(_utc(now, "now")), name),
             )
 
+    def aggregate_events_for_day(self, day: date) -> dict[int, DayEventTotals]:
+        """Per-user outcome counts and activity marks for one UTC day.
+
+        The one-day scan the event-log discipline permits (design SS6.11 rule
+        4); it takes no user id. The fifteen activity names are bound as
+        parameters rather than interpolated.
+        """
+        start, end = _day_bounds_iso(day)
+        activity = ", ".join("?" for _ in _ACTIVITY_EVENT_NAMES)
+        sql = _EVENTS_FOR_DAY_SQL.format(activity=activity, p="?")
+        with self._analytics_connection() as conn:
+            rows = conn.execute(sql, [*_ACTIVITY_EVENT_NAMES, start, end]).fetchall()
+        return {
+            int(_row_value(row, "user_id")): _events_totals_from_row(row) for row in rows
+        }
+
+    def record_activity_batch(
+        self,
+        updates: Sequence[ActivityUpdate],
+        *,
+        now: datetime,
+    ) -> int:
+        """Many ``record_activity`` corrections in one ``executemany``.
+
+        Same MIN/MAX upsert as ``record_activity`` and ``seed_activity_from_snapshots``,
+        with both incoming columns nullable: the daily job's ledger step knows
+        a user's last credit activity but nothing about activation, and its
+        events step knows both. A per-user ``record_activity`` loop would be a
+        query count that grows with the population (design SS6.12). Returns
+        the number of updates submitted; an empty batch touches nothing.
+        """
+        if not updates:
+            return 0
+        stamp = utc_iso(_utc(now, "now"))
+        sql = """
+            INSERT INTO user_activity (
+                user_id, activated_at, last_meaningful_activity_at, updated_at
+            ) VALUES (?, ?, ?, ?)
+            ON CONFLICT(user_id) DO UPDATE SET
+                activated_at = MIN(
+                    COALESCE(user_activity.activated_at, excluded.activated_at),
+                    COALESCE(excluded.activated_at, user_activity.activated_at)
+                ),
+                last_meaningful_activity_at = MAX(
+                    COALESCE(
+                        user_activity.last_meaningful_activity_at,
+                        excluded.last_meaningful_activity_at
+                    ),
+                    COALESCE(
+                        excluded.last_meaningful_activity_at,
+                        user_activity.last_meaningful_activity_at
+                    )
+                ),
+                updated_at = excluded.updated_at
+        """
+        with self._analytics_connection() as conn:
+            conn.executemany(
+                sql, [_activity_update_values(update, stamp) for update in updates]
+            )
+        return len(updates)
+
+    def upsert_daily_facts(self, rows: Sequence[UserDailyFact]) -> int:
+        """Write one batch of fact rows. One executemany, not a loop."""
+        if not rows:
+            return 0
+        columns = ", ".join(_DAILY_FACT_COLUMNS)
+        placeholders = ", ".join("?" for _ in _DAILY_FACT_COLUMNS)
+        sql = f"""
+            INSERT INTO user_daily_facts ({columns})
+            VALUES ({placeholders})
+            ON CONFLICT(snapshot_date, user_id) DO UPDATE SET {_DAILY_FACT_UPDATES}
+        """
+        with self._analytics_connection() as conn:
+            conn.executemany(
+                sql, [_fact_values(row, active_value=int(row.active)) for row in rows]
+            )
+        return len(rows)
+
+    def append_lifecycle_transitions(
+        self, rows: Sequence[LifecycleTransitionRow]
+    ) -> int:
+        """Write segment changes for one day, correcting any already there.
+
+        ``ON CONFLICT (user_id, snapshot_date) DO UPDATE`` -- **not** DO
+        NOTHING. The day this table is rewritten is exactly the day something
+        went wrong: a step failed and the row was derived from a missing
+        source, or a late event changed the day's totals. DO NOTHING would
+        freeze that first, weakest answer forever while the retry corrected
+        ``user_daily_facts`` (which upserts), leaving the two tables in
+        permanent disagreement (design SS6.8). The UNIQUE constraint's job is
+        to stop a *duplicate*, which DO UPDATE does equally well.
+        """
+        if not rows:
+            return 0
+        columns = ", ".join(_TRANSITION_COLUMNS)
+        placeholders = ", ".join("?" for _ in _TRANSITION_COLUMNS)
+        sql = f"""
+            INSERT INTO lifecycle_transitions ({columns})
+            VALUES ({placeholders})
+            ON CONFLICT(user_id, snapshot_date) DO UPDATE SET {_TRANSITION_UPDATES}
+        """
+        with self._analytics_connection() as conn:
+            conn.executemany(sql, [_transition_values(row) for row in rows])
+        return len(rows)
+
+    def list_facts_for_date(self, day: date) -> list[UserDailyFact]:
+        """Every fact row for one date. Used for the previous day's segments."""
+        with self._analytics_connection() as conn:
+            rows = conn.execute(
+                "SELECT * FROM user_daily_facts WHERE snapshot_date = ? ORDER BY user_id",
+                (day.isoformat(),),
+            ).fetchall()
+        return [_fact_from_row(row) for row in rows]
+
+    def list_days_needing_recompute(self, *, since: date, until: date) -> list[date]:
+        """Past days whose events arrived after their facts were computed.
+
+        Two statements, neither parameterised by a user: events grouped by
+        UTC day with ``MAX(received_at)``, and facts grouped by date with
+        ``MIN(calculated_at)``; a day is returned, newest first, when the
+        former exceeds the latter. This exists because
+        ``aggregate_events_for_day`` filters on ``occurred_at`` while the job
+        runs minutes after midnight: the frontend route accepts ``occurred_at``
+        up to 24 hours old (``service.py:96-97``), and a server event for a run
+        that finished at 23:59 can be appended after the aggregate was taken.
+        Without this sweep every such row would be silently dropped from
+        ``active``, DAU and the run counts, permanently and with no signal.
+        """
+        if until < since:
+            raise ValueError("until must not precede since")
+        start, _unused = _day_bounds_iso(since)
+        _unused, end = _day_bounds_iso(until)
+        with self._analytics_connection() as conn:
+            event_rows = conn.execute(
+                _RECOMPUTE_EVENTS_SQL.format(p="?"), (start, end)
+            ).fetchall()
+            fact_rows = conn.execute(
+                _RECOMPUTE_FACTS_SQL.format(p="?"),
+                (since.isoformat(), until.isoformat()),
+            ).fetchall()
+        return _recompute_days(event_rows, fact_rows)
+
 
 def build_value_analytics_store(
     analytics_base: Any | None = None,
@@ -1478,8 +1842,12 @@ __all__ = [
     "CommercialValueFact",
     "CurrentOperationalFacts",
     "ProjectionJob",
+    "ActivityUpdate",
+    "DayEventTotals",
     "RecentFactTotals",
+    "LifecycleTransitionRow",
     "UserActivity",
+    "UserDailyFact",
     "UserLifecycleDailySnapshot",
     "UserValueSnapshot",
     "ValueAnalyticsStore",

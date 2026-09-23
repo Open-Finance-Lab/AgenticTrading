@@ -632,6 +632,37 @@ class AnalyticsStore:
         existing: set[str] = set()
         if not values:
             return existing
+
+    def list_daily_subjects(self) -> list[dict[str, Any]]:
+        """Every non-admin, non-excluded account: id, user_group, created_at.
+
+        The one place the daily job materialises the whole user list -- a
+        few hundred rows of three columns. The predicate is the one
+        ``list_stale_user_ids`` and the lifecycle backfill already use for
+        aggregate exclusion (design SS6.7). ``created_at`` comes back as the
+        raw text the users table holds (CURRENT_TIMESTAMP text on SQLite,
+        ISO-8601 on Postgres); the caller parses.
+        """
+        with self._get_connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT users.id, users.user_group, users.created_at
+                FROM users
+                LEFT JOIN analytics_subject_settings AS settings
+                  ON settings.user_id = users.id
+                WHERE users.role <> 'admin'
+                  AND COALESCE(settings.excluded, 0) = 0
+                ORDER BY users.id
+                """
+            ).fetchall()
+        return [
+            {
+                "id": int(row["id"]),
+                "user_group": row["user_group"],
+                "created_at": row["created_at"],
+            }
+            for row in rows
+        ]
         with self._get_connection() as conn:
             for offset in range(0, len(values), 500):
                 chunk = values[offset : offset + 500]
