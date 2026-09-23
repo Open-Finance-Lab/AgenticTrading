@@ -237,3 +237,19 @@ def test_built_singleton_does_not_synchronously_project_snapshots(monkeypatch):
 
     assert result.created is True
     assert calls == []
+
+
+def test_built_singleton_maintains_user_activity(monkeypatch):
+    from dashboard.backend.domain.analytics import service as service_module
+
+    monkeypatch.setattr(service_module, "analytics_store", RecordingStore())
+
+    built = service_module._build_analytics_service()
+
+    assert built.maintain_activity is True
+    assert built.project_snapshots is False
+
+
+def test_maintaining_activity_requires_a_value_store():
+    with pytest.raises(ValueError):
+        AnalyticsService(RecordingStore(), maintain_activity=True)

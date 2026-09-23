@@ -18,6 +18,7 @@ from .repository_common import positive_limit, positive_user_id, utc_iso
 from .value_repository import (
     _ACTIVE_RUN_STATUSES,
     _TERMINAL_RUN_STATUSES,
+    _activity_from_row,
     LIFECYCLE_ROLLUP_METRICS,
     LIFECYCLE_SEGMENTS,
     MAX_USER_BATCH,
@@ -25,6 +26,7 @@ from .value_repository import (
     CommercialValueFact,
     CurrentOperationalFacts,
     ProjectionJob,
+    UserActivity,
     UserLifecycleDailySnapshot,
     UserValueSnapshot,
     _current_snapshot_from_row,
@@ -430,6 +432,127 @@ class PostgresValueAnalyticsStore:
                 cur.execute(sql, (before.isoformat(),))
                 row = cur.fetchone()
         return row is not None
+
+    def record_activity(
+        self,
+        user_id: int,
+        *,
+        occurred_at: datetime,
+        activating: bool,
+        now: datetime,
+    ) -> None:
+        """See the SQLite twin. Postgres ``LEAST``/``GREATEST`` skip NULLs, so
+        the COALESCE pair is redundant here but harmless; keeping both dialects
+        spelled the same way is worth more than saving two lines. ``%s::text``
+        on the nullable ``activated_at`` gives psycopg a type for the ``None``
+        it would otherwise send as OID 0.
+        """
+        subject_id = positive_user_id(user_id)
+        occurred = utc_iso(_utc(occurred_at, "occurred_at"))
+        values = (
+            subject_id,
+            occurred if activating else None,
+            occurred,
+            utc_iso(_utc(now, "now")),
+        )
+        sql = """
+            INSERT INTO user_activity (
+                user_id, activated_at, last_meaningful_activity_at, updated_at
+            ) VALUES (%s, %s::text, %s, %s)
+            ON CONFLICT(user_id) DO UPDATE SET
+                activated_at = LEAST(
+                    COALESCE(user_activity.activated_at, EXCLUDED.activated_at),
+                    COALESCE(EXCLUDED.activated_at, user_activity.activated_at)
+                ),
+                last_meaningful_activity_at = GREATEST(
+                    COALESCE(
+                        user_activity.last_meaningful_activity_at,
+                        EXCLUDED.last_meaningful_activity_at
+                    ),
+                    EXCLUDED.last_meaningful_activity_at
+                ),
+                updated_at = EXCLUDED.updated_at
+        """
+        with self._analytics_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql, values)
+
+    def get_activity(self, user_id: int) -> UserActivity | None:
+        """One user's stored activity row, or None if they have none yet."""
+        subject_id = positive_user_id(user_id)
+        with self._analytics_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT * FROM user_activity WHERE user_id = %s", (subject_id,)
+                )
+                row = cur.fetchone()
+        return _activity_from_row(row) if row is not None else None
+
+    def list_activity(
+        self,
+        user_ids: Sequence[int] | None = None,
+    ) -> dict[int, UserActivity]:
+        """See the SQLite twin."""
+        result: dict[int, UserActivity] = {}
+        if user_ids is None:
+            with self._analytics_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT * FROM user_activity ORDER BY user_id")
+                    rows = cur.fetchall()
+            for row in rows:
+                activity = _activity_from_row(row)
+                result[activity.user_id] = activity
+            return result
+        ids = _ids(user_ids)
+        if not ids:
+            return {}
+        for offset in range(0, len(ids), MAX_USER_BATCH):
+            chunk = ids[offset : offset + MAX_USER_BATCH]
+            with self._analytics_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "SELECT * FROM user_activity WHERE user_id = ANY(%s) "
+                        "ORDER BY user_id",
+                        (chunk,),
+                    )
+                    rows = cur.fetchall()
+            for row in rows:
+                activity = _activity_from_row(row)
+                result[activity.user_id] = activity
+        return result
+
+    def seed_activity_from_snapshots(self, *, now: datetime) -> int:
+        """See the SQLite twin."""
+        stamp = utc_iso(_utc(now, "now"))
+        sql = """
+            INSERT INTO user_activity (
+                user_id, activated_at, last_meaningful_activity_at, updated_at
+            )
+            SELECT user_id, activated_at, last_meaningful_activity_at, %s
+            FROM user_analytics_snapshots
+            WHERE activated_at IS NOT NULL
+               OR last_meaningful_activity_at IS NOT NULL
+            ON CONFLICT(user_id) DO UPDATE SET
+                activated_at = LEAST(
+                    COALESCE(user_activity.activated_at, EXCLUDED.activated_at),
+                    COALESCE(EXCLUDED.activated_at, user_activity.activated_at)
+                ),
+                last_meaningful_activity_at = GREATEST(
+                    COALESCE(
+                        user_activity.last_meaningful_activity_at,
+                        EXCLUDED.last_meaningful_activity_at
+                    ),
+                    COALESCE(
+                        EXCLUDED.last_meaningful_activity_at,
+                        user_activity.last_meaningful_activity_at
+                    )
+                ),
+                updated_at = EXCLUDED.updated_at
+        """
+        with self._analytics_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql, (stamp,))
+                return max(0, int(cur.rowcount))
 
     def list_commercial_values(
         self,

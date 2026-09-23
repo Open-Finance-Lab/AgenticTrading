@@ -126,6 +126,40 @@ class UserLifecycleDailySnapshot(BaseModel):
         return _utc(value)
 
 
+class UserActivity(BaseModel):
+    """One user's current activity clock. One row, overwritten in place.
+
+    Design SS6.5: ``activated_at`` is the first accepted ``backtest_completed``
+    and is set once; ``last_meaningful_activity_at`` is the greatest
+    ``occurred_at`` of any accepted event in the lifecycle activity set. It is
+    current state, not history, and is never swept (SS11).
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    user_id: int = Field(gt=0)
+    activated_at: datetime | None = None
+    last_meaningful_activity_at: datetime | None = None
+    updated_at: datetime
+
+    @field_validator("activated_at", "last_meaningful_activity_at", "updated_at")
+    @classmethod
+    def require_timezone(cls, value: datetime | None) -> datetime | None:
+        return _utc(value) if value is not None else None
+
+
+def _activity_from_row(row: Any) -> UserActivity:
+    """Shared by both twins."""
+    return UserActivity(
+        user_id=int(_row_value(row, "user_id")),
+        activated_at=_optional_timestamp(_row_value(row, "activated_at")),
+        last_meaningful_activity_at=_optional_timestamp(
+            _row_value(row, "last_meaningful_activity_at")
+        ),
+        updated_at=_timestamp(_row_value(row, "updated_at")),
+    )
+
+
 class CommercialValueFact(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -679,6 +713,160 @@ class ValueAnalyticsStore:
             row = conn.execute(sql, (before.isoformat(),)).fetchone()
         return row is not None
 
+    def record_activity(
+        self,
+        user_id: int,
+        *,
+        occurred_at: datetime,
+        activating: bool,
+        now: datetime,
+    ) -> None:
+        """Advance one user's activity timestamps. One statement, no read.
+
+        The two columns move in opposite directions, on purpose.
+
+        ``activated_at`` keeps the **earliest** success, because activation
+        is defined as the first server-authoritative ``backtest_completed``
+        by ``occurred_at`` -- not by arrival order. Ingestion does not see
+        events in occurred_at order: a completion can be appended late,
+        replayed, or backdated up to the 24 hours ``service.py:96-97``
+        accepts. A plain ``COALESCE(stored, incoming)`` would freeze
+        whichever row happened to land first and make the value
+        uncorrectable afterwards, which would also silently turn the daily
+        job's ``events`` step repair into a no-op. A non-activating event
+        passes NULL and the COALESCE pair leaves the stored value alone.
+
+        ``last_meaningful_activity_at`` only ever advances, so a
+        late-arriving old event cannot make a user look more dormant than
+        they are.
+
+        Timestamps are ISO-8601 UTC text throughout this schema, which orders
+        lexicographically, so MIN and MAX over the text are the same
+        comparisons as over the instants.
+
+        SQLite's scalar ``max(X, Y)`` and ``min(X, Y)`` both return NULL if
+        **either** argument is NULL, which is why each stored value is
+        COALESCEd against the incoming one before the comparison rather than
+        passed raw.
+        """
+        subject_id = positive_user_id(user_id)
+        occurred = utc_iso(_utc(occurred_at, "occurred_at"))
+        values = (
+            subject_id,
+            occurred if activating else None,
+            occurred,
+            utc_iso(_utc(now, "now")),
+        )
+        sql = """
+            INSERT INTO user_activity (
+                user_id, activated_at, last_meaningful_activity_at, updated_at
+            ) VALUES (?, ?, ?, ?)
+            ON CONFLICT(user_id) DO UPDATE SET
+                activated_at = MIN(
+                    COALESCE(user_activity.activated_at, excluded.activated_at),
+                    COALESCE(excluded.activated_at, user_activity.activated_at)
+                ),
+                last_meaningful_activity_at = MAX(
+                    COALESCE(
+                        user_activity.last_meaningful_activity_at,
+                        excluded.last_meaningful_activity_at
+                    ),
+                    excluded.last_meaningful_activity_at
+                ),
+                updated_at = excluded.updated_at
+        """
+        with self._analytics_connection() as conn:
+            conn.execute(sql, values)
+
+    def get_activity(self, user_id: int) -> UserActivity | None:
+        """One user's stored activity row, or None if they have none yet."""
+        subject_id = positive_user_id(user_id)
+        with self._analytics_connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM user_activity WHERE user_id = ?", (subject_id,)
+            ).fetchone()
+        return _activity_from_row(row) if row is not None else None
+
+    def list_activity(
+        self,
+        user_ids: Sequence[int] | None = None,
+    ) -> dict[int, UserActivity]:
+        """Activity rows for many users, or for everyone when ``user_ids`` is None.
+
+        ``None`` is the daily job's shape: one statement over the whole
+        population, parameterised by nothing. A sequence is batched by
+        ``MAX_USER_BATCH`` the way ``list_current_snapshots`` already is.
+        """
+        result: dict[int, UserActivity] = {}
+        if user_ids is None:
+            with self._analytics_connection() as conn:
+                rows = conn.execute(
+                    "SELECT * FROM user_activity ORDER BY user_id"
+                ).fetchall()
+            for row in rows:
+                activity = _activity_from_row(row)
+                result[activity.user_id] = activity
+            return result
+        ids = _ids(user_ids)
+        if not ids:
+            return {}
+        for offset in range(0, len(ids), MAX_USER_BATCH):
+            chunk = ids[offset : offset + MAX_USER_BATCH]
+            clause = f"user_id IN ({', '.join('?' for _ in chunk)})"
+            with self._analytics_connection() as conn:
+                rows = conn.execute(
+                    f"SELECT * FROM user_activity WHERE {clause} ORDER BY user_id",
+                    chunk,
+                ).fetchall()
+            for row in rows:
+                activity = _activity_from_row(row)
+                result[activity.user_id] = activity
+        return result
+
+    def seed_activity_from_snapshots(self, *, now: datetime) -> int:
+        """Copy ``activated_at`` / ``last_meaningful_activity_at`` from the legacy row.
+
+        Design SS11: ``user_analytics_snapshots`` is the only table that knows
+        when an existing user first activated, and it is dropped in PR B.
+        Ingestion only maintains ``user_activity`` for events arriving after
+        this deploy, so without this copy every pre-existing activation date
+        would vanish on the night of the drop.
+
+        Idempotent by construction -- the same MIN/MAX upsert
+        ``record_activity`` uses -- so PR B can re-run it immediately before
+        the drop (the legacy row keeps being maintained by the throttled
+        repair between the two PRs). Returns the number of rows touched.
+        """
+        stamp = utc_iso(_utc(now, "now"))
+        sql = """
+            INSERT INTO user_activity (
+                user_id, activated_at, last_meaningful_activity_at, updated_at
+            )
+            SELECT user_id, activated_at, last_meaningful_activity_at, ?
+            FROM user_analytics_snapshots
+            WHERE activated_at IS NOT NULL
+               OR last_meaningful_activity_at IS NOT NULL
+            ON CONFLICT(user_id) DO UPDATE SET
+                activated_at = MIN(
+                    COALESCE(user_activity.activated_at, excluded.activated_at),
+                    COALESCE(excluded.activated_at, user_activity.activated_at)
+                ),
+                last_meaningful_activity_at = MAX(
+                    COALESCE(
+                        user_activity.last_meaningful_activity_at,
+                        excluded.last_meaningful_activity_at
+                    ),
+                    COALESCE(
+                        excluded.last_meaningful_activity_at,
+                        user_activity.last_meaningful_activity_at
+                    )
+                ),
+                updated_at = excluded.updated_at
+        """
+        with self._analytics_connection() as conn:
+            cursor = conn.execute(sql, (stamp,))
+            return max(0, int(cursor.rowcount))
+
     def list_commercial_values(
         self,
         user_ids: Sequence[int],
@@ -1087,6 +1275,7 @@ __all__ = [
     "CommercialValueFact",
     "CurrentOperationalFacts",
     "ProjectionJob",
+    "UserActivity",
     "UserLifecycleDailySnapshot",
     "UserValueSnapshot",
     "ValueAnalyticsStore",
