@@ -323,14 +323,53 @@ def test_backfill_rejects_invalid_day_bounds(tmp_path, days):
         )
 
 
-class SqliteRows:
+class FakeAgentRows:
+    """What AgentStore.list_agent_source_rows() answers, without a store."""
+
     def __init__(self, path):
         self.path = path
 
-    def _get_connection(self):
+    def list_agent_source_rows(self):
         conn = sqlite3.connect(self.path)
         conn.row_factory = sqlite3.Row
-        return conn
+        try:
+            return [
+                dict(row)
+                for row in conn.execute(
+                    "SELECT agent_id, session_id, owner_user_id, created_at "
+                    "FROM external_agents ORDER BY created_at, agent_id"
+                ).fetchall()
+            ]
+        finally:
+            conn.close()
+
+
+class FakeCreditRows:
+    """What CreditsStore.list_llm_*_rows() answer, without a store."""
+
+    def __init__(self, path):
+        self.path = path
+
+    def _rows(self, sql):
+        conn = sqlite3.connect(self.path)
+        conn.row_factory = sqlite3.Row
+        try:
+            return [dict(row) for row in conn.execute(sql).fetchall()]
+        finally:
+            conn.close()
+
+    def list_llm_reservation_rows(self):
+        return self._rows(
+            "SELECT reservation_id, user_id, run_id, call_index, "
+            "reserved_grant_micro, reserved_purchased_micro, status, created_at, "
+            "updated_at FROM credit_llm_reservations ORDER BY created_at, reservation_id"
+        )
+
+    def list_llm_usage_rows(self):
+        return self._rows(
+            "SELECT id, user_id, reservation_id, run_id, call_index, bucket, "
+            "amount_micro, created_at FROM credit_llm_usage_entries ORDER BY created_at, id"
+        )
 
 
 class FakeUsers:
@@ -472,10 +511,10 @@ def test_authoritative_source_combines_safe_independent_store_evidence(tmp_path)
 
     collection = AuthoritativeBackfillSource(
         user_store=FakeUsers(),
-        agent_store=SqliteRows(content_path),
+        agent_store=FakeAgentRows(content_path),
         protocol_run_store=FakeProtocolRuns(),
         run_history_store=FakeRunHistory(),
-        credits_store=SqliteRows(credits_path),
+        credits_store=FakeCreditRows(credits_path),
     ).collect(start=NOW - timedelta(days=180), end=NOW)
     by_source_id = {item.source_event_id: item for item in collection.candidates}
 

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any
+from typing import Any, Sequence
 
 import psycopg
 
@@ -504,6 +504,25 @@ class PostgresAnalyticsStore:
                     cur.execute("SELECT id FROM users WHERE role = 'admin'")
                     excluded.update(int(row["id"]) for row in cur.fetchall())
         return excluded
+
+
+    def list_existing_source_event_ids(self, source_ids: Sequence[str]) -> set[str]:
+        """See the SQLite twin."""
+        values = sorted({str(value) for value in source_ids})
+        existing: set[str] = set()
+        if not values:
+            return existing
+        with self._get_connection() as conn:
+            with conn.cursor() as cur:
+                for offset in range(0, len(values), 500):
+                    chunk = values[offset : offset + 500]
+                    cur.execute(
+                        "SELECT source_event_id FROM analytics_events "
+                        "WHERE source_event_id = ANY(%s)",
+                        (chunk,),
+                    )
+                    existing.update(str(row["source_event_id"]) for row in cur.fetchall())
+        return existing
 
     def record_admin_access(
         self,

@@ -189,3 +189,42 @@ def test_list_account_billing_states_agrees_with_the_single_user_reader(tmp_path
     assert batched[alice]["account_status"] == "restricted"
     assert batched[alice]["restriction_reason"] == "llm_overage"
     assert store.list_account_billing_states([]) == {}
+
+
+def test_backfill_source_rows_come_from_the_credits_store(tmp_path):
+    store, alice, _bob, day_start = _store(tmp_path)
+    _insert(
+        tmp_path / "credits.db",
+        "credit_llm_reservations",
+        [
+            {
+                "reservation_id": "res-a6",
+                "user_id": alice,
+                "run_id": "run-a6",
+                "call_index": 0,
+                "reserved_micro": 500_000,
+                "reserved_grant_micro": 500_000,
+                "reserved_purchased_micro": 0,
+                "status": "settled",
+                "operation_key": "reserve:a6",
+                "request_digest": "digest",
+                "created_at": _iso(day_start + timedelta(hours=4)),
+                "updated_at": _iso(day_start + timedelta(hours=5)),
+            }
+        ],
+    )
+
+    reservations = store.list_llm_reservation_rows()
+    usage = store.list_llm_usage_rows()
+
+    assert [row["reservation_id"] for row in reservations] == ["res-a6"]
+    assert set(reservations[0]) == {
+        "reservation_id", "user_id", "run_id", "call_index",
+        "reserved_grant_micro", "reserved_purchased_micro", "status",
+        "created_at", "updated_at",
+    }
+    assert [row["reservation_id"] for row in usage] == ["res-a6", "res-a7", "res-b2", "res-a8"]
+    assert set(usage[0]) == {
+        "id", "user_id", "reservation_id", "run_id", "call_index", "bucket",
+        "amount_micro", "created_at",
+    }

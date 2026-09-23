@@ -1332,6 +1332,37 @@ class CreditsStore:
             ).fetchall()
         return _assemble_billing_states(account_rows, outstanding_rows)
 
+    def list_llm_reservation_rows(self) -> list[dict[str, Any]]:
+        """Every LLM reservation, oldest first, for the analytics backfill.
+
+        Safe columns only -- no evidence, no digests. ``backfill.py`` read this
+        table through this store's connection until PR A (design SS6.14).
+        """
+        with self._get_connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT reservation_id, user_id, run_id, call_index,
+                       reserved_grant_micro, reserved_purchased_micro,
+                       status, created_at, updated_at
+                FROM credit_llm_reservations
+                ORDER BY created_at, reservation_id
+                """
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def list_llm_usage_rows(self) -> list[dict[str, Any]]:
+        """Every LLM usage entry, oldest first, for the analytics backfill."""
+        with self._get_connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT id, user_id, reservation_id, run_id, call_index,
+                       bucket, amount_micro, created_at
+                FROM credit_llm_usage_entries
+                ORDER BY created_at, id
+                """
+            ).fetchall()
+        return [dict(row) for row in rows]
+
     def grant_promotion_credits(
         self,
         *,

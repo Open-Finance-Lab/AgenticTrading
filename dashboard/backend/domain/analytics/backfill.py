@@ -2,7 +2,7 @@
 
 Only source records that prove an authenticated owner and a safe lifecycle
 outcome become Analytics events.  Browser/session/network history is never
-invented.  The source adapter deliberately reads each database independently;
+invented.  The source adapter reads each database through the store that owns it and never opens another domain's connection;
 cross-database ownership is resolved in Python.
 """
 
@@ -116,19 +116,6 @@ class BackfillSource(Protocol):
     def collect(self, *, start: datetime, end: datetime) -> BackfillCollection: ...
 
 
-def _query_all(store: Any, sql: str) -> list[dict[str, Any]]:
-    """Read safe source columns from either store twin without joining stores."""
-
-    if hasattr(store, "database_url"):
-        with store._get_connection() as conn:
-            with conn.cursor() as cur:
-                cur.execute(sql)
-                return [dict(row) for row in cur.fetchall()]
-    conn = store._get_connection()
-    try:
-        return [dict(row) for row in conn.execute(sql).fetchall()]
-    finally:
-        conn.close()
 
 
 def _all_users(user_store: Any) -> list[dict[str, Any]]:
@@ -148,25 +135,8 @@ def _credit_candidates(
     candidates: list[BackfillCandidate] = []
     invalid = 0
     try:
-        reservations = _query_all(
-            credits_store,
-            """
-            SELECT reservation_id, user_id, run_id, call_index,
-                   reserved_grant_micro, reserved_purchased_micro,
-                   status, created_at, updated_at
-            FROM credit_llm_reservations
-            ORDER BY created_at, reservation_id
-            """,
-        )
-        usage_entries = _query_all(
-            credits_store,
-            """
-            SELECT id, user_id, reservation_id, run_id, call_index,
-                   bucket, amount_micro, created_at
-            FROM credit_llm_usage_entries
-            ORDER BY created_at, id
-            """,
-        )
+        reservations = credits_store.list_llm_reservation_rows()
+        usage_entries = credits_store.list_llm_usage_rows()
     except Exception:
         return [], 1
 
@@ -376,14 +346,7 @@ class AuthoritativeBackfillSource:
                 invalid += 1
 
         try:
-            agents = _query_all(
-                self.agent_store,
-                """
-                SELECT agent_id, session_id, owner_user_id, created_at
-                FROM external_agents
-                ORDER BY created_at, agent_id
-                """,
-            )
+            agents = self.agent_store.list_agent_source_rows()
         except Exception:
             agents = []
             invalid += 1
@@ -505,33 +468,9 @@ class AuthoritativeBackfillSource:
 
 def _existing_source_event_ids(store: Any, source_ids: Iterable[str]) -> set[str]:
     values = sorted(set(source_ids))
-    if not values or not hasattr(store, "_get_connection"):
+    if not values or not hasattr(store, "list_existing_source_event_ids"):
         return set()
-    existing: set[str] = set()
-    for offset in range(0, len(values), 500):
-        chunk = values[offset : offset + 500]
-        if hasattr(store, "database_url"):
-            with store._get_connection() as conn:
-                with conn.cursor() as cur:
-                    cur.execute(
-                        "SELECT source_event_id FROM analytics_events "
-                        "WHERE source_event_id = ANY(%s)",
-                        (chunk,),
-                    )
-                    existing.update(
-                        str(row["source_event_id"]) for row in cur.fetchall()
-                    )
-        else:
-            placeholders = ",".join("?" for _ in chunk)
-            with store._get_connection() as conn:
-                rows = conn.execute(
-                    "SELECT source_event_id FROM analytics_events "
-                    f"WHERE source_event_id IN ({placeholders})",
-                    chunk,
-                ).fetchall()
-            existing.update(str(row["source_event_id"]) for row in rows)
-    return existing
-
+    return store.list_existing_source_event_ids(values)
 
 def _event(candidate: BackfillCandidate, *, received_at: datetime) -> AnalyticsEventRecord:
     return AnalyticsEventRecord(

@@ -1062,6 +1062,37 @@ class PostgresCreditsStore:
                 outstanding_rows = cur.fetchall()
         return _assemble_billing_states(account_rows, outstanding_rows)
 
+    def list_llm_reservation_rows(self) -> list[dict[str, Any]]:
+        """See the SQLite twin."""
+        with self._get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT reservation_id, user_id, run_id, call_index,
+                           reserved_grant_micro, reserved_purchased_micro,
+                           status, created_at, updated_at
+                    FROM credit_llm_reservations
+                    ORDER BY created_at, reservation_id
+                    """
+                )
+                rows = cur.fetchall()
+        return [dict(row) for row in rows]
+
+    def list_llm_usage_rows(self) -> list[dict[str, Any]]:
+        """See the SQLite twin."""
+        with self._get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT id, user_id, reservation_id, run_id, call_index,
+                           bucket, amount_micro, created_at
+                    FROM credit_llm_usage_entries
+                    ORDER BY created_at, id
+                    """
+                )
+                rows = cur.fetchall()
+        return [dict(row) for row in rows]
+
     def grant_promotion_credits(
         self,
         *,

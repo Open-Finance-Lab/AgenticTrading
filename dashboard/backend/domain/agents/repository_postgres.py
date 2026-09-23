@@ -629,6 +629,21 @@ class PostgresAgentStore:
                 row = cur.fetchone()
         return int(row["n"] if row else 0)
 
+
+    def list_agent_source_rows(self) -> List[Dict[str, Any]]:
+        """See the SQLite twin."""
+        with self._get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT agent_id, session_id, owner_user_id, created_at
+                    FROM external_agents
+                    ORDER BY created_at, agent_id
+                    """
+                )
+                rows = cur.fetchall()
+        return [dict(row) for row in rows]
+
     def list_owner_scope_agent_ids(self, agent_id: str) -> List[str]:
         """Postgres twin of ``AgentStore.list_owner_scope_agent_ids``.
 

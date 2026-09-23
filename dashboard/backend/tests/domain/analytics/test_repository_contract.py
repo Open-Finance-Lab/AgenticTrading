@@ -857,3 +857,28 @@ def test_lifecycle_transitions_are_unique_per_user_per_day(sqlite_contract):
         ).fetchone()[0]
 
     assert count == 1
+
+
+def test_existing_source_event_ids_are_looked_up_in_batches(sqlite_contract):
+    store, _admin_id, user_id = sqlite_contract
+    for suffix in ("a", "b"):
+        store.append_event(
+            event_record(
+                user_id,
+                event_name="backtest_completed",
+                event_group="run",
+                event_source="server",
+                source_event_id=f"run:backtest_completed:run-{suffix}",
+                page_view=None,
+                device_category=None,
+                browser_family=None,
+            )
+        )
+
+    found = store.list_existing_source_event_ids(
+        ["run:backtest_completed:run-a", "run:backtest_completed:run-zzz"]
+        + [f"run:backtest_completed:filler-{i}" for i in range(600)]
+    )
+
+    assert found == {"run:backtest_completed:run-a"}
+    assert store.list_existing_source_event_ids([]) == set()

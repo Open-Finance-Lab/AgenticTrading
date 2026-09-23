@@ -702,6 +702,28 @@ class AgentStore:
         conn.close()
         return int(row["n"] if row else 0)
 
+
+    def list_agent_source_rows(self) -> List[Dict[str, Any]]:
+        """agent_id, session_id, owner_user_id, created_at for every agent.
+
+        The analytics backfill's ownership source (design SS6.14): it used to
+        read these four columns through this store's connection. Guest agents
+        (NULL owner) are returned and skipped by the caller, so the caller can
+        count them as unmapped rather than silently losing them.
+        """
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT agent_id, session_id, owner_user_id, created_at
+            FROM external_agents
+            ORDER BY created_at, agent_id
+            """
+        )
+        rows = cursor.fetchall()
+        conn.close()
+        return [dict(row) for row in rows]
+
     def list_owner_scope_agent_ids(self, agent_id: str) -> List[str]:
         """Agent ids that share an owner with ``agent_id``.
 

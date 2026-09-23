@@ -8,7 +8,7 @@ import sqlite3
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Iterator, Sequence
 
 from dashboard.backend.database import DB_PATH
 from dashboard.backend.db_url import describe_database_url
@@ -624,6 +624,25 @@ class AnalyticsStore:
                 ).fetchall()
                 excluded.update(int(row["id"]) for row in admin_rows)
         return excluded
+
+
+    def list_existing_source_event_ids(self, source_ids: Sequence[str]) -> set[str]:
+        """Which of ``source_ids`` already have a row. Batched by 500."""
+        values = sorted({str(value) for value in source_ids})
+        existing: set[str] = set()
+        if not values:
+            return existing
+        with self._get_connection() as conn:
+            for offset in range(0, len(values), 500):
+                chunk = values[offset : offset + 500]
+                placeholders = ",".join("?" for _ in chunk)
+                rows = conn.execute(
+                    "SELECT source_event_id FROM analytics_events "
+                    f"WHERE source_event_id IN ({placeholders})",
+                    chunk,
+                ).fetchall()
+                existing.update(str(row["source_event_id"]) for row in rows)
+        return existing
 
     def record_admin_access(
         self,

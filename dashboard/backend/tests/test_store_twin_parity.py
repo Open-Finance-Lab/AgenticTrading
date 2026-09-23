@@ -306,16 +306,6 @@ _DIALECT_BRANCH_ALLOWLIST: dict[str, str] = {
         "job. Not a store of its own; admin layer redesign PR A's daily job "
         "and migration (design doc §6.9) replace this reconstruction path."
     ),
-    "dashboard/backend/domain/analytics/backfill.py": (
-        "_query_all dialect-branches over injected credits/agent stores for "
-        "the authoritative-history backfill; admin layer redesign PR A "
-        "moves those two ledger and run reads onto CreditsStore/"
-        "PostgresCreditsStore and the run-history store (design doc §12 "
-        "item 1), which removes this branch. _existing_source_event_ids "
-        "separately dialect-branches over the already-twinned analytics_store "
-        "to deduplicate against analytics_events, the analytics domain's own "
-        "table -- a different case, out of scope for PR T."
-    ),
 }
 
 
