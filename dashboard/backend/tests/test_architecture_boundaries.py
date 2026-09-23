@@ -550,3 +550,169 @@ def test_portfolio_manager_construction_always_declares_settlement():
         "PortfolioManager built without an explicit t_plus_one_enabled at: "
         + ", ".join(offenders)
     )
+
+
+# ---------------------------------------------------------------------------
+# Event-log discipline (admin layer redesign design doc SS6.11, rules 1-7)
+# ---------------------------------------------------------------------------
+
+_ANALYTICS = _BACKEND / "domain" / "analytics"
+_EVENT_READ_NAMES = {"list_events", "list_user_events", "list_metric_events"}
+# Files that may call a raw-event reader, each with the reason. Rules 3-5: the
+# paginated timeline and the overview's one-day scan are the only permitted raw
+# reads; everything else reads rollups or user_daily_facts. Every entry must
+# still contain a hit (the stale check below), so PR B removes the last two as
+# it deletes the files and narrows the others as it moves the reads.
+_EVENT_READ_ALLOWLIST = {
+    "dashboard/backend/domain/analytics/rollups.py": (
+        "defines AnalyticsRollupStore.list_events; rollup_day / rollup_current_day "
+        "are the day rollups and the overview's current-day scan (rule 5), "
+        "narrowed to one UTC day in PR B"
+    ),
+    "dashboard/backend/domain/analytics/query_service.py": (
+        "the paginated timeline (rule 3) and the overview's current-day read "
+        "(rule 5); PR B narrows the overview read and gives sessions a 30-day window"
+    ),
+    "dashboard/backend/domain/analytics/value_queries.py": (
+        "the retention grid's per-activation-week scan and the one-user profile "
+        "scan; PR B moves both onto user_daily_facts / user_activity"
+    ),
+    "dashboard/backend/domain/analytics/states.py": (
+        "legacy five-state calculator: full-history per-user reads. DELETED IN "
+        "PR B (design SS13 row B); allowlisted, not fixed, because PR A creates "
+        "and PR B drops"
+    ),
+    "dashboard/backend/domain/analytics/lifecycle_backfill.py": (
+        "historical eight-week reconstruction, per-user history reads. DELETED "
+        "IN PR B; the copy in facts_migration.py carries the history now"
+    ),
+}
+_OWN_CONNECTION_RECEIVERS = {"self", "self.analytics_base", "self.base_store"}
+_OWN_DIALECT_RECEIVERS = {
+    "base_store",
+    "self.base_store",
+    "analytics_base",
+    "self.analytics_base",
+    "resolved_analytics_base",
+}
+# Rule 7 tolerates nothing after PR A. A future entry needs a file path and a
+# reason, exactly like _EVENT_READ_ALLOWLIST -- and a design-doc amendment,
+# because the rule it relaxes is SS6.14's first row.
+_CROSS_DOMAIN_READ_ALLOWLIST: dict[str, str] = {}
+_PER_USER_QUERY_PREFIXES = (
+    "aggregate_", "list_", "upsert_", "record_", "sum_", "claim_",
+    "complete_", "release_", "get_", "append_", "copy_", "seed_",
+)
+
+
+def _analytics_sources():
+    for path in sorted(_ANALYTICS.glob("*.py")):
+        yield path.relative_to(_REPO_ROOT).as_posix(), ast.parse(
+            path.read_text(encoding="utf-8")
+        )
+
+
+def _dotted(node) -> str | None:
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Attribute):
+        base = _dotted(node.value)
+        return f"{base}.{node.attr}" if base else None
+    return None
+
+
+def test_event_log_rule_1_and_2_constants_hold():
+    from dashboard.backend.domain.analytics import models, retention
+
+    assert models.MAX_PROPERTIES_BYTES == 1024
+    assert isinstance(models.ALLOWED_SERVER_EVENT_NAMES, (set, frozenset))
+    assert retention.RAW_EVENT_RETENTION_DAYS == 180
+    mutators = []
+    for relative, tree in _analytics_sources():
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr in {"add", "update", "discard", "remove"}
+                and isinstance(node.func.value, ast.Name)
+                and node.func.value.id.startswith("ALLOWED_")
+            ):
+                mutators.append((relative, node.lineno))
+    assert mutators == [], f"the event allowlist is mutated at runtime: {mutators}"
+
+
+def test_raw_event_reads_stay_inside_the_allowlist():
+    """No new caller may read the event log (rules 3, 4, 5).
+
+    On 2026-09-11 a maintenance sweep read every user's 180-day history
+    every fifteen minutes, exhausted a 5 GB monthly egress allowance, and
+    500'd login for five hours. Nothing in the suite noticed, because every
+    behavioural assertion still passed. This is the assertion that would have.
+    """
+    hits: dict[str, list[tuple[str, int]]] = {}
+    for relative, tree in _analytics_sources():
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr in _EVENT_READ_NAMES
+            ):
+                hits.setdefault(relative, []).append((node.func.attr, node.lineno))
+    unapproved = {path: calls for path, calls in hits.items() if path not in _EVENT_READ_ALLOWLIST}
+    assert unapproved == {}, f"unapproved raw-event reads: {unapproved}"
+    stale = sorted(set(_EVENT_READ_ALLOWLIST) - set(hits))
+    assert stale == [], (
+        "allowlist entries with no raw-event read left in them -- delete the entry "
+        f"so the exemption cannot be inherited by the next reader: {stale}"
+    )
+
+
+def test_the_daily_job_never_loops_over_users():
+    """A for-loop issuing a query per user is the shape that caused the outage (rule 6)."""
+    source = (_ANALYTICS / "daily_facts.py").read_text(encoding="utf-8")
+    offenders = []
+    for node in ast.walk(ast.parse(source)):
+        if not isinstance(node, (ast.For, ast.AsyncFor)):
+            continue
+        # The loop's own iterable may be one set-based read; its body may not
+        # issue any.
+        for statement in node.body:
+            for inner in ast.walk(statement):
+                if (
+                    isinstance(inner, ast.Call)
+                    and isinstance(inner.func, ast.Attribute)
+                    and inner.func.attr.startswith(_PER_USER_QUERY_PREFIXES)
+                ):
+                    offenders.append((inner.func.attr, inner.lineno))
+    assert offenders == [], f"store calls inside a loop in daily_facts.py: {offenders}"
+
+
+def test_the_analytics_package_opens_only_its_own_connection():
+    """Rule 7 (design SS6.11, SS6.14 row 1): `_get_connection()` is called only
+    on the analytics domain's own store, and no analytics module sniffs another
+    store's dialect. Other domains' tables are read through public methods on
+    the store that owns them -- CreditsStore.aggregate_ledger_for_day, not SQL
+    against credit_ledger_entries from inside this package."""
+    offenders = []
+    for relative, tree in _analytics_sources():
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            if isinstance(node.func, ast.Attribute) and node.func.attr == "_get_connection":
+                receiver = _dotted(node.func.value)
+                if receiver not in _OWN_CONNECTION_RECEIVERS:
+                    offenders.append((relative, node.lineno, f"{receiver}._get_connection()"))
+            if (
+                isinstance(node.func, ast.Name)
+                and node.func.id == "hasattr"
+                and len(node.args) == 2
+                and isinstance(node.args[1], ast.Constant)
+                and node.args[1].value == "database_url"
+            ):
+                receiver = _dotted(node.args[0])
+                if receiver not in _OWN_DIALECT_RECEIVERS:
+                    offenders.append((relative, node.lineno, f'hasattr({receiver}, "database_url")'))
+    unlisted = [entry for entry in offenders if entry[0] not in _CROSS_DOMAIN_READ_ALLOWLIST]
+    assert unlisted == [], f"cross-domain connection or dialect sniff in domain/analytics: {unlisted}"
+    stale = sorted(set(_CROSS_DOMAIN_READ_ALLOWLIST) - {entry[0] for entry in offenders})
+    assert stale == [], f"stale rule-7 allowlist entries: {stale}"
