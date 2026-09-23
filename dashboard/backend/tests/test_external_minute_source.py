@@ -194,6 +194,76 @@ def test_the_closing_decision_fills_at_the_last_regular_hours_close(monkeypatch)
     )
 
 
+def test_an_unaggregated_run_fills_at_the_decision_bar_close(monkeypatch):
+    """A run whose source bars already are its decision bars has no execution
+    plan. Each bar is stamped at its close, so its open is an hour before the
+    decision and filling there is look-ahead: the contract says
+    ``decision_bar_close``, and both the recorded fill and the price agree."""
+
+    class _LegacyHourlyLoader:
+        # No ``source_timeframe``: the dataset takes it as 60m, unaggregated.
+        def fetch_bars(self, symbols, start, end):
+            timestamps = pd.date_range(
+                "2026-04-15 14:00:00+00:00",
+                "2026-04-15 20:00:00+00:00",
+                freq="60min",
+            )
+            closes = [200.0 + index for index in range(len(timestamps))]
+            frame = pd.DataFrame(
+                {
+                    "open": [close - 50.0 for close in closes],
+                    "high": [close + 1.0 for close in closes],
+                    "low": [close - 51.0 for close in closes],
+                    "close": closes,
+                    "volume": [1000] * len(closes),
+                },
+                index=timestamps,
+            )
+            return {symbol: frame.copy() for symbol in symbols}
+
+    monkeypatch.setattr(ebs, "AlpacaDataLoader", _LegacyHourlyLoader)
+    session = ebs.ExternalBacktestSession(
+        backtest_id="bt-hourly",
+        session_id="sess-hourly",
+        agent_name="agent-hourly",
+        model_name="test-model",
+        start_date="2026-04-15",
+        end_date="2026-04-15",
+        symbols=["AAPL"],
+    )
+    session.load_market_data()
+
+    assert session.intraday_mode is False
+    assert session.execution_fills == [
+        ExecutionFill(timestamp, "close", timestamp) for timestamp in session.timestamps
+    ]
+    assert session.frequency_contract["fill_policy"] == "decision_bar_close"
+
+    session.submit_decisions(
+        {
+            "actions": [
+                {
+                    "symbol": "AAPL",
+                    "action": "buy",
+                    "confidence": 1.0,
+                    "reasoning": "first bar buy",
+                    "position_size": 1,
+                }
+            ]
+        }
+    )
+
+    decision_bar = session.timestamps[0]
+    trade = session.manager.trades[0]
+    assert trade["timestamp"] == decision_bar
+    assert trade["price"] == pytest.approx(
+        session.all_data["AAPL"].loc[decision_bar, "close"]
+    )
+    assert trade["price"] != pytest.approx(
+        session.all_data["AAPL"].loc[decision_bar, "open"]
+    )
+
+
 def test_external_session_does_not_report_fill_without_next_symbol_bar(monkeypatch):
     class _MissingExecutionBarLoader(_MinuteLoader):
         def fetch_bars(self, symbols, start, end):

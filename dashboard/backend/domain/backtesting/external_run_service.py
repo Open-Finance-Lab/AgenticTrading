@@ -438,11 +438,12 @@ class ExternalBacktestSession:
 
     def _effective_execution_fills(self) -> List[ExecutionFill]:
         """One ``ExecutionFill`` per step. A dataset with no plan for these
-        steps fills each on its own bar's open; the bar and its price field
-        travel together, so a remapped bar can never borrow a default field."""
+        steps fills each at its own bar's close (``decision_bar_close``); the
+        bar and its price field travel together, so a remapped bar can never
+        borrow a default field."""
         if len(self.execution_fills) == self.total_steps:
             return self.execution_fills
-        return [ExecutionFill(timestamp, "open", timestamp) for timestamp in self.timestamps]
+        return [ExecutionFill(timestamp, "close", timestamp) for timestamp in self.timestamps]
 
     def _value_through(self, target_timestamp=None) -> None:
         """Mark the portfolio on each source bar through the given timestamp."""

@@ -113,11 +113,13 @@ class MarketDataset:
         )
         # One ExecutionFill per step. Without a plan -- a dataset whose
         # decision bars ARE its source bars -- each step fills at its own bar's
-        # open, as the protocol path always has.
+        # close (``decision_bar_close``), as ``engine._plan_executions`` does.
+        # Its open is an hour before the decision, and a field left naming it
+        # is one unconditional ``execution_prices`` away from look-ahead.
         self.execution_fills = (
             execution_fills
             if execution_fills is not None
-            else [ExecutionFill(timestamp, "open", timestamp) for timestamp in timestamps]
+            else [ExecutionFill(timestamp, "close", timestamp) for timestamp in timestamps]
         )
         self.source_timeframe = source_timeframe
         self.decision_timeframe = decision_timeframe
