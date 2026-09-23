@@ -160,6 +160,65 @@ def _activity_from_row(row: Any) -> UserActivity:
     )
 
 
+class RecentFactTotals(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    active_days: int = Field(default=0, ge=0)
+    successful_backtests: int = Field(default=0, ge=0)
+    runs_requested: int = Field(default=0, ge=0)
+    runs_completed: int = Field(default=0, ge=0)
+    runs_failed: int = Field(default=0, ge=0)
+    runs_cancelled: int = Field(default=0, ge=0)
+    operator_cost_micro: int = Field(default=0, ge=0)
+    own_spend_micro: int = Field(default=0, ge=0)
+    # How many of the requested dates actually have a row. Fewer than
+    # requested means the window is incomplete, which the UI labels rather
+    # than rendering as zero.
+    days_present: int = Field(default=0, ge=0)
+    # The latest date inside the window on which this user was active, or
+    # None. The daily job needs it to answer "what did this user's activity
+    # look like as of the end of day D" -- `user_activity` holds one row
+    # overwritten in place and cannot answer a question about the past.
+    last_active_date: date | None = None
+
+
+_RECENT_FACTS_SQL = """
+    SELECT user_id,
+           SUM(CASE WHEN active THEN 1 ELSE 0 END) AS active_days,
+           SUM(runs_completed) AS successful_backtests,
+           SUM(runs_requested) AS runs_requested,
+           SUM(runs_failed) AS runs_failed,
+           SUM(runs_cancelled) AS runs_cancelled,
+           SUM(operator_cost_micro) AS operator_cost_micro,
+           SUM(own_spend_micro) AS own_spend_micro,
+           COUNT(*) AS days_present,
+           MAX(CASE WHEN active THEN snapshot_date END) AS last_active_date
+    FROM user_daily_facts
+    WHERE snapshot_date >= {p} AND snapshot_date <= {p}{user_clause}
+    GROUP BY user_id
+"""
+
+
+def _recent_totals_from_row(row: Any) -> RecentFactTotals:
+    """Shared by both twins."""
+    last_active = _row_value(row, "last_active_date")
+    completed = int(_row_value(row, "successful_backtests", 0) or 0)
+    return RecentFactTotals(
+        active_days=int(_row_value(row, "active_days", 0) or 0),
+        successful_backtests=completed,
+        runs_requested=int(_row_value(row, "runs_requested", 0) or 0),
+        runs_completed=completed,
+        runs_failed=int(_row_value(row, "runs_failed", 0) or 0),
+        runs_cancelled=int(_row_value(row, "runs_cancelled", 0) or 0),
+        operator_cost_micro=int(_row_value(row, "operator_cost_micro", 0) or 0),
+        own_spend_micro=int(_row_value(row, "own_spend_micro", 0) or 0),
+        days_present=int(_row_value(row, "days_present", 0) or 0),
+        last_active_date=(
+            date.fromisoformat(str(last_active)) if last_active else None
+        ),
+    )
+
+
 class CommercialValueFact(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -867,6 +926,39 @@ class ValueAnalyticsStore:
             cursor = conn.execute(sql, (stamp,))
             return max(0, int(cursor.rowcount))
 
+    def sum_recent_facts(
+        self,
+        user_ids: Sequence[int] | None,
+        *,
+        start: date,
+        end: date,
+    ) -> dict[int, RecentFactTotals]:
+        """Trailing-window totals for many users in one query.
+
+        ``start`` and ``end`` are inclusive UTC dates. ``None`` for
+        ``user_ids`` means the whole population -- the daily job's shape,
+        parameterised by two dates and nothing else. One statement for the
+        whole batch: a per-user loop here is the shape that caused the
+        outage, and the read-budget test fails on it.
+        """
+        if end < start:
+            raise ValueError("end must not precede start")
+        params: list[Any] = [start.isoformat(), end.isoformat()]
+        user_clause = ""
+        if user_ids is not None:
+            ids = _ids(user_ids)
+            if not ids:
+                return {}
+            user_clause = f" AND user_id IN ({', '.join('?' for _ in ids)})"
+            params.extend(ids)
+        sql = _RECENT_FACTS_SQL.format(p="?", user_clause=user_clause)
+        with self._analytics_connection() as conn:
+            rows = conn.execute(sql, params).fetchall()
+        return {
+            int(_row_value(row, "user_id")): _recent_totals_from_row(row)
+            for row in rows
+        }
+
     def list_commercial_values(
         self,
         user_ids: Sequence[int],
@@ -1275,6 +1367,7 @@ __all__ = [
     "CommercialValueFact",
     "CurrentOperationalFacts",
     "ProjectionJob",
+    "RecentFactTotals",
     "UserActivity",
     "UserLifecycleDailySnapshot",
     "UserValueSnapshot",

@@ -18,7 +18,9 @@ from .repository_common import positive_limit, positive_user_id, utc_iso
 from .value_repository import (
     _ACTIVE_RUN_STATUSES,
     _TERMINAL_RUN_STATUSES,
+    _RECENT_FACTS_SQL,
     _activity_from_row,
+    _recent_totals_from_row,
     LIFECYCLE_ROLLUP_METRICS,
     LIFECYCLE_SEGMENTS,
     MAX_USER_BATCH,
@@ -26,6 +28,7 @@ from .value_repository import (
     CommercialValueFact,
     CurrentOperationalFacts,
     ProjectionJob,
+    RecentFactTotals,
     UserActivity,
     UserLifecycleDailySnapshot,
     UserValueSnapshot,
@@ -553,6 +556,34 @@ class PostgresValueAnalyticsStore:
             with conn.cursor() as cur:
                 cur.execute(sql, (stamp,))
                 return max(0, int(cur.rowcount))
+
+    def sum_recent_facts(
+        self,
+        user_ids: Sequence[int] | None,
+        *,
+        start: date,
+        end: date,
+    ) -> dict[int, RecentFactTotals]:
+        """See the SQLite twin."""
+        if end < start:
+            raise ValueError("end must not precede start")
+        params: list[Any] = [start.isoformat(), end.isoformat()]
+        user_clause = ""
+        if user_ids is not None:
+            ids = _ids(user_ids)
+            if not ids:
+                return {}
+            user_clause = " AND user_id = ANY(%s)"
+            params.append(ids)
+        sql = _RECENT_FACTS_SQL.format(p="%s", user_clause=user_clause)
+        with self._analytics_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql, params)
+                rows = cur.fetchall()
+        return {
+            int(_row_value(row, "user_id")): _recent_totals_from_row(row)
+            for row in rows
+        }
 
     def list_commercial_values(
         self,
