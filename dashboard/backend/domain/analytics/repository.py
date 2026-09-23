@@ -674,17 +674,6 @@ class AnalyticsStore:
             }
             for row in rows
         ]
-        with self._get_connection() as conn:
-            for offset in range(0, len(values), 500):
-                chunk = values[offset : offset + 500]
-                placeholders = ",".join("?" for _ in chunk)
-                rows = conn.execute(
-                    "SELECT source_event_id FROM analytics_events "
-                    f"WHERE source_event_id IN ({placeholders})",
-                    chunk,
-                ).fetchall()
-                existing.update(str(row["source_event_id"]) for row in rows)
-        return existing
 
     def record_admin_access(
         self,

@@ -443,9 +443,6 @@ def _recompute_days(event_rows: Sequence[Any], fact_rows: Sequence[Any]) -> list
     return sorted(stale, reverse=True)
 
 
-PLATFORM_CREDENTIAL_ENVIRONMENT_SECRET = "dashboard.backend.domain.model_providers.service"
-
-
 def _platform_lane_open(providers: Sequence[Mapping[str, Any]], platform_statuses: Mapping[str, str]) -> bool:
     """The population-wide half of ``platform_credits_available``.
 

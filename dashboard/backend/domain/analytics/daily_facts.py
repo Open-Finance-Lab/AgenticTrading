@@ -386,9 +386,19 @@ def run_daily_facts(
                 f"category={type(exc).__name__[:80]}"
             )
         for stale_day in stale_days[:MAX_RECOMPUTES_PER_TICK]:
-            _compute_day(
+            stale_outcome = _compute_day(
                 stale_day, now=current, store=store, run_history_store=runs, rollup=rollup_fn
             )
+            if stale_outcome.failed_steps:
+                # The recompute claims the day internally; a failed attempt
+                # must release it so the next tick retries, and the report
+                # must not claim the stale facts were refreshed (Codex P2).
+                store.release_projection_day(DAILY_FACTS_JOB, now=current)
+                print(
+                    "WARNING: analytics.daily_facts.recompute_failed "
+                    f"day={stale_day.isoformat()} steps={','.join(stale_outcome.failed_steps)}"
+                )
+                continue
             recomputed.append(stale_day)
 
         report = DailyFactsReport(

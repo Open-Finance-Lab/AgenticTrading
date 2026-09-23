@@ -67,17 +67,3 @@ def test_maintenance_no_longer_owns_rollups_or_the_lifecycle_backfill():
     reaper tick must not be able to write the same rollup rows."""
     parameters = inspect.signature(maintenance.run_analytics_maintenance).parameters
     source = inspect.getsource(maintenance)
-
-    assert "rebuild_rollup" not in parameters
-    assert "backfill_lifecycle" not in parameters
-    assert "rollup_day" not in source  # reworded in the docstring to "the day rollup"
-    assert "lifecycle_backfill" not in source
-    assert not hasattr(maintenance, "reset_maintenance_guard_for_tests")
-    assert not hasattr(maintenance, "_last_rollup_day")
-
-
-def test_maintenance_no_longer_owns_rollups_or_the_lifecycle_backfill():
-    """Design SS6.9 step 1 / D23: the daily job owns rollup_day now, so the
-    reaper tick must not be able to write the same rollup rows."""
-    parameters = inspect.signature(maintenance.run_analytics_maintenance).parameters
-    source = inspect.getsource(maintenance)
