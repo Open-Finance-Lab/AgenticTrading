@@ -473,15 +473,23 @@ def get_current_user(
     authorization: Optional[str] = Header(default=None),
 ) -> dict:
     token = _session_token(request, authorization)
-    if not token:
+    user = None
+    if token:
+        try:
+            user = users_module.user_store.get_user_for_token(token)
+        except _USER_STORE_OUTAGE as exc:
+            raise _store_unavailable(exc, route="get_current_user") from None
+    if not user:
+        # The local-console fallback covers BOTH shapes of "no live session":
+        # no cookie at all, and a cookie whose session died (wiped dev DB,
+        # expired row) — the second shape is what a stale browser cookie
+        # produces after the database is swapped, and it must land on the
+        # seeded admin instead of a 401 nothing on the page explains.
         autologin = _local_autologin_user(request)
         if autologin is not None:
             return autologin
+    if not token:
         raise HTTPException(status_code=401, detail="Not authenticated")
-    try:
-        user = users_module.user_store.get_user_for_token(token)
-    except _USER_STORE_OUTAGE as exc:
-        raise _store_unavailable(exc, route="get_current_user") from None
     if not user:
         raise HTTPException(status_code=401, detail="Invalid or expired session")
     return user
