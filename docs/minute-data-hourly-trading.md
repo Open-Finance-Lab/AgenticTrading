@@ -44,7 +44,10 @@ Phase 3 将分钟链路的数据质量和无未来数据约束固化为可测试
 ## Phase 4：API 可观测性
 
 Phase 4 保持唯一、固定的成交规则 `next_source_bar_open`，不增加成交策略
-配置项。回测详情 API 和外部 Agent 的完成结果会返回：
+配置项。唯一例外是每个交易日收盘时点的决策（如 16:00 ET）：会话内已没有
+下一根源 bar，因此以最后一根会话内源 bar（15:55）的收盘价成交，而不是
+盘后 bar 的开盘价；契约中以 `session_close_fill: last_source_bar_close`
+记录。回测详情 API 和外部 Agent 的完成结果会返回：
 
 - `frequency_contract`：5m 源数据、60m 决策 bar、1h 决策、5m 成交与估值；
 - `market_data_quality`：聚合后的可用、丢弃及异常计数。

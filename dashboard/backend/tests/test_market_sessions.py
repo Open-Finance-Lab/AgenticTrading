@@ -212,6 +212,20 @@ def test_the_final_bucket_fills_at_the_last_in_session_close():
     ) == {}
 
 
+def test_an_exact_fill_is_the_source_bar_not_the_equal_decision_stamp():
+    from dashboard.backend.domain.backtesting.bar_aggregation import (
+        plan_execution_fills,
+    )
+
+    # Aggregated decisions arrive in UTC, source bars in ET: equal instants,
+    # but the trade is stamped with the fill bar, so its tz must survive.
+    decision = _et("15:30").tz_convert("UTC")
+    fills = plan_execution_fills(
+        [decision], [_et("15:30")], market="US", timezone="US/Eastern"
+    )
+    assert str(fills[decision][0].tz) == "US/Eastern"
+
+
 def test_the_engine_filter_agrees_for_both_markets():
     from dashboard.backend.domain.backtesting.engine import HourlyBacktester
 

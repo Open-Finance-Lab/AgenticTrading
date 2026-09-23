@@ -76,6 +76,7 @@ def test_runtime_contract_attests_fixed_intraday_execution_policy():
         "valuation_frequency": "5m",
         "aggregation": "session_anchored_completed_bars",
         "fill_policy": "next_source_bar_open",
+        "session_close_fill": "last_source_bar_close",
         "verification_status": "verified",
     }
 

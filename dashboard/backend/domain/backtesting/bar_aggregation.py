@@ -368,7 +368,9 @@ def plan_execution_fills(
         same_day = by_day.get(_market_day(timestamp, timezone), [])
         index = bisect_left(same_day, timestamp)
         if index < len(same_day) and same_day[index] == timestamp:
-            fills[timestamp] = (timestamp, "open")
+            # The source's own object, not the equal decision stamp: they can
+            # differ in tz, and the fill bar is what a trade is stamped with.
+            fills[timestamp] = (same_day[index], "open")
         elif index > 0 and is_session_close(
             timestamp, market=market, timezone=timezone
         ):

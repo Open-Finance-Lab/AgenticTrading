@@ -79,6 +79,22 @@ def test_minute_frequency_formatter_states_fixed_execution_policy():
     assert value == "5m source · 1h decisions · next 5m open fills · 5m valuation"
 
 
+def test_minute_frequency_formatter_names_the_session_close_fill():
+    value = _run_formatters(
+        "formatBacktestFrequencyContract({"
+        "source_timeframe:'5m',decision_timeframe:'60m',"
+        "decision_frequency:'1h',execution_timeframe:'5m',"
+        "valuation_frequency:'5m',fill_policy:'next_source_bar_open',"
+        "session_close_fill:'last_source_bar_close'"
+        "})"
+    )
+
+    assert value == (
+        "5m source · 1h decisions · next 5m open fills "
+        "(last close at session end) · 5m valuation"
+    )
+
+
 def test_quality_formatter_reports_dropped_and_problem_counts():
     value = _run_formatters(
         "formatBacktestMarketDataQuality({"
