@@ -271,7 +271,17 @@ def test_render_measures_each_stage_and_publishes_the_result():
 
 
 def test_page_size_is_shared_with_the_grid():
-    assert re.search(r"const AGENT_GRID_PAGE_SIZE = \d+", APP_JS)
+    """The page cap the note calls `paged` is still a real cap.
+
+    It is no longer one number: the grid pins its columns via a CSS ladder and
+    `agentGridPageSizeFor` sizes each page to whole rows of whatever rung is
+    live. What this guard cares about is only that a cap exists and that the
+    render applies it -- `test_agent_grid_pagination.py` owns its shape.
+    """
+    assert re.search(r"const AGENT_GRID_TARGET_PAGE_SIZE = \d+", APP_JS)
+    body = fn_body("function renderAgentCards")
+    assert "const pageSize = agentGridPageSize(grid);" in body
+    assert "agents.slice(start, start + pageSize)" in body
 
 
 def test_legend_renders_the_note_and_exposes_its_refresh():

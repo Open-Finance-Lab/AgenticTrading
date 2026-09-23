@@ -25,6 +25,7 @@ from dashboard.backend.domain.credits.repository_common import (
     IdempotencyConflictError,
 )
 from dashboard.backend.domain.credits.service import credits_service
+from dashboard.backend.domain.user_groups import DEFAULT_USER_GROUP
 
 
 router = APIRouter(
@@ -227,7 +228,7 @@ def list_grant_users(
                 # admin-only dimension. Keep the stable stored value alongside
                 # the identity fields so the frontend can render one select
                 # without a second users lookup.
-                "user_group": identity.get("user_group", "unknown"),
+                "user_group": identity.get("user_group", DEFAULT_USER_GROUP),
                 "balance": balance,
             }
         )

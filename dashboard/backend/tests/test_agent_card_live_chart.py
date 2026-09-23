@@ -53,6 +53,7 @@ _SPARK_HELPERS = (
     "function resolveProgressAgeSeconds(",
     "function formatProgressStaleness(",
     "function formatStartupStaleness(",
+    "function formatBacktestPhase(",
     "function resolveRunningNotice(",
     "function deriveRunningProgress(",
 )
@@ -82,6 +83,8 @@ def _fold(progress_js: str, previous_js: str = "null") -> object:
     script = "\n".join(
         [
             js_const("LIVE_SPARK_MAX_POINTS"),
+            js_const("BACKTEST_PHASE_LABELS"),
+            fn_body("function formatBacktestPhase("),
             fn_body("function advanceBacktestProgress("),
             f"console.log(JSON.stringify(advanceBacktestProgress("
             f"{previous_js}, {progress_js}, Date.now())));",
@@ -125,6 +128,102 @@ def test_fold_still_refuses_a_tick_with_no_step():
     assert _fold("{equity_curve: [{equity: 1000}, {equity: 1010}]}") is None
 
 
+def test_fold_accepts_a_phase_tick_without_a_step():
+    """A pre-loop phase folds so the card can name it, but without an ETA
+    anchor: firstStep/firstStepAt stay absent so the first real step still
+    sets the rate and the launch-biased ETA cannot come back."""
+    folded = _fold(
+        "{step: 0, total_steps: 49, phase: 'first_decision',"
+        " phase_started_at: 1700000000, progress_age_seconds: 4}"
+    )
+    assert folded["step"] == 0
+    assert folded["totalSteps"] == 49
+    assert folded["phase"] == "first_decision"
+    # NOT folded, deliberately. `phase_started_at` is a raw server wall clock;
+    # every elapsed figure the card prints derives from `progress_age_seconds`
+    # instead, computed server side so a skewed client clock cannot report a
+    # phase as having started in the future. It was carried here, read by
+    # nothing, and set on only one of the fold's three exits -- a trap one
+    # `Date.now() / 1000 - phaseStartedAt` away from being real.
+    assert "phaseStartedAt" not in folded
+    assert folded["ageSeconds"] == 4
+    assert folded["equityCurve"] == []
+    assert "firstStep" not in folded
+    assert "firstStepAt" not in folded
+
+
+def test_fold_ignores_a_phase_it_cannot_name():
+    assert _fold("{step: 0, total_steps: 49, phase: 'warp'}") is None
+
+
+def test_first_real_step_anchors_after_a_phase_tick():
+    previous = (
+        "{step: 0, totalSteps: 49, phase: 'first_decision',"
+        " ageSeconds: 4, ageAt: Date.now()}"
+    )
+    folded = _fold("{step: 1, total_steps: 49}", previous_js=previous)
+    assert folded["firstStep"] == 1
+    assert "phase" not in folded
+
+
+def test_fold_refuses_a_starting_tick():
+    """`starting` carries an empty label, so it folds like any phase the card
+    cannot name. Nothing publishes it today; this pins that adding a publisher
+    without adding a label is a clean no-op rather than a blank phase line."""
+    assert _fold("{step: 0, total_steps: 0, phase: 'starting'}") is None
+
+
+def test_fold_refuses_an_inherited_object_key_as_a_phase():
+    """`BACKTEST_PHASE_LABELS[phase]` on a plain object literal answers for
+    every key on Object.prototype: `constructor` returns a *function*, which is
+    truthy, so the guard above would accept the tick and the card's detail line
+    would interpolate a function body. `warp` cannot catch that -- it is a
+    miss, and the prototype keys are hits. Hence hasOwnProperty in the helper.
+    """
+    for key in ("constructor", "toString", "valueOf", "hasOwnProperty"):
+        assert _fold(f"{{step: 0, total_steps: 49, phase: '{key}'}}") is None
+
+
+def test_fold_carries_a_phase_the_payload_names():
+    """The ordinary path keeps the phase too, so the card can name `saving`
+    -- which now arrives with the loop's real step count (Task 1), not with
+    zeros. A payload that names no phase still leaves no key: the anchor test
+    above pins that, and it is also the honest render ("this tick said nothing
+    about the phase" rather than "the phase is null")."""
+    folded = _fold("{step: 49, total_steps: 49, phase: 'saving'}")
+    assert folded["step"] == 49
+    assert folded["phase"] == "saving"
+
+
+def test_a_late_phase_tick_does_not_blank_the_card():
+    """The second lock on the Task 1 regression, and it is not redundant.
+
+    `saving` arrives AFTER the loop has published, and this fold *replaces*
+    the stored entry (app.js:7932 onwards). A bare phase payload carries step 0
+    and an empty curve, so accepting it wholesale wipes the sparkline, the
+    equity label and the determinate bar at the finish line of every run --
+    with nothing red anywhere, and after the run spent its whole length earning
+    them. Task 1 stops the engine emitting that payload; this stops the browser
+    trusting one if any writer still does. Neither covers the other: the
+    Backtest panel's own bar is computed from the raw payload (`stepPct`,
+    app.js:8600 and again at :8432) and never passes through here at all.
+    """
+    previous = (
+        "{step: 49, totalSteps: 49, equityCurve: [1000, 1100], openingEquity: 1000,"
+        " firstStep: 1, firstStepAt: Date.now() - 60000,"
+        " ageSeconds: 1, ageAt: Date.now()}"
+    )
+    folded = _fold(
+        "{step: 0, total_steps: 49, phase: 'saving', progress_age_seconds: 0}",
+        previous_js=previous,
+    )
+    assert folded["step"] == 49
+    assert folded["equityCurve"] == [1000, 1100]
+    assert folded["openingEquity"] == 1000
+    assert folded["firstStep"] == 1
+    assert folded["phase"] == "saving"
+
+
 def test_fold_ignores_non_numeric_equity_points():
     """The curve is JSON off disk, written by a subprocess mid-run. A null
     equity reaching the SVG path builder renders `LNaN,NaN` and blanks the
@@ -152,6 +251,7 @@ def _render_raw(running_js: str) -> str:
     script = "\n".join(
         [
             js_const("BACKTEST_STALE_SECONDS"),
+            js_const("BACKTEST_PHASE_LABELS"),
             "function escapeHtml(s) { return String(s); }",
             "function renderAgentAllocatedCapitalHero() { return ''; }",
             "function formatBacktestElapsed(s) { return String(s); }",

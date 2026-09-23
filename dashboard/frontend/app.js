@@ -17,7 +17,35 @@ const SELECTED_BACKTEST_RUN_KEY = 'selected-backtest-run-id';
 // literal (no build step to share this constant across the landing/app split).
 const NAV_STATE_KEY = 'nav-state';
 const DISCORD_SERVER_URL = 'https://discord.gg/9HnQ6XDG98';
-const BACKTEST_POLL_MAX_SECONDS = 3600; // 60 minutes at 1-second polling intervals
+// Two numbers, deliberately not one. The budget is the SERVER's -- it mirrors
+// PIPELINE_SUBPROCESS_TIMEOUT_SECONDS and is what the progress bar is drawn
+// against, so the bar answers "how far through its budget is this run?". The
+// poll ceiling is how long this page keeps WATCHING, and it has to be longer:
+// they were the same value, so the poller gave up at the same instant the
+// server began finalizing and the server's own verdict was written after the
+// client stopped looking (issue #474 item 5). The margin is the repo's own
+// SUBPROCESS_TIMEOUT_OVERHEAD_SECONDS. Pinned to both server constants by
+// test_ifind_ashare_frontend.py.
+// ⚠ The margin covers the PIPELINE runtime, the only one whose budget is a
+// fixed constant. A hosted (AI Hedge Fund) run is sized per trading day by
+// `_backtest_subprocess_timeout` and may be granted up to
+// MAX_SUBPROCESS_TIMEOUT_SECONDS (14400) -- four times this ceiling. At the
+// shipped MAX_AI_HEDGE_FUND_TRADING_DAYS (10) the derived budget lands back on
+// 3600 and the margin holds, but an operator who raises that bound makes this
+// poller report "lost contact" for a healthy run. Raising the ceiling is not
+// the fix (it would keep a tab polling for four hours); the fix is for the
+// RUNNING status payload to publish the run's own budget, which today appears
+// only once the run has already timed out. Tracked with issue #474 item 5.
+const BACKTEST_BUDGET_SECONDS = 3600;   // mirrors PIPELINE_SUBPROCESS_TIMEOUT_SECONDS
+const BACKTEST_POLL_MAX_SECONDS = 4200; // budget + SUBPROCESS_TIMEOUT_OVERHEAD_SECONDS
+// One sentence for one condition, reached two ways -- the per-run poll-failure
+// budget running out, and the whole poller hitting its ceiling. They were two
+// strings giving different instructions ("Reload to check." vs "check the
+// Backtest tab later") for the same situation, and the copy register pinned
+// only one of them, so the other was free to drift. No number in it, so it
+// cannot drift from a constant either.
+const BACKTEST_LOST_CONTACT_MESSAGE =
+    'Lost contact with this backtest. It may still be running — check the Backtest tab later.';
 
 function initSession() {
   // Stable browser identity — never changes when switching agents.
@@ -638,7 +666,17 @@ const MOCK_AGENTS = [
 // Holds the most recently loaded agents so the toolbar can re-filter without refetching.
 let allAgents = [];
 let agentViewMode = 'grid';
-const AGENT_GRID_PAGE_SIZE = 5;
+/* Cards per shelf page at the widest layout: 4 columns x 2 rows.
+ *
+ * Not the page size itself -- see agentGridPageSizeFor, which turns this into
+ * a whole number of rows for whatever column count the CSS ladder is actually
+ * on. The old constant WAS the page size (a flat 5) and that is precisely what
+ * produced the widow: it counted items while the grid laid out tracks. */
+const AGENT_GRID_TARGET_PAGE_SIZE = 8;
+
+/* Fallback column count when the grid cannot be measured -- see
+ * agentGridColumnCount. Matches the widest rung of the CSS ladder. */
+const AGENT_GRID_FALLBACK_COLUMNS = 4;
 
 // Legacy runtime -> market, for an uncategorized agent whose runtime already
 // implies one. Every agent cloned before shelving shipped carries
@@ -774,6 +812,13 @@ function shelfIdSuffix(shelfKey) {
 /** Per-shelf page index (0-based), keyed by AGENT_SHELVES' `key`. Reset on search change. */
 let agentGridPage = Object.fromEntries(AGENT_SHELVES.map((shelf) => [shelf.key, 0]));
 
+/** Columns each shelf was last PAINTED at, keyed the same way.
+ *
+ * Only the resize handler reads it, and only to answer "did the ladder
+ * actually step?" -- see setupAgentGridResizeHandler for why the answer has to
+ * be a comparison rather than an unconditional re-render. */
+let agentGridColumns = Object.fromEntries(AGENT_SHELVES.map((shelf) => [shelf.key, 0]));
+
 /** An agent the Capital Allocation legend draws a row for.
  *
  * Mirrors buildAgentAllocationData's `cash_allocation > 0` filter in
@@ -832,12 +877,75 @@ function describeAgentGridVisibility() {
 }
 window.describeAgentGridVisibility = describeAgentGridVisibility;
 
-function agentGridPageCount(total) {
-  return Math.max(1, Math.ceil(total / AGENT_GRID_PAGE_SIZE));
+/** How many cards fit on one page of a grid `columns` wide.
+ *
+ * Whole rows only: `agentGridPageSizeFor(cols) % cols === 0` for every rung of
+ * the ladder, which is the entire point. A page that ends mid-row leaves a
+ * widow card sitting alone under a full row, and a lone card under a gap reads
+ * as "the rest are on the next page" even when the page is full.
+ *
+ *   cols 4 -> 8  (2 rows x 4 -- the shipped desktop layout)
+ *   cols 3 -> 6  (2 rows x 3; 8 here would be 3 + 3 + 2, the widow again)
+ *   cols 2 -> 8  (4 rows x 2)
+ *   cols 1 -> 8  (8 rows x 1)
+ *
+ * The max(2, ...) floor is why the two narrow rungs hold 8 rather than 2 rows'
+ * worth: two rows of one card is not a page, it is a reason to tap "next" four
+ * times. Two rows is the target wherever two rows means something.
+ *
+ * Pure -- no DOM -- so the guards can run it under node. */
+function agentGridPageSizeFor(columns) {
+  const cols = Math.max(1, Math.floor(Number(columns) || 0));
+  return cols * Math.max(2, Math.floor(AGENT_GRID_TARGET_PAGE_SIZE / cols));
 }
 
-function normalizeAgentGridPage(categoryKey, total) {
-  const maxPage = agentGridPageCount(total) - 1;
+/** Columns the CSS ladder is rendering `grid` at, or 0 if it cannot be read.
+ *
+ * Read back off the computed style rather than mirrored from the breakpoints
+ * in JS, so the page size cannot drift out of step with styles.css -- edit a
+ * breakpoint there and this follows. Deliberately not matchMedia for the same
+ * reason: that would be a second copy of the ladder.
+ *
+ * `gridTemplateColumns` resolves to used pixel tracks ("289px 289px ...") only
+ * for a grid that is actually laid out. On a hidden page -- and every shelf is
+ * hidden until you navigate to My Agents -- it returns the SPECIFIED value
+ * instead ("repeat(4, minmax(0, 1fr))"), which naively split on whitespace
+ * counts as 2 tokens and would paginate the whole shelf into pairs. So a
+ * measurement counts only when every token is a px length.
+ *
+ * 0 rather than the fallback, so callers can tell "could not measure" from "is
+ * four columns wide" -- renderAgentCards stores this, and the resize guard
+ * needs the difference. agentGridColumnCount applies the fallback. */
+function agentGridMeasuredColumns(grid) {
+  if (!grid || typeof window === 'undefined' || !window.getComputedStyle) return 0;
+  let template = '';
+  try {
+    template = window.getComputedStyle(grid).gridTemplateColumns || '';
+  } catch (err) {
+    return 0;
+  }
+  const tokens = template.trim().split(/\s+/).filter(Boolean);
+  if (!tokens.length || !tokens.every((token) => /^[\d.]+px$/.test(token))) return 0;
+  return tokens.length;
+}
+
+/** Columns to paginate `grid` at -- the measurement, or the widest rung. */
+function agentGridColumnCount(grid) {
+  return agentGridMeasuredColumns(grid) || AGENT_GRID_FALLBACK_COLUMNS;
+}
+
+/** Cards per page for the shelf drawn into `grid`. */
+function agentGridPageSize(grid) {
+  return agentGridPageSizeFor(agentGridColumnCount(grid));
+}
+
+function agentGridPageCount(total, pageSize) {
+  const size = Math.max(1, Math.floor(Number(pageSize) || 0));
+  return Math.max(1, Math.ceil(total / size));
+}
+
+function normalizeAgentGridPage(categoryKey, total, pageSize) {
+  const maxPage = agentGridPageCount(total, pageSize) - 1;
   const page = agentGridPage[categoryKey] || 0;
   agentGridPage[categoryKey] = Math.min(Math.max(page, 0), maxPage);
   return agentGridPage[categoryKey];
@@ -1559,6 +1667,42 @@ function setAgentViewMode(mode) {
   });
   document.getElementById('agentViewGrid')?.classList.toggle('active', agentViewMode === 'grid');
   document.getElementById('agentViewList')?.classList.toggle('active', agentViewMode === 'list');
+  // List view is a single column (.agents-grid--list), so the class toggle
+  // above changes the page size. Toggling it without repainting left the cards
+  // already on screen paginated for the OTHER view -- 8 stacked full-width
+  // rows, or 4 columns holding one page's worth of a 1-column shelf. Keep the
+  // page index: switching how the shelf is drawn should not scroll you back to
+  // the top of it.
+  applyAgentFilters(false);
+}
+
+let agentGridResizeTimer = null;
+
+/* Repaint the shelves when the CSS ladder steps to a different column count.
+ *
+ * Guarded on the column count CHANGING, not on the resize firing, and that
+ * guard is load-bearing twice over. Dragging a window edge emits a resize
+ * event per frame while the ladder holds at one rung for hundreds of pixels,
+ * so the common case has to cost nothing. And a repaint changes the grid's
+ * own height, which is exactly the kind of thing that can feed back into
+ * another layout pass -- an unconditional re-render here is how you get a
+ * render loop that only reproduces on someone else's machine.
+ *
+ * Mirrors setupTickerResizeHandler's debounce, the only other resize listener
+ * on this page. */
+function setupAgentGridResizeHandler() {
+  window.addEventListener('resize', () => {
+    if (agentGridResizeTimer) clearTimeout(agentGridResizeTimer);
+    agentGridResizeTimer = setTimeout(() => {
+      const stepped = AGENT_SHELVES.some((shelf) => {
+        const grid = document.getElementById(`agentsGrid${shelfIdSuffix(shelf.key)}`);
+        if (!grid || !grid.offsetParent) return false; // hidden page: nothing painted to fix
+        return agentGridColumnCount(grid) !== agentGridColumns[shelf.key];
+      });
+      if (!stepped) return;
+      applyAgentFilters(false);
+    }, 150);
+  });
 }
 
 function isDemoAgent(agentId) {
@@ -1678,7 +1822,14 @@ function bindAgentCardMenus(grid) {
   });
 }
 
-function renderAgentGridFooter(categoryKey, total, page, pageCount) {
+/* The pager label names the RANGE on screen, not the page ordinal.
+ *
+ * "Page 2 of 3" told you where you were in a sequence but nothing about how
+ * much of the shelf you had seen, and the page size now moves with the column
+ * ladder, so the same ordinal covers a different number of agents at different
+ * widths. "Showing 9-16 of 21 agents" is true at every rung and answers the
+ * question the widow bug made people ask -- how many are left. */
+function renderAgentGridFooter(categoryKey, total, page, pageCount, pageSize) {
   const footerId = `agentsGridFooter${shelfIdSuffix(categoryKey)}`;
   const footer = document.getElementById(footerId);
   if (!footer) return;
@@ -1690,19 +1841,33 @@ function renderAgentGridFooter(categoryKey, total, page, pageCount) {
   footer.hidden = false;
   const atStart = page <= 0;
   const atEnd = page >= pageCount - 1;
+  const first = page * pageSize + 1;
+  const last = Math.min(total, (page + 1) * pageSize);
   footer.innerHTML = `
     <button type="button" class="agents-grid-footer-btn agents-grid-footer-btn--nav" data-agent-grid-prev="${categoryKey}" aria-label="Previous page" ${atStart ? 'disabled' : ''}>←</button>
-    <span class="agents-grid-footer-count">Page ${page + 1} of ${pageCount} · ${total} total</span>
+    <span class="agents-grid-footer-count">Showing ${first}–${last} <span class="agents-grid-footer-total">of ${total} agents</span></span>
     <button type="button" class="agents-grid-footer-btn agents-grid-footer-btn--nav" data-agent-grid-next="${categoryKey}" aria-label="Next page" ${atEnd ? 'disabled' : ''}>→</button>`;
 }
 
 function renderAgentCards(grid, agents, categoryKey) {
   grid.innerHTML = '';
   const total = agents.length;
-  const pageCount = agentGridPageCount(total);
-  const page = normalizeAgentGridPage(categoryKey, total);
-  const start = page * AGENT_GRID_PAGE_SIZE;
-  const visibleAgents = agents.slice(start, start + AGENT_GRID_PAGE_SIZE);
+  // Measured per render, per shelf, AFTER the clear -- the tracks are pinned
+  // by the CSS ladder, so they exist whether or not the grid holds cards.
+  const pageSize = agentGridPageSize(grid);
+  // The MEASURED count, not the fallback: loadAgents() paints these shelves
+  // while the panel is still hidden (showPlaygroundPanel does it on the
+  // Backtest subtab too), and a hidden paint has to stay distinguishable from
+  // a real 4-column one. Recording 0 makes the resize guard below treat the
+  // first measurable layout as a step and repaint. The ordinary correction is
+  // simpler -- entering My Agents calls loadAgents(), which re-renders with
+  // the panel visible -- this is the backstop for a shelf that somehow
+  // reaches the screen without one.
+  agentGridColumns[categoryKey] = agentGridMeasuredColumns(grid);
+  const pageCount = agentGridPageCount(total, pageSize);
+  const page = normalizeAgentGridPage(categoryKey, total, pageSize);
+  const start = page * pageSize;
+  const visibleAgents = agents.slice(start, start + pageSize);
 
   const defaultId = getDefaultAgentId();
 
@@ -1755,7 +1920,7 @@ function renderAgentCards(grid, agents, categoryKey) {
 
   bindAgentCardMenus(grid);
 
-  renderAgentGridFooter(categoryKey, total, page, pageCount);
+  renderAgentGridFooter(categoryKey, total, page, pageCount, pageSize);
 
   grid.querySelectorAll('.agent-configure-btn').forEach((btn) => {
     btn.addEventListener('click', () => {
@@ -6297,6 +6462,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     // phase settles, so wiring early cannot reorder the claim invariant. ----
     initNavigation();
     setupTickerResizeHandler();
+    setupAgentGridResizeHandler();
     setupTickerScrollControls();
     populateSupportedModelSelects();
 
@@ -7820,11 +7986,92 @@ function resolveProgressAgeSeconds(running) {
  * "stuck" -- we know the file is old, not that the run died, and a long model
  * step looks exactly like this.
  */
-function formatProgressStaleness(secondsSinceUpdate) {
+function formatProgressStaleness(secondsSinceUpdate, phase) {
     const gap = Number(secondsSinceUpdate);
     if (!Number.isFinite(gap) || gap < BACKTEST_STALE_SECONDS) return null;
     const minutes = Math.floor(gap / 60);
-    return `No progress for ${minutes}m — long model steps can do this.`;
+    // The cause clause names what is actually running. Declared inside the
+    // function rather than beside BACKTEST_PHASE_LABELS on purpose: it has
+    // exactly one reader, and fn_body carries it into every node harness for
+    // free -- a second top-level const would have to be hand-added to five
+    // script builders, which is the ReferenceError this task already pays off
+    // once. hasOwnProperty for the same reason formatBacktestPhase uses it:
+    // `causes['constructor']` is a truthy function on a plain literal, and
+    // this string goes straight into the sentence.
+    const causes = {
+        loading_bars: 'a wide bar window can do this',
+        indicators: 'a wide bar window can do this',
+        saving: 'writing results can do this',
+    };
+    const named =
+        typeof phase === 'string'
+        && Object.prototype.hasOwnProperty.call(causes, phase);
+    const cause = named ? causes[phase] : 'long model steps can do this';
+    return `No progress for ${minutes}m — ${cause}.`;
+}
+
+/**
+ * Short labels for the pre-loop phases the child publishes (engine.py
+ * PROGRESS_PHASES). The Backtest panel prints the server's own sentence; the
+ * agent card has one short line, so it gets these. The phase *names* are the
+ * contract between the two; each surface owns only its wording. `running` is
+ * empty on purpose: a step count owns that line. `starting` is empty for a
+ * different reason -- nothing publishes it. The child's first write happens
+ * inside load_data, after the imports that dominate the launch, so `starting`
+ * exists only as the retroactive gap name in `phases[]`. Listed rather than
+ * deleted so this table still enumerates every phase name the engine knows;
+ * empty so advanceBacktestProgress keeps refusing such a tick and the card
+ * keeps the startup-staleness notice, which is the true sentence there.
+ */
+const BACKTEST_PHASE_LABELS = {
+    starting: '',
+    loading_bars: 'Loading market data',
+    indicators: 'Calculating indicators',
+    first_decision: 'Waiting on first decision',
+    running: '',
+    saving: 'Saving results',
+};
+
+function formatBacktestPhase(phase) {
+    // hasOwnProperty, not `LABELS[phase] || ''`. A plain object literal answers
+    // for every key on Object.prototype, and `LABELS['constructor']` is a
+    // *function* -- truthy, so advanceBacktestProgress's phase guard would
+    // accept the tick and deriveRunningProgress would interpolate a function
+    // body into the card's detail line. The phase arrives from a JSON file
+    // written by a subprocess, so "no caller would pass that" is not an
+    // argument available here.
+    if (typeof phase !== 'string') return '';
+    return Object.prototype.hasOwnProperty.call(BACKTEST_PHASE_LABELS, phase)
+        ? BACKTEST_PHASE_LABELS[phase]
+        : '';
+}
+
+/**
+ * The Backtest panel's bar percentage, from the RAW /backtest/status payload.
+ *
+ * One owner because there are two callers -- attachToLiveBacktest and the 1s
+ * poller -- and they were byte-identical inline copies, which is how both came
+ * to carry the same defect: they gated on `total > 0` and never on `step > 0`.
+ * Since Task 1 the progress file exists before the first step, so
+ * `first_decision` publishes `{step: 0, total_steps: N}`; the old test returned
+ * a finite 0, updateBacktestRunProgress takes any finite percentage as
+ * authoritative over its elapsed-based creep, and the bar snapped to a flat 0%
+ * and stopped moving until the first real step. An empty track with the
+ * indeterminate sweep switched off reads as broken, which is the same judgement
+ * deriveRunningProgress already encodes for the card (`determinate` requires
+ * `step > 0`) -- this is that rule, on the surface that had its own copy.
+ *
+ * Deliberately NOT shared with deriveRunningProgress: that one reads the
+ * *folded* entry (`totalSteps`, camelCase) and also owns `pct`, the ETA and
+ * `determinate`. Same rule, two payload shapes; merging them would mean one
+ * function that has to know which shape it was handed.
+ */
+function backtestStepPercent(progress) {
+    const step = Number(progress?.step);
+    const total = Number(progress?.total_steps);
+    return Number.isFinite(step) && step > 0 && Number.isFinite(total) && total > 0
+        ? (100 * step / total)
+        : null;
 }
 
 /**
@@ -7850,11 +8097,15 @@ function formatStartupStaleness(elapsedSeconds) {
 /** Whichever staleness notice applies to this running entry, or null. */
 function resolveRunningNotice(running) {
     const step = Number(running.step);
-    if (!Number.isFinite(step) || step <= 0) {
+    // A child that publishes phases rewrites the file at every transition, so
+    // its mtime ages exactly like a step's: a long phase reads as "No
+    // progress for Nm", which is the true statement. Only a child that has
+    // published nothing at all falls back to the elapsed-based notice.
+    if ((!Number.isFinite(step) || step <= 0) && !formatBacktestPhase(running.phase)) {
         return formatStartupStaleness(running.elapsedSeconds);
     }
     const age = resolveProgressAgeSeconds(running);
-    return age === null ? null : formatProgressStaleness(age);
+    return age === null ? null : formatProgressStaleness(age, running.phase);
 }
 
 /**
@@ -7874,7 +8125,56 @@ function resolveRunningNotice(running) {
 function advanceBacktestProgress(previous, progress, now) {
     const step = Number(progress?.step);
     const total = Number(progress?.total_steps);
-    if (!Number.isFinite(step) || step <= 0) return null;
+    if (!Number.isFinite(step) || step <= 0) {
+        // A pre-loop phase folds so the card can name it, but without an ETA
+        // anchor: firstStep/firstStepAt stay absent so the first real step
+        // still sets the rate, and the launch-biased ETA this branch exists
+        // to prevent cannot return. A payload with no nameable phase is the
+        // pre-confirmation entry this function has always refused.
+        if (!formatBacktestPhase(progress?.phase)) return null;
+        // A late phase tick -- `saving`, arriving after the loop has
+        // published -- must not be folded as a fresh start. This function
+        // *replaces* the stored entry, and a bare phase payload carries step 0
+        // and an empty curve, so accepting it wholesale blanks the sparkline,
+        // the equity label and the determinate bar at the finish line of every
+        // run. Carry the phase onto what is already there instead. The age is
+        // refreshed because the file really was just rewritten -- keeping the
+        // old one would start the staleness notice against a fresh write.
+        //
+        // Task 1 already stops the engine emitting such a payload (a terminal
+        // phase write carries the loop's numbers forward). This is the second
+        // lock, for any other writer, and the two are not interchangeable: the
+        // Backtest panel's own bar is computed from the raw payload
+        // (`stepPct`, :8600 and :8432) and never reaches this function.
+        const previousStep = previous ? Number(previous.step) : NaN;
+        if (Number.isFinite(previousStep) && previousStep > 0) {
+            const lateAge = Number(progress?.progress_age_seconds);
+            return {
+                ...previous,
+                phase: String(progress.phase),
+                ageSeconds: Number.isFinite(lateAge) ? lateAge : null,
+                ageAt: now,
+            };
+        }
+        const phaseAge = Number(progress?.progress_age_seconds);
+        // `phase_started_at` is deliberately NOT folded. It is a raw *server*
+        // wall clock, while every elapsed figure this card prints is derived
+        // from `progress_age_seconds` -- computed server side precisely so a
+        // skewed client clock, or a laptop resumed from sleep, cannot report a
+        // phase as having started in the future. Folding it put that trap one
+        // `Date.now() / 1000 - phaseStartedAt` away from being real, in a field
+        // nothing read, set on only one of this function's three exits. Use
+        // `ageSeconds` below; see resolveProgressAgeSeconds' docblock.
+        return {
+            step: 0,
+            totalSteps: Number.isFinite(total) ? total : 0,
+            phase: String(progress.phase),
+            equityCurve: [],
+            openingEquity: null,
+            ageSeconds: Number.isFinite(phaseAge) ? phaseAge : null,
+            ageAt: now,
+        };
+    }
     const anchorStep = previous ? Number(previous.firstStep) : NaN;
     const anchorAt = previous ? Number(previous.firstStepAt) : NaN;
     const keepAnchor =
@@ -7902,6 +8202,15 @@ function advanceBacktestProgress(previous, progress, now) {
     return {
         step,
         totalSteps: total,
+        // Carried on the ordinary path too, so the card can name `saving` --
+        // which since Task 1 arrives with the loop's real step count rather
+        // than zeros, and therefore never takes the step-0 branch above.
+        // Spread conditionally rather than `phase: … ?? null`: a payload that
+        // names no phase must leave no key at all, which is what
+        // test_first_real_step_anchors_after_a_phase_tick pins, and which is
+        // also the honest render -- "this tick said nothing about the phase"
+        // is not "the phase is null".
+        ...(typeof progress?.phase === 'string' ? { phase: progress.phase } : null),
         equityCurve,
         // The run's opening equity, read *before* the tail trim above and
         // carried separately because the trim destroys it. The card's gain
@@ -7997,12 +8306,24 @@ function deriveRunningProgress(running) {
                   .filter(Boolean)
                   .join(' · ')
             : '',
-        stepLabel: determinate ? `${step}/${total}` : '',
+        stepLabel: determinate ? `${step}/${total}` : (total > 0 ? `0/${total}` : ''),
         // Deliberately excludes elapsed: the head already renders it one line
         // above, and printing "3:05" beside "3:05 elapsed" is the kind of noise
         // this change exists to remove. Built from raw values; escaping happens
         // once at each interpolation site.
-        detail: [determinate ? `${pct}%` : null, eta].filter(Boolean).join(' · '),
+        detail: [
+            // The label first, the percentage as its fallback -- not the other
+            // way round. `running`'s label is empty, so a mid-loop tick still
+            // reads `35%` exactly as today, and the pre-loop phases are
+            // indeterminate anyway. The case this ordering exists for is
+            // `saving`: since Task 1 it arrives carrying the loop's final
+            // numbers, so `determinate` is true and a percentage that has
+            // stopped moving would win the line for the whole
+            // baseline/persistence tail, beside a run that is plainly still
+            // working.
+            formatBacktestPhase(running.phase) || (determinate ? `${pct}%` : null),
+            eta,
+        ].filter(Boolean).join(' · '),
         notice: resolveRunningNotice(running) || '',
     };
 }
@@ -8081,21 +8402,83 @@ async function cancelBacktest(runId) {
 }
 
 /**
- * `isFinished` and `isCancelled` are for a panel that outlives the run it
- * describes; they are three states, not shades of one.
+ * The three sentences a timed-out backtest owes its user.
+ *
+ * Composed HERE, not on the server, for the same reason the season badge's
+ * number has exactly one owner: the amount has to be formatted by the same
+ * helper the Credits page uses (`CreditFormat.formatCreditsMicro`, exact to six
+ * decimal places), and a sentence built server-side would put that formatting
+ * and this copy under two owners that drift. The server sends facts; this turns
+ * them into words, where `test_app_copy_register.py` can see them.
+ *
+ * `timeout` may be undefined -- `/backtest/status` attaches the block only when
+ * the worker recorded one -- so every field is read defensively. Throwing here
+ * would throw inside the poll callback and stop polling for every other run on
+ * the page.
+ */
+function formatBacktestTimeoutMessage(timeout) {
+    const limitSeconds = Number(timeout && timeout.limit_seconds);
+    const lines = [
+        // Derived, never a literal: the old ceiling message hardcoded
+        // "60 minutes" and would have gone on saying it after the budget moved.
+        Number.isFinite(limitSeconds) && limitSeconds > 0
+            ? `Stopped at the ${Math.round(limitSeconds / 60)}-minute limit.`
+            : 'Stopped at the time limit.',
+    ];
+    const spentMicro = timeout ? timeout.spent_micro : null;
+    const modelCalls = Number(timeout && timeout.model_calls);
+    // Guarded the same way admin-analytics-value.js's `credits()` guards this
+    // same call (js/admin-analytics-value.js:292) -- but omitting the line
+    // entirely when the formatter is unavailable, not falling back to a second
+    // implementation of its six-decimal math. A wrong number is worse than no
+    // number, and this function already has a rule for "no number": the BYOK
+    // omission just below.
+    //
+    // Gated on calls having actually SETTLED, not merely on `spent_micro`
+    // being a number. Zero reaches here for real: a platform-credits run that
+    // times out before the first call settles reports `spent_micro: 0,
+    // model_calls: 0`, and "Model calls completed … cost 0.000000 Credits"
+    // then asserts calls that did not happen -- the same false claim the BYOK
+    // omission exists to prevent, in the other direction. Rendering the count
+    // rather than merely consulting it is what makes the amount checkable by
+    // the person being charged.
+    if (
+        spentMicro !== null &&
+        spentMicro !== undefined &&
+        Number.isFinite(modelCalls) &&
+        modelCalls > 0 &&
+        window.CreditFormat?.formatCreditsMicro
+    ) {
+        // Omitted entirely on BYOK rather than rendered as zero: BYOK never
+        // touches the ATL ledger, so "0.000000 Credits" is a claim about a row
+        // that does not exist.
+        lines.push(
+            `${modelCalls} model call${modelCalls === 1 ? '' : 's'} completed before the stop cost ${window.CreditFormat.formatCreditsMicro(spentMicro)} Credits.`,
+        );
+    }
+    // Both levers, matching the 422 that refuses an over-long pipeline window.
+    // Naming only the window is a dead end for a user whose real problem is a
+    // wide pipeline.
+    lines.push('Shorten the date range, or use fewer pipeline steps, then run it again.');
+    return lines.join(' ');
+}
+
+/**
+ * `isFinished`, `isCancelled` and `isTimedOut` are for a panel that outlives
+ * the run it describes; they are four states, not shades of one.
  *
  * Every other caller shows this panel while something is still happening, so
  * the markup's defaults -- the title "Backtest in progress", a progress track,
  * and a hint about the 60-minute limit -- were always true for as long as it
  * was on screen. A fallback run now holds the panel open indefinitely after
- * the run is over (see `settleFinishedBacktestPanel`), and a cancelled run
- * leaves it up too; those three would otherwise sit under a stopped backtest
- * telling the user to keep waiting for it. The elapsed clock stays: on a run
- * that is over it is the duration.
+ * the run is over (see `settleFinishedBacktestPanel`), and a cancelled or
+ * timed-out run leaves it up too; those three would otherwise sit under a
+ * stopped backtest telling the user to keep waiting for it. The elapsed clock
+ * stays: on a run that is over it is the duration.
  */
 function showBacktestRunProgress(
     show,
-    { isError = false, isFinished = false, isCancelled = false } = {},
+    { isError = false, isFinished = false, isCancelled = false, isTimedOut = false } = {},
 ) {
     const panel = document.getElementById('backtestRunProgress');
     if (!panel) return;
@@ -8106,18 +8489,23 @@ function showBacktestRunProgress(
     // that a failure is the same class of lie as reporting a rule-based
     // fallback curve as a clean model run.
     panel.classList.toggle('is-cancelled', !!isCancelled);
+    // A fourth state, and not a shade of the first either. A run the product
+    // stopped because it ran out of the budget it set itself is not the user's
+    // error -- amber, like a warning, not `is-error`'s red.
+    panel.classList.toggle('is-timed-out', !!isTimedOut);
     const title = panel.querySelector('.backtest-run-progress-title');
     const elapsed = panel.querySelector('.backtest-run-elapsed');
     const track = panel.querySelector('.backtest-run-progress-track');
     const hint = panel.querySelector('.backtest-run-progress-hint');
     const cancel = document.getElementById('backtestRunCancel');
-    // Over is over: an error, a cancel and a finished fallback run all mean the
-    // progress track and the 60-minute hint are describing something that is no
-    // longer happening.
-    const terminal = !!isError || !!isCancelled || !!isFinished;
+    // Over is over: an error, a cancel, a timeout and a finished fallback run
+    // all mean the progress track and the 60-minute hint are describing
+    // something that is no longer happening.
+    const terminal = !!isError || !!isCancelled || !!isTimedOut || !!isFinished;
     if (title) {
         if (isError) title.textContent = 'Backtest did not start';
         else if (isCancelled) title.textContent = 'Backtest cancelled';
+        else if (isTimedOut) title.textContent = 'Backtest stopped at the time limit';
         else if (isFinished) title.textContent = 'Backtest complete';
         else title.textContent = 'Backtest in progress';
     }
@@ -8125,6 +8513,32 @@ function showBacktestRunProgress(
     if (track) track.hidden = terminal;
     if (hint) hint.hidden = terminal;
     if (cancel) cancel.hidden = terminal || !show || !backtestCancelTargetRunId;
+}
+
+/**
+ * Paint the Backtest panel for a run the server stopped at its time limit.
+ *
+ * Factored out of the poll callback rather than inlined beside the cancel and
+ * error branches so `_frontend_source.fn_body` can lift it: neither of those
+ * two is reachable by a node harness today, and this state's copy -- the
+ * derived minutes, the BYOK omission, the exact amount -- is precisely what
+ * needs executing rather than grepping.
+ *
+ * Run config repainted FIRST and with a null run, exactly as the cancel branch
+ * does: the previous paint came from the running branch and still says
+ * "Running", and a run stopped mid-flight has no coverage verdict for the Model
+ * coverage cell to read.
+ */
+function renderBacktestTimeoutPanel(status, displayElapsed, launchRunId) {
+    renderBacktestRunConfig(null, {
+        launchConfig: getBacktestLaunchConfig(launchRunId),
+        statusLabel: 'Stopped at limit',
+    });
+    showBacktestRunProgress(true, { isTimedOut: true });
+    updateBacktestRunProgress({
+        elapsedSeconds: displayElapsed,
+        message: formatBacktestTimeoutMessage(status && status.timeout),
+    });
 }
 
 /**
@@ -8140,7 +8554,7 @@ function showBacktestRunProgress(
 function updateBacktestRunProgress({
     elapsedSeconds,
     message = '',
-    maxSeconds = BACKTEST_POLL_MAX_SECONDS,
+    maxSeconds = BACKTEST_BUDGET_SECONDS,
     stepPct = null,
     progress = null,
 } = {}) {
@@ -8321,7 +8735,12 @@ function prepareLiveBacktestView(launchConfig = null) {
 }
 
 /** Switch the Backtest surface onto an in-flight run (chart + log + config). */
-function attachToLiveBacktest(runId, progress = null, launchConfig = null) {
+function attachToLiveBacktest(
+    runId,
+    progress = null,
+    launchConfig = null,
+    { serverMessage = '' } = {},
+) {
     if (!runId) return;
     backtestSurfaceRequestSeq += 1;
     liveBacktestLaunchPending = false;
@@ -8369,18 +8788,51 @@ function attachToLiveBacktest(runId, progress = null, launchConfig = null) {
     if (progress) {
         updateLiveBacktestChart(progress);
         updateLiveTradingLog(progress);
-        const step = Number(progress.step);
-        const total = Number(progress.total_steps);
-        const stepPct = Number.isFinite(step) && Number.isFinite(total) && total > 0
-            ? (100 * step / total)
-            : null;
+        const stepPct = backtestStepPercent(progress);
         updateBacktestRunProgress({
-            message: stepPct != null
-                ? `Backtest running… step ${step}/${total} (${Math.round(stepPct)}%)`
-                : 'Backtest is running…',
+            // The server's own sentence, byte-identical to what the 1s poller
+            // writes into this same node. That is the ownership rule
+            // BACKTEST_PHASE_LABELS' docblock states: the phase *names* are the
+            // contract between the two surfaces, the Backtest panel prints the
+            // server's sentence, and the agent card owns the short labels.
+            //
+            // This used to call `formatBacktestPhase` -- the card's vocabulary
+            // -- on the panel. Attaching to a run in `first_decision` therefore
+            // wrote "Waiting on first decision" and the poller replaced it with
+            // "Waiting on the first model decision… (49 decision bars queued)"
+            // about a second later: one node changing its own wording, on the
+            // dropdown / deep-link / reload-mid-run path that is the first
+            // thing a returning user sees.
+            //
+            // The count stays as the fallback for a status payload with no
+            // message (an older server, or a status fetch that threw). It
+            // cannot bring back the `saving` inversion the phase-first ordering
+            // was added to fix, because `_progress_message` already applies
+            // that precedence server side.
+            message: serverMessage
+                || (stepPct != null
+                    ? `Backtest running… step ${progress.step}/${progress.total_steps} (${Math.round(stepPct)}%)`
+                    : 'Backtest is running…'),
             stepPct,
         });
-    } else if (!alreadyLive) {
+    }
+    // Outside the `if`, and keyed on the records rather than on the payload.
+    // Publishing the phase before the bar loop made `progress` truthy for the
+    // whole pre-loop window -- ~18s of a ~21s launch, almost all of it
+    // `loading_bars` -- which is precisely when this branch used to run. That
+    // payload carries no `trades` and no `order_events`: it is `dict(last)`
+    // over an empty `last` (engine.py `publish_phase`). So
+    // `updateLiveTradingLog` early-returns on it and the log was left neither
+    // repainted nor cleared, leaving the previously viewed run's fills on
+    // screen under a header reading "Loading market data…", as though they
+    // belonged to the run just starting.
+    //
+    // Keyed on `hasTradingLogRecords` and not on `progress` so it cannot rot
+    // the same way again: the question is "did anything paint the log?", and
+    // that is the same predicate the painter itself returns on. `alreadyLive`
+    // still suppresses the clear, because there the fills on screen are this
+    // very run's.
+    if (!alreadyLive && !hasTradingLogRecords(progress)) {
         clearTradingLog('Backtest running… orders will appear here.');
     }
     ensureBacktestPolling();
@@ -8508,7 +8960,7 @@ function ensureBacktestPolling() {
                         liveBacktestProgress = null;
                         liveBacktestChartActive = false;
                     }
-                    const lostMessage = 'Lost contact with the backtest — it may still be running. Reload to check.';
+                    const lostMessage = BACKTEST_LOST_CONTACT_MESSAGE;
                     if (wasViewed) {
                         setBacktestCancelTarget(null);
                         showBacktestRunProgress(true, { isError: true });
@@ -8537,11 +8989,7 @@ function ensureBacktestPolling() {
                     if (liveId && !liveBacktestRunId && (!pinnedRunId || pinnedRunId === liveId)) {
                         liveBacktestRunId = liveId;
                     }
-                    const step = Number(status.progress?.step);
-                    const total = Number(status.progress?.total_steps);
-                    const stepPct = Number.isFinite(step) && Number.isFinite(total) && total > 0
-                        ? (100 * step / total)
-                        : null;
+                    const stepPct = backtestStepPercent(status.progress);
                     // Assigned BEFORE refreshRunningAgentCards() below, which reads
                     // it through getAgentBacktestRunning(). Painting first would
                     // show the previous tick's step on the card while the Backtest
@@ -8598,13 +9046,24 @@ function ensureBacktestPolling() {
                     const announcedHere = liveId
                         ? backtestCancelsAnnouncedLocally.delete(liveId)
                         : false;
-                    if (
-                        status.cancelled
-                        && !announcedHere
-                        && !viewingLive
-                        && liveId !== liveBacktestRunId
-                    ) {
+                    const unwatched = !viewingLive && liveId !== liveBacktestRunId;
+                    if (status.cancelled && !announcedHere && unwatched) {
                         showAppToast('Backtest cancelled.');
+                    } else if (status.timed_out && unwatched) {
+                        // The billed outcome had the silence and the free one
+                        // had the acknowledgement. `finishedFocused` is only
+                        // populated for the pinned run, so a background run
+                        // that ran out of budget cleared its My Agents card
+                        // and told the user nothing at all -- not that it
+                        // stopped, not why, and not that Credits were spent.
+                        // Pointed at the tab because that is where the amount
+                        // is; a toast is the wrong place for a number this
+                        // one has to be exact.
+                        //
+                        // No `announcedHere` guard: that map records cancels
+                        // THIS tab issued, and nothing announces a timeout
+                        // locally.
+                        showAppToast('Backtest stopped at the time limit — open the Backtest tab for details.');
                     }
                     // Armed here, between the registry clear above and the
                     // roster refresh below, because that is exactly the window
@@ -8678,6 +9137,17 @@ function ensureBacktestPolling() {
                         elapsedSeconds: displayElapsed,
                         message: `Cancelled after ${formatBacktestElapsed(displayElapsed)}.`,
                     });
+                } else if (status.timed_out) {
+                    // Between cancelled and error, and never through either.
+                    // The server sends no `error` key for a timeout, so the
+                    // error branch below would paint the red "Backtest did not
+                    // start" panel with an undefined message -- for a run that
+                    // started, ran for an hour, and was billed.
+                    renderBacktestTimeoutPanel(
+                        status,
+                        displayElapsed,
+                        liveId || finishedId,
+                    );
                 } else if (status.error) {
                     const source = getBacktestLaunchConfig(liveId || finishedId)?.dataSource;
                     const message = formatBacktestError(status.error, source);
@@ -8741,7 +9211,14 @@ function ensureBacktestPolling() {
                     showBacktestRunProgress(true, { isError: true });
                     updateBacktestRunProgress({
                         elapsedSeconds: maxAttempts,
-                        message: 'Timed out after 60 minutes. The backtest may still be running in the background.',
+                        // Not "timed out": the ceiling now sits above the
+                        // server's budget, so a real timeout arrives as a
+                        // `timed_out` status ten minutes before this. Getting
+                        // here means no terminal answer ever came -- a crash, a
+                        // redeploy, a dropped connection. Shared with the
+                        // poll-failure path above, which is the same condition
+                        // reached by a different route.
+                        message: BACKTEST_LOST_CONTACT_MESSAGE,
                     });
                 }
                 liveBacktestChartActive = false;
@@ -9142,8 +9619,20 @@ function clearTradingLog(message = 'Waiting for orders…') {
     renderTradingLog([], { emptyMessage: message });
 }
 
+/**
+ * Does this progress payload carry anything the trading log can render?
+ *
+ * One owner, because two callers branch on it: `updateLiveTradingLog` below,
+ * which paints, and `attachToLiveBacktest`, which must clear the previously
+ * viewed run's fills when the answer is no. A pre-loop phase payload answers
+ * false -- it carries neither key.
+ */
+function hasTradingLogRecords(progress) {
+    return Array.isArray(progress?.order_events) || Array.isArray(progress?.trades);
+}
+
 function updateLiveTradingLog(progress) {
-    if (!Array.isArray(progress?.order_events) && !Array.isArray(progress?.trades)) return;
+    if (!hasTradingLogRecords(progress)) return;
     renderTradingLog(resolveTradingLogRecords(progress), {
         truncatedCount: resolveTradingLogTruncation(progress),
     });
@@ -10388,7 +10877,7 @@ async function runBacktest() {
 async function pollBacktestStatus(btn) {
     ensureBacktestPolling();
     // Legacy callers awaited this; keep a lightweight wait until the poller stops
-    // or the run leaves "running" (max ~60 min).
+    // or the run leaves "running" (max ~70 min).
     const maxAttempts = BACKTEST_POLL_MAX_SECONDS;
     for (let i = 0; i < maxAttempts; i += 1) {
         if (!backtestPollTimer) {
@@ -11501,6 +11990,7 @@ async function loadData({ liveRunId = null } = {}) {
 
             let runningId = liveBacktestRunId || null;
             let statusProgress = null;
+            let statusMessage = '';
             try {
                 // `liveRunId` is the run the caller is opening, when it knows.
                 // Without it this asks "what is the newest thing this browser is
@@ -11512,6 +12002,7 @@ async function loadData({ liveRunId = null } = {}) {
                     runningId = status.live_run_id;
                     liveBacktestRunId = runningId;
                     statusProgress = status.progress || null;
+                    statusMessage = status.message || '';
                     ensureBacktestPolling();
                 } else if (!status?.running) {
                     liveBacktestRunId = null;
@@ -11536,6 +12027,7 @@ async function loadData({ liveRunId = null } = {}) {
                     runningId,
                     statusProgress,
                     getBacktestLaunchConfig(runningId),
+                    { serverMessage: statusMessage },
                 );
                 return;
             }

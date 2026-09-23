@@ -91,6 +91,44 @@ os.environ.pop("MAX_ACTIVE_DASHBOARD_BACKTESTS", None)
 os.environ.pop("AGENT_AUTH_CACHE_TTL_SECONDS", None)
 os.environ.pop("MAX_LEGACY_ACTIVE_PER_SESSION", None)
 os.environ.pop("MAX_LEGACY_ACTIVE_GLOBAL", None)
+# A shell that exported the backtest-worker flag would make every Postgres
+# twin the suite constructs skip DDL and fail on its first query.
+os.environ.pop("ATL_BACKTEST_WORKER", None)
+
+# The on-disk bar cache (infrastructure/market_data/bar_cache.py) is ON by
+# default in production. The suite runs with it OFF so every existing
+# market-data test keeps asserting the exact request shapes it always has --
+# test_alpaca_bars.py asserts batching is literally [100, 100, 35], which a
+# warm cache would shorten. Cache tests opt back in with monkeypatch plus a
+# tmp_path directory; the production default is pinned by
+# test_bar_cache.py::test_cache_is_enabled_by_default.
+os.environ["ATL_BAR_CACHE"] = "0"
+
+# Warm-on-boot makes LIVE Alpaca calls from app.py's startup hook. Importing
+# the app anywhere in the suite must never do that: it is both a network
+# dependency in an offline suite and real money. Pinned to "0" rather than
+# left to the production default so the suite stays quiet whichever way that
+# default moves. Same reason RENDER and the IFIND_* credentials are stripped
+# above.
+os.environ["ATL_BAR_CACHE_WARM"] = "0"
+
+# A developer's own cache tuning must not reach the suite.
+os.environ.pop("ATL_BAR_CACHE_MAX_MB", None)
+os.environ.pop("ATL_BAR_CACHE_TTL_DAYS", None)
+
+# PINNED at a temp directory, not popped. Popping made the repo-tree default
+# (dashboard/storage/data/bar_cache/) the fallback, so any test that armed
+# ATL_BAR_CACHE=1 without also setting a directory would write parquet into
+# the tracked storage tree -- the same hazard as the seed backtest.db that
+# "running the app locally can add empty tables to". Worse than the stray
+# files: entries would persist BETWEEN runs, so `read_many` could serve a
+# previous run's frames and the test would pass for the wrong reason. The
+# cache suites still point at their own tmp_path; this is the backstop for
+# the ones that forget. Mirrors how DATABASE_PATH is aimed at a temp file
+# above, before any backend import.
+_BAR_CACHE_TMPDIR = tempfile.mkdtemp(prefix="atl-bar-cache-")
+os.environ["ATL_BAR_CACHE_DIR"] = _BAR_CACHE_TMPDIR
+atexit.register(shutil.rmtree, _BAR_CACHE_TMPDIR, True)
 os.environ.pop("ALPACA_HTTP_TIMEOUT_SECONDS", None)
 os.environ.pop("ALPACA_HTTP_CONNECT_TIMEOUT_SECONDS", None)
 os.environ.pop("LEGACY_SESSION_RETENTION_SECONDS", None)

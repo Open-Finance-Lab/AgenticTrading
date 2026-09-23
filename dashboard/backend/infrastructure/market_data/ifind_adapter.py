@@ -9,12 +9,12 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from dashboard.backend.infrastructure.market_data.sessions import session_windows
+
 
 OHLCV_COLUMNS = ("open", "high", "low", "close", "volume")
 PRICE_COLUMNS = ("open", "high", "low", "close")
 MARKET_TIMEZONE = "Asia/Shanghai"
-_MORNING_SESSION = (time(9, 30), time(11, 30))
-_AFTERNOON_SESSION = (time(13, 0), time(15, 0))
 
 
 class IFindAdapterError(ValueError):
@@ -259,9 +259,10 @@ def _validate_timestamps(
 
 
 def _in_trading_session(value: time) -> bool:
-    morning = _MORNING_SESSION[0] <= value <= _MORNING_SESSION[1]
-    afternoon = _AFTERNOON_SESSION[0] <= value <= _AFTERNOON_SESSION[1]
-    return morning or afternoon
+    # Exact to the second, unlike `sessions.time_in_session`: this validates a
+    # provider's wire, where a stamp inside 11:30 is a malformed row rather
+    # than a bar to keep. Only the bounds are shared.
+    return any(start <= value <= end for start, end in session_windows("CN"))
 
 
 def _numeric_values(

@@ -24,12 +24,20 @@ produced.
 """
 
 import json
+import re
 import shutil
 import subprocess
 
 import pytest
 
-from dashboard.backend.tests._frontend_source import css_blocks, fn_body, js_const
+from dashboard.backend.tests._frontend_source import (
+    APP_JS,
+    FRONTEND,
+    css_blocks,
+    fn_body,
+    js_const,
+    strip_comments,
+)
 
 pytestmark = pytest.mark.skipif(
     shutil.which("node") is None, reason="node is not installed"
@@ -41,6 +49,8 @@ _REDUCED_MOTION = "@media (prefers-reduced-motion: reduce)"
 #: list is a ReferenceError, but a helper *stubbed* in one list quietly tests the
 #: stub. One list means every harness runs the same shipped code.
 _PROGRESS_HELPERS = (
+    "function formatBacktestPhase(",
+    "function backtestStepPercent(",
     "function formatBacktestEta(",
     "function resolveBacktestEta(",
     "function resolveProgressAgeSeconds(",
@@ -69,6 +79,7 @@ def _render(running_js: str) -> str:
     script = "\n".join(
         [
             js_const("BACKTEST_STALE_SECONDS"),
+            js_const("BACKTEST_PHASE_LABELS"),
             "function escapeHtml(s) { return String(s); }",
             "function renderAgentAllocatedCapitalHero() { return ''; }",
             "function formatBacktestElapsed(s) { return String(s); }",
@@ -285,7 +296,9 @@ def _patch(progress_js: str, then_progress_js: str | None = None, elapsed_ms: in
     script = "\n".join(
         [
             js_const("BACKTEST_POLL_MAX_SECONDS"),
+            js_const("BACKTEST_BUDGET_SECONDS"),
             js_const("BACKTEST_STALE_SECONDS"),
+            js_const("BACKTEST_PHASE_LABELS"),
             f"const MAP = {{a1: {{runId: 'run-1', startedAt: Date.now() - {elapsed_ms}}}}};",
             "let liveBacktestRunId = 'run-1';",
             "let liveBacktestProgress = null;",
@@ -440,6 +453,8 @@ def _advance(previous_js: str, progress_js: str, now: int) -> dict:
             # harness runs the shipped function, so it owes it the shipped
             # constant.
             js_const("LIVE_SPARK_MAX_POINTS"),
+            js_const("BACKTEST_PHASE_LABELS"),
+            fn_body("function formatBacktestPhase("),
             fn_body("function advanceBacktestProgress("),
             f"console.log(JSON.stringify("
             f"advanceBacktestProgress({previous_js}, {progress_js}, {now})));",
@@ -506,7 +521,9 @@ def _run_panel(options_js: str) -> dict:
     script = "\n".join(
         [
             js_const("BACKTEST_POLL_MAX_SECONDS"),
+            js_const("BACKTEST_BUDGET_SECONDS"),
             js_const("BACKTEST_STALE_SECONDS"),
+            js_const("BACKTEST_PHASE_LABELS"),
             "const els = {",
             "  backtestRunElapsed: { textContent: '' },",
             "  backtestRunProgressMessage: { textContent: '' },",
@@ -576,16 +593,33 @@ def test_run_panel_prefers_step_percent_over_the_elapsed_guess():
 
 def test_run_panel_falls_back_to_the_elapsed_guess():
     panel = _run_panel("{elapsedSeconds: 60, message: 'x'}")
-    assert panel["width"] == "2%"  # 60 / 3600
+    assert panel["width"] == "2%"  # 60 / BACKTEST_BUDGET_SECONDS
 
 
-def test_frontend_backtest_observation_window_is_sixty_minutes():
+def test_frontend_progress_bar_is_drawn_against_the_server_budget():
+    """The denominator, executed rather than read.
+
+    `updateBacktestRunProgress`'s `maxSeconds` default answers "how far through
+    its budget is this run?", so it must be the server's number and not the
+    client's watching window. The two were one constant; separating them is
+    what stops raising the poll ceiling from silently shrinking every bar.
+    """
+    assert (
+        _node(
+            js_const("BACKTEST_BUDGET_SECONDS")
+            + "console.log(JSON.stringify(BACKTEST_BUDGET_SECONDS));"
+        )
+        == 3600
+    )
+
+
+def test_frontend_keeps_polling_past_the_server_budget():
     assert (
         _node(
             js_const("BACKTEST_POLL_MAX_SECONDS")
             + "console.log(JSON.stringify(BACKTEST_POLL_MAX_SECONDS));"
         )
-        == 3600
+        == 4200
     )
 
 
@@ -601,6 +635,7 @@ def _resolve_entry(
     script = "\n".join(
         [
             js_const("BACKTEST_POLL_MAX_SECONDS"),
+            js_const("BACKTEST_BUDGET_SECONDS"),
             f"const MAP = {map_js};",
             clock,
             "function readRunningBacktests() { return MAP; }",
@@ -620,6 +655,7 @@ def _list_entries(map_js: str, now_ms: int) -> dict:
     script = "\n".join(
         [
             js_const("BACKTEST_POLL_MAX_SECONDS"),
+            js_const("BACKTEST_BUDGET_SECONDS"),
             f"const MAP = {map_js};",
             f"Date.now = () => {now_ms};",
             "function readRunningBacktests() { return MAP; }",
@@ -667,25 +703,29 @@ def test_progress_is_withheld_when_no_run_is_identified():
     assert entry.get("step") is None
 
 
-def test_running_entry_is_retained_until_the_sixty_minute_ceiling():
+def test_running_entry_is_retained_until_the_poll_ceiling():
+    # The GC boundary is BACKTEST_POLL_MAX_SECONDS (4200s / 70 minutes), not
+    # the server's 3600s budget -- the poll ceiling deliberately outlives it
+    # (issue #474 item 5) so an entry must not be reaped before the server has
+    # had its chance to answer.
     entry = _resolve_entry(
         "{'agent-A': {runId: 'run-1', startedAt: 0}}",
         "'run-1'",
         "null",
         "agent-A",
-        now_ms=3_599_000,
+        now_ms=4_199_000,
     )
     assert entry["runId"] == "run-1"
-    assert entry["elapsedSeconds"] == 3599
+    assert entry["elapsedSeconds"] == 4199
 
 
-def test_running_entry_is_cleared_after_the_sixty_minute_ceiling():
+def test_running_entry_is_cleared_after_the_poll_ceiling():
     entry = _resolve_entry(
         "{'agent-A': {runId: 'run-1', startedAt: 0}}",
         "'run-1'",
         "null",
         "agent-A",
-        now_ms=3_600_001,
+        now_ms=4_200_001,
     )
     assert entry is None
 
@@ -694,7 +734,7 @@ def test_running_list_sweeps_only_entries_past_the_ceiling():
     result = _list_entries(
         "{'keep': {runId: 'run-keep', startedAt: 1},"
         " 'drop': {runId: 'run-drop', startedAt: -1}}",
-        now_ms=3_600_000,
+        now_ms=4_200_000,
     )
     assert [run["runId"] for run in result["runs"]] == ["run-keep"]
     assert "drop" not in result["map"]
@@ -808,6 +848,7 @@ def test_progress_reaches_each_concurrent_agent():
     script = "\n".join(
         [
             js_const("BACKTEST_POLL_MAX_SECONDS"),
+            js_const("BACKTEST_BUDGET_SECONDS"),
             (
                 "const MAP = {"
                 " 'agent-A': {runId: 'run-1', startedAt: Date.now() - 30000},"
@@ -836,3 +877,290 @@ def test_progress_reaches_each_concurrent_agent():
     result = _node(script)
     assert result["a"]["step"] == 3
     assert result["b"]["step"] == 8
+
+
+def _timeout_message(timeout_js: str) -> str:
+    """Run the real formatBacktestTimeoutMessage against the real formatter.
+
+    `credit-format.js` is loaded rather than stubbed: the amount's precision is
+    the whole reason the card and the Credits page agree, and a stub that
+    rounded differently would let them diverge with every case still green.
+    """
+    format_js = (
+        FRONTEND / "js" / "credit-format.js"
+    ).read_text(encoding="utf-8")
+    script = "\n".join(
+        [
+            "const window = globalThis;",
+            format_js,
+            fn_body("function formatBacktestTimeoutMessage("),
+            f"console.log(JSON.stringify(formatBacktestTimeoutMessage({timeout_js})));",
+        ]
+    )
+    return _node(script)
+
+
+def test_timeout_card_names_the_limit_the_cost_and_both_levers():
+    """Three facts, in the order a user needs them: what happened, what it cost,
+    what to change. The third line names BOTH levers, matching the 422 that
+    refuses an over-long pipeline window -- a user who meets both refusals
+    should hear one story.
+
+    The call COUNT is rendered, not merely consulted. It was computed by
+    `sum_run_llm_spend`, carried through `timeout_detail` and serialized into
+    `/backtest/status` while no surface read it -- an unread field in a
+    money-adjacent payload. It is also what makes the amount checkable by the
+    person being charged."""
+    message = _timeout_message(
+        "{limit_seconds: 3600, billing_mode: 'platform_credits',"
+        " spent_micro: 42318, model_calls: 2}"
+    )
+    assert message == (
+        "Stopped at the 60-minute limit. "
+        "2 model calls completed before the stop cost 0.042318 Credits. "
+        "Shorten the date range, or use fewer pipeline steps, then run it again."
+    )
+
+
+def test_timeout_card_says_one_model_call_not_one_model_calls():
+    """A count that is rendered has to read as English at 1."""
+    message = _timeout_message(
+        "{limit_seconds: 3600, billing_mode: 'platform_credits',"
+        " spent_micro: 9, model_calls: 1}"
+    )
+    assert "1 model call completed before the stop cost 0.000009 Credits." in message
+
+
+def test_timeout_card_omits_the_cost_line_when_no_call_ever_settled():
+    """`spent_micro: 0` is a reachable platform-credits payload -- a run that
+    timed out before the first call settled -- and a guard that only rejects
+    null/undefined let it through as "Model calls completed … cost 0.000000
+    Credits", asserting calls that did not happen. That is the same false claim
+    the BYOK omission exists to prevent, in the other direction."""
+    message = _timeout_message(
+        "{limit_seconds: 3600, billing_mode: 'platform_credits',"
+        " spent_micro: 0, model_calls: 0}"
+    )
+    assert "Credits" not in message
+    assert message == (
+        "Stopped at the 60-minute limit. "
+        "Shorten the date range, or use fewer pipeline steps, then run it again."
+    )
+
+
+def test_timeout_card_derives_the_minutes_from_the_budget_it_was_given():
+    """Derived, never a literal. `app.js`'s old ceiling message hardcoded
+    "60 minutes" and would have gone on saying it after the number moved."""
+    message = _timeout_message(
+        "{limit_seconds: 7200, billing_mode: 'byok',"
+        " spent_micro: null, model_calls: null}"
+    )
+    assert message.startswith("Stopped at the 120-minute limit.")
+
+
+def test_timeout_card_omits_the_cost_line_entirely_on_byok():
+    """Not "0.000000 Credits" -- BYOK never touches the ATL ledger, so any
+    amount at all is a claim about a row that does not exist."""
+    message = _timeout_message(
+        "{limit_seconds: 3600, billing_mode: 'byok',"
+        " spent_micro: null, model_calls: null}"
+    )
+    assert "Credits" not in message
+    assert message == (
+        "Stopped at the 60-minute limit. "
+        "Shorten the date range, or use fewer pipeline steps, then run it again."
+    )
+
+
+def test_timeout_card_survives_a_payload_with_no_timeout_block():
+    """The status route attaches `timeout` conditionally, so absence is a real
+    case. The card must still say what happened rather than throwing inside the
+    poll callback, which would silently stop every other run's polling too."""
+    message = _timeout_message("undefined")
+    assert message == (
+        "Stopped at the time limit. "
+        "Shorten the date range, or use fewer pipeline steps, then run it again."
+    )
+
+
+def test_timed_out_panel_is_its_own_state_not_an_error_shade():
+    """`is-timed-out`, not `is-error`. The user did not do anything wrong, and
+    the panel must not read as though they did -- the same argument the
+    `is-cancelled` comment already makes for the third state."""
+    body = fn_body("function showBacktestRunProgress(")
+    assert "isTimedOut" in body
+    assert "'is-timed-out'" in body
+    assert "Backtest stopped at the time limit" in body
+    blocks = css_blocks(".backtest-run-progress.is-timed-out")
+    assert blocks, ".backtest-run-progress.is-timed-out has no styles.css rule"
+
+
+def test_a_timed_out_panel_stops_advertising_a_run_in_flight():
+    """`isTimedOut` has to reach the `terminal` flag, or a timed-out card keeps
+    a live progress track and the "limit: 60 minutes" wait hint sitting under a
+    panel that says the run stopped.
+
+    Nothing pinned this before: `test_a_finished_panel_stops_advertising_a_run_
+    in_flight` (test_backtest_run_provenance.py) only asserts `isFinished` is in
+    `terminal`, by design, so it would still pass with `!!isTimedOut ||` deleted
+    from the expression. Mirrors that test's style -- pin the flag's definition
+    plus membership, not the whole expression's spelling, so a fifth state does
+    not break this again.
+    """
+    body = strip_comments(fn_body("function showBacktestRunProgress("))
+    terminal_def = re.search(r"const terminal = ([^;]+);", body)
+    assert terminal_def, "showBacktestRunProgress must define `const terminal`"
+    assert re.search(r"\bisTimedOut\b", terminal_def.group(1)), (
+        "`terminal` must still be derived from isTimedOut"
+    )
+
+
+def test_poll_dispatch_takes_the_timeout_branch_before_the_error_branch():
+    """A payload with `timed_out` must not reach `status.error`.
+
+    The server sends no `error` key for a timeout, so the error branch would
+    paint the red "Backtest did not start" panel with an undefined message --
+    for a run that started, ran for an hour, and was billed.
+
+    Sliced to the `finishedFocused` block FIRST. `status.cancelled` also appears
+    earlier in `ensureBacktestPolling`, in the toast that announces a cancel on
+    an unfocused card, and a scan over the whole function would anchor on that
+    one instead -- passing even if the dispatch's cancel branch were deleted
+    outright.
+    """
+    body = fn_body("function ensureBacktestPolling(")
+    dispatch = body[body.index("if (finishedFocused) {"):]
+    cancelled_at = dispatch.index("status.cancelled")
+    timeout_at = dispatch.index("status.timed_out")
+    error_at = dispatch.index("status.error")
+    assert cancelled_at < timeout_at < error_at, (
+        "the finishedFocused dispatch must test cancelled, then timed_out, then "
+        "error -- the server sends no `error` key for either of the first two"
+    )
+
+
+def test_card_names_the_phase_before_the_first_step():
+    html = _render(
+        "{step: 0, totalSteps: 49, phase: 'first_decision',"
+        " ageSeconds: 2, ageAt: Date.now(), elapsedSeconds: 40}"
+    )
+    assert "Waiting on first decision" in html
+    assert "0/49" in html
+    assert "Still starting up" not in html
+    # The `0/N` label must not drag the bar along with it. `determinate` is
+    # gated on `step > 0` (app.js:8005) and this task does not touch that, so
+    # the assertion holds structurally -- but the case that pins indeterminacy
+    # today, test_card_falls_back_to_indeterminate_before_the_first_step,
+    # predates this work and renders a payload with no phase and no bar count.
+    # The shape this task *introduces* -- phase set, total known, step 0 -- is
+    # unpinned without this line, and it is the shape the design's user-facing
+    # promise leans on. A determinate bar here is an empty track with the
+    # indeterminate sweep switched off (app.js:6299-6303): it reads as broken
+    # rather than as starting.
+    assert "is-determinate" not in html
+
+
+def test_card_keeps_the_startup_notice_when_nothing_was_published():
+    html = _render("{elapsedSeconds: 1000}")
+    assert "Still starting up" in html
+
+
+def test_a_long_phase_reads_as_no_progress_not_as_starting():
+    html = _render(
+        "{step: 0, totalSteps: 0, phase: 'loading_bars',"
+        " ageSeconds: 1000, ageAt: Date.now(), elapsedSeconds: 1010}"
+    )
+    assert "Loading market data" in html
+    assert "No progress for" in html
+    assert "Still starting up" not in html
+    # ...and does not blame a model that has not been called yet. This is the
+    # whole reason the notice takes the phase: routing a pre-model phase into
+    # "long model steps can do this" is the same unsupported claim the spec's
+    # copy rule bans ("The card never says 'deterministic'"), pointed the other
+    # way. A wedged Alpaca/iFinD fetch is the case that produces it.
+    assert "long model steps" not in html
+    assert "a wide bar window can do this" in html
+
+
+def test_the_starting_phase_has_no_label_so_the_card_keeps_the_startup_notice():
+    """The empty label is what keeps the honest sentence. Were `starting` ever
+    published with a label, the fold would accept it and resolveRunningNotice
+    would route off formatStartupStaleness ("Still starting up — no steps
+    reported after Nm", true during imports) onto formatProgressStaleness ("No
+    progress for Nm", false in every clause it could pick before the child has
+    even reached load_data)."""
+    html = _render("{elapsedSeconds: 1000, phase: 'starting'}")
+    assert "Still starting up" in html
+    assert "No progress for" not in html
+
+
+def test_the_card_names_saving_instead_of_a_frozen_percentage():
+    """`saving` now arrives carrying the loop's final numbers (Task 1), so the
+    card is determinate and `99%` would win the detail line -- a number that
+    has stopped moving, beside a run that is demonstrably still working. The
+    phase label outranks the percentage for exactly the phases that have one;
+    `running`'s label is empty, so a mid-loop tick still reads `35%`."""
+    html = _render(
+        "{step: 49, totalSteps: 49, phase: 'saving',"
+        " ageSeconds: 1, ageAt: Date.now(), elapsedSeconds: 600}"
+    )
+    assert "49/49" in html
+    assert "Saving results" in html
+
+
+def _step_percent(payload_js: str) -> object:
+    return _node(
+        fn_body("function backtestStepPercent(")
+        + f"console.log(JSON.stringify(backtestStepPercent({payload_js})));"
+    )
+
+
+def test_step_percent_is_null_until_a_real_step():
+    """`0/49` is a label, not a percentage.
+
+    Until Task 1 no progress file existed before the first step, so the two
+    raw-payload sites saw no `progress` at all, `Number(undefined)` was NaN,
+    and the panel bar kept its elapsed-based creep. Now `first_decision`
+    publishes `{step: 0, total_steps: 49}` -- and a `total > 0` test alone
+    returns a finite 0, which updateBacktestRunProgress takes as authoritative
+    over the creep (app.js:8228-8231) and writes as `width: 0%`. An empty
+    track with the sweep switched off is the *reads as broken* state the whole
+    task exists to avoid.
+    """
+    assert _step_percent("{step: 0, total_steps: 49}") is None
+    assert _step_percent("{step: 0, total_steps: 0}") is None
+    assert _step_percent("{}") is None
+    assert _step_percent("null") is None
+    # ...and a real step is unaffected: this helper replaced two identical
+    # inline copies, so the ordinary path must be byte-for-byte what it was.
+    assert _step_percent("{step: 84, total_steps: 240}") == 35.0
+
+
+def test_run_panel_keeps_the_elapsed_bar_at_step_zero():
+    """The consumer end of the same rule, driven through the real
+    updateBacktestRunProgress rather than asserted on the helper's return
+    value -- because the defect was never in the arithmetic, it was in what
+    the consumer does with a finite 0."""
+    panel = _run_panel(
+        "{elapsedSeconds: 60, message: 'Waiting on the first model decision…',"
+        " stepPct: backtestStepPercent({step: 0, total_steps: 49})}"
+    )
+    assert panel["width"] == "2%"  # 60 / 3600, the elapsed fallback
+    assert "step 0/49" not in panel["message"]
+
+
+def test_both_raw_payload_surfaces_share_the_step_percent_rule():
+    """A source-shape guard, because neither call site is liftable:
+    attachToLiveBacktest is DOM-bound and the poller lives inside an async
+    tick. Two byte-identical inline copies are how both acquired the
+    `total > 0` defect in the first place, so what is worth pinning is that
+    there is one owner left -- not that each copy was fixed."""
+    source = strip_comments(APP_JS)
+    # Exactly the two inline copies, and deliberately NOT the bare
+    # `Number.isFinite(step) && Number.isFinite(total) && total > 0`: that
+    # substring also sits inside deriveRunningProgress's `determinate` line
+    # (app.js:8005), which is correct code this task does not touch, so a
+    # guard written that way fails on the shipped tree for the wrong reason.
+    assert "const stepPct = Number.isFinite(" not in source
+    # definition + attachToLiveBacktest + the 1s poller
+    assert source.count("backtestStepPercent(") == 3

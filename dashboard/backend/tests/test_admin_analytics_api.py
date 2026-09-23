@@ -47,7 +47,11 @@ from dashboard.backend.domain.analytics.value_queries import (
     UserGroupSummary,
     ValueUserProfile,
 )
-from dashboard.backend.domain.user_groups import USER_GROUP_LABELS, USER_GROUPS
+from dashboard.backend.domain.user_groups import (
+    DEFAULT_USER_GROUP,
+    USER_GROUP_LABELS,
+    USER_GROUPS,
+)
 from dashboard.backend.users import UserStore
 
 
@@ -90,7 +94,7 @@ class FixtureValueQueryService:
                 UserGroupSummary(
                     group=group,
                     label=USER_GROUP_LABELS[group],
-                    users=(1 if selected in {None, group} and group == "unknown" else 0),
+                    users=(1 if selected in {None, group} and group == DEFAULT_USER_GROUP else 0),
                     successful_run_users=0,
                     repeat_users=0,
                     total_runs=0,

@@ -18,8 +18,38 @@ import inspect
 import json
 import uuid
 from bisect import bisect_left
-from datetime import date, datetime, time
+from datetime import date, datetime
 from math import ceil
+# `from time import ...`, not `import time`. This module used to import
+# `datetime.time` too, to build the A-share session bounds inline, and the two
+# bare `time` names shadowed each other depending on import order -- green on
+# every US run, red only on an A-share one. The bounds now live in
+# `market_data.sessions`, but keep the aliased form so re-adding either import
+# cannot bring the collision back.
+#
+# Two clocks, deliberately. `wall_clock` stamps INSTANTS an operator or another
+# process reads -- `started_at`/`ended_at` in `phases[]`, which are compared
+# against `--launched-at` and the two stamps the launch script takes. `steady`
+# measures DURATIONS, because `time.time()` is not monotonic: an NTP step
+# between two reads distorts the interval and a backward step makes it
+# negative, and these numbers are published on the card and are the measurement
+# the next latency decision is made on.
+#
+# `starting` is the one phase whose TOTAL cannot move to `steady`, and not for
+# a reason worth working around: `monotonic()` has a per-process epoch, so the
+# parent's reading and the child's are not comparable at all. That phase opens
+# at the parent's `--launched-at` and closes in the child, so the wall clock is
+# the only shared reference. It is also the interval least exposed to the
+# hazard: a single span bounded by a process spawn, not a loop.
+#
+# Its SPLITS are not all like that, and reading "the phase is cross-process" as
+# "every number under it is" is how the fix for #509 first shipped with two
+# wall-clock differences still in it. Only `spawn+interpreter` reaches back
+# into the parent; `imports+stores` and `preflight` both begin and end inside
+# the child, so both take the steady clock -- bounded by the two `monotonic()`
+# marks the launch script hands over in `startup_clock`. See
+# `_set_progress_phase`.
+from time import monotonic as steady_clock, time as wall_clock
 from typing import Any, Dict, List, Optional, Tuple
 
 from dashboard.backend.database import db
@@ -90,6 +120,7 @@ from dashboard.backend.infrastructure.market_data.frequency import (
     timeframe_minutes,
     verify_source_timeframe,
 )
+from dashboard.backend.infrastructure.market_data.sessions import is_in_session
 from dashboard.backend.infrastructure.market_data.profiles import (
     IFIND_ASHARE,
     LLM_DECISION_SOURCE,
@@ -134,6 +165,18 @@ REJECTED_ORDER_SAMPLE_LIMIT = 200
 # view only ever shows the latest activity, so carry a tail window.
 LIVE_PROGRESS_REJECTED_ORDER_LIMIT = 50
 LIVE_PROGRESS_ORDER_EVENT_LIMIT = 50
+
+#: Every phase the child publishes to the progress file, in the order a run
+#: passes through them. `running` is set by `_publish_live_progress`; the rest
+#: by `publish_phase`. The status route and the card key on these names.
+PROGRESS_PHASES = (
+    "starting",
+    "loading_bars",
+    "indicators",
+    "first_decision",
+    "running",
+    "saving",
+)
 
 
 def _unfilled_order_events(order_events) -> List[Dict]:
@@ -201,6 +244,8 @@ class HourlyBacktester:
         pool_mode: Optional[str] = None,
         universe_selection: Optional[Dict] = None,
         source_timeframe: Optional[str] = None,
+        launched_at: Optional[float] = None,
+        startup_clock: Optional[Dict[str, float]] = None,
     ):
         # Validate and swap dates if they're in the wrong order
         from datetime import datetime as dt_parser
@@ -236,6 +281,7 @@ class HourlyBacktester:
         self.execution_client = execution_client
         self.live_run_id = (live_run_id or "").strip() or None
         self.progress_file = (progress_file or "").strip() or None
+        self._init_progress_phases(launched_at, startup_clock)
         self.data_source = data_source
         self.runtime_type = normalize_runtime_type(runtime_type)
         self.runtime_config = normalize_runtime_config(
@@ -585,11 +631,390 @@ class HourlyBacktester:
             serialized.append(item)
         return serialized
 
+    # -- Progress phases -----------------------------------------------------
+    #
+    # `_publish_live_progress` is the only writer once the bar loop starts;
+    # before it, nothing wrote anything, and the card sat on its launch
+    # sentence for the whole start (imports, six stores' DDL, the bar fetch,
+    # aggregation, indicators, then bar 1's full pipeline). Each phase write
+    # carries the phase in progress plus the finished ones with timestamps, so
+    # the same payload that drives the card is the measurement of the start.
+    # Every accessor tolerates an instance built with __new__ (tests, legacy
+    # tools) that never ran _init_progress_phases -- and `publish_phase`
+    # additionally tolerates `progress_file` being *absent* rather than None,
+    # because Step 6 makes it the first statement of `load_data`, which is
+    # documented as usable on exactly such an instance.
+
+    def _init_progress_phases(
+        self,
+        launched_at: Optional[float] = None,
+        startup_clock: Optional[Dict[str, float]] = None,
+    ) -> None:
+        """Open the implicit `starting` phase at the parent's launch time.
+
+        The parent alone can see the gap between spawning the child and the
+        child's first write (imports, store startup); passing its clock in is
+        how that gap becomes a measured phase instead of a missing one. A
+        caller that passes nothing (the CLI without --launched-at, tests,
+        `__new__` instances) opens no phase at all, so the first
+        `publish_phase` records no `starting` entry rather than inventing one
+        from the child's own clock -- which would measure zero and read as a
+        start that cost nothing.
+
+        `starting` is deliberately ONE phase name -- the card has nothing
+        useful to say about spawn vs imports vs stores, and a name the status
+        route must translate is a name the frontend must learn. But one
+        undifferentiated number cannot justify an optimisation either: it lumps
+        process spawn, pandas and three SDK imports, seven store constructions
+        (six of them Postgres twins, and only those six run DDL) and that DDL
+        into a single figure that moves for reasons nobody can attribute. So
+        the *record* is split even though the *phase* is not.
+        With the script's two stamps and its reading of db_url's accumulator,
+        the `starting` entry yields four numbers from one run:
+
+            spawn + interpreter    = child_entered_at - started_at
+            imports incl. stores   = imports_seconds       (steady clock)
+            of which schema DDL    = schema_init_seconds   (0.0 in a worker)
+            preflight remainder    = preflight_seconds     (steady clock)
+
+        The middle two are measured, not re-derived from the stamps beside
+        them: both intervals begin and end inside the child, so both belong on
+        the steady clock for the reason the module header gives. The stamps
+        stay because `spawn + interpreter` genuinely needs them and because
+        they are what a log line is correlated against.
+
+        Undo the split and the Final verification table can say that `starting`
+        got shorter but not which of those four moved -- which is the same as
+        not knowing whether removing the DDL did anything.
+
+        A mark nobody passed is *absent*, not zero: an in-process engine gets a
+        plain three-key record. `schema_init_seconds` is the one exception --
+        present and 0.0 in a worker, because that zero is the evidence the flag
+        fired, not a gap.
+        """
+        # `is not None`, not truthiness: 0.0 is a launch time, and argparse's
+        # `type=float` hands it over intact. A falsy gate dropped the whole
+        # `starting` phase for `--launched-at 0` -- deleting the one number
+        # this plan exists to produce, with nothing in the file to say so.
+        # Deliberately NOT range-checked: `starting` is never a live phase, so
+        # an absurd clock lands only in `phases[]`, where it reads as an
+        # absurdly long row -- visible, and therefore fixable. A bounds check
+        # would turn that back into a silent absence, which is the one outcome
+        # this repo never accepts (see IFIND_ALLOW_CORPORATE_ACTION_GAPS in
+        # CLAUDE.md: a labelled wrong number, never a silent one). The other
+        # malformed forms cannot reach here at all -- argparse's `type=float`
+        # rejects an empty string and a BSD `date +%s.%N`'s trailing "N" at the
+        # CLI boundary, loudly.
+        self._progress_phase: Optional[str] = (
+            "starting" if launched_at is not None else None
+        )
+        self._progress_phase_started_at: Optional[float] = (
+            float(launched_at) if launched_at is not None else None
+        )
+        # Deliberately None even when `starting` opens: that phase began in the
+        # PARENT, and a monotonic reading is meaningless across processes.
+        # `_set_progress_phase` reads None as "fall back to the wall-clock
+        # difference", which is correct for exactly and only this phase.
+        self._progress_phase_started_steady: Optional[float] = None
+        extra: Dict = {}
+        # Seed the startup clock only when `starting` is actually open.
+        # backtest_hourly_agent.py always passes `startup_clock` but
+        # `launched_at` only from --launched-at, which a bare CLI run omits;
+        # today the orphaned keys are dropped because `starting` never closes,
+        # and once extras merge into whichever phase closes they would
+        # otherwise land on `loading_bars` -- a spawn time and a DDL cost on
+        # the phase that did neither.
+        # The steady marks ride the same gate but land in their own attribute
+        # rather than in `extra`, because `extra` is persisted into `phases[]`
+        # and a raw `monotonic()` reading has a per-process epoch: in the file
+        # it is a large meaningless float, and an operator differencing it
+        # against anything else in the payload gets nonsense. What gets
+        # published is the two durations `_set_progress_phase` derives from
+        # them.
+        steady: Dict[str, float] = {}
+        if launched_at is not None:
+            for key in ("child_entered_at", "imports_done_at", "schema_init_seconds"):
+                value = (startup_clock or {}).get(key)
+                if value is not None:
+                    extra[key] = float(value)
+            for key in ("child_entered_steady", "imports_done_steady"):
+                value = (startup_clock or {}).get(key)
+                if value is not None:
+                    steady[key] = float(value)
+        self._progress_startup_steady: Dict[str, float] = steady
+        self._progress_phase_extra: Dict = extra
+        self._progress_phases: List[Dict] = []
+        self._progress_total_steps: int = 0
+
+    def _set_progress_phase(
+        self, name: str, *, total_steps: Optional[int] = None
+    ) -> bool:
+        """Close the current phase and open ``name``. True if the phase moved."""
+        if name not in PROGRESS_PHASES:
+            raise ValueError(f"unknown progress phase: {name!r}")
+        if not hasattr(self, "_progress_phases"):
+            self._init_progress_phases()
+        if total_steps is not None:
+            self._progress_total_steps = int(total_steps)
+        if self._progress_phase == name:
+            return False
+        now = wall_clock()
+        now_steady = steady_clock()
+        if self._progress_phase is not None:
+            finished = {
+                "name": self._progress_phase,
+                "started_at": self._progress_phase_started_at,
+                "ended_at": now,
+            }
+            # Extras belong to whichever phase was open, not to `starting`
+            # alone. `_init_progress_phases` seeds them for `starting` -- and
+            # ONLY when it actually opens that phase, see below;
+            # `record_phase_metric` adds them for any later phase, and only
+            # while one is open. Cleared on every transition so a number can
+            # never be reported against the wrong phase.
+            finished.update(getattr(self, "_progress_phase_extra", {}))
+            self._progress_phase_extra = {}
+            self._progress_phases.append(finished)
+            # stdout as well as the file, and from here rather than from
+            # main(). The parent unlinks the progress file the moment the run
+            # ends (`backtests.py:1993`, inside run_backtest_background's
+            # `finally` at `:1954`), so `phases[]` can only be read by racing a
+            # live poll; the child's stdout is captured head+tail
+            # (SUBPROCESS_LOG_HEAD_CHARS / _TAIL_CHARS, 32k each, `:2482-2483`)
+            # and dumped into the parent's log under
+            # `=== BACKTEST SCRIPT OUTPUT ===` (`:1773`), where it keeps. It is
+            # also the ONLY phase record a CLI run, the external-run session or
+            # the algo service has -- none of them writes a progress file.
+            # main() could not do this job: it cannot see `first_decision` open
+            # and close inside run_agent_backtest, and a second elapsed clock in
+            # the script is the two-owners pattern this repo already documents.
+            # `is None`, not `or`: `started_at` is 0.0 for the very launch
+            # clock this plan exists to measure, and `0.0 or now` would print
+            # that phase as having cost nothing -- the same falsy-zero trap
+            # _init_progress_phases's gate is about, one line further on.
+            opened = finished["started_at"]
+            opened_steady = getattr(self, "_progress_phase_started_steady", None)
+            if opened_steady is None:
+                # `starting` (opened in the parent), or a legacy `__new__`
+                # instance predating the steady mark. The wall clock is the
+                # only shared reference across that process boundary.
+                elapsed = finished["ended_at"] - (now if opened is None else opened)
+            else:
+                elapsed = now_steady - opened_steady
+            # Recorded, not just printed: `phases[]` is what an operator reads
+            # off the progress file, and leaving only the two wall-clock
+            # instants there would make them re-derive the distorted number the
+            # steady clock exists to avoid.
+            finished["duration_seconds"] = elapsed
+            print(f"⏱  phase {name} (after {finished['name']} {elapsed:.2f}s)", flush=True)
+            if finished["name"] == "starting" and {
+                "child_entered_at",
+                "imports_done_at",
+            } <= finished.keys():
+                # Printed on this transition, not saved for a summary at the
+                # end: `saving` fires before the agent's insert_run with two
+                # baseline runs still to print, so a closing table can land in
+                # the truncated middle of the parent's bounded capture. These
+                # lines are at the head.
+                #
+                # Two of the four numbers are MEASURED, not differenced.
+                # `imports+stores` and `preflight` both begin and end inside
+                # this process, so an NTP step between the stamps that bound
+                # them is the #509 hazard exactly -- a negative
+                # `imports+stores`, or one smaller than the monotonic `schema
+                # DDL` printed beside it on the same line, i.e. an internally
+                # contradictory measurement. They come off the steady marks
+                # the launch script hands over. `spawn+interpreter` cannot:
+                # its left edge is the PARENT's clock, and that is the same
+                # irreducible cross-process interval the module header
+                # describes.
+                #
+                # Derived and stored HERE rather than pre-differenced in the
+                # script, for one owner each: `preflight` closes on this very
+                # transition, so only the engine can compute it, and splitting
+                # the pair across two files is how they end up on two clocks.
+                # Stored as well as printed for the same reason
+                # `duration_seconds` is -- `phases[]` is what an operator
+                # reads off the progress file, and leaving only the stamps
+                # there makes them re-derive the distorted number.
+                steady_marks = getattr(self, "_progress_startup_steady", None) or {}
+                entered_steady = steady_marks.get("child_entered_steady")
+                imports_done_steady = steady_marks.get("imports_done_steady")
+                # A child predating the steady marks (or a test handing over
+                # the three stamps alone) still gets a number: the wall-clock
+                # difference this replaced. Absent beats silently zero.
+                if entered_steady is None or imports_done_steady is None:
+                    imports_seconds = (
+                        finished["imports_done_at"] - finished["child_entered_at"]
+                    )
+                else:
+                    imports_seconds = imports_done_steady - entered_steady
+                if imports_done_steady is None:
+                    preflight_seconds = (
+                        finished["ended_at"] - finished["imports_done_at"]
+                    )
+                else:
+                    preflight_seconds = now_steady - imports_done_steady
+                finished["imports_seconds"] = imports_seconds
+                finished["preflight_seconds"] = preflight_seconds
+                print(
+                    f"     spawn+interpreter "
+                    f"{finished['child_entered_at'] - finished['started_at']:.2f}s"
+                    f" | imports+stores {imports_seconds:.2f}s"
+                    f" (schema DDL {finished.get('schema_init_seconds', 0.0):.2f}s)"
+                    f" | preflight {preflight_seconds:.2f}s",
+                    flush=True,
+                )
+            elif finished["name"] == "loading_bars" and "fetch_seconds" in finished:
+                # The design's measurement gate: with a warm cache the residual
+                # here IS the aggregation cost, directly -- no synthetic
+                # benchmark, no subtraction. It decides whether caching the
+                # AGGREGATED output is worth a second change or whether the
+                # fetch was the whole story. `elapsed` is the phase total
+                # computed above, and for THIS phase it always comes off the
+                # steady clock -- only `starting` can reach the wall-clock
+                # branch, because it is the only phase `_init_progress_phases`
+                # opens and so the only one whose steady mark can be None.
+                # That matters here: `fetch_seconds` is a steady-clock delta
+                # (`load_data`), so the subtraction below is same-clock and
+                # cannot go negative from a step. It is also why the test
+                # bounding `fetch_seconds` has to bound it by
+                # `duration_seconds` and not by `ended_at - started_at`.
+                fetch_seconds = float(finished["fetch_seconds"])
+                print(
+                    f"     fetch {fetch_seconds:.2f}s"
+                    f" | aggregate+verify {elapsed - fetch_seconds:.2f}s",
+                    flush=True,
+                )
+        else:
+            print(f"⏱  phase {name}", flush=True)
+        self._progress_phase = name
+        self._progress_phase_started_at = now
+        self._progress_phase_started_steady = now_steady
+        return True
+
+    def _progress_phase_fields(self) -> Dict:
+        if not hasattr(self, "_progress_phases"):
+            self._init_progress_phases()
+        return {
+            "phase": self._progress_phase,
+            "phase_started_at": self._progress_phase_started_at,
+            "phases": list(self._progress_phases),
+        }
+
+    def record_phase_metric(self, key: str, value: float) -> None:
+        """Attach a number to the phase that is currently open.
+
+        The phase *name* stays one word -- the card has nothing useful to say
+        about fetch versus aggregate, and a name the status route must
+        translate is a name the frontend must learn. But one undifferentiated
+        number cannot justify an optimisation either, which is the same
+        argument `_init_progress_phases` makes for splitting `starting` into
+        four. So the record is split even though the phase is not.
+
+        Tolerates an instance built with `__new__` that never ran
+        `_init_progress_phases`, like every other accessor here.
+
+        With no phase open the number has no owner and is dropped: the
+        alternative is handing it to whichever phase closes first, which is
+        the same misattribution `_init_progress_phases` guards against for
+        the startup clock.
+        """
+        if not hasattr(self, "_progress_phase_extra"):
+            self._init_progress_phases()
+        if self._progress_phase is None:
+            return
+        self._progress_phase_extra[str(key)] = float(value)
+
+    def publish_phase(self, name: str, *, total_steps: Optional[int] = None) -> None:
+        """Record a phase transition and, with a progress file, publish it.
+
+        **Before** the loop there is nothing to carry, so the payload is the
+        skeleton `step: 0` / `equity_curve: []`, and every existing reader of
+        the file (chart, trading log, ETA anchor) keeps its early return while
+        only the message and the bar count change.
+
+        **After** the loop there is, and writing that skeleton over it was a
+        real regression rather than a cosmetic one. `saving` fires at the end
+        of a 49-bar run: a payload of `step: 0, equity_curve: []` snaps the
+        Backtest panel's bar from 99% to 0 -- `stepPct` is computed straight
+        off this file's `step`/`total_steps` (`app.js:8879`, the 1s poller;
+        `attachToLiveBacktest` at `:8700` holds a byte-identical second copy,
+        which Task 4 replaces with one shared helper) and never passes through
+        the fold, so no frontend guard can reach it -- and the My
+        Agents fold *replaces* its stored entry (`app.js:8886`), blanking the
+        sparkline, the equity label and `49/49` for the whole
+        baseline/persistence tail, with nothing red anywhere. So a phase write
+        carries the last published payload forward and changes only the phase
+        fields and the bar count: the file never says less than it last said.
+
+        The carry is what makes the fix hold at the source. Task 4 Step 6 adds
+        a second, independent guard in the browser for any writer that still
+        publishes a bare phase tick after real progress; neither is a substitute
+        for the other, because the panel's bar bypasses the fold and the fold
+        outlives this engine's payload shape.
+        """
+        self._set_progress_phase(name, total_steps=total_steps)
+        # `getattr`, not `self.progress_file`. Step 6 makes this method the
+        # first statement of `load_data`, and `load_data` is documented as
+        # usable on an instance built with `__new__` (its own comment,
+        # engine.py:913-914) -- so this read is now the first attribute such a
+        # caller touches. `progress_file` is assigned in `__init__` and is not
+        # a class attribute, so on that instance it is *absent*, and a bare
+        # read raises AttributeError rather than returning None. Verified by
+        # running it. The one such caller in the suite is
+        # test_market_data_errors.py::test_engine_load_data_empty_raises_not_exits,
+        # which sets five attributes and not this one; it would report an
+        # AttributeError naming neither this task nor its own subject, in
+        # place of the MarketDataUnavailableError it asserts.
+        if not getattr(self, "progress_file", None):
+            return
+        last = getattr(self, "_progress_last_payload", None) or {}
+        payload = dict(last)
+        payload.update(
+            {
+                "run_id": self.live_run_id,
+                # `last.get(...)`, not `self._progress_...`: the step and the
+                # curve belong to the loop, and re-deriving them here would be
+                # a second owner for numbers _publish_live_progress already
+                # published. Absent (pre-loop) they default to the skeleton.
+                "step": int(last.get("step") or 0),
+                "total_steps": self._progress_total_steps,
+                "equity_curve": last.get("equity_curve") or [],
+                **self._progress_phase_fields(),
+            }
+        )
+        self._write_progress_payload(payload)
+
+    def _write_progress_payload(self, payload: Dict) -> None:
+        from pathlib import Path
+
+        # Remembered before the write, not after it: this is the payload this
+        # process intends the file to hold, and a phase published after a failed
+        # write must still carry the loop's numbers rather than silently fall
+        # back to the skeleton. One reference to data the manager already holds.
+        self._progress_last_payload: Dict = payload
+        try:
+            Path(self.progress_file).write_text(json.dumps(payload), encoding="utf-8")
+        except OSError as exc:
+            print(f"   ⚠️  Could not write live progress: {exc}")
+
     def _publish_live_progress(self, step: int, total_steps: int, manager) -> None:
         """Write incremental equity curve snapshots for live dashboard charting."""
+        # Above the early return, not below it. The phase clock is state, not a
+        # side effect of writing, and the progress file is only one of its
+        # readers. Below the return an engine with no progress file -- every
+        # CLI run, the external-run session, the algo service -- never leaves
+        # `first_decision`, so `publish_phase("saving")` closes a
+        # `first_decision` spanning the entire bar loop: the one number this
+        # phase exists to produce, published as hours instead of seconds, in
+        # the row of the table that is supposed to justify the whole track.
+        # `publish_phase` is already the right way round; this is the only
+        # asymmetry. `_set_progress_phase`'s hasattr guard self-initialises, so
+        # a `__new__`-built instance is unaffected.
+        self._set_progress_phase("running", total_steps=total_steps)
         if not self.progress_file:
             return
-        from pathlib import Path
 
         curve = manager.get_equity_curve()
         serialized = []
@@ -636,14 +1061,13 @@ class HourlyBacktester:
                 unfilled_order_events[-LIVE_PROGRESS_ORDER_EVENT_LIMIT:]
             ),
             "order_events_count": len(unfilled_order_events),
+            **self._progress_phase_fields(),
         }
-        try:
-            Path(self.progress_file).write_text(json.dumps(payload), encoding="utf-8")
-        except OSError as exc:
-            print(f"   ⚠️  Could not write live progress: {exc}")
-    
+        self._write_progress_payload(payload)
+
     def load_data(self):
         """Fetch source bars and build the strategy's decision-bar dataset."""
+        self.publish_phase("loading_bars")
         # Keep the error path usable for legacy callers that construct an
         # instance with ``__new__`` (or inject a loader) before initialization.
         symbols = getattr(self, "symbols", ())
@@ -651,9 +1075,15 @@ class HourlyBacktester:
             f"   Universe: {len(symbols)} symbols ({', '.join(symbols[:8])}"
             f"{'…' if len(symbols) > 8 else ''})"
         )
+        fetch_started_at = steady_clock()
         self.source_data = self.data_loader.fetch_bars(
             symbols, self.start_date, self.end_date
         )
+        # Everything after this point in `loading_bars` -- the frequency
+        # verification and, in intraday mode, `aggregate_bars_by_symbol` -- is
+        # the half the phase name hides. Recorded here so the number survives
+        # in `phases[]` as well as on stdout.
+        self.record_phase_metric("fetch_seconds", steady_clock() - fetch_started_at)
         if not self.source_data:
             # Raise, don't sys.exit(1): this runs inside server threads
             # (external runs, algo service) where SystemExit evades
@@ -875,6 +1305,7 @@ class HourlyBacktester:
     
     def calculate_indicators(self):
         """Calculate technical indicators for all symbols."""
+        self.publish_phase("indicators")
         print("\n📈 Calculating technical indicators...")
         count = 0
         for symbol, df in self.all_data.items():
@@ -1191,33 +1622,20 @@ class HourlyBacktester:
         return float(manager.cash)
 
     def _market_hours_only(self, timestamps):
-        """Filter timestamps using the selected market's local sessions."""
-        import pytz
+        """Filter timestamps using the selected market's local sessions.
 
+        Through ``market_data.sessions``, the same owner the dataset store and
+        the aggregation use, so the dashboard and protocol paths cannot count
+        different steps for one window.
+        """
         profile = self._effective_profile()
-        market_tz = pytz.timezone(profile.timezone)
-        kept = []
-        for timestamp in timestamps:
-            local = (
-                market_tz.localize(timestamp)
-                if timestamp.tzinfo is None
-                else timestamp.astimezone(market_tz)
+        return [
+            timestamp
+            for timestamp in timestamps
+            if is_in_session(
+                timestamp, market=profile.market, timezone=profile.timezone
             )
-            local_time = local.time()
-            if profile.market == "CN":
-                is_market_hours = (
-                    time(9, 30) <= local_time <= time(11, 30)
-                    or time(13, 0) <= local_time <= time(15, 0)
-                )
-            else:
-                is_market_hours = (
-                    (local.hour > 9 and local.hour < 16)
-                    or (local.hour == 9 and local.minute >= 30)
-                    or (local.hour == 16 and local.minute == 0)
-                )
-            if is_market_hours:
-                kept.append(timestamp)
-        return kept
+        ]
 
     def _market_day_key(self, timestamp) -> str:
         """Return a trading-day key in the market's local timezone."""
@@ -1421,6 +1839,7 @@ class HourlyBacktester:
             + "...\n"
         )
         total_steps = len(all_timestamps)
+        self.publish_phase("first_decision", total_steps=total_steps)
         # Declare the run length so a strict-LLM run can absorb a small number
         # of unusable responses instead of discarding hours of work on the
         # first one. Left unset the budget is 0 (fatal on the first strike).
@@ -1745,6 +2164,7 @@ class HourlyBacktester:
             _unfilled_order_events(manager.order_events)
         )
         self.transaction_cost_totals = dict(manager.transaction_cost_totals)
+        self.publish_phase("saving")
         db.insert_run(
             run_id=run_id,
             session_id=self.session_id,

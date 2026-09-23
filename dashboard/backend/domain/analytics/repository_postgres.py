@@ -7,7 +7,7 @@ from typing import Any
 
 import psycopg
 
-from dashboard.backend.db_url import require_postgres_url
+from dashboard.backend.db_url import init_schema_unless_worker, require_postgres_url
 
 from .models import AnalyticsEventRecord, AppendEventResult, RetentionResult
 from .repository import _EVENT_COLUMNS, _event_values, _row_to_event
@@ -60,7 +60,7 @@ CREATE TABLE IF NOT EXISTS analytics_events (
             'credential_invalid', 'credential_missing', 'provider_timeout',
             'provider_unavailable', 'provider_quota_exhausted',
             'credits_unavailable',
-            'model_not_allowed', 'internal_error'
+            'model_not_allowed', 'internal_error', 'run_timeout'
         )
     ),
     country_code TEXT CHECK (country_code IS NULL OR length(country_code) = 2),
@@ -192,7 +192,7 @@ class PostgresAnalyticsStore:
 
     def __init__(self, database_url: str):
         self.database_url = require_postgres_url(database_url)
-        self._init_schema()
+        init_schema_unless_worker("analytics_store", self._init_schema)
 
     def _get_connection(self):
         from dashboard.backend.db_pool import get_pool
@@ -235,7 +235,8 @@ class PostgresAnalyticsStore:
                             'credential_invalid', 'credential_missing',
                             'provider_timeout', 'provider_unavailable',
                             'provider_quota_exhausted', 'credits_unavailable',
-                            'model_not_allowed', 'internal_error'
+                            'model_not_allowed', 'internal_error',
+                            'run_timeout'
                         )
                     )
                     """

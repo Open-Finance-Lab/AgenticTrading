@@ -23,6 +23,8 @@ from dashboard.backend.infrastructure.market_data.frequency import (
     normalize_bar_timeframe,
     timeframe_minutes,
 )
+# Re-exported: the session bounds have one owner, and it is not this module.
+from dashboard.backend.infrastructure.market_data.sessions import session_windows
 
 
 class BarAggregationError(ValueError):
@@ -35,13 +37,6 @@ _QUALITY_COUNT_COLUMNS = (
     "off_grid_source_bars",
     "invalid_source_bars",
 )
-
-
-def _session_windows(market: str) -> tuple[tuple[time, time], ...]:
-    canonical = str(market or "US").strip().upper()
-    if canonical == "CN":
-        return ((time(9, 30), time(11, 30)), (time(13, 0), time(15, 0)))
-    return ((time(9, 30), time(16, 0)),)
 
 
 def _as_local_index(frame: pd.DataFrame, timezone: str) -> pd.DataFrame:
@@ -116,12 +111,33 @@ def aggregate_bars(
         return frame.copy()
 
     local = _as_local_index(frame, timezone)
-    windows = _session_windows(market)
-    buckets: dict[pd.Timestamp, list[pd.Series]] = {}
-    bucket_ends: dict[pd.Timestamp, pd.Timestamp] = {}
-    for timestamp, row in local.iterrows():
+    windows = session_windows(market)
+    # Walk the index, not the rows: iterrows builds a Series per source bar,
+    # and the onboarding shape has ~16k of them (7 weekdays x 78 five-minute
+    # bars x 30 symbols). That is the cheapest thing here to remove, not the
+    # expensive one, and the comment first drafted for this block claimed the
+    # opposite. Measured 2026-09-21 under cProfile: iterrows is ~0.8s of this
+    # function's ~9.2s cumulative, while the per-bucket work carries the rest
+    # (_weighted_vwap ~1.9s, group.apply(pd.to_numeric) ~1.3s, plus a
+    # DataFrame and a pd.date_range built for each of 1,470 buckets). End to
+    # end this buys ~11%. It also lands in `loading_bars`, not `indicators`:
+    # aggregate_bars_by_symbol is called from load_data (engine.py:989). The
+    # per-bucket arithmetic below -- quality counts, OHLCV, turnover, vwap -- is
+    # byte-for-byte what it was; only how a row finds its bucket, and how that
+    # bucket's end is looked up, changed.
+    keep: list[bool] = []
+    starts: list[pd.Timestamp] = []
+    # One entry per bucket, not one per source bar. `bucket_end` is a pure
+    # function of `bucket_start` -- min(start + decision, session_end) -- and a
+    # start belongs to exactly one session, because sessions on a date do not
+    # overlap and the date is part of the start. The previous shape built an
+    # `ends` list and a `_bucket_end` column as long as the kept rows, then read
+    # `.iloc[0]` of each group and discarded the rest.
+    ends_by_start: dict[pd.Timestamp, pd.Timestamp] = {}
+    for timestamp in local.index:
         session = _session_for_timestamp(timestamp, windows)
         if session is None:
+            keep.append(False)
             continue
         session_start, session_end = session
         elapsed_minutes = int((timestamp - session_start).total_seconds() // 60)
@@ -132,15 +148,37 @@ def aggregate_bars(
         )
         # A source bar can only belong to a decision bucket that has not ended.
         if bucket_start >= bucket_end:
+            keep.append(False)
             continue
-        buckets.setdefault(bucket_start, []).append(row)
-        bucket_ends[bucket_start] = bucket_end
+        keep.append(True)
+        starts.append(bucket_start)
+        # Checked, not assumed. Collapsing one end per bucket is only sound
+        # while the mapping really is a function; a market whose windows put
+        # two sessions on the same bucket start would otherwise silently take
+        # whichever end arrived first and mis-size that bucket's expected bar
+        # count. One dict op either way, and a wrong number here is invisible
+        # downstream -- it lands as a quality count, not as a crash.
+        if ends_by_start.setdefault(bucket_start, bucket_end) != bucket_end:
+            raise BarAggregationError(
+                "two sessions produced decision bucket "
+                f"{bucket_start} with different ends "
+                f"({ends_by_start[bucket_start]} and {bucket_end}); "
+                "bucket_end is no longer a function of bucket_start"
+            )
+
+    # Boolean-mask `.loc` already returns a new frame, and grouping on an
+    # external key array never writes to it, so the defensive `.copy()` -- a
+    # third full copy of the bars, after `_as_local_index`'s `frame.copy()` and
+    # its `sort_index()` -- bought nothing here. Positional alignment holds
+    # because `starts` gains exactly one entry for every True appended to
+    # `keep`.
+    kept = local.loc[keep]
+    bucket_keys = pd.DatetimeIndex(starts)
 
     records: list[dict] = []
-    for bucket_start in sorted(buckets):
-        group = pd.DataFrame(buckets[bucket_start])
+    for bucket_start, group in kept.groupby(bucket_keys, sort=True):
+        bucket_end = ends_by_start[bucket_start]
         group = group.sort_index()
-        bucket_end = bucket_ends[bucket_start]
         expected = int(
             (bucket_end - bucket_start).total_seconds() // (source_minutes * 60)
         )

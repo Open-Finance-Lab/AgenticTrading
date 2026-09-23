@@ -100,6 +100,7 @@ def _harness(body: str, *, extra: str = "") -> str:
         [
             _CLOCK,
             js_const("BACKTEST_POLL_MAX_SECONDS"),
+            js_const("BACKTEST_BUDGET_SECONDS"),
             js_const("RUNNING_BACKTESTS_KEY"),
             js_let("pendingBacktestSeq"),
             _SESSION_STORAGE,

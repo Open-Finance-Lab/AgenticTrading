@@ -2,6 +2,18 @@
 
 This module deliberately keeps the Credits ledger authoritative.  Analytics
 stores only calculated lifecycle history and reads commercial facts in batches.
+
+SQLite twin. The PostgreSQL twin is ``value_repository_postgres.py``
+(``PostgresValueAnalyticsStore``); ``build_value_analytics_store()`` below
+selects between them the same way ``repository.py``'s ``_build_analytics_store()``
+selects between ``AnalyticsStore`` and ``PostgresAnalyticsStore``. Every method
+that reads or writes this store's own tables (``user_analytics_snapshots``,
+``user_lifecycle_daily_snapshots``, ``analytics_projection_jobs``) has exactly
+one code path here; the two methods that branch on a *different* store's
+dialect (``list_commercial_values``, ``list_credit_activity``, both reading
+``self.credits_base``) are unchanged and identical on both twins, because that
+branch was never about which twin this class is -- a caller can pair either
+``analytics_base`` with either ``credits_base``, and both twins must handle it.
 """
 
 from __future__ import annotations
@@ -208,8 +220,96 @@ def _legacy_seed(snapshot: UserValueSnapshot) -> tuple[str, str, str]:
     return status, reason_code, reason
 
 
+def _current_snapshot_from_row(row: Any) -> UserValueSnapshot | None:
+    """Shared by both twins.
+
+    Moved out of the class (was ``ValueAnalyticsStore._current_snapshot_from_row``,
+    a ``@staticmethod``) so ``value_repository_postgres.py`` can import it
+    directly, mirroring how ``repository_postgres.py`` imports bare functions
+    (``_row_to_event``) from ``repository.py``. No caller outside this module
+    referenced the staticmethod, so this is not a behaviour change.
+    """
+    if row is None or _row_value(row, "lifecycle_segment") is None:
+        return None
+
+    def seq(name: str) -> tuple[str, ...]:
+        try:
+            value = json.loads(_row_value(row, name, "[]"))
+            if not isinstance(value, list) or not all(
+                isinstance(item, str) for item in value
+            ):
+                return ()
+            return tuple(value)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return ()
+
+    return UserValueSnapshot(
+        user_id=int(_row_value(row, "user_id")),
+        lifecycle_segment=_row_value(row, "lifecycle_segment"),
+        lifecycle_reason_code=_row_value(row, "lifecycle_reason_code"),
+        lifecycle_reason=_row_value(row, "lifecycle_reason"),
+        lifecycle_evidence=seq("lifecycle_evidence_json"),
+        operational_state=_row_value(row, "operational_state") or "healthy",
+        operational_reason_code=(
+            _row_value(row, "operational_reason_code") or "no_supported_issue"
+        ),
+        operational_reason=(
+            _row_value(row, "operational_reason")
+            or "No supported current operational issue was detected."
+        ),
+        operational_evidence=seq("operational_evidence_json"),
+        activated_at=_optional_timestamp(_row_value(row, "activated_at")),
+        last_meaningful_activity_at=_optional_timestamp(
+            _row_value(row, "last_meaningful_activity_at")
+        ),
+        inactive_days=int(_row_value(row, "inactive_days", 0)),
+        active_days_30d=int(_row_value(row, "active_days_30d", 0)),
+        successful_backtests_30d=int(
+            _row_value(row, "successful_backtests_30d", 0)
+        ),
+        calculated_at=_timestamp(_row_value(row, "calculated_at")),
+    )
+
+
+def _fetchall(conn: Any, postgres: bool, sql: str, params: Sequence[Any]):
+    """Shared by both twins.
+
+    Still dialect-parameterised: it serves ``list_commercial_values``/
+    ``list_credit_activity``, which branch on the *credits* store's dialect,
+    never on this class's own -- see the module docstring.
+    """
+    if postgres:
+        with conn.cursor() as cur:
+            cur.execute(sql, params)
+            return cur.fetchall()
+    return conn.execute(sql, params).fetchall()
+
+
+def _user_clause(ids: list[int], postgres: bool) -> tuple[str, list[Any]]:
+    """Shared by both twins; see ``_fetchall`` above."""
+    if postgres:
+        return "user_id = ANY(%s)", [ids]
+    placeholders = ", ".join("?" for _ in ids)
+    return f"user_id IN ({placeholders})", list(ids)
+
+
+def _projection_job_name(value: object) -> str:
+    """Shared by both twins; see ``_current_snapshot_from_row`` above."""
+    if (
+        not isinstance(value, str)
+        or not value
+        or value != value.strip()
+        or len(value) > 100
+    ):
+        raise ValueError("job_name must be a trimmed non-empty string")
+    return value
+
+
 class ValueAnalyticsStore:
-    """SQLite/PostgreSQL-neutral value projection storage.
+    """SQLite value projection storage.
+
+    See ``value_repository_postgres.py`` for the PostgreSQL twin;
+    ``build_value_analytics_store()`` below picks between them.
 
     ``credits_base`` and the optional operational stores are injectable to keep
     contract tests synthetic and to avoid importing production singletons.
@@ -223,7 +323,22 @@ class ValueAnalyticsStore:
         agent_base: Any | None = None,
         run_base: Any | None = None,
     ) -> None:
+        # The mirror of PostgresValueAnalyticsStore's guard, and the reason
+        # this class needs one at all: until PR T it served both dialects, so
+        # `ValueAnalyticsStore(postgres_base)` was correct and is still the
+        # natural thing to write. It now emits `?` placeholders, which raise
+        # psycopg.errors.SyntaxError on the Postgres deployment *only* -- CI
+        # and local runs are both SQLite, so a caller that reintroduced it
+        # would keep a green suite all the way to prod.
         self.analytics_base = analytics_base or analytics_store
+        if hasattr(self.analytics_base, "database_url"):
+            raise TypeError(
+                "ValueAnalyticsStore is the SQLite twin and emits `?` "
+                "placeholders, but the resolved analytics base is "
+                "PostgreSQL. Build the pair through "
+                "build_value_analytics_store(), which resolves the base and "
+                "returns the matching twin."
+            )
         if credits_base is None:
             from dashboard.backend.domain.credits.repository import credits_store
 
@@ -246,7 +361,6 @@ class ValueAnalyticsStore:
 
             run_base = run_store
         self.run_base = run_base
-        self.is_postgres = hasattr(self.analytics_base, "database_url")
 
     def _analytics_connection(self):
         return self.analytics_base._get_connection()
@@ -310,87 +424,24 @@ class ValueAnalyticsStore:
             successful_backtests_30d=excluded.successful_backtests_30d,
             calculated_at=excluded.calculated_at
         """
-        if self.is_postgres:
-            with self._analytics_connection() as conn:
-                with conn.cursor() as cur:
-                    cur.execute(
-                        f"""
-                        INSERT INTO user_analytics_snapshots ({columns})
-                        VALUES ({", ".join(["%s"] * len(values))})
-                        ON CONFLICT(user_id) DO UPDATE SET {updates}
-                        """,
-                        values,
-                    )
-        else:
-            with self._analytics_connection() as conn:
-                conn.execute(
-                    f"""
-                    INSERT INTO user_analytics_snapshots ({columns})
-                    VALUES ({", ".join(["?"] * len(values))})
-                    ON CONFLICT(user_id) DO UPDATE SET {updates}
-                    """,
-                    values,
-                )
+        with self._analytics_connection() as conn:
+            conn.execute(
+                f"""
+                INSERT INTO user_analytics_snapshots ({columns})
+                VALUES ({", ".join(["?"] * len(values))})
+                ON CONFLICT(user_id) DO UPDATE SET {updates}
+                """,
+                values,
+            )
         return snapshot
 
     def get_current_snapshot(self, user_id: int) -> UserValueSnapshot | None:
         subject = positive_user_id(user_id)
         with self._analytics_connection() as conn:
-            if self.is_postgres:
-                with conn.cursor() as cur:
-                    cur.execute(
-                        "SELECT * FROM user_analytics_snapshots WHERE user_id=%s",
-                        (subject,),
-                    )
-                    row = cur.fetchone()
-            else:
-                row = conn.execute(
-                    "SELECT * FROM user_analytics_snapshots WHERE user_id=?", (subject,)
-                ).fetchone()
-        return self._current_snapshot_from_row(row)
-
-    @staticmethod
-    def _current_snapshot_from_row(row: Any) -> UserValueSnapshot | None:
-        if row is None or _row_value(row, "lifecycle_segment") is None:
-            return None
-
-        def seq(name: str) -> tuple[str, ...]:
-            try:
-                value = json.loads(_row_value(row, name, "[]"))
-                if not isinstance(value, list) or not all(
-                    isinstance(item, str) for item in value
-                ):
-                    return ()
-                return tuple(value)
-            except (TypeError, ValueError, json.JSONDecodeError):
-                return ()
-
-        return UserValueSnapshot(
-            user_id=int(_row_value(row, "user_id")),
-            lifecycle_segment=_row_value(row, "lifecycle_segment"),
-            lifecycle_reason_code=_row_value(row, "lifecycle_reason_code"),
-            lifecycle_reason=_row_value(row, "lifecycle_reason"),
-            lifecycle_evidence=seq("lifecycle_evidence_json"),
-            operational_state=_row_value(row, "operational_state") or "healthy",
-            operational_reason_code=(
-                _row_value(row, "operational_reason_code") or "no_supported_issue"
-            ),
-            operational_reason=(
-                _row_value(row, "operational_reason")
-                or "No supported current operational issue was detected."
-            ),
-            operational_evidence=seq("operational_evidence_json"),
-            activated_at=_optional_timestamp(_row_value(row, "activated_at")),
-            last_meaningful_activity_at=_optional_timestamp(
-                _row_value(row, "last_meaningful_activity_at")
-            ),
-            inactive_days=int(_row_value(row, "inactive_days", 0)),
-            active_days_30d=int(_row_value(row, "active_days_30d", 0)),
-            successful_backtests_30d=int(
-                _row_value(row, "successful_backtests_30d", 0)
-            ),
-            calculated_at=_timestamp(_row_value(row, "calculated_at")),
-        )
+            row = conn.execute(
+                "SELECT * FROM user_analytics_snapshots WHERE user_id=?", (subject,)
+            ).fetchone()
+        return _current_snapshot_from_row(row)
 
     def list_current_snapshots(
         self,
@@ -402,38 +453,20 @@ class ValueAnalyticsStore:
         result: dict[int, UserValueSnapshot] = {}
         for offset in range(0, len(ids), MAX_USER_BATCH):
             chunk = ids[offset : offset + MAX_USER_BATCH]
-            if self.is_postgres:
-                clause = "user_id = ANY(%s)"
-                params: Sequence[Any] = [chunk]
-            else:
-                clause = f"user_id IN ({', '.join('?' for _ in chunk)})"
-                params = chunk
+            clause = f"user_id IN ({', '.join('?' for _ in chunk)})"
             with self._analytics_connection() as conn:
-                if self.is_postgres:
-                    with conn.cursor() as cur:
-                        cur.execute(
-                            f"""
-                            SELECT *
-                            FROM user_analytics_snapshots
-                            WHERE {clause} AND lifecycle_segment IS NOT NULL
-                            ORDER BY user_id
-                            """,
-                            params,
-                        )
-                        rows = cur.fetchall()
-                else:
-                    rows = conn.execute(
-                        f"""
-                        SELECT *
-                        FROM user_analytics_snapshots
-                        WHERE {clause} AND lifecycle_segment IS NOT NULL
-                        ORDER BY user_id
-                        """,
-                        params,
-                    ).fetchall()
+                rows = conn.execute(
+                    f"""
+                    SELECT *
+                    FROM user_analytics_snapshots
+                    WHERE {clause} AND lifecycle_segment IS NOT NULL
+                    ORDER BY user_id
+                    """,
+                    chunk,
+                ).fetchall()
             for row in rows:
                 user_id = int(_row_value(row, "user_id"))
-                snapshot = self._current_snapshot_from_row(row)
+                snapshot = _current_snapshot_from_row(row)
                 if snapshot is not None:
                     result[user_id] = snapshot
         return result
@@ -450,14 +483,11 @@ class ValueAnalyticsStore:
             snapshot.data_quality,
             utc_iso(snapshot.calculated_at),
         )
-        placeholders = (
-            "%s, %s, %s, %s, %s, %s" if self.is_postgres else "?, ?, ?, ?, ?, ?"
-        )
-        sql = f"""
+        sql = """
             INSERT INTO user_lifecycle_daily_snapshots (
                 snapshot_date, user_id, lifecycle_segment,
                 lifecycle_reason_code, data_quality, calculated_at
-            ) VALUES ({placeholders})
+            ) VALUES (?, ?, ?, ?, ?, ?)
             ON CONFLICT(snapshot_date, user_id) DO UPDATE SET
                 lifecycle_segment=excluded.lifecycle_segment,
                 lifecycle_reason_code=excluded.lifecycle_reason_code,
@@ -465,11 +495,7 @@ class ValueAnalyticsStore:
                 calculated_at=excluded.calculated_at
         """
         with self._analytics_connection() as conn:
-            if self.is_postgres:
-                with conn.cursor() as cur:
-                    cur.execute(sql, values)
-            else:
-                conn.execute(sql, values)
+            conn.execute(sql, values)
         return snapshot
 
     def list_daily_snapshots(
@@ -487,28 +513,18 @@ class ValueAnalyticsStore:
         params: list[Any] = [start.isoformat(), end.isoformat()]
         clause = ""
         if ids:
-            if self.is_postgres:
-                clause = " AND user_id = ANY(%s)"
-                params.append(ids)
-            else:
-                clause = f" AND user_id IN ({','.join('?' for _ in ids)})"
-                params.extend(ids)
-        placeholder = "%s" if self.is_postgres else "?"
+            clause = f" AND user_id IN ({','.join('?' for _ in ids)})"
+            params.extend(ids)
         sql = f"""
             SELECT *
             FROM user_lifecycle_daily_snapshots
-            WHERE snapshot_date >= {placeholder}
-              AND snapshot_date < {placeholder}
+            WHERE snapshot_date >= ?
+              AND snapshot_date < ?
               {clause}
             ORDER BY snapshot_date, user_id
         """
         with self._analytics_connection() as conn:
-            if self.is_postgres:
-                with conn.cursor() as cur:
-                    cur.execute(sql, params)
-                    rows = cur.fetchall()
-            else:
-                rows = conn.execute(sql, params).fetchall()
+            rows = conn.execute(sql, params).fetchall()
         return [
             UserLifecycleDailySnapshot(
                 snapshot_date=date.fromisoformat(str(_row_value(row, "snapshot_date"))),
@@ -592,49 +608,28 @@ class ValueAnalyticsStore:
                     utc_iso(row.updated_at),
                 )
             )
-        placeholders = ", ".join(["%s" if self.is_postgres else "?"] * len(columns))
+        placeholders = ", ".join(["?"] * len(columns))
         metrics = ["lifecycle_segment_count"]
         if replace_transitions:
             metrics.append("lifecycle_transition")
-        metric_placeholders = ", ".join(
-            ["%s" if self.is_postgres else "?"] * len(metrics)
-        )
+        metric_placeholders = ", ".join(["?"] * len(metrics))
         with self._analytics_connection() as conn:
-            if self.is_postgres:
-                with conn.cursor() as cur:
-                    cur.execute(
-                        f"""
-                        DELETE FROM analytics_daily_rollups
-                        WHERE rollup_date = %s
-                          AND metric_name IN ({metric_placeholders})
-                        """,
-                        (day.isoformat(), *metrics),
-                    )
-                    if payloads:
-                        cur.executemany(
-                            f"""
-                            INSERT INTO analytics_daily_rollups ({', '.join(columns)})
-                            VALUES ({placeholders})
-                            """,
-                            payloads,
-                        )
-            else:
-                conn.execute(
+            conn.execute(
+                f"""
+                DELETE FROM analytics_daily_rollups
+                WHERE rollup_date = ?
+                  AND metric_name IN ({metric_placeholders})
+                """,
+                (day.isoformat(), *metrics),
+            )
+            if payloads:
+                conn.executemany(
                     f"""
-                    DELETE FROM analytics_daily_rollups
-                    WHERE rollup_date = ?
-                      AND metric_name IN ({metric_placeholders})
+                    INSERT INTO analytics_daily_rollups ({', '.join(columns)})
+                    VALUES ({placeholders})
                     """,
-                    (day.isoformat(), *metrics),
+                    payloads,
                 )
-                if payloads:
-                    conn.executemany(
-                        f"""
-                        INSERT INTO analytics_daily_rollups ({', '.join(columns)})
-                        VALUES ({placeholders})
-                        """,
-                        payloads,
-                    )
 
     def list_expiring_daily_dates(
         self,
@@ -645,21 +640,15 @@ class ValueAnalyticsStore:
         if not isinstance(before, date) or isinstance(before, datetime):
             raise ValueError("before must be a date")
         page_size = positive_limit(limit, maximum=1000)
-        placeholder = "%s" if self.is_postgres else "?"
-        sql = f"""
+        sql = """
             SELECT DISTINCT snapshot_date
             FROM user_lifecycle_daily_snapshots
-            WHERE snapshot_date < {placeholder}
+            WHERE snapshot_date < ?
             ORDER BY snapshot_date
-            LIMIT {placeholder}
+            LIMIT ?
         """
         with self._analytics_connection() as conn:
-            if self.is_postgres:
-                with conn.cursor() as cur:
-                    cur.execute(sql, (before.isoformat(), page_size))
-                    rows = cur.fetchall()
-            else:
-                rows = conn.execute(sql, (before.isoformat(), page_size)).fetchall()
+            rows = conn.execute(sql, (before.isoformat(), page_size)).fetchall()
         return [
             date.fromisoformat(str(_row_value(row, "snapshot_date"))) for row in rows
         ]
@@ -668,17 +657,6 @@ class ValueAnalyticsStore:
         if not isinstance(day, date) or isinstance(day, datetime):
             raise ValueError("day must be a date")
         with self._analytics_connection() as conn:
-            if self.is_postgres:
-                with conn.cursor() as cur:
-                    cur.execute(
-                        """
-                        DELETE FROM user_lifecycle_daily_snapshots
-                        WHERE snapshot_date = %s
-                        RETURNING user_id
-                        """,
-                        (day.isoformat(),),
-                    )
-                    return len(cur.fetchall())
             cursor = conn.execute(
                 """
                 DELETE FROM user_lifecycle_daily_snapshots
@@ -691,36 +669,15 @@ class ValueAnalyticsStore:
     def has_daily_before(self, before: date) -> bool:
         if not isinstance(before, date) or isinstance(before, datetime):
             raise ValueError("before must be a date")
-        placeholder = "%s" if self.is_postgres else "?"
-        sql = f"""
+        sql = """
             SELECT 1
             FROM user_lifecycle_daily_snapshots
-            WHERE snapshot_date < {placeholder}
+            WHERE snapshot_date < ?
             LIMIT 1
         """
         with self._analytics_connection() as conn:
-            if self.is_postgres:
-                with conn.cursor() as cur:
-                    cur.execute(sql, (before.isoformat(),))
-                    row = cur.fetchone()
-            else:
-                row = conn.execute(sql, (before.isoformat(),)).fetchone()
+            row = conn.execute(sql, (before.isoformat(),)).fetchone()
         return row is not None
-
-    @staticmethod
-    def _fetchall(conn: Any, postgres: bool, sql: str, params: Sequence[Any]):
-        if postgres:
-            with conn.cursor() as cur:
-                cur.execute(sql, params)
-                return cur.fetchall()
-        return conn.execute(sql, params).fetchall()
-
-    @staticmethod
-    def _user_clause(ids: list[int], postgres: bool) -> tuple[str, list[Any]]:
-        if postgres:
-            return "user_id = ANY(%s)", [ids]
-        placeholders = ", ".join("?" for _ in ids)
-        return f"user_id IN ({placeholders})", list(ids)
 
     def list_commercial_values(
         self,
@@ -739,7 +696,7 @@ class ValueAnalyticsStore:
         usage_by_user: dict[int, int] = {}
         if hasattr(self.credits_base, "_get_connection"):
             postgres = hasattr(self.credits_base, "database_url")
-            user_clause, user_params = self._user_clause(ids, postgres)
+            user_clause, user_params = _user_clause(ids, postgres)
             placeholder = "%s" if postgres else "?"
             window_params = [
                 *user_params,
@@ -747,7 +704,7 @@ class ValueAnalyticsStore:
                 utc_iso(window_end),
             ]
             with self.credits_base._get_connection() as conn:
-                lifetime_rows = self._fetchall(
+                lifetime_rows = _fetchall(
                     conn,
                     postgres,
                     f"""
@@ -763,7 +720,7 @@ class ValueAnalyticsStore:
                     """,
                     user_params,
                 )
-                period_rows = self._fetchall(
+                period_rows = _fetchall(
                     conn,
                     postgres,
                     f"""
@@ -784,7 +741,7 @@ class ValueAnalyticsStore:
                     """,
                     window_params,
                 )
-                usage_rows = self._fetchall(
+                usage_rows = _fetchall(
                     conn,
                     postgres,
                     f"""
@@ -867,11 +824,11 @@ class ValueAnalyticsStore:
             return {user_id: () for user_id in ids}
 
         postgres = hasattr(self.credits_base, "database_url")
-        user_clause, user_params = self._user_clause(ids, postgres)
+        user_clause, user_params = _user_clause(ids, postgres)
         placeholder = "%s" if postgres else "?"
         params = [*user_params, utc_iso(window_start), utc_iso(window_end)]
         with self.credits_base._get_connection() as conn:
-            purchase_rows = self._fetchall(
+            purchase_rows = _fetchall(
                 conn,
                 postgres,
                 f"""
@@ -884,7 +841,7 @@ class ValueAnalyticsStore:
                 """,
                 params,
             )
-            usage_rows = self._fetchall(
+            usage_rows = _fetchall(
                 conn,
                 postgres,
                 f"""
@@ -1046,20 +1003,12 @@ class ValueAnalyticsStore:
         )
 
     def get_projection_job(self, job_name: str) -> ProjectionJob | None:
-        name = self._projection_job_name(job_name)
+        name = _projection_job_name(job_name)
         with self._analytics_connection() as conn:
-            if self.is_postgres:
-                with conn.cursor() as cur:
-                    cur.execute(
-                        "SELECT * FROM analytics_projection_jobs WHERE job_name=%s",
-                        (name,),
-                    )
-                    row = cur.fetchone()
-            else:
-                row = conn.execute(
-                    "SELECT * FROM analytics_projection_jobs WHERE job_name=?",
-                    (name,),
-                ).fetchone()
+            row = conn.execute(
+                "SELECT * FROM analytics_projection_jobs WHERE job_name=?",
+                (name,),
+            ).fetchone()
         if row is None:
             return None
         return ProjectionJob(
@@ -1071,19 +1020,8 @@ class ValueAnalyticsStore:
             updated_at=_timestamp(_row_value(row, "updated_at")),
         )
 
-    @staticmethod
-    def _projection_job_name(value: object) -> str:
-        if (
-            not isinstance(value, str)
-            or not value
-            or value != value.strip()
-            or len(value) > 100
-        ):
-            raise ValueError("job_name must be a trimmed non-empty string")
-        return value
-
     def save_projection_job(self, job: ProjectionJob) -> ProjectionJob:
-        self._projection_job_name(job.job_name)
+        _projection_job_name(job.job_name)
         values = (
             job.job_name,
             job.window_start.isoformat(),
@@ -1092,13 +1030,10 @@ class ValueAnalyticsStore:
             job.status,
             utc_iso(job.updated_at),
         )
-        placeholders = (
-            "%s, %s, %s, %s, %s, %s" if self.is_postgres else "?, ?, ?, ?, ?, ?"
-        )
-        sql = f"""
+        sql = """
             INSERT INTO analytics_projection_jobs (
                 job_name, window_start, window_end, cursor, status, updated_at
-            ) VALUES ({placeholders})
+            ) VALUES (?, ?, ?, ?, ?, ?)
             ON CONFLICT(job_name) DO UPDATE SET
                 window_start=excluded.window_start,
                 window_end=excluded.window_end,
@@ -1107,12 +1042,45 @@ class ValueAnalyticsStore:
                 updated_at=excluded.updated_at
         """
         with self._analytics_connection() as conn:
-            if self.is_postgres:
-                with conn.cursor() as cur:
-                    cur.execute(sql, values)
-            else:
-                conn.execute(sql, values)
+            conn.execute(sql, values)
         return job
+
+
+def build_value_analytics_store(
+    analytics_base: Any | None = None,
+    credits_base: Any | None = None,
+    provider_base: Any | None = None,
+    agent_base: Any | None = None,
+    run_base: Any | None = None,
+):
+    """Pick the SQLite or PostgreSQL value-analytics twin.
+
+    Mirrors ``repository.py``'s ``_build_analytics_store()``: the decision is
+    made from the resolved ``analytics_base`` alone -- the same object every
+    caller already passes, or, if none, the same ``analytics_store`` singleton
+    that decision is based on. ``credits_base``/``provider_base``/
+    ``agent_base``/``run_base`` are forwarded unexamined; their own dialect,
+    if any, is handled inside ``list_commercial_values``/``list_credit_activity``
+    on either twin, independently of this choice.
+    """
+    resolved_analytics_base = analytics_base or analytics_store
+    if hasattr(resolved_analytics_base, "database_url"):
+        from .value_repository_postgres import PostgresValueAnalyticsStore
+
+        return PostgresValueAnalyticsStore(
+            resolved_analytics_base,
+            credits_base=credits_base,
+            provider_base=provider_base,
+            agent_base=agent_base,
+            run_base=run_base,
+        )
+    return ValueAnalyticsStore(
+        resolved_analytics_base,
+        credits_base=credits_base,
+        provider_base=provider_base,
+        agent_base=agent_base,
+        run_base=run_base,
+    )
 
 
 __all__ = [
@@ -1122,4 +1090,5 @@ __all__ = [
     "UserLifecycleDailySnapshot",
     "UserValueSnapshot",
     "ValueAnalyticsStore",
+    "build_value_analytics_store",
 ]

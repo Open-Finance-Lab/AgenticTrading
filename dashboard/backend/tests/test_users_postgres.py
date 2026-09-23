@@ -25,6 +25,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from dashboard.backend.app import app
+from dashboard.backend.domain.user_groups import DEFAULT_USER_GROUP
 from dashboard.backend.tests.auth_cookies_helpers import _cookie_session_token
 from dashboard.backend.tests._postgres_testing import require_local_postgres_url
 
@@ -413,7 +414,14 @@ def test_users_postgres_repeats_sqlite_user_group_migration():
     source = Path(__file__).resolve().parents[1] / "users_postgres.py"
     sql = source.read_text(encoding="utf-8")
     assert "ADD COLUMN IF NOT EXISTS user_group" in sql
-    assert "user_group TEXT NOT NULL DEFAULT 'unknown'" in sql
+    assert f"user_group TEXT NOT NULL DEFAULT '{DEFAULT_USER_GROUP}'" in sql
+    # ADD COLUMN IF NOT EXISTS is skipped outright once the column exists, so it
+    # can never restate a default -- the deployed catalog keeps whatever the
+    # column was created with. These two are what make the source authoritative.
+    # Their exact folded text is pinned against both twins in
+    # test_store_twin_parity.py; here we only assert Postgres has them at all.
+    assert f"ALTER COLUMN user_group SET DEFAULT '{DEFAULT_USER_GROUP}'" in sql
+    assert "WHERE user_group NOT IN (" in sql
 
 
 @pg_only
@@ -638,6 +646,69 @@ def test_apply_admin_patch_atomic_postgres(temp_postgres_store):
     # Last-admin guard, serialized by the advisory lock.
     with pytest.raises(ValueError, match="last_admin"):
         store.apply_admin_patch(admin["id"], role="user")
+
+
+@pg_only
+def test_drifted_user_group_column_is_repaired_on_the_next_boot(temp_postgres_store):
+    """The half the source-text guard above cannot prove: that the SQL works.
+
+    Reconstructs the two ways the deployed column drifts away from what this
+    repo says it is -- a catalog default nothing in source can restate, and rows
+    holding a value parse_user_group() rejects -- then reopens the store over it.
+
+    Both halves have to fire. Without SET DEFAULT the catalog keeps handing new
+    rows the stale value (ADD COLUMN IF NOT EXISTS is skipped outright once the
+    column exists, so it never restates one), and without the repair the bad
+    rows stay put, invisibly, because every read path coerces them.
+    """
+    import dashboard.backend.users_postgres as users_postgres_module
+    from dashboard.backend.users import _utcnow_iso
+
+    store = temp_postgres_store
+    junk = ("organic ", "PARTNER", "friends", "")
+    with store._get_connection() as conn:
+        with conn.cursor() as cur:
+            # A default this file cannot restate through ADD COLUMN.
+            cur.execute("ALTER TABLE users ALTER COLUMN user_group SET DEFAULT 'stale'")
+            for index, value in enumerate(junk):
+                cur.execute(
+                    "INSERT INTO users (email, display_name, password_hash, role, created_at, user_group) "
+                    "VALUES (%s, %s, %s, 'user', %s, %s)",
+                    (
+                        f"junk-{index}@example.test",
+                        f"Junk {index}",
+                        "hash",
+                        _utcnow_iso(),
+                        value,
+                    ),
+                )
+            cur.execute(
+                "INSERT INTO users (email, display_name, password_hash, role, created_at, user_group) "
+                "VALUES (%s, %s, %s, 'user', %s, 'competition')",
+                ("kept@example.test", "Kept", "hash", _utcnow_iso()),
+            )
+
+    reopened = users_postgres_module.PostgresUserStore(TEST_POSTGRES_URL)
+
+    with reopened._get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT column_default FROM information_schema.columns "
+                "WHERE table_name = 'users' AND column_name = 'user_group'"
+            )
+            assert cur.fetchone()["column_default"].startswith(f"'{DEFAULT_USER_GROUP}'")
+            cur.execute("SELECT email, user_group FROM users ORDER BY email")
+            stored = {row["email"]: row["user_group"] for row in cur.fetchall()}
+
+    # A canonical group is left alone; every junk value is folded.
+    assert stored["kept@example.test"] == "competition"
+    assert [stored[f"junk-{index}@example.test"] for index in range(len(junk))] == [
+        DEFAULT_USER_GROUP
+    ] * len(junk)
+
+    # And the repaired default is now what an insert naming no group would get.
+    created = reopened.create_user("fresh@example.test", "Fresh", "securepass1")
+    assert reopened.get_user_admin(created["id"])["user_group"] == DEFAULT_USER_GROUP
 
 
 @pg_only

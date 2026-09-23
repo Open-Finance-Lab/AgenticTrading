@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, Optional
 
-from dashboard.backend.db_url import require_postgres_url
+from dashboard.backend.db_url import init_schema_unless_worker, require_postgres_url
 from dashboard.backend.domain.agents.credential_store import _decrypt_value, _public_row
 from dashboard.backend.domain.agents.repository import _utcnow_iso
 from dashboard.backend.domain.brokers.repository import _encrypt
@@ -15,7 +15,7 @@ class PostgresAgentCredentialStore:
 
     def __init__(self, database_url: str):
         self.database_url = require_postgres_url(database_url)
-        self._init_schema()
+        init_schema_unless_worker("agent_credential_store", self._init_schema)
 
     def _get_connection(self):
         from dashboard.backend.db_pool import get_pool

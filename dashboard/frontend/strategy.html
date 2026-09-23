@@ -168,12 +168,29 @@
         if (!startData.success) throw new Error(startData.error || "Failed to start backtest");
 
         statusEl.textContent = "Backtest running… this can take a few minutes.";
+        // The terminal shapes, in the order /backtest/status emits them. A
+        // payload matching none of them used to fall through with neither
+        // `continue` nor `break`, so a cancelled or timed-out run spun out the
+        // full thirty-minute budget and then fetched /runs/latest/metrics
+        // anyway -- painting a PREVIOUS run's numbers under "Backtest
+        // complete." Add a branch here whenever a terminal state is added to
+        // the status route; this is the third poller (app.js and the Discord
+        // watcher are the others) and the easiest of the three to miss.
+        let completed = false;
         for (let i = 0; i < 360; i++) {
           await new Promise((r) => setTimeout(r, 5000));
           const st = await (await fetch(`${API}/backtest/status`, { headers })).json();
           if (st.running) { statusEl.textContent = `Backtest running… (${(i + 1) * 5}s)`; continue; }
+          if (st.cancelled) throw new Error(st.message || "Backtest cancelled.");
+          if (st.timed_out) throw new Error(st.message || "Backtest stopped at the time limit.");
           if (st.error) throw new Error(st.error);
-          if (st.success || st.runs_count) break;
+          if (st.success || st.runs_count) { completed = true; break; }
+        }
+        if (!completed) {
+          // Never fall through to the metrics fetch. "The loop ran out" and
+          // "the run finished" produced the same green panel, filled with
+          // whatever this session happened to run last.
+          throw new Error("No result after 30 minutes. The backtest may still be running — check the dashboard.");
         }
 
         const m = await (await fetch(`${API}/runs/latest/metrics`, { headers })).json();

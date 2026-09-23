@@ -1745,3 +1745,98 @@ def test_failed_refund_releases_the_purchase_lot(pg_credits_store):
 
     assert failed["outcome"] == "processed"
     assert replacement["status"] == "pending"
+
+
+def test_postgres_schema_indexes_llm_usage_by_user_and_run():
+    """Static DDL guard -- runs without a live Postgres.
+
+    The twin's index set is what makes the new aggregate cheap on the engine
+    that actually holds production volume, and CI's Postgres container is empty
+    on every run, so no live test would notice its absence.
+    """
+    assert "idx_credit_llm_usage_user_run" in pg_module.CREDITS_POSTGRES_DDL
+    assert (
+        "ON credit_llm_usage_entries(user_id, run_id)"
+        in pg_module.CREDITS_POSTGRES_DDL
+    )
+
+
+def _settle_call_pg(
+    store,
+    *,
+    user_id: int = 1,
+    run_id: str,
+    call_index: int,
+    actual_micro: int,
+    provider_id: str = "openrouter",
+    model_id: str = "anthropic/claude-haiku-4-5",
+):
+    reservation_id = f"activity:{user_id}:{run_id}:{call_index}"
+    reservation = store.reserve_llm_credits(
+        reservation_id=reservation_id,
+        user_id=user_id,
+        run_id=run_id,
+        call_index=call_index,
+        provider_id=provider_id,
+        attempt_index=0,
+        reserved_micro=actual_micro,
+        operation_key=f"reserve:{reservation_id}",
+        request_digest=f"{user_id}{call_index}".ljust(64, "a")[:64],
+    )
+    return store.settle_llm_credits(
+        reservation["reservation_id"],
+        actual_micro=actual_micro,
+        evidence={
+            "billing_source": "platform_credits",
+            "pricing_snapshot": {
+                "provider_id": provider_id,
+                "model_id": model_id,
+            },
+        },
+    )
+
+
+@pg_only
+def test_postgres_sum_run_llm_spend_matches_the_sqlite_twin(pg_credits_store):
+    """Same question, same answer, on the engine with no shared base class.
+
+    Includes a ``:recovery:`` row for the same reason the SQLite case does: the
+    filter direction is the one thing about this method that is easy to get
+    backwards, and the twins have no ABC to keep them honest about it.
+    """
+    store = pg_credits_store
+    user_id = 1
+    _pending_order(store)
+    _pay_order(store)
+
+    _settle_call_pg(store, run_id="run-a", call_index=0, actual_micro=25_000)
+    _settle_call_pg(store, run_id="run-a", call_index=1, actual_micro=17_318)
+    _settle_call_pg(store, run_id="run-b", call_index=0, actual_micro=900_000)
+
+    assert store.sum_run_llm_spend(user_id, "run-a") == (42_318, 2)
+    assert store.sum_run_llm_spend(user_id, "run-never-ran") == (0, 0)
+    assert store.sum_run_llm_spend(user_id + 9999, "run-a") == (0, 0)
+
+    with store._get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT reservation_id FROM credit_llm_reservations WHERE run_id = %s ORDER BY call_index LIMIT 1", ("run-a",))
+            reservation_id = cur.fetchone()["reservation_id"]
+            cur.execute(
+                """
+                INSERT INTO credit_llm_usage_entries (
+                    user_id, reservation_id, run_id, call_index, bucket,
+                    amount_micro, operation_key, evidence_json, created_at
+                ) VALUES (%s, %s, %s, %s, 'purchased', %s, %s, '{"t":"test"}', %s)
+                """,
+                (
+                    user_id,
+                    reservation_id,
+                    "run-a",
+                    0,
+                    -4_000,
+                    f"{reservation_id}:recovery:test:purchased",
+                    "2026-09-14T00:00:00+00:00",
+                ),
+            )
+
+    assert store.sum_run_llm_spend(user_id, "run-a") == (46_318, 2)
