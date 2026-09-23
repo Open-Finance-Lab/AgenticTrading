@@ -632,6 +632,17 @@ class AnalyticsStore:
         existing: set[str] = set()
         if not values:
             return existing
+        with self._get_connection() as conn:
+            for offset in range(0, len(values), 500):
+                chunk = values[offset : offset + 500]
+                placeholders = ",".join("?" for _ in chunk)
+                rows = conn.execute(
+                    "SELECT source_event_id FROM analytics_events "
+                    f"WHERE source_event_id IN ({placeholders})",
+                    chunk,
+                ).fetchall()
+                existing.update(str(row["source_event_id"]) for row in rows)
+        return existing
 
     def list_daily_subjects(self) -> list[dict[str, Any]]:
         """Every non-admin, non-excluded account: id, user_group, created_at.

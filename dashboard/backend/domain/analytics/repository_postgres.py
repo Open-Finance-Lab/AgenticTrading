@@ -512,6 +512,17 @@ class PostgresAnalyticsStore:
         existing: set[str] = set()
         if not values:
             return existing
+        with self._get_connection() as conn:
+            with conn.cursor() as cur:
+                for offset in range(0, len(values), 500):
+                    chunk = values[offset : offset + 500]
+                    cur.execute(
+                        "SELECT source_event_id FROM analytics_events "
+                        "WHERE source_event_id = ANY(%s)",
+                        (chunk,),
+                    )
+                    existing.update(str(row["source_event_id"]) for row in cur.fetchall())
+        return existing
 
     def list_daily_subjects(self) -> list[dict[str, Any]]:
         """See the SQLite twin."""
