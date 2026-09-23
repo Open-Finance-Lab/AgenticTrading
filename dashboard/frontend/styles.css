@@ -13793,3 +13793,4 @@ table.sr-only {
 .research-open-btn{margin-top:4px}
 @media(max-width:900px){.research-columns{grid-template-columns:1fr}}
 .marketplace-card--research{border-color:rgba(103,232,249,.25)}
+.research-fact-icon{width:14px;height:14px;vertical-align:-2px;margin-right:2px}

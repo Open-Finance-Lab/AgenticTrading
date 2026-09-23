@@ -3120,6 +3120,14 @@ function buildResearchMarketplaceCardHtml(template) {
   const runtimeMin = Math.max(1, Math.round((research.estimated_runtime_seconds || 300) / 60));
   const formats = (research.output_formats || []).join(' / ') || 'Markdown';
   const description = String(template.description || '').trim();
+  const repoUrl = String(template.repo_url || '').trim();
+  const repoLabel = marketplaceRepoLabel(template);
+  const repoExtra = repoUrl
+    ? `<a class="marketplace-repo-btn" href="${escapeHtml(repoUrl)}" target="_blank" rel="noopener noreferrer" aria-label="Open ${escapeHtml(repoLabel)} on GitHub">
+            <svg class="ui-icon marketplace-repo-icon" aria-hidden="true"><use href="#icon-github"></use></svg>
+            <span>${escapeHtml(repoLabel)}</span>
+          </a>`
+    : '';
   return `
     <div class="section-card agent-card marketplace-card marketplace-card--research">
       <div class="agent-card-top">
@@ -3133,9 +3141,10 @@ function buildResearchMarketplaceCardHtml(template) {
         <span class="marketplace-mode-chip">Research</span>
       </div>
       ${description ? `<p class="marketplace-card-description">${escapeHtml(description)}</p>` : ''}
+      ${repoExtra}
       <div class="research-card-facts">
-        <span>⏱ ~${runtimeMin} min per run</span>
-        <span>📄 ${escapeHtml(formats)}</span>
+        <span><svg class="ui-icon research-fact-icon" aria-hidden="true"><use href="#icon-clock"></use></svg> ~${runtimeMin} min per run</span>
+        <span><svg class="ui-icon research-fact-icon" aria-hidden="true"><use href="#icon-file-text"></use></svg> ${escapeHtml(formats)}</span>
       </div>
       <div class="agent-card-actions agent-card-actions--status">
         <button class="agent-card-cta marketplace-clone-btn" type="button" data-template-id="${escapeHtml(template.template_id)}">Add to My Agents</button>
@@ -12520,7 +12529,10 @@ async function renderResearchShelf() {
           <span class="marketplace-mode-chip">Research</span>
         </div>
         <p class="research-agent-card-desc">${escapeHtml(String(agent.description || '').slice(0, 140))}</p>
-        <p class="research-agent-card-meta">⏱ ~${runtimeMin} min · ${escapeHtml(((agent.research || {}).output_formats || []).join(' / '))}</p>
+        <p class="research-agent-card-meta">
+          <svg class="ui-icon research-fact-icon" aria-hidden="true"><use href="#icon-clock"></use></svg> ~${runtimeMin} min ·
+          <svg class="ui-icon research-fact-icon" aria-hidden="true"><use href="#icon-file-text"></use></svg> ${escapeHtml(((agent.research || {}).output_formats || []).join(' / '))}
+        </p>
         <button type="button" class="auth-btn auth-btn-primary research-open-btn">Open workbench</button>
       </article>`;
   }).join('');
@@ -12642,7 +12654,11 @@ async function openResearchWorkbench(templateId) {
   nameEl.textContent = manifest.name || templateId;
   descEl.textContent = manifest.description || '';
   const runtimeMin = Math.max(1, Math.round((manifest.estimated_runtime_seconds || 300) / 60));
-  metaEl.textContent = `⏱ ~${runtimeMin} min per run · Output: ${(manifest.output_formats || []).join(' / ')}`;
+  metaEl.innerHTML =
+    '<svg class="ui-icon research-fact-icon" aria-hidden="true"><use href="#icon-clock"></use></svg> '
+    + `~${runtimeMin} min per run · `
+    + '<svg class="ui-icon research-fact-icon" aria-hidden="true"><use href="#icon-file-text"></use></svg> '
+    + `Output: ${escapeHtml((manifest.output_formats || []).join(' / '))}`;
 
   fieldsEl.innerHTML = (manifest.settings_schema?.fields || []).map((field) => {
     const value = field.default != null ? String(field.default) : '';

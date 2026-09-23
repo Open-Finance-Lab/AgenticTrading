@@ -436,7 +436,8 @@
      "pdf",
      "evidence_json"
     ]
-   }
+   },
+   "repo_url": "https://github.com/Lin-Feihan/shell-company-screening-agent"
   },
   {
    "template_id": "due-diligence-agent",
@@ -460,7 +461,8 @@
      "pdf",
      "evidence_json"
     ]
-   }
+   },
+   "repo_url": "https://github.com/Lin-Feihan/due-diligence-agent"
   }
  ]
 }
