@@ -13792,3 +13792,4 @@ table.sr-only {
 .research-agent-card-meta{margin:0;font-size:11.5px;opacity:.7}
 .research-open-btn{margin-top:4px}
 @media(max-width:900px){.research-columns{grid-template-columns:1fr}}
+.marketplace-card--research{border-color:rgba(103,232,249,.25)}

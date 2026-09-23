@@ -3113,25 +3113,34 @@ function marketplaceRepoLabel(template) {
 
 /** Compact leaderboard-first card. Shared by both supermarket shelves. */
 function buildResearchMarketplaceCardHtml(template) {
+  // Mirrors the trading card's wrapper classes (agent-card / agent-card-cta /
+  // agent-card-actions) — the blue CTA and card chrome hang off those, and a
+  // bare button with marketplace-clone-btn alone renders unstyled.
   const research = template.research || {};
   const runtimeMin = Math.max(1, Math.round((research.estimated_runtime_seconds || 300) / 60));
   const formats = (research.output_formats || []).join(' / ') || 'Markdown';
   const description = String(template.description || '').trim();
   return `
-    <article class="section-card marketplace-card research-card">
-      <div class="mp-head">
+    <div class="section-card agent-card marketplace-card marketplace-card--research">
+      <div class="agent-card-top">
+        <div class="agent-card-identity">
+          ${agentRobotIcon()}
+          <div class="agent-card-identity-text">
+            <h3 class="agent-name">${escapeHtml(template.name)}</h3>
+            <p class="agent-card-submeta">${escapeHtml(template.author || 'Community')} · Deep Research</p>
+          </div>
+        </div>
         <span class="marketplace-mode-chip">Research</span>
       </div>
-      <h4 class="marketplace-card-name">${escapeHtml(template.name)}</h4>
       ${description ? `<p class="marketplace-card-description">${escapeHtml(description)}</p>` : ''}
       <div class="research-card-facts">
         <span>⏱ ~${runtimeMin} min per run</span>
         <span>📄 ${escapeHtml(formats)}</span>
       </div>
-      <div class="marketplace-card-actions">
-        <button type="button" class="marketplace-clone-btn" data-template-id="${escapeHtml(template.template_id)}">Add to My Agents</button>
+      <div class="agent-card-actions agent-card-actions--status">
+        <button class="agent-card-cta marketplace-clone-btn" type="button" data-template-id="${escapeHtml(template.template_id)}">Add to My Agents</button>
       </div>
-    </article>`;
+    </div>`;
 }
 
 function buildMarketplaceCardHtml(template) {
