@@ -305,6 +305,7 @@ class ExternalBacktestSession:
         self.source_timestamps: List[Any] = []
         self.source_price_cache: Dict[str, Dict[Any, float]] = {}
         self.execution_timestamps: List[Any] = []
+        self.execution_price_fields: List[str] = []
         self.data_quality: Dict[str, Any] = {}
         self.frequency_contract: Optional[Dict[str, str]] = None
         self.market_data_provenance: Dict[str, Any] = {}
@@ -374,6 +375,9 @@ class ExternalBacktestSession:
         self.execution_timestamps = list(
             getattr(dataset, "execution_timestamps", self.timestamps)
         )
+        self.execution_price_fields = list(
+            getattr(dataset, "execution_price_fields", None) or []
+        )
         self.data_quality = dict(getattr(dataset, "data_quality", {}) or {})
         self.equity_metadata = dict(getattr(dataset, "equity_metadata", {}) or {})
         self.source_timeframe = getattr(
@@ -441,6 +445,13 @@ class ExternalBacktestSession:
         if len(self.execution_timestamps) == self.total_steps:
             return self.execution_timestamps
         return list(self.timestamps)
+
+    def _execution_price_field(self, step_index: int) -> str:
+        """The execution bar's "open", or its "close" for a session's final
+        bucket; see ``bar_aggregation.plan_execution_fills``."""
+        if len(self.execution_price_fields) == self.total_steps:
+            return self.execution_price_fields[step_index]
+        return "open"
 
     def _value_through(self, target_timestamp=None) -> None:
         """Mark the portfolio on each source bar through the given timestamp."""
@@ -776,10 +787,11 @@ class ExternalBacktestSession:
         timestamp = self.timestamps[self.step_index]
         execution_timestamp = self._effective_execution_timestamps()[self.step_index]
         execution_market_data = self._source_market_data_at(execution_timestamp)
+        execution_field = self._execution_price_field(self.step_index)
         execution_prices = {
-            symbol: row["open"]
+            symbol: row[execution_field]
             for symbol, row in execution_market_data.items()
-            if "open" in row
+            if execution_field in row
         }
 
         trades_before_execution = len(self.manager.trades)

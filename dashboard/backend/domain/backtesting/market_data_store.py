@@ -28,17 +28,16 @@ from __future__ import annotations
 import os
 import threading
 import time
-from bisect import bisect_left
 from collections import OrderedDict
 from math import ceil
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import pandas as pd
-import pytz
 
 from dashboard.backend.domain.backtesting.features import TechnicalIndicators
 from dashboard.backend.domain.backtesting.bar_aggregation import (
     aggregate_bars_by_symbol,
+    plan_execution_fills,
     summarize_aggregation_quality,
 )
 from dashboard.backend.infrastructure.market_data.alpaca_bars import AlpacaDataLoader
@@ -52,6 +51,7 @@ from dashboard.backend.infrastructure.market_data.frequency import (
     verify_source_timeframe,
 )
 from dashboard.backend.infrastructure.market_data.sessions import (
+    DEFAULT_MARKET,
     canonical_market,
     is_in_session,
     timezone_for_market,
@@ -79,7 +79,8 @@ class MarketDataset:
     __slots__ = (
         "key", "all_data", "timestamps", "price_cache", "total_steps",
         "source_data", "source_timestamps", "source_price_cache",
-        "execution_timestamps", "source_timeframe", "decision_timeframe",
+        "execution_timestamps", "execution_price_fields",
+        "source_timeframe", "decision_timeframe",
         "data_quality",
         "equity_metadata",
     )
@@ -90,6 +91,7 @@ class MarketDataset:
                  source_timestamps: Optional[List[Any]] = None,
                  source_price_cache: Optional[Dict[str, Dict[Any, float]]] = None,
                  execution_timestamps: Optional[List[Any]] = None,
+                 execution_price_fields: Optional[List[str]] = None,
                  source_timeframe: str = "60m",
                  decision_timeframe: str = "60m",
                  data_quality: Optional[Dict[str, Any]] = None,
@@ -113,6 +115,13 @@ class MarketDataset:
             if execution_timestamps is not None
             else list(timestamps)
         )
+        # Which price of the execution bar fills each step: its "open", or the
+        # "close" for a session's final bucket (``plan_execution_fills``).
+        self.execution_price_fields = (
+            execution_price_fields
+            if execution_price_fields is not None
+            else ["open"] * len(self.execution_timestamps)
+        )
         self.source_timeframe = source_timeframe
         self.decision_timeframe = decision_timeframe
         self.data_quality = data_quality or {}
@@ -133,12 +142,12 @@ _cache_lock = threading.Lock()
 _cache: "OrderedDict[Tuple, _Entry]" = OrderedDict()
 
 
-#: What this store assumed unconditionally before the market became a
-#: parameter, and therefore what a caller that passes nothing still gets. Kept
-#: as the default rather than made required so the in-process test doubles and
-#: the legacy callers that predate the market dimension are unaffected: the
-#: three shipped call sites all hold a `MarketProfile` and pass it.
-DEFAULT_MARKET = "US"
+# `DEFAULT_MARKET` (imported from `sessions`, which owns it) is what this store
+# assumed unconditionally before the market became a parameter, and therefore
+# what a caller that passes nothing still gets. Kept as the default rather than
+# made required so the in-process test doubles and the legacy callers that
+# predate the market dimension are unaffected: the three shipped call sites all
+# hold a `MarketProfile` and pass it.
 DEFAULT_TIMEZONE = timezone_for_market(DEFAULT_MARKET)
 
 
@@ -363,7 +372,8 @@ def _build_dataset(
             evidence="fetch",
         )
     data_quality: Dict[str, Any] = {}
-    if timeframe_minutes(actual_source) < timeframe_minutes(requested_decision):
+    aggregated = timeframe_minutes(actual_source) < timeframe_minutes(requested_decision)
+    if aggregated:
         aggregated_data = aggregate_bars_by_symbol(
             source_data,
             source_timeframe=actual_source,
@@ -394,8 +404,14 @@ def _build_dataset(
             all_data,
             timezone=timezone,
         )
+    # This store's loaders are Alpaca's, which stamp a raw bar at its open;
+    # an aggregated decision bar is stamped at its close.
+    source_open_minutes = timeframe_minutes(actual_source)
     timestamps = _build_trading_timestamps(
-        all_data, market=market, timezone=timezone
+        all_data,
+        market=market,
+        timezone=timezone,
+        open_stamped_minutes=None if aggregated else source_open_minutes,
     )
     if not timestamps:
         raise RuntimeError("No trading hours in the selected date range")
@@ -405,25 +421,17 @@ def _build_dataset(
         min_symbol_coverage=0.0,
         market=market,
         timezone=timezone,
+        open_stamped_minutes=source_open_minutes,
     )
     source_price_cache = _build_price_cache(source_data, source_timestamps)
-    execution_timestamps = _build_execution_timestamps(
-        timestamps,
-        source_timestamps,
-        timezone=timezone,
+    fills = plan_execution_fills(
+        timestamps, source_timestamps, market=market, timezone=timezone
     )
-    if any(execution_timestamp is None for execution_timestamp in execution_timestamps):
-        timestamps = [
-            timestamp
-            for timestamp, execution_timestamp in zip(
-                timestamps, execution_timestamps
-            )
-            if execution_timestamp is not None
-        ]
-        execution_timestamps = [
-            timestamp for timestamp in execution_timestamps if timestamp is not None
-        ]
+    if len(fills) < len(timestamps):
+        timestamps = [timestamp for timestamp in timestamps if timestamp in fills]
         price_cache = _build_price_cache(all_data, timestamps)
+    execution_timestamps = [fills[timestamp][0] for timestamp in timestamps]
+    execution_price_fields = [fills[timestamp][1] for timestamp in timestamps]
     dataset = MarketDataset(
         key,
         all_data,
@@ -433,6 +441,7 @@ def _build_dataset(
         source_timestamps=source_timestamps,
         source_price_cache=source_price_cache,
         execution_timestamps=execution_timestamps,
+        execution_price_fields=execution_price_fields,
         source_timeframe=actual_source,
         decision_timeframe=requested_decision,
         data_quality=data_quality,
@@ -444,45 +453,13 @@ def _build_dataset(
     return dataset
 
 
-def _market_day_key(timestamp, timezone: str) -> str:
-    if timestamp.tzinfo is None:
-        local = pytz.timezone(timezone).localize(timestamp)
-    else:
-        local = timestamp.astimezone(pytz.timezone(timezone))
-    return local.date().isoformat()
-
-
-def _build_execution_timestamps(
-    decision_timestamps: List[Any],
-    source_timestamps: List[Any],
-    *,
-    timezone: str,
-) -> List[Any]:
-    """Map a decision close to the source bar opening at that exact boundary."""
-    source_by_day: Dict[str, List[Any]] = {}
-    for timestamp in source_timestamps:
-        source_by_day.setdefault(_market_day_key(timestamp, timezone), []).append(
-            timestamp
-        )
-    result = []
-    for timestamp in decision_timestamps:
-        same_day = source_by_day.get(_market_day_key(timestamp, timezone), [])
-        index = bisect_left(same_day, timestamp)
-        exact_match = (
-            same_day[index]
-            if index < len(same_day) and same_day[index] == timestamp
-            else None
-        )
-        result.append(exact_match)
-    return result
-
-
 def _build_trading_timestamps(
     all_data: Dict[str, pd.DataFrame],
     *,
     min_symbol_coverage: float = 0.8,
     market: str = DEFAULT_MARKET,
     timezone: str = DEFAULT_TIMEZONE,
+    open_stamped_minutes: Optional[int] = None,
 ) -> List[Any]:
     """Return in-session timestamps meeting the requested symbol coverage.
 
@@ -506,7 +483,12 @@ def _build_trading_timestamps(
 
     return [
         ts for ts in ordered
-        if is_in_session(ts, market=market, timezone=timezone)
+        if is_in_session(
+            ts,
+            market=market,
+            timezone=timezone,
+            open_stamped_minutes=open_stamped_minutes,
+        )
     ]
 
 

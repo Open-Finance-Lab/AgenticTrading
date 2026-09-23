@@ -13,8 +13,9 @@ and some markets have a lunch break.
 
 from __future__ import annotations
 
-from datetime import time
-from typing import Any, Dict, Iterable, Mapping
+from bisect import bisect_left
+from datetime import date, time
+from typing import Any, Dict, Iterable, List, Mapping, Tuple
 
 import numpy as np
 import pandas as pd
@@ -24,7 +25,10 @@ from dashboard.backend.infrastructure.market_data.frequency import (
     timeframe_minutes,
 )
 # Re-exported: the session bounds have one owner, and it is not this module.
-from dashboard.backend.infrastructure.market_data.sessions import session_windows
+from dashboard.backend.infrastructure.market_data.sessions import (
+    is_session_close,
+    session_windows,
+)
 
 
 class BarAggregationError(ValueError):
@@ -326,3 +330,47 @@ def summarize_aggregation_quality(
         summary["usable_decision_bars"] += usable
         summary["dropped_decision_bars"] += total - usable
     return summary
+
+
+def _market_day(timestamp: Any, timezone: str) -> date:
+    stamp = pd.Timestamp(timestamp)
+    if stamp.tzinfo is None:
+        return stamp.tz_localize(timezone).date()
+    return stamp.tz_convert(timezone).date()
+
+
+def plan_execution_fills(
+    decision_timestamps: Iterable[Any],
+    source_timestamps: List[Any],
+    *,
+    market: str,
+    timezone: str,
+) -> Dict[Any, Tuple[Any, str]]:
+    """Map each decision bar to ``(source bar, price field)`` it fills on.
+
+    A decision closes at its stamp, so it fills at the ``open`` of the source
+    bar opening at that instant -- the first fill without look-ahead. A
+    session's final bucket (16:00 ET) has no such bar once after-hours bars are
+    out of the source set, so it fills at the ``close`` of the last source bar
+    before it that day: the same instant, priced at the last regular-hours
+    trade. Filling it at the 16:00 bar instead made the day's closing decision
+    depend on whether the tape served an after-hours bar at all.
+
+    One planner for the engine and the protocol path's dataset store, which
+    each used to carry their own copy of the exact-match rule. Decisions with
+    no fill are absent. ``source_timestamps`` must be sorted.
+    """
+    by_day: Dict[date, List[Any]] = {}
+    for timestamp in source_timestamps:
+        by_day.setdefault(_market_day(timestamp, timezone), []).append(timestamp)
+    fills: Dict[Any, Tuple[Any, str]] = {}
+    for timestamp in decision_timestamps:
+        same_day = by_day.get(_market_day(timestamp, timezone), [])
+        index = bisect_left(same_day, timestamp)
+        if index < len(same_day) and same_day[index] == timestamp:
+            fills[timestamp] = (timestamp, "open")
+        elif index > 0 and is_session_close(
+            timestamp, market=market, timezone=timezone
+        ):
+            fills[timestamp] = (same_day[index - 1], "close")
+    return fills

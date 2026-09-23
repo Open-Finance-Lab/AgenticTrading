@@ -12,9 +12,18 @@ from typing import Any, Dict, List, Optional
 import pandas as pd
 import pytz
 
+from dashboard.backend.infrastructure.market_data.frequency import timeframe_minutes
 from dashboard.backend.infrastructure.market_data.sessions import is_in_session
 
 _ET = pytz.timezone("US/Eastern")
+
+# Every leaderboard strategy runs on the raw Alpaca bars
+# ``leaderboard/baselines.fetch_hourly_bars`` requests at this timeframe.
+# Alpaca stamps a bar at its open, so the session filter needs the span: under
+# the close-stamp rule the board kept 10:00-16:00, i.e. the 16:00-17:00
+# after-hours bar in and the 09:00 bar holding the 09:30 open out.
+LEADERBOARD_BAR_TIMEFRAME = "60m"
+LEADERBOARD_BAR_OPEN_MINUTES = timeframe_minutes(LEADERBOARD_BAR_TIMEFRAME)
 
 
 def parse_config_date(date_str: str) -> dt.date:
@@ -63,10 +72,16 @@ def timestamps_in_reference(
 
 
 def filter_market_hours(timestamps: List[Any]) -> List[Any]:
-    """Keep only regular US market-hours timestamps (9:30–16:00 ET)."""
+    """Keep the board's open-stamped hourly bars that close in the 9:30–16:00
+    ET session: 09:00 through 15:00."""
     return [
         ts for ts in timestamps
-        if is_in_session(ts, market="US", timezone=_ET.zone)
+        if is_in_session(
+            ts,
+            market="US",
+            timezone=_ET.zone,
+            open_stamped_minutes=LEADERBOARD_BAR_OPEN_MINUTES,
+        )
     ]
 
 

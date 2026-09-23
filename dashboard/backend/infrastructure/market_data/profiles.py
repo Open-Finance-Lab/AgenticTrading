@@ -281,6 +281,18 @@ _DEFAULT_UNIVERSES = {
 }
 
 
+def bars_open_stamped(data_source: object) -> bool:
+    """Whether this source stamps a raw bar at its OPEN.
+
+    Alpaca does (10:00 is 10:00-11:00) and serves extended hours with it;
+    iFinD stamps at the close (10:30 is 09:30-10:30), and the vnpy simulation
+    emits in-session closes. The session filter must know which, since one
+    inclusive rule keeps Alpaca's after-hours 16:00 bar -- see
+    ``sessions.is_in_session(open_stamped_minutes=...)``.
+    """
+    return str(data_source or ALPACA).strip().lower() == ALPACA
+
+
 def registered_market_timezones() -> dict[str, str]:
     """``{market: timezone}`` across the registered profiles.
 

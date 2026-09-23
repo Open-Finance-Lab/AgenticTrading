@@ -70,7 +70,9 @@ def test_external_session_serves_hourly_bars_but_fills_and_values_on_5m():
 
     assert session.source_timeframe == "5m"
     assert session.intraday_mode is True
-    assert session.total_steps == 6
+    # Seven: the 16:00 bucket fills at the 15:55 bar's close rather than
+    # needing an after-hours bar to open at 16:00.
+    assert session.total_steps == 7
     assert session.data_quality["total_decision_bars"] == 7
     assert session.data_quality["usable_decision_bars"] == 7
     assert session.data_quality["dropped_decision_bars"] == 0
@@ -108,6 +110,73 @@ def test_external_session_serves_hourly_bars_but_fills_and_values_on_5m():
     assert decision_audit["actions_executed"] == 1
     # 09:30 through 10:30 ET inclusive: 13 five-minute valuation points.
     assert len(session.manager.equity_history) == 13
+
+
+def test_the_closing_decision_fills_at_the_last_regular_hours_close(monkeypatch):
+    """Alpaca stamps bars at their open and serves extended hours, so the bar
+    stamped 16:00 ET is 16:00-16:05 after hours. It must neither fill the
+    closing decision nor mark the curve; whether it exists is the tape's call.
+    """
+    after_hours_open = 999.0
+
+    class _ExtendedHoursLoader(_MinuteLoader):
+        def fetch_bars(self, symbols, start, end):
+            bars = _minute_bars(symbols, start, end)
+            extra = pd.Timestamp("2026-04-15 20:00:00+00:00")
+            for frame in bars.values():
+                frame.loc[extra] = {
+                    "open": after_hours_open,
+                    "high": after_hours_open,
+                    "low": after_hours_open,
+                    "close": after_hours_open,
+                    "volume": 10,
+                }
+            return bars
+
+    monkeypatch.setattr(ebs, "AlpacaDataLoader", _ExtendedHoursLoader)
+    session = ebs.ExternalBacktestSession(
+        backtest_id="bt-close",
+        session_id="sess-close",
+        agent_name="agent-close",
+        model_name="test-model",
+        start_date="2026-04-15",
+        end_date="2026-04-15",
+        symbols=["AAPL"],
+    )
+    session.load_market_data()
+
+    after_hours = pd.Timestamp("2026-04-15 20:00:00+00:00")
+    last_regular = pd.Timestamp("2026-04-15 19:55:00+00:00")
+    assert after_hours not in session.source_timestamps
+    assert session.total_steps == 7
+    assert session.execution_timestamps[-1] == last_regular
+    assert session.execution_price_fields == ["open"] * 6 + ["close"]
+
+    for _ in range(session.total_steps - 1):
+        session.submit_decisions({"actions": []})
+    session.submit_decisions(
+        {
+            "actions": [
+                {
+                    "symbol": "AAPL",
+                    "action": "buy",
+                    "confidence": 1.0,
+                    "reasoning": "closing buy",
+                    "position_size": 1,
+                }
+            ]
+        }
+    )
+
+    trade = session.manager.trades[-1]
+    assert trade["timestamp"] == last_regular
+    last_close = session.source_data["AAPL"].loc[last_regular, "close"]
+    assert trade["price"] == pytest.approx(last_close)
+    assert trade["price"] != pytest.approx(after_hours_open)
+    assert all(
+        pd.Timestamp(point["timestamp"]) != after_hours
+        for point in session.manager.equity_history
+    )
 
 
 def test_external_session_does_not_report_fill_without_next_symbol_bar(monkeypatch):
@@ -201,3 +270,38 @@ def test_final_metrics_expose_minute_contract_without_symbol_quality_details():
     assert metrics["market_data_feed"] == "iex"
     assert metrics["sip_fallback_to_iex"] is True
     assert metrics["end_clamped"] is False
+
+
+def test_the_engine_plans_the_same_closing_fill():
+    """The dashboard engine's twin of the protocol test above: the plan both
+    paths build through ``plan_execution_fills`` from the same source bars."""
+    from pathlib import Path
+
+    from dashboard.backend.domain.backtesting import engine as engine_module
+    from dashboard.backend.infrastructure.market_data import profiles
+
+    bars = _minute_bars(["AAPL"], None, None)
+    after_hours = pd.Timestamp("2026-04-15 20:00:00+00:00")
+    bars["AAPL"].loc[after_hours] = [999.0] * 5
+    backtester = engine_module.HourlyBacktester.__new__(
+        engine_module.HourlyBacktester
+    )
+    backtester.data_source = profiles.ALPACA
+    backtester.profile = profiles.get_market_profile(profiles.ALPACA)
+    backtester.intraday_mode = True
+    backtester.source_timeframe = "5m"
+    backtester.source_data = bars
+    decisions = list(
+        pd.date_range("2026-04-15 14:30", "2026-04-15 19:30", freq="h", tz="UTC")
+    ) + [after_hours]  # 10:30 ... 15:30 and the 16:00 ET closing bucket
+
+    kept, valuation, plan, fields = backtester._plan_executions(decisions)
+
+    last_regular = pd.Timestamp("2026-04-15 19:55:00+00:00")
+    assert kept == decisions
+    assert after_hours not in valuation and valuation[-1] == last_regular
+    assert plan[after_hours] == last_regular and fields[after_hours] == "close"
+    assert all(fields[ts] == "open" and plan[ts] == ts for ts in decisions[:-1])
+    # ...and the run loop prices the fill by that field, not a literal "open".
+    source = Path(engine_module.__file__).read_text(encoding="utf-8")
+    assert "symbol: row[execution_field]" in source
