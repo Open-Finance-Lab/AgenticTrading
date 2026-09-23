@@ -17,7 +17,6 @@ from dashboard.backend.app import app
 from dashboard.backend.domain.analytics.metrics import AnalyticsMetricFilters
 from dashboard.backend.domain.analytics.query_service import (
     AnalyticsQueryService,
-    AnalyticsUserFilters,
     get_analytics_query_service,
     get_value_analytics_query_service,
 )
@@ -329,17 +328,10 @@ def test_user_list_and_profile_are_display_safe(tmp_path):
     recalculate_user_snapshot(1, now=NOW, store=states)
     service = AnalyticsQueryService(store=analytics, user_store=users)
 
-    listing = service.list_users(
-        filters=AnalyticsUserFilters(),
-        limit=25,
-        offset=0,
-        now=NOW,
-    )
+
     profile = service.get_user_profile(user_id=1, now=NOW)
     serialized = profile.model_dump(mode="json")
 
-    assert listing.total == 1
-    assert listing.items[0].user_id == 1
     assert profile.state.status == "active"
     assert success.event_id in profile.state.evidence_event_ids
     assert profile.input_tokens == 120

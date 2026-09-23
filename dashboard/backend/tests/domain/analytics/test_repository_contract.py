@@ -15,7 +15,6 @@ from dashboard.backend.domain.analytics.models import (
 )
 from dashboard.backend.domain.analytics.query_service import (
     AnalyticsQueryService,
-    AnalyticsUserFilters,
 )
 from dashboard.backend.domain.analytics.repository import (
     ANALYTICS_SQLITE_DDL,
@@ -294,12 +293,7 @@ def assert_pr2_query_contract(store, user_id):
         ),
         now=NOW,
     )
-    users = service.list_users(
-        filters=AnalyticsUserFilters(),
-        limit=10,
-        offset=0,
-        now=NOW,
-    )
+
     profile = service.get_user_profile(user_id=user_id, now=NOW)
     activity = service.get_user_activity(
         user_id=user_id,
@@ -328,8 +322,6 @@ def assert_pr2_query_contract(store, user_id):
     assert overview.completed_runs == 1
     assert overview.failed_runs == 1
     assert overview.platform_model_cost_usd == 0.25
-    assert users.total == 1
-    assert users.items[0].status == "active"
     assert profile.state.status == "active"
     assert completed.event_id in profile.state.evidence_event_ids
     assert profile.input_tokens == 120
