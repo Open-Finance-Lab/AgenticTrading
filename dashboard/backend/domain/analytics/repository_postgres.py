@@ -161,6 +161,66 @@ CREATE TABLE IF NOT EXISTS analytics_projection_jobs (
     updated_at TEXT NOT NULL
 );
 
+
+CREATE TABLE IF NOT EXISTS user_activity (
+    user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+    activated_at TEXT,
+    last_meaningful_activity_at TEXT,
+    updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS user_daily_facts (
+    snapshot_date TEXT NOT NULL CHECK (length(snapshot_date) = 10),
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    lifecycle_segment TEXT NOT NULL,
+    lifecycle_reason_code TEXT NOT NULL,
+    operational_state TEXT NOT NULL
+        CHECK (operational_state IN ('blocked', 'needs_attention', 'healthy')),
+    operational_reason_code TEXT,
+    tier TEXT NOT NULL
+        CHECK (tier IN ('unpaid', 'starter', 'invested', 'high_value')),
+    user_group TEXT NOT NULL DEFAULT 'unknown'
+        CHECK (user_group IN (
+            'internal', 'invited', 'organic', 'competition', 'partner', 'unknown'
+        )),
+    active BOOLEAN NOT NULL DEFAULT FALSE,
+    runs_requested INTEGER NOT NULL DEFAULT 0 CHECK (runs_requested >= 0),
+    runs_completed INTEGER NOT NULL DEFAULT 0 CHECK (runs_completed >= 0),
+    runs_failed INTEGER NOT NULL DEFAULT 0 CHECK (runs_failed >= 0),
+    runs_cancelled INTEGER NOT NULL DEFAULT 0 CHECK (runs_cancelled >= 0),
+    operator_cost_micro BIGINT NOT NULL DEFAULT 0
+        CHECK (operator_cost_micro >= 0),
+    own_spend_micro BIGINT NOT NULL DEFAULT 0 CHECK (own_spend_micro >= 0),
+    data_quality TEXT NOT NULL CHECK (data_quality IN ('complete', 'partial')),
+    calculated_at TEXT NOT NULL,
+    PRIMARY KEY (snapshot_date, user_id)
+);
+CREATE INDEX IF NOT EXISTS idx_daily_facts_segment
+    ON user_daily_facts(snapshot_date, lifecycle_segment);
+CREATE INDEX IF NOT EXISTS idx_daily_facts_user
+    ON user_daily_facts(user_id, snapshot_date DESC);
+CREATE INDEX IF NOT EXISTS idx_daily_facts_user_group
+    ON user_daily_facts(snapshot_date, user_group);
+CREATE INDEX IF NOT EXISTS idx_daily_facts_tier
+    ON user_daily_facts(snapshot_date, tier);
+CREATE INDEX IF NOT EXISTS idx_daily_facts_operational
+    ON user_daily_facts(snapshot_date, operational_state, operational_reason_code);
+
+CREATE TABLE IF NOT EXISTS lifecycle_transitions (
+    transition_id BIGSERIAL PRIMARY KEY,
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    snapshot_date TEXT NOT NULL CHECK (length(snapshot_date) = 10),
+    from_segment TEXT NOT NULL,
+    to_segment TEXT NOT NULL,
+    inactive_days INTEGER NOT NULL DEFAULT 0 CHECK (inactive_days >= 0),
+    data_quality TEXT NOT NULL DEFAULT 'complete'
+        CHECK (data_quality IN ('complete', 'partial')),
+    created_at TEXT NOT NULL,
+    UNIQUE (user_id, snapshot_date)
+);
+CREATE INDEX IF NOT EXISTS idx_lifecycle_transitions_day
+    ON lifecycle_transitions(snapshot_date, to_segment);
+
 CREATE TABLE IF NOT EXISTS analytics_subject_settings (
     user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
     excluded BOOLEAN NOT NULL,

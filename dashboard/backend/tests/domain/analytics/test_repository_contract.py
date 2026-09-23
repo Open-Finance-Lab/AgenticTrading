@@ -729,3 +729,131 @@ def test_foreign_keys_reject_missing_users(sqlite_contract):
         store.append_event(event_record(999_999))
     with pytest.raises((AnalyticsStoreError, sqlite3.IntegrityError)):
         store.record_admin_access(999_998, 999_999, "overview")
+
+
+def test_sqlite_declares_the_daily_fact_tables(sqlite_contract):
+    store, _admin_id, _user_id = sqlite_contract
+
+    with store._get_connection() as conn:
+        names = {
+            row[0]
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            ).fetchall()
+        }
+        fact_columns = {
+            row[1]
+            for row in conn.execute("PRAGMA table_info(user_daily_facts)").fetchall()
+        }
+        activity_columns = {
+            row[1]
+            for row in conn.execute("PRAGMA table_info(user_activity)").fetchall()
+        }
+        transition_columns = {
+            row[1]
+            for row in conn.execute(
+                "PRAGMA table_info(lifecycle_transitions)"
+            ).fetchall()
+        }
+
+    assert {
+        "user_activity",
+        "user_daily_facts",
+        "lifecycle_transitions",
+    } <= names
+    assert fact_columns == {
+        "snapshot_date",
+        "user_id",
+        "lifecycle_segment",
+        "lifecycle_reason_code",
+        "operational_state",
+        "operational_reason_code",
+        "tier",
+        "user_group",
+        "active",
+        "runs_requested",
+        "runs_completed",
+        "runs_failed",
+        "runs_cancelled",
+        "operator_cost_micro",
+        "own_spend_micro",
+        "data_quality",
+        "calculated_at",
+    }
+    # D9: the struck axis must not come back under its old name.
+    assert "cohort" not in fact_columns
+    assert activity_columns == {
+        "user_id",
+        "activated_at",
+        "last_meaningful_activity_at",
+        "updated_at",
+    }
+    assert transition_columns == {
+        "transition_id",
+        "user_id",
+        "snapshot_date",
+        "from_segment",
+        "to_segment",
+        "inactive_days",
+        "data_quality",
+        "created_at",
+    }
+
+
+def test_user_group_on_facts_defaults_to_unknown_and_is_constrained(sqlite_contract):
+    store, _admin_id, user_id = sqlite_contract
+
+    with store._get_connection() as conn:
+        conn.execute(
+            """
+            INSERT INTO user_daily_facts (
+                snapshot_date, user_id, lifecycle_segment, lifecycle_reason_code,
+                operational_state, tier, data_quality, calculated_at
+            ) VALUES (
+                '2026-09-11', ?, 'growing', 'growing_activated_below_core_threshold',
+                'healthy', 'unpaid', 'complete', '2026-09-12T00:05:00+00:00'
+            )
+            """,
+            (user_id,),
+        )
+        row = conn.execute(
+            "SELECT user_group, operational_reason_code FROM user_daily_facts"
+        ).fetchone()
+        assert row["user_group"] == "unknown"
+        assert row["operational_reason_code"] is None
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute(
+                """
+                INSERT INTO user_daily_facts (
+                    snapshot_date, user_id, lifecycle_segment, lifecycle_reason_code,
+                    operational_state, tier, user_group, data_quality, calculated_at
+                ) VALUES (
+                    '2026-09-10', ?, 'growing', 'growing_activated_below_core_threshold',
+                    'healthy', 'unpaid', 'lab', 'complete', '2026-09-11T00:05:00+00:00'
+                )
+                """,
+                (user_id,),
+            )
+
+
+def test_lifecycle_transitions_are_unique_per_user_per_day(sqlite_contract):
+    """A retried daily job must not append the same transition twice."""
+    store, _admin_id, user_id = sqlite_contract
+
+    with store._get_connection() as conn:
+        for _ in range(2):
+            conn.execute(
+                """
+                INSERT OR IGNORE INTO lifecycle_transitions (
+                    user_id, snapshot_date, from_segment, to_segment,
+                    inactive_days, created_at
+                ) VALUES (?, '2026-09-11', 'growing', 'at_risk', 8,
+                          '2026-09-12T00:05:00+00:00')
+                """,
+                (user_id,),
+            )
+        count = conn.execute(
+            "SELECT COUNT(*) FROM lifecycle_transitions"
+        ).fetchone()[0]
+
+    assert count == 1
