@@ -126,6 +126,7 @@ class PostgresBacktestDatabase:
                         output_tokens INTEGER DEFAULT 0,
                         est_cost_usd DOUBLE PRECISION DEFAULT 0,
                         metadata TEXT,
+                        owner_user_id INTEGER,
                         created_at TEXT NOT NULL {created_at_default},
                         updated_at TEXT NOT NULL {created_at_default},
                         baseline_djia_run_id TEXT,
@@ -274,6 +275,9 @@ class PostgresBacktestDatabase:
                 )
                 cur.execute(
                     "ALTER TABLE agent_runs ADD COLUMN IF NOT EXISTS metadata TEXT"
+                )
+                cur.execute(
+                    "ALTER TABLE agent_runs ADD COLUMN IF NOT EXISTS owner_user_id INTEGER"
                 )
 
                 cur.execute(
@@ -487,7 +491,8 @@ class PostgresBacktestDatabase:
                    input_tokens: int = 0,
                    output_tokens: int = 0,
                    est_cost_usd: float = 0.0,
-                   metadata: Optional[Dict[str, Any]] = None) -> None:
+                   metadata: Optional[Dict[str, Any]] = None,
+                   owner_user_id: Optional[int] = None) -> None:
         """Insert or refresh a backtest run.
 
         Carries divergences 1-3 from the module docstring, all of them
@@ -549,8 +554,8 @@ class PostgresBacktestDatabase:
                      initial_equity, final_equity, total_return, sharpe_ratio,
                      max_drawdown, num_trades, llm_model,
                      llm_calls, llm_decisions, input_tokens, output_tokens,
-                     est_cost_usd, metadata)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                     est_cost_usd, metadata, owner_user_id)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::integer)
                     ON CONFLICT (run_id) DO UPDATE SET
                         session_id = EXCLUDED.session_id,
                         agent_name = EXCLUDED.agent_name,
@@ -570,6 +575,7 @@ class PostgresBacktestDatabase:
                         output_tokens = EXCLUDED.output_tokens,
                         est_cost_usd = EXCLUDED.est_cost_usd,
                         metadata = EXCLUDED.metadata,
+                        owner_user_id = EXCLUDED.owner_user_id,
                         updated_at = to_char(now() AT TIME ZONE 'utc', 'YYYY-MM-DD HH24:MI:SS')
                     """,
                     (
@@ -579,6 +585,7 @@ class PostgresBacktestDatabase:
                         llm_calls, llm_decisions, input_tokens, output_tokens,
                         est_cost_usd,
                         json.dumps(metadata) if metadata is not None else None,
+                        owner_user_id,
                     ),
                 )
 

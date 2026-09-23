@@ -1576,6 +1576,7 @@ def run_backtest_background(
     # decoding it at timeout time would fail even if we had the key. Used only
     # to decide whether a timeout has a Credits cost worth reporting.
     billing_mode: Optional[str] = None,
+    owner_user_id: Optional[int] = None,
 ):
     """Run backtest in background thread.
 
@@ -1731,6 +1732,8 @@ def run_backtest_background(
             # how that gap becomes its measured `starting` phase.
             "--launched-at", f"{launched_at:.3f}",
         ]
+        if owner_user_id is not None:
+            cmd += ["--owner-user-id", str(int(owner_user_id))]
 
         # Simulation capital is independent of the agent's portfolio sleeve.
         cmd += ["--initial-capital", str(resolve_initial_capital(initial_capital))]
@@ -3522,6 +3525,10 @@ def run_backtest_endpoint(
                 if execution_handoff_payload is not None and billing_mode is not None
                 else None
             ),
+            # The caller's OWN account, the same user_id _backtest_owner_key
+            # bills the slot to -- never the session the results file under,
+            # which for a built-in agent is the agent's, not the caller's.
+            "owner_user_id": user_id,
             **({"universe_selection": universe_selection} if universe_selection is not None else {}),
         },
         daemon=True

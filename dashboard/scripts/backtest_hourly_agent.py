@@ -269,6 +269,13 @@ def main():
         help="Read one signed, secret-free execution handoff from stdin",
     )
     parser.add_argument("--run-id", default=None, help="Preset run id (used for live progress + DB row)")
+
+    parser.add_argument(
+        "--owner-user-id",
+        type=int,
+        default=None,
+        help="Authenticated caller who started this run (analytics attribution)",
+    )
     parser.add_argument("--progress-file", default=None, help="Path to write incremental equity snapshots for live dashboard charting")
     parser.add_argument(
         "--launched-at",
@@ -508,6 +515,7 @@ def main():
         model=args.model,
         pipeline=pipeline,
         live_run_id=args.run_id,
+        owner_user_id=args.owner_user_id,
         progress_file=args.progress_file,
         data_source=args.data_source,
         initial_capital=capital,

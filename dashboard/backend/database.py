@@ -146,6 +146,7 @@ class BacktestDatabase:
                 output_tokens INTEGER DEFAULT 0,
                 est_cost_usd REAL DEFAULT 0,
                 metadata TEXT,
+                owner_user_id INTEGER,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
@@ -369,6 +370,11 @@ class BacktestDatabase:
                  "ALTER TABLE agent_runs ADD COLUMN est_cost_usd REAL DEFAULT 0"),
                 ("metadata",
                  "ALTER TABLE agent_runs ADD COLUMN metadata TEXT"),
+                # Analytics attribution (design §6.4): the authenticated caller
+                # who started a dashboard backtest. Nullable and never
+                # backfilled -- scheduled leaderboard deploys have no caller.
+                ("owner_user_id",
+                 "ALTER TABLE agent_runs ADD COLUMN owner_user_id INTEGER"),
             ]
             for col_name, add_column_sql in token_columns:
                 if col_name not in columns:
@@ -642,7 +648,8 @@ class BacktestDatabase:
                    input_tokens: int = 0,
                    output_tokens: int = 0,
                    est_cost_usd: float = 0.0,
-                   metadata: Optional[Dict[str, Any]] = None) -> None:
+                   metadata: Optional[Dict[str, Any]] = None,
+                   owner_user_id: Optional[int] = None) -> None:
         """Insert a new backtest run with session_id, LLM model and token-cost tracking.
 
         ``llm_calls`` and ``llm_decisions`` are not two spellings of one number:
@@ -662,14 +669,15 @@ class BacktestDatabase:
              initial_equity, final_equity, total_return, sharpe_ratio,
              max_drawdown, num_trades, llm_model,
              llm_calls, llm_decisions, input_tokens, output_tokens,
-             est_cost_usd, metadata)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             est_cost_usd, metadata, owner_user_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (run_id, session_id, agent_name, mode, start_date, end_date,
               initial_equity, final_equity, total_return, sharpe_ratio,
               max_drawdown, num_trades, llm_model,
               llm_calls, llm_decisions, input_tokens, output_tokens,
               est_cost_usd,
-              json.dumps(metadata) if metadata is not None else None))
+              json.dumps(metadata) if metadata is not None else None,
+              owner_user_id))
 
         conn.commit()
         conn.close()
