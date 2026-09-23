@@ -27,6 +27,18 @@ import time
 #: module, so this stamp costs nothing it measures.
 CHILD_ENTERED_AT = time.time()
 
+#: The steady companion to the stamp above, taken at the same instant. The
+#: wall stamp has to stay -- it is the only reference the PARENT's
+#: `--launched-at` can be differenced against -- but the interval that starts
+#: here and ends at IMPORTS_DONE_STEADY is entirely inside this process, so
+#: differencing the two wall stamps for it would reintroduce exactly the
+#: hazard #509 removed everywhere else: an NTP correction landing mid-import
+#: prints a negative `imports+stores`, or one smaller than the monotonic
+#: `schema DDL` figure beside it on the same line. `time.monotonic` is the
+#: same clock `engine.steady_clock` is bound to, which is what lets the engine
+#: close the `preflight` split against IMPORTS_DONE_STEADY below.
+CHILD_ENTERED_STEADY = time.monotonic()
+
 import sys
 import json
 import argparse
@@ -194,6 +206,14 @@ from dashboard.backend import db_url
 #: Postgres-capable). The gap to CHILD_ENTERED_AT is the number Task 5 moves a
 #: part of; without it, `starting` cannot say which part.
 IMPORTS_DONE_AT = time.time()
+
+#: Steady twin, for the two splits of `starting` that have no cross-process
+#: endpoint: `imports+stores` (bounded by CHILD_ENTERED_STEADY above) and
+#: `preflight` (bounded by the engine's own `steady_clock()` read when it
+#: closes the phase, in this same process). Only `spawn+interpreter` and the
+#: phase total are irreducibly wall-clock, because only they reach back into
+#: the parent.
+IMPORTS_DONE_STEADY = time.monotonic()
 
 #: The DDL total as of that same instant. Read here rather than in main()
 #: because it is attributed to the CHILD_ENTERED_AT -> IMPORTS_DONE_AT window,
@@ -511,6 +531,15 @@ def main():
             "child_entered_at": CHILD_ENTERED_AT,
             "imports_done_at": IMPORTS_DONE_AT,
             "schema_init_seconds": IMPORTS_SCHEMA_INIT_SECONDS,
+            # The steady pair is handed over raw rather than pre-differenced:
+            # `imports+stores` closes here, but `preflight` closes in the
+            # engine, so only the engine can compute it -- and one owner for
+            # both keeps the two splits on the same clock by construction.
+            # The engine keeps these two OUT of `phases[]`: a raw
+            # `monotonic()` reading has a per-process epoch and means nothing
+            # to whoever reads the file. It publishes the durations instead.
+            "child_entered_steady": CHILD_ENTERED_STEADY,
+            "imports_done_steady": IMPORTS_DONE_STEADY,
         },
         **({"universe_selection": universe_selection} if universe_selection is not None else {}),
     )

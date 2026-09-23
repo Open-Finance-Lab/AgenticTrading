@@ -739,6 +739,41 @@ def test_write_many_skips_the_scan_when_it_cannot_have_crossed_the_cap(
     assert len(scans) == 1
 
 
+def test_scan_state_is_bounded_and_keeps_the_newest_directories(monkeypatch, tmp_path):
+    """`_scan_state` is keyed by cache directory and nothing else removes from
+    it. Every deployed configuration resolves `cache_dir()` once, so this is a
+    bound against a leak that only a long-lived process moving
+    ATL_BAR_CACHE_DIR could reach -- today, a test suite. What must hold is the
+    eviction ORDER: the entries worth keeping are the ones a live writer is
+    still writing to, i.e. the most recently scanned.
+    """
+    monkeypatch.setattr(bar_cache, "_scan_state", {})
+    for index in range(bar_cache._MAX_SCAN_STATE_DIRS + 4):
+        bar_cache._remember_scan(tmp_path / f"dir{index}", float(index), 0.0)
+    assert len(bar_cache._scan_state) == bar_cache._MAX_SCAN_STATE_DIRS
+    kept = set(bar_cache._scan_state)
+    newest = {
+        str(tmp_path / f"dir{index}")
+        for index in range(4, bar_cache._MAX_SCAN_STATE_DIRS + 4)
+    }
+    assert kept == newest
+
+
+def test_remember_scan_returns_a_usable_state_even_if_it_was_evicted(
+    monkeypatch, tmp_path
+):
+    """`enforce_size_cap` amends the state after evicting, so it holds the
+    returned reference rather than re-indexing the dict. A clock that made the
+    new entry look stalest would otherwise KeyError on that second write.
+    """
+    monkeypatch.setattr(bar_cache, "_scan_state", {})
+    for index in range(bar_cache._MAX_SCAN_STATE_DIRS):
+        bar_cache._remember_scan(tmp_path / f"dir{index}", 1000.0, 0.0)
+    state = bar_cache._remember_scan(tmp_path / "late", 0.0, 5.0)
+    assert str(tmp_path / "late") not in bar_cache._scan_state  # evicted as stalest
+    state[1] = 7.0  # must not raise
+
+
 def test_write_many_rescans_once_the_interval_has_elapsed(cache_dir, monkeypatch):
     """Other processes' writes are invisible to the estimate, so the scan
     also runs on a clock, not only on this process's bytes."""
