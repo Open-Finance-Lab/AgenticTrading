@@ -18,17 +18,26 @@ from .repository_common import positive_limit, positive_user_id, utc_iso
 from .value_repository import (
     _ACTIVE_RUN_STATUSES,
     _TERMINAL_RUN_STATUSES,
+    _RECENT_FACTS_SQL,
+    _activity_from_row,
+    _population_operational_signals,
+    _recent_totals_from_row,
     LIFECYCLE_ROLLUP_METRICS,
     LIFECYCLE_SEGMENTS,
     MAX_USER_BATCH,
     RUN_SAFE_DEADLINE,
     CommercialValueFact,
     CurrentOperationalFacts,
+    ActivityUpdate,
+    DayEventTotals,
+    LifecycleTransitionRow,
     ProjectionJob,
+    RecentFactTotals,
+    UserActivity,
+    UserDailyFact,
     UserLifecycleDailySnapshot,
     UserValueSnapshot,
     _current_snapshot_from_row,
-    _fetchall,
     _ids,
     _legacy_seed,
     _object_value,
@@ -36,11 +45,14 @@ from .value_repository import (
     _projection_job_name,
     _row_value,
     _timestamp,
-    _user_clause,
     _utc,
     _validate_window,
     analytics_store,
     commercial_tier,
+)
+from .lifecycle import (
+    OperationalSignals,
+    consecutive_failed_terminal_runs,
 )
 
 
@@ -431,6 +443,304 @@ class PostgresValueAnalyticsStore:
                 row = cur.fetchone()
         return row is not None
 
+    def record_activity(
+        self,
+        user_id: int,
+        *,
+        occurred_at: datetime,
+        activating: bool,
+        now: datetime,
+    ) -> None:
+        """See the SQLite twin. Postgres ``LEAST``/``GREATEST`` skip NULLs, so
+        the COALESCE pair is redundant here but harmless; keeping both dialects
+        spelled the same way is worth more than saving two lines. ``%s::text``
+        on the nullable ``activated_at`` gives psycopg a type for the ``None``
+        it would otherwise send as OID 0.
+        """
+        subject_id = positive_user_id(user_id)
+        occurred = utc_iso(_utc(occurred_at, "occurred_at"))
+        values = (
+            subject_id,
+            occurred if activating else None,
+            occurred,
+            utc_iso(_utc(now, "now")),
+        )
+        sql = """
+            INSERT INTO user_activity (
+                user_id, activated_at, last_meaningful_activity_at, updated_at
+            ) VALUES (%s, %s::text, %s, %s)
+            ON CONFLICT(user_id) DO UPDATE SET
+                activated_at = LEAST(
+                    COALESCE(user_activity.activated_at, EXCLUDED.activated_at),
+                    COALESCE(EXCLUDED.activated_at, user_activity.activated_at)
+                ),
+                last_meaningful_activity_at = GREATEST(
+                    COALESCE(
+                        user_activity.last_meaningful_activity_at,
+                        EXCLUDED.last_meaningful_activity_at
+                    ),
+                    EXCLUDED.last_meaningful_activity_at
+                ),
+                updated_at = EXCLUDED.updated_at
+        """
+        with self._analytics_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql, values)
+
+    def get_activity(self, user_id: int) -> UserActivity | None:
+        """One user's stored activity row, or None if they have none yet."""
+        subject_id = positive_user_id(user_id)
+        with self._analytics_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT * FROM user_activity WHERE user_id = %s", (subject_id,)
+                )
+                row = cur.fetchone()
+        return _activity_from_row(row) if row is not None else None
+
+    def list_activity(
+        self,
+        user_ids: Sequence[int] | None = None,
+    ) -> dict[int, UserActivity]:
+        """See the SQLite twin."""
+        result: dict[int, UserActivity] = {}
+        if user_ids is None:
+            with self._analytics_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT * FROM user_activity ORDER BY user_id")
+                    rows = cur.fetchall()
+            for row in rows:
+                activity = _activity_from_row(row)
+                result[activity.user_id] = activity
+            return result
+        ids = _ids(user_ids)
+        if not ids:
+            return {}
+        for offset in range(0, len(ids), MAX_USER_BATCH):
+            chunk = ids[offset : offset + MAX_USER_BATCH]
+            with self._analytics_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "SELECT * FROM user_activity WHERE user_id = ANY(%s) "
+                        "ORDER BY user_id",
+                        (chunk,),
+                    )
+                    rows = cur.fetchall()
+            for row in rows:
+                activity = _activity_from_row(row)
+                result[activity.user_id] = activity
+        return result
+
+    def seed_activity_from_snapshots(self, *, now: datetime) -> int:
+        """See the SQLite twin."""
+        stamp = utc_iso(_utc(now, "now"))
+        sql = """
+            INSERT INTO user_activity (
+                user_id, activated_at, last_meaningful_activity_at, updated_at
+            )
+            SELECT user_id, activated_at, last_meaningful_activity_at, %s
+            FROM user_analytics_snapshots
+            WHERE activated_at IS NOT NULL
+               OR last_meaningful_activity_at IS NOT NULL
+            ON CONFLICT(user_id) DO UPDATE SET
+                activated_at = LEAST(
+                    COALESCE(user_activity.activated_at, EXCLUDED.activated_at),
+                    COALESCE(EXCLUDED.activated_at, user_activity.activated_at)
+                ),
+                last_meaningful_activity_at = GREATEST(
+                    COALESCE(
+                        user_activity.last_meaningful_activity_at,
+                        EXCLUDED.last_meaningful_activity_at
+                    ),
+                    COALESCE(
+                        EXCLUDED.last_meaningful_activity_at,
+                        user_activity.last_meaningful_activity_at
+                    )
+                ),
+                updated_at = EXCLUDED.updated_at
+        """
+        with self._analytics_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql, (stamp,))
+                return max(0, int(cur.rowcount))
+
+    def sum_recent_facts(
+        self,
+        user_ids: Sequence[int] | None,
+        *,
+        start: date,
+        end: date,
+    ) -> dict[int, RecentFactTotals]:
+        """See the SQLite twin."""
+        if end < start:
+            raise ValueError("end must not precede start")
+        params: list[Any] = [start.isoformat(), end.isoformat()]
+        user_clause = ""
+        if user_ids is not None:
+            ids = _ids(user_ids)
+            if not ids:
+                return {}
+            user_clause = " AND user_id = ANY(%s)"
+            params.append(ids)
+        sql = _RECENT_FACTS_SQL.format(p="%s", user_clause=user_clause)
+        with self._analytics_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql, params)
+                rows = cur.fetchall()
+        return {
+            int(_row_value(row, "user_id")): _recent_totals_from_row(row)
+            for row in rows
+        }
+
+    def aggregate_events_for_day(self, day: date) -> dict[int, DayEventTotals]:
+        """See the SQLite twin."""
+        start, end = _day_bounds_iso(day)
+        activity = ", ".join("%s" for _ in _ACTIVITY_EVENT_NAMES)
+        sql = _EVENTS_FOR_DAY_SQL.format(activity=activity, p="%s")
+        with self._analytics_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql, [*_ACTIVITY_EVENT_NAMES, start, end])
+                rows = cur.fetchall()
+        return {
+            int(_row_value(row, "user_id")): _events_totals_from_row(row) for row in rows
+        }
+
+    def record_activity_batch(
+        self,
+        updates: Sequence[ActivityUpdate],
+        *,
+        now: datetime,
+    ) -> int:
+        """See the SQLite twin."""
+        if not updates:
+            return 0
+        stamp = utc_iso(_utc(now, "now"))
+        sql = """
+            INSERT INTO user_activity (
+                user_id, activated_at, last_meaningful_activity_at, updated_at
+            ) VALUES (%s, %s::text, %s::text, %s)
+            ON CONFLICT(user_id) DO UPDATE SET
+                activated_at = LEAST(
+                    COALESCE(user_activity.activated_at, EXCLUDED.activated_at),
+                    COALESCE(EXCLUDED.activated_at, user_activity.activated_at)
+                ),
+                last_meaningful_activity_at = GREATEST(
+                    COALESCE(
+                        user_activity.last_meaningful_activity_at,
+                        EXCLUDED.last_meaningful_activity_at
+                    ),
+                    COALESCE(
+                        EXCLUDED.last_meaningful_activity_at,
+                        user_activity.last_meaningful_activity_at
+                    )
+                ),
+                updated_at = EXCLUDED.updated_at
+        """
+        with self._analytics_connection() as conn:
+            with conn.cursor() as cur:
+                cur.executemany(
+                    sql, [_activity_update_values(update, stamp) for update in updates]
+                )
+        return len(updates)
+
+    def upsert_daily_facts(self, rows: Sequence[UserDailyFact]) -> int:
+        """See the SQLite twin. ``active`` is BOOLEAN here."""
+        if not rows:
+            return 0
+        columns = ", ".join(_DAILY_FACT_COLUMNS)
+        placeholders = ", ".join("%s" for _ in _DAILY_FACT_COLUMNS)
+        sql = f"""
+            INSERT INTO user_daily_facts ({columns})
+            VALUES ({placeholders})
+            ON CONFLICT(snapshot_date, user_id) DO UPDATE SET {_DAILY_FACT_UPDATES}
+        """
+        with self._analytics_connection() as conn:
+            with conn.cursor() as cur:
+                cur.executemany(
+                    sql, [_fact_values(row, active_value=bool(row.active)) for row in rows]
+                )
+        return len(rows)
+
+    def append_lifecycle_transitions(
+        self, rows: Sequence[LifecycleTransitionRow]
+    ) -> int:
+        """See the SQLite twin."""
+        if not rows:
+            return 0
+        columns = ", ".join(_TRANSITION_COLUMNS)
+        placeholders = ", ".join("%s" for _ in _TRANSITION_COLUMNS)
+        sql = f"""
+            INSERT INTO lifecycle_transitions ({columns})
+            VALUES ({placeholders})
+            ON CONFLICT(user_id, snapshot_date) DO UPDATE SET {_TRANSITION_UPDATES}
+        """
+        with self._analytics_connection() as conn:
+            with conn.cursor() as cur:
+                cur.executemany(sql, [_transition_values(row) for row in rows])
+        return len(rows)
+
+    def list_facts_for_date(self, day: date) -> list[UserDailyFact]:
+        """See the SQLite twin."""
+        with self._analytics_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT * FROM user_daily_facts WHERE snapshot_date = %s ORDER BY user_id",
+                    (day.isoformat(),),
+                )
+                rows = cur.fetchall()
+        return [_fact_from_row(row) for row in rows]
+
+    def list_days_needing_recompute(self, *, since: date, until: date) -> list[date]:
+        """See the SQLite twin."""
+        if until < since:
+            raise ValueError("until must not precede since")
+        start, _unused = _day_bounds_iso(since)
+        _unused, end = _day_bounds_iso(until)
+        with self._analytics_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(_RECOMPUTE_EVENTS_SQL.format(p="%s"), (start, end))
+                event_rows = cur.fetchall()
+                cur.execute(
+                    _RECOMPUTE_FACTS_SQL.format(p="%s"),
+                    (since.isoformat(), until.isoformat()),
+                )
+                fact_rows = cur.fetchall()
+        return _recompute_days(event_rows, fact_rows)
+
+    def copy_daily_snapshot_history(self, *, since: date, now: datetime) -> int:
+        """See the SQLite twin. ``active`` is BOOLEAN here."""
+        stamp = utc_iso(_utc(now, "now"))
+        sql = """
+            INSERT INTO user_daily_facts (
+                snapshot_date, user_id, lifecycle_segment, lifecycle_reason_code,
+                operational_state, operational_reason_code, tier, user_group, active,
+                runs_requested, runs_completed, runs_failed, runs_cancelled,
+                operator_cost_micro, own_spend_micro, data_quality, calculated_at
+            )
+            SELECT s.snapshot_date, s.user_id, s.lifecycle_segment,
+                   s.lifecycle_reason_code, 'healthy', NULL, 'unpaid',
+                   users.user_group, FALSE, 0, 0, 0, 0, 0, 0, 'partial', %s
+            FROM user_lifecycle_daily_snapshots AS s
+            JOIN users ON users.id = s.user_id
+            WHERE s.snapshot_date >= %s
+            ON CONFLICT(snapshot_date, user_id) DO NOTHING
+        """
+        with self._analytics_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql, (stamp, since.isoformat()))
+                return max(0, int(cur.rowcount))
+
+    def list_operational_signals(
+        self,
+        user_ids: Sequence[int],
+        *,
+        now: datetime,
+        population_wide: bool = False,
+    ) -> dict[int, OperationalSignals]:
+        """See the SQLite twin."""
+        return _population_operational_signals(
+            self, user_ids, now=now, population_wide=population_wide
+        )
     def list_commercial_values(
         self,
         user_ids: Sequence[int],
@@ -443,92 +753,16 @@ class PostgresValueAnalyticsStore:
         if not ids:
             return {}
 
-        lifetime_by_user: dict[int, tuple[int, int]] = {}
-        period_by_user: dict[int, tuple[int, int, int]] = {}
-        usage_by_user: dict[int, int] = {}
-        if hasattr(self.credits_base, "_get_connection"):
-            postgres = hasattr(self.credits_base, "database_url")
-            user_clause, user_params = _user_clause(ids, postgres)
-            placeholder = "%s" if postgres else "?"
-            window_params = [
-                *user_params,
-                utc_iso(window_start),
-                utc_iso(window_end),
-            ]
-            with self.credits_base._get_connection() as conn:
-                lifetime_rows = _fetchall(
-                    conn,
-                    postgres,
-                    f"""
-                    SELECT user_id,
-                           COALESCE(SUM(CASE WHEN entry_type = 'purchase'
-                               THEN amount_micro ELSE 0 END), 0) AS purchased_micro,
-                           COALESCE(SUM(CASE WHEN entry_type = 'refund'
-                               THEN -amount_micro ELSE 0 END), 0) AS refunded_micro
-                    FROM credit_ledger_entries
-                    WHERE {user_clause}
-                      AND entry_type IN ('purchase', 'refund')
-                    GROUP BY user_id
-                    """,
-                    user_params,
-                )
-                period_rows = _fetchall(
-                    conn,
-                    postgres,
-                    f"""
-                    SELECT user_id,
-                           COALESCE(SUM(CASE WHEN entry_type = 'purchase'
-                               THEN amount_micro ELSE 0 END), 0) AS purchased_micro,
-                           COALESCE(SUM(CASE WHEN entry_type = 'refund'
-                               THEN -amount_micro ELSE 0 END), 0) AS refunded_micro,
-                           COALESCE(SUM(CASE
-                               WHEN entry_type = 'admin_grant_assign' THEN amount_micro
-                               WHEN entry_type = 'admin_grant_reclaim' THEN -amount_micro
-                               ELSE 0 END), 0) AS grant_activity_micro
-                    FROM credit_ledger_entries
-                    WHERE {user_clause}
-                      AND created_at >= {placeholder}
-                      AND created_at < {placeholder}
-                    GROUP BY user_id
-                    """,
-                    window_params,
-                )
-                usage_rows = _fetchall(
-                    conn,
-                    postgres,
-                    f"""
-                    SELECT user_id,
-                           COALESCE(SUM(-amount_micro), 0) AS consumed_micro
-                    FROM credit_llm_usage_entries
-                    WHERE {user_clause}
-                      AND created_at >= {placeholder}
-                      AND created_at < {placeholder}
-                    GROUP BY user_id
-                    """,
-                    window_params,
-                )
-            lifetime_by_user = {
-                int(_row_value(row, "user_id")): (
-                    max(int(_row_value(row, "purchased_micro", 0)), 0),
-                    max(int(_row_value(row, "refunded_micro", 0)), 0),
-                )
-                for row in lifetime_rows
-            }
-            period_by_user = {
-                int(_row_value(row, "user_id")): (
-                    max(int(_row_value(row, "purchased_micro", 0)), 0),
-                    max(int(_row_value(row, "refunded_micro", 0)), 0),
-                    max(int(_row_value(row, "grant_activity_micro", 0)), 0),
-                )
-                for row in period_rows
-            }
-            usage_by_user = {
-                int(_row_value(row, "user_id")): max(
-                    int(_row_value(row, "consumed_micro", 0)), 0
-                )
-                for row in usage_rows
-            }
-
+        # The ledger is read through the credits domain (design SS6.14). The
+        # guard mirrors the old ``hasattr(self.credits_base, "_get_connection")``
+        # one: retention.py constructs this store with ``credits_base=object()``.
+        ledger = (
+            self.credits_base.aggregate_commercial_ledger(
+                ids, start=window_start, end=window_end
+            )
+            if hasattr(self.credits_base, "aggregate_commercial_ledger")
+            else {}
+        )
         balances = (
             self.credits_base.get_balance_projections(ids)
             if hasattr(self.credits_base, "get_balance_projections")
@@ -536,10 +770,13 @@ class PostgresValueAnalyticsStore:
         )
         result: dict[int, CommercialValueFact] = {}
         for user_id in ids:
-            lifetime_purchased, lifetime_refunded = lifetime_by_user.get(
-                user_id, (0, 0)
-            )
-            purchased, refunded, grant_activity = period_by_user.get(user_id, (0, 0, 0))
+            totals = ledger.get(user_id, {})
+            lifetime_purchased = max(int(totals.get("lifetime_purchased_micro", 0)), 0)
+            lifetime_refunded = max(int(totals.get("lifetime_refunded_micro", 0)), 0)
+            purchased = max(int(totals.get("purchased_micro", 0)), 0)
+            refunded = max(int(totals.get("refunded_micro", 0)), 0)
+            grant_activity = max(int(totals.get("grant_activity_micro", 0)), 0)
+            consumed = max(int(totals.get("consumed_micro", 0)), 0)
             net_purchased = max(lifetime_purchased - lifetime_refunded, 0)
             balance = balances.get(user_id, {})
             result[user_id] = CommercialValueFact(
@@ -548,7 +785,7 @@ class PostgresValueAnalyticsStore:
                 commercial_tier=commercial_tier(net_purchased),
                 purchased_micro=purchased,
                 refunded_micro=refunded,
-                consumed_micro=usage_by_user.get(user_id, 0),
+                consumed_micro=consumed,
                 admin_grant_activity_micro=grant_activity,
                 grant_available_micro=max(
                     int(_object_value(balance, "grant_available_micro")), 0
@@ -561,7 +798,6 @@ class PostgresValueAnalyticsStore:
                 ),
             )
         return result
-
     def list_credit_activity(
         self,
         user_ids: Sequence[int],
@@ -571,48 +807,15 @@ class PostgresValueAnalyticsStore:
     ) -> dict[int, Sequence[datetime]]:
         ids = _ids(user_ids)
         window_start, window_end = _validate_window(start, end)
-        result: dict[int, list[datetime]] = {user_id: [] for user_id in ids}
-        if not ids or not hasattr(self.credits_base, "_get_connection"):
+        if not ids or not hasattr(self.credits_base, "list_credit_activity_timestamps"):
             return {user_id: () for user_id in ids}
-
-        postgres = hasattr(self.credits_base, "database_url")
-        user_clause, user_params = _user_clause(ids, postgres)
-        placeholder = "%s" if postgres else "?"
-        params = [*user_params, utc_iso(window_start), utc_iso(window_end)]
-        with self.credits_base._get_connection() as conn:
-            purchase_rows = _fetchall(
-                conn,
-                postgres,
-                f"""
-                SELECT user_id, created_at
-                FROM credit_ledger_entries
-                WHERE {user_clause}
-                  AND entry_type = 'purchase'
-                  AND created_at >= {placeholder}
-                  AND created_at < {placeholder}
-                """,
-                params,
-            )
-            usage_rows = _fetchall(
-                conn,
-                postgres,
-                f"""
-                SELECT user_id, created_at
-                FROM credit_llm_usage_entries
-                WHERE {user_clause}
-                  AND created_at >= {placeholder}
-                  AND created_at < {placeholder}
-                """,
-                params,
-            )
-        for row in (*purchase_rows, *usage_rows):
-            user_id = int(_row_value(row, "user_id"))
-            if user_id in result:
-                result[user_id].append(_timestamp(_row_value(row, "created_at")))
+        stamps = self.credits_base.list_credit_activity_timestamps(
+            ids, start=window_start, end=window_end
+        )
         return {
-            user_id: tuple(sorted(timestamps)) for user_id, timestamps in result.items()
+            user_id: tuple(sorted(_timestamp(value) for value in stamps.get(user_id, ())))
+            for user_id in ids
         }
-
     def _run_health(self, user_id: int, now: datetime) -> tuple[int, bool]:
         if self.agent_base is None or self.run_base is None:
             return 0, False
@@ -645,11 +848,9 @@ class PostgresValueAnalyticsStore:
             )
             and now - timedelta(hours=24) <= timestamp <= now
         ]
-        consecutive_failures = 0
-        for run in terminal_24h:
-            if str(run.get("status")) not in {"failed", "timed_out"}:
-                break
-            consecutive_failures += 1
+        consecutive_failures = consecutive_failed_terminal_runs(
+            [str(run.get("status")) for run in terminal_24h]
+        )
 
         beyond_deadline = False
         for run in ordered:
@@ -799,3 +1000,70 @@ class PostgresValueAnalyticsStore:
             with conn.cursor() as cur:
                 cur.execute(sql, values)
         return job
+
+    def claim_projection_day(
+        self,
+        job_name: str,
+        *,
+        day: date,
+        now: datetime,
+        stale_after: timedelta = timedelta(hours=2),
+    ) -> bool:
+        """See the SQLite twin."""
+        name = _projection_job_name(job_name)
+        target = day.isoformat()
+        stamp = utc_iso(_utc(now, "now"))
+        stale_before = utc_iso(_utc(now, "now") - stale_after)
+        with self._analytics_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO analytics_projection_jobs (
+                        job_name, window_start, window_end, cursor, status, updated_at
+                    ) VALUES (%s, %s, %s, NULL, 'pending', %s)
+                    ON CONFLICT(job_name) DO NOTHING
+                    """,
+                    (name, target, target, stamp),
+                )
+                cur.execute(
+                    """
+                    UPDATE analytics_projection_jobs
+                       SET status = 'running', window_end = %s, updated_at = %s
+                     WHERE job_name = %s
+                       AND (cursor IS NULL OR cursor < %s)
+                       AND (
+                            status IN ('pending', 'complete')
+                            OR (status = 'running' AND updated_at < %s)
+                       )
+                    """,
+                    (target, stamp, name, target, stale_before),
+                )
+                return cur.rowcount == 1
+
+    def complete_projection_day(self, job_name: str, *, day: date, now: datetime) -> None:
+        """See the SQLite twin."""
+        name = _projection_job_name(job_name)
+        with self._analytics_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE analytics_projection_jobs
+                       SET cursor = %s, status = 'complete', updated_at = %s
+                     WHERE job_name = %s
+                    """,
+                    (day.isoformat(), utc_iso(_utc(now, "now")), name),
+                )
+
+    def release_projection_day(self, job_name: str, *, now: datetime) -> None:
+        """See the SQLite twin."""
+        name = _projection_job_name(job_name)
+        with self._analytics_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE analytics_projection_jobs
+                       SET status = 'pending', updated_at = %s
+                     WHERE job_name = %s AND status = 'running'
+                    """,
+                    (utc_iso(_utc(now, "now")), name),
+                )

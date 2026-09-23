@@ -183,10 +183,13 @@ def test_reap_runs_invokes_registered_sweeps(monkeypatch):
     assert calls == ["swept"]
 
 
-def test_startup_registers_analytics_retention_sweep_once():
+def test_startup_leaves_analytics_retention_to_the_daily_job():
+    """Admin layer redesign PR A: the retention coordinator runs from the
+    daily-facts worker (domain/analytics/daily_facts.py), not the reaper."""
     source = inspect.getsource(app_module.startup_event)
     call = "register_reaper_sweep(analytics_retention_coordinator.run_if_due)"
-    assert source.count(call) == 1
+    assert source.count(call) == 0
+    assert source.count("start_daily_facts_worker()") == 1
 
 
 def test_reap_runs_survives_a_raising_analytics_retention_sweep(monkeypatch):

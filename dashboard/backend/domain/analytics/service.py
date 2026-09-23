@@ -42,15 +42,21 @@ class AnalyticsService:
         state_store=None,
         value_store=None,
         project_snapshots: bool = False,
+        maintain_activity: bool = False,
     ):
         if not isinstance(project_snapshots, bool):
             raise TypeError("project_snapshots must be a boolean")
+        if not isinstance(maintain_activity, bool):
+            raise TypeError("maintain_activity must be a boolean")
         if project_snapshots and (state_store is None or value_store is None):
             raise ValueError("snapshot stores are required when projection is enabled")
+        if maintain_activity and value_store is None:
+            raise ValueError("a value store is required to maintain user activity")
         self.store = store
         self.state_store = state_store
         self.value_store = value_store
         self.project_snapshots = project_snapshots
+        self.maintain_activity = maintain_activity
 
     def _try_recalculate_snapshots(
         self,
@@ -74,6 +80,35 @@ class AnalyticsService:
             print(
                 "WARNING: analytics.value_projection_failed "
                 f"event={event_name} category={type(exc).__name__[:80]}"
+            )
+
+    def _try_record_activity(
+        self,
+        *,
+        user_id: int,
+        event: AnalyticsEventRecord,
+        now: datetime,
+    ) -> None:
+        """Advance the stored activity clock for one accepted event.
+
+        Best-effort, like every other analytics write: a failure here must
+        never change the outcome of the operation that emitted the event.
+        This is the write that replaces the per-event history recompute
+        (design SS6.5): one upsert of two timestamps, no read.
+        """
+        if not self.maintain_activity:
+            return
+        try:
+            self.value_store.record_activity(
+                user_id,
+                occurred_at=event.occurred_at,
+                activating=event.event_name == "backtest_completed",
+                now=now,
+            )
+        except Exception as exc:
+            print(
+                "WARNING: analytics.activity_update_failed "
+                f"event={event.event_name} category={type(exc).__name__[:80]}"
             )
 
     def accept_frontend_event(
@@ -169,7 +204,10 @@ class AnalyticsService:
         result = self.store.append_event(event)
         from .lifecycle import is_lifecycle_activity
 
-        projection_relevant = is_lifecycle_activity(event) or event_name in {
+        lifecycle_activity = is_lifecycle_activity(event)
+        if result.created and lifecycle_activity:
+            self._try_record_activity(user_id=subject_id, event=event, now=received)
+        projection_relevant = lifecycle_activity or event_name in {
             "account_signed_up",
             "safe_error_recorded",
         }
@@ -247,6 +285,9 @@ def _build_analytics_service() -> AnalyticsService:
         # which otherwise steps in for exactly this state (see that task --
         # flipping this flag alone is not sufficient).
         project_snapshots=False,
+        # PR A replaces the per-event snapshot recompute with the activity
+        # upsert. PR B deletes the projection flag entirely.
+        maintain_activity=True,
     )
 
 

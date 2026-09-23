@@ -19,7 +19,7 @@ import sqlite3
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from dashboard.backend.database import DB_PATH, enable_wal
 
@@ -60,6 +60,19 @@ def _public_run(row: sqlite3.Row | Dict[str, Any]) -> Dict[str, Any]:
         "created_at": data.get("created_at"),
         "updated_at": data.get("updated_at"),
     }
+
+def _parse_run_timestamp(value: object) -> Optional[datetime]:
+    """Both shapes protocol_runs holds: CURRENT_TIMESTAMP text and ISO-8601."""
+    if value in (None, ""):
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value))
+    except (TypeError, ValueError):
+        return None
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
 
 
 class RunStore:
@@ -264,6 +277,58 @@ class RunStore:
         rows = cursor.fetchall()
         conn.close()
         return [_public_run(row) for row in rows]
+
+    _TERMINAL_STATUSES = ("completed", "failed", "cancelled", "closed", "timed_out")
+
+    def list_terminal_runs_since(
+        self,
+        *,
+        since: datetime,
+    ) -> Dict[str, Tuple[Tuple[datetime, str], ...]]:
+        """Terminal runs for every agent since ``since``, newest first per agent.
+
+        Returns `(effective_time, status)` pairs per agent, where the effective
+        time is `COALESCE(updated_at, created_at)` -- the same ordering key
+        `_run_health` uses. Bounded by construction: a 24-hour window of
+        terminal runs across the whole population is a small result, and the
+        caller pools and re-sorts them per owner because the consecutive rule
+        runs over an owner's agents together, not per agent.
+
+        The two timestamp columns hold mixed shapes (``CURRENT_TIMESTAMP``
+        text on old rows, ISO-8601 with an offset from ``update_run``), so the
+        SQL bounds the scan to calendar days by the 10-character date prefix
+        and the exact comparison happens in Python.
+        """
+        if since.tzinfo is None or since.utcoffset() is None:
+            raise ValueError("since must include a timezone")
+        floor = since.astimezone(timezone.utc).date().isoformat()
+        placeholders = ", ".join("?" for _ in self._TERMINAL_STATUSES)
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            f"""
+            SELECT agent_id, status, created_at, updated_at
+            FROM protocol_runs
+            WHERE agent_id IS NOT NULL
+              AND status IN ({placeholders})
+              AND substr(COALESCE(updated_at, created_at), 1, 10) >= ?
+            """,
+            (*self._TERMINAL_STATUSES, floor),
+        )
+        rows = cursor.fetchall()
+        conn.close()
+        grouped: Dict[str, List[Tuple[datetime, str]]] = {}
+        for row in rows:
+            stamp = _parse_run_timestamp(row["updated_at"]) or _parse_run_timestamp(
+                row["created_at"]
+            )
+            if stamp is None or stamp < since:
+                continue
+            grouped.setdefault(str(row["agent_id"]), []).append((stamp, str(row["status"])))
+        return {
+            agent_id: tuple(sorted(pairs, key=lambda pair: pair[0], reverse=True))
+            for agent_id, pairs in grouped.items()
+        }
 
     # Runs that are still consuming resources (not yet terminal).
     _ACTIVE_STATUSES = ("created", "loading", "running")

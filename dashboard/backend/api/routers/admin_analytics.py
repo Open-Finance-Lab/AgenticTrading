@@ -15,7 +15,6 @@ from dashboard.backend.domain.analytics.query_service import (
     AnalyticsActivityPage,
     AnalyticsOverview,
     AnalyticsQueryService,
-    AnalyticsUserFilters,
     get_analytics_query_service,
     get_value_analytics_query_service,
 )
@@ -51,8 +50,6 @@ _PROVIDER_ID_PATTERN = re.compile(r"^[a-z0-9_]{2,64}$")
 _MODEL_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/\-:]{0,255}$")
 _POSITIVE_INTEGER_PATTERN = re.compile(r"^[0-9]+$")
 _USER_STATES = {"blocked", "needs_attention", "dormant", "onboarding", "active"}
-_USER_SORTS = {"last_activity", "joined_at", "recent_runs", "recent_failures"}
-_SORT_ORDERS = {"asc", "desc"}
 _ACTIVITY_SECTIONS = {"timeline", "runs", "usage", "sessions"}
 _LIFECYCLE_SEGMENTS = {"new", "onboarding", "growing", "core", "at_risk", "dormant"}
 _OPERATIONAL_STATES = {"blocked", "needs_attention", "healthy"}
@@ -295,74 +292,6 @@ def _value_user_filters(request: Request) -> tuple[UserValueFilters, int, int]:
     return filters, limit, offset
 
 
-def _user_filters(request: Request) -> tuple[AnalyticsUserFilters, int, int]:
-    values = _query_values(
-        request,
-        {
-            "q",
-            "status",
-            "last_activity_from",
-            "last_activity_to",
-            "sort",
-            "order",
-            "limit",
-            "offset",
-            "include_internal",
-        },
-    )
-    query = values.get("q")
-    if query is not None and len(query) > 100:
-        _invalid_query()
-    status = values.get("status")
-    if status is not None and status not in _USER_STATES:
-        _invalid_query()
-    sort = values.get("sort", "last_activity")
-    if sort not in _USER_SORTS:
-        _invalid_query()
-    order = values.get("order", "desc")
-    if order not in _SORT_ORDERS:
-        _invalid_query()
-
-    from_date = (
-        _parse_date(values["last_activity_from"])
-        if "last_activity_from" in values
-        else None
-    )
-    to_date = (
-        _parse_date(values["last_activity_to"])
-        if "last_activity_to" in values
-        else None
-    )
-    if from_date is not None and to_date is not None and to_date < from_date:
-        _invalid_query()
-    activity_start = _utc_midnight(from_date) if from_date else None
-    activity_end = (
-        _exclusive_date_end(to_date) - timedelta(microseconds=1)
-        if to_date
-        else None
-    )
-
-    try:
-        filters = AnalyticsUserFilters(
-            q=query,
-            status=status,
-            last_activity_from=activity_start,
-            last_activity_to=activity_end,
-            sort=sort,
-            order=order,
-            include_internal=(
-                _parse_bool(values["include_internal"])
-                if "include_internal" in values
-                else False
-            ),
-        )
-    except (ValidationError, ValueError):
-        _invalid_query()
-    limit = _parse_integer(values.get("limit", "50"), minimum=1, maximum=100)
-    offset = _parse_integer(values.get("offset", "0"), minimum=0)
-    return filters, limit, offset
-
-
 def _activity_query(request: Request) -> tuple[str, int, str | None]:
     values = _query_values(request, {"section", "limit", "cursor"})
     section = values.get("section")
@@ -380,7 +309,12 @@ def _raise_service_error(exc: Exception) -> Never:
         raise HTTPException(status_code=404, detail=_NOT_FOUND_DETAIL) from None
     if isinstance(exc, (ValidationError, ValueError)):
         raise HTTPException(status_code=422, detail=_INVALID_QUERY_DETAIL) from None
-    raise HTTPException(status_code=503, detail=_UNAVAILABLE_DETAIL) from None
+    # Category only, never the message: a psycopg OperationalError carries the
+    # DSN and a ValidationError carries field values. The class name is what
+    # tells "the pool is exhausted" from "a bad SQL statement" in prod logs,
+    # which the bare `from None` 503 never could (design D24, SS4.4).
+    print(f"ERROR: admin_analytics.unhandled category={type(exc).__name__[:80]}")
+    raise HTTPException(status_code=503, detail=_UNAVAILABLE_DETAIL) from exc
 
 
 def _record_access(

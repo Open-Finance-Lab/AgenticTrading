@@ -355,3 +355,54 @@ def test_lifecycle_history_is_aggregated_before_user_rows_are_deleted(tmp_path):
         "growing",
         1,
     ) in [tuple(row) for row in rows]
+
+
+def test_the_retention_sweep_never_touches_user_activity(tmp_path):
+    """Design doc SS11: user_activity is current state, not history.
+
+    Every other user-keyed analytics table is retained 180 days. This one
+    holds the only record of when a user first activated, on a row that is
+    overwritten in place; sweeping it would delete every lifetime metric with
+    nothing else failing. A future "complete the 180-day rule" tidy-up must
+    turn this red.
+    """
+    import inspect
+    import sqlite3
+
+    from dashboard.backend.domain.analytics import retention as retention_module
+    from dashboard.backend.domain.analytics.value_repository import (
+        build_value_analytics_store,
+    )
+
+    path = tmp_path / "retention.db"
+    UserStore(db_path=path)
+    with sqlite3.connect(path) as conn:
+        conn.executemany(
+            "INSERT INTO users (id, email, display_name, password_hash, role, user_group, created_at) "
+            "VALUES (?, ?, ?, 'x', 'user', 'unknown', ?)",
+            [
+                (1, "one@example.test", "One", (NOW - timedelta(days=500)).isoformat()),
+                (2, "two@example.test", "Two", (NOW - timedelta(days=500)).isoformat()),
+            ],
+        )
+    analytics = AnalyticsStore(path)
+    value_store = build_value_analytics_store(
+        analytics,
+        credits_base=object(),
+        provider_base=object(),
+        agent_base=object(),
+        run_base=object(),
+    )
+    ancient = NOW - timedelta(days=RAW_EVENT_RETENTION_DAYS + 200)
+    for user_id in (1, 2):
+        value_store.record_activity(user_id, occurred_at=ancient, activating=True, now=ancient)
+        analytics.append_event(_event(user_id, ancient))
+    before = {user_id: value_store.get_activity(user_id) for user_id in (1, 2)}
+
+    result = AnalyticsRetentionService(store=analytics, value_store=value_store).run_once(NOW)
+
+    assert result.raw_events_deleted == 2
+    assert {user_id: value_store.get_activity(user_id) for user_id in (1, 2)} == before
+    assert before[1].activated_at == ancient
+    assert "user_activity" not in inspect.getsource(retention_module)
+

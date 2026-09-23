@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 import uuid
 import json
 import os
@@ -24,6 +25,8 @@ from .repository_common import (
     serialize_capabilities,
     validate_adapter_type,
     validate_approved_origin,
+    DefaultCredentialFacts,
+    fold_default_credential_rows,
 )
 
 
@@ -297,6 +300,35 @@ class PostgresModelProviderStore:
                 cur.execute("SELECT * FROM provider_registry ORDER BY display_name")
                 rows = cur.fetchall()
         return [_public_provider(row) for row in rows]
+
+    def list_default_credential_facts(
+        self, user_ids: Sequence[int] | None = None
+    ) -> dict[int, DefaultCredentialFacts]:
+        """See the SQLite twin."""
+        sql = (
+            "SELECT user_id, provider_id, status FROM user_model_credentials "
+            "WHERE is_default = TRUE AND status <> 'revoked'"
+        )
+        params: tuple[Any, ...] = ()
+        if user_ids is not None:
+            ids = list(dict.fromkeys(int(user_id) for user_id in user_ids))
+            if not ids:
+                return {}
+            sql += " AND user_id = ANY(%s)"
+            params = (ids,)
+        with self._get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql, params)
+                rows = cur.fetchall()
+        return fold_default_credential_rows(rows)
+
+    def list_platform_credential_statuses(self) -> dict[str, str]:
+        """See the SQLite twin."""
+        with self._get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT provider_id, status FROM platform_model_credentials")
+                rows = cur.fetchall()
+        return {str(row["provider_id"]): str(row["status"]) for row in rows}
 
     def record_admin_operation(self, **values: Any) -> None:
         with self._get_connection() as conn:

@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timedelta
+from collections.abc import Sequence
+from datetime import date, datetime, timedelta
 from typing import Any
 
 import psycopg
@@ -26,6 +27,14 @@ from dashboard.backend.domain.credits.repository_common import (
     _required_text,
     _utcnow_iso,
     _validate_amount_pair,
+)
+from dashboard.backend.domain.credits.repository import (
+    _assemble_billing_states,
+    _assemble_commercial_ledger,
+    _assemble_ledger_day,
+    _day_bounds,
+    _unique_user_ids,
+    _utc_text,
 )
 from dashboard.backend.domain.model_providers.repository_common import (
     validate_provider_id,
@@ -754,19 +763,34 @@ class PostgresCreditsStore:
                 return self._balance_projection_in_transaction(cur, user_id)
 
     def get_balance_projections(
-        self, user_ids: list[int] | tuple[int, ...]
+        self, user_ids: list[int] | tuple[int, ...] | None
     ) -> dict[int, dict[str, int]]:
-        if not isinstance(user_ids, (list, tuple)):
-            raise ValueError("user_ids must be a list or tuple")
-        validated = [_positive_integer(user_id, "user_id") for user_id in user_ids]
-        if not validated:
-            return {}
+        """Balances for many accounts; ``None`` means every account with a row.
 
-        unique_ids = list(dict.fromkeys(validated))
+        ``None`` is the daily job's shape (design SS6.12): the four statements
+        below then carry no ``WHERE user_id = ANY(%s)`` clause at all, so the
+        query count and shape are the same at 200 and 20,000 users.
+        """
+        if user_ids is None:
+            unique_ids = None
+            where = ""
+            params: tuple[Any, ...] = ()
+        else:
+            if not isinstance(user_ids, (list, tuple)):
+                raise ValueError("user_ids must be a list or tuple")
+            validated = [_positive_integer(user_id, "user_id") for user_id in user_ids]
+            if not validated:
+                return {}
+            unique_ids = list(dict.fromkeys(validated))
+            where = "WHERE user_id = ANY(%s)"
+            params = (unique_ids,)
+        reservation_filter = (
+            f"{where} AND status = 'open'" if where else "WHERE status = 'open'"
+        )
         with self._get_connection() as conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    """
+                    f"""
                     SELECT
                         user_id,
                         COALESCE(SUM(
@@ -776,24 +800,24 @@ class PostgresCreditsStore:
                             CASE WHEN bucket = 'purchased' THEN amount_micro ELSE 0 END
                         ), 0) AS purchased_committed_micro
                     FROM credit_ledger_entries
-                    WHERE user_id = ANY(%s)
+                    {where}
                     GROUP BY user_id
                     """,
-                    (unique_ids,),
+                    params,
                 )
                 rows = cur.fetchall()
                 cur.execute(
-                    """
+                    f"""
                     SELECT user_id, COALESCE(SUM(amount_micro), 0) AS grant_micro
                     FROM credit_promotion_grants
-                    WHERE user_id = ANY(%s)
+                    {where}
                     GROUP BY user_id
                     """,
-                    (unique_ids,),
+                    params,
                 )
                 promotion_rows = cur.fetchall()
                 cur.execute(
-                    """
+                    f"""
                     SELECT
                         user_id,
                         COALESCE(SUM(CASE WHEN bucket = 'grant' THEN amount_micro ELSE 0 END), 0)
@@ -801,23 +825,23 @@ class PostgresCreditsStore:
                         COALESCE(SUM(CASE WHEN bucket = 'purchased' THEN amount_micro ELSE 0 END), 0)
                             AS purchased_usage_micro
                     FROM credit_llm_usage_entries
-                    WHERE user_id = ANY(%s)
+                    {where}
                     GROUP BY user_id
                     """,
-                    (unique_ids,),
+                    params,
                 )
                 usage_rows = cur.fetchall()
                 cur.execute(
-                    """
+                    f"""
                     SELECT
                         user_id,
                         COALESCE(SUM(reserved_grant_micro), 0) AS reserved_grant_micro,
                         COALESCE(SUM(reserved_purchased_micro), 0) AS reserved_purchased_micro
                     FROM credit_llm_reservations
-                    WHERE user_id = ANY(%s) AND status = 'open'
+                    {reservation_filter}
                     GROUP BY user_id
                     """,
-                    (unique_ids,),
+                    params,
                 )
                 reservation_rows = cur.fetchall()
 
@@ -847,6 +871,8 @@ class PostgresCreditsStore:
             for row in reservation_rows
         }
         projections: dict[int, dict[str, int]] = {}
+        if unique_ids is None:
+            unique_ids = sorted(set(amounts) | set(usage_amounts) | set(reserved_amounts))
         for user_id in unique_ids:
             grant_micro, purchased_micro = amounts.get(user_id, (0, 0))
             grant_usage, purchased_usage = usage_amounts.get(user_id, (0, 0))
@@ -872,6 +898,217 @@ class PostgresCreditsStore:
                 cur.execute("SELECT id FROM users ORDER BY id")
                 rows = cur.fetchall()
         return [int(row["id"]) for row in rows]
+
+    def aggregate_commercial_ledger(
+        self,
+        user_ids: Sequence[int],
+        *,
+        start: datetime,
+        end: datetime,
+    ) -> dict[int, dict[str, int]]:
+        """See the SQLite twin."""
+        ids = _unique_user_ids(user_ids)
+        if not ids:
+            return {}
+        window = (_utc_text(start, "start"), _utc_text(end, "end"))
+        with self._get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT user_id,
+                           COALESCE(SUM(CASE WHEN entry_type = 'purchase'
+                               THEN amount_micro ELSE 0 END), 0) AS purchased_micro,
+                           COALESCE(SUM(CASE WHEN entry_type = 'refund'
+                               THEN -amount_micro ELSE 0 END), 0) AS refunded_micro
+                    FROM credit_ledger_entries
+                    WHERE user_id = ANY(%s)
+                      AND entry_type IN ('purchase', 'refund')
+                    GROUP BY user_id
+                    """,
+                    (ids,),
+                )
+                lifetime_rows = cur.fetchall()
+                cur.execute(
+                    """
+                    SELECT user_id,
+                           COALESCE(SUM(CASE WHEN entry_type = 'purchase'
+                               THEN amount_micro ELSE 0 END), 0) AS purchased_micro,
+                           COALESCE(SUM(CASE WHEN entry_type = 'refund'
+                               THEN -amount_micro ELSE 0 END), 0) AS refunded_micro,
+                           COALESCE(SUM(CASE
+                               WHEN entry_type = 'admin_grant_assign' THEN amount_micro
+                               WHEN entry_type = 'admin_grant_reclaim' THEN -amount_micro
+                               ELSE 0 END), 0) AS grant_activity_micro
+                    FROM credit_ledger_entries
+                    WHERE user_id = ANY(%s)
+                      AND created_at >= %s
+                      AND created_at < %s
+                    GROUP BY user_id
+                    """,
+                    (ids, *window),
+                )
+                period_rows = cur.fetchall()
+                cur.execute(
+                    """
+                    SELECT user_id,
+                           COALESCE(SUM(-amount_micro), 0) AS consumed_micro
+                    FROM credit_llm_usage_entries
+                    WHERE user_id = ANY(%s)
+                      AND created_at >= %s
+                      AND created_at < %s
+                    GROUP BY user_id
+                    """,
+                    (ids, *window),
+                )
+                usage_rows = cur.fetchall()
+        return _assemble_commercial_ledger(ids, lifetime_rows, period_rows, usage_rows)
+
+    def list_credit_activity_timestamps(
+        self,
+        user_ids: Sequence[int],
+        *,
+        start: datetime,
+        end: datetime,
+    ) -> dict[int, list[str]]:
+        """See the SQLite twin."""
+        ids = _unique_user_ids(user_ids)
+        result: dict[int, list[str]] = {user_id: [] for user_id in ids}
+        if not ids:
+            return result
+        params = (ids, _utc_text(start, "start"), _utc_text(end, "end"))
+        with self._get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT user_id, created_at
+                    FROM credit_ledger_entries
+                    WHERE user_id = ANY(%s)
+                      AND entry_type = 'purchase'
+                      AND created_at >= %s
+                      AND created_at < %s
+                    """,
+                    params,
+                )
+                purchase_rows = cur.fetchall()
+                cur.execute(
+                    """
+                    SELECT user_id, created_at
+                    FROM credit_llm_usage_entries
+                    WHERE user_id = ANY(%s)
+                      AND created_at >= %s
+                      AND created_at < %s
+                    """,
+                    params,
+                )
+                usage_rows = cur.fetchall()
+        for row in (*purchase_rows, *usage_rows):
+            result[int(row["user_id"])].append(str(row["created_at"]))
+        return result
+
+    def aggregate_ledger_for_day(self, day: date) -> dict[int, dict[str, Any]]:
+        """See the SQLite twin."""
+        day_start, day_end = _day_bounds(day)
+        with self._get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT user_id,
+                           COALESCE(SUM(-amount_micro), 0) AS consumed_micro,
+                           MAX(created_at) AS last_usage_at
+                    FROM credit_llm_usage_entries
+                    WHERE created_at >= %s AND created_at < %s
+                    GROUP BY user_id
+                    """,
+                    (day_start, day_end),
+                )
+                usage_rows = cur.fetchall()
+                cur.execute(
+                    """
+                    SELECT user_id,
+                           COALESCE(SUM(CASE WHEN entry_type = 'purchase'
+                               THEN amount_micro ELSE 0 END), 0) AS purchased_micro,
+                           COALESCE(SUM(CASE WHEN entry_type = 'refund'
+                               THEN -amount_micro ELSE 0 END), 0) AS refunded_micro
+                    FROM credit_ledger_entries
+                    WHERE entry_type IN ('purchase', 'refund')
+                    GROUP BY user_id
+                    """
+                )
+                lifetime_rows = cur.fetchall()
+                cur.execute(
+                    """
+                    SELECT user_id, MAX(created_at) AS last_purchase_at
+                    FROM credit_ledger_entries
+                    WHERE entry_type = 'purchase'
+                      AND created_at >= %s AND created_at < %s
+                    GROUP BY user_id
+                    """,
+                    (day_start, day_end),
+                )
+                purchase_rows = cur.fetchall()
+        return _assemble_ledger_day(usage_rows, lifetime_rows, purchase_rows)
+
+    def list_account_billing_states(
+        self,
+        user_ids: Sequence[int] | None = None,
+    ) -> dict[int, dict[str, Any]]:
+        """See the SQLite twin."""
+        account_sql = "SELECT user_id, status, restriction_reason FROM credit_accounts"
+        outstanding_sql = """
+            SELECT user_id,
+                   COALESCE(SUM(
+                       GREATEST(outstanding_micro - outstanding_recovered_micro, 0)
+                   ), 0) AS outstanding_micro
+            FROM credit_llm_reservations
+            WHERE status = 'settled'
+        """
+        params: tuple[Any, ...] = ()
+        if user_ids is not None:
+            ids = _unique_user_ids(user_ids)
+            if not ids:
+                return {}
+            account_sql += " WHERE user_id = ANY(%s)"
+            outstanding_sql += " AND user_id = ANY(%s)"
+            params = (ids,)
+        outstanding_sql += " GROUP BY user_id"
+        with self._get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(account_sql, params)
+                account_rows = cur.fetchall()
+                cur.execute(outstanding_sql, params)
+                outstanding_rows = cur.fetchall()
+        return _assemble_billing_states(account_rows, outstanding_rows)
+
+    def list_llm_reservation_rows(self) -> list[dict[str, Any]]:
+        """See the SQLite twin."""
+        with self._get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT reservation_id, user_id, run_id, call_index,
+                           reserved_grant_micro, reserved_purchased_micro,
+                           status, created_at, updated_at
+                    FROM credit_llm_reservations
+                    ORDER BY created_at, reservation_id
+                    """
+                )
+                rows = cur.fetchall()
+        return [dict(row) for row in rows]
+
+    def list_llm_usage_rows(self) -> list[dict[str, Any]]:
+        """See the SQLite twin."""
+        with self._get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT id, user_id, reservation_id, run_id, call_index,
+                           bucket, amount_micro, created_at
+                    FROM credit_llm_usage_entries
+                    ORDER BY created_at, id
+                    """
+                )
+                rows = cur.fetchall()
+        return [dict(row) for row in rows]
 
     def grant_promotion_credits(
         self,

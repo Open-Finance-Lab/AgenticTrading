@@ -231,6 +231,7 @@ class HourlyBacktester:
         model: str = None,
         pipeline: list = None,
         live_run_id: str = None,
+        owner_user_id: Optional[int] = None,
         progress_file: str = None,
         data_source: str = ALPACA,
         initial_capital: float = None,
@@ -280,6 +281,7 @@ class HourlyBacktester:
         self.model = model or default_model_name()
         self.execution_client = execution_client
         self.live_run_id = (live_run_id or "").strip() or None
+        self.owner_user_id = int(owner_user_id) if owner_user_id is not None else None
         self.progress_file = (progress_file or "").strip() or None
         self._init_progress_phases(launched_at, startup_clock)
         self.data_source = data_source
@@ -2187,6 +2189,7 @@ class HourlyBacktester:
             output_tokens=manager.output_tokens,
             est_cost_usd=est_cost,
             metadata=self._agent_run_metadata(),
+            owner_user_id=self.owner_user_id,
         )
 
         db.insert_equity_points(run_id, equity_curve)
@@ -2294,6 +2297,7 @@ class HourlyBacktester:
                 costs_applied=profile.transaction_cost_profile is not None,
                 baseline_allocation=baseline_allocation,
             ),
+            owner_user_id=self.owner_user_id,
         )
         
         db.insert_equity_points(run_id, equity_history)
@@ -2372,6 +2376,7 @@ class HourlyBacktester:
             max_drawdown=self._calc_max_dd(equity_history),
             num_trades=0,
             metadata=self._run_metadata(),
+            owner_user_id=self.owner_user_id,
         )
         
         db.insert_equity_points(run_id, equity_history)

@@ -120,54 +120,8 @@ class AnalyticsUserListItem(BaseModel):
     profile_path: str
 
 
-class AnalyticsUserFilters(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    q: str | None = Field(default=None, max_length=100)
-    status: str | None = None
-    last_activity_from: datetime | None = None
-    last_activity_to: datetime | None = None
-    sort: Literal[
-        "last_activity", "joined_at", "recent_runs", "recent_failures"
-    ] = "last_activity"
-    order: Literal["asc", "desc"] = "desc"
-    include_internal: bool = False
-
-    @field_validator("q")
-    @classmethod
-    def normalize_query(cls, value: str | None) -> str | None:
-        if value is None:
-            return None
-        normalized = value.strip()
-        return normalized or None
-
-    @field_validator("status")
-    @classmethod
-    def validate_status(cls, value: str | None) -> str | None:
-        if value is not None and value not in _USER_STATES:
-            raise ValueError("status must be a supported Analytics user state")
-        return value
-
-    @model_validator(mode="after")
-    def validate_activity_range(self) -> "AnalyticsUserFilters":
-        start = self.last_activity_from
-        end = self.last_activity_to
-        if start is not None:
-            object.__setattr__(self, "last_activity_from", _utc(start, "last_activity_from"))
-        if end is not None:
-            object.__setattr__(self, "last_activity_to", _utc(end, "last_activity_to"))
-        if start is not None and end is not None and _utc(end, "last_activity_to") < _utc(start, "last_activity_from"):
-            raise ValueError("last_activity_to cannot be before last_activity_from")
-        return self
 
 
-class PaginatedUsers(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    items: list[AnalyticsUserListItem]
-    total: int = Field(ge=0)
-    limit: int = Field(ge=1, le=100)
-    offset: int = Field(ge=0)
 
 
 class AnalyticsFootprintItem(BaseModel):
@@ -958,116 +912,6 @@ class AnalyticsQueryService:
             availability=availability,
         )
 
-    def list_users(
-        self,
-        *,
-        filters: AnalyticsUserFilters,
-        limit: int,
-        offset: int,
-        now: datetime | None = None,
-    ) -> PaginatedUsers:
-        if not isinstance(filters, AnalyticsUserFilters):
-            filters = AnalyticsUserFilters.model_validate(filters)
-        page_size = positive_limit(limit)
-        if isinstance(offset, bool) or not isinstance(offset, int) or offset < 0:
-            raise ValueError("offset must be a non-negative integer")
-        current = _utc(now or datetime.now(timezone.utc), "now")
-        users = _all_users(self.user_store)
-        excluded = (
-            set()
-            if filters.include_internal
-            else self.store.list_excluded_user_ids(include_admin_accounts=True)
-        )
-        snapshots = self.query_store.list_snapshots()
-        events = self.query_store.rollups.list_events(
-            start=current - timedelta(days=30),
-            end=current + timedelta(microseconds=1),
-            include_internal=True,
-        )
-        by_user: dict[int, list[AnalyticsEventRecord]] = defaultdict(list)
-        for event in events:
-            by_user[event.user_id].append(event)
-
-        items: list[AnalyticsUserListItem] = []
-        for user in users:
-            user_id = int(user["id"])
-            if user_id in excluded:
-                continue
-            user_events = sorted(
-                by_user.get(user_id, []),
-                key=lambda event: event.occurred_at,
-                reverse=True,
-            )
-            meaningful = [event for event in user_events if is_meaningful_event(event)]
-            last_activity = meaningful[0].occurred_at if meaningful else None
-            snapshot = snapshots.get(user_id)
-            if snapshot is None:
-                snapshot = calculate_user_state(
-                    user_id,
-                    now=current,
-                    store=self.query_store.states,
-                )
-            item = AnalyticsUserListItem(
-                user_id=user_id,
-                display_name=str(user.get("display_name") or ""),
-                email=str(user.get("email") or ""),
-                joined_at=_parse_timestamp(user["created_at"]),
-                status=snapshot.status,
-                reason_code=snapshot.reason_code,
-                human_readable_reason=snapshot.human_readable_reason,
-                last_meaningful_activity=last_activity,
-                recent_runs=sum(event.event_group == "run" for event in user_events),
-                recent_failures=sum(
-                    event.event_name == "backtest_failed" for event in user_events
-                ),
-                profile_path=f"/admin/analytics/users/{user_id}",
-            )
-            if filters.q is not None:
-                needle = filters.q.lower()
-                if needle not in item.email.lower() and needle not in item.display_name.lower():
-                    continue
-            if filters.status is not None and item.status != filters.status:
-                continue
-            if (
-                filters.last_activity_from is not None
-                and (
-                    item.last_meaningful_activity is None
-                    or item.last_meaningful_activity < filters.last_activity_from
-                )
-            ):
-                continue
-            if (
-                filters.last_activity_to is not None
-                and (
-                    item.last_meaningful_activity is None
-                    or item.last_meaningful_activity > filters.last_activity_to
-                )
-            ):
-                continue
-            items.append(item)
-
-        def sort_value(item: AnalyticsUserListItem):
-            if filters.sort == "joined_at":
-                return item.joined_at
-            if filters.sort == "recent_runs":
-                return item.recent_runs
-            if filters.sort == "recent_failures":
-                return item.recent_failures
-            return item.last_meaningful_activity or datetime.min.replace(
-                tzinfo=timezone.utc
-            )
-
-        items.sort(
-            key=lambda item: (sort_value(item), item.user_id),
-            reverse=filters.order == "desc",
-        )
-        return PaginatedUsers(
-            items=items[offset : offset + page_size],
-            total=len(items),
-            limit=page_size,
-            offset=offset,
-        )
-
     def get_user_profile(
         self,
         *,
@@ -1327,11 +1171,9 @@ __all__ = [
     "AnalyticsOverview",
     "AnalyticsQueryService",
     "AnalyticsStateSummary",
-    "AnalyticsUserFilters",
     "AnalyticsUserListItem",
     "AnalyticsUserProfile",
     "FailureCategoryCount",
-    "PaginatedUsers",
     "PanelAvailability",
     "get_analytics_query_service",
     "get_value_analytics_query_service",

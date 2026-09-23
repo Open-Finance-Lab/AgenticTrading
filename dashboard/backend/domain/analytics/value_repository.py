@@ -27,8 +27,11 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from .lifecycle import (
     CommercialTier,
     LifecycleSegment,
+    OperationalSignals,
     OperationalState,
+    _LIFECYCLE_ACTIVITY_EVENTS,
     commercial_tier,
+    consecutive_failed_terminal_runs,
 )
 from .repository import analytics_store
 from .repository_common import positive_limit, positive_user_id, utc_iso
@@ -124,6 +127,453 @@ class UserLifecycleDailySnapshot(BaseModel):
     @classmethod
     def require_timezone(cls, value: datetime) -> datetime:
         return _utc(value)
+
+
+class UserActivity(BaseModel):
+    """One user's current activity clock. One row, overwritten in place.
+
+    Design SS6.5: ``activated_at`` is the first accepted ``backtest_completed``
+    and is set once; ``last_meaningful_activity_at`` is the greatest
+    ``occurred_at`` of any accepted event in the lifecycle activity set. It is
+    current state, not history, and is never swept (SS11).
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    user_id: int = Field(gt=0)
+    activated_at: datetime | None = None
+    last_meaningful_activity_at: datetime | None = None
+    updated_at: datetime
+
+    @field_validator("activated_at", "last_meaningful_activity_at", "updated_at")
+    @classmethod
+    def require_timezone(cls, value: datetime | None) -> datetime | None:
+        return _utc(value) if value is not None else None
+
+
+def _activity_from_row(row: Any) -> UserActivity:
+    """Shared by both twins."""
+    return UserActivity(
+        user_id=int(_row_value(row, "user_id")),
+        activated_at=_optional_timestamp(_row_value(row, "activated_at")),
+        last_meaningful_activity_at=_optional_timestamp(
+            _row_value(row, "last_meaningful_activity_at")
+        ),
+        updated_at=_timestamp(_row_value(row, "updated_at")),
+    )
+
+
+class RecentFactTotals(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    active_days: int = Field(default=0, ge=0)
+    successful_backtests: int = Field(default=0, ge=0)
+    runs_requested: int = Field(default=0, ge=0)
+    runs_completed: int = Field(default=0, ge=0)
+    runs_failed: int = Field(default=0, ge=0)
+    runs_cancelled: int = Field(default=0, ge=0)
+    operator_cost_micro: int = Field(default=0, ge=0)
+    own_spend_micro: int = Field(default=0, ge=0)
+    # How many of the requested dates actually have a row. Fewer than
+    # requested means the window is incomplete, which the UI labels rather
+    # than rendering as zero.
+    days_present: int = Field(default=0, ge=0)
+    # The latest date inside the window on which this user was active, or
+    # None. The daily job needs it to answer "what did this user's activity
+    # look like as of the end of day D" -- `user_activity` holds one row
+    # overwritten in place and cannot answer a question about the past.
+    last_active_date: date | None = None
+
+
+_RECENT_FACTS_SQL = """
+    SELECT user_id,
+           SUM(CASE WHEN active THEN 1 ELSE 0 END) AS active_days,
+           SUM(runs_completed) AS successful_backtests,
+           SUM(runs_requested) AS runs_requested,
+           SUM(runs_failed) AS runs_failed,
+           SUM(runs_cancelled) AS runs_cancelled,
+           SUM(operator_cost_micro) AS operator_cost_micro,
+           SUM(own_spend_micro) AS own_spend_micro,
+           COUNT(*) AS days_present,
+           MAX(CASE WHEN active THEN snapshot_date END) AS last_active_date
+    FROM user_daily_facts
+    WHERE snapshot_date >= {p} AND snapshot_date <= {p}{user_clause}
+    GROUP BY user_id
+"""
+
+
+def _recent_totals_from_row(row: Any) -> RecentFactTotals:
+    """Shared by both twins."""
+    last_active = _row_value(row, "last_active_date")
+    completed = int(_row_value(row, "successful_backtests", 0) or 0)
+    return RecentFactTotals(
+        active_days=int(_row_value(row, "active_days", 0) or 0),
+        successful_backtests=completed,
+        runs_requested=int(_row_value(row, "runs_requested", 0) or 0),
+        runs_completed=completed,
+        runs_failed=int(_row_value(row, "runs_failed", 0) or 0),
+        runs_cancelled=int(_row_value(row, "runs_cancelled", 0) or 0),
+        operator_cost_micro=int(_row_value(row, "operator_cost_micro", 0) or 0),
+        own_spend_micro=int(_row_value(row, "own_spend_micro", 0) or 0),
+        days_present=int(_row_value(row, "days_present", 0) or 0),
+        last_active_date=(
+            date.fromisoformat(str(last_active)) if last_active else None
+        ),
+    )
+
+
+class DayEventTotals(BaseModel):
+    """One user's run outcomes and activity marks inside one UTC day."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    user_id: int = Field(gt=0)
+    runs_requested: int = Field(default=0, ge=0)
+    runs_completed: int = Field(default=0, ge=0)
+    runs_failed: int = Field(default=0, ge=0)
+    runs_cancelled: int = Field(default=0, ge=0)
+    first_success_at: datetime | None = None
+    last_activity_at: datetime | None = None
+
+    @property
+    def active(self) -> bool:
+        return self.last_activity_at is not None
+
+
+class ActivityUpdate(BaseModel):
+    """One row of a batched ``record_activity``; either timestamp may be absent."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    user_id: int = Field(gt=0)
+    activated_at: datetime | None = None
+    last_activity_at: datetime | None = None
+
+
+class UserDailyFact(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    snapshot_date: date
+    user_id: int = Field(gt=0)
+    lifecycle_segment: LifecycleSegment
+    lifecycle_reason_code: str = Field(min_length=1, max_length=100)
+    operational_state: OperationalState
+    operational_reason_code: str | None = Field(default=None, max_length=100)
+    tier: CommercialTier
+    user_group: str = Field(min_length=1, max_length=32)
+    active: bool = False
+    runs_requested: int = Field(default=0, ge=0)
+    runs_completed: int = Field(default=0, ge=0)
+    runs_failed: int = Field(default=0, ge=0)
+    runs_cancelled: int = Field(default=0, ge=0)
+    operator_cost_micro: int = Field(default=0, ge=0)
+    own_spend_micro: int = Field(default=0, ge=0)
+    data_quality: Literal["complete", "partial"]
+    calculated_at: datetime
+
+    @field_validator("calculated_at")
+    @classmethod
+    def require_timezone(cls, value: datetime) -> datetime:
+        return _utc(value)
+
+
+class LifecycleTransitionRow(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    user_id: int = Field(gt=0)
+    snapshot_date: date
+    from_segment: LifecycleSegment
+    to_segment: LifecycleSegment
+    inactive_days: int = Field(default=0, ge=0)
+    data_quality: Literal["complete", "partial"] = "complete"
+    created_at: datetime
+
+    @field_validator("created_at")
+    @classmethod
+    def require_timezone(cls, value: datetime) -> datetime:
+        return _utc(value)
+
+
+_DAILY_FACT_COLUMNS = (
+    "snapshot_date", "user_id", "lifecycle_segment", "lifecycle_reason_code",
+    "operational_state", "operational_reason_code", "tier", "user_group", "active",
+    "runs_requested", "runs_completed", "runs_failed", "runs_cancelled",
+    "operator_cost_micro", "own_spend_micro", "data_quality", "calculated_at",
+)
+_DAILY_FACT_UPDATES = ", ".join(
+    f"{column} = excluded.{column}" for column in _DAILY_FACT_COLUMNS[2:]
+)
+_TRANSITION_COLUMNS = (
+    "user_id", "snapshot_date", "from_segment", "to_segment", "inactive_days",
+    "data_quality", "created_at",
+)
+_TRANSITION_UPDATES = ", ".join(
+    f"{column} = excluded.{column}" for column in _TRANSITION_COLUMNS[2:]
+)
+_ACTIVITY_EVENT_NAMES = tuple(sorted(_LIFECYCLE_ACTIVITY_EVENTS))
+_EVENTS_FOR_DAY_SQL = """
+    SELECT user_id,
+           SUM(CASE WHEN event_name = 'backtest_requested' THEN 1 ELSE 0 END)
+               AS runs_requested,
+           SUM(CASE WHEN event_name = 'backtest_completed' THEN 1 ELSE 0 END)
+               AS runs_completed,
+           SUM(CASE WHEN event_name = 'backtest_failed' THEN 1 ELSE 0 END)
+               AS runs_failed,
+           SUM(CASE WHEN event_name = 'backtest_cancelled' THEN 1 ELSE 0 END)
+               AS runs_cancelled,
+           MIN(CASE WHEN event_name = 'backtest_completed' THEN occurred_at END)
+               AS first_success_at,
+           MAX(CASE WHEN event_name IN ({activity}) THEN occurred_at END)
+               AS last_activity_at
+    FROM analytics_events
+    WHERE occurred_at >= {p} AND occurred_at < {p}
+    GROUP BY user_id
+"""
+_RECOMPUTE_EVENTS_SQL = """
+    SELECT substr(occurred_at, 1, 10) AS day, MAX(received_at) AS last_received
+    FROM analytics_events
+    WHERE occurred_at >= {p} AND occurred_at < {p}
+    GROUP BY substr(occurred_at, 1, 10)
+"""
+_RECOMPUTE_FACTS_SQL = """
+    SELECT snapshot_date, MIN(calculated_at) AS calculated_at
+    FROM user_daily_facts
+    WHERE snapshot_date >= {p} AND snapshot_date <= {p}
+    GROUP BY snapshot_date
+"""
+
+
+def _day_bounds_iso(day: date) -> tuple[str, str]:
+    start = datetime.combine(day, datetime.min.time(), tzinfo=timezone.utc)
+    return utc_iso(start), utc_iso(start + timedelta(days=1))
+
+
+def _events_totals_from_row(row: Any) -> DayEventTotals:
+    """Shared by both twins."""
+    return DayEventTotals(
+        user_id=int(_row_value(row, "user_id")),
+        runs_requested=int(_row_value(row, "runs_requested", 0) or 0),
+        runs_completed=int(_row_value(row, "runs_completed", 0) or 0),
+        runs_failed=int(_row_value(row, "runs_failed", 0) or 0),
+        runs_cancelled=int(_row_value(row, "runs_cancelled", 0) or 0),
+        first_success_at=_optional_timestamp(_row_value(row, "first_success_at")),
+        last_activity_at=_optional_timestamp(_row_value(row, "last_activity_at")),
+    )
+
+
+def _fact_from_row(row: Any) -> UserDailyFact:
+    """Shared by both twins."""
+    return UserDailyFact(
+        snapshot_date=date.fromisoformat(str(_row_value(row, "snapshot_date"))),
+        user_id=int(_row_value(row, "user_id")),
+        lifecycle_segment=_row_value(row, "lifecycle_segment"),
+        lifecycle_reason_code=_row_value(row, "lifecycle_reason_code"),
+        operational_state=_row_value(row, "operational_state"),
+        operational_reason_code=_row_value(row, "operational_reason_code"),
+        tier=_row_value(row, "tier"),
+        user_group=_row_value(row, "user_group"),
+        active=bool(_row_value(row, "active", 0)),
+        runs_requested=int(_row_value(row, "runs_requested", 0) or 0),
+        runs_completed=int(_row_value(row, "runs_completed", 0) or 0),
+        runs_failed=int(_row_value(row, "runs_failed", 0) or 0),
+        runs_cancelled=int(_row_value(row, "runs_cancelled", 0) or 0),
+        operator_cost_micro=int(_row_value(row, "operator_cost_micro", 0) or 0),
+        own_spend_micro=int(_row_value(row, "own_spend_micro", 0) or 0),
+        data_quality=_row_value(row, "data_quality"),
+        calculated_at=_timestamp(_row_value(row, "calculated_at")),
+    )
+
+
+def _fact_values(row: UserDailyFact, *, active_value: Any) -> tuple[Any, ...]:
+    """Shared by both twins; ``active_value`` is int on SQLite, bool on Postgres."""
+    return (
+        row.snapshot_date.isoformat(),
+        row.user_id,
+        row.lifecycle_segment,
+        row.lifecycle_reason_code,
+        row.operational_state,
+        row.operational_reason_code,
+        row.tier,
+        row.user_group,
+        active_value,
+        row.runs_requested,
+        row.runs_completed,
+        row.runs_failed,
+        row.runs_cancelled,
+        row.operator_cost_micro,
+        row.own_spend_micro,
+        row.data_quality,
+        utc_iso(row.calculated_at),
+    )
+
+
+def _transition_values(row: LifecycleTransitionRow) -> tuple[Any, ...]:
+    return (
+        row.user_id,
+        row.snapshot_date.isoformat(),
+        row.from_segment,
+        row.to_segment,
+        row.inactive_days,
+        row.data_quality,
+        utc_iso(row.created_at),
+    )
+
+
+def _activity_update_values(update: ActivityUpdate, stamp: str) -> tuple[Any, ...]:
+    return (
+        update.user_id,
+        utc_iso(update.activated_at) if update.activated_at is not None else None,
+        utc_iso(update.last_activity_at) if update.last_activity_at is not None else None,
+        stamp,
+    )
+
+
+def _recompute_days(event_rows: Sequence[Any], fact_rows: Sequence[Any]) -> list[date]:
+    """Shared by both twins: days whose newest event landed after their facts."""
+    calculated = {
+        str(_row_value(row, "snapshot_date")): str(_row_value(row, "calculated_at"))
+        for row in fact_rows
+    }
+    stale: list[date] = []
+    for row in event_rows:
+        day = str(_row_value(row, "day"))
+        last_received = _row_value(row, "last_received")
+        if day in calculated and last_received is not None and str(last_received) > calculated[day]:
+            stale.append(date.fromisoformat(day))
+    return sorted(stale, reverse=True)
+
+
+def _platform_lane_open(providers: Sequence[Mapping[str, Any]], platform_statuses: Mapping[str, str]) -> bool:
+    """The population-wide half of ``platform_credits_available``.
+
+    Mirrors ModelProviderService.list_execution_options (service.py:175-186):
+    an enabled, platform-enabled provider whose platform credential is
+    verified or whose deployment secret is set. No user appears in this
+    expression, which is the whole reason the lane is batchable at all.
+    """
+    from dashboard.backend.domain.model_providers.service import (
+        _environment_platform_secret,
+    )
+
+    for provider in providers:
+        provider_id = str(provider.get("provider_id"))
+        if provider.get("status") != "enabled" or not provider.get("platform_enabled"):
+            continue
+        if platform_statuses.get(provider_id) == "verified":
+            return True
+        if _environment_platform_secret(provider_id):
+            return True
+    return False
+
+
+def _population_operational_signals(
+    store: Any,
+    user_ids: Sequence[int],
+    *,
+    now: datetime,
+    population_wide: bool,
+) -> dict[int, OperationalSignals]:
+    """Shared by both twins: seven owning-store calls, one fold, no per-user query.
+
+    ``user_ids`` is always the set answered for. ``population_wide`` decides
+    how the sources are *read*: False passes the ids as an IN list (the
+    live/batched shape, capped by ``_ids``); True passes ``None`` so every
+    statement is population-wide and the same at any user count -- the daily
+    job's shape. Either way a user with no row in any source is computed from
+    the model's defaults and a zero balance, exactly as ``get_operational_facts``
+    computes them, rather than being dropped.
+    """
+    current = _utc(now, "now")
+    if population_wide:
+        if not isinstance(user_ids, (list, tuple)):
+            raise ValueError("user_ids must be a list or tuple")
+        ids = list(dict.fromkeys(positive_user_id(item) for item in user_ids))
+        query_ids = None
+    else:
+        ids = _ids(user_ids)
+        query_ids = ids
+    if not ids:
+        return {}
+
+    def batched(base: Any, method: str, *args: Any, **kwargs: Any) -> Any:
+        if not hasattr(base, method):
+            return {}
+        result = getattr(base, method)(*args, **kwargs)
+        if not result:
+            # Fail-visible: every OperationalSignals default is permissive, so
+            # a source that silently answers nothing reads as "everyone
+            # healthy". A fresh deploy may legitimately have no rows, which is
+            # why this is a line and not an exception.
+            print(f"WARNING: analytics.operational_signals_empty source={method}")
+        return result
+
+    balances = batched(store.credits_base, "get_balance_projections", query_ids)          # 1
+    billing = batched(store.credits_base, "list_account_billing_states", query_ids)       # 2
+    credentials = batched(store.provider_base, "list_default_credential_facts", query_ids)  # 3
+    providers = (
+        list(store.provider_base.list_all_providers())                                    # 4
+        if hasattr(store.provider_base, "list_all_providers")
+        else []
+    )
+    platform_statuses = batched(store.provider_base, "list_platform_credential_statuses")  # 5
+    owners = batched(store.agent_base, "list_agent_owners", query_ids)                    # 6
+    runs = (
+        store.run_base.list_terminal_runs_since(since=current - timedelta(hours=24))      # 7
+        if hasattr(store.run_base, "list_terminal_runs_since")
+        else {}
+    )
+
+    providers_by_id = {str(row.get("provider_id")): row for row in providers}
+    platform_open = _platform_lane_open(providers, platform_statuses)
+    agents_by_owner: dict[int, list[str]] = {}
+    for agent_id, owner in owners.items():
+        agents_by_owner.setdefault(int(owner), []).append(agent_id)
+
+    signals: dict[int, OperationalSignals] = {}
+    for user_id in ids:
+        facts = credentials.get(user_id)
+        default_ids = facts.default_provider_ids if facts is not None else frozenset()
+        verified_counts = facts.verified_default_provider_counts if facts is not None else {}
+        selected_enabled = all(
+            providers_by_id.get(provider_id, {}).get("status") == "enabled"
+            for provider_id in default_ids
+        )
+        verified_byok = any(
+            row.get("status") == "enabled"
+            and bool(row.get("byok_enabled"))
+            and verified_counts.get(str(row.get("provider_id")), 0) == 1
+            for row in providers
+        )
+        total_available = int(
+            _object_value(balances.get(user_id, {}), "total_available_micro")
+        )
+        platform_lane = total_available > 0 and platform_open
+        pooled = sorted(
+            (
+                pair
+                for agent_id in agents_by_owner.get(user_id, ())
+                for pair in runs.get(agent_id, ())
+                if pair[0] <= current
+            ),
+            key=lambda pair: pair[0],
+            reverse=True,
+        )
+        signals[user_id] = OperationalSignals(
+            user_id=user_id,
+            account_restricted=(
+                billing.get(user_id, {}).get("account_status") == "restricted"
+            ),
+            usable_billing_lane=platform_lane or verified_byok,
+            selected_provider_enabled=selected_enabled,
+            default_credential_status=facts.status if facts is not None else "missing",
+            failed_terminal_runs_24h=consecutive_failed_terminal_runs(
+                [status for _stamp, status in pooled]
+            ),
+            # A live condition about a run happening right now; a fact row for
+            # a completed day cannot meaningfully carry it.
+            run_beyond_safe_deadline=False,
+        )
+    return signals
 
 
 class CommercialValueFact(BaseModel):
@@ -269,28 +719,6 @@ def _current_snapshot_from_row(row: Any) -> UserValueSnapshot | None:
         ),
         calculated_at=_timestamp(_row_value(row, "calculated_at")),
     )
-
-
-def _fetchall(conn: Any, postgres: bool, sql: str, params: Sequence[Any]):
-    """Shared by both twins.
-
-    Still dialect-parameterised: it serves ``list_commercial_values``/
-    ``list_credit_activity``, which branch on the *credits* store's dialect,
-    never on this class's own -- see the module docstring.
-    """
-    if postgres:
-        with conn.cursor() as cur:
-            cur.execute(sql, params)
-            return cur.fetchall()
-    return conn.execute(sql, params).fetchall()
-
-
-def _user_clause(ids: list[int], postgres: bool) -> tuple[str, list[Any]]:
-    """Shared by both twins; see ``_fetchall`` above."""
-    if postgres:
-        return "user_id = ANY(%s)", [ids]
-    placeholders = ", ".join("?" for _ in ids)
-    return f"user_id IN ({placeholders})", list(ids)
 
 
 def _projection_job_name(value: object) -> str:
@@ -679,6 +1107,193 @@ class ValueAnalyticsStore:
             row = conn.execute(sql, (before.isoformat(),)).fetchone()
         return row is not None
 
+    def record_activity(
+        self,
+        user_id: int,
+        *,
+        occurred_at: datetime,
+        activating: bool,
+        now: datetime,
+    ) -> None:
+        """Advance one user's activity timestamps. One statement, no read.
+
+        The two columns move in opposite directions, on purpose.
+
+        ``activated_at`` keeps the **earliest** success, because activation
+        is defined as the first server-authoritative ``backtest_completed``
+        by ``occurred_at`` -- not by arrival order. Ingestion does not see
+        events in occurred_at order: a completion can be appended late,
+        replayed, or backdated up to the 24 hours ``service.py:96-97``
+        accepts. A plain ``COALESCE(stored, incoming)`` would freeze
+        whichever row happened to land first and make the value
+        uncorrectable afterwards, which would also silently turn the daily
+        job's ``events`` step repair into a no-op. A non-activating event
+        passes NULL and the COALESCE pair leaves the stored value alone.
+
+        ``last_meaningful_activity_at`` only ever advances, so a
+        late-arriving old event cannot make a user look more dormant than
+        they are.
+
+        Timestamps are ISO-8601 UTC text throughout this schema, which orders
+        lexicographically, so MIN and MAX over the text are the same
+        comparisons as over the instants.
+
+        SQLite's scalar ``max(X, Y)`` and ``min(X, Y)`` both return NULL if
+        **either** argument is NULL, which is why each stored value is
+        COALESCEd against the incoming one before the comparison rather than
+        passed raw.
+        """
+        subject_id = positive_user_id(user_id)
+        occurred = utc_iso(_utc(occurred_at, "occurred_at"))
+        values = (
+            subject_id,
+            occurred if activating else None,
+            occurred,
+            utc_iso(_utc(now, "now")),
+        )
+        sql = """
+            INSERT INTO user_activity (
+                user_id, activated_at, last_meaningful_activity_at, updated_at
+            ) VALUES (?, ?, ?, ?)
+            ON CONFLICT(user_id) DO UPDATE SET
+                activated_at = MIN(
+                    COALESCE(user_activity.activated_at, excluded.activated_at),
+                    COALESCE(excluded.activated_at, user_activity.activated_at)
+                ),
+                last_meaningful_activity_at = MAX(
+                    COALESCE(
+                        user_activity.last_meaningful_activity_at,
+                        excluded.last_meaningful_activity_at
+                    ),
+                    excluded.last_meaningful_activity_at
+                ),
+                updated_at = excluded.updated_at
+        """
+        with self._analytics_connection() as conn:
+            conn.execute(sql, values)
+
+    def get_activity(self, user_id: int) -> UserActivity | None:
+        """One user's stored activity row, or None if they have none yet."""
+        subject_id = positive_user_id(user_id)
+        with self._analytics_connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM user_activity WHERE user_id = ?", (subject_id,)
+            ).fetchone()
+        return _activity_from_row(row) if row is not None else None
+
+    def list_activity(
+        self,
+        user_ids: Sequence[int] | None = None,
+    ) -> dict[int, UserActivity]:
+        """Activity rows for many users, or for everyone when ``user_ids`` is None.
+
+        ``None`` is the daily job's shape: one statement over the whole
+        population, parameterised by nothing. A sequence is batched by
+        ``MAX_USER_BATCH`` the way ``list_current_snapshots`` already is.
+        """
+        result: dict[int, UserActivity] = {}
+        if user_ids is None:
+            with self._analytics_connection() as conn:
+                rows = conn.execute(
+                    "SELECT * FROM user_activity ORDER BY user_id"
+                ).fetchall()
+            for row in rows:
+                activity = _activity_from_row(row)
+                result[activity.user_id] = activity
+            return result
+        ids = _ids(user_ids)
+        if not ids:
+            return {}
+        for offset in range(0, len(ids), MAX_USER_BATCH):
+            chunk = ids[offset : offset + MAX_USER_BATCH]
+            clause = f"user_id IN ({', '.join('?' for _ in chunk)})"
+            with self._analytics_connection() as conn:
+                rows = conn.execute(
+                    f"SELECT * FROM user_activity WHERE {clause} ORDER BY user_id",
+                    chunk,
+                ).fetchall()
+            for row in rows:
+                activity = _activity_from_row(row)
+                result[activity.user_id] = activity
+        return result
+
+    def seed_activity_from_snapshots(self, *, now: datetime) -> int:
+        """Copy ``activated_at`` / ``last_meaningful_activity_at`` from the legacy row.
+
+        Design SS11: ``user_analytics_snapshots`` is the only table that knows
+        when an existing user first activated, and it is dropped in PR B.
+        Ingestion only maintains ``user_activity`` for events arriving after
+        this deploy, so without this copy every pre-existing activation date
+        would vanish on the night of the drop.
+
+        Idempotent by construction -- the same MIN/MAX upsert
+        ``record_activity`` uses -- so PR B can re-run it immediately before
+        the drop (the legacy row keeps being maintained by the throttled
+        repair between the two PRs). Returns the number of rows touched.
+        """
+        stamp = utc_iso(_utc(now, "now"))
+        sql = """
+            INSERT INTO user_activity (
+                user_id, activated_at, last_meaningful_activity_at, updated_at
+            )
+            SELECT user_id, activated_at, last_meaningful_activity_at, ?
+            FROM user_analytics_snapshots
+            WHERE activated_at IS NOT NULL
+               OR last_meaningful_activity_at IS NOT NULL
+            ON CONFLICT(user_id) DO UPDATE SET
+                activated_at = MIN(
+                    COALESCE(user_activity.activated_at, excluded.activated_at),
+                    COALESCE(excluded.activated_at, user_activity.activated_at)
+                ),
+                last_meaningful_activity_at = MAX(
+                    COALESCE(
+                        user_activity.last_meaningful_activity_at,
+                        excluded.last_meaningful_activity_at
+                    ),
+                    COALESCE(
+                        excluded.last_meaningful_activity_at,
+                        user_activity.last_meaningful_activity_at
+                    )
+                ),
+                updated_at = excluded.updated_at
+        """
+        with self._analytics_connection() as conn:
+            cursor = conn.execute(sql, (stamp,))
+            return max(0, int(cursor.rowcount))
+
+    def sum_recent_facts(
+        self,
+        user_ids: Sequence[int] | None,
+        *,
+        start: date,
+        end: date,
+    ) -> dict[int, RecentFactTotals]:
+        """Trailing-window totals for many users in one query.
+
+        ``start`` and ``end`` are inclusive UTC dates. ``None`` for
+        ``user_ids`` means the whole population -- the daily job's shape,
+        parameterised by two dates and nothing else. One statement for the
+        whole batch: a per-user loop here is the shape that caused the
+        outage, and the read-budget test fails on it.
+        """
+        if end < start:
+            raise ValueError("end must not precede start")
+        params: list[Any] = [start.isoformat(), end.isoformat()]
+        user_clause = ""
+        if user_ids is not None:
+            ids = _ids(user_ids)
+            if not ids:
+                return {}
+            user_clause = f" AND user_id IN ({', '.join('?' for _ in ids)})"
+            params.extend(ids)
+        sql = _RECENT_FACTS_SQL.format(p="?", user_clause=user_clause)
+        with self._analytics_connection() as conn:
+            rows = conn.execute(sql, params).fetchall()
+        return {
+            int(_row_value(row, "user_id")): _recent_totals_from_row(row)
+            for row in rows
+        }
+
     def list_commercial_values(
         self,
         user_ids: Sequence[int],
@@ -691,92 +1306,16 @@ class ValueAnalyticsStore:
         if not ids:
             return {}
 
-        lifetime_by_user: dict[int, tuple[int, int]] = {}
-        period_by_user: dict[int, tuple[int, int, int]] = {}
-        usage_by_user: dict[int, int] = {}
-        if hasattr(self.credits_base, "_get_connection"):
-            postgres = hasattr(self.credits_base, "database_url")
-            user_clause, user_params = _user_clause(ids, postgres)
-            placeholder = "%s" if postgres else "?"
-            window_params = [
-                *user_params,
-                utc_iso(window_start),
-                utc_iso(window_end),
-            ]
-            with self.credits_base._get_connection() as conn:
-                lifetime_rows = _fetchall(
-                    conn,
-                    postgres,
-                    f"""
-                    SELECT user_id,
-                           COALESCE(SUM(CASE WHEN entry_type = 'purchase'
-                               THEN amount_micro ELSE 0 END), 0) AS purchased_micro,
-                           COALESCE(SUM(CASE WHEN entry_type = 'refund'
-                               THEN -amount_micro ELSE 0 END), 0) AS refunded_micro
-                    FROM credit_ledger_entries
-                    WHERE {user_clause}
-                      AND entry_type IN ('purchase', 'refund')
-                    GROUP BY user_id
-                    """,
-                    user_params,
-                )
-                period_rows = _fetchall(
-                    conn,
-                    postgres,
-                    f"""
-                    SELECT user_id,
-                           COALESCE(SUM(CASE WHEN entry_type = 'purchase'
-                               THEN amount_micro ELSE 0 END), 0) AS purchased_micro,
-                           COALESCE(SUM(CASE WHEN entry_type = 'refund'
-                               THEN -amount_micro ELSE 0 END), 0) AS refunded_micro,
-                           COALESCE(SUM(CASE
-                               WHEN entry_type = 'admin_grant_assign' THEN amount_micro
-                               WHEN entry_type = 'admin_grant_reclaim' THEN -amount_micro
-                               ELSE 0 END), 0) AS grant_activity_micro
-                    FROM credit_ledger_entries
-                    WHERE {user_clause}
-                      AND created_at >= {placeholder}
-                      AND created_at < {placeholder}
-                    GROUP BY user_id
-                    """,
-                    window_params,
-                )
-                usage_rows = _fetchall(
-                    conn,
-                    postgres,
-                    f"""
-                    SELECT user_id,
-                           COALESCE(SUM(-amount_micro), 0) AS consumed_micro
-                    FROM credit_llm_usage_entries
-                    WHERE {user_clause}
-                      AND created_at >= {placeholder}
-                      AND created_at < {placeholder}
-                    GROUP BY user_id
-                    """,
-                    window_params,
-                )
-            lifetime_by_user = {
-                int(_row_value(row, "user_id")): (
-                    max(int(_row_value(row, "purchased_micro", 0)), 0),
-                    max(int(_row_value(row, "refunded_micro", 0)), 0),
-                )
-                for row in lifetime_rows
-            }
-            period_by_user = {
-                int(_row_value(row, "user_id")): (
-                    max(int(_row_value(row, "purchased_micro", 0)), 0),
-                    max(int(_row_value(row, "refunded_micro", 0)), 0),
-                    max(int(_row_value(row, "grant_activity_micro", 0)), 0),
-                )
-                for row in period_rows
-            }
-            usage_by_user = {
-                int(_row_value(row, "user_id")): max(
-                    int(_row_value(row, "consumed_micro", 0)), 0
-                )
-                for row in usage_rows
-            }
-
+        # The ledger is read through the credits domain (design SS6.14). The
+        # guard mirrors the old ``hasattr(self.credits_base, "_get_connection")``
+        # one: retention.py constructs this store with ``credits_base=object()``.
+        ledger = (
+            self.credits_base.aggregate_commercial_ledger(
+                ids, start=window_start, end=window_end
+            )
+            if hasattr(self.credits_base, "aggregate_commercial_ledger")
+            else {}
+        )
         balances = (
             self.credits_base.get_balance_projections(ids)
             if hasattr(self.credits_base, "get_balance_projections")
@@ -784,10 +1323,13 @@ class ValueAnalyticsStore:
         )
         result: dict[int, CommercialValueFact] = {}
         for user_id in ids:
-            lifetime_purchased, lifetime_refunded = lifetime_by_user.get(
-                user_id, (0, 0)
-            )
-            purchased, refunded, grant_activity = period_by_user.get(user_id, (0, 0, 0))
+            totals = ledger.get(user_id, {})
+            lifetime_purchased = max(int(totals.get("lifetime_purchased_micro", 0)), 0)
+            lifetime_refunded = max(int(totals.get("lifetime_refunded_micro", 0)), 0)
+            purchased = max(int(totals.get("purchased_micro", 0)), 0)
+            refunded = max(int(totals.get("refunded_micro", 0)), 0)
+            grant_activity = max(int(totals.get("grant_activity_micro", 0)), 0)
+            consumed = max(int(totals.get("consumed_micro", 0)), 0)
             net_purchased = max(lifetime_purchased - lifetime_refunded, 0)
             balance = balances.get(user_id, {})
             result[user_id] = CommercialValueFact(
@@ -796,7 +1338,7 @@ class ValueAnalyticsStore:
                 commercial_tier=commercial_tier(net_purchased),
                 purchased_micro=purchased,
                 refunded_micro=refunded,
-                consumed_micro=usage_by_user.get(user_id, 0),
+                consumed_micro=consumed,
                 admin_grant_activity_micro=grant_activity,
                 grant_available_micro=max(
                     int(_object_value(balance, "grant_available_micro")), 0
@@ -809,7 +1351,6 @@ class ValueAnalyticsStore:
                 ),
             )
         return result
-
     def list_credit_activity(
         self,
         user_ids: Sequence[int],
@@ -819,48 +1360,15 @@ class ValueAnalyticsStore:
     ) -> dict[int, Sequence[datetime]]:
         ids = _ids(user_ids)
         window_start, window_end = _validate_window(start, end)
-        result: dict[int, list[datetime]] = {user_id: [] for user_id in ids}
-        if not ids or not hasattr(self.credits_base, "_get_connection"):
+        if not ids or not hasattr(self.credits_base, "list_credit_activity_timestamps"):
             return {user_id: () for user_id in ids}
-
-        postgres = hasattr(self.credits_base, "database_url")
-        user_clause, user_params = _user_clause(ids, postgres)
-        placeholder = "%s" if postgres else "?"
-        params = [*user_params, utc_iso(window_start), utc_iso(window_end)]
-        with self.credits_base._get_connection() as conn:
-            purchase_rows = _fetchall(
-                conn,
-                postgres,
-                f"""
-                SELECT user_id, created_at
-                FROM credit_ledger_entries
-                WHERE {user_clause}
-                  AND entry_type = 'purchase'
-                  AND created_at >= {placeholder}
-                  AND created_at < {placeholder}
-                """,
-                params,
-            )
-            usage_rows = _fetchall(
-                conn,
-                postgres,
-                f"""
-                SELECT user_id, created_at
-                FROM credit_llm_usage_entries
-                WHERE {user_clause}
-                  AND created_at >= {placeholder}
-                  AND created_at < {placeholder}
-                """,
-                params,
-            )
-        for row in (*purchase_rows, *usage_rows):
-            user_id = int(_row_value(row, "user_id"))
-            if user_id in result:
-                result[user_id].append(_timestamp(_row_value(row, "created_at")))
+        stamps = self.credits_base.list_credit_activity_timestamps(
+            ids, start=window_start, end=window_end
+        )
         return {
-            user_id: tuple(sorted(timestamps)) for user_id, timestamps in result.items()
+            user_id: tuple(sorted(_timestamp(value) for value in stamps.get(user_id, ())))
+            for user_id in ids
         }
-
     def _run_health(self, user_id: int, now: datetime) -> tuple[int, bool]:
         if self.agent_base is None or self.run_base is None:
             return 0, False
@@ -893,11 +1401,9 @@ class ValueAnalyticsStore:
             )
             and now - timedelta(hours=24) <= timestamp <= now
         ]
-        consecutive_failures = 0
-        for run in terminal_24h:
-            if str(run.get("status")) not in {"failed", "timed_out"}:
-                break
-            consecutive_failures += 1
+        consecutive_failures = consecutive_failed_terminal_runs(
+            [str(run.get("status")) for run in terminal_24h]
+        )
 
         beyond_deadline = False
         for run in ordered:
@@ -1002,6 +1508,27 @@ class ValueAnalyticsStore:
             run_beyond_safe_deadline=beyond_deadline,
         )
 
+    def list_operational_signals(
+        self,
+        user_ids: Sequence[int],
+        *,
+        now: datetime,
+        population_wide: bool = False,
+    ) -> dict[int, OperationalSignals]:
+        """Operational signals for many users, at a fixed query count.
+
+        The per-user twin, ``get_operational_facts``, fans out into roughly
+        five store calls plus one per agent the user owns. That is right for
+        one profile and catastrophic for a population, so the daily job uses
+        this instead, with ``population_wide=True`` so no statement carries an
+        IN list that grows with the population. Both must produce the same
+        answer; the equivalence is pinned by
+        tests/domain/analytics/test_operational_signals.py.
+        """
+        return _population_operational_signals(
+            self, user_ids, now=now, population_wide=population_wide
+        )
+
     def get_projection_job(self, job_name: str) -> ProjectionJob | None:
         name = _projection_job_name(job_name)
         with self._analytics_connection() as conn:
@@ -1045,6 +1572,262 @@ class ValueAnalyticsStore:
             conn.execute(sql, values)
         return job
 
+    def claim_projection_day(
+        self,
+        job_name: str,
+        *,
+        day: date,
+        now: datetime,
+        stale_after: timedelta = timedelta(hours=2),
+    ) -> bool:
+        """Take the lease on ``day`` for ``job_name``; True for the caller that won.
+
+        Two fields, two questions (design SS6.9). ``cursor`` answers "which
+        day is done" and only ``complete_projection_day`` moves it, so a day
+        is never run twice once it succeeded. ``status`` answers "is someone
+        running it now": the compare-and-set below moves it from
+        ``pending``/``complete`` to ``running`` and stamps ``updated_at``; a
+        second process whose UPDATE matches nothing gets False. A ``running``
+        lease older than ``stale_after`` is a crash, not a worker, and may be
+        taken over -- which is how a job killed mid-day retries on the next
+        tick instead of never.
+
+        The cursor comparison is lexicographic on ISO dates. ``cursor >= day``
+        means the day (or a later one) already completed and the claim is
+        refused without a write.
+        """
+        name = _projection_job_name(job_name)
+        target = day.isoformat()
+        stamp = utc_iso(_utc(now, "now"))
+        stale_before = utc_iso(_utc(now, "now") - stale_after)
+        with self._analytics_connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO analytics_projection_jobs (
+                    job_name, window_start, window_end, cursor, status, updated_at
+                ) VALUES (?, ?, ?, NULL, 'pending', ?)
+                ON CONFLICT(job_name) DO NOTHING
+                """,
+                (name, target, target, stamp),
+            )
+            cursor = conn.execute(
+                """
+                UPDATE analytics_projection_jobs
+                   SET status = 'running', window_end = ?, updated_at = ?
+                 WHERE job_name = ?
+                   AND (cursor IS NULL OR cursor < ?)
+                   AND (
+                        status IN ('pending', 'complete')
+                        OR (status = 'running' AND updated_at < ?)
+                   )
+                """,
+                (target, stamp, name, target, stale_before),
+            )
+            return cursor.rowcount == 1
+
+    def complete_projection_day(self, job_name: str, *, day: date, now: datetime) -> None:
+        """Record ``day`` as done: cursor -> day, status -> complete."""
+        name = _projection_job_name(job_name)
+        with self._analytics_connection() as conn:
+            conn.execute(
+                """
+                UPDATE analytics_projection_jobs
+                   SET cursor = ?, status = 'complete', updated_at = ?
+                 WHERE job_name = ?
+                """,
+                (day.isoformat(), utc_iso(_utc(now, "now")), name),
+            )
+
+    def release_projection_day(self, job_name: str, *, now: datetime) -> None:
+        """Give a failed day back: status -> pending, cursor untouched.
+
+        Called when a step failed, so the next tick's claim retries the same
+        day at once instead of waiting out the stale window.
+        """
+        name = _projection_job_name(job_name)
+        with self._analytics_connection() as conn:
+            conn.execute(
+                """
+                UPDATE analytics_projection_jobs
+                   SET status = 'pending', updated_at = ?
+                 WHERE job_name = ? AND status = 'running'
+                """,
+                (utc_iso(_utc(now, "now")), name),
+            )
+
+    def aggregate_events_for_day(self, day: date) -> dict[int, DayEventTotals]:
+        """Per-user outcome counts and activity marks for one UTC day.
+
+        The one-day scan the event-log discipline permits (design SS6.11 rule
+        4); it takes no user id. The fifteen activity names are bound as
+        parameters rather than interpolated.
+        """
+        start, end = _day_bounds_iso(day)
+        activity = ", ".join("?" for _ in _ACTIVITY_EVENT_NAMES)
+        sql = _EVENTS_FOR_DAY_SQL.format(activity=activity, p="?")
+        with self._analytics_connection() as conn:
+            rows = conn.execute(sql, [*_ACTIVITY_EVENT_NAMES, start, end]).fetchall()
+        return {
+            int(_row_value(row, "user_id")): _events_totals_from_row(row) for row in rows
+        }
+
+    def record_activity_batch(
+        self,
+        updates: Sequence[ActivityUpdate],
+        *,
+        now: datetime,
+    ) -> int:
+        """Many ``record_activity`` corrections in one ``executemany``.
+
+        Same MIN/MAX upsert as ``record_activity`` and ``seed_activity_from_snapshots``,
+        with both incoming columns nullable: the daily job's ledger step knows
+        a user's last credit activity but nothing about activation, and its
+        events step knows both. A per-user ``record_activity`` loop would be a
+        query count that grows with the population (design SS6.12). Returns
+        the number of updates submitted; an empty batch touches nothing.
+        """
+        if not updates:
+            return 0
+        stamp = utc_iso(_utc(now, "now"))
+        sql = """
+            INSERT INTO user_activity (
+                user_id, activated_at, last_meaningful_activity_at, updated_at
+            ) VALUES (?, ?, ?, ?)
+            ON CONFLICT(user_id) DO UPDATE SET
+                activated_at = MIN(
+                    COALESCE(user_activity.activated_at, excluded.activated_at),
+                    COALESCE(excluded.activated_at, user_activity.activated_at)
+                ),
+                last_meaningful_activity_at = MAX(
+                    COALESCE(
+                        user_activity.last_meaningful_activity_at,
+                        excluded.last_meaningful_activity_at
+                    ),
+                    COALESCE(
+                        excluded.last_meaningful_activity_at,
+                        user_activity.last_meaningful_activity_at
+                    )
+                ),
+                updated_at = excluded.updated_at
+        """
+        with self._analytics_connection() as conn:
+            conn.executemany(
+                sql, [_activity_update_values(update, stamp) for update in updates]
+            )
+        return len(updates)
+
+    def upsert_daily_facts(self, rows: Sequence[UserDailyFact]) -> int:
+        """Write one batch of fact rows. One executemany, not a loop."""
+        if not rows:
+            return 0
+        columns = ", ".join(_DAILY_FACT_COLUMNS)
+        placeholders = ", ".join("?" for _ in _DAILY_FACT_COLUMNS)
+        sql = f"""
+            INSERT INTO user_daily_facts ({columns})
+            VALUES ({placeholders})
+            ON CONFLICT(snapshot_date, user_id) DO UPDATE SET {_DAILY_FACT_UPDATES}
+        """
+        with self._analytics_connection() as conn:
+            conn.executemany(
+                sql, [_fact_values(row, active_value=int(row.active)) for row in rows]
+            )
+        return len(rows)
+
+    def append_lifecycle_transitions(
+        self, rows: Sequence[LifecycleTransitionRow]
+    ) -> int:
+        """Write segment changes for one day, correcting any already there.
+
+        ``ON CONFLICT (user_id, snapshot_date) DO UPDATE`` -- **not** DO
+        NOTHING. The day this table is rewritten is exactly the day something
+        went wrong: a step failed and the row was derived from a missing
+        source, or a late event changed the day's totals. DO NOTHING would
+        freeze that first, weakest answer forever while the retry corrected
+        ``user_daily_facts`` (which upserts), leaving the two tables in
+        permanent disagreement (design SS6.8). The UNIQUE constraint's job is
+        to stop a *duplicate*, which DO UPDATE does equally well.
+        """
+        if not rows:
+            return 0
+        columns = ", ".join(_TRANSITION_COLUMNS)
+        placeholders = ", ".join("?" for _ in _TRANSITION_COLUMNS)
+        sql = f"""
+            INSERT INTO lifecycle_transitions ({columns})
+            VALUES ({placeholders})
+            ON CONFLICT(user_id, snapshot_date) DO UPDATE SET {_TRANSITION_UPDATES}
+        """
+        with self._analytics_connection() as conn:
+            conn.executemany(sql, [_transition_values(row) for row in rows])
+        return len(rows)
+
+    def list_facts_for_date(self, day: date) -> list[UserDailyFact]:
+        """Every fact row for one date. Used for the previous day's segments."""
+        with self._analytics_connection() as conn:
+            rows = conn.execute(
+                "SELECT * FROM user_daily_facts WHERE snapshot_date = ? ORDER BY user_id",
+                (day.isoformat(),),
+            ).fetchall()
+        return [_fact_from_row(row) for row in rows]
+
+    def list_days_needing_recompute(self, *, since: date, until: date) -> list[date]:
+        """Past days whose events arrived after their facts were computed.
+
+        Two statements, neither parameterised by a user: events grouped by
+        UTC day with ``MAX(received_at)``, and facts grouped by date with
+        ``MIN(calculated_at)``; a day is returned, newest first, when the
+        former exceeds the latter. This exists because
+        ``aggregate_events_for_day`` filters on ``occurred_at`` while the job
+        runs minutes after midnight: the frontend route accepts ``occurred_at``
+        up to 24 hours old (``service.py:96-97``), and a server event for a run
+        that finished at 23:59 can be appended after the aggregate was taken.
+        Without this sweep every such row would be silently dropped from
+        ``active``, DAU and the run counts, permanently and with no signal.
+        """
+        if until < since:
+            raise ValueError("until must not precede since")
+        start, _unused = _day_bounds_iso(since)
+        _unused, end = _day_bounds_iso(until)
+        with self._analytics_connection() as conn:
+            event_rows = conn.execute(
+                _RECOMPUTE_EVENTS_SQL.format(p="?"), (start, end)
+            ).fetchall()
+            fact_rows = conn.execute(
+                _RECOMPUTE_FACTS_SQL.format(p="?"),
+                (since.isoformat(), until.isoformat()),
+            ).fetchall()
+        return _recompute_days(event_rows, fact_rows)
+
+    def copy_daily_snapshot_history(self, *, since: date, now: datetime) -> int:
+        """Copy legacy ``user_lifecycle_daily_snapshots`` rows into the fact table.
+
+        Run, cost and tier columns are filled with their neutral values and
+        every copied row is ``partial``, so the UI labels the period
+        "Incomplete data" instead of charting zeros as fact (design SS6.7).
+        ``tier='unpaid'`` is a placeholder, not a claim, for the same reason.
+        ``user_group`` is read from ``users`` at the copy (D9). ``ON CONFLICT
+        DO NOTHING`` makes it both idempotent and unable to clobber a row the
+        daily job already computed. Returns the number of rows inserted.
+        """
+        stamp = utc_iso(_utc(now, "now"))
+        sql = """
+            INSERT INTO user_daily_facts (
+                snapshot_date, user_id, lifecycle_segment, lifecycle_reason_code,
+                operational_state, operational_reason_code, tier, user_group, active,
+                runs_requested, runs_completed, runs_failed, runs_cancelled,
+                operator_cost_micro, own_spend_micro, data_quality, calculated_at
+            )
+            SELECT s.snapshot_date, s.user_id, s.lifecycle_segment,
+                   s.lifecycle_reason_code, 'healthy', NULL, 'unpaid',
+                   users.user_group, 0, 0, 0, 0, 0, 0, 0, 'partial', ?
+            FROM user_lifecycle_daily_snapshots AS s
+            JOIN users ON users.id = s.user_id
+            WHERE s.snapshot_date >= ?
+            ON CONFLICT(snapshot_date, user_id) DO NOTHING
+        """
+        with self._analytics_connection() as conn:
+            cursor = conn.execute(sql, (stamp, since.isoformat()))
+            return max(0, int(cursor.rowcount))
+
 
 def build_value_analytics_store(
     analytics_base: Any | None = None,
@@ -1087,6 +1870,12 @@ __all__ = [
     "CommercialValueFact",
     "CurrentOperationalFacts",
     "ProjectionJob",
+    "ActivityUpdate",
+    "DayEventTotals",
+    "RecentFactTotals",
+    "LifecycleTransitionRow",
+    "UserActivity",
+    "UserDailyFact",
     "UserLifecycleDailySnapshot",
     "UserValueSnapshot",
     "ValueAnalyticsStore",

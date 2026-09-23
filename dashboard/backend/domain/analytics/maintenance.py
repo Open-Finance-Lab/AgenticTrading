@@ -1,9 +1,18 @@
-"""Bounded Analytics rollup and snapshot repair maintenance."""
+"""Throttled repair of the legacy Analytics snapshot rows.
+
+Admin layer redesign PR A moved the day rollup and the lifecycle history backfill off
+this reaper tick: the daily-facts job (``daily_facts.py``, on its own worker
+thread, ``daily_job.py``) owns the day rollup now, so the two can never write
+the same rows (design SS6.9 step 1, D23), and the eight-week history copy in
+``facts_migration.py`` replaces the history copy. What remains is the two
+24-hour-throttled snapshot repairs PR 0 left, which keep
+``user_analytics_snapshots`` maintained for the read paths that still use it.
+PR B moves those read paths and deletes this module.
+"""
 
 from __future__ import annotations
 
-from datetime import date, datetime, timedelta, timezone
-from threading import Lock
+from datetime import datetime, timezone
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -12,19 +21,9 @@ from pydantic import BaseModel, ConfigDict, Field
 class AnalyticsMaintenanceReport(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    rollup_days: tuple[date, ...]
-    rollup_rebuilt: bool = False
     repaired_snapshots: int = Field(default=0, ge=0)
     repaired_value_snapshots: int = Field(default=0, ge=0)
-    backfilled_lifecycle_users: int = Field(default=0, ge=0)
-    backfilled_lifecycle_rows: int = Field(default=0, ge=0)
-    lifecycle_backfill_complete: bool = False
-    lifecycle_backfill_failures: int = Field(default=0, ge=0)
     failures: int = Field(default=0, ge=0)
-
-
-_guard_lock = Lock()
-_last_rollup_day: date | None = None
 
 
 def _current_utc(value: datetime | None) -> datetime:
@@ -34,38 +33,21 @@ def _current_utc(value: datetime | None) -> datetime:
     return current.astimezone(timezone.utc)
 
 
-def reset_maintenance_guard_for_tests() -> None:
-    """Reset only the process-local scheduling guard."""
-
-    global _last_rollup_day
-    with _guard_lock:
-        _last_rollup_day = None
-
-
 def run_analytics_maintenance(
     *,
     now: datetime | None = None,
     snapshot_limit: int = 100,
-    rebuild_rollup: Any | None = None,
     repair_snapshots: Any | None = None,
     repair_value_snapshots: Any | None = None,
-    backfill_lifecycle: Any | None = None,
 ) -> AnalyticsMaintenanceReport:
-    """Rebuild yesterday and repair bounded dual-axis and legacy batches."""
+    """Repair bounded batches of stale dual-axis and legacy snapshots."""
 
-    global _last_rollup_day
     current = _current_utc(now)
     if isinstance(snapshot_limit, bool) or not isinstance(snapshot_limit, int):
         raise ValueError("snapshot_limit must be an integer")
     page_size = max(1, min(snapshot_limit, 100))
-    completed_day = current.date() - timedelta(days=1)
     failures = 0
-    rebuilt = False
 
-    if rebuild_rollup is None:
-        from .rollups import rollup_day
-
-        rebuild_rollup = rollup_day
     if repair_snapshots is None:
         from .states import repair_stale_snapshots
 
@@ -74,37 +56,6 @@ def run_analytics_maintenance(
         from .states import repair_stale_value_snapshots
 
         repair_value_snapshots = repair_stale_value_snapshots
-    if backfill_lifecycle is None:
-        from .lifecycle_backfill import run_lifecycle_backfill_batch
-
-        backfill_lifecycle = run_lifecycle_backfill_batch
-
-    with _guard_lock:
-        should_rebuild = _last_rollup_day != completed_day
-        if should_rebuild:
-            # Reserve the day before doing I/O so concurrent reaper passes do
-            # not rebuild it twice.  A failure clears the reservation below.
-            _last_rollup_day = completed_day
-    if should_rebuild:
-        try:
-            rebuild_rollup(
-                completed_day,
-                now=datetime.combine(
-                    current.date(),
-                    datetime.min.time(),
-                    tzinfo=timezone.utc,
-                ),
-            )
-            rebuilt = True
-        except Exception as exc:
-            failures += 1
-            with _guard_lock:
-                if _last_rollup_day == completed_day:
-                    _last_rollup_day = None
-            print(
-                "WARNING: analytics.rollup_maintenance_failed "
-                f"category={type(exc).__name__[:80]}"
-            )
 
     repaired_values = 0
     try:
@@ -136,41 +87,14 @@ def run_analytics_maintenance(
             f"category={type(exc).__name__[:80]}"
         )
 
-    backfilled_users = 0
-    backfilled_rows = 0
-    backfill_complete = False
-    backfill_failures = 0
-    try:
-        backfill_report = backfill_lifecycle(
-            now=current,
-            batch_size=page_size,
-        )
-        backfilled_users = max(0, int(backfill_report.processed_users))
-        backfilled_rows = max(0, int(backfill_report.written_rows))
-        backfill_complete = bool(backfill_report.complete)
-    except Exception as exc:
-        failures += 1
-        backfill_failures = 1
-        print(
-            "WARNING: analytics.lifecycle_backfill_failed "
-            f"category={type(exc).__name__[:80]}"
-        )
-
     return AnalyticsMaintenanceReport(
-        rollup_days=(completed_day,),
-        rollup_rebuilt=rebuilt,
         repaired_snapshots=max(0, repaired),
         repaired_value_snapshots=max(0, repaired_values),
-        backfilled_lifecycle_users=backfilled_users,
-        backfilled_lifecycle_rows=backfilled_rows,
-        lifecycle_backfill_complete=backfill_complete,
-        lifecycle_backfill_failures=backfill_failures,
         failures=failures,
     )
 
 
 __all__ = [
     "AnalyticsMaintenanceReport",
-    "reset_maintenance_guard_for_tests",
     "run_analytics_maintenance",
 ]

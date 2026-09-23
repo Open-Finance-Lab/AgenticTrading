@@ -93,6 +93,101 @@ class SyntheticCreditsStore:
         )
 
 
+    def aggregate_commercial_ledger(self, user_ids, *, start, end):
+        ids = list(dict.fromkeys(int(user_id) for user_id in user_ids))
+        placeholders = ", ".join("?" for _ in ids)
+        window = [start.isoformat(), end.isoformat()]
+        with self._get_connection() as conn:
+            lifetime = conn.execute(
+                f"""
+                SELECT user_id,
+                       COALESCE(SUM(CASE WHEN entry_type = 'purchase'
+                           THEN amount_micro ELSE 0 END), 0) AS purchased_micro,
+                       COALESCE(SUM(CASE WHEN entry_type = 'refund'
+                           THEN -amount_micro ELSE 0 END), 0) AS refunded_micro
+                FROM credit_ledger_entries
+                WHERE user_id IN ({placeholders}) AND entry_type IN ('purchase', 'refund')
+                GROUP BY user_id
+                """,
+                ids,
+            ).fetchall()
+            period = conn.execute(
+                f"""
+                SELECT user_id,
+                       COALESCE(SUM(CASE WHEN entry_type = 'purchase'
+                           THEN amount_micro ELSE 0 END), 0) AS purchased_micro,
+                       COALESCE(SUM(CASE WHEN entry_type = 'refund'
+                           THEN -amount_micro ELSE 0 END), 0) AS refunded_micro,
+                       COALESCE(SUM(CASE
+                           WHEN entry_type = 'admin_grant_assign' THEN amount_micro
+                           WHEN entry_type = 'admin_grant_reclaim' THEN -amount_micro
+                           ELSE 0 END), 0) AS grant_activity_micro
+                FROM credit_ledger_entries
+                WHERE user_id IN ({placeholders}) AND created_at >= ? AND created_at < ?
+                GROUP BY user_id
+                """,
+                [*ids, *window],
+            ).fetchall()
+            usage = conn.execute(
+                f"""
+                SELECT user_id, COALESCE(SUM(-amount_micro), 0) AS consumed_micro
+                FROM credit_llm_usage_entries
+                WHERE user_id IN ({placeholders}) AND created_at >= ? AND created_at < ?
+                GROUP BY user_id
+                """,
+                [*ids, *window],
+            ).fetchall()
+        by_user = {
+            user_id: {
+                "lifetime_purchased_micro": 0,
+                "lifetime_refunded_micro": 0,
+                "purchased_micro": 0,
+                "refunded_micro": 0,
+                "grant_activity_micro": 0,
+                "consumed_micro": 0,
+            }
+            for user_id in ids
+        }
+        for row in lifetime:
+            by_user[int(row["user_id"])].update(
+                lifetime_purchased_micro=int(row["purchased_micro"]),
+                lifetime_refunded_micro=int(row["refunded_micro"]),
+            )
+        for row in period:
+            by_user[int(row["user_id"])].update(
+                purchased_micro=int(row["purchased_micro"]),
+                refunded_micro=int(row["refunded_micro"]),
+                grant_activity_micro=int(row["grant_activity_micro"]),
+            )
+        for row in usage:
+            by_user[int(row["user_id"])]["consumed_micro"] = int(row["consumed_micro"])
+        return by_user
+
+    def list_credit_activity_timestamps(self, user_ids, *, start, end):
+        ids = list(dict.fromkeys(int(user_id) for user_id in user_ids))
+        placeholders = ", ".join("?" for _ in ids)
+        params = [*ids, start.isoformat(), end.isoformat()]
+        result = {user_id: [] for user_id in ids}
+        with self._get_connection() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT user_id, created_at FROM credit_ledger_entries
+                WHERE user_id IN ({placeholders}) AND entry_type = 'purchase'
+                  AND created_at >= ? AND created_at < ?
+                """,
+                params,
+            ).fetchall()
+            rows += conn.execute(
+                f"""
+                SELECT user_id, created_at FROM credit_llm_usage_entries
+                WHERE user_id IN ({placeholders}) AND created_at >= ? AND created_at < ?
+                """,
+                params,
+            ).fetchall()
+        for row in rows:
+            result[int(row["user_id"])].append(str(row["created_at"]))
+        return result
+
 class SyntheticProviderStore:
     def __init__(self, credentials, providers):
         self.credentials = credentials
@@ -475,3 +570,69 @@ def test_non_default_credential_does_not_create_a_usable_billing_lane(tmp_path):
 
     assert facts.usable_billing_lane is False
     assert facts.default_credential_status == "missing"
+
+
+JOB = "analytics_daily_facts"
+DAY = date(2026, 9, 11)
+CLAIM_AT = datetime(2026, 9, 12, 0, 5, tzinfo=timezone.utc)
+
+
+def test_only_one_claim_of_a_day_succeeds(tmp_path):
+    _user_id, analytics, credits = _stores(tmp_path)
+    store = _value_store(analytics, credits)
+
+    first = store.claim_projection_day(JOB, day=DAY, now=CLAIM_AT)
+    second = store.claim_projection_day(JOB, day=DAY, now=CLAIM_AT + timedelta(minutes=1))
+    job = store.get_projection_job(JOB)
+
+    assert first is True
+    assert second is False
+    assert job.status == "running"
+    assert job.cursor is None  # the cursor moves only when the day completes
+
+
+def test_a_crashed_claim_is_reclaimable_after_two_hours(tmp_path):
+    _user_id, analytics, credits = _stores(tmp_path)
+    store = _value_store(analytics, credits)
+    store.claim_projection_day(JOB, day=DAY, now=CLAIM_AT)
+
+    too_soon = store.claim_projection_day(JOB, day=DAY, now=CLAIM_AT + timedelta(hours=1))
+    reclaimed = store.claim_projection_day(JOB, day=DAY, now=CLAIM_AT + timedelta(hours=2, minutes=1))
+
+    assert too_soon is False
+    assert reclaimed is True
+
+
+def test_a_completed_day_is_never_run_again(tmp_path):
+    _user_id, analytics, credits = _stores(tmp_path)
+    store = _value_store(analytics, credits)
+    store.claim_projection_day(JOB, day=DAY, now=CLAIM_AT)
+    store.complete_projection_day(JOB, day=DAY, now=CLAIM_AT + timedelta(minutes=2))
+
+    again = store.claim_projection_day(JOB, day=DAY, now=CLAIM_AT + timedelta(hours=5))
+    earlier = store.claim_projection_day(JOB, day=DAY - timedelta(days=1), now=CLAIM_AT + timedelta(hours=5))
+    next_day = store.claim_projection_day(
+        JOB, day=DAY + timedelta(days=1), now=CLAIM_AT + timedelta(days=1)
+    )
+    job = store.get_projection_job(JOB)
+
+    assert again is False
+    assert earlier is False
+    assert next_day is True
+    assert job.cursor == DAY.isoformat()
+    assert job.status == "running"
+    assert job.window_end == DAY + timedelta(days=1)
+
+
+def test_a_released_claim_can_be_retried_at_once(tmp_path):
+    _user_id, analytics, credits = _stores(tmp_path)
+    store = _value_store(analytics, credits)
+    store.claim_projection_day(JOB, day=DAY, now=CLAIM_AT)
+
+    store.release_projection_day(JOB, now=CLAIM_AT + timedelta(minutes=1))
+    retried = store.claim_projection_day(JOB, day=DAY, now=CLAIM_AT + timedelta(minutes=2))
+    job = store.get_projection_job(JOB)
+
+    assert retried is True
+    assert job.cursor is None
+    assert job.status == "running"

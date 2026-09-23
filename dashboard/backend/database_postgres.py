@@ -42,6 +42,7 @@ domain/runs/repository.py and are untouched.
 from __future__ import annotations
 
 import json
+from datetime import date, timedelta
 from typing import Any, Dict, List, Optional
 
 from dashboard.backend.database import (
@@ -126,6 +127,7 @@ class PostgresBacktestDatabase:
                         output_tokens INTEGER DEFAULT 0,
                         est_cost_usd DOUBLE PRECISION DEFAULT 0,
                         metadata TEXT,
+                        owner_user_id INTEGER,
                         created_at TEXT NOT NULL {created_at_default},
                         updated_at TEXT NOT NULL {created_at_default},
                         baseline_djia_run_id TEXT,
@@ -274,6 +276,9 @@ class PostgresBacktestDatabase:
                 )
                 cur.execute(
                     "ALTER TABLE agent_runs ADD COLUMN IF NOT EXISTS metadata TEXT"
+                )
+                cur.execute(
+                    "ALTER TABLE agent_runs ADD COLUMN IF NOT EXISTS owner_user_id INTEGER"
                 )
 
                 cur.execute(
@@ -487,7 +492,8 @@ class PostgresBacktestDatabase:
                    input_tokens: int = 0,
                    output_tokens: int = 0,
                    est_cost_usd: float = 0.0,
-                   metadata: Optional[Dict[str, Any]] = None) -> None:
+                   metadata: Optional[Dict[str, Any]] = None,
+                   owner_user_id: Optional[int] = None) -> None:
         """Insert or refresh a backtest run.
 
         Carries divergences 1-3 from the module docstring, all of them
@@ -549,8 +555,8 @@ class PostgresBacktestDatabase:
                      initial_equity, final_equity, total_return, sharpe_ratio,
                      max_drawdown, num_trades, llm_model,
                      llm_calls, llm_decisions, input_tokens, output_tokens,
-                     est_cost_usd, metadata)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                     est_cost_usd, metadata, owner_user_id)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::integer)
                     ON CONFLICT (run_id) DO UPDATE SET
                         session_id = EXCLUDED.session_id,
                         agent_name = EXCLUDED.agent_name,
@@ -570,6 +576,7 @@ class PostgresBacktestDatabase:
                         output_tokens = EXCLUDED.output_tokens,
                         est_cost_usd = EXCLUDED.est_cost_usd,
                         metadata = EXCLUDED.metadata,
+                        owner_user_id = EXCLUDED.owner_user_id,
                         updated_at = to_char(now() AT TIME ZONE 'utc', 'YYYY-MM-DD HH24:MI:SS')
                     """,
                     (
@@ -579,6 +586,7 @@ class PostgresBacktestDatabase:
                         llm_calls, llm_decisions, input_tokens, output_tokens,
                         est_cost_usd,
                         json.dumps(metadata) if metadata is not None else None,
+                        owner_user_id,
                     ),
                 )
 
@@ -1018,6 +1026,28 @@ class PostgresBacktestDatabase:
                 )
                 rows = cur.fetchall()
         return [BacktestDatabase._parse_run_row(row) for row in rows]
+
+    def aggregate_operator_cost_for_day(self, day: date) -> Dict[int, int]:
+        """See the SQLite twin."""
+        start = f"{day.isoformat()} 00:00:00"
+        end = f"{(day + timedelta(days=1)).isoformat()} 00:00:00"
+        with self._get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT owner_user_id, COALESCE(SUM(est_cost_usd), 0) AS cost_usd
+                    FROM agent_runs
+                    WHERE owner_user_id IS NOT NULL
+                      AND updated_at >= %s AND updated_at < %s
+                    GROUP BY owner_user_id
+                    """,
+                    (start, end),
+                )
+                rows = cur.fetchall()
+        return {
+            int(row["owner_user_id"]): max(0, round(float(row["cost_usd"] or 0) * 1_000_000))
+            for row in rows
+        }
 
     def get_trades(self, run_id: str) -> List[Dict]:
         """Get all trades for a run.

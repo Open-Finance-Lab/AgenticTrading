@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+from typing import Mapping
 from urllib.parse import urlsplit
 import base64
 import hashlib
@@ -38,6 +40,56 @@ class ProviderNotFoundError(ModelProviderStoreError):
 class InvalidProviderOriginError(ModelProviderStoreError):
     pass
 
+
+
+@dataclass(frozen=True)
+class DefaultCredentialFacts:
+    """One user's default credentials, folded to what operational state needs.
+
+    ``status`` follows get_operational_facts' worst-first precedence: invalid
+    beats verification_unavailable beats verified. ``default_provider_ids``
+    carries every provider a default credential points at, and
+    ``verified_default_provider_counts`` the per-provider count of *verified*
+    defaults -- the ``== 1`` test in ModelProviderService.list_execution_options
+    (service.py:194) is a count, not a boolean, and collapsing it to one loses
+    the two-defaults case.
+    """
+
+    status: str
+    default_provider_ids: frozenset[str]
+    verified_default_provider_counts: Mapping[str, int]
+
+
+def fold_default_credential_rows(rows) -> dict[int, DefaultCredentialFacts]:
+    """Shared by both twins: rows of (user_id, provider_id, status) -> facts."""
+    statuses: dict[int, set[str]] = {}
+    providers: dict[int, set[str]] = {}
+    verified: dict[int, dict[str, int]] = {}
+    for row in rows:
+        user_id = int(row["user_id"])
+        provider_id = str(row["provider_id"])
+        status = str(row["status"])
+        statuses.setdefault(user_id, set()).add(status)
+        providers.setdefault(user_id, set()).add(provider_id)
+        if status == "verified":
+            counts = verified.setdefault(user_id, {})
+            counts[provider_id] = counts.get(provider_id, 0) + 1
+    result: dict[int, DefaultCredentialFacts] = {}
+    for user_id, seen in statuses.items():
+        if "invalid" in seen:
+            status = "invalid"
+        elif "verification_unavailable" in seen:
+            status = "verification_unavailable"
+        elif "verified" in seen:
+            status = "verified"
+        else:
+            status = "missing"
+        result[user_id] = DefaultCredentialFacts(
+            status=status,
+            default_provider_ids=frozenset(providers[user_id]),
+            verified_default_provider_counts=dict(verified.get(user_id, {})),
+        )
+    return result
 
 def canonical_request_digest(payload: Mapping[str, object]) -> str:
     """Return a stable digest for an admin mutation without retaining secrets."""

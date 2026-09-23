@@ -249,29 +249,13 @@ _DIALECT_BRANCH_PATTERN = re.compile(
 )
 
 _DIALECT_BRANCH_ALLOWLIST: dict[str, str] = {
-    "dashboard/backend/domain/analytics/value_repository.py": (
-        "list_commercial_values and list_credit_activity branch on the "
-        "injected credits_base's own dialect (hasattr(self.credits_base, "
-        "'database_url')), not on ValueAnalyticsStore's -- a caller can (and "
-        "in tests does) pair either analytics_base with either credits_base. "
-        "PostgresValueAnalyticsStore carries the identical branch for the "
-        "same reason (see value_repository_postgres.py's module docstring); "
-        "both are correct, not a missing extraction. A third hit lives in "
-        "build_value_analytics_store's own selection branch "
-        "(hasattr(resolved_analytics_base, 'database_url')): that factory's "
-        "whole job is to pick SQLite vs. Postgres, and it must do so by "
-        "reading the resolved analytics_base object rather than an "
-        "os.getenv(...) check, because it receives an already-constructed "
-        "base and must follow that object's dialect -- reading the "
-        "environment instead would hand a caller who injects a Postgres "
-        "base the SQLite twin whenever the var happens to be unset. That "
-        "makes this a dialect selection, the same idiom every other "
-        "store's _build_*_store() performs on os.getenv(...) directly, not "
-        "a missing extraction. A fourth hit is ValueAnalyticsStore.__init__'s "
-        "guard (PR #498 review), which refuses a Postgres analytics_base "
-        "rather than silently emitting `?` placeholders against it; it reads "
-        "the same attribute the factory dispatches on, on purpose, so guard "
-        "and factory cannot disagree about which twin a base belongs to."
+        "dashboard/backend/domain/analytics/value_repository.py": (
+        "build_value_analytics_store() dispatches on hasattr(resolved_analytics_base, "
+        "'database_url') to pick the twin, mirroring repository.py's "
+        "_build_analytics_store(). That is the factory's job, not an inline "
+        "dialect branch: every method on both twins has exactly one code path. "
+        "The two credit readers that used to branch here moved onto "
+        "CreditsStore / PostgresCreditsStore in admin layer redesign PR A."
     ),
     "dashboard/backend/domain/analytics/value_repository_postgres.py": (
         "The Postgres twin's two hits are the same credits_base branch its "
@@ -321,16 +305,6 @@ _DIALECT_BRANCH_ALLOWLIST: dict[str, str] = {
         "analytics_base for the historical 8-week lifecycle reconstruction "
         "job. Not a store of its own; admin layer redesign PR A's daily job "
         "and migration (design doc §6.9) replace this reconstruction path."
-    ),
-    "dashboard/backend/domain/analytics/backfill.py": (
-        "_query_all dialect-branches over injected credits/agent stores for "
-        "the authoritative-history backfill; admin layer redesign PR A "
-        "moves those two ledger and run reads onto CreditsStore/"
-        "PostgresCreditsStore and the run-history store (design doc §12 "
-        "item 1), which removes this branch. _existing_source_event_ids "
-        "separately dialect-branches over the already-twinned analytics_store "
-        "to deduplicate against analytics_events, the analytics domain's own "
-        "table -- a different case, out of scope for PR T."
     ),
 }
 

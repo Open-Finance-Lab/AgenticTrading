@@ -48,7 +48,6 @@ os.environ.pop("USERS_DATABASE_URL", None)
 
 # A developer's deployment pseudonymization secret must never affect tests.
 os.environ.pop("ANALYTICS_PSEUDONYMIZATION_KEY", None)
-
 # Hermetic HMAC key for session-token digests (see session_tokens.py).
 os.environ["SESSION_HASH_SECRET"] = "test-session-hash-secret"
 
@@ -91,6 +90,7 @@ os.environ.pop("MAX_ACTIVE_DASHBOARD_BACKTESTS", None)
 os.environ.pop("AGENT_AUTH_CACHE_TTL_SECONDS", None)
 os.environ.pop("MAX_LEGACY_ACTIVE_PER_SESSION", None)
 os.environ.pop("MAX_LEGACY_ACTIVE_GLOBAL", None)
+os.environ.pop("ANALYTICS_DAILY_JOB_INTERVAL_SECONDS", None)
 # A shell that exported the backtest-worker flag would make every Postgres
 # twin the suite constructs skip DDL and fail on its first query.
 os.environ.pop("ATL_BACKTEST_WORKER", None)

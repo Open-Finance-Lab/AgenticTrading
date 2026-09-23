@@ -8,7 +8,7 @@ import sqlite3
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Iterator, Sequence
 
 from dashboard.backend.database import DB_PATH
 from dashboard.backend.db_url import describe_database_url
@@ -171,6 +171,69 @@ CREATE TABLE IF NOT EXISTS analytics_projection_jobs (
     status TEXT NOT NULL CHECK (status IN ('pending', 'running', 'complete')),
     updated_at TEXT NOT NULL
 );
+
+
+CREATE TABLE IF NOT EXISTS user_activity (
+    user_id INTEGER PRIMARY KEY,
+    activated_at TEXT,
+    last_meaningful_activity_at TEXT,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS user_daily_facts (
+    snapshot_date TEXT NOT NULL CHECK (length(snapshot_date) = 10),
+    user_id INTEGER NOT NULL,
+    lifecycle_segment TEXT NOT NULL,
+    lifecycle_reason_code TEXT NOT NULL,
+    operational_state TEXT NOT NULL
+        CHECK (operational_state IN ('blocked', 'needs_attention', 'healthy')),
+    operational_reason_code TEXT,
+    tier TEXT NOT NULL
+        CHECK (tier IN ('unpaid', 'starter', 'invested', 'high_value')),
+    user_group TEXT NOT NULL DEFAULT 'unknown'
+        CHECK (user_group IN (
+            'internal', 'invited', 'organic', 'competition', 'partner', 'unknown'
+        )),
+    active INTEGER NOT NULL DEFAULT 0 CHECK (active IN (0, 1)),
+    runs_requested INTEGER NOT NULL DEFAULT 0 CHECK (runs_requested >= 0),
+    runs_completed INTEGER NOT NULL DEFAULT 0 CHECK (runs_completed >= 0),
+    runs_failed INTEGER NOT NULL DEFAULT 0 CHECK (runs_failed >= 0),
+    runs_cancelled INTEGER NOT NULL DEFAULT 0 CHECK (runs_cancelled >= 0),
+    operator_cost_micro INTEGER NOT NULL DEFAULT 0
+        CHECK (operator_cost_micro >= 0),
+    own_spend_micro INTEGER NOT NULL DEFAULT 0 CHECK (own_spend_micro >= 0),
+    data_quality TEXT NOT NULL CHECK (data_quality IN ('complete', 'partial')),
+    calculated_at TEXT NOT NULL,
+    PRIMARY KEY (snapshot_date, user_id),
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_daily_facts_segment
+    ON user_daily_facts(snapshot_date, lifecycle_segment);
+CREATE INDEX IF NOT EXISTS idx_daily_facts_user
+    ON user_daily_facts(user_id, snapshot_date DESC);
+CREATE INDEX IF NOT EXISTS idx_daily_facts_user_group
+    ON user_daily_facts(snapshot_date, user_group);
+CREATE INDEX IF NOT EXISTS idx_daily_facts_tier
+    ON user_daily_facts(snapshot_date, tier);
+CREATE INDEX IF NOT EXISTS idx_daily_facts_operational
+    ON user_daily_facts(snapshot_date, operational_state, operational_reason_code);
+
+CREATE TABLE IF NOT EXISTS lifecycle_transitions (
+    transition_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    snapshot_date TEXT NOT NULL CHECK (length(snapshot_date) = 10),
+    from_segment TEXT NOT NULL,
+    to_segment TEXT NOT NULL,
+    inactive_days INTEGER NOT NULL DEFAULT 0 CHECK (inactive_days >= 0),
+    data_quality TEXT NOT NULL DEFAULT 'complete'
+        CHECK (data_quality IN ('complete', 'partial')),
+    created_at TEXT NOT NULL,
+    UNIQUE (user_id, snapshot_date),
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_lifecycle_transitions_day
+    ON lifecycle_transitions(snapshot_date, to_segment);
 
 CREATE TABLE IF NOT EXISTS analytics_subject_settings (
     user_id INTEGER PRIMARY KEY,
@@ -561,6 +624,56 @@ class AnalyticsStore:
                 ).fetchall()
                 excluded.update(int(row["id"]) for row in admin_rows)
         return excluded
+
+
+    def list_existing_source_event_ids(self, source_ids: Sequence[str]) -> set[str]:
+        """Which of ``source_ids`` already have a row. Batched by 500."""
+        values = sorted({str(value) for value in source_ids})
+        existing: set[str] = set()
+        if not values:
+            return existing
+        with self._get_connection() as conn:
+            for offset in range(0, len(values), 500):
+                chunk = values[offset : offset + 500]
+                placeholders = ",".join("?" for _ in chunk)
+                rows = conn.execute(
+                    "SELECT source_event_id FROM analytics_events "
+                    f"WHERE source_event_id IN ({placeholders})",
+                    chunk,
+                ).fetchall()
+                existing.update(str(row["source_event_id"]) for row in rows)
+        return existing
+
+    def list_daily_subjects(self) -> list[dict[str, Any]]:
+        """Every non-admin, non-excluded account: id, user_group, created_at.
+
+        The one place the daily job materialises the whole user list -- a
+        few hundred rows of three columns. The predicate is the one
+        ``list_stale_user_ids`` and the lifecycle backfill already use for
+        aggregate exclusion (design SS6.7). ``created_at`` comes back as the
+        raw text the users table holds (CURRENT_TIMESTAMP text on SQLite,
+        ISO-8601 on Postgres); the caller parses.
+        """
+        with self._get_connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT users.id, users.user_group, users.created_at
+                FROM users
+                LEFT JOIN analytics_subject_settings AS settings
+                  ON settings.user_id = users.id
+                WHERE users.role <> 'admin'
+                  AND COALESCE(settings.excluded, 0) = 0
+                ORDER BY users.id
+                """
+            ).fetchall()
+        return [
+            {
+                "id": int(row["id"]),
+                "user_group": row["user_group"],
+                "created_at": row["created_at"],
+            }
+            for row in rows
+        ]
 
     def record_admin_access(
         self,

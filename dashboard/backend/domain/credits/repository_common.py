@@ -7,7 +7,118 @@ import binascii
 import hashlib
 import json
 from collections.abc import Iterable, Mapping
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
+
+
+def _utc_text(value: datetime, name: str) -> str:
+    """ISO-8601 UTC text, the format every ``created_at`` in this ledger uses."""
+    if value.tzinfo is None or value.utcoffset() is None:
+        raise ValueError(f"{name} must include a timezone")
+    return value.astimezone(timezone.utc).isoformat()
+
+
+def _day_bounds(day: date) -> tuple[str, str]:
+    start = datetime.combine(day, datetime.min.time(), tzinfo=timezone.utc)
+    return _utc_text(start, "day"), _utc_text(start + timedelta(days=1), "day")
+
+
+def _unique_user_ids(user_ids: Sequence[int]) -> list[int]:
+    if not isinstance(user_ids, (list, tuple)):
+        raise ValueError("user_ids must be a list or tuple")
+    return list(
+        dict.fromkeys(_positive_integer(user_id, "user_id") for user_id in user_ids)
+    )
+
+
+def _assemble_commercial_ledger(
+    ids: list[int], lifetime_rows, period_rows, usage_rows
+) -> dict[int, dict[str, int]]:
+    lifetime = {
+        int(row["user_id"]): (
+            int(row["purchased_micro"] or 0),
+            int(row["refunded_micro"] or 0),
+        )
+        for row in lifetime_rows
+    }
+    period = {
+        int(row["user_id"]): (
+            int(row["purchased_micro"] or 0),
+            int(row["refunded_micro"] or 0),
+            int(row["grant_activity_micro"] or 0),
+        )
+        for row in period_rows
+    }
+    usage = {int(row["user_id"]): int(row["consumed_micro"] or 0) for row in usage_rows}
+    result: dict[int, dict[str, int]] = {}
+    for user_id in ids:
+        lifetime_purchased, lifetime_refunded = lifetime.get(user_id, (0, 0))
+        purchased, refunded, grant_activity = period.get(user_id, (0, 0, 0))
+        result[user_id] = {
+            "lifetime_purchased_micro": lifetime_purchased,
+            "lifetime_refunded_micro": lifetime_refunded,
+            "purchased_micro": purchased,
+            "refunded_micro": refunded,
+            "grant_activity_micro": grant_activity,
+            "consumed_micro": usage.get(user_id, 0),
+        }
+    return result
+
+
+def _assemble_ledger_day(usage_rows, lifetime_rows, purchase_rows) -> dict[int, dict[str, Any]]:
+    result: dict[int, dict[str, Any]] = {}
+
+    def entry(user_id: int) -> dict[str, Any]:
+        return result.setdefault(
+            user_id,
+            {
+                "own_spend_micro": 0,
+                "lifetime_net_purchased_micro": 0,
+                "last_activity_at": None,
+            },
+        )
+
+    def later(current: str | None, candidate: Any) -> str | None:
+        if candidate is None:
+            return current
+        text = str(candidate)
+        return text if current is None or text > current else current
+
+    for row in usage_rows:
+        record = entry(int(row["user_id"]))
+        record["own_spend_micro"] = max(0, int(row["consumed_micro"] or 0))
+        record["last_activity_at"] = later(record["last_activity_at"], row["last_usage_at"])
+    for row in lifetime_rows:
+        record = entry(int(row["user_id"]))
+        record["lifetime_net_purchased_micro"] = max(
+            0, int(row["purchased_micro"] or 0) - int(row["refunded_micro"] or 0)
+        )
+    for row in purchase_rows:
+        record = entry(int(row["user_id"]))
+        record["last_activity_at"] = later(
+            record["last_activity_at"], row["last_purchase_at"]
+        )
+    return result
+
+
+def _assemble_billing_states(account_rows, outstanding_rows) -> dict[int, dict[str, Any]]:
+    outstanding = {
+        int(row["user_id"]): int(row["outstanding_micro"] or 0) for row in outstanding_rows
+    }
+    result: dict[int, dict[str, Any]] = {}
+    for row in account_rows:
+        user_id = int(row["user_id"])
+        reason = row["restriction_reason"]
+        if row["status"] == "restricted" and reason not in {
+            "llm_overage",
+            "refund_reconciliation",
+        }:
+            reason = "refund_reconciliation"
+        result[user_id] = {
+            "account_status": row["status"],
+            "restriction_reason": reason,
+            "outstanding_credits_micro": outstanding.get(user_id, 0),
+        }
+    return result
 
 
 class CreditsStoreError(RuntimeError):

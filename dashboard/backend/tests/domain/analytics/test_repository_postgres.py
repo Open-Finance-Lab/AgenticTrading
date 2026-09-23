@@ -279,3 +279,24 @@ def test_postgres_user_value_projection_round_trip(
     ) == [NOW.date()]
     assert value_store.delete_daily_snapshots_for_date(NOW.date()) == 1
     assert value_store.has_daily_before(NOW.date() + timedelta(days=1)) is False
+
+
+def test_postgres_ddl_declares_the_daily_fact_tables():
+    ddl = pg_module.ANALYTICS_POSTGRES_DDL
+    assert "CREATE TABLE IF NOT EXISTS user_activity" in ddl
+    assert "CREATE TABLE IF NOT EXISTS user_daily_facts" in ddl
+    assert "CREATE TABLE IF NOT EXISTS lifecycle_transitions" in ddl
+    for column in (
+        "operator_cost_micro",
+        "own_spend_micro",
+        "runs_completed",
+        "data_quality",
+        "operational_reason_code",
+        "user_group TEXT NOT NULL DEFAULT 'unknown'",
+        "tier",
+    ):
+        assert column in ddl
+    assert "cohort" not in ddl
+    # Wide counters are BIGINT on Postgres, matching analytics_daily_rollups.
+    assert "operator_cost_micro BIGINT" in ddl
+    assert "own_spend_micro BIGINT" in ddl
