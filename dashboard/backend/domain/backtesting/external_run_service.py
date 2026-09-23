@@ -33,6 +33,7 @@ from dashboard.backend.infrastructure.llm.validator import (
     actions_to_executable,
     parse_actions_payload,
 )
+from dashboard.backend.domain.backtesting.bar_aggregation import ExecutionFill
 from dashboard.backend.domain.backtesting.constants import (
     fractional_return,
     resolve_initial_capital,
@@ -304,8 +305,7 @@ class ExternalBacktestSession:
         self.source_data: Dict[str, pd.DataFrame] = {}
         self.source_timestamps: List[Any] = []
         self.source_price_cache: Dict[str, Dict[Any, float]] = {}
-        self.execution_timestamps: List[Any] = []
-        self.execution_price_fields: List[str] = []
+        self.execution_fills: List[ExecutionFill] = []
         self.data_quality: Dict[str, Any] = {}
         self.frequency_contract: Optional[Dict[str, str]] = None
         self.market_data_provenance: Dict[str, Any] = {}
@@ -372,12 +372,7 @@ class ExternalBacktestSession:
         self.source_price_cache = getattr(
             dataset, "source_price_cache", self.price_cache
         )
-        self.execution_timestamps = list(
-            getattr(dataset, "execution_timestamps", self.timestamps)
-        )
-        self.execution_price_fields = list(
-            getattr(dataset, "execution_price_fields", None) or []
-        )
+        self.execution_fills = list(getattr(dataset, "execution_fills", None) or [])
         self.data_quality = dict(getattr(dataset, "data_quality", {}) or {})
         self.equity_metadata = dict(getattr(dataset, "equity_metadata", {}) or {})
         self.source_timeframe = getattr(
@@ -441,17 +436,13 @@ class ExternalBacktestSession:
     def _effective_source_price_cache(self) -> Dict[str, Dict[Any, float]]:
         return self.source_price_cache or self.price_cache
 
-    def _effective_execution_timestamps(self) -> List[Any]:
-        if len(self.execution_timestamps) == self.total_steps:
-            return self.execution_timestamps
-        return list(self.timestamps)
-
-    def _execution_price_field(self, step_index: int) -> str:
-        """The execution bar's "open", or its "close" for a session's final
-        bucket; see ``bar_aggregation.plan_execution_fills``."""
-        if len(self.execution_price_fields) == self.total_steps:
-            return self.execution_price_fields[step_index]
-        return "open"
+    def _effective_execution_fills(self) -> List[ExecutionFill]:
+        """One ``ExecutionFill`` per step. A dataset with no plan for these
+        steps fills each on its own bar's open; the bar and its price field
+        travel together, so a remapped bar can never borrow a default field."""
+        if len(self.execution_fills) == self.total_steps:
+            return self.execution_fills
+        return [ExecutionFill(timestamp, "open", timestamp) for timestamp in self.timestamps]
 
     def _value_through(self, target_timestamp=None) -> None:
         """Mark the portfolio on each source bar through the given timestamp."""
@@ -785,20 +776,20 @@ class ExternalBacktestSession:
             # agent_runs.metadata).
             self.timeout_holds += 1
         timestamp = self.timestamps[self.step_index]
-        execution_timestamp = self._effective_execution_timestamps()[self.step_index]
+        fill = self._effective_execution_fills()[self.step_index]
+        execution_timestamp = fill.bar
         execution_market_data = self._source_market_data_at(execution_timestamp)
-        execution_field = self._execution_price_field(self.step_index)
         execution_prices = {
-            symbol: row[execution_field]
+            symbol: row[fill.price_field]
             for symbol, row in execution_market_data.items()
-            if execution_field in row
+            if fill.price_field in row
         }
 
         trades_before_execution = len(self.manager.trades)
         self.manager.execute_actions(
             executable,
             execution_market_data,
-            execution_timestamp,
+            fill.filled_at,
             fallback_prices={
                 symbol: values[execution_timestamp]
                 for symbol, values in self._effective_source_price_cache().items()
@@ -822,9 +813,9 @@ class ExternalBacktestSession:
             "timestamp": timestamp.isoformat()
             if hasattr(timestamp, "isoformat")
             else str(timestamp),
-            "execution_timestamp": execution_timestamp.isoformat()
-            if hasattr(execution_timestamp, "isoformat")
-            else str(execution_timestamp),
+            "execution_timestamp": fill.filled_at.isoformat()
+            if hasattr(fill.filled_at, "isoformat")
+            else str(fill.filled_at),
             "decision_source": decision_source,
             "actions_submitted": raw_actions or [],
             "actions_executed": len(self.last_executed),

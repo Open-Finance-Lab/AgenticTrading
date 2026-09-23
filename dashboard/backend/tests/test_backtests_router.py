@@ -625,6 +625,27 @@ def test_run_metadata_response_exposes_minute_data_contract_and_quality():
     assert response.end_clamped is True
 
 
+def test_run_metadata_response_passes_every_field_the_contract_builder_writes():
+    """Pinned against the producer, not a hand-copied dict: the allow-list
+    once dropped ``session_close_fill``, and the details label that reads it
+    never rendered while a formatter-only test stayed green."""
+    from dashboard.backend.infrastructure.market_data.frequency import (
+        build_verified_intraday_contract,
+    )
+
+    contract = build_verified_intraday_contract(
+        source_timeframe="5m",
+        decision_timeframe="60m",
+        decision_frequency="1h",
+    )
+    response = bt._run_metadata_response(
+        _run_record({"data_source": "alpaca", "frequency_contract": contract})
+    )
+
+    assert response.frequency_contract == contract
+    assert response.frequency_contract["session_close_fill"] == "last_source_bar_close"
+
+
 def test_run_metadata_response_exposes_sanitized_llm_execution_evidence():
     response = bt._run_metadata_response(
         _run_record({

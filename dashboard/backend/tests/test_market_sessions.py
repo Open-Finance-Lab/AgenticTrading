@@ -7,6 +7,7 @@ copy of the bounds appears beside it.
 """
 
 import ast
+import functools
 from datetime import time as clock_time
 from pathlib import Path
 
@@ -96,8 +97,10 @@ def test_every_us_filter_agrees():
     from dashboard.backend.domain.leaderboard.strategies import _common
 
     stamps = _sample_timestamps()
-    frame = pd.DataFrame({"close": 1.0}, index=pd.DatetimeIndex(stamps))
     for open_minutes in (None, 60):
+        frame = pd.DataFrame({"close": 1.0}, index=pd.DatetimeIndex(stamps))
+        if open_minutes is not None:
+            frame.attrs[sessions.FRAME_ATTR_OPEN_STAMPED_MINUTES] = open_minutes
         expected = [
             ts for ts in stamps
             if sessions.is_in_session(
@@ -108,17 +111,17 @@ def test_every_us_filter_agrees():
             )
         ]
         assert expected, "the sample must straddle the session"
+        # Each reads the convention off the frame, as its callers hand it one.
         assert baseline_generator._market_hours_only(
-            stamps, "US/Eastern", open_minutes
+            stamps, "US/Eastern", {"X": frame}
         ) == expected
         assert mds._build_trading_timestamps(
-            {"X": frame},
-            market="US",
-            timezone="US/Eastern",
-            open_stamped_minutes=open_minutes,
+            {"X": frame}, market="US", timezone="US/Eastern"
         ) == expected
-        if open_minutes == _common.LEADERBOARD_BAR_OPEN_MINUTES:
-            assert _common.filter_market_hours(stamps) == expected
+        assert _common.market_timestamps({"X": frame}) == expected
+        assert _common.filter_market_hours(
+            stamps, open_stamped_minutes=open_minutes
+        ) == expected
     # The 16:00:30 stamp is in for a close-stamped bar: the store's own first
     # rewrite excluded it while the engine kept it.
     assert sessions.is_in_session(
@@ -140,14 +143,15 @@ def _et(clock):
         ("09:30", 5, True),
         ("15:55", 5, True),
         ("16:00", 5, False),  # 16:00-16:05 is after hours
-        # Alpaca 1h, clock-aligned: 09:00 (closes 10:00) through 15:00.
+        # Alpaca 1h, clock-aligned: 10:00 through 15:00.
         ("08:00", 60, False),
-        ("09:00", 60, True),
+        ("09:00", 60, False),  # 09:00-10:00 holds 30 minutes of pre-market
+        ("10:00", 60, True),
         ("15:00", 60, True),
         ("16:00", 60, False),  # the bar the close-stamp rule used to keep
     ],
 )
-def test_an_open_stamped_bar_is_in_session_when_it_closes_in_one(
+def test_an_open_stamped_bar_is_in_session_only_when_wholly_inside_one(
     clock, minutes, kept
 ):
     assert sessions.is_in_session(
@@ -158,9 +162,10 @@ def test_an_open_stamped_bar_is_in_session_when_it_closes_in_one(
     ) is kept
 
 
-def test_open_stamped_hourly_day_is_seven_bars():
-    """The raw 1h path keeps seven bars a day, as the close-stamp rule did --
-    but 09:00-15:00 rather than 10:00-16:00."""
+def test_open_stamped_hourly_day_is_six_bars():
+    """The raw 1h path keeps 10:00-15:00. The close-stamp rule kept 10:00-16:00,
+    the last of which is after hours; 09:00 straddles the open, so its prices
+    are part pre-market and it cannot stand in for the 09:30-10:00 half hour."""
     day = pd.date_range("2026-04-15 04:00", "2026-04-15 19:00", freq="h",
                         tz="US/Eastern")
     kept = [
@@ -169,7 +174,7 @@ def test_open_stamped_hourly_day_is_seven_bars():
             ts, market="US", timezone="US/Eastern", open_stamped_minutes=60
         )
     ]
-    assert kept == ["09:00", "10:00", "11:00", "12:00", "13:00", "14:00", "15:00"]
+    assert kept == ["10:00", "11:00", "12:00", "13:00", "14:00", "15:00"]
 
 
 def test_session_close_is_each_window_end():
@@ -185,10 +190,41 @@ def test_session_close_is_each_window_end():
         ) is is_close
 
 
-def test_only_alpaca_stamps_bars_at_their_open():
-    assert profiles.bars_open_stamped(profiles.ALPACA)
-    assert not profiles.bars_open_stamped(profiles.IFIND_ASHARE)
-    assert not profiles.bars_open_stamped(profiles.VNPY_SIMULATION)
+def test_the_alpaca_loader_stamps_every_frame_it_returns(monkeypatch):
+    """Stamped above the bar cache, so a hit carries the convention too."""
+    from dashboard.backend.infrastructure.market_data.alpaca_bars import (
+        AlpacaDataLoader,
+    )
+
+    loader = AlpacaDataLoader.__new__(AlpacaDataLoader)
+    for timeframe, span in (("5m", 5), ("60m", 60)):
+        loader.source_timeframe = timeframe
+        monkeypatch.setattr(
+            loader,
+            "_fetch_bars_resolved",
+            lambda symbols, start, end: {
+                symbol: pd.DataFrame({"close": [1.0]}) for symbol in symbols
+            },
+        )
+        frames = loader.fetch_bars(["AAPL", "MSFT"], "2026-04-15", "2026-04-16")
+        assert sessions.frames_open_stamped_minutes(frames) == span
+
+
+def test_frames_open_stamped_minutes_refuses_a_mix():
+    def frame(span=None, rows=1):
+        result = pd.DataFrame({"close": [1.0] * rows})
+        if span is not None:
+            result.attrs[sessions.FRAME_ATTR_OPEN_STAMPED_MINUTES] = span
+        return result
+
+    assert sessions.frames_open_stamped_minutes({}) is None
+    assert sessions.frames_open_stamped_minutes({"A": frame()}) is None
+    # An empty frame holds no bars to misfilter, whatever it carries.
+    assert sessions.frames_open_stamped_minutes(
+        {"A": frame(5), "B": frame(rows=0)}
+    ) == 5
+    with pytest.raises(ValueError, match="mix stamp conventions"):
+        sessions.frames_open_stamped_minutes({"A": frame(5), "B": frame()})
 
 
 def test_the_final_bucket_fills_at_the_last_in_session_close():
@@ -196,20 +232,22 @@ def test_the_final_bucket_fills_at_the_last_in_session_close():
         plan_execution_fills,
     )
 
+    plan = functools.partial(
+        plan_execution_fills, source_minutes=5, market="US", timezone="US/Eastern"
+    )
     source = [_et("15:25"), _et("15:30"), _et("15:55")]
     decisions = [_et("15:30"), _et("16:00"), _et("15:45")]
-    fills = plan_execution_fills(
-        decisions, source, market="US", timezone="US/Eastern"
-    )
-    assert fills == {
-        _et("15:30"): (_et("15:30"), "open"),
-        _et("16:00"): (_et("15:55"), "close"),
+    assert plan(decisions, source) == {
+        _et("15:30"): (_et("15:30"), "open", _et("15:30")),
+        # Priced at the 15:55 bar's close and stamped then: 16:00, never before
+        # the decision it fills.
+        _et("16:00"): (_et("15:55"), "close", _et("16:00")),
         # Not a session close and no bar opens there: no fill.
     }
     # A day with no source bars has nothing to fill the close on.
-    assert plan_execution_fills(
-        [_et("16:00")], [], market="US", timezone="US/Eastern"
-    ) == {}
+    assert plan([_et("16:00")], []) == {}
+    # Nor does one whose last bar ends before the close: 15:50's close is 15:55.
+    assert plan([_et("16:00")], [_et("15:45"), _et("15:50")]) == {}
 
 
 def test_an_exact_fill_is_the_source_bar_not_the_equal_decision_stamp():
@@ -221,9 +259,14 @@ def test_an_exact_fill_is_the_source_bar_not_the_equal_decision_stamp():
     # but the trade is stamped with the fill bar, so its tz must survive.
     decision = _et("15:30").tz_convert("UTC")
     fills = plan_execution_fills(
-        [decision], [_et("15:30")], market="US", timezone="US/Eastern"
+        [decision],
+        [_et("15:30")],
+        source_minutes=5,
+        market="US",
+        timezone="US/Eastern",
     )
-    assert str(fills[decision][0].tz) == "US/Eastern"
+    assert str(fills[decision].bar.tz) == "US/Eastern"
+    assert str(fills[decision].filled_at.tz) == "US/Eastern"
 
 
 def test_the_engine_filter_agrees_for_both_markets():
@@ -236,7 +279,8 @@ def test_the_engine_filter_agrees_for_both_markets():
     ):
         engine = HourlyBacktester.__new__(HourlyBacktester)
         engine.profile = profiles.get_market_profile(data_source)
-        assert engine._market_hours_only(stamps) == [
+        close_stamped = {"X": pd.DataFrame({"close": 1.0}, index=pd.DatetimeIndex(stamps))}
+        assert engine._market_hours_only(stamps, close_stamped) == [
             ts for ts in stamps
             if sessions.is_in_session(ts, market=market, timezone=zone)
         ]
@@ -319,7 +363,7 @@ def test_no_module_restates_the_session_bounds():
 )
 def test_leaderboard_baselines_read_the_board_bars_as_open_stamped(strategy_key):
     """These three hand the board's raw Alpaca hourly bars to the baseline
-    generator, which cannot tell the stamp convention from the frame."""
+    generator, which reads the stamp convention the loader left on them."""
     from dashboard.backend.domain.leaderboard.strategies import get_strategy
 
     hours = pd.date_range("2026-04-15 08:00", "2026-04-15 18:00", freq="h",
@@ -334,6 +378,7 @@ def test_leaderboard_baselines_read_the_board_bars_as_open_stamped(strategy_key)
         },
         index=hours.tz_convert("UTC"),
     )
+    frame.attrs[sessions.FRAME_ATTR_OPEN_STAMPED_MINUTES] = 60
     strategy = get_strategy({"strategy": strategy_key, "symbols": ["AAPL", "MSFT"]})
     curve = strategy.run(
         {"AAPL": frame, "MSFT": frame.copy()}, "2026-04-15", "2026-04-15", 10_000.0
@@ -342,4 +387,4 @@ def test_leaderboard_baselines_read_the_board_bars_as_open_stamped(strategy_key)
         pd.Timestamp(point["timestamp"]).tz_convert("US/Eastern").strftime("%H:%M")
         for point in curve
     ]
-    assert clocks[0] == "09:00" and clocks[-1] == "15:00"
+    assert clocks[0] == "10:00" and clocks[-1] == "15:00"

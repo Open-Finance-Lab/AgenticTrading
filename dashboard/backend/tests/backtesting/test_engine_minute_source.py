@@ -12,6 +12,9 @@ from dashboard.backend.infrastructure.market_data.alpaca_bars import (
     FRAME_ATTR_SIP_FALLBACK,
     MarketDataUnavailableError,
 )
+from dashboard.backend.infrastructure.market_data.sessions import (
+    FRAME_ATTR_OPEN_STAMPED_MINUTES,
+)
 
 
 class _MinuteLoader:
@@ -72,6 +75,7 @@ def _make_minute_bars():
         index=pd.DatetimeIndex(timestamps),
     )
     frame.attrs[FRAME_ATTR_FEED] = "sip"
+    frame.attrs[FRAME_ATTR_OPEN_STAMPED_MINUTES] = 5
     frame.attrs[FRAME_ATTR_SIP_FALLBACK] = False
     frame.attrs[FRAME_ATTR_END_CLAMPED] = True
     return {"AAPL": frame}

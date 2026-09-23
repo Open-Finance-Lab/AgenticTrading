@@ -21,6 +21,7 @@ from dashboard.backend.domain.backtesting.currency import CurrencyContext
 from dashboard.backend.domain.backtesting.market_rules import MarketRuleCalendar
 from dashboard.backend.domain.trading.execution import calculate_transaction_costs
 from dashboard.backend.infrastructure.market_data.sessions import (
+    frames_open_stamped_minutes,
     is_in_session,
     market_for_timezone,
 )
@@ -38,18 +39,17 @@ except ImportError as exc:
     ) from exc
 
 
-def _market_hours_only(
-    timestamps, market_timezone: str, open_stamped_minutes: Optional[int] = None
-):
+def _market_hours_only(timestamps, market_timezone: str, bars):
     """Keep regular sessions in the timezone belonging to the market profile.
 
     This API takes only the zone, so the market is recovered from it through
-    the profile registry rather than a zone-string comparison kept here.
-    ``open_stamped_minutes`` is set when the bars are raw Alpaca bars, stamped
-    at their open (see ``sessions.is_in_session``); aggregated decision bars
-    and iFinD bars are stamped at their close and leave it ``None``.
+    the profile registry rather than a zone-string comparison kept here. The
+    stamp convention is read off ``bars``, the frames the timestamps came from
+    (``sessions.frames_open_stamped_minutes``): raw Alpaca bars are stamped at
+    their open, aggregated decision bars and iFinD bars at their close.
     """
     market = market_for_timezone(market_timezone)
+    open_stamped_minutes = frames_open_stamped_minutes(bars)
     return [
         timestamp
         for timestamp in timestamps
@@ -255,7 +255,6 @@ class BaselineGenerator:
         lot_size: int = 1,
         allocation_summary: Optional[Dict[str, Any]] = None,
         market_rule_calendar: MarketRuleCalendar | None = None,
-        open_stamped_minutes: Optional[int] = None,
     ) -> List[Dict]:
         """
         Generate Buy & Hold baseline curve.
@@ -303,7 +302,7 @@ class BaselineGenerator:
             return []
         
         all_timestamps = _market_hours_only(
-            all_timestamps, market_timezone, open_stamped_minutes
+            all_timestamps, market_timezone, bars_subset
         )
         all_timestamps = _timestamps_in_window(
             all_timestamps, start_date, end_date, market_timezone
@@ -563,7 +562,6 @@ class BaselineGenerator:
         symbols_to_track: Optional[List[str]] = None,
         market_timezone: str = "US/Eastern",
         currency_context: CurrencyContext | None = None,
-        open_stamped_minutes: Optional[int] = None,
     ) -> List[Dict]:
         """
         Generate Index baseline curve (equal-weight index).
@@ -599,7 +597,7 @@ class BaselineGenerator:
             return []
         
         all_timestamps = _market_hours_only(
-            all_timestamps, market_timezone, open_stamped_minutes
+            all_timestamps, market_timezone, bars_subset
         )
         all_timestamps = _timestamps_in_window(
             all_timestamps, start_date, end_date, market_timezone
@@ -700,7 +698,6 @@ def generate_baselines(
     lot_size: int = 1,
     allocation_summary: Optional[Dict[str, Any]] = None,
     market_rule_calendar: MarketRuleCalendar | None = None,
-    open_stamped_minutes: Optional[int] = None,
 ) -> Tuple[List[Dict], List[Dict]]:
     """
     Generate both baselines (Buy & Hold, Index).
@@ -715,8 +712,6 @@ def generate_baselines(
             ``BaselineGenerator.generate_buyhold_baseline``.
         allocation_summary: Out-dict describing how much of the buy & hold
             sleeve actually filled.
-        open_stamped_minutes: Bar span when the bars are stamped at their
-            open (raw Alpaca bars); ``None`` for close-stamped bars.
 
     Returns:
         Tuple of (buyhold_curve, index_curve)
@@ -736,7 +731,6 @@ def generate_baselines(
         lot_size=lot_size,
         allocation_summary=allocation_summary,
         market_rule_calendar=market_rule_calendar,
-        open_stamped_minutes=open_stamped_minutes,
     )
     
     index_curve = generator.generate_index_baseline(
@@ -747,7 +741,6 @@ def generate_baselines(
         symbols_list,
         market_timezone,
         currency_context,
-        open_stamped_minutes=open_stamped_minutes,
     )
     
     return buyhold_curve, index_curve

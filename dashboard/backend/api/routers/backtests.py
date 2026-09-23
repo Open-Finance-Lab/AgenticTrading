@@ -464,6 +464,7 @@ def _run_metadata_response(run: Dict[str, Any]) -> RunMetadata:
                             "valuation_frequency",
                             "aggregation",
                             "fill_policy",
+                            "session_close_fill",
                             "verification_status",
                         )
                         if name in metadata[field]

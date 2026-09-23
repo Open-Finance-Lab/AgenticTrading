@@ -36,6 +36,7 @@ import pandas as pd
 
 from dashboard.backend.domain.backtesting.features import TechnicalIndicators
 from dashboard.backend.domain.backtesting.bar_aggregation import (
+    ExecutionFill,
     aggregate_bars_by_symbol,
     plan_execution_fills,
     summarize_aggregation_quality,
@@ -53,6 +54,7 @@ from dashboard.backend.infrastructure.market_data.frequency import (
 from dashboard.backend.infrastructure.market_data.sessions import (
     DEFAULT_MARKET,
     canonical_market,
+    frames_open_stamped_minutes,
     is_in_session,
     timezone_for_market,
 )
@@ -79,7 +81,7 @@ class MarketDataset:
     __slots__ = (
         "key", "all_data", "timestamps", "price_cache", "total_steps",
         "source_data", "source_timestamps", "source_price_cache",
-        "execution_timestamps", "execution_price_fields",
+        "execution_fills",
         "source_timeframe", "decision_timeframe",
         "data_quality",
         "equity_metadata",
@@ -90,8 +92,7 @@ class MarketDataset:
                  *, source_data: Optional[Dict[str, pd.DataFrame]] = None,
                  source_timestamps: Optional[List[Any]] = None,
                  source_price_cache: Optional[Dict[str, Dict[Any, float]]] = None,
-                 execution_timestamps: Optional[List[Any]] = None,
-                 execution_price_fields: Optional[List[str]] = None,
+                 execution_fills: Optional[List[ExecutionFill]] = None,
                  source_timeframe: str = "60m",
                  decision_timeframe: str = "60m",
                  data_quality: Optional[Dict[str, Any]] = None,
@@ -110,17 +111,13 @@ class MarketDataset:
             if source_price_cache is not None
             else price_cache
         )
-        self.execution_timestamps = (
-            execution_timestamps
-            if execution_timestamps is not None
-            else list(timestamps)
-        )
-        # Which price of the execution bar fills each step: its "open", or the
-        # "close" for a session's final bucket (``plan_execution_fills``).
-        self.execution_price_fields = (
-            execution_price_fields
-            if execution_price_fields is not None
-            else ["open"] * len(self.execution_timestamps)
+        # One ExecutionFill per step. Without a plan -- a dataset whose
+        # decision bars ARE its source bars -- each step fills at its own bar's
+        # open, as the protocol path always has.
+        self.execution_fills = (
+            execution_fills
+            if execution_fills is not None
+            else [ExecutionFill(timestamp, "open", timestamp) for timestamp in timestamps]
         )
         self.source_timeframe = source_timeframe
         self.decision_timeframe = decision_timeframe
@@ -404,14 +401,10 @@ def _build_dataset(
             all_data,
             timezone=timezone,
         )
-    # This store's loaders are Alpaca's, which stamp a raw bar at its open;
-    # an aggregated decision bar is stamped at its close.
-    source_open_minutes = timeframe_minutes(actual_source)
     timestamps = _build_trading_timestamps(
         all_data,
         market=market,
         timezone=timezone,
-        open_stamped_minutes=None if aggregated else source_open_minutes,
     )
     if not timestamps:
         raise RuntimeError("No trading hours in the selected date range")
@@ -421,17 +414,21 @@ def _build_dataset(
         min_symbol_coverage=0.0,
         market=market,
         timezone=timezone,
-        open_stamped_minutes=source_open_minutes,
     )
     source_price_cache = _build_price_cache(source_data, source_timestamps)
-    fills = plan_execution_fills(
-        timestamps, source_timestamps, market=market, timezone=timezone
-    )
-    if len(fills) < len(timestamps):
-        timestamps = [timestamp for timestamp in timestamps if timestamp in fills]
-        price_cache = _build_price_cache(all_data, timestamps)
-    execution_timestamps = [fills[timestamp][0] for timestamp in timestamps]
-    execution_price_fields = [fills[timestamp][1] for timestamp in timestamps]
+    execution_fills = None
+    if aggregated:
+        fills = plan_execution_fills(
+            timestamps,
+            source_timestamps,
+            source_minutes=timeframe_minutes(actual_source),
+            market=market,
+            timezone=timezone,
+        )
+        if len(fills) < len(timestamps):
+            timestamps = [timestamp for timestamp in timestamps if timestamp in fills]
+            price_cache = _build_price_cache(all_data, timestamps)
+        execution_fills = [fills[timestamp] for timestamp in timestamps]
     dataset = MarketDataset(
         key,
         all_data,
@@ -440,8 +437,7 @@ def _build_dataset(
         source_data=source_data,
         source_timestamps=source_timestamps,
         source_price_cache=source_price_cache,
-        execution_timestamps=execution_timestamps,
-        execution_price_fields=execution_price_fields,
+        execution_fills=execution_fills,
         source_timeframe=actual_source,
         decision_timeframe=requested_decision,
         data_quality=data_quality,
@@ -459,15 +455,17 @@ def _build_trading_timestamps(
     min_symbol_coverage: float = 0.8,
     market: str = DEFAULT_MARKET,
     timezone: str = DEFAULT_TIMEZONE,
-    open_stamped_minutes: Optional[int] = None,
 ) -> List[Any]:
     """Return in-session timestamps meeting the requested symbol coverage.
 
     Session membership comes from ``market_data.sessions`` rather than a
     literal here, so this filter and the aggregation that produced the bars
     agree about when the market is open -- including for tz-naive bars, which
-    both read as market-local time.
+    both read as market-local time. The stamp convention is the frames' own
+    (``sessions.frames_open_stamped_minutes``): a raw Alpaca bar is stamped at
+    its open, an aggregated decision bar or a legacy loader's at its close.
     """
+    open_stamped_minutes = frames_open_stamped_minutes(all_data)
     all_timestamps: set = set()
     for df in all_data.values():
         all_timestamps.update(df.index)

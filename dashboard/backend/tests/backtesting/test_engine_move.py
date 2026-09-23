@@ -29,6 +29,9 @@ from dashboard.backend.domain.agents.runtime import (
 )
 from dashboard.backend.infrastructure.ai_hedge_fund.adapter import AiHedgeFundRuntime
 from dashboard.scripts import backtest_hourly_agent as bha
+from dashboard.backend.infrastructure.market_data.sessions import (
+    FRAME_ATTR_OPEN_STAMPED_MINUTES,
+)
 
 _REPO_ROOT = Path(__file__).resolve().parents[4]
 ENGINE_MODULE = "dashboard.backend.domain.backtesting.engine"
@@ -443,6 +446,7 @@ def test_djia_baseline_drops_incomplete_decision_bars(monkeypatch):
         },
         index=timestamps,
     )
+    source_frame.attrs[FRAME_ATTR_OPEN_STAMPED_MINUTES] = 5
     _FakeLoader.bars = {symbol: source_frame for symbol in engine_mod.DJIA_30}
 
     captured = {}

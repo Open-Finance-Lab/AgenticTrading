@@ -16,6 +16,7 @@ can import it: domain, the backend-root baseline generator and ``api/`` alike.
 from __future__ import annotations
 
 from datetime import datetime, time, timedelta
+from typing import Any, Mapping
 
 import pytz
 
@@ -78,11 +79,41 @@ def time_in_session(local_time: time, market: object) -> bool:
     return any(start <= minute <= end for start, end in session_windows(market))
 
 
-def _market_local(timestamp: datetime, timezone: str) -> datetime:
-    """A naive timestamp is read as market-local time, matching
-    ``bar_aggregation._as_local_index``; ``astimezone`` on a naive pandas
-    ``Timestamp`` raises instead, which made the filter and the aggregation
-    disagree on exactly the data a local-time feed returns."""
+#: ``DataFrame.attrs`` key a loader sets on every frame whose bars it stamps at
+#: their OPEN, holding the bar span in minutes. Absent means stamped at the
+#: close -- an aggregated decision bar, an iFinD bar, a legacy double. It lives
+#: on the frame because the convention is a fact about the data, not about
+#: whoever is filtering it: passing it by hand let the protocol baseline worker,
+#: which builds its backtester without loading anything, filter aggregated
+#: close-stamped bars under the raw-bar rule and drop every 16:00 close.
+FRAME_ATTR_OPEN_STAMPED_MINUTES = "bar_open_stamped_minutes"
+
+
+def frames_open_stamped_minutes(frames: Mapping[str, Any]) -> int | None:
+    """The span the loader stamped on ``frames``, or ``None`` if their bars are
+    stamped at the close. Empty frames carry no bars and are ignored.
+
+    Raises ``ValueError`` on a mix: no one rule filters both conventions, and
+    choosing one would silently misfilter the other half of the universe.
+    """
+    spans = {
+        frame.attrs.get(FRAME_ATTR_OPEN_STAMPED_MINUTES)
+        for frame in frames.values()
+        if len(frame)
+    }
+    if len(spans) > 1:
+        raise ValueError(
+            f"bars mix stamp conventions (open-stamped spans {sorted(spans, key=str)})"
+        )
+    return spans.pop() if spans else None
+
+
+def market_local(timestamp: datetime, timezone: str) -> datetime:
+    """``timestamp`` in the market's zone. A naive timestamp is read as
+    market-local time, matching ``bar_aggregation._as_local_index``;
+    ``astimezone`` on a naive pandas ``Timestamp`` raises instead, which made
+    the filter and the aggregation disagree on exactly the data a local-time
+    feed returns."""
     zone = pytz.timezone(timezone)
     if timestamp.tzinfo is None:
         return zone.localize(timestamp)
@@ -99,21 +130,27 @@ def is_in_session(
     """:func:`time_in_session` for a timestamp in any zone.
 
     ``open_stamped_minutes`` says the timestamp is a bar's OPEN and the bar
-    spans that many minutes; the bar is then in session when it CLOSES inside
-    one (``start < close <= end``). Alpaca stamps every bar at its open and
-    returns extended hours, so the close-stamp rule kept its 16:00 bar -- the
-    16:00-16:05 (or 16:00-17:00) after-hours bar -- and, for clock-aligned
-    hourly bars, dropped the 09:00 bar that holds the 09:30 open.
+    spans that many minutes (read it off the frames with
+    :func:`frames_open_stamped_minutes`). Such a bar is in session only when it
+    lies wholly inside one: it opens at or after the session starts and closes
+    at or before it ends. Alpaca stamps bars at their open and serves extended
+    hours, so the close-stamp rule kept its 16:00 bar -- 16:00-16:05, or
+    16:00-17:00, after hours. Clock-aligned hourly bars straddle the 09:30
+    open, and that 09:00 bar is out too: its open, high, low and volume include
+    half an hour of pre-market trading, so admitting it would price the day's
+    first fill off a pre-market print.
     """
-    local = _market_local(timestamp, timezone)
+    local = market_local(timestamp, timezone)
     if open_stamped_minutes is None:
         return time_in_session(local.time(), market)
     close = local + timedelta(minutes=open_stamped_minutes)
     if close.date() != local.date():
         return False
+    open_minute = local.time().replace(second=0, microsecond=0)
     close_minute = close.time().replace(second=0, microsecond=0)
     return any(
-        start < close_minute <= end for start, end in session_windows(market)
+        start <= open_minute and close_minute <= end
+        for start, end in session_windows(market)
     )
 
 
@@ -121,7 +158,7 @@ def is_session_close(timestamp: datetime, *, market: object, timezone: str) -> b
     """Whether ``timestamp`` falls in the minute a session ends (16:00 ET,
     11:30 and 15:00 CST): the stamp of a final bucket, which no in-session
     source bar opens at."""
-    minute = _market_local(timestamp, timezone).time().replace(
+    minute = market_local(timestamp, timezone).time().replace(
         second=0, microsecond=0
     )
     return any(minute == end for _start, end in session_windows(market))

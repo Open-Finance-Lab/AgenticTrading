@@ -15,7 +15,6 @@ from dashboard.backend.baseline_generator import BaselineGenerator
 from dashboard.backend.infrastructure.llm.validator import DJIA_30
 
 from .base import BaselineStrategy
-from ._common import LEADERBOARD_BAR_OPEN_MINUTES
 
 
 class EqualWeightIndexStrategy(BaselineStrategy):
@@ -34,6 +33,5 @@ class EqualWeightIndexStrategy(BaselineStrategy):
     ) -> List[Dict[str, Any]]:
         symbols = self.required_symbols()
         return BaselineGenerator().generate_index_baseline(
-            bars_by_symbol, start_date, end_date, initial_capital, symbols,
-            open_stamped_minutes=LEADERBOARD_BAR_OPEN_MINUTES,
+            bars_by_symbol, start_date, end_date, initial_capital, symbols
         )

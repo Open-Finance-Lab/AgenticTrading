@@ -19,9 +19,6 @@ from typing import Any, Dict, List
 import pandas as pd
 
 from dashboard.backend.domain.leaderboard.strategies import get_strategy
-from dashboard.backend.domain.leaderboard.strategies._common import (
-    LEADERBOARD_BAR_TIMEFRAME,
-)
 from dashboard.backend.domain.backtesting.constants import INITIAL_CAPITAL
 from dashboard.backend.domain.backtesting.metrics import (
     calculate_max_drawdown,
@@ -45,7 +42,7 @@ def fetch_hourly_bars(symbols: List[str], start_date: str, end_date: str) -> Dic
     that persist a curve should read it with ``feed_provenance`` and store it,
     because the log line below outlives nothing.
     """
-    loader = AlpacaDataLoader(source_timeframe=LEADERBOARD_BAR_TIMEFRAME)
+    loader = AlpacaDataLoader()
     end_inclusive = (
         datetime.strptime(end_date, "%Y-%m-%d") + timedelta(days=1)
     ).strftime("%Y-%m-%d")

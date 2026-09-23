@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from bisect import bisect_left
 from datetime import date, time
-from typing import Any, Dict, Iterable, List, Mapping, Tuple
+from typing import Any, Dict, Iterable, List, Mapping, NamedTuple
 
 import numpy as np
 import pandas as pd
@@ -26,7 +26,9 @@ from dashboard.backend.infrastructure.market_data.frequency import (
 )
 # Re-exported: the session bounds have one owner, and it is not this module.
 from dashboard.backend.infrastructure.market_data.sessions import (
+    FRAME_ATTR_OPEN_STAMPED_MINUTES,
     is_session_close,
+    market_local,
     session_windows,
 )
 
@@ -112,7 +114,19 @@ def aggregate_bars(
             f"source bars are missing required columns: {', '.join(missing)}"
         )
     if frame.empty:
-        return frame.copy()
+        result = frame.copy()
+        result.attrs.pop(FRAME_ATTR_OPEN_STAMPED_MINUTES, None)
+        return result
+    # Bucketing below reads a source stamp as its bar's OPEN (09:30-10:25 ->
+    # the 10:30 bar), and ``plan_execution_fills`` then fills at the bar opening
+    # on a decision's close. A close-stamped source would land one bar late in
+    # every bucket with nothing to show for it, so it is refused, not guessed.
+    stamped = frame.attrs.get(FRAME_ATTR_OPEN_STAMPED_MINUTES)
+    if stamped != source_minutes:
+        raise BarAggregationError(
+            f"aggregation requires {source}-bars stamped at their open; the "
+            f"frame is stamped {'at the close' if stamped is None else f'{stamped}m at the open'}"
+        )
 
     local = _as_local_index(frame, timezone)
     windows = session_windows(market)
@@ -255,6 +269,8 @@ def aggregate_bars(
 
     result = pd.DataFrame.from_records(records).set_index("timestamp").sort_index()
     result.attrs.update(dict(getattr(frame, "attrs", {}) or {}))
+    # A decision bar is stamped at its close, whatever its source was.
+    result.attrs.pop(FRAME_ATTR_OPEN_STAMPED_MINUTES, None)
     result.attrs.update(
         {
             "aggregation_source_timeframe": source,
@@ -332,47 +348,64 @@ def summarize_aggregation_quality(
     return summary
 
 
-def _market_day(timestamp: Any, timezone: str) -> date:
-    stamp = pd.Timestamp(timestamp)
-    if stamp.tzinfo is None:
-        return stamp.tz_localize(timezone).date()
-    return stamp.tz_convert(timezone).date()
+class ExecutionFill(NamedTuple):
+    """How one decision fills: the source ``bar`` it is priced from, which of
+    that bar's prices (``price_field``), and the instant it fills
+    (``filled_at``). One record rather than parallel lists, so a bar can never
+    be paired with another step's price field."""
+
+    bar: Any
+    price_field: str
+    filled_at: Any
 
 
 def plan_execution_fills(
     decision_timestamps: Iterable[Any],
     source_timestamps: List[Any],
     *,
+    source_minutes: int,
     market: str,
     timezone: str,
-) -> Dict[Any, Tuple[Any, str]]:
-    """Map each decision bar to ``(source bar, price field)`` it fills on.
+) -> Dict[Any, ExecutionFill]:
+    """Map each decision bar to the :class:`ExecutionFill` it fills on.
 
-    A decision closes at its stamp, so it fills at the ``open`` of the source
-    bar opening at that instant -- the first fill without look-ahead. A
-    session's final bucket (16:00 ET) has no such bar once after-hours bars are
-    out of the source set, so it fills at the ``close`` of the last source bar
-    before it that day: the same instant, priced at the last regular-hours
-    trade. Filling it at the 16:00 bar instead made the day's closing decision
-    depend on whether the tape served an after-hours bar at all.
+    ``source_timestamps`` are open-stamped bars of ``source_minutes`` (the only
+    kind :func:`aggregate_bars` accepts), sorted. A decision closes at its
+    stamp, so it fills at the ``open`` of the source bar opening at that
+    instant -- the first fill without look-ahead. A session's final bucket
+    (16:00 ET) has no such bar once after-hours bars are out of the source set,
+    so it fills at the ``close`` of the source bar ending at that instant,
+    priced at the last regular-hours trade and stamped at that bar's close
+    rather than its open, so the trade never predates the decision.
+    Filling it at the 16:00 bar instead made the day's closing decision depend
+    on whether the tape served an after-hours bar at all.
 
     One planner for the engine and the protocol path's dataset store, which
     each used to carry their own copy of the exact-match rule. Decisions with
-    no fill are absent. ``source_timestamps`` must be sorted.
+    no fill are absent.
     """
     by_day: Dict[date, List[Any]] = {}
     for timestamp in source_timestamps:
-        by_day.setdefault(_market_day(timestamp, timezone), []).append(timestamp)
-    fills: Dict[Any, Tuple[Any, str]] = {}
+        by_day.setdefault(market_local(timestamp, timezone).date(), []).append(
+            timestamp
+        )
+    span = pd.Timedelta(minutes=source_minutes)
+    fills: Dict[Any, ExecutionFill] = {}
     for timestamp in decision_timestamps:
-        same_day = by_day.get(_market_day(timestamp, timezone), [])
+        same_day = by_day.get(market_local(timestamp, timezone).date(), [])
         index = bisect_left(same_day, timestamp)
         if index < len(same_day) and same_day[index] == timestamp:
             # The source's own object, not the equal decision stamp: they can
             # differ in tz, and the fill bar is what a trade is stamped with.
-            fills[timestamp] = (same_day[index], "open")
-        elif index > 0 and is_session_close(
-            timestamp, market=market, timezone=timezone
+            bar = same_day[index]
+            fills[timestamp] = ExecutionFill(bar, "open", bar)
+        elif (
+            index > 0
+            and same_day[index - 1] + span == timestamp
+            and is_session_close(timestamp, market=market, timezone=timezone)
         ):
-            fills[timestamp] = (same_day[index - 1], "close")
+            # Only the bar closing AT the session close: an earlier one's close
+            # predates the decision it would fill.
+            bar = same_day[index - 1]
+            fills[timestamp] = ExecutionFill(bar, "close", bar + span)
     return fills

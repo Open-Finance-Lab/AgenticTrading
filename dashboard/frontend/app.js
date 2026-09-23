@@ -10089,11 +10089,12 @@ function formatBacktestFrequencyContract(contract) {
     const execution = contract.execution_timeframe;
     const valuation = contract.valuation_frequency;
     if (!source || !decision || !execution || !valuation) return null;
-    let fill = contract.fill_policy === 'next_source_bar_open'
-        ? `next ${execution} open fills`
-        : `${execution} execution`;
-    if (contract.session_close_fill === 'last_source_bar_close') {
-        fill += ' (last close at session end)';
+    let fill = `${execution} execution`;
+    if (contract.fill_policy === 'next_source_bar_open') {
+        fill = `next ${execution} open fills`;
+        if (contract.session_close_fill === 'last_source_bar_close') {
+            fill += ' (last close at session end)';
+        }
     }
     const verification = contract.verification_status === 'verified'
         ? ' · verified'

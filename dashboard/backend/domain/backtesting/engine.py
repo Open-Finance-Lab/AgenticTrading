@@ -68,6 +68,7 @@ from dashboard.backend.domain.backtesting.currency import (
 )
 from dashboard.backend.domain.backtesting.features import TechnicalIndicators
 from dashboard.backend.domain.backtesting.bar_aggregation import (
+    ExecutionFill,
     aggregate_bars_by_symbol,
     plan_execution_fills,
     summarize_aggregation_quality,
@@ -120,13 +121,15 @@ from dashboard.backend.infrastructure.market_data.frequency import (
     timeframe_minutes,
     verify_source_timeframe,
 )
-from dashboard.backend.infrastructure.market_data.sessions import is_in_session
+from dashboard.backend.infrastructure.market_data.sessions import (
+    frames_open_stamped_minutes,
+    is_in_session,
+)
 from dashboard.backend.infrastructure.market_data.profiles import (
     IFIND_ASHARE,
     LLM_DECISION_SOURCE,
     RULE_BASED_DECISION_SOURCE,
     MarketProfile,
-    bars_open_stamped,
     get_market_profile,
     resolve_decision_source,
 )
@@ -1624,15 +1627,17 @@ class HourlyBacktester:
             return self._require_currency_context().to_reporting(manager.cash, timestamp)
         return float(manager.cash)
 
-    def _market_hours_only(self, timestamps, *, open_stamped_minutes=None):
+    def _market_hours_only(self, timestamps, bars):
         """Filter timestamps using the selected market's local sessions.
 
         Through ``market_data.sessions``, the same owner the dataset store and
         the aggregation use, so the dashboard and protocol paths cannot count
-        different steps for one window. ``open_stamped_minutes`` is set for raw
-        provider bars stamped at their open; see :meth:`_raw_bar_open_minutes`.
+        different steps for one window. The stamp convention is read off
+        ``bars``, the frames the timestamps came from: raw Alpaca bars are
+        stamped at their open, aggregated decision bars at their close.
         """
         profile = self._effective_profile()
+        open_stamped_minutes = frames_open_stamped_minutes(bars)
         return [
             timestamp
             for timestamp in timestamps
@@ -1644,53 +1649,40 @@ class HourlyBacktester:
             )
         ]
 
-    def _raw_bar_open_minutes(self, timeframe):
-        """The span of a raw provider bar when the provider stamps it at its
-        open, else ``None``. Aggregated decision bars are always stamped at
-        their close and must not go through this."""
-        if not bars_open_stamped(getattr(self, "data_source", None)):
-            return None
-        return timeframe_minutes(timeframe)
-
     def _plan_executions(self, decision_timestamps):
-        """``(decisions, valuation bars, {decision: fill bar}, {decision:
-        price field})`` for the run loop.
+        """``(decisions, valuation bars, {decision: ExecutionFill})`` for the
+        run loop.
 
-        Hourly mode fills and values on the decision bar itself. Minute mode
-        values on every in-session source bar and fills through
-        ``plan_execution_fills``; a decision it cannot fill is not a step.
+        Hourly mode fills and values on the decision bar itself, priced off its
+        market data (the bar's close). Minute mode values on every in-session
+        source bar and fills through ``plan_execution_fills``; a decision it
+        cannot fill is not a step.
         """
         if not self.intraday_mode:
             return (
                 list(decision_timestamps),
                 list(decision_timestamps),
-                {timestamp: timestamp for timestamp in decision_timestamps},
-                {},
+                {
+                    timestamp: ExecutionFill(timestamp, "close", timestamp)
+                    for timestamp in decision_timestamps
+                },
             )
         raw_timestamps = self._market_hours_only(
-            self._timestamps_for_data(self.source_data),
-            open_stamped_minutes=self._raw_bar_open_minutes(self.source_timeframe),
+            self._timestamps_for_data(self.source_data), self.source_data
         )
         profile = self._effective_profile()
         fills = plan_execution_fills(
             decision_timestamps,
             raw_timestamps,
+            source_minutes=timeframe_minutes(self.source_timeframe),
             market=profile.market,
             timezone=profile.timezone,
         )
         return (
             [timestamp for timestamp in decision_timestamps if timestamp in fills],
             raw_timestamps,
-            {timestamp: source for timestamp, (source, _field) in fills.items()},
-            {timestamp: field for timestamp, (_source, field) in fills.items()},
+            fills,
         )
-
-    def _decision_bar_open_minutes(self):
-        """:meth:`_raw_bar_open_minutes` for ``all_data``'s bars: ``None`` in
-        minute mode, where they are aggregated and stamped at their close."""
-        if getattr(self, "intraday_mode", False):
-            return None
-        return self._raw_bar_open_minutes(self.source_timeframe)
 
     def _run_daily_post_trade(
         self,
@@ -1818,10 +1810,7 @@ class HourlyBacktester:
         
         all_timestamps = filtered
         
-        all_timestamps = self._market_hours_only(
-            all_timestamps,
-            open_stamped_minutes=self._decision_bar_open_minutes(),
-        )
+        all_timestamps = self._market_hours_only(all_timestamps, self.all_data)
         prior_market_dates = (
             _prior_market_date_by_decision_date(all_timestamps)
             if self.runtime_type == AI_HEDGE_FUND_RUNTIME_TYPE
@@ -1839,12 +1828,9 @@ class HourlyBacktester:
                 f"failed step(s) before aborting\n"
             )
 
-        (
-            all_timestamps,
-            raw_timestamps,
-            execution_plan,
-            execution_fields,
-        ) = self._plan_executions(all_timestamps)
+        all_timestamps, raw_timestamps, execution_plan = self._plan_executions(
+            all_timestamps
+        )
 
         print(
             f"   Trading {len(all_timestamps)} hourly decision bars during "
@@ -1986,10 +1972,10 @@ class HourlyBacktester:
             # In minute mode, execute at the next source bar's open. The
             # decision bar closes at ``timestamp``; the source bar opening at
             # that same instant is the first non-look-ahead fill opportunity.
-            # A session's final bucket fills at the last source bar's close
-            # instead (``plan_execution_fills``).
-            execution_timestamp = execution_plan[timestamp]
-            execution_field = execution_fields.get(timestamp, "open")
+            # A session's final bucket fills at the close of the source bar
+            # ending then instead (``plan_execution_fills``).
+            fill = execution_plan[timestamp]
+            execution_timestamp = fill.bar
             execution_market_data = market_data
             execution_fallback_prices = {
                 symbol: values[execution_timestamp]
@@ -2004,9 +1990,9 @@ class HourlyBacktester:
                     execution_timestamp,
                 )
                 execution_prices = {
-                    symbol: row[execution_field]
+                    symbol: row[fill.price_field]
                     for symbol, row in execution_market_data.items()
-                    if execution_field in row
+                    if fill.price_field in row
                 }
 
             # Execute trades (only if real data available)
@@ -2014,7 +2000,7 @@ class HourlyBacktester:
             manager.execute_actions(
                 decision["actions"],
                 execution_market_data,
-                execution_timestamp,
+                fill.filled_at,
                 fallback_prices=execution_fallback_prices,
                 execution_prices=execution_prices,
             )
@@ -2281,7 +2267,6 @@ class HourlyBacktester:
             currency_context=self._require_currency_context(),
             transaction_cost_profile=profile.transaction_cost_profile,
             transaction_cost_totals=baseline_cost_totals,
-            open_stamped_minutes=self._decision_bar_open_minutes(),
             # The board lot is its own market rule. Deriving it from the cost
             # profile would floor buys to 100 in any future market that charges
             # fees but trades in single shares.
@@ -2371,7 +2356,6 @@ class HourlyBacktester:
             market_timezone=self._effective_profile().timezone,
             symbols_list=list(DJIA_30),
             currency_context=self._require_currency_context(),
-            open_stamped_minutes=self._decision_bar_open_minutes(),
         )
         
         if not equity_history:

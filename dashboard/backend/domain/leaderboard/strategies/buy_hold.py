@@ -12,7 +12,7 @@ import pandas as pd
 from dashboard.backend.baseline_generator import BaselineGenerator
 
 from .base import BaselineStrategy
-from ._common import LEADERBOARD_BAR_OPEN_MINUTES, subset_bars
+from ._common import subset_bars
 
 
 class BuyHoldStrategy(BaselineStrategy):
@@ -33,8 +33,7 @@ class BuyHoldStrategy(BaselineStrategy):
         if not bars_subset:
             return []
         return BaselineGenerator().generate_buyhold_baseline(
-            bars_subset, start_date, end_date, initial_capital, symbols,
-            open_stamped_minutes=LEADERBOARD_BAR_OPEN_MINUTES,
+            bars_subset, start_date, end_date, initial_capital, symbols
         )
 
     def num_trades(self) -> int:
