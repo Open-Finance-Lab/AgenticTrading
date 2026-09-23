@@ -192,7 +192,7 @@ the cache living inside `AlpacaDataLoader`, not by a runtime check.
 
 **Location:** a new `BAR_CACHE_DIR = DATA_DIR / "bar_cache"` constant in
 `dashboard/backend/paths.py`, on the container's ephemeral filesystem. It sits under
-`dashboard/storage/data`, which `.gitignore:225` already ignores wholesale, so
+`dashboard/storage/data`, which a `.gitignore` rule already ignores wholesale, so
 entries can never be staged by accident.
 
 **Ephemeral is sufficient, and that is the point.** Render's live service has
@@ -203,12 +203,10 @@ outlive a `Popen`, which is precisely what the existing in-process
 module-level `OrderedDict` is empty on every run; a file on the instance's disk is
 shared by every child on that instance.
 
-⚠ Do **not** write into `dashboard/storage/data/cache/`. That directory holds **nine
-git-tracked** per-symbol CSVs (`AAPL_2024-01-01_2024-01-31_1d.csv` and siblings),
-orphaned from any current code path — gitignored going forward by
-`.gitignore:222-223`, but gitignore does not untrack what is already tracked. Reusing
-it would interleave live cache entries with tracked files and put a binary-ish diff in
-front of every reviewer. `bar_cache/` is a fresh, wholly ignored sibling.
+`bar_cache/` is a fresh, wholly ignored sibling (`.gitignore`'s `dashboard/storage/data`
+rule). *Resolved:* this section used to warn against reusing the neighbouring
+`dashboard/storage/data/cache/`, which held nine git-tracked CSVs with no reader; #521
+(closing #515) deleted that directory and its now-dead ignore rules.
 
 - **Atomic writes:** write to a temp file in the same directory, then `os.replace`.
   Up to `MAX_ACTIVE_DASHBOARD_BACKTESTS` (default 5) children run concurrently on one
@@ -383,7 +381,7 @@ there, not here.
 5. Read `agent_runs.runtime_type` / `decision_source` in prod to settle the LLM-vs-rule-based
    mix, which is the ceiling on every latency change of this kind (§1-C). → **#514**
    (companion to #502: same trip to prod, different data source)
-6. Stale git-tracked CSVs under `dashboard/storage/data/cache/` with no reader. → **#515**
+6. Stale git-tracked CSVs under `dashboard/storage/data/cache/` with no reader. → **#515**, removed by #521
    (nine files; the only `data/cache` readers are `orchestration/` scripts naming an
    absolute macOS path, not this directory)
 

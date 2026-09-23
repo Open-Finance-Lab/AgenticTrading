@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import ast
+from pathlib import Path
+
 import pandas as pd
 import pytest
 from datetime import date
@@ -15,9 +18,7 @@ from dashboard.backend.domain.backtesting.market_rules import (
     DailyMarketRule,
     MarketRuleCalendar,
 )
-from dashboard.backend.infrastructure.market_data.alpaca_bars import (
-    MarketDataUnavailableError,
-)
+from dashboard.backend.infrastructure.market_data import alpaca_bars as bars_mod
 from dashboard.backend.infrastructure.market_data.profiles import (
     ASHARE_TRANSACTION_COST_PROFILE,
 )
@@ -85,11 +86,70 @@ def sample_cn_bars() -> dict[str, pd.DataFrame]:
     }
 
 
-def test_constructor_and_supplied_bar_calculations_do_not_load_credentials(monkeypatch):
-    def fail_if_called(*args, **kwargs):
-        raise AssertionError("Alpaca credentials must not be loaded")
+# Modules through which baseline_generator could reach a market-data API or a
+# credential store again. Matched on the imported module path, so a respelled
+# helper (`_fetch_bars`, `fetch_symbol`, a module-level function) cannot hide it.
+_FETCH_MODULE_MARKERS = (
+    "alpaca",
+    "ifind",
+    "vnpy",
+    "provider",
+    "requests",
+    "httpx",
+    "urllib",
+    "dotenv",
+)
 
-    monkeypatch.setattr(BaselineGenerator, "_load_credentials", fail_if_called)
+
+def _imported_modules(tree: ast.AST) -> set[str]:
+    modules: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            modules.update(alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            modules.add(node.module)
+            modules.update(f"{node.module}.{alias.name}" for alias in node.names)
+    return modules
+
+
+def test_the_generator_module_has_no_route_to_market_data():
+    """Baselines are computed from bars the caller already holds.
+
+    The deleted `_fetch_bars_for_symbol` had no production caller for a long
+    time before anyone noticed -- a second, independent route to bars is
+    exactly the thing that grows back quietly. Checked on the module's imports
+    rather than on method names: any fetch needs a client, and every client
+    lives behind one of these modules.
+    """
+    tree = ast.parse(Path(baseline_module.__file__).read_text(encoding="utf-8"))
+    offenders = sorted(
+        module
+        for module in _imported_modules(tree)
+        if any(marker in module.lower() for marker in _FETCH_MODULE_MARKERS)
+    )
+    assert offenders == [], (
+        "baseline_generator imports a market-data or credential module again: "
+        f"{offenders}. Fetching belongs to the caller's loader (the engine's "
+        "data_loader, or AlpacaDataLoader via leaderboard/baselines), which owns "
+        "the SIP clamp, the IEX retry, the feed stamps and the bar cache."
+    )
+    assert "CREDENTIALS_DIR" not in {
+        node.id for node in ast.walk(tree) if isinstance(node, ast.Name)
+    }
+
+
+def test_supplied_bar_calculations_never_construct_a_loader(monkeypatch, tmp_path):
+    """Fails on any machine if computing a baseline reaches for Alpaca --
+    including one with a real `credentials/alpaca.json`, which merely clearing
+    the env vars would let satisfy the lookup."""
+    monkeypatch.delenv("ALPACA_API_KEY", raising=False)
+    monkeypatch.delenv("ALPACA_SECRET_KEY", raising=False)
+    monkeypatch.setattr(bars_mod, "CREDENTIALS_DIR", tmp_path)
+
+    def _refuse(*_args, **_kwargs):
+        raise AssertionError("baseline computation constructed an AlpacaDataLoader")
+
+    monkeypatch.setattr(bars_mod.AlpacaDataLoader, "__init__", _refuse)
     generator = BaselineGenerator()
     bars = sample_bars()
 
@@ -104,17 +164,6 @@ def test_constructor_and_supplied_bar_calculations_do_not_load_credentials(monke
     assert index
     assert buyhold[0]["equity"] > 0
     assert index[0]["equity"] > 0
-
-
-def test_real_alpaca_fetch_loads_credentials_lazily(monkeypatch, tmp_path):
-    monkeypatch.delenv("ALPACA_API_KEY", raising=False)
-    monkeypatch.delenv("ALPACA_SECRET_KEY", raising=False)
-    monkeypatch.setattr(baseline_module, "CREDENTIALS_DIR", tmp_path)
-
-    generator = BaselineGenerator()
-
-    with pytest.raises(MarketDataUnavailableError, match="credentials"):
-        generator._fetch_bars_for_symbol("AAPL", "2026-04-01", "2026-04-02")
 
 
 def test_cn_baselines_keep_shanghai_session_timestamps():

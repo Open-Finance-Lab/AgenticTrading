@@ -1,7 +1,9 @@
 """Deep fix for the sys.exit()-in-library-code class (B0/H4 follow-up).
 
 AlpacaDataLoader, BaselineGenerator and the engine used to sys.exit(1) on
-missing credentials / missing SDK / empty data. SystemExit is a BaseException:
+missing credentials / missing SDK / empty data. (BaselineGenerator's credential
+path has since been deleted outright, so only the loader and engine are pinned
+here.) SystemExit is a BaseException:
 it sails past `except Exception`, silently kills daemon threads, and wedged
 the ASGI loop (the original B0 hang). The B0/H4 fixes added
 `except (Exception, SystemExit)` guards at every known call site — this is the
@@ -11,16 +13,15 @@ and only the CLI entrypoints translate it to an exit code.
 
 import pytest
 
-import dashboard.backend.baseline_generator as bg_mod
 import dashboard.backend.infrastructure.market_data.alpaca_bars as bars_mod
 
 
-def _clear_creds(monkeypatch, tmp_path, mod):
+def _clear_creds(monkeypatch, tmp_path):
     monkeypatch.delenv("ALPACA_API_KEY", raising=False)
     monkeypatch.delenv("ALPACA_SECRET_KEY", raising=False)
     # Point the file fallback at an empty directory so a developer's local
     # credentials/alpaca.json can't satisfy the lookup.
-    monkeypatch.setattr(mod, "CREDENTIALS_DIR", tmp_path)
+    monkeypatch.setattr(bars_mod, "CREDENTIALS_DIR", tmp_path)
 
 
 def test_market_data_error_is_a_plain_exception():
@@ -31,16 +32,9 @@ def test_market_data_error_is_a_plain_exception():
 
 
 def test_alpaca_loader_missing_credentials_raises_not_exits(monkeypatch, tmp_path):
-    _clear_creds(monkeypatch, tmp_path, bars_mod)
+    _clear_creds(monkeypatch, tmp_path)
     with pytest.raises(bars_mod.MarketDataUnavailableError):
         bars_mod.AlpacaDataLoader()
-
-
-def test_baseline_fetch_missing_credentials_raises_not_exits(monkeypatch, tmp_path):
-    _clear_creds(monkeypatch, tmp_path, bg_mod)
-    generator = bg_mod.BaselineGenerator()
-    with pytest.raises(bars_mod.MarketDataUnavailableError):
-        generator._ensure_credentials()
 
 
 def test_engine_load_data_empty_raises_not_exits():

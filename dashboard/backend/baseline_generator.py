@@ -13,12 +13,9 @@ Can be called by:
 Same logic, different contexts.
 """
 
-import json
-import os
 from typing import Any, Dict, List, Optional, Tuple
 from datetime import datetime
 
-from dashboard.backend.paths import CREDENTIALS_DIR
 from dashboard.backend.domain.backtesting.constants import INITIAL_CAPITAL
 from dashboard.backend.domain.backtesting.currency import CurrencyContext
 from dashboard.backend.domain.backtesting.market_rules import MarketRuleCalendar
@@ -27,14 +24,10 @@ from dashboard.backend.infrastructure.market_data.sessions import (
     is_in_session,
     market_for_timezone,
 )
-from dashboard.backend.infrastructure.market_data.alpaca_bars import (
-    AlpacaDataLoader,
-    MarketDataUnavailableError,
-)
 
-# The baseline calculations operate on already-normalized bars and keep their
-# market-session filtering local so A-share timestamps are not interpreted as
-# US/Eastern dates.
+# The baseline calculations operate on already-normalized bars and filter
+# sessions in the market profile's own timezone, so A-share timestamps are not
+# interpreted as US/Eastern dates.
 
 try:
     import pandas as pd
@@ -222,91 +215,21 @@ def _plan_buyhold_allocation(
 
 
 class BaselineGenerator:
-    """Generates baseline equity curves from real historical data."""
+    """Builds baseline equity curves from bars its caller already holds.
 
-    def __init__(self):
-        """Initialize without touching credentials or the network."""
-        self.api_key = None
-        self.secret_key = None
-        self.headers = None
-
-    def _ensure_credentials(self):
-        """Load Alpaca credentials only for methods that fetch remote bars."""
-        if self.api_key and self.secret_key:
-            return
-        self._load_credentials()
-    
-    def _load_credentials(self):
-        """Load Alpaca credentials from environment variables or file."""
-        # Try environment variables first (for Render, Docker, etc.)
-        self.api_key = os.getenv('ALPACA_API_KEY')
-        self.secret_key = os.getenv('ALPACA_SECRET_KEY')
-        
-        if self.api_key and self.secret_key:
-            print("✅ Loaded Alpaca credentials from environment variables")
-            self.headers = {
-                "APCA-API-KEY-ID": self.api_key,
-                "APCA-API-SECRET-KEY": self.secret_key,
-            }
-            return
-        
-        # Fall back to credentials file (for local development)
-        creds_path = CREDENTIALS_DIR / "alpaca.json"
-        try:
-            with open(creds_path, 'r') as f:
-                creds = json.load(f)
-                self.api_key = creds.get('api_key')
-                self.secret_key = creds.get('secret_key')
-                
-                if not self.api_key or not self.secret_key:
-                    raise ValueError("Missing Alpaca credentials in file")
-                
-                print(f"✅ Loaded Alpaca credentials from {creds_path}")
-                self.headers = {
-                    "APCA-API-KEY-ID": self.api_key,
-                    "APCA-API-SECRET-KEY": self.secret_key,
-                }
-        except Exception as e:
-            print(f"❌ Failed to load credentials from file: {e}")
-            print("   Set ALPACA_API_KEY and ALPACA_SECRET_KEY environment variables")
-            # A plain exception, not sys.exit(1): baselines are generated inside
-            # the server (paper init, leaderboard strategies, backtest finalize)
-            # where SystemExit would evade `except Exception` (the B0 class).
-            raise MarketDataUnavailableError(
-                "Alpaca credentials not found (set ALPACA_API_KEY and "
-                "ALPACA_SECRET_KEY, or provide credentials/alpaca.json)"
-            ) from e
-    
-    def _fetch_bars_for_symbol(self, symbol: str, start_date: str, end_date: str) -> Optional[pd.DataFrame]:
-        """
-        Fetch REAL historical bars from Alpaca API.
-
-        Delegates to :class:`AlpacaDataLoader` rather than rebuilding the
-        request here: that is the one place the Basic-plan SIP clamp, the
-        IEX-on-refusal retry and the feed stamping live. Hand-rolling a second
-        request meant this call site opted into SIP but swallowed the exact
-        refusal the retry exists to absorb — every symbol would come back
-        ``None``, rendering "the feed refused us" as "there is no data".
-
-        Args:
-            symbol: Stock symbol (e.g., "AAPL")
-            start_date: Start date (YYYY-MM-DD)
-            end_date: End date (YYYY-MM-DD)
-
-        Returns:
-            DataFrame with OHLCV data, indexed by timestamp
-        """
-        self._ensure_credentials()
-
-        # Imported at module scope alongside MarketDataUnavailableError, not
-        # inside the alpaca-py ImportError handler this method used to carry:
-        # reporting a first-party import break as "pip install alpaca-py" sends
-        # the next debugger somewhere the problem is not. The loader raises
-        # MarketDataUnavailableError itself when the SDK really is missing,
-        # with the same install hint.
-        loader = AlpacaDataLoader(api_key=self.api_key, secret_key=self.secret_key)
-        bars = loader.fetch_bars([symbol], start_date, end_date)
-        return bars.get(symbol)
+    Stateless, and deliberately has no way to fetch: every method takes
+    ``bars_by_symbol``. It used to carry its own Alpaca credential loading and
+    a ``_fetch_bars_for_symbol``, which had no production caller -- a second,
+    independent path to Alpaca bars that anyone auditing which call sites
+    inherit the on-disk bar cache had to read and then discount. The bars come
+    from the callers of ``generate_baselines`` and of the leaderboard
+    strategies: the backtest engine fetches through its profile's
+    ``data_loader`` (Alpaca, iFinD or vn.py), and the leaderboard through
+    ``leaderboard/baselines.fetch_hourly_bars``, i.e. ``AlpacaDataLoader`` --
+    the one place the SIP clamp, the IEX-on-refusal retry, the feed stamping
+    and the bar cache live. An A-share baseline therefore never touches that
+    cache.
+    """
 
     def generate_buyhold_baseline(
         self, 
