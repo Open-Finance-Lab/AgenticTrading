@@ -221,10 +221,14 @@ class BaselineGenerator:
     ``bars_by_symbol``. It used to carry its own Alpaca credential loading and
     a ``_fetch_bars_for_symbol``, which had no production caller -- a second,
     independent path to Alpaca bars that anyone auditing which call sites
-    inherit the on-disk bar cache had to read and then discount. The callers
-    that do fetch (``generate_baselines`` and the leaderboard strategies) go
-    through ``AlpacaDataLoader``, which is the one place the SIP clamp, the
-    IEX-on-refusal retry, the feed stamping and now the cache live.
+    inherit the on-disk bar cache had to read and then discount. The bars come
+    from the callers of ``generate_baselines`` and of the leaderboard
+    strategies: the backtest engine fetches through its profile's
+    ``data_loader`` (Alpaca, iFinD or vn.py), and the leaderboard through
+    ``leaderboard/baselines.fetch_hourly_bars``, i.e. ``AlpacaDataLoader`` --
+    the one place the SIP clamp, the IEX-on-refusal retry, the feed stamping
+    and the bar cache live. An A-share baseline therefore never touches that
+    cache.
     """
 
     def generate_buyhold_baseline(

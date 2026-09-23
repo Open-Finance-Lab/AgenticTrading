@@ -19,7 +19,7 @@
 - **`bar_cache.py` imports nothing from `alpaca_bars.py`.** The dependency runs one way only (`alpaca_bars` → `bar_cache`). Provenance flags are passed as arguments, never read back off `DataFrame.attrs` inside the cache.
 - **Exact constants**, copied from the spec: `SCHEMA_VERSION = 1`; size cap default **256 MB** (`ATL_BAR_CACHE_MAX_MB`, range 1–16384); TTL default **7 days** (`ATL_BAR_CACHE_TTL_DAYS`, range 1–365); cache directory `DATA_DIR / "bar_cache"` (`ATL_BAR_CACHE_DIR` overrides); flags `ATL_BAR_CACHE` and `ATL_BAR_CACHE_WARM`, both default **on** when unset, on for `1`/`true`/`yes`/`on`, off for anything else (a recognised `0`/`false`/`no`/`off` silently, junk with a `WARNING`); settle margin **24 hours** (`_SETTLE_MARGIN_SECONDS`, spec §5); stray-file grace **1 hour** (`_STRAY_GRACE_SECONDS`, spec §6); full-scan interval **60 seconds** (`_SWEEP_INTERVAL_SECONDS`, spec §6).
 - **Refusals are whole-batch and derived from the frames, never from `last_fetch`.** `last_fetch` describes the *last* request the loader made, which for a >100-symbol call is the last 100-symbol chunk; the `.attrs` stamps are per frame and cover every chunk. The wrapper in Task 4 folds them with `any()`.
-- **Never write into `dashboard/storage/data/cache/`.** That directory holds nine git-tracked orphan CSVs. `bar_cache/` is a fresh sibling; `.gitignore:225` (`dashboard/storage/data`) already ignores it wholesale.
+- **Never write into `dashboard/storage/data/cache/`.** That directory held nine git-tracked orphan CSVs (since deleted by #521, closing #515). `bar_cache/` is a fresh sibling; the `dashboard/storage/data` rule in `.gitignore` already ignores it wholesale.
 - **Do not commit seed-DB mutations.** `dashboard/storage/data/backtest.db` must stay at 688,128 bytes. Stage by explicit path; never `git add -A`. Any ad-hoc `python -c` that imports a backend module must run with `DATABASE_PATH` pointed at a throwaway file.
 - **Line numbers in the spec and in this plan are advisory.** Grep for the quoted symbol or signature; never jump to a number.
 - Run the suite from the repo root: `pytest dashboard/backend/tests/ -q`.
@@ -2797,4 +2797,4 @@ Ask before filing — an issue on a shared repo assigns work to someone.
 3. `market_data_store._dataset_key` uses order-sensitive `tuple(symbols)`.
 4. `baseline_generator._fetch_bars_for_symbol` is dead code — referenced only by `tests/test_baseline_generator_offline.py`.
 5. Read `agent_runs.runtime_type` / `decision_source` in prod to settle the LLM-vs-rule-based mix, which is the ceiling on every latency change of this kind (spec §1-C).
-6. Nine stale git-tracked CSVs under `dashboard/storage/data/cache/` with no reader.
+6. Nine stale git-tracked CSVs under `dashboard/storage/data/cache/` with no reader. (Removed by #521.)
