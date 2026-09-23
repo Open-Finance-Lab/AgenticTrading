@@ -18,16 +18,14 @@ import inspect
 import json
 import uuid
 from bisect import bisect_left
-from datetime import date, datetime, time
+from datetime import date, datetime
 from math import ceil
-# `from time import ...`, not `import time`: line 21's
-# `from datetime import date, datetime, time` binds the bare name `time` to
-# `datetime.time`, which this module *calls as a constructor* for the A-share
-# session bounds (`time(9, 30) <= local_time <= time(11, 30)`, :1209-1210). A
-# plain `import time` above it is rebound by that later line, so `time.time()`
-# raises AttributeError; below it, those four session bounds silently become
-# calls on the time module instead. Green on every US run either way, red only
-# on an A-share one.
+# `from time import ...`, not `import time`. This module used to import
+# `datetime.time` too, to build the A-share session bounds inline, and the two
+# bare `time` names shadowed each other depending on import order -- green on
+# every US run, red only on an A-share one. The bounds now live in
+# `market_data.sessions`, but keep the aliased form so re-adding either import
+# cannot bring the collision back.
 #
 # Two clocks, deliberately. `wall_clock` stamps INSTANTS an operator or another
 # process reads -- `started_at`/`ended_at` in `phases[]`, which are compared
@@ -122,6 +120,7 @@ from dashboard.backend.infrastructure.market_data.frequency import (
     timeframe_minutes,
     verify_source_timeframe,
 )
+from dashboard.backend.infrastructure.market_data.sessions import is_in_session
 from dashboard.backend.infrastructure.market_data.profiles import (
     IFIND_ASHARE,
     LLM_DECISION_SOURCE,
@@ -1623,33 +1622,20 @@ class HourlyBacktester:
         return float(manager.cash)
 
     def _market_hours_only(self, timestamps):
-        """Filter timestamps using the selected market's local sessions."""
-        import pytz
+        """Filter timestamps using the selected market's local sessions.
 
+        Through ``market_data.sessions``, the same owner the dataset store and
+        the aggregation use, so the dashboard and protocol paths cannot count
+        different steps for one window.
+        """
         profile = self._effective_profile()
-        market_tz = pytz.timezone(profile.timezone)
-        kept = []
-        for timestamp in timestamps:
-            local = (
-                market_tz.localize(timestamp)
-                if timestamp.tzinfo is None
-                else timestamp.astimezone(market_tz)
+        return [
+            timestamp
+            for timestamp in timestamps
+            if is_in_session(
+                timestamp, market=profile.market, timezone=profile.timezone
             )
-            local_time = local.time()
-            if profile.market == "CN":
-                is_market_hours = (
-                    time(9, 30) <= local_time <= time(11, 30)
-                    or time(13, 0) <= local_time <= time(15, 0)
-                )
-            else:
-                is_market_hours = (
-                    (local.hour > 9 and local.hour < 16)
-                    or (local.hour == 9 and local.minute >= 30)
-                    or (local.hour == 16 and local.minute == 0)
-                )
-            if is_market_hours:
-                kept.append(timestamp)
-        return kept
+        ]
 
     def _market_day_key(self, timestamp) -> str:
         """Return a trading-day key in the market's local timezone."""

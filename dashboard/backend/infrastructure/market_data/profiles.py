@@ -281,6 +281,24 @@ _DEFAULT_UNIVERSES = {
 }
 
 
+def registered_market_timezones() -> dict[str, str]:
+    """``{market: timezone}`` across the registered profiles.
+
+    A market is one timezone: two profiles pairing the same market with
+    different zones would make a dataset keyed on the market ambiguous, so
+    that is refused here rather than resolved by whichever profile came first.
+    """
+    zones: dict[str, str] = {}
+    for profile in _MARKET_PROFILES.values():
+        existing = zones.setdefault(profile.market, profile.timezone)
+        if existing != profile.timezone:
+            raise ValueError(
+                f"market {profile.market!r} is registered with two timezones: "
+                f"{existing!r} and {profile.timezone!r}"
+            )
+    return zones
+
+
 def get_market_profile(
     data_source: str,
     universe: str | None = None,

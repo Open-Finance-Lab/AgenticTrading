@@ -16,7 +16,7 @@ import os
 import secrets
 import tempfile
 import threading
-from datetime import date, datetime, time, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple, Union
 from zoneinfo import ZoneInfo
 
@@ -26,6 +26,7 @@ import dashboard.backend.domain.leaderboard.baselines as _baselines
 from dashboard.backend.domain.leaderboard.strategies._common import reference_start_date
 from dashboard.backend.domain.leaderboard.strategies import get_strategy
 from dashboard.backend.infrastructure.llm import backtest_harness as llm_harness
+from dashboard.backend.infrastructure.market_data.sessions import session_windows
 from dashboard.backend.infrastructure.market_data.alpaca_bars import (
     MarketDataUnavailableError,
     configured_feed_name,
@@ -80,7 +81,8 @@ _CACHE_STALE = 2
 
 # Daily board window is the last *completed* US cash session, not UTC-yesterday.
 _US_EASTERN = ZoneInfo("America/New_York")
-_US_CASH_CLOSE = time(16, 0)  # 16:00 America/New_York regular-session close
+# 16:00 America/New_York regular-session close, from the one owner of the bounds.
+_US_CASH_CLOSE = session_windows("US")[-1][1]
 
 # H6 integrity threshold: an LLM entry must have decided at least this fraction
 # of its steps with the model itself. Below it, the curve is mostly a rule-based

@@ -344,6 +344,8 @@ class ExternalBacktestSession:
             loader_factory=AlpacaDataLoader,
             source_timeframe=self.profile.source_timeframe,
             decision_timeframe=self.profile.decision_timeframe,
+            market=self.profile.market,
+            timezone=self.profile.timezone,
         )
         self.adopt_dataset(dataset)
 
@@ -1295,6 +1297,7 @@ def start_backtest(
         end_date,
         source_timeframe=session.profile.source_timeframe,
         decision_timeframe=session.profile.decision_timeframe,
+        market=session.profile.market,
     )
     if dataset is not None:
         session.adopt_dataset(dataset)
