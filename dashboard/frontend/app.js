@@ -6425,7 +6425,14 @@ document.addEventListener('DOMContentLoaded', async () => {
     // The HttpOnly session cookie is invisible to JS, so the boot signal is
     // the cached auth-user (written on every cookie sign-in) or a pre-cookie
     // legacy localStorage token (upgraded to a cookie by the /me bridge).
-    if (localStorage.getItem(AUTH_TOKEN_KEY) || getStoredAuthUser()) {
+    // Local console (design N2/PR2 local verification): the launchd service
+    // runs with ATL_LOCAL_AUTOLOGIN_EMAIL, so /me answers as the local admin
+    // for every loopback request. Probe unconditionally on loopback — the
+    // "cached auth-user only" shortcut would keep a fresh browser a guest
+    // forever, because there is nothing cached to trigger the first probe.
+    // The hostname gate keeps prod boot (cold-start /me skip) untouched.
+    const localConsole = ['127.0.0.1', 'localhost'].includes(window.location.hostname);
+    if (localStorage.getItem(AUTH_TOKEN_KEY) || getStoredAuthUser() || localConsole) {
         try {
             await refreshAuthUser();
         } catch (error) {
