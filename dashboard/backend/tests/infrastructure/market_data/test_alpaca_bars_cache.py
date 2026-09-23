@@ -141,6 +141,104 @@ def test_a_cache_hit_restores_last_fetch(cached_loader, fake_alpaca):
     assert cached_loader.last_fetch["end_clamped"] is False
 
 
+#: Every field ``AlpacaDataLoader._record_fetch`` puts in ``last_fetch``
+#: (``alpaca_bars.py:414``), with the reason serving it from a sidecar is
+#: sound. ``write_many`` stores this dict (``bar_cache.py``) and a TOTAL hit
+#: restores it (``fetch_bars``'s ``if not misses:`` branch,
+#: ``alpaca_bars.py:575``; a MIXED hit re-records it live from the fetch of
+#: the misses instead), so a value written once is served to a DIFFERENT
+#: PROCESS for the whole TTL. That is safe only while every field is:
+#:
+#:   KEYED   -- a component of the cache key ``{start, end, source_timeframe,
+#:              feed}``, so the stored value is a pure function of the key and
+#:              cannot describe a different request than the one being served.
+#:   REFUSED -- a flag ``write_many`` refuses to store on, so an entry holding
+#:              anything other than the benign value cannot exist on disk.
+#:
+#: A seventh field that is neither -- a fetch timestamp, a retry count, the
+#: per-chunk symbol list -- would be served stale, silently, to the three call
+#: sites that read ``last_fetch`` as fetch evidence: ``engine.py:load_data``,
+#: ``market_data_store._build_dataset`` (both ``verify_source_timeframe(...,
+#: evidence="fetch")``) and ``leaderboard/baselines.py`` (the IEX/clamp
+#: warning). Add a field here only with its classification.
+_LAST_FETCH_FIELDS = {
+    # The key's `feed` is `configured_feed_name()` -- the tape REQUESTED. This
+    # is the tape ANSWERED, and they diverge exactly when the IEX fallback
+    # fired, which `write_many` refuses to store. So for any entry that can be
+    # on disk, keyed.
+    "feed": "KEYED",
+    "source_timeframe": "KEYED",
+    "requested_end": "KEYED",  # literally the key's `end`
+    # Differs from `requested_end` only when the SIP clamp moved it, and a
+    # clamped window is refused.
+    "effective_end": "REFUSED",
+    "sip_fallback_to_iex": "REFUSED",
+    "end_clamped": "REFUSED",
+}
+
+
+def test_last_fetch_carries_only_keyed_or_refused_fields(cached_loader, fake_alpaca):
+    """GUARD for the invariant that makes a cached `last_fetch` servable.
+
+    Asserted against a real fetch rather than the source text, because what
+    matters is the dict that reaches `write_many`, not the literal in
+    `_record_fetch`.
+    """
+    fake_alpaca["df"] = _bars_df(["AAPL"])
+    cached_loader.fetch_bars(["AAPL"], "2026-05-04", "2026-05-12")
+    assert set(cached_loader.last_fetch) == set(_LAST_FETCH_FIELDS), (
+        "last_fetch gained or lost a field. Every field is served cross-process "
+        "from a sidecar for the whole TTL, so a new one must be either a cache-key "
+        "component or a flag write_many refuses to store -- classify it in "
+        "_LAST_FETCH_FIELDS and say which."
+    )
+
+
+def test_a_cache_hit_reproduces_last_fetch_exactly(
+    cached_loader, fake_alpaca, tmp_path, monkeypatch
+):
+    """The behavioural half of the guard above: a served copy must be
+    indistinguishable from a live one for the same KEY.
+
+    The symbol list is deliberately not in that key -- which is what makes the
+    index baseline cheap -- so the entry read here is written by a DIFFERENT
+    request than the one it serves: a two-symbol fetch warms it, a one-symbol
+    fetch reads it, and the comparison is against a live loader on a cold
+    cache.
+
+    Two identical calls could not catch a request-dependent field at all.
+    `write_many` stores `last_fetch` verbatim and a hit returns it verbatim,
+    so the restored dict IS the stored dict: comparing it against the call
+    that stored it compares a value with itself, and a `symbol_count`, a
+    `fetched_at` or a per-chunk symbol list all match. What that shape does
+    pin is the JSON round-trip through the sidecar (a `datetime` field comes
+    back a `str`), which this comparison still covers -- the served half
+    round-trips either way.
+    """
+    fake_alpaca["df"] = _bars_df(["AAPL", "MSFT"])
+    cached_loader.fetch_bars(["AAPL", "MSFT"], "2026-05-04", "2026-05-12")
+    cached_loader.last_fetch = None
+    served = cached_loader.fetch_bars(["AAPL"], "2026-05-04", "2026-05-12")
+    assert len(fake_alpaca["requests"]) == 1  # a TOTAL hit: the restore branch
+    assert set(served) == {"AAPL"}
+    restored = dict(cached_loader.last_fetch)
+
+    # The same one-symbol request, made live. A second cache dir rather than a
+    # second window: moving the window would move `requested_end` too, and the
+    # two dicts would then differ for a reason that is not the invariant.
+    monkeypatch.setenv("ATL_BAR_CACHE_DIR", str(tmp_path / "cold_bar_cache"))
+    live_loader = AlpacaDataLoader()
+    live_loader.configure_source_timeframe("5m")
+    live_loader.fetch_bars(["AAPL"], "2026-05-04", "2026-05-12")
+    assert len(fake_alpaca["requests"]) == 2
+
+    assert restored == live_loader.last_fetch, (
+        "a served last_fetch describes the request that WROTE the entry, not "
+        "the one being served. Every field must be a cache-key component or a "
+        "flag write_many refuses to store -- see _LAST_FETCH_FIELDS."
+    )
+
+
 def test_a_cache_hit_restores_the_attrs_stamps(cached_loader, fake_alpaca):
     fake_alpaca["df"] = _bars_df(["AAPL"])
     cached_loader.fetch_bars(["AAPL"], "2026-05-04", "2026-05-12")

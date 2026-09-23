@@ -18,17 +18,38 @@ import inspect
 import json
 import uuid
 from bisect import bisect_left
-from datetime import date, datetime, time
+from datetime import date, datetime
 from math import ceil
-# `from time import ...`, not `import time`: line 21's
-# `from datetime import date, datetime, time` binds the bare name `time` to
-# `datetime.time`, which this module *calls as a constructor* for the A-share
-# session bounds (`time(9, 30) <= local_time <= time(11, 30)`, :1209-1210). A
-# plain `import time` above it is rebound by that later line, so `time.time()`
-# raises AttributeError; below it, those four session bounds silently become
-# calls on the time module instead. Green on every US run either way, red only
-# on an A-share one.
-from time import time as wall_clock
+# `from time import ...`, not `import time`. This module used to import
+# `datetime.time` too, to build the A-share session bounds inline, and the two
+# bare `time` names shadowed each other depending on import order -- green on
+# every US run, red only on an A-share one. The bounds now live in
+# `market_data.sessions`, but keep the aliased form so re-adding either import
+# cannot bring the collision back.
+#
+# Two clocks, deliberately. `wall_clock` stamps INSTANTS an operator or another
+# process reads -- `started_at`/`ended_at` in `phases[]`, which are compared
+# against `--launched-at` and the two stamps the launch script takes. `steady`
+# measures DURATIONS, because `time.time()` is not monotonic: an NTP step
+# between two reads distorts the interval and a backward step makes it
+# negative, and these numbers are published on the card and are the measurement
+# the next latency decision is made on.
+#
+# `starting` is the one phase whose TOTAL cannot move to `steady`, and not for
+# a reason worth working around: `monotonic()` has a per-process epoch, so the
+# parent's reading and the child's are not comparable at all. That phase opens
+# at the parent's `--launched-at` and closes in the child, so the wall clock is
+# the only shared reference. It is also the interval least exposed to the
+# hazard: a single span bounded by a process spawn, not a loop.
+#
+# Its SPLITS are not all like that, and reading "the phase is cross-process" as
+# "every number under it is" is how the fix for #509 first shipped with two
+# wall-clock differences still in it. Only `spawn+interpreter` reaches back
+# into the parent; `imports+stores` and `preflight` both begin and end inside
+# the child, so both take the steady clock -- bounded by the two `monotonic()`
+# marks the launch script hands over in `startup_clock`. See
+# `_set_progress_phase`.
+from time import monotonic as steady_clock, time as wall_clock
 from typing import Any, Dict, List, Optional, Tuple
 
 from dashboard.backend.database import db
@@ -99,6 +120,7 @@ from dashboard.backend.infrastructure.market_data.frequency import (
     timeframe_minutes,
     verify_source_timeframe,
 )
+from dashboard.backend.infrastructure.market_data.sessions import is_in_session
 from dashboard.backend.infrastructure.market_data.profiles import (
     IFIND_ASHARE,
     LLM_DECISION_SOURCE,
@@ -651,9 +673,15 @@ class HourlyBacktester:
         the `starting` entry yields four numbers from one run:
 
             spawn + interpreter    = child_entered_at - started_at
-            imports incl. stores   = imports_done_at - child_entered_at
+            imports incl. stores   = imports_seconds       (steady clock)
             of which schema DDL    = schema_init_seconds   (0.0 in a worker)
-            preflight remainder    = ended_at - imports_done_at
+            preflight remainder    = preflight_seconds     (steady clock)
+
+        The middle two are measured, not re-derived from the stamps beside
+        them: both intervals begin and end inside the child, so both belong on
+        the steady clock for the reason the module header gives. The stamps
+        stay because `spawn + interpreter` genuinely needs them and because
+        they are what a log line is correlated against.
 
         Undo the split and the Final verification table can say that `starting`
         got shorter but not which of those four moved -- which is the same as
@@ -683,6 +711,11 @@ class HourlyBacktester:
         self._progress_phase_started_at: Optional[float] = (
             float(launched_at) if launched_at is not None else None
         )
+        # Deliberately None even when `starting` opens: that phase began in the
+        # PARENT, and a monotonic reading is meaningless across processes.
+        # `_set_progress_phase` reads None as "fall back to the wall-clock
+        # difference", which is correct for exactly and only this phase.
+        self._progress_phase_started_steady: Optional[float] = None
         extra: Dict = {}
         # Seed the startup clock only when `starting` is actually open.
         # backtest_hourly_agent.py always passes `startup_clock` but
@@ -691,11 +724,24 @@ class HourlyBacktester:
         # and once extras merge into whichever phase closes they would
         # otherwise land on `loading_bars` -- a spawn time and a DDL cost on
         # the phase that did neither.
+        # The steady marks ride the same gate but land in their own attribute
+        # rather than in `extra`, because `extra` is persisted into `phases[]`
+        # and a raw `monotonic()` reading has a per-process epoch: in the file
+        # it is a large meaningless float, and an operator differencing it
+        # against anything else in the payload gets nonsense. What gets
+        # published is the two durations `_set_progress_phase` derives from
+        # them.
+        steady: Dict[str, float] = {}
         if launched_at is not None:
             for key in ("child_entered_at", "imports_done_at", "schema_init_seconds"):
                 value = (startup_clock or {}).get(key)
                 if value is not None:
                     extra[key] = float(value)
+            for key in ("child_entered_steady", "imports_done_steady"):
+                value = (startup_clock or {}).get(key)
+                if value is not None:
+                    steady[key] = float(value)
+        self._progress_startup_steady: Dict[str, float] = steady
         self._progress_phase_extra: Dict = extra
         self._progress_phases: List[Dict] = []
         self._progress_total_steps: int = 0
@@ -713,6 +759,7 @@ class HourlyBacktester:
         if self._progress_phase == name:
             return False
         now = wall_clock()
+        now_steady = steady_clock()
         if self._progress_phase is not None:
             finished = {
                 "name": self._progress_phase,
@@ -746,7 +793,19 @@ class HourlyBacktester:
             # that phase as having cost nothing -- the same falsy-zero trap
             # _init_progress_phases's gate is about, one line further on.
             opened = finished["started_at"]
-            elapsed = finished["ended_at"] - (now if opened is None else opened)
+            opened_steady = getattr(self, "_progress_phase_started_steady", None)
+            if opened_steady is None:
+                # `starting` (opened in the parent), or a legacy `__new__`
+                # instance predating the steady mark. The wall clock is the
+                # only shared reference across that process boundary.
+                elapsed = finished["ended_at"] - (now if opened is None else opened)
+            else:
+                elapsed = now_steady - opened_steady
+            # Recorded, not just printed: `phases[]` is what an operator reads
+            # off the progress file, and leaving only the two wall-clock
+            # instants there would make them re-derive the distorted number the
+            # steady clock exists to avoid.
+            finished["duration_seconds"] = elapsed
             print(f"⏱  phase {name} (after {finished['name']} {elapsed:.2f}s)", flush=True)
             if finished["name"] == "starting" and {
                 "child_entered_at",
@@ -757,14 +816,53 @@ class HourlyBacktester:
                 # baseline runs still to print, so a closing table can land in
                 # the truncated middle of the parent's bounded capture. These
                 # lines are at the head.
+                #
+                # Two of the four numbers are MEASURED, not differenced.
+                # `imports+stores` and `preflight` both begin and end inside
+                # this process, so an NTP step between the stamps that bound
+                # them is the #509 hazard exactly -- a negative
+                # `imports+stores`, or one smaller than the monotonic `schema
+                # DDL` printed beside it on the same line, i.e. an internally
+                # contradictory measurement. They come off the steady marks
+                # the launch script hands over. `spawn+interpreter` cannot:
+                # its left edge is the PARENT's clock, and that is the same
+                # irreducible cross-process interval the module header
+                # describes.
+                #
+                # Derived and stored HERE rather than pre-differenced in the
+                # script, for one owner each: `preflight` closes on this very
+                # transition, so only the engine can compute it, and splitting
+                # the pair across two files is how they end up on two clocks.
+                # Stored as well as printed for the same reason
+                # `duration_seconds` is -- `phases[]` is what an operator
+                # reads off the progress file, and leaving only the stamps
+                # there makes them re-derive the distorted number.
+                steady_marks = getattr(self, "_progress_startup_steady", None) or {}
+                entered_steady = steady_marks.get("child_entered_steady")
+                imports_done_steady = steady_marks.get("imports_done_steady")
+                # A child predating the steady marks (or a test handing over
+                # the three stamps alone) still gets a number: the wall-clock
+                # difference this replaced. Absent beats silently zero.
+                if entered_steady is None or imports_done_steady is None:
+                    imports_seconds = (
+                        finished["imports_done_at"] - finished["child_entered_at"]
+                    )
+                else:
+                    imports_seconds = imports_done_steady - entered_steady
+                if imports_done_steady is None:
+                    preflight_seconds = (
+                        finished["ended_at"] - finished["imports_done_at"]
+                    )
+                else:
+                    preflight_seconds = now_steady - imports_done_steady
+                finished["imports_seconds"] = imports_seconds
+                finished["preflight_seconds"] = preflight_seconds
                 print(
                     f"     spawn+interpreter "
                     f"{finished['child_entered_at'] - finished['started_at']:.2f}s"
-                    f" | imports+stores "
-                    f"{finished['imports_done_at'] - finished['child_entered_at']:.2f}s"
+                    f" | imports+stores {imports_seconds:.2f}s"
                     f" (schema DDL {finished.get('schema_init_seconds', 0.0):.2f}s)"
-                    f" | preflight "
-                    f"{finished['ended_at'] - finished['imports_done_at']:.2f}s",
+                    f" | preflight {preflight_seconds:.2f}s",
                     flush=True,
                 )
             elif finished["name"] == "loading_bars" and "fetch_seconds" in finished:
@@ -772,9 +870,16 @@ class HourlyBacktester:
                 # here IS the aggregation cost, directly -- no synthetic
                 # benchmark, no subtraction. It decides whether caching the
                 # AGGREGATED output is worth a second change or whether the
-                # fetch was the whole story. `elapsed` is the phase total,
-                # already computed above with the `is None` guard that keeps a
-                # 0.0 start time from reading as a phase that cost nothing.
+                # fetch was the whole story. `elapsed` is the phase total
+                # computed above, and for THIS phase it always comes off the
+                # steady clock -- only `starting` can reach the wall-clock
+                # branch, because it is the only phase `_init_progress_phases`
+                # opens and so the only one whose steady mark can be None.
+                # That matters here: `fetch_seconds` is a steady-clock delta
+                # (`load_data`), so the subtraction below is same-clock and
+                # cannot go negative from a step. It is also why the test
+                # bounding `fetch_seconds` has to bound it by
+                # `duration_seconds` and not by `ended_at - started_at`.
                 fetch_seconds = float(finished["fetch_seconds"])
                 print(
                     f"     fetch {fetch_seconds:.2f}s"
@@ -785,6 +890,7 @@ class HourlyBacktester:
             print(f"⏱  phase {name}", flush=True)
         self._progress_phase = name
         self._progress_phase_started_at = now
+        self._progress_phase_started_steady = now_steady
         return True
 
     def _progress_phase_fields(self) -> Dict:
@@ -969,7 +1075,7 @@ class HourlyBacktester:
             f"   Universe: {len(symbols)} symbols ({', '.join(symbols[:8])}"
             f"{'…' if len(symbols) > 8 else ''})"
         )
-        fetch_started_at = wall_clock()
+        fetch_started_at = steady_clock()
         self.source_data = self.data_loader.fetch_bars(
             symbols, self.start_date, self.end_date
         )
@@ -977,7 +1083,7 @@ class HourlyBacktester:
         # verification and, in intraday mode, `aggregate_bars_by_symbol` -- is
         # the half the phase name hides. Recorded here so the number survives
         # in `phases[]` as well as on stdout.
-        self.record_phase_metric("fetch_seconds", wall_clock() - fetch_started_at)
+        self.record_phase_metric("fetch_seconds", steady_clock() - fetch_started_at)
         if not self.source_data:
             # Raise, don't sys.exit(1): this runs inside server threads
             # (external runs, algo service) where SystemExit evades
@@ -1516,33 +1622,20 @@ class HourlyBacktester:
         return float(manager.cash)
 
     def _market_hours_only(self, timestamps):
-        """Filter timestamps using the selected market's local sessions."""
-        import pytz
+        """Filter timestamps using the selected market's local sessions.
 
+        Through ``market_data.sessions``, the same owner the dataset store and
+        the aggregation use, so the dashboard and protocol paths cannot count
+        different steps for one window.
+        """
         profile = self._effective_profile()
-        market_tz = pytz.timezone(profile.timezone)
-        kept = []
-        for timestamp in timestamps:
-            local = (
-                market_tz.localize(timestamp)
-                if timestamp.tzinfo is None
-                else timestamp.astimezone(market_tz)
+        return [
+            timestamp
+            for timestamp in timestamps
+            if is_in_session(
+                timestamp, market=profile.market, timezone=profile.timezone
             )
-            local_time = local.time()
-            if profile.market == "CN":
-                is_market_hours = (
-                    time(9, 30) <= local_time <= time(11, 30)
-                    or time(13, 0) <= local_time <= time(15, 0)
-                )
-            else:
-                is_market_hours = (
-                    (local.hour > 9 and local.hour < 16)
-                    or (local.hour == 9 and local.minute >= 30)
-                    or (local.hour == 16 and local.minute == 0)
-                )
-            if is_market_hours:
-                kept.append(timestamp)
-        return kept
+        ]
 
     def _market_day_key(self, timestamp) -> str:
         """Return a trading-day key in the market's local timezone."""

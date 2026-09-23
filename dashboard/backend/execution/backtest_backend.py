@@ -100,12 +100,18 @@ class BacktestBackend(ExecutionBackend):
             "decision_timeframe",
             getattr(profile, "decision_timeframe", "60m"),
         )
+        # Same fallback as the clocks above, and it must match the store's own
+        # default: this peek has to produce the key the loader thread's
+        # `get_dataset` will build under, or the fast path misses on every run
+        # against a dataset that is actually resident.
+        market = getattr(profile, "market", ext.market_data_store.DEFAULT_MARKET)
         dataset = ext.market_data_store.peek(
             DJIA_30,
             self.session.start_date,
             self.session.end_date,
             source_timeframe=source_timeframe,
             decision_timeframe=decision_timeframe,
+            market=market,
         )
         if dataset is not None:
             self.session.adopt_dataset(dataset)

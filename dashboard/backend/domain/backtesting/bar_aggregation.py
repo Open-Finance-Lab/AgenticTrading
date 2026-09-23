@@ -23,6 +23,8 @@ from dashboard.backend.infrastructure.market_data.frequency import (
     normalize_bar_timeframe,
     timeframe_minutes,
 )
+# Re-exported: the session bounds have one owner, and it is not this module.
+from dashboard.backend.infrastructure.market_data.sessions import session_windows
 
 
 class BarAggregationError(ValueError):
@@ -35,13 +37,6 @@ _QUALITY_COUNT_COLUMNS = (
     "off_grid_source_bars",
     "invalid_source_bars",
 )
-
-
-def _session_windows(market: str) -> tuple[tuple[time, time], ...]:
-    canonical = str(market or "US").strip().upper()
-    if canonical == "CN":
-        return ((time(9, 30), time(11, 30)), (time(13, 0), time(15, 0)))
-    return ((time(9, 30), time(16, 0)),)
 
 
 def _as_local_index(frame: pd.DataFrame, timezone: str) -> pd.DataFrame:
@@ -116,7 +111,7 @@ def aggregate_bars(
         return frame.copy()
 
     local = _as_local_index(frame, timezone)
-    windows = _session_windows(market)
+    windows = session_windows(market)
     # Walk the index, not the rows: iterrows builds a Series per source bar,
     # and the onboarding shape has ~16k of them (7 weekdays x 78 five-minute
     # bars x 30 symbols). That is the cheapest thing here to remove, not the

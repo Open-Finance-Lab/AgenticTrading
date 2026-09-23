@@ -20,6 +20,7 @@ from matplotlib.figure import Figure
 from matplotlib.ticker import FixedFormatter, FixedLocator, FuncFormatter, NullFormatter
 
 from dashboard.backend.chart_style import PLAYGROUND_THEME, series_color
+from dashboard.backend.infrastructure.market_data.sessions import time_in_session
 from dashboard.backend.domain.leaderboard.strategies._yahoo import (
     fetch_index_hourly,
     usable_window,
@@ -54,8 +55,7 @@ def is_market_hour(ts: datetime) -> bool:
     t = _to_et(ts)
     if t.weekday() >= 5:
         return False
-    minutes = t.hour * 60 + t.minute
-    return 9 * 60 + 30 <= minutes <= 16 * 60
+    return time_in_session(t.time(), "US")
 
 
 def compute_index_baseline_values(

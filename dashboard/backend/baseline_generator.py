@@ -14,16 +14,20 @@ Same logic, different contexts.
 """
 
 from typing import Any, Dict, List, Optional, Tuple
-from datetime import datetime, time
+from datetime import datetime
 
 from dashboard.backend.domain.backtesting.constants import INITIAL_CAPITAL
 from dashboard.backend.domain.backtesting.currency import CurrencyContext
 from dashboard.backend.domain.backtesting.market_rules import MarketRuleCalendar
 from dashboard.backend.domain.trading.execution import calculate_transaction_costs
+from dashboard.backend.infrastructure.market_data.sessions import (
+    is_in_session,
+    market_for_timezone,
+)
 
-# The baseline calculations operate on already-normalized bars and keep their
-# market-session filtering local so A-share timestamps are not interpreted as
-# US/Eastern dates.
+# The baseline calculations operate on already-normalized bars and filter
+# sessions in the market profile's own timezone, so A-share timestamps are not
+# interpreted as US/Eastern dates.
 
 try:
     import pandas as pd
@@ -35,28 +39,17 @@ except ImportError as exc:
 
 
 def _market_hours_only(timestamps, market_timezone: str):
-    """Keep regular sessions in the timezone belonging to the market profile."""
-    import pytz
+    """Keep regular sessions in the timezone belonging to the market profile.
 
-    market_tz = pytz.timezone(market_timezone)
-    kept = []
-    for timestamp in timestamps:
-        local = timestamp.astimezone(market_tz)
-        local_time = local.time()
-        if market_timezone == "Asia/Shanghai":
-            in_session = (
-                time(9, 30) <= local_time <= time(11, 30)
-                or time(13, 0) <= local_time <= time(15, 0)
-            )
-        else:
-            in_session = (
-                (local.hour > 9 and local.hour < 16)
-                or (local.hour == 9 and local.minute >= 30)
-                or (local.hour == 16 and local.minute == 0)
-            )
-        if in_session:
-            kept.append(timestamp)
-    return kept
+    This API takes only the zone, so the market is recovered from it through
+    the profile registry rather than a zone-string comparison kept here.
+    """
+    market = market_for_timezone(market_timezone)
+    return [
+        timestamp
+        for timestamp in timestamps
+        if is_in_session(timestamp, market=market, timezone=market_timezone)
+    ]
 
 
 def _timestamps_in_window(timestamps, start_date: str, end_date: str, market_timezone: str):
