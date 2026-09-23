@@ -707,6 +707,29 @@ class PostgresValueAnalyticsStore:
                 fact_rows = cur.fetchall()
         return _recompute_days(event_rows, fact_rows)
 
+    def copy_daily_snapshot_history(self, *, since: date, now: datetime) -> int:
+        """See the SQLite twin. ``active`` is BOOLEAN here."""
+        stamp = utc_iso(_utc(now, "now"))
+        sql = """
+            INSERT INTO user_daily_facts (
+                snapshot_date, user_id, lifecycle_segment, lifecycle_reason_code,
+                operational_state, operational_reason_code, tier, user_group, active,
+                runs_requested, runs_completed, runs_failed, runs_cancelled,
+                operator_cost_micro, own_spend_micro, data_quality, calculated_at
+            )
+            SELECT s.snapshot_date, s.user_id, s.lifecycle_segment,
+                   s.lifecycle_reason_code, 'healthy', NULL, 'unpaid',
+                   users.user_group, FALSE, 0, 0, 0, 0, 0, 0, 'partial', %s
+            FROM user_lifecycle_daily_snapshots AS s
+            JOIN users ON users.id = s.user_id
+            WHERE s.snapshot_date >= %s
+            ON CONFLICT(snapshot_date, user_id) DO NOTHING
+        """
+        with self._analytics_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql, (stamp, since.isoformat()))
+                return max(0, int(cur.rowcount))
+
     def list_operational_signals(
         self,
         user_ids: Sequence[int],

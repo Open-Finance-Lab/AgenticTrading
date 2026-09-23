@@ -1800,6 +1800,37 @@ class ValueAnalyticsStore:
             ).fetchall()
         return _recompute_days(event_rows, fact_rows)
 
+    def copy_daily_snapshot_history(self, *, since: date, now: datetime) -> int:
+        """Copy legacy ``user_lifecycle_daily_snapshots`` rows into the fact table.
+
+        Run, cost and tier columns are filled with their neutral values and
+        every copied row is ``partial``, so the UI labels the period
+        "Incomplete data" instead of charting zeros as fact (design SS6.7).
+        ``tier='unpaid'`` is a placeholder, not a claim, for the same reason.
+        ``user_group`` is read from ``users`` at the copy (D9). ``ON CONFLICT
+        DO NOTHING`` makes it both idempotent and unable to clobber a row the
+        daily job already computed. Returns the number of rows inserted.
+        """
+        stamp = utc_iso(_utc(now, "now"))
+        sql = """
+            INSERT INTO user_daily_facts (
+                snapshot_date, user_id, lifecycle_segment, lifecycle_reason_code,
+                operational_state, operational_reason_code, tier, user_group, active,
+                runs_requested, runs_completed, runs_failed, runs_cancelled,
+                operator_cost_micro, own_spend_micro, data_quality, calculated_at
+            )
+            SELECT s.snapshot_date, s.user_id, s.lifecycle_segment,
+                   s.lifecycle_reason_code, 'healthy', NULL, 'unpaid',
+                   users.user_group, 0, 0, 0, 0, 0, 0, 0, 'partial', ?
+            FROM user_lifecycle_daily_snapshots AS s
+            JOIN users ON users.id = s.user_id
+            WHERE s.snapshot_date >= ?
+            ON CONFLICT(snapshot_date, user_id) DO NOTHING
+        """
+        with self._analytics_connection() as conn:
+            cursor = conn.execute(sql, (stamp, since.isoformat()))
+            return max(0, int(cursor.rowcount))
+
 
 def build_value_analytics_store(
     analytics_base: Any | None = None,
