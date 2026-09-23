@@ -385,21 +385,25 @@ def run_daily_facts(
                 "WARNING: analytics.daily_facts.recompute_scan_failed "
                 f"category={type(exc).__name__[:80]}"
             )
+        # One store call after the loop, never inside it: the lease belongs to
+        # the job row, not the day, and the discipline guard forbids store
+        # calls inside loops (design SS6.11 rule 7). A failed stale day stays
+        # in list_days_needing_recompute, so the next tick retries it.
+        failed_recomputes: list[date] = []
         for stale_day in stale_days[:MAX_RECOMPUTES_PER_TICK]:
             stale_outcome = _compute_day(
                 stale_day, now=current, store=store, run_history_store=runs, rollup=rollup_fn
             )
             if stale_outcome.failed_steps:
-                # The recompute claims the day internally; a failed attempt
-                # must release it so the next tick retries, and the report
-                # must not claim the stale facts were refreshed (Codex P2).
-                store.release_projection_day(DAILY_FACTS_JOB, now=current)
+                failed_recomputes.append(stale_day)
                 print(
                     "WARNING: analytics.daily_facts.recompute_failed "
                     f"day={stale_day.isoformat()} steps={','.join(stale_outcome.failed_steps)}"
                 )
                 continue
             recomputed.append(stale_day)
+        if failed_recomputes:
+            store.release_projection_day(DAILY_FACTS_JOB, now=current)
 
         report = DailyFactsReport(
             snapshot_date=target,
