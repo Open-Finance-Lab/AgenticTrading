@@ -3147,7 +3147,7 @@ function buildResearchMarketplaceCardHtml(template) {
         <span><svg class="ui-icon research-fact-icon" aria-hidden="true"><use href="#icon-file-text"></use></svg> ${escapeHtml(formats)}</span>
       </div>
       <div class="agent-card-actions agent-card-actions--status">
-        <button class="agent-card-cta marketplace-clone-btn" type="button" data-template-id="${escapeHtml(template.template_id)}">Add to My Agents</button>
+        <button class="agent-card-cta marketplace-clone-btn" type="button" data-template-id="${escapeHtml(template.template_id)}"${researchAddedIds.has(template.template_id) ? ' disabled' : ''}>${researchAddedIds.has(template.template_id) ? 'Added ✓' : 'Add to My Agents'}</button>
       </div>
     </div>`;
 }
@@ -3304,12 +3304,25 @@ function renderMarketplaceGrid() {
       btn.disabled = true;
       const prevLabel = btn.textContent;
       btn.textContent = 'Adding…';
-      try {
-        if (templateMarketplaceShelf(template) === 'research') {
-          await API.post(`${API_BASE}/api/v1/research/agents/${encodeURIComponent(templateId)}/add`, {});
-        } else {
-          await cloneMarketplaceTemplate(template);
+      if (templateMarketplaceShelf(template) === 'research') {
+        try {
+          const data = await API.post(`${API_BASE}/api/v1/research/agents/${encodeURIComponent(templateId)}/add`, {});
+          researchAddedIds.add(templateId);
+          btn.textContent = 'Added ✓';
+          if (typeof showAppToast === 'function') {
+            showAppToast(data.created
+              ? 'Added to My Agents — open it there to start a research run.'
+              : 'Already in My Agents — open it there to start a research run.');
+          }
+        } catch (error) {
+          alert(error.message || `Couldn't add this template. Please try again.`);
+        } finally {
+          marketplaceCloneInFlight = false;
         }
+        return;
+      }
+      try {
+        await cloneMarketplaceTemplate(template);
       } catch (error) {
         alert(error.message || `Couldn't add this template. Please try again.`);
       } finally {
@@ -3377,6 +3390,15 @@ async function loadMarketplaceLeaderboard() {
  */
 async function loadMarketplace() {
   loadMarketplaceLeaderboard();
+  // Research cards need their added-state for the button, so fetch the
+  // research shelf's add-state alongside the static catalog.
+  (async () => {
+    try {
+      const data = await API.get(`${RESEARCH_API}/agents`);
+      researchAddedIds = new Set((data.agents || []).filter((a) => a.added).map((a) => a.template_id));
+      renderMarketplaceGrid();
+    } catch (_error) { /* guest: buttons stay as plain Add */ }
+  })();
   if (marketplaceTemplates.length) {
     renderMarketplaceGrid();
     return;
@@ -12464,6 +12486,7 @@ console.log('Frontend loaded - connecting to API at ' + API_BASE);
 // ============================================================================
 
 const RESEARCH_API = `${API_BASE}/api/v1/research`;
+let researchAddedIds = new Set();
 let researchWorkbenchTemplateId = null;
 let researchWorkbenchReturnView = null;
 let researchPollTimer = null;
