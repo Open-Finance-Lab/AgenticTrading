@@ -13,7 +13,7 @@
          because every API call is a CORS request. -->
     <link rel="preconnect" href="https://agentictrading.onrender.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="styles.css?v=146">
+    <link rel="stylesheet" href="styles.css?v=147">
     <!-- defer: ~200KB that was render-blocking. Deferred scripts execute in
          document order (this one first, the body-end ones after), all before
          DOMContentLoaded, so Chart is defined before any chart renders. -->
@@ -31,7 +31,9 @@
             account: { page: 'account' },
             credits: { page: 'credits' },
             backtest: { page: 'playground', playgroundTab: 'backtest' },
-            paper: { page: 'playground', playgroundTab: 'paper' },
+            // Paper trading is switched off (PAPER_TRADING_ENABLED in app.js):
+            // old ?view=paper links land on My Agents instead of a dead panel.
+            paper: { page: 'playground', playgroundTab: 'agents' },
             agents: { page: 'playground', playgroundTab: 'agents' },
             marketplace: { page: 'community' },
             playground: { page: 'playground', playgroundTab: 'agents' },
@@ -60,6 +62,10 @@
         function migrateSavedNavState(saved) {
             if (saved && saved.page === 'playground' && saved.playgroundTab === 'marketplace') {
                 return { page: 'community' };
+            }
+            // Paper trading is switched off; see the 'paper' entry above.
+            if (saved && saved.page === 'playground' && saved.playgroundTab === 'paper') {
+                return Object.assign({}, saved, { playgroundTab: 'agents' });
             }
             // The Daily Leaderboard became the Live Trading Leaderboard.
             // Anyone whose last visit was that tab has 'daily' in localStorage
@@ -275,7 +281,7 @@
         <div class="auth-modal-panel" role="dialog" aria-labelledby="authModalTitle">
             <button id="authModalClose" class="auth-modal-close" type="button" aria-label="Close">×</button>
             <h2 id="authModalTitle" class="auth-modal-title">Sign in</h2>
-            <p id="authModalSubtitle" class="auth-modal-subtitle">Optional — backtest and paper trading work without an account.</p>
+            <p id="authModalSubtitle" class="auth-modal-subtitle">Optional — backtests work without an account.</p>
             <form id="authForm" class="auth-form">
                 <label class="auth-field">
                     <span>Email</span>
@@ -317,7 +323,7 @@
         <div class="auth-modal-panel run-backtest-modal-panel" role="dialog" aria-labelledby="runBacktestModalTitle">
             <button id="runBacktestModalClose" class="auth-modal-close" type="button" aria-label="Close">×</button>
             <h2 id="runBacktestModalTitle" class="auth-modal-title">Run Backtest</h2>
-            <p class="auth-modal-subtitle">Simulation settings for this agent. Does not change its Paper Trading Allocated Capital.</p>
+            <p class="auth-modal-subtitle">Simulation settings for this agent.</p>
 
             <div class="run-backtest-modal-body">
                 <div class="control-group">
@@ -424,7 +430,7 @@
                         <p id="runBacktestCapitalValue" class="run-backtest-readonly">—</p>
                         <button id="runBacktestEditCapitalBtn" class="run-backtest-edit-link" type="button">Edit in Configure</button>
                     </div>
-                    <p id="runBacktestCapitalHint" class="control-helper">Simulated starting cash. Does not change Paper Trading Allocated Capital.</p>
+                    <p id="runBacktestCapitalHint" class="control-helper">Simulated starting cash.</p>
                 </div>
 
                 <div class="control-group" id="runBacktestBillingGroup">
@@ -842,12 +848,14 @@
                     <span>Model name (optional)</span>
                     <input id="externalAgentModel" type="text" maxlength="100" placeholder="gpt-4 / rule-based" autocomplete="off">
                 </label>
-                <label class="auth-field">
+                <!-- Paper trading is switched off (PAPER_TRADING_ENABLED in app.js):
+                     hidden and disabled, and the create posts cash_allocation 0. -->
+                <label class="auth-field" hidden>
                     <span>Paper Trading Allocated Capital (max $3,000)</span>
-                    <input id="externalAgentCashAllocation" type="number" min="0" max="3000" step="any" data-cash-step="100" value="1000" required aria-describedby="externalAgentCashHint">
+                    <input id="externalAgentCashAllocation" type="number" min="0" max="3000" step="any" data-cash-step="100" value="1000" required disabled aria-describedby="externalAgentCashHint">
                     <span class="capital-input-error" data-cash-error-slot role="alert" hidden></span>
                 </label>
-                <p id="externalAgentCashHint" class="credential-hint">Cash reserved from My Portfolio for this agent's paper trading. Backtests start from this amount by default but never spend it.</p>
+                <p id="externalAgentCashHint" class="credential-hint" hidden>Cash reserved from My Portfolio for this agent's paper trading. Backtests start from this amount by default but never spend it.</p>
                 <p id="createExternalAgentError" class="auth-error" hidden></p>
                 <button id="createExternalAgentSubmit" class="auth-submit-btn" type="submit">Create agent</button>
             </form>
@@ -876,12 +884,14 @@
                     <span>Description (optional)</span>
                     <input id="builtinAgentDescription" type="text" maxlength="280" placeholder="What makes this agent different?" autocomplete="off">
                 </label>
-                <label class="auth-field">
+                <!-- Paper trading is switched off (PAPER_TRADING_ENABLED in app.js):
+                     hidden and disabled, and the create posts cash_allocation 0. -->
+                <label class="auth-field" hidden>
                     <span>Paper Trading Allocated Capital (max $3,000)</span>
-                    <input id="builtinAgentCashAllocation" type="number" min="0" max="3000" step="any" data-cash-step="100" value="1000" required aria-describedby="builtinAgentCashHint">
+                    <input id="builtinAgentCashAllocation" type="number" min="0" max="3000" step="any" data-cash-step="100" value="1000" required disabled aria-describedby="builtinAgentCashHint">
                     <span class="capital-input-error" data-cash-error-slot role="alert" hidden></span>
                 </label>
-                <p id="builtinAgentCashHint" class="credential-hint">Cash reserved from My Portfolio for this agent's paper trading. Backtests start from this amount by default but never spend it.</p>
+                <p id="builtinAgentCashHint" class="credential-hint" hidden>Cash reserved from My Portfolio for this agent's paper trading. Backtests start from this amount by default but never spend it.</p>
                 <p id="createBuiltinAgentError" class="auth-error" hidden></p>
                 <button id="createBuiltinAgentSubmit" class="auth-submit-btn" type="submit">Create built-in agent</button>
             </form>
@@ -932,11 +942,13 @@
         <div class="subtab-bar playground-subtabs">
             <button class="subtab-btn active" data-playground-tab="agents">My Agents</button>
             <button class="subtab-btn" data-playground-tab="backtest">Backtest</button>
-            <button class="subtab-btn" data-playground-tab="paper">Paper Trading</button>
+            <button class="subtab-btn subtab-btn--disabled" data-playground-tab="paper" disabled aria-disabled="true" title="Paper trading is coming soon">Paper Trading</button>
         </div>
         <div id="playgroundAgentsPanel" class="playground-panel">
-            <!-- My Portfolio: Overview + Capital Allocation (live ledger when signed in, sample data for guests) -->
-            <div class="page-header">
+            <!-- My Portfolio: Overview + Capital Allocation (live ledger when signed in, sample data for guests).
+                 Hidden while paper trading is switched off (PAPER_TRADING_ENABLED in app.js): the
+                 ledger only funds paper sleeves. portfolio.js still renders into it unchanged. -->
+            <div class="page-header" data-paper-trading-only hidden>
                 <div>
                     <h2 class="page-title">My Portfolio
                         <span id="portfolioSampleBadge" title="Illustrative sample data — not a real brokerage account." style="display:inline-block; vertical-align:middle; margin-left:8px; padding:2px 9px; border-radius:999px; font-size:11px; font-weight:700; letter-spacing:.04em; background:rgba(245,158,11,.15); color:#f59e0b; border:1px solid rgba(245,158,11,.4);">SAMPLE DATA</span>
@@ -944,7 +956,7 @@
                 </div>
             </div>
 
-            <div class="portfolio-top-grid">
+            <div class="portfolio-top-grid" data-paper-trading-only hidden>
                 <section class="section-card pf-overview-card" id="portfolioOverviewCard" aria-label="Portfolio Overview">
                     <!-- filled by portfolio.js -->
                 </section>
@@ -1157,11 +1169,14 @@
                     <div class="agent-capital-card section-card compact">
                         <h3 class="agent-capital-title">Allocated Capital</h3>
                         <div class="agent-capital-grid">
-                            <label class="agent-capital-field" for="agentEditorCashAllocation">
-                                <span class="agent-capital-label">Paper Trading <span class="agent-capital-max">max $3,000</span></span>
-                                <input id="agentEditorCashAllocation" class="agent-capital-input" type="number" min="0" max="3000" step="any" data-cash-step="100" placeholder="1000" aria-label="Paper Trading Allocated Capital">
+                            <!-- Greyed while paper trading is switched off (PAPER_TRADING_ENABLED
+                                 in app.js). agent-editor.js reads `disabled` as "leave the saved
+                                 sleeve alone" and omits cash_allocation from the PATCH. -->
+                            <label class="agent-capital-field agent-capital-field--disabled" for="agentEditorCashAllocation" title="Paper trading is coming soon">
+                                <span class="agent-capital-label">Paper Trading <span class="agent-capital-max">coming soon</span></span>
+                                <input id="agentEditorCashAllocation" class="agent-capital-input" type="number" min="0" max="3000" step="any" data-cash-step="100" placeholder="1000" aria-label="Paper Trading Allocated Capital" disabled aria-disabled="true">
                                 <span class="capital-input-error" data-cash-error-slot role="alert" hidden></span>
-                                <span class="agent-capital-note">Reserved from your My Portfolio balance while this agent paper-trades. Backtests use a separate simulated amount and never touch it.</span>
+                                <span class="agent-capital-note">Paper trading is not available yet. Backtests use the simulated amount beside it.</span>
                             </label>
                             <label class="agent-capital-field" for="agentEditorBacktestAllocation">
                                 <span class="agent-capital-label">Backtesting <span class="agent-capital-max">max $3,000</span></span>
@@ -2393,9 +2408,9 @@
     <script src="market-events/MarketEventFeed.js" defer></script>
     <script src="js/portfolio.js?v=18" defer></script>
     <script src="js/backtest-comparison.js?v=1" defer></script>
-    <script src="app.js?v=141" defer></script>
+    <script src="app.js?v=142" defer></script>
     <script src="js/analytics.js?v=1" defer></script>
-    <script src="js/agent-editor.js?v=31" defer></script>
+    <script src="js/agent-editor.js?v=32" defer></script>
     <script src="js/credit-format.js?v=1" defer></script>
     <script src="js/credits.js?v=8" defer></script>
     <script src="js/admin-credits.js?v=8" defer></script>

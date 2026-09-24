@@ -8612,6 +8612,11 @@ html[data-nav-page="home"] #homeView .dashboard-bottom-grid .home-module--market
 /* ===========================================================================
    My Portfolio — Overview + Capital Allocation (My Agents page)
    =========================================================================== */
+/* `display` on .page-header / .portfolio-top-grid beats the UA [hidden] rule. */
+[data-paper-trading-only][hidden] {
+    display: none !important;
+}
+
 .portfolio-top-grid {
     display: grid;
     grid-template-columns: minmax(0, 1.35fr) minmax(0, 1fr);
@@ -9437,6 +9442,11 @@ html[data-nav-page="home"] #homeView .dashboard-bottom-grid .home-module--market
     gap: 12px;
 }
 
+/* Paper trading off (PAPER_TRADING_ENABLED): the backtest figure stands alone. */
+.agent-card-capitals--single {
+    grid-template-columns: 1fr;
+}
+
 .agent-card-capital {
     min-width: 0;
 }
@@ -10031,6 +10041,15 @@ html[data-nav-page="home"] #homeView .dashboard-bottom-grid .home-module--market
     background: var(--bg-hover);
 }
 
+/* Paper Trading while PAPER_TRADING_ENABLED is off: greyed, not clickable. */
+.subtab-btn--disabled,
+.subtab-btn--disabled:hover:not(.active) {
+    color: var(--text-muted);
+    background: transparent;
+    opacity: 0.55;
+    cursor: not-allowed;
+}
+
 /*
  * styles.css had zero `:focus-visible` rules and eight bare `outline: none`
  * resets, and this bar had no focus style of any kind -- keyboard users could
@@ -10334,6 +10353,16 @@ body.agent-editor-open {
 .agent-capital-note {
     font-size: 13px;
     color: var(--text-secondary);
+}
+
+/* Paper Trading capital while PAPER_TRADING_ENABLED is off. */
+.agent-capital-field--disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+.agent-capital-field--disabled .agent-capital-input {
+    cursor: not-allowed;
 }
 
 /* Inline validity message for the Allocated Capital inputs, written by
