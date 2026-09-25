@@ -23,11 +23,13 @@ import dashboard.backend.domain.portfolios.service as portfolio_service_module
 import dashboard.backend.users as users_module
 from dashboard.backend.app import app
 from dashboard.backend.domain.agents.defaults import STARTER_AGENTS
-from dashboard.backend.domain.backtesting.constants import (
-    DEFAULT_AGENT_CASH_ALLOCATION,
-    DEFAULT_PORTFOLIO_EQUITY,
-    MAX_AGENT_CASH_ALLOCATION,
-)
+
+# Plain values read off the module (it is imported whole for the
+# PAPER_TRADING_ENABLED patch below; a second `from` import of it is CodeQL
+# py/import-and-import-from). None of these three is ever patched.
+DEFAULT_AGENT_CASH_ALLOCATION = backtesting_constants.DEFAULT_AGENT_CASH_ALLOCATION
+DEFAULT_PORTFOLIO_EQUITY = backtesting_constants.DEFAULT_PORTFOLIO_EQUITY
+MAX_AGENT_CASH_ALLOCATION = backtesting_constants.MAX_AGENT_CASH_ALLOCATION
 
 # Signup mints one starter per STARTER_AGENTS entry, each funded at
 # DEFAULT_AGENT_CASH_ALLOCATION. Cash checks after _signup() subtract this,
