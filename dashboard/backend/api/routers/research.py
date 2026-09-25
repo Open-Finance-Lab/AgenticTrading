@@ -28,6 +28,7 @@ from fastapi.responses import Response
 from dashboard.backend.api.auth import get_current_user
 from dashboard.backend.domain.agents import marketplace as marketplace_mod
 from dashboard.backend.domain.agents import research_store
+from dashboard.backend.domain.entitlements import research_credits
 
 router = APIRouter(prefix="/v1/research", tags=["research"])
 
@@ -175,6 +176,13 @@ def create_research_run(
 
     email_me = bool(body.get("email_me"))
     payload = {"agent_id": _agent_id(template), "settings": settings}
+
+    # Billing (route 0): debit at accept, before the agent service is called;
+    # refund below when the service never accepts, so the user pays only for
+    # runs that could have started a Deep Research invocation.
+    outcome = research_credits.authorize_research_run(current_user["id"])
+    if not outcome.allowed:
+        raise HTTPException(status_code=402, detail=outcome.detail)
     try:
         response = httpx.post(
             f"{_service_base(template)}/runs",
@@ -185,6 +193,11 @@ def create_research_run(
         response.raise_for_status()
         service_run = response.json()
     except httpx.HTTPError as exc:
+        # Refund only a debit that actually happened: refund_credits is
+        # unconditional at the store level, so refunding an uncharged run
+        # (metering off, store fail-open) would mint free credits.
+        if outcome.charged:
+            research_credits.refund_research_run(current_user["id"])
         raise _service_error(exc, "submitting the research run") from None
 
     import uuid
