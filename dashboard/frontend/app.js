@@ -214,7 +214,9 @@ function showAppToast(message) {
  * ledger the sleeves draw from) is hidden, and new agents reserve $0 -- a
  * sleeve nobody can see or spend must not be able to refuse a later create
  * with "Insufficient unallocated cash". Existing sleeves are left untouched.
- * The HTML ships the paper inputs `disabled` to match; flip both together.
+ * The HTML ships the paper inputs `disabled` to match, and the server's
+ * PAPER_TRADING_ENABLED (domain/backtesting/constants.py) makes every sleeve it
+ * picks by default $0 too; flip all three together.
  */
 const PAPER_TRADING_ENABLED = false;
 const MAX_AGENT_CASH_ALLOCATION = 3000;

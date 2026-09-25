@@ -650,7 +650,9 @@
                                 <svg id="homePortfolioChart" class="hm-port-chart" viewBox="0 0 360 148" role="img" aria-label="Portfolio equity over time"></svg>
                                 <div class="hm-port-tooltip" id="homePortfolioTooltip" hidden></div>
                             </figure>
-                            <button class="hm-footer-btn" id="homeModuleViewPortfolioBtn" type="button">View my portfolio</button>
+                            <!-- Hidden while paper trading is switched off (PAPER_TRADING_ENABLED in app.js):
+                                 its target, My Agents' My Portfolio header, is hidden too. -->
+                            <button class="hm-footer-btn" id="homeModuleViewPortfolioBtn" type="button" data-paper-trading-only hidden>View my portfolio</button>
                         </article>
 
                         <article class="home-module home-module--agent" id="homeModuleAgent">
@@ -2416,7 +2418,7 @@
     <script src="js/admin-credits.js?v=8" defer></script>
     <script src="js/admin-tabs.js?v=12" defer></script>
     <script src="js/leaderboard.js?v=33" defer></script>
-    <script src="home-page.js?v=50" defer></script>
+    <script src="home-page.js?v=51" defer></script>
     <!-- Load order: must come after app.js (API/API_BASE/escapeHtml) and
          market-events/marketEventRelativeTime.js (formatMarketEventRelativeTime),
          both loaded above — not beside the market-events/* block, which loads
