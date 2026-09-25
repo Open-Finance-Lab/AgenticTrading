@@ -15,6 +15,7 @@ from dashboard.backend.tests.auth_cookies_helpers import _cookie_session_token
 # attributes at call time to see the patched value. Importing the classes
 # directly as well would bind two names to one module (CodeQL
 # py/import-and-import-from) and make it easy to grab a stale, unpatched store.
+import dashboard.backend.domain.backtesting.constants as backtesting_constants
 import dashboard.backend.domain.agents.repository as agent_repo
 import dashboard.backend.domain.agents.service as agent_service_module
 import dashboard.backend.domain.portfolios.repository as portfolio_repo
@@ -36,6 +37,15 @@ STARTER_ALLOCATED = len(STARTER_AGENTS) * float(DEFAULT_AGENT_CASH_ALLOCATION)
 
 def _cash_after_signup() -> float:
     return float(DEFAULT_PORTFOLIO_EQUITY) - STARTER_ALLOCATED
+
+
+@pytest.fixture(autouse=True)
+def paper_trading_on(monkeypatch):
+    """These tests pin the ledger that paper trading draws on, so they run with
+    it switched on: while it is off, nothing picks a non-zero sleeve on the
+    caller's behalf (``new_agent_cash_allocation``) and every default below
+    would be $0."""
+    monkeypatch.setattr(backtesting_constants, "PAPER_TRADING_ENABLED", True)
 
 
 @pytest.fixture
@@ -568,3 +578,101 @@ def test_service_serialises_concurrent_allocations_for_one_user(env, monkeypatch
     assert len(rejected) == 1, f"expected one rejection, got {rejected}"
     expected = STARTER_ALLOCATED + 2 * float(MAX_AGENT_CASH_ALLOCATION)
     assert total == expected, f"over-allocated: {total} against a 10000 account"
+
+
+# ---------------------------------------------------------------------------
+# Paper trading switched off (the shipped state). The dashboard hides My
+# Portfolio then, so a sleeve the server picks by default is a reservation
+# nobody can see or release -- and enough of them refuse a later create with
+# "Insufficient unallocated cash". Every path that chooses a sleeve for the
+# caller (signup starters, a create that omits one, marketplace clone,
+# duplicate) reserves $0; an explicit value is still honoured.
+# ---------------------------------------------------------------------------
+
+
+def _switch_paper_trading_off(monkeypatch):
+    # Runs in the test body, after the autouse paper_trading_on fixture.
+    monkeypatch.setattr(backtesting_constants, "PAPER_TRADING_ENABLED", False)
+
+
+def test_paper_trading_ships_switched_off():
+    # Read the source, not the module attribute: the autouse fixture above has
+    # already switched the flag on for this test.
+    source = Path(backtesting_constants.__file__).read_text(encoding="utf-8")
+    assert "\nPAPER_TRADING_ENABLED = False\n" in source
+
+
+def test_signup_starters_reserve_nothing(client, monkeypatch):
+    _switch_paper_trading_off(monkeypatch)
+    token, _ = _signup(client, "paper-off-signup@example.com")
+    headers = _auth(token)
+
+    agents = client.get("/api/v1/agents", headers=headers).json()["agents"]
+    assert agents, "signup should still provision the starter agents"
+    assert all(float(agent["cash_allocation"] or 0) == 0 for agent in agents)
+
+    portfolio = client.get("/api/v1/portfolio", headers=headers).json()["portfolio"]
+    assert portfolio["allocated"] == 0
+    assert portfolio["cash_available"] == float(DEFAULT_PORTFOLIO_EQUITY)
+
+
+def test_create_without_a_sleeve_reserves_nothing(client, monkeypatch):
+    _switch_paper_trading_off(monkeypatch)
+    token, _ = _signup(client, "paper-off-create@example.com")
+    headers = _auth(token)
+
+    created = client.post(
+        "/api/v1/agents",
+        headers=headers,
+        json={"name": "No sleeve", "model_name": "local-model", "agent_type": "builtin"},
+    )
+    assert created.status_code == 200, created.text
+    assert created.json()["agent"]["cash_allocation"] == 0
+
+
+def test_an_explicit_sleeve_is_still_honoured(client, monkeypatch):
+    _switch_paper_trading_off(monkeypatch)
+    token, _ = _signup(client, "paper-off-explicit@example.com")
+    headers = _auth(token)
+
+    created = client.post(
+        "/api/v1/agents",
+        headers=headers,
+        json={
+            "name": "Explicit",
+            "model_name": "local-model",
+            "agent_type": "builtin",
+            "cash_allocation": 1500,
+        },
+    )
+    assert created.status_code == 200, created.text
+    assert created.json()["agent"]["cash_allocation"] == 1500
+    portfolio = client.get("/api/v1/portfolio", headers=headers).json()["portfolio"]
+    assert portfolio["allocated"] == 1500
+
+
+def test_clone_and_duplicate_reserve_nothing_and_never_run_out(client, monkeypatch):
+    """Twelve copies would have needed $12,000 of a $10,000 ledger at $1,000
+    each -- the "Insufficient unallocated cash" refusal this change removes."""
+    _switch_paper_trading_off(monkeypatch)
+    token, _ = _signup(client, "paper-off-copies@example.com")
+    headers = _auth(token)
+
+    cloned = client.post(
+        "/api/v1/agents/marketplace/claude-haiku-4-5/clone", headers=headers, json={}
+    )
+    assert cloned.status_code == 200, cloned.text
+    source = cloned.json()["agent"]
+    assert source["cash_allocation"] == 0
+
+    for _ in range(12):
+        copy = client.post(
+            f"/api/v1/agents/{source['agent_id']}/duplicate",
+            headers=headers,
+            json={"model_name": "deepseek/deepseek-v4-pro"},
+        )
+        assert copy.status_code == 200, copy.text
+        assert copy.json()["agent"]["cash_allocation"] == 0
+
+    portfolio = client.get("/api/v1/portfolio", headers=headers).json()["portfolio"]
+    assert portfolio["allocated"] == 0

@@ -20,10 +20,10 @@ from pydantic import (
 )
 
 from dashboard.backend.domain.backtesting.constants import (
-    DEFAULT_AGENT_CASH_ALLOCATION,
     MAX_AGENT_CASH_ALLOCATION,
     MAX_BACKTEST_INITIAL_CAPITAL,
     MIN_BACKTEST_INITIAL_CAPITAL,
+    new_agent_cash_allocation,
 )
 from dashboard.backend.domain.agents.repository import _UNSET
 from dashboard.backend.domain.agents.taxonomy import AgentCategory, coerce_category
@@ -75,8 +75,10 @@ class CreateAgentBody(BaseModel):
     description: Optional[str] = Field(default=None, max_length=280)
     runtime_type: Literal["pipeline", "ai_hedge_fund"] = "pipeline"
     runtime_config: Dict[str, Any] = Field(default_factory=dict)
+    # None = "not chosen": the route resolves it via new_agent_cash_allocation()
+    # at call time ($0 while paper trading is switched off).
     cash_allocation: Optional[float] = Field(
-        default=DEFAULT_AGENT_CASH_ALLOCATION,
+        default=None,
         ge=0,
         le=MAX_AGENT_CASH_ALLOCATION,
     )
@@ -167,7 +169,7 @@ def create_agent(
     cash = float(
         body.cash_allocation
         if body.cash_allocation is not None
-        else DEFAULT_AGENT_CASH_ALLOCATION
+        else new_agent_cash_allocation()
     )
 
     # Signed-in users fund the sleeve from their account portfolio (#175).
@@ -280,7 +282,7 @@ def clone_marketplace_agent(
 ):
     """Copy a marketplace template into the caller's My Agents list."""
     ctx = _require_owner_context(request, authorization)
-    cash = float(DEFAULT_AGENT_CASH_ALLOCATION)
+    cash = new_agent_cash_allocation()
     if ctx["user_id"] and cash > 0:
         try:
             portfolio_service.ensure_cash_for_new_agent(
@@ -682,7 +684,7 @@ def duplicate_agent(
     """
     ctx = _require_owner_context(request, authorization)
     _require_agent_access(agent_id, ctx, reclaim_on_session_match=True)
-    cash = float(DEFAULT_AGENT_CASH_ALLOCATION)
+    cash = new_agent_cash_allocation()
     if ctx["user_id"] and cash > 0:
         try:
             portfolio_service.ensure_cash_for_new_agent(

@@ -118,8 +118,8 @@ def test_duplicate_copies_backtest_allocation_but_not_cash_allocation(client):
     against the source's -- different starting capital makes those curves
     incomparable. ``backtest_allocation`` is simulated capital with no ledger
     coupling, so it is safe to copy. ``cash_allocation`` IS a real ledger debit
-    (the route reserves only DEFAULT_AGENT_CASH_ALLOCATION for it) and must
-    stay un-copied."""
+    (the route reserves only ``new_agent_cash_allocation()`` for it -- $0 while
+    paper trading is switched off) and must stay un-copied."""
     headers = {"X-Session-Id": str(uuid.uuid4())}
     created = client.post(
         "/api/v1/agents",
@@ -144,7 +144,7 @@ def test_duplicate_copies_backtest_allocation_but_not_cash_allocation(client):
     assert response.status_code == 200, response.text
     copy = response.json()["agent"]
     assert copy["backtest_allocation"] == 2000
-    assert copy["cash_allocation"] == 1000
+    assert copy["cash_allocation"] == 0
 
 
 def test_duplicate_defaults_the_name(client):

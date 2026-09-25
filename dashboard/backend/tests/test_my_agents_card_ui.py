@@ -9,6 +9,7 @@ in app.js; execution/paper_backend.py is still a stub), so the shipped card
 shows the backtest figure alone and offers no paper-trading button at all.
 """
 
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -159,6 +160,16 @@ def test_cards_offer_no_paper_trading_button():
     actions = _extract_function(_APP_JS, "renderAgentCardActions")
     assert ">Run Paper Trading<" not in actions
 
+
+
+def test_home_view_my_portfolio_button_ships_hidden():
+    """Its target -- the My Portfolio header on My Agents -- is hidden while
+    paper trading is off, so the button would navigate and then scroll nowhere."""
+    html = (_FRONTEND / "app.html").read_text(encoding="utf-8")
+    tag = re.search(r'<button[^>]*id="homeModuleViewPortfolioBtn"[^>]*>', html)
+    assert tag, "Home 'View my portfolio' button not found"
+    assert "data-paper-trading-only" in tag.group(0)
+    assert re.search(r"\shidden[\s>]", tag.group(0))
 
 def test_status_badge_never_says_paper_trading_while_it_is_off():
     """A live/paper deployment flag (or the guest demo's is_live mock) must not

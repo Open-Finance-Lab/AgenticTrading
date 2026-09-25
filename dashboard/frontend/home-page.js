@@ -2186,6 +2186,9 @@ function initHomeModules() {
         }
     });
     document.getElementById('homeModuleViewPortfolioBtn')?.addEventListener('click', () => {
+        // Paper trading off: the button ships hidden, and its scroll target
+        // (#playgroundAgentsPanel .page-header) is hidden with it.
+        if (typeof PAPER_TRADING_ENABLED !== 'undefined' && !PAPER_TRADING_ENABLED) return;
         if (typeof navigateToPage === 'function') {
             navigateToPage('playground', { playgroundTab: 'agents' });
         }
