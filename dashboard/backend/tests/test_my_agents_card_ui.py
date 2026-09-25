@@ -1,11 +1,12 @@
-"""My Agents card: both capitals, and a signposted paper-trading affordance.
+"""My Agents card: the capital figures, and paper trading switched off.
 
 The card showed only the paper sleeve directly above a **Run Backtest** button,
 which implied the figure was what the backtest would use -- it wasn't. Both
-figures are now labelled side by side.
+figures are now labelled side by side whenever paper trading is enabled.
 
-Run Paper Trading ships disabled: execution/paper_backend.py is still a stub
-(Phase B), and a greyed button with no explanation reads as a bug.
+Paper trading is switched off product-wide (`PAPER_TRADING_ENABLED = false`
+in app.js; execution/paper_backend.py is still a stub), so the shipped card
+shows the backtest figure alone and offers no paper-trading button at all.
 """
 
 import shutil
@@ -49,9 +50,14 @@ def _run_node(script: str) -> str:
     return result.stdout
 
 
-def _harness(body: str) -> str:
-    """Real functions lifted from app.js, with their few dependencies stubbed."""
+def _harness(body: str, paper_enabled: bool = True) -> str:
+    """Real functions lifted from app.js, with their few dependencies stubbed.
+
+    ``paper_enabled`` defaults to True so the capital-resolution tests below
+    keep seeing both figures; the shipped value is pinned separately.
+    """
     return f"""
+const PAPER_TRADING_ENABLED = {"true" if paper_enabled else "false"};
 const MAX_BACKTEST_ALLOCATED_CAPITAL = 3000;
 const DEFAULT_AGENT_CASH_ALLOCATION = 1000;
 function escapeHtml(s) {{ return String(s); }}
@@ -60,6 +66,27 @@ function formatAgentCashAllocation(v) {{ return '$' + Number(v).toLocaleString()
 {_extract_function(_APP_JS, "renderAgentAllocatedCapitalHero")}
 {body}
 """
+
+
+def test_paper_trading_ships_switched_off():
+    """The product decision itself: paper trading is disabled until it ships."""
+    assert "const PAPER_TRADING_ENABLED = false;" in _APP_JS
+
+
+def test_card_hides_the_paper_sleeve_when_paper_trading_is_off():
+    out = _run_node(
+        _harness(
+            "console.log(renderAgentAllocatedCapitalHero("
+            "{cash_allocation: 1000, backtest_allocation: 2500}));",
+            paper_enabled=False,
+        )
+    )
+    assert "Paper Trading" not in out
+    assert "From My Portfolio" not in out
+    assert "$1,000" not in out
+    assert "Backtesting" in out
+    assert "$2,500" in out
+    assert "agent-card-capitals--single" in out
 
 
 def test_card_shows_both_capitals():
@@ -127,19 +154,25 @@ def test_a_saved_zero_backtest_capital_is_displayed_as_zero():
     assert "$1,000" not in out
 
 
-def test_run_paper_trading_button_is_disabled_and_explained():
+def test_cards_offer_no_paper_trading_button():
+    """Paper trading is switched off: no greyed "Run Paper Trading" button."""
     actions = _extract_function(_APP_JS, "renderAgentCardActions")
-    assert "Run Paper Trading" in actions
-    assert "disabled" in actions
-    assert "Paper trading is coming soon" in actions
+    assert ">Run Paper Trading<" not in actions
 
 
-def test_run_paper_trading_is_absent_from_live_paper_cards():
-    """Paper cards show Open Agent; a second paper button would be nonsense."""
-    actions = _extract_function(_APP_JS, "renderAgentCardActions")
-    head, _, tail = actions.partition("if (statusKey === 'paper')")
-    branch, _, rest = tail.partition("} else {")
-    assert "Run Paper Trading" not in branch
+def test_status_badge_never_says_paper_trading_while_it_is_off():
+    """A live/paper deployment flag (or the guest demo's is_live mock) must not
+    resurrect the PAPER TRADING card while the feature is disabled."""
+    fn = _extract_function(_APP_JS, "resolveAgentStatusBadge")
+    out = _run_node(
+        "const PAPER_TRADING_ENABLED = false;\n"
+        + fn
+        + "\nconsole.log(JSON.stringify(["
+        "resolveAgentStatusBadge({is_live: true}).key,"
+        "resolveAgentStatusBadge({deployment_status: 'paper', run_count: 1}).key,"
+        "]));"
+    )
+    assert out.strip() == '["draft","backtested"]'
 
 
 def test_run_backtest_lands_on_my_agents():

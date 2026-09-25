@@ -97,9 +97,12 @@ def test_competition_organizer_line_is_present():
 
 
 def test_capital_note_new_text_is_present():
+    # Paper trading is switched off (PAPER_TRADING_ENABLED in app.js), so the
+    # Configure field is greyed and its note says so instead of describing a
+    # reservation nobody can make.
     assert (
-        "Reserved from your My Portfolio balance while this agent paper-trades. "
-        "Backtests use a separate simulated amount and never touch it."
+        "Paper trading is not available yet. "
+        "Backtests use the simulated amount beside it."
     ) in _HTML
 
 
