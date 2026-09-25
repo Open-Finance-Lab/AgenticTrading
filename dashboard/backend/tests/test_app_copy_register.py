@@ -313,7 +313,9 @@ def test_home_screen_zero_leads_with_the_board_not_a_second_marketing_hero():
     "Talk to Agents / Test Trading Ideas" over a "Get Started" button -- which
     meant a signed-in user with agents was shown the acquisition pitch and an
     invitation to begin. It now carries `#homeModuleRanking`, the one board with
-    real numbers on it.
+    real numbers on it. The "Talk to Agents / Test Trading Ideas" headline came
+    back on 2026-09-25 by product decision (it replaced "See where each model
+    ranks"); what stays retired is the Get Started pitch, not the headline.
 
     This replaces `test_home_mock_chat_gloss_matches_landing`, whose subject was
     the mock chat demo that lived on that screen. The demo was not weakened, it
@@ -327,7 +329,6 @@ def test_home_screen_zero_leads_with_the_board_not_a_second_marketing_hero():
     assert 'id="homePlaygroundChat"' not in _HTML, (
         "the mock chat moved to the landing page; a copy here needs its own gloss"
     )
-    assert "Talk to Agents" not in _HTML, "the app must not re-run the landing pitch"
 
     start = _HTML.index('id="homeScreenLanding"')
     end = _HTML.index('id="homeScreenDashboard"')

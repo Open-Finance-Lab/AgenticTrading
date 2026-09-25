@@ -6158,40 +6158,43 @@ html[data-nav-page="home"] #homeView .home-landing-board {
        headline's OWN `max-width: 36rem` = 576px, further down this file. Below
        ~1650px of viewport the column is narrower than 576 and the ratio binds;
        above it the column clears 576, the h1 stops at its cap, and the ratio
-       stops mattering at all. Slack below is measured for the shipped accent
-       line, "each model ranks", against the h1's laid-out content width --
+       stops mattering at all. Slack below is for the shipped accent line,
+       "Test Trading Ideas", against the h1's laid-out content width --
        min(column, 576) -- and not against the column, Inter loaded, with W
-       marking a headline that actually wrapped (rendered height, not
-       arithmetic):
+       marking a headline that would wrap. DERIVED, not re-rendered: the grid
+       was measured for the previous accent line, "each model ranks" (549.5px
+       at the 4.25rem cap), and every cell here is that measurement less the
+       19.6px this copy adds (569.0px, measured in Chromium with Inter 800):
 
          ratio   1201   1600   1744   1920   2176
-         1.25   +57.0  +68.9  +26.5  +26.5  +26.5
-         1.30   +48.0  +66.9  +26.5  +26.5  +20.5
-         1.35   +39.0  +54.9  +17.5  +13.5   +8.5
-         1.38   +34.0  +47.9  +10.5   +6.5   +1.5
-         1.40   +30.0  +42.9   +5.5   +2.5   -3.5W
+         1.25   +37.4  +49.3   +6.9   +6.9   +6.9
+         1.30   +28.4  +47.3   +6.9   +6.9   +0.9
+         1.35   +19.4  +35.3   -2.1W  -6.1W -11.1W
+         1.38   +14.4  +28.3   -9.1W -13.1W -18.1W
+         1.40   +10.4  +23.3  -14.1W -17.1W -23.1W
 
-       MEASURED-HEADLINE: "each model ranks"
+       MEASURED-HEADLINE: "Test Trading Ideas"
 
        That line is what the guard reads, and it is a marker rather than prose
-       on purpose: this comment names the RETIRED headline too, a few lines
-       down, so a check that merely looks for the shipped string SOMEWHERE in
-       the block is satisfied by the history -- revert screen 0 and it still
+       on purpose: this comment names RETIRED headlines too, a few lines down,
+       so a check that merely looks for the shipped string SOMEWHERE in the
+       block is satisfied by the history -- revert screen 0 and it still
        passes, over a grid measured for the other copy. One line, one quoted
        string, nothing else quoted on it.
 
-       The flat +26.5 across 1744-2176 is the cap binding, not a coincidence.
-       The ceiling is now ~1.38. It was 1.28 for the previous headline, "AI
-       models finished", which is 25.6px wider: that copy wrapped at 1.30 (2176)
-       and at 1.35 from 1744 up, and at the shipped 1.25 it cleared its cap by
-       +1.0px at every viewport from 1744 -- one pixel, at three of five widths
-       measured. A font update or one longer word would have wrapped it, and the
-       column-only table read that as +17/+13/+7.7 of headroom.
+       The flat +6.9 across 1744-2176 is the cap binding, not a coincidence.
+       The ceiling is now ~1.30. It was ~1.38 for "each model ranks" and 1.28
+       for "AI models finished", which is 6px wider still: that copy wrapped at
+       1.30 (2176) and at 1.35 from 1744 up, and at the shipped 1.25 it cleared
+       its cap by +1.0px at every viewport from 1744 -- one pixel, at three of
+       five widths measured. A font update or one longer word would have
+       wrapped it, and the column-only table read that as +17/+13/+7.7 of
+       headroom. This copy sits at +6.9 -- thin, so re-measure before
+       lengthening it.
 
-       So this number is deliberately NOT raised to its new ceiling: the copy
-       got shorter, the constraint did not get looser, and the next headline
-       spends the margin again. Raising it is still not free; re-measure at 2176
-       and up, and against the cap. Pinned by
+       So this number is deliberately NOT raised: the headline has spent most
+       of the margin, and the next one may spend the rest. Raising it is still
+       not free; re-measure at 2176 and up, and against the cap. Pinned by
        test_the_board_ratio_leaves_the_headline_room.
 
        Shrink is 0, written into the shorthand. The rule this replaced read
