@@ -1,5 +1,13 @@
 """Credit metering for operator-funded LLM spend.
 
+**STATUS (2026-09): NOT wired into any production path.** The live backtest
+billing is the real-money credits system (`domain/credits/`):
+platform-credit runs reserve at accept and settle from actual provider usage
+(`reserve_llm_credits` / `settle_llm_credits`), and BYOK runs bill nothing.
+This module is the reference flat-quota implementation, kept until the
+team decides to wire or retire it — do not call it from new code without
+that discussion.
+
 One credit buys one LLM-driven dashboard backtest.
 
 **What is metered, and why only that.** A credit denominates operator money, so

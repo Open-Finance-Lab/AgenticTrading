@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import base64
 import os
+import uuid
 from typing import Any, Dict, Optional
 
 import httpx
@@ -28,13 +29,34 @@ from fastapi.responses import Response
 from dashboard.backend.api.auth import get_current_user
 from dashboard.backend.domain.agents import marketplace as marketplace_mod
 from dashboard.backend.domain.agents import research_store
-from dashboard.backend.domain.entitlements import research_credits
+from dashboard.backend.domain.credits.models import credits_micro_for_cents
+from dashboard.backend.domain.credits.repository_common import (
+    InsufficientCreditsError,
+)
+from dashboard.backend.domain.credits.service import credits_service
+from dashboard.backend.domain.credits.repository_common import (
+    InsufficientCreditsError,
+)
+from dashboard.backend.domain.credits.service import credits_service
 
 router = APIRouter(prefix="/v1/research", tags=["research"])
 
 POLL_TIMEOUT_SECONDS = 10.0
 MANIFEST_CACHE_SECONDS = 300.0
 _manifest_cache: Dict[str, Any] = {}
+
+# Route-0 billing on the REAL credit rail: reserve a per-run usage ceiling at
+# submit, settle at the same amount on completion, release on failure. When
+# contract v1.1 adds usage reporting, `actual_micro` becomes the reported
+# spend instead of the estimate — the reserve/settle calls stay.
+def _estimate_usd_cents() -> int:
+    raw = (os.getenv("RESEARCH_RUN_ESTIMATE_USD_CENTS") or "").strip()
+    try:
+        value = int(raw)
+    except ValueError:
+        return 100  # $1.00 per Deep Research run, absent operator tuning
+    return value if value > 0 else 100
+
 
 ARTIFACT_CONTENT_TYPES = {
     "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
@@ -177,12 +199,26 @@ def create_research_run(
     email_me = bool(body.get("email_me"))
     payload = {"agent_id": _agent_id(template), "settings": settings}
 
-    # Billing (route 0): debit at accept, before the agent service is called;
-    # refund below when the service never accepts, so the user pays only for
-    # runs that could have started a Deep Research invocation.
-    outcome = research_credits.authorize_research_run(current_user["id"])
-    if not outcome.allowed:
-        raise HTTPException(status_code=402, detail=outcome.detail)
+    # Billing: reserve a per-run usage ceiling from the caller's real Credits
+    # balance — the same $1 = 1 credit rail platform-credit backtests settle
+    # on. The store raises InsufficientCreditsError when the balance can't
+    # cover the ceiling, which maps to the 402. (Route-0 interim: completion
+    # settles at the reserved estimate; contract v1.1's usage reporting turns
+    # this into settle-at-actual.)
+    run_id = f"rr_{uuid.uuid4().hex[:12]}"
+    estimate_micro = credits_micro_for_cents(_estimate_usd_cents())
+    try:
+        reservation = credits_service.reserve_llm_credits(
+            user_id=current_user["id"],
+            run_id=run_id,
+            call_index=0,
+            amount_micro=estimate_micro,
+            provider_id=_agent_id(template).replace("-", "_"),
+        )
+    except InsufficientCreditsError as exc:
+        raise HTTPException(status_code=402, detail=str(exc)) from None
+    reservation_id = str(reservation.reservation_id)
+
     try:
         response = httpx.post(
             f"{_service_base(template)}/runs",
@@ -193,27 +229,28 @@ def create_research_run(
         response.raise_for_status()
         service_run = response.json()
     except httpx.HTTPError as exc:
-        # Refund only a debit that actually happened: refund_credits is
-        # unconditional at the store level, so refunding an uncharged run
-        # (metering off, store fail-open) would mint free credits.
-        if outcome.charged:
-            research_credits.refund_research_run(current_user["id"])
+        credits_service.release_llm_credits(
+            reservation_id, reason="submit failed; no Deep Research invocation"
+        )
         raise _service_error(exc, "submitting the research run") from None
 
-    import uuid
-
     service_run_id = str(service_run.get("run_id") or "").strip()
-    run_id = f"rr_{service_run_id}" if service_run_id else f"rr_{uuid.uuid4().hex[:12]}"
     research_store.create_run(
         run_id=run_id,
         user_id=current_user["id"],
         template_id=template_id,
         service_run_id=service_run_id,
+        reservation_id=reservation_id,
         status=str(service_run.get("status") or "running"),
         settings=settings,
         email_me=email_me,
     )
     return {"run_id": run_id, "status": service_run.get("status") or "running"}
+
+
+def _estimate_micro_from_run(run: Dict[str, Any]) -> int:
+    """Route-0 settle amount: the reserved estimate, from env-tunable cents."""
+    return credits_micro_for_cents(_estimate_usd_cents())
 
 
 def _service_run_id(run: Dict[str, Any]) -> str:
@@ -243,6 +280,9 @@ def _maybe_complete_run(run: Dict[str, Any], template: Dict[str, Any],
         research_store.update_run_status(run["run_id"], "failed",
                                          error=service_status.get("error") or "Research failed",
                                          completed=True)
+        credits_service.release_llm_credits(
+            run["reservation_id"], reason="research run failed",
+        )
         run["status"] = "failed"
         return run
     if status != "completed":
@@ -268,6 +308,14 @@ def _maybe_complete_run(run: Dict[str, Any], template: Dict[str, Any],
         payload.get("artifacts") or {},
         payload.get("evidence"),
         payload.get("report_markdown") or "",
+    )
+    # Route-0 interim: settle at the reserved estimate. Contract v1.1 adds
+    # usage reporting in the result payload, and this becomes
+    # settle(actual_micro=reported spend) — the reserve call above stays.
+    credits_service.settle_llm_credits(
+        run["reservation_id"],
+        actual_micro=_estimate_micro_from_run(run),
+        evidence={"source": "research-agent", "agent_id": run["template_id"]},
     )
     research_store.update_run_status(run["run_id"], "completed", completed=True)
     run["status"] = "completed"
