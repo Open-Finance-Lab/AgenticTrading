@@ -6216,6 +6216,7 @@ html[data-nav-page="home"] #homeView .home-landing-board {
     display: flex;
     align-self: stretch;
     min-height: 0;
+    position: relative;
 }
 /* The pager clips rather than scrolls (.home-pager-screen is overflow:hidden),
    so the panel is sized against the viewport, not left to its content.
@@ -13886,16 +13887,58 @@ table.sr-only {
 .research-remove-btn{padding:7px 12px;border-radius:8px;border:1px solid rgba(240,128,128,.35);background:transparent;color:#f08080;font:inherit;font-size:12.5px;cursor:pointer}
 .research-remove-btn:hover{border-color:#f08080;background:rgba(240,128,128,.08)}
 
+.home-board-stage {
+    position: relative;
+    flex: 1 1 auto;
+    min-width: 0;
+    min-height: 0;
+    width: 100%;
+    height: 100%;
+}
+.home-board-nav {
+    position: absolute;
+    top: 50%;
+    z-index: 4;
+    width: 36px;
+    height: 36px;
+    margin: 0;
+    padding: 0;
+    transform: translateY(-50%);
+    border-radius: 999px;
+    border: 1px solid rgba(148, 163, 184, 0.35);
+    background: rgba(15, 23, 42, 0.88);
+    color: #e2e8f0;
+    font-size: 22px;
+    line-height: 1;
+    cursor: pointer;
+}
+.home-board-nav:disabled {
+    opacity: 0.35;
+    cursor: default;
+}
+.home-board-nav--prev { left: 10px; }
+.home-board-nav--next { right: 10px; }
 .home-demo-run {
+    position: absolute;
+    inset: 0;
+    z-index: 2;
     display: flex;
     flex-direction: column;
-    flex: 1 1 auto;
     min-height: 0;
     padding: 12px 16px 14px;
     gap: 8px;
+    opacity: 0;
+    visibility: hidden;
+    pointer-events: none;
 }
-.home-demo-run[hidden] {
-    display: none;
+html[data-nav-page="home"] #homeView .home-landing-board[data-home-board-slide="demo"] #homeDemoRunPanel {
+    opacity: 1;
+    visibility: visible;
+    pointer-events: auto;
+}
+html[data-nav-page="home"] #homeView .home-landing-board[data-home-board-slide="demo"] #homeModuleRanking {
+    visibility: hidden;
+    pointer-events: none;
 }
 .home-demo-run-kicker {
     margin: 0;
@@ -13931,7 +13974,7 @@ table.sr-only {
     margin: 0;
     padding: 0;
     list-style: none;
-    max-height: 72px;
+    max-height: 88px;
     overflow: auto;
     font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
     font-size: 11px;
@@ -13945,7 +13988,6 @@ table.sr-only {
     font-size: 11px;
     color: rgba(148, 163, 184, 0.65);
 }
-
 /* Live Trading Leaderboard (Phase 0) — scoped so contest/daily CSS stays put */
 .live-phase-banner {
     margin: 8px 0 0;

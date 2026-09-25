@@ -113,6 +113,7 @@ EXPECTED_ALGO_ROUTES = {
 EXPECTED_LEADERBOARD_ROUTES = {
     ("GET", "/v1/leaderboard", "api_get_leaderboard"),
     ("POST", "/v1/leaderboard/daily/refresh", "api_refresh_daily_leaderboard"),
+    ("POST", "/v1/leaderboard/live/refresh", "api_refresh_live_leaderboard"),
 }
 
 EXPECTED_NEWS_ROUTES = {

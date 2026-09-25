@@ -9,8 +9,9 @@ the line cannot interpolate into the live tail or the future.
 Phase 1 caches auto-compute baselines/indices for month-open → last completed
 session under ``leaderboard-live``. LLM models are written by
 ``refresh_live_leaderboard(deploy_models=True)`` (or the deploy script), never
-on public GET. Each freeze close is its own ``agent_runs`` snapshot keyed by
-month-open → freeze date.
+on public GET. Each freeze close appends one cash session onto the prior
+snapshot (cash + positions), so a month costs about one full backtest, not a
+replay from the 1st every night.
 """
 
 from __future__ import annotations
@@ -18,6 +19,7 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+import threading
 from calendar import monthrange
 from datetime import date, datetime, time, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple, Union
@@ -51,7 +53,10 @@ LIVE_MODEL_IDS = (
     "deepseek_v4_pro",
     "nemotron_3_nano_30b",
 )
+LIVE_SNAPSHOT_KEY = "live_portfolio_snapshot"
 _LIVE_REFRESH_STATE_PATH = DATA_DIR / "leaderboard_live_refresh.json"
+_live_refresh_lock = threading.Lock()
+_live_refresh_running = False
 
 
 def _coerce_as_of_eastern(as_of: Optional[Union[date, datetime]] = None) -> datetime:
@@ -105,6 +110,42 @@ def _previous_weekday(day: date) -> date:
     while cursor.weekday() >= 5:
         cursor -= timedelta(days=1)
     return cursor
+
+
+def next_session_day(day: date) -> date:
+    """Next US weekday after ``day`` (Sat/Sun → Monday)."""
+    cursor = day + timedelta(days=1)
+    while cursor.weekday() >= 5:
+        cursor += timedelta(days=1)
+    return cursor
+
+
+def live_increment_bounds(
+    prior_end: Optional[str],
+    *,
+    month_start: str,
+    freeze_end: str,
+) -> Optional[Tuple[str, str]]:
+    """Inclusive window of sessions not yet on the stored snapshot.
+
+    ``None`` means the snapshot already covers ``freeze_end``. With no prior
+    row the window is month-open → freeze (first backtest of the month).
+    """
+    freeze = date.fromisoformat(freeze_end)
+    start = date.fromisoformat(month_start)
+    if not prior_end:
+        if freeze < start:
+            return None
+        return month_start, freeze_end
+    prior = date.fromisoformat(prior_end)
+    if prior >= freeze:
+        return None
+    nxt = next_session_day(prior)
+    if nxt < start:
+        nxt = start
+    if nxt > freeze:
+        return None
+    return nxt.isoformat(), freeze.isoformat()
 
 
 def live_clock(as_of: Optional[Union[date, datetime]] = None) -> Dict[str, Any]:
@@ -269,6 +310,240 @@ def _clip_end(left: str, right: str) -> str:
     return left if left <= right else right
 
 
+def _run_metadata_dict(run: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    if not run:
+        return {}
+    meta = run.get("metadata")
+    if isinstance(meta, str):
+        try:
+            meta = json.loads(meta)
+        except json.JSONDecodeError:
+            return {}
+    return meta if isinstance(meta, dict) else {}
+
+
+def _snapshot_from_run(run: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    snap = _run_metadata_dict(run).get(LIVE_SNAPSHOT_KEY)
+    if isinstance(snap, dict) and snap.get("cash") is not None:
+        return snap
+    return None
+
+
+def _stitch_equity_curves(
+    prior: List[Dict[str, Any]],
+    new: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    if not prior:
+        return list(new)
+    seen = {str(point.get("timestamp")) for point in prior}
+    extra = [point for point in new if str(point.get("timestamp")) not in seen]
+    return list(prior) + extra
+
+
+def _set_live_refresh_running(value: bool) -> None:
+    global _live_refresh_running
+    _live_refresh_running = value
+
+
+def deploy_live_model_increment(
+    entry: Dict[str, Any],
+    freeze_cfg: Dict[str, Any],
+    *,
+    force_refresh: bool = False,
+    allow_fallback: bool = False,
+) -> Dict[str, Any]:
+    """Append unseen cash sessions onto a live-month LLM snapshot.
+
+    Trades only ``live_increment_bounds`` (usually one day) and restores cash
+    plus positions from the previous freeze row. A missing snapshot falls back
+    to a full month-open → freeze replay once, then stores the book for later
+    nights. Does not change contest/daily ``deploy_model_run``.
+    """
+    entry_id = entry["id"]
+    month_start = freeze_cfg["start_date"]
+    freeze_end = freeze_cfg["end_date"]
+    session_id = freeze_cfg["session_id"]
+    initial_capital = float(freeze_cfg.get("initial_capital", INITIAL_CAPITAL))
+
+    prior = None if force_refresh else lb_service._find_live_month_run(
+        entry_id, month_start, freeze_end, session_id
+    )
+    snapshot = _snapshot_from_run(prior)
+    if prior and str(prior.get("end_date") or "") == freeze_end and not force_refresh:
+        return {
+            "entry_id": entry_id,
+            "run_id": prior.get("run_id"),
+            "cached": True,
+            "increment": False,
+            "model": entry.get("model"),
+            "window": {"start_date": month_start, "end_date": freeze_end},
+            "segment": None,
+            "total_return": prior.get("total_return"),
+            "final_equity": prior.get("final_equity"),
+            "llm_calls": prior.get("llm_calls"),
+        }
+
+    if force_refresh or prior is None or snapshot is None:
+        segment_start, segment_end = month_start, freeze_end
+        snapshot = None
+        prior_curve: List[Dict[str, Any]] = []
+        resumed = False
+        if prior is not None and snapshot is None and not force_refresh:
+            print(
+                f"⚠️ Live {entry_id}: no portfolio snapshot on "
+                f"{prior.get('run_id')}; replaying {month_start} → {freeze_end} once"
+            )
+    else:
+        bounds = live_increment_bounds(
+            str(prior.get("end_date") or ""),
+            month_start=month_start,
+            freeze_end=freeze_end,
+        )
+        if bounds is None:
+            return {
+                "entry_id": entry_id,
+                "run_id": prior.get("run_id"),
+                "cached": True,
+                "increment": False,
+                "model": entry.get("model"),
+                "window": {"start_date": month_start, "end_date": freeze_end},
+                "segment": None,
+            }
+        segment_start, segment_end = bounds
+        prior_curve = db.get_equity_curve(prior["run_id"]) or []
+        resumed = True
+
+    strategy_impl = lb_service.get_strategy(entry)
+    bars_start = lb_service.reference_start_date(segment_start, freeze_cfg)
+    if bars_start > segment_start:
+        bars_start = segment_start
+    bars = lb_service.fetch_hourly_bars(
+        strategy_impl.required_symbols(), bars_start, segment_end
+    )
+    if not bars:
+        raise RuntimeError(
+            f"No market data returned for live increment {bars_start} → {segment_end}"
+        )
+    print(
+        f"  live increment {entry_id}: trade {segment_start} → {segment_end} "
+        f"(month {month_start} → {freeze_end}, resume={resumed})"
+    )
+
+    curve = strategy_impl.run(
+        bars,
+        segment_start,
+        segment_end,
+        initial_capital,
+        starting_snapshot=snapshot,
+    )
+    if not curve:
+        raise RuntimeError(
+            f"No equity curve produced for live increment '{entry_id}' "
+            f"{segment_start} → {segment_end}"
+        )
+
+    stitched = _stitch_equity_curves(prior_curve, curve)
+    metrics = calc_metrics(stitched, initial_capital)
+    run_id = lb_service._run_id(entry_id, month_start, freeze_end)
+
+    input_tokens = int(getattr(strategy_impl, "input_tokens", 0) or 0)
+    output_tokens = int(getattr(strategy_impl, "output_tokens", 0) or 0)
+    llm_calls = int(getattr(strategy_impl, "llm_calls", 0) or 0)
+    llm_decisions = lb_service._reported_int(strategy_impl, "llm_decisions")
+    decision_steps = int(getattr(strategy_impl, "decision_steps", 0) or 0)
+    model_id = getattr(strategy_impl, "model_id", None) or entry.get("model_id")
+    if resumed and prior:
+        input_tokens += int(prior.get("input_tokens") or 0)
+        output_tokens += int(prior.get("output_tokens") or 0)
+        llm_calls += int(prior.get("llm_calls") or 0)
+    est_cost = lb_service.token_cost.estimate_cost_usd(
+        model_id, input_tokens, output_tokens
+    )
+
+    lb_service._reject_if_llm_fallback(
+        entry_id,
+        strategy_impl,
+        int(getattr(strategy_impl, "llm_calls", 0) or 0),
+        llm_decisions=llm_decisions,
+        decision_steps=decision_steps,
+        model=entry.get("model"),
+        model_id=model_id,
+        allow_fallback=allow_fallback,
+    )
+
+    new_snapshot = getattr(strategy_impl, "last_portfolio_snapshot", None)
+    meta = lb_service._llm_run_metadata(
+        entry_id,
+        entry,
+        strategy_impl,
+        model_id=model_id,
+        initial_capital=initial_capital,
+        start_date=month_start,
+        end_date=freeze_end,
+    ) or {}
+    meta[LIVE_SNAPSHOT_KEY] = new_snapshot
+    meta["live_increment"] = {
+        "segment_start": segment_start,
+        "segment_end": segment_end,
+        "resumed_from_run_id": prior.get("run_id") if resumed else None,
+        "full_replay": not resumed,
+    }
+
+    trades = int(strategy_impl.num_trades() or 0)
+    if resumed and prior:
+        trades += int(prior.get("num_trades") or 0)
+
+    stored_decisions = llm_calls if llm_decisions is None else llm_decisions
+    if resumed and prior and llm_decisions is not None:
+        stored_decisions = int(prior.get("llm_decisions") or 0) + int(llm_decisions)
+
+    db.insert_run(
+        run_id=run_id,
+        session_id=session_id,
+        agent_name=entry["name"],
+        mode=lb_service.LEADERBOARD_MODE,
+        start_date=month_start,
+        end_date=freeze_end,
+        initial_equity=metrics["initial_equity"],
+        final_equity=metrics["final_equity"],
+        total_return=metrics["total_return"],
+        sharpe_ratio=metrics["sharpe_ratio"],
+        max_drawdown=metrics["max_drawdown"],
+        num_trades=trades,
+        llm_model=entry_id,
+        llm_calls=llm_calls,
+        llm_decisions=stored_decisions,
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        est_cost_usd=est_cost,
+        metadata=lb_service._with_market_data_provenance(
+            meta,
+            lb_service.feed_provenance(bars),
+        ),
+    )
+    db.insert_equity_points(run_id, stitched)
+
+    return {
+        "entry_id": entry_id,
+        "run_id": run_id,
+        "cached": False,
+        "increment": resumed,
+        "model": entry.get("model"),
+        "model_id": model_id,
+        "window": {"start_date": month_start, "end_date": freeze_end},
+        "segment": {"start_date": segment_start, "end_date": segment_end},
+        "total_return": metrics["total_return"],
+        "sharpe_ratio": metrics["sharpe_ratio"],
+        "max_drawdown": metrics["max_drawdown"],
+        "final_equity": metrics["final_equity"],
+        "num_trades": trades,
+        "llm_calls": llm_calls,
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "est_cost_usd": est_cost,
+    }
+
+
 def refresh_live_leaderboard(
     *,
     deploy_models: bool = False,
@@ -279,9 +554,9 @@ def refresh_live_leaderboard(
     """Persist this month's freeze-window runs into ``agent_runs``.
 
     Always refreshes cheap baselines/indices for month-open → last completed
-    session. When ``deploy_models`` is True, also runs every competition
-    ``llm_agent`` over that same freeze (real LLM API calls — operator CLI
-    only; public GET never calls this).
+    session. When ``deploy_models`` is True, each LLM entry continues from the
+    latest snapshot and only trades sessions not yet stored (typically one
+    cash day). Public GET never calls this.
     """
     freeze_cfg = live_freeze_config(as_of)
     if freeze_cfg is None:
@@ -333,14 +608,11 @@ def refresh_live_leaderboard(
         for entry in live_llm_entries(freeze_cfg):
             entry_id = entry["id"]
             try:
-                row = lb_service.deploy_model_run(
-                    entry_id,
+                row = deploy_live_model_increment(
+                    entry,
+                    freeze_cfg,
                     force_refresh=force_refresh,
-                    start_date=freeze_cfg["start_date"],
-                    end_date=freeze_cfg["end_date"],
-                    period="live",
                     allow_fallback=allow_fallback,
-                    config=freeze_cfg,
                 )
                 successes.append(row)
             except (lb_service.LeaderboardFallbackError, ValueError, RuntimeError) as exc:
@@ -351,6 +623,104 @@ def refresh_live_leaderboard(
 
     _save_live_refresh_state(result)
     return result
+
+
+def _run_live_refresh_background(
+    *,
+    deploy_models: bool,
+    force_refresh: bool,
+) -> None:
+    try:
+        refresh_live_leaderboard(
+            deploy_models=deploy_models,
+            force_refresh=force_refresh,
+        )
+    except Exception as exc:
+        print(f"⚠️ Live leaderboard background refresh failed: {exc}")
+    finally:
+        with _live_refresh_lock:
+            _set_live_refresh_running(False)
+
+
+def maybe_schedule_live_leaderboard_refresh(
+    *,
+    deploy_models: bool = True,
+    force_refresh: bool = False,
+) -> bool:
+    """Start a background live refresh if one is not already running."""
+    freeze_cfg = live_freeze_config()
+    if freeze_cfg is None:
+        raise RuntimeError(
+            "Live leaderboard has no completed cash session this month yet"
+        )
+    if not force_refresh and not deploy_models:
+        prior = _live_refresh_state()
+        if prior.get("window_key") == _live_window_key(freeze_cfg) and prior.get(
+            "baselines_refreshed"
+        ):
+            return False
+
+    with _live_refresh_lock:
+        global _live_refresh_running
+        if _live_refresh_running:
+            return False
+        _set_live_refresh_running(True)
+        thread = threading.Thread(
+            target=_run_live_refresh_background,
+            kwargs={
+                "deploy_models": deploy_models,
+                "force_refresh": force_refresh,
+            },
+            name="live-leaderboard-refresh",
+            daemon=True,
+        )
+        try:
+            thread.start()
+        except BaseException:
+            _set_live_refresh_running(False)
+            raise
+        return True
+
+
+def enqueue_live_leaderboard_refresh(
+    *,
+    deploy_models: bool = True,
+    force_refresh: bool = False,
+) -> Dict[str, Any]:
+    """Cron/API entrypoint: accept a live refresh and run it in a background thread.
+
+    Never blocks on model deploys. GET never calls this. No ``allow_fallback``.
+    """
+    freeze_cfg = live_freeze_config()
+    if freeze_cfg is None:
+        raise RuntimeError(
+            "Live leaderboard has no completed cash session this month yet"
+        )
+    started = maybe_schedule_live_leaderboard_refresh(
+        deploy_models=deploy_models,
+        force_refresh=force_refresh,
+    )
+    in_progress = started or _live_refresh_running
+    return {
+        "accepted": True,
+        "started": started,
+        "refresh_in_progress": in_progress,
+        "period": "live",
+        "window": {
+            "start_date": freeze_cfg["start_date"],
+            "end_date": freeze_cfg["end_date"],
+            "label": f"{freeze_cfg['start_date']} → {freeze_cfg['end_date']}",
+        },
+        "message": (
+            "Live leaderboard refresh started in the background."
+            if started
+            else (
+                "Live leaderboard refresh already in progress."
+                if in_progress
+                else "No new live refresh scheduled (window already satisfied)."
+            )
+        ),
+    }
 
 
 def _parse_to_et(ts: Any) -> Optional[datetime]:

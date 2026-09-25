@@ -4,7 +4,7 @@ Isolated from contest/daily: live freeze uses ``leaderboard-live`` and must
 not rewrite the contest window.
 """
 
-from datetime import datetime
+from datetime import date, datetime
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -281,6 +281,7 @@ def test_get_live_never_deploys_models(no_alpaca, monkeypatch):
         raise AssertionError("GET must not deploy models")
 
     monkeypatch.setattr(lb_service, "deploy_model_run", boom)
+    monkeypatch.setattr(live, "deploy_live_model_increment", boom)
     live.get_live_leaderboard(as_of=datetime(2026, 8, 27, 17, 39, tzinfo=_ET))
     assert calls == []
 
@@ -295,14 +296,14 @@ def test_refresh_live_leaderboard_deploys_models(monkeypatch, tmp_path):
         lambda **kwargs: {"created": 0, "cache_hit": True},
     )
 
-    def fake_deploy(entry_id, **kwargs):
-        deployed.append(entry_id)
-        assert kwargs.get("config", {}).get("session_id") == "leaderboard-live"
-        assert kwargs.get("start_date") == "2026-08-01"
-        assert kwargs.get("end_date") == "2026-08-27"
-        return {"entry_id": entry_id, "run_id": f"lb_{entry_id}", "cached": False}
+    def fake_deploy(entry, freeze_cfg, **kwargs):
+        deployed.append(entry["id"])
+        assert freeze_cfg.get("session_id") == "leaderboard-live"
+        assert freeze_cfg.get("start_date") == "2026-08-01"
+        assert freeze_cfg.get("end_date") == "2026-08-27"
+        return {"entry_id": entry["id"], "run_id": f"lb_{entry['id']}", "cached": False}
 
-    monkeypatch.setattr(lb_service, "deploy_model_run", fake_deploy)
+    monkeypatch.setattr(live, "deploy_live_model_increment", fake_deploy)
     result = live.refresh_live_leaderboard(
         deploy_models=True,
         as_of=datetime(2026, 8, 27, 17, 39, tzinfo=_ET),
@@ -324,3 +325,160 @@ def test_contest_period_still_uses_get_leaderboard(client, monkeypatch):
     resp = client.get("/api/v1/leaderboard?period=contest")
     assert resp.status_code == 200
     assert resp.json()["sentinel"] is True
+
+
+def test_live_increment_bounds_appends_next_session_only():
+    assert live.live_increment_bounds(
+        "2026-08-27", month_start="2026-08-01", freeze_end="2026-08-27"
+    ) is None
+    assert live.live_increment_bounds(
+        "2026-08-26", month_start="2026-08-01", freeze_end="2026-08-27"
+    ) == ("2026-08-27", "2026-08-27")
+    assert live.live_increment_bounds(
+        "2026-08-28", month_start="2026-08-01", freeze_end="2026-08-31"
+    ) == ("2026-08-31", "2026-08-31")
+    assert live.live_increment_bounds(
+        None, month_start="2026-08-01", freeze_end="2026-08-03"
+    ) == ("2026-08-01", "2026-08-03")
+
+
+def test_portfolio_snapshot_roundtrip_keeps_cash_and_lots():
+    from dashboard.backend.domain.backtesting.portfolio_manager import PortfolioManager
+
+    manager = PortfolioManager(initial_capital=SEED, t_plus_one_enabled=True)
+    manager.cash = 1234.5
+    manager.positions = {"AAPL": 10}
+    manager.entry_prices = {"AAPL": 100.0}
+    manager.available_positions = {"AAPL": 0}
+    manager.frozen_lots = {"AAPL": [{"quantity": 10, "buy_date": date(2026, 8, 26)}]}
+    snap = manager.snapshot_state()
+    restored = PortfolioManager(initial_capital=SEED, t_plus_one_enabled=True)
+    restored.restore_state(snap)
+    assert restored.cash == 1234.5
+    assert restored.positions == {"AAPL": 10.0}
+    assert restored.frozen_lots["AAPL"][0]["quantity"] == 10.0
+    assert restored.frozen_lots["AAPL"][0]["buy_date"] == date(2026, 8, 26)
+
+
+def test_deploy_live_increment_trades_only_the_new_session(monkeypatch):
+    freeze_cfg = live.live_freeze_config(datetime(2026, 8, 27, 17, 39, tzinfo=_ET))
+    assert freeze_cfg is not None
+    snapshot = {"cash": SEED * 0.2, "positions": {"AAPL": 3}, "entry_prices": {"AAPL": 50}}
+    db.insert_run(
+        run_id="lb_gpt_5_5_20260801_20260826",
+        session_id="leaderboard-live",
+        agent_name="GPT-5.5",
+        mode="leaderboard",
+        start_date="2026-08-01",
+        end_date="2026-08-26",
+        initial_equity=SEED,
+        final_equity=SEED * 1.01,
+        total_return=0.01,
+        sharpe_ratio=0.5,
+        max_drawdown=-0.01,
+        num_trades=2,
+        llm_model="gpt_5_5",
+        llm_calls=70,
+        llm_decisions=70,
+        input_tokens=1000,
+        output_tokens=200,
+        metadata={live.LIVE_SNAPSHOT_KEY: snapshot},
+    )
+    db.insert_equity_points(
+        "lb_gpt_5_5_20260801_20260826",
+        [
+            {
+                "timestamp": "2026-08-03T14:00:00+00:00",
+                "equity": SEED,
+                "cash": SEED,
+                "positions_value": 0,
+            },
+            {
+                "timestamp": "2026-08-26T20:00:00+00:00",
+                "equity": SEED * 1.01,
+                "cash": snapshot["cash"],
+                "positions_value": SEED * 1.01 - snapshot["cash"],
+            },
+        ],
+    )
+
+    class FakeAgent:
+        def __init__(self):
+            self.windows = []
+            self.input_tokens = 11
+            self.output_tokens = 3
+            self.llm_calls = 7
+            self.llm_decisions = 7
+            self.decision_steps = 7
+            self.used_llm = True
+            self.model_id = "openai/gpt-5.5"
+            self.last_portfolio_snapshot = {
+                "cash": 500.0,
+                "positions": {"AAPL": 4},
+            }
+
+        def required_symbols(self):
+            return ["AAPL"]
+
+        def run(self, bars, start, end, capital, starting_snapshot=None):
+            self.windows.append((start, end, starting_snapshot))
+            return [
+                {
+                    "timestamp": "2026-08-27T14:00:00+00:00",
+                    "equity": SEED * 1.02,
+                    "cash": 500.0,
+                    "positions_value": SEED * 1.02 - 500.0,
+                }
+            ]
+
+        def num_trades(self):
+            return 1
+
+    fake = FakeAgent()
+    monkeypatch.setattr(lb_service, "get_strategy", lambda entry: fake)
+    monkeypatch.setattr(
+        lb_service,
+        "fetch_hourly_bars",
+        lambda symbols, start, end: {"AAPL": type("Frame", (), {"attrs": {}})()},
+    )
+
+    entry = next(e for e in live.live_llm_entries(freeze_cfg) if e["id"] == "gpt_5_5")
+    row = live.deploy_live_model_increment(entry, freeze_cfg)
+    assert fake.windows == [("2026-08-27", "2026-08-27", snapshot)]
+    assert row["increment"] is True
+    assert row["segment"] == {"start_date": "2026-08-27", "end_date": "2026-08-27"}
+    assert row["window"] == {"start_date": "2026-08-01", "end_date": "2026-08-27"}
+    curve = db.get_equity_curve(row["run_id"])
+    assert len(curve) == 3
+    assert curve[-1]["equity"] == pytest.approx(SEED * 1.02)
+    stored = db.get_run(row["run_id"])
+    assert stored["end_date"] == "2026-08-27"
+    assert stored["llm_calls"] == 77
+    meta = stored["metadata"]
+    assert meta[live.LIVE_SNAPSHOT_KEY]["positions"]["AAPL"] == 4
+
+
+def test_live_refresh_endpoint_requires_secret(client, monkeypatch):
+    monkeypatch.setenv("LEADERBOARD_DAILY_REFRESH_SECRET", "cron-secret")
+    resp = client.post("/api/v1/leaderboard/live/refresh")
+    assert resp.status_code == 401
+
+    monkeypatch.setattr(
+        "dashboard.backend.api.routers.leaderboard.enqueue_live_leaderboard_refresh",
+        lambda **_: {
+            "accepted": True,
+            "started": True,
+            "refresh_in_progress": True,
+            "period": "live",
+            "window": {"start_date": "2026-08-01", "end_date": "2026-08-27", "label": "2026-08-01 → 2026-08-27"},
+            "message": "Live leaderboard refresh started in the background.",
+        },
+    )
+    ok = client.post(
+        "/api/v1/leaderboard/live/refresh?deploy_models=true",
+        headers={"X-Leaderboard-Refresh-Secret": "cron-secret"},
+    )
+    assert ok.status_code == 202
+    body = ok.json()
+    assert body["accepted"] is True
+    assert body["period"] == "live"

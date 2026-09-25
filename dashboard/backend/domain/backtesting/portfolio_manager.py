@@ -24,9 +24,9 @@ This module is domain-level orchestration: it must NOT import dashboard scripts,
 
 import json
 import math
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from types import MappingProxyType
-from typing import Dict, List, Mapping, Optional
+from typing import Any, Dict, List, Mapping, Optional
 
 import pandas as pd
 
@@ -138,6 +138,81 @@ class PortfolioManager:
         symbols = allowed_symbols if allowed_symbols is not None else DJIA_30
         self.allowed_symbols = [str(s).strip().upper() for s in symbols if s]
         self._allowed_set = set(self.allowed_symbols)
+
+    def snapshot_state(self) -> Dict[str, Any]:
+        """JSON-safe book for resuming a later session (Live daily increment)."""
+
+        def _lot(lot: Dict) -> Dict[str, Any]:
+            buy = lot.get("buy_date")
+            if hasattr(buy, "isoformat"):
+                buy = buy.isoformat()
+            return {
+                "quantity": float(lot.get("quantity") or 0),
+                "buy_date": str(buy) if buy is not None else None,
+            }
+
+        return {
+            "cash": float(self.cash),
+            "positions": {
+                str(symbol): float(shares)
+                for symbol, shares in (self.positions or {}).items()
+                if shares
+            },
+            "entry_prices": {
+                str(symbol): float(price)
+                for symbol, price in (self.entry_prices or {}).items()
+            },
+            "available_positions": {
+                str(symbol): float(shares)
+                for symbol, shares in (self.available_positions or {}).items()
+            },
+            "frozen_lots": {
+                str(symbol): [_lot(lot) for lot in (lots or [])]
+                for symbol, lots in (self.frozen_lots or {}).items()
+            },
+            "t_plus_one_enabled": bool(self.t_plus_one_enabled),
+        }
+
+    def restore_state(self, snapshot: Optional[Dict[str, Any]]) -> None:
+        """Load cash/positions/T+1 lots from ``snapshot_state`` (no-op if empty)."""
+        if not snapshot:
+            return
+        self.cash = float(snapshot.get("cash", self.cash))
+        self.positions = {
+            str(symbol): float(shares)
+            for symbol, shares in (snapshot.get("positions") or {}).items()
+        }
+        self.entry_prices = {
+            str(symbol): float(price)
+            for symbol, price in (snapshot.get("entry_prices") or {}).items()
+        }
+        available = snapshot.get("available_positions")
+        if available is None:
+            self.available_positions = dict(self.positions)
+        else:
+            self.available_positions = {
+                str(symbol): float(shares) for symbol, shares in available.items()
+            }
+        lots_out: Dict[str, List[Dict[str, Any]]] = {}
+        for symbol, lots in (snapshot.get("frozen_lots") or {}).items():
+            restored: List[Dict[str, Any]] = []
+            for lot in lots or []:
+                buy = lot.get("buy_date")
+                if isinstance(buy, str) and buy:
+                    try:
+                        buy = date.fromisoformat(buy[:10])
+                    except ValueError:
+                        pass
+                restored.append(
+                    {
+                        "quantity": float(lot.get("quantity") or 0),
+                        "buy_date": buy,
+                    }
+                )
+            if restored:
+                lots_out[str(symbol)] = restored
+        self.frozen_lots = lots_out
+
     @property
     def sellable_positions(self) -> Optional[Mapping]:
         """The T+1 sellable balance, or ``None`` when settlement is immediate.

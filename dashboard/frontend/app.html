@@ -13,7 +13,7 @@
          because every API call is a CORS request. -->
     <link rel="preconnect" href="https://agentictrading.onrender.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="styles.css?v=147">
+    <link rel="stylesheet" href="styles.css?v=149">
     <!-- defer: ~200KB that was render-blocking. Deferred scripts execute in
          document order (this one first, the body-end ones after), all before
          DOMContentLoaded, so Chart is defined before any chart renders. -->
@@ -554,7 +554,8 @@
                                 <a class="home-btn home-btn-secondary home-landing-cta" href="https://discord.gg/9HnQ6XDG98" target="_blank" rel="noopener noreferrer">Join our Discord community</a>
                             </div>
                         </div>
-                        <div class="home-landing-board">
+                        <div class="home-landing-board" id="homeLandingBoard" data-home-board-slide="rank">
+                            <div class="home-board-stage">
                             <article class="home-module home-module--ranking" id="homeModuleRanking">
                                 <header class="home-module-head">
                                     <h3 class="home-module-title">
@@ -595,21 +596,26 @@
                                     Season 0 preview and has not moved forward yet.
                                 </p>
                                 <button class="hm-footer-btn" id="homeModuleRankingBtn" type="button">See both leaderboards</button>
-
-                                <div id="homeDemoRunPanel" class="home-demo-run" hidden>
-                                    <p class="home-demo-run-kicker" id="homeDemoRunKicker">Hourly paper backtest</p>
-                                    <div class="home-demo-run-stats">
-                                        <div>Equity <strong id="homeDemoRunEquity">$10,000.00</strong></div>
-                                        <div>Return <strong id="homeDemoRunReturn">0.00%</strong></div>
-                                        <div>Clock <strong id="homeDemoRunClock">—</strong></div>
-                                    </div>
-                                    <div class="home-demo-run-chart-wrap">
-                                        <canvas id="homeDemoRunChart" aria-label="Stored GPT-5.5 equity curve replay"></canvas>
-                                    </div>
-                                    <ol class="home-demo-run-log" id="homeDemoRunLog" aria-live="polite"></ol>
-                                    <p class="home-demo-run-caption">Stored GPT-5.5 freeze snapshot · Aug 2026 · replay only, no live API calls</p>
-                                </div>
                             </article>
+                            <article id="homeDemoRunPanel" class="home-module home-demo-run" aria-hidden="true">
+                                <header class="home-module-head">
+                                    <h3 class="home-module-title">Stored model replay</h3>
+                                </header>
+                                <p class="home-demo-run-kicker" id="homeDemoRunKicker">Hourly paper backtest</p>
+                                <div class="home-demo-run-stats">
+                                    <div>Equity <strong id="homeDemoRunEquity">$10,000.00</strong></div>
+                                    <div>Return <strong id="homeDemoRunReturn">0.00%</strong></div>
+                                    <div>Clock <strong id="homeDemoRunClock">—</strong></div>
+                                </div>
+                                <div class="home-demo-run-chart-wrap">
+                                    <canvas id="homeDemoRunChart" aria-label="Stored GPT-5.5 equity curve replay"></canvas>
+                                </div>
+                                <ol class="home-demo-run-log" id="homeDemoRunLog" aria-live="polite"></ol>
+                                <p class="home-demo-run-caption">Stored GPT-5.5 freeze snapshot · Aug 2026 · replay only, no live API calls</p>
+                            </article>
+                            </div>
+                            <button class="home-board-nav home-board-nav--prev" id="homeBoardPrev" type="button" aria-label="Show competition leaderboard" disabled>‹</button>
+                            <button class="home-board-nav home-board-nav--next" id="homeBoardNext" type="button" aria-label="Show stored model replay">›</button>
                         </div>
                     </div>
 
@@ -2531,7 +2537,7 @@
     <script src="js/admin-tabs.js?v=12" defer></script>
     <script src="js/leaderboard.js?v=33" defer></script>
     <script src="js/live-leaderboard.js?v=1" defer></script>
-    <script src="home-page.js?v=51" defer></script>
+    <script src="home-page.js?v=53" defer></script>
     <!-- Load order: must come after app.js (API/API_BASE/escapeHtml) and
          market-events/marketEventRelativeTime.js (formatMarketEventRelativeTime),
          both loaded above — not beside the market-events/* block, which loads

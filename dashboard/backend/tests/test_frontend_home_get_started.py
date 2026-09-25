@@ -29,9 +29,17 @@ def test_get_started_plays_stored_curve_not_my_agents():
     assert "navigateToPage('playground'" not in source
 
 
-def test_home_demo_panel_and_fixture_exist():
+def test_home_demo_covers_ranking_with_arrows():
     assert 'id="homeDemoRunPanel"' in _APP_HTML
     assert 'id="homeDemoRunChart"' in _APP_HTML
+    assert 'id="homeBoardPrev"' in _APP_HTML
+    assert 'id="homeBoardNext"' in _APP_HTML
+    assert 'data-home-board-slide="rank"' in _APP_HTML
+    assert "HOME_DEMO_RETURN_MS = 3000" in _HOME_JS
+    assert "setHomeBoardSlide('demo'" in _HOME_JS
+    assert "scheduleHomeDemoAutoReturn" in _HOME_JS
+    assert "homeModuleRanking.hidden" not in _HOME_JS
+    assert "board.hidden = true" not in _HOME_JS
     assert _DEMO_JSON.is_file()
     payload = json.loads(_DEMO_JSON.read_text(encoding="utf-8"))
     assert payload["model"] == "GPT-5.5"

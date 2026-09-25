@@ -3,19 +3,23 @@
 
 1. Recomputes cheap baselines (indices + rule-based strategies) for
    month-open → last completed US cash session under ``leaderboard-live``.
-2. Optionally deploys every competition ``llm_agent`` over that same freeze
-   (real API calls — this is how model curves appear on GET ?period=live).
-
-Public GET never runs this. After each close, re-run with --models to append
-a new snapshot row (start stays month-open; end_date is that freeze). The
-board keeps serving the latest snapshot that does not extend past freeze.
+2. Optionally appends each Live LLM roster entry for sessions not yet stored
+   (usually one cash day), restoring cash/positions from yesterday's snapshot.
+   Public GET never runs this.
 
     python dashboard/scripts/refresh_live_leaderboard.py --models
+
+Remote prod (Render) without shell access — enqueues a background refresh
+(HTTP 202); poll ``GET /api/v1/leaderboard?period=live``:
+
+    curl -X POST "$ATL_API/api/v1/leaderboard/live/refresh?deploy_models=true" \\
+      -H "X-Leaderboard-Refresh-Secret: $LEADERBOARD_DAILY_REFRESH_SECRET"
 """
 
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from pathlib import Path
 
@@ -45,7 +49,7 @@ def main() -> int:
     parser.add_argument(
         "--models",
         action="store_true",
-        help="Also deploy the Live LLM roster (GPT / DeepSeek / Nemotron) for the freeze window",
+        help="Append the Live LLM roster (GPT / DeepSeek / Nemotron) for new cash sessions",
     )
     parser.add_argument(
         "--allow-fallback",
@@ -60,9 +64,21 @@ def main() -> int:
     parser.add_argument(
         "--force",
         action="store_true",
-        help="Ignore the per-freeze refresh cache and recompute even if cached",
+        help="Replay the whole month from the 1st (ignores the daily snapshot)",
+    )
+    parser.add_argument(
+        "--remote",
+        action="store_true",
+        help="POST to ATL_API instead of running locally (uses LEADERBOARD_DAILY_REFRESH_SECRET)",
     )
     args = parser.parse_args()
+
+    if args.remote:
+        return _refresh_remote(
+            deploy_models=args.models,
+            force=args.force,
+            allow_fallback=args.allow_fallback,
+        )
 
     freeze = live_freeze_config()
     if freeze is None:
@@ -104,7 +120,7 @@ def main() -> int:
     )
 
     if not args.models:
-        print("Done (baselines only). Pass --models to deploy LLM freeze snapshots.")
+        print("Done (baselines only). Pass --models to append LLM freeze snapshots.")
         print("View: GET /api/v1/leaderboard?period=live")
         return 0
 
@@ -112,13 +128,60 @@ def main() -> int:
     for row in result.get("model_results") or []:
         ret = row.get("total_return")
         ret_s = f"{ret * 100:+.2f}%" if ret is not None else "—"
-        print(f"  ok  {row.get('entry_id')}  run={row.get('run_id')}  return={ret_s}")
+        seg = row.get("segment") or {}
+        extra = ""
+        if seg:
+            extra = f"  segment={seg.get('start_date')}→{seg.get('end_date')}"
+        print(
+            f"  ok  {row.get('entry_id')}  run={row.get('run_id')}  "
+            f"return={ret_s}{extra}"
+        )
     for fail in failures:
         print(f"  FAIL {fail.get('entry_id')}: {fail.get('error')}", file=sys.stderr)
 
     print(f"\nDone. Failures: {len(failures)}")
     print("View: GET /api/v1/leaderboard?period=live")
     return 1 if failures else 0
+
+
+def _refresh_remote(*, deploy_models: bool, force: bool, allow_fallback: bool) -> int:
+    import httpx
+
+    secret = (os.getenv("LEADERBOARD_DAILY_REFRESH_SECRET") or "").strip()
+    if not secret:
+        print("ERROR: LEADERBOARD_DAILY_REFRESH_SECRET is not set", file=sys.stderr)
+        return 1
+    if allow_fallback:
+        print(
+            "ERROR: --allow-fallback cannot be combined with --remote; run the "
+            "refresh locally against the target database instead.",
+            file=sys.stderr,
+        )
+        return 1
+    base = (os.getenv("ATL_API") or os.getenv("ATL_API_BASE") or "http://localhost:8000").rstrip("/")
+    params = {
+        "deploy_models": str(deploy_models).lower(),
+        "force": str(force).lower(),
+    }
+    url = f"{base}/api/v1/leaderboard/live/refresh"
+    print(f"POST {url}")
+    try:
+        resp = httpx.post(
+            url,
+            params=params,
+            headers={"X-Leaderboard-Refresh-Secret": secret},
+            timeout=120.0,
+        )
+    except httpx.HTTPError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 1
+    if resp.status_code >= 400:
+        print(f"ERROR {resp.status_code}: {resp.text}", file=sys.stderr)
+        return 1
+    print(resp.text)
+    if resp.status_code == 202:
+        print("Accepted (background). Poll GET /api/v1/leaderboard?period=live")
+    return 0
 
 
 if __name__ == "__main__":
