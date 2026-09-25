@@ -254,6 +254,13 @@ def _no_background_daily_refresh(request, monkeypatch, tmp_path):
         "_DAILY_REFRESH_STATE_PATH",
         tmp_path / "leaderboard_daily_refresh.json",
     )
+    from dashboard.backend.domain.leaderboard import live as live_lb
+
+    monkeypatch.setattr(
+        live_lb,
+        "_LIVE_REFRESH_STATE_PATH",
+        tmp_path / "leaderboard_live_refresh.json",
+    )
     if request.node.get_closest_marker("daily_refresh_background"):
         return
     monkeypatch.setattr(

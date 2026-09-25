@@ -112,11 +112,12 @@ def test_the_config_declares_the_season_rather_than_the_code():
     assert cfg["season"]["season_zero_start"] == "2026-08-12"
 
 
-def test_only_the_live_board_carries_a_season():
-    """The Competition board is one fixed historical window and is not a season;
-    attaching one would make the season strip render on a board that has none."""
+def test_only_the_live_board_carries_live_status():
+    """Calendar-month Live GET is isolated from the contest season chrome."""
     assert "season" not in service.get_leaderboard(period="contest")
-    assert "season" in service.get_leaderboard(period="live")
+    live = service.get_leaderboard(period="live")
+    assert "live_status" in live
+    assert "season" not in live
 
 
 # ── The window is a claim, and a claim that nothing maintains goes stale ─────

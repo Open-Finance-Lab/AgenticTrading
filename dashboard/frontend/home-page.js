@@ -620,18 +620,184 @@ function syncHomeGetStartedLabel() {
 function initHomeGetStarted() {
     syncHomeGetStartedLabel();
     document.getElementById('homeGetStartedBtn')?.addEventListener('click', () => {
-        if (!isHomeSignedIn()) {
-            if (typeof openAuthModal === 'function') {
-                openAuthModal('signup');
-                return;
-            }
-        }
-        if (typeof navigateToPage === 'function') {
-            navigateToPage('playground', { playgroundTab: 'agents' });
-            return;
-        }
-        document.getElementById('homeLiveSection')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        startHomeDemoRun();
     });
+}
+
+let homeDemoChart = null;
+let homeDemoTimer = 0;
+let homeDemoPayload = null;
+
+function homeDemoMoney(n) {
+    const v = Number(n);
+    if (!Number.isFinite(v)) return '$0.00';
+    return `$${v.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+}
+
+function homeDemoPct(n) {
+    const v = Number(n);
+    if (!Number.isFinite(v)) return '0.00%';
+    const sign = v > 0 ? '+' : '';
+    return `${sign}${(v * 100).toFixed(2)}%`;
+}
+
+function homeDemoClock(iso) {
+    try {
+        const d = new Date(iso);
+        return d.toLocaleString('en-US', {
+            timeZone: 'America/New_York',
+            month: 'short',
+            day: 'numeric',
+            hour: 'numeric',
+            minute: '2-digit',
+        });
+    } catch (e) {
+        return String(iso || '—');
+    }
+}
+
+function stopHomeDemoRun() {
+    if (homeDemoTimer) {
+        window.clearTimeout(homeDemoTimer);
+        homeDemoTimer = 0;
+    }
+}
+
+function appendHomeDemoLog(text) {
+    const log = document.getElementById('homeDemoRunLog');
+    if (!log) return;
+    const li = document.createElement('li');
+    li.textContent = text;
+    log.appendChild(li);
+    log.scrollTop = log.scrollHeight;
+}
+
+function ensureHomeDemoChart(labels, values) {
+    const canvas = document.getElementById('homeDemoRunChart');
+    if (!canvas || typeof Chart === 'undefined') return null;
+    if (homeDemoChart) {
+        homeDemoChart.destroy();
+        homeDemoChart = null;
+    }
+    homeDemoChart = new Chart(canvas.getContext('2d'), {
+        type: 'line',
+        data: {
+            labels,
+            datasets: [{
+                data: values,
+                borderColor: '#22d3ee',
+                backgroundColor: 'rgba(34, 211, 238, 0.12)',
+                fill: true,
+                tension: 0.25,
+                pointRadius: 0,
+                borderWidth: 2,
+            }],
+        },
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            animation: false,
+            plugins: { legend: { display: false }, tooltip: { enabled: true } },
+            scales: {
+                x: { display: false },
+                y: {
+                    ticks: { color: 'rgba(148,163,184,0.8)', font: { size: 10 } },
+                    grid: { color: 'rgba(148,163,184,0.12)' },
+                },
+            },
+        },
+    });
+    return homeDemoChart;
+}
+
+function paintHomeDemoStep(points, idx, initial) {
+    const pt = points[idx];
+    if (!pt) return;
+    const equity = Number(pt.equity);
+    const ret = initial ? (equity / initial) - 1 : 0;
+    const eqEl = document.getElementById('homeDemoRunEquity');
+    const retEl = document.getElementById('homeDemoRunReturn');
+    const clockEl = document.getElementById('homeDemoRunClock');
+    if (eqEl) eqEl.textContent = homeDemoMoney(equity);
+    if (retEl) {
+        retEl.textContent = homeDemoPct(ret);
+        retEl.classList.toggle('positive', ret > 0);
+        retEl.classList.toggle('negative', ret < 0);
+    }
+    if (clockEl) clockEl.textContent = homeDemoClock(pt.t);
+    if (homeDemoChart) {
+        homeDemoChart.data.labels = points.slice(0, idx + 1).map((p) => homeDemoClock(p.t));
+        homeDemoChart.data.datasets[0].data = points.slice(0, idx + 1).map((p) => Number(p.equity));
+        homeDemoChart.update('none');
+    }
+    const prev = idx > 0 ? Number(points[idx - 1].equity) : equity;
+    const delta = equity - prev;
+    if (idx === 0) {
+        appendHomeDemoLog(`${homeDemoClock(pt.t)} · start ${homeDemoMoney(equity)}`);
+    } else if (Math.abs(delta) >= 8) {
+        const dir = delta >= 0 ? 'up' : 'down';
+        appendHomeDemoLog(`${homeDemoClock(pt.t)} · ${dir} ${homeDemoMoney(delta)} → ${homeDemoMoney(equity)}`);
+    }
+}
+
+function playHomeDemoRun(payload) {
+    const points = payload.points || [];
+    const initial = Number(payload.initial_equity) || 10000;
+    const board = document.getElementById('homeModuleRanking');
+    const panel = document.getElementById('homeDemoRunPanel');
+    const kicker = document.getElementById('homeDemoRunKicker');
+    const log = document.getElementById('homeDemoRunLog');
+    if (board) board.hidden = true;
+    if (panel) panel.hidden = false;
+    if (kicker) {
+        const start = payload.window && payload.window.start;
+        const end = payload.window && payload.window.end;
+        kicker.textContent = start && end
+            ? `${payload.model} · ${start} → ${end}`
+            : 'Hourly paper backtest';
+    }
+    if (log) log.innerHTML = '';
+    stopHomeDemoRun();
+    ensureHomeDemoChart([], []);
+    if (!points.length) return;
+
+    const reduced = homePrefersReducedMotion();
+    if (reduced) {
+        paintHomeDemoStep(points, points.length - 1, initial);
+        appendHomeDemoLog(`Done · ${homeDemoPct(payload.total_return)} · no live model calls`);
+        return;
+    }
+
+    let i = 0;
+    const tick = () => {
+        paintHomeDemoStep(points, i, initial);
+        i += 1;
+        if (i < points.length) {
+            homeDemoTimer = window.setTimeout(tick, 95);
+        } else {
+            appendHomeDemoLog(`Done · ${homeDemoPct(payload.total_return)} · stored snapshot replay`);
+        }
+    };
+    tick();
+}
+
+async function startHomeDemoRun() {
+    const panel = document.getElementById('homeDemoRunPanel');
+    if (!panel) return;
+    try {
+        if (!homeDemoPayload) {
+            const res = await fetch('/data/home-demo-run.json', { cache: 'no-store' });
+            if (!res.ok) throw new Error(`demo run ${res.status}`);
+            homeDemoPayload = await res.json();
+        }
+        playHomeDemoRun(homeDemoPayload);
+    } catch (error) {
+        console.warn('Home demo run failed:', error && error.message);
+        appendHomeDemoLog('Could not load the stored model curve.');
+        const board = document.getElementById('homeModuleRanking');
+        if (board) board.hidden = true;
+        panel.hidden = false;
+    }
 }
 
 function measureAppChromeHeight() {
@@ -2277,6 +2443,7 @@ function onHomePageShow() {
 
 function onHomePageHide() {
     homeMockLive?.stop();
+    stopHomeDemoRun();
     hideLiveToast();
     window.newsSignalsPanel && window.newsSignalsPanel.onHide();
 }

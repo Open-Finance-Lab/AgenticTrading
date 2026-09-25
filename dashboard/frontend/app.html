@@ -13,7 +13,7 @@
          because every API call is a CORS request. -->
     <link rel="preconnect" href="https://agentictrading.onrender.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="styles.css?v=146">
+    <link rel="stylesheet" href="styles.css?v=147">
     <!-- defer: ~200KB that was render-blocking. Deferred scripts execute in
          document order (this one first, the body-end ones after), all before
          DOMContentLoaded, so Chart is defined before any chart renders. -->
@@ -161,7 +161,7 @@
     html[data-nav-boot][data-nav-page="competition"][data-nav-competition-tab="leaderboard"] .competition-subtabs [data-competition-tab="leaderboard"],
     html[data-nav-boot][data-nav-page="competition"][data-nav-competition-tab="participants"] .competition-subtabs [data-competition-tab="participants"],
     html[data-nav-boot][data-nav-page="competition"][data-nav-competition-tab="about"] .competition-subtabs [data-competition-tab="about"] { background: var(--info-color); color: white; }
-    html[data-nav-boot][data-nav-page="competition"][data-nav-competition-tab="live"] #leaderboardView,
+    html[data-nav-boot][data-nav-page="competition"][data-nav-competition-tab="live"] #liveLeaderboardView { display: flex !important; }
     html[data-nav-boot][data-nav-page="competition"][data-nav-competition-tab="leaderboard"] #leaderboardView { display: flex !important; }
     html[data-nav-boot][data-nav-page="competition"][data-nav-competition-tab="participants"] #competitionParticipantsPanel { display: block !important; }
     html[data-nav-boot][data-nav-page="competition"][data-nav-competition-tab="about"] #competitionAboutPanel { display: block !important; }
@@ -550,7 +550,7 @@
                                      initHomeGetStarted() in home-page.js. Offering
                                      "Create a free account" to someone who is signed in
                                      was the original complaint. -->
-                                <button id="homeGetStartedBtn" class="home-btn home-btn-primary home-landing-cta" type="button" data-label-signed-out="Create a free account" data-label-signed-in="Test a trading idea">Create a free account</button>
+                                <button id="homeGetStartedBtn" class="home-btn home-btn-primary home-landing-cta" type="button" data-label-signed-out="Get Started" data-label-signed-in="Get Started">Get Started</button>
                                 <a class="home-btn home-btn-secondary home-landing-cta" href="https://discord.gg/9HnQ6XDG98" target="_blank" rel="noopener noreferrer">Join our Discord community</a>
                             </div>
                         </div>
@@ -595,6 +595,20 @@
                                     Season 0 preview and has not moved forward yet.
                                 </p>
                                 <button class="hm-footer-btn" id="homeModuleRankingBtn" type="button">See both leaderboards</button>
+
+                                <div id="homeDemoRunPanel" class="home-demo-run" hidden>
+                                    <p class="home-demo-run-kicker" id="homeDemoRunKicker">Hourly paper backtest</p>
+                                    <div class="home-demo-run-stats">
+                                        <div>Equity <strong id="homeDemoRunEquity">$10,000.00</strong></div>
+                                        <div>Return <strong id="homeDemoRunReturn">0.00%</strong></div>
+                                        <div>Clock <strong id="homeDemoRunClock">—</strong></div>
+                                    </div>
+                                    <div class="home-demo-run-chart-wrap">
+                                        <canvas id="homeDemoRunChart" aria-label="Stored GPT-5.5 equity curve replay"></canvas>
+                                    </div>
+                                    <ol class="home-demo-run-log" id="homeDemoRunLog" aria-live="polite"></ol>
+                                    <p class="home-demo-run-caption">Stored GPT-5.5 freeze snapshot · Aug 2026 · replay only, no live API calls</p>
+                                </div>
                             </article>
                         </div>
                     </div>
@@ -1598,6 +1612,121 @@
         </div>
     </div>
 
+    <!-- Live Trading Leaderboard (calendar month — isolated from contest/daily) -->
+    <div id="liveLeaderboardView" class="leaderboard-view competition-panel live-leaderboard-panel" style="display: none;">
+        <div class="leaderboard-container compact">
+            <div class="leaderboard-contest-header">
+                <div class="contest-identity">
+                    <div class="contest-title-row">
+                        <h2 class="contest-title" id="liveBoardTitle">Live Trading Leaderboard</h2>
+                        <span id="liveStatusBadge" class="status-badge upcoming contest-live-badge">Cash session closed</span>
+                    </div>
+                    <p class="contest-subtitle" id="liveBoardSubtitle">Paper trading · hourly US cash session</p>
+                    <p class="contest-subtitle">Same model roster as Competition. One continuous month, not a daily $10k reset.</p>
+                </div>
+            </div>
+            <p id="livePhaseBanner" class="live-phase-banner"></p>
+            <div class="live-season-bar" aria-label="Live month status">
+                <div class="stat-item compact">
+                    <span class="stat-label">Season</span>
+                    <span class="stat-value" id="livePhaseLabel">Season 0</span>
+                </div>
+                <div class="stat-item compact">
+                    <span class="stat-label">Window</span>
+                    <span class="stat-value" id="liveWindowLabel">—</span>
+                </div>
+                <div class="stat-item compact">
+                    <span class="stat-label">Last Updated</span>
+                    <span class="stat-value" id="liveUpdatedLabel">—</span>
+                </div>
+                <div class="stat-item compact">
+                    <span class="stat-label">Leader</span>
+                    <span class="stat-value" id="liveLeaderLabel">—</span>
+                </div>
+                <div class="stat-item compact">
+                    <span class="stat-label">Progress</span>
+                    <span class="stat-value" id="liveProgressLabel">—</span>
+                </div>
+            </div>
+            <div class="leaderboard-header-bar compact">
+                <div class="header-stats compact">
+                    <p id="liveZoneCaption" class="live-zone-caption">Frozen · live tail · future</p>
+                </div>
+                <div class="header-controls compact">
+                    <div class="curve-picker" id="liveCurvePicker">
+                        <button type="button" class="curve-picker-trigger" id="liveCurvePickerTrigger" aria-expanded="false" aria-haspopup="true">
+                            <span class="curve-picker-trigger-label">Show on Chart</span>
+                            <span class="curve-picker-sep" aria-hidden="true">·</span>
+                            <span class="curve-picker-count" id="liveCurvePickerCount">0 selected</span>
+                            <span class="curve-picker-caret" aria-hidden="true">▾</span>
+                        </button>
+                        <div class="curve-picker-menu" id="liveCurvePickerMenu" hidden role="dialog" aria-label="Chart curves">
+                            <div class="curve-picker-menu-head">
+                                <button type="button" class="curve-picker-clear" id="liveCurvePickerClear">Clear</button>
+                            </div>
+                            <div class="curve-picker-body" id="liveCurvePickerBody"></div>
+                        </div>
+                    </div>
+                    <div class="view-toggle compact">
+                        <button class="live-view-toggle-btn compact" data-view="cumulative" type="button">%</button>
+                        <button class="live-view-toggle-btn compact active" data-view="absolute" type="button">$</button>
+                    </div>
+                </div>
+            </div>
+            <div class="leaderboard-main compact full-width">
+                <section class="chart-section full-width">
+                    <div class="chart-container medium">
+                        <canvas id="liveEquityCurvesChart"></canvas>
+                    </div>
+                    <div id="liveEquityCurvesLegend" class="chart-legend-custom"></div>
+                    <div class="chart-hint">Hourly nodes · US cash session 10:00–16:00 ET · future days stay empty</div>
+                </section>
+            </div>
+            <div class="leaderboard-bottom compact">
+                <section class="leaderboard-table-section compact">
+                    <div class="table-header compact">
+                        <h3 id="liveStandingsTitle">Ranking</h3>
+                    </div>
+                    <div class="table-wrapper compact">
+                        <table class="live-board-table compact">
+                            <thead>
+                                <tr>
+                                    <th class="rank-col sortable" data-sort="rank" aria-sort="ascending">Rank <span class="sort-arrow" aria-hidden="true"></span></th>
+                                    <th class="name-col">Entry</th>
+                                    <th class="portfolio-col sortable" data-sort="value">Value <span class="sort-arrow" aria-hidden="true"></span></th>
+                                    <th class="return-col sortable" data-sort="return">Return <span class="sort-arrow" aria-hidden="true"></span></th>
+                                    <th class="sharpe-col sortable" data-sort="sharpe">Sharpe <span class="sort-arrow" aria-hidden="true"></span></th>
+                                    <th class="dd-col sortable" data-sort="dd">Max DD <span class="sort-arrow" aria-hidden="true"></span></th>
+                                </tr>
+                            </thead>
+                            <tbody id="liveLeaderboardTableBody"></tbody>
+                        </table>
+                    </div>
+                </section>
+                <aside class="leaderboard-table-sidebar compact">
+                    <div class="sidebar-card compact">
+                        <h3 class="sidebar-title compact">Rules</h3>
+                        <div class="ranking-formula compact">
+                            <p class="formula-compact">Official rank = latest printed portfolio value</p>
+                            <ul class="formula-items compact">
+                                <li>Month is one continuous book from the 1st</li>
+                                <li>Frozen hours never rewrite</li>
+                                <li>Today appends after the open, hourly</li>
+                                <li>Ties break on cumulative return</li>
+                            </ul>
+                        </div>
+                    </div>
+                    <div class="sidebar-card compact">
+                        <h3 class="sidebar-title compact">Entry Details</h3>
+                        <div id="liveSelectedDetail" class="team-detail compact">
+                            <div class="no-selection">Click a row</div>
+                        </div>
+                    </div>
+                </aside>
+            </div>
+        </div>
+    </div>
+
     <!-- Leaderboard View (Competition / Leaderboard) -->
     <div id="leaderboardView" class="leaderboard-view competition-panel competition-leaderboard-panel" style="display: none;">
         <div class="leaderboard-container compact">
@@ -2393,7 +2522,7 @@
     <script src="market-events/MarketEventFeed.js" defer></script>
     <script src="js/portfolio.js?v=18" defer></script>
     <script src="js/backtest-comparison.js?v=1" defer></script>
-    <script src="app.js?v=141" defer></script>
+    <script src="app.js?v=142" defer></script>
     <script src="js/analytics.js?v=1" defer></script>
     <script src="js/agent-editor.js?v=31" defer></script>
     <script src="js/credit-format.js?v=1" defer></script>
@@ -2401,7 +2530,8 @@
     <script src="js/admin-credits.js?v=8" defer></script>
     <script src="js/admin-tabs.js?v=12" defer></script>
     <script src="js/leaderboard.js?v=33" defer></script>
-    <script src="home-page.js?v=50" defer></script>
+    <script src="js/live-leaderboard.js?v=1" defer></script>
+    <script src="home-page.js?v=51" defer></script>
     <!-- Load order: must come after app.js (API/API_BASE/escapeHtml) and
          market-events/marketEventRelativeTime.js (formatMarketEventRelativeTime),
          both loaded above — not beside the market-events/* block, which loads

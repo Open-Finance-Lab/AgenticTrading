@@ -58,9 +58,9 @@ def main() -> int:
     parser.add_argument("--force", action="store_true", help="Recompute even if a cached run exists")
     parser.add_argument(
         "--period",
-        choices=("contest", "daily"),
+        choices=("contest", "daily", "live"),
         default="contest",
-        help="Target board: contest (fixed preseason window) or daily (last completed weekday)",
+        help="Target board: contest, daily, or live (current-month freeze snapshot)",
     )
     parser.add_argument(
         "--allow-fallback",

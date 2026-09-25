@@ -773,49 +773,23 @@ def test_thread_start_failure_releases_the_in_progress_flag(monkeypatch):
     assert lb_service._daily_refresh_running is False
 
 
-def test_live_leaderboard_api_serves_the_contest_curves_under_season_chrome(client, monkeypatch):
-    """The route, not the service function. `?period=live` was previously coerced
-    to 'contest' *inside* `_normalize_period`, so every service-level assertion
-    about the live board passed identically before and after the period existed.
-    Only a request through the router proves FastAPI accepts the value, that it
-    survives the `Query` declaration, and that `season` reaches the wire.
-    """
-    _seed_leaderboard_runs(lb_service.db)
-    monkeypatch.setattr(
-        lb_service,
-        "ensure_leaderboard_runs",
-        lambda force_refresh=False, period="contest", config=None: {
-            "session_id": "leaderboard-contest",
-            "start_date": "2026-04-15",
-            "end_date": "2026-05-15",
-            "period": "live",
-            "created": 0,
-            "refreshed_at": "2026-06-18T00:00:00+00:00",
-        },
-    )
+def test_live_leaderboard_api_serves_the_calendar_month_freeze(client, monkeypatch):
+    """GET ?period=live is the month freeze board, not the contest preview.
 
+    Public GET must never call ensure_leaderboard_runs / deploy models. The
+    payload carries ``live_status`` so the dedicated Live tab can paint the
+    freeze window without a season-advance engine.
+    """
     resp = client.get("/api/v1/leaderboard?period=live")
     assert resp.status_code == 200
     body = resp.json()
     assert body["period"] == "live"
     assert body["board_title"] == "Live Trading Leaderboard"
-    # Same window as the contest board, deliberately: a distinct window would
-    # miss `_find_cached_run` on every entry and start recomputing baselines --
-    # and, with LEADERBOARD_DAILY_AUTO_DEPLOY armed, billable LLM deploys -- from
-    # a public, unauthenticated GET.
-    assert body["window"]["start_date"] == "2026-04-15"
-    assert body["window"]["end_date"] == "2026-05-15"
-    assert body["total_entries"] == 2
-
-    # The board's own description, not the Competition board's rules.
-    assert "contest window" not in body["window"]["description"]
-    assert "preview" in body["window"]["description"].lower()
-
-    # And it still reads as a preview to `seasonHasAdvanced()`.
-    season = body["season"]
-    assert season["number"] == 0
-    assert season["last_advanced_date"] is None
-    assert season["trading_days_elapsed"] == 0
+    assert "live_status" in body
+    status = body["live_status"]
+    assert status["session_id"] == "leaderboard-live"
+    assert "freeze_end" in status or status.get("freeze_error")
+    assert "season" not in body
 
 
 def test_contest_leaderboard_api_carries_no_season(client, monkeypatch):

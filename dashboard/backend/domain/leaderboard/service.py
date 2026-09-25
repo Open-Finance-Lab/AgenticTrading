@@ -1090,6 +1090,34 @@ def _find_cached_run(
     )[0]
 
 
+def _find_live_month_run(
+    strategy_id: str,
+    month_start: str,
+    freeze_end: str,
+    session_id: str,
+) -> Optional[Dict[str, Any]]:
+    """Latest live-month snapshot that does not extend past ``freeze_end``.
+
+    Each freeze close writes its own ``agent_runs`` row (``start_date`` is
+    month-open, ``end_date`` is that freeze). GET must keep serving yesterday's
+    snapshot after the clock rolls, until the next operator deploy lands.
+    """
+    best: Optional[Dict[str, Any]] = None
+    for run in db.get_runs_by_session(session_id) or []:
+        if (
+            run.get("mode") != LEADERBOARD_MODE
+            or run.get("llm_model") != strategy_id
+            or run.get("start_date") != month_start
+        ):
+            continue
+        end = str(run.get("end_date") or "")
+        if not end or end > freeze_end:
+            continue
+        if best is None or end > str(best.get("end_date") or ""):
+            best = run
+    return best
+
+
 def _symbols_for_config(config: Dict[str, Any]) -> List[str]:
     symbols: set[str] = set()
     for strategy in config.get("strategies", []):
@@ -1588,6 +1616,7 @@ def deploy_model_run(
     end_date: Optional[str] = None,
     allow_fallback: bool = False,
     period: Optional[str] = "contest",
+    config: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Compute and persist one (expensive) leaderboard model entry.
 
@@ -1596,9 +1625,18 @@ def deploy_model_run(
     stores the equity curve + metrics + token cost, and caches it so the web
     leaderboard can display it without recomputing. Pass start/end to test on a
     shorter window (writes a separate cached run for that window). Pass
-    ``period="daily"`` to target the rolling daily board window.
+    ``period="daily"`` to target the rolling daily board window. Pass
+    ``period="live"`` (or an explicit ``config``) for the calendar-month freeze.
     """
-    config = resolve_leaderboard_config(period)
+    if config is None and _normalize_period(period) == "live":
+        from dashboard.backend.domain.leaderboard.live import live_freeze_config
+
+        config = live_freeze_config()
+        if config is None:
+            raise RuntimeError(
+                "Live leaderboard has no completed cash session this month yet"
+            )
+    config = config or resolve_leaderboard_config(period)
     session_id = config["session_id"]
     start_date = start_date or config["start_date"]
     end_date = end_date or config["end_date"]
@@ -2006,6 +2044,10 @@ def get_leaderboard(
     period: Optional[str] = "contest",
 ) -> Dict[str, Any]:
     """Return ranked leaderboard entries with chart-ready equity curves."""
+    if _normalize_period(period) == "live":
+        from dashboard.backend.domain.leaderboard.live import get_live_leaderboard
+
+        return get_live_leaderboard()
     config = resolve_leaderboard_config(period)
     meta = ensure_leaderboard_runs(force_refresh=force_refresh, config=config)
     session_id = config["session_id"]

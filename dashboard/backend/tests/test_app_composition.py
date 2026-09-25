@@ -257,6 +257,7 @@ EXPECTED_FULL_CONTRACT = {
     ("GET", "/config/defaults"),
     ("GET", "/config/features"),
     ("GET", "/config/stock-pools"),
+    ("GET", "/data/{file_name}"),
     ("GET", "/health"),
     ("GET", "/favicon.ico"),
     ("GET", "/favicon.svg"),

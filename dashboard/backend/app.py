@@ -554,6 +554,19 @@ async def serve_js_module(file_name: str):
 
     return FileResponse(script_path, media_type="text/javascript")
 
+
+@app.get("/data/{file_name}", include_in_schema=False)
+async def serve_frontend_data(file_name: str):
+    """Serve allowlisted static JSON used by the Home Get Started demo."""
+    if file_name != "home-demo-run.json" or "/" in file_name or "\\" in file_name:
+        raise HTTPException(status_code=404, detail="Data file not found")
+    data_path = (frontend_path / "data" / file_name).resolve()
+    data_dir = (frontend_path / "data").resolve()
+    if not data_path.is_file() or data_dir not in data_path.parents:
+        raise HTTPException(status_code=404, detail="Data file not found")
+    return FileResponse(data_path, media_type="application/json")
+
+
 @app.get("/market-events/{file_name}", include_in_schema=False)
 async def serve_market_events_js(file_name: str):
     """Serve market-events/*.js modules for the Live Market Events panel."""

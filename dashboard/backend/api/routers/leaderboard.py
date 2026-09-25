@@ -13,6 +13,7 @@ from fastapi import APIRouter, Header, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
 
 from dashboard.backend.api.rate_limit import FixedWindowRateLimiter, client_key
+from dashboard.backend.domain.leaderboard.live import get_live_leaderboard
 from dashboard.backend.domain.leaderboard.service import (
     enqueue_daily_leaderboard_refresh,
     get_leaderboard,
@@ -34,8 +35,7 @@ def api_get_leaderboard(
         default="contest",
         description=(
             "Leaderboard period: 'contest' (fixed preseason window), "
-            "'daily' (last completed weekday), or 'live' (Season 0 preview — "
-            "the contest curves under season chrome; no season has advanced)."
+            "'daily' (last completed weekday), or 'live' (current calendar month)."
         ),
     ),
 ):
@@ -45,11 +45,8 @@ def api_get_leaderboard(
     Baselines are computed from Alpaca hourly backtest data and cached in SQLite.
     Pass ?refresh=true to recompute (e.g. after config change).
     Pass ?period=daily for the rolling one-day board (weekends show Friday).
-    Pass ?period=live for the Live Trading Leaderboard: the contest window and
-    curves, plus a ``season`` block describing Season 0. No advance engine
-    exists yet, so the response always carries a preview season (no
-    last_advanced_date, zero trading_days_elapsed) — see
-    ``domain/leaderboard/service.py::build_season_payload``.
+    Pass ?period=live for the current calendar-month Live Trading Leaderboard
+    (freeze-window snapshots under leaderboard-live; GET never deploys models).
     """
     # Public, unauthenticated endpoint: no exception text reaches the caller.
     # A raw exception string can embed internal infrastructure details — the
@@ -65,6 +62,9 @@ def api_get_leaderboard(
     # through ensure_leaderboard_runs -> fetch_hourly_bars. It only selects the
     # 503 status code, never the message.
     try:
+        if period.strip().lower() == "live":
+            # Isolated from contest/daily: live GET never deploys LLM models.
+            return get_live_leaderboard()
         return get_leaderboard(force_refresh=refresh, period=period)
     except RuntimeError:
         print(f"⚠️ Leaderboard unavailable: {traceback.format_exc()}")
