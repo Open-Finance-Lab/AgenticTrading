@@ -20,7 +20,9 @@ from .repository_common import (
     CredentialNotFoundError,
     CredentialOwnershipError,
     ProviderNotFoundError,
+    COMMONSTACK_ALLOWLIST_MIGRATION_ID,
     SEEDED_PROVIDERS,
+    commonstack_allowlist_backfill,
     deserialize_capabilities,
     serialize_capabilities,
     validate_adapter_type,
@@ -230,6 +232,7 @@ class PostgresModelProviderStore:
                         ),
                     )
                 self._migrate_legacy_openrouter_platform_flag(cur)
+                self._migrate_commonstack_allowlist(cur)
 
     @staticmethod
     def _migrate_legacy_openrouter_platform_flag(cur) -> None:
@@ -277,6 +280,41 @@ class PostgresModelProviderStore:
             "UPDATE provider_registry SET platform_enabled = TRUE, updated_at = %s WHERE provider_id = 'openrouter'",
             (now,),
         )
+        cur.execute(
+            "INSERT INTO model_provider_migrations (migration_id, applied_at) VALUES (%s, %s)",
+            (migration_id, now),
+        )
+
+    @staticmethod
+    def _migrate_commonstack_allowlist(cur) -> None:
+        """Backfill newly verified CommonStack models into a seeded row, once.
+
+        Recorded even when nothing changed, so an admin who later removes one
+        of these models is not overridden on the next boot.
+        """
+
+        migration_id = COMMONSTACK_ALLOWLIST_MIGRATION_ID
+        cur.execute(
+            "SELECT 1 FROM model_provider_migrations WHERE migration_id = %s",
+            (migration_id,),
+        )
+        if cur.fetchone():
+            return
+        now = _utcnow_iso()
+        cur.execute(
+            "SELECT capabilities_json FROM provider_registry WHERE provider_id = 'commonstack'"
+        )
+        provider = cur.fetchone()
+        updated = (
+            commonstack_allowlist_backfill(provider["capabilities_json"])
+            if provider
+            else None
+        )
+        if updated is not None:
+            cur.execute(
+                "UPDATE provider_registry SET capabilities_json = %s, updated_at = %s WHERE provider_id = 'commonstack'",
+                (updated, now),
+            )
         cur.execute(
             "INSERT INTO model_provider_migrations (migration_id, applied_at) VALUES (%s, %s)",
             (migration_id, now),
