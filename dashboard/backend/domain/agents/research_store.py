@@ -47,6 +47,7 @@ def _init_schema() -> None:
                 user_id INTEGER NOT NULL,
                 template_id TEXT NOT NULL,
                 service_run_id TEXT,
+                reservation_id TEXT,
                 status TEXT NOT NULL DEFAULT 'queued',
                 settings_json TEXT NOT NULL,
                 email_me INTEGER NOT NULL DEFAULT 0,
@@ -68,6 +69,18 @@ def _init_schema() -> None:
                 ON research_runs(user_id, created_at DESC);
             """
         )
+        # Existing installs created the table before billing (route 0) added
+        # the reservation column; CREATE IF NOT EXISTS won't add it there.
+        migrations = (
+            "ALTER TABLE research_runs ADD COLUMN reservation_id TEXT",
+            "ALTER TABLE research_runs ADD COLUMN estimate_micro INTEGER",
+        )
+        for statement in migrations:
+            try:
+                with _connect() as conn:
+                    conn.execute(statement)
+            except sqlite3.OperationalError:
+                pass  # column already exists
 
 
 _init_schema()
@@ -111,6 +124,8 @@ def create_run(
     user_id: int,
     template_id: str,
     service_run_id: str,
+    reservation_id: str,
+    estimate_micro: int,
     status: str,
     settings: Dict[str, Any],
     email_me: bool,
@@ -118,10 +133,21 @@ def create_run(
     with _connect() as conn:
         conn.execute(
             "INSERT INTO research_runs (run_id, user_id, template_id, service_run_id,"
-            " status, settings_json, email_me) VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (run_id, user_id, template_id, service_run_id, status,
+            " reservation_id, estimate_micro, status, settings_json, email_me)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (run_id, user_id, template_id, service_run_id, reservation_id,
+             int(estimate_micro), status,
              json.dumps(settings, ensure_ascii=False), int(email_me)),
         )
+
+
+def list_nonterminal_runs() -> List[Dict[str, Any]]:
+    """All queued/running runs across users — the sweeper's work queue."""
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT * FROM research_runs WHERE status IN ('queued', 'running')"
+        ).fetchall()
+    return [dict(row) for row in rows]
 
 
 def get_run(run_id: str, user_id: int) -> Optional[Dict[str, Any]]:
