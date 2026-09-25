@@ -19,6 +19,8 @@ from __future__ import annotations
 
 import base64
 import os
+import threading
+import time
 import uuid
 from typing import Any, Dict, Optional
 
@@ -31,13 +33,17 @@ from dashboard.backend.domain.agents import marketplace as marketplace_mod
 from dashboard.backend.domain.agents import research_store
 from dashboard.backend.domain.credits.models import credits_micro_for_cents
 from dashboard.backend.domain.credits.repository_common import (
+    CreditAccountRestrictedStoreError,
     InsufficientCreditsError,
 )
 from dashboard.backend.domain.credits.service import credits_service
+from dashboard.backend import users as users_module
 from dashboard.backend.domain.credits.repository_common import (
+    CreditAccountRestrictedStoreError,
     InsufficientCreditsError,
 )
 from dashboard.backend.domain.credits.service import credits_service
+from dashboard.backend import users as users_module
 
 router = APIRouter(prefix="/v1/research", tags=["research"])
 
@@ -217,8 +223,15 @@ def create_research_run(
         )
     except InsufficientCreditsError as exc:
         raise HTTPException(status_code=402, detail=str(exc)) from None
+    except CreditAccountRestrictedStoreError as exc:
+        # A paused/restricted Credits account must get the deliberate refusal
+        # other Credits surfaces use, not an uncaught 500.
+        raise HTTPException(status_code=403, detail=str(exc)) from None
     reservation_id = str(reservation.reservation_id)
 
+    # From here until create_run, any failure must release the just-taken
+    # hold — an unreleased reservation permanently strands the user's
+    # balance (each client retry strands another chunk).
     try:
         response = httpx.post(
             f"{_service_base(template)}/runs",
@@ -228,11 +241,18 @@ def create_research_run(
         )
         response.raise_for_status()
         service_run = response.json()
-    except httpx.HTTPError as exc:
+        if not isinstance(service_run, dict):
+            raise ValueError("submit response was not a JSON object")
+    except (httpx.HTTPError, ValueError) as exc:
         credits_service.release_llm_credits(
             reservation_id, reason="submit failed; no Deep Research invocation"
         )
-        raise _service_error(exc, "submitting the research run") from None
+        if isinstance(exc, httpx.HTTPError):
+            raise _service_error(exc, "submitting the research run") from None
+        raise HTTPException(
+            status_code=502,
+            detail="Research service returned a malformed submit response",
+        ) from None
 
     service_run_id = str(service_run.get("run_id") or "").strip()
     research_store.create_run(
@@ -241,6 +261,7 @@ def create_research_run(
         template_id=template_id,
         service_run_id=service_run_id,
         reservation_id=reservation_id,
+        estimate_micro=estimate_micro,
         status=str(service_run.get("status") or "running"),
         settings=settings,
         email_me=email_me,
@@ -251,6 +272,53 @@ def create_research_run(
 def _estimate_micro_from_run(run: Dict[str, Any]) -> int:
     """Route-0 settle amount: the reserved estimate, from env-tunable cents."""
     return credits_micro_for_cents(_estimate_usd_cents())
+
+
+# Background sweeper (v1.1): discovers completed/failed runs without relying
+# on the submitting user keeping the page open. Same logic the status route
+# runs, just on a timer; single in-process worker (matches the codebase's
+# single-worker assumption). In-flight guard keeps it from racing a
+# user-driven poll on the same run.
+_SWEEP_INTERVAL_SECONDS = 60
+_sweep_lock = threading.Lock()
+_sweep_inflight: set = set()
+
+
+def _sweep_pending_runs() -> None:
+    for row in research_store.list_nonterminal_runs():
+        run_id = row["run_id"]
+        with _sweep_lock:
+            if run_id in _sweep_inflight:
+                continue
+            _sweep_inflight.add(run_id)
+        try:
+            template = marketplace_mod.get_marketplace_template(row["template_id"])
+            if not template or not marketplace_mod.shelf_is_research(template):
+                continue
+            user = users_module.user_store.get_user_by_id(row["user_id"])
+            if not user:
+                continue
+            fresh = research_store.get_run(run_id, row["user_id"])
+            if not fresh:
+                continue
+            _maybe_complete_run(fresh, template, user)
+        except Exception as exc:  # noqa: BLE001 - one bad run must not kill the sweep
+            print(f"research sweeper: run {run_id} sweep error: {exc}")
+        finally:
+            with _sweep_lock:
+                _sweep_inflight.discard(run_id)
+
+
+def _sweeper_loop() -> None:
+    while True:
+        try:
+            _sweep_pending_runs()
+        except Exception as exc:  # noqa: BLE001
+            print(f"research sweeper: loop error: {exc}")
+        time.sleep(_SWEEP_INTERVAL_SECONDS)
+
+
+threading.Thread(target=_sweeper_loop, name="research-sweeper", daemon=True).start()
 
 
 def _service_run_id(run: Dict[str, Any]) -> str:
@@ -280,9 +348,10 @@ def _maybe_complete_run(run: Dict[str, Any], template: Dict[str, Any],
         research_store.update_run_status(run["run_id"], "failed",
                                          error=service_status.get("error") or "Research failed",
                                          completed=True)
-        credits_service.release_llm_credits(
-            run["reservation_id"], reason="research run failed",
-        )
+        if run.get("reservation_id"):
+            credits_service.release_llm_credits(
+                run["reservation_id"], reason="research run failed",
+            )
         run["status"] = "failed"
         return run
     if status != "completed":
@@ -297,10 +366,9 @@ def _maybe_complete_run(run: Dict[str, Any], template: Dict[str, Any],
         result.raise_for_status()
         payload = result.json()
     except httpx.HTTPError:
-        research_store.update_run_status(run["run_id"], "failed",
-                                         error="Result could not be retrieved",
-                                         completed=True)
-        run["status"] = "failed"
+        # Result fetch failed but the run COMPLETED on the service — this is
+        # retryable (next poll re-fetches), not a failed run. Making it
+        # terminal here would strand the reservation on a transient 5xx.
         return run
 
     research_store.store_artifacts(
@@ -309,12 +377,20 @@ def _maybe_complete_run(run: Dict[str, Any], template: Dict[str, Any],
         payload.get("evidence"),
         payload.get("report_markdown") or "",
     )
-    # Route-0 interim: settle at the reserved estimate. Contract v1.1 adds
-    # usage reporting in the result payload, and this becomes
-    # settle(actual_micro=reported spend) — the reserve call above stays.
+    reservation_id = run.get("reservation_id")
+    if not reservation_id:
+        # Pre-billing legacy run (route-0 migration): nothing was reserved, so
+        # complete without touching Credits — settling a NULL id would raise.
+        research_store.update_run_status(run["run_id"], "completed", completed=True)
+        run["status"] = "completed"
+        return run
+    # Route-0 interim: settle at the amount actually reserved for THIS run
+    # (persisted at submit — re-reading the env here would settle a run at a
+    # price chosen after it started). Contract v1.1's usage reporting upgrades
+    # this to settle(actual_micro=reported spend).
     credits_service.settle_llm_credits(
-        run["reservation_id"],
-        actual_micro=_estimate_micro_from_run(run),
+        reservation_id,
+        actual_micro=int(run.get("estimate_micro") or 0),
         evidence={"source": "research-agent", "agent_id": run["template_id"]},
     )
     research_store.update_run_status(run["run_id"], "completed", completed=True)
