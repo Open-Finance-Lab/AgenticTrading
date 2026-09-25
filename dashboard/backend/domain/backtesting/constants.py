@@ -66,6 +66,27 @@ DEFAULT_PORTFOLIO_EQUITY = 10_000
 DEFAULT_AGENT_CASH_ALLOCATION = 1000
 MAX_AGENT_CASH_ALLOCATION = 3_000
 
+# Paper trading is switched off product-wide until it ships for real
+# (``execution/paper_backend.py`` is still a stub); the dashboard mirrors this as
+# ``PAPER_TRADING_ENABLED`` in ``app.js`` and hides the ledger the sleeves draw
+# from. While off, every server-side path that picks a sleeve on the caller's
+# behalf -- signup starters, marketplace clone, duplicate, a create that omits
+# ``cash_allocation`` -- reserves ``new_agent_cash_allocation()`` ($0) instead
+# of $1,000: a reservation nobody can see or release would otherwise refuse a
+# later create with "Insufficient unallocated cash". An explicit
+# ``cash_allocation`` is still honoured, and existing sleeves are left
+# untouched. Flip both flags together.
+PAPER_TRADING_ENABLED = False
+
+
+def new_agent_cash_allocation() -> float:
+    """Sleeve a new agent gets when nobody chose one.
+
+    A function, read at call time, so the ledger tests can pin the paper-on
+    behaviour by patching ``PAPER_TRADING_ENABLED`` alone.
+    """
+    return float(DEFAULT_AGENT_CASH_ALLOCATION) if PAPER_TRADING_ENABLED else 0.0
+
 
 def resolve_initial_capital(requested: Optional[Any] = None) -> float:
     """Resolve simulation capital for a backtest / protocol run.
