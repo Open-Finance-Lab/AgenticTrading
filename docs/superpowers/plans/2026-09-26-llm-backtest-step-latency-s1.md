@@ -21,6 +21,8 @@
 > - Only platform-only lanes move in `list_execution_options`.
 > - The legacy `("openrouter",)` expansion is deleted.
 > - The billing hint is `ATL Credits cover the model calls. ATL picks an available provider automatically.`
+>
+> **S1a shipped with one change from its task below.** `disable_synchronous_projection()` and its `app.py` call were deleted rather than kept, and the guard test patches every `states` function instead of one. Spec §4 has the details.
 
 ## Global Constraints
 

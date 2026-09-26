@@ -130,19 +130,23 @@ The daily job writes `user_daily_facts`, not snapshots. So a worker-emitted even
 it landed at once. That is accepted: the admin read paths move to `user_daily_facts` in PR B, which
 also deletes the repair sweep.
 
+**Deleted.** `disable_synchronous_projection()` and its call in `app.py`'s startup. With the default
+inert, the no-op it registered did exactly what `None` does. Nothing in production registers a
+recalculator now; `register_snapshot_recalculator` stays as the hook.
+
 **Unchanged.**
-- `disable_synchronous_projection()` and its call at `app.py:334-343` stay. The call now states the
-  intent explicitly instead of carrying the fix. The function's docstring and the `app.py` comment
-  are updated to say so.
 - `SNAPSHOT_RELEVANT_EVENTS` is unchanged.
 - The `project_snapshots` guard in `_emit` is unchanged.
 
 **Tests** (`tests/domain/analytics/test_instrumentation.py`).
-- New: with `_snapshot_recalculator` set to `None` and a non-projecting service, emitting a
-  snapshot-relevant event never calls `states.recalculate_user_snapshots`. The test patches it to
-  record calls. This is the backtest child's exact state.
-- `test_disable_synchronous_projection_makes_the_fallback_a_no_op` still passes. Its name and
-  docstring are updated, since the fallback it neutralises no longer exists.
+- New: every function in `states.py` is patched to raise and `_snapshot_recalculator` is `None`.
+  - `_recalculate_snapshot` is called directly for each of `SNAPSHOT_RELEVANT_EVENTS`, because
+    `_emit` swallows exceptions.
+  - Emitting through a non-projecting service prints no `instrumentation_failed` warning. This is
+    the backtest child's exact state.
+  - Patching all of `states`, not one function, catches a restored fallback however it spells the
+    call.
+- `test_disable_synchronous_projection_makes_the_fallback_a_no_op` is deleted with the function.
 - `test_stored_event_recalculates_snapshot_best_effort` and `test_analytics_integration.py:235`
   register their own callbacks and are unaffected.
 

@@ -330,24 +330,6 @@ async def startup_event():
         )
 
     try:
-        from dashboard.backend.domain.analytics.instrumentation import (
-            disable_synchronous_projection,
-        )
-
-        # Since #522 an unregistered recalculator is already inert, so this
-        # call no longer carries the fix: PR 0 put it here, which fixed the
-        # web process and left the backtest child (which never runs this
-        # hook) rebuilding snapshots on every event. It stays so this process
-        # states its intent explicitly instead of relying on the default.
-        disable_synchronous_projection()
-        print("🧹 Analytics snapshot projection left off the request path")
-    except Exception as e:
-        print(
-            "WARNING: analytics.snapshot_projection_disable_failed "
-            f"category={type(e).__name__}"
-        )
-
-    try:
         # Admin layer redesign PR A (design D23, SS6.9): the daily-facts job
         # runs on its own thread, not as a reaper sweep -- a whole-population
         # batch across three databases on the heartbeat thread would let a

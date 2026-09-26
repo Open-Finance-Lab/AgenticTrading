@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import inspect
 from datetime import datetime, timezone
 
 import pytest
 
-from dashboard.backend.domain.analytics import instrumentation
+from dashboard.backend.domain.analytics import instrumentation, states
 from dashboard.backend.domain.analytics.models import AppendEventResult
 
 
@@ -228,59 +229,49 @@ def test_snapshot_failure_never_escapes_or_logs_exception_text(
     assert "category=RuntimeError" in output
 
 
-def test_disable_synchronous_projection_registers_a_no_op(monkeypatch):
-    """app.py's explicit opt-out still registers a callable no-op (#522 made
-    the unregistered default inert, so this pins the call, not the fix)."""
-    calls = []
-    monkeypatch.setattr(
-        "dashboard.backend.domain.analytics.states.recalculate_user_snapshots",
-        lambda *a, **k: calls.append((a, k)),
-    )
+class NonProjectingService:
+    project_snapshots = False
+
+    def try_record_server_event(self, **kwargs):
+        return AppendEventResult.model_construct(event=None, created=True)
+
+
+def _forbid_snapshot_rebuild(monkeypatch) -> None:
+    """Make every function in states.py raise, and the recalculator unset.
+
+    Patching every function, not only recalculate_user_snapshots, keeps the
+    guard independent of how a restored fallback would spell its call: a lazy
+    import, a module-level import, or a different entry point into states.
+    """
+
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("synchronous snapshot rebuild")
+
+    for name, value in vars(states).items():
+        if inspect.isfunction(value) and value.__module__ == states.__name__:
+            monkeypatch.setattr(states, name, forbidden)
+            monkeypatch.setattr(instrumentation, name, forbidden, raising=False)
     monkeypatch.setattr(instrumentation, "_snapshot_recalculator", None)
 
-    instrumentation.disable_synchronous_projection()
 
-    class NonProjectingService:
-        project_snapshots = False
+@pytest.mark.parametrize("event_name", sorted(instrumentation.SNAPSHOT_RELEVANT_EVENTS))
+def test_unregistered_recalculator_is_inert(monkeypatch, event_name):
+    """Called directly, because _emit swallows exceptions (#522)."""
+    _forbid_snapshot_rebuild(monkeypatch)
 
-        def try_record_server_event(self, **kwargs):
-            return AppendEventResult.model_construct(event=None, created=True)
-
-    monkeypatch.setattr(instrumentation, "get_analytics_service", lambda: NonProjectingService())
-
-    instrumentation.emit_agent_event(
-        event_name="agent_created",
-        user_id=7,
-        agent_id="agent-1",
-        occurred_at=NOW,
-    )
-
-    assert instrumentation._snapshot_recalculator is not None
-    assert instrumentation._snapshot_recalculator(7) is None
-    assert calls == []
+    instrumentation._recalculate_snapshot(7, event_name)
 
 
-def test_unregistered_recalculator_never_rebuilds_snapshots(monkeypatch):
+def test_unregistered_recalculator_never_rebuilds_snapshots(monkeypatch, capsys):
     """The dashboard backtest child's exact state (#522).
 
-    The child never runs app.py's startup, so nothing registers a
-    recalculator, and the live analytics singleton does not project. Before
-    #522 that combination fell back to states.recalculate_user_snapshots on
-    every snapshot-relevant event -- ~5s each, ~31s of every model call.
+    Nothing registers a recalculator in any process, and the live analytics
+    singleton does not project. Before #522 that combination fell back to
+    states.recalculate_user_snapshots on every snapshot-relevant event --
+    ~5s each, ~31s of every model call. _emit swallows the AssertionError a
+    fallback would raise, so the test reads its WARNING line instead.
     """
-    calls = []
-    monkeypatch.setattr(
-        "dashboard.backend.domain.analytics.states.recalculate_user_snapshots",
-        lambda *a, **k: calls.append((a, k)),
-    )
-    monkeypatch.setattr(instrumentation, "_snapshot_recalculator", None)
-
-    class NonProjectingService:
-        project_snapshots = False
-
-        def try_record_server_event(self, **kwargs):
-            return AppendEventResult.model_construct(event=None, created=True)
-
+    _forbid_snapshot_rebuild(monkeypatch)
     monkeypatch.setattr(
         instrumentation, "get_analytics_service", lambda: NonProjectingService()
     )
@@ -301,4 +292,4 @@ def test_unregistered_recalculator_never_rebuilds_snapshots(monkeypatch):
         occurred_at=NOW,
     )
 
-    assert calls == []
+    assert "instrumentation_failed" not in capsys.readouterr().out

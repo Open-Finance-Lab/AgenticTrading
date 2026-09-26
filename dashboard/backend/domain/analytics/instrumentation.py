@@ -53,9 +53,9 @@ SNAPSHOT_RELEVANT_EVENTS = (
     | _RESOURCE_EVENTS
     | {"safe_error_recorded"}
 )
-# None means "no synchronous projection". That is the default every process
-# gets, including a dashboard backtest child, which never runs app.py's
-# startup hook. Before #522, None fell back to
+# None means "no synchronous projection". That is the default in every process
+# and nothing in production registers a callback, so no process rebuilds
+# snapshots on the event path. Before #522, None fell back to
 # states.recalculate_user_snapshots: ~5s per event in the child, ~31s of every
 # model call. Snapshots now catch up only through the reaper's repair sweep,
 # throttled to a 24-hour staleness window, for worker-emitted events exactly
@@ -70,22 +70,6 @@ def register_snapshot_recalculator(callback: Any) -> None:
     _snapshot_recalculator = callback
 
 
-def disable_synchronous_projection() -> None:
-    """Register an explicit no-op snapshot recalculator.
-
-    Since #522 an unregistered recalculator is already inert, so this call
-    no longer carries the fix. PR 0 added it because ``_emit``'s guard below
-    fires whenever the handling service does not project
-    (``not getattr(service, "project_snapshots", False)``). The live
-    singleton builds with ``project_snapshots=False``, and the old fallback
-    then recomputed per accepted event. That default was fixed only in the
-    process that ran this call, which left the backtest child paying for it.
-    ``app.py`` still calls this so the web process states its intent
-    explicitly rather than depending on the default.
-    """
-    register_snapshot_recalculator(lambda user_id: None)
-
-
 def _recalculate_snapshot(user_id: int, event_name: str) -> None:
     if event_name not in SNAPSHOT_RELEVANT_EVENTS:
         return
@@ -94,6 +78,7 @@ def _recalculate_snapshot(user_id: int, event_name: str) -> None:
         # Inert by default (#522). A default that is expensive until something
         # disables it is inherited by every entry point that skips app.py's
         # startup: the backtest child, CLI scripts, a future worker service.
+        # Do not add a fallback here.
         return
     callback(user_id)
 
