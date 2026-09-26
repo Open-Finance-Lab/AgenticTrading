@@ -780,6 +780,13 @@ def test_live_leaderboard_api_serves_the_calendar_month_freeze(client, monkeypat
     payload carries ``live_status`` so the dedicated Live tab can paint the
     freeze window without a season-advance engine.
     """
+    def _must_not_run(*_args, **_kwargs):
+        raise AssertionError("public GET ?period=live reached the compute path")
+
+    monkeypatch.setattr(lb_service, "ensure_leaderboard_runs", _must_not_run)
+    monkeypatch.setattr(lb_service, "fetch_hourly_bars", _must_not_run)
+    monkeypatch.setattr(lb_service, "deploy_model_run", _must_not_run)
+
     resp = client.get("/api/v1/leaderboard?period=live")
     assert resp.status_code == 200
     body = resp.json()
@@ -788,7 +795,7 @@ def test_live_leaderboard_api_serves_the_calendar_month_freeze(client, monkeypat
     assert "live_status" in body
     status = body["live_status"]
     assert status["session_id"] == "leaderboard-live"
-    assert "freeze_end" in status or status.get("freeze_error")
+    assert "freeze_end" in status
     assert "season" not in body
 
 

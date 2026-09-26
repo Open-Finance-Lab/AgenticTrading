@@ -61,3 +61,16 @@ def test_home_demo_json_is_public_without_session():
         response = client.get("/data/home-demo-run.json")
     assert response.status_code == 200
     assert response.json()["model"] == "GPT-5.5"
+
+
+def test_data_route_serves_only_the_allowlisted_file():
+    from fastapi.testclient import TestClient
+    from dashboard.backend.app import app
+
+    with TestClient(app) as client:
+        for path in (
+            "/data/app.html",
+            "/data/..%2Fapp.html",
+            "/data/..%2F..%2Fconfig%2Fleaderboard.json",
+        ):
+            assert client.get(path).status_code == 404, path

@@ -142,8 +142,11 @@ def api_refresh_daily_leaderboard(
 def api_refresh_live_leaderboard(
     request: Request,
     deploy_models: bool = Query(
-        default=True,
-        description="Append the latest cash session onto each Live LLM snapshot (billable).",
+        default=False,
+        description=(
+            "Append the latest cash session onto each Live LLM snapshot. "
+            "Billable, so opt-in: omitted, only baselines/indices refresh."
+        ),
     ),
     force: bool = Query(default=False, description="Replay the whole month from the 1st."),
     x_leaderboard_refresh_secret: str | None = Header(default=None, alias="X-Leaderboard-Refresh-Secret"),

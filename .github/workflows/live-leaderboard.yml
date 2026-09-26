@@ -1,8 +1,14 @@
 name: Live Leaderboard refresh
 
-# After US cash equity close, append one session onto each Live LLM snapshot
-# (cash + positions carried forward). Does not replay the month from the 1st.
-# The API returns 202 immediately; model steps continue on the Render instance.
+# After the US cash close settles, freeze the day's baselines/indices on the
+# Live board. Public GET never computes, so this job is what fills the board.
+# The API returns 202 immediately; the work continues on the Render instance.
+#
+# LLM deploys are BILLABLE and strictly opt-in: the nightly run appends one
+# session onto each Live LLM snapshot (cash + positions carried forward) only
+# when the repository variable LIVE_LEADERBOARD_DEPLOY_MODELS is exactly
+# "true" — a recurring API cost for 3 models every weekday. Unset, the
+# schedule refreshes baselines only. A manual dispatch defaults to off too.
 #
 # Requires repository secret LEADERBOARD_DAILY_REFRESH_SECRET matching
 # the value configured on the Render service (same secret as the daily hook).
@@ -16,11 +22,14 @@ on:
       deploy_models:
         description: "Append Live LLM roster for the latest cash session (billable)"
         type: boolean
-        default: true
+        default: false
       force:
         description: "Replay the whole month from the 1st (expensive — leave off)"
         type: boolean
         default: false
+
+# The job only POSTs to the API; it needs no repository access.
+permissions: {}
 
 concurrency:
   group: live-leaderboard
@@ -36,7 +45,7 @@ jobs:
         env:
           ATL_API: ${{ vars.ATL_API || 'https://agentictrading.onrender.com' }}
           LEADERBOARD_DAILY_REFRESH_SECRET: ${{ secrets.LEADERBOARD_DAILY_REFRESH_SECRET }}
-          DEPLOY_MODELS: ${{ github.event_name != 'workflow_dispatch' && 'true' || (inputs.deploy_models && 'true' || 'false') }}
+          DEPLOY_MODELS: ${{ github.event_name != 'workflow_dispatch' && (vars.LIVE_LEADERBOARD_DEPLOY_MODELS == 'true' && 'true' || 'false') || (inputs.deploy_models && 'true' || 'false') }}
           FORCE: ${{ github.event_name != 'workflow_dispatch' && 'false' || (inputs.force && 'true' || 'false') }}
         run: |
           set -euo pipefail

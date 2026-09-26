@@ -17,7 +17,7 @@ import secrets
 import tempfile
 import threading
 from datetime import date, datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 from zoneinfo import ZoneInfo
 
 import dashboard.backend.infrastructure.llm.token_cost as token_cost
@@ -1090,34 +1090,6 @@ def _find_cached_run(
     )[0]
 
 
-def _find_live_month_run(
-    strategy_id: str,
-    month_start: str,
-    freeze_end: str,
-    session_id: str,
-) -> Optional[Dict[str, Any]]:
-    """Latest live-month snapshot that does not extend past ``freeze_end``.
-
-    Each freeze close writes its own ``agent_runs`` row (``start_date`` is
-    month-open, ``end_date`` is that freeze). GET must keep serving yesterday's
-    snapshot after the clock rolls, until the next operator deploy lands.
-    """
-    best: Optional[Dict[str, Any]] = None
-    for run in db.get_runs_by_session(session_id) or []:
-        if (
-            run.get("mode") != LEADERBOARD_MODE
-            or run.get("llm_model") != strategy_id
-            or run.get("start_date") != month_start
-        ):
-            continue
-        end = str(run.get("end_date") or "")
-        if not end or end > freeze_end:
-            continue
-        if best is None or end > str(best.get("end_date") or ""):
-            best = run
-    return best
-
-
 def _symbols_for_config(config: Dict[str, Any]) -> List[str]:
     symbols: set[str] = set()
     for strategy in config.get("strategies", []):
@@ -1625,17 +1597,18 @@ def deploy_model_run(
     stores the equity curve + metrics + token cost, and caches it so the web
     leaderboard can display it without recomputing. Pass start/end to test on a
     shorter window (writes a separate cached run for that window). Pass
-    ``period="daily"`` to target the rolling daily board window. Pass
-    ``period="live"`` (or an explicit ``config``) for the calendar-month freeze.
+    ``period="daily"`` to target the rolling daily board window, or an
+    explicit ``config``. The Live board deploys through
+    ``live.deploy_live_model_increment`` instead.
     """
     if config is None and _normalize_period(period) == "live":
-        from dashboard.backend.domain.leaderboard.live import live_freeze_config
-
-        config = live_freeze_config()
-        if config is None:
-            raise RuntimeError(
-                "Live leaderboard has no completed cash session this month yet"
-            )
+        # A live row must carry the portfolio snapshot the next night resumes
+        # from; a plain run here is a snapshot-less month replay that the next
+        # increment would pay for again.
+        raise ValueError(
+            "period='live' deploys go through "
+            "domain/leaderboard/live.py::deploy_live_model_increment"
+        )
     config = config or resolve_leaderboard_config(period)
     session_id = config["session_id"]
     start_date = start_date or config["start_date"]
@@ -2039,15 +2012,28 @@ def _board_capital_base(
     return groups[best][0]
 
 
+# Boards that build their own payload register here (the Live board, from
+# domain/leaderboard/live.py) so this module never imports them back: live.py
+# depends on this module, and a return import is a cycle even inside a function.
+_PERIOD_BOARDS: Dict[str, Callable[[], Dict[str, Any]]] = {}
+
+
+def register_period_board(period: str, builder: Callable[[], Dict[str, Any]]) -> None:
+    _PERIOD_BOARDS[period] = builder
+
+
 def get_leaderboard(
     force_refresh: bool = False,
     period: Optional[str] = "contest",
 ) -> Dict[str, Any]:
     """Return ranked leaderboard entries with chart-ready equity curves."""
+    board = _PERIOD_BOARDS.get(_normalize_period(period))
+    if board is not None:
+        return board()
     if _normalize_period(period) == "live":
-        from dashboard.backend.domain.leaderboard.live import get_live_leaderboard
-
-        return get_live_leaderboard()
+        # Never fall back to building the Live period here: that is the old
+        # contest-window preview, which would answer 200 with the wrong board.
+        raise RuntimeError("Live leaderboard module is not loaded")
     config = resolve_leaderboard_config(period)
     meta = ensure_leaderboard_runs(force_refresh=force_refresh, config=config)
     session_id = config["session_id"]

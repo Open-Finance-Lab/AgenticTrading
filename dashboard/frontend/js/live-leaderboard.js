@@ -99,8 +99,22 @@ function liveTooltipLabel(ts) {
 function liveSessionCopy(state) {
   if (state === 'rth') return 'Cash session open';
   if (state === 'preopen') return 'Before the open';
+  if (state === 'settling') return 'Closed · settling';
   if (state === 'weekend') return 'Weekend';
+  if (state === 'holiday') return 'Market holiday';
   return 'Cash session closed';
+}
+
+// A row with no stored run has no value, return or rank. The server leaves
+// those fields null rather than publishing the seed at 0%.
+function liveEntryIsPending(entry) {
+  return !entry || entry.rank == null || entry.status === 'pending';
+}
+
+function liveModelRosterNote(entries) {
+  const names = (entries || []).filter(liveIsModel).map(liveSeriesLabel).filter(Boolean);
+  const roster = names.length ? `Models: ${names.join(', ')} — a subset of the Competition roster.` : '';
+  return `${roster} One continuous book for the month, not a daily reset.`.trim();
 }
 
 function isLiveBoardVisible() {
@@ -171,22 +185,28 @@ function updateLiveHeader(payload) {
     badge.classList.toggle('upcoming', status.session_state !== 'rth');
   }
 
+  const rosterNote = document.getElementById('liveRosterNote');
+  if (rosterNote) rosterNote.textContent = liveModelRosterNote(payload.entries);
+
   const banner = document.getElementById('livePhaseBanner');
   if (banner) {
-    if (status.freeze_error) {
-      banner.hidden = false;
-      banner.textContent = `Could not refresh freeze-window bars (${status.frozen_through || 'T-1'}). Showing cached live-month runs if any exist.`;
-    } else if (!status.has_prints) {
+    if (!status.has_prints) {
       banner.hidden = false;
       banner.textContent = (
-        `Waiting on freeze-window bars through ${status.frozen_through || 'T-1'}. ` +
-        `The axis is ${window.label || 'this month'}; curves appear after Alpaca hourly data is available.`
+        `No freeze snapshot for ${window.label || 'this month'} yet. ` +
+        'Curves appear after the nightly refresh that runs once the cash session has closed and settled.'
+      );
+    } else if (status.snapshot_stale) {
+      banner.hidden = false;
+      banner.textContent = (
+        `Showing the snapshot through ${status.snapshot_end || '—'}. ` +
+        `The session through ${status.frozen_through || '—'} appears after the next nightly refresh.`
       );
     } else if ((Number(status.models_cached) || 0) === 0) {
       banner.hidden = false;
       banner.textContent = (
         `Baselines frozen through ${status.frozen_through}. ` +
-        `Competition model curves load from this month's freeze snapshot; they are not computed on page load.`
+        'Model curves appear once the nightly refresh deploys them; they are never computed on page load.'
       );
     } else {
       banner.hidden = true;
@@ -196,8 +216,10 @@ function updateLiveHeader(payload) {
 
   const zone = document.getElementById('liveZoneCaption');
   if (zone) {
-    const liveDay = status.live_day ? `live tail ${status.live_day}` : 'no live tail';
-    zone.textContent = `Frozen through ${status.frozen_through || '—'} · ${liveDay} · future days have no points`;
+    const today = status.live_day
+      ? `${status.live_day} in progress, appends after the close`
+      : 'no session in progress';
+    zone.textContent = `Frozen through ${status.frozen_through || '—'} · ${today} · future days have no points`;
   }
 
   const countEl = document.getElementById('liveCurvePickerCount');
@@ -212,6 +234,12 @@ function liveSortedEntries() {
   const dir = liveSortDir === 'asc' ? 1 : -1;
   const num = (v) => Number(v) || 0;
   entries.sort((a, b) => {
+    // Pending rows have nothing to sort on; keep them below every ranked row
+    // in either direction.
+    const pa = liveEntryIsPending(a);
+    const pb = liveEntryIsPending(b);
+    if (pa !== pb) return pa ? 1 : -1;
+    if (pa) return 0;
     let cmp = 0;
     switch (liveSortKey) {
       case 'value': cmp = num(a.portfolio_value) - num(b.portfolio_value); break;
@@ -233,18 +261,20 @@ function populateLiveTable() {
     tbody.innerHTML = `<tr><td colspan="6" style="text-align:center;padding:24px;color:var(--text-secondary);">No live-month entries configured.</td></tr>`;
     return;
   }
-  const hasPrints = Boolean(livePayload?.live_status?.has_prints);
   tbody.innerHTML = rows.map((entry) => {
-    const safeId = escapeHtml(String(entry.entry_id || '').replace(/\\/g, '\\\\').replace(/'/g, "\\'"));
+    const printed = !liveEntryIsPending(entry);
+    const safeId = escapeHtml(String(entry.entry_id || ''));
     const label = escapeHtml(liveSeriesLabel(entry));
     const ret = Number(entry.cumulative_return || 0);
-    const retClass = ret >= 0 ? 'return-positive' : 'return-negative';
+    const retClass = printed ? (ret >= 0 ? 'return-positive' : 'return-negative') : '';
     const dd = (Math.abs(Number(entry.max_drawdown || 0)) * 100).toFixed(2);
-    const valueCell = `$${liveFormatMoney(hasPrints ? entry.portfolio_value : entry.initial_equity)}`;
+    const valueCell = printed && entry.portfolio_value != null
+      ? `$${liveFormatMoney(entry.portfolio_value)}`
+      : '—';
     const selected = liveSelectedId === entry.entry_id ? ' is-selected' : '';
     return `
       <tr class="${selected}" data-live-entry="${safeId}">
-        <td class="rank-cell">${hasPrints ? escapeHtml(entry.rank) : '—'}</td>
+        <td class="rank-cell">${printed ? escapeHtml(entry.rank) : '—'}</td>
         <td>
           <div class="team-name-badge">
             <span>${label}</span>
@@ -252,9 +282,9 @@ function populateLiveTable() {
           </div>
         </td>
         <td style="text-align:right;font-family:var(--font-mono);">${valueCell}</td>
-        <td style="text-align:right;" class="${retClass}">${hasPrints ? `${(ret * 100).toFixed(2)}%` : '—'}</td>
-        <td style="text-align:right;font-family:var(--font-mono);">${hasPrints ? Number(entry.sharpe_ratio || 0).toFixed(2) : '—'}</td>
-        <td style="text-align:right;font-family:var(--font-mono);">${hasPrints ? `${dd}%` : '—'}</td>
+        <td style="text-align:right;" class="${retClass}">${printed ? `${(ret * 100).toFixed(2)}%` : '—'}</td>
+        <td style="text-align:right;font-family:var(--font-mono);">${printed ? Number(entry.sharpe_ratio || 0).toFixed(2) : '—'}</td>
+        <td style="text-align:right;font-family:var(--font-mono);">${printed ? `${dd}%` : '—'}</td>
       </tr>`;
   }).join('');
 
@@ -273,7 +303,7 @@ function renderLiveDetail(entry) {
     host.innerHTML = '<div class="no-selection">Click a row</div>';
     return;
   }
-  const hasPrints = Boolean(livePayload?.live_status?.has_prints);
+  const hasPrints = !liveEntryIsPending(entry);
   const ret = Number(entry.cumulative_return || 0);
   const retColor = ret >= 0 ? 'var(--success-color)' : 'var(--danger-color)';
   host.innerHTML = `

@@ -2,12 +2,18 @@
 """Persist the Live Trading Leaderboard freeze snapshot for the current month.
 
 1. Recomputes cheap baselines (indices + rule-based strategies) for
-   month-open → last completed US cash session under ``leaderboard-live``.
-2. Optionally appends each Live LLM roster entry for sessions not yet stored
-   (usually one cash day), restoring cash/positions from yesterday's snapshot.
-   Public GET never runs this.
+   month-open → last settled US cash session under ``leaderboard-live``.
+2. With ``--models`` (billable), appends each Live LLM roster entry for
+   sessions not yet stored (usually one cash day), restoring cash/positions
+   from yesterday's snapshot.
+3. Deletes this month's freeze rows the new ones supersede.
+
+Public GET never runs this; it only reads the rows written here.
 
     python dashboard/scripts/refresh_live_leaderboard.py --models
+
+``--clear`` also forgets the last refresh's window, so the refresh after it
+always runs instead of reporting "already refreshed" over an empty board.
 
 Remote prod (Render) without shell access — enqueues a background refresh
 (HTTP 202); poll ``GET /api/v1/leaderboard?period=live``:

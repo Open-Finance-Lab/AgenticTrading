@@ -2,16 +2,17 @@
 
 This board is not Daily stretched to 30 days and not the fixed contest window.
 One continuous paper-trading month per entry: the chart axis is the current
-America/New_York calendar month, hourly nodes are US cash-session hours
-(10:00–16:00 ET, weekdays), and points after the freeze close stay empty so
-the line cannot interpolate into the live tail or the future.
+America/New_York calendar month, hourly nodes are the closes of the US cash
+session's hourly bars (10:00–16:00 ET, NYSE trading days), and points after
+the freeze close stay empty so the line cannot interpolate into the future.
 
-Phase 1 caches auto-compute baselines/indices for month-open → last completed
-session under ``leaderboard-live``. LLM models are written by
-``refresh_live_leaderboard(deploy_models=True)`` (or the deploy script), never
-on public GET. Each freeze close appends one cash session onto the prior
-snapshot (cash + positions), so a month costs about one full backtest, not a
-replay from the 1st every night.
+Every curve is written by ``refresh_live_leaderboard`` (the cron hook or the
+refresh script), never on a public GET: GET only reads the latest stored
+freeze row per entry. Baselines/indices are recomputed for month-open → last
+settled session on every refresh; LLM models only when ``deploy_models=True``,
+and each freeze appends one cash session onto the prior snapshot (cash +
+positions), so a month costs about one full backtest, not a replay from the
+1st every night.
 """
 
 from __future__ import annotations
@@ -21,28 +22,38 @@ import os
 import tempfile
 import threading
 from calendar import monthrange
-from datetime import date, datetime, time, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple, Union
 from zoneinfo import ZoneInfo
 
 from dashboard.backend.database import db
 from dashboard.backend.domain.leaderboard.baselines import INITIAL_CAPITAL, calc_metrics
-from dashboard.backend.domain.leaderboard.service import (
-    _rank_entries,
-    load_leaderboard_config,
-)
 from dashboard.backend.domain.leaderboard.strategies._common import reference_start_date
+from dashboard.backend.domain.leaderboard.us_market_calendar import is_trading_day
+from dashboard.backend.infrastructure.market_data.alpaca_bars import (
+    allow_recent_sip,
+    sip_delay_minutes,
+)
+from dashboard.backend.infrastructure.market_data.sessions import session_windows
 from dashboard.backend.paths import DATA_DIR
 import dashboard.backend.domain.leaderboard.service as lb_service
 
 _US_EASTERN = ZoneInfo("America/New_York")
-_US_CASH_OPEN = time(9, 30)
-_US_CASH_CLOSE = time(16, 0)
-# Alpaca 1h bars for the cash session typically print on the hour from 10:00
-# through the 16:00 close (7 nodes). 9:30 is the open, not a separate hourly
-# close. Phase 1 will replace this synthetic grid with the actual tape's
-# timestamps and only *pad* the tail out to month-end.
+# The US cash session has one owner (market_data/sessions.py); restating it here
+# is how the board's copies drifted apart before #529.
+((_US_CASH_OPEN, _US_CASH_CLOSE),) = session_windows("US")
+# Axis nodes are hourly bar *closes*. Since #529 the board's Alpaca bars are
+# open-stamped (09:00 … 15:00, each closing an hour later) and Yahoo's index
+# bars are open-stamped on the half hour (09:30 … 15:30), so a stored point is
+# placed at the hour its bar closed in (see ``_axis_node_key``): seven nodes a
+# day, the last one holding the 16:00 close.
 _RTH_HOURS = (10, 11, 12, 13, 14, 15, 16)
+_BAR_MINUTES = 60
+# A session joins the freeze only once its closing bar is final on the tape the
+# board is priced off. A Basic plan clamps a SIP request to now − delay, so a
+# refresh at 16:02 would fetch a truncated 15:00 bar and cache that curve as
+# the day's close. The margin covers late prints and the cron's own jitter.
+_FREEZE_SETTLE_MARGIN_MINUTES = 15
 
 LIVE_SESSION_ID = "leaderboard-live"
 LIVE_PHASE = 1
@@ -81,41 +92,41 @@ def live_month_dates(as_of: Optional[Union[date, datetime]] = None) -> Tuple[str
     return start.isoformat(), end.isoformat()
 
 
-def _weekdays_inclusive(start: date, end: date) -> List[date]:
+def _trading_days_inclusive(start: date, end: date) -> List[date]:
     if end < start:
         return []
     days: List[date] = []
     cursor = start
     while cursor <= end:
-        if cursor.weekday() < 5:
+        if is_trading_day(cursor):
             days.append(cursor)
         cursor += timedelta(days=1)
     return days
 
 
 def live_month_hourly_axis(start_date: str, end_date: str) -> List[str]:
-    """RTH hourly ISO timestamps covering the calendar month (weekends skipped)."""
+    """Hourly bar-close ISO timestamps covering the month's NYSE trading days."""
     start = date.fromisoformat(start_date)
     end = date.fromisoformat(end_date)
     out: List[str] = []
-    for day in _weekdays_inclusive(start, end):
+    for day in _trading_days_inclusive(start, end):
         for hour in _RTH_HOURS:
             ts = datetime(day.year, day.month, day.day, hour, 0, tzinfo=_US_EASTERN)
             out.append(ts.isoformat())
     return out
 
 
-def _previous_weekday(day: date) -> date:
+def _previous_trading_day(day: date) -> date:
     cursor = day - timedelta(days=1)
-    while cursor.weekday() >= 5:
+    while not is_trading_day(cursor):
         cursor -= timedelta(days=1)
     return cursor
 
 
 def next_session_day(day: date) -> date:
-    """Next US weekday after ``day`` (Sat/Sun → Monday)."""
+    """Next NYSE trading day after ``day`` (skips weekends and holidays)."""
     cursor = day + timedelta(days=1)
-    while cursor.weekday() >= 5:
+    while not is_trading_day(cursor):
         cursor += timedelta(days=1)
     return cursor
 
@@ -148,36 +159,47 @@ def live_increment_bounds(
     return nxt.isoformat(), freeze.isoformat()
 
 
+def freeze_settle_time(day: date) -> datetime:
+    """When ``day``'s closing bar is final on the board's tape."""
+    delay = 0 if allow_recent_sip() else sip_delay_minutes()
+    close = datetime.combine(day, _US_CASH_CLOSE, tzinfo=_US_EASTERN)
+    return close + timedelta(minutes=delay + _FREEZE_SETTLE_MARGIN_MINUTES)
+
+
 def live_clock(as_of: Optional[Union[date, datetime]] = None) -> Dict[str, Any]:
     """Session state for the live month at ``as_of`` (America/New_York).
 
-    - ``weekend`` / ``preopen``: yesterday (or Friday) is frozen; no live tail.
-    - ``rth``: yesterday is frozen; today is the live tail through the last
-      hourly node ``<= as_of``.
-    - ``closed``: today's cash session is complete and joins the freeze.
+    - ``weekend`` / ``holiday``: the last trading day is frozen; no session.
+    - ``preopen``: the previous trading day is frozen; today has not opened.
+    - ``rth``: the previous trading day is frozen; today's session is in
+      progress. Nothing prints intraday — today appends once it settles.
+    - ``settling``: the cash session has closed but its closing bar is not
+      yet final on the tape (``freeze_settle_time``); still not frozen.
+    - ``closed``: today's cash session is settled and joins the freeze.
     """
     now = _coerce_as_of_eastern(as_of)
     today = now.date()
-    weekday = now.weekday()
 
-    if weekday >= 5:
-        session_state = "weekend"
-        frozen_through = today
-        while frozen_through.weekday() >= 5:
-            frozen_through -= timedelta(days=1)
+    if not is_trading_day(today):
+        session_state = "weekend" if today.weekday() >= 5 else "holiday"
+        frozen_through = _previous_trading_day(today)
         live_day = None
     elif now.time() < _US_CASH_OPEN:
         session_state = "preopen"
-        frozen_through = _previous_weekday(today)
+        frozen_through = _previous_trading_day(today)
+        live_day = None
+    elif now.time() < _US_CASH_CLOSE:
+        session_state = "rth"
+        frozen_through = _previous_trading_day(today)
         live_day = today
-    elif now.time() >= _US_CASH_CLOSE:
+    elif now < freeze_settle_time(today):
+        session_state = "settling"
+        frozen_through = _previous_trading_day(today)
+        live_day = today
+    else:
         session_state = "closed"
         frozen_through = today
         live_day = None
-    else:
-        session_state = "rth"
-        frozen_through = _previous_weekday(today)
-        live_day = today
 
     return {
         "as_of": now.isoformat(),
@@ -232,7 +254,7 @@ def live_freeze_config(
     freeze_end = clock["frozen_through"]
     if date.fromisoformat(freeze_end) < date.fromisoformat(month_start):
         return None
-    base = load_leaderboard_config()
+    base = lb_service.load_leaderboard_config()
     live_base = {k: v for k, v in base.items() if k != "reference_start_date"}
     return {
         **live_base,
@@ -249,7 +271,7 @@ def live_freeze_config(
 
 def live_board_strategies(config: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
     """Baselines plus the Season-0 Live LLM roster (not the full contest list)."""
-    cfg = config or load_leaderboard_config()
+    cfg = config or lb_service.load_leaderboard_config()
     out: List[Dict[str, Any]] = []
     for strategy in cfg.get("strategies", []):
         if strategy.get("strategy") == "llm_agent" and strategy.get("id") not in LIVE_MODEL_IDS:
@@ -266,13 +288,81 @@ def live_llm_entries(config: Optional[Dict[str, Any]] = None) -> List[Dict[str, 
 
 
 def clear_live_session_runs() -> int:
-    """Delete every ``leaderboard-live`` run (curves, trades, decisions)."""
+    """Delete every ``leaderboard-live`` run (curves, trades, decisions).
+
+    Also forgets which window the last refresh satisfied: that record describes
+    rows that no longer exist, and left in place it makes the very next
+    refresh report "already refreshed" and skip, leaving the board empty.
+    """
     runs = db.get_runs_by_session(LIVE_SESSION_ID) or []
     for run in runs:
         run_id = run.get("run_id")
         if run_id:
             db.delete_run(run_id)
+    try:
+        _LIVE_REFRESH_STATE_PATH.unlink()
+    except FileNotFoundError:
+        pass
     return len(runs)
+
+
+def latest_live_month_runs(
+    month_start: str,
+    freeze_end: str,
+    *,
+    runs: Optional[List[Dict[str, Any]]] = None,
+) -> Dict[str, Dict[str, Any]]:
+    """Latest freeze row per entry for this month that ends by ``freeze_end``.
+
+    Each freeze close writes its own ``agent_runs`` row (``start_date`` is
+    month-open, ``end_date`` is that freeze), so GET keeps serving yesterday's
+    snapshot after the clock rolls, until the next refresh lands. One session
+    scan serves the whole board; pass ``runs`` to reuse a scan already made.
+    """
+    if runs is None:
+        runs = db.get_runs_by_session(LIVE_SESSION_ID) or []
+    best: Dict[str, Dict[str, Any]] = {}
+    for run in runs:
+        entry_id = run.get("llm_model")
+        if (
+            not entry_id
+            or run.get("mode") != lb_service.LEADERBOARD_MODE
+            or run.get("start_date") != month_start
+        ):
+            continue
+        end = str(run.get("end_date") or "")
+        if not end or end > freeze_end:
+            continue
+        current = best.get(entry_id)
+        if current is None or end > str(current.get("end_date") or ""):
+            best[entry_id] = run
+    return best
+
+
+def prune_superseded_live_runs(month_start: str, freeze_end: str) -> int:
+    """Delete this month's freeze rows that a later freeze row has replaced.
+
+    Every row stores the whole month-to-date curve, so keeping one per day
+    grows storage with the square of the day of the month while nothing but
+    the latest row per entry is ever read again.
+    """
+    runs = db.get_runs_by_session(LIVE_SESSION_ID) or []
+    keep = {
+        run.get("run_id")
+        for run in latest_live_month_runs(month_start, freeze_end, runs=runs).values()
+    }
+    deleted = 0
+    for run in runs:
+        run_id = run.get("run_id")
+        if (
+            run_id
+            and run_id not in keep
+            and run.get("start_date") == month_start
+            and str(run.get("end_date") or "") <= freeze_end
+        ):
+            db.delete_run(run_id)
+            deleted += 1
+    return deleted
 
 
 def _live_window_key(config: Dict[str, Any]) -> str:
@@ -351,6 +441,7 @@ def deploy_live_model_increment(
     *,
     force_refresh: bool = False,
     allow_fallback: bool = False,
+    bars_memo: Optional[Dict[Tuple[Any, ...], Any]] = None,
 ) -> Dict[str, Any]:
     """Append unseen cash sessions onto a live-month LLM snapshot.
 
@@ -358,6 +449,10 @@ def deploy_live_model_increment(
     plus positions from the previous freeze row. A missing snapshot falls back
     to a full month-open → freeze replay once, then stores the book for later
     nights. Does not change contest/daily ``deploy_model_run``.
+
+    ``bars_memo`` lets one refresh share a bar fetch across the roster: the
+    on-disk bar cache refuses windows under 24 hours old, so without it every
+    model re-downloads the same increment window.
     """
     entry_id = entry["id"]
     month_start = freeze_cfg["start_date"]
@@ -365,9 +460,9 @@ def deploy_live_model_increment(
     session_id = freeze_cfg["session_id"]
     initial_capital = float(freeze_cfg.get("initial_capital", INITIAL_CAPITAL))
 
-    prior = None if force_refresh else lb_service._find_live_month_run(
-        entry_id, month_start, freeze_end, session_id
-    )
+    prior = None if force_refresh else latest_live_month_runs(
+        month_start, freeze_end
+    ).get(entry_id)
     snapshot = _snapshot_from_run(prior)
     if prior and str(prior.get("end_date") or "") == freeze_end and not force_refresh:
         return {
@@ -414,12 +509,19 @@ def deploy_live_model_increment(
         resumed = True
 
     strategy_impl = lb_service.get_strategy(entry)
-    bars_start = lb_service.reference_start_date(segment_start, freeze_cfg)
-    if bars_start > segment_start:
-        bars_start = segment_start
-    bars = lb_service.fetch_hourly_bars(
-        strategy_impl.required_symbols(), bars_start, segment_end
-    )
+    # The indicator lookback is relative to the segment being traded, not to
+    # month-open. ``freeze_cfg`` pins ``reference_start_date`` to a month before
+    # the 1st, so passing it here made a one-day increment on the 28th fetch
+    # about two months of bars.
+    bars_start = reference_start_date(segment_start, None)
+    symbols = strategy_impl.required_symbols()
+    memo_key = (tuple(sorted(symbols)), bars_start, segment_end)
+    if bars_memo is not None and memo_key in bars_memo:
+        bars = bars_memo[memo_key]
+    else:
+        bars = lb_service.fetch_hourly_bars(symbols, bars_start, segment_end)
+        if bars_memo is not None and bars:
+            bars_memo[memo_key] = bars
     if not bars:
         raise RuntimeError(
             f"No market data returned for live increment {bars_start} → {segment_end}"
@@ -605,6 +707,7 @@ def refresh_live_leaderboard(
     if deploy_models:
         failures: List[Dict[str, str]] = []
         successes: List[Dict[str, Any]] = []
+        bars_memo: Dict[Tuple[Any, ...], Any] = {}
         for entry in live_llm_entries(freeze_cfg):
             entry_id = entry["id"]
             try:
@@ -613,6 +716,7 @@ def refresh_live_leaderboard(
                     freeze_cfg,
                     force_refresh=force_refresh,
                     allow_fallback=allow_fallback,
+                    bars_memo=bars_memo,
                 )
                 successes.append(row)
             except (lb_service.LeaderboardFallbackError, ValueError, RuntimeError) as exc:
@@ -621,6 +725,9 @@ def refresh_live_leaderboard(
         result["model_results"] = successes
         result["model_failures"] = failures
 
+    result["pruned_runs"] = prune_superseded_live_runs(
+        freeze_cfg["start_date"], freeze_cfg["end_date"]
+    )
     _save_live_refresh_state(result)
     return result
 
@@ -644,7 +751,7 @@ def _run_live_refresh_background(
 
 def maybe_schedule_live_leaderboard_refresh(
     *,
-    deploy_models: bool = True,
+    deploy_models: bool = False,
     force_refresh: bool = False,
 ) -> bool:
     """Start a background live refresh if one is not already running."""
@@ -661,7 +768,6 @@ def maybe_schedule_live_leaderboard_refresh(
             return False
 
     with _live_refresh_lock:
-        global _live_refresh_running
         if _live_refresh_running:
             return False
         _set_live_refresh_running(True)
@@ -684,12 +790,14 @@ def maybe_schedule_live_leaderboard_refresh(
 
 def enqueue_live_leaderboard_refresh(
     *,
-    deploy_models: bool = True,
+    deploy_models: bool = False,
     force_refresh: bool = False,
 ) -> Dict[str, Any]:
     """Cron/API entrypoint: accept a live refresh and run it in a background thread.
 
     Never blocks on model deploys. GET never calls this. No ``allow_fallback``.
+    ``deploy_models`` defaults off: it is the billable half (every Live LLM
+    trades a session at the operator's API cost), so each caller opts in.
     """
     freeze_cfg = live_freeze_config()
     if freeze_cfg is None:
@@ -739,11 +847,21 @@ def _parse_to_et(ts: Any) -> Optional[datetime]:
     return dt.astimezone(_US_EASTERN)
 
 
-def _hour_key(dt: datetime) -> str:
-    hour = dt.hour
-    if hour == 9 and dt.minute >= 30:
-        hour = 10
-    return f"{dt.date().isoformat()}T{hour:02d}:00"
+def _axis_node_key(bar_open: datetime) -> Optional[str]:
+    """The axis node an open-stamped hourly point belongs to: its bar's close.
+
+    Alpaca's 09:00 bar (09:30 open → 10:00) lands on 10:00 and its 15:00 bar on
+    the 16:00 close; Yahoo's 09:30 bar closes 10:30 and lands on 10:00, and its
+    15:30 half-bar is capped at the 16:00 close. A bar opening at or after the
+    close is after-hours and has no node.
+    """
+    if bar_open.time() >= _US_CASH_CLOSE:
+        return None
+    close = bar_open + timedelta(minutes=_BAR_MINUTES)
+    session_close = datetime.combine(close.date(), _US_CASH_CLOSE, tzinfo=_US_EASTERN)
+    if close > session_close:
+        close = session_close
+    return f"{close.date().isoformat()}T{close.hour:02d}:00"
 
 
 def reindex_frozen_curve(
@@ -751,19 +869,24 @@ def reindex_frozen_curve(
     axis: List[str],
     freeze_end: str,
     initial_capital: float,
+    scale: float = 1.0,
 ) -> List[Dict[str, Any]]:
     """Map a freeze-window hourly curve onto the calendar-month axis.
 
     Points after the freeze close are omitted (frontend leaves those axis
     nodes null). Missing hours inside the freeze as-of fill from the last
     print so the line is continuous across sparse bars, not into the future.
+    A stored NULL equity is "no observation", never $0 (issue #390).
     """
     by_hour: Dict[str, float] = {}
     for pt in hourly_points:
         dt = _parse_to_et(pt.get("timestamp"))
-        if dt is None:
+        equity = pt.get("equity")
+        if dt is None or equity is None:
             continue
-        by_hour[_hour_key(dt)] = float(pt.get("equity") or 0)
+        key = _axis_node_key(dt)
+        if key is not None:
+            by_hour[key] = float(equity) * scale
 
     freeze_dt = datetime.combine(
         date.fromisoformat(freeze_end), _US_CASH_CLOSE, tzinfo=_US_EASTERN
@@ -783,37 +906,50 @@ def reindex_frozen_curve(
     return out
 
 
+def _recorded_seed(run: Dict[str, Any]) -> Optional[float]:
+    """The capital a live row was run at, when the row recorded it.
+
+    ``agent_runs.initial_equity`` is not that number: ``calc_metrics`` stores
+    the curve's *first mark*, which already carries the first hour's P&L, so
+    rescaling by it erased that hour from every published figure.
+    """
+    value = _run_metadata_dict(run).get("initial_capital")
+    try:
+        seed = float(value)
+    except (TypeError, ValueError):
+        return None
+    return seed if seed > 0 else None
+
+
 def _entry_from_strategy(
     strategy: Dict[str, Any],
     *,
     display_capital: float,
     curve: List[Dict[str, Any]],
     run: Optional[Dict[str, Any]],
+    scale: float = 1.0,
 ) -> Dict[str, Any]:
+    """One board row. Returns and risk come off the stored run untouched.
+
+    The stored run's metrics were computed against the capital it was seeded
+    with, over exactly the curve this row plots, so only the dollar axis is
+    scaled (the contest board's rule). A row with no run is *pending*: it has
+    no value, return or rank — publishing the seed and 0% would rank an entry
+    that never traded against ones that did.
+    """
     is_model = strategy.get("strategy") == "llm_agent" or strategy.get("label") == "Model"
-    printed = [p for p in curve if p.get("equity") is not None]
+    printed = bool(run) and any(p.get("equity") is not None for p in curve)
     if printed:
-        last_eq = float(printed[-1]["equity"])
-        metrics = calc_metrics(printed, display_capital)
-        portfolio_value = last_eq
-        total_return = metrics["total_return"]
-        sharpe = metrics["sharpe_ratio"]
-        max_dd = metrics["max_drawdown"]
-    elif run:
-        scale = 1.0
-        stored = float(run.get("initial_equity") or display_capital)
-        if stored:
-            scale = display_capital / stored
         final = run.get("final_equity")
-        portfolio_value = float(final) * scale if final is not None else display_capital
-        total_return = run.get("total_return") or 0.0
-        sharpe = run.get("sharpe_ratio") or 0.0
-        max_dd = run.get("max_drawdown") or 0.0
+        portfolio_value = float(final) * scale if final is not None else None
+        total_return = run.get("total_return")
+        sharpe = run.get("sharpe_ratio")
+        max_dd = run.get("max_drawdown")
     else:
-        portfolio_value = display_capital
-        total_return = 0.0
-        sharpe = 0.0
-        max_dd = 0.0
+        portfolio_value = None
+        total_return = None
+        sharpe = None
+        max_dd = None
     return {
         "entry_id": strategy["id"],
         "team_name": strategy.get("name") or "Agentic Trading Lab",
@@ -827,12 +963,13 @@ def _entry_from_strategy(
         "sharpe_ratio": sharpe,
         "max_drawdown": max_dd,
         "status": "frozen" if printed else "pending",
+        "rank": None,
         "run_id": run.get("run_id") if run else None,
         "llm_calls": (run or {}).get("llm_calls") or 0,
         "input_tokens": (run or {}).get("input_tokens") or 0,
         "output_tokens": (run or {}).get("output_tokens") or 0,
         "est_cost_usd": (run or {}).get("est_cost_usd") or 0,
-        "equity_curve": curve,
+        "equity_curve": curve if printed else [],
     }
 
 
@@ -842,11 +979,14 @@ def get_live_leaderboard(
 ) -> Dict[str, Any]:
     """Calendar-month board: freeze-window curves on a full-month axis.
 
-    Auto-compute baselines/indices run for month-open → last completed session
-    and cache under ``leaderboard-live``. LLM entries stay pending until
-    ``refresh_live_leaderboard(deploy_models=True)`` (this path never calls the
-    models). Points after the stored snapshot — and after the freeze close —
-    stay off the series so a stale cache cannot paint the next session.
+    Read-only. This is a public, unauthenticated GET, and the freeze window
+    moves every trading day, so computing here would miss the run cache on
+    the first request of every day and fetch 30 symbols of bars plus the index
+    series inside a request thread — once per concurrent request. Every row is
+    written by ``refresh_live_leaderboard`` instead; this serves the latest
+    stored freeze row per entry and leaves the rest pending. Points after the
+    stored snapshot — and after the freeze close — stay off the series so a
+    stale row cannot paint the next session.
     """
     now = _coerce_as_of_eastern(as_of)
     start_date, end_date = live_month_dates(now)
@@ -856,73 +996,65 @@ def get_live_leaderboard(
     month_start = date.fromisoformat(start_date)
     month_end = date.fromisoformat(end_date)
     frozen_day = date.fromisoformat(clock["frozen_through"])
-    trading_days = _weekdays_inclusive(month_start, month_end)
+    trading_days = _trading_days_inclusive(month_start, month_end)
     elapsed_end = min(frozen_day, month_end)
-    elapsed = _weekdays_inclusive(month_start, elapsed_end) if elapsed_end >= month_start else []
+    elapsed = (
+        _trading_days_inclusive(month_start, elapsed_end)
+        if elapsed_end >= month_start
+        else []
+    )
 
-    config = load_leaderboard_config()
+    config = lb_service.load_leaderboard_config()
     strategies = live_board_strategies(config)
     display_capital = float(config.get("initial_capital", INITIAL_CAPITAL))
     freeze_cfg = live_freeze_config(now)
-    freeze_error: Optional[str] = None
-    if freeze_cfg is not None:
-        try:
-            lb_service.ensure_leaderboard_runs(config=freeze_cfg)
-        except Exception:
-            print("⚠️ Live freeze refresh failed; serving any cached live-month runs")
-            freeze_error = "freeze_unavailable"
-
-    entries: List[Dict[str, Any]] = []
     freeze_start = freeze_cfg["start_date"] if freeze_cfg else start_date
     freeze_end = freeze_cfg["end_date"] if freeze_cfg else clock["frozen_through"]
-    session_id = LIVE_SESSION_ID
+    runs_by_entry = (
+        latest_live_month_runs(freeze_start, freeze_end) if freeze_cfg else {}
+    )
+
+    ranked: List[Dict[str, Any]] = []
+    pending: List[Dict[str, Any]] = []
     snapshot_ends: List[str] = []
 
     for strategy in strategies:
-        run = None
-        if freeze_cfg is not None:
-            run = lb_service._find_live_month_run(
-                strategy["id"], freeze_start, freeze_end, session_id
-            )
-        hourly: List[Dict[str, Any]] = []
-        curve_end = freeze_end
+        run = runs_by_entry.get(strategy["id"])
+        curve: List[Dict[str, Any]] = []
+        scale = 1.0
         if run:
             snapshot_ends.append(str(run.get("end_date") or freeze_end))
             curve_end = _clip_end(str(run.get("end_date") or freeze_end), freeze_end)
+            seed = _recorded_seed(run)
+            if seed is not None:
+                scale = display_capital / seed
             hourly = db.get_equity_curve(run["run_id"]) or []
-            stored = float(run.get("initial_equity") or display_capital)
-            scale = (display_capital / stored) if stored else 1.0
-            if scale != 1.0:
-                hourly = [
-                    {**pt, "equity": float(pt.get("equity") or 0) * scale}
-                    for pt in hourly
-                ]
-        curve = reindex_frozen_curve(
-            hourly, axis, curve_end, display_capital
-        ) if hourly else []
-        entries.append(
-            _entry_from_strategy(
-                strategy,
-                display_capital=display_capital,
-                curve=curve,
-                run=run,
-            )
+            if hourly:
+                curve = reindex_frozen_curve(
+                    hourly, axis, curve_end, display_capital, scale=scale
+                )
+        entry = _entry_from_strategy(
+            strategy,
+            display_capital=display_capital,
+            curve=curve,
+            run=run,
+            scale=scale,
         )
+        (ranked if entry["status"] == "frozen" else pending).append(entry)
 
-    entries = _rank_entries(entries)
-    printed_entries = [e for e in entries if e.get("equity_curve")]
-    models_with_prints = [e for e in printed_entries if e.get("is_model")]
+    entries = lb_service._rank_entries(ranked) + pending
+    models_with_prints = [e for e in ranked if e.get("is_model")]
     if models_with_prints:
         leader = models_with_prints[0].get("model") or models_with_prints[0].get("team_name") or "—"
-    elif printed_entries:
-        top = max(printed_entries, key=lambda e: e.get("portfolio_value") or 0)
-        leader = top.get("model") or top.get("team_name") or "—"
+    elif ranked:
+        leader = ranked[0].get("model") or ranked[0].get("team_name") or "—"
     else:
         leader = "—"
 
     printed_count = max((len(e.get("equity_curve") or []) for e in entries), default=0)
-    models_cached = sum(1 for e in entries if e.get("is_model") and e.get("equity_curve"))
+    models_cached = sum(1 for e in ranked if e.get("is_model"))
     models_total = sum(1 for e in entries if e.get("is_model"))
+    snapshot_end = max(snapshot_ends) if snapshot_ends else None
     month_label = now.strftime("%B %Y")
     live_status = {
         "phase": LIVE_PHASE,
@@ -942,11 +1074,15 @@ def get_live_leaderboard(
         "models_cached": models_cached,
         "models_pending": max(models_total - models_cached, 0),
         "roster": list(LIVE_MODEL_IDS),
-        "snapshot_end": max(snapshot_ends) if snapshot_ends else None,
-        "has_prints": bool(printed_entries),
+        "snapshot_end": snapshot_end,
+        # The newest stored freeze is behind the clock's: tonight's refresh
+        # has not landed (or failed). GET never fills that gap itself.
+        "snapshot_stale": bool(
+            freeze_cfg is not None and (snapshot_end is None or snapshot_end < freeze_end)
+        ),
+        "has_prints": bool(ranked),
         "freeze_start": freeze_start,
         "freeze_end": freeze_end,
-        "freeze_error": freeze_error,
     }
 
     return {
@@ -959,11 +1095,13 @@ def get_live_leaderboard(
             "end_date": end_date,
             "label": f"{start_date} — {end_date}",
             "description": (
-                f"Live month {month_label}. Axis is the calendar month; hourly "
-                "nodes are US cash-session hours (10:00–16:00 America/New_York). "
-                f"Frozen history is the hourly backtest through {clock['frozen_through']}. "
-                "Each completed freeze is stored as a monthly snapshot in agent_runs "
-                "(session leaderboard-live); public GET never calls the models."
+                f"Live month {month_label}. Axis is the calendar month's NYSE "
+                "trading days; each node is the close of an hourly US cash-session "
+                "bar (10:00–16:00 America/New_York). "
+                f"Frozen history is the hourly backtest through {clock['frozen_through']}; "
+                "a session is appended once, after it closes and settles. "
+                "Each freeze is stored as a monthly snapshot in agent_runs "
+                "(session leaderboard-live); public GET only reads it."
             ),
         },
         "chart_axis": axis,
@@ -974,3 +1112,6 @@ def get_live_leaderboard(
         "entries": entries,
         "live_status": live_status,
     }
+
+
+lb_service.register_period_board("live", get_live_leaderboard)

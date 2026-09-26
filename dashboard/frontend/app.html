@@ -1646,7 +1646,7 @@
                         <span id="liveStatusBadge" class="status-badge upcoming contest-live-badge">Cash session closed</span>
                     </div>
                     <p class="contest-subtitle" id="liveBoardSubtitle">Paper trading · hourly US cash session</p>
-                    <p class="contest-subtitle">Same model roster as Competition. One continuous month, not a daily $10k reset.</p>
+                    <p class="contest-subtitle" id="liveRosterNote">A subset of the Competition model roster. One continuous book for the month, not a daily reset.</p>
                 </div>
             </div>
             <p id="livePhaseBanner" class="live-phase-banner"></p>
@@ -1674,7 +1674,7 @@
             </div>
             <div class="leaderboard-header-bar compact">
                 <div class="header-stats compact">
-                    <p id="liveZoneCaption" class="live-zone-caption">Frozen · live tail · future</p>
+                    <p id="liveZoneCaption" class="live-zone-caption">Frozen · session in progress · future</p>
                 </div>
                 <div class="header-controls compact">
                     <div class="curve-picker" id="liveCurvePicker">
@@ -1703,7 +1703,7 @@
                         <canvas id="liveEquityCurvesChart"></canvas>
                     </div>
                     <div id="liveEquityCurvesLegend" class="chart-legend-custom"></div>
-                    <div class="chart-hint">Hourly nodes · US cash session 10:00–16:00 ET · future days stay empty</div>
+                    <div class="chart-hint">Hourly bar closes · US cash session 10:00–16:00 ET, NYSE trading days · future days stay empty</div>
                 </section>
             </div>
             <div class="leaderboard-bottom compact">
@@ -1731,12 +1731,13 @@
                     <div class="sidebar-card compact">
                         <h3 class="sidebar-title compact">Rules</h3>
                         <div class="ranking-formula compact">
-                            <p class="formula-compact">Official rank = latest printed portfolio value</p>
+                            <p class="formula-compact">Official rank = latest frozen portfolio value</p>
                             <ul class="formula-items compact">
                                 <li>Month is one continuous book from the 1st</li>
                                 <li>Frozen hours never rewrite</li>
-                                <li>Today appends after the open, hourly</li>
+                                <li>Each session appends once, after the close settles</li>
                                 <li>Ties break on cumulative return</li>
+                                <li>Entries with no frozen session are unranked</li>
                             </ul>
                         </div>
                     </div>
@@ -2554,7 +2555,7 @@
     <script src="js/admin-credits.js?v=8" defer></script>
     <script src="js/admin-tabs.js?v=12" defer></script>
     <script src="js/leaderboard.js?v=33" defer></script>
-    <script src="js/live-leaderboard.js?v=1" defer></script>
+    <script src="js/live-leaderboard.js?v=2" defer></script>
     <script src="home-page.js?v=54" defer></script>
     <!-- Load order: must come after app.js (API/API_BASE/escapeHtml) and
          market-events/marketEventRelativeTime.js (formatMarketEventRelativeTime),
