@@ -29,10 +29,58 @@ SIMPLE_INSTRUCTION_LABEL = "Trading instruction"
 
 # Seeded into every new built-in agent so a user can sign up and immediately run
 # a meaningful backtest without opening Configure first.
+#
+# Worded for how the engine actually executes, because the model is told none of
+# it: orders fill in whole shares, and a sell always closes the whole position.
+# The closing "Orders:" paragraph exists because a short run tolerates almost no
+# malformed replies before it aborts. Those replies are checked by
+# pipeline_runner.pipeline_output_to_decision and the strict_llm block in
+# portfolio_manager.py, not by infrastructure/llm/validator.py. Staying
+# invested and holding is the design goal: LLM traders most often lose to
+# buy-and-hold by sitting in cash and over-trading.
+#
+# Known gaps between this text and the engine. Close them in the engine, not
+# here: the wording is what the A/B measured, so rewording it means a new run.
+# - "Listed stocks" are the per-bar snapshot, not the run's universe:
+#   make_trading_decision_with_llm shows the 12 best names by trend score plus
+#   holdings. The seven-name onboarding sleeve fits whole; a 30-name Dow run
+#   shows 12 of 30, so rule 1 cannot spread across all of them.
+# - Rule 7's 0 is how sma20, macd and macd_signal warm up, with two exceptions.
+#   RSI warms up at a neutral 50, harmless while rule 4 uses it only as an
+#   upper gate. And in a window shorter than 20 bars, sma20 is the whole
+#   window's mean close, future bars included (features.py; dashboard
+#   backtests fetch no warm-up history). A week-long onboarding window clears it.
+# - Rules 5 and 6 are advice: nothing in the engine caps a position's share of
+#   the account or, A-share T+1 aside, stops a same-day round trip.
+#
+# Three copies must match exactly: this one, app.js's mirror and the seven LLM
+# cards in config/marketplace.json (each pinned by a test). Seeding is
+# write-once, so a change reaches new agents and new clones only.
 DEFAULT_STARTER_INSTRUCTION = (
-    "Spread the money across a few of the strongest available stocks. Buy on "
-    "meaningful dips, take profits after strong run-ups, and never put "
-    "everything into one stock."
+    "Manage this account like a disciplined portfolio manager. The goal is to "
+    "keep pace with, and ideally beat, simply buying equal amounts of every "
+    "listed stock and holding them.\n\n"
+    "1. Stay invested. At the start (all cash), buy roughly equal dollar "
+    "amounts of as many listed stocks as the cash allows, keeping about 3% in "
+    "cash. Skip a stock if one share costs more than a third of the account.\n"
+    "2. Holding is the default. Most hours the right move is to change "
+    "nothing. Never trade on small moves.\n"
+    "3. Sell a stock only when its trend has clearly broken: price at least "
+    "2% below its 20-hour average (sma20) AND momentum (macd) below its "
+    "signal line (macd_signal). A sell always closes the whole position.\n"
+    "4. Reinvest cash quickly. When cash is above 10% of the account, buy the "
+    "stock you own the least of among those with price above sma20, macd "
+    "above macd_signal and RSI below 75. If none qualifies, buy the stock you "
+    "own the least of anyway.\n"
+    "5. Keep any one stock under 35% of the account, and do not add to a "
+    "stock that is already above 25%.\n"
+    "6. Do not buy back a stock you sold in the last day, or sell one you "
+    "bought in the last day (check recent_trades).\n"
+    "7. An indicator showing 0 does not have enough history yet: ignore it.\n\n"
+    "Orders: list each stock at most once, use whole-share quantities, and "
+    "keep the total cost of all buys within available cash. If you make no "
+    'trades, return one "hold" order for any listed stock. Keep each reason '
+    "under 15 words."
 )
 
 def starter_agent_description(name: str) -> str:

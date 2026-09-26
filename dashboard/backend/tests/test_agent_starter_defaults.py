@@ -276,6 +276,37 @@ def test_starter_instruction_matches_the_frontend():
     assert _js_const("DEFAULT_STARTER_INSTRUCTION") == DEFAULT_STARTER_INSTRUCTION
 
 
+def test_starter_instruction_line_breaks_survive_the_frontend_mirror():
+    """The instruction is a numbered list, so its newlines are content.
+
+    app.js must hold them as ``\\n`` escapes: a raw newline inside a
+    single-quoted literal is a SyntaxError, and no CI step parses app.js whole,
+    so the last two assertions are the only thing here that would catch one
+    (the helper's regex matches a raw newline and the equality passes anyway).
+    The helper used to unescape only ``\\'``, under which the equality could
+    never hold for a multi-line instruction. The first assertion keeps this
+    from passing vacuously if the constant goes back to a single line; the
+    line-by-line comparison makes a failure name the line that drifted.
+    """
+    assert "\n" in DEFAULT_STARTER_INSTRUCTION
+    assert (
+        _js_const("DEFAULT_STARTER_INSTRUCTION").split("\n")
+        == DEFAULT_STARTER_INSTRUCTION.split("\n")
+    )
+    decl_start = _APP_JS.index("const DEFAULT_STARTER_INSTRUCTION =\n")
+    decl = _APP_JS[decl_start : _APP_JS.index(";\n", decl_start)]
+    _, literal = decl.split("\n", 1)
+    assert "\n" not in literal
+    assert "\\n" in literal
+
+
+def test_starter_instruction_stays_under_2000_characters():
+    """The instruction is resent verbatim on every model call of every run
+    (``pipeline_runner._build_step_prompt``), so its length is paid again on
+    every bar. 2,000 is headroom over the current text, not a target."""
+    assert len(DEFAULT_STARTER_INSTRUCTION) <= 2000
+
+
 def test_starter_agent_identity_matches_the_frontend():
     assert _js_const("DEFAULT_STARTER_AGENT_NAME") == STARTER_AGENT_NAME
     assert _js_const("DEFAULT_FOUNDATION_MODEL") == STARTER_AGENT_MODEL
