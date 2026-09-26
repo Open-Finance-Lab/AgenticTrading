@@ -6219,6 +6219,7 @@ html[data-nav-page="home"] #homeView .home-landing-board {
     display: flex;
     align-self: stretch;
     min-height: 0;
+    position: relative;
 }
 /* The pager clips rather than scrolls (.home-pager-screen is overflow:hidden),
    so the panel is sized against the viewport, not left to its content.
@@ -13917,3 +13918,261 @@ table.sr-only {
 .research-agent-card-actions{display:flex;gap:8px;align-items:center}
 .research-remove-btn{padding:7px 12px;border-radius:8px;border:1px solid rgba(240,128,128,.35);background:transparent;color:#f08080;font:inherit;font-size:12.5px;cursor:pointer}
 .research-remove-btn:hover{border-color:#f08080;background:rgba(240,128,128,.08)}
+
+.home-board-stage {
+    position: relative;
+    flex: 1 1 auto;
+    min-width: 0;
+    min-height: 0;
+    width: 100%;
+    height: 100%;
+}
+.home-board-nav {
+    position: absolute;
+    top: 50%;
+    z-index: 4;
+    width: 36px;
+    height: 36px;
+    margin: 0;
+    padding: 0;
+    transform: translateY(-50%);
+    border-radius: 999px;
+    border: 1px solid rgba(148, 163, 184, 0.35);
+    background: rgba(15, 23, 42, 0.88);
+    color: #e2e8f0;
+    font-size: 22px;
+    line-height: 1;
+    cursor: pointer;
+}
+.home-board-nav:disabled {
+    opacity: 0.35;
+    cursor: default;
+}
+.home-board-nav--prev { left: 10px; }
+.home-board-nav--next { right: 10px; }
+.home-demo-run {
+    position: absolute;
+    inset: 0;
+    z-index: 2;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    padding: 12px 16px 14px;
+    gap: 8px;
+    opacity: 0;
+    visibility: hidden;
+    pointer-events: none;
+}
+html[data-nav-page="home"] #homeView .home-landing-board[data-home-board-slide="demo"] #homeDemoRunPanel {
+    opacity: 1;
+    visibility: visible;
+    pointer-events: auto;
+}
+html[data-nav-page="home"] #homeView .home-landing-board[data-home-board-slide="demo"] #homeModuleRanking {
+    visibility: hidden;
+    pointer-events: none;
+}
+.home-demo-run-kicker {
+    margin: 0;
+    font-size: 11px;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: rgba(148, 163, 184, 0.8);
+}
+.home-demo-run-stats {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 8px;
+    font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 11px;
+    color: rgba(148, 163, 184, 0.9);
+}
+.home-demo-run-stats strong {
+    display: block;
+    margin-top: 2px;
+    font-size: 13px;
+    color: #e2e8f0;
+}
+.home-demo-run-chart-wrap {
+    flex: 1 1 auto;
+    min-height: 160px;
+    position: relative;
+}
+.home-demo-run-chart-wrap canvas {
+    width: 100% !important;
+    height: 100% !important;
+}
+.home-demo-run-log {
+    margin: 0;
+    padding: 0;
+    list-style: none;
+    max-height: 88px;
+    overflow: auto;
+    font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 11px;
+    color: rgba(148, 163, 184, 0.95);
+}
+.home-demo-run-log li {
+    padding: 2px 0;
+}
+.home-demo-run-caption {
+    margin: 0;
+    font-size: 11px;
+    color: rgba(148, 163, 184, 0.65);
+}
+/* Live Trading Leaderboard (Phase 0) — scoped so contest/daily CSS stays put */
+.live-phase-banner {
+    margin: 8px 0 0;
+    padding: 10px 12px;
+    border-radius: 6px;
+    border: 1px solid rgba(250, 204, 21, 0.28);
+    background: rgba(250, 204, 21, 0.08);
+    color: var(--text-secondary);
+    font-size: 13px;
+    line-height: 1.45;
+}
+
+.live-season-bar {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px 20px;
+    align-items: center;
+    padding: 8px 12px;
+    background-color: var(--bg-card);
+    border: 1px solid var(--border-color);
+    border-radius: 6px;
+}
+
+.live-zone-caption {
+    margin: 0;
+    font-size: 11px;
+    color: var(--text-secondary);
+}
+
+.live-view-toggle-btn {
+    background-color: transparent;
+    border: none;
+    color: var(--text-secondary);
+    padding: 5px 10px;
+    font-size: 11px;
+    font-weight: 600;
+    cursor: pointer;
+    border-right: 1px solid var(--border-color);
+}
+
+.live-view-toggle-btn:last-child {
+    border-right: none;
+}
+
+.live-view-toggle-btn:hover {
+    background-color: var(--bg-hover);
+    color: var(--text-primary);
+}
+
+.live-view-toggle-btn.active {
+    background-color: var(--neutral-color);
+    color: white;
+}
+
+#liveLeaderboardView .live-board-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 10px;
+}
+
+#liveLeaderboardView .live-board-table thead {
+    background-color: var(--bg-hover);
+    border-bottom: 1px solid var(--border-color);
+}
+
+#liveLeaderboardView .live-board-table th {
+    padding: 4px 6px;
+    text-align: left;
+    font-weight: 600;
+    color: var(--text-secondary);
+    font-size: 9px;
+    letter-spacing: 0.3px;
+    white-space: nowrap;
+}
+
+#liveLeaderboardView .live-board-table th.rank-col { width: 60px; text-align: center; }
+#liveLeaderboardView .live-board-table th.portfolio-col,
+#liveLeaderboardView .live-board-table th.return-col,
+#liveLeaderboardView .live-board-table th.sharpe-col,
+#liveLeaderboardView .live-board-table th.dd-col { text-align: right; }
+
+#liveLeaderboardView .live-board-table th.sortable {
+    cursor: pointer;
+    user-select: none;
+}
+
+#liveLeaderboardView .live-board-table th.sortable:hover,
+#liveLeaderboardView .live-board-table th.sortable.is-sorted {
+    color: var(--text-primary);
+}
+
+#liveLeaderboardView .live-board-table tbody tr {
+    border-bottom: 1px solid rgba(31, 41, 55, 0.5);
+    cursor: pointer;
+}
+
+#liveLeaderboardView .live-board-table tbody tr:hover,
+#liveLeaderboardView .live-board-table tbody tr.is-selected {
+    background-color: var(--bg-hover);
+}
+
+#liveLeaderboardView .live-board-table td {
+    padding: 4px 6px;
+    font-size: 10px;
+    color: var(--text-primary);
+}
+
+#liveLeaderboardView .live-board-table td.rank-cell {
+    text-align: center;
+    font-weight: 700;
+}
+
+#liveLeaderboardView .legend-swatch,
+#liveLeaderboardView .curve-picker-swatch {
+    display: inline-block;
+    width: 10px;
+    height: 10px;
+    border-radius: 2px;
+    flex: 0 0 auto;
+}
+
+#liveLeaderboardView .curve-picker-group-head {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin: 8px 0 4px;
+}
+
+#liveLeaderboardView .curve-picker-group-toggle,
+#liveLeaderboardView .curve-picker-group-title-btn {
+    background: none;
+    border: none;
+    color: var(--text-secondary);
+    font-size: 11px;
+    cursor: pointer;
+    padding: 0;
+}
+
+#liveLeaderboardView .curve-picker-group-title {
+    font-weight: 600;
+    color: var(--text-primary);
+}
+
+#liveLeaderboardView .curve-picker-children.is-collapsed {
+    display: none;
+}
+
+#liveLeaderboardView .curve-picker-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 4px 2px;
+    font-size: 12px;
+    color: var(--text-primary);
+    cursor: pointer;
+}

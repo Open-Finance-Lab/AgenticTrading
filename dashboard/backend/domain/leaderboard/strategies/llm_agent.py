@@ -14,7 +14,7 @@ web request. It records token usage / cost so cost can be shown per run.
 from __future__ import annotations
 
 import math
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 import pandas as pd
 
@@ -138,6 +138,7 @@ class LLMAgentStrategy(BaselineStrategy):
         self.output_tokens = 0
         self._num_trades = 0
         self.used_llm = False
+        self.last_portfolio_snapshot: Optional[Dict[str, Any]] = None
 
     def required_symbols(self) -> List[str]:
         symbols = self.config.get("symbols")
@@ -170,8 +171,9 @@ class LLMAgentStrategy(BaselineStrategy):
         price_cache,
         initial_capital,
         model_id,
+        starting_snapshot=None,
     ):
-        """One decision per timestamp, executed against a fresh PortfolioManager.
+        """One decision per timestamp, executed against a PortfolioManager.
 
         Extracted from run() so the strategy_prompt hand-off is reachable in a
         test without live bars or an LLM client — an untestable call site is
@@ -186,6 +188,7 @@ class LLMAgentStrategy(BaselineStrategy):
             initial_capital=initial_capital,
             t_plus_one_enabled=profile.t_plus_one_enabled,
         )
+        manager.restore_state(starting_snapshot)
         # Resolution lives in run() alone. Re-applying the
         # `or self.model_id or default_model_name(...)` chain here meant two
         # copies of it: change one and the header can advertise one model while
@@ -230,6 +233,7 @@ class LLMAgentStrategy(BaselineStrategy):
         start_date: str,
         end_date: str,
         initial_capital: float,
+        starting_snapshot: Optional[Dict[str, Any]] = None,
     ) -> List[Dict[str, Any]]:
         symbols = self.required_symbols()
         bars_subset = subset_bars(bars_by_symbol, symbols)
@@ -275,6 +279,7 @@ class LLMAgentStrategy(BaselineStrategy):
             price_cache=price_cache,
             initial_capital=initial_capital,
             model_id=model_id,
+            starting_snapshot=starting_snapshot,
         )
 
         curve = manager.get_equity_curve()
@@ -289,6 +294,7 @@ class LLMAgentStrategy(BaselineStrategy):
         self.input_tokens = manager.input_tokens
         self.output_tokens = manager.output_tokens
         self.model_id = model_id
+        self.last_portfolio_snapshot = manager.snapshot_state()
         return curve
 
     def num_trades(self) -> int:

@@ -11332,17 +11332,25 @@ function showCompetitionPanel(tab) {
     updateCompetitionSubtabs();
 
     const leaderboard = document.getElementById('leaderboardView');
+    const liveBoard = document.getElementById('liveLeaderboardView');
     const participants = document.getElementById('competitionParticipantsPanel');
     const about = document.getElementById('competitionAboutPanel');
-    const showBoard = tab === 'leaderboard' || tab === 'live';
+    const showContestBoard = tab === 'leaderboard';
+    const showLiveBoard = tab === 'live';
 
-    if (leaderboard) leaderboard.style.display = showBoard ? 'flex' : 'none';
+    if (leaderboard) leaderboard.style.display = showContestBoard ? 'flex' : 'none';
+    if (liveBoard) liveBoard.style.display = showLiveBoard ? 'flex' : 'none';
     if (participants) participants.style.display = tab === 'participants' ? 'block' : 'none';
     if (about) about.style.display = tab === 'about' ? 'block' : 'none';
 
-    if (showBoard) {
+    if (showLiveBoard) {
+        currentMode = 'live';
+        if (typeof loadLiveLeaderboardData === 'function') {
+            loadLiveLeaderboardData();
+        }
+    } else if (showContestBoard) {
         currentMode = 'contest';
-        loadLeaderboardData(tab === 'live' ? 'live' : 'contest');
+        loadLeaderboardData('contest');
     } else {
         currentMode = tab;
     }
@@ -11465,6 +11473,7 @@ function navigateToPage(page, options = {}) {
     hide(paperView);
     hide(myAlgoView);
     hide(leaderboardView);
+    hide(document.getElementById('liveLeaderboardView'));
     hide(document.getElementById('playgroundAgentsPanel'));
     hide(document.getElementById('researchWorkbenchView'));
     hide(document.getElementById('competitionParticipantsPanel'));

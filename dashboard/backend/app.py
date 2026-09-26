@@ -554,6 +554,21 @@ async def serve_js_module(file_name: str):
 
     return FileResponse(script_path, media_type="text/javascript")
 
+
+# The one data file the frontend fetches. The path is built from this constant,
+# never from the request, so the route cannot be steered at another file.
+_FRONTEND_DATA_FILES = {"home-demo-run.json": frontend_path / "data" / "home-demo-run.json"}
+
+
+@app.get("/data/{file_name}", include_in_schema=False)
+async def serve_frontend_data(file_name: str):
+    """Serve allowlisted static JSON used by the Home Get Started demo."""
+    data_path = _FRONTEND_DATA_FILES.get(file_name)
+    if data_path is None or not data_path.is_file():
+        raise HTTPException(status_code=404, detail="Data file not found")
+    return FileResponse(data_path, media_type="application/json")
+
+
 @app.get("/market-events/{file_name}", include_in_schema=False)
 async def serve_market_events_js(file_name: str):
     """Serve market-events/*.js modules for the Live Market Events panel."""

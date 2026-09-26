@@ -13,6 +13,10 @@ from fastapi import APIRouter, Header, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
 
 from dashboard.backend.api.rate_limit import FixedWindowRateLimiter, client_key
+from dashboard.backend.domain.leaderboard.live import (
+    enqueue_live_leaderboard_refresh,
+    get_live_leaderboard,
+)
 from dashboard.backend.domain.leaderboard.service import (
     enqueue_daily_leaderboard_refresh,
     get_leaderboard,
@@ -25,6 +29,7 @@ router = APIRouter(prefix="/v1/leaderboard", tags=["leaderboard"])
 # schedules real LLM spend. Best-effort budget (see api/rate_limit): it bounds
 # naive abuse and secret-guessing volume, it is not the security boundary.
 _daily_refresh_rate_limiter = FixedWindowRateLimiter(max_events=20, window_seconds=3600)
+_live_refresh_rate_limiter = FixedWindowRateLimiter(max_events=20, window_seconds=3600)
 
 
 @router.get("")
@@ -34,8 +39,7 @@ def api_get_leaderboard(
         default="contest",
         description=(
             "Leaderboard period: 'contest' (fixed preseason window), "
-            "'daily' (last completed weekday), or 'live' (Season 0 preview — "
-            "the contest curves under season chrome; no season has advanced)."
+            "'daily' (last completed weekday), or 'live' (current calendar month)."
         ),
     ),
 ):
@@ -45,11 +49,8 @@ def api_get_leaderboard(
     Baselines are computed from Alpaca hourly backtest data and cached in SQLite.
     Pass ?refresh=true to recompute (e.g. after config change).
     Pass ?period=daily for the rolling one-day board (weekends show Friday).
-    Pass ?period=live for the Live Trading Leaderboard: the contest window and
-    curves, plus a ``season`` block describing Season 0. No advance engine
-    exists yet, so the response always carries a preview season (no
-    last_advanced_date, zero trading_days_elapsed) — see
-    ``domain/leaderboard/service.py::build_season_payload``.
+    Pass ?period=live for the current calendar-month Live Trading Leaderboard
+    (freeze-window snapshots under leaderboard-live; GET never deploys models).
     """
     # Public, unauthenticated endpoint: no exception text reaches the caller.
     # A raw exception string can embed internal infrastructure details — the
@@ -65,6 +66,9 @@ def api_get_leaderboard(
     # through ensure_leaderboard_runs -> fetch_hourly_bars. It only selects the
     # 503 status code, never the message.
     try:
+        if period.strip().lower() == "live":
+            # Isolated from contest/daily: live GET never deploys LLM models.
+            return get_live_leaderboard()
         return get_leaderboard(force_refresh=refresh, period=period)
     except RuntimeError:
         print(f"⚠️ Leaderboard unavailable: {traceback.format_exc()}")
@@ -129,6 +133,57 @@ def api_refresh_daily_leaderboard(
         raise HTTPException(
             status_code=500,
             detail="Failed to enqueue daily leaderboard refresh",
+        ) from None
+
+    return JSONResponse(status_code=202, content=payload)
+
+
+@router.post("/live/refresh")
+def api_refresh_live_leaderboard(
+    request: Request,
+    deploy_models: bool = Query(
+        default=False,
+        description=(
+            "Append the latest cash session onto each Live LLM snapshot. "
+            "Billable, so opt-in: omitted, only baselines/indices refresh."
+        ),
+    ),
+    force: bool = Query(default=False, description="Replay the whole month from the 1st."),
+    x_leaderboard_refresh_secret: str | None = Header(default=None, alias="X-Leaderboard-Refresh-Secret"),
+):
+    """Cron hook: enqueue a Live Trading Leaderboard increment (non-blocking).
+
+    Uses the same ``LEADERBOARD_DAILY_REFRESH_SECRET`` as the daily board.
+    Returns **202 Accepted**; model steps run in a background thread. Public GET
+    never calls this. There is no ``allow_fallback`` parameter.
+    """
+    if not _live_refresh_rate_limiter.allow(client_key(request)):
+        raise HTTPException(
+            status_code=429,
+            detail="Too many live leaderboard refresh requests. Try again later.",
+        )
+
+    try:
+        verify_daily_refresh_secret(x_leaderboard_refresh_secret)
+    except ValueError:
+        print("⚠️ Live leaderboard refresh rejected: LEADERBOARD_DAILY_REFRESH_SECRET is not configured")
+        raise HTTPException(
+            status_code=401, detail="Invalid live leaderboard refresh secret"
+        ) from None
+    except PermissionError as exc:
+        raise HTTPException(status_code=401, detail=str(exc)) from exc
+
+    try:
+        payload = enqueue_live_leaderboard_refresh(
+            deploy_models=deploy_models,
+            force_refresh=force,
+        )
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except Exception:
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to enqueue live leaderboard refresh",
         ) from None
 
     return JSONResponse(status_code=202, content=payload)

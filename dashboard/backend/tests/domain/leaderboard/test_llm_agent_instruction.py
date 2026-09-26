@@ -46,6 +46,12 @@ class FakeManager:
         # manager itself, so a test can only see these through the fake.
         FakeManager.init_kwargs_seen = kwargs
 
+    def restore_state(self, snapshot):
+        pass
+
+    def snapshot_state(self):
+        return {"cash": self.cash, "positions": {}}
+
     def get_portfolio_state(self, market_data, price_cache, ts):
         return {}
 
