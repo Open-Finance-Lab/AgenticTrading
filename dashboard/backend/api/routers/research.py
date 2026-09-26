@@ -47,7 +47,7 @@ from dashboard.backend import users as users_module
 
 router = APIRouter(prefix="/v1/research", tags=["research"])
 
-POLL_TIMEOUT_SECONDS = 10.0
+POLL_TIMEOUT_SECONDS = 50.0
 MANIFEST_CACHE_SECONDS = 300.0
 _manifest_cache: Dict[str, Any] = {}
 
