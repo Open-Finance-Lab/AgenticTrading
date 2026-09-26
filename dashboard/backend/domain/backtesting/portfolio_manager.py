@@ -197,18 +197,23 @@ class PortfolioManager:
         for symbol, lots in (snapshot.get("frozen_lots") or {}).items():
             restored: List[Dict[str, Any]] = []
             for lot in lots or []:
+                quantity = float(lot.get("quantity") or 0)
                 buy = lot.get("buy_date")
-                if isinstance(buy, str) and buy:
+                if isinstance(buy, str):
                     try:
                         buy = date.fromisoformat(buy[:10])
                     except ValueError:
-                        pass
-                restored.append(
-                    {
-                        "quantity": float(lot.get("quantity") or 0),
-                        "buy_date": buy,
-                    }
-                )
+                        buy = None
+                if not isinstance(buy, date):
+                    # A snapshot is always restored in a later session, so a
+                    # lot with no readable buy date was bought before today:
+                    # release it rather than keep a lot the T+1 sweep would
+                    # crash comparing against a date.
+                    self.available_positions[str(symbol)] = (
+                        self.available_positions.get(str(symbol), 0.0) + quantity
+                    )
+                    continue
+                restored.append({"quantity": quantity, "buy_date": buy})
             if restored:
                 lots_out[str(symbol)] = restored
         self.frozen_lots = lots_out

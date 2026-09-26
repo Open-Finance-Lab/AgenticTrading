@@ -17,6 +17,7 @@ positions), so a month costs about one full backtest, not a replay from the
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import tempfile
@@ -41,7 +42,7 @@ import dashboard.backend.domain.leaderboard.service as lb_service
 _US_EASTERN = ZoneInfo("America/New_York")
 # The US cash session has one owner (market_data/sessions.py); restating it here
 # is how the board's copies drifted apart before #529.
-((_US_CASH_OPEN, _US_CASH_CLOSE),) = session_windows("US")
+_US_CASH_OPEN, _US_CASH_CLOSE = session_windows("US")[0]
 # Axis nodes are hourly bar *closes*. Since #529 the board's Alpaca bars are
 # open-stamped (09:00 … 15:00, each closing an hour later) and Yahoo's index
 # bars are open-stamped on the half hour (09:30 … 15:30), so a stored point is
@@ -299,10 +300,7 @@ def clear_live_session_runs() -> int:
         run_id = run.get("run_id")
         if run_id:
             db.delete_run(run_id)
-    try:
-        _LIVE_REFRESH_STATE_PATH.unlink()
-    except FileNotFoundError:
-        pass
+    _LIVE_REFRESH_STATE_PATH.unlink(missing_ok=True)
     return len(runs)
 
 
@@ -389,10 +387,10 @@ def _save_live_refresh_state(state: Dict[str, Any]) -> None:
             json.dump(state, f, indent=2, sort_keys=True)
         os.replace(tmp, _LIVE_REFRESH_STATE_PATH)
     except BaseException:
-        try:
+        # Best-effort cleanup of our own temp file; the original error is the
+        # one worth raising.
+        with contextlib.suppress(OSError):
             os.unlink(tmp)
-        except OSError:
-            pass
         raise
 
 

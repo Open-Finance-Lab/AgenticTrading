@@ -799,3 +799,20 @@ def test_increment_lookback_is_relative_to_the_segment_and_shared(monkeypatch):
         if entry["id"] in ("gpt_5_5", "deepseek_v4_pro"):
             live.deploy_live_model_increment(entry, freeze_cfg, bars_memo=memo)
     assert fetches == [(("AAPL", "MSFT"), "2026-07-27", "2026-08-27")]
+
+
+def test_restored_lot_with_an_unreadable_date_is_released_not_kept():
+    from dashboard.backend.domain.backtesting.portfolio_manager import PortfolioManager
+
+    manager = PortfolioManager(initial_capital=SEED, t_plus_one_enabled=True)
+    manager.restore_state({
+        "cash": 100.0,
+        "positions": {"AAPL": 10},
+        "available_positions": {"AAPL": 4},
+        "frozen_lots": {"AAPL": [
+            {"quantity": 5, "buy_date": "not-a-date"},
+            {"quantity": 1, "buy_date": None},
+        ]},
+    })
+    assert manager.available_positions["AAPL"] == 10.0
+    assert "AAPL" not in manager.frozen_lots
