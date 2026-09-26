@@ -182,3 +182,27 @@ def test_platform_provider_order_parses_and_rejects_junk_whole(monkeypatch, caps
         out = capsys.readouterr().out
         assert out.count("WARNING: ATL_PLATFORM_PROVIDER_ORDER") == 1
         assert junk not in out
+
+
+def test_misspelled_provider_in_order_rejects_the_whole_value(
+    tmp_path, monkeypatch, capsys
+):
+    """A one-letter typo passes the id syntax check; it must still not
+    half-apply by silently dropping the lane it misnames."""
+    from dashboard.backend.domain.model_providers import service as service_module
+
+    monkeypatch.setattr(service_module, "_warned_platform_provider_orders", set())
+    store = ModelProviderStore(tmp_path / "providers.db")
+    service = ModelProviderService(store=store)
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-openrouter-test-abcd")
+    monkeypatch.setenv("COMMONSTACK_API_KEY", "cs-commonstack-test-abcd")
+    monkeypatch.setenv("ATL_PLATFORM_PROVIDER_ORDER", "commonstak,openrouter")
+
+    for _ in range(2):
+        assert service.resolve_platform_execution_candidates(
+            "qwen/qwen3.7-plus"
+        ) == ("commonstack", "openrouter")
+
+    out = capsys.readouterr().out
+    assert out.count("WARNING: ATL_PLATFORM_PROVIDER_ORDER") == 1
+    assert "commonstak" not in out

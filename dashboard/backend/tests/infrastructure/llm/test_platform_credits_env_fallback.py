@@ -788,3 +788,27 @@ def test_quota_report_is_once_under_concurrency_and_flushed(
     assert "flush=True" in inspect.getsource(
         execution_service_module._report_platform_quota_exhausted
     )
+
+
+def test_pulled_commonstack_lane_is_not_re_added_by_the_legacy_expansion(
+    tmp_path, monkeypatch, capsys, fresh_quota_reports
+):
+    """ATL_PLATFORM_PROVIDER_ORDER=openrouter makes the route hand over exactly
+    ("openrouter",), the shape the legacy expansion keys on. The operator
+    pulled CommonStack; a failover must not bill it anyway."""
+    monkeypatch.setenv("COMMONSTACK_API_KEY", "cs-fake-pulled-abcd")
+    monkeypatch.setenv("ATL_PLATFORM_PROVIDER_ORDER", "openrouter")
+    openrouter = ScriptedExecutionAdapter([_quota_error()])
+    commonstack = ScriptedExecutionAdapter([_ok_response()])
+    service, _store = _execution_service(
+        tmp_path,
+        monkeypatch,
+        openrouter,
+        adapters={"openrouter": openrouter, "commonstack": commonstack},
+    )
+
+    with pytest.raises(LLMExecutionError) as exc_info:
+        service.execute(_platform_request("pulled-lane", ("openrouter",)))
+
+    assert exc_info.value.category is ExecutionErrorCategory.PROVIDER_QUOTA_EXHAUSTED
+    assert commonstack.calls == []

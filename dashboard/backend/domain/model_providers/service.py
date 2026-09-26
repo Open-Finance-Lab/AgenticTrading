@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Collection
 from datetime import datetime, timezone
 from dataclasses import dataclass
 import json
@@ -104,7 +104,9 @@ _PLATFORM_PROVIDER_ORDER_ENV = "ATL_PLATFORM_PROVIDER_ORDER"
 _warned_platform_provider_orders: set[str] = set()
 
 
-def platform_provider_order() -> tuple[str, ...]:
+def platform_provider_order(
+    known_provider_ids: Collection[str] | None = None,
+) -> tuple[str, ...]:
     """Return the ATL Credits provider preference, read per call.
 
     CommonStack comes first by default so its prepaid balance is spent
@@ -116,6 +118,10 @@ def platform_provider_order() -> tuple[str, ...]:
     boot. Any invalid token rejects the whole value, because a typo'd order
     must not half-apply. A provider left out is never an automatic
     candidate, which is the operator's no-deploy way to pull a drained lane.
+
+    Pass ``known_provider_ids`` wherever the registry is at hand: a one-letter
+    typo (``commonstak``) is a well-formed id, and without the registry it
+    would silently drop the lane it misnames.
     """
 
     raw = os.getenv(_PLATFORM_PROVIDER_ORDER_ENV, "")
@@ -126,14 +132,16 @@ def platform_provider_order() -> tuple[str, ...]:
     try:
         for token in tokens:
             provider_id = validate_provider_id(token)
+            if known_provider_ids is not None and provider_id not in known_provider_ids:
+                raise ModelProviderStoreError("unknown provider id")
             if provider_id not in ordered:
                 ordered.append(provider_id)
     except ModelProviderStoreError:
         if raw not in _warned_platform_provider_orders:
             _warned_platform_provider_orders.add(raw)
             print(
-                f"WARNING: {_PLATFORM_PROVIDER_ORDER_ENV} is not a comma-separated "
-                "list of provider ids; using "
+                f"WARNING: {_PLATFORM_PROVIDER_ORDER_ENV} is not a comma-separated list "
+                "of known provider ids; using "
                 f"{','.join(DEFAULT_PLATFORM_PROVIDER_ORDER)}"
             )
         return DEFAULT_PLATFORM_PROVIDER_ORDER
@@ -213,7 +221,8 @@ class ModelProviderService:
             default_counts[provider_id] = default_counts.get(provider_id, 0) + 1
 
         options: list[ExecutionProviderOption] = []
-        for raw_provider in self.store.list_all_providers():
+        raw_providers = self.store.list_all_providers()
+        for raw_provider in raw_providers:
             provider = ProviderRecord.model_validate(raw_provider)
             if provider.status != "enabled":
                 continue
@@ -258,7 +267,11 @@ class ModelProviderService:
         # ATL_PLATFORM_PROVIDER_ORDER order, CommonStack first by default.
         rank = {
             provider_id: index
-            for index, provider_id in enumerate(platform_provider_order())
+            for index, provider_id in enumerate(
+                platform_provider_order(
+                    {str(raw.get("provider_id")) for raw in raw_providers}
+                )
+            )
         }
         options.sort(
             key=lambda option: (
@@ -286,7 +299,7 @@ class ModelProviderService:
             else None
         )
         ordered_ids: list[str] = []
-        for provider_id in (preferred, *platform_provider_order()):
+        for provider_id in (preferred, *platform_provider_order(providers)):
             if provider_id and provider_id not in ordered_ids:
                 ordered_ids.append(provider_id)
         candidates: list[str] = []

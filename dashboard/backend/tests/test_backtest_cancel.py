@@ -1038,3 +1038,26 @@ def test_an_unreadable_step_timeout_does_not_kill_app_import(monkeypatch):
         bt._max_ai_hedge_fund_trading_days()
         == bt._DEFAULT_MAX_AI_HEDGE_FUND_TRADING_DAYS
     )
+
+
+def test_drain_relays_operator_llm_errors_to_the_parent_log_live(capsys):
+    """The quota ERROR line must reach the service log even if the child is
+    killed. The timeout path never dumps the child's capture, and a long run's
+    middle is elided from it, so the parent echoes the line as it arrives."""
+    import io
+
+    capture = bt._BoundedStreamCapture(head_chars=10, tail_chars=10)
+    stream = io.StringIO(
+        "filler line that fills the head\n"
+        "ERROR: llm.platform_quota_exhausted provider=commonstack fallback=openrouter\n"
+        "ordinary progress line\n"
+        "more filler to push the error out of the retained tail\n"
+    )
+
+    bt._drain_stream(stream, capture)
+
+    out = capsys.readouterr().out
+    assert out == (
+        "ERROR: llm.platform_quota_exhausted provider=commonstack fallback=openrouter\n"
+    )
+    assert "provider=commonstack" not in capture.text()

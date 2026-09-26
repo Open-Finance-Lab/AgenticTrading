@@ -23,6 +23,7 @@ from dashboard.backend.domain.model_providers.service import (
     ModelProviderService,
     ResolvedCredential,
     CredentialResolutionError,
+    platform_provider_order,
 )
 from dashboard.backend.infrastructure.llm.execution.adapters.base import (
     AdapterResponse,
@@ -386,7 +387,10 @@ class LLMExecutionService:
         # Direct service callers predating the candidate-list handoff still get
         # the established OpenRouter -> CommonStack fallback when the route is
         # available. New handoffs always carry the complete ordered tuple.
-        if candidates == ("openrouter",):
+        # An operator who left CommonStack out of ATL_PLATFORM_PROVIDER_ORDER
+        # makes the route hand over exactly ("openrouter",) too; re-adding the
+        # lane here would bill the provider they pulled.
+        if candidates == ("openrouter",) and "commonstack" in platform_provider_order():
             try:
                 self.providers.preflight_execution_model(
                     "commonstack", request.model_id

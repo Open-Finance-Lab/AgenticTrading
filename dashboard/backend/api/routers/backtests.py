@@ -2544,6 +2544,9 @@ class _BoundedStreamCapture:
         )
 
 
+_RELAYED_CHILD_LINE_PREFIX = "ERROR: llm."
+
+
 def _drain_stream(stream: Any, capture: _BoundedStreamCapture) -> None:
     """Copy one child stream into a bounded capture until EOF.
 
@@ -2555,6 +2558,12 @@ def _drain_stream(stream: Any, capture: _BoundedStreamCapture) -> None:
     try:
         for line in iter(stream.readline, ""):
             capture.feed(line)
+            if line.startswith(_RELAYED_CHILD_LINE_PREFIX):
+                # Echoed live, not left to the capture: the timeout path never
+                # dumps it, a normal exit dumps it only when the run ends, and
+                # a long run's middle is elided. Operator lines carry provider
+                # ids only (execution/service.py), so no redaction is needed.
+                print(line, end="", flush=True)
     except (OSError, ValueError):
         # The pipe was closed under us, which is the kill path doing its job.
         # Whatever was read before that still stands and is still worth logging.
