@@ -16,6 +16,12 @@
 
 **Spec:** `docs/superpowers/specs/2026-09-23-llm-backtest-step-latency-design.md`, amended 2026-09-26. Read §4 (S1a), §5 (S1b), §6 (failure behaviour) and §8 (rollout) before starting.
 
+> **S1b is superseded by #535's `ab8919b6` (2026-09-26). Do not re-execute its tasks from this plan.** That commit changed four things this plan's S1b tasks spell out. The spec's §5 and §7 now describe the shipped behaviour; where a task's code block below disagrees with them, the spec wins.
+> - An explicit `provider_id` is honoured only when it is in the configured order.
+> - Only platform-only lanes move in `list_execution_options`.
+> - The legacy `("openrouter",)` expansion is deleted.
+> - The billing hint is `ATL Credits cover the model calls. ATL picks an available provider automatically.`
+
 ## Global Constraints
 
 - Run everything from the repo root of the relevant worktree. Import by full package path (`dashboard.backend...`), never by file path.
@@ -26,8 +32,8 @@
 - Operator log lines use the repo's `print("ERROR: …")` / `print("WARNING: …")` convention. They carry no exception text and no identifiers beyond provider ids.
 - The quota ERROR line is exactly `ERROR: llm.platform_quota_exhausted provider=<id> fallback=<next id|none>`.
 - The env var is exactly `ATL_PLATFORM_PROVIDER_ORDER`, default `commonstack,openrouter`.
-- The billing-hint copy is exactly `ATL Credits automatically switch between CommonStack and OpenRouter if one is unavailable.`
-- Leave the legacy `("openrouter",)` expansion in `infrastructure/llm/execution/service.py` alone. It is out of scope by decision (2026-09-26).
+- The billing-hint copy is exactly `ATL Credits cover the model calls. ATL picks an available provider automatically.` (was the CommonStack/OpenRouter "switch between" copy until `ab8919b6`).
+- The legacy `("openrouter",)` expansion in `infrastructure/llm/execution/service.py` is deleted (`ab8919b6`). The route's candidate tuple is authoritative.
 - Do not touch `PIPELINE_SECONDS_PER_LLM_CALL`. Recalibrating it is S4.
 - Do not edit user-facing docs (`app.html` copy other than the cache-buster, `strategy.html`, `docs/source/**`). They are listed as follow-ups in spec §9.
 - Commits end with the trailer `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`.

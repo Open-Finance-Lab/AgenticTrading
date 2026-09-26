@@ -10,6 +10,14 @@ spec before any code.
 - The provider order is now an operator knob, `ATL_PLATFORM_PROVIDER_ORDER`, rather than a
   hard-coded tuple (§5.1). The billing hint copy is neutral for the same reason (§5.4).
 
+**Amended again 2026-09-26**, after #535's review fix `ab8919b6`. §5.1, §5.3, §5.4 and §7 now
+describe what #535 ships:
+- an explicit `provider_id` is honoured only when it is in the configured order;
+- only platform-only lanes move in `list_execution_options`;
+- the worker's legacy `("openrouter",)` expansion is deleted, not left alone;
+- each allowlist backfill names only the ids it introduced and skips an emptied allowlist;
+- the billing hint names no provider.
+
 **Issues:** #522 (the preflight is ~5× optimistic), #523 (the OpenRouter platform key is out of quota), #524 (a killed run loses
 every bar). **Builds on:** `2026-09-20-backtest-speed-and-trust-design.md`. Its *Track C* named the
 analytics rebuild this design removes, and its *Track B* is S3 below.
@@ -115,8 +123,12 @@ leave the same trap in every other process that never runs `app.py`'s startup: C
 future worker service. #485 was correct for the process it changed and made the one it didn't
 see worse. A default that is expensive unless something disables it is inherited by every new entry
 point. The web process has had synchronous projection off since #485, so no reader depends on it.
-Snapshots come from the reaper's throttled repair and the daily job, and a worker-emitted event is
-picked up the same way a web-emitted one already is.
+`user_analytics_snapshots` is refreshed only by the reaper's repair sweep, throttled to a 24-hour
+staleness window, and a worker-emitted event is picked up the same way a web-emitted one already is.
+The daily job writes `user_daily_facts`, not snapshots. So a worker-emitted event (`credits_*`,
+`model_usage_recorded`, `backtest_*`) now reaches the snapshot up to about a day late, where before
+it landed at once. That is accepted: the admin read paths move to `user_daily_facts` in PR B, which
+also deletes the repair sweep.
 
 **Unchanged.**
 - `disable_synchronous_projection()` and its call at `app.py:334-343` stay. The call now states the
@@ -146,16 +158,22 @@ picked up the same way a web-emitted one already is.
   - An empty or unset value gives the default silently.
   - If any token fails `validate_provider_id`, the whole value is rejected. It logs one `WARNING`
     per distinct bad value and falls back to the default. A typo'd order must not half-apply.
-  - A provider left out of the list is never an automatic candidate. That is deliberate: it is the
-    operator's way to take a drained or broken lane out without a deploy. An explicit `provider_id`
-    in the request body is still honoured first, as today. If nothing is left, the route already
-    answers 422 (`backtests.py`, `if not provider_ids`), so the run fails visibly.
+  - It takes an optional `known_provider_ids` (the registry). With it, a well-formed but unknown id
+    (`commonstak`) is rejected the same way, instead of silently dropping the lane it misspells.
+  - A provider left out of the list is never a candidate. That is deliberate: it is the operator's
+    way to take a drained or broken lane out without a deploy. An explicit `provider_id` in the
+    request body is honoured first **only when it is in the configured order**: an API caller naming
+    a pulled lane must not reopen it. If nothing is left, the route already answers 422
+    (`backtests.py`, `if not provider_ids`), so the run fails visibly.
   - Changing it on Render takes effect at the next restart. Render restarts the service on any
     env change.
 - `ModelProviderService.resolve_platform_execution_candidates` iterates
-  `(preferred, *platform_provider_order())`.
-- `list_execution_options`' sort puts providers in that same order, with unlisted providers after
-  them in repository order. Its comment is updated.
+  `(preferred, *configured)`, where `configured = platform_provider_order(registry)`, and keeps an id
+  only if it is in `configured`.
+- `list_execution_options` moves **only platform-only lanes** (today just Commonstack): they go last,
+  in the configured order. Every BYOK-capable provider, OpenRouter included, keeps repository order,
+  so the env var cannot change the BYOK default `app.js` takes from `providers[0]`. Platform routing
+  order is decided by the route, not by this list.
 - BYOK is unaffected: Commonstack is not BYOK-enabled, and a BYOK run carries a single provider.
 - Platform-credit runs send no `provider_id` (`app.js:10839-10841` sets it only for BYOK), so this
   tuple alone decides the order. The failover loop in `_execute_with_platform_failover` is unchanged:
@@ -166,8 +184,11 @@ is broken. The day someone tops up the OpenRouter key (the fix #523 asks for), a
 OpenRouter and Commonstack's balance sits unused. The flip makes the spending order a decision
 instead of an accident.
 
-**Left alone:** the legacy `("openrouter",)` expansion at `execution/service.py:369`. Only a request
-that names OpenRouter alone reaches it; the live route always hands over the complete tuple.
+**Deleted:** the legacy `("openrouter",)` expansion in `_execute_with_platform_failover`
+(`execution/service.py`). It widened a lone OpenRouter candidate to OpenRouter → Commonstack:
+hard-coded OpenRouter-first, and blind to an order the route had rejected. The worker now treats the
+route's candidate tuple as authoritative. A lone candidate is what the route decided, and it is not
+widened.
 
 ### 5.2 Quota exhaustion is loud, once
 
@@ -202,12 +223,19 @@ entry, so no pricing-table change is needed.
 - **Existing databases need a migration.** The seed is `INSERT … ON CONFLICT (provider_id) DO NOTHING`
   (`repository_postgres.py:218`), and the admin UI passes `capabilities` through unedited, so
   changing the constant never reaches prod's row.
-  - **Shipped on draft PR #535** as `commonstack-allowlist-v1` (`COMMONSTACK_ALLOWLIST_MIGRATION_ID`),
-    in both twins' `_init_schema`, after the seed. It follows the `openrouter-platform-key-v1`
-    pattern (`model_provider_migrations`).
-  - The pure helper `commonstack_allowlist_backfill` in `repository_common.py` appends *every*
-    seeded id missing from the stored allowlist, not just Haiku. It keeps admin-added ids and their
-    order, and bumps `updated_at`. The next allowlist addition bumps the id to `-v2`.
+  - **Shipped on draft PR #535** as the `COMMONSTACK_ALLOWLIST_BACKFILLS` registry in
+    `repository_common.py`, one `(migration_id, model_ids)` entry per addition. Its first entry is
+    `("commonstack-allowlist-v1", ("anthropic/claude-haiku-4-5",))`. Both twins run it in
+    `_init_schema`, after the seed. It follows the `openrouter-platform-key-v1` pattern
+    (`model_provider_migrations`).
+  - The pure helper `commonstack_allowlist_backfill(capabilities_json, model_ids)` appends only the
+    ids **that migration introduced**. It must never append "whatever the allowlist now holds",
+    because that would re-add every model an admin had removed from the live row. It keeps
+    admin-added ids and their order, and bumps `updated_at`.
+  - The next allowlist addition **appends a new entry** (`-v2`, …) naming only its new ids. A
+    shipped entry is never edited.
+  - It skips an **empty** stored allowlist. An empty allowlist routes nothing, so it is how an admin
+    turns the lane off, and adding one model would turn it back on at boot.
   - It records itself even when nothing changed, so an admin's later removal survives a reboot.
   - It leaves an unreadable row untouched rather than writing default capabilities over it.
   - `test_backtest_worker_schema_skip.py`'s reason string for `repository_postgres.py` already
@@ -222,9 +250,9 @@ entry, so no pricing-table change is needed.
 ### 5.4 Copy and developer docs
 
 - The backtest modal's billing hint (`app.js`, `'ATL Credits automatically use OpenRouter first…'`)
-  becomes *"ATL Credits automatically switch between CommonStack and OpenRouter if one is
-  unavailable."* The order is now an env var, so copy naming an order could go stale without a
-  code change. `test_byok_backtest_frontend.py` pins the string and is updated with it.
+  becomes *"ATL Credits cover the model calls. ATL picks an available provider automatically."* The
+  order is now an env var, and a lane can be pulled entirely, so copy that names a provider or
+  promises a fallback could go stale without a code change. `test_byok_backtest_frontend.py` pins the string and is updated with it.
 - The `app.js?v=` cache-buster is bumped in `app.html`, and in every test that pins it. Find those
   with a grep, not a remembered count.
 - `2026-09-01-platform-provider-auto-routing-design.md` gets a dated amendment line under its summary,
@@ -256,14 +284,18 @@ entry, so no pricing-table change is needed.
     gives `("openrouter", "commonstack")`. A value with an invalid token gives the default and
     prints one `WARNING`, once per distinct value.
   - `test_execution_catalog.py::test_platform_candidates_prefer_openrouter_and_support_commonstack_only`
-    is renamed and inverted. With both keys, `("commonstack", "openrouter")`. Commonstack-only still
-    gives `("commonstack",)`. OpenRouter-only gives `("openrouter",)`. With
-    `ATL_PLATFORM_PROVIDER_ORDER=openrouter,commonstack`, `("openrouter", "commonstack")`. With
-    `ATL_PLATFORM_PROVIDER_ORDER=openrouter`, Commonstack is excluded even with its key set, but
-    `preferred_provider_id="commonstack"` still puts it first.
+    is renamed (`…_prefer_commonstack_and_follow_the_env_order`) and inverted. With both keys,
+    `("commonstack", "openrouter")`, and `preferred_provider_id="openrouter"` gives
+    `("openrouter", "commonstack")`. Commonstack-only still gives `("commonstack",)`. OpenRouter-only
+    gives `("openrouter",)`. With `ATL_PLATFORM_PROVIDER_ORDER=openrouter,commonstack`,
+    `("openrouter", "commonstack")`. With `ATL_PLATFORM_PROVIDER_ORDER=openrouter`, Commonstack is
+    excluded even with its key set, and `preferred_provider_id="commonstack"` gives
+    `("openrouter",)`: the pulled lane stays pulled.
   - Haiku with both keys resolves to `("commonstack", "openrouter")`. That needs #535's allowlist.
-  - `test_service.py::test_execution_options_keep_openrouter_ahead_of_commonstack` is renamed and
-    inverted: Commonstack comes first by default, and the env var reverses it.
+  - `test_service.py::test_execution_options_keep_openrouter_ahead_of_commonstack` is renamed
+    (`…_follow_platform_order_and_keep_byok_order`). With a BYOK provider whose name sorts after
+    OpenRouter added, the order is `anthropic, gemini, openai, openrouter, xai, commonstack` under the
+    default and under every env value tried: only the platform-only lane moves.
 - **S1b, quota signal:** two consecutive calls that each fail `PROVIDER_QUOTA_EXHAUSTED` on
   Commonstack print exactly one line, naming the fallback. A quota failure with no next candidate
   prints `fallback=none`. BYOK prints nothing. The per-process set is reset in the fixture.

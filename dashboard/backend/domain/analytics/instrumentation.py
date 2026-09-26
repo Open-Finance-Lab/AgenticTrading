@@ -57,8 +57,9 @@ SNAPSHOT_RELEVANT_EVENTS = (
 # gets, including a dashboard backtest child, which never runs app.py's
 # startup hook. Before #522, None fell back to
 # states.recalculate_user_snapshots: ~5s per event in the child, ~31s of every
-# model call. The reaper's throttled repair and the daily job keep snapshots
-# fresh instead, for worker-emitted events exactly as for web-emitted ones.
+# model call. Snapshots now catch up only through the reaper's repair sweep,
+# throttled to a 24-hour staleness window, for worker-emitted events exactly
+# as for web-emitted ones. The daily job writes user_daily_facts, not snapshots.
 _snapshot_recalculator: Any = None
 
 
