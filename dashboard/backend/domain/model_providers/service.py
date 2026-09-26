@@ -42,6 +42,7 @@ from .repository import (
 )
 from .repository_common import (
     CredentialConflictError,
+    ModelProviderStoreError,
     ProviderNotFoundError,
     canonical_request_digest,
     secret_fingerprint,
@@ -96,6 +97,47 @@ def _environment_platform_secret(provider_id: str) -> str | None:
         return None
     secret = os.getenv(variable_name, "").strip()
     return secret or None
+
+
+DEFAULT_PLATFORM_PROVIDER_ORDER: tuple[str, ...] = ("commonstack", "openrouter")
+_PLATFORM_PROVIDER_ORDER_ENV = "ATL_PLATFORM_PROVIDER_ORDER"
+_warned_platform_provider_orders: set[str] = set()
+
+
+def platform_provider_order() -> tuple[str, ...]:
+    """Return the ATL Credits provider preference, read per call.
+
+    CommonStack comes first by default so its prepaid balance is spent
+    before OpenRouter's (#522). The order used to be hard-coded
+    OpenRouter-first, and CommonStack carried the traffic only because
+    OpenRouter's key was quota-dead (#523).
+
+    The value is read per call, never at import, so a bad value cannot kill
+    boot. Any invalid token rejects the whole value, because a typo'd order
+    must not half-apply. A provider left out is never an automatic
+    candidate, which is the operator's no-deploy way to pull a drained lane.
+    """
+
+    raw = os.getenv(_PLATFORM_PROVIDER_ORDER_ENV, "")
+    tokens = [token.strip().lower() for token in raw.split(",") if token.strip()]
+    if not tokens:
+        return DEFAULT_PLATFORM_PROVIDER_ORDER
+    ordered: list[str] = []
+    try:
+        for token in tokens:
+            provider_id = validate_provider_id(token)
+            if provider_id not in ordered:
+                ordered.append(provider_id)
+    except ModelProviderStoreError:
+        if raw not in _warned_platform_provider_orders:
+            _warned_platform_provider_orders.add(raw)
+            print(
+                f"WARNING: {_PLATFORM_PROVIDER_ORDER_ENV} is not a comma-separated "
+                "list of provider ids; using "
+                f"{','.join(DEFAULT_PLATFORM_PROVIDER_ORDER)}"
+            )
+        return DEFAULT_PLATFORM_PROVIDER_ORDER
+    return tuple(ordered)
 
 
 def _utcnow_iso() -> str:
@@ -210,9 +252,20 @@ class ModelProviderService:
                     ),
                 )
             )
-        # Preserve the repository's existing order while keeping OpenRouter as
-        # the preferred platform lane before the CommonStack fallback.
-        options.sort(key=lambda option: option.provider_id == "commonstack")
+        # Providers outside the platform order keep repository order, ahead
+        # of the platform lanes, so a BYOK user's default pick (app.js takes
+        # providers[0]) does not move. The platform lanes follow in
+        # ATL_PLATFORM_PROVIDER_ORDER order, CommonStack first by default.
+        rank = {
+            provider_id: index
+            for index, provider_id in enumerate(platform_provider_order())
+        }
+        options.sort(
+            key=lambda option: (
+                option.provider_id in rank,
+                rank.get(option.provider_id, 0),
+            )
+        )
         return options
 
     def resolve_platform_execution_candidates(
@@ -233,7 +286,7 @@ class ModelProviderService:
             else None
         )
         ordered_ids: list[str] = []
-        for provider_id in (preferred, "openrouter", "commonstack"):
+        for provider_id in (preferred, *platform_provider_order()):
             if provider_id and provider_id not in ordered_ids:
                 ordered_ids.append(provider_id)
         candidates: list[str] = []

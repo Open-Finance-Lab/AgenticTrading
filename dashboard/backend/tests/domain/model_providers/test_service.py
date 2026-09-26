@@ -472,20 +472,25 @@ def test_verified_stored_commonstack_credential_precedes_environment_key(
     assert resolved.secret == "cs-fake-stored-test-wxyz"
 
 
-def test_execution_options_keep_openrouter_ahead_of_commonstack(
+def test_execution_options_follow_platform_order_and_keep_byok_order(
     tmp_path, monkeypatch
 ):
+    monkeypatch.delenv("ATL_PLATFORM_PROVIDER_ORDER", raising=False)
     service, _store = _service(tmp_path, FakeAdapter())
     monkeypatch.setenv("OPENROUTER_API_KEY", "or-fake-options-abcd")
     monkeypatch.setenv("COMMONSTACK_API_KEY", "cs-fake-options-wxyz")
 
-    provider_ids = [
-        option.provider_id
-        for option in service.list_execution_options(7)
-        if option.platform_credits_available
-    ]
+    # Providers outside the platform order keep repository (display-name)
+    # order ahead of the platform lanes, so app.js's providers[0] BYOK
+    # default is exactly what it was before CommonStack moved first.
+    assert [
+        option.provider_id for option in service.list_execution_options(7)
+    ] == ["anthropic", "gemini", "openai", "commonstack", "openrouter"]
 
-    assert provider_ids.index("openrouter") < provider_ids.index("commonstack")
+    monkeypatch.setenv("ATL_PLATFORM_PROVIDER_ORDER", "openrouter,commonstack")
+    assert [
+        option.provider_id for option in service.list_execution_options(7)
+    ] == ["anthropic", "gemini", "openai", "openrouter", "commonstack"]
     assert "cs-fake-options-wxyz" not in repr(service.list_execution_options(7))
 
 
