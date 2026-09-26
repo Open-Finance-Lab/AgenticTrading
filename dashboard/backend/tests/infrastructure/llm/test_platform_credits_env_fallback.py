@@ -167,6 +167,17 @@ def _request(run_id: str) -> LLMExecutionRequest:
     )
 
 
+def _failover_request(run_id: str) -> LLMExecutionRequest:
+    """A platform request carrying the route's OpenRouter -> CommonStack tuple.
+
+    The worker never widens a lone candidate, so failover tests hand over the
+    ordered tuple exactly as the route would.
+    """
+    return _request(run_id).model_copy(
+        update={"provider_ids": ("openrouter", "commonstack")}
+    )
+
+
 def _execution_service(tmp_path, monkeypatch, adapter, *, adapters=None):
     monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-execution-test-abcd")
     provider_store = ModelProviderStore(tmp_path / "providers.db")
@@ -298,7 +309,7 @@ def test_platform_quota_error_retries_once_through_commonstack(
         },
     )
     assert service.providers.store.get_provider("commonstack")["platform_enabled"] is True
-    request = _request("failover-run").model_copy(
+    request = _failover_request("failover-run").model_copy(
         update={
             "model_id": "qwen/qwen3.7-plus",
             "reasoning_effort": "high",
@@ -356,7 +367,7 @@ def test_non_quota_platform_failures_do_not_fail_over(
     )
 
     with pytest.raises(LLMExecutionError) as exc_info:
-        service.execute(_request(f"no-failover-{category.value}"))
+        service.execute(_failover_request(f"no-failover-{category.value}"))
 
     assert exc_info.value.category is category
     assert fallback.calls == []
@@ -391,7 +402,7 @@ def test_provider_selection_failures_fail_over_to_commonstack(
         adapters={"openrouter": primary, "commonstack": fallback},
     )
 
-    result = service.execute(_request(f"failover-{category.value}"))
+    result = service.execute(_failover_request(f"failover-{category.value}"))
 
     assert result.provider_id == "commonstack"
     assert result.requested_provider_id == "openrouter"
@@ -451,7 +462,7 @@ def test_fallback_failure_returns_commonstack_safe_category(tmp_path, monkeypatc
         adapters={"openrouter": primary, "commonstack": fallback},
     )
     with pytest.raises(LLMExecutionError) as exc_info:
-        service.execute(_request("dual-failure"))
+        service.execute(_failover_request("dual-failure"))
     assert exc_info.value.category is ExecutionErrorCategory.PROVIDER_TIMEOUT
     assert len(primary.calls) == 1
     assert len(fallback.calls) == 1
@@ -503,7 +514,7 @@ def test_primary_release_failure_aborts_before_fallback(tmp_path, monkeypatch):
 
     monkeypatch.setattr(service.credits, "release_llm_credits", fail_release)
     with pytest.raises(LLMExecutionError) as exc_info:
-        service.execute(_request("release-failure"))
+        service.execute(_failover_request("release-failure"))
     assert exc_info.value.category is ExecutionErrorCategory.BILLING_FAILED
     assert fallback.calls == []
 
@@ -531,7 +542,7 @@ def test_two_quota_failures_stop_after_commonstack(tmp_path, monkeypatch):
         adapters={"openrouter": primary, "commonstack": fallback},
     )
     with pytest.raises(LLMExecutionError) as exc_info:
-        service.execute(_request("double-quota"))
+        service.execute(_failover_request("double-quota"))
     assert exc_info.value.category is ExecutionErrorCategory.PROVIDER_QUOTA_EXHAUSTED
     assert len(primary.calls) == 1
     assert len(fallback.calls) == 1
@@ -790,14 +801,16 @@ def test_quota_report_is_once_under_concurrency_and_flushed(
     )
 
 
-def test_pulled_commonstack_lane_is_not_re_added_by_the_legacy_expansion(
+def test_worker_never_widens_the_route_s_lone_candidate(
     tmp_path, monkeypatch, capsys, fresh_quota_reports
 ):
-    """ATL_PLATFORM_PROVIDER_ORDER=openrouter makes the route hand over exactly
-    ("openrouter",), the shape the legacy expansion keys on. The operator
-    pulled CommonStack; a failover must not bill it anyway."""
+    """A lone ("openrouter",) is what the route decided -- CommonStack pulled
+    from ATL_PLATFORM_PROVIDER_ORDER (including by a typo the route rejected),
+    or ineligible for the model. The worker used to re-derive routing and add
+    CommonStack back; with the default order and CommonStack fully eligible
+    it must still bill only the lane it was handed."""
+    monkeypatch.delenv("ATL_PLATFORM_PROVIDER_ORDER", raising=False)
     monkeypatch.setenv("COMMONSTACK_API_KEY", "cs-fake-pulled-abcd")
-    monkeypatch.setenv("ATL_PLATFORM_PROVIDER_ORDER", "openrouter")
     openrouter = ScriptedExecutionAdapter([_quota_error()])
     commonstack = ScriptedExecutionAdapter([_ok_response()])
     service, _store = _execution_service(

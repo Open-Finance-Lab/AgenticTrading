@@ -121,6 +121,11 @@ def test_platform_candidates_prefer_commonstack_and_follow_the_env_order(
         "anthropic/claude-haiku-4-5"
     ) == ("commonstack", "openrouter")
 
+    # An explicit provider_id that IS in the order is still honoured first.
+    assert service.resolve_platform_execution_candidates(
+        "qwen/qwen3.7-plus", preferred_provider_id="openrouter"
+    ) == ("openrouter", "commonstack")
+
     monkeypatch.setenv("ATL_PLATFORM_PROVIDER_ORDER", "openrouter,commonstack")
     assert service.resolve_platform_execution_candidates(
         "qwen/qwen3.7-plus"
@@ -131,10 +136,10 @@ def test_platform_candidates_prefer_commonstack_and_follow_the_env_order(
     assert service.resolve_platform_execution_candidates(
         "qwen/qwen3.7-plus"
     ) == ("openrouter",)
-    # ...but an explicit provider_id from the caller is still honoured first.
+    # ...and an explicit provider_id naming the pulled lane cannot reopen it.
     assert service.resolve_platform_execution_candidates(
         "qwen/qwen3.7-plus", preferred_provider_id="commonstack"
-    ) == ("commonstack", "openrouter")
+    ) == ("openrouter",)
 
     # An order naming nothing routable yields no candidates; the route 422s.
     monkeypatch.setenv("ATL_PLATFORM_PROVIDER_ORDER", "anthropic")

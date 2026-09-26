@@ -20,7 +20,7 @@ from dashboard.backend.domain.model_providers.execution_catalog import (
     resolve_execution_model_route,
 )
 from dashboard.backend.domain.model_providers.repository_common import (
-    COMMONSTACK_ALLOWLIST_MIGRATION_ID,
+    COMMONSTACK_ALLOWLIST_BACKFILLS,
     CredentialConflictError,
     CredentialOwnershipError,
 )
@@ -72,7 +72,8 @@ def test_postgres_commonstack_allowlist_backfills_a_row_seeded_before_haiku(
     postgres_store,
 ):
     # The seed is ON CONFLICT DO NOTHING, so prod's pre-Haiku row is reachable
-    # only through the one-shot backfill; an admin-added id must survive it.
+    # only through the one-shot backfill. It adds Haiku alone: the seeded ids
+    # this row lacks were removed and stay removed; an admin-added id survives.
     with psycopg.connect(TEST_POSTGRES_URL, autocommit=True) as conn:
         with conn.cursor() as cur:
             cur.execute(
@@ -84,9 +85,9 @@ def test_postgres_commonstack_allowlist_backfills_a_row_seeded_before_haiku(
                 "UPDATE provider_registry SET capabilities_json = %s WHERE provider_id = 'commonstack'",
                 (json.dumps(capabilities),),
             )
-            cur.execute(
+            cur.executemany(
                 "DELETE FROM model_provider_migrations WHERE migration_id = %s",
-                (COMMONSTACK_ALLOWLIST_MIGRATION_ID,),
+                [(migration_id,) for migration_id, _ in COMMONSTACK_ALLOWLIST_BACKFILLS],
             )
 
     reopened = PostgresModelProviderStore(TEST_POSTGRES_URL)
@@ -94,10 +95,6 @@ def test_postgres_commonstack_allowlist_backfills_a_row_seeded_before_haiku(
     assert reopened.get_provider("commonstack")["capabilities"].model_allowlist == (
         "openai/gpt-5.5",
         "admin/extra-model",
-        "google/gemini-3.1-pro-preview",
-        "anthropic/claude-sonnet-4-6",
-        "deepseek/deepseek-v4-pro",
-        "qwen/qwen3.7-plus",
         "anthropic/claude-haiku-4-5",
     )
 

@@ -221,11 +221,14 @@ class ModelProviderService:
             default_counts[provider_id] = default_counts.get(provider_id, 0) + 1
 
         options: list[ExecutionProviderOption] = []
+        byok_enabled_ids: set[str] = set()
         raw_providers = self.store.list_all_providers()
         for raw_provider in raw_providers:
             provider = ProviderRecord.model_validate(raw_provider)
             if provider.status != "enabled":
                 continue
+            if provider.byok_enabled:
+                byok_enabled_ids.add(provider.provider_id)
             platform = self.store.get_platform_credential_public(
                 provider.provider_id
             )
@@ -261,17 +264,19 @@ class ModelProviderService:
                     ),
                 )
             )
-        # Providers outside the platform order keep repository order, ahead
-        # of the platform lanes, so a BYOK user's default pick (app.js takes
-        # providers[0]) does not move. The platform lanes follow in
-        # ATL_PLATFORM_PROVIDER_ORDER order, CommonStack first by default.
+        # Only platform-only lanes move: they go last, in
+        # ATL_PLATFORM_PROVIDER_ORDER order. Every BYOK-capable provider --
+        # OpenRouter included, though it is also a platform lane -- keeps
+        # repository order, so the BYOK list app.js takes providers[0] from
+        # cannot be reordered by this env var or by a newly added provider.
+        # Platform routing order is decided by the route, not by this list.
+        platform_ids = platform_provider_order(
+            {str(raw.get("provider_id")) for raw in raw_providers}
+        )
         rank = {
             provider_id: index
-            for index, provider_id in enumerate(
-                platform_provider_order(
-                    {str(raw.get("provider_id")) for raw in raw_providers}
-                )
-            )
+            for index, provider_id in enumerate(platform_ids)
+            if provider_id not in byok_enabled_ids
         }
         options.sort(
             key=lambda option: (
@@ -298,9 +303,13 @@ class ModelProviderService:
             if preferred_provider_id and preferred_provider_id.strip()
             else None
         )
+        configured = platform_provider_order(providers)
+        # An explicit provider_id is honoured first only when it is in the
+        # configured order: leaving a lane out is the operator's no-deploy kill
+        # switch, and an API caller naming the pulled lane must not reopen it.
         ordered_ids: list[str] = []
-        for provider_id in (preferred, *platform_provider_order(providers)):
-            if provider_id and provider_id not in ordered_ids:
+        for provider_id in (preferred, *configured):
+            if provider_id and provider_id in configured and provider_id not in ordered_ids:
                 ordered_ids.append(provider_id)
         candidates: list[str] = []
         for provider_id in ordered_ids:

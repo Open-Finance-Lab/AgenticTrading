@@ -476,21 +476,34 @@ def test_execution_options_follow_platform_order_and_keep_byok_order(
     tmp_path, monkeypatch
 ):
     monkeypatch.delenv("ATL_PLATFORM_PROVIDER_ORDER", raising=False)
-    service, _store = _service(tmp_path, FakeAdapter())
+    service, store = _service(tmp_path, FakeAdapter())
     monkeypatch.setenv("OPENROUTER_API_KEY", "or-fake-options-abcd")
     monkeypatch.setenv("COMMONSTACK_API_KEY", "cs-fake-options-wxyz")
+    # A BYOK provider whose display name sorts after "OpenRouter": moving
+    # OpenRouter (a BYOK *and* platform lane) to the end would make this the
+    # BYOK default that app.js takes from providers[0].
+    store.upsert_provider(
+        provider_id="xai",
+        display_name="xAI",
+        adapter_type="openai_compatible",
+        approved_base_url="https://api.x.ai/v1",
+        capabilities=ProviderCapabilities(model_allowlist=()),
+        byok_enabled=True,
+        platform_enabled=False,
+        status="enabled",
+    )
 
-    # Providers outside the platform order keep repository (display-name)
-    # order ahead of the platform lanes, so app.js's providers[0] BYOK
-    # default is exactly what it was before CommonStack moved first.
-    assert [
-        option.provider_id for option in service.list_execution_options(7)
-    ] == ["anthropic", "gemini", "openai", "commonstack", "openrouter"]
-
-    monkeypatch.setenv("ATL_PLATFORM_PROVIDER_ORDER", "openrouter,commonstack")
-    assert [
-        option.provider_id for option in service.list_execution_options(7)
-    ] == ["anthropic", "gemini", "openai", "openrouter", "commonstack"]
+    # Every BYOK-capable provider keeps repository (display-name) order;
+    # only the platform-only CommonStack lane moves, to the end.
+    expected = ["anthropic", "gemini", "openai", "openrouter", "xai", "commonstack"]
+    for order in (None, "openrouter,commonstack", "commonstack,openrouter,openai"):
+        if order is None:
+            monkeypatch.delenv("ATL_PLATFORM_PROVIDER_ORDER", raising=False)
+        else:
+            monkeypatch.setenv("ATL_PLATFORM_PROVIDER_ORDER", order)
+        assert [
+            option.provider_id for option in service.list_execution_options(7)
+        ] == expected, order
     assert "cs-fake-options-wxyz" not in repr(service.list_execution_options(7))
 
 

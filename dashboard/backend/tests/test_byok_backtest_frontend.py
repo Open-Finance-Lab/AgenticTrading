@@ -57,13 +57,13 @@ def test_atl_credits_hides_provider_and_omits_provider_payload():
     assert body.index("payload.billing_mode = selectedBillingMode") < body.index(
         "payload.provider_id = selectedProviderId"
     )
-    # Neutral on order: ATL_PLATFORM_PROVIDER_ORDER can flip it with no
-    # deploy, so copy naming an order would go stale silently.
-    _assert_contains(
-        APP_JS,
-        "ATL Credits automatically switch between CommonStack and OpenRouter if one is unavailable.",
-    )
-    assert "use OpenRouter first" not in APP_JS
+    # Names no provider and no order: ATL_PLATFORM_PROVIDER_ORDER can reorder
+    # or remove either lane with no deploy, so copy naming them (or promising
+    # a fallback between them) would go stale silently.
+    _assert_contains(APP_JS, "ATL Credits cover the model calls. ATL picks an available provider automatically.")
+    hint = _function_body("setRunBacktestBillingMode")
+    assert "OpenRouter" not in hint
+    assert "CommonStack" not in hint
 
 
 def test_atl_model_options_are_merged_without_duplicate_ids():

@@ -19,7 +19,7 @@ from .repository_common import (
     CredentialNotFoundError,
     CredentialOwnershipError,
     ProviderNotFoundError,
-    COMMONSTACK_ALLOWLIST_MIGRATION_ID,
+    COMMONSTACK_ALLOWLIST_BACKFILLS,
     SEEDED_PROVIDERS,
     commonstack_allowlist_backfill,
     deserialize_capabilities,
@@ -212,34 +212,35 @@ class ModelProviderStore:
     def _migrate_commonstack_allowlist(conn: sqlite3.Connection) -> None:
         """Backfill newly verified CommonStack models into a seeded row, once.
 
-        Recorded even when nothing changed, so an admin who later removes one
-        of these models is not overridden on the next boot.
+        Each backfill appends only the ids it introduced, and is recorded even
+        when nothing changed, so an admin who removes one of those models --
+        before or after it runs -- is not overridden on a later boot.
         """
 
-        migration_id = COMMONSTACK_ALLOWLIST_MIGRATION_ID
-        if conn.execute(
-            "SELECT 1 FROM model_provider_migrations WHERE migration_id = ?",
-            (migration_id,),
-        ).fetchone():
-            return
-        now = _utcnow_iso()
-        provider = conn.execute(
-            "SELECT capabilities_json FROM provider_registry WHERE provider_id = 'commonstack'"
-        ).fetchone()
-        updated = (
-            commonstack_allowlist_backfill(provider["capabilities_json"])
-            if provider
-            else None
-        )
-        if updated is not None:
-            conn.execute(
-                "UPDATE provider_registry SET capabilities_json = ?, updated_at = ? WHERE provider_id = 'commonstack'",
-                (updated, now),
+        for migration_id, model_ids in COMMONSTACK_ALLOWLIST_BACKFILLS:
+            if conn.execute(
+                "SELECT 1 FROM model_provider_migrations WHERE migration_id = ?",
+                (migration_id,),
+            ).fetchone():
+                continue
+            now = _utcnow_iso()
+            provider = conn.execute(
+                "SELECT capabilities_json FROM provider_registry WHERE provider_id = 'commonstack'"
+            ).fetchone()
+            updated = (
+                commonstack_allowlist_backfill(provider["capabilities_json"], model_ids)
+                if provider
+                else None
             )
-        conn.execute(
-            "INSERT INTO model_provider_migrations (migration_id, applied_at) VALUES (?, ?)",
-            (migration_id, now),
-        )
+            if updated is not None:
+                conn.execute(
+                    "UPDATE provider_registry SET capabilities_json = ?, updated_at = ? WHERE provider_id = 'commonstack'",
+                    (updated, now),
+                )
+            conn.execute(
+                "INSERT INTO model_provider_migrations (migration_id, applied_at) VALUES (?, ?)",
+                (migration_id, now),
+            )
 
     @staticmethod
     def _ensure_user_credential_columns(conn: sqlite3.Connection) -> None:

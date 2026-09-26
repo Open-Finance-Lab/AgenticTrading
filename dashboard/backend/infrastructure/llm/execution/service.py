@@ -13,17 +13,9 @@ from dashboard.backend.domain.credits.repository_common import (
 )
 from dashboard.backend.domain.analytics import instrumentation as analytics_instrumentation
 from dashboard.backend.domain.model_providers.models import ProviderRecord
-from dashboard.backend.domain.model_providers.execution_catalog import (
-    UnsupportedExecutionModel,
-)
-from dashboard.backend.domain.model_providers.repository_common import (
-    ProviderNotFoundError,
-)
 from dashboard.backend.domain.model_providers.service import (
     ModelProviderService,
     ResolvedCredential,
-    CredentialResolutionError,
-    platform_provider_order,
 )
 from dashboard.backend.infrastructure.llm.execution.adapters.base import (
     AdapterResponse,
@@ -383,28 +375,13 @@ class LLMExecutionService:
     ) -> LLMExecutionResult:
         """Try ordered platform candidates, retaining one requested identity."""
 
+        # The route's ordered tuple is authoritative: it already applied
+        # ATL_PLATFORM_PROVIDER_ORDER against the registry, and the handoff
+        # carries it whole. The worker used to re-derive routing here, turning
+        # a lone ("openrouter",) into OpenRouter -> CommonStack -- hard-coded
+        # OpenRouter-first, and blind to an order the route had rejected. A
+        # lone candidate is what the route decided, so it is not widened.
         candidates = tuple(request.provider_ids or (request.provider_id,))
-        # Direct service callers predating the candidate-list handoff still get
-        # the established OpenRouter -> CommonStack fallback when the route is
-        # available. New handoffs always carry the complete ordered tuple.
-        # An operator who left CommonStack out of ATL_PLATFORM_PROVIDER_ORDER
-        # makes the route hand over exactly ("openrouter",) too; re-adding the
-        # lane here would bill the provider they pulled.
-        if candidates == ("openrouter",) and "commonstack" in platform_provider_order():
-            try:
-                self.providers.preflight_execution_model(
-                    "commonstack", request.model_id
-                )
-                self.providers.preflight_platform_credential("commonstack")
-            except (
-                ProviderNotFoundError,
-                CredentialResolutionError,
-                UnsupportedExecutionModel,
-            ):
-                pass
-            else:
-                candidates = ("openrouter", "commonstack")
-
         requested_provider_id = candidates[0]
         last_error: LLMExecutionError | None = None
         for attempt_index, provider_id in enumerate(candidates):
