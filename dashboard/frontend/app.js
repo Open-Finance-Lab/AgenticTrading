@@ -207,6 +207,18 @@ function showAppToast(message) {
 // unavailable). Lets the redesigned My Agents page render without a backend.
 // TODO: Replace mock agent data with backend API data later.
 // ============================================================================
+/**
+ * Paper trading is switched off product-wide until it ships for real
+ * (execution/paper_backend.py is still a stub). Off, the Playground subtab is
+ * greyed and unreachable, cards drop the paper sleeve, My Portfolio (the
+ * ledger the sleeves draw from) is hidden, and new agents reserve $0 -- a
+ * sleeve nobody can see or spend must not be able to refuse a later create
+ * with "Insufficient unallocated cash". Existing sleeves are left untouched.
+ * The HTML ships the paper inputs `disabled` to match, and the server's
+ * PAPER_TRADING_ENABLED (domain/backtesting/constants.py) makes every sleeve it
+ * picks by default $0 too; flip all three together.
+ */
+const PAPER_TRADING_ENABLED = false;
 const MAX_AGENT_CASH_ALLOCATION = 3000;
 const DEFAULT_AGENT_CASH_ALLOCATION = 1000;
 /** Simulated cash ceiling for a single backtest run — unrelated to the paper sleeve above. */
@@ -955,9 +967,10 @@ function normalizeAgentGridPage(categoryKey, total, pageSize) {
 function resolveAgentStatusBadge(agent) {
   const deployment = String(agent.deployment_status || '').toLowerCase();
   if (
-    agent.is_live === true ||
+    PAPER_TRADING_ENABLED &&
+    (agent.is_live === true ||
     deployment === 'live' ||
-    deployment === 'paper'
+    deployment === 'paper')
   ) {
     return { key: 'paper', label: 'PAPER TRADING', className: 'paper' };
   }
@@ -1303,20 +1316,26 @@ function resolveBacktestCapital(agent) {
   return DEFAULT_AGENT_CASH_ALLOCATION;
 }
 
-/** Shared top block: both capital figures, equal weight (draft + backtested). */
+/**
+ * Shared top block: both capital figures, equal weight (draft + backtested).
+ * With paper trading off only the backtest figure is shown.
+ */
 function renderAgentAllocatedCapitalHero(agent) {
   const paper =
     agent.cash_allocation != null
       ? formatAgentCashAllocation(agent.cash_allocation)
       : '$1,000';
   const backtest = formatAgentCashAllocation(resolveBacktestCapital(agent));
-  return `
-    <div class="agent-card-capitals">
+  const paperHtml = PAPER_TRADING_ENABLED
+    ? `
       <div class="agent-card-capital">
         <span class="agent-card-metric-label">Paper Trading</span>
         <p class="agent-card-metric-value">${escapeHtml(paper)}</p>
         <p class="agent-card-capital-note">From My Portfolio</p>
-      </div>
+      </div>`
+    : '';
+  return `
+    <div class="agent-card-capitals${PAPER_TRADING_ENABLED ? '' : ' agent-card-capitals--single'}">${paperHtml}
       <div class="agent-card-capital">
         <span class="agent-card-metric-label">Backtesting</span>
         <p class="agent-card-metric-value">${escapeHtml(backtest)}</p>
@@ -1460,13 +1479,12 @@ function renderAgentCardActions(agent, statusKey) {
   if (statusKey === 'paper') {
     primary = `<button class="agent-card-cta agent-open-btn" type="button" data-agent-id="${id}">Open Agent</button>`;
   } else {
-    // Paper trading is Phase B (execution/paper_backend.py is a stub). Ship the
-    // affordance disabled *with a reason* -- an unexplained grey button reads as
-    // a bug, and its absence hides that the two capital figures above map onto
-    // two different things you can eventually run.
+    // Paper trading is Phase B (execution/paper_backend.py is a stub). With it
+    // switched off (PAPER_TRADING_ENABLED) the card offers backtesting only; the
+    // old disabled "Run Paper Trading" button was one more thing to parse on a
+    // card that already had too many.
     primary = `
-      <button class="agent-card-cta agent-run-backtest-btn" type="button" data-agent-id="${id}">Run Backtest</button>
-      <button class="agent-card-cta agent-card-cta--disabled" type="button" disabled aria-disabled="true" title="Paper trading is coming soon" aria-label="Run Paper Trading — Paper trading is coming soon">Run Paper Trading</button>`;
+      <button class="agent-card-cta agent-run-backtest-btn" type="button" data-agent-id="${id}">Run Backtest</button>`;
   }
   const configure = `<button class="agent-card-cta agent-card-cta--configure agent-configure-btn" type="button" data-agent-id="${id}">Configure</button>`;
   const rotate =
@@ -2666,7 +2684,7 @@ async function ensureDefaultFoundationAgent(agents) {
           model_name: spec.model_name,
           agent_type: 'builtin',
           description: spec.description,
-          cash_allocation: DEFAULT_AGENT_CASH_ALLOCATION,
+          cash_allocation: PAPER_TRADING_ENABLED ? DEFAULT_AGENT_CASH_ALLOCATION : 0,
         });
         const agent = data?.agent;
         if (!agent?.agent_id) continue;
@@ -3682,7 +3700,8 @@ async function submitCreateBuiltinAgent(event) {
 
   let cash_allocation;
   try {
-    cash_allocation = parseAgentCashAllocationInput(cashInput?.value);
+    // Paper off: reserve nothing (see PAPER_TRADING_ENABLED).
+    cash_allocation = PAPER_TRADING_ENABLED ? parseAgentCashAllocationInput(cashInput?.value) : 0;
   } catch (error) {
     if (errorEl) {
       errorEl.textContent = error.message;
@@ -3790,7 +3809,8 @@ async function submitCreateExternalAgent(event) {
 
   let cash_allocation;
   try {
-    cash_allocation = parseAgentCashAllocationInput(cashInput?.value);
+    // Paper off: reserve nothing (see PAPER_TRADING_ENABLED).
+    cash_allocation = PAPER_TRADING_ENABLED ? parseAgentCashAllocationInput(cashInput?.value) : 0;
   } catch (error) {
     if (errorEl) {
       errorEl.textContent = error.message;
@@ -5366,7 +5386,7 @@ function setAuthMode(mode) {
   if (subtitle) {
     subtitle.textContent = mode === 'reset'
       ? "Enter your account email and we'll send a 6-character reset code."
-      : 'Optional — backtest and paper trading work without an account.';
+      : 'Optional — backtests work without an account.';
   }
   if (submitBtn) {
     submitBtn.textContent = mode === 'signup' ? 'Create account' : mode === 'reset' ? 'Send code' : 'Sign in';
@@ -10484,7 +10504,9 @@ async function openRunBacktestModal(agent) {
 
     const sleeve = Number(agent.cash_allocation);
     const hint = document.getElementById('runBacktestCapitalHint');
-    if (hint) {
+    if (hint && !PAPER_TRADING_ENABLED) {
+        hint.textContent = 'Simulated starting cash.';
+    } else if (hint) {
         hint.textContent = Number.isFinite(sleeve)
             ? `Does not change Paper Trading Allocated Capital ($${sleeve.toLocaleString()}).`
             : 'Does not change Paper Trading Allocated Capital.';
@@ -11258,6 +11280,7 @@ function showPlaygroundPanel(tab) {
         navigateToPage('community');
         return;
     }
+    if (tab === 'paper' && !PAPER_TRADING_ENABLED) tab = 'agents';
 
     playgroundTab = tab;
     updatePlaygroundSubtabs();
@@ -11351,6 +11374,13 @@ function navigateToPage(page, options = {}) {
     // set to 'marketplace' would bounce the *next* Playground visit as well.
     if (page === 'playground' && (options.playgroundTab || playgroundTab) === 'marketplace') {
         page = 'community';
+        options = { ...options, playgroundTab: 'agents' };
+    }
+    // Paper trading is switched off: ?view=paper, a saved nav state and any
+    // stray caller all land on My Agents instead of a dead panel. Same
+    // rewrite-not-clear rule as the marketplace redirect above.
+    if (!PAPER_TRADING_ENABLED && page === 'playground'
+        && (options.playgroundTab || playgroundTab) === 'paper') {
         options = { ...options, playgroundTab: 'agents' };
     }
     // (The PR #335 redirect that sent competitionTab 'daily' to 'leaderboard'

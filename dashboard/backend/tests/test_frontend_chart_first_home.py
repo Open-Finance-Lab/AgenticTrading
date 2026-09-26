@@ -913,12 +913,12 @@ _RESERVE_MAX_GATE_PX = 768
 # (which sets the copy column) and the headline's own `max-width: 36rem` = 576px.
 # Below ~1650px of viewport the column is the narrower of the two and the ratio
 # binds; above it the column clears 576, the h1 stops at its cap, and the ratio
-# stops mattering. Measured against the h1's laid-out width -- min(column, 576)
-# -- at 2176px with the current headline: 1.25 -> +26.5px, 1.35 -> +8.5px,
-# 1.38 -> +1.5px, 1.40 -> wraps. The ceiling is ~1.38 and is deliberately NOT
-# taken here: the copy got shorter, the constraint did not get looser. The
-# previous headline ("AI models finished", 25.6px wider) put the ceiling at 1.28
-# and cleared its cap by +1.0px at 1744 and up.
+# stops mattering. Against the h1's laid-out width -- min(column, 576) -- at
+# 2176px with the current headline, "Test Trading Ideas" (derived from the grid
+# measured for "each model ranks", less the 19.6px this copy adds): 1.25 ->
+# +6.9px, 1.30 -> +0.9px, 1.35 -> wraps. The ceiling is ~1.30, so 1.25 is now
+# close to it. Earlier headlines: "each model ranks" put it at ~1.38, "AI models
+# finished" (6px wider than this one) at 1.28, clearing its cap by +1.0px.
 _MAX_BOARD_GROW = 1.25
 
 _HINT_SELECTOR_HINT = "scroll-hint"
