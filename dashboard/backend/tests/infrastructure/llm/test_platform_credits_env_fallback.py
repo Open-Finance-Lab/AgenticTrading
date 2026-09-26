@@ -653,3 +653,138 @@ def test_restricted_account_execution_error_is_actionable(
     assert exc_info.value.category is ExecutionErrorCategory.ACCOUNT_RESTRICTED
     assert expected in exc_info.value.safe_message
     assert "CreditAccountRestrictedStoreError" not in exc_info.value.safe_message
+
+
+def _platform_request(run_id: str, provider_ids: tuple[str, ...]) -> LLMExecutionRequest:
+    return LLMExecutionRequest(
+        user_id=USER_ID,
+        run_id=run_id,
+        call_index=0,
+        billing_mode=BillingMode.PLATFORM_CREDITS,
+        provider_id=provider_ids[0],
+        provider_ids=provider_ids,
+        model_id=MODEL_ID,
+        system_message="Return one trading decision.",
+        messages=(LLMMessage(role="user", content="Analyze the market."),),
+        usage_policy=UsagePolicy(max_output_tokens=100),
+    )
+
+
+def _quota_error() -> ProviderExecutionError:
+    return ProviderExecutionError(ExecutionErrorCategory.PROVIDER_QUOTA_EXHAUSTED)
+
+
+def _ok_response() -> AdapterResponse:
+    return AdapterResponse(
+        text="BUY",
+        model_id=MODEL_ID,
+        usage=LLMUsage(input_tokens=40, output_tokens=20),
+        finish_reason="stop",
+    )
+
+
+@pytest.fixture
+def fresh_quota_reports(monkeypatch):
+    monkeypatch.setattr(execution_service_module, "_quota_exhausted_reported", set())
+
+
+def test_drained_commonstack_prints_one_operator_error_per_process(
+    tmp_path, monkeypatch, capsys, fresh_quota_reports
+):
+    monkeypatch.setenv("COMMONSTACK_API_KEY", "cs-fake-drained-abcd")
+    commonstack = ScriptedExecutionAdapter([_quota_error(), _quota_error()])
+    openrouter = ScriptedExecutionAdapter([_ok_response(), _ok_response()])
+    service, _store = _execution_service(
+        tmp_path,
+        monkeypatch,
+        openrouter,
+        adapters={"commonstack": commonstack, "openrouter": openrouter},
+    )
+
+    for run_id in ("drained-1", "drained-2"):
+        result = service.execute(
+            _platform_request(run_id, ("commonstack", "openrouter"))
+        )
+        assert result.provider_id == "openrouter"
+
+    lines = [
+        line
+        for line in capsys.readouterr().out.splitlines()
+        if "llm.platform_quota_exhausted" in line
+    ]
+    assert lines == [
+        "ERROR: llm.platform_quota_exhausted provider=commonstack fallback=openrouter"
+    ]
+
+
+def test_quota_exhaustion_with_no_next_candidate_names_none(
+    tmp_path, monkeypatch, capsys, fresh_quota_reports
+):
+    monkeypatch.setenv("COMMONSTACK_API_KEY", "cs-fake-drained-only-abcd")
+    commonstack = ScriptedExecutionAdapter([_quota_error()])
+    service, _store = _execution_service(
+        tmp_path,
+        monkeypatch,
+        commonstack,
+        adapters={"commonstack": commonstack},
+    )
+
+    with pytest.raises(LLMExecutionError) as exc_info:
+        service.execute(_platform_request("drained-only", ("commonstack",)))
+
+    assert exc_info.value.category is ExecutionErrorCategory.PROVIDER_QUOTA_EXHAUSTED
+    assert (
+        "ERROR: llm.platform_quota_exhausted provider=commonstack fallback=none"
+        in capsys.readouterr().out
+    )
+
+
+def test_byok_quota_exhaustion_prints_no_operator_error(
+    tmp_path, monkeypatch, capsys, fresh_quota_reports
+):
+    service, _store = _execution_service(
+        tmp_path,
+        monkeypatch,
+        ScriptedExecutionAdapter([]),
+    )
+
+    def fail_byok_once(*_args, **_kwargs):
+        raise LLMExecutionError(ExecutionErrorCategory.PROVIDER_QUOTA_EXHAUSTED)
+
+    monkeypatch.setattr(service, "_execute_once", fail_byok_once)
+    request = _request("byok-drained").model_copy(
+        update={"billing_mode": BillingMode.BYOK}
+    )
+
+    with pytest.raises(LLMExecutionError):
+        service.execute(request)
+
+    assert "llm.platform_quota_exhausted" not in capsys.readouterr().out
+
+
+def test_quota_report_is_once_under_concurrency_and_flushed(
+    capsys, fresh_quota_reports
+):
+    import inspect
+    import threading
+
+    barrier = threading.Barrier(8)
+
+    def report():
+        barrier.wait()
+        execution_service_module._report_platform_quota_exhausted(
+            "commonstack", "openrouter"
+        )
+
+    threads = [threading.Thread(target=report) for _ in range(8)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert capsys.readouterr().out.count("llm.platform_quota_exhausted") == 1
+    # A killed child's block-buffered stdout dies with it, and the 3600s
+    # timeout kill is exactly when this line matters.
+    assert "flush=True" in inspect.getsource(
+        execution_service_module._report_platform_quota_exhausted
+    )

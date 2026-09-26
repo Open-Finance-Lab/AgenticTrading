@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import threading
 from collections.abc import Callable
 
 from dashboard.backend.domain.credits.models import LLMSettlementResult
@@ -61,6 +62,25 @@ _PLATFORM_FAILOVER_CATEGORIES = frozenset(
         ExecutionErrorCategory.PROVIDER_QUOTA_EXHAUSTED,
     }
 )
+
+# CommonStack has no balance endpoint (every candidate path 404s as of
+# 2026-09-23), so a drained platform lane is only observable as a failed
+# call. Once per provider per process: a backtest child is one run, so a
+# drained lane costs one line per run, not one per call.
+_quota_exhausted_reported: set[str] = set()
+_quota_exhausted_lock = threading.Lock()
+
+
+def _report_platform_quota_exhausted(provider_id: str, fallback: str | None) -> None:
+    with _quota_exhausted_lock:
+        if provider_id in _quota_exhausted_reported:
+            return
+        _quota_exhausted_reported.add(provider_id)
+    print(
+        "ERROR: llm.platform_quota_exhausted "
+        f"provider={provider_id} fallback={fallback or 'none'}",
+        flush=True,
+    )
 
 
 # The provider receives the serialized messages, but its tokenizer is not
@@ -398,6 +418,13 @@ class LLMExecutionService:
                 )
             except LLMExecutionError as exc:
                 last_error = exc
+                if exc.category is ExecutionErrorCategory.PROVIDER_QUOTA_EXHAUSTED:
+                    _report_platform_quota_exhausted(
+                        provider_id,
+                        candidates[attempt_index + 1]
+                        if attempt_index + 1 < len(candidates)
+                        else None,
+                    )
                 if exc.category not in _PLATFORM_FAILOVER_CATEGORIES:
                     raise
         assert last_error is not None
