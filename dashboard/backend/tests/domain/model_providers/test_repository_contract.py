@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import sqlite3
 
 import pytest
@@ -16,7 +17,12 @@ from dashboard.backend.domain.model_providers.execution_catalog import (
     resolve_execution_model_route,
 )
 from dashboard.backend.domain.model_providers.models import ProviderRecord
-from dashboard.backend.domain.model_providers.repository_common import CredentialConflictError
+from dashboard.backend.domain.model_providers.repository_common import (
+    COMMONSTACK_ALLOWLIST_BACKFILLS,
+    COMMONSTACK_MODEL_ALLOWLIST,
+    CredentialConflictError,
+    commonstack_allowlist_backfill,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -101,6 +107,7 @@ def test_seeded_commonstack_is_platform_only_with_verified_model_allowlist(store
         "anthropic/claude-sonnet-4-6",
         "deepseek/deepseek-v4-pro",
         "qwen/qwen3.7-plus",
+        "anthropic/claude-haiku-4-5",
     )
 
 
@@ -108,6 +115,7 @@ def test_commonstack_routes_only_the_verified_catalog_models(store):
     provider = ProviderRecord.model_validate(store.get_provider("commonstack"))
 
     assert [route.catalog_id for route in list_execution_model_routes(provider)] == [
+        "anthropic/claude-haiku-4-5",
         "anthropic/claude-sonnet-4-6",
         "openai/gpt-5.5",
         "google/gemini-3.1-pro-preview",
@@ -115,7 +123,7 @@ def test_commonstack_routes_only_the_verified_catalog_models(store):
         "qwen/qwen3.7-plus",
     ]
     with pytest.raises(UnsupportedExecutionModel):
-        resolve_execution_model_route(provider, "anthropic/claude-haiku-4-5")
+        resolve_execution_model_route(provider, "nvidia/nemotron-3-nano-30b-a3b")
 
 
 def test_legacy_openrouter_platform_flag_migrates_when_environment_key_exists(
@@ -136,6 +144,7 @@ def test_legacy_openrouter_platform_flag_migrates_when_environment_key_exists(
     assert reopened.get_provider("openrouter")["platform_enabled"] is True
     marker = reopened._get_connection().execute(
         "SELECT migration_id FROM model_provider_migrations"
+        " WHERE migration_id = 'openrouter-platform-key-v1'"
     ).fetchone()
     assert marker[0] == "openrouter-platform-key-v1"
 
@@ -171,7 +180,10 @@ def test_legacy_migration_respects_admin_platform_disable(
     assert reopened.get_provider("openrouter")["platform_enabled"] is False
     assert (
         reopened._get_connection()
-        .execute("SELECT COUNT(*) FROM model_provider_migrations")
+        .execute(
+            "SELECT COUNT(*) FROM model_provider_migrations"
+            " WHERE migration_id = 'openrouter-platform-key-v1'"
+        )
         .fetchone()[0]
         == 0
     )
@@ -325,3 +337,92 @@ def test_legacy_sqlite_schema_is_migrated_without_losing_active_rows(tmp_path):
         label="Old",
         secret="sk-reused-label-1234",
     )["label"] == "Old"
+
+
+def _set_commonstack_allowlist(database_path, allowlist, *, forget_migration):
+    conn = sqlite3.connect(database_path)
+    row = conn.execute(
+        "SELECT capabilities_json FROM provider_registry WHERE provider_id = 'commonstack'"
+    ).fetchone()
+    capabilities = json.loads(row[0])
+    capabilities["model_allowlist"] = list(allowlist)
+    conn.execute(
+        "UPDATE provider_registry SET capabilities_json = ? WHERE provider_id = 'commonstack'",
+        (json.dumps(capabilities),),
+    )
+    if forget_migration:
+        conn.executemany(
+            "DELETE FROM model_provider_migrations WHERE migration_id = ?",
+            [(migration_id,) for migration_id, _ in COMMONSTACK_ALLOWLIST_BACKFILLS],
+        )
+    conn.commit()
+    conn.close()
+
+
+def test_commonstack_allowlist_backfills_a_row_seeded_before_haiku(tmp_path):
+    # Prod's row was seeded before Haiku joined the allowlist, and the seed is
+    # ON CONFLICT DO NOTHING -- only the backfill can reach it. It adds Haiku
+    # and nothing else: gemini/sonnet/deepseek were removed from this row (by
+    # an admin, as far as the store can tell) and must stay removed. An id an
+    # admin added survives too.
+    database_path = tmp_path / "provider-backfill.db"
+    ModelProviderStore(database_path)
+    _set_commonstack_allowlist(
+        database_path,
+        ("openai/gpt-5.5", "qwen/qwen3.7-plus", "admin/extra-model"),
+        forget_migration=True,
+    )
+
+    store = ModelProviderStore(database_path)
+
+    assert store.get_provider("commonstack")["capabilities"].model_allowlist == (
+        "openai/gpt-5.5",
+        "qwen/qwen3.7-plus",
+        "admin/extra-model",
+        "anthropic/claude-haiku-4-5",
+    )
+
+
+def test_commonstack_allowlist_backfill_keeps_an_emptied_lane_off(tmp_path):
+    # An empty allowlist routes nothing, so it is how an admin pulls the lane;
+    # a backfill adding one model would silently reopen it.
+    database_path = tmp_path / "provider-backfill-empty.db"
+    ModelProviderStore(database_path)
+    _set_commonstack_allowlist(database_path, (), forget_migration=True)
+
+    store = ModelProviderStore(database_path)
+
+    assert store.get_provider("commonstack")["capabilities"].model_allowlist == ()
+
+
+def test_every_commonstack_backfill_id_is_in_the_seeded_allowlist():
+    # A backfill may only add what a fresh deployment would seed; and ids are
+    # one-shot per migration, so two entries must not share an id.
+    migration_ids = [migration_id for migration_id, _ in COMMONSTACK_ALLOWLIST_BACKFILLS]
+    assert len(migration_ids) == len(set(migration_ids))
+    for _migration_id, model_ids in COMMONSTACK_ALLOWLIST_BACKFILLS:
+        assert model_ids
+        assert set(model_ids) <= set(COMMONSTACK_MODEL_ALLOWLIST)
+
+
+def test_commonstack_allowlist_backfill_runs_once_so_admin_removals_stick(tmp_path):
+    database_path = tmp_path / "provider-backfill-once.db"
+    ModelProviderStore(database_path)
+    _set_commonstack_allowlist(
+        database_path, ("openai/gpt-5.5",), forget_migration=False
+    )
+
+    store = ModelProviderStore(database_path)
+
+    assert store.get_provider("commonstack")["capabilities"].model_allowlist == (
+        "openai/gpt-5.5",
+    )
+
+
+def test_commonstack_allowlist_backfill_leaves_an_unreadable_row_alone():
+    haiku = ("anthropic/claude-haiku-4-5",)
+    assert commonstack_allowlist_backfill("{not json", haiku) is None
+    assert commonstack_allowlist_backfill(None, haiku) is None
+    assert commonstack_allowlist_backfill(
+        json.dumps({"model_allowlist": list(COMMONSTACK_MODEL_ALLOWLIST)}), haiku
+    ) is None

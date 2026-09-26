@@ -133,6 +133,17 @@ COMMONSTACK_MODEL_ALLOWLIST = (
     "anthropic/claude-sonnet-4-6",
     "deepseek/deepseek-v4-pro",
     "qwen/qwen3.7-plus",
+    "anthropic/claude-haiku-4-5",
+)
+
+# The seed below is ``ON CONFLICT DO NOTHING``, so an id appended to the
+# allowlist above never reaches a deployment whose row already exists. Each
+# addition therefore ships a one-shot backfill naming ONLY the ids it
+# introduced -- never "whatever the allowlist now holds", which would re-add
+# every model an admin had removed from the live row. Append a new entry
+# (``-v2``, ...) with the next addition; never edit a shipped one.
+COMMONSTACK_ALLOWLIST_BACKFILLS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("commonstack-allowlist-v1", ("anthropic/claude-haiku-4-5",)),
 )
 
 
@@ -251,6 +262,36 @@ def validate_provider_id(value: str) -> str:
 def serialize_capabilities(value: ProviderCapabilities | dict) -> str:
     capabilities = value if isinstance(value, ProviderCapabilities) else ProviderCapabilities.model_validate(value)
     return json.dumps(capabilities.model_dump(), sort_keys=True, separators=(",", ":"))
+
+
+def commonstack_allowlist_backfill(
+    capabilities_json: str | None,
+    model_ids: tuple[str, ...],
+) -> str | None:
+    """Return ``capabilities_json`` with ``model_ids`` appended where missing.
+
+    Only appends: an id an admin added stays and nothing is reordered. Returns
+    None when there is nothing to add, when the stored allowlist is empty (an
+    empty allowlist routes nothing, so it is how an admin turns the lane off,
+    and adding one model would turn it back on), or when the stored row cannot
+    be read -- ``deserialize_capabilities`` turns an unreadable row into
+    default capabilities, and writing that back would erase whatever it held.
+    """
+    try:
+        capabilities = ProviderCapabilities.model_validate(
+            json.loads(capabilities_json or "")
+        )
+    except (TypeError, ValueError):
+        return None
+    current = capabilities.model_allowlist
+    if not current:
+        return None
+    missing = tuple(model_id for model_id in model_ids if model_id not in current)
+    if not missing:
+        return None
+    return serialize_capabilities(
+        capabilities.model_copy(update={"model_allowlist": current + missing})
+    )
 
 
 def deserialize_capabilities(value: str | None) -> ProviderCapabilities:
