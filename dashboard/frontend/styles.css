@@ -11683,6 +11683,9 @@ body.agent-editor-open {
     padding: 10px 12px;
     border-left: 2px solid var(--border-color);
     color: var(--text-secondary);
+    /* The default instruction is a numbered list separated by newlines;
+       a <p> would otherwise collapse it into one run-on paragraph. */
+    white-space: pre-line;
 }
 
 .agent-editor-analyst-grid {
