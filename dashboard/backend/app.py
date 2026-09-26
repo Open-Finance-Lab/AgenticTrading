@@ -334,12 +334,11 @@ async def startup_event():
             disable_synchronous_projection,
         )
 
-        # PR 0: analytics_service now builds with project_snapshots=False, so
-        # record_server_event no longer recomputes synchronously. Without
-        # this call, instrumentation.py's own fallback guard -- written for a
-        # caller-supplied service that never learned to project -- would
-        # still call recalculate_user_snapshots per accepted event, moving
-        # the burner one module over instead of killing it.
+        # Since #522 an unregistered recalculator is already inert, so this
+        # call no longer carries the fix: PR 0 put it here, which fixed the
+        # web process and left the backtest child (which never runs this
+        # hook) rebuilding snapshots on every event. It stays so this process
+        # states its intent explicitly instead of relying on the default.
         disable_synchronous_projection()
         print("🧹 Analytics snapshot projection left off the request path")
     except Exception as e:

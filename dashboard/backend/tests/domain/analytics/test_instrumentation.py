@@ -228,7 +228,9 @@ def test_snapshot_failure_never_escapes_or_logs_exception_text(
     assert "category=RuntimeError" in output
 
 
-def test_disable_synchronous_projection_makes_the_fallback_a_no_op(monkeypatch):
+def test_disable_synchronous_projection_registers_a_no_op(monkeypatch):
+    """app.py's explicit opt-out still registers a callable no-op (#522 made
+    the unregistered default inert, so this pins the call, not the fix)."""
     calls = []
     monkeypatch.setattr(
         "dashboard.backend.domain.analytics.states.recalculate_user_snapshots",
@@ -246,6 +248,52 @@ def test_disable_synchronous_projection_makes_the_fallback_a_no_op(monkeypatch):
 
     monkeypatch.setattr(instrumentation, "get_analytics_service", lambda: NonProjectingService())
 
+    instrumentation.emit_agent_event(
+        event_name="agent_created",
+        user_id=7,
+        agent_id="agent-1",
+        occurred_at=NOW,
+    )
+
+    assert instrumentation._snapshot_recalculator is not None
+    assert instrumentation._snapshot_recalculator(7) is None
+    assert calls == []
+
+
+def test_unregistered_recalculator_never_rebuilds_snapshots(monkeypatch):
+    """The dashboard backtest child's exact state (#522).
+
+    The child never runs app.py's startup, so nothing registers a
+    recalculator, and the live analytics singleton does not project. Before
+    #522 that combination fell back to states.recalculate_user_snapshots on
+    every snapshot-relevant event -- ~5s each, ~31s of every model call.
+    """
+    calls = []
+    monkeypatch.setattr(
+        "dashboard.backend.domain.analytics.states.recalculate_user_snapshots",
+        lambda *a, **k: calls.append((a, k)),
+    )
+    monkeypatch.setattr(instrumentation, "_snapshot_recalculator", None)
+
+    class NonProjectingService:
+        project_snapshots = False
+
+        def try_record_server_event(self, **kwargs):
+            return AppendEventResult.model_construct(event=None, created=True)
+
+    monkeypatch.setattr(
+        instrumentation, "get_analytics_service", lambda: NonProjectingService()
+    )
+
+    for event_name in ("credits_reserved", "credits_settled", "model_usage_recorded"):
+        instrumentation.emit_resource_event(
+            event_name=event_name,
+            user_id=7,
+            source_record_type="llm_reservation",
+            source_record_id=f"reservation-{event_name}",
+            properties={},
+            occurred_at=NOW,
+        )
     instrumentation.emit_agent_event(
         event_name="agent_created",
         user_id=7,
