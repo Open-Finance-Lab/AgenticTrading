@@ -58,9 +58,9 @@ def main() -> int:
     parser.add_argument("--force", action="store_true", help="Recompute even if a cached run exists")
     parser.add_argument(
         "--period",
-        choices=("contest", "daily"),
+        choices=("contest", "daily", "live"),
         default="contest",
-        help="Target board: contest (fixed preseason window) or daily (last completed weekday)",
+        help="Target board: contest, daily, or live (current-month freeze snapshot)",
     )
     parser.add_argument(
         "--allow-fallback",
@@ -89,14 +89,19 @@ def main() -> int:
         print(f"  (test window override: {args.start or 'config'} → {args.end or 'config'})")
 
     try:
-        result = deploy_model_run(
-            args.entry,
-            force_refresh=args.force,
-            start_date=args.start,
-            end_date=args.end,
-            allow_fallback=args.allow_fallback,
-            period=args.period,
-        )
+        if args.period == "live":
+            result = _deploy_live(args)
+            if result is None:
+                return 1
+        else:
+            result = deploy_model_run(
+                args.entry,
+                force_refresh=args.force,
+                start_date=args.start,
+                end_date=args.end,
+                allow_fallback=args.allow_fallback,
+                period=args.period,
+            )
     except LeaderboardFallbackError as exc:
         print("\n❌ Refused to publish a rule-based fallback under an LLM name:")
         print(f"   {exc}")
@@ -129,6 +134,37 @@ def main() -> int:
     print(f"  Est. Cost    : ${float(result.get('est_cost_usd') or 0):.4f}")
     print("\nRefresh the leaderboard (or GET /api/v1/leaderboard?refresh=true) to see it.")
     return 0
+
+
+def _deploy_live(args):
+    """One Live-board entry through the snapshot-carrying increment.
+
+    ``deploy_model_run`` writes no portfolio snapshot, so a live row made there
+    is a month replay the next nightly increment has to pay for again.
+    """
+    from dashboard.backend.domain.leaderboard.live import (
+        deploy_live_model_increment,
+        live_freeze_config,
+        live_llm_entries,
+    )
+
+    if args.start or args.end:
+        print("ERROR: --start/--end do not apply to --period live (the window is the month freeze).")
+        return None
+    freeze = live_freeze_config()
+    if freeze is None:
+        print("ERROR: no settled cash session this month yet — nothing to freeze.")
+        return None
+    entry = next((e for e in live_llm_entries(freeze) if e["id"] == args.entry), None)
+    if entry is None:
+        print(f"ERROR: '{args.entry}' is not on the Live roster.")
+        return None
+    return deploy_live_model_increment(
+        entry,
+        freeze,
+        force_refresh=args.force,
+        allow_fallback=args.allow_fallback,
+    )
 
 
 if __name__ == "__main__":

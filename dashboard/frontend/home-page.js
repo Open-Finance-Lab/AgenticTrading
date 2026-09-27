@@ -617,21 +617,242 @@ function syncHomeGetStartedLabel() {
     if (label) btn.textContent = label;
 }
 
+const HOME_DEMO_RETURN_MS = 3000;
+
 function initHomeGetStarted() {
     syncHomeGetStartedLabel();
     document.getElementById('homeGetStartedBtn')?.addEventListener('click', () => {
-        if (!isHomeSignedIn()) {
-            if (typeof openAuthModal === 'function') {
-                openAuthModal('signup');
-                return;
-            }
-        }
-        if (typeof navigateToPage === 'function') {
-            navigateToPage('playground', { playgroundTab: 'agents' });
-            return;
-        }
-        document.getElementById('homeLiveSection')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        startHomeDemoRun();
     });
+    document.getElementById('homeBoardPrev')?.addEventListener('click', () => {
+        stopHomeDemoRun();
+        setHomeBoardSlide('rank', { cancelAutoReturn: true });
+    });
+    document.getElementById('homeBoardNext')?.addEventListener('click', () => {
+        setHomeBoardSlide('demo', { cancelAutoReturn: true, playIfIdle: true });
+    });
+}
+
+let homeDemoChart = null;
+let homeDemoTimer = 0;
+let homeDemoReturnTimer = 0;
+let homeDemoPayload = null;
+let homeDemoPlaying = false;
+
+function homeDemoMoney(n) {
+    const v = Number(n);
+    if (!Number.isFinite(v)) return '$0.00';
+    return `$${v.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+}
+
+function homeDemoPct(n) {
+    const v = Number(n);
+    if (!Number.isFinite(v)) return '0.00%';
+    const sign = v > 0 ? '+' : '';
+    return `${sign}${(v * 100).toFixed(2)}%`;
+}
+
+function homeDemoClock(iso) {
+    try {
+        const d = new Date(iso);
+        return d.toLocaleString('en-US', {
+            timeZone: 'America/New_York',
+            month: 'short',
+            day: 'numeric',
+            hour: 'numeric',
+            minute: '2-digit',
+        });
+    } catch (e) {
+        return String(iso || '—');
+    }
+}
+
+function stopHomeDemoRun() {
+    if (homeDemoTimer) {
+        window.clearTimeout(homeDemoTimer);
+        homeDemoTimer = 0;
+    }
+    homeDemoPlaying = false;
+}
+
+function cancelHomeDemoAutoReturn() {
+    if (homeDemoReturnTimer) {
+        window.clearTimeout(homeDemoReturnTimer);
+        homeDemoReturnTimer = 0;
+    }
+}
+
+function scheduleHomeDemoAutoReturn() {
+    cancelHomeDemoAutoReturn();
+    homeDemoReturnTimer = window.setTimeout(() => {
+        homeDemoReturnTimer = 0;
+        setHomeBoardSlide('rank');
+    }, HOME_DEMO_RETURN_MS);
+}
+
+function setHomeBoardSlide(slide, opts) {
+    const options = opts || {};
+    const board = document.getElementById('homeLandingBoard');
+    const ranking = document.getElementById('homeModuleRanking');
+    const panel = document.getElementById('homeDemoRunPanel');
+    const prev = document.getElementById('homeBoardPrev');
+    const next = document.getElementById('homeBoardNext');
+    const showDemo = slide === 'demo';
+    if (options.cancelAutoReturn) cancelHomeDemoAutoReturn();
+    if (board) board.setAttribute('data-home-board-slide', showDemo ? 'demo' : 'rank');
+    if (ranking) ranking.setAttribute('aria-hidden', showDemo ? 'true' : 'false');
+    if (panel) panel.setAttribute('aria-hidden', showDemo ? 'false' : 'true');
+    if (prev) prev.disabled = !showDemo;
+    if (next) next.disabled = showDemo;
+    if (showDemo && homeDemoChart) {
+        window.requestAnimationFrame(() => homeDemoChart.resize());
+    }
+    if (showDemo && options.playIfIdle && !homeDemoPayload && !homeDemoPlaying && !homeDemoTimer) {
+        startHomeDemoRun({ skipCover: true });
+    }
+}
+
+function appendHomeDemoLog(text) {
+    const log = document.getElementById('homeDemoRunLog');
+    if (!log) return;
+    const li = document.createElement('li');
+    li.textContent = text;
+    log.appendChild(li);
+    log.scrollTop = log.scrollHeight;
+}
+
+function ensureHomeDemoChart(labels, values) {
+    const canvas = document.getElementById('homeDemoRunChart');
+    if (!canvas || typeof Chart === 'undefined') return null;
+    if (homeDemoChart) {
+        homeDemoChart.destroy();
+        homeDemoChart = null;
+    }
+    homeDemoChart = new Chart(canvas.getContext('2d'), {
+        type: 'line',
+        data: {
+            labels,
+            datasets: [{
+                data: values,
+                borderColor: '#22d3ee',
+                backgroundColor: 'rgba(34, 211, 238, 0.12)',
+                fill: true,
+                tension: 0.25,
+                pointRadius: 0,
+                borderWidth: 2,
+            }],
+        },
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            animation: false,
+            plugins: { legend: { display: false }, tooltip: { enabled: true } },
+            scales: {
+                x: { display: false },
+                y: {
+                    ticks: { color: 'rgba(148,163,184,0.8)', font: { size: 10 } },
+                    grid: { color: 'rgba(148,163,184,0.12)' },
+                },
+            },
+        },
+    });
+    return homeDemoChart;
+}
+
+function paintHomeDemoStep(points, idx, initial) {
+    const pt = points[idx];
+    if (!pt) return;
+    const equity = Number(pt.equity);
+    const ret = initial ? (equity / initial) - 1 : 0;
+    const eqEl = document.getElementById('homeDemoRunEquity');
+    const retEl = document.getElementById('homeDemoRunReturn');
+    const clockEl = document.getElementById('homeDemoRunClock');
+    if (eqEl) eqEl.textContent = homeDemoMoney(equity);
+    if (retEl) {
+        retEl.textContent = homeDemoPct(ret);
+        retEl.classList.toggle('positive', ret > 0);
+        retEl.classList.toggle('negative', ret < 0);
+    }
+    if (clockEl) clockEl.textContent = homeDemoClock(pt.t);
+    if (homeDemoChart) {
+        homeDemoChart.data.labels = points.slice(0, idx + 1).map((p) => homeDemoClock(p.t));
+        homeDemoChart.data.datasets[0].data = points.slice(0, idx + 1).map((p) => Number(p.equity));
+        homeDemoChart.update('none');
+    }
+    const prev = idx > 0 ? Number(points[idx - 1].equity) : equity;
+    const delta = equity - prev;
+    if (idx === 0) {
+        appendHomeDemoLog(`${homeDemoClock(pt.t)} · start ${homeDemoMoney(equity)}`);
+    } else if (Math.abs(delta) >= 8) {
+        const dir = delta >= 0 ? 'up' : 'down';
+        appendHomeDemoLog(`${homeDemoClock(pt.t)} · ${dir} ${homeDemoMoney(delta)} → ${homeDemoMoney(equity)}`);
+    }
+}
+
+function playHomeDemoRun(payload) {
+    const points = payload.points || [];
+    const initial = Number(payload.initial_equity) || 10000;
+    const kicker = document.getElementById('homeDemoRunKicker');
+    const log = document.getElementById('homeDemoRunLog');
+    setHomeBoardSlide('demo');
+    if (kicker) {
+        const start = payload.window && payload.window.start;
+        const end = payload.window && payload.window.end;
+        kicker.textContent = start && end
+            ? `${payload.model} · ${start} → ${end}`
+            : 'Hourly paper backtest';
+    }
+    if (log) log.innerHTML = '';
+    stopHomeDemoRun();
+    cancelHomeDemoAutoReturn();
+    ensureHomeDemoChart([], []);
+    if (!points.length) {
+        scheduleHomeDemoAutoReturn();
+        return;
+    }
+
+    const reduced = homePrefersReducedMotion();
+    if (reduced) {
+        paintHomeDemoStep(points, points.length - 1, initial);
+        appendHomeDemoLog(`Done · ${homeDemoPct(payload.total_return)} · no live model calls`);
+        scheduleHomeDemoAutoReturn();
+        return;
+    }
+
+    homeDemoPlaying = true;
+    let i = 0;
+    const tick = () => {
+        paintHomeDemoStep(points, i, initial);
+        i += 1;
+        if (i < points.length) {
+            homeDemoTimer = window.setTimeout(tick, 95);
+        } else {
+            homeDemoPlaying = false;
+            homeDemoTimer = 0;
+            appendHomeDemoLog(`Done · ${homeDemoPct(payload.total_return)} · stored snapshot replay`);
+            scheduleHomeDemoAutoReturn();
+        }
+    };
+    tick();
+}
+
+async function startHomeDemoRun(opts) {
+    const options = opts || {};
+    const panel = document.getElementById('homeDemoRunPanel');
+    if (!panel) return;
+    if (!options.skipCover) setHomeBoardSlide('demo');
+    try {
+        if (!homeDemoPayload) {
+            const res = await fetch('/data/home-demo-run.json', { cache: 'no-store' });
+            if (!res.ok) throw new Error(`demo run ${res.status}`);
+            homeDemoPayload = await res.json();
+        }
+        playHomeDemoRun(homeDemoPayload);
+    } catch (error) {
+        console.warn('Home demo run failed:', error && error.message);
+        setHomeBoardSlide('demo');
+        appendHomeDemoLog('Could not load the stored model curve.');
+    }
 }
 
 function measureAppChromeHeight() {
@@ -2280,6 +2501,7 @@ function onHomePageShow() {
 
 function onHomePageHide() {
     homeMockLive?.stop();
+    stopHomeDemoRun();
     hideLiveToast();
     window.newsSignalsPanel && window.newsSignalsPanel.onHide();
 }

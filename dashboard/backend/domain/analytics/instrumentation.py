@@ -53,6 +53,13 @@ SNAPSHOT_RELEVANT_EVENTS = (
     | _RESOURCE_EVENTS
     | {"safe_error_recorded"}
 )
+# None means "no synchronous projection". That is the default in every process
+# and nothing in production registers a callback, so no process rebuilds
+# snapshots on the event path. Before #522, None fell back to
+# states.recalculate_user_snapshots: ~5s per event in the child, ~31s of every
+# model call. Snapshots now catch up only through the reaper's repair sweep,
+# throttled to a 24-hour staleness window, for worker-emitted events exactly
+# as for web-emitted ones. The daily job writes user_daily_facts, not snapshots.
 _snapshot_recalculator: Any = None
 
 
@@ -63,38 +70,16 @@ def register_snapshot_recalculator(callback: Any) -> None:
     _snapshot_recalculator = callback
 
 
-def disable_synchronous_projection() -> None:
-    """Make this module's own snapshot-recompute fallback inert.
-
-    ``_emit``'s guard below fires whenever the service handling an event does
-    not itself project a snapshot (``not getattr(service, "project_snapshots",
-    False)``) -- a safety net for a caller-supplied service that never
-    learned to project. That is exactly the state PR 0 puts the live
-    singleton into (``service.py::_build_analytics_service`` now builds with
-    ``project_snapshots=False``), so without this call the fallback --
-    calling ``states.recalculate_user_snapshots`` per accepted event -- fires
-    on every real request, reproducing the exact synchronous recompute PR 0
-    exists to kill, just one module over. Registering a no-op keeps the
-    mechanism itself intact (``test_stored_event_recalculates_snapshot_
-    best_effort`` pins it directly, against its own stub service, and does
-    not go through this default) while retiring it for the singleton every
-    production event actually flows through.
-    """
-    register_snapshot_recalculator(lambda user_id: None)
-
-
 def _recalculate_snapshot(user_id: int, event_name: str) -> None:
     if event_name not in SNAPSHOT_RELEVANT_EVENTS:
         return
     callback = _snapshot_recalculator
     if callback is None:
-        # Keep the legacy compatibility snapshot and the value-analytics
-        # projection in sync after every authoritative event.  The combined
-        # recalculator writes both projections atomically when they share the
-        # same analytics store.
-        from .states import recalculate_user_snapshots
-
-        callback = recalculate_user_snapshots
+        # Inert by default (#522). A default that is expensive until something
+        # disables it is inherited by every entry point that skips app.py's
+        # startup: the backtest child, CLI scripts, a future worker service.
+        # Do not add a fallback here.
+        return
     callback(user_id)
 
 

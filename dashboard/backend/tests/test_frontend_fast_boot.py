@@ -193,9 +193,9 @@ def test_cache_busters_bumped():
     # round of follow-ups (#347/#348).
     assert "app.js?v=145" in APP_HTML
     assert "js/agent-editor.js?v=32" in APP_HTML
-    assert "styles.css?v=147" in APP_HTML
+    assert "styles.css?v=150" in APP_HTML
     assert "js/leaderboard.js?v=33" in APP_HTML
-    assert "home-page.js?v=51" in APP_HTML
+    assert "home-page.js?v=54" in APP_HTML
     assert "js/credit-format.js?v=1" in APP_HTML
     assert "js/credits.js?v=8" in APP_HTML
     assert "js/admin-credits.js?v=8" in APP_HTML
