@@ -9882,7 +9882,7 @@ function setRunBacktestBillingMode(
         hint.textContent = runBacktestBillingMode === 'byok'
             ? 'Provider charges go directly to your API key. ATL Credits are not deducted.'
             : (runBacktestBillingMode === 'platform_credits'
-                ? 'ATL Credits automatically use OpenRouter first, then CommonStack if needed.'
+                ? 'ATL Credits cover the model calls. ATL picks an available provider automatically.'
                 : 'Choose an available AI billing method.');
     }
 }

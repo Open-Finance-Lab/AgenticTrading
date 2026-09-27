@@ -56,3 +56,10 @@ def test_snapshot_default_source_version_follows_the_table():
         snapshot.input_usd_per_million_tokens,
         snapshot.output_usd_per_million_tokens,
     ) == (2.50, 10.0)
+
+
+def test_haiku_on_commonstack_prices_at_the_listed_rate():
+    # CommonStack lists anthropic/claude-haiku-4-5 at $1 / $5 per million
+    # (checked 2026-09-23). The claude-haiku-4 entry already matches, so the
+    # #535 allowlist addition needed no pricing-table change.
+    assert pricing.price_for_model("anthropic/claude-haiku-4-5") == (1.0, 5.0)

@@ -104,9 +104,10 @@ def test_custom_provider_allowlist_rejects_invalid_model_ids():
         _provider("openai_compatible", allowlist=("not allowed?",))
 
 
-def test_platform_candidates_prefer_openrouter_and_support_commonstack_only(
+def test_platform_candidates_prefer_commonstack_and_follow_the_env_order(
     tmp_path, monkeypatch
 ):
+    monkeypatch.delenv("ATL_PLATFORM_PROVIDER_ORDER", raising=False)
     store = ModelProviderStore(tmp_path / "providers.db")
     service = ModelProviderService(store=store)
     monkeypatch.setenv("OPENROUTER_API_KEY", "sk-openrouter-test-abcd")
@@ -114,9 +115,99 @@ def test_platform_candidates_prefer_openrouter_and_support_commonstack_only(
 
     assert service.resolve_platform_execution_candidates(
         "qwen/qwen3.7-plus"
+    ) == ("commonstack", "openrouter")
+    # Haiku reaches CommonStack only through #535's allowlist backfill.
+    assert service.resolve_platform_execution_candidates(
+        "anthropic/claude-haiku-4-5"
+    ) == ("commonstack", "openrouter")
+
+    # An explicit provider_id that IS in the order is still honoured first.
+    assert service.resolve_platform_execution_candidates(
+        "qwen/qwen3.7-plus", preferred_provider_id="openrouter"
     ) == ("openrouter", "commonstack")
 
+    monkeypatch.setenv("ATL_PLATFORM_PROVIDER_ORDER", "openrouter,commonstack")
+    assert service.resolve_platform_execution_candidates(
+        "qwen/qwen3.7-plus"
+    ) == ("openrouter", "commonstack")
+
+    # Leaving a lane out takes it out of automatic routing...
+    monkeypatch.setenv("ATL_PLATFORM_PROVIDER_ORDER", "openrouter")
+    assert service.resolve_platform_execution_candidates(
+        "qwen/qwen3.7-plus"
+    ) == ("openrouter",)
+    # ...and an explicit provider_id naming the pulled lane cannot reopen it.
+    assert service.resolve_platform_execution_candidates(
+        "qwen/qwen3.7-plus", preferred_provider_id="commonstack"
+    ) == ("openrouter",)
+
+    # An order naming nothing routable yields no candidates; the route 422s.
+    monkeypatch.setenv("ATL_PLATFORM_PROVIDER_ORDER", "anthropic")
+    assert service.resolve_platform_execution_candidates("qwen/qwen3.7-plus") == ()
+
+    monkeypatch.delenv("ATL_PLATFORM_PROVIDER_ORDER")
     monkeypatch.delenv("OPENROUTER_API_KEY")
     assert service.resolve_platform_execution_candidates(
         "qwen/qwen3.7-plus"
     ) == ("commonstack",)
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-openrouter-test-abcd")
+    monkeypatch.delenv("COMMONSTACK_API_KEY")
+    assert service.resolve_platform_execution_candidates(
+        "qwen/qwen3.7-plus"
+    ) == ("openrouter",)
+
+
+def test_platform_provider_order_parses_and_rejects_junk_whole(monkeypatch, capsys):
+    from dashboard.backend.domain.model_providers import service as service_module
+
+    monkeypatch.setattr(service_module, "_warned_platform_provider_orders", set())
+
+    monkeypatch.delenv("ATL_PLATFORM_PROVIDER_ORDER", raising=False)
+    assert service_module.platform_provider_order() == ("commonstack", "openrouter")
+    monkeypatch.setenv("ATL_PLATFORM_PROVIDER_ORDER", "  ")
+    assert service_module.platform_provider_order() == ("commonstack", "openrouter")
+
+    monkeypatch.setenv(
+        "ATL_PLATFORM_PROVIDER_ORDER", " OpenRouter , commonstack,,openrouter "
+    )
+    assert service_module.platform_provider_order() == ("openrouter", "commonstack")
+    assert capsys.readouterr().out == ""
+
+    for junk in ("commonstack;openrouter", "Common Stack", "commonstack,open-router"):
+        monkeypatch.setenv("ATL_PLATFORM_PROVIDER_ORDER", junk)
+        assert service_module.platform_provider_order() == (
+            "commonstack",
+            "openrouter",
+        )
+        assert service_module.platform_provider_order() == (
+            "commonstack",
+            "openrouter",
+        )
+        out = capsys.readouterr().out
+        assert out.count("WARNING: ATL_PLATFORM_PROVIDER_ORDER") == 1
+        assert junk not in out
+
+
+def test_misspelled_provider_in_order_rejects_the_whole_value(
+    tmp_path, monkeypatch, capsys
+):
+    """A one-letter typo passes the id syntax check; it must still not
+    half-apply by silently dropping the lane it misnames."""
+    from dashboard.backend.domain.model_providers import service as service_module
+
+    monkeypatch.setattr(service_module, "_warned_platform_provider_orders", set())
+    store = ModelProviderStore(tmp_path / "providers.db")
+    service = ModelProviderService(store=store)
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-openrouter-test-abcd")
+    monkeypatch.setenv("COMMONSTACK_API_KEY", "cs-commonstack-test-abcd")
+    monkeypatch.setenv("ATL_PLATFORM_PROVIDER_ORDER", "commonstak,openrouter")
+
+    for _ in range(2):
+        assert service.resolve_platform_execution_candidates(
+            "qwen/qwen3.7-plus"
+        ) == ("commonstack", "openrouter")
+
+    out = capsys.readouterr().out
+    assert out.count("WARNING: ATL_PLATFORM_PROVIDER_ORDER") == 1
+    assert "commonstak" not in out

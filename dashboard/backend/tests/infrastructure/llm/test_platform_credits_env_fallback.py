@@ -167,6 +167,17 @@ def _request(run_id: str) -> LLMExecutionRequest:
     )
 
 
+def _failover_request(run_id: str) -> LLMExecutionRequest:
+    """A platform request carrying the route's OpenRouter -> CommonStack tuple.
+
+    The worker never widens a lone candidate, so failover tests hand over the
+    ordered tuple exactly as the route would.
+    """
+    return _request(run_id).model_copy(
+        update={"provider_ids": ("openrouter", "commonstack")}
+    )
+
+
 def _execution_service(tmp_path, monkeypatch, adapter, *, adapters=None):
     monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-execution-test-abcd")
     provider_store = ModelProviderStore(tmp_path / "providers.db")
@@ -298,7 +309,7 @@ def test_platform_quota_error_retries_once_through_commonstack(
         },
     )
     assert service.providers.store.get_provider("commonstack")["platform_enabled"] is True
-    request = _request("failover-run").model_copy(
+    request = _failover_request("failover-run").model_copy(
         update={
             "model_id": "qwen/qwen3.7-plus",
             "reasoning_effort": "high",
@@ -356,7 +367,7 @@ def test_non_quota_platform_failures_do_not_fail_over(
     )
 
     with pytest.raises(LLMExecutionError) as exc_info:
-        service.execute(_request(f"no-failover-{category.value}"))
+        service.execute(_failover_request(f"no-failover-{category.value}"))
 
     assert exc_info.value.category is category
     assert fallback.calls == []
@@ -391,7 +402,7 @@ def test_provider_selection_failures_fail_over_to_commonstack(
         adapters={"openrouter": primary, "commonstack": fallback},
     )
 
-    result = service.execute(_request(f"failover-{category.value}"))
+    result = service.execute(_failover_request(f"failover-{category.value}"))
 
     assert result.provider_id == "commonstack"
     assert result.requested_provider_id == "openrouter"
@@ -451,7 +462,7 @@ def test_fallback_failure_returns_commonstack_safe_category(tmp_path, monkeypatc
         adapters={"openrouter": primary, "commonstack": fallback},
     )
     with pytest.raises(LLMExecutionError) as exc_info:
-        service.execute(_request("dual-failure"))
+        service.execute(_failover_request("dual-failure"))
     assert exc_info.value.category is ExecutionErrorCategory.PROVIDER_TIMEOUT
     assert len(primary.calls) == 1
     assert len(fallback.calls) == 1
@@ -503,7 +514,7 @@ def test_primary_release_failure_aborts_before_fallback(tmp_path, monkeypatch):
 
     monkeypatch.setattr(service.credits, "release_llm_credits", fail_release)
     with pytest.raises(LLMExecutionError) as exc_info:
-        service.execute(_request("release-failure"))
+        service.execute(_failover_request("release-failure"))
     assert exc_info.value.category is ExecutionErrorCategory.BILLING_FAILED
     assert fallback.calls == []
 
@@ -531,7 +542,7 @@ def test_two_quota_failures_stop_after_commonstack(tmp_path, monkeypatch):
         adapters={"openrouter": primary, "commonstack": fallback},
     )
     with pytest.raises(LLMExecutionError) as exc_info:
-        service.execute(_request("double-quota"))
+        service.execute(_failover_request("double-quota"))
     assert exc_info.value.category is ExecutionErrorCategory.PROVIDER_QUOTA_EXHAUSTED
     assert len(primary.calls) == 1
     assert len(fallback.calls) == 1
@@ -653,3 +664,164 @@ def test_restricted_account_execution_error_is_actionable(
     assert exc_info.value.category is ExecutionErrorCategory.ACCOUNT_RESTRICTED
     assert expected in exc_info.value.safe_message
     assert "CreditAccountRestrictedStoreError" not in exc_info.value.safe_message
+
+
+def _platform_request(run_id: str, provider_ids: tuple[str, ...]) -> LLMExecutionRequest:
+    return LLMExecutionRequest(
+        user_id=USER_ID,
+        run_id=run_id,
+        call_index=0,
+        billing_mode=BillingMode.PLATFORM_CREDITS,
+        provider_id=provider_ids[0],
+        provider_ids=provider_ids,
+        model_id=MODEL_ID,
+        system_message="Return one trading decision.",
+        messages=(LLMMessage(role="user", content="Analyze the market."),),
+        usage_policy=UsagePolicy(max_output_tokens=100),
+    )
+
+
+def _quota_error() -> ProviderExecutionError:
+    return ProviderExecutionError(ExecutionErrorCategory.PROVIDER_QUOTA_EXHAUSTED)
+
+
+def _ok_response() -> AdapterResponse:
+    return AdapterResponse(
+        text="BUY",
+        model_id=MODEL_ID,
+        usage=LLMUsage(input_tokens=40, output_tokens=20),
+        finish_reason="stop",
+    )
+
+
+@pytest.fixture
+def fresh_quota_reports(monkeypatch):
+    monkeypatch.setattr(execution_service_module, "_quota_exhausted_reported", set())
+
+
+def test_drained_commonstack_prints_one_operator_error_per_process(
+    tmp_path, monkeypatch, capsys, fresh_quota_reports
+):
+    monkeypatch.setenv("COMMONSTACK_API_KEY", "cs-fake-drained-abcd")
+    commonstack = ScriptedExecutionAdapter([_quota_error(), _quota_error()])
+    openrouter = ScriptedExecutionAdapter([_ok_response(), _ok_response()])
+    service, _store = _execution_service(
+        tmp_path,
+        monkeypatch,
+        openrouter,
+        adapters={"commonstack": commonstack, "openrouter": openrouter},
+    )
+
+    for run_id in ("drained-1", "drained-2"):
+        result = service.execute(
+            _platform_request(run_id, ("commonstack", "openrouter"))
+        )
+        assert result.provider_id == "openrouter"
+
+    lines = [
+        line
+        for line in capsys.readouterr().out.splitlines()
+        if "llm.platform_quota_exhausted" in line
+    ]
+    assert lines == [
+        "ERROR: llm.platform_quota_exhausted provider=commonstack fallback=openrouter"
+    ]
+
+
+def test_quota_exhaustion_with_no_next_candidate_names_none(
+    tmp_path, monkeypatch, capsys, fresh_quota_reports
+):
+    monkeypatch.setenv("COMMONSTACK_API_KEY", "cs-fake-drained-only-abcd")
+    commonstack = ScriptedExecutionAdapter([_quota_error()])
+    service, _store = _execution_service(
+        tmp_path,
+        monkeypatch,
+        commonstack,
+        adapters={"commonstack": commonstack},
+    )
+
+    with pytest.raises(LLMExecutionError) as exc_info:
+        service.execute(_platform_request("drained-only", ("commonstack",)))
+
+    assert exc_info.value.category is ExecutionErrorCategory.PROVIDER_QUOTA_EXHAUSTED
+    assert (
+        "ERROR: llm.platform_quota_exhausted provider=commonstack fallback=none"
+        in capsys.readouterr().out
+    )
+
+
+def test_byok_quota_exhaustion_prints_no_operator_error(
+    tmp_path, monkeypatch, capsys, fresh_quota_reports
+):
+    service, _store = _execution_service(
+        tmp_path,
+        monkeypatch,
+        ScriptedExecutionAdapter([]),
+    )
+
+    def fail_byok_once(*_args, **_kwargs):
+        raise LLMExecutionError(ExecutionErrorCategory.PROVIDER_QUOTA_EXHAUSTED)
+
+    monkeypatch.setattr(service, "_execute_once", fail_byok_once)
+    request = _request("byok-drained").model_copy(
+        update={"billing_mode": BillingMode.BYOK}
+    )
+
+    with pytest.raises(LLMExecutionError):
+        service.execute(request)
+
+    assert "llm.platform_quota_exhausted" not in capsys.readouterr().out
+
+
+def test_quota_report_is_once_under_concurrency_and_flushed(
+    capsys, fresh_quota_reports
+):
+    import inspect
+    import threading
+
+    barrier = threading.Barrier(8)
+
+    def report():
+        barrier.wait()
+        execution_service_module._report_platform_quota_exhausted(
+            "commonstack", "openrouter"
+        )
+
+    threads = [threading.Thread(target=report) for _ in range(8)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert capsys.readouterr().out.count("llm.platform_quota_exhausted") == 1
+    # A killed child's block-buffered stdout dies with it, and the 3600s
+    # timeout kill is exactly when this line matters.
+    assert "flush=True" in inspect.getsource(
+        execution_service_module._report_platform_quota_exhausted
+    )
+
+
+def test_worker_never_widens_the_route_s_lone_candidate(
+    tmp_path, monkeypatch, capsys, fresh_quota_reports
+):
+    """A lone ("openrouter",) is what the route decided -- CommonStack pulled
+    from ATL_PLATFORM_PROVIDER_ORDER (including by a typo the route rejected),
+    or ineligible for the model. The worker used to re-derive routing and add
+    CommonStack back; with the default order and CommonStack fully eligible
+    it must still bill only the lane it was handed."""
+    monkeypatch.delenv("ATL_PLATFORM_PROVIDER_ORDER", raising=False)
+    monkeypatch.setenv("COMMONSTACK_API_KEY", "cs-fake-pulled-abcd")
+    openrouter = ScriptedExecutionAdapter([_quota_error()])
+    commonstack = ScriptedExecutionAdapter([_ok_response()])
+    service, _store = _execution_service(
+        tmp_path,
+        monkeypatch,
+        openrouter,
+        adapters={"openrouter": openrouter, "commonstack": commonstack},
+    )
+
+    with pytest.raises(LLMExecutionError) as exc_info:
+        service.execute(_platform_request("pulled-lane", ("openrouter",)))
+
+    assert exc_info.value.category is ExecutionErrorCategory.PROVIDER_QUOTA_EXHAUSTED
+    assert commonstack.calls == []

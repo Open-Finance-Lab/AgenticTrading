@@ -195,6 +195,11 @@ os.environ.pop("LLM_ESCALATE_CEILING_ON_RETRY", None)
 # unrelated failures.
 os.environ.pop("PIPELINE_SECONDS_PER_LLM_CALL", None)
 
+# Decides which platform provider every ATL Credits call tries first. A
+# developer configured like prod would otherwise see the routing and
+# failover tests' order assertions fail as unexplained mismatches.
+os.environ.pop("ATL_PLATFORM_PROVIDER_ORDER", None)
+
 
 @atexit.register
 def _cleanup_test_db_dir() -> None:
