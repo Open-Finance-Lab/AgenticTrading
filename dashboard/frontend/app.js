@@ -6190,6 +6190,20 @@ function clearAgentBacktestRunning(runKey) {
 }
 
 /**
+ * Wipe the tab's in-flight registry. Called when the server definitively
+ * reports nothing running for this session: the registry is this tab's
+ * memory of ITS launches, and a run that died on a server restart can
+ * never produce the terminal event that would clear its entry — without
+ * this reconciliation the card spins "Backtesting…" until the poll
+ * ceiling (70 minutes) ages it out, for a run that has been gone for
+ * hours. Never called on a failed status probe: only a definitive
+ * `running: false` proves the entries are dead.
+ */
+function clearAllRunningBacktests() {
+    writeRunningBacktests({});
+}
+
+/**
  * Every run still in flight, oldest first, with dead entries swept.
  *
  * Entries older than the poll ceiling are discarded here as well as in
@@ -12049,6 +12063,10 @@ async function loadData({ liveRunId = null } = {}) {
                     ensureBacktestPolling();
                 } else if (!status?.running) {
                     liveBacktestRunId = null;
+                    // Definitive: the server has nothing in flight for this
+                    // session, so every registry entry belongs to a run that
+                    // ended without our hearing it (typically a restart).
+                    clearAllRunningBacktests();
                 }
             } catch (_statusError) {
                 /* status optional while browsing history */
