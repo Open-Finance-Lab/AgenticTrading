@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import base64
 import os
+from urllib.parse import quote as url_quote
 import threading
 import time
 import uuid
@@ -47,7 +48,7 @@ from dashboard.backend import users as users_module
 
 router = APIRouter(prefix="/v1/research", tags=["research"])
 
-POLL_TIMEOUT_SECONDS = 10.0
+POLL_TIMEOUT_SECONDS = 50.0
 MANIFEST_CACHE_SECONDS = 300.0
 _manifest_cache: Dict[str, Any] = {}
 
@@ -325,10 +326,85 @@ def _service_run_id(run: Dict[str, Any]) -> str:
     return str(run.get("service_run_id") or "")
 
 
-def _maybe_complete_run(run: Dict[str, Any], template: Dict[str, Any],
-                        current_user: dict) -> Dict[str, Any]:
-    """Poll the service once for a non-terminal run; on first discovery of
-    completion, store artifacts and send the notification email."""
+def _actual_cost_micro(payload: Dict[str, Any]) -> Optional[int]:
+    """Real spend in micro-credits from the agent-reported usage:
+    (model tokens) × price table → USD → micro. None when the payload
+    carries no usable usage — callers fall back to the reserved estimate."""
+    try:
+        evidence = payload.get("evidence") or {}
+        metadata = evidence.get("metadata") or {}
+        usage = metadata.get("usage") or {}
+        model = metadata.get("model")
+        in_tokens = int(usage.get("input_tokens") or 0)
+        out_tokens = int(usage.get("output_tokens") or 0)
+        if not model or (in_tokens == 0 and out_tokens == 0):
+            return None
+        from dashboard.backend.infrastructure.llm.token_cost import (
+            credits_micro_for_usd,
+            estimate_cost_usd,
+        )
+
+        return int(credits_micro_for_usd(estimate_cost_usd(model, in_tokens, out_tokens)))
+    except Exception:  # noqa: BLE001 - billing must never break report delivery
+        return None
+
+
+def _finalize_completed_run(run: Dict[str, Any], template: Dict[str, Any],
+                            payload: Dict[str, Any], notify_email: str | None) -> None:
+    """Store artifacts, settle the reservation, and send the notification
+    email. Shared by the route poll and the background sweeper."""
+    research_store.store_artifacts(
+        run["run_id"],
+        payload.get("artifacts") or {},
+        payload.get("evidence"),
+        payload.get("report_markdown") or "",
+    )
+    reservation_id = run.get("reservation_id")
+    if not reservation_id:
+        # Pre-billing legacy run (route-0 migration): nothing was reserved, so
+        # complete without touching Credits — settling a NULL id would raise.
+        research_store.update_run_status(run["run_id"], "completed", completed=True)
+        run["status"] = "completed"
+        return
+    # Settle at the REAL reported spend when the agent reported usage
+    # (model tokens × price table), else the reserved estimate. Both stay
+    # within the reservation's ceiling; settle records any overage.
+    actual = _actual_cost_micro(payload)
+    settle_micro = actual if actual is not None else int(run.get("estimate_micro") or 0)
+    credits_service.settle_llm_credits(
+        reservation_id,
+        actual_micro=settle_micro,
+        evidence={
+            "source": "research-agent",
+            "agent_id": run["template_id"],
+            "usage": (payload.get("evidence") or {}).get("metadata", {}).get("usage"),
+        },
+    )
+    research_store.update_run_status(run["run_id"], "completed", completed=True)
+    run["status"] = "completed"
+    if notify_email and run.get("email_me") and not run.get("emailed"):
+        from dashboard.backend.infrastructure.email.sender import email_configured, send_email
+
+        if email_configured():
+            base = os.getenv("PUBLIC_APP_URL", "https://agentic-trading-lab.vercel.app")
+            link = f"{base}/app?view=research"
+            sent = send_email(
+                notify_email,
+                f"[ATL] Your research report is ready — {template['name']}",
+                "Your research report has completed.\n\n"
+                f"Open it here: {link}\n"
+                "(The report page offers Markdown / DOCX / PDF downloads.)\n",
+            )
+            if sent:
+                research_store.mark_emailed(run["run_id"])
+
+
+def _poll_run_once(run: Dict[str, Any], template: Dict[str, Any],
+                   notify_email: str | None) -> Dict[str, Any]:
+    """One status poll; on completion, fetch + finalize + (opt) notify email.
+
+    Shared by the route poll and the background sweeper — `notify_email` is
+    the run owner's address (the sweeper has no session user).""",
     if run["status"] in ("completed", "failed"):
         return run
     try:
@@ -371,48 +447,15 @@ def _maybe_complete_run(run: Dict[str, Any], template: Dict[str, Any],
         # terminal here would strand the reservation on a transient 5xx.
         return run
 
-    research_store.store_artifacts(
-        run["run_id"],
-        payload.get("artifacts") or {},
-        payload.get("evidence"),
-        payload.get("report_markdown") or "",
-    )
-    reservation_id = run.get("reservation_id")
-    if not reservation_id:
-        # Pre-billing legacy run (route-0 migration): nothing was reserved, so
-        # complete without touching Credits — settling a NULL id would raise.
-        research_store.update_run_status(run["run_id"], "completed", completed=True)
-        run["status"] = "completed"
-        return run
-    # Route-0 interim: settle at the amount actually reserved for THIS run
-    # (persisted at submit — re-reading the env here would settle a run at a
-    # price chosen after it started). Contract v1.1's usage reporting upgrades
-    # this to settle(actual_micro=reported spend).
-    credits_service.settle_llm_credits(
-        reservation_id,
-        actual_micro=int(run.get("estimate_micro") or 0),
-        evidence={"source": "research-agent", "agent_id": run["template_id"]},
-    )
-    research_store.update_run_status(run["run_id"], "completed", completed=True)
-    run["status"] = "completed"
-
-    # Notification email (link, not attachment — Brevo sender is plain-text v1).
-    if run.get("email_me") and not run.get("emailed"):
-        from dashboard.backend.infrastructure.email.sender import email_configured, send_email
-
-        if email_configured():
-            base = os.getenv("PUBLIC_BASE_URL", "https://agentic-trading-lab.vercel.app")
-            link = f"{base}/app?view=research"
-            sent = send_email(
-                current_user["email"],
-                f"[ATL] Your research report is ready — {template['name']}",
-                "Your research report has completed.\n\n"
-                f"Open it here: {link}\n"
-                "(The report page offers Markdown / DOCX / PDF downloads.)\n",
-            )
-            if sent:
-                research_store.mark_emailed(run["run_id"])
+    _finalize_completed_run(run, template, payload, notify_email)
     return run
+
+
+
+def _maybe_complete_run(run: Dict[str, Any], template: Dict[str, Any],
+                        current_user: dict) -> Dict[str, Any]:
+    """Route wrapper: poll once, notify the signed-in submitter."""
+    return _poll_run_once(run, template, current_user["email"])
 
 
 @router.get("/runs")
@@ -476,17 +519,36 @@ def download_artifact(run_id: str, kind: str, current_user: dict = Depends(get_c
     content = artifact["content_base64"] or ""
     if artifact["kind"] in ("markdown_report", "evidence_json"):
         # These two are stored as plain text, not base64.
+        text_name = artifact["filename"] or f"{run_id}.{kind}"
         return Response(
             content=content,
             media_type=ARTIFACT_CONTENT_TYPES[artifact["kind"]],
-            headers={"Content-Disposition": f'attachment; filename="{artifact["filename"]}"'},
+            headers={
+                "Content-Disposition": (
+                    f"attachment; filename=\"{text_name}\"; "
+                    f"filename*=UTF-8''{url_quote(text_name)}"
+                )
+            },
         )
     try:
         raw = base64.b64decode(content)
     except Exception:
         raise HTTPException(status_code=500, detail="Artifact payload is corrupt")
+    # Filenames embed the user's client_name and can be any Unicode; the
+    # plain filename= parameter is latin-1-only, so send an ASCII-safe
+    # fallback plus the RFC 6266 filename* form for the real name.
+    raw_name = artifact["filename"] or f"{run_id}.{kind}"
+    ascii_name = "".join(
+        ch for ch in raw_name if ch.isascii() and (ch.isalnum() or ch in "._- ")
+    ).strip() or f"{run_id}.{kind}"
+
     return Response(
         content=raw,
         media_type=ARTIFACT_CONTENT_TYPES.get(artifact["kind"], "application/octet-stream"),
-        headers={"Content-Disposition": f'attachment; filename="{artifact["filename"]}"'},
+        headers={
+            "Content-Disposition": (
+                f"attachment; filename=\"{ascii_name}\"; "
+                f"filename*=UTF-8''{url_quote(raw_name)}"
+            )
+        },
     )

@@ -314,6 +314,11 @@ async def startup_event():
     except Exception as e:
         print(f"⚠️ legacy session sweep registration error: {e}")
 
+    # Research runs are swept by the dedicated research-sweeper daemon thread
+    # started at import of api.routers.research (60s loop, in-flight guard) —
+    # NOT via the shared reaper: a slow agent service must not block the
+    # reaper's other sweeps for minutes at a time.
+
 
     try:
         from dashboard.backend.domain.analytics.maintenance import (
