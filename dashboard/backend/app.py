@@ -314,17 +314,10 @@ async def startup_event():
     except Exception as e:
         print(f"⚠️ legacy session sweep registration error: {e}")
 
-    try:
-        # Research runs: settle + notify completions even when the submitter's
-        # browser is closed (design N2/PR2; the run's result lives on the
-        # external agent service and the platform owes the user the report).
-        from dashboard.backend.api.routers.research import (
-            sweep_open_research_runs,
-        )
-        register_reaper_sweep(sweep_open_research_runs)
-        print("🧹 research run sweep registered with the reaper")
-    except Exception as e:
-        print(f"⚠️ research sweep registration error: {e}")
+    # Research runs are swept by the dedicated research-sweeper daemon thread
+    # started at import of api.routers.research (60s loop, in-flight guard) —
+    # NOT via the shared reaper: a slow agent service must not block the
+    # reaper's other sweeps for minutes at a time.
 
 
     try:

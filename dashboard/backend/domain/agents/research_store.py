@@ -150,25 +150,6 @@ def list_nonterminal_runs() -> List[Dict[str, Any]]:
     return [dict(row) for row in rows]
 
 
-def list_open_runs() -> List[Dict[str, Any]]:
-    """All non-terminal runs across users — the background sweeper's queue."""
-    with _connect() as conn:
-        rows = conn.execute(
-            "SELECT run_id, user_id, template_id, service_run_id, reservation_id,"
-            " estimate_micro, status, settings_json, email_me, emailed, error,"
-            " created_at FROM research_runs"
-            " WHERE status IN ('queued', 'running') ORDER BY created_at",
-        ).fetchall()
-    out = []
-    for row in rows:
-        item = dict(row)
-        try:
-            item["settings"] = json.loads(item.pop("settings_json") or "{}")
-        except Exception:
-            item["settings"] = {}
-        out.append(item)
-    return out
-
 
 def get_run(run_id: str, user_id: int) -> Optional[Dict[str, Any]]:
     with _connect() as conn:

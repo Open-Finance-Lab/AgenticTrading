@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import base64
 import os
+from urllib.parse import quote as url_quote
 import threading
 import time
 import uuid
@@ -447,23 +448,6 @@ def _poll_run_once(run: Dict[str, Any], template: Dict[str, Any],
         return run
 
     _finalize_completed_run(run, template, payload, notify_email)
-
-    # Notification email (link, not attachment — Brevo sender is plain-text v1).
-    if run.get("email_me") and not run.get("emailed"):
-        from dashboard.backend.infrastructure.email.sender import email_configured, send_email
-
-        if email_configured():
-            base = os.getenv("PUBLIC_BASE_URL", "https://agentic-trading-lab.vercel.app")
-            link = f"{base}/app?view=research"
-            sent = send_email(
-                current_user["email"],
-                f"[ATL] Your research report is ready — {template['name']}",
-                "Your research report has completed.\n\n"
-                f"Open it here: {link}\n"
-                "(The report page offers Markdown / DOCX / PDF downloads.)\n",
-            )
-            if sent:
-                research_store.mark_emailed(run["run_id"])
     return run
 
 
@@ -535,57 +519,36 @@ def download_artifact(run_id: str, kind: str, current_user: dict = Depends(get_c
     content = artifact["content_base64"] or ""
     if artifact["kind"] in ("markdown_report", "evidence_json"):
         # These two are stored as plain text, not base64.
+        text_name = artifact["filename"] or f"{run_id}.{kind}"
         return Response(
             content=content,
             media_type=ARTIFACT_CONTENT_TYPES[artifact["kind"]],
-            headers={"Content-Disposition": f'attachment; filename="{artifact["filename"]}"'},
+            headers={
+                "Content-Disposition": (
+                    f"attachment; filename=\"{text_name}\"; "
+                    f"filename*=UTF-8''{url_quote(text_name)}"
+                )
+            },
         )
     try:
         raw = base64.b64decode(content)
     except Exception:
         raise HTTPException(status_code=500, detail="Artifact payload is corrupt")
+    # Filenames embed the user's client_name and can be any Unicode; the
+    # plain filename= parameter is latin-1-only, so send an ASCII-safe
+    # fallback plus the RFC 6266 filename* form for the real name.
+    raw_name = artifact["filename"] or f"{run_id}.{kind}"
+    ascii_name = "".join(
+        ch for ch in raw_name if ch.isascii() and (ch.isalnum() or ch in "._- ")
+    ).strip() or f"{run_id}.{kind}"
+
     return Response(
         content=raw,
         media_type=ARTIFACT_CONTENT_TYPES.get(artifact["kind"], "application/octet-stream"),
-        headers={"Content-Disposition": f'attachment; filename="{artifact["filename"]}"'},
+        headers={
+            "Content-Disposition": (
+                f"attachment; filename=\"{ascii_name}\"; "
+                f"filename*=UTF-8''{url_quote(raw_name)}"
+            )
+        },
     )
-
-
-# ---------------------------------------------------------------------------
-# Background sweeper (design: users close their browser after submitting; the
-# platform still owes them settlement + email). The reaper pass invokes this
-# once per pass via register_reaper_sweep — same daemon pattern as the v2-run
-# and legacy-session sweeps.
-# ---------------------------------------------------------------------------
-
-_SWEEP_BATCH_LIMIT = 25
-
-
-def sweep_open_research_runs() -> int:
-    """Background pass: poll every non-terminal research run once, settling
-    and emailing completions even when the submitter's browser is closed.
-
-    Returns the number of runs that reached a terminal state this pass.
-    Per-run failures are swallowed: one bad row must not starve the rest.
-    """
-    completed = 0
-    try:
-        open_runs = research_store.list_open_runs()
-    except Exception:  # noqa: BLE001 - sweep must never crash the reaper
-        return 0
-    for row in open_runs[:_SWEEP_BATCH_LIMIT]:
-        try:
-            run = dict(row)
-            template = marketplace_mod.get_marketplace_template(run["template_id"])
-            if not template:
-                continue
-            import dashboard.backend.users as users_module
-
-            owner = users_module.user_store.get_user_by_id(run["user_id"])
-            notify = (owner or {}).get("email")
-            _poll_run_once(run, template, notify)
-            if run["status"] in ("completed", "failed"):
-                completed += 1
-        except Exception:  # noqa: BLE001 - keep sweeping the remaining rows
-            continue
-    return completed
