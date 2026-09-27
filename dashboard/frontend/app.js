@@ -13216,6 +13216,12 @@ async function openResearchWorkbench(templateId) {
   fieldsEl.innerHTML = '';
   resultArea.hidden = true;
   runsList.innerHTML = '<p class="control-helper">Loading…</p>';
+  const staleNote = document.getElementById('researchFormError');
+  if (staleNote) {
+    staleNote.hidden = true;
+    staleNote.textContent = '';
+    staleNote.className = 'research-error';
+  }
 
   let manifest;
   try {
@@ -13333,6 +13339,7 @@ async function submitResearchRun() {
       { settings, email_me: emailMe },
     );
     errorEl.hidden = false;
+    errorEl.className = 'research-note';
     errorEl.textContent = 'Research started — this usually takes a few minutes. You can keep this page open.';
     const runId = data.run_id;
     await loadResearchRuns(templateId);
@@ -13342,11 +13349,14 @@ async function submitResearchRun() {
         const status = await API.get(`${RESEARCH_API}/runs/${encodeURIComponent(runId)}`);
         if (status.status === 'completed') {
           stopResearchPolling();
+          errorEl.hidden = true;
+          errorEl.textContent = '';
           await loadResearchRuns(templateId);
           await showCompletedResearchReport(runId);
         } else if (status.status === 'failed') {
           stopResearchPolling();
           errorEl.hidden = false;
+          errorEl.className = 'research-error';
           errorEl.textContent = status.error || 'The research run failed.';
         }
       } catch (_error) { /* transient — next tick retries */ }
@@ -13354,6 +13364,7 @@ async function submitResearchRun() {
   } catch (error) {
     const detail = error?.message || 'Submit failed.';
     errorEl.hidden = false;
+    errorEl.className = 'research-error';
     errorEl.textContent = typeof detail === 'string' ? detail : 'Submit failed.';
     try {
       const fieldErrors = error?.field_errors || {};
