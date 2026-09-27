@@ -272,9 +272,7 @@ def test_unregistered_recalculator_never_rebuilds_snapshots(monkeypatch, capsys)
     fallback would raise, so the test reads its WARNING line instead.
     """
     _forbid_snapshot_rebuild(monkeypatch)
-    monkeypatch.setattr(
-        instrumentation, "get_analytics_service", lambda: NonProjectingService()
-    )
+    monkeypatch.setattr(instrumentation, "get_analytics_service", NonProjectingService)
 
     for event_name in ("credits_reserved", "credits_settled", "model_usage_recorded"):
         instrumentation.emit_resource_event(
