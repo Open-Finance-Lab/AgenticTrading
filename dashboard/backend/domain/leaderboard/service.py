@@ -17,7 +17,7 @@ import secrets
 import tempfile
 import threading
 from datetime import date, datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 from zoneinfo import ZoneInfo
 
 import dashboard.backend.infrastructure.llm.token_cost as token_cost
@@ -1588,6 +1588,7 @@ def deploy_model_run(
     end_date: Optional[str] = None,
     allow_fallback: bool = False,
     period: Optional[str] = "contest",
+    config: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Compute and persist one (expensive) leaderboard model entry.
 
@@ -1596,9 +1597,19 @@ def deploy_model_run(
     stores the equity curve + metrics + token cost, and caches it so the web
     leaderboard can display it without recomputing. Pass start/end to test on a
     shorter window (writes a separate cached run for that window). Pass
-    ``period="daily"`` to target the rolling daily board window.
+    ``period="daily"`` to target the rolling daily board window, or an
+    explicit ``config``. The Live board deploys through
+    ``live.deploy_live_model_increment`` instead.
     """
-    config = resolve_leaderboard_config(period)
+    if config is None and _normalize_period(period) == "live":
+        # A live row must carry the portfolio snapshot the next night resumes
+        # from; a plain run here is a snapshot-less month replay that the next
+        # increment would pay for again.
+        raise ValueError(
+            "period='live' deploys go through "
+            "domain/leaderboard/live.py::deploy_live_model_increment"
+        )
+    config = config or resolve_leaderboard_config(period)
     session_id = config["session_id"]
     start_date = start_date or config["start_date"]
     end_date = end_date or config["end_date"]
@@ -2001,11 +2012,28 @@ def _board_capital_base(
     return groups[best][0]
 
 
+# Boards that build their own payload register here (the Live board, from
+# domain/leaderboard/live.py) so this module never imports them back: live.py
+# depends on this module, and a return import is a cycle even inside a function.
+_PERIOD_BOARDS: Dict[str, Callable[[], Dict[str, Any]]] = {}
+
+
+def register_period_board(period: str, builder: Callable[[], Dict[str, Any]]) -> None:
+    _PERIOD_BOARDS[period] = builder
+
+
 def get_leaderboard(
     force_refresh: bool = False,
     period: Optional[str] = "contest",
 ) -> Dict[str, Any]:
     """Return ranked leaderboard entries with chart-ready equity curves."""
+    board = _PERIOD_BOARDS.get(_normalize_period(period))
+    if board is not None:
+        return board()
+    if _normalize_period(period) == "live":
+        # Never fall back to building the Live period here: that is the old
+        # contest-window preview, which would answer 200 with the wrong board.
+        raise RuntimeError("Live leaderboard module is not loaded")
     config = resolve_leaderboard_config(period)
     meta = ensure_leaderboard_runs(force_refresh=force_refresh, config=config)
     session_id = config["session_id"]

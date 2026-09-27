@@ -1,5 +1,7 @@
 # Platform Provider Auto-Routing Design
 
+> **Amended 2026-09-26:** the OpenRouter-first order this document specifies is superseded. ATL Credits now follow `ATL_PLATFORM_PROVIDER_ORDER`, CommonStack first by default. See `2026-09-23-llm-backtest-step-latency-design.md` §5.
+
 ## Goal
 
 When a user runs an LLM backtest with `Use ATL Credits`, the UI exposes only the approved model list. The backend automatically tries OpenRouter first and falls back to CommonStack when the first provider cannot serve the request because of quota, balance, credential availability, timeout, or temporary provider unavailability. BYOK keeps its explicit provider selection.

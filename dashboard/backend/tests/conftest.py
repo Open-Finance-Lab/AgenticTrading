@@ -195,6 +195,11 @@ os.environ.pop("LLM_ESCALATE_CEILING_ON_RETRY", None)
 # unrelated failures.
 os.environ.pop("PIPELINE_SECONDS_PER_LLM_CALL", None)
 
+# Decides which platform provider every ATL Credits call tries first. A
+# developer configured like prod would otherwise see the routing and
+# failover tests' order assertions fail as unexplained mismatches.
+os.environ.pop("ATL_PLATFORM_PROVIDER_ORDER", None)
+
 
 @atexit.register
 def _cleanup_test_db_dir() -> None:
@@ -253,6 +258,13 @@ def _no_background_daily_refresh(request, monkeypatch, tmp_path):
         lb_service,
         "_DAILY_REFRESH_STATE_PATH",
         tmp_path / "leaderboard_daily_refresh.json",
+    )
+    from dashboard.backend.domain.leaderboard import live as live_lb
+
+    monkeypatch.setattr(
+        live_lb,
+        "_LIVE_REFRESH_STATE_PATH",
+        tmp_path / "leaderboard_live_refresh.json",
     )
     if request.node.get_closest_marker("daily_refresh_background"):
         return

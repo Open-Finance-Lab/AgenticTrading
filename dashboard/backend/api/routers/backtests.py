@@ -1765,6 +1765,7 @@ def run_backtest_background(
             stdin_payload=execution_handoff_payload or "",
             timeout=subprocess_timeout,
             live_run_id=resolved_live_run_id,
+            redact_secret=financial_datasets_api_key,
         )
 
         # Print script output for debugging
@@ -1775,14 +1776,18 @@ def run_backtest_background(
         # byte the child ever wrote held in parent RAM for the whole run; the
         # head this comment used to promise (universe, decision source, FX
         # bootstrap) is exactly what the head half of that buffer keeps.
-        if result.stdout:
+        # Relayed ERROR: llm. lines were already printed live by _drain_stream;
+        # dumping them again would count every quota event twice in the log.
+        dumped_stdout = _without_relayed_lines(result.stdout or "")
+        dumped_stderr = _without_relayed_lines(result.stderr or "")
+        if dumped_stdout:
             print(
-                f"STDOUT:\n{_redact_credentials(result.stdout, financial_datasets_api_key)}",
+                f"STDOUT:\n{_redact_credentials(dumped_stdout, financial_datasets_api_key)}",
                 flush=True,
             )
-        if result.stderr:
+        if dumped_stderr:
             print(
-                f"STDERR:\n{_redact_credentials(result.stderr, financial_datasets_api_key)}",
+                f"STDERR:\n{_redact_credentials(dumped_stderr, financial_datasets_api_key)}",
                 flush=True,
             )
         print(f"Return code: {result.returncode}", flush=True)
@@ -2544,7 +2549,27 @@ class _BoundedStreamCapture:
         )
 
 
-def _drain_stream(stream: Any, capture: _BoundedStreamCapture) -> None:
+_RELAYED_CHILD_LINE_PREFIX = "ERROR: llm."
+
+
+def _without_relayed_lines(text: str) -> str:
+    """Drop the lines ``_drain_stream`` already echoed to the service log.
+
+    Applied to the end-of-run dump only, so a relayed line reaches the log
+    once. The capture itself keeps them: it also feeds the failure summary.
+    """
+    return "".join(
+        line
+        for line in text.splitlines(keepends=True)
+        if not line.startswith(_RELAYED_CHILD_LINE_PREFIX)
+    )
+
+
+def _drain_stream(
+    stream: Any,
+    capture: _BoundedStreamCapture,
+    redact_secret: Optional[str] = None,
+) -> None:
     """Copy one child stream into a bounded capture until EOF.
 
     This is what makes ``Popen`` + ``wait`` safe: without a reader the child
@@ -2555,6 +2580,16 @@ def _drain_stream(stream: Any, capture: _BoundedStreamCapture) -> None:
     try:
         for line in iter(stream.readline, ""):
             capture.feed(line)
+            if line.startswith(_RELAYED_CHILD_LINE_PREFIX):
+                # Echoed live, not left to the capture: the timeout path never
+                # dumps it, a normal exit dumps it only when the run ends, and
+                # a long run's middle is elided. Redacted like the dump, since
+                # the prefix is all that selects a line for this path.
+                print(
+                    _redact_credentials(line, redact_secret),
+                    end="",
+                    flush=True,
+                )
     except (OSError, ValueError):
         # The pipe was closed under us, which is the kill path doing its job.
         # Whatever was read before that still stands and is still worth logging.
@@ -2586,6 +2621,7 @@ def _run_backtest_subprocess(
     stdin_payload: str,
     timeout: int,
     live_run_id: Optional[str],
+    redact_secret: Optional[str] = None,
 ) -> _BacktestSubprocessOutcome:
     """Run the backtest child, draining its output into bounded buffers.
 
@@ -2632,10 +2668,14 @@ def _run_backtest_subprocess(
     stderr_capture = _BoundedStreamCapture()
     readers = [
         _StreamReaderThread(
-            target=_drain_stream, args=(process.stdout, stdout_capture), daemon=True
+            target=_drain_stream,
+            args=(process.stdout, stdout_capture, redact_secret),
+            daemon=True,
         ),
         _StreamReaderThread(
-            target=_drain_stream, args=(process.stderr, stderr_capture), daemon=True
+            target=_drain_stream,
+            args=(process.stderr, stderr_capture, redact_secret),
+            daemon=True,
         ),
     ]
     for reader in readers:

@@ -240,7 +240,8 @@ _DATA_MUTATING_SCHEMA_BODIES = {
         "amounts plus ledger bucket/operation columns"
     ),
     "domain/model_providers/repository_postgres.py": (
-        "scrubs api_key_enc on revoked credentials and seeds SEEDED_PROVIDERS"
+        "scrubs api_key_enc on revoked credentials, seeds SEEDED_PROVIDERS "
+        "and backfills the CommonStack model allowlist"
     ),
     "users_postgres.py": (
         "repairs users.user_group values outside the allowed set"

@@ -472,20 +472,38 @@ def test_verified_stored_commonstack_credential_precedes_environment_key(
     assert resolved.secret == "cs-fake-stored-test-wxyz"
 
 
-def test_execution_options_keep_openrouter_ahead_of_commonstack(
+def test_execution_options_follow_platform_order_and_keep_byok_order(
     tmp_path, monkeypatch
 ):
-    service, _store = _service(tmp_path, FakeAdapter())
+    monkeypatch.delenv("ATL_PLATFORM_PROVIDER_ORDER", raising=False)
+    service, store = _service(tmp_path, FakeAdapter())
     monkeypatch.setenv("OPENROUTER_API_KEY", "or-fake-options-abcd")
     monkeypatch.setenv("COMMONSTACK_API_KEY", "cs-fake-options-wxyz")
+    # A BYOK provider whose display name sorts after "OpenRouter": moving
+    # OpenRouter (a BYOK *and* platform lane) to the end would make this the
+    # BYOK default that app.js takes from providers[0].
+    store.upsert_provider(
+        provider_id="xai",
+        display_name="xAI",
+        adapter_type="openai_compatible",
+        approved_base_url="https://api.x.ai/v1",
+        capabilities=ProviderCapabilities(model_allowlist=()),
+        byok_enabled=True,
+        platform_enabled=False,
+        status="enabled",
+    )
 
-    provider_ids = [
-        option.provider_id
-        for option in service.list_execution_options(7)
-        if option.platform_credits_available
-    ]
-
-    assert provider_ids.index("openrouter") < provider_ids.index("commonstack")
+    # Every BYOK-capable provider keeps repository (display-name) order;
+    # only the platform-only CommonStack lane moves, to the end.
+    expected = ["anthropic", "gemini", "openai", "openrouter", "xai", "commonstack"]
+    for order in (None, "openrouter,commonstack", "commonstack,openrouter,openai"):
+        if order is None:
+            monkeypatch.delenv("ATL_PLATFORM_PROVIDER_ORDER", raising=False)
+        else:
+            monkeypatch.setenv("ATL_PLATFORM_PROVIDER_ORDER", order)
+        assert [
+            option.provider_id for option in service.list_execution_options(7)
+        ] == expected, order
     assert "cs-fake-options-wxyz" not in repr(service.list_execution_options(7))
 
 

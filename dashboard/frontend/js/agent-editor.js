@@ -821,7 +821,14 @@
     const descInput = document.getElementById('agentEditorDescription');
     const cashInput = document.getElementById('agentEditorCashAllocation');
     let cash_allocation = null;
-    if (cashInput && cashInput.value !== '') {
+    // A disabled field (paper trading switched off) means "leave the saved
+    // sleeve alone": undefined drops the key from the PATCH body, so the
+    // server neither rewrites the sleeve nor re-checks the portfolio ledger.
+    // Posting the displayed value instead would turn a blank field into a
+    // fresh $1,000 reservation the user cannot see.
+    if (cashInput?.disabled) {
+      cash_allocation = undefined;
+    } else if (cashInput && cashInput.value !== '') {
       const value = Number(cashInput.value);
       if (!Number.isFinite(value) || value < 0) {
         throw new Error('Paper Trading Allocated Capital must be zero or greater.');
@@ -855,9 +862,12 @@
       // what is saveable: a $0 paper sleeve is a common state for someone who
       // does not paper-trade, and silently turning their unset backtest capital
       // into $0 would change a run they never touched. Unset stays $1,000.
+      const sleeve = cash_allocation === undefined
+        ? currentAgent?.cash_allocation
+        : cash_allocation;
       backtest_allocation =
-        Number.isFinite(Number(cash_allocation)) && Number(cash_allocation) > 0
-          ? Math.min(Math.round(Number(cash_allocation)), 3000)
+        Number.isFinite(Number(sleeve)) && Number(sleeve) > 0
+          ? Math.min(Math.round(Number(sleeve)), 3000)
           : 1000;
     }
     const modelSelect = document.getElementById('agentEditorModelSelect');
@@ -1416,7 +1426,10 @@
           `${NAME_OVERRIDE_PREFIX}${currentAgent.agent_id}`,
           JSON.stringify({ name: state.name, description: state.description })
         );
-        if (state.cash_allocation != null) {
+        // undefined = the paper field is disabled; leave the override alone.
+        if (state.cash_allocation === undefined) {
+          // no-op
+        } else if (state.cash_allocation != null) {
           localStorage.setItem(`${CASH_OVERRIDE_PREFIX}${currentAgent.agent_id}`, String(state.cash_allocation));
         } else {
           localStorage.removeItem(`${CASH_OVERRIDE_PREFIX}${currentAgent.agent_id}`);
@@ -1425,7 +1438,7 @@
           ...currentAgent,
           name: state.name,
           description: state.description,
-          cash_allocation: state.cash_allocation,
+          ...(state.cash_allocation === undefined ? {} : { cash_allocation: state.cash_allocation }),
         };
         if (state.sendPipeline) savePipelineLocal(currentAgent.agent_id, subAgents);
         if (localStorage.getItem('active-agent-id') === currentAgent.agent_id) {

@@ -19,7 +19,9 @@ from .repository_common import (
     CredentialNotFoundError,
     CredentialOwnershipError,
     ProviderNotFoundError,
+    COMMONSTACK_ALLOWLIST_BACKFILLS,
     SEEDED_PROVIDERS,
+    commonstack_allowlist_backfill,
     deserialize_capabilities,
     serialize_capabilities,
     validate_adapter_type,
@@ -156,6 +158,7 @@ class ModelProviderStore:
                 ),
             )
         self._migrate_legacy_openrouter_platform_flag(conn)
+        self._migrate_commonstack_allowlist(conn)
         conn.commit()
         conn.close()
 
@@ -204,6 +207,40 @@ class ModelProviderStore:
             "INSERT INTO model_provider_migrations (migration_id, applied_at) VALUES (?, ?)",
             (migration_id, _utcnow_iso()),
         )
+
+    @staticmethod
+    def _migrate_commonstack_allowlist(conn: sqlite3.Connection) -> None:
+        """Backfill newly verified CommonStack models into a seeded row, once.
+
+        Each backfill appends only the ids it introduced, and is recorded even
+        when nothing changed, so an admin who removes one of those models --
+        before or after it runs -- is not overridden on a later boot.
+        """
+
+        for migration_id, model_ids in COMMONSTACK_ALLOWLIST_BACKFILLS:
+            if conn.execute(
+                "SELECT 1 FROM model_provider_migrations WHERE migration_id = ?",
+                (migration_id,),
+            ).fetchone():
+                continue
+            now = _utcnow_iso()
+            provider = conn.execute(
+                "SELECT capabilities_json FROM provider_registry WHERE provider_id = 'commonstack'"
+            ).fetchone()
+            updated = (
+                commonstack_allowlist_backfill(provider["capabilities_json"], model_ids)
+                if provider
+                else None
+            )
+            if updated is not None:
+                conn.execute(
+                    "UPDATE provider_registry SET capabilities_json = ?, updated_at = ? WHERE provider_id = 'commonstack'",
+                    (updated, now),
+                )
+            conn.execute(
+                "INSERT INTO model_provider_migrations (migration_id, applied_at) VALUES (?, ?)",
+                (migration_id, now),
+            )
 
     @staticmethod
     def _ensure_user_credential_columns(conn: sqlite3.Connection) -> None:

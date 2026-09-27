@@ -28,6 +28,7 @@ from fastapi.testclient import TestClient
 
 from dashboard.backend.tests.auth_cookies_helpers import _cookie_session_token
 
+import dashboard.backend.domain.backtesting.constants as backtesting_constants
 import dashboard.backend.domain.agents.repository as agent_repo
 import dashboard.backend.domain.agents.service as agent_service_module
 import dashboard.backend.domain.portfolios.repository as portfolio_repo
@@ -37,6 +38,15 @@ from dashboard.backend.app import app
 from dashboard.backend.csrf import csrf_cookie_name
 
 BROWSER = "browser-scope-sync"
+
+
+@pytest.fixture(autouse=True)
+def paper_trading_on(monkeypatch):
+    """These tests pin the ledger that paper trading draws on, so they run with
+    it switched on: while it is off, nothing picks a non-zero sleeve on the
+    caller's behalf (``new_agent_cash_allocation``) and every default below
+    would be $0."""
+    monkeypatch.setattr(backtesting_constants, "PAPER_TRADING_ENABLED", True)
 
 
 @pytest.fixture

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import threading
 from collections.abc import Callable
 
 from dashboard.backend.domain.credits.models import LLMSettlementResult
@@ -12,16 +13,9 @@ from dashboard.backend.domain.credits.repository_common import (
 )
 from dashboard.backend.domain.analytics import instrumentation as analytics_instrumentation
 from dashboard.backend.domain.model_providers.models import ProviderRecord
-from dashboard.backend.domain.model_providers.execution_catalog import (
-    UnsupportedExecutionModel,
-)
-from dashboard.backend.domain.model_providers.repository_common import (
-    ProviderNotFoundError,
-)
 from dashboard.backend.domain.model_providers.service import (
     ModelProviderService,
     ResolvedCredential,
-    CredentialResolutionError,
 )
 from dashboard.backend.infrastructure.llm.execution.adapters.base import (
     AdapterResponse,
@@ -61,6 +55,25 @@ _PLATFORM_FAILOVER_CATEGORIES = frozenset(
         ExecutionErrorCategory.PROVIDER_QUOTA_EXHAUSTED,
     }
 )
+
+# CommonStack has no balance endpoint (every candidate path 404s as of
+# 2026-09-23), so a drained platform lane is only observable as a failed
+# call. Once per provider per process: a backtest child is one run, so a
+# drained lane costs one line per run, not one per call.
+_quota_exhausted_reported: set[str] = set()
+_quota_exhausted_lock = threading.Lock()
+
+
+def _report_platform_quota_exhausted(provider_id: str, fallback: str | None) -> None:
+    with _quota_exhausted_lock:
+        if provider_id in _quota_exhausted_reported:
+            return
+        _quota_exhausted_reported.add(provider_id)
+    print(
+        "ERROR: llm.platform_quota_exhausted "
+        f"provider={provider_id} fallback={fallback or 'none'}",
+        flush=True,
+    )
 
 
 # The provider receives the serialized messages, but its tokenizer is not
@@ -362,25 +375,13 @@ class LLMExecutionService:
     ) -> LLMExecutionResult:
         """Try ordered platform candidates, retaining one requested identity."""
 
+        # The route's ordered tuple is authoritative: it already applied
+        # ATL_PLATFORM_PROVIDER_ORDER against the registry, and the handoff
+        # carries it whole. The worker used to re-derive routing here, turning
+        # a lone ("openrouter",) into OpenRouter -> CommonStack -- hard-coded
+        # OpenRouter-first, and blind to an order the route had rejected. A
+        # lone candidate is what the route decided, so it is not widened.
         candidates = tuple(request.provider_ids or (request.provider_id,))
-        # Direct service callers predating the candidate-list handoff still get
-        # the established OpenRouter -> CommonStack fallback when the route is
-        # available. New handoffs always carry the complete ordered tuple.
-        if candidates == ("openrouter",):
-            try:
-                self.providers.preflight_execution_model(
-                    "commonstack", request.model_id
-                )
-                self.providers.preflight_platform_credential("commonstack")
-            except (
-                ProviderNotFoundError,
-                CredentialResolutionError,
-                UnsupportedExecutionModel,
-            ):
-                pass
-            else:
-                candidates = ("openrouter", "commonstack")
-
         requested_provider_id = candidates[0]
         last_error: LLMExecutionError | None = None
         for attempt_index, provider_id in enumerate(candidates):
@@ -398,6 +399,13 @@ class LLMExecutionService:
                 )
             except LLMExecutionError as exc:
                 last_error = exc
+                if exc.category is ExecutionErrorCategory.PROVIDER_QUOTA_EXHAUSTED:
+                    _report_platform_quota_exhausted(
+                        provider_id,
+                        candidates[attempt_index + 1]
+                        if attempt_index + 1 < len(candidates)
+                        else None,
+                    )
                 if exc.category not in _PLATFORM_FAILOVER_CATEGORIES:
                     raise
         assert last_error is not None

@@ -405,14 +405,14 @@ class AgentService:
         protocol API and never use the editor pipeline, so they are not seeded.
         """
         from dashboard.backend.domain.backtesting.constants import (
-            DEFAULT_AGENT_CASH_ALLOCATION,
+            new_agent_cash_allocation,
         )
 
         runtime_type = normalize_runtime_type(runtime_type)
         runtime_config = normalize_runtime_config(runtime_type, runtime_config or {})
         category = coerce_category(category)  # see update_agent for why
         if cash_allocation is None:
-            cash_allocation = float(DEFAULT_AGENT_CASH_ALLOCATION)
+            cash_allocation = new_agent_cash_allocation()
         agent = self.agents.create_agent(
             name=name,
             model_name=model_name,
@@ -460,13 +460,14 @@ class AgentService:
         Fail-open per card: signup must still succeed if one write fails.
         """
         from dashboard.backend.domain.backtesting.constants import (
-            DEFAULT_AGENT_CASH_ALLOCATION,
+            new_agent_cash_allocation,
         )
         from dashboard.backend.domain.portfolios.service import portfolio_service
 
         owned = list(self.agents.list_agents(owner_user_id=int(owner_user_id)))
         by_model = {str(agent.get("model_name") or ""): agent for agent in owned}
         created: List[Dict[str, Any]] = []
+        starter_cash = new_agent_cash_allocation()
         for spec in STARTER_AGENTS:
             model_name = spec["model_name"]
             existing_agent = by_model.get(model_name)
@@ -485,9 +486,10 @@ class AgentService:
                         )
                 continue
             try:
-                portfolio_service.ensure_cash_for_new_agent(
-                    int(owner_user_id), float(DEFAULT_AGENT_CASH_ALLOCATION)
-                )
+                if starter_cash > 0:
+                    portfolio_service.ensure_cash_for_new_agent(
+                        int(owner_user_id), starter_cash
+                    )
                 agent = self.create_agent(
                     name=spec["name"],
                     model_name=model_name,
@@ -495,7 +497,7 @@ class AgentService:
                     owner_browser_session=owner_browser_session,
                     agent_type="builtin",
                     description=spec["description"],
-                    cash_allocation=float(DEFAULT_AGENT_CASH_ALLOCATION),
+                    cash_allocation=starter_cash,
                 )
                 created.append(agent)
                 by_model[model_name] = agent
@@ -554,8 +556,8 @@ class AgentService:
         le=MAX_BACKTEST_INITIAL_CAPITAL``), so it is safe to copy from a
         source. ``cash_allocation`` is a real ledger debit and must NOT be
         copied here -- ``create_agent`` below is deliberately not passed one,
-        so it falls back to ``DEFAULT_AGENT_CASH_ALLOCATION`` like any other
-        fresh agent.
+        so it falls back to ``new_agent_cash_allocation()`` like any other
+        fresh agent ($0 while paper trading is switched off).
         """
         has_own_pipeline = isinstance(pipeline, list) and bool(pipeline)
         agent = self.create_agent(

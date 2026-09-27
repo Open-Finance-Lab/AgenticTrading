@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 
 import psycopg
@@ -19,6 +20,7 @@ from dashboard.backend.domain.model_providers.execution_catalog import (
     resolve_execution_model_route,
 )
 from dashboard.backend.domain.model_providers.repository_common import (
+    COMMONSTACK_ALLOWLIST_BACKFILLS,
     CredentialConflictError,
     CredentialOwnershipError,
 )
@@ -66,6 +68,38 @@ def test_postgres_store_rejects_non_postgres_url_before_connecting():
 
 
 @pg_only
+def test_postgres_commonstack_allowlist_backfills_a_row_seeded_before_haiku(
+    postgres_store,
+):
+    # The seed is ON CONFLICT DO NOTHING, so prod's pre-Haiku row is reachable
+    # only through the one-shot backfill. It adds Haiku alone: the seeded ids
+    # this row lacks were removed and stay removed; an admin-added id survives.
+    with psycopg.connect(TEST_POSTGRES_URL, autocommit=True) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT capabilities_json FROM provider_registry WHERE provider_id = 'commonstack'"
+            )
+            capabilities = json.loads(cur.fetchone()[0])
+            capabilities["model_allowlist"] = ["openai/gpt-5.5", "admin/extra-model"]
+            cur.execute(
+                "UPDATE provider_registry SET capabilities_json = %s WHERE provider_id = 'commonstack'",
+                (json.dumps(capabilities),),
+            )
+            cur.executemany(
+                "DELETE FROM model_provider_migrations WHERE migration_id = %s",
+                [(migration_id,) for migration_id, _ in COMMONSTACK_ALLOWLIST_BACKFILLS],
+            )
+
+    reopened = PostgresModelProviderStore(TEST_POSTGRES_URL)
+
+    assert reopened.get_provider("commonstack")["capabilities"].model_allowlist == (
+        "openai/gpt-5.5",
+        "admin/extra-model",
+        "anthropic/claude-haiku-4-5",
+    )
+
+
+@pg_only
 def test_postgres_seeded_commonstack_is_platform_only_with_allowlisted_models(
     postgres_store,
 ):
@@ -81,12 +115,14 @@ def test_postgres_seeded_commonstack_is_platform_only_with_allowlisted_models(
         "anthropic/claude-sonnet-4-6",
         "deepseek/deepseek-v4-pro",
         "qwen/qwen3.7-plus",
+        "anthropic/claude-haiku-4-5",
     )
 
     provider_record = ProviderRecord.model_validate(provider)
     assert [
         route.catalog_id for route in list_execution_model_routes(provider_record)
     ] == [
+        "anthropic/claude-haiku-4-5",
         "anthropic/claude-sonnet-4-6",
         "openai/gpt-5.5",
         "google/gemini-3.1-pro-preview",
@@ -94,7 +130,7 @@ def test_postgres_seeded_commonstack_is_platform_only_with_allowlisted_models(
         "qwen/qwen3.7-plus",
     ]
     with pytest.raises(UnsupportedExecutionModel):
-        resolve_execution_model_route(provider_record, "anthropic/claude-haiku-4-5")
+        resolve_execution_model_route(provider_record, "nvidia/nemotron-3-nano-30b-a3b")
 
 
 @pg_only

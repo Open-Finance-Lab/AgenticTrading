@@ -10,6 +10,7 @@ from datetime import date
 
 import pytest
 
+from dashboard.backend.domain.leaderboard import live as live_board
 from dashboard.backend.domain.leaderboard import service
 
 
@@ -112,11 +113,24 @@ def test_the_config_declares_the_season_rather_than_the_code():
     assert cfg["season"]["season_zero_start"] == "2026-08-12"
 
 
-def test_only_the_live_board_carries_a_season():
-    """The Competition board is one fixed historical window and is not a season;
-    attaching one would make the season strip render on a board that has none."""
+def test_only_the_live_board_carries_live_status():
+    """Calendar-month Live GET is isolated from the contest season chrome."""
     assert "season" not in service.get_leaderboard(period="contest")
-    assert "season" in service.get_leaderboard(period="live")
+    live = service.get_leaderboard(period="live")
+    assert "live_status" in live
+    assert "season" not in live
+    assert service._PERIOD_BOARDS["live"] is live_board.get_live_leaderboard
+
+
+def test_live_period_never_falls_back_to_the_contest_preview(monkeypatch):
+    monkeypatch.setattr(service, "_PERIOD_BOARDS", {})
+    with pytest.raises(RuntimeError):
+        service.get_leaderboard(period="live")
+
+
+def test_deploy_model_run_refuses_a_snapshot_less_live_row():
+    with pytest.raises(ValueError):
+        service.deploy_model_run("gpt_5_5", period="live")
 
 
 # ── The window is a claim, and a claim that nothing maintains goes stale ─────

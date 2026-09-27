@@ -20,7 +20,10 @@ from dashboard.backend.domain.analytics.repository_postgres import (
 )
 from dashboard.backend.domain.analytics.rollups import AnalyticsRollupStore, DailyRollup
 from dashboard.backend.domain.analytics.value_repository import (
+    ActivityUpdate,
+    LifecycleTransitionRow,
     ProjectionJob,
+    UserDailyFact,
     UserLifecycleDailySnapshot,
 )
 from dashboard.backend.domain.analytics.value_repository_postgres import (
@@ -34,6 +37,7 @@ from dashboard.backend.tests.domain.analytics.test_repository_contract import (
     assert_source_event_idempotency_contract,
     assert_subject_and_access_contract,
     assert_error_category_contract,
+    event_record,
 )
 from dashboard.backend.tests.domain.analytics.test_value_repository import (
     NOW,
@@ -279,6 +283,85 @@ def test_postgres_user_value_projection_round_trip(
     ) == [NOW.date()]
     assert value_store.delete_daily_snapshots_for_date(NOW.date()) == 1
     assert value_store.has_daily_before(NOW.date() + timedelta(days=1)) is False
+
+
+@pg_only
+def test_postgres_daily_facts_methods_round_trip(postgres_contract_store, tmp_path):
+    # Every method the daily-facts job calls on the Postgres twin. These
+    # raised NameError in prod from 2026-09-23 (helpers used but never
+    # imported from the SQLite twin) while the SQLite suite stayed green.
+    analytics, _admin_id, user_id = postgres_contract_store
+    value_store = PostgresValueAnalyticsStore(
+        analytics,
+        SyntheticCreditsStore(tmp_path / "postgres-daily-credits.db"),
+        provider_base=SyntheticProviderStore({}, []),
+        agent_base=SyntheticAgentStore(),
+        run_base=SyntheticRunStore({}),
+    )
+    day = NOW.date()
+    at = NOW.replace(hour=12, minute=0, second=0, microsecond=0)
+
+    analytics.append_event(
+        event_record(
+            user_id,
+            event_name="backtest_completed",
+            event_group="run",
+            event_source="server",
+            source_event_id="run:backtest_completed:daily-facts-pg",
+            source_record_type="run",
+            source_record_id="daily-facts-pg",
+            page_view=None,
+            session_id=None,
+            device_category=None,
+            browser_family=None,
+            outcome="succeeded",
+            occurred_at=at,
+            received_at=at + timedelta(seconds=1),
+        )
+    )
+    totals = value_store.aggregate_events_for_day(day)
+    assert totals[user_id].runs_completed == 1
+
+    assert value_store.record_activity_batch(
+        [ActivityUpdate(user_id=user_id, activated_at=at, last_activity_at=at)],
+        now=NOW,
+    ) == 1
+    activity = value_store.get_activity(user_id)
+    assert activity.activated_at == at
+    assert activity.last_meaningful_activity_at == at
+
+    fact = UserDailyFact(
+        snapshot_date=day,
+        user_id=user_id,
+        lifecycle_segment="growing",
+        lifecycle_reason_code="growing_activated_below_core_threshold",
+        operational_state="healthy",
+        tier="unpaid",
+        user_group="unknown",
+        active=True,
+        runs_requested=1,
+        runs_completed=1,
+        data_quality="complete",
+        calculated_at=at,
+    )
+    assert value_store.upsert_daily_facts([fact]) == 1
+    assert value_store.list_facts_for_date(day) == [fact]
+
+    assert value_store.append_lifecycle_transitions(
+        [
+            LifecycleTransitionRow(
+                user_id=user_id,
+                snapshot_date=day,
+                from_segment="new",
+                to_segment="growing",
+                created_at=at,
+            )
+        ]
+    ) == 1
+
+    # The event was received after the facts were calculated, so the day is
+    # stale and due for a recompute.
+    assert value_store.list_days_needing_recompute(since=day, until=day) == [day]
 
 
 def test_postgres_ddl_declares_the_daily_fact_tables():
