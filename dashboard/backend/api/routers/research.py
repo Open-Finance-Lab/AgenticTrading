@@ -325,6 +325,29 @@ def _service_run_id(run: Dict[str, Any]) -> str:
     return str(run.get("service_run_id") or "")
 
 
+def _actual_cost_micro(payload: Dict[str, Any]) -> Optional[int]:
+    """Real spend in micro-credits from the agent-reported usage:
+    (model tokens) × price table → USD → micro. None when the payload
+    carries no usable usage — callers fall back to the reserved estimate."""
+    try:
+        evidence = payload.get("evidence") or {}
+        metadata = evidence.get("metadata") or {}
+        usage = metadata.get("usage") or {}
+        model = metadata.get("model")
+        in_tokens = int(usage.get("input_tokens") or 0)
+        out_tokens = int(usage.get("output_tokens") or 0)
+        if not model or (in_tokens == 0 and out_tokens == 0):
+            return None
+        from dashboard.backend.infrastructure.llm.token_cost import (
+            credits_micro_for_usd,
+            estimate_cost_usd,
+        )
+
+        return int(credits_micro_for_usd(estimate_cost_usd(model, in_tokens, out_tokens)))
+    except Exception:  # noqa: BLE001 - billing must never break report delivery
+        return None
+
+
 def _finalize_completed_run(run: Dict[str, Any], template: Dict[str, Any],
                             payload: Dict[str, Any], notify_email: str | None) -> None:
     """Store artifacts, settle the reservation, and send the notification
@@ -342,14 +365,19 @@ def _finalize_completed_run(run: Dict[str, Any], template: Dict[str, Any],
         research_store.update_run_status(run["run_id"], "completed", completed=True)
         run["status"] = "completed"
         return
-    # Route-0 interim: settle at the amount actually reserved for THIS run
-    # (persisted at submit — re-reading the env here would settle a run at a
-    # price chosen after it started). Contract v1.1's usage reporting upgrades
-    # this to settle(actual_micro=reported spend).
+    # Settle at the REAL reported spend when the agent reported usage
+    # (model tokens × price table), else the reserved estimate. Both stay
+    # within the reservation's ceiling; settle records any overage.
+    actual = _actual_cost_micro(payload)
+    settle_micro = actual if actual is not None else int(run.get("estimate_micro") or 0)
     credits_service.settle_llm_credits(
         reservation_id,
-        actual_micro=int(run.get("estimate_micro") or 0),
-        evidence={"source": "research-agent", "agent_id": run["template_id"]},
+        actual_micro=settle_micro,
+        evidence={
+            "source": "research-agent",
+            "agent_id": run["template_id"],
+            "usage": (payload.get("evidence") or {}).get("metadata", {}).get("usage"),
+        },
     )
     research_store.update_run_status(run["run_id"], "completed", completed=True)
     run["status"] = "completed"
