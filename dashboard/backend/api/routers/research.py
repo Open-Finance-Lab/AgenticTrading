@@ -325,10 +325,57 @@ def _service_run_id(run: Dict[str, Any]) -> str:
     return str(run.get("service_run_id") or "")
 
 
-def _maybe_complete_run(run: Dict[str, Any], template: Dict[str, Any],
-                        current_user: dict) -> Dict[str, Any]:
-    """Poll the service once for a non-terminal run; on first discovery of
-    completion, store artifacts and send the notification email."""
+def _finalize_completed_run(run: Dict[str, Any], template: Dict[str, Any],
+                            payload: Dict[str, Any], notify_email: str | None) -> None:
+    """Store artifacts, settle the reservation, and send the notification
+    email. Shared by the route poll and the background sweeper."""
+    research_store.store_artifacts(
+        run["run_id"],
+        payload.get("artifacts") or {},
+        payload.get("evidence"),
+        payload.get("report_markdown") or "",
+    )
+    reservation_id = run.get("reservation_id")
+    if not reservation_id:
+        # Pre-billing legacy run (route-0 migration): nothing was reserved, so
+        # complete without touching Credits — settling a NULL id would raise.
+        research_store.update_run_status(run["run_id"], "completed", completed=True)
+        run["status"] = "completed"
+        return
+    # Route-0 interim: settle at the amount actually reserved for THIS run
+    # (persisted at submit — re-reading the env here would settle a run at a
+    # price chosen after it started). Contract v1.1's usage reporting upgrades
+    # this to settle(actual_micro=reported spend).
+    credits_service.settle_llm_credits(
+        reservation_id,
+        actual_micro=int(run.get("estimate_micro") or 0),
+        evidence={"source": "research-agent", "agent_id": run["template_id"]},
+    )
+    research_store.update_run_status(run["run_id"], "completed", completed=True)
+    run["status"] = "completed"
+    if notify_email and run.get("email_me") and not run.get("emailed"):
+        from dashboard.backend.infrastructure.email.sender import email_configured, send_email
+
+        if email_configured():
+            base = os.getenv("PUBLIC_APP_URL", "https://agentic-trading-lab.vercel.app")
+            link = f"{base}/app?view=research"
+            sent = send_email(
+                notify_email,
+                f"[ATL] Your research report is ready — {template['name']}",
+                "Your research report has completed.\n\n"
+                f"Open it here: {link}\n"
+                "(The report page offers Markdown / DOCX / PDF downloads.)\n",
+            )
+            if sent:
+                research_store.mark_emailed(run["run_id"])
+
+
+def _poll_run_once(run: Dict[str, Any], template: Dict[str, Any],
+                   notify_email: str | None) -> Dict[str, Any]:
+    """One status poll; on completion, fetch + finalize + (opt) notify email.
+
+    Shared by the route poll and the background sweeper — `notify_email` is
+    the run owner's address (the sweeper has no session user).""",
     if run["status"] in ("completed", "failed"):
         return run
     try:
@@ -371,30 +418,7 @@ def _maybe_complete_run(run: Dict[str, Any], template: Dict[str, Any],
         # terminal here would strand the reservation on a transient 5xx.
         return run
 
-    research_store.store_artifacts(
-        run["run_id"],
-        payload.get("artifacts") or {},
-        payload.get("evidence"),
-        payload.get("report_markdown") or "",
-    )
-    reservation_id = run.get("reservation_id")
-    if not reservation_id:
-        # Pre-billing legacy run (route-0 migration): nothing was reserved, so
-        # complete without touching Credits — settling a NULL id would raise.
-        research_store.update_run_status(run["run_id"], "completed", completed=True)
-        run["status"] = "completed"
-        return run
-    # Route-0 interim: settle at the amount actually reserved for THIS run
-    # (persisted at submit — re-reading the env here would settle a run at a
-    # price chosen after it started). Contract v1.1's usage reporting upgrades
-    # this to settle(actual_micro=reported spend).
-    credits_service.settle_llm_credits(
-        reservation_id,
-        actual_micro=int(run.get("estimate_micro") or 0),
-        evidence={"source": "research-agent", "agent_id": run["template_id"]},
-    )
-    research_store.update_run_status(run["run_id"], "completed", completed=True)
-    run["status"] = "completed"
+    _finalize_completed_run(run, template, payload, notify_email)
 
     # Notification email (link, not attachment — Brevo sender is plain-text v1).
     if run.get("email_me") and not run.get("emailed"):
@@ -413,6 +437,13 @@ def _maybe_complete_run(run: Dict[str, Any], template: Dict[str, Any],
             if sent:
                 research_store.mark_emailed(run["run_id"])
     return run
+
+
+
+def _maybe_complete_run(run: Dict[str, Any], template: Dict[str, Any],
+                        current_user: dict) -> Dict[str, Any]:
+    """Route wrapper: poll once, notify the signed-in submitter."""
+    return _poll_run_once(run, template, current_user["email"])
 
 
 @router.get("/runs")
@@ -490,3 +521,43 @@ def download_artifact(run_id: str, kind: str, current_user: dict = Depends(get_c
         media_type=ARTIFACT_CONTENT_TYPES.get(artifact["kind"], "application/octet-stream"),
         headers={"Content-Disposition": f'attachment; filename="{artifact["filename"]}"'},
     )
+
+
+# ---------------------------------------------------------------------------
+# Background sweeper (design: users close their browser after submitting; the
+# platform still owes them settlement + email). The reaper pass invokes this
+# once per pass via register_reaper_sweep — same daemon pattern as the v2-run
+# and legacy-session sweeps.
+# ---------------------------------------------------------------------------
+
+_SWEEP_BATCH_LIMIT = 25
+
+
+def sweep_open_research_runs() -> int:
+    """Background pass: poll every non-terminal research run once, settling
+    and emailing completions even when the submitter's browser is closed.
+
+    Returns the number of runs that reached a terminal state this pass.
+    Per-run failures are swallowed: one bad row must not starve the rest.
+    """
+    completed = 0
+    try:
+        open_runs = research_store.list_open_runs()
+    except Exception:  # noqa: BLE001 - sweep must never crash the reaper
+        return 0
+    for row in open_runs[:_SWEEP_BATCH_LIMIT]:
+        try:
+            run = dict(row)
+            template = marketplace_mod.get_marketplace_template(run["template_id"])
+            if not template:
+                continue
+            import dashboard.backend.users as users_module
+
+            owner = users_module.user_store.get_user_by_id(run["user_id"])
+            notify = (owner or {}).get("email")
+            _poll_run_once(run, template, notify)
+            if run["status"] in ("completed", "failed"):
+                completed += 1
+        except Exception:  # noqa: BLE001 - keep sweeping the remaining rows
+            continue
+    return completed
