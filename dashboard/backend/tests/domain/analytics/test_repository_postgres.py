@@ -326,6 +326,9 @@ def test_postgres_daily_facts_methods_round_trip(postgres_contract_store, tmp_pa
         [ActivityUpdate(user_id=user_id, activated_at=at, last_activity_at=at)],
         now=NOW,
     ) == 1
+    activity = value_store.get_activity(user_id)
+    assert activity.activated_at == at
+    assert activity.last_meaningful_activity_at == at
 
     fact = UserDailyFact(
         snapshot_date=day,
