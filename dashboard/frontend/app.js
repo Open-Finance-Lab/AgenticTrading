@@ -10450,9 +10450,16 @@ function renderBacktestRunConfig(
         'backtestConfigWindow',
         start && end ? `${start} → ${end}` : '—',
     );
+    const statusNode = document.getElementById('backtestConfigStatus');
+    if (statusNode) statusNode.classList.toggle('is-interrupted', Boolean(!running && !statusLabel && run?.interrupted));
     setBacktestConfigText(
         'backtestConfigStatus',
-        statusLabel || (running ? 'Running' : 'Completed'),
+        statusLabel
+            || (running
+                ? 'Running'
+                : (run?.interrupted
+                    ? `Interrupted at step ${run.interrupted_step ?? '?'}${run.interrupted_total_steps ? `/${run.interrupted_total_steps}` : ''} (server restart) — partial results shown`
+                    : 'Completed')),
     );
 
     const promptRow = document.getElementById('backtestConfigPromptRow');
@@ -11875,9 +11882,14 @@ function populateBacktestRunSelector(externalRuns, { runningId = null } = {}) {
     select.innerHTML = sorted
         .map((run) => {
             const isRunning = run._running || run.run_id === runningId;
+            const interruptedAt = run.interrupted
+                ? ` — interrupted at step ${run.interrupted_step ?? '?'}${run.interrupted_total_steps ? `/${run.interrupted_total_steps}` : ''}`
+                : '';
             const label = isRunning
                 ? `Running… · ${formatBacktestRunPrimary(run)}`
-                : formatBacktestRunLabel(run);
+                : run.interrupted
+                    ? `${formatBacktestRunLabel(run)}${interruptedAt}`
+                    : formatBacktestRunLabel(run);
             return `<option value="${escapeHtml(run.run_id)}">${escapeHtml(label)}</option>`;
         })
         .join('');

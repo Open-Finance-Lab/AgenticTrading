@@ -261,6 +261,19 @@ class BacktestDatabase:
             ON backtest_decisions(run_id, step_index)
         """)
 
+        # run_live_progress: durable partial-result snapshots (design:
+        # backtest partial results). Written throttled by the engine while a
+        # run is in flight; consumed and deleted by the startup reclaimer.
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS run_live_progress (
+                run_id TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL,
+                agent_name TEXT NOT NULL,
+                payload TEXT NOT NULL,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+
         # idempotency_keys: replay-safe decision submissions (v2)
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS idempotency_keys (
@@ -635,6 +648,68 @@ class BacktestDatabase:
         cursor.execute("PRAGMA table_info(trades)")
         return {row[1] for row in cursor.fetchall()}
     
+    # --- live-progress snapshots (partial-result recovery, design: backtest
+    # partial results). The engine flushes its progress payload here while a
+    # run is in flight; the startup reclaimer moves surviving snapshots into
+    # the regular tables as interrupted runs and deletes the rows. A snapshot
+    # whose run COMPLETED is simply stale and is dropped by the same reclaimer
+    # (its full result already lives in agent_runs/equity_timeseries).
+    def upsert_live_progress(self, run_id: str, session_id: str, agent_name: str,
+                             payload: Dict[str, Any]) -> None:
+        """One full-snapshot overwrite per flush; the payload is idempotent."""
+        conn = self._get_connection()
+        try:
+            conn.execute(
+                "INSERT INTO run_live_progress (run_id, session_id, agent_name, payload, updated_at)"
+                " VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)"
+                " ON CONFLICT(run_id) DO UPDATE SET"
+                " session_id = excluded.session_id, agent_name = excluded.agent_name,"
+                " payload = excluded.payload, updated_at = CURRENT_TIMESTAMP",
+                (run_id, session_id, agent_name, json.dumps(payload, default=str))),
+            conn.commit()
+        finally:
+            conn.close()
+
+    def get_live_progress(self, run_id: str) -> Optional[Dict[str, Any]]:
+        conn = self._get_connection()
+        try:
+            row = conn.execute(
+                "SELECT payload FROM run_live_progress WHERE run_id = ?", (run_id,)
+            ).fetchone()
+            return json.loads(row["payload"]) if row else None
+        except (sqlite3.OperationalError, TypeError):
+            return None
+        finally:
+            conn.close()
+
+    def list_live_progress(self) -> List[Dict[str, Any]]:
+        conn = self._get_connection()
+        try:
+            rows = conn.execute(
+                "SELECT run_id, session_id, agent_name, payload FROM run_live_progress"
+            ).fetchall()
+            return [
+                {
+                    "run_id": r["run_id"],
+                    "session_id": r["session_id"],
+                    "agent_name": r["agent_name"],
+                    "payload": json.loads(r["payload"]),
+                }
+                for r in rows
+            ]
+        except sqlite3.OperationalError:
+            return []
+        finally:
+            conn.close()
+
+    def delete_live_progress(self, run_id: str) -> None:
+        conn = self._get_connection()
+        try:
+            conn.execute("DELETE FROM run_live_progress WHERE run_id = ?", (run_id,))
+            conn.commit()
+        finally:
+            conn.close()
+
     def insert_run(self, run_id: str, session_id: str, agent_name: str, mode: str, 
                    start_date: str, end_date: str, 
                    initial_equity: float,
