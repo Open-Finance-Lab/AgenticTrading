@@ -739,3 +739,121 @@ def test_strict_llm_absorbed_upstream_error_still_hides_provider_detail(
     # Absorbing a strike must not turn the provider's message into log output;
     # print() is the channel that actually reaches prod, so assert on capsys.
     assert "upstream-secret-detail" not in capsys.readouterr().out
+
+
+# ---------------------------------------------------------------------------
+# Hosted runs (fail_closed execution client): a provider outage spends a
+# strike; every other execution failure stays fatal.
+# ---------------------------------------------------------------------------
+
+def test_strict_llm_budget_gives_short_runs_one_strike():
+    pm = CanonicalPortfolioManager(100000)
+
+    pm.strict_llm_total_steps = 49  # the onboarding modal's window
+    assert pm.strict_llm_fallback_budget() == 1
+    pm.strict_llm_total_steps = 25
+    assert pm.strict_llm_fallback_budget() == 1
+    pm.strict_llm_total_steps = 24
+    assert pm.strict_llm_fallback_budget() == 0
+
+
+def test_one_strike_floor_clears_h6():
+    from dashboard.backend.domain.backtesting.portfolio_manager import (
+        STRICT_LLM_MIN_STEPS_FOR_ONE_STRIKE,
+    )
+    from dashboard.backend.domain.leaderboard.service import (
+        MIN_LLM_DECISION_COVERAGE,
+    )
+
+    assert 1 / STRICT_LLM_MIN_STEPS_FOR_ONE_STRIKE < 1 - MIN_LLM_DECISION_COVERAGE
+
+
+def _hosted_client_raising(category):
+    from dashboard.backend.infrastructure.llm.execution.errors import (
+        LLMExecutionError,
+    )
+
+    class _HostedClient:
+        fail_closed = True
+
+        class messages:
+            @staticmethod
+            def create(**_kwargs):
+                raise LLMExecutionError(category)
+
+    return _HostedClient()
+
+
+_PIPELINE = [{"label": "Decide", "prompt": "Decide the trades."}]
+
+
+@pytest.mark.parametrize("category", ["provider_unavailable", "provider_timeout"])
+@pytest.mark.parametrize("pipeline", [None, _PIPELINE], ids=["single", "pipeline"])
+def test_hosted_run_absorbs_a_provider_outage_within_budget(
+    monkeypatch, category, pipeline
+):
+    pm = CanonicalPortfolioManager(100000)
+    pm.strict_llm_total_steps = 49
+    monkeypatch.setattr(
+        pm, "make_trading_decision", lambda _state: {"actions": ["rule-based"]}
+    )
+
+    result = pm.make_trading_decision_with_llm(
+        _llm_state(),
+        _hosted_client_raising(category),
+        strict_llm=True,
+        pipeline=pipeline,
+    )
+
+    assert result == {"actions": ["rule-based"]}
+    assert pm.strict_llm_fallbacks == 1
+    assert pm.llm_decisions == 0
+
+
+def test_hosted_run_aborts_once_the_outage_budget_is_spent(monkeypatch):
+    pm = CanonicalPortfolioManager(100000)
+    pm.strict_llm_total_steps = 49  # budget of 1
+    monkeypatch.setattr(
+        pm, "make_trading_decision", lambda _state: {"actions": []}
+    )
+    client = _hosted_client_raising("provider_unavailable")
+
+    pm.make_trading_decision_with_llm(_llm_state(), client, strict_llm=True)
+    with pytest.raises(LLMDecisionError):
+        pm.make_trading_decision_with_llm(_llm_state(), client, strict_llm=True)
+
+
+@pytest.mark.parametrize(
+    "category",
+    [
+        "billing_failed",
+        "credential_invalid",
+        "provider_quota_exhausted",
+        "account_restricted",
+        "response_invalid",
+    ],
+)
+def test_hosted_run_stays_fatal_on_non_outage_failures(monkeypatch, category):
+    from dashboard.backend.infrastructure.llm.execution.errors import (
+        LLMExecutionError,
+    )
+
+    pm = CanonicalPortfolioManager(100000)
+    pm.strict_llm_total_steps = 10_000
+    fallback_calls = []
+    monkeypatch.setattr(
+        pm,
+        "make_trading_decision",
+        lambda _state: fallback_calls.append(True) or {"actions": []},
+    )
+
+    with pytest.raises(LLMExecutionError):
+        pm.make_trading_decision_with_llm(
+            _llm_state(),
+            _hosted_client_raising(category),
+            strict_llm=True,
+            pipeline=_PIPELINE,
+        )
+
+    assert fallback_calls == []
+    assert pm.strict_llm_fallbacks == 0
