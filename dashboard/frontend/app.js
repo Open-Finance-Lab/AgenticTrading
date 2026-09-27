@@ -13297,6 +13297,16 @@ async function showCompletedResearchReport(runId) {
     downloadBtns.innerHTML = kinds
       .map(([kind, label]) => `<a class="auth-btn auth-btn-secondary" href="${RESEARCH_API}/runs/${encodeURIComponent(runId)}/artifacts/${kind}" download>${label}</a>`)
       .join('');
+    // Artifacts are best-effort on the agent's server (PDF needs Word on
+    // Linux, for one) — the contract lets a kind be absent. Probe each and
+    // drop the buttons whose artifact 404s, so nobody is offered a download
+    // that can only fail.
+    downloadBtns.querySelectorAll('a').forEach(async (anchor) => {
+      try {
+        const probe = await fetch(anchor.getAttribute('href'), { method: 'HEAD', credentials: 'include' });
+        if (!probe.ok) anchor.remove();
+      } catch (_error) { /* offline probe: keep the button; the click surfaces it */ }
+    });
   } catch (error) {
     body.innerHTML = `<p class="control-helper">${escapeHtml(error.message || 'Report could not be loaded.')}</p>`;
   }
