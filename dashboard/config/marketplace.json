@@ -417,7 +417,7 @@
    "template_id": "shell-company-screening",
    "shelf": "research",
    "name": "Shell Company Screening Agent",
-   "description": "Deep Research agent that identifies and evaluates listed shell-company candidates for reverse mergers and other M&A transactions. Fill in a client mandate, get a structured, evidence-backed screening report.",
+   "description": "Deep Research agent for identifying and screening public shell companies for reverse mergers and reverse takeovers (RTOs), covering candidate discovery, due diligence, feasibility assessment, prioritization, and screening report generation.",
    "tags": [
     "M&A",
     "deep research",
@@ -437,13 +437,14 @@
      "evidence_json"
     ]
    },
-   "repo_url": "https://github.com/Lin-Feihan/shell-company-screening-agent"
+   "repo_url": "https://github.com/Lin-Feihan/shell-company-screening-agent",
+   "card_subtitle": "M&A · Deep Research"
   },
   {
    "template_id": "due-diligence-agent",
    "shelf": "research",
    "name": "Due Diligence Agent",
-   "description": "Deep Research agent for public-source corporate due diligence: planning, multi-dimensional investigation, risk assessment, valuation and deal-impact analysis, delivered as a standalone DD report.",
+   "description": "Deep Research agent for corporate due diligence, covering research planning, multi-dimensional investigation, risk assessment, valuation and deal-impact analysis, and DD report generation.",
    "tags": [
     "M&A",
     "deep research",
@@ -462,7 +463,8 @@
      "evidence_json"
     ]
    },
-   "repo_url": "https://github.com/Lin-Feihan/due-diligence-agent"
+   "repo_url": "https://github.com/Lin-Feihan/due-diligence-agent",
+   "card_subtitle": "DD · Deep Research"
   }
  ]
 }
