@@ -360,8 +360,11 @@ def execute_algo(
     """Start async real backtest. Returns immediately with job id."""
     global algo_status
 
-    if algo_status["running"] and algo_status.get("session_id") == session_id:
-        raise RuntimeError("A backtest is already running for this session. Please wait.")
+    # Server-wide single flight: ``algo_status`` is one global record, and a
+    # per-session check let any caller rotating X-Session-Id start unlimited
+    # concurrent LLM subprocesses on the platform key.
+    if algo_status["running"]:
+        raise RuntimeError("A trading-algo backtest is already running. Please wait.")
 
     if _blocks_match_defaults(blocks):
         raise RuntimeError(
