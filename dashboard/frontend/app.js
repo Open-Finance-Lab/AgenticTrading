@@ -3318,7 +3318,7 @@ function buildResearchMarketplaceCardHtml(template) {
           ${agentRobotIcon()}
           <div class="agent-card-identity-text">
             <h3 class="agent-name">${escapeHtml(template.name)}</h3>
-            <p class="agent-card-submeta">${escapeHtml(template.author || 'Community')} · Deep Research</p>
+            <p class="agent-card-submeta">${escapeHtml(template.card_subtitle || `${template.author || 'Community'} · Deep Research`)}</p>
           </div>
         </div>
         <span class="marketplace-mode-chip">Research</span>
