@@ -12,6 +12,7 @@ from dashboard.backend.domain.model_providers.models import ProviderRecord
 from dashboard.backend.infrastructure.llm.execution.models import LLMExecutionRequest
 
 from .base import (
+    SDK_MAX_RETRIES,
     AdapterResponse,
     ClientFactory,
     CredentialMaterial,
@@ -20,6 +21,7 @@ from .base import (
     map_provider_error,
     normalize_finish_reason,
     optional_nonnegative_float,
+    provider_http_timeout,
     usage_from_fields,
     value_at,
 )
@@ -96,14 +98,20 @@ class OpenAIExecutionAdapter:
                 ).provider_model_id
             except UnsupportedExecutionModel as exc:
                 raise ProviderExecutionError("provider_unavailable") from exc
+            # One Timeout object for both layers, and no SDK retries: see the
+            # provider-timeout block in base.py.
+            timeout = provider_http_timeout()
             owned_http_client = build_safe_http_client(
                 provider.approved_base_url,
                 proxy_origin=self.proxy_origin,
+                timeout=timeout,
             )
             client = self.client_factory(
                 api_key=credential.secret,
                 base_url=provider.approved_base_url,
                 http_client=owned_http_client,
+                timeout=timeout,
+                max_retries=SDK_MAX_RETRIES,
             )
             kwargs: dict[str, Any] = {
                 "model": provider_model_id,

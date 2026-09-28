@@ -99,6 +99,12 @@ Four more facts come from the same data:
 
 S1 is necessary, not sufficient. The goal needs S2 as well.
 
+> **Amendment (2026-09-28).** S2's no-regeneration half ships per
+> `2026-09-28-llm-provider-retry-timeout-design.md`: SDK retries off, a 180s
+> per-attempt read deadline, and service-owned retries only for attempts that
+> generated nothing. The per-run provider cooldown stays open; it is moot while
+> OpenRouter is quota-dead (#523).
+
 **Deferred, deliberately.** Decision cadence, result contract (single curve vs an N-run band), and
 OpenRouter host routing (`provider.sort`, `:nitro`). The first two wait for the Track B measurement.
 The third is moot while OpenRouter is not the primary lane.

@@ -3,13 +3,20 @@
 import json
 from types import SimpleNamespace
 
+import httpx
+import openai
 import pytest
 
+from dashboard.backend.infrastructure.llm.adapters.safe_http import (
+    ProviderAddressResolutionError,
+    UnsafeProviderAddress,
+)
 from dashboard.backend.infrastructure.llm.execution.adapters.base import (
     map_provider_error,
 )
 from dashboard.backend.infrastructure.llm.execution.errors import (
     ExecutionErrorCategory,
+    RetryHint,
 )
 
 
@@ -123,3 +130,156 @@ def test_timeout_precedes_quota_classification():
 
     exc = _TimeoutProviderError("quota exceeded")
     assert map_provider_error(exc).category is ExecutionErrorCategory.PROVIDER_TIMEOUT
+
+
+# --- Retry hints: whether LLMExecutionService may repeat the attempt --------
+# The category of every error above is unchanged by the hints; these pin the
+# second, independent axis the service's same-provider retry reads.
+
+_WIRE_REQUEST = httpx.Request("POST", "https://api.commonstack.ai/v1/chat/completions")
+
+
+def _raised_from(outer: BaseException, inner: BaseException) -> BaseException:
+    """``outer`` raised ``from inner``, as both SDKs raise their wrappers."""
+    try:
+        try:
+            raise inner
+        except BaseException as cause:
+            raise outer from cause
+    except BaseException as raised:
+        return raised
+
+
+def _status_error(status: int, headers: dict[str, str] | None = None, body=None):
+    response = httpx.Response(
+        status, headers=headers or {}, json=body or {}, request=_WIRE_REQUEST
+    )
+    return openai.APIStatusError("synthetic", response=response, body=body)
+
+
+@pytest.mark.parametrize(
+    ("exc", "phase", "hint"),
+    [
+        (httpx.ReadTimeout("x"), "read", RetryHint.NONE),
+        (
+            _raised_from(openai.APITimeoutError(request=_WIRE_REQUEST), httpx.ReadTimeout("x")),
+            "read",
+            RetryHint.NONE,
+        ),
+        (httpx.ConnectTimeout("x"), "connect", RetryHint.PRE_SEND),
+        (
+            _raised_from(openai.APITimeoutError(request=_WIRE_REQUEST), httpx.ConnectTimeout("x")),
+            "connect",
+            RetryHint.PRE_SEND,
+        ),
+        (httpx.WriteTimeout("x"), "write", RetryHint.PRE_SEND),
+        (httpx.PoolTimeout("x"), "pool", RetryHint.PRE_SEND),
+        (TimeoutError("x"), None, RetryHint.NONE),
+        (openai.APITimeoutError(request=_WIRE_REQUEST), None, RetryHint.NONE),
+    ],
+)
+def test_timeout_phase_and_hint_from_exception_chain(exc, phase, hint):
+    mapped = map_provider_error(exc)
+    assert mapped.category is ExecutionErrorCategory.PROVIDER_TIMEOUT
+    assert mapped.timeout_phase == phase
+    assert mapped.retry_hint is hint
+
+
+@pytest.mark.parametrize(
+    ("exc", "hint"),
+    [
+        (
+            _raised_from(openai.APIConnectionError(request=_WIRE_REQUEST), httpx.ConnectError("x")),
+            RetryHint.PRE_SEND,
+        ),
+        (httpx.ConnectError("x"), RetryHint.PRE_SEND),
+        (ProviderAddressResolutionError("dns"), RetryHint.PRE_SEND),
+        (
+            _raised_from(
+                openai.APIConnectionError(request=_WIRE_REQUEST),
+                httpx.RemoteProtocolError("x"),
+            ),
+            RetryHint.REJECTED,
+        ),
+        (
+            _raised_from(openai.APIConnectionError(request=_WIRE_REQUEST), httpx.ReadError("x")),
+            RetryHint.REJECTED,
+        ),
+        (httpx.WriteError("x"), RetryHint.REJECTED),
+        (UnsafeProviderAddress("private"), RetryHint.NONE),
+        (openai.APIConnectionError(request=_WIRE_REQUEST), RetryHint.NONE),
+        (RuntimeError("adapter bug"), RetryHint.NONE),
+    ],
+)
+def test_transport_failures_before_and_after_send(exc, hint):
+    mapped = map_provider_error(exc)
+    assert mapped.category is ExecutionErrorCategory.PROVIDER_UNAVAILABLE
+    assert mapped.retry_hint is hint
+    assert mapped.provider_status_code is None
+
+
+@pytest.mark.parametrize("status", [408, 409, 429, 500, 502, 503, 504, 529])
+def test_status_rejections_carry_status_and_hint(status):
+    mapped = map_provider_error(_status_error(status))
+    assert mapped.category is ExecutionErrorCategory.PROVIDER_UNAVAILABLE
+    assert mapped.retry_hint is RetryHint.REJECTED
+    assert mapped.provider_status_code == status
+
+
+@pytest.mark.parametrize("status", [400, 404, 422])
+def test_other_client_errors_are_never_repeated(status):
+    mapped = map_provider_error(_status_error(status))
+    assert mapped.category is ExecutionErrorCategory.PROVIDER_UNAVAILABLE
+    assert mapped.retry_hint is RetryHint.NONE
+
+
+@pytest.mark.parametrize(
+    ("status", "body", "category"),
+    [
+        (401, None, ExecutionErrorCategory.CREDENTIAL_INVALID),
+        (403, None, ExecutionErrorCategory.CREDENTIAL_INVALID),
+        (402, None, ExecutionErrorCategory.PROVIDER_QUOTA_EXHAUSTED),
+        (429, {"error": {"code": "insufficient_quota"}}, ExecutionErrorCategory.PROVIDER_QUOTA_EXHAUSTED),
+        (429, {"error": {"code": "in_flight_budget_exhausted"}}, ExecutionErrorCategory.PROVIDER_QUOTA_EXHAUSTED),
+    ],
+)
+def test_lane_state_errors_keep_their_category_and_no_hint(status, body, category):
+    mapped = map_provider_error(_status_error(status, body=body))
+    assert mapped.category is category
+    assert mapped.retry_hint is RetryHint.NONE
+
+
+def test_x_should_retry_header_overrides_status():
+    assert (
+        map_provider_error(_status_error(503, {"x-should-retry": "false"})).retry_hint
+        is RetryHint.NONE
+    )
+    assert (
+        map_provider_error(_status_error(400, {"x-should-retry": "true"})).retry_hint
+        is RetryHint.REJECTED
+    )
+
+
+@pytest.mark.parametrize(
+    ("headers", "expected"),
+    [
+        ({"retry-after": "7"}, 7.0),
+        ({"retry-after": "0.5"}, 0.5),
+        ({"retry-after-ms": "1500", "retry-after": "9"}, 1.5),
+        ({"retry-after": "Wed, 21 Oct 2026 07:28:00 GMT"}, None),
+        ({"retry-after": "-1"}, None),
+        ({"retry-after": "nan"}, None),
+        ({"retry-after": "inf"}, None),
+        ({"retry-after": "9" * 64}, None),
+        ({}, None),
+    ],
+)
+def test_retry_after_parsing(headers, expected):
+    assert map_provider_error(_status_error(503, headers)).retry_after_seconds == expected
+
+
+def test_fake_response_without_headers_maps_without_raising():
+    mapped = map_provider_error(_error(503, {"error": {"message": "down"}}))
+    assert mapped.category is ExecutionErrorCategory.PROVIDER_UNAVAILABLE
+    assert mapped.retry_hint is RetryHint.REJECTED
+    assert mapped.retry_after_seconds is None
