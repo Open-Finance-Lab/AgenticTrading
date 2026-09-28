@@ -25,5 +25,25 @@
     "status": "ready",
     "coverage_start": null,
     "coverage_end": null
-  }
+  },
+  "purchased_by_day": [
+    {
+      "day": "2026-09-01",
+      "amount_micro": 5000000
+    },
+    {
+      "day": "2026-09-02",
+      "amount_micro": 7000000
+    }
+  ],
+  "consumed_by_day": [
+    {
+      "day": "2026-09-01",
+      "amount_micro": 1200000
+    },
+    {
+      "day": "2026-09-02",
+      "amount_micro": 1800000
+    }
+  ]
 }

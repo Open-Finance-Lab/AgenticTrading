@@ -30,8 +30,14 @@
     "active": 37
   },
   "top_failure_categories": [
-    {"error_category": "credential_invalid", "affected_users": 4},
-    {"error_category": "provider_timeout", "affected_users": 2}
+    {
+      "error_category": "credential_invalid",
+      "affected_users": 4
+    },
+    {
+      "error_category": "provider_timeout",
+      "affected_users": 2
+    }
   ],
   "users_needing_attention": [
     {
@@ -58,10 +64,37 @@
     "include_internal": false
   },
   "availability": {
-    "snapshot": {"available": true, "error_code": null},
-    "growth": {"available": true, "error_code": null},
-    "funnel": {"available": true, "error_code": null},
-    "friction": {"available": true, "error_code": null},
-    "attention": {"available": true, "error_code": null}
-  }
+    "snapshot": {
+      "available": true,
+      "error_code": null
+    },
+    "growth": {
+      "available": true,
+      "error_code": null
+    },
+    "funnel": {
+      "available": true,
+      "error_code": null
+    },
+    "friction": {
+      "available": true,
+      "error_code": null
+    },
+    "attention": {
+      "available": true,
+      "error_code": null
+    }
+  },
+  "billing_lane_mix": [
+    {
+      "day": "2026-08-25",
+      "platform_credits": 11,
+      "byok": 7
+    },
+    {
+      "day": "2026-08-26",
+      "platform_credits": 14,
+      "byok": 8
+    }
+  ]
 }
