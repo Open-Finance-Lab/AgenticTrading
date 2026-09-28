@@ -17,6 +17,7 @@ fetches that run's status — acceptable for v1, noted in the route docstring.
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import os
 from urllib.parse import quote as url_quote
@@ -388,14 +389,18 @@ def _finalize_completed_run(run: Dict[str, Any], template: Dict[str, Any],
         if email_configured():
             base = os.getenv("PUBLIC_APP_URL", "https://agentic-trading-lab.vercel.app")
             link = f"{base}/app?view=research"
-            sent = send_email(
+            # send_email is a coroutine and every caller here is sync (a
+            # threadpool route or the sweeper thread), so drive it to
+            # completion. Called bare, it returned an un-run coroutine, which
+            # is truthy: the run was marked emailed and nothing was ever sent.
+            sent = asyncio.run(send_email(
                 notify_email,
                 f"[ATL] Your research report is ready — {template['name']}",
                 "Your research report has completed.\n\n"
                 f"Open it here: {link}\n"
                 "(The report page offers Markdown / DOCX / PDF downloads.)\n",
-            )
-            if sent:
+            ))
+            if sent is True:
                 research_store.mark_emailed(run["run_id"])
 
 
