@@ -448,9 +448,21 @@ def _risk_gate_orders(
     if not math.isfinite(cap_usd) or cap_usd <= 0:
         cap_usd = DEFAULT_MAX_ORDER_USD
 
+    seen: set = set()
     for order in orders or []:
         symbol = str(order.get("symbol") or "").upper()
         side = str(order.get("side") or "").lower()
+        # The cap is per order, so N copies of one action were N capped orders
+        # (and N sells each clamped to the full holding). One per symbol+side.
+        if (symbol, side) in seen:
+            rejections.append(
+                _rejection(
+                    order,
+                    "duplicate_order",
+                    f"A {side} {symbol} order was already accepted in this run.",
+                )
+            )
+            continue
         try:
             requested = float(order.get("quantity"))
         except (TypeError, ValueError):
@@ -504,6 +516,7 @@ def _risk_gate_orders(
         gated["quantity"] = qty
         gated["notional_usd"] = round(qty * price, 2)
         accepted.append(gated)
+        seen.add((symbol, side))
 
     return accepted, rejections
 
