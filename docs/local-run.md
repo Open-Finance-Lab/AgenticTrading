@@ -89,9 +89,34 @@ keys are in `dashboard/.env`.
 
 ## 4. Run a backtest
 
-**From the dashboard:** use the Backtest panel and set *Market Data* to
-**vn.py simulated data**, with a rule-based decision source. LLM decisions need
-sign-in and a model key, and vn.py data forces the LLM off anyway.
+**From the dashboard.** This sample was verified click by click:
+
+1. **My Agents → Add Agent → Create a Built-in Agent.** Name it (e.g. *Sample
+   Momentum Agent*). The model you pick does not matter: on simulated data the
+   LLM is forced off.
+2. On the new card click **Configure**, set **Backtesting** capital to
+   **3000**, then click **Save**.
+3. Click **Run Backtest**. Set *Market Data* to **vn.py simulated data** and
+   the period to **2026-03-02 → 2026-03-15**, keep *DJIA 30*, then click
+   **▶ Run Backtest**. The card shows live progress and finishes in about 10 s.
+4. Click the card's **"N backtests"** link to open the **Backtest** tab. It
+   shows the run config, the equity chart against DJIA / Nasdaq-100 / Buy &
+   Hold, the comparison table, and the Trading Log: a BUY of 1 KO ("RSI
+   oversold (15), price below MA") and a SELL ("RSI overbought (71)").
+
+Why those settings: the built-in rule-based agent sizes a buy as
+`int(equity × 2% / price)`. At the default $1,000 that is 0 shares for any stock
+above $20, and simulated prices run $40–$400, so a default run completes with
+**0 trades and 0.0%**. That is not a failure. $3,000 is the UI's maximum, and
+that window has an affordable oversold signal.
+
+Also note that the DJIA and Nasdaq-100 lines are **real** index data, plotted
+next to an agent trading *simulated* prices, so they are not a like-for-like
+benchmark here. Buy & Hold is the comparable baseline.
+
+Runs belong to the browser that made them. Results live under the agent's
+session, which is kept in that browser's local storage. Another browser, a
+private window or cleared site data will not see them.
 
 **From the API:**
 
