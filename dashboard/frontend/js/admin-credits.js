@@ -478,12 +478,21 @@
     }
     items.forEach((entry) => {
       const row = document.createElement('tr');
-      const account = entry.user_id ? `User #${entry.user_id}` : 'Grant Pool';
+      // A person, not an id: name on top, email underneath; Grant Pool
+      // entries keep their plain label.
+      let account;
+      if (!entry.user_id) {
+        account = textNode('td', '', 'Grant Pool');
+      } else {
+        account = document.createElement('td');
+        account.appendChild(textNode('strong', '', entry.user_display_name || 'Unknown user'));
+        account.appendChild(textNode('span', 'admin-credits-status-detail', entry.user_email || ''));
+      }
       const amount = `${operationSign(entry.entry_type)}${formatCredits(entry.display_credits)}`;
       row.append(
         textNode('td', 'admin-credits-time', formatTime(entry.created_at)),
         textNode('td', '', operationLabel(entry.entry_type)),
-        textNode('td', '', account),
+        account,
         textNode('td', `admin-credits-activity-amount is-${operationSign(entry.entry_type) === '+' ? 'positive' : 'negative'}`, amount),
         textNode('td', '', entry.source || '—'),
         textNode('td', 'admin-credits-reason', entry.reason || '—'),
