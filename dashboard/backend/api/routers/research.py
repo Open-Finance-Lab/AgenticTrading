@@ -9,10 +9,14 @@ Auth model: everything requires a signed-in user (runs and reports are
 per-user; a due-diligence report is not platform-public content). Service-side
 calls carry ``X-Service-Token`` from RESEARCH_SERVICE_TOKEN.
 
-Completion side effects happen on the poll that *discovers* completion (the
-frontend polls every ~15s while a run is open; there is no background sweeper
-in v1). If the user closes the browser, the email fires the next time anyone
-fetches that run's status — acceptable for v1, noted in the route docstring.
+Completion is discovered by whichever poll gets there first: the route poll
+(the frontend polls every ~15s while a run is open) or the research-sweeper
+thread (every 60s, so a closed browser still completes). Both go through one
+per-run single-flight guard, and the terminal status is claimed with a
+conditional UPDATE, so exactly one caller finalizes a run. The "report ready"
+email is not sent on that path: the sweeper drains it as an outbox, retrying a
+failed send with backoff, so a Brevo outage delays the email instead of
+losing it and never blocks a status request.
 """
 
 from __future__ import annotations
@@ -24,7 +28,8 @@ from urllib.parse import quote as url_quote
 import threading
 import time
 import uuid
-from typing import Any, Dict, Optional
+from contextlib import contextmanager
+from typing import Any, Dict, Iterator, Optional
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException
@@ -34,12 +39,6 @@ from dashboard.backend.api.auth import get_current_user
 from dashboard.backend.domain.agents import marketplace as marketplace_mod
 from dashboard.backend.domain.agents import research_store
 from dashboard.backend.domain.credits.models import credits_micro_for_cents
-from dashboard.backend.domain.credits.repository_common import (
-    CreditAccountRestrictedStoreError,
-    InsufficientCreditsError,
-)
-from dashboard.backend.domain.credits.service import credits_service
-from dashboard.backend import users as users_module
 from dashboard.backend.domain.credits.repository_common import (
     CreditAccountRestrictedStoreError,
     InsufficientCreditsError,
@@ -276,51 +275,133 @@ def _estimate_micro_from_run(run: Dict[str, Any]) -> int:
     return credits_micro_for_cents(_estimate_usd_cents())
 
 
-# Background sweeper (v1.1): discovers completed/failed runs without relying
-# on the submitting user keeping the page open. Same logic the status route
-# runs, just on a timer; single in-process worker (matches the codebase's
-# single-worker assumption). In-flight guard keeps it from racing a
-# user-driven poll on the same run.
+# Background sweeper: discovers completed/failed runs without relying on the
+# submitting user keeping the page open, and drains the email outbox. Same
+# logic the status route runs, just on a timer. Not the shared run reaper: a
+# slow agent service must not block the reaper's other sweeps for minutes.
 _SWEEP_INTERVAL_SECONDS = 60
-_sweep_lock = threading.Lock()
-_sweep_inflight: set = set()
+_inflight_lock = threading.Lock()
+_inflight: set = set()
+_sweeper_started = False
+
+# Email outbox policy: retry a failed send with doubling backoff, then give
+# up loudly. Age-bounded so a deploy never mails out long-finished reports.
+EMAIL_MAX_ATTEMPTS = 5
+EMAIL_BACKOFF_BASE_SECONDS = 120
+EMAIL_MAX_AGE_HOURS = 24
+
+
+@contextmanager
+def _single_flight(run_id: str) -> Iterator[bool]:
+    """Yield True when this caller owns the run's poll, False if one is live.
+
+    Shared by the route poll and the sweeper so the two never finalize the
+    same run concurrently in-process; `claim_terminal` covers the rest.
+    """
+    with _inflight_lock:
+        owned = run_id not in _inflight
+        if owned:
+            _inflight.add(run_id)
+    if not owned:
+        yield False
+        return
+    try:
+        yield True
+    finally:
+        with _inflight_lock:
+            _inflight.discard(run_id)
 
 
 def _sweep_pending_runs() -> None:
     for row in research_store.list_nonterminal_runs():
         run_id = row["run_id"]
-        with _sweep_lock:
-            if run_id in _sweep_inflight:
+        with _single_flight(run_id) as owned:
+            if not owned:
                 continue
-            _sweep_inflight.add(run_id)
+            try:
+                template = marketplace_mod.get_marketplace_template(row["template_id"])
+                if not template or not marketplace_mod.shelf_is_research(template):
+                    continue
+                fresh = research_store.get_run(run_id, row["user_id"])
+                if not fresh:
+                    continue
+                _poll_run_once(fresh, template)
+            except Exception as exc:  # noqa: BLE001 - one bad run must not kill the sweep
+                print(f"research sweeper: run {run_id} sweep error: {exc}")
+
+
+def _send_report_ready_email(to: str, template_name: str) -> bool:
+    """Drive the async sender from sync code. Never raises: False on failure."""
+    from dashboard.backend.infrastructure.email.sender import send_email
+
+    base = os.getenv("PUBLIC_APP_URL", "https://agentic-trading-lab.vercel.app")
+    link = f"{base}/app?view=research"
+    try:
+        # Only ever called from the sweeper thread, which has no running
+        # event loop; asyncio.run would raise inside one, so it is guarded.
+        return bool(asyncio.run(send_email(
+            to,
+            f"[ATL] Your research report is ready — {template_name}",
+            "Your research report has completed.\n\n"
+            f"Open it here: {link}\n"
+            "(The report page offers Markdown / DOCX / PDF downloads.)\n",
+        )))
+    except Exception as exc:  # noqa: BLE001 - the outbox retries; never kill the sweep
+        print(f"ERROR: research report email raised: {exc!r}")
+        return False
+
+
+def _deliver_pending_emails() -> None:
+    """Send every owed "report ready" email that is due, one lease each.
+
+    Failures print ERROR (send_email does, including for missing Brevo
+    config) and are retried after a doubling backoff, up to
+    EMAIL_MAX_ATTEMPTS; the last failure says the email was abandoned.
+    """
+    for row in research_store.list_email_outbox(EMAIL_MAX_ATTEMPTS, EMAIL_MAX_AGE_HOURS):
+        run_id = row["run_id"]
+        attempts = int(row["email_attempts"] or 0)
+        backoff = EMAIL_BACKOFF_BASE_SECONDS * (2 ** attempts)
+        if not research_store.claim_email_attempt(run_id, attempts, backoff):
+            continue  # another sender took this attempt
         try:
-            template = marketplace_mod.get_marketplace_template(row["template_id"])
-            if not template or not marketplace_mod.shelf_is_research(template):
-                continue
             user = users_module.user_store.get_user_by_id(row["user_id"])
-            if not user:
-                continue
-            fresh = research_store.get_run(run_id, row["user_id"])
-            if not fresh:
-                continue
-            _maybe_complete_run(fresh, template, user)
-        except Exception as exc:  # noqa: BLE001 - one bad run must not kill the sweep
-            print(f"research sweeper: run {run_id} sweep error: {exc}")
-        finally:
-            with _sweep_lock:
-                _sweep_inflight.discard(run_id)
+            template = marketplace_mod.get_marketplace_template(row["template_id"])
+        except Exception as exc:  # noqa: BLE001
+            print(f"ERROR: research email for run {run_id} lookup failed: {exc!r}")
+            continue
+        if not user or not user.get("email"):
+            print(f"ERROR: research email for run {run_id} has no recipient; skipped")
+            continue
+        name = (template or {}).get("name") or "Research agent"
+        if _send_report_ready_email(user["email"], name):
+            research_store.mark_emailed(run_id)
+        elif attempts + 1 >= EMAIL_MAX_ATTEMPTS:
+            print(
+                f"ERROR: research email for run {run_id} abandoned after "
+                f"{EMAIL_MAX_ATTEMPTS} attempts"
+            )
 
 
 def _sweeper_loop() -> None:
     while True:
-        try:
-            _sweep_pending_runs()
-        except Exception as exc:  # noqa: BLE001
-            print(f"research sweeper: loop error: {exc}")
+        for step in (_sweep_pending_runs, _deliver_pending_emails):
+            try:
+                step()
+            except Exception as exc:  # noqa: BLE001
+                print(f"research sweeper: {step.__name__} error: {exc}")
         time.sleep(_SWEEP_INTERVAL_SECONDS)
 
 
-threading.Thread(target=_sweeper_loop, name="research-sweeper", daemon=True).start()
+def start_research_sweeper() -> None:
+    """Start the sweeper thread once. Called from app startup, not at import,
+    so importing this module (tests, scripts) never spawns a poller."""
+    global _sweeper_started
+    with _inflight_lock:
+        if _sweeper_started:
+            return
+        _sweeper_started = True
+    threading.Thread(target=_sweeper_loop, name="research-sweeper", daemon=True).start()
 
 
 def _service_run_id(run: Dict[str, Any]) -> str:
@@ -350,10 +431,14 @@ def _actual_cost_micro(payload: Dict[str, Any]) -> Optional[int]:
         return None
 
 
-def _finalize_completed_run(run: Dict[str, Any], template: Dict[str, Any],
-                            payload: Dict[str, Any], notify_email: str | None) -> None:
-    """Store artifacts, settle the reservation, and send the notification
-    email. Shared by the route poll and the background sweeper."""
+def _finalize_completed_run(run: Dict[str, Any], payload: Dict[str, Any]) -> None:
+    """Store artifacts, settle the reservation, then claim `completed`.
+
+    Settle runs before the claim so a transient billing error leaves the run
+    nonterminal and the next poll retries it; settle is idempotent on replay,
+    so a retry cannot double-debit. The claim decides the one finalizer. The
+    notification email is the sweeper's outbox, not this path's job.
+    """
     research_store.store_artifacts(
         run["run_id"],
         payload.get("artifacts") or {},
@@ -361,55 +446,33 @@ def _finalize_completed_run(run: Dict[str, Any], template: Dict[str, Any],
         payload.get("report_markdown") or "",
     )
     reservation_id = run.get("reservation_id")
-    if not reservation_id:
-        # Pre-billing legacy run (route-0 migration): nothing was reserved, so
-        # complete without touching Credits — settling a NULL id would raise.
-        research_store.update_run_status(run["run_id"], "completed", completed=True)
-        run["status"] = "completed"
-        return
-    # Settle at the REAL reported spend when the agent reported usage
-    # (model tokens × price table), else the reserved estimate. Both stay
-    # within the reservation's ceiling; settle records any overage.
-    actual = _actual_cost_micro(payload)
-    settle_micro = actual if actual is not None else int(run.get("estimate_micro") or 0)
-    credits_service.settle_llm_credits(
-        reservation_id,
-        actual_micro=settle_micro,
-        evidence={
-            "source": "research-agent",
-            "agent_id": run["template_id"],
-            "usage": (payload.get("evidence") or {}).get("metadata", {}).get("usage"),
-        },
-    )
-    research_store.update_run_status(run["run_id"], "completed", completed=True)
+    # A pre-billing legacy run (route-0 migration) reserved nothing, so it
+    # completes without touching Credits — settling a NULL id would raise.
+    if reservation_id:
+        # Settle at the REAL reported spend when the agent reported usage
+        # (model tokens × price table), else the reserved estimate. Both stay
+        # within the reservation's ceiling; settle records any overage.
+        actual = _actual_cost_micro(payload)
+        settle_micro = actual if actual is not None else int(run.get("estimate_micro") or 0)
+        credits_service.settle_llm_credits(
+            reservation_id,
+            actual_micro=settle_micro,
+            evidence={
+                "source": "research-agent",
+                "agent_id": run["template_id"],
+                "usage": (payload.get("evidence") or {}).get("metadata", {}).get("usage"),
+            },
+        )
+    research_store.claim_terminal(run["run_id"], "completed")
     run["status"] = "completed"
-    if notify_email and run.get("email_me") and not run.get("emailed"):
-        from dashboard.backend.infrastructure.email.sender import email_configured, send_email
-
-        if email_configured():
-            base = os.getenv("PUBLIC_APP_URL", "https://agentic-trading-lab.vercel.app")
-            link = f"{base}/app?view=research"
-            # send_email is a coroutine and every caller here is sync (a
-            # threadpool route or the sweeper thread), so drive it to
-            # completion. Called bare, it returned an un-run coroutine, which
-            # is truthy: the run was marked emailed and nothing was ever sent.
-            sent = asyncio.run(send_email(
-                notify_email,
-                f"[ATL] Your research report is ready — {template['name']}",
-                "Your research report has completed.\n\n"
-                f"Open it here: {link}\n"
-                "(The report page offers Markdown / DOCX / PDF downloads.)\n",
-            ))
-            if sent is True:
-                research_store.mark_emailed(run["run_id"])
 
 
-def _poll_run_once(run: Dict[str, Any], template: Dict[str, Any],
-                   notify_email: str | None) -> Dict[str, Any]:
-    """One status poll; on completion, fetch + finalize + (opt) notify email.
+def _poll_run_once(run: Dict[str, Any], template: Dict[str, Any]) -> Dict[str, Any]:
+    """One status poll; on completion, fetch + finalize.
 
-    Shared by the route poll and the background sweeper — `notify_email` is
-    the run owner's address (the sweeper has no session user).""",
+    Shared by the route poll and the background sweeper. Callers hold the
+    run's `_single_flight` and pass a row read inside it.
+    """
     if run["status"] in ("completed", "failed"):
         return run
     try:
@@ -426,13 +489,16 @@ def _poll_run_once(run: Dict[str, Any], template: Dict[str, Any],
 
     status = str(service_status.get("status") or "running")
     if status == "failed":
-        research_store.update_run_status(run["run_id"], "failed",
-                                         error=service_status.get("error") or "Research failed",
-                                         completed=True)
+        # Release before the claim, mirroring settle: a transient release
+        # error leaves the run nonterminal for the next poll (release is
+        # idempotent, so a replay is harmless).
         if run.get("reservation_id"):
             credits_service.release_llm_credits(
                 run["reservation_id"], reason="research run failed",
             )
+        research_store.claim_terminal(
+            run["run_id"], "failed", error=service_status.get("error") or "Research failed",
+        )
         run["status"] = "failed"
         return run
     if status != "completed":
@@ -452,15 +518,8 @@ def _poll_run_once(run: Dict[str, Any], template: Dict[str, Any],
         # terminal here would strand the reservation on a transient 5xx.
         return run
 
-    _finalize_completed_run(run, template, payload, notify_email)
+    _finalize_completed_run(run, payload)
     return run
-
-
-
-def _maybe_complete_run(run: Dict[str, Any], template: Dict[str, Any],
-                        current_user: dict) -> Dict[str, Any]:
-    """Route wrapper: poll once, notify the signed-in submitter."""
-    return _poll_run_once(run, template, current_user["email"])
 
 
 @router.get("/runs")
@@ -480,7 +539,12 @@ def get_run_status(run_id: str, current_user: dict = Depends(get_current_user)):
     if not run:
         raise HTTPException(status_code=404, detail="Run not found")
     template = _template_or_404(run["template_id"])
-    run = _maybe_complete_run(run, template, current_user)
+    with _single_flight(run_id) as owned:
+        if owned:
+            # Re-read inside the flight: a poll that finished between the
+            # read above and here must not be finalized a second time.
+            run = research_store.get_run(run_id, current_user["id"]) or run
+            run = _poll_run_once(run, template)
     return {
         "run_id": run["run_id"],
         "template_id": run["template_id"],
@@ -517,7 +581,7 @@ def get_run_report(run_id: str, current_user: dict = Depends(get_current_user)):
 
 @router.get("/runs/{run_id}/artifacts/{kind}")
 def download_artifact(run_id: str, kind: str, current_user: dict = Depends(get_current_user)):
-    run, _template = _run_and_template_or_404(run_id, current_user)
+    _run_and_template_or_404(run_id, current_user)
     artifact = research_store.get_artifact(run_id, kind)
     if not artifact:
         raise HTTPException(status_code=404, detail="Artifact not found")

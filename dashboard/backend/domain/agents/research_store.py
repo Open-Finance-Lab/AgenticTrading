@@ -74,6 +74,9 @@ def _init_schema() -> None:
         migrations = (
             "ALTER TABLE research_runs ADD COLUMN reservation_id TEXT",
             "ALTER TABLE research_runs ADD COLUMN estimate_micro INTEGER",
+            # Email outbox (the sweeper retries a failed "report ready" send).
+            "ALTER TABLE research_runs ADD COLUMN email_attempts INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE research_runs ADD COLUMN email_next_attempt_at TIMESTAMP",
         )
         for statement in migrations:
             try:
@@ -187,6 +190,56 @@ def update_run_status(run_id: str, status: str, error: Optional[str] = None,
             )
 
 
+def claim_terminal(run_id: str, status: str, error: Optional[str] = None) -> bool:
+    """Move a run to a terminal status once. True only for the caller that did.
+
+    The route poll and the sweeper can both see the same service completion;
+    the conditional UPDATE is what makes exactly one of them the finalizer.
+    """
+    with _connect() as conn:
+        cursor = conn.execute(
+            "UPDATE research_runs SET status = ?, error = ?,"
+            " completed_at = CURRENT_TIMESTAMP"
+            " WHERE run_id = ? AND status NOT IN ('completed', 'failed')",
+            (status, error, run_id),
+        )
+        return cursor.rowcount == 1
+
+
+def list_email_outbox(max_attempts: int, max_age_hours: int) -> List[Dict[str, Any]]:
+    """Completed "email me" runs still owed their notification and due a try.
+
+    Age-bounded so a deploy never mails out reports that finished long ago.
+    """
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT run_id, user_id, template_id, email_attempts FROM research_runs"
+            " WHERE status = 'completed' AND email_me = 1 AND emailed = 0"
+            " AND email_attempts < ?"
+            " AND completed_at >= datetime('now', ?)"
+            " AND (email_next_attempt_at IS NULL"
+            "      OR email_next_attempt_at <= CURRENT_TIMESTAMP)",
+            (int(max_attempts), f"-{int(max_age_hours)} hours"),
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def claim_email_attempt(run_id: str, attempts_seen: int, backoff_seconds: int) -> bool:
+    """Lease one send attempt: bump the counter and push the next try out.
+
+    Conditional on the counter the caller read, so two senders never both
+    send the same attempt. A crash mid-send just waits out the backoff.
+    """
+    with _connect() as conn:
+        cursor = conn.execute(
+            "UPDATE research_runs SET email_attempts = email_attempts + 1,"
+            " email_next_attempt_at = datetime('now', ?)"
+            " WHERE run_id = ? AND emailed = 0 AND email_attempts = ?",
+            (f"+{int(backoff_seconds)} seconds", run_id, int(attempts_seen)),
+        )
+        return cursor.rowcount == 1
+
+
 def mark_emailed(run_id: str) -> None:
     with _connect() as conn:
         conn.execute("UPDATE research_runs SET emailed = 1 WHERE run_id = ?", (run_id,))
@@ -197,9 +250,6 @@ def mark_emailed(run_id: str) -> None:
 def store_artifacts(run_id: str, artifacts: Dict[str, Dict[str, str]],
                     evidence: Dict[str, Any], report_markdown: str) -> None:
     """Persist everything a completed run delivered (replace-on-complete)."""
-    rows = [
-        (run_id, "markdown", f"{run_id}.md", None),
-    ]
     with _connect() as conn:
         conn.execute("DELETE FROM research_artifacts WHERE run_id = ?", (run_id,))
         conn.execute(
