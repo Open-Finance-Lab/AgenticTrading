@@ -29,6 +29,7 @@ import os
 import threading
 import time
 from collections import OrderedDict
+from datetime import date
 from math import ceil
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -45,6 +46,10 @@ from dashboard.backend.infrastructure.market_data.alpaca_bars import AlpacaDataL
 from dashboard.backend.infrastructure.market_data.equity_metadata import (
     configured_dataset_path,
     load_and_enrich_us_equity_bars,
+)
+from dashboard.backend.infrastructure.market_data.provider import (
+    parse_ymd,
+    settled_exclusive_end,
 )
 from dashboard.backend.infrastructure.market_data.frequency import (
     normalize_bar_timeframe,
@@ -86,6 +91,11 @@ class MarketDataset:
         "data_quality",
         "equity_metadata",
     )
+
+    @property
+    def provider_end(self) -> str:
+        """The exclusive bound the bars were fetched with (see `_dataset_key`)."""
+        return self.key[2]
 
     def __init__(self, key: Tuple, all_data: Dict[str, pd.DataFrame],
                  timestamps: List[Any], price_cache: Dict[str, Dict[Any, float]],
@@ -192,7 +202,15 @@ def _dataset_key(
         # second key for the same dataset.
         tuple(sorted(set(symbols))),
         str(start_date),
-        str(end_date),
+        # The half-open bound actually FETCHED, not the inclusive date the run
+        # records: callers pass the day to trade through, and handing that to
+        # a half-open provider dropped it (a one-day protocol run got no bars).
+        # Keying on the bound rather than the label also means a window
+        # reaching today's open session re-keys at midnight instead of serving
+        # the pre-midnight, shorter build under the same label, and `peek` --
+        # which goes through this same function -- still finds what
+        # `get_dataset` built. `_build_dataset` fetches with this element.
+        settled_exclusive_end(str(end_date), market=market),
         normalize_bar_timeframe(source_timeframe),
         normalize_bar_timeframe(decision_timeframe),
         str(configured_dataset_path() or ""),
@@ -218,18 +236,24 @@ def peek(
     market: str = DEFAULT_MARKET,
 ) -> Optional[MarketDataset]:
     """Non-blocking: the resident dataset, or None (miss / build in flight /
-    negative-cached failure). The only store call allowed under _create_lock."""
-    with _cache_lock:
-        entry = _cache.get(
-            _dataset_key(
-                symbols,
-                start_date,
-                end_date,
-                source_timeframe,
-                decision_timeframe,
-                market,
-            )
+    negative-cached failure). The only store call allowed under _create_lock.
+
+    An unparseable date is a miss, not an error: this runs under the create
+    lock on the request path, and the loader thread's ``get_dataset`` raises
+    the same ``ValueError`` where a failed load is already reported."""
+    try:
+        key = _dataset_key(
+            symbols,
+            start_date,
+            end_date,
+            source_timeframe,
+            decision_timeframe,
+            market,
         )
+    except ValueError:
+        return None
+    with _cache_lock:
+        entry = _cache.get(key)
         if entry is None or entry.dataset is None:
             return None
         _cache.move_to_end(entry.dataset.key)
@@ -358,7 +382,13 @@ def _build_dataset(
             configured_source,
             evidence="configured",
         )
-    source_data = loader.fetch_bars(symbols, start_date, end_date)
+    provider_end = key[2]
+    if date.fromisoformat(provider_end) <= parse_ymd(start_date):
+        raise RuntimeError(
+            f"No completed session in {start_date}..{end_date} yet; "
+            "pick a window that ends before today."
+        )
+    source_data = loader.fetch_bars(symbols, start_date, provider_end)
     if not source_data:
         raise RuntimeError("No market data returned from Alpaca")
     # And pin the order of what came back, which is the loader's to choose.

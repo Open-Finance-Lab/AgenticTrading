@@ -423,6 +423,7 @@ def _real_engine_shortfall_message() -> str:
         HourlyBacktester,
         MarketDataUnavailableError,
     )
+    from dashboard.backend.infrastructure.market_data.provider import exclusive_end
 
     frame = pd.DataFrame(
         {"open": [100.0], "high": [101.0], "low": [99.0], "close": [100.5], "volume": [1.0]},
@@ -439,6 +440,7 @@ def _real_engine_shortfall_message() -> str:
         all_data={_ASHARE_SYMBOL: frame},
         start_date=_WINDOW_START,
         end_date=_WINDOW_END,
+        provider_end_date=exclusive_end(_WINDOW_END),
     )
     with pytest.raises(MarketDataUnavailableError) as excinfo:
         HourlyBacktester._validate_ifind_loaded_data(stand_in)

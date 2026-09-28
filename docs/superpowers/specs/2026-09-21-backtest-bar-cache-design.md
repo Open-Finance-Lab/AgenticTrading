@@ -271,7 +271,10 @@ A background thread at startup pre-fetches the three default windows:
 - `DJIA_30` over that **same** window — fact A in §1: every default run also fetches
   the full Dow for the index baseline, on the ordinary path, after
   `publish_phase("saving")`, and `engine.py`'s index-baseline block passes
-  `self.start_date`/`self.end_date` verbatim, so it is the same key. Five of the
+  `self.start_date`/`self.provider_end_date` — the run's inclusive end converted by
+  `settled_exclusive_end` (2026-09-28, PR #563) — so it is the same key. The warm
+  converts each window's end with that same function, once, in `warm_bar_cache`'s
+  loop; warming the raw `endDate` would warm entries no run requests. Five of the
   thirty names are already hits from the first window; twenty-five are requested.
   Without this the default run's *visible* wait ends warm and its uncounted tail
   still runs cold.

@@ -37,6 +37,7 @@ from dashboard.backend.domain.backtesting.constants import (
 from dashboard.backend.execution.base import TERMINAL_STATUSES
 from dashboard.backend.domain.runs.environment import get_environment
 from dashboard.backend.infrastructure.llm.validator import DJIA_30, MAX_ORDER_SHARES
+from dashboard.backend.infrastructure.market_data.provider import parse_ymd
 from dashboard.backend.domain.runs.protocol import (
     PROTOCOL_VERSION,
     VALID_SIDES,
@@ -574,6 +575,15 @@ def create_run(
     end_date = config.get("end_date")
     if not start_date or not end_date:
         raise ProtocolError("invalid_config", "config.start_date and config.end_date are required", 400)
+    try:
+        parse_ymd(start_date)
+        parse_ymd(end_date)
+    except ValueError:
+        raise ProtocolError(
+            "invalid_config",
+            "config.start_date and config.end_date must be YYYY-MM-DD dates",
+            400,
+        )
 
     symbols = config.get("symbols")
     if symbols:

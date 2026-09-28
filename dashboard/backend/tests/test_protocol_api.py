@@ -563,6 +563,29 @@ def test_reject_nondefault_initial_cash(client):
     assert resp.json()["detail"]["error"]["code"] == "invalid_config"
 
 
+def test_reject_malformed_window_dates(client):
+    """A date the data layer cannot bump into a half-open bound is refused up
+    front, rather than failing the run later in the loader thread."""
+    agent_id, key, _ = _new_agent(client)
+    version_id = _new_version(client, agent_id, key)
+
+    resp = client.post(
+        "/api/v1/runs",
+        json={
+            "agent_version_id": version_id,
+            "environment": {"type": "backtest", "environment_id": "us-equity-hourly-v1"},
+            "config": {
+                "start_date": "2026-04-15",
+                "end_date": "2026/04/16",
+                "symbols": ["AAPL", "MSFT"],
+            },
+        },
+        headers={"X-API-Key": key},
+    )
+    assert resp.status_code == 400, resp.text
+    assert resp.json()["detail"]["error"]["code"] == "invalid_config"
+
+
 def test_create_run_accepts_independent_initial_cash(client):
     """Simulation capital is independent of the agent's cash_allocation sleeve."""
     agent_id, key, session_headers = _new_agent(client)

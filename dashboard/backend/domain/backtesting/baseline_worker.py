@@ -43,11 +43,12 @@ _STOP = object()
 
 class BaselineJob:
     __slots__ = ("run_id", "session_id", "start_date", "end_date", "mode",
-                 "all_data", "publish")
+                 "all_data", "publish", "provider_end")
 
     def __init__(self, *, run_id: str, session_id: str, start_date: str,
                  end_date: str, mode: str, all_data: Dict[str, Any],
-                 publish: Callable[[Dict[str, str]], None]):
+                 publish: Callable[[Dict[str, str]], None],
+                 provider_end: Optional[str] = None):
         self.run_id = run_id
         self.session_id = session_id
         self.start_date = start_date
@@ -55,6 +56,12 @@ class BaselineJob:
         self.mode = mode
         self.all_data = all_data
         self.publish = publish
+        # The exclusive bound `all_data` was fetched with (the dataset's
+        # `provider_end`). The DJIA baseline may refetch; it must use this
+        # bound, not re-derive one, or the index curve covers a different
+        # window than the agent's (e.g. after midnight on a window that
+        # reached an open session).
+        self.provider_end = provider_end
 
 
 _queue: "queue.Queue" = queue.Queue(maxsize=BASELINE_QUEUE_MAX)
@@ -123,7 +130,7 @@ def _drain_forever(q: "queue.Queue") -> None:
 
 
 def _run_job(job: BaselineJob) -> None:
-    key = (job.start_date, job.end_date, job.mode)
+    key = (job.start_date, job.end_date, job.provider_end, job.mode)
     ids = _completed.get(key)
     if ids is None:
         backtester = HourlyBacktester(
@@ -131,6 +138,8 @@ def _run_job(job: BaselineJob) -> None:
             use_llm=False, mode=job.mode,
         )
         backtester.all_data = job.all_data
+        if job.provider_end is not None:
+            backtester.provider_end_date = job.provider_end
         buyhold_id, _ = backtester.run_buyhold_baseline()
         djia_id, _ = backtester.run_djia_baseline()
         ids = {}

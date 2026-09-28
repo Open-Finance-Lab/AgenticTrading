@@ -65,8 +65,10 @@ def minimum_bars_for_window(start: date, end: date) -> int:
 
     Derived from the requested half-open window rather than fixed, because a
     flat count is simultaneously a hidden minimum window (it was 50, i.e. ~13
-    trading days) and unreachable once MAX_BACKTEST_DAYS fell to 14 -- a
-    14-day window holds at most 10 weekdays, or 40 bars.
+    trading days) and unreachable once MAX_BACKTEST_DAYS fell to 14. That
+    bound limits ``end - start`` to 14 days and the window includes its
+    end date, so a run spans up to 15 calendar days: at most 11 weekdays,
+    or 44 bars. ``end`` here is the provider's half-open bound, one day on.
 
     Public because the same depth question is asked twice on this path, at two
     layers: here, against one upstream response, and again in
