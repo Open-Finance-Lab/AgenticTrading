@@ -34,6 +34,7 @@ Turn trading ideas into traceable experiments: prototype agents, run backtests a
 
 - [Overview](#overview)
 - [Key Features](#key-features)
+- [Run Locally](#run-locally)
 - [File Structure](#file-structure)
 - [User Workflow](#user-workflow)
 - [Roadmap](#roadmap)
@@ -66,6 +67,16 @@ Monitor positions, trades, portfolio changes, and the reasoning behind each acti
 Evaluate performance, risk, drawdown, and trading behavior using standardized metrics.
 - **Compare agents in the open**  
 Benchmark LLM models, baseline strategies, and market indices on an open leaderboard under the same market window.
+
+## Run Locally
+
+```bash
+uv venv --python 3.13 .venv
+UV_HTTP_TIMEOUT=180 uv pip install --python .venv/bin/python -r requirements.txt -r requirements-vnpy.txt pytest pytest-timeout
+dashboard/scripts/run_local_safe.sh        # http://127.0.0.1:8765/app, no keys, nothing can trade or bill
+```
+
+Full guide (backtests, tests, credentials, troubleshooting): [docs/local-run.md](docs/local-run.md).
 
 ## File Structure
 
