@@ -282,7 +282,7 @@ def _estimate_micro_from_run(run: Dict[str, Any]) -> int:
 _SWEEP_INTERVAL_SECONDS = 60
 _inflight_lock = threading.Lock()
 _inflight: set = set()
-_sweeper_started = False
+_sweeper_started = threading.Event()
 
 # Email outbox policy: retry a failed send with doubling backoff, then give
 # up loudly. Age-bounded so a deploy never mails out long-finished reports.
@@ -396,11 +396,10 @@ def _sweeper_loop() -> None:
 def start_research_sweeper() -> None:
     """Start the sweeper thread once. Called from app startup, not at import,
     so importing this module (tests, scripts) never spawns a poller."""
-    global _sweeper_started
     with _inflight_lock:
-        if _sweeper_started:
+        if _sweeper_started.is_set():
             return
-        _sweeper_started = True
+        _sweeper_started.set()
     threading.Thread(target=_sweeper_loop, name="research-sweeper", daemon=True).start()
 
 
