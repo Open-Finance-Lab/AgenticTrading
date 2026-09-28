@@ -195,6 +195,15 @@ class AnalyticsActivityPage(BaseModel):
     next_cursor: str | None = None
 
 
+class BillingLaneDay(BaseModel):
+    """One UTC day of run counts split by billing lane, for the Credits panel."""
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    day: str
+    platform_credits: int = Field(ge=0)
+    byok: int = Field(ge=0)
+
+
 class AnalyticsOverview(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -209,6 +218,7 @@ class AnalyticsOverview(BaseModel):
     output_tokens: int | None = Field(default=None, ge=0)
     daily_active_users: dict[str, int]
     daily_completed_runs: dict[str, int]
+    billing_lane_mix: list[BillingLaneDay]
     activation_funnel: dict[str, int]
     user_state_counts: dict[str, int]
     top_failure_categories: list[FailureCategoryCount]
@@ -627,6 +637,7 @@ class AnalyticsQueryService:
         output_tokens: int | None = None
         daily_active: dict[str, int] = {}
         daily_completed: dict[str, int] = {}
+        lane_days: dict[str, dict[str, int]] = {}
         funnel: dict[str, int] = {}
         failures: list[FailureCategoryCount] = []
         raw_events: list[_MetricEvent] = []
@@ -649,6 +660,28 @@ class AnalyticsQueryService:
                 active_users = raw_metrics.active_users_7d
                 conversion = raw_metrics.first_success_conversion
                 repeat_rate = raw_metrics.repeat_run_rate
+                # §9 Credits panel: settled reservations by day and lane.
+                # credits_settled is the platform lane; a BYOK run settles
+                # nothing through this ledger, so byok counts come from the
+                # same events' absent counterpart — model_usage_recorded
+                # events whose billing_mode is not platform_credits.
+                for event in raw_events:
+                    if event.event_name == "credits_settled":
+                        lane = lane_days.setdefault(
+                            event.occurred_at.date().isoformat(),
+                            {"platform_credits": 0, "byok": 0},
+                        )
+                        lane["platform_credits"] += 1
+                    elif (
+                        event.event_name == "model_usage_recorded"
+                        and event.billing_mode
+                        and event.billing_mode != "platform_credits"
+                    ):
+                        lane = lane_days.setdefault(
+                            event.occurred_at.date().isoformat(),
+                            {"platform_credits": 0, "byok": 0},
+                        )
+                        lane["byok"] += 1
                 funnel = {
                     event_name: len(
                         {
@@ -903,6 +936,14 @@ class AnalyticsQueryService:
             output_tokens=output_tokens,
             daily_active_users=daily_active,
             daily_completed_runs=daily_completed,
+            billing_lane_mix=[
+                BillingLaneDay(
+                    day=day,
+                    platform_credits=counts["platform_credits"],
+                    byok=counts["byok"],
+                )
+                for day, counts in sorted(lane_days.items())
+            ],
             activation_funnel=funnel,
             user_state_counts=state_counts,
             top_failure_categories=failures,

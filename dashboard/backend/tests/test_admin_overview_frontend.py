@@ -9,7 +9,10 @@ CREDIT_FORMAT = source("credit-format.js")
 OVERVIEW = source("admin-overview.js")
 # The four payloads that gain §9 fields come from the target-shape copies (Task 1);
 # the absent-field test below deletes those keys again. PR D switches these to `fixture`.
-TARGET = ("overview", "overview_partial_error", "operational", "commercial")
+# overview/commercial §9 chart fields are landed on the committed fixtures
+# (PR D delivered billing_lane_mix, purchased_by_day, consumed_by_day); only
+# operational still reads its target copy.
+TARGET = ("operational",)
 F = {name: (target_fixture if name in TARGET else fixture)(f"{name}.json") for name in (
     "overview", "overview_partial_error", "operational", "lifecycle", "retention", "commercial", "groups",
 )}

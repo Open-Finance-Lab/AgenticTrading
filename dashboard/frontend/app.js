@@ -13352,7 +13352,14 @@ async function showCompletedResearchReport(runId) {
     // that can only fail.
     downloadBtns.querySelectorAll('a').forEach(async (anchor) => {
       try {
-        const probe = await fetch(anchor.getAttribute('href'), { method: 'HEAD', credentials: 'include' });
+        // GET + Range (not HEAD): the report GET already works through this
+        // exact proxy chain, while HEAD gets eaten by some layers. Requesting
+        // one byte keeps the probe cheap; the status is what we need.
+        const probe = await fetch(anchor.getAttribute('href'), {
+          method: 'GET',
+          credentials: 'include',
+          headers: { Range: 'bytes=0-0' },
+        });
         if (!probe.ok) anchor.remove();
       } catch (_error) { /* offline probe: keep the button; the click surfaces it */ }
     });

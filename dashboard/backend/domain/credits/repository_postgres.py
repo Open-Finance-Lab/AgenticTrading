@@ -963,6 +963,72 @@ class PostgresCreditsStore:
                 usage_rows = cur.fetchall()
         return _assemble_commercial_ledger(ids, lifetime_rows, period_rows, usage_rows)
 
+    def list_daily_purchase_and_consumption(
+        self,
+        user_ids: Sequence[int],
+        *,
+        start: datetime,
+        end: datetime,
+    ) -> list[dict[str, int]]:
+        """Postgres twin of the SQLite daily aggregation (%s, to_char)."""
+        ids = _unique_user_ids(user_ids)
+        if not ids:
+            return []
+        placeholders = ", ".join("%s" for _ in ids)
+        params = [*ids, _utc_text(start, "start"), _utc_text(end, "end")]
+        with self._get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"""
+                    SELECT to_char(created_at, 'YYYY-MM-DD') AS day,
+                           COALESCE(SUM(CASE WHEN entry_type = 'purchase'
+                               THEN amount_micro WHEN entry_type = 'refund'
+                               THEN -amount_micro ELSE 0 END), 0) AS purchases_micro,
+                           COALESCE(SUM(CASE WHEN entry_type = 'admin_grant_assign'
+                               THEN amount_micro ELSE 0 END), 0) AS grants_micro
+                    FROM credit_ledger_entries
+                    WHERE user_id IN ({placeholders})
+                      AND created_at >= %s
+                      AND created_at < %s
+                      AND entry_type IN ('purchase', 'refund', 'admin_grant_assign')
+                    GROUP BY day
+                    """,
+                    params,
+                )
+                ledger_rows = cur.fetchall()
+                cur.execute(
+                    f"""
+                    SELECT to_char(created_at, 'YYYY-MM-DD') AS day,
+                           COALESCE(SUM(-amount_micro), 0) AS consumption_micro
+                    FROM credit_llm_usage_entries
+                    WHERE user_id IN ({placeholders})
+                      AND created_at >= %s
+                      AND created_at < %s
+                    GROUP BY day
+                    """,
+                    params,
+                )
+                usage_rows = cur.fetchall()
+
+        days: dict[str, dict[str, int]] = {}
+        def bucket(key: str) -> dict[str, int]:
+            return days.setdefault(key, {"purchases_micro": 0, "grants_micro": 0, "consumption_micro": 0})
+        for row in ledger_rows:
+            entry = bucket(str(row["day"]))
+            entry["purchases_micro"] += int(row["purchases_micro"] or 0)
+            entry["grants_micro"] += int(row["grants_micro"] or 0)
+        for row in usage_rows:
+            bucket(str(row["day"]))["consumption_micro"] += int(row["consumption_micro"] or 0)
+        return [
+            {
+                "day_string": key,
+                "purchases_micro": days[key]["purchases_micro"],
+                "grants_micro": days[key]["grants_micro"],
+                "consumption_micro": days[key]["consumption_micro"],
+            }
+            for key in sorted(days)
+        ]
+
     def list_credit_activity_timestamps(
         self,
         user_ids: Sequence[int],
