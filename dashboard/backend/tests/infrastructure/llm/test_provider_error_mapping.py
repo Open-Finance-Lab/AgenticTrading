@@ -139,14 +139,14 @@ def test_timeout_precedes_quota_classification():
 _WIRE_REQUEST = httpx.Request("POST", "https://api.commonstack.ai/v1/chat/completions")
 
 
-def _raised_from(outer: BaseException, inner: BaseException) -> BaseException:
+def _raised_from(outer: Exception, inner: Exception) -> Exception:
     """``outer`` raised ``from inner``, as both SDKs raise their wrappers."""
     try:
         try:
             raise inner
-        except BaseException as cause:
+        except Exception as cause:
             raise outer from cause
-    except BaseException as raised:
+    except Exception as raised:
         return raised
 
 
@@ -266,6 +266,8 @@ def test_x_should_retry_header_overrides_status():
         ({"retry-after": "7"}, 7.0),
         ({"retry-after": "0.5"}, 0.5),
         ({"retry-after-ms": "1500", "retry-after": "9"}, 1.5),
+        ({"retry-after-ms": "junk", "retry-after": "25"}, 25.0),
+        ({"retry-after-ms": "-5", "retry-after": "25"}, 25.0),
         ({"retry-after": "Wed, 21 Oct 2026 07:28:00 GMT"}, None),
         ({"retry-after": "-1"}, None),
         ({"retry-after": "nan"}, None),

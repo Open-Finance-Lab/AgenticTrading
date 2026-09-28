@@ -13,7 +13,6 @@ from dashboard.backend.domain.credits.repository import CreditsStore
 from dashboard.backend.domain.credits.service import CreditsService
 from dashboard.backend.domain.model_providers.repository import ModelProviderStore
 from dashboard.backend.domain.model_providers.service import ModelProviderService
-import dashboard.backend.infrastructure.llm.execution.adapters.base as adapter_base_module
 from dashboard.backend.infrastructure.llm.execution.adapters.base import (
     AdapterResponse,
     ProviderExecutionError,
@@ -1050,7 +1049,14 @@ def test_read_timeout_is_never_retried_on_same_provider(retry_harness, elapsed, 
 
 @pytest.mark.parametrize(
     ("retry_after", "expected_sleeps", "provider"),
-    [(1.0, [4.0], "commonstack"), (7.0, [7.0], "commonstack"), (31.0, [], "openrouter")],
+    [
+        (1.0, [4.0], "commonstack"),
+        (7.0, [7.0], "commonstack"),
+        # Up to the SDKs' own 60s ceiling: what the SDK used to wait out, we do.
+        (45.0, [45.0], "commonstack"),
+        (60.0, [60.0], "commonstack"),
+        (61.0, [], "openrouter"),
+    ],
 )
 def test_retry_after_is_honoured_up_to_cap(
     retry_harness, retry_after, expected_sleeps, provider
@@ -1298,7 +1304,7 @@ def test_incident_shape_end_to_end(tmp_path, monkeypatch, capsys, fresh_quota_re
         raise httpx.ReadTimeout("generation still running", request=request)
 
     monkeypatch.setattr(
-        adapter_base_module,
+        "dashboard.backend.infrastructure.llm.execution.adapters.base."
         "build_pinned_transport",
         lambda *_args, **_kwargs: httpx.MockTransport(stall),
     )
@@ -1337,3 +1343,27 @@ def test_incident_shape_end_to_end(tmp_path, monkeypatch, capsys, fresh_quota_re
     assert " read_timeout_s=180 next=openrouter" in line
     assert "ERROR: llm.platform_quota_exhausted provider=openrouter fallback=none" in out
     assert "cs-fake-incident-abcd" not in out
+
+
+def test_byok_waits_out_a_long_retry_after_rather_than_aborting(
+    retry_harness, monkeypatch
+):
+    """BYOK has no fallback: "fail over instead of waiting" would abort the run."""
+
+    h = retry_harness([])
+    refused = _rejected(429, retry_after=45.0)
+    refused.provider_elapsed_seconds = 0.5
+    outcomes = [refused, "ok"]
+
+    def execute_once(request, **_kwargs):
+        outcome = outcomes.pop(0)
+        if isinstance(outcome, Exception):
+            raise outcome
+        return outcome
+
+    monkeypatch.setattr(h.service, "_execute_once", execute_once)
+    monkeypatch.setattr(h.service, "_emit_model_usage", lambda *_args: None)
+    request = _request("byok-429").model_copy(update={"billing_mode": BillingMode.BYOK})
+
+    assert h.service.execute(request) == "ok"
+    assert h.sleeps == [45.0]

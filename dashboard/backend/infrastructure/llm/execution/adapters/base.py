@@ -371,8 +371,9 @@ def _retry_after_seconds(headers: Any) -> float | None:
         try:
             value = float(raw) / scale
         except ValueError:
-            return None
-        return value if math.isfinite(value) and value >= 0 else None
+            continue
+        if math.isfinite(value) and value >= 0:
+            return value
     return None
 
 

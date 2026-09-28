@@ -71,7 +71,11 @@ _PLATFORM_FAILOVER_CATEGORIES = frozenset(
 #     it came back within FAST_FAILURE_SECONDS. CommonStack's 2026-09-27 500s
 #     arrived ~24s in, after the generation, and three SDK replays of them
 #     bought nothing but 73s; a gateway that refuses outright answers in <2s,
-#     and the fastest DeepSeek completion seen is ~24s.
+#     and the fastest DeepSeek completion seen is ~24s. The gate is calibrated
+#     on DeepSeek: a model that can finish in under 15s (Haiku, GPT-5.5) can
+#     have a fast post-generation 5xx or cut-off body repeated. That is still
+#     fewer replays than the SDK made unconditionally, each on its own
+#     reservation, and fail_closed makes a run abort the costlier outcome.
 # A read timeout is never repeated here: failover to the next candidate is the
 # only second chance, and it is a recorded, reserved one. Every attempt --
 # repeat or failover -- takes the next ``attempt_index`` of its call, because
@@ -80,8 +84,13 @@ _PLATFORM_FAILOVER_CATEGORIES = frozenset(
 MAX_SAME_PROVIDER_RETRIES = 2
 SAME_PROVIDER_BACKOFF_SECONDS = (4.0, 12.0)
 FAST_FAILURE_SECONDS = 15.0
-# A stated Retry-After above this fails over instead of waiting.
-RETRY_AFTER_CAP_SECONDS = 30.0
+# A stated Retry-After is waited out up to the SDKs' own ceiling (openai and
+# anthropic ``_calculate_retry_timeout`` honour <= 60s), so no refusal the SDK
+# used to wait out now fails the call -- which matters because "fail over
+# instead" means "abort the run" on BYOK and whenever the next lane is dead
+# (OpenRouter, #523). Above it the provider is saying "not this minute", and
+# repeating early would only be refused again.
+RETRY_AFTER_CAP_SECONDS = 60.0
 # Failures of this one call at this one provider, as opposed to lane state
 # (quota, credentials) that is equally true of every call.
 _CALL_SPECIFIC_FAILURES = frozenset(
@@ -101,8 +110,10 @@ def _report_provider_attempt_failed(
 ) -> None:
     """Print one line per failed attempt; the parent relays ``ERROR: llm.`` lines live.
 
-    Not deduplicated: each line is a distinct, possibly billed attempt, and
-    the count is bounded by the retry policy above. Every field is a
+    Not deduplicated: each line is a distinct failed attempt, and the count is
+    bounded by the retry policy above. ``elapsed_s=-`` marks one that failed
+    before reaching the provider (provider/adapter resolution): it holds an
+    ``attempt_index`` but no reservation row. Every field is a
     validated identifier, an enum value or a number -- never exception text,
     and never ``=``/``:`` inside a value, so ``_redact_credentials`` in the
     parent has nothing to rewrite.
@@ -564,11 +575,11 @@ class LLMExecutionService:
                 ):
                     first_call_specific = exc
         assert last_error is not None
-        # The first timeout/unavailable in attempt order outranks later lane
-        # state: a quota-dead fallback must not relabel the primary's timeout
-        # as "insufficient balance" (09-28: CommonStack timed out, OpenRouter
-        # answered 402, and the run reported quota). The quota line above
-        # still names the drained lane.
+        # The first candidate whose final error was a timeout/unavailable
+        # outranks later lane state: a quota-dead fallback must not relabel
+        # the primary's timeout as "insufficient balance" (09-28: CommonStack
+        # timed out, OpenRouter answered 402, and the run reported quota). The
+        # quota line above still names the drained lane.
         raise first_call_specific or last_error
 
     def _resolve_provider(self, provider_id: str) -> ProviderRecord:

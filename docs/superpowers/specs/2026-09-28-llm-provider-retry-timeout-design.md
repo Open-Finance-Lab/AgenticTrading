@@ -57,8 +57,10 @@ that might generate never shares a row with another attempt.
 | RESPONSE_INVALID, USAGE_UNAVAILABLE, BILLING_FAILED, ACCOUNT_RESTRICTED | never | not provider availability |
 
 - **Limits.** At most 2 repeats per candidate. Backoff is 4s then 12s. A numeric
-  `Retry-After` / `retry-after-ms` is honoured up to 30s; above that the call
-  fails over instead of waiting.
+  `Retry-After` / `retry-after-ms` is honoured up to 60s, the SDKs' own
+  ceiling, so nothing the SDK used to wait out now fails the call. "Fail over
+  instead" would mean "abort the run" on BYOK and whenever the next lane is
+  dead. Above 60s the call fails over, or fails.
 - **Counter.** Every attempt, repeat or failover, takes the next `attempt_index`
   of its call. The reservation key is `(user, run, call, attempt)`, and reusing
   an index returns the already-released row, which raises BILLING_FAILED.
@@ -66,8 +68,15 @@ that might generate never shares a row with another attempt.
 - **Hints change no categories.** An error built without a hint means "never
   repeat". That covers every scripted test adapter and Gemini's status branch,
   so their behaviour is unchanged.
-- **Error raised.** When every candidate fails, the error raised is the first
-  timeout or unavailable in attempt order.
+- **Error raised.** When every candidate fails, the error raised is that of the
+  first candidate whose *final* error was a timeout or unavailable. A
+  candidate's retried intermediate errors don't count: a later attempt proved
+  the lane state.
+- **Known limit of the 15s gate.** It is calibrated on DeepSeek, whose fastest
+  completion is ~24s. A model that can finish in under 15s (Haiku, GPT-5.5) can
+  have a fast post-generation 5xx or cut-off body repeated. That is still
+  strictly fewer replays than the SDK made, each on its own reservation, and
+  under `fail_closed` an aborted run costs more.
 
 ## 4. Constants
 
@@ -79,7 +88,7 @@ that might generate never shares a row with another attempt.
 | `MAX_SAME_PROVIDER_RETRIES` | 2 | Keeps the SDK's old attempt count, but only for the cheap class. |
 | `FAST_FAILURE_SECONDS` | 15 | Gateway refusals arrive in under 2s. The fastest DeepSeek completion seen is ~24s. |
 | `SAME_PROVIDER_BACKOFF_SECONDS` | (4, 12) | Paid only on failure paths; 16s is ~0.5% of the 3000s budget. |
-| `RETRY_AFTER_CAP_SECONDS` | 30 | Beyond this, failover is the better use of the time. |
+| `RETRY_AFTER_CAP_SECONDS` | 60 | The SDKs' own ceiling. Above it the provider means "not this minute". |
 
 **A flat deadline, not one derived from `max_tokens`.** The alternative was
 `clamp(30 + max_tokens / 20, 60, 300)`. It would stretch a hung 4096-token

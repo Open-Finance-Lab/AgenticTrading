@@ -16,7 +16,6 @@ import httpx
 import openai
 import pytest
 from anthropic import _base_client as anthropic_base_client
-from openai import _base_client as openai_base_client
 
 import dashboard.backend.infrastructure.llm.execution.adapters.anthropic as anthropic_module
 import dashboard.backend.infrastructure.llm.execution.adapters.base as base_module
@@ -27,9 +26,6 @@ from dashboard.backend.domain.model_providers.models import (
     ProviderRecord,
 )
 from dashboard.backend.infrastructure.llm.execution import service as service_module
-from dashboard.backend.infrastructure.llm.execution.adapters.base import (
-    ProviderExecutionError,
-)
 from dashboard.backend.infrastructure.llm.execution.errors import (
     ExecutionErrorCategory,
     RetryHint,
@@ -150,7 +146,7 @@ def wire(monkeypatch):
     )
     # Both SDKs back off with ``time.sleep``; recording it makes any replay
     # visible and keeps a regression from sleeping for real.
-    for sdk_client in (openai_base_client, anthropic_base_client):
+    for sdk_client in (openai._base_client, anthropic_base_client):
         monkeypatch.setattr(sdk_client.time, "sleep", state.sdk_sleeps.append)
     return state
 
@@ -164,7 +160,7 @@ def test_real_openai_sdk_makes_one_request_on_read_timeout(wire, route):
     adapter_class, provider, model_id = _OPENAI_ROUTES[route]
     wire.respond = _stall
 
-    with pytest.raises(ProviderExecutionError) as exc_info:
+    with pytest.raises(base_module.ProviderExecutionError) as exc_info:
         adapter_class().complete(
             _request(route, model_id), _credential(route), provider
         )
@@ -184,7 +180,7 @@ def test_real_openai_sdk_makes_one_request_on_read_timeout(wire, route):
 def test_real_anthropic_sdk_makes_one_request_on_read_timeout(wire):
     wire.respond = _stall
 
-    with pytest.raises(ProviderExecutionError) as exc_info:
+    with pytest.raises(base_module.ProviderExecutionError) as exc_info:
         anthropic_module.AnthropicExecutionAdapter().complete(
             _request("anthropic", _ANTHROPIC_MODEL),
             _credential("anthropic"),
@@ -237,7 +233,7 @@ def test_read_timeout_setting_reaches_the_wire(wire, monkeypatch):
     wire.respond = _stall
     adapter_class, provider, model_id = _OPENAI_ROUTES["commonstack"]
 
-    with pytest.raises(ProviderExecutionError):
+    with pytest.raises(base_module.ProviderExecutionError):
         adapter_class().complete(
             _request("commonstack", model_id), _credential("commonstack"), provider
         )
@@ -254,7 +250,7 @@ def test_real_sdk_status_error_is_single_attempt_with_hints(wire):
     )
     adapter_class, provider, model_id = _OPENAI_ROUTES["commonstack"]
 
-    with pytest.raises(ProviderExecutionError) as exc_info:
+    with pytest.raises(base_module.ProviderExecutionError) as exc_info:
         adapter_class().complete(
             _request("commonstack", model_id), _credential("commonstack"), provider
         )
@@ -357,7 +353,7 @@ def test_every_sdk_adapter_disables_sdk_retries(
 
     monkeypatch.setattr(module, "build_safe_http_client", build)
 
-    with pytest.raises(ProviderExecutionError):
+    with pytest.raises(base_module.ProviderExecutionError):
         adapter_factory(client_factory=client_factory).complete(
             _request(provider.provider_id, model_id),
             _credential(provider.provider_id),
@@ -402,7 +398,7 @@ def test_gemini_gets_provider_timeout_and_keeps_status_branch(wire):
         client.close()
 
     wire.respond = _stall
-    with pytest.raises(ProviderExecutionError) as timed_out:
+    with pytest.raises(base_module.ProviderExecutionError) as timed_out:
         gemini_module.GeminiExecutionAdapter().complete(
             _request("gemini", _GEMINI_MODEL), _credential("gemini"), _GEMINI_PROVIDER
         )
@@ -415,7 +411,7 @@ def test_gemini_gets_provider_timeout_and_keeps_status_branch(wire):
     # The status branch raises its own error and carries no hint, so a Gemini
     # 5xx is never repeated -- unchanged from before the policy.
     wire.respond = lambda request: httpx.Response(503, json={}, request=request)
-    with pytest.raises(ProviderExecutionError) as unavailable:
+    with pytest.raises(base_module.ProviderExecutionError) as unavailable:
         gemini_module.GeminiExecutionAdapter().complete(
             _request("gemini", _GEMINI_MODEL), _credential("gemini"), _GEMINI_PROVIDER
         )
@@ -454,7 +450,7 @@ def test_suite_runs_with_default_read_timeout():
 def test_attempt_failure_line_is_relay_safe(capsys):
     from dashboard.backend.api.routers import backtests
 
-    error = ProviderExecutionError(
+    error = base_module.ProviderExecutionError(
         ExecutionErrorCategory.PROVIDER_UNAVAILABLE,
         retry_hint=RetryHint.REJECTED,
         provider_status_code=503,
