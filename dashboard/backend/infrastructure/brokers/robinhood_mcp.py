@@ -33,6 +33,11 @@ def _tool_text(result: Any) -> Any:
     if not texts:
         return None
     joined = "\n".join(texts)
+    # A tool error must reach the caller as an error. Returned as bare text it
+    # was indistinguishable from a successful plain-text reply, so a refused
+    # pre-trade review read as "not blocked" and the order was still placed.
+    if getattr(result, "isError", False) is True:
+        return {"error": joined}
     try:
         return json.loads(joined)
     except json.JSONDecodeError:
