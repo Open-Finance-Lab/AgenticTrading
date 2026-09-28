@@ -3691,7 +3691,13 @@ def get_backtest_status(
     )
 
     # Tests and legacy callers still mutate ``backtest_status`` directly without
-    # registering a slot — honour that mirror when no slot resolves.
+    # registering a slot — honour that mirror when no slot resolves, but only
+    # for the session it mirrors. ``_mirror_slot_to_legacy`` keeps it live on
+    # every acquire, so answering any other caller from it handed a stranger
+    # the running visitor's session_id (often their browser ownership id) and
+    # live_run_id — enough to take over their guest agents or cancel the run.
+    if slot is None and backtest_session_id is not None and backtest_session_id != session_id:
+        slot = {"running": False, "runs_count": 0}
     if slot is None:
         slot = {
             "running": bool(backtest_status.get("running")),
