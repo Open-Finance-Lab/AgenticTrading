@@ -89,3 +89,22 @@ def test_two_dataframes_computed_independently():
     out_a = TechnicalIndicators.calculate_indicators(_df(60, seed=4))
     out_b = TechnicalIndicators.calculate_indicators(_df(60, seed=5))
     assert out_a["sma20"].iloc[-1] != out_b["sma20"].iloc[-1]
+
+
+@pytest.mark.parametrize("n", [10, 19, 30, 49, 60])
+def test_indicators_never_see_future_closes(n):
+    """Bar t's indicators must not move when closes after t change.
+
+    Short windows used to fall back to whole-window mean/max/min, so every
+    decision on a < 50-bar run saw an sma50 averaged over future prices.
+    """
+    df = _df(n)
+    cut = n // 2
+    shocked = df.copy()
+    shocked.iloc[cut + 1 :, 0] *= 3.0
+    base = TechnicalIndicators.calculate_indicators(df)
+    moved = TechnicalIndicators.calculate_indicators(shocked)
+    for col in ("bb_upper", "bb_lower", "sma20", "sma50", "rsi_14", "macd", "macd_signal"):
+        pd.testing.assert_series_equal(
+            base[col].iloc[: cut + 1], moved[col].iloc[: cut + 1], check_names=False
+        )

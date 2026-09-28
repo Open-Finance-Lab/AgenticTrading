@@ -92,6 +92,10 @@ class TechnicalIndicators:
                 df["macd_signal"] = 0.0
 
             # Bollinger Bands (20-period required)
+            # Every fallback below is an *expanding* statistic, never a
+            # whole-window one: bar t may only see closes up to t. A full-window
+            # mean/max/min on a short window (< 50 bars is the onboarding
+            # default) handed each decision an average of future prices.
             if len(df) >= 20:
                 bbands = ta.bbands(df["close"], length=20, std=2)
                 if bbands is not None and isinstance(bbands, pd.DataFrame):
@@ -100,36 +104,36 @@ class TechnicalIndicators:
                     if bbu_cols:
                         df["bb_upper"] = bbands[bbu_cols[0]]
                     else:
-                        df["bb_upper"] = df["close"].max()
+                        df["bb_upper"] = df["close"].expanding().max()
                     if bbl_cols:
                         df["bb_lower"] = bbands[bbl_cols[0]]
                     else:
-                        df["bb_lower"] = df["close"].min()
+                        df["bb_lower"] = df["close"].expanding().min()
                 else:
-                    df["bb_upper"] = df["close"].max()
-                    df["bb_lower"] = df["close"].min()
+                    df["bb_upper"] = df["close"].expanding().max()
+                    df["bb_lower"] = df["close"].expanding().min()
             else:
-                df["bb_upper"] = df["close"].max()
-                df["bb_lower"] = df["close"].min()
+                df["bb_upper"] = df["close"].expanding().max()
+                df["bb_lower"] = df["close"].expanding().min()
 
             # SMAs
             if len(df) >= 20:
                 sma20 = ta.sma(df["close"], length=20)
-                df["sma20"] = sma20 if sma20 is not None else df["close"].mean()
+                df["sma20"] = sma20 if sma20 is not None else df["close"].expanding().mean()
             else:
-                df["sma20"] = df["close"].mean()
+                df["sma20"] = df["close"].expanding().mean()
 
             if len(df) >= 50:
                 sma50 = ta.sma(df["close"], length=50)
-                df["sma50"] = sma50 if sma50 is not None else df["close"].mean()
+                df["sma50"] = sma50 if sma50 is not None else df["close"].expanding().mean()
             else:
-                df["sma50"] = df["close"].mean()
+                df["sma50"] = df["close"].expanding().mean()
 
         except Exception as e:
             print(f"Warning: Error calculating indicators: {e}")
             # Fill in defaults
             for col in ["rsi_14", "macd", "macd_signal", "bb_upper", "bb_lower", "sma20", "sma50"]:
                 if col not in df.columns:
-                    df[col] = df["close"].mean() if col != "rsi_14" else 50.0
+                    df[col] = df["close"].expanding().mean() if col != "rsi_14" else 50.0
 
         return df
