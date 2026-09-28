@@ -250,6 +250,18 @@ class BalanceTotals(BaseModel):
     total_available_micro: int = Field(ge=0)
 
 
+def _parse_day(value: str) -> date:
+    return date.fromisoformat(str(value)[:10])
+
+
+class DailyMicroTotals(BaseModel):
+    """One UTC day of ledger movement for the /admin Credits & revenue charts."""
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    day: date
+    amount_micro: int
+
+
 class CommercialAnalyticsResponse(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -258,6 +270,9 @@ class CommercialAnalyticsResponse(BaseModel):
     lifetime_net_purchased_micro: int = Field(ge=0)
     selected_period: CommercialPeriodSummary
     current_balances: BalanceTotals
+    # §9 chart series; empty when the range has no movement.
+    purchased_by_day: list[DailyMicroTotals]
+    consumed_by_day: list[DailyMicroTotals]
     availability: SectionAvailability
 
 
@@ -540,6 +555,24 @@ class ValueAnalyticsQueryService:
                 )
             )
         return result
+
+    def _daily_ledger(
+        self,
+        users: Sequence[dict[str, Any]],
+        *,
+        start: date,
+        end: date,
+    ) -> list[dict[str, int]]:
+        """Per-day ledger movement for the Credits & revenue charts, read
+        through the credits domain (same SS6.14 seam as _commercial)."""
+        base = getattr(self.value_store, "credits_base", None)
+        if base is None or not hasattr(base, "list_daily_purchase_and_consumption"):
+            return []
+        return base.list_daily_purchase_and_consumption(
+            self._ids(users),
+            start=_day_start(start),
+            end=_day_start(end),
+        )
 
     def _daily(
         self,
@@ -994,6 +1027,7 @@ class ValueAnalyticsQueryService:
             now=current_time,
         )
         cost_available = overview.availability["growth"].available
+        daily = self._daily_ledger(users, start=start, end=end)
         return CommercialAnalyticsResponse(
             as_of=current_time,
             tier_counts={
@@ -1024,6 +1058,19 @@ class ValueAnalyticsQueryService:
                     fact.total_available_micro for fact in facts.values()
                 ),
             ),
+            purchased_by_day=[
+                DailyMicroTotals(day=_parse_day(row["day_string"]), amount_micro=row["purchases_micro"])
+                for row in daily
+                if row["purchases_micro"] > 0
+            ],
+            consumed_by_day=[
+                DailyMicroTotals(
+                    day=_parse_day(row["day_string"]),
+                    amount_micro=row["consumption_micro"] + row["grants_micro"],
+                )
+                for row in daily
+                if row["consumption_micro"] + row["grants_micro"] > 0
+            ],
             availability=SectionAvailability(
                 available=True,
                 status="ready" if cost_available else "partial",

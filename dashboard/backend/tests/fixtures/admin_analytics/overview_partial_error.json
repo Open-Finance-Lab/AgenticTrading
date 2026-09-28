@@ -24,7 +24,10 @@
     "active": 37
   },
   "top_failure_categories": [
-    {"error_category": "credential_invalid", "affected_users": 4}
+    {
+      "error_category": "credential_invalid",
+      "affected_users": 4
+    }
   ],
   "users_needing_attention": [],
   "last_updated": "2026-08-26T12:34:56Z",
@@ -37,10 +40,26 @@
     "include_internal": false
   },
   "availability": {
-    "snapshot": {"available": true, "error_code": null},
-    "growth": {"available": false, "error_code": "temporarily_unavailable"},
-    "funnel": {"available": true, "error_code": null},
-    "friction": {"available": true, "error_code": null},
-    "attention": {"available": true, "error_code": null}
-  }
+    "snapshot": {
+      "available": true,
+      "error_code": null
+    },
+    "growth": {
+      "available": false,
+      "error_code": "temporarily_unavailable"
+    },
+    "funnel": {
+      "available": true,
+      "error_code": null
+    },
+    "friction": {
+      "available": true,
+      "error_code": null
+    },
+    "attention": {
+      "available": true,
+      "error_code": null
+    }
+  },
+  "billing_lane_mix": []
 }
