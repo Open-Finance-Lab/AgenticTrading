@@ -13271,7 +13271,15 @@ async function openResearchWorkbench(templateId) {
     + '<svg class="ui-icon research-fact-icon" aria-hidden="true"><use href="#icon-file-text"></use></svg> '
     + `Output: ${escapeHtml((manifest.output_formats || []).join(' / '))}`;
 
-  fieldsEl.innerHTML = (manifest.settings_schema?.fields || []).map((field) => {
+  // Only required fields show by default; the optional mandate knobs live
+  // behind one disclosure so a run is a two-field form until the user asks
+  // for more. (The dd agent has only 3 fields — 2 required — and typically
+  // nothing to fold; the toggle is hidden when there is nothing to fold.)
+  const allFields = manifest.settings_schema?.fields || [];
+  const primary = allFields.filter((field) => field.required);
+  const optional = allFields.filter((field) => !field.required);
+
+  const renderField = (field) => {
     const value = field.default != null ? String(field.default) : '';
     const requiredMark = field.required ? ' <span class="research-required">*</span>' : '';
     let control;
@@ -13283,7 +13291,12 @@ async function openResearchWorkbench(templateId) {
       control = `<input id="rf_${escapeHtml(field.id)}" type="${field.type === 'date' ? 'date' : field.type === 'number' ? 'number' : 'text'}" value="${escapeHtml(value)}" placeholder="${escapeHtml(field.placeholder || '')}">`;
     }
     return `<label class="research-field"><span>${escapeHtml(field.label || field.id)}${requiredMark}</span>${control}<small class="research-field-desc">${escapeHtml(field.description || '')}</small></label>`;
-  }).join('');
+  };
+
+  fieldsEl.innerHTML = primary.map(renderField).join('')
+    + (optional.length
+        ? `<details class="research-advanced"><summary>Advanced options (${optional.length})</summary>${optional.map(renderField).join('')}</details>`
+        : '');
 
   const form = document.getElementById('researchRunForm');
   if (!form.dataset.bound) {
