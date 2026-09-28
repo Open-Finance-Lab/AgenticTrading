@@ -188,3 +188,30 @@ def test_ifind_profile_describes_the_fixed_a_share_market():
     assert profile.benchmark == "equal_weight_buyhold"
     assert profile.llm_enabled is True
     assert profile.index_baseline_enabled is False
+
+
+@pytest.mark.parametrize(
+    ("end_date", "expected"),
+    [
+        ("2026-09-11", "2026-09-12"),
+        ("2026-04-30", "2026-05-01"),
+        ("2026-12-31", "2027-01-01"),
+        ("not-a-date", "not-a-date"),
+    ],
+)
+def test_exclusive_end_covers_the_inclusive_last_day(end_date, expected):
+    from dashboard.backend.infrastructure.market_data.provider import exclusive_end
+
+    assert exclusive_end(end_date) == expected
+
+
+def test_engine_hands_providers_the_day_after_its_inclusive_end():
+    """A picked end date is a day to trade. Passed through raw, every
+    half-open provider dropped it, and a one-day run (`start == end`, which
+    the route accepts) had no bars at all."""
+    from types import SimpleNamespace
+
+    from dashboard.backend.domain.backtesting.engine import HourlyBacktester
+
+    getter = HourlyBacktester.provider_end_date.fget
+    assert getter(SimpleNamespace(end_date="2026-09-11")) == "2026-09-12"

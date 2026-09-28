@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib.util
 import os
+from datetime import date, timedelta
 from typing import Protocol
 
 import pandas as pd
@@ -18,6 +19,19 @@ SUPPORTED_DATA_SOURCES = (ALPACA, VNPY_SIMULATION, IFIND_ASHARE)
 _TRUTHY = {"1", "true", "yes", "on"}
 
 
+def exclusive_end(end_date: str) -> str:
+    """The provider ``end`` that covers the inclusive ``end_date``.
+
+    Every provider reads ``end`` as half-open, while a backtest's ``end_date``
+    is the last day to trade. Unparseable input passes through unchanged so
+    the provider reports it, as it always has.
+    """
+    try:
+        return (date.fromisoformat(end_date) + timedelta(days=1)).isoformat()
+    except (TypeError, ValueError):
+        return end_date
+
+
 class MarketDataProvider(Protocol):
     """Normalized market-data input consumed by backtests."""
 
@@ -27,7 +41,7 @@ class MarketDataProvider(Protocol):
         start: str,
         end: str,
     ) -> dict[str, pd.DataFrame]:
-        """Return symbol-keyed OHLCV frames for the requested date window."""
+        """Return symbol-keyed OHLCV frames for the half-open window ``[start, end)``."""
 
 
 class UnsupportedMarketDataSource(ValueError):

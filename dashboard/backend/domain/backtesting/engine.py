@@ -113,6 +113,7 @@ from dashboard.backend.domain.backtesting.market_rules import (
 from dashboard.backend.infrastructure.market_data.provider import (
     ALPACA,
     create_market_data_provider,
+    exclusive_end,
 )
 from dashboard.backend.infrastructure.market_data.frequency import (
     FrequencyConfigError,
@@ -440,6 +441,22 @@ class HourlyBacktester:
                 print(f"✅ LLM initialized (model={self.model})")
 
         self.data_loader = self._create_market_data_provider()
+
+    @property
+    def provider_end_date(self) -> str:
+        """The exclusive upper bound handed to the market-data providers.
+
+        ``end_date`` is inclusive everywhere a person sets or reads it: the
+        route accepts ``start == end`` as a one-day run, ``_estimated_decision_days``
+        sizes the timeout over ``end - start + 1`` days, the baselines keep
+        timestamps ``<= end``, and ``leaderboard/baselines.fetch_hourly_bars``
+        bumps its end by a day for the same reason. Every provider reads its
+        ``end`` as half-open (Alpaca's API, vnpy's ``current < end``, iFinD's
+        ``end - 1`` last day), so passing ``end_date`` through unchanged
+        silently dropped the last selected day, and a one-day run got no bars at all.
+        ``end_date`` itself stays inclusive: it is what the run records.
+        """
+        return exclusive_end(self.end_date)
 
     def _create_market_data_provider(self):
         """Create the selected provider without breaking legacy test doubles."""
@@ -1125,7 +1142,7 @@ class HourlyBacktester:
         )
         fetch_started_at = steady_clock()
         self.source_data = self.data_loader.fetch_bars(
-            symbols, self.start_date, self.end_date
+            symbols, self.start_date, self.provider_end_date
         )
         # Everything after this point in `loading_bars` -- the frequency
         # verification and, in intraday mode, `aggregate_bars_by_symbol` -- is
@@ -1229,7 +1246,7 @@ class HourlyBacktester:
             self.market_rule_calendar = self.data_loader.fetch_market_rules(
                 self.symbols,
                 self.start_date,
-                self.end_date,
+                self.provider_end_date,
                 bars_by_symbol=self.all_data,
             )
         except (CorporateActionGapError, IFindClientError, MarketRuleDataError, ValueError) as exc:
@@ -1264,7 +1281,7 @@ class HourlyBacktester:
             rates = self.data_loader.fetch_usd_cny(
                 self.symbols,
                 self.start_date,
-                self.end_date,
+                self.provider_end_date,
             )
             context = CurrencyContext(
                 native_currency=self.profile.native_currency,
@@ -1328,7 +1345,7 @@ class HourlyBacktester:
         # same two strings by the time any data exists to validate.
         floor = minimum_bars_for_window(
             date.fromisoformat(self.start_date),
-            date.fromisoformat(self.end_date),
+            date.fromisoformat(self.provider_end_date),
         )
         short = {
             symbol: len(self.all_data[symbol])
@@ -2376,7 +2393,7 @@ class HourlyBacktester:
             bars = self.all_data
         else:
             print("   Fetching full DJIA bars for index baseline…")
-            bars = self.data_loader.fetch_bars(DJIA_30, self.start_date, self.end_date)
+            bars = self.data_loader.fetch_bars(DJIA_30, self.start_date, self.provider_end_date)
             if not bars:
                 print("   ⚠️  No DJIA bars available; skipping index baseline")
                 return None, []

@@ -9,6 +9,7 @@ import pytest
 
 from dashboard.backend.infrastructure.llm.validator import DJIA_30
 from dashboard.backend.infrastructure.market_data import bar_cache, bar_cache_warm
+from dashboard.backend.infrastructure.market_data.provider import exclusive_end
 from dashboard.backend.paths import BACKEND_DIR, CONFIG_DIR, REPO_ROOT
 
 
@@ -125,16 +126,18 @@ def test_the_first_window_is_the_onboarding_modal():
     settings = _defaults()["defaultSettings"]
     symbols, start, end = bar_cache_warm.warm_windows()[0]
     assert symbols == [s.upper() for s in settings["assetList"]]
-    assert (start, end) == (settings["startDate"], settings["endDate"])
+    # The engine's provider bound, not the inclusive date: the cache is keyed
+    # on what a run requests.
+    assert (start, end) == (settings["startDate"], exclusive_end(settings["endDate"]))
 
 
 def test_the_second_window_is_the_index_baseline_over_the_same_dates():
     """Every default run also fetches the full Dow for the index baseline,
-    over the SAME window (engine.py passes start_date/end_date verbatim)."""
+    over the SAME window (engine.py passes start_date/provider_end_date)."""
     settings = _defaults()["defaultSettings"]
     symbols, start, end = bar_cache_warm.warm_windows()[1]
     assert symbols == list(DJIA_30)
-    assert (start, end) == (settings["startDate"], settings["endDate"])
+    assert (start, end) == (settings["startDate"], exclusive_end(settings["endDate"]))
 
 
 def test_the_third_window_is_the_bare_post_default():
@@ -142,7 +145,7 @@ def test_the_third_window_is_the_bare_post_default():
     assert symbols == list(DJIA_30)
     assert (start, end) == (
         bar_cache_warm.ROUTE_DEFAULT_START,
-        bar_cache_warm.ROUTE_DEFAULT_END,
+        exclusive_end(bar_cache_warm.ROUTE_DEFAULT_END),
     )
 
 
