@@ -453,6 +453,10 @@ def test_ifind_engine_uses_profile_symbols_in_explicit_rule_mode(monkeypatch):
         "native_currency": "CNY",
         "reporting_currency": "USD",
         "lot_size": 100,
+        # The run's window, as fetched: its end date is a day traded.
+        "end_date_inclusive": True,
+        "provider_end_date": PROVIDER_END,
+        "open_session_excluded": False,
         "fx_pair": "USD/CNY",
         "fx_source": "ifind_history_currency_conversion",
         "fx_policy": "daily_implied_median_forward_fill",
@@ -536,6 +540,10 @@ def test_ifind_engine_resolves_csi300_sample20_and_records_provenance(
         "native_currency": "CNY",
         "reporting_currency": "USD",
         "lot_size": 100,
+        # The run's window, as fetched: its end date is a day traded.
+        "end_date_inclusive": True,
+        "provider_end_date": PROVIDER_END,
+        "open_session_excluded": False,
         "fx_pair": "USD/CNY",
         "fx_source": "ifind_history_currency_conversion",
         "fx_policy": "daily_implied_median_forward_fill",

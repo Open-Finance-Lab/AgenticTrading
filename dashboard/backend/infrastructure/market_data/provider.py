@@ -4,14 +4,16 @@ from __future__ import annotations
 
 import importlib.util
 import os
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from typing import Protocol
 
 import pandas as pd
+import pytz
 
 from .alpaca_bars import AlpacaDataLoader
 from .frequency import normalize_bar_timeframe
 from .profiles import ALPACA, IFIND_ASHARE, VNPY_SIMULATION
+from .sessions import timezone_for_market
 
 
 SUPPORTED_DATA_SOURCES = (ALPACA, VNPY_SIMULATION, IFIND_ASHARE)
@@ -23,13 +25,67 @@ def exclusive_end(end_date: str) -> str:
     """The provider ``end`` that covers the inclusive ``end_date``.
 
     Every provider reads ``end`` as half-open, while a backtest's ``end_date``
-    is the last day to trade. Unparseable input passes through unchanged so
-    the provider reports it, as it always has.
+    is the last day to trade.
+
+    Parsed with the same ``strptime`` the route and the engine validate with,
+    so an unpadded ``2026-9-11`` they accept is bumped here too, and returned
+    zero-padded. Anything that does not parse RAISES: passing it through
+    unchanged let the provider read it as the exclusive bound again, which
+    silently dropped the last day -- the bug this function exists to fix.
     """
+    return (parse_ymd(end_date) + timedelta(days=1)).isoformat()
+
+
+def parse_ymd(value: object) -> date:
+    """A ``YYYY-MM-DD`` date, parsed as leniently as the route parses it."""
     try:
-        return (date.fromisoformat(end_date) + timedelta(days=1)).isoformat()
-    except (TypeError, ValueError):
-        return end_date
+        return datetime.strptime(str(value), "%Y-%m-%d").date()
+    except ValueError as exc:
+        raise ValueError(f"expected a YYYY-MM-DD date, got {value!r}") from exc
+
+
+def market_today(market: object = None) -> date:
+    """Today's date on ``market``'s own clock."""
+    return datetime.now(pytz.timezone(timezone_for_market(market))).date()
+
+
+def settled_exclusive_end(
+    end_date: str,
+    *,
+    market: object = None,
+    today: date | None = None,
+) -> str:
+    """``exclusive_end``, never past the start of the market's current day.
+
+    A backtest over a window that reaches today would otherwise trade today's
+    session while it is still forming: no provider is asked for bars past
+    their close (Alpaca returns the hour whose OPEN is before ``end`` with
+    whatever volume it has so far, even under the SIP delay clamp), so the
+    last bars' OHLCV are partial and the same labelled window re-run an hour
+    later draws a different curve. Before inclusive ends, today was excluded
+    by accident; this keeps it excluded on purpose.
+
+    Not used by ``leaderboard/baselines.fetch_hourly_bars``: the rolling daily
+    board deliberately reads today up to the SIP clamp.
+    """
+    bound = exclusive_end(end_date)
+    ceiling = (today or market_today(market)).isoformat()
+    return min(bound, ceiling)
+
+
+def window_provenance(end_date: str, provider_end: str) -> dict[str, object]:
+    """What a run's recorded window actually covered, for ``agent_runs.metadata``.
+
+    Rows written before inclusive ends stopped a day short of the same
+    ``end_date`` label; ``end_date_inclusive`` is what tells the two apart
+    after the fact. ``open_session_excluded`` marks a window that reached a
+    session still in progress, whose last day was therefore not traded.
+    """
+    return {
+        "end_date_inclusive": True,
+        "provider_end_date": provider_end,
+        "open_session_excluded": provider_end < exclusive_end(end_date),
+    }
 
 
 class MarketDataProvider(Protocol):

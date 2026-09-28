@@ -55,6 +55,9 @@ from dashboard.backend.infrastructure.market_data.profiles import (
     ALPACA,
     get_market_profile,
 )
+from dashboard.backend.infrastructure.market_data.provider import (
+    window_provenance,
+)
 
 from dashboard.backend.domain.backtesting import (
     baseline_worker,
@@ -309,6 +312,9 @@ class ExternalBacktestSession:
         self.data_quality: Dict[str, Any] = {}
         self.frequency_contract: Optional[Dict[str, str]] = None
         self.market_data_provenance: Dict[str, Any] = {}
+        # The exclusive bound the adopted dataset was fetched with; see
+        # `market_data_store._dataset_key`. None until a dataset is adopted.
+        self.provider_end: Optional[str] = None
         self.equity_metadata: Dict[str, Any] = {}
         self._valuation_cursor = 0
 
@@ -385,6 +391,7 @@ class ExternalBacktestSession:
             self.decision_timeframe
         )
         self.market_data_provenance = feed_provenance(self.source_data) or {}
+        self.provider_end = getattr(dataset, "provider_end", None)
         if self.intraday_mode:
             self.frequency_contract = build_verified_intraday_contract(
                 source_timeframe=self.source_timeframe,
@@ -886,6 +893,11 @@ class ExternalBacktestSession:
                 ),
                 **self.market_data_provenance,
                 **(
+                    window_provenance(self.end_date, self.provider_end)
+                    if self.provider_end
+                    else {}
+                ),
+                **(
                     {"equity_metadata": self.equity_metadata}
                     if self.equity_metadata.get("status") == "available"
                     else {}
@@ -927,6 +939,7 @@ class ExternalBacktestSession:
             mode=self.mode,
             all_data=self.all_data,
             publish=self._publish_baselines,
+            provider_end=self.provider_end,
         ))
 
         try:

@@ -114,6 +114,9 @@ from dashboard.backend.infrastructure.market_data.provider import (
     ALPACA,
     create_market_data_provider,
     exclusive_end,
+    parse_ymd,
+    settled_exclusive_end,
+    window_provenance,
 )
 from dashboard.backend.infrastructure.market_data.frequency import (
     FrequencyConfigError,
@@ -455,8 +458,28 @@ class HourlyBacktester:
         ``end - 1`` last day), so passing ``end_date`` through unchanged
         silently dropped the last selected day, and a one-day run got no bars at all.
         ``end_date`` itself stays inclusive: it is what the run records.
+
+        Never past today on the market's clock (``settled_exclusive_end``): a
+        session still in progress is not traded. Resolved ONCE and pinned, so
+        a run that crosses midnight cannot fetch its index baseline over a
+        different window than its bars; the baseline worker assigns the bound
+        its dataset was built with for the same reason.
         """
-        return exclusive_end(self.end_date)
+        pinned = getattr(self, "_provider_end_date", None)
+        if pinned is None:
+            market = getattr(getattr(self, "profile", None), "market", None)
+            pinned = settled_exclusive_end(self.end_date, market=market)
+            if pinned != exclusive_end(self.end_date):
+                print(
+                    f"   NOTE: {self.end_date}'s session is still open on the "
+                    f"market clock; bars stop before {pinned}."
+                )
+            self._provider_end_date = pinned
+        return pinned
+
+    @provider_end_date.setter
+    def provider_end_date(self, value: str) -> None:
+        self._provider_end_date = value
 
     def _create_market_data_provider(self):
         """Create the selected provider without breaking legacy test doubles."""
@@ -1140,6 +1163,14 @@ class HourlyBacktester:
             f"   Universe: {len(symbols)} symbols ({', '.join(symbols[:8])}"
             f"{'…' if len(symbols) > 8 else ''})"
         )
+        if date.fromisoformat(self.provider_end_date) <= parse_ymd(self.start_date):
+            # The whole window is today's open session (or later): there is no
+            # completed bar to trade. Said here rather than left to a provider
+            # to answer an empty range with a generic "no data".
+            raise ValueError(
+                f"No completed session in {self.start_date}..{self.end_date} yet; "
+                "pick a window that ends before today."
+            )
         fetch_started_at = steady_clock()
         self.source_data = self.data_loader.fetch_bars(
             symbols, self.start_date, self.provider_end_date
@@ -1339,12 +1370,12 @@ class HourlyBacktester:
         # Scaled to the requested window, not a flat count. A fixed 50 lived
         # here and in ifind_ashare.py, and both were quietly a ~13-trading-day
         # minimum window: once MAX_BACKTEST_DAYS fell to 14, no legal window
-        # could reach it (at most 10 weekdays x 4 A-share 60m sessions = 40
-        # bars), so every A-share run raised here instead of returning data.
-        # Parsing is bare because the provider has already normalized these
-        # same two strings by the time any data exists to validate.
+        # could reach it (at most 11 weekdays x 4 A-share 60m sessions = 44
+        # bars, the end date being a traded day), so every A-share run raised
+        # here instead of returning data. The end is the half-open provider
+        # bound, which is what the floor counts weekdays up to.
         floor = minimum_bars_for_window(
-            date.fromisoformat(self.start_date),
+            parse_ymd(self.start_date),
             date.fromisoformat(self.provider_end_date),
         )
         short = {
@@ -1423,6 +1454,13 @@ class HourlyBacktester:
             "reporting_currency": profile.reporting_currency,
             "lot_size": profile.lot_size,
             **dict(getattr(self, "market_data_provenance", {}) or {}),
+            # Guarded like the provenance above: a legacy double built with
+            # ``__new__`` has no window, and there is nothing to record.
+            **(
+                window_provenance(self.end_date, self.provider_end_date)
+                if getattr(self, "end_date", None)
+                else {}
+            ),
         }
         if getattr(self, "intraday_mode", False):
             frequency_contract = getattr(self, "frequency_contract", None)

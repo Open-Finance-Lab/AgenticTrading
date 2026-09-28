@@ -10641,7 +10641,9 @@ async function runBacktest() {
     }
     if (Number.isFinite(spanDays) && spanDays > MAX_BACKTEST_DAYS) {
         showModalError(
-            `Pick a window of ${MAX_BACKTEST_DAYS} days or fewer — that range is ${spanDays} days.`,
+            // Worded as a distance, not a length: the end date is itself a
+            // traded day, so the longest legal window spans one day more.
+            `Pick an end date at most ${MAX_BACKTEST_DAYS} days after the start — that one is ${spanDays} days after it.`,
         );
         return;
     }

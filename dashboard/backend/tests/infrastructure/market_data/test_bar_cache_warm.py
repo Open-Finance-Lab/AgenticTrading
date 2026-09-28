@@ -9,7 +9,7 @@ import pytest
 
 from dashboard.backend.infrastructure.llm.validator import DJIA_30
 from dashboard.backend.infrastructure.market_data import bar_cache, bar_cache_warm
-from dashboard.backend.infrastructure.market_data.provider import exclusive_end
+from dashboard.backend.infrastructure.market_data.provider import settled_exclusive_end
 from dashboard.backend.paths import BACKEND_DIR, CONFIG_DIR, REPO_ROOT
 
 
@@ -126,9 +126,8 @@ def test_the_first_window_is_the_onboarding_modal():
     settings = _defaults()["defaultSettings"]
     symbols, start, end = bar_cache_warm.warm_windows()[0]
     assert symbols == [s.upper() for s in settings["assetList"]]
-    # The engine's provider bound, not the inclusive date: the cache is keyed
-    # on what a run requests.
-    assert (start, end) == (settings["startDate"], exclusive_end(settings["endDate"]))
+    # The run's own inclusive dates; `warm_bar_cache` converts them once.
+    assert (start, end) == (settings["startDate"], settings["endDate"])
 
 
 def test_the_second_window_is_the_index_baseline_over_the_same_dates():
@@ -137,7 +136,7 @@ def test_the_second_window_is_the_index_baseline_over_the_same_dates():
     settings = _defaults()["defaultSettings"]
     symbols, start, end = bar_cache_warm.warm_windows()[1]
     assert symbols == list(DJIA_30)
-    assert (start, end) == (settings["startDate"], exclusive_end(settings["endDate"]))
+    assert (start, end) == (settings["startDate"], settings["endDate"])
 
 
 def test_the_third_window_is_the_bare_post_default():
@@ -145,8 +144,24 @@ def test_the_third_window_is_the_bare_post_default():
     assert symbols == list(DJIA_30)
     assert (start, end) == (
         bar_cache_warm.ROUTE_DEFAULT_START,
-        exclusive_end(bar_cache_warm.ROUTE_DEFAULT_END),
+        bar_cache_warm.ROUTE_DEFAULT_END,
     )
+
+
+def test_warm_requests_the_bound_a_run_requests(warm_cache_dir, monkeypatch):
+    """The cache is keyed on what a run REQUESTS, and a run requests
+    `settled_exclusive_end` of its inclusive end -- the engine's
+    `provider_end_date` and `market_data_store`'s key both. Warming the raw
+    end date warms entries no run ever asks for, while `ready` still counts."""
+    calls, written = [], []
+    monkeypatch.setattr(
+        bar_cache_warm, "AlpacaDataLoader", _writing_loader(calls, written)
+    )
+    bar_cache_warm.warm_bar_cache()
+    assert [(start, end) for *_, start, end in calls] == [
+        (start, settled_exclusive_end(end, market="US"))
+        for _, start, end in bar_cache_warm.warm_windows()
+    ]
 
 
 def test_route_defaults_match_the_route_signature():
@@ -186,7 +201,7 @@ def test_warm_fetches_every_window_at_the_intraday_source_timeframe(
         (symbol, start, end)
         for symbols, start, end in bar_cache_warm.warm_windows()
         for symbol in symbols
-    }
+    }  # distinct regardless of the end conversion, which is one-to-one
     assert warmed == len(expected) > 0
     assert warmed < sum(written), "the windows no longer overlap; pick another pair"
 

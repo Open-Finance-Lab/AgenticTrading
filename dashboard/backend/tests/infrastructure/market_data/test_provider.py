@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import subprocess
 import sys
+from datetime import date, datetime
 
 import pytest
+import pytz
 
 
 def test_provider_module_import_does_not_import_vnpy():
@@ -196,7 +198,8 @@ def test_ifind_profile_describes_the_fixed_a_share_market():
         ("2026-09-11", "2026-09-12"),
         ("2026-04-30", "2026-05-01"),
         ("2026-12-31", "2027-01-01"),
-        ("not-a-date", "not-a-date"),
+        # The route's strptime accepts it, so this must bump it too.
+        ("2026-9-11", "2026-09-12"),
     ],
 )
 def test_exclusive_end_covers_the_inclusive_last_day(end_date, expected):
@@ -205,13 +208,52 @@ def test_exclusive_end_covers_the_inclusive_last_day(end_date, expected):
     assert exclusive_end(end_date) == expected
 
 
-def test_engine_hands_providers_the_day_after_its_inclusive_end():
-    """A picked end date is a day to trade. Passed through raw, every
-    half-open provider dropped it, and a one-day run (`start == end`, which
-    the route accepts) had no bars at all."""
-    from types import SimpleNamespace
+@pytest.mark.parametrize("end_date", ["not-a-date", "2026/09/11", "", None])
+def test_exclusive_end_refuses_what_it_cannot_bump(end_date):
+    """REGRESSION. Passed through unchanged, a malformed end was read by the
+    provider as the exclusive bound again and the last day was dropped with
+    no signal."""
+    from dashboard.backend.infrastructure.market_data.provider import exclusive_end
 
-    from dashboard.backend.domain.backtesting.engine import HourlyBacktester
+    with pytest.raises(ValueError, match="YYYY-MM-DD"):
+        exclusive_end(end_date)
 
-    getter = HourlyBacktester.provider_end_date.fget
-    assert getter(SimpleNamespace(end_date="2026-09-11")) == "2026-09-12"
+
+@pytest.mark.parametrize(
+    ("end_date", "today", "expected"),
+    [
+        ("2026-09-10", date(2026, 9, 11), "2026-09-11"),  # settled: untouched
+        ("2026-09-11", date(2026, 9, 11), "2026-09-11"),  # today: excluded
+        ("2026-09-20", date(2026, 9, 11), "2026-09-11"),  # future: excluded
+    ],
+)
+def test_settled_exclusive_end_never_reaches_the_open_session(end_date, today, expected):
+    from dashboard.backend.infrastructure.market_data.provider import settled_exclusive_end
+
+    assert settled_exclusive_end(end_date, today=today) == expected
+
+
+def test_market_today_reads_the_markets_own_clock(monkeypatch):
+    """16:30 UTC on Sep 11 is still Sep 11 in New York but 00:30 on Sep 12 in
+    Shanghai: each market's open session is judged on its own date."""
+    from dashboard.backend.infrastructure.market_data import provider
+
+    class _Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime(2026, 9, 11, 16, 30, tzinfo=pytz.utc).astimezone(tz)
+
+    monkeypatch.setattr(provider, "datetime", _Clock)
+    assert provider.market_today("US") == date(2026, 9, 11)
+    assert provider.market_today("CN") == date(2026, 9, 12)
+
+
+def test_window_provenance_marks_an_excluded_open_session():
+    from dashboard.backend.infrastructure.market_data.provider import window_provenance
+
+    assert window_provenance("2026-09-11", "2026-09-12") == {
+        "end_date_inclusive": True,
+        "provider_end_date": "2026-09-12",
+        "open_session_excluded": False,
+    }
+    assert window_provenance("2026-09-11", "2026-09-11")["open_session_excluded"] is True
