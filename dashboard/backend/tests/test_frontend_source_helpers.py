@@ -7,7 +7,13 @@ somebody else's source -- vacuous in one direction, red for no reason in the
 other. Nothing downstream can tell the difference.
 """
 
-from dashboard.backend.tests._frontend_source import at_rule_blocks, fn_body
+import pytest
+
+from dashboard.backend.tests._frontend_source import (
+    at_rule_blocks,
+    decode_js_string,
+    fn_body,
+)
 
 
 def test_fn_body_walks_past_the_parameter_list():
@@ -42,3 +48,22 @@ def test_at_rule_blocks_isolates_each_block():
     assert len(blocks) > 1
     assert all(block.endswith("}") for block in blocks)
     assert all(block.count("{") == block.count("}") for block in blocks)
+
+
+def test_js_string_escapes_decode_in_one_pass():
+    """js_string_const compares app.js copies against their Python originals, so
+    a decoder that is wrong in either direction reports drift that is not there
+    or hides drift that is. An escaped backslash before ``n`` is the case that
+    chained ``.replace()`` calls get wrong whichever order they run in."""
+    assert decode_js_string(r"a\nb") == "a\nb"
+    assert decode_js_string(r"a\\nb") == "a\\nb"
+    assert decode_js_string(r"it\'s a \"hold\"") == "it's a \"hold\""
+    assert decode_js_string("no escapes") == "no escapes"
+
+
+def test_js_string_decoder_refuses_escapes_it_does_not_model():
+    """Passing a unicode escape through as six literal characters would make a
+    copy compare unequal for no visible reason; failing names the missing escape.
+    """
+    with pytest.raises(AssertionError, match="cannot decode"):
+        decode_js_string("caf" + "\\" + "u00e9")
