@@ -555,7 +555,9 @@ def main():
     if args.runtime_type == AI_HEDGE_FUND_RUNTIME_TYPE:
         print("🧠 Using hosted AI Hedge Fund runtime for trading decisions\n")
     elif backtester.use_llm:
-        print(f"🧠 Using {LLM_MODEL_NAME} for trading decisions (Mode: {mode_display})\n")
+        # The engine's resolved model, not the module default: printing
+        # LLM_MODEL_NAME named Claude Haiku on every DeepSeek or Qwen run.
+        print(f"🧠 Using {backtester.model} for trading decisions (Mode: {mode_display})\n")
     else:
         print("⚙️  Using rule-based logic for trading decisions\n")
     
