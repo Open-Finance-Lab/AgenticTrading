@@ -14177,3 +14177,7 @@ html[data-nav-page="home"] #homeView .home-landing-board[data-home-board-slide="
     cursor: pointer;
 }
 .research-note{margin:0 0 10px;font-size:12.5px;color:#9fc5e8}
+
+/* Interrupted backtests (partial-result recovery): the run ended early
+   through no strategy fault — grey, not the red of a failure. */
+.backtest-config-status.is-interrupted{color:#9fb6d4}

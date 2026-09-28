@@ -1070,6 +1070,48 @@ class HourlyBacktester:
             **self._progress_phase_fields(),
         }
         self._write_progress_payload(payload)
+        self._flush_live_progress_durable(step, payload)
+
+    #: Flush cadence for the durable partial-result snapshot. Ten bars is
+    #: under a second of wall time on the cheapest Neon tier yet bounds a
+    #: server crash to losing at most nine bars of curve.
+    LIVE_PROGRESS_FLUSH_EVERY_STEPS = 10
+
+    def _flush_live_progress_durable(self, step: int, payload: Dict) -> None:
+        """Mirror the progress payload into the run database, throttled.
+
+        The progress FILE lives on the instance's ephemeral disk and dies with
+        the process; this snapshot is what survives a restart, so the startup
+        reclaimer can hand the user the partial curve an interrupted run had
+        earned. Failures are swallowed: persistence here is a courtesy on top
+        of a run whose real write comes at completion, and a flaky DB must not
+        stall the bar loop. First step always flushes so a run that dies young
+        still leaves a tombstone; the terminal caller (``_save`` paths) relies
+        on the reclaimer treating snapshots WITHOUT a matching agent_runs row
+        as interrupted, which is why completion also clears via delete in the
+        reclaim path rather than here.
+        """
+        try:
+            if step % self.LIVE_PROGRESS_FLUSH_EVERY_STEPS != 0 and step != 1:
+                return
+            from dashboard.backend.database import db
+
+            db.upsert_live_progress(
+                str(self.live_run_id),
+                str(self.session_id),
+                str(getattr(self, "agent_name", "") or "agent"),
+                {
+                    **payload,
+                    "run_metadata": {
+                        "start_date": getattr(self, "start_date", None),
+                        "end_date": getattr(self, "end_date", None),
+                        "mode": getattr(self, "mode", None),
+                        "llm_model": getattr(self, "model", None),
+                    },
+                },
+            )
+        except Exception as exc:  # noqa: BLE001 - see docstring
+            print(f"   ⚠️  live-progress durable flush skipped: {exc}")
 
     def load_data(self):
         """Fetch source bars and build the strategy's decision-bar dataset."""

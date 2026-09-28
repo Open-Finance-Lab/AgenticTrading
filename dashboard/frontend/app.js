@@ -6190,6 +6190,20 @@ function clearAgentBacktestRunning(runKey) {
 }
 
 /**
+ * Wipe the tab's in-flight registry. Called when the server definitively
+ * reports nothing running for this session: the registry is this tab's
+ * memory of ITS launches, and a run that died on a server restart can
+ * never produce the terminal event that would clear its entry — without
+ * this reconciliation the card spins "Backtesting…" until the poll
+ * ceiling (70 minutes) ages it out, for a run that has been gone for
+ * hours. Never called on a failed status probe: only a definitive
+ * `running: false` proves the entries are dead.
+ */
+function clearAllRunningBacktests() {
+    writeRunningBacktests({});
+}
+
+/**
  * Every run still in flight, oldest first, with dead entries swept.
  *
  * Entries older than the poll ceiling are discarded here as well as in
@@ -10436,9 +10450,16 @@ function renderBacktestRunConfig(
         'backtestConfigWindow',
         start && end ? `${start} → ${end}` : '—',
     );
+    const statusNode = document.getElementById('backtestConfigStatus');
+    if (statusNode) statusNode.classList.toggle('is-interrupted', Boolean(!running && !statusLabel && run?.interrupted));
     setBacktestConfigText(
         'backtestConfigStatus',
-        statusLabel || (running ? 'Running' : 'Completed'),
+        statusLabel
+            || (running
+                ? 'Running'
+                : (run?.interrupted
+                    ? `Interrupted at step ${run.interrupted_step ?? '?'}${run.interrupted_total_steps ? `/${run.interrupted_total_steps}` : ''} (server restart) — partial results shown`
+                    : 'Completed')),
     );
 
     const promptRow = document.getElementById('backtestConfigPromptRow');
@@ -11861,9 +11882,14 @@ function populateBacktestRunSelector(externalRuns, { runningId = null } = {}) {
     select.innerHTML = sorted
         .map((run) => {
             const isRunning = run._running || run.run_id === runningId;
+            const interruptedAt = run.interrupted
+                ? ` — interrupted at step ${run.interrupted_step ?? '?'}${run.interrupted_total_steps ? `/${run.interrupted_total_steps}` : ''}`
+                : '';
             const label = isRunning
                 ? `Running… · ${formatBacktestRunPrimary(run)}`
-                : formatBacktestRunLabel(run);
+                : run.interrupted
+                    ? `${formatBacktestRunLabel(run)}${interruptedAt}`
+                    : formatBacktestRunLabel(run);
             return `<option value="${escapeHtml(run.run_id)}">${escapeHtml(label)}</option>`;
         })
         .join('');
@@ -12049,6 +12075,10 @@ async function loadData({ liveRunId = null } = {}) {
                     ensureBacktestPolling();
                 } else if (!status?.running) {
                     liveBacktestRunId = null;
+                    // Definitive: the server has nothing in flight for this
+                    // session, so every registry entry belongs to a run that
+                    // ended without our hearing it (typically a restart).
+                    clearAllRunningBacktests();
                 }
             } catch (_statusError) {
                 /* status optional while browsing history */

@@ -221,6 +221,14 @@ class PostgresBacktestDatabase:
                 # rows are deleted explicitly (see delete_run/clear_all).
                 cur.execute(
                     f"""
+                    CREATE TABLE IF NOT EXISTS run_live_progress (
+                        run_id TEXT PRIMARY KEY,
+                        session_id TEXT NOT NULL,
+                        agent_name TEXT NOT NULL,
+                        payload TEXT NOT NULL,
+                        updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+                    );
+
                     CREATE TABLE IF NOT EXISTS run_manifest (
                         run_id TEXT PRIMARY KEY,
                         manifest_json TEXT NOT NULL,
@@ -477,6 +485,75 @@ class PostgresBacktestDatabase:
     # ------------------------------------------------------------------
     # Writers
     # ------------------------------------------------------------------
+
+    # --- live-progress snapshots (partial-result recovery). Twin of the
+    # SQLite store's methods; see database.py for the design note.
+    def upsert_live_progress(self, run_id: str, session_id: str, agent_name: str,
+                             payload: Dict[str, Any]) -> None:
+        with self._get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO run_live_progress
+                        (run_id, session_id, agent_name, payload, updated_at)
+                    VALUES (%s, %s, %s, %s, now())
+                    ON CONFLICT (run_id) DO UPDATE SET
+                        session_id = EXCLUDED.session_id,
+                        agent_name = EXCLUDED.agent_name,
+                        payload = EXCLUDED.payload,
+                        updated_at = now()
+                    """,
+                    (run_id, session_id, agent_name, json.dumps(payload, default=str)),
+                )
+
+    def get_live_progress(self, run_id: str) -> Optional[Dict[str, Any]]:
+        try:
+            with self._get_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "SELECT payload FROM run_live_progress WHERE run_id = %s",
+                        (run_id,),
+                    )
+                    row = cur.fetchone()
+        except Exception:
+            return None
+        if not row:
+            return None
+        try:
+            return json.loads(row[0])
+        except (TypeError, ValueError):
+            return None
+
+    def list_live_progress(self) -> List[Dict[str, Any]]:
+        try:
+            with self._get_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "SELECT run_id, session_id, agent_name, payload"
+                        " FROM run_live_progress"
+                    )
+                    rows = cur.fetchall()
+        except Exception:
+            return []
+        out = []
+        for r in rows:
+            try:
+                out.append({
+                    "run_id": r[0],
+                    "session_id": r[1],
+                    "agent_name": r[2],
+                    "payload": json.loads(r[3]),
+                })
+            except (TypeError, ValueError):
+                continue
+        return out
+
+    def delete_live_progress(self, run_id: str) -> None:
+        with self._get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "DELETE FROM run_live_progress WHERE run_id = %s", (run_id,)
+                )
 
     def insert_run(self, run_id: str, session_id: str, agent_name: str, mode: str,
                    start_date: str, end_date: str,

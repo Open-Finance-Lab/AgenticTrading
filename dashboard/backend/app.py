@@ -292,6 +292,22 @@ async def startup_event():
         print(f"⚠️ Orphaned-run recovery error: {e}")
 
     try:
+        # Partial-result reclaim: dashboard backtests only write their results
+        # at completion, so a restart mid-run used to erase the user's wait.
+        # Surviving live-progress snapshots become honest interrupted runs.
+        from dashboard.backend.domain.backtesting.partial_results import (
+            reclaim_interrupted_backtests,
+        )
+        counts = reclaim_interrupted_backtests()
+        if counts.get("reclaimed"):
+            print(
+                f"🧹 Reclaimed {counts['reclaimed']} interrupted run(s) with partial results"
+                f" (dropped {counts.get('dropped_stale', 0)} stale, {counts.get('failed', 0)} failed)"
+            )
+    except Exception as e:
+        print(f"⚠️ Interrupted-run reclaim error: {e}")
+
+    try:
         # Composition-root wiring (the domain reaper must not import api/*):
         # each reaper pass also sweeps the v2 registry — drains abandoned v2
         # runs, heartbeats live ones, archives terminal backends.
