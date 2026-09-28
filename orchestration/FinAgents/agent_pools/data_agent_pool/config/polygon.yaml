@@ -9,7 +9,7 @@ api:
     # ...可继续扩展
   default_interval: "1d"
 authentication:
-  api_key: "sPyhe4R8hELdEDjG2LrncAke9H7PLLGZ"  # Replace with actual API key
+  api_key: "demo"  # Set your Polygon key here locally; never commit it (the previous value is public in git history and must be revoked)
   secret_key: ""
 constraints:
   timeout: 30
