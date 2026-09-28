@@ -198,4 +198,4 @@ def test_cache_busters_bumped():
     assert "home-page.js?v=54" in APP_HTML
     assert "js/credit-format.js?v=1" in APP_HTML
     assert "js/credits.js?v=8" in APP_HTML
-    assert "js/admin-credits.js?v=8" in APP_HTML
+    assert "js/admin-credits.js?v=9" in APP_HTML

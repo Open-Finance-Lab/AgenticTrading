@@ -145,8 +145,28 @@ def get_grant_pool_activity(
         )
     except Exception as exc:
         _raise_grant_http_error(exc)
+    # The table renders a person, not an id: batch-resolve the distinct
+    # user_ids on this page once, then attach identity to each entry.
+    import dashboard.backend.users as users_module
+
+    identities: dict[int, dict[str, Any] | None] = {}
+    for item in page["items"]:
+        uid = item.get("user_id")
+        if uid is not None and uid not in identities:
+            try:
+                identities[uid] = users_module.user_store.get_user_by_id(int(uid))
+            except Exception:
+                identities[uid] = None
+    items = []
+    for item in page["items"]:
+        payload = _public_activity(item)
+        uid = payload.get("user_id")
+        identity = identities.get(uid) if uid is not None else None
+        payload["user_display_name"] = (identity or {}).get("display_name")
+        payload["user_email"] = (identity or {}).get("email")
+        items.append(payload)
     return {
-        "items": [_public_activity(item) for item in page["items"]],
+        "items": items,
         "next_cursor": page["next_cursor"],
     }
 
