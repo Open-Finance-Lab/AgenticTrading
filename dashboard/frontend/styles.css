@@ -14184,11 +14184,9 @@ html[data-nav-page="home"] #homeView .home-landing-board[data-home-board-slide="
 .research-advanced{margin:14px 0 0;border:1px solid rgba(103,232,249,.28);border-radius:10px;background:rgba(103,232,249,.04);overflow:hidden}
 .research-advanced summary{display:flex;align-items:center;gap:10px;padding:11px 14px;font-size:13px;font-weight:600;color:#bfe8f7;cursor:pointer;user-select:none;list-style:none;transition:background .12s ease}
 .research-advanced summary:hover{background:rgba(103,232,249,.08)}
-/* The arrow is a proper chevron badge — 22px cyan-on-dark tile, hard to
-   miss at any zoom — and rotates (not glyph-swaps) on open so the motion
-   itself signals the state change. */
-.research-advanced summary::after{content:"";order:2;margin-left:auto;width:0;height:0;border-left:6px solid #67e8f9;border-top:4px solid transparent;border-bottom:4px solid transparent;transition:transform .18s ease}
-.research-advanced[open] summary::after{transform:rotate(90deg)}
+/* Chevron leads the label (tree-disclosure convention) and rotates open. */
+.research-advanced summary::before{content:"";flex-shrink:0;width:0;height:0;border-left:7px solid #67e8f9;border-top:5px solid transparent;border-bottom:5px solid transparent;transition:transform .18s ease}
+.research-advanced[open] summary::before{transform:rotate(90deg)}
 .research-advanced[open] summary{border-bottom:1px solid rgba(103,232,249,.18);color:#67e8f9}
 .research-advanced .research-field{padding:0 14px}
 .research-advanced .research-field:first-of-type{padding-top:10px}
