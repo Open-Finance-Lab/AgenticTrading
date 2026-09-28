@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import itertools
 import json
+import re
 import threading
-from collections.abc import Callable
+import time
+from collections.abc import Callable, Iterator
 
 from dashboard.backend.domain.credits.models import LLMSettlementResult
 from dashboard.backend.domain.credits.service import CreditsService
@@ -20,6 +23,7 @@ from dashboard.backend.domain.model_providers.service import (
 from dashboard.backend.infrastructure.llm.execution.adapters.base import (
     AdapterResponse,
     ProviderExecutionAdapter,
+    provider_read_timeout_seconds,
 )
 from dashboard.backend.infrastructure.llm.execution.adapters.registry import (
     get_execution_adapter,
@@ -27,6 +31,7 @@ from dashboard.backend.infrastructure.llm.execution.adapters.registry import (
 from dashboard.backend.infrastructure.llm.execution.errors import (
     ExecutionErrorCategory,
     LLMExecutionError,
+    RetryHint,
 )
 from dashboard.backend.infrastructure.llm.execution.models import (
     BillingEvidence,
@@ -55,6 +60,82 @@ _PLATFORM_FAILOVER_CATEGORIES = frozenset(
         ExecutionErrorCategory.PROVIDER_QUOTA_EXHAUSTED,
     }
 )
+
+# Same-provider retries. This service is the only retry owner: the SDKs run
+# with max_retries=0 (see the provider-timeout block in adapters/base.py),
+# because their retry loop replays read timeouts -- a whole billed generation
+# -- and sends no idempotency key. Here an attempt is repeated at the same
+# provider only when ``map_provider_error`` says nothing was generated:
+#   - ``RetryHint.PRE_SEND`` (DNS, connect, TLS, a stalled body), at any age;
+#   - ``RetryHint.REJECTED`` (408/409/429/5xx, a dropped connection) only when
+#     it came back within FAST_FAILURE_SECONDS. CommonStack's 2026-09-27 500s
+#     arrived ~24s in, after the generation, and three SDK replays of them
+#     bought nothing but 73s; a gateway that refuses outright answers in <2s,
+#     and the fastest DeepSeek completion seen is ~24s. The gate is calibrated
+#     on DeepSeek: a model that can finish in under 15s (Haiku, GPT-5.5) can
+#     have a fast post-generation 5xx or cut-off body repeated. That is still
+#     fewer replays than the SDK made unconditionally, each on its own
+#     reservation, and fail_closed makes a run abort the costlier outcome.
+# A read timeout is never repeated here: failover to the next candidate is the
+# only second chance, and it is a recorded, reserved one. Every attempt --
+# repeat or failover -- takes the next ``attempt_index`` of its call, because
+# a reservation is keyed on (user, run, call, attempt) and reusing an index
+# returns the already-released row (BILLING_FAILED).
+MAX_SAME_PROVIDER_RETRIES = 2
+SAME_PROVIDER_BACKOFF_SECONDS = (4.0, 12.0)
+FAST_FAILURE_SECONDS = 15.0
+# A stated Retry-After is waited out up to the SDKs' own ceiling (openai and
+# anthropic ``_calculate_retry_timeout`` honour <= 60s), so no refusal the SDK
+# used to wait out now fails the call -- which matters because "fail over
+# instead" means "abort the run" on BYOK and whenever the next lane is dead
+# (OpenRouter, #523). Above it the provider is saying "not this minute", and
+# repeating early would only be refused again.
+RETRY_AFTER_CAP_SECONDS = 60.0
+# Failures of this one call at this one provider, as opposed to lane state
+# (quota, credentials) that is equally true of every call.
+_CALL_SPECIFIC_FAILURES = frozenset(
+    {
+        ExecutionErrorCategory.PROVIDER_TIMEOUT,
+        ExecutionErrorCategory.PROVIDER_UNAVAILABLE,
+    }
+)
+_LOG_SAFE_RUN_ID = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
+
+
+def _report_provider_attempt_failed(
+    request: LLMExecutionRequest,
+    attempt_index: int,
+    exc: LLMExecutionError,
+    next_step: str,
+) -> None:
+    """Print one line per failed attempt; the parent relays ``ERROR: llm.`` lines live.
+
+    Not deduplicated: each line is a distinct failed attempt, and the count is
+    bounded by the retry policy above. ``elapsed_s=-`` marks one that failed
+    before reaching the provider (provider/adapter resolution): it holds an
+    ``attempt_index`` but no reservation row. Every field is a
+    validated identifier, an enum value or a number -- never exception text,
+    and never ``=``/``:`` inside a value, so ``_redact_credentials`` in the
+    parent has nothing to rewrite.
+    """
+
+    elapsed = getattr(exc, "provider_elapsed_seconds", None)
+    status = getattr(exc, "provider_status_code", None)
+    hint = getattr(exc, "retry_hint", RetryHint.NONE)
+    run_id = request.run_id if _LOG_SAFE_RUN_ID.match(request.run_id) else "-"
+    print(
+        "ERROR: llm.provider_attempt_failed "
+        f"run={run_id} call={request.call_index} attempt={attempt_index} "
+        f"provider={request.provider_id} model={request.model_id} "
+        f"billing={request.billing_mode.value} category={exc.category.value} "
+        f"phase={getattr(exc, 'timeout_phase', None) or '-'} "
+        f"status={status if isinstance(status, int) else '-'} "
+        f"hint={RetryHint(hint).value} "
+        f"elapsed_s={f'{elapsed:.1f}' if isinstance(elapsed, float) else '-'} "
+        f"read_timeout_s={provider_read_timeout_seconds()} next={next_step}",
+        flush=True,
+    )
+
 
 # CommonStack has no balance endpoint (every candidate path 404s as of
 # 2026-09-23), so a drained platform lane is only observable as a failed
@@ -126,23 +207,34 @@ class LLMExecutionService:
         credits: CreditsService,
         adapter_resolver: AdapterResolver = get_execution_adapter,
         pricing_snapshot_factory: PricingSnapshotFactory = _pricing_snapshot_for,
+        sleep: Callable[[float], None] = time.sleep,
+        clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self.providers = providers
         self.credits = credits
         self.adapter_resolver = adapter_resolver
         self.pricing_snapshot_factory = pricing_snapshot_factory
+        self._sleep = sleep
+        self._clock = clock
         self._platform_runs: set[str] = set()
 
     def execute(self, request: LLMExecutionRequest) -> LLMExecutionResult:
-        """Run exactly one requested model call with its selected payment lane."""
+        """Run one logical model call with its selected payment lane.
+
+        One logical call is up to 1 + MAX_SAME_PROVIDER_RETRIES physical
+        attempts per candidate, repeated only for pre-send failures and fast
+        rejections, each billed on its own reservation; Platform Credits then
+        fail over across the route's candidates.
+        """
         try:
             if request.billing_mode is BillingMode.PLATFORM_CREDITS:
                 result = self._execute_with_platform_failover(request)
             else:
-                result = self._execute_once(
+                result = self._execute_candidate(
                     request,
-                    attempt_index=0,
+                    attempts=itertools.count(),
                     requested_provider_id=request.provider_id,
+                    next_provider_id=None,
                 )
             self._emit_model_usage(request, result)
             return result
@@ -369,6 +461,71 @@ class LLMExecutionService:
             requested_provider_id=requested_provider_id,
         )
 
+    @staticmethod
+    def _same_provider_retry_delay(
+        exc: LLMExecutionError,
+        retries_done: int,
+    ) -> float | None:
+        """Seconds to wait before repeating ``exc``'s attempt, or None to stop."""
+
+        if retries_done >= MAX_SAME_PROVIDER_RETRIES:
+            return None
+        if exc.category not in _CALL_SPECIFIC_FAILURES:
+            return None
+        hint = getattr(exc, "retry_hint", RetryHint.NONE)
+        elapsed = getattr(exc, "provider_elapsed_seconds", None)
+        if hint is RetryHint.PRE_SEND:
+            pass
+        elif (
+            hint is RetryHint.REJECTED
+            and isinstance(elapsed, float)
+            and elapsed <= FAST_FAILURE_SECONDS
+        ):
+            pass
+        else:
+            # A read timeout, a slow rejection, or anything unclassified.
+            return None
+        delay = SAME_PROVIDER_BACKOFF_SECONDS[retries_done]
+        retry_after = getattr(exc, "retry_after_seconds", None)
+        if retry_after is not None:
+            if retry_after > RETRY_AFTER_CAP_SECONDS:
+                return None
+            delay = max(delay, retry_after)
+        return delay
+
+    def _execute_candidate(
+        self,
+        request: LLMExecutionRequest,
+        *,
+        attempts: Iterator[int],
+        requested_provider_id: str,
+        next_provider_id: str | None,
+    ) -> LLMExecutionResult:
+        """Run ``request`` at its provider, repeating only what generated nothing."""
+
+        retries_done = 0
+        while True:
+            attempt_index = next(attempts)
+            try:
+                return self._execute_once(
+                    request,
+                    attempt_index=attempt_index,
+                    requested_provider_id=requested_provider_id,
+                )
+            except LLMExecutionError as exc:
+                delay = self._same_provider_retry_delay(exc, retries_done)
+                if exc.category in _CALL_SPECIFIC_FAILURES:
+                    _report_provider_attempt_failed(
+                        request,
+                        attempt_index,
+                        exc,
+                        "retry" if delay is not None else (next_provider_id or "none"),
+                    )
+                if delay is None:
+                    raise
+                self._sleep(delay)
+                retries_done += 1
+
     def _execute_with_platform_failover(
         self,
         request: LLMExecutionRequest,
@@ -383,8 +540,16 @@ class LLMExecutionService:
         # lone candidate is what the route decided, so it is not widened.
         candidates = tuple(request.provider_ids or (request.provider_id,))
         requested_provider_id = candidates[0]
+        # One counter for the whole call: same-provider repeats and failover
+        # share it (see MAX_SAME_PROVIDER_RETRIES). With no repeats it is the
+        # candidate position, as it always was.
+        attempts = itertools.count()
+        first_call_specific: LLMExecutionError | None = None
         last_error: LLMExecutionError | None = None
-        for attempt_index, provider_id in enumerate(candidates):
+        for position, provider_id in enumerate(candidates):
+            next_provider_id = (
+                candidates[position + 1] if position + 1 < len(candidates) else None
+            )
             attempt_request = request.model_copy(
                 update={
                     "provider_id": provider_id,
@@ -392,24 +557,30 @@ class LLMExecutionService:
                 }
             )
             try:
-                return self._execute_once(
+                return self._execute_candidate(
                     attempt_request,
-                    attempt_index=attempt_index,
+                    attempts=attempts,
                     requested_provider_id=requested_provider_id,
+                    next_provider_id=next_provider_id,
                 )
             except LLMExecutionError as exc:
                 last_error = exc
                 if exc.category is ExecutionErrorCategory.PROVIDER_QUOTA_EXHAUSTED:
-                    _report_platform_quota_exhausted(
-                        provider_id,
-                        candidates[attempt_index + 1]
-                        if attempt_index + 1 < len(candidates)
-                        else None,
-                    )
+                    _report_platform_quota_exhausted(provider_id, next_provider_id)
                 if exc.category not in _PLATFORM_FAILOVER_CATEGORIES:
                     raise
+                if (
+                    first_call_specific is None
+                    and exc.category in _CALL_SPECIFIC_FAILURES
+                ):
+                    first_call_specific = exc
         assert last_error is not None
-        raise last_error
+        # The first candidate whose final error was a timeout/unavailable
+        # outranks later lane state: a quota-dead fallback must not relabel
+        # the primary's timeout as "insufficient balance" (09-28: CommonStack
+        # timed out, OpenRouter answered 402, and the run reported quota). The
+        # quota line above still names the drained lane.
+        raise first_call_specific or last_error
 
     def _resolve_provider(self, provider_id: str) -> ProviderRecord:
         store = getattr(self.providers, "store", None)
@@ -457,19 +628,25 @@ class LLMExecutionService:
         ):
             raise LLMExecutionError(ExecutionErrorCategory.BILLING_FAILED)
 
-    @staticmethod
     def _complete(
+        self,
         adapter: ProviderExecutionAdapter,
         request: LLMExecutionRequest,
         credential: ResolvedCredential,
         provider: ProviderRecord,
     ) -> AdapterResponse:
+        # Time the provider call alone -- not credential, pricing or ledger
+        # work -- because the same-provider retry gate reads it.
+        started = self._clock()
         try:
             response = adapter.complete(request, credential, provider)
-        except LLMExecutionError:
+        except LLMExecutionError as exc:
+            exc.provider_elapsed_seconds = float(self._clock() - started)
             raise
         except Exception as exc:  # noqa: BLE001 - adapter bugs cannot leak details
-            raise LLMExecutionError(ExecutionErrorCategory.PROVIDER_UNAVAILABLE) from exc
+            error = LLMExecutionError(ExecutionErrorCategory.PROVIDER_UNAVAILABLE)
+            error.provider_elapsed_seconds = float(self._clock() - started)
+            raise error from exc
         if not isinstance(response, AdapterResponse) or not response.text.strip():
             raise LLMExecutionError(ExecutionErrorCategory.RESPONSE_INVALID)
         if not isinstance(response.model_id, str) or not response.model_id.strip():

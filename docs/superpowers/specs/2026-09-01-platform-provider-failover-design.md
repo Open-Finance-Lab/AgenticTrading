@@ -148,6 +148,12 @@ reservation identity with a non-negative `attempt_index` and the attempted
 - primary attempt: `attempt_index=0`, `provider_id=openrouter`;
 - fallback attempt: `attempt_index=1`, `provider_id=commonstack`.
 
+> **Superseded (2026-09-28).** `attempt_index` now counts every physical attempt
+> of a call, and same-provider repeats share the counter with failover
+> (`2026-09-28-llm-provider-retry-timeout-design.md` §3). A fallback can
+> therefore land on index 1, 2 or 3; select a lane by `provider_id`. The
+> default order is now CommonStack first (`ATL_PLATFORM_PROVIDER_ORDER`).
+
 The reservation operation key, reservation identifier, request digest, and
 uniqueness constraint include `attempt_index`. The logical call identity
 remains `(user_id, run_id, call_index)` so aggregate call counts do not count a

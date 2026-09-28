@@ -2245,12 +2245,17 @@ def _enforce_ai_hedge_fund_window(start_date: str, end_date: str) -> None:
 #
 # Nothing enforces a per-bar ceiling on the pipeline path. run_pipeline_decision
 # issues one model call per pipeline decision step per hourly bar, each with up
-# to one retry, and the only wall-clock bound anywhere is the 60s httpx read
-# timeout every provider adapter takes by default. A refusal built on that worst
-# case -- 3000 / (60 * 4) = about 12 bars, under two trading days -- would refuse
-# essentially every run. So the number below is a CALIBRATED ESTIMATE of typical
-# per-call latency, not an inverted ceiling, and the 3600s timeout stays the real
-# backstop: a slow reasoning model can still exhaust the budget and be killed.
+# to one retry, and the only wall-clock bound is per provider attempt:
+# LLM_PROVIDER_READ_TIMEOUT_SECONDS (180s by default,
+# infrastructure/llm/execution/adapters/base.py), with one more attempt when a
+# Platform Credits call fails over to the next candidate. (Until 2026-09-28 this
+# said "the 60s httpx read timeout"; the SDKs' silent retries made that ~185s
+# and three billed generations.) A refusal built on that worst case --
+# 3000 / (180 * 2 candidates * 2 attempts) = about 4 bars, under one trading
+# day -- would refuse essentially every run. So the number below is a
+# CALIBRATED ESTIMATE of typical per-call latency, not an inverted ceiling, and
+# the 3600s timeout stays the real backstop: a slow reasoning model can still
+# exhaust the budget and be killed.
 # What this preflight removes is the obviously uncompletable case, before any
 # spend and while the user still has the dates on screen.
 #
@@ -2326,8 +2331,9 @@ def _estimated_pipeline_llm_calls(
 # Typical wall-clock for one model call on this deployment. NOT enforced
 # anywhere -- see the banner above. 15s is calibrated for a model that spends a
 # little time reasoning; a fast completion model finishes in a few seconds and a
-# slow reasoning model can exceed the 60s httpx read timeout, which is why this
-# is an operator dial rather than a literal.
+# slow reasoning model can take minutes, up to the 180s provider read timeout
+# (DeepSeek V4 on CommonStack has taken 10s to over a minute per call), which is
+# why this is an operator dial rather than a literal.
 #
 # Consequence worth knowing before changing it: at 15s the shipped modal default
 # window (7 weekdays, 49 US bars) is comfortable at the modal's own default of

@@ -18,6 +18,24 @@ class ExecutionErrorCategory(StrEnum):
     WORKER_FAILED = "worker_failed"
 
 
+class RetryHint(StrEnum):
+    """Whether one failed provider attempt may be repeated against that provider.
+
+    ``PRE_SEND`` — the request never reached the provider (DNS, connect, TLS,
+    a stalled request body): repeating it cannot regenerate anything.
+    ``REJECTED`` — the provider answered with a status that says "not now"
+    (408/409/429/5xx, ``x-should-retry: true``) or dropped the connection; it
+    may already have done work, so the service repeats it only when it failed
+    fast. ``NONE`` — never repeat: above all a read timeout, where a whole
+    generation was in flight and, with no idempotency key, is billed again on
+    every replay.
+    """
+
+    PRE_SEND = "pre_send"
+    REJECTED = "rejected"
+    NONE = "none"
+
+
 _SAFE_MESSAGES = {
     ExecutionErrorCategory.CREDENTIAL_MISSING: "The selected model credential is unavailable.",
     ExecutionErrorCategory.CREDENTIAL_INVALID: "The selected model credential is invalid.",
@@ -92,4 +110,4 @@ class LLMExecutionError(RuntimeError):
         return cls(ExecutionErrorCategory.ACCOUNT_RESTRICTED, message)
 
 
-__all__ = ["ExecutionErrorCategory", "LLMExecutionError"]
+__all__ = ["ExecutionErrorCategory", "LLMExecutionError", "RetryHint"]

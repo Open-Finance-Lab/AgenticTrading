@@ -200,6 +200,12 @@ os.environ.pop("PIPELINE_SECONDS_PER_LLM_CALL", None)
 # failover tests' order assertions fail as unexplained mismatches.
 os.environ.pop("ATL_PLATFORM_PROVIDER_ORDER", None)
 
+# The per-attempt provider read deadline. The retry/timeout tests assert the
+# exact Timeout that reaches the wire (180s by default), so a developer
+# configured with a different value would see them fail as unexplained
+# mismatches. base.py reads it at import, which this module precedes.
+os.environ.pop("LLM_PROVIDER_READ_TIMEOUT_SECONDS", None)
+
 
 @atexit.register
 def _cleanup_test_db_dir() -> None:
