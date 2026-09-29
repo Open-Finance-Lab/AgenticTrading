@@ -30,20 +30,24 @@ against a placeholder signal. Every other row uses a causal fallback:
 |---|---|
 | `rsi_14` | 50 (neutral) |
 | `macd`, `macd_signal` | 0 (neutral) |
-| `sma20`, `sma50` | expanding mean of the closes seen so far |
-| `bb_upper`, `bb_lower` | expanding mean ± 2 sample standard deviations |
+| `sma20`, `sma50` | mean of the usable closes in the 20- or 50-bar window so far |
+| `bb_upper`, `bb_lower` | that 20-bar mean ± 2 sample standard deviations |
 
-The SMA and band fallbacks are the library's own formula over the bars seen so
-far, so they agree with the library at its first ready row (bar 20 for
-SMA20 and the bands, bar 50 for SMA50). The band is zero-width only on the very
-first bar, where one close has no dispersion. It replaced a running max/min,
-which always contained the current close and so placed a rising price at the
-upper band on every bar.
+The SMA and band fallbacks are the library's own formula with
+`min_periods=1`: during warm-up they average every bar seen so far, and once a
+window is full they equal the library value. So a row the library leaves empty
+after warm-up (an unusable close inside its window) or a library error still
+gets a 20- or 50-bar figure, not the mean of all history. The band is
+zero-width only where its window holds one close. It replaced a running
+max/min, which always contained the current close and so placed a rising price
+at the upper band on every bar.
 
 A library error keeps the groups computed before it and falls back for the
 rest, with the same values as above. Non-numeric and non-finite closes count as
-missing; indicator columns are NaN only on rows with no usable close at or
-before them.
+missing; SMA and band columns are NaN only on rows whose window holds no usable
+close. pandas-ta runs on a positional index, since its MACD slices by label and
+a repeated timestamp would otherwise raise and push every later group onto its
+fallback.
 
 ## Verification
 
@@ -64,9 +68,11 @@ python -m pytest dashboard/backend/tests/backtesting/test_indicator_lookahead.py
   asserts the patched function was actually called and whether the error
   handler ran.
 - Separate checks pin the fallback values, that an error falls back exactly like
-  a missing library, the band's behavior on a rising series, that fallbacks meet
-  the library at its first ready row, that ready rows match pandas-ta, and that
-  unusable closes never raise.
+  a missing library and keeps the groups computed before it, the band's
+  behavior on a rising series, that fallbacks reproduce the library once a
+  window is full, that ready rows match pandas-ta, that an unusable close
+  mid-series keeps windowed fallbacks, that repeated timestamps leave the
+  library path intact, and that unusable closes never raise.
 
 The fixtures are synthetic and need no market-data or model API calls. The
 comparison approach is inspired by
@@ -81,7 +87,15 @@ equivalence. The engine still loads bars from `start_date` with no earlier
 warm-up history, so the first bars of every run use fallbacks; loading a
 look-back window before the start date is a separate change.
 
-Early-bar prompts change as a result: rows that used to carry a library warm-up
-NaN (sent to the model as `0.0`) now carry the fallback, and the rule-based
-reference agent, which skips rows whose RSI or SMA20 is NaN, now evaluates
-those early rows too (its RSI < 30 entry still cannot fire before bar 15).
+Early bars change as a result. Rows that used to carry a library warm-up NaN
+now carry the fallback, for every consumer:
+
+- **LLM prompts** and **external agents** (v1/v2 step snapshots) used to see
+  `0.0` there; a client treating `sma50 == 0` as "not warmed up" loses that
+  signal.
+- **The rule-based reference agent** skips rows whose RSI or SMA20 is NaN, so
+  it now evaluates those rows too. Its RSI < 30 entry still cannot fire before
+  bar 15, but its `price > sma50 * 1.02` exit can now fire before bar 50.
+- **Leaderboard rows** cached before this change keep the old indicators until
+  a forced refresh, so a partial refresh would rank old and new curves side by
+  side.

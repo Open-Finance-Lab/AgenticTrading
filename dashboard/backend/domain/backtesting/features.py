@@ -9,11 +9,12 @@ causally: a row depends only on the closes at or before it, never on the
 closes after it or on how many bars follow it. A row takes the pandas-ta value
 only once its own prefix is long enough for pandas-ta to answer (``_GROUPS``);
 earlier rows, rows the library leaves empty, and groups the library failed to
-produce use causal fallbacks -- neutral RSI (50) and MACD (0), an expanding
-mean for the SMAs, and expanding mean +/- 2 sample standard deviations for the
-Bollinger Bands, which is the library's own formula over the bars seen so far.
-Indicator columns are NaN only on rows with no usable close at or before them;
-non-numeric and non-finite closes count as missing.
+produce use causal fallbacks -- neutral RSI (50) and MACD (0), and for the
+SMAs and Bollinger Bands the library's own formula with ``min_periods=1``: the
+mean (+/- 2 sample standard deviations) of the closes seen so far during
+warm-up, and of the indicator's window once it is full. Non-numeric and
+non-finite closes count as missing; SMA and band columns are NaN only on rows
+whose window holds no usable close.
 """
 
 import numpy as np
@@ -57,10 +58,13 @@ def _usable_close(close: pd.Series) -> pd.Series:
 
 
 def _fallbacks(close: pd.Series) -> dict:
-    seen = close.expanding(min_periods=1)
-    mean = seen.mean()
+    # Windowed, not expanding: a row the library leaves empty after warm-up (an
+    # unusable close inside its window) or a library error still gets a 20- or
+    # 50-bar figure rather than the mean of all history.
+    window = close.rolling(BB_LENGTH, min_periods=1)
+    mean = window.mean()
     # One bar has no dispersion yet: a zero-width band there, not a missing one.
-    std = seen.std(ddof=BB_DDOF).fillna(0.0).where(mean.notna())
+    std = window.std(ddof=BB_DDOF).fillna(0.0).where(mean.notna())
     return {
         "rsi_14": pd.Series(50.0, index=close.index),
         "macd": pd.Series(0.0, index=close.index),
@@ -68,7 +72,7 @@ def _fallbacks(close: pd.Series) -> dict:
         "bb_upper": mean + BB_STD * std,
         "bb_lower": mean - BB_STD * std,
         "sma20": mean,
-        "sma50": mean,
+        "sma50": close.rolling(50, min_periods=1).mean(),
     }
 
 
@@ -139,7 +143,9 @@ class TechnicalIndicators:
         fallback = _fallbacks(close)
         library: dict = {}
         try:
-            _library_indicators(close, library)
+            # pandas-ta aligns by label (MACD slices with .loc), so a repeated
+            # timestamp would raise; the gate below reads results by position.
+            _library_indicators(close.reset_index(drop=True), library)
         except Exception as e:
             print(f"Warning: Error calculating indicators: {e}")
 

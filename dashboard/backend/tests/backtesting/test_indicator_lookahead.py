@@ -125,16 +125,53 @@ def test_fallback_band_does_not_pin_a_rising_close_to_its_upper_edge():
     assert (result["bb_upper"] - result["bb_lower"]).iloc[1:].gt(0).all()
 
 
-def test_fallbacks_meet_the_library_at_its_first_ready_row():
-    """The fallback formula is the library's own over the bars seen so far."""
-    close = prices(80)["close"]
-    result = indicators(close.to_frame())
-    first20, first50 = close.iloc[:20], close.iloc[:50]
-    band = 2 * first20.std(ddof=1)
-    assert result["sma20"].iloc[19] == pytest.approx(first20.mean())
-    assert result["sma50"].iloc[49] == pytest.approx(first50.mean())
-    assert result["bb_upper"].iloc[19] == pytest.approx(first20.mean() + band)
-    assert result["bb_lower"].iloc[19] == pytest.approx(first20.mean() - band)
+@pytest.mark.parametrize("failure", ["missing", "exception"])
+def test_fallbacks_reproduce_the_library_once_a_window_is_full(monkeypatch, failure):
+    """SMA and band fallbacks are the library's formula, not an all-history mean."""
+    frame = prices(80)
+    library = indicators(frame)
+    install_failure(monkeypatch, failure)
+    fallback = indicators(frame)
+    for column in ("bb_upper", "bb_lower", "sma20", "sma50"):
+        first = FIRST_READY_ROW[column]
+        np.testing.assert_allclose(fallback[column].iloc[first:], library[column].iloc[first:], rtol=1e-12)
+    close = frame["close"]
+    assert fallback["sma50"].iloc[30] == pytest.approx(close.iloc[:31].mean())
+
+
+def test_a_library_error_keeps_the_groups_computed_before_it(monkeypatch):
+    frame = prices(80)
+    expected = indicators(frame)
+    install_failure(monkeypatch, "late_exception")
+    result = indicators(frame)
+    for column in ("rsi_14", "macd", "macd_signal"):
+        first = FIRST_READY_ROW[column]
+        pd.testing.assert_series_equal(result[column].iloc[first:], expected[column].iloc[first:])
+
+
+@pytest.mark.parametrize("bad", [np.nan, np.inf, "n/a"])
+def test_an_unusable_close_mid_series_keeps_windowed_fallbacks(bad):
+    frame = prices(120).astype(object)
+    frame.iloc[60, 0] = bad
+    result = indicators(frame)
+    assert np.isfinite(result.to_numpy(dtype=float)).all()
+    close = pd.to_numeric(frame["close"], errors="coerce").where(lambda c: np.isfinite(c))
+    # pandas-ta leaves every window containing row 60 empty; the fallback
+    # averages the usable closes in that window instead of all history.
+    assert result["sma20"].iloc[70] == pytest.approx(close.iloc[51:71].mean())
+    assert result["sma50"].iloc[90] == pytest.approx(close.iloc[41:91].mean())
+    window = close.iloc[51:71]
+    assert result["bb_upper"].iloc[70] == pytest.approx(window.mean() + 2 * window.std(ddof=1))
+
+
+def test_repeated_timestamps_do_not_knock_out_the_library(capsys):
+    frame = prices(120)
+    index = list(frame.index)
+    index[80] = index[25]
+    frame.index = pd.DatetimeIndex(index)
+    result = indicators(frame)
+    assert "Warning" not in capsys.readouterr().out
+    np.testing.assert_array_equal(result.to_numpy(), indicators(prices(120)).to_numpy())
 
 
 def test_ready_rows_match_library_output():
