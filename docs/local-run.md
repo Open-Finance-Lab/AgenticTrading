@@ -97,18 +97,22 @@ keys are in `dashboard/.env`.
 2. On the new card click **Configure**, set **Backtesting** capital to
    **3000**, then click **Save**.
 3. Click **Run Backtest**. Set *Market Data* to **vn.py simulated data** and
-   the period to **2026-03-02 → 2026-03-15**, keep *DJIA 30*, then click
+   the period to **2026-03-16 → 2026-03-29**, keep *DJIA 30*, then click
    **▶ Run Backtest**. The card shows live progress and finishes in about 10 s.
 4. Click the card's **"N backtests"** link to open the **Backtest** tab. It
    shows the run config, the equity chart against DJIA / Nasdaq-100 / Buy &
-   Hold, the comparison table, and the Trading Log: a BUY of 1 KO ("RSI
-   oversold (15), price below MA") and a SELL ("RSI overbought (71)").
+   Hold, the comparison table, and the Trading Log: three 1-share BUYs (GS,
+   AMZN, NVDA, "RSI oversold, price below MA") and three SELLs ("RSI overbought
+   (71)"). Result: agent about +0.6% against buy-and-hold about −1.3%. The
+   RSI readings near 0 come from the simulator's deliberate trend phases.
 
 Why those settings: the built-in rule-based agent sizes a buy as
 `int(equity × 2% / price)`. At the default $1,000 that is 0 shares for any stock
 above $20, and simulated prices run $40–$400, so a default run completes with
 **0 trades and 0.0%**. That is not a failure. $3,000 is the UI's maximum, and
-that window has an affordable oversold signal.
+that window has affordable oversold signals. It also avoids a US daylight-saving
+switch (second Sunday of March, first of November): on builds without the chart
+DST fix, a run spanning one completes but its chart does not load.
 
 Also note that the DJIA and Nasdaq-100 lines are **real** index data, plotted
 next to an agent trading *simulated* prices, so they are not a like-for-like
