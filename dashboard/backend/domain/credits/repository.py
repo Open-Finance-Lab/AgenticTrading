@@ -14,6 +14,10 @@ from typing import Any
 from dashboard.backend.database import DB_PATH
 from dashboard.backend.db_url import describe_database_url
 from dashboard.backend.domain.credits.repository_common import (
+    LedgerDayTotal,
+    _ledger_by_day_statements,
+    _ledger_window,
+    _merge_ledger_days,
     CreditAccountRestrictedStoreError,
     GrantPoolInsufficientError,
     GrantReclaimExceedsAvailableError,
@@ -1110,6 +1114,33 @@ class CreditsStore:
                 [*ids, *window],
             ).fetchall()
         return _assemble_commercial_ledger(ids, lifetime_rows, period_rows, usage_rows)
+
+    def sum_ledger_by_day(
+        self,
+        user_ids: Sequence[int],
+        *,
+        start: datetime,
+        end: datetime,
+    ) -> list[LedgerDayTotal]:
+        """Purchases, refunds and model consumption per UTC day over [start, end).
+
+        Scoped to ``user_ids`` so the series honours the same audience filter
+        as the ``aggregate_commercial_ledger`` headline it is charted under.
+        The caller chunks the id list (the analytics service uses 500), since
+        SQLite binds one parameter per id here. Days with no movement produce
+        no row.
+        """
+        ids = _unique_user_ids(user_ids)
+        if not ids:
+            return []
+        ledger_sql, usage_sql = _ledger_by_day_statements(
+            user_filter=f"user_id IN ({', '.join('?' for _ in ids)})", ph="?"
+        )
+        params = [*ids, *_ledger_window(start, end)]
+        with self._get_connection() as conn:
+            ledger_rows = conn.execute(ledger_sql, params).fetchall()
+            usage_rows = conn.execute(usage_sql, params).fetchall()
+        return _merge_ledger_days(ledger_rows, usage_rows)
 
     def list_credit_activity_timestamps(
         self,

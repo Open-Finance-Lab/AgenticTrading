@@ -287,8 +287,8 @@
     const laneByDay = new Map(lanes.map((d) => [String(d.day), d]));
 
     const series = [
-      { key: 'platform', label: 'Platform Credits', className: 'credits-chart-platform', values: days.map((d) => Number(laneByDay.get(d)?.platform_credits) || 0) },
-      { key: 'byok', label: 'BYOK runs', className: 'credits-chart-byok', values: days.map((d) => Number(laneByDay.get(d)?.byok) || 0) },
+      { key: 'platform', label: 'Platform Credits calls', className: 'credits-chart-platform', values: days.map((d) => Number(laneByDay.get(d)?.platform_credits) || 0) },
+      { key: 'byok', label: 'BYOK calls', className: 'credits-chart-byok', values: days.map((d) => Number(laneByDay.get(d)?.byok) || 0) },
       { key: 'revenue', label: 'Revenue (Credits)', className: 'credits-chart-revenue', values: days.map((d) => revenueByDay.get(d) || 0) },
     ];
     const allValues = series.flatMap((s2) => s2.values.filter((v) => v > 0));
@@ -299,7 +299,7 @@
     const y = (value) => bottom - (value / max) * plotHeight;
     const labels = days.map((d) => s.formatShortDay(d));
 
-    const svg = svgNode('svg', { viewBox: `0 0 ${width} ${height}`, role: 'img', 'aria-label': `Platform Credits, BYOK runs and revenue by date for ${s.state.range}` });
+    const svg = svgNode('svg', { viewBox: `0 0 ${width} ${height}`, role: 'img', 'aria-label': `Platform Credits and BYOK model calls, and revenue, by date for ${s.state.range}` });
     [0, 0.5, 1].forEach((fraction) => svg.appendChild(svgNode('line', { class: 'revenue-grid', x1: left, y1: bottom - fraction * plotHeight, x2: right, y2: bottom - fraction * plotHeight })));
     svg.appendChild(svgNode('line', { class: 'revenue-axis', x1: left, y1: top, x2: left, y2: bottom }));
     svg.appendChild(svgNode('line', { class: 'revenue-axis', x1: left, y1: bottom, x2: right, y2: bottom }));

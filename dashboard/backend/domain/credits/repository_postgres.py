@@ -11,6 +11,10 @@ import psycopg
 
 from dashboard.backend.db_url import init_schema_unless_worker, require_postgres_url
 from dashboard.backend.domain.credits.repository_common import (
+    LedgerDayTotal,
+    _ledger_by_day_statements,
+    _ledger_window,
+    _merge_ledger_days,
     CreditAccountRestrictedStoreError,
     GrantPoolInsufficientError,
     GrantReclaimExceedsAvailableError,
@@ -962,6 +966,29 @@ class PostgresCreditsStore:
                 )
                 usage_rows = cur.fetchall()
         return _assemble_commercial_ledger(ids, lifetime_rows, period_rows, usage_rows)
+
+    def sum_ledger_by_day(
+        self,
+        user_ids: Sequence[int],
+        *,
+        start: datetime,
+        end: datetime,
+    ) -> list[LedgerDayTotal]:
+        """See the SQLite twin."""
+        ids = _unique_user_ids(user_ids)
+        if not ids:
+            return []
+        ledger_sql, usage_sql = _ledger_by_day_statements(
+            user_filter="user_id = ANY(%s)", ph="%s"
+        )
+        params = (ids, *_ledger_window(start, end))
+        with self._get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(ledger_sql, params)
+                ledger_rows = cur.fetchall()
+                cur.execute(usage_sql, params)
+                usage_rows = cur.fetchall()
+        return _merge_ledger_days(ledger_rows, usage_rows)
 
     def list_credit_activity_timestamps(
         self,

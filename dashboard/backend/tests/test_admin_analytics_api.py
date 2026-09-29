@@ -280,6 +280,86 @@ def test_query_service_merges_completed_rollups_with_current_raw_day(tmp_path):
     assert overview.availability["growth"].available is True
 
 
+def test_billing_lane_mix_counts_model_calls_from_rollups_and_today_honouring_filters(tmp_path):
+    analytics, events, rollups, _states, users = _fixture(tmp_path)
+    yesterday = NOW.date() - timedelta(days=1)
+    stamp = datetime.combine(NOW.date(), datetime.min.time(), tzinfo=timezone.utc)
+
+    def usage_rollup(billing_mode, model_id, count):
+        return DailyRollup(
+            rollup_date=yesterday,
+            metric_name="event_count",
+            event_name="model_usage_recorded",
+            billing_mode=billing_mode,
+            provider_id="openrouter",
+            model_id=model_id,
+            value_count=count,
+            updated_at=stamp,
+        )
+
+    rollups.replace_day(
+        yesterday,
+        [
+            usage_rollup("platform_credits", "a", 3),
+            usage_rollup("platform_credits", "b", 1),
+            usage_rollup("byok", "a", 2),
+            # One settlement per non-zero credit bucket: not a call counter.
+            DailyRollup(
+                rollup_date=yesterday,
+                metric_name="event_count",
+                event_name="credits_settled",
+                billing_mode="platform_credits",
+                value_count=8,
+                updated_at=stamp,
+            ),
+        ],
+    )
+    for index, (billing_mode, model_id) in enumerate(
+        (("platform_credits", "a"), ("byok", "a"), ("byok", "b"))
+    ):
+        _event(
+            events,
+            "model_usage_recorded",
+            NOW - timedelta(minutes=10 + index),
+            f"resource:model_usage_recorded:run-today:{index}",
+            correlation_id="run-today",
+            provider_id="openrouter",
+            model_id=model_id,
+            billing_mode=billing_mode,
+            outcome="succeeded",
+            properties={"input_tokens": 1, "output_tokens": 1, "cost_micro_usd": 1},
+        )
+    _event(
+        events,
+        "credits_settled",
+        NOW - timedelta(minutes=5),
+        "resource:credits_settled:reservation-today:grant",
+        source_record_type="credit_reservation",
+        source_record_id="reservation-today",
+        correlation_id="run-today",
+        billing_mode="platform_credits",
+        properties={"amount_micro": 100, "bucket": "grant"},
+    )
+    service = AnalyticsQueryService(store=analytics, user_store=users)
+    start = datetime.combine(yesterday, datetime.min.time(), tzinfo=timezone.utc)
+
+    def mix(**filters):
+        overview = service.get_overview(
+            now=NOW,
+            filters=AnalyticsMetricFilters(start=start, end=NOW, **filters),
+        )
+        assert overview.availability["growth"].available is True
+        return [
+            (row.day, row.platform_credits, row.byok)
+            for row in overview.billing_lane_mix
+        ]
+
+    today = NOW.date().isoformat()
+    assert mix() == [(yesterday.isoformat(), 4, 2), (today, 1, 2)]
+    assert mix(model_id="a") == [(yesterday.isoformat(), 3, 2), (today, 1, 1)]
+    assert mix(billing_mode="byok") == [(yesterday.isoformat(), 0, 2), (today, 0, 2)]
+
+
 def test_user_list_and_profile_are_display_safe(tmp_path):
     analytics, events, _rollups, states, users = _fixture(tmp_path)
     _event(

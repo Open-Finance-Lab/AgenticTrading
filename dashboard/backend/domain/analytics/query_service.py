@@ -34,6 +34,8 @@ from .states import (
 ActivitySection = Literal["timeline", "runs", "usage", "sessions"]
 _USER_STATES = {"blocked", "needs_attention", "dormant", "onboarding", "active"}
 _ATTENTION_STATES = {"blocked", "needs_attention"}
+# The two BillingLaneDay fields; also models.ALLOWED_BILLING_MODES.
+_BILLING_LANES = ("platform_credits", "byok")
 _ACTIVATION_EVENTS = (
     "account_signed_up",
     "credential_verified",
@@ -195,6 +197,21 @@ class AnalyticsActivityPage(BaseModel):
     next_cursor: str | None = None
 
 
+class BillingLaneDay(BaseModel):
+    """One UTC day of model calls split by billing lane, for the Credits panel.
+
+    Both lanes count ``model_usage_recorded`` events -- one per model call --
+    so the two bars share a unit. ``credits_settled`` is not a run or a call
+    counter: it fires once per non-zero credit bucket, and not at all for a
+    zero-cost settlement.
+    """
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    day: str
+    platform_credits: int = Field(ge=0)
+    byok: int = Field(ge=0)
+
+
 class AnalyticsOverview(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -209,6 +226,7 @@ class AnalyticsOverview(BaseModel):
     output_tokens: int | None = Field(default=None, ge=0)
     daily_active_users: dict[str, int]
     daily_completed_runs: dict[str, int]
+    billing_lane_mix: list[BillingLaneDay]
     activation_funnel: dict[str, int]
     user_state_counts: dict[str, int]
     top_failure_categories: list[FailureCategoryCount]
@@ -627,6 +645,7 @@ class AnalyticsQueryService:
         output_tokens: int | None = None
         daily_active: dict[str, int] = {}
         daily_completed: dict[str, int] = {}
+        lane_days: dict[str, dict[str, int]] = {}
         funnel: dict[str, int] = {}
         failures: list[FailureCategoryCount] = []
         raw_events: list[_MetricEvent] = []
@@ -815,6 +834,33 @@ class AnalyticsQueryService:
                     {event.user_id for event in current_day_events}
                 )
                 daily_completed[day_key] = current_completed
+            # Billing-lane mix (design D14): completed days from the rollups'
+            # billing_mode dimension, today from the same filtered raw events
+            # as the rest of this block. Built locally and published only on
+            # success, so a failure part-way never ships a half-counted series.
+            lanes: dict[str, dict[str, int]] = {}
+            for row in rollups:
+                if (
+                    row.metric_name == "event_count"
+                    and row.event_name == "model_usage_recorded"
+                    and row.billing_mode in _BILLING_LANES
+                    and _matches_rollup_dimensions(row, filters)
+                ):
+                    lane = lanes.setdefault(
+                        row.rollup_date.isoformat(), dict.fromkeys(_BILLING_LANES, 0)
+                    )
+                    lane[row.billing_mode] += row.value_count
+            for event in current_events:
+                if (
+                    event.event_name == "model_usage_recorded"
+                    and event.billing_mode in _BILLING_LANES
+                ):
+                    lane = lanes.setdefault(
+                        event.occurred_at.date().isoformat(),
+                        dict.fromkeys(_BILLING_LANES, 0),
+                    )
+                    lane[event.billing_mode] += 1
+            lane_days = lanes
         except Exception:
             availability["growth"] = _availability(False)
 
@@ -903,6 +949,14 @@ class AnalyticsQueryService:
             output_tokens=output_tokens,
             daily_active_users=daily_active,
             daily_completed_runs=daily_completed,
+            billing_lane_mix=[
+                BillingLaneDay(
+                    day=day,
+                    platform_credits=counts["platform_credits"],
+                    byok=counts["byok"],
+                )
+                for day, counts in sorted(lane_days.items())
+            ],
             activation_funnel=funnel,
             user_state_counts=state_counts,
             top_failure_categories=failures,

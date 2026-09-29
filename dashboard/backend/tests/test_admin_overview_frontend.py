@@ -7,9 +7,10 @@ pytestmark = requires_node
 SHELL = source("admin-shell.js")
 CREDIT_FORMAT = source("credit-format.js")
 OVERVIEW = source("admin-overview.js")
-# The four payloads that gain §9 fields come from the target-shape copies (Task 1);
-# the absent-field test below deletes those keys again. PR D switches these to `fixture`.
-TARGET = ("overview", "overview_partial_error", "operational", "commercial")
+# Payloads whose §9 fields are still unserved come from the target-shape copies (Task 1);
+# overview and commercial left this list when PR #564 started serving theirs. The
+# absent-field test below deletes those keys again. PR D switches the rest to `fixture`.
+TARGET = ("operational",)
 F = {name: (target_fixture if name in TARGET else fixture)(f"{name}.json") for name in (
     "overview", "overview_partial_error", "operational", "lifecycle", "retention", "commercial", "groups",
 )}
@@ -125,7 +126,7 @@ def test_credits_combines_lanes_and_revenue_on_one_axis():
     )
     assert result["headline"] == "4.800000 Credits"
     assert result["lineCount"] == 3
-    assert result["legend"] == ["Platform Credits", "BYOK runs", "Revenue (Credits)"]
+    assert result["legend"] == ["Platform Credits calls", "BYOK calls", "Revenue (Credits)"]
     # Union of lane days (Aug 25/26) and revenue days (Sep 1/2) on one axis;
     # four days → first/middle/last labels shown
     assert result["xLabels"] == ["Aug 25", "Aug 26", "Sep 2"]
