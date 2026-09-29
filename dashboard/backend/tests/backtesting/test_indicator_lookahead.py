@@ -155,7 +155,7 @@ def test_an_unusable_close_mid_series_keeps_windowed_fallbacks(bad):
     frame.iloc[60, 0] = bad
     result = indicators(frame)
     assert np.isfinite(result.to_numpy(dtype=float)).all()
-    close = pd.to_numeric(frame["close"], errors="coerce").where(lambda c: np.isfinite(c))
+    close = pd.to_numeric(frame["close"], errors="coerce").where(np.isfinite)
     # pandas-ta leaves every window containing row 60 empty; the fallback
     # averages the usable closes in that window instead of all history.
     assert result["sma20"].iloc[70] == pytest.approx(close.iloc[51:71].mean())
