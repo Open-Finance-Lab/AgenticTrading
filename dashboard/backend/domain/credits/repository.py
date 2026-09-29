@@ -14,6 +14,10 @@ from typing import Any
 from dashboard.backend.database import DB_PATH
 from dashboard.backend.db_url import describe_database_url
 from dashboard.backend.domain.credits.repository_common import (
+    LedgerDayTotal,
+    _ledger_by_day_statements,
+    _ledger_window,
+    _merge_ledger_days,
     CreditAccountRestrictedStoreError,
     GrantPoolInsufficientError,
     GrantReclaimExceedsAvailableError,
@@ -32,7 +36,6 @@ from dashboard.backend.domain.credits.repository_common import (
     _validate_amount_pair,
     _assemble_billing_states,
     _assemble_commercial_ledger,
-    _assemble_daily_ledger,
     _assemble_ledger_day,
     _day_bounds,
     _unique_user_ids,
@@ -1112,53 +1115,32 @@ class CreditsStore:
             ).fetchall()
         return _assemble_commercial_ledger(ids, lifetime_rows, period_rows, usage_rows)
 
-    def list_daily_purchase_and_consumption(
+    def sum_ledger_by_day(
         self,
         user_ids: Sequence[int],
         *,
         start: datetime,
         end: datetime,
-    ) -> list[dict[str, Any]]:
-        """Per-day micro totals for the /admin Credits & revenue charts.
+    ) -> list[LedgerDayTotal]:
+        """Purchases, refunds and model consumption per UTC day over [start, end).
 
-        One row per UTC day: ``purchases_micro`` (purchases net of refunds —
-        a refund row's ``amount_micro`` is already negative, so both are
-        summed as stored) and ``consumption_micro`` (settled model spend).
-        Admin grants are neither revenue nor consumption and are excluded.
-        Days with no movement produce no row.
+        Scoped to ``user_ids`` so the series honours the same audience filter
+        as the ``aggregate_commercial_ledger`` headline it is charted under.
+        The caller chunks the id list (the analytics service uses 500), since
+        SQLite binds one parameter per id here. Days with no movement produce
+        no row.
         """
         ids = _unique_user_ids(user_ids)
         if not ids:
             return []
-        placeholders = ", ".join("?" for _ in ids)
-        params = [*ids, _utc_text(start, "start"), _utc_text(end, "end")]
+        ledger_sql, usage_sql = _ledger_by_day_statements(
+            user_filter=f"user_id IN ({', '.join('?' for _ in ids)})", ph="?"
+        )
+        params = [*ids, *_ledger_window(start, end)]
         with self._get_connection() as conn:
-            ledger_rows = conn.execute(
-                f"""
-                SELECT substr(created_at, 1, 10) AS day,
-                       COALESCE(SUM(amount_micro), 0) AS purchases_micro
-                FROM credit_ledger_entries
-                WHERE user_id IN ({placeholders})
-                  AND created_at >= ?
-                  AND created_at < ?
-                  AND entry_type IN ('purchase', 'refund')
-                GROUP BY day
-                """,
-                params,
-            ).fetchall()
-            usage_rows = conn.execute(
-                f"""
-                SELECT substr(created_at, 1, 10) AS day,
-                       COALESCE(SUM(-amount_micro), 0) AS consumption_micro
-                FROM credit_llm_usage_entries
-                WHERE user_id IN ({placeholders})
-                  AND created_at >= ?
-                  AND created_at < ?
-                GROUP BY day
-                """,
-                params,
-            ).fetchall()
-        return _assemble_daily_ledger(ledger_rows, usage_rows)
+            ledger_rows = conn.execute(ledger_sql, params).fetchall()
+            usage_rows = conn.execute(usage_sql, params).fetchall()
+        return _merge_ledger_days(ledger_rows, usage_rows)
 
     def list_credit_activity_timestamps(
         self,

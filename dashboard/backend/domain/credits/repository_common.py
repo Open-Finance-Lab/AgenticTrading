@@ -9,6 +9,8 @@ import json
 from collections.abc import Iterable, Mapping
 from datetime import date, datetime, timedelta, timezone
 
+from pydantic import BaseModel, ConfigDict, Field
+
 
 def _utc_text(value: datetime, name: str) -> str:
     """ISO-8601 UTC text, the format every ``created_at`` in this ledger uses."""
@@ -62,20 +64,6 @@ def _assemble_commercial_ledger(
             "consumed_micro": usage.get(user_id, 0),
         }
     return result
-
-
-def _assemble_daily_ledger(ledger_rows, usage_rows) -> list[dict[str, Any]]:
-    """Merge per-day purchase and usage rows into one sorted day series."""
-    days: dict[str, dict[str, int]] = {}
-
-    def bucket(key: str) -> dict[str, int]:
-        return days.setdefault(key, {"purchases_micro": 0, "consumption_micro": 0})
-
-    for row in ledger_rows:
-        bucket(str(row["day"]))["purchases_micro"] += int(row["purchases_micro"] or 0)
-    for row in usage_rows:
-        bucket(str(row["day"]))["consumption_micro"] += int(row["consumption_micro"] or 0)
-    return [{"day_string": key, **days[key]} for key in sorted(days)]
 
 
 def _assemble_ledger_day(usage_rows, lifetime_rows, purchase_rows) -> dict[int, dict[str, Any]]:
@@ -219,6 +207,79 @@ def _positive_limit(value: int) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= 100:
         raise ValueError("limit must be an integer from 1 through 100")
     return value
+
+
+class LedgerDayTotal(BaseModel):
+    """Ledger movement for one UTC day, as positive magnitudes.
+
+    Refund and usage rows are stored with a negative ``amount_micro`` (the
+    ledger CHECKs enforce it); the SQL negates them so every field here is
+    ``>= 0`` and the caller never has to remember which sign a type carries.
+    Grants are excluded: they are neither revenue nor consumption (design
+    §15.4), and ``admin_grant_activity_micro`` already reports them.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    day: date
+    purchased_micro: int = Field(default=0, ge=0)
+    refunded_micro: int = Field(default=0, ge=0)
+    consumed_micro: int = Field(default=0, ge=0)
+
+
+# ``created_at`` is ISO-8601 UTC text on both dialects, so ``substr(.., 1, 10)``
+# is the UTC day everywhere -- no dialect-specific date function. The same
+# three expressions as ``aggregate_commercial_ledger``, so the per-day series
+# sums exactly to the headline totals it is drawn under.
+_LEDGER_BY_DAY_SQL = """
+    SELECT substr(created_at, 1, 10) AS day,
+           COALESCE(SUM(CASE WHEN entry_type = 'purchase'
+               THEN amount_micro ELSE 0 END), 0) AS purchased_micro,
+           COALESCE(SUM(CASE WHEN entry_type = 'refund'
+               THEN -amount_micro ELSE 0 END), 0) AS refunded_micro
+    FROM credit_ledger_entries
+    WHERE {user_filter}
+      AND created_at >= {ph}
+      AND created_at < {ph}
+      AND entry_type IN ('purchase', 'refund')
+    GROUP BY substr(created_at, 1, 10)
+"""
+_USAGE_BY_DAY_SQL = """
+    SELECT substr(created_at, 1, 10) AS day,
+           COALESCE(SUM(-amount_micro), 0) AS consumed_micro
+    FROM credit_llm_usage_entries
+    WHERE {user_filter}
+      AND created_at >= {ph}
+      AND created_at < {ph}
+    GROUP BY substr(created_at, 1, 10)
+"""
+
+
+def _ledger_by_day_statements(*, user_filter: str, ph: str) -> tuple[str, str]:
+    """(ledger, usage) statements for one dialect's user filter and placeholder."""
+    return (
+        _LEDGER_BY_DAY_SQL.format(user_filter=user_filter, ph=ph),
+        _USAGE_BY_DAY_SQL.format(user_filter=user_filter, ph=ph),
+    )
+
+
+def _ledger_window(start: datetime, end: datetime) -> tuple[str, str]:
+    window = (_utc_text(start, "start"), _utc_text(end, "end"))
+    if end <= start:
+        raise ValueError("end must be later than start")
+    return window
+
+
+def _merge_ledger_days(ledger_rows, usage_rows) -> list[LedgerDayTotal]:
+    totals: dict[date, dict[str, int]] = {}
+    for row in ledger_rows:
+        bucket = totals.setdefault(date.fromisoformat(str(row["day"])), {})
+        bucket["purchased_micro"] = max(int(row["purchased_micro"] or 0), 0)
+        bucket["refunded_micro"] = max(int(row["refunded_micro"] or 0), 0)
+    for row in usage_rows:
+        bucket = totals.setdefault(date.fromisoformat(str(row["day"])), {})
+        bucket["consumed_micro"] = max(int(row["consumed_micro"] or 0), 0)
+    return [LedgerDayTotal(day=day, **values) for day, values in sorted(totals.items())]
 
 
 def encode_activity_cursor(

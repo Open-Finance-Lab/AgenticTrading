@@ -11,6 +11,10 @@ import psycopg
 
 from dashboard.backend.db_url import init_schema_unless_worker, require_postgres_url
 from dashboard.backend.domain.credits.repository_common import (
+    LedgerDayTotal,
+    _ledger_by_day_statements,
+    _ledger_window,
+    _merge_ledger_days,
     CreditAccountRestrictedStoreError,
     GrantPoolInsufficientError,
     GrantReclaimExceedsAvailableError,
@@ -31,7 +35,6 @@ from dashboard.backend.domain.credits.repository_common import (
 from dashboard.backend.domain.credits.repository import (
     _assemble_billing_states,
     _assemble_commercial_ledger,
-    _assemble_daily_ledger,
     _assemble_ledger_day,
     _day_bounds,
     _unique_user_ids,
@@ -964,48 +967,28 @@ class PostgresCreditsStore:
                 usage_rows = cur.fetchall()
         return _assemble_commercial_ledger(ids, lifetime_rows, period_rows, usage_rows)
 
-    def list_daily_purchase_and_consumption(
+    def sum_ledger_by_day(
         self,
         user_ids: Sequence[int],
         *,
         start: datetime,
         end: datetime,
-    ) -> list[dict[str, Any]]:
+    ) -> list[LedgerDayTotal]:
         """See the SQLite twin."""
         ids = _unique_user_ids(user_ids)
         if not ids:
             return []
-        window = (_utc_text(start, "start"), _utc_text(end, "end"))
+        ledger_sql, usage_sql = _ledger_by_day_statements(
+            user_filter="user_id = ANY(%s)", ph="%s"
+        )
+        params = (ids, *_ledger_window(start, end))
         with self._get_connection() as conn:
             with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    SELECT substr(created_at, 1, 10) AS day,
-                           COALESCE(SUM(amount_micro), 0) AS purchases_micro
-                    FROM credit_ledger_entries
-                    WHERE user_id = ANY(%s)
-                      AND created_at >= %s
-                      AND created_at < %s
-                      AND entry_type IN ('purchase', 'refund')
-                    GROUP BY day
-                    """,
-                    (ids, *window),
-                )
+                cur.execute(ledger_sql, params)
                 ledger_rows = cur.fetchall()
-                cur.execute(
-                    """
-                    SELECT substr(created_at, 1, 10) AS day,
-                           COALESCE(SUM(-amount_micro), 0) AS consumption_micro
-                    FROM credit_llm_usage_entries
-                    WHERE user_id = ANY(%s)
-                      AND created_at >= %s
-                      AND created_at < %s
-                    GROUP BY day
-                    """,
-                    (ids, *window),
-                )
+                cur.execute(usage_sql, params)
                 usage_rows = cur.fetchall()
-        return _assemble_daily_ledger(ledger_rows, usage_rows)
+        return _merge_ledger_days(ledger_rows, usage_rows)
 
     def list_credit_activity_timestamps(
         self,

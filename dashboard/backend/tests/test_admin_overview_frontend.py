@@ -138,22 +138,6 @@ def test_credits_combines_lanes_and_revenue_on_one_x_axis():
     }
 
 
-def test_credits_revenue_axis_goes_negative_on_a_net_refund_day():
-    result = _eval(
-        "(() => {"
-        f"  const commercial = {F['commercial']};"
-        "  commercial.purchased_by_day = [{day: '2026-08-25', amount_micro: -2000000}, {day: '2026-08-26', amount_micro: 4000000}];"
-        f"  const r = window.AdminOverview.renderCredits(commercial, {F['overview']});"
-        "  const revenue = byTag(r.body, 'circle').filter((c) => c.getAttribute('class').includes('credits-chart-revenue'));"
-        "  return {axis: texts(byClass(r.body, 'revenue-axis-label')), revenueTitles: revenue.map((c) => byTag(c, 'title')[0].textContent)};"
-        "})()"
-    )
-    assert result == {
-        "axis": ["14", "7", "0", "4", "1", "-2"],
-        "revenueTitles": ["Aug 25 · Revenue (Credits): -2", "Aug 26 · Revenue (Credits): 4"],
-    }
-
-
 def test_credits_lanes_still_draw_when_revenue_is_unavailable():
     """A failed ledger read (null) or an absent field must not blank the lanes."""
     result = _eval(

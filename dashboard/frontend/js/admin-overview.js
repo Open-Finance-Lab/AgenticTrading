@@ -295,8 +295,8 @@
     const laneByDay = new Map(lanes.map((d) => [String(d.day), d]));
 
     // Two units, two axes: the lanes count model calls (left), revenue is
-    // Credits net of refunds (right), which can go negative on a refund-heavy
-    // day. Sharing one scale drew a count and a currency against each other.
+    // gross purchased Credits (right, the same quantity as the Revenue
+    // headline). Sharing one scale drew a count and a currency against each other.
     const series = [
       { label: 'Platform calls', className: 'credits-chart-platform', axis: 'calls', values: days.map((d) => Number(laneByDay.get(d)?.platform_credits) || 0) },
       { label: 'BYOK calls', className: 'credits-chart-byok', axis: 'calls', values: days.map((d) => Number(laneByDay.get(d)?.byok) || 0) },
@@ -305,19 +305,17 @@
       series.push({ label: 'Revenue (Credits)', className: 'credits-chart-revenue', axis: 'credits', values: days.map((d) => revenueByDay.get(d) || 0) });
     }
     const callMax = Math.max(1, ...series.filter((e) => e.axis === 'calls').flatMap((e) => e.values));
-    const revenueValues = series.filter((e) => e.axis === 'credits').flatMap((e) => e.values);
-    const revMin = Math.min(0, ...revenueValues);
-    const revMax = Math.max(revMin === 0 ? 1 : 0, ...revenueValues);
+    const revMax = Math.max(1, ...series.filter((e) => e.axis === 'credits').flatMap((e) => e.values));
     const width = 520, height = 200, left = 42, right = 474, top = 14, bottom = 154;
     const plotWidth = right - left, plotHeight = bottom - top;
     const x = (index) => left + (days.length === 1 ? 0 : index / (days.length - 1) * plotWidth);
     const scale = {
       calls: (value) => bottom - (value / callMax) * plotHeight,
-      credits: (value) => bottom - ((value - revMin) / (revMax - revMin)) * plotHeight,
+      credits: (value) => bottom - (value / revMax) * plotHeight,
     };
     const labels = days.map((d) => s.formatShortDay(d));
 
-    const svg = svgNode('svg', { viewBox: `0 0 ${width} ${height}`, role: 'img', 'aria-label': `Model calls by billing lane${revenueAvailable ? ' and net purchased Credits' : ''} by date for ${s.state.range}` });
+    const svg = svgNode('svg', { viewBox: `0 0 ${width} ${height}`, role: 'img', 'aria-label': `Model calls by billing lane${revenueAvailable ? ' and purchased Credits' : ''} by date for ${s.state.range}` });
     const tickY = [top + 3, (top + bottom) / 2 + 3, bottom + 3];
     [0, 0.5, 1].forEach((fraction) => svg.appendChild(svgNode('line', { class: 'revenue-grid', x1: left, y1: bottom - fraction * plotHeight, x2: right, y2: bottom - fraction * plotHeight })));
     svg.appendChild(svgNode('line', { class: 'revenue-axis', x1: left, y1: top, x2: left, y2: bottom }));
@@ -325,7 +323,7 @@
     [callMax, callMax / 2, 0].forEach((value, index) => svg.appendChild(svgNode('text', { class: 'revenue-axis-label', x: 5, y: tickY[index] }, axisLabel(value))));
     if (revenueAvailable) {
       svg.appendChild(svgNode('line', { class: 'revenue-axis', x1: right, y1: top, x2: right, y2: bottom }));
-      [revMax, (revMax + revMin) / 2, revMin].forEach((value, index) => svg.appendChild(svgNode('text', { class: 'revenue-axis-label', x: right + 5, y: tickY[index] }, axisLabel(value))));
+      [revMax, revMax / 2, 0].forEach((value, index) => svg.appendChild(svgNode('text', { class: 'revenue-axis-label', x: right + 5, y: tickY[index] }, axisLabel(value))));
     }
 
     series.forEach((entry) => {
@@ -371,7 +369,7 @@
   }
 
   function axisLabel(value) {
-    return Math.abs(value) >= 100 ? String(Math.round(value)) : value.toFixed(1).replace(/\.0$/, '');
+    return value >= 100 ? String(Math.round(value)) : value.toFixed(1).replace(/\.0$/, '');
   }
 
   function renderRevenue(commercial) {
