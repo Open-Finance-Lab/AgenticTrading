@@ -302,17 +302,14 @@ def test_index_baseline_survives_a_dst_change(monkeypatch):
     pd.DatetimeIndex refuses mixed offsets, so every chart whose run spanned
     the second Sunday of March (or first of November) 404'd the whole chart.
     """
-    from datetime import datetime, timedelta, timezone
-
-    import dashboard.backend.equity_plot as equity_plot
+    from datetime import timedelta, timezone
 
     est, edt = timezone(timedelta(hours=-5)), timezone(timedelta(hours=-4))
     stamps = [datetime(2026, 3, 6, 14, tzinfo=est), datetime(2026, 3, 9, 14, tzinfo=edt)]
     monkeypatch.setattr(
-        equity_plot,
-        "fetch_index_hourly",
+        "dashboard.backend.equity_plot.fetch_index_hourly",
         lambda *a, **k: [(s.astimezone(timezone.utc).replace(tzinfo=None), 100.0 + i)
                          for i, s in enumerate(stamps)],
     )
-    values = equity_plot.compute_index_baseline_values("^DJI", stamps, "2026-03-06", "2026-03-09", 1000.0)
+    values = compute_index_baseline_values("^DJI", stamps, "2026-03-06", "2026-03-09", 1000.0)
     assert values == [1000.0, 1010.0]
