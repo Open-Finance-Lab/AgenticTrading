@@ -274,11 +274,11 @@
     const headline = s.formatCredits(commercial?.selected_period?.consumed_micro);
     const days = Array.isArray(overview?.billing_lane_mix) ? overview.billing_lane_mix : [];
     if (s.fieldPending(overview, 'billing_lane_mix')) return { headline, body: emptyBody(s.PENDING) };
-    if (!days.length) return { headline, body: emptyBody('No run activity by billing lane in this range.') };
+    if (!days.length) return { headline, body: emptyBody('No model calls by billing lane in this range.') };
     const body = s.el('div');
     const chart = s.el('div', 'credits-paired');
     chart.setAttribute('role', 'img');
-    chart.setAttribute('aria-label', `Platform Credits and BYOK runs by date for ${s.state.range}`);
+    chart.setAttribute('aria-label', `Platform Credits and BYOK model calls by date for ${s.state.range}`);
     chart.style.gridTemplateColumns = `repeat(${days.length},minmax(0,1fr))`;
     chart.style.height = days.length > 8 ? '184px' : '164px';
     const axis = s.el('div', 'credit-axis');
@@ -298,7 +298,7 @@
       chart.appendChild(column);
     });
     const legend = s.el('div', 'credit-legend');
-    [['Platform Credits', ''], ['BYOK runs', 'violet']].forEach(([label, className]) => {
+    [['Platform Credits calls', ''], ['BYOK calls', 'violet']].forEach(([label, className]) => {
       const item = s.el('span');
       item.appendChild(s.el('i', className));
       item.append(label);

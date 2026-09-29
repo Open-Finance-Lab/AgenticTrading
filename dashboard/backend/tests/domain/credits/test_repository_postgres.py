@@ -1747,6 +1747,64 @@ def test_failed_refund_releases_the_purchase_lot(pg_credits_store):
     assert replacement["status"] == "pending"
 
 
+@pg_only
+def test_postgres_sum_ledger_by_day_signs_refunds_and_matches_the_headline(pg_credits_store):
+    """The per-day series the /admin Revenue and Credits charts draw.
+
+    Real purchase -> refund -> settlement rows, so the refund is stored with
+    the negative amount the ledger CHECK enforces; the PR's first cut negated
+    it again and reported the refund as extra revenue.
+    """
+    from datetime import datetime, timedelta, timezone
+
+    from dashboard.backend.domain.credits.repository_common import LedgerDayTotal
+
+    store = pg_credits_store
+    _pending_order(store)
+    _pay_order(store)
+    store.reserve_refund(
+        refund_id="rfnd_day",
+        payment_order_id="ord_10",
+        user_id=1,
+        requested_by_user_id=2,
+        amount_usd_cents=200,
+        credits_micro=2_000_000,
+    )
+    store.attach_stripe_refund("rfnd_day", stripe_refund_id="re_test_day")
+    store.settle_succeeded_refund(
+        event_id="evt_refund_day",
+        event_type="refund.created",
+        livemode=False,
+        object_id="re_test_day",
+        payload_sha256="d" * 64,
+        refund_id="rfnd_day",
+        stripe_refund_id="re_test_day",
+        payment_intent_id="pi_test_ord_10",
+        currency="usd",
+        amount_usd_cents=200,
+    )
+    _settle_call_pg(store, run_id="run-day", call_index=0, actual_micro=25_000)
+
+    today = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+    window = {"start": today - timedelta(days=1), "end": today + timedelta(days=2)}
+    rows = store.sum_ledger_by_day([1, 3], **window)
+
+    assert rows == [
+        LedgerDayTotal(
+            day=today.date(),
+            purchased_micro=10_000_000,
+            refunded_micro=2_000_000,
+            consumed_micro=25_000,
+        )
+    ]
+    headline = store.aggregate_commercial_ledger([1, 3], **window)
+    for field in ("purchased_micro", "refunded_micro", "consumed_micro"):
+        assert sum(getattr(row, field) for row in rows) == sum(
+            totals[field] for totals in headline.values()
+        ), field
+    assert store.sum_ledger_by_day([3], **window) == []
+
+
 def test_postgres_schema_indexes_llm_usage_by_user_and_run():
     """Static DDL guard -- runs without a live Postgres.
 

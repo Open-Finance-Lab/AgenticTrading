@@ -1367,6 +1367,8 @@ _DUPLICATED_BODIES: dict[str, frozenset[str]] = {
             "get_operational_facts",
             "list_commercial_values",
             "list_credit_activity",
+            # PR #564: delegates to the injected credits_base, like the two above.
+            "list_ledger_days",
         }
     ),
 }

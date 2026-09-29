@@ -34,6 +34,8 @@ from .states import (
 ActivitySection = Literal["timeline", "runs", "usage", "sessions"]
 _USER_STATES = {"blocked", "needs_attention", "dormant", "onboarding", "active"}
 _ATTENTION_STATES = {"blocked", "needs_attention"}
+# The two BillingLaneDay fields; also models.ALLOWED_BILLING_MODES.
+_BILLING_LANES = ("platform_credits", "byok")
 _ACTIVATION_EVENTS = (
     "account_signed_up",
     "credential_verified",
@@ -196,7 +198,13 @@ class AnalyticsActivityPage(BaseModel):
 
 
 class BillingLaneDay(BaseModel):
-    """One UTC day of run counts split by billing lane, for the Credits panel."""
+    """One UTC day of model calls split by billing lane, for the Credits panel.
+
+    Both lanes count ``model_usage_recorded`` events -- one per model call --
+    so the two bars share a unit. ``credits_settled`` is not a run or a call
+    counter: it fires once per non-zero credit bucket, and not at all for a
+    zero-cost settlement.
+    """
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     day: str
@@ -660,23 +668,6 @@ class AnalyticsQueryService:
                 active_users = raw_metrics.active_users_7d
                 conversion = raw_metrics.first_success_conversion
                 repeat_rate = raw_metrics.repeat_run_rate
-                for event in raw_events:
-                    if event.event_name == "credits_settled":
-                        lane = lane_days.setdefault(
-                            event.occurred_at.date().isoformat(),
-                            {"platform_credits": 0, "byok": 0},
-                        )
-                        lane["platform_credits"] += 1
-                    elif (
-                        event.event_name == "model_usage_recorded"
-                        and event.billing_mode
-                        and event.billing_mode != "platform_credits"
-                    ):
-                        lane = lane_days.setdefault(
-                            event.occurred_at.date().isoformat(),
-                            {"platform_credits": 0, "byok": 0},
-                        )
-                        lane["byok"] += 1
                 funnel = {
                     event_name: len(
                         {
@@ -843,6 +834,33 @@ class AnalyticsQueryService:
                     {event.user_id for event in current_day_events}
                 )
                 daily_completed[day_key] = current_completed
+            # Billing-lane mix (design D14): completed days from the rollups'
+            # billing_mode dimension, today from the same filtered raw events
+            # as the rest of this block. Built locally and published only on
+            # success, so a failure part-way never ships a half-counted series.
+            lanes: dict[str, dict[str, int]] = {}
+            for row in rollups:
+                if (
+                    row.metric_name == "event_count"
+                    and row.event_name == "model_usage_recorded"
+                    and row.billing_mode in _BILLING_LANES
+                    and _matches_rollup_dimensions(row, filters)
+                ):
+                    lane = lanes.setdefault(
+                        row.rollup_date.isoformat(), dict.fromkeys(_BILLING_LANES, 0)
+                    )
+                    lane[row.billing_mode] += row.value_count
+            for event in current_events:
+                if (
+                    event.event_name == "model_usage_recorded"
+                    and event.billing_mode in _BILLING_LANES
+                ):
+                    lane = lanes.setdefault(
+                        event.occurred_at.date().isoformat(),
+                        dict.fromkeys(_BILLING_LANES, 0),
+                    )
+                    lane[event.billing_mode] += 1
+            lane_days = lanes
         except Exception:
             availability["growth"] = _availability(False)
 

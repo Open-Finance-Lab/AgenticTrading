@@ -7,8 +7,9 @@ pytestmark = requires_node
 SHELL = source("admin-shell.js")
 CREDIT_FORMAT = source("credit-format.js")
 OVERVIEW = source("admin-overview.js")
-# The four payloads that gain §9 fields come from the target-shape copies (Task 1);
-# the absent-field test below deletes those keys again. PR D switches these to `fixture`.
+# Payloads whose §9 fields are still unserved come from the target-shape copies (Task 1);
+# overview and commercial left this list when PR #564 started serving theirs. The
+# absent-field test below deletes those keys again. PR D switches the rest to `fixture`.
 TARGET = ("operational",)
 F = {name: (target_fixture if name in TARGET else fixture)(f"{name}.json") for name in (
     "overview", "overview_partial_error", "operational", "lifecycle", "retention", "commercial", "groups",
@@ -120,7 +121,7 @@ def test_credits_pairs_platform_and_byok_per_day():
         "headline": "4.800000 Credits",
         "stems": ["11", "7", "14", "8"],
         "days": ["Aug 25", "Aug 26"],
-        "legend": ["Platform Credits", "BYOK runs"],
+        "legend": ["Platform Credits calls", "BYOK calls"],
     }
 
 
