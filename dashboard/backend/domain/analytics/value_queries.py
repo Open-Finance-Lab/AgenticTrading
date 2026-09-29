@@ -270,9 +270,11 @@ class CommercialAnalyticsResponse(BaseModel):
     lifetime_net_purchased_micro: int = Field(ge=0)
     selected_period: CommercialPeriodSummary
     current_balances: BalanceTotals
-    # §9 chart series; empty when the range has no movement.
-    purchased_by_day: list[DailyMicroTotals]
-    consumed_by_day: list[DailyMicroTotals]
+    # §9 chart series; empty when the range has no movement, None when the
+    # ledger read failed (the rest of the response is still served).
+    # purchased_by_day is net of refunds, so a refund-heavy day is negative.
+    purchased_by_day: list[DailyMicroTotals] | None
+    consumed_by_day: list[DailyMicroTotals] | None
     availability: SectionAvailability
 
 
@@ -562,17 +564,38 @@ class ValueAnalyticsQueryService:
         *,
         start: date,
         end: date,
-    ) -> list[dict[str, int]]:
+    ) -> list[dict[str, int]] | None:
         """Per-day ledger movement for the Credits & revenue charts, read
-        through the credits domain (same SS6.14 seam as _commercial)."""
+        through the credits domain (same SS6.14 seam as _commercial).
+
+        Chunked like ``_commercial`` so the IN list stays under the SQLite
+        bound-variable limit. ``None`` means the read failed: the chart
+        series are optional extras on this response, so a failure here is
+        reported as unavailable series rather than taking the headline,
+        tiers and balances down with it.
+        """
         base = getattr(self.value_store, "credits_base", None)
         if base is None or not hasattr(base, "list_daily_purchase_and_consumption"):
             return []
-        return base.list_daily_purchase_and_consumption(
-            self._ids(users),
-            start=_day_start(start),
-            end=_day_start(end),
-        )
+        ids = self._ids(users)
+        days: dict[str, dict[str, int]] = {}
+        try:
+            for offset in range(0, len(ids), 500):
+                for row in base.list_daily_purchase_and_consumption(
+                    ids[offset : offset + 500],
+                    start=_day_start(start),
+                    end=_day_start(end),
+                ):
+                    entry = days.setdefault(
+                        str(row["day_string"]),
+                        {"purchases_micro": 0, "consumption_micro": 0},
+                    )
+                    entry["purchases_micro"] += int(row["purchases_micro"])
+                    entry["consumption_micro"] += int(row["consumption_micro"])
+        except Exception as exc:  # noqa: BLE001 - chart series are best-effort
+            print(f"[analytics] ERROR commercial daily ledger unavailable: {type(exc).__name__}")
+            return None
+        return [{"day_string": key, **days[key]} for key in sorted(days)]
 
     def _daily(
         self,
@@ -1058,22 +1081,19 @@ class ValueAnalyticsQueryService:
                     fact.total_available_micro for fact in facts.values()
                 ),
             ),
-            purchased_by_day=[
+            purchased_by_day=None if daily is None else [
                 DailyMicroTotals(day=_parse_day(row["day_string"]), amount_micro=row["purchases_micro"])
                 for row in daily
-                if row["purchases_micro"] > 0
+                if row["purchases_micro"] != 0
             ],
-            consumed_by_day=[
-                DailyMicroTotals(
-                    day=_parse_day(row["day_string"]),
-                    amount_micro=row["consumption_micro"] + row["grants_micro"],
-                )
+            consumed_by_day=None if daily is None else [
+                DailyMicroTotals(day=_parse_day(row["day_string"]), amount_micro=row["consumption_micro"])
                 for row in daily
-                if row["consumption_micro"] + row["grants_micro"] > 0
+                if row["consumption_micro"] > 0
             ],
             availability=SectionAvailability(
                 available=True,
-                status="ready" if cost_available else "partial",
+                status="ready" if cost_available and daily is not None else "partial",
             ),
         )
 

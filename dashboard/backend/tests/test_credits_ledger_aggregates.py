@@ -8,10 +8,14 @@ onto the store that owns the tables.
 
 from __future__ import annotations
 
+import os
 import sqlite3
 from datetime import date, datetime, timedelta, timezone
 
+import pytest
+
 from dashboard.backend.domain.credits.repository import CreditsStore
+from dashboard.backend.tests._postgres_testing import require_local_postgres_url
 from dashboard.backend.users import UserStore
 
 
@@ -228,3 +232,86 @@ def test_backfill_source_rows_come_from_the_credits_store(tmp_path):
         "id", "user_id", "reservation_id", "run_id", "call_index", "bucket",
         "amount_micro", "created_at",
     }
+
+
+# Alice's window day nets a 3.0 purchase against a 6.0 refund (refund rows
+# are stored negative), ignores both grant rows, and consumes 0.5; the next
+# day she consumes 0.05. Bob consumes 0.025 on the window day.
+DAILY_EXPECTED = [
+    {"day_string": "2026-09-11", "purchases_micro": -3_000_000, "consumption_micro": 525_000},
+    {"day_string": "2026-09-12", "purchases_micro": 0, "consumption_micro": 50_000},
+]
+
+
+def test_list_daily_purchase_and_consumption_nets_refunds_and_skips_grants(tmp_path):
+    store, alice, bob, day_start = _store(tmp_path)
+
+    rows = store.list_daily_purchase_and_consumption(
+        [alice, bob], start=day_start, end=day_start + timedelta(days=2)
+    )
+
+    assert rows == DAILY_EXPECTED
+    assert store.list_daily_purchase_and_consumption([], start=day_start, end=NOW) == []
+
+
+# --- the Postgres twin, on the live tier -------------------------------------
+
+TEST_POSTGRES_URL = os.getenv("TEST_POSTGRES_URL")
+pg_only = pytest.mark.skipif(
+    not TEST_POSTGRES_URL,
+    reason="TEST_POSTGRES_URL not set; skipping live-Postgres tests",
+)
+_PG_ALICE, _PG_BOB = 910_001, 910_002
+
+
+def _pg_delete(conn):
+    with conn.cursor() as cur:
+        ids = [_PG_ALICE, _PG_BOB]
+        cur.execute("DELETE FROM credit_llm_usage_entries WHERE user_id = ANY(%s)", (ids,))
+        cur.execute("DELETE FROM credit_ledger_entries WHERE user_id = ANY(%s)", (ids,))
+
+
+@pg_only
+def test_postgres_daily_purchase_and_consumption_matches_the_sqlite_twin():
+    require_local_postgres_url(TEST_POSTGRES_URL)
+    from dashboard.backend.domain.credits.repository_postgres import PostgresCreditsStore
+    from dashboard.backend.users_postgres import PostgresUserStore
+
+    PostgresUserStore(TEST_POSTGRES_URL)  # the credits DDL references users
+    store = PostgresCreditsStore(TEST_POSTGRES_URL)
+    day_start = datetime.combine(DAY, datetime.min.time(), tzinfo=timezone.utc)
+    ledger = [
+        _ledger_row(_PG_ALICE, "purchase", 10_000_000, NOW - timedelta(days=40), key="pa1"),
+        _ledger_row(_PG_ALICE, "purchase", 3_000_000, day_start + timedelta(hours=1), key="pa2"),
+        _ledger_row(_PG_ALICE, "refund", -6_000_000, day_start + timedelta(hours=2), key="pa3"),
+        _ledger_row(_PG_ALICE, "admin_grant_assign", 1_500_000, day_start + timedelta(hours=3), key="pa4"),
+        _ledger_row(_PG_ALICE, "admin_grant_reclaim", -500_000, day_start + timedelta(hours=4), key="pa5"),
+        _ledger_row(_PG_BOB, "purchase", 2_000_000, NOW - timedelta(days=3), key="pb1"),
+    ]
+    usage = [
+        _usage_row(_PG_ALICE, -400_000, day_start + timedelta(hours=5), key="pa6"),
+        _usage_row(_PG_ALICE, -100_000, day_start + timedelta(hours=6), key="pa7", bucket="purchased"),
+        _usage_row(_PG_ALICE, -50_000, day_start + timedelta(days=1, hours=1), key="pa8"),
+        _usage_row(_PG_BOB, -25_000, day_start + timedelta(hours=9), key="pb2"),
+    ]
+    with store._get_connection() as conn:
+        _pg_delete(conn)
+        with conn.cursor() as cur:
+            # Same shortcut as the SQLite fixture's FK-less connection: the
+            # CHECK constraints still apply, the parent rows (users, orders,
+            # refunds, stripe events, reservations) are not needed.
+            cur.execute("SET LOCAL session_replication_role = replica")
+            for table, rows in (("credit_ledger_entries", ledger), ("credit_llm_usage_entries", usage)):
+                for row in rows:
+                    cur.execute(
+                        f"INSERT INTO {table} ({', '.join(row)}) VALUES ({', '.join('%s' for _ in row)})",
+                        tuple(row.values()),
+                    )
+    try:
+        rows = store.list_daily_purchase_and_consumption(
+            [_PG_ALICE, _PG_BOB], start=day_start, end=day_start + timedelta(days=2)
+        )
+        assert rows == DAILY_EXPECTED
+    finally:
+        with store._get_connection() as conn:
+            _pg_delete(conn)

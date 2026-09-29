@@ -22,7 +22,7 @@ EXPECTED_SCRIPTS = [
     # The app chrome's ticker (D5 layout pass) rides after the formatters.
     "js/admin-ticker.js?v=2",
     "js/admin-live.js?v=1",
-    "js/admin-overview.js?v=3",
+    "js/admin-overview.js?v=6",
     "js/admin-users.js?v=1",
     "js/admin-providers.js?v=1",
     # The absorbed credits console (design N2/PR2).
@@ -91,7 +91,7 @@ def test_gate_module_loads_first_and_every_script_is_pinned():
 
 
 def test_stylesheet_is_admin_css_and_the_page_does_not_inherit_styles_css():
-    assert '<link rel="stylesheet" href="admin.css?v=6">' in ADMIN_HTML
+    assert '<link rel="stylesheet" href="admin.css?v=8">' in ADMIN_HTML
     assert "styles.css" not in ADMIN_HTML
     assert "@import" not in ADMIN_CSS
     assert "cdn.jsdelivr.net" not in ADMIN_HTML
@@ -221,12 +221,12 @@ def test_pruned_css_carries_none_of_the_dead_mock_passes():
         ".blocked-reasons", ".source-bars", ".stack-column", ".inline-key",
         ".sample-label", ".queue-", ".operation-lane", ".blocker-item",
         ".value-donut", ".detail-live-grid", ".snapshot-tile.online",
-        ".snapshot-tile.queued", ".snapshot-tile.blocked",
+        ".snapshot-tile.queued", ".snapshot-tile.blocked", ".credits-paired",
     ):
         assert selector not in ADMIN_CSS, selector
     for selector in (
         ".layered-route", ".source-donut", ".source-legend-six", ".value-steps",
-        ".lifecycle-bar", ".retention-chart", ".credits-paired", ".revenue-viz",
+        ".lifecycle-bar", ".retention-chart", ".revenue-viz",
         ".snapshot-grid", ".attention-row", ".group-badge", ".panel-error",
         ".freshness-legend", "@media(max-width:1040px)", "@media(max-width:680px)",
         "@media(prefers-reduced-motion:reduce)",

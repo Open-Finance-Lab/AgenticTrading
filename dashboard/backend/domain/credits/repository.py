@@ -32,6 +32,7 @@ from dashboard.backend.domain.credits.repository_common import (
     _validate_amount_pair,
     _assemble_billing_states,
     _assemble_commercial_ledger,
+    _assemble_daily_ledger,
     _assemble_ledger_day,
     _day_bounds,
     _unique_user_ids,
@@ -1117,12 +1118,14 @@ class CreditsStore:
         *,
         start: datetime,
         end: datetime,
-    ) -> list[dict[str, int]]:
+    ) -> list[dict[str, Any]]:
         """Per-day micro totals for the /admin Credits & revenue charts.
 
-        One row per UTC day: ``purchases_micro`` (net of refunds),
-        ``grants_micro`` (admin grant assignments) and ``consumption_micro``
-        (settled model spend). Days with no movement produce no row.
+        One row per UTC day: ``purchases_micro`` (purchases net of refunds —
+        a refund row's ``amount_micro`` is already negative, so both are
+        summed as stored) and ``consumption_micro`` (settled model spend).
+        Admin grants are neither revenue nor consumption and are excluded.
+        Days with no movement produce no row.
         """
         ids = _unique_user_ids(user_ids)
         if not ids:
@@ -1133,16 +1136,12 @@ class CreditsStore:
             ledger_rows = conn.execute(
                 f"""
                 SELECT substr(created_at, 1, 10) AS day,
-                       COALESCE(SUM(CASE WHEN entry_type = 'purchase'
-                           THEN amount_micro WHEN entry_type = 'refund'
-                           THEN -amount_micro ELSE 0 END), 0) AS purchases_micro,
-                       COALESCE(SUM(CASE WHEN entry_type = 'admin_grant_assign'
-                           THEN amount_micro ELSE 0 END), 0) AS grants_micro
+                       COALESCE(SUM(amount_micro), 0) AS purchases_micro
                 FROM credit_ledger_entries
                 WHERE user_id IN ({placeholders})
                   AND created_at >= ?
                   AND created_at < ?
-                  AND entry_type IN ('purchase', 'refund', 'admin_grant_assign')
+                  AND entry_type IN ('purchase', 'refund')
                 GROUP BY day
                 """,
                 params,
@@ -1159,25 +1158,7 @@ class CreditsStore:
                 """,
                 params,
             ).fetchall()
-
-        days: dict[str, dict[str, int]] = {}
-        def bucket(key: str) -> dict[str, int]:
-            return days.setdefault(key, {"purchases_micro": 0, "grants_micro": 0, "consumption_micro": 0})
-        for row in ledger_rows:
-            entry = bucket(str(row["day"]))
-            entry["purchases_micro"] += int(row["purchases_micro"] or 0)
-            entry["grants_micro"] += int(row["grants_micro"] or 0)
-        for row in usage_rows:
-            bucket(str(row["day"]))["consumption_micro"] += int(row["consumption_micro"] or 0)
-        return [
-            {
-                "day_string": key,
-                "purchases_micro": days[key]["purchases_micro"],
-                "grants_micro": days[key]["grants_micro"],
-                "consumption_micro": days[key]["consumption_micro"],
-            }
-            for key in sorted(days)
-        ]
+        return _assemble_daily_ledger(ledger_rows, usage_rows)
 
     def list_credit_activity_timestamps(
         self,

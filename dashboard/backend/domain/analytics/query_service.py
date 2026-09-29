@@ -196,7 +196,7 @@ class AnalyticsActivityPage(BaseModel):
 
 
 class BillingLaneDay(BaseModel):
-    """One UTC day of run counts split by billing lane, for the Credits panel."""
+    """One UTC day of model-call counts split by billing lane, for the Credits panel."""
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     day: str
@@ -660,23 +660,28 @@ class AnalyticsQueryService:
                 active_users = raw_metrics.active_users_7d
                 conversion = raw_metrics.first_success_conversion
                 repeat_rate = raw_metrics.repeat_run_rate
+                # Both lanes count `model_usage_recorded` — one event per
+                # model call, emitted for either billing mode. Counting
+                # `credits_settled` for the platform lane instead mixed units:
+                # it fires once per ledger bucket debited, so one call split
+                # across the grant and purchased buckets counted twice.
                 for event in raw_events:
-                    if event.event_name == "credits_settled":
-                        lane = lane_days.setdefault(
-                            event.occurred_at.date().isoformat(),
-                            {"platform_credits": 0, "byok": 0},
-                        )
-                        lane["platform_credits"] += 1
-                    elif (
-                        event.event_name == "model_usage_recorded"
-                        and event.billing_mode
-                        and event.billing_mode != "platform_credits"
+                    if (
+                        event.event_name != "model_usage_recorded"
+                        or not event.billing_mode
+                        or not _event_matches_filters(event, filters)
                     ):
-                        lane = lane_days.setdefault(
-                            event.occurred_at.date().isoformat(),
-                            {"platform_credits": 0, "byok": 0},
-                        )
-                        lane["byok"] += 1
+                        continue
+                    lane = lane_days.setdefault(
+                        event.occurred_at.date().isoformat(),
+                        {"platform_credits": 0, "byok": 0},
+                    )
+                    key = (
+                        "platform_credits"
+                        if event.billing_mode == "platform_credits"
+                        else "byok"
+                    )
+                    lane[key] += 1
                 funnel = {
                     event_name: len(
                         {

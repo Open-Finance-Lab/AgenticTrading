@@ -644,6 +644,58 @@ def test_commercial_response_keeps_revenue_usage_grants_cost_and_balances_separa
     }
 
 
+class FakeDailyLedger:
+    """The credits store's per-day reader: one row set per call, sized by chunk."""
+
+    def __init__(self, *, fail=False):
+        self.fail = fail
+        self.chunks = []
+
+    def list_daily_purchase_and_consumption(self, user_ids, *, start, end):
+        self.chunks.append(len(user_ids))
+        if self.fail:
+            raise RuntimeError("ledger down")
+        return [
+            {"day_string": "2026-08-02", "purchases_micro": len(user_ids), "consumption_micro": 0},
+            {"day_string": "2026-08-03", "purchases_micro": 0, "consumption_micro": 0},
+            {"day_string": "2026-08-04", "purchases_micro": -5, "consumption_micro": 7},
+        ]
+
+
+def test_commercial_daily_series_merge_across_user_id_chunks():
+    users = range(1, 1202)
+    service, value_store, _legacy = _service(snapshots={i: _snapshot(i) for i in users})
+    value_store.credits_base = FakeDailyLedger()
+
+    response = service.get_commercial(start=date(2026, 8, 1), end=date(2026, 9, 1), now=NOW)
+
+    # 1201 ids -> three reads, none past the SQLite bound-variable budget.
+    assert value_store.credits_base.chunks == [500, 500, 201]
+    # Per-day sums across the chunks; purchases are net of refunds and may be
+    # negative, consumption keeps only days that actually consumed.
+    assert [(row.day.isoformat(), row.amount_micro) for row in response.purchased_by_day] == [
+        ("2026-08-02", 1201),
+        ("2026-08-04", -15),
+    ]
+    assert [(row.day.isoformat(), row.amount_micro) for row in response.consumed_by_day] == [
+        ("2026-08-04", 21),
+    ]
+    assert response.availability.status == "ready"
+
+
+def test_commercial_daily_ledger_failure_keeps_the_response_and_reports_partial(capsys):
+    service, value_store, _legacy = _service(snapshots={1: _snapshot(1)})
+    value_store.credits_base = FakeDailyLedger(fail=True)
+
+    response = service.get_commercial(start=date(2026, 8, 1), end=date(2026, 9, 1), now=NOW)
+
+    assert response.purchased_by_day is None
+    assert response.consumed_by_day is None
+    assert response.availability.status == "partial"
+    assert response.tier_counts["unpaid"] == 1  # the rest is still served
+    assert "[analytics] ERROR commercial daily ledger unavailable: RuntimeError" in capsys.readouterr().out
+
+
 def test_missing_operational_subsection_is_reported_as_partial():
     service, _value_store, _legacy = _service(
         snapshots={1: _snapshot(1)},

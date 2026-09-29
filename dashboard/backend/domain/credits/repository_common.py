@@ -64,6 +64,20 @@ def _assemble_commercial_ledger(
     return result
 
 
+def _assemble_daily_ledger(ledger_rows, usage_rows) -> list[dict[str, Any]]:
+    """Merge per-day purchase and usage rows into one sorted day series."""
+    days: dict[str, dict[str, int]] = {}
+
+    def bucket(key: str) -> dict[str, int]:
+        return days.setdefault(key, {"purchases_micro": 0, "consumption_micro": 0})
+
+    for row in ledger_rows:
+        bucket(str(row["day"]))["purchases_micro"] += int(row["purchases_micro"] or 0)
+    for row in usage_rows:
+        bucket(str(row["day"]))["consumption_micro"] += int(row["consumption_micro"] or 0)
+    return [{"day_string": key, **days[key]} for key in sorted(days)]
+
+
 def _assemble_ledger_day(usage_rows, lifetime_rows, purchase_rows) -> dict[int, dict[str, Any]]:
     result: dict[int, dict[str, Any]] = {}
 

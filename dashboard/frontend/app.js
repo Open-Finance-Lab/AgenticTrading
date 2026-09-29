@@ -13344,26 +13344,17 @@ async function showCompletedResearchReport(runId) {
   try {
     const data = await API.get(`${RESEARCH_API}/runs/${encodeURIComponent(runId)}/report`);
     body.innerHTML = renderSimpleMarkdown(data.report_markdown);
-    const kinds = [['markdown', 'Markdown'], ['docx', 'Word'], ['pdf', 'PDF'], ['evidence_json', 'Evidence JSON']];
+    // Artifacts are best-effort on the agent's server (PDF needs Word on
+    // Linux, for one) — the contract lets a kind be absent. The report
+    // payload says which kinds the download route can serve, so nobody is
+    // offered a download that can only fail. (This used to probe each kind
+    // with a GET, which rendered the fallback PDF on every report view.)
+    const available = Array.isArray(data.available_artifacts) ? data.available_artifacts : null;
+    const kinds = [['markdown', 'Markdown'], ['docx', 'Word'], ['pdf', 'PDF'], ['evidence_json', 'Evidence JSON']]
+      .filter(([kind]) => !available || available.includes(kind));
     downloadBtns.innerHTML = kinds
       .map(([kind, label]) => `<a class="auth-btn auth-btn-secondary" href="${RESEARCH_API}/runs/${encodeURIComponent(runId)}/artifacts/${kind}" download>${label}</a>`)
       .join('');
-    // Artifacts are best-effort on the agent's server (PDF needs Word on
-    // Linux, for one) — the contract lets a kind be absent. Probe each and
-    // drop the buttons whose artifact 404s, so nobody is offered a download
-    // that can only fail.
-    downloadBtns.querySelectorAll('a').forEach(async (anchor) => {
-      try {
-        // GET + Range (not HEAD): the artifact route is GET-only, so a HEAD
-        // probe returns 405 and removed every button. A 1-byte Range GET is a
-        // real GET through the chain and still costs almost nothing.
-        const probe = await fetch(anchor.getAttribute('href'), {
-          method: 'GET', credentials: 'include',
-          headers: { Range: 'bytes=0-0' },
-        });
-        if (!probe.ok) anchor.remove();
-      } catch (_error) { /* offline probe: keep the button; the click surfaces it */ }
-    });
   } catch (error) {
     body.innerHTML = `<p class="control-helper">${escapeHtml(error.message || 'Report could not be loaded.')}</p>`;
   }

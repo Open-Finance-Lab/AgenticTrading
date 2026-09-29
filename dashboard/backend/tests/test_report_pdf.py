@@ -94,3 +94,64 @@ def test_no_stored_artifact_still_404s():
         headers={"X-CSRF-Token": csrf.split("atl_csrf=")[-1].split(";")[0]} if csrf else {},
     )
     assert resp.status_code == 404
+
+
+def test_crossing_inline_markup_degrades_to_plain_text_not_a_crash():
+    # _clean's regexes do not nest, so these produce crossed tags that
+    # reportlab's Paragraph parser rejects at construction time.
+    for line in (
+        "*a `b* c`",
+        "**bold `code** tail`",
+        "| *x `y* z` | ok |\n|---|---|\n| 1 | 2 |",
+        "- *a `b* c`",
+        "1. *a `b* c`",
+        "> *a `b* c`",
+        "## *a `b* c`",
+    ):
+        result = markdown_to_pdf_bytes(f"# Title\n\n{line}\n")
+        assert result is not None, line
+        assert result[:5] == b"%PDF-", line
+
+
+def test_page_cap_truncates_instead_of_dropping_the_pdf():
+    import re
+
+    result = markdown_to_pdf_bytes(SAMPLE * 400)
+    assert result is not None
+    assert result[:5] == b"%PDF-"
+    pages = len(re.findall(rb"/Type /Page\b", result))
+    # 60 capped pages plus the one carrying the truncation notice.
+    assert 60 < pages <= 62
+
+
+def test_report_lists_available_artifacts_without_rendering_a_pdf(monkeypatch):
+    """The download buttons read this list; it must never run the converter."""
+    from dashboard.backend.api.routers import research
+
+    stored = {"markdown": {"content_base64": "# r", "filename": "r.md"}, "evidence_json": {"x": 1}}
+    monkeypatch.setattr(research, "_run_and_template_or_404", lambda run_id, user: ({"template_id": "t"}, None))
+    monkeypatch.setattr(research.research_store, "get_artifact", lambda run_id, kind: stored.get(kind))
+
+    def forbidden(_markdown):
+        raise AssertionError("listing artifacts rendered a PDF")
+
+    monkeypatch.setattr(research.report_pdf, "markdown_to_pdf_bytes", forbidden)
+
+    payload = research.get_run_report("rr_1", current_user={"id": 1})
+    # No stored docx; the PDF is offered because the Markdown can render it.
+    assert payload["available_artifacts"] == ["markdown", "pdf", "evidence_json"]
+
+    monkeypatch.setattr(research.report_pdf, "_HAS_REPORTLAB", False)
+    assert research.get_run_report("rr_1", current_user={"id": 1})["available_artifacts"] == [
+        "markdown", "evidence_json",
+    ]
+
+
+def test_report_view_does_not_probe_downloads():
+    from pathlib import Path
+
+    app_js = (Path(__file__).resolve().parents[2] / "frontend" / "app.js").read_text(encoding="utf-8")
+    start = app_js.index("async function showCompletedResearchReport(")
+    body = app_js[start : app_js.index("\nasync function ", start + 1)]
+    assert "available_artifacts" in body
+    assert "Range" not in body and "fetch(" not in body

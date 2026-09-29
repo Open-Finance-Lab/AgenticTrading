@@ -280,6 +280,51 @@ def test_query_service_merges_completed_rollups_with_current_raw_day(tmp_path):
     assert overview.availability["growth"].available is True
 
 
+def test_billing_lane_mix_counts_model_calls_and_honours_filters(tmp_path):
+    analytics, events, _rollups, _states, users = _fixture(tmp_path)
+    for index, (mode, provider) in enumerate((
+        ("platform_credits", "commonstack"),
+        ("byok", "openrouter"),
+    )):
+        _event(
+            events,
+            "model_usage_recorded",
+            NOW - timedelta(minutes=30 - index),
+            f"resource:model_usage_recorded:run-lane:{index}",
+            correlation_id="run-lane",
+            provider_id=provider,
+            model_id="deepseek/deepseek-v4-pro",
+            billing_mode=mode,
+            outcome="succeeded",
+            properties={"input_tokens": 10, "output_tokens": 5, "cost_micro_usd": 1_000},
+        )
+    # One call settled across two ledger buckets: two credits_settled rows
+    # for a single model call, which must not count as two calls.
+    for bucket in ("grant", "purchased"):
+        _event(
+            events,
+            "credits_settled",
+            NOW - timedelta(minutes=20),
+            f"resource:credits_settled:reservation-lane:{bucket}",
+            source_record_type="credit_reservation",
+            source_record_id="reservation-lane",
+            correlation_id="run-lane",
+            billing_mode="platform_credits",
+            properties={"amount_micro": 100, "bucket": bucket},
+        )
+    service = AnalyticsQueryService(store=analytics, user_store=users)
+    window = {"start": NOW - timedelta(days=1), "end": NOW}
+
+    def lanes(**filters):
+        overview = service.get_overview(now=NOW, filters=AnalyticsMetricFilters(**window, **filters))
+        return [lane.model_dump() for lane in overview.billing_lane_mix]
+
+    day = NOW.date().isoformat()
+    assert lanes() == [{"day": day, "platform_credits": 1, "byok": 1}]
+    assert lanes(provider_id="openrouter") == [{"day": day, "platform_credits": 0, "byok": 1}]
+    assert lanes(billing_mode="byok") == [{"day": day, "platform_credits": 0, "byok": 1}]
+
+
 def test_user_list_and_profile_are_display_safe(tmp_path):
     analytics, events, _rollups, states, users = _fixture(tmp_path)
     _event(
