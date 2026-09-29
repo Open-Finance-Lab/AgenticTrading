@@ -6,6 +6,7 @@ bars. They contain no strategy logic, so individual strategies stay independent.
 
 from __future__ import annotations
 
+import calendar
 import datetime as dt
 from typing import Any, Dict, List, Optional
 
@@ -25,7 +26,12 @@ def parse_config_date(date_str: str) -> dt.date:
 
 
 def reference_start_date(contest_start: str, config: Optional[Dict[str, Any]] = None) -> str:
-    """Prior-month reference window start (defaults to one calendar month before contest)."""
+    """Prior-month reference window start (defaults to one calendar month before contest).
+
+    The day is clamped to the prior month's length: keeping it verbatim turned a
+    start on the 29th-31st into dates like ``2026-11-31``, which the bar fetch
+    rejects, so every window starting on such a day failed outright.
+    """
     if config and config.get("reference_start_date"):
         return str(config["reference_start_date"])
     start = parse_config_date(contest_start)
@@ -34,7 +40,8 @@ def reference_start_date(contest_start: str, config: Optional[Dict[str, Any]] = 
     if month < 1:
         month = 12
         year -= 1
-    return f"{year}-{month:02d}-{start.day:02d}"
+    day = min(start.day, calendar.monthrange(year, month)[1])
+    return f"{year}-{month:02d}-{day:02d}"
 
 
 def timestamp_date(ts: Any) -> dt.date:
