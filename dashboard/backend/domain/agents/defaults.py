@@ -45,11 +45,12 @@ SIMPLE_INSTRUCTION_LABEL = "Trading instruction"
 #   make_trading_decision_with_llm shows the 12 best names by trend score plus
 #   holdings. The seven-name onboarding sleeve fits whole; a 30-name Dow run
 #   shows 12 of 30, so rule 1 cannot spread across all of them.
-# - Rule 7's 0 is how sma20, macd and macd_signal warm up, with two exceptions.
-#   RSI warms up at a neutral 50, harmless while rule 4 uses it only as an
-#   upper gate. And in a window shorter than 20 bars, sma20 is the whole
-#   window's mean close, future bars included (features.py; dashboard
-#   backtests fetch no warm-up history). A week-long onboarding window clears it.
+# - Rule 7's 0 is how macd and macd_signal warm up: both read 0 for a run's
+#   first 33 bars (features.py). RSI warms up at a neutral 50, harmless while
+#   rule 4 uses it only as an upper gate, and sma20 at the mean of the closes
+#   so far, so neither shows 0. Dashboard backtests fetch no warm-up history
+#   (#540), so rules 3 and 4 run without MACD for 33 of the onboarding
+#   window's 49 bars.
 # - Rules 5 and 6 are advice: nothing in the engine caps a position's share of
 #   the account or, A-share T+1 aside, stops a same-day round trip.
 #
