@@ -340,7 +340,7 @@ def _build_research_store():
                         " WHERE user_id = %s ORDER BY added_at DESC",
                         (user_id,),
                     )
-                    return [r[0] for r in cur.fetchall()]
+                    return [r["template_id"] for r in cur.fetchall()]
 
         def create_run(self, *, run_id, user_id, template_id,
                        service_run_id, reservation_id, estimate_micro,
