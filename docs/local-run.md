@@ -195,6 +195,7 @@ Only do this once the no-key setup works.
 | `env: ' ': No such file or directory` / `event not found` after pasting | a multi-line command lost its `\` line endings, or picked up stray text | use the script, or paste the command as one line |
 | `/paper/account` → `success: false` | no Alpaca keys | expected without keys |
 | `401` on `/api/v1/research/agents` in the browser console | signed-out visitor | expected; that endpoint is sign-in-only |
+| 2 failures in `test_indicator_lookahead.py::test_fallbacks_reproduce_the_library_once_a_window_is_full` (`[missing]`, `[exception]`) | `vnpy` installs TA-Lib, and pandas-ta switches its Bollinger bands to TA-Lib when it is importable. CI does not install vnpy | expected with `requirements-vnpy.txt` installed; run that file without vnpy (or in a venv without it) to confirm |
 | `test_deleted_shim_is_not_importable` fails with `DID NOT RAISE` | stale `__pycache__` from the old layout | `rm -rf dashboard/backend/engines dashboard/backend/services` |
 
 ## 8. What "safe" does and does not cover
