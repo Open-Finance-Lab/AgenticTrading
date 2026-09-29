@@ -54,6 +54,7 @@ psycopg[binary,pool]==3.3.4
 PyYAML==6.0.1
 referencing==0.36.2
 requests==2.33.1
+reportlab==5.0.1
 rpds-py==0.27.0
 six==1.17.0
 sniffio==1.3.1
