@@ -1,11 +1,23 @@
 """Technical indicator feature computation.
 
-Extracted (Phase 2A) verbatim from ``TechnicalIndicators`` in
+Extracted (Phase 2A) from ``TechnicalIndicators`` in
 ``dashboard/scripts/backtest_hourly_agent.py``. Feature names, dataframe column
-names, NaN behavior, minimum-history assumptions, indicator parameters, and the
-returned dataframe shape are unchanged.
+names, indicator parameters, and the returned dataframe shape are preserved.
+
+The whole backtest window arrives at once, so every indicator is computed
+causally: a row depends only on the closes at or before it, never on the
+closes after it or on how many bars follow it. A row takes the pandas-ta value
+only once its own prefix is long enough for pandas-ta to answer (``_GROUPS``);
+earlier rows, rows the library leaves empty, and groups the library failed to
+produce use causal fallbacks -- neutral RSI (50) and MACD (0), and for the
+SMAs and Bollinger Bands the library's own formula with ``min_periods=1``: the
+mean (+/- 2 sample standard deviations) of the closes seen so far during
+warm-up, and of the indicator's window once it is full. Non-numeric and
+non-finite closes count as missing; SMA and band columns are NaN only on rows
+whose window holds no usable close.
 """
 
+import numpy as np
 import pandas as pd
 
 try:
@@ -15,6 +27,74 @@ except ImportError as exc:
         "pandas-ta is required for technical indicators; "
         "install the project dependencies from requirements.txt"
     ) from exc
+
+
+RSI_LENGTH = 14
+MACD_FAST, MACD_SLOW, MACD_SIGNAL = 12, 26, 9
+BB_LENGTH, BB_STD, BB_DDOF = 20, 2.0, 1
+
+# Columns that switch between library and fallback together, and the shortest
+# frame pandas-ta answers for them (it returns None below it). Gating on the
+# row's own prefix rather than on len(df) is what keeps a row independent of
+# the bars after it: pandas-ta fills early rows of a long enough frame (RSI
+# from bar 2, the MACD line from bar 26) that it leaves empty in a shorter one.
+# Pairs share one gate so a MACD line is never read against a signal line, or
+# an upper band against a lower band, from the other source.
+_GROUPS = (
+    (("rsi_14",), RSI_LENGTH + 1),
+    (("macd", "macd_signal"), MACD_SLOW + MACD_SIGNAL - 1),
+    (("bb_upper", "bb_lower"), BB_LENGTH),
+    (("sma20",), 20),
+    (("sma50",), 50),
+)
+
+
+def _usable_close(close: pd.Series) -> pd.Series:
+    try:
+        values = pd.to_numeric(close, errors="coerce").astype(float)
+    except (TypeError, ValueError):
+        return pd.Series(np.nan, index=close.index)
+    return values.where(np.isfinite(values))
+
+
+def _fallbacks(close: pd.Series) -> dict:
+    # Windowed, not expanding: a row the library leaves empty after warm-up (an
+    # unusable close inside its window) or a library error still gets a 20- or
+    # 50-bar figure rather than the mean of all history.
+    window = close.rolling(BB_LENGTH, min_periods=1)
+    mean = window.mean()
+    # One bar has no dispersion yet: a zero-width band there, not a missing one.
+    std = window.std(ddof=BB_DDOF).fillna(0.0).where(mean.notna())
+    return {
+        "rsi_14": pd.Series(50.0, index=close.index),
+        "macd": pd.Series(0.0, index=close.index),
+        "macd_signal": pd.Series(0.0, index=close.index),
+        "bb_upper": mean + BB_STD * std,
+        "bb_lower": mean - BB_STD * std,
+        "sma20": mean,
+        "sma50": close.rolling(50, min_periods=1).mean(),
+    }
+
+
+def _column(frame, marker: str):
+    if not isinstance(frame, pd.DataFrame):
+        return None
+    return next((frame[name] for name in frame.columns if marker in name), None)
+
+
+def _library_indicators(close: pd.Series, out: dict) -> None:
+    """Fill ``out`` in order, so an exception keeps what was computed before it."""
+    out["rsi_14"] = ta.rsi(close, length=RSI_LENGTH)
+    macd = ta.macd(close, fast=MACD_FAST, slow=MACD_SLOW, signal=MACD_SIGNAL)
+    out["macd"] = _column(macd, f"MACD_{MACD_FAST}_{MACD_SLOW}_{MACD_SIGNAL}")
+    out["macd_signal"] = _column(macd, f"MACDs_{MACD_FAST}_{MACD_SLOW}_{MACD_SIGNAL}")
+    bbands = ta.bbands(
+        close, length=BB_LENGTH, lower_std=BB_STD, upper_std=BB_STD, ddof=BB_DDOF
+    )
+    out["bb_upper"] = _column(bbands, "BBU")
+    out["bb_lower"] = _column(bbands, "BBL")
+    out["sma20"] = ta.sma(close, length=20)
+    out["sma50"] = ta.sma(close, length=50)
 
 
 class TechnicalIndicators:
@@ -59,77 +139,29 @@ class TechnicalIndicators:
             print(f"   Recommended: 3+ months for meaningful results.\n")
             # Still calculate what we can
 
+        close = _usable_close(df["close"])
+        fallback = _fallbacks(close)
+        library: dict = {}
         try:
-            # RSI (14-period requires 14+ bars)
-            if len(df) >= 14:
-                rsi = ta.rsi(df["close"], length=14)
-                if rsi is not None:
-                    df["rsi_14"] = rsi
-                else:
-                    df["rsi_14"] = 50.0  # Default neutral RSI
-            else:
-                df["rsi_14"] = 50.0  # Not enough data
-
-            # MACD (26-period required)
-            if len(df) >= 26:
-                macd = ta.macd(df["close"], fast=12, slow=26, signal=9)
-                if macd is not None and isinstance(macd, pd.DataFrame):
-                    macd_cols = [c for c in macd.columns if "MACD_12_26_9" in c]
-                    signal_cols = [c for c in macd.columns if "MACDs_12_26_9" in c]
-                    if macd_cols:
-                        df["macd"] = macd[macd_cols[0]]
-                    else:
-                        df["macd"] = 0.0
-                    if signal_cols:
-                        df["macd_signal"] = macd[signal_cols[0]]
-                    else:
-                        df["macd_signal"] = 0.0
-                else:
-                    df["macd"] = 0.0
-                    df["macd_signal"] = 0.0
-            else:
-                df["macd"] = 0.0
-                df["macd_signal"] = 0.0
-
-            # Bollinger Bands (20-period required)
-            if len(df) >= 20:
-                bbands = ta.bbands(df["close"], length=20, std=2)
-                if bbands is not None and isinstance(bbands, pd.DataFrame):
-                    bbu_cols = [c for c in bbands.columns if "BBU" in c]
-                    bbl_cols = [c for c in bbands.columns if "BBL" in c]
-                    if bbu_cols:
-                        df["bb_upper"] = bbands[bbu_cols[0]]
-                    else:
-                        df["bb_upper"] = df["close"].max()
-                    if bbl_cols:
-                        df["bb_lower"] = bbands[bbl_cols[0]]
-                    else:
-                        df["bb_lower"] = df["close"].min()
-                else:
-                    df["bb_upper"] = df["close"].max()
-                    df["bb_lower"] = df["close"].min()
-            else:
-                df["bb_upper"] = df["close"].max()
-                df["bb_lower"] = df["close"].min()
-
-            # SMAs
-            if len(df) >= 20:
-                sma20 = ta.sma(df["close"], length=20)
-                df["sma20"] = sma20 if sma20 is not None else df["close"].mean()
-            else:
-                df["sma20"] = df["close"].mean()
-
-            if len(df) >= 50:
-                sma50 = ta.sma(df["close"], length=50)
-                df["sma50"] = sma50 if sma50 is not None else df["close"].mean()
-            else:
-                df["sma50"] = df["close"].mean()
-
+            # pandas-ta aligns by label (MACD slices with .loc), so a repeated
+            # timestamp would raise; the gate below reads results by position.
+            _library_indicators(close.reset_index(drop=True), library)
         except Exception as e:
             print(f"Warning: Error calculating indicators: {e}")
-            # Fill in defaults
-            for col in ["rsi_14", "macd", "macd_signal", "bb_upper", "bb_lower", "sma20", "sma50"]:
-                if col not in df.columns:
-                    df[col] = df["close"].mean() if col != "rsi_14" else 50.0
+
+        rows = np.arange(len(df))
+        for columns, min_bars in _GROUPS:
+            ready = rows >= min_bars - 1
+            for column in columns:
+                series = library.get(column)
+                if series is None or len(series) != len(df):
+                    ready = np.zeros(len(df), dtype=bool)
+                    break
+                ready = ready & series.notna().to_numpy()
+            for column in columns:
+                values = fallback[column].to_numpy()
+                if ready.any():
+                    values = np.where(ready, library[column].to_numpy(dtype=float), values)
+                df[column] = values
 
         return df
