@@ -3,7 +3,7 @@
    pruned to what its final rendered DOM used (design §8.1). This file does
    not import styles.css: the admin page must not inherit a 15,000-line
    stylesheet to get a header. */
-:root{color-scheme:dark;--bg:var(--bg);--surface:#12172b;--line:#2a3041;--line-strong:#384158;--text:#e5e7eb;--muted:#9ca3af;--accent:#00bfff;--green:#42cc8b;--amber:#e6b75c;--red:#f08080;--violet:#8797ff;--steel:#6f86a8;--font-mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace;--font-base:-apple-system,BlinkMacSystemFont,"Segoe UI","Helvetica Neue",sans-serif;font-family:var(--font-base);color:var(--text);background:var(--bg)}
+:root{color-scheme:dark;--bg:#0a0e27;--surface:#12172b;--line:#2a3041;--line-strong:#384158;--text:#e5e7eb;--muted:#9ca3af;--accent:#00bfff;--green:#42cc8b;--amber:#e6b75c;--red:#f08080;--violet:#8797ff;--steel:#6f86a8;--font-mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace;--font-base:-apple-system,BlinkMacSystemFont,"Segoe UI","Helvetica Neue",sans-serif;font-family:var(--font-base);color:var(--text);background:var(--bg)}
 
 /* styles.css token names, carrying styles.css's *values* — not this file's
    nearest equivalent. The universal header below is retyped verbatim from
@@ -225,21 +225,13 @@ main{width:100%;max-width:1420px;margin:0 auto;padding:30px 36px 50px}
 .lifecycle-legend div:nth-child(6) i{background:#697586}
 .lifecycle-legend b{color:var(--text)}
 
-/* Credits usage — paired stems (mock lines 666-676) */
-.credits-paired{display:grid;grid-template-columns:repeat(7,minmax(0,1fr));gap:8px;height:164px;align-items:end;padding:0 4px;border-bottom:1px solid var(--line);position:relative}
-.credits-paired .credit-day{position:relative;height:100%;display:flex;align-items:end;justify-content:center;gap:4px;padding-bottom:24px}
-.credits-paired .credit-day::after{content:"";position:absolute;left:50%;top:16px;bottom:24px;width:1px;background:rgba(255,255,255,.06)}
-.credits-paired .credit-stem{position:relative;z-index:1;width:11px;border-radius:7px 7px 2px 2px;background:var(--accent)}
-.credits-paired .credit-stem.violet{background:#8998ff}
-.credits-paired .credit-stem b{position:absolute;bottom:calc(100% + 4px);left:50%;transform:translateX(-50%);font-size:10px;color:var(--text);font-variant-numeric:tabular-nums}
-.credits-paired .credit-date{position:absolute;bottom:4px;color:var(--muted);font-size:10px;white-space:nowrap}
-.credits-paired .credit-axis{position:absolute;left:0;right:0;top:2px;display:flex;justify-content:space-between;color:var(--muted);font-size:10px;pointer-events:none}
-.credits-paired .credit-legend{grid-column:1/-1;display:flex;gap:16px;color:var(--muted);font-size:11px;margin-top:10px}
-.credits-paired .credit-legend i{display:inline-block;width:8px;height:8px;border-radius:2px;background:var(--accent);margin-right:5px}
-.credits-paired .credit-legend i.violet{background:#8998ff}
+/* Credits usage — the combined lanes + revenue chart is drawn in the
+   .revenue-viz SVG below; only its legend lives outside the SVG. */
+.revenue-viz .credit-legend{display:flex;flex-wrap:wrap;gap:16px;color:var(--muted);font-size:11px;margin-top:10px}
+.credit-note{color:var(--muted);font-size:11px;margin:6px 0 0}
 
 /* Revenue — generated point line (mock lines 353-361) */
-.revenue-viz{height:190px;padding-top:8px;border-bottom:1px solid var(--line)}
+.revenue-viz{min-height:190px;padding-top:8px;border-bottom:1px solid var(--line)}
 .revenue-viz svg{display:block;width:100%;height:174px;overflow:visible}
 .revenue-viz .revenue-grid{stroke:var(--line);stroke-width:1}
 .revenue-viz .revenue-axis{stroke:var(--line-strong);stroke-width:1}
@@ -458,7 +450,7 @@ dialog::backdrop{background:rgba(0,0,0,.64)}
 @media(max-width:600px){.header{padding:10px 12px}}
 
 @media(max-width:1040px){.filters{grid-template-columns:repeat(2,minmax(0,1fr))}.overview-row.priority-row{grid-template-columns:1fr;gap:0}.metric-strip{grid-template-columns:repeat(2,1fr)}.detail-metric:nth-child(3){padding-left:0;border-left:0;border-top:1px solid var(--line)}.detail-metric:nth-child(4){border-top:1px solid var(--line)}.admin-provider-grid{grid-template-columns:1fr}.admin-platform-key-form{grid-template-columns:repeat(2,minmax(0,1fr))}.admin-platform-key-form .auth-btn{grid-column:1/-1}}
-@media(max-width:680px){.workspace{grid-template-columns:64px minmax(0,1fr)}aside{padding:18px 6px}aside>strong{display:none}.admin-rail{padding:5px}.admin-tab{justify-content:center;min-height:42px;padding:9px}.admin-tab span,.admin-tab-caret{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap;border:0}.analytics-subnav{display:none}main{padding:24px 16px 40px}.page-head{flex-direction:column;align-items:stretch}.page-controls{justify-items:stretch}.page-actions{flex-direction:row;align-items:center;justify-content:space-between}.live-row .live-head{flex-direction:column;align-items:flex-start}.range button{min-width:38px;padding-inline:7px}.filters{grid-template-columns:1fr}.snapshot-grid{grid-template-columns:1fr}.snapshot-tile+.snapshot-tile{border-left:0;border-top:1px solid var(--line)}.source-wrap{grid-template-columns:1fr;justify-items:center;gap:17px}.source-legend-six{width:100%;gap:10px 14px}.attention-note{align-items:flex-start;flex-direction:column;gap:8px}.retention-chart{grid-template-columns:55px repeat(4,1fr);gap:4px}.lifecycle-legend{grid-template-columns:repeat(2,1fr)}.value-step{grid-template-columns:112px 1fr auto;gap:8px}.value-step>span{white-space:normal}.layered-route{min-width:600px;overflow:visible}.credits-paired{min-width:560px}.priority-row:has(.layered-route),.priority-row:has(.credits-paired){overflow-x:auto}.revenue-viz{height:184px}.revenue-viz svg{height:168px}.metric-strip{grid-template-columns:1fr}.detail-metric,.detail-metric:first-child,.detail-metric:nth-child(3){padding:17px 0;border-left:0;border-top:1px solid var(--line)}.milestones{grid-template-columns:repeat(2,1fr)}.admin-platform-key-form{grid-template-columns:1fr}}
+@media(max-width:680px){.workspace{grid-template-columns:64px minmax(0,1fr)}aside{padding:18px 6px}aside>strong{display:none}.admin-rail{padding:5px}.admin-tab{justify-content:center;min-height:42px;padding:9px}.admin-tab span,.admin-tab-caret{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap;border:0}.analytics-subnav{display:none}main{padding:24px 16px 40px}.page-head{flex-direction:column;align-items:stretch}.page-controls{justify-items:stretch}.page-actions{flex-direction:row;align-items:center;justify-content:space-between}.live-row .live-head{flex-direction:column;align-items:flex-start}.range button{min-width:38px;padding-inline:7px}.filters{grid-template-columns:1fr}.snapshot-grid{grid-template-columns:1fr}.snapshot-tile+.snapshot-tile{border-left:0;border-top:1px solid var(--line)}.source-wrap{grid-template-columns:1fr;justify-items:center;gap:17px}.source-legend-six{width:100%;gap:10px 14px}.attention-note{align-items:flex-start;flex-direction:column;gap:8px}.retention-chart{grid-template-columns:55px repeat(4,1fr);gap:4px}.lifecycle-legend{grid-template-columns:repeat(2,1fr)}.value-step{grid-template-columns:112px 1fr auto;gap:8px}.value-step>span{white-space:normal}.layered-route{min-width:600px;overflow:visible}.priority-row:has(.layered-route){overflow-x:auto}.revenue-viz{min-height:184px}.revenue-viz svg{height:168px}.metric-strip{grid-template-columns:1fr}.detail-metric,.detail-metric:first-child,.detail-metric:nth-child(3){padding:17px 0;border-left:0;border-top:1px solid var(--line)}.milestones{grid-template-columns:repeat(2,1fr)}.admin-platform-key-form{grid-template-columns:1fr}}
 @media(prefers-reduced-motion:reduce){.module-link:after{transition:none}}
 
 /* D5/PR2 layout additions: the app chrome and the absorbed sections ride on

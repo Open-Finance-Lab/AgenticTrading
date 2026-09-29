@@ -575,7 +575,25 @@ def get_run_report(run_id: str, current_user: dict = Depends(get_current_user)):
         "template_id": run["template_id"],
         "report_markdown": artifact["content_base64"],
         "filename": artifact["filename"],
+        "available_artifacts": _available_artifact_kinds(run_id, has_markdown=True),
     }
+
+
+def _available_artifact_kinds(run_id: str, *, has_markdown: bool) -> list[str]:
+    """Kinds ``download_artifact`` can serve, decided without rendering.
+
+    The download buttons used to find this out by probing each kind with a
+    GET, and the route ignores ``Range`` — so every report view rendered the
+    fallback PDF in full just to drop the bytes. A PDF counts as available
+    when one is stored or when the Markdown it would be rendered from is.
+    """
+    kinds = ["markdown"] if has_markdown else []
+    for kind in ("docx", "pdf", "evidence_json"):
+        if research_store.get_artifact(run_id, kind):
+            kinds.append(kind)
+        elif kind == "pdf" and has_markdown and report_pdf._HAS_REPORTLAB:
+            kinds.append(kind)
+    return kinds
 
 
 @router.get("/runs/{run_id}/artifacts/{kind}")

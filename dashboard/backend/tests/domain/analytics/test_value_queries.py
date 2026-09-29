@@ -711,9 +711,11 @@ def test_commercial_series_failure_is_partial_and_logged_not_an_empty_ready(caps
 
     response = service.get_commercial(start=date(2026, 8, 1), end=date(2026, 9, 1), now=NOW)
 
-    assert response.purchased_by_day == []
-    assert response.consumed_by_day == []
+    # None, not []: [] renders as "No settled purchases in this range".
+    assert response.purchased_by_day is None
+    assert response.consumed_by_day is None
     assert response.availability.status == "partial"
+    assert response.tier_counts["unpaid"] == 1  # the rest is still served
     assert "ERROR commercial per-day ledger unavailable" in capsys.readouterr().out
 
 

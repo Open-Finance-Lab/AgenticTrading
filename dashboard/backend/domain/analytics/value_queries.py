@@ -269,8 +269,10 @@ class CommercialAnalyticsResponse(BaseModel):
     # §9 chart series, one entry per UTC day with movement. Each sums to the
     # selected_period figure of the same name (gross purchases; model spend
     # only), so a chart never disagrees with the headline drawn above it.
-    purchased_by_day: list[DailyMicroTotals]
-    consumed_by_day: list[DailyMicroTotals]
+    # None when the ledger read failed: "partial" alone cannot say which half
+    # of the section degraded, and [] is the real answer "no purchases".
+    purchased_by_day: list[DailyMicroTotals] | None
+    consumed_by_day: list[DailyMicroTotals] | None
     availability: SectionAvailability
 
 
@@ -1051,12 +1053,12 @@ class ValueAnalyticsQueryService:
         except Exception as exc:
             # An empty series renders as "No settled purchases in this range",
             # so a failed read must be distinguishable from a quiet one: say so
-            # in the log and downgrade the section, never ship [] as "ready".
+            # in the log, ship None rather than [], and downgrade the section.
             print(
                 "[analytics] ERROR commercial per-day ledger unavailable: "
                 f"{type(exc).__name__}"
             )
-            purchased_by_day, consumed_by_day = [], []
+            purchased_by_day = consumed_by_day = None
             ledger_available = False
         return CommercialAnalyticsResponse(
             as_of=current_time,
