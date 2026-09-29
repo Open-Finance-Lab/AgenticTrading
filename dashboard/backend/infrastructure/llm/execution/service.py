@@ -285,6 +285,12 @@ class LLMExecutionService:
                 if result.billing.provider_cost_usd is not None
                 else result.billing.estimated_cost_usd or 0.0
             )
+        else:
+            # BYOK debits no Credits, but analytics still expresses the lane in
+            # Credits: record the platform list-price estimate of the same
+            # tokens. The provider cost belongs to the user's own key and is
+            # not the platform's equivalent, so it is deliberately ignored here.
+            cost_usd = result.billing.estimated_cost_usd or 0.0
         analytics_instrumentation.emit_resource_event(
             event_name="model_usage_recorded",
             user_id=request.user_id,

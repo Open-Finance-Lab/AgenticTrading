@@ -22,7 +22,7 @@ EXPECTED_SCRIPTS = [
     # The app chrome's ticker (D5 layout pass) rides after the formatters.
     "js/admin-ticker.js?v=2",
     "js/admin-live.js?v=1",
-    "js/admin-overview.js?v=4",
+    "js/admin-overview.js?v=5",
     "js/admin-users.js?v=1",
     "js/admin-providers.js?v=1",
     # The absorbed credits console (design N2/PR2).

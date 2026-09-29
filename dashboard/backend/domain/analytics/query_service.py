@@ -196,12 +196,19 @@ class AnalyticsActivityPage(BaseModel):
 
 
 class BillingLaneDay(BaseModel):
-    """One UTC day of run counts split by billing lane, for the Credits panel."""
+    """One UTC day of Credits flow split by billing lane, for the Credits panel.
+
+    ``platform_credits_micro`` sums the settled debit (grant + purchased
+    buckets), so the chart plots real Credits; ``byok`` counts the lane's
+    usage calls and ``byok_estimated_micro`` the platform list-price estimate
+    of those calls — what they would have debited had they run on Credits.
+    """
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     day: str
-    platform_credits: int = Field(ge=0)
+    platform_credits_micro: int = Field(ge=0)
     byok: int = Field(ge=0)
+    byok_estimated_micro: int = Field(default=0, ge=0)
 
 
 class AnalyticsOverview(BaseModel):
@@ -334,7 +341,10 @@ class AnalyticsQueryStore:
             event_name = str(row["event_name"])
             properties = (
                 json.loads(str(row["properties_json"]))
-                if event_name == "model_usage_recorded"
+                # The Overview formulas read tokens/cost from usage calls and
+                # the settled debit amount from the credits ledger events;
+                # every other event's payload stays unparsed.
+                if event_name in {"model_usage_recorded", "credits_settled"}
                 else {}
             )
             if not isinstance(properties, dict):
@@ -664,9 +674,11 @@ class AnalyticsQueryService:
                     if event.event_name == "credits_settled":
                         lane = lane_days.setdefault(
                             event.occurred_at.date().isoformat(),
-                            {"platform_credits": 0, "byok": 0},
+                            {"platform_credits_micro": 0, "byok": 0, "byok_estimated_micro": 0},
                         )
-                        lane["platform_credits"] += 1
+                        lane["platform_credits_micro"] += int(
+                            event.properties.get("amount_micro", 0)
+                        )
                     elif (
                         event.event_name == "model_usage_recorded"
                         and event.billing_mode
@@ -674,9 +686,12 @@ class AnalyticsQueryService:
                     ):
                         lane = lane_days.setdefault(
                             event.occurred_at.date().isoformat(),
-                            {"platform_credits": 0, "byok": 0},
+                            {"platform_credits_micro": 0, "byok": 0, "byok_estimated_micro": 0},
                         )
                         lane["byok"] += 1
+                        lane["byok_estimated_micro"] += int(
+                            event.properties.get("cost_micro_usd", 0)
+                        )
                 funnel = {
                     event_name: len(
                         {
@@ -934,8 +949,9 @@ class AnalyticsQueryService:
             billing_lane_mix=[
                 BillingLaneDay(
                     day=day,
-                    platform_credits=counts["platform_credits"],
+                    platform_credits_micro=counts["platform_credits_micro"],
                     byok=counts["byok"],
+                    byok_estimated_micro=counts["byok_estimated_micro"],
                 )
                 for day, counts in sorted(lane_days.items())
             ],

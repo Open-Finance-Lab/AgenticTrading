@@ -169,7 +169,7 @@ def test_app_lifecycle_and_cache_versions_are_wired():
         'src="js/admin-shell.js?v=7"',
         'src="js/credit-format.js?v=1"',
         'src="js/admin-live.js?v=1"',
-        'src="js/admin-overview.js?v=4"',
+        'src="js/admin-overview.js?v=5"',
         'src="js/admin-users.js?v=1"',
         'src="js/admin-providers.js?v=1"',
     ):
