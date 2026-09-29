@@ -10,46 +10,40 @@ professional document:
 - **Page furniture** — report title in the header, page numbers in the
   footer.
 - **Page cap** — enforced during rendering via handle_pageBegin.
+
+reportlab is imported behind a guard: environments that don't install it
+still import this module (and the research router) fine — PDF generation
+degrades to "no PDF", exactly like v1.
 """
 
 from __future__ import annotations
 
 import io
 import re
-from typing import List, Optional, Tuple
 
-from reportlab.lib import colors
-from reportlab.lib.pagesizes import A4
-from reportlab.lib.styles import ParagraphStyle
-from reportlab.lib.units import mm
-from reportlab.pdfbase import pdfmetrics
-from reportlab.pdfbase.cidfonts import UnicodeCIDFont
-from reportlab.platypus import (
-    BaseDocTemplate, Frame, PageTemplate, Paragraph, Spacer,
-    Table, TableStyle, HRFlowable,
-)
-
-_FONT_REGISTERED = False
-
-
-def _ensure_fonts():
-    global _FONT_REGISTERED
-    if _FONT_REGISTERED:
-        return
-    pdfmetrics.registerFont(UnicodeCIDFont("STSong-Light"))
-    _FONT_REGISTERED = True
-
-
-_ACCENT = colors.HexColor("#0e7490")
-_ROW_ALT = colors.HexColor("#f8fafc")
-_BORDER = colors.HexColor("#cbd5e1")
-_TEXT_DARK = colors.HexColor("#1e293b")
-_TEXT_MUTED = colors.HexColor("#64748b")
+try:
+    from reportlab.lib import colors
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib.styles import ParagraphStyle
+    from reportlab.lib.units import mm
+    from reportlab.pdfbase import pdfmetrics
+    from reportlab.pdfbase.cidfonts import UnicodeCIDFont
+    from reportlab.platypus import (
+        BaseDocTemplate, Frame, PageTemplate, Paragraph, Spacer,
+        Table, TableStyle, HRFlowable,
+    )
+    _HAS_REPORTLAB = True
+except Exception:  # reportlab is optional at runtime — best-effort PDF
+    _HAS_REPORTLAB = False
 
 _PDF_MAX_PAGES = 60
 _BODY = 9
 _LEADING = _BODY + 4
 _H_SIZES = {1: 15, 2: 12.5, 3: 11, 4: 10}
+
+
+class _PageCapExceeded(Exception):
+    pass
 
 
 def _clean(text):
@@ -70,6 +64,46 @@ def _split_table_block(lines, start):
             rows.append(cells)
         i += 1
     return rows, i
+
+
+if _HAS_REPORTLAB:
+    _ACCENT = colors.HexColor("#0e7490")
+    _ROW_ALT = colors.HexColor("#f8fafc")
+    _BORDER = colors.HexColor("#cbd5e1")
+    _TEXT_DARK = colors.HexColor("#1e293b")
+    _TEXT_MUTED = colors.HexColor("#64748b")
+
+    class _CappedDoc(BaseDocTemplate):
+        def __init__(self, *args, title="", **kw):
+            super().__init__(*args, **kw)
+            self._report_title = title
+            self._pages = 0
+            frame = Frame(self.leftMargin, self.bottomMargin, self.width, self.height, id="body")
+            self.addPageTemplates([PageTemplate(id="main", frames=[frame], onPage=self._furniture)])
+
+        def _furniture(self, canvas, doc):
+            canvas.saveState()
+            y = A4[1] - 10 * mm
+            canvas.setStrokeColor(_BORDER)
+            canvas.setLineWidth(0.5)
+            canvas.line(18 * mm, y, A4[0] - 18 * mm, y)
+            canvas.setFont("STSong-Light", 7)
+            canvas.setFillColor(_TEXT_MUTED)
+            canvas.drawString(18 * mm, y + 3, self._report_title[:60])
+            canvas.drawRightString(A4[0] - 18 * mm, y + 3, "Agentic Trading Lab")
+            canvas.setFont("STSong-Light", 8)
+            canvas.drawCentredString(A4[0] / 2, 10 * mm, "- %d -" % doc.page)
+            canvas.restoreState()
+
+        def handle_pageBegin(self):
+            self._pages += 1
+            if self._pages > _PDF_MAX_PAGES:
+                raise _PageCapExceeded()
+            super().handle_pageBegin()
+
+    def _ensure_fonts():
+        if "STSong-Light" not in pdfmetrics.getRegisteredFontNames():
+            pdfmetrics.registerFont(UnicodeCIDFont("STSong-Light"))
 
 
 def _build_table(rows):
@@ -107,40 +141,9 @@ def _build_table(rows):
     return table
 
 
-class _PageCapExceeded(Exception):
-    pass
-
-
-class _CappedDoc(BaseDocTemplate):
-    def __init__(self, *args, title="", **kw):
-        super().__init__(*args, **kw)
-        self._report_title = title
-        self._pages = 0
-        frame = Frame(self.leftMargin, self.bottomMargin, self.width, self.height, id="body")
-        self.addPageTemplates([PageTemplate(id="main", frames=[frame], onPage=self._furniture)])
-
-    def _furniture(self, canvas, doc):
-        canvas.saveState()
-        y = A4[1] - 10 * mm
-        canvas.setStrokeColor(_BORDER)
-        canvas.setLineWidth(0.5)
-        canvas.line(18 * mm, y, A4[0] - 18 * mm, y)
-        canvas.setFont("STSong-Light", 7)
-        canvas.setFillColor(_TEXT_MUTED)
-        canvas.drawString(18 * mm, y + 3, self._report_title[:60])
-        canvas.drawRightString(A4[0] - 18 * mm, y + 3, "Agentic Trading Lab")
-        canvas.setFont("STSong-Light", 8)
-        canvas.drawCentredString(A4[0] / 2, 10 * mm, "- %d -" % doc.page)
-        canvas.restoreState()
-
-    def handle_pageBegin(self):
-        self._pages += 1
-        if self._pages > _PDF_MAX_PAGES:
-            raise _PageCapExceeded()
-        super().handle_pageBegin()
-
-
 def markdown_to_pdf_bytes(markdown_text):
+    if not _HAS_REPORTLAB:
+        return None
     _ensure_fonts()
     buf = io.BytesIO()
     title_match = re.match(r"^#\s+(.+)", (markdown_text or "").strip())
