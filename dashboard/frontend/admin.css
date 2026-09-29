@@ -3,7 +3,7 @@
    pruned to what its final rendered DOM used (design §8.1). This file does
    not import styles.css: the admin page must not inherit a 15,000-line
    stylesheet to get a header. */
-:root{color-scheme:dark;--bg:#0a0e27;--surface:#12172b;--line:#2a3041;--line-strong:#384158;--text:#e5e7eb;--muted:#9ca3af;--accent:#00bfff;--green:#42cc8b;--amber:#e6b75c;--red:#f08080;--violet:#8797ff;--steel:#6f86a8;--font-mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace;--font-base:-apple-system,BlinkMacSystemFont,"Segoe UI","Helvetica Neue",sans-serif;font-family:var(--font-base);color:var(--text);background:var(--bg)}
+:root{color-scheme:dark;--bg:var(--bg);--surface:#12172b;--line:#2a3041;--line-strong:#384158;--text:#e5e7eb;--muted:#9ca3af;--accent:#00bfff;--green:#42cc8b;--amber:#e6b75c;--red:#f08080;--violet:#8797ff;--steel:#6f86a8;--font-mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace;--font-base:-apple-system,BlinkMacSystemFont,"Segoe UI","Helvetica Neue",sans-serif;font-family:var(--font-base);color:var(--text);background:var(--bg)}
 
 /* styles.css token names, carrying styles.css's *values* — not this file's
    nearest equivalent. The universal header below is retyped verbatim from
@@ -470,3 +470,17 @@ dialog::backdrop{background:rgba(0,0,0,.64)}
 .credits-status:empty{display:none}
 .admin-workspace-content .admin-stats{margin:18px 0 22px}
 .admin-workspace-content .admin-credits-status{margin:0 0 14px}
+
+/* Three-series Credits chart (platform / BYOK / revenue on one axis). */
+.credits-chart-line{fill:none;stroke-width:2;stroke-linejoin:round;stroke-linecap:round}
+.credits-chart-line.credits-chart-platform{stroke:var(--accent)}
+.credits-chart-line.credits-chart-byok{stroke:var(--violet)}
+.credits-chart-line.credits-chart-revenue{stroke:var(--green)}
+.credits-chart-point{stroke-width:1.5}
+.credits-chart-point.credits-chart-platform{fill:var(--bg);stroke:var(--accent)}
+.credits-chart-point.credits-chart-byok{fill:var(--bg);stroke:var(--violet)}
+.credits-chart-point.credits-chart-revenue{fill:var(--bg);stroke:var(--green)}
+.credits-chart-swatch{display:inline-block;width:12px;height:3px;border-radius:2px;margin-right:6px;vertical-align:middle}
+.credits-chart-swatch.credits-chart-platform{background:var(--accent)}
+.credits-chart-swatch.credits-chart-byok{background:var(--violet)}
+.credits-chart-swatch.credits-chart-revenue{background:var(--green)}

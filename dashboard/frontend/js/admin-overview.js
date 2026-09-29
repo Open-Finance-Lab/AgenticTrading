@@ -272,40 +272,67 @@
   function renderCredits(commercial, overview) {
     const s = shell();
     const headline = s.formatCredits(commercial?.selected_period?.consumed_micro);
-    const days = Array.isArray(overview?.billing_lane_mix) ? overview.billing_lane_mix : [];
+    const lanes = Array.isArray(overview?.billing_lane_mix) ? overview.billing_lane_mix : [];
+    const revenue = Array.isArray(commercial?.purchased_by_day) ? commercial.purchased_by_day : [];
     if (s.fieldPending(overview, 'billing_lane_mix')) return { headline, body: emptyBody(s.PENDING) };
-    if (!days.length) return { headline, body: emptyBody('No run activity by billing lane in this range.') };
-    const body = s.el('div');
-    const chart = s.el('div', 'credits-paired');
-    chart.setAttribute('role', 'img');
-    chart.setAttribute('aria-label', `Platform Credits and BYOK runs by date for ${s.state.range}`);
-    chart.style.gridTemplateColumns = `repeat(${days.length},minmax(0,1fr))`;
-    chart.style.height = days.length > 8 ? '184px' : '164px';
-    const axis = s.el('div', 'credit-axis');
-    axis.appendChild(s.el('span', '', 'Higher usage'));
-    axis.appendChild(s.el('span', '', `Selected range · ${s.state.range}`));
-    chart.appendChild(axis);
-    const max = Math.max(1, ...days.flatMap((day) => [Number(day.platform_credits) || 0, Number(day.byok) || 0]));
-    days.forEach((day) => {
-      const column = s.el('div', 'credit-day');
-      [[day.platform_credits, 'credit-stem', 12], [day.byok, 'credit-stem violet', 10]].forEach(([value, className, floor]) => {
-        const stem = s.el('span', className);
-        stem.style.height = `${Math.max(floor, (Number(value) || 0) / max * 124)}px`;
-        stem.appendChild(s.el('b', '', s.formatNumber(value)));
-        column.appendChild(stem);
+    if (s.fieldPending(commercial, 'purchased_by_day')) return { headline, body: emptyBody(s.PENDING) };
+    if (!lanes.length && !revenue.length) return { headline, body: emptyBody('No Credits activity in this range.') };
+
+    // Union of lane days and revenue days on one shared x-axis.
+    const daySet = new Set();
+    lanes.forEach((d) => daySet.add(String(d.day)));
+    revenue.forEach((d) => daySet.add(String(d.day)));
+    const days = [...daySet].sort();
+    const revenueByDay = new Map(revenue.map((d) => [String(d.day), (Number(d.amount_micro) || 0) / 1000000]));
+    const laneByDay = new Map(lanes.map((d) => [String(d.day), d]));
+
+    const series = [
+      { key: 'platform', label: 'Platform Credits', className: 'credits-chart-platform', values: days.map((d) => Number(laneByDay.get(d)?.platform_credits) || 0) },
+      { key: 'byok', label: 'BYOK runs', className: 'credits-chart-byok', values: days.map((d) => Number(laneByDay.get(d)?.byok) || 0) },
+      { key: 'revenue', label: 'Revenue (Credits)', className: 'credits-chart-revenue', values: days.map((d) => revenueByDay.get(d) || 0) },
+    ];
+    const allValues = series.flatMap((s2) => s2.values.filter((v) => v > 0));
+    const max = Math.max(1, ...allValues);
+    const width = 520, height = 200, left = 42, right = 508, top = 14, bottom = 154;
+    const plotWidth = right - left, plotHeight = bottom - top;
+    const x = (index) => left + (days.length === 1 ? 0 : index / (days.length - 1) * plotWidth);
+    const y = (value) => bottom - (value / max) * plotHeight;
+    const labels = days.map((d) => s.formatShortDay(d));
+
+    const svg = svgNode('svg', { viewBox: `0 0 ${width} ${height}`, role: 'img', 'aria-label': `Platform Credits, BYOK runs and revenue by date for ${s.state.range}` });
+    [0, 0.5, 1].forEach((fraction) => svg.appendChild(svgNode('line', { class: 'revenue-grid', x1: left, y1: bottom - fraction * plotHeight, x2: right, y2: bottom - fraction * plotHeight })));
+    svg.appendChild(svgNode('line', { class: 'revenue-axis', x1: left, y1: top, x2: left, y2: bottom }));
+    svg.appendChild(svgNode('line', { class: 'revenue-axis', x1: left, y1: bottom, x2: right, y2: bottom }));
+    [max, max / 2, 0].forEach((value, index) => svg.appendChild(svgNode('text', { class: 'revenue-axis-label', x: 5, y: [top + 3, (top + bottom) / 2 + 3, bottom + 3][index] }, axisLabel(value))));
+
+    series.forEach((entry) => {
+      const path = entry.values
+        .map((value, index) => `${index ? 'L' : 'M'}${x(index).toFixed(1)} ${y(value).toFixed(1)}`)
+        .join(' ');
+      svg.appendChild(svgNode('path', { class: `credits-chart-line ${entry.className}`, d: path }));
+      entry.values.forEach((value, index) => {
+        if (value <= 0) return;
+        const circle = svgNode('circle', { class: `credits-chart-point ${entry.className}`, cx: x(index), cy: y(value), r: 3 });
+        circle.appendChild(svgNode('title', {}, `${labels[index]} · ${entry.label}: ${axisLabel(value)}`));
+        svg.appendChild(circle);
       });
-      column.appendChild(s.el('span', 'credit-date', s.formatShortDay(day.day)));
-      chart.appendChild(column);
     });
+
+    const shown = [0, Math.floor((labels.length - 1) / 2), labels.length - 1].filter((index, position, list) => list.indexOf(index) === position);
+    shown.forEach((index) => svg.appendChild(svgNode('text', { class: 'revenue-x-label', x: x(index), y: 174, 'text-anchor': index === 0 ? 'start' : index === labels.length - 1 ? 'end' : 'middle' }, labels[index])));
+
+    const body = s.el('div');
+    const wrap = s.el('div', 'revenue-viz');
+    wrap.appendChild(svg);
     const legend = s.el('div', 'credit-legend');
-    [['Platform Credits', ''], ['BYOK runs', 'violet']].forEach(([label, className]) => {
+    series.forEach((entry) => {
       const item = s.el('span');
-      item.appendChild(s.el('i', className));
-      item.append(label);
+      item.appendChild(s.el('i', `credits-chart-swatch ${entry.className}`));
+      item.append(entry.label);
       legend.appendChild(item);
     });
-    chart.appendChild(legend);
-    body.appendChild(chart);
+    wrap.appendChild(legend);
+    body.appendChild(wrap);
     return { headline, body };
   }
 
@@ -323,41 +350,15 @@
   function renderRevenue(commercial) {
     const s = shell();
     const headline = s.formatCredits(commercial?.selected_period?.purchased_micro);
-    const series = Array.isArray(commercial?.purchased_by_day) ? commercial.purchased_by_day : [];
-    if (s.fieldPending(commercial, 'purchased_by_day')) return { headline, body: emptyBody(s.PENDING) };
-    if (!series.length) return { headline, body: emptyBody('No settled purchases in this range.') };
-    const values = series.map((row) => (Number(row.amount_micro) || 0) / 1000000);
-    const labels = series.map((row) => s.formatShortDay(row.day));
-    const width = 520, height = 180, left = 42, right = 508, top = 19, bottom = 141;
-    const plotWidth = right - left, plotHeight = bottom - top;
-    const max = Math.max(1, ...values);
-    const points = values.map((value, index) => ({
-      x: left + (values.length === 1 ? 0 : index / (values.length - 1) * plotWidth),
-      y: bottom - (value / max) * plotHeight,
-      value,
-      label: labels[index],
-    }));
-    const svg = svgNode('svg', { viewBox: `0 0 ${width} ${height}`, role: 'img', 'aria-label': `Purchased Credits revenue trend with ${values.length} data points` });
-    [0, 0.5, 1].forEach((fraction) => svg.appendChild(svgNode('line', { class: 'revenue-grid', x1: left, y1: bottom - fraction * plotHeight, x2: right, y2: bottom - fraction * plotHeight })));
-    svg.appendChild(svgNode('line', { class: 'revenue-axis', x1: left, y1: top, x2: left, y2: bottom }));
-    svg.appendChild(svgNode('line', { class: 'revenue-axis', x1: left, y1: bottom, x2: right, y2: bottom }));
-    [max, max / 2, 0].forEach((value, index) => svg.appendChild(svgNode('text', { class: 'revenue-axis-label', x: 5, y: [top + 3, (top + bottom) / 2 + 3, bottom + 3][index] }, axisLabel(value))));
-    const path = points.map((point, index) => `${index ? 'L' : 'M'}${point.x.toFixed(1)} ${point.y.toFixed(1)}`).join(' ');
-    svg.appendChild(svgNode('path', { class: 'revenue-area', d: `${path} L ${right} ${bottom} L ${left} ${bottom} Z` }));
-    svg.appendChild(svgNode('path', { class: 'revenue-line', d: path }));
-    points.forEach((point) => {
-      const circle = svgNode('circle', { class: 'revenue-point', cx: point.x, cy: point.y, r: 4, tabindex: '0' });
-      circle.appendChild(svgNode('title', {}, `${point.label}: ${point.value.toFixed(1)} purchased Credits`));
-      svg.appendChild(circle);
-      svg.appendChild(svgNode('text', { class: 'revenue-point-label', x: point.x, y: Math.max(top + 11, point.y - 9) }, axisLabel(point.value)));
-    });
-    const shown = [0, Math.floor((labels.length - 1) / 2), labels.length - 1].filter((index, position, list) => list.indexOf(index) === position);
-    shown.forEach((index) => svg.appendChild(svgNode('text', { class: 'revenue-x-label', x: points[index].x, y: 164, 'text-anchor': index === 0 ? 'start' : index === labels.length - 1 ? 'end' : 'middle' }, labels[index])));
-    const body = s.el('div');
-    const wrap = s.el('div', 'revenue-viz');
-    wrap.appendChild(svg);
-    body.appendChild(wrap);
-    return { headline, body };
+    return {
+      headline,
+      body: (() => {
+        const p = s.el('p', 'panel-empty', 'The daily revenue series now lives on the Credits usage chart above.');
+        const b = s.el('div');
+        b.appendChild(p);
+        return b;
+      })(),
+    };
   }
 
   // --------------------------------------------------------- detail views

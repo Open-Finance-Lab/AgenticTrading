@@ -32,7 +32,7 @@ from fastapi.responses import Response
 
 from dashboard.backend.api.auth import get_current_user
 from dashboard.backend.domain.agents import marketplace as marketplace_mod
-from dashboard.backend.domain.agents import research_store
+from dashboard.backend.domain.agents import report_pdf, research_store
 from dashboard.backend.domain.credits.models import credits_micro_for_cents
 from dashboard.backend.domain.credits.repository_common import (
     CreditAccountRestrictedStoreError,
@@ -519,6 +519,27 @@ def get_run_report(run_id: str, current_user: dict = Depends(get_current_user)):
 def download_artifact(run_id: str, kind: str, current_user: dict = Depends(get_current_user)):
     run, _template = _run_and_template_or_404(run_id, current_user)
     artifact = research_store.get_artifact(run_id, kind)
+
+    # PDF fallback: the agent service generates PDF via Microsoft Word,
+    # unavailable on its Linux host — so the stored PDF is routinely absent
+    # while the Markdown report always exists. Render the PDF here from the
+    # stored Markdown so the download always works for the caller.
+    if not artifact and kind == "pdf":
+        md = research_store.get_artifact(run_id, "markdown")
+        if md and md.get("content_base64"):
+            pdf_bytes = report_pdf.markdown_to_pdf_bytes(md["content_base64"])
+            if pdf_bytes:
+                return Response(
+                    content=pdf_bytes,
+                    media_type="application/pdf",
+                    headers={
+                        "Content-Disposition": (
+                            f'attachment; filename="{run_id}.pdf"; '
+                            f"filename*=UTF-8''{url_quote(run_id + '.pdf')}"
+                        )
+                    },
+                )
+
     if not artifact:
         raise HTTPException(status_code=404, detail="Artifact not found")
     content = artifact["content_base64"] or ""
