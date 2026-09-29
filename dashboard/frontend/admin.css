@@ -470,3 +470,17 @@ dialog::backdrop{background:rgba(0,0,0,.64)}
 .credits-status:empty{display:none}
 .admin-workspace-content .admin-stats{margin:18px 0 22px}
 .admin-workspace-content .admin-credits-status{margin:0 0 14px}
+
+/* Three-series Credits chart (platform / BYOK / revenue on one axis). */
+.credits-chart-line{fill:none;stroke-width:2;stroke-linejoin:round;stroke-linecap:round}
+.credits-chart-line.credits-chart-platform{stroke:#67e8f9}
+.credits-chart-line.credits-chart-byok{stroke:var(--violet)}
+.credits-chart-line.credits-chart-revenue{stroke:var(--green)}
+.credits-chart-point{stroke-width:1.5}
+.credits-chart-point.credits-chart-platform{fill:#0a0e27;stroke:#67e8f9}
+.credits-chart-point.credits-chart-byok{fill:#0a0e27;stroke:var(--violet)}
+.credits-chart-point.credits-chart-revenue{fill:#0a0e27;stroke:var(--green)}
+.credits-chart-swatch{display:inline-block;width:12px;height:3px;border-radius:2px;margin-right:6px;vertical-align:middle}
+.credits-chart-swatch.credits-chart-platform{background:#67e8f9}
+.credits-chart-swatch.credits-chart-byok{background:var(--violet)}
+.credits-chart-swatch.credits-chart-revenue{background:var(--green)}

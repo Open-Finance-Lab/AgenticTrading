@@ -22,7 +22,7 @@ import io
 import re
 from typing import Optional
 
-_PDF_MAX_PAGES = 60
+
 _PDF_BODY_SIZE = 9.5
 _PDF_HEADING_SIZES = {1: 16, 2: 13, 3: 11.5, 4: 10.5}
 
@@ -40,12 +40,6 @@ def markdown_to_pdf_bytes(markdown_text: str) -> Optional[bytes]:
         return None
 
     buf = io.BytesIO()
-    doc = SimpleDocTemplate(
-        buf, pagesize=A4,
-        leftMargin=18 * mm, rightMargin=18 * mm,
-        topMargin=16 * mm, bottomMargin=16 * mm,
-        title="Research Report",
-    )
 
     base = ParagraphStyle(
         "body", fontName="Helvetica", fontSize=_PDF_BODY_SIZE,
@@ -58,6 +52,22 @@ def markdown_to_pdf_bytes(markdown_text: str) -> Optional[bytes]:
             fontSize=size, leading=size + 4, spaceBefore=10, spaceAfter=5,
         )
     mono = ParagraphStyle("mono", parent=base, fontName="Courier", fontSize=8, leading=10)
+
+    # Enforce the page cap during rendering: stop adding flowables once
+    # the document has reached _PDF_MAX_PAGES, rather than building every
+    # page and only checking the byte size after all the CPU is spent.
+    _PDF_MAX_PAGES = 60
+    page_count = [0]
+
+    class _PageCappedDoc(SimpleDocTemplate):
+        def handle_pageBegin(self):
+            page_count[0] += 1
+            if page_count[0] > _PDF_MAX_PAGES:
+                raise _PageCapExceeded()
+            super().handle_pageBegin()
+
+    class _PageCapExceeded(Exception):
+        pass
 
     story = []
     # Strip inline Markdown noise that reportlab's mini-HTML can't handle;
@@ -147,7 +157,15 @@ def markdown_to_pdf_bytes(markdown_text: str) -> Optional[bytes]:
         story.append(Paragraph(clean(" ".join(para)), base))
 
     try:
+        doc = _PageCappedDoc(
+            buf, pagesize=A4,
+            leftMargin=18 * mm, rightMargin=18 * mm,
+            topMargin=16 * mm, bottomMargin=16 * mm,
+            title="Research Report",
+        )
         doc.build(story)
+    except _PageCapExceeded:
+        pass  # capped: emit the truncated PDF, not the full runaway
     except Exception:
         return None
 

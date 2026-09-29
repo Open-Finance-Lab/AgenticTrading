@@ -162,10 +162,10 @@ def test_app_lifecycle_and_cache_versions_are_wired():
     # Lockstep owner for the console's bumped tags and the /admin page's pins:
     # every bump edits this test in the same change (Global Constraints).
     assert 'styles.css?v=155' in APP_HTML
-    assert 'app.js?v=150' in APP_HTML
+    assert 'app.js?v=151' in APP_HTML
     assert 'js/admin-tabs.js?v=12' in APP_HTML
     for tag in (
-        'href="admin.css?v=4"',
+        'href="admin.css?v=5"',
         'src="js/admin-shell.js?v=7"',
         'src="js/credit-format.js?v=1"',
         'src="js/admin-live.js?v=1"',

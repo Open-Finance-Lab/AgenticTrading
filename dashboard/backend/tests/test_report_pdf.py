@@ -2,8 +2,6 @@
 when the agent service's own PDF is absent (its Word-based generator doesn't
 run on Linux). Covers the converter's formatting contracts."""
 
-import pytest
-
 from dashboard.backend.domain.agents.report_pdf import markdown_to_pdf_bytes
 
 

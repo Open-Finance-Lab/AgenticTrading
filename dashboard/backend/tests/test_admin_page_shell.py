@@ -91,7 +91,7 @@ def test_gate_module_loads_first_and_every_script_is_pinned():
 
 
 def test_stylesheet_is_admin_css_and_the_page_does_not_inherit_styles_css():
-    assert '<link rel="stylesheet" href="admin.css?v=4">' in ADMIN_HTML
+    assert '<link rel="stylesheet" href="admin.css?v=5">' in ADMIN_HTML
     assert "styles.css" not in ADMIN_HTML
     assert "@import" not in ADMIN_CSS
     assert "cdn.jsdelivr.net" not in ADMIN_HTML
