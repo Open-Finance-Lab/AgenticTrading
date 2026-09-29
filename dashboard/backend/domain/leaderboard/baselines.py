@@ -13,7 +13,6 @@ aggregation schema, and daily downsample policy live here.
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta
 from typing import Any, Dict, List
 
 import pandas as pd
@@ -25,6 +24,7 @@ from dashboard.backend.domain.backtesting.metrics import (
     calculate_sharpe,
 )
 from dashboard.backend.infrastructure.market_data.alpaca_bars import AlpacaDataLoader
+from dashboard.backend.infrastructure.market_data.provider import exclusive_end
 
 
 def fetch_hourly_bars(symbols: List[str], start_date: str, end_date: str) -> Dict[str, pd.DataFrame]:
@@ -43,10 +43,9 @@ def fetch_hourly_bars(symbols: List[str], start_date: str, end_date: str) -> Dic
     because the log line below outlives nothing.
     """
     loader = AlpacaDataLoader()
-    end_inclusive = (
-        datetime.strptime(end_date, "%Y-%m-%d") + timedelta(days=1)
-    ).strftime("%Y-%m-%d")
-    data = loader.fetch_bars(symbols, start_date, end_inclusive)
+    # `exclusive_end`, not `settled_exclusive_end`: the rolling daily board
+    # reads today on purpose, up to the SIP clamp described above.
+    data = loader.fetch_bars(symbols, start_date, exclusive_end(end_date))
     meta = loader.last_fetch or {}
     if meta.get("sip_fallback_to_iex"):
         print(

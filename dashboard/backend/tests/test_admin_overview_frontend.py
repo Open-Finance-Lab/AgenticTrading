@@ -110,36 +110,43 @@ def test_lifecycle_bar_and_legend_follow_segment_counts():
     assert result == {"headline": "33", "shares": ["3", "6", "7", "8", "5", "4"], "legend": ["3", "6", "7", "8", "5", "4"]}
 
 
-def test_credits_pairs_platform_and_byok_per_day():
+def test_credits_combines_lanes_and_revenue_on_one_axis():
+    """Three series — platform, BYOK, revenue — share one x-axis and legend."""
     result = _eval(
         "(() => {"
-        f"  const r = window.AdminOverview.renderCredits({F['commercial']}, {F['overview']});"
-        "  return {headline: r.headline, stems: texts(byClass(r.body, 'credit-stem').map((s) => byTag(s, 'b')[0])), days: texts(byClass(r.body, 'credit-date')), legend: texts(byClass(r.body, 'credit-legend')[0].children)};"
+        f"  const commercial = {F['commercial']};"
+        f"  const overview = {F['overview']};"
+        "  const r = window.AdminOverview.renderCredits(commercial, overview);"
+        "  const lines = byTag(r.body, 'path').filter((p) => p.getAttribute('class')?.includes('credits-chart-line'));"
+        "  const points = byTag(r.body, 'circle');"
+        "  const legend = texts(byClass(r.body, 'credit-legend')[0].children);"
+        "  const xLabels = texts(byClass(r.body, 'revenue-x-label'));"
+        "  return {headline: r.headline, lineCount: lines.length, pointCount: points.length, legend, xLabels};"
         "})()"
     )
-    assert result == {
-        "headline": "4.800000 Credits",
-        "stems": ["11", "7", "14", "8"],
-        "days": ["Aug 25", "Aug 26"],
-        "legend": ["Platform Credits calls", "BYOK calls"],
-    }
+    assert result["headline"] == "4.800000 Credits"
+    assert result["lineCount"] == 3
+    assert result["legend"] == ["Platform Credits calls", "BYOK calls", "Revenue (Credits)"]
+    # Union of lane days (Aug 25/26) and revenue days (Sep 1/2) on one axis;
+    # four days → first/middle/last labels shown
+    assert result["xLabels"] == ["Aug 25", "Aug 26", "Sep 2"]
 
 
-def test_revenue_line_is_generated_svg_with_fixed_axis_labels():
+
+def test_revenue_panel_points_to_the_combined_chart():
+    """Revenue's daily series moved onto the Credits chart; this panel keeps
+    the headline and says where the trend went."""
     result = _eval(
         "(() => {"
         f"  const r = window.AdminOverview.renderRevenue({F['commercial']});"
-        "  const svg = byTag(r.body, 'svg')[0];"
-        "  return {headline: r.headline, label: svg.getAttribute('aria-label'), texts: texts(byTag(svg, 'text')), titles: texts(byTag(svg, 'title')), points: byTag(svg, 'circle').length};"
+        "  const empty = byClass(r.body, 'panel-empty');"
+        "  return {headline: r.headline, hasSVG: byTag(r.body, 'svg').length, empty: empty.length ? empty[0].textContent : null};"
         "})()"
     )
-    assert result == {
-        "headline": "12.000000 Credits",
-        "label": "Purchased Credits revenue trend with 2 data points",
-        "texts": ["7", "3.5", "0", "5", "7", "Sep 1", "Sep 2"],
-        "titles": ["Sep 1: 5.0 purchased Credits", "Sep 2: 7.0 purchased Credits"],
-        "points": 2,
-    }
+    assert result["headline"] == "12.000000 Credits"
+    assert result["hasSVG"] == 0
+    assert "Credits usage chart" in result["empty"]
+
 
 
 def test_attention_counts_and_top_reason():
@@ -175,11 +182,11 @@ def test_recut_fields_absent_render_awaiting_data_source_not_an_empty_chart():
         "})()"
     )
     assert result["credits"] == ["4.800000 Credits", ["Awaiting data source"]]
-    assert result["revenue"] == ["12.000000 Credits", ["Awaiting data source"]]
+    assert result["revenue"] == ["12.000000 Credits", ["The daily revenue series now lives on the Credits usage chart above."]]
     assert result["attention"] == ["11", ["2", "4", "5"], "Awaiting data source"]
     assert result["health"] == [["Awaiting data source"]]
     # Served-and-empty keeps the panel's own copy: the two states must never collapse into one.
-    assert result["empty"] == ["No settled purchases in this range."]
+    assert result["empty"] == ["The daily revenue series now lives on the Credits usage chart above."]
 
 
 def test_health_detail_has_no_affected_users_column():

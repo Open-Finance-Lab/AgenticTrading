@@ -103,3 +103,33 @@ def test_full_queue_drops_job_with_print(capsys, monkeypatch):
     assert "Baseline queue full" in capsys.readouterr().out
     release.set()
     assert bw.wait_idle(10)
+
+
+def test_the_job_pins_its_datasets_bound_on_the_backtester(monkeypatch):
+    """The DJIA baseline may refetch. It must use the bound the agent's bars
+    were fetched with (the dataset's `provider_end`), not re-derive one --
+    otherwise a window reaching an open session, drained after midnight,
+    prices the index over a day the agent never traded."""
+    seen = []
+
+    class _Pinned(_FakeBacktester):
+        provider_end_date = None
+
+        def run_djia_baseline(self):
+            seen.append(self.provider_end_date)
+            return super().run_djia_baseline()
+
+    monkeypatch.setattr(bw, "HourlyBacktester", _Pinned)
+    job = _job("pinned")
+    job.provider_end = "2026-04-16"
+    assert bw.submit(job)
+    assert bw.wait_idle(10)
+    assert seen == ["2026-04-16"]
+
+
+def test_jobs_with_different_bounds_do_not_share_baselines(_isolate):
+    first, second = _job("a"), _job("b")
+    first.provider_end, second.provider_end = "2026-04-16", "2026-04-17"
+    assert bw.submit(first) and bw.submit(second)
+    assert bw.wait_idle(10)
+    assert _FakeBacktester.instances == 2

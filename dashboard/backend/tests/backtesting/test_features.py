@@ -1,7 +1,7 @@
 """Characterization tests for extracted TechnicalIndicators (Phase 2A).
 
 Uses a fixed local dataframe (no Alpaca/network) and locks in column names,
-shape/index behavior, NaN behavior, minimum-history defaults, and a couple of
+shape/index behavior, warm-up fallbacks, minimum-history defaults, and a couple of
 deterministic indicator values.
 """
 
@@ -59,13 +59,14 @@ def test_sma_values_are_rolling_means():
     assert out["sma50"].iloc[-1] == pytest.approx(df["close"].iloc[-50:].mean())
 
 
-def test_nan_behavior_on_early_rows():
+def test_early_rows_use_causal_fallbacks_not_nan():
     df = _df(60, seed=2)
     out = TechnicalIndicators.calculate_indicators(df)
-    # rolling indicators are NaN until they have enough history
-    assert np.isnan(out["rsi_14"].iloc[0])
-    assert np.isnan(out["sma20"].iloc[0])
-    assert np.isnan(out["sma50"].iloc[0])
+    # Rows before an indicator's warm-up carry a fallback built from the bars
+    # seen so far, never a NaN (which the LLM prompt would render as 0.0).
+    assert not out[sorted(EXPECTED_COLS)].isna().any().any()
+    assert out["rsi_14"].iloc[0] == 50.0
+    assert out["sma20"].iloc[0] == out["sma50"].iloc[0] == df["close"].iloc[0]
 
 
 def test_insufficient_data_uses_defaults():

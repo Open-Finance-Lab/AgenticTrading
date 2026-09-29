@@ -52,8 +52,9 @@ def response_to_frames(
     outlive the provider's being fixed. Now that the floor is derived from the
     requested window, any default here is a third copy of a number that no
     longer has a single correct value: a caller that omitted it would silently
-    get the retired ~13-trading-day floor back, which ``MAX_BACKTEST_DAYS`` (14
-    calendar days, at most 10 weekdays) makes unreachable. Forcing the caller to
+    get the retired ~13-trading-day floor back, which ``MAX_BACKTEST_DAYS`` (``end - start``
+    at most 14 days: 15 calendar days including the end date, at most 11
+    weekdays) makes unreachable. Forcing the caller to
     say what the window costs is what keeps the floor in one place.
     """
     symbols = _validate_expected_symbols(expected_symbols)

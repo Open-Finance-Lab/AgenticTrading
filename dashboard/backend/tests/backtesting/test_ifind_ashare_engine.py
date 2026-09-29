@@ -45,6 +45,8 @@ from dashboard.backend.infrastructure.market_data.alpaca_bars import (
 CN = ZoneInfo("Asia/Shanghai")
 START = "2026-04-01"
 END = "2026-05-01"
+# The engine hands providers a half-open bound one day past the inclusive END.
+PROVIDER_END = "2026-05-02"
 
 
 class RecordingProvider:
@@ -412,8 +414,8 @@ def test_ifind_engine_uses_profile_symbols_in_explicit_rule_mode(monkeypatch):
     assert backtester.symbols == A_SHARE_DEMO_6_SYMBOLS
 
     backtester.load_data()
-    assert provider.calls == [(A_SHARE_DEMO_6_SYMBOLS, START, END)]
-    assert provider.fx_calls == [(A_SHARE_DEMO_6_SYMBOLS, START, END)]
+    assert provider.calls == [(A_SHARE_DEMO_6_SYMBOLS, START, PROVIDER_END)]
+    assert provider.fx_calls == [(A_SHARE_DEMO_6_SYMBOLS, START, PROVIDER_END)]
     assert backtester.native_initial_capital == pytest.approx(7_000)
     backtester.calculate_indicators()
 
@@ -451,6 +453,10 @@ def test_ifind_engine_uses_profile_symbols_in_explicit_rule_mode(monkeypatch):
         "native_currency": "CNY",
         "reporting_currency": "USD",
         "lot_size": 100,
+        # The run's window, as fetched: its end date is a day traded.
+        "end_date_inclusive": True,
+        "provider_end_date": PROVIDER_END,
+        "open_session_excluded": False,
         "fx_pair": "USD/CNY",
         "fx_source": "ifind_history_currency_conversion",
         "fx_policy": "daily_implied_median_forward_fill",
@@ -517,8 +523,8 @@ def test_ifind_engine_resolves_csi300_sample20_and_records_provenance(
 
     assert factory_calls == [(IFIND_ASHARE, CSI300_SAMPLE_20_2026H2)]
     assert backtester.symbols == CSI300_SAMPLE_20_2026H2_SYMBOLS
-    assert provider.calls == [(CSI300_SAMPLE_20_2026H2_SYMBOLS, START, END)]
-    assert provider.fx_calls == [(CSI300_SAMPLE_20_2026H2_SYMBOLS, START, END)]
+    assert provider.calls == [(CSI300_SAMPLE_20_2026H2_SYMBOLS, START, PROVIDER_END)]
+    assert provider.fx_calls == [(CSI300_SAMPLE_20_2026H2_SYMBOLS, START, PROVIDER_END)]
     assert backtester.use_llm is False
     metadata = backtester._run_metadata()
     assert metadata == {
@@ -534,6 +540,10 @@ def test_ifind_engine_resolves_csi300_sample20_and_records_provenance(
         "native_currency": "CNY",
         "reporting_currency": "USD",
         "lot_size": 100,
+        # The run's window, as fetched: its end date is a day traded.
+        "end_date_inclusive": True,
+        "provider_end_date": PROVIDER_END,
+        "open_session_excluded": False,
         "fx_pair": "USD/CNY",
         "fx_source": "ifind_history_currency_conversion",
         "fx_policy": "daily_implied_median_forward_fill",

@@ -31,6 +31,10 @@ from dashboard.backend.infrastructure.market_data.alpaca_bars import (
     MarketDataUnavailableError,
     configured_feed_name,
 )
+from dashboard.backend.infrastructure.market_data.provider import (
+    settled_exclusive_end,
+)
+from dashboard.backend.infrastructure.market_data.sessions import DEFAULT_MARKET
 from dashboard.backend.paths import CONFIG_DIR
 
 #: The bare ``POST /backtest/run`` defaults. Deliberately a local copy rather
@@ -69,7 +73,12 @@ def _defaults_window():
 
 
 def warm_windows() -> List[Tuple[List[str], str, str]]:
-    """The ``(symbols, start, end)`` triples worth holding warm, in order."""
+    """The ``(symbols, start, end)`` triples worth holding warm, in order.
+
+    ``end`` is the inclusive date a run records, exactly as the run would be
+    asked for. ``warm_bar_cache`` converts it to the provider bound in ONE
+    place, so a window added here cannot forget to.
+    """
     windows: List[Tuple[List[str], str, str]] = []
     defaults = _defaults_window()
     if defaults is not None:
@@ -77,7 +86,7 @@ def warm_windows() -> List[Tuple[List[str], str, str]]:
         windows.append((symbols, start, end))
         # Every default run ALSO fetches the full Dow over the same window for
         # the index baseline (`engine.py`'s index-baseline block passes
-        # `self.start_date`/`self.end_date` verbatim). Same key, so the five
+        # `self.start_date`/`self.provider_end_date`). Same key, so the five
         # Mag7 names warmed above are hits and only twenty-five are requested.
         windows.append((list(DJIA_30), start, end))
     # A bare `POST /backtest/run` resolves to the djia_30 profile, so its
@@ -141,7 +150,16 @@ def warm_bar_cache() -> int:
     # twice: 67 "ready" for ~62 entries, a number that overstates by an amount
     # depending on the defaults file.
     ready: Set[Tuple[str, str, str]] = set()
-    for symbols, start, end in warm_windows():
+    for symbols, start, run_end in warm_windows():
+        # The engine's provider bound, not the inclusive date the run records:
+        # the cache key holds what is REQUESTED, so warming the raw end date
+        # warms nothing a real run asks for. The same function the engine and
+        # `market_data_store` call, so the two cannot drift apart.
+        try:
+            end = settled_exclusive_end(run_end, market=DEFAULT_MARKET)
+        except ValueError as exc:
+            print(f"📦 bar cache warm: {start}..{run_end} skipped: {exc}", flush=True)
+            continue
         wanted = {str(symbol) for symbol in symbols}
         # Sampled BEFORE the fetch so this window is judged on its own writes.
         # Counting the directory afterwards asked the wrong question: window
@@ -154,7 +172,7 @@ def warm_bar_cache() -> int:
             frames = loader.fetch_bars(list(symbols), start, end)
         except Exception as exc:  # noqa: BLE001
             print(
-                f"📦 bar cache warm: {start}..{end} failed: {exc}",
+                f"📦 bar cache warm: {start}..{run_end} failed: {exc}",
                 flush=True,
             )
             continue
@@ -171,7 +189,7 @@ def warm_bar_cache() -> int:
             # move. `before != wanted` is what keeps an already-warm window
             # (nothing to store, nothing stored) from tripping the alarm.
             print(
-                f"📦 bar cache warm: {start}..{end} fetched {len(frames)} "
+                f"📦 bar cache warm: {start}..{run_end} fetched {len(frames)} "
                 "symbols and stored none -- see the refusal above; this "
                 "window will be re-fetched on every deploy until it is fixed",
                 flush=True,

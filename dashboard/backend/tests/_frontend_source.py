@@ -184,6 +184,31 @@ def js_let(name: str) -> str:
     return match.group(0)
 
 
+#: The escapes `decode_js_string` understands. Anything else fails the calling
+#: test rather than decoding wrong: a `\u` or `\x` passed through as literal
+#: text would make a frontend copy compare unequal for a reason nobody can see.
+_JS_SIMPLE_ESCAPES = {"n": "\n", "t": "\t", "r": "\r", "'": "'", '"': '"', "\\": "\\"}
+
+
+def _decode_js_escape(match: re.Match) -> str:
+    char = match.group(1)
+    assert char in _JS_SIMPLE_ESCAPES, (
+        f"decode_js_string cannot decode \\{char}; add it to _JS_SIMPLE_ESCAPES"
+    )
+    return _JS_SIMPLE_ESCAPES[char]
+
+
+def decode_js_string(body: str) -> str:
+    """The value of a JS string literal, given the source between its quotes.
+
+    One left-to-right pass. Chained `.replace()` calls cannot do this correctly
+    in any order: decoding `\\n` first turns an escaped backslash followed by
+    `n` into a newline, and decoding `\\\\` first creates escapes that were
+    never in the source.
+    """
+    return re.sub(r"\\(.)", _decode_js_escape, body, flags=re.DOTALL)
+
+
 def js_string_const(name: str) -> str:
     """The *value* of a single-quoted JS string constant in app.js.
 
@@ -195,7 +220,7 @@ def js_string_const(name: str) -> str:
         rf"const\s+{re.escape(name)}\s*=\s*\n?\s*'((?:[^'\\]|\\.)*)'", APP_JS
     )
     assert match, f"{name} is no longer a single-quoted const in app.js"
-    return match.group(1).replace("\\'", "'")
+    return decode_js_string(match.group(1))
 
 
 def css_blocks(prelude: str) -> list[str]:

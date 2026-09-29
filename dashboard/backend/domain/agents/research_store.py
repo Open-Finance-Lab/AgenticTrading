@@ -74,6 +74,9 @@ def _init_schema() -> None:
         migrations = (
             "ALTER TABLE research_runs ADD COLUMN reservation_id TEXT",
             "ALTER TABLE research_runs ADD COLUMN estimate_micro INTEGER",
+            # Email outbox (the sweeper retries a failed "report ready" send).
+            "ALTER TABLE research_runs ADD COLUMN email_attempts INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE research_runs ADD COLUMN email_next_attempt_at TIMESTAMP",
         )
         for statement in migrations:
             try:
@@ -187,6 +190,56 @@ def update_run_status(run_id: str, status: str, error: Optional[str] = None,
             )
 
 
+def claim_terminal(run_id: str, status: str, error: Optional[str] = None) -> bool:
+    """Move a run to a terminal status once. True only for the caller that did.
+
+    The route poll and the sweeper can both see the same service completion;
+    the conditional UPDATE is what makes exactly one of them the finalizer.
+    """
+    with _connect() as conn:
+        cursor = conn.execute(
+            "UPDATE research_runs SET status = ?, error = ?,"
+            " completed_at = CURRENT_TIMESTAMP"
+            " WHERE run_id = ? AND status NOT IN ('completed', 'failed')",
+            (status, error, run_id),
+        )
+        return cursor.rowcount == 1
+
+
+def list_email_outbox(max_attempts: int, max_age_hours: int) -> List[Dict[str, Any]]:
+    """Completed "email me" runs still owed their notification and due a try.
+
+    Age-bounded so a deploy never mails out reports that finished long ago.
+    """
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT run_id, user_id, template_id, email_attempts FROM research_runs"
+            " WHERE status = 'completed' AND email_me = 1 AND emailed = 0"
+            " AND email_attempts < ?"
+            " AND completed_at >= datetime('now', ?)"
+            " AND (email_next_attempt_at IS NULL"
+            "      OR email_next_attempt_at <= CURRENT_TIMESTAMP)",
+            (int(max_attempts), f"-{int(max_age_hours)} hours"),
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def claim_email_attempt(run_id: str, attempts_seen: int, backoff_seconds: int) -> bool:
+    """Lease one send attempt: bump the counter and push the next try out.
+
+    Conditional on the counter the caller read, so two senders never both
+    send the same attempt. A crash mid-send just waits out the backoff.
+    """
+    with _connect() as conn:
+        cursor = conn.execute(
+            "UPDATE research_runs SET email_attempts = email_attempts + 1,"
+            " email_next_attempt_at = datetime('now', ?)"
+            " WHERE run_id = ? AND emailed = 0 AND email_attempts = ?",
+            (f"+{int(backoff_seconds)} seconds", run_id, int(attempts_seen)),
+        )
+        return cursor.rowcount == 1
+
+
 def mark_emailed(run_id: str) -> None:
     with _connect() as conn:
         conn.execute("UPDATE research_runs SET emailed = 1 WHERE run_id = ?", (run_id,))
@@ -197,9 +250,6 @@ def mark_emailed(run_id: str) -> None:
 def store_artifacts(run_id: str, artifacts: Dict[str, Dict[str, str]],
                     evidence: Dict[str, Any], report_markdown: str) -> None:
     """Persist everything a completed run delivered (replace-on-complete)."""
-    rows = [
-        (run_id, "markdown", f"{run_id}.md", None),
-    ]
     with _connect() as conn:
         conn.execute("DELETE FROM research_artifacts WHERE run_id = ?", (run_id,))
         conn.execute(
@@ -235,3 +285,254 @@ def get_artifact(run_id: str, kind: str) -> Optional[Dict[str, Any]]:
             (run_id, lookup),
         ).fetchone()
     return dict(row) if row else None
+
+
+# ---------------------------------------------------------------------------
+# Postgres twin (production durability). The SQLite module above is the dev
+# and test backend; on Render the filesystem is ephemeral and every restart
+# wiped the user's added agents and run history — the same class of loss the
+# users table had before USERS_DATABASE_URL. Selected when
+# CONTENT_DATABASE_URL is set (research adds/runs are user content, same
+# scope as agents/strategies per the spec's Decision 2).
+# ---------------------------------------------------------------------------
+
+import os as _os
+import json as _json
+
+
+def _research_postgres_url() -> str:
+    return (_os.getenv("CONTENT_DATABASE_URL") or "").strip()
+
+
+def _build_research_store():
+    url = _research_postgres_url()
+    if not url:
+        return "sqlite"
+    # Late import: psycopg is only installed in deployments that need it.
+    from dashboard.backend.db_pool import get_pool
+    from dashboard.backend.db_url import init_schema_unless_worker
+
+    class _PostgresResearchStore:
+        def __init__(self, url):
+            self.url = url
+            init_schema_unless_worker("research_store", self._init_schema)
+
+        def _conn(self):
+            return get_pool(self.url).connection()
+
+        def _init_schema(self):
+            with self._conn() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("""
+                        CREATE TABLE IF NOT EXISTS research_agent_adds (
+                            user_id INTEGER NOT NULL,
+                            template_id TEXT NOT NULL,
+                            added_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                            PRIMARY KEY (user_id, template_id)
+                        )
+                    """)
+                    cur.execute("""
+                        CREATE TABLE IF NOT EXISTS research_runs (
+                            run_id TEXT PRIMARY KEY,
+                            user_id INTEGER NOT NULL,
+                            template_id TEXT NOT NULL,
+                            service_run_id TEXT,
+                            reservation_id TEXT,
+                            estimate_micro INTEGER,
+                            status TEXT NOT NULL DEFAULT 'queued',
+                            settings_json TEXT NOT NULL,
+                            email_me BOOLEAN NOT NULL DEFAULT FALSE,
+                            emailed BOOLEAN NOT NULL DEFAULT FALSE,
+                            error TEXT,
+                            created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                            completed_at TIMESTAMPTZ
+                        )
+                    """)
+                    cur.execute("""
+                        CREATE TABLE IF NOT EXISTS research_artifacts (
+                            run_id TEXT NOT NULL,
+                            kind TEXT NOT NULL,
+                            filename TEXT,
+                            content_base64 TEXT,
+                            PRIMARY KEY (run_id, kind)
+                        )
+                    """)
+                    cur.execute("""
+                        CREATE INDEX IF NOT EXISTS idx_research_runs_user
+                            ON research_runs(user_id, created_at DESC)
+                    """)
+
+        def add_research_agent(self, user_id, template_id):
+            with self._conn() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "INSERT INTO research_agent_adds (user_id, template_id)"
+                        " VALUES (%s, %s) ON CONFLICT DO NOTHING",
+                        (user_id, template_id),
+                    )
+                    return cur.rowcount > 0
+
+        def remove_research_agent(self, user_id, template_id):
+            with self._conn() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "DELETE FROM research_agent_adds"
+                        " WHERE user_id = %s AND template_id = %s",
+                        (user_id, template_id),
+                    )
+                    return cur.rowcount > 0
+
+        def list_added_template_ids(self, user_id):
+            with self._conn() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "SELECT template_id FROM research_agent_adds"
+                        " WHERE user_id = %s ORDER BY added_at DESC",
+                        (user_id,),
+                    )
+                    return [r["template_id"] for r in cur.fetchall()]
+
+        def create_run(self, *, run_id, user_id, template_id,
+                       service_run_id, reservation_id, estimate_micro,
+                       status, settings, email_me):
+            with self._conn() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "INSERT INTO research_runs"
+                        " (run_id, user_id, template_id, service_run_id,"
+                        "  reservation_id, estimate_micro, status,"
+                        "  settings_json, email_me)"
+                        " VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                        (run_id, user_id, template_id, service_run_id,
+                         reservation_id, estimate_micro, status,
+                         _json.dumps(settings, ensure_ascii=False), email_me),
+                    )
+
+        def get_run(self, run_id, user_id):
+            with self._conn() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "SELECT * FROM research_runs"
+                        " WHERE run_id = %s AND user_id = %s",
+                        (run_id, user_id),
+                    )
+                    row = cur.fetchone()
+            if not row:
+                return None
+            # dict_row: the pool already returns column-name → value dicts;
+            # no re-zip needed (zipping a dict with its own keys yields
+            # {name: name}, a row of column names instead of data).
+            return dict(row)
+
+        def list_runs_for_user(self, user_id, limit=50):
+            with self._conn() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "SELECT run_id, template_id, status, settings_json,"
+                        " error, created_at, completed_at FROM research_runs"
+                        " WHERE user_id = %s ORDER BY created_at DESC LIMIT %s",
+                        (user_id, limit),
+                    )
+                    rows = cur.fetchall()
+                # dict_row returns dicts; keep settings_json verbatim because the
+            # /runs route owns the parsing (it pops settings_json itself) —
+            # pre-parsing here made the router's KeyError fallback wipe every
+            # Postgres-backed run's settings to {} on the wire.
+            return [dict(row) for row in rows]
+
+        def update_run_status(self, run_id, status, error=None, completed=False):
+            with self._conn() as conn:
+                with conn.cursor() as cur:
+                    if completed:
+                        cur.execute(
+                            "UPDATE research_runs SET status=%s, error=%s,"
+                            " completed_at=now() WHERE run_id=%s",
+                            (status, error, run_id),
+                        )
+                    else:
+                        cur.execute(
+                            "UPDATE research_runs SET status=%s, error=%s"
+                            " WHERE run_id=%s",
+                            (status, error, run_id),
+                        )
+
+        def mark_emailed(self, run_id):
+            with self._conn() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "UPDATE research_runs SET emailed=TRUE WHERE run_id=%s",
+                        (run_id,),
+                    )
+
+        def store_artifacts(self, run_id, artifacts, evidence, report_markdown):
+            with self._conn() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("DELETE FROM research_artifacts WHERE run_id=%s", (run_id,))
+                    cur.execute(
+                        "INSERT INTO research_artifacts (run_id, kind, filename, content_base64)"
+                        " VALUES (%s, 'markdown_report', %s, %s)",
+                        (run_id, f"{run_id}.md", report_markdown),
+                    )
+                    for kind, item in (artifacts or {}).items():
+                        safe = str(kind).replace("/", "_")
+                        cur.execute(
+                            "INSERT INTO research_artifacts (run_id, kind, filename, content_base64)"
+                            " VALUES (%s, %s, %s, %s)",
+                            (run_id, safe, item.get("filename") or f"{run_id}.{safe}",
+                             item.get("content_base64")),
+                        )
+                    if evidence is not None:
+                        cur.execute(
+                            "INSERT INTO research_artifacts (run_id, kind, filename, content_base64)"
+                            " VALUES (%s, 'evidence_json', %s, %s)",
+                            (run_id, f"{run_id}_evidence.json",
+                             _json.dumps(evidence, ensure_ascii=False)),
+                        )
+
+        def get_artifact(self, run_id, kind):
+            kind_map = {"markdown": "markdown_report", "evidence_json": "evidence_json"}
+            lookup = kind_map.get(kind, kind)
+            with self._conn() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "SELECT kind, filename, content_base64 FROM research_artifacts"
+                        " WHERE run_id=%s AND kind=%s",
+                        (run_id, lookup),
+                    )
+                    row = cur.fetchone()
+            return dict(row) if row else None
+
+        def list_nonterminal_runs(self):
+            with self._conn() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "SELECT run_id, user_id, template_id, service_run_id,"
+                        " reservation_id, estimate_micro, status, settings_json,"
+                        " email_me, emailed, error, created_at FROM research_runs"
+                        " WHERE status IN ('queued','running') ORDER BY created_at",
+                    )
+                    rows = cur.fetchall()
+                # dict_row; settings_json kept raw — the sweeper only reads
+            # service_run_id/reservation_id/status, not settings.
+            return [dict(row) for row in rows]
+
+    return _PostgresResearchStore(url)
+
+
+_backend = _build_research_store()
+
+if _backend != "sqlite":
+    # Re-export the Postgres methods at module level so callers see the
+    # same names as the SQLite section above (zero router changes).
+    _pg = _backend
+    def add_research_agent(user_id, template_id): return _pg.add_research_agent(user_id, template_id)
+    def remove_research_agent(user_id, template_id): return _pg.remove_research_agent(user_id, template_id)
+    def list_added_template_ids(user_id): return _pg.list_added_template_ids(user_id)
+    def create_run(**kw): return _pg.create_run(**kw)
+    def get_run(run_id, user_id): return _pg.get_run(run_id, user_id)
+    def list_runs_for_user(user_id, limit=50): return _pg.list_runs_for_user(user_id, limit)
+    def update_run_status(run_id, status, error=None, completed=False): return _pg.update_run_status(run_id, status, error, completed)
+    def mark_emailed(run_id): return _pg.mark_emailed(run_id)
+    def store_artifacts(run_id, artifacts, evidence, report_markdown): return _pg.store_artifacts(run_id, artifacts, evidence, report_markdown)
+    def get_artifact(run_id, kind): return _pg.get_artifact(run_id, kind)
+    def list_nonterminal_runs(): return _pg.list_nonterminal_runs()

@@ -2897,6 +2897,8 @@ MAX_STRATEGY_PROMPT_CHARS = 4000
 # budget with no preflight (issue #474 item 1). This bound is the calendar half
 # of the answer; _enforce_pipeline_llm_window below is the work-volume half,
 # because window length alone does not say how much a run costs.
+# Bounds ``end - start``. ``end_date`` is a traded day, so the longest legal
+# window spans 15 calendar days (at most 11 weekdays).
 MAX_BACKTEST_DAYS = 14
 MAX_PIPELINE_STEPS = 20
 MAX_PIPELINE_JSON_CHARS = 32000
@@ -3011,7 +3013,10 @@ def _validate_backtest_params(start_date, end_date, strategy_prompt, model, pipe
     if (end - start).days > MAX_BACKTEST_DAYS:
         raise HTTPException(
             status_code=422,
-            detail=f"Date range too large (max {MAX_BACKTEST_DAYS} days).",
+            detail=(
+                f"Date range too large (max {MAX_BACKTEST_DAYS} days between "
+                "start_date and end_date)."
+            ),
         )
 
 

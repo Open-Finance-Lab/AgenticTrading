@@ -54,6 +54,10 @@ from dashboard.backend.infrastructure.llm.backtest_harness import (
     parse_llm_response as _parse_llm_response,
     request_trading_decision as _request_trading_decision,
 )
+from dashboard.backend.infrastructure.llm.execution.errors import (
+    ExecutionErrorCategory,
+    LLMExecutionError,
+)
 from dashboard.backend.infrastructure.llm.pipeline_runner import (
     RECOVERY_MAX_OUTPUT_TOKENS,
     escalate_ceiling_on_retry,
@@ -76,6 +80,30 @@ class LLMDecisionError(RuntimeError):
 # this module's docstring forbids). ``test_strict_llm_budget_clears_h6``
 # asserts the two stay consistent.
 STRICT_LLM_MAX_FALLBACK_RATIO = 0.02
+
+# The ratio rounds to zero below 50 steps, so the onboarding modal's 49-bar run
+# had no tolerance at all. From this length on, one strike still leaves the run
+# above H6 (1/25 = 4% < 5%); ``test_strict_llm_budget_clears_h6`` pins that.
+STRICT_LLM_MIN_STEPS_FOR_ONE_STRIKE = 25
+
+# A hosted run (``fail_closed`` execution client) aborts on any model error,
+# because a billing or credential failure absorbed as a step would let the run
+# continue unbilled or unauthorised. A provider outage is neither: the failed
+# call's Credits reservation is already released before the error reaches
+# here, so absorbing it costs one held step and nothing else.
+_ABSORBABLE_EXECUTION_CATEGORIES = frozenset(
+    {
+        ExecutionErrorCategory.PROVIDER_UNAVAILABLE,
+        ExecutionErrorCategory.PROVIDER_TIMEOUT,
+    }
+)
+
+
+def _is_transient_provider_failure(error: BaseException) -> bool:
+    return (
+        isinstance(error, LLMExecutionError)
+        and error.category in _ABSORBABLE_EXECUTION_CATEGORIES
+    )
 
 
 class PortfolioManager:
@@ -869,14 +897,20 @@ class PortfolioManager:
             return self._absorb_strict_llm_failure(portfolio_state, strict_error)
         except Exception as e:
             if strict_llm:
-                if getattr(llm_client, "fail_closed", False):
+                if getattr(llm_client, "fail_closed", False) and not (
+                    _is_transient_provider_failure(e)
+                ):
                     raise
                 # Same treatment as an explicit strict violation. Built rather
                 # than raised because the budget may still absorb it; the cause
                 # is attached by hand so the traceback survives either way.
                 strict_error = LLMDecisionError("LLM decision processing failed")
                 strict_error.__cause__ = e
-                return self._absorb_strict_llm_failure(portfolio_state, strict_error)
+                return self._absorb_strict_llm_failure(
+                    portfolio_state,
+                    strict_error,
+                    hold=_is_transient_provider_failure(e),
+                )
             print(f"\n❌ LLM decision error: {e}")
             print(f"   Falling back to rule-based logic\n")
             return self.make_trading_decision(portfolio_state)
@@ -902,23 +936,41 @@ class PortfolioManager:
         total_steps = self.strict_llm_total_steps
         if not total_steps or total_steps <= 0:
             return 0
-        return int(total_steps * STRICT_LLM_MAX_FALLBACK_RATIO)
+        budget = int(total_steps * STRICT_LLM_MAX_FALLBACK_RATIO)
+        if budget == 0 and total_steps >= STRICT_LLM_MIN_STEPS_FOR_ONE_STRIKE:
+            return 1
+        return budget
 
     def _absorb_strict_llm_failure(
         self,
         portfolio_state: Dict,
         error: LLMDecisionError,
+        *,
+        hold: bool = False,
     ) -> Dict:
         """Spend one strike on an unusable response, or abort the run.
 
-        The step falls back to rule-based logic and deliberately does NOT
-        increment ``llm_decisions``: the model did not drive it, so it counts
-        against H6 coverage exactly as an ordinary fallback would.
+        The step falls back to rule-based logic, or holds when ``hold`` is set,
+        and deliberately does NOT increment ``llm_decisions``: the model did
+        not drive it, so it counts against H6 coverage exactly as an ordinary
+        fallback would.
+
+        A provider outage holds because it says nothing about the market, and
+        rule-based trades would put orders into a user's LLM run that neither
+        the model nor the user chose. Other strikes keep the rule-based
+        fallback that existing strict runs, leaderboard curves included, were
+        built with.
         """
         self.strict_llm_fallbacks += 1
         budget = self.strict_llm_fallback_budget()
         if self.strict_llm_fallbacks > budget:
             raise error
+        if hold:
+            print(
+                f"\n⚠️  Strict LLM step failed ({error}); holding this step. "
+                f"Strike {self.strict_llm_fallbacks}/{budget}.\n"
+            )
+            return {"actions": []}
         print(
             f"\n⚠️  Strict LLM step failed ({error}); using rule-based logic for "
             f"this step. Strike {self.strict_llm_fallbacks}/{budget}.\n"
