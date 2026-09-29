@@ -369,8 +369,10 @@ def _build_research_store():
                     row = cur.fetchone()
             if not row:
                 return None
-            cols = [d[0] for d in cur.description] if cur.description else []
-            return dict(zip(cols, row)) if row else None
+            # dict_row: the pool already returns column-name → value dicts;
+            # no re-zip needed (zipping a dict with its own keys yields
+            # {name: name}, a row of column names instead of data).
+            return dict(row)
 
         def list_runs_for_user(self, user_id, limit=50):
             with self._conn() as conn:
@@ -382,16 +384,11 @@ def _build_research_store():
                         (user_id, limit),
                     )
                     rows = cur.fetchall()
-                    cols = [d[0] for d in cur.description]
-            out = []
-            for row in rows:
-                item = dict(zip(cols, row))
-                try:
-                    item["settings"] = _json.loads(item.pop("settings_json") or "{}")
-                except Exception:
-                    item["settings"] = {}
-                out.append(item)
-            return out
+                # dict_row returns dicts; keep settings_json verbatim because the
+            # /runs route owns the parsing (it pops settings_json itself) —
+            # pre-parsing here made the router's KeyError fallback wipe every
+            # Postgres-backed run's settings to {} on the wire.
+            return [dict(row) for row in rows]
 
         def update_run_status(self, run_id, status, error=None, completed=False):
             with self._conn() as conn:
@@ -453,8 +450,7 @@ def _build_research_store():
                         (run_id, lookup),
                     )
                     row = cur.fetchone()
-                    cols = [d[0] for d in cur.description]
-            return dict(zip(cols, row)) if row else None
+            return dict(row) if row else None
 
         def list_nonterminal_runs(self):
             with self._conn() as conn:
@@ -466,16 +462,9 @@ def _build_research_store():
                         " WHERE status IN ('queued','running') ORDER BY created_at",
                     )
                     rows = cur.fetchall()
-                    cols = [d[0] for d in cur.description]
-            out = []
-            for row in rows:
-                item = dict(zip(cols, row))
-                try:
-                    item["settings"] = _json.loads(item.pop("settings_json") or "{}")
-                except Exception:
-                    item["settings"] = {}
-                out.append(item)
-            return out
+                # dict_row; settings_json kept raw — the sweeper only reads
+            # service_run_id/reservation_id/status, not settings.
+            return [dict(row) for row in rows]
 
     return _PostgresResearchStore(url)
 
