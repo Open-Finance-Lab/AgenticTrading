@@ -248,7 +248,7 @@ def test_renderers_can_be_lifted_with_fn_body():
     for signature in (
         "function renderAttention(", "function renderActiveUsers(", "function renderActivation(",
         "function renderSources(", "function renderRetention(", "function renderValue(",
-        "function renderLifecycle(", "function renderCredits(", "function renderRevenue(",
+        "function renderLifecycle(", "function renderCredits(",
         "function detailSources(", "function detailRetention(", "function detailCredits(",
         "function detailLifecycle(", "function detailHealth(",
     ):

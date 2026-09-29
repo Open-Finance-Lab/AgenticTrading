@@ -3,7 +3,7 @@
    pruned to what its final rendered DOM used (design §8.1). This file does
    not import styles.css: the admin page must not inherit a 15,000-line
    stylesheet to get a header. */
-:root{color-scheme:dark;--bg:var(--bg);--surface:#12172b;--line:#2a3041;--line-strong:#384158;--text:#e5e7eb;--muted:#9ca3af;--accent:#00bfff;--green:#42cc8b;--amber:#e6b75c;--red:#f08080;--violet:#8797ff;--steel:#6f86a8;--font-mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace;--font-base:-apple-system,BlinkMacSystemFont,"Segoe UI","Helvetica Neue",sans-serif;font-family:var(--font-base);color:var(--text);background:var(--bg)}
+:root{color-scheme:dark;--bg:#0a0e27;--surface:#12172b;--line:#2a3041;--line-strong:#384158;--text:#e5e7eb;--muted:#9ca3af;--accent:#00bfff;--green:#42cc8b;--amber:#e6b75c;--red:#f08080;--violet:#8797ff;--steel:#6f86a8;--font-mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace;--font-base:-apple-system,BlinkMacSystemFont,"Segoe UI","Helvetica Neue",sans-serif;font-family:var(--font-base);color:var(--text);background:var(--bg)}
 
 /* styles.css token names, carrying styles.css's *values* — not this file's
    nearest equivalent. The universal header below is retyped verbatim from
@@ -110,10 +110,12 @@ main{width:100%;max-width:1420px;margin:0 auto;padding:30px 36px 50px}
 
 /* Panels and their states (mock lines 15, 466-476; §15.6 loading/empty/error/stale) */
 .overview-row.priority-row{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:34px;max-width:none;margin:0}
+.overview-row.overview-row-single{grid-template-columns:minmax(0,1fr)}
 .panel{display:block;min-width:0;padding:26px 0;border-bottom:1px solid var(--line)}
 .section-head{align-items:flex-start;margin-bottom:20px}
 .section-head small{display:block;margin-top:5px}
 .section-meta{text-align:right}
+.section-figures{display:flex;gap:48px;text-align:right}
 .headline-number{display:block;margin-bottom:3px;color:var(--text);font-size:25px;line-height:1;font-weight:650}
 .panel-body{min-height:180px}
 .panel[aria-busy=true] .panel-body{opacity:.55}
@@ -240,6 +242,8 @@ main{width:100%;max-width:1420px;margin:0 auto;padding:30px 36px 50px}
 
 /* Revenue — generated point line (mock lines 353-361) */
 .revenue-viz{height:190px;padding-top:8px;border-bottom:1px solid var(--line)}
+.overview-row-single .revenue-viz{height:216px}
+.overview-row-single .revenue-viz svg{height:200px}
 .revenue-viz svg{display:block;width:100%;height:174px;overflow:visible}
 .revenue-viz .revenue-grid{stroke:var(--line);stroke-width:1}
 .revenue-viz .revenue-axis{stroke:var(--line-strong);stroke-width:1}

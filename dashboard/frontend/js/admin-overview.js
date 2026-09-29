@@ -272,11 +272,12 @@
   function renderCredits(commercial, overview) {
     const s = shell();
     const headline = s.formatCredits(commercial?.selected_period?.consumed_micro);
+    const headline2 = s.formatCredits(commercial?.selected_period?.purchased_micro);
     const lanes = Array.isArray(overview?.billing_lane_mix) ? overview.billing_lane_mix : [];
     const revenue = Array.isArray(commercial?.purchased_by_day) ? commercial.purchased_by_day : [];
-    if (s.fieldPending(overview, 'billing_lane_mix')) return { headline, body: emptyBody(s.PENDING) };
-    if (s.fieldPending(commercial, 'purchased_by_day')) return { headline, body: emptyBody(s.PENDING) };
-    if (!lanes.length && !revenue.length) return { headline, body: emptyBody('No Credits activity in this range.') };
+    if (s.fieldPending(overview, 'billing_lane_mix')) return { headline, headline2, body: emptyBody(s.PENDING) };
+    if (s.fieldPending(commercial, 'purchased_by_day')) return { headline, headline2, body: emptyBody(s.PENDING) };
+    if (!lanes.length && !revenue.length) return { headline, headline2, body: emptyBody('No Credits activity in this range.') };
 
     // Union of lane days and revenue days on one shared x-axis.
     const daySet = new Set();
@@ -293,7 +294,7 @@
     ];
     const allValues = series.flatMap((s2) => s2.values.filter((v) => v > 0));
     const max = Math.max(1, ...allValues);
-    const width = 520, height = 200, left = 42, right = 508, top = 14, bottom = 154;
+    const width = 980, height = 200, left = 42, right = 968, top = 14, bottom = 154;
     const plotWidth = right - left, plotHeight = bottom - top;
     const x = (index) => left + (days.length === 1 ? 0 : index / (days.length - 1) * plotWidth);
     const y = (value) => bottom - (value / max) * plotHeight;
@@ -333,7 +334,7 @@
     });
     wrap.appendChild(legend);
     body.appendChild(wrap);
-    return { headline, body };
+    return { headline, headline2, body };
   }
 
   function svgNode(name, attrs, text) {
@@ -345,20 +346,6 @@
 
   function axisLabel(value) {
     return value >= 100 ? String(Math.round(value)) : value.toFixed(1).replace(/\.0$/, '');
-  }
-
-  function renderRevenue(commercial) {
-    const s = shell();
-    const headline = s.formatCredits(commercial?.selected_period?.purchased_micro);
-    return {
-      headline,
-      body: (() => {
-        const p = s.el('p', 'panel-empty', 'The daily revenue series now lives on the Credits usage chart above.');
-        const b = s.el('div');
-        b.appendChild(p);
-        return b;
-      })(),
-    };
   }
 
   // --------------------------------------------------------- detail views
@@ -591,7 +578,6 @@
     { id: 'panelValue', name: 'value', needs: ['groups'], render: (d) => renderValue(d.groups) },
     { id: 'panelLifecycle', name: 'lifecycle', needs: ['lifecycle'], render: (d) => renderLifecycle(d.lifecycle) },
     { id: 'panelCredits', name: 'credits', needs: ['commercial', 'overview'], render: (d) => renderCredits(d.commercial, d.overview) },
-    { id: 'panelRevenue', name: 'revenue', needs: ['commercial'], render: (d) => renderRevenue(d.commercial) },
   ];
 
   function pathFor(name) {
@@ -606,6 +592,8 @@
     const s = shell();
     const headline = panel.querySelector('[data-headline]');
     if (headline) headline.textContent = s.DASH;
+    const headline2 = panel.querySelector('[data-headline2]');
+    if (headline2) headline2.textContent = s.DASH;
     const body = panel.querySelector('[data-body]');
     if (body) s.clear(body);
     s.setPanelState(panel, { busy: false, error: s.SECTION_UNAVAILABLE });
@@ -624,6 +612,8 @@
     const result = def.render(state.data);
     const headline = panel.querySelector('[data-headline]');
     if (headline) headline.textContent = result.headline;
+    const headline2 = panel.querySelector('[data-headline2]');
+    if (headline2 && result.headline2 != null) headline2.textContent = result.headline2;
     const body = panel.querySelector('[data-body]');
     if (body) {
       s.clear(body);
@@ -654,7 +644,7 @@
     // aria-busy="true" with no error and no body -- a spinner that never resolves,
     // which is the one state this page must not publish. The reachable case was
     // formatCredits dereferencing a missing window.CreditFormat (now guarded in the
-    // shell): renderCredits is PANELS index 7, so it stranded panelRevenue behind it.
+    // shell): renderCredits sat mid-list, so it stranded every panel behind it.
     PANELS.forEach((def) => {
       try {
         paint(def);
@@ -748,7 +738,7 @@
   window.AdminOverview = {
     PANELS, DETAIL_NEEDS, state,
     renderAttention, renderActiveUsers, renderActivation, renderSources, renderRetention,
-    renderValue, renderLifecycle, renderCredits, renderRevenue,
+    renderValue, renderLifecycle, renderCredits,
     detailSources, detailRetention, detailCredits, detailLifecycle, detailHealth,
     paint, loadAll, showDetail,
   };
