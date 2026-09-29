@@ -789,13 +789,16 @@ _PIPELINE = [{"label": "Decide", "prompt": "Decide the trades."}]
 
 @pytest.mark.parametrize("category", ["provider_unavailable", "provider_timeout"])
 @pytest.mark.parametrize("pipeline", [None, _PIPELINE], ids=["single", "pipeline"])
-def test_hosted_run_absorbs_a_provider_outage_within_budget(
+def test_hosted_run_holds_through_a_provider_outage_within_budget(
     monkeypatch, category, pipeline
 ):
     pm = CanonicalPortfolioManager(100000)
     pm.strict_llm_total_steps = 49
+    fallback_calls = []
     monkeypatch.setattr(
-        pm, "make_trading_decision", lambda _state: {"actions": ["rule-based"]}
+        pm,
+        "make_trading_decision",
+        lambda _state: fallback_calls.append(True) or {"actions": ["rule-based"]},
     )
 
     result = pm.make_trading_decision_with_llm(
@@ -805,7 +808,9 @@ def test_hosted_run_absorbs_a_provider_outage_within_budget(
         pipeline=pipeline,
     )
 
-    assert result == {"actions": ["rule-based"]}
+    # An outage holds: no rule-based orders enter a run the model drives.
+    assert result == {"actions": []}
+    assert fallback_calls == []
     assert pm.strict_llm_fallbacks == 1
     assert pm.llm_decisions == 0
 
