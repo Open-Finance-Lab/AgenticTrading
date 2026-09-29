@@ -134,15 +134,16 @@ def test_credits_combines_lanes_and_revenue_on_one_axis():
 
 def test_merged_credits_panel_carries_both_headlines():
     """Credits usage and Revenue merged into one card: renderCredits returns the
-    settled headline, the purchased headline and the combined chart body."""
+    settled headline, the purchased headline, the BYOK run total and the chart body."""
     result = _eval(
         "(() => {"
         f"  const r = window.AdminOverview.renderCredits({F['commercial']}, {F['overview']});"
-        "  return {headline: r.headline, headline2: r.headline2, hasSVG: byTag(r.body, 'svg').length};"
+        "  return {headline: r.headline, headline2: r.headline2, headline3: r.headline3, hasSVG: byTag(r.body, 'svg').length};"
         "})()"
     )
     assert result["headline"] == "4.800000 Credits"
     assert result["headline2"] == "12.000000 Credits"
+    assert result["headline3"] == "15"
     assert result["hasSVG"] == 1
 
 
@@ -170,18 +171,18 @@ def test_recut_fields_absent_render_awaiting_data_source_not_an_empty_chart():
         "  const reasons = byTag(health, 'table')[1];"
         "  const empty = window.AdminOverview.renderCredits(Object.assign({}, commercial, {purchased_by_day: []}), Object.assign({}, overview, {billing_lane_mix: []}));"
         "  return {"
-        "    credits: [credits.headline, credits.headline2, texts(byClass(credits.body, 'panel-empty'))],"
+        "    credits: [credits.headline, credits.headline2, credits.headline3, texts(byClass(credits.body, 'panel-empty'))],"
         "    attention: [attention.headline, texts(byClass(attention.body, 'attention-row').map((row) => byTag(row, 'b')[0])), byClass(attention.body, 'attention-note')[0].children[0].children[1].textContent],"
         "    health: byTag(reasons, 'tbody')[0].children.map((tr) => texts(tr.children)),"
-        "    empty: [empty.headline, empty.headline2, texts(byClass(empty.body, 'panel-empty'))],"
+        "    empty: [empty.headline, empty.headline2, empty.headline3, texts(byClass(empty.body, 'panel-empty'))],"
         "  };"
         "})()"
     )
-    assert result["credits"] == ["4.800000 Credits", "12.000000 Credits", ["Awaiting data source"]]
+    assert result["credits"] == ["4.800000 Credits", "12.000000 Credits", "—", ["Awaiting data source"]]
     assert result["attention"] == ["11", ["2", "4", "5"], "Awaiting data source"]
     assert result["health"] == [["Awaiting data source"]]
     # Served-and-empty keeps the panel's own copy: the two states must never collapse into one.
-    assert result["empty"] == ["4.800000 Credits", "12.000000 Credits", ["No Credits activity in this range."]]
+    assert result["empty"] == ["4.800000 Credits", "12.000000 Credits", "0", ["No Credits activity in this range."]]
 
 
 def test_health_detail_has_no_affected_users_column():
@@ -263,15 +264,15 @@ def test_one_failing_renderer_does_not_strand_the_panels_behind_it():
         f"  fetchQueue.push({{ok: true, status: 200, body: {F['operational']}}});"
         f"  fetchQueue.push({{ok: true, status: 200, body: {F['groups']}}});"
         "  await window.AdminOverview.loadAll(['overview', 'lifecycle', 'retention', 'commercial', 'operational', 'groups']);"
-        "  const read = (id) => ({headline: stubs[id].parts.headline.textContent, headline2: stubs[id].parts.headline2.textContent, error: stubs[id].parts.errorText.textContent, busy: stubs[id].panel.getAttribute('aria-busy')});"
+        "  const read = (id) => ({headline: stubs[id].parts.headline.textContent, headline2: stubs[id].parts.headline2.textContent, headline3: stubs[id].parts.headline3.textContent, error: stubs[id].parts.errorText.textContent, busy: stubs[id].panel.getAttribute('aria-busy')});"
         "  return {credits: read('panelCredits'), lifecycle: read('panelLifecycle'), attention: read('panelAttention')};"
         "})()"
     )
     # The panel whose renderer threw reports the failure it actually had...
-    assert result["lifecycle"] == {"headline": "—", "headline2": "—", "error": "This section is temporarily unavailable.", "busy": "false"}
-    # ...and the panel *after* it in PANELS still paints both headline numbers,
-    # rather than spinning forever.
-    assert result["credits"] == {"headline": "4.800000 Credits", "headline2": "12.000000 Credits", "error": "", "busy": "false"}
+    assert result["lifecycle"] == {"headline": "—", "headline2": "—", "headline3": "—", "error": "This section is temporarily unavailable.", "busy": "false"}
+    # ...and the panel *after* it in PANELS still paints all three headline
+    # numbers, rather than spinning forever.
+    assert result["credits"] == {"headline": "4.800000 Credits", "headline2": "12.000000 Credits", "headline3": "15", "error": "", "busy": "false"}
     assert result["attention"]["headline"] == "11"
 
 

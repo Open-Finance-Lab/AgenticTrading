@@ -275,9 +275,10 @@
     const headline2 = s.formatCredits(commercial?.selected_period?.purchased_micro);
     const lanes = Array.isArray(overview?.billing_lane_mix) ? overview.billing_lane_mix : [];
     const revenue = Array.isArray(commercial?.purchased_by_day) ? commercial.purchased_by_day : [];
-    if (s.fieldPending(overview, 'billing_lane_mix')) return { headline, headline2, body: emptyBody(s.PENDING) };
-    if (s.fieldPending(commercial, 'purchased_by_day')) return { headline, headline2, body: emptyBody(s.PENDING) };
-    if (!lanes.length && !revenue.length) return { headline, headline2, body: emptyBody('No Credits activity in this range.') };
+    if (s.fieldPending(overview, 'billing_lane_mix')) return { headline, headline2, headline3: s.DASH, body: emptyBody(s.PENDING) };
+    if (s.fieldPending(commercial, 'purchased_by_day')) return { headline, headline2, headline3: s.DASH, body: emptyBody(s.PENDING) };
+    const headline3 = s.formatNumber(lanes.reduce((acc, d) => acc + (Number(d.byok) || 0), 0));
+    if (!lanes.length && !revenue.length) return { headline, headline2, headline3, body: emptyBody('No Credits activity in this range.') };
 
     // Union of lane days and revenue days on one shared x-axis.
     const daySet = new Set();
@@ -334,7 +335,7 @@
     });
     wrap.appendChild(legend);
     body.appendChild(wrap);
-    return { headline, headline2, body };
+    return { headline, headline2, headline3, body };
   }
 
   function svgNode(name, attrs, text) {
@@ -594,6 +595,8 @@
     if (headline) headline.textContent = s.DASH;
     const headline2 = panel.querySelector('[data-headline2]');
     if (headline2) headline2.textContent = s.DASH;
+    const headline3 = panel.querySelector('[data-headline3]');
+    if (headline3) headline3.textContent = s.DASH;
     const body = panel.querySelector('[data-body]');
     if (body) s.clear(body);
     s.setPanelState(panel, { busy: false, error: s.SECTION_UNAVAILABLE });
@@ -614,6 +617,8 @@
     if (headline) headline.textContent = result.headline;
     const headline2 = panel.querySelector('[data-headline2]');
     if (headline2 && result.headline2 != null) headline2.textContent = result.headline2;
+    const headline3 = panel.querySelector('[data-headline3]');
+    if (headline3 && result.headline3 != null) headline3.textContent = result.headline3;
     const body = panel.querySelector('[data-body]');
     if (body) {
       s.clear(body);
