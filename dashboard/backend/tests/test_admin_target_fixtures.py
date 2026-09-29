@@ -18,10 +18,10 @@ TARGET = FIXTURES / "target"
 
 # fixture name -> [(path to the object that gains keys, keys added by design §9)]
 TARGET_FIELDS = {
-    "overview.json": [((), {"billing_lane_mix"})],
-    "overview_partial_error.json": [((), {"billing_lane_mix"})],
+    # billing_lane_mix / purchased_by_day / consumed_by_day moved to the
+    # committed fixtures (this PR landed those three §9 fields ahead of
+    # the rest); only the still-pending §9 fields stay listed here.
     "operational.json": [((), {"top_operational_reasons"})],
-    "commercial.json": [((), {"purchased_by_day", "consumed_by_day"})],
     "users.json": [
         (("items", 0), {"user_group", "role", "group_badge", "last_meaningful_activity_at"}),
         (("items", 1), {"user_group", "role", "group_badge", "last_meaningful_activity_at"}),
