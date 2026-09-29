@@ -255,6 +255,14 @@ _USAGE_BY_DAY_SQL = """
 """
 
 
+def _ledger_by_day_statements(*, user_filter: str, ph: str) -> tuple[str, str]:
+    """(ledger, usage) statements for one dialect's user filter and placeholder."""
+    return (
+        _LEDGER_BY_DAY_SQL.format(user_filter=user_filter, ph=ph),
+        _USAGE_BY_DAY_SQL.format(user_filter=user_filter, ph=ph),
+    )
+
+
 def _ledger_window(start: datetime, end: datetime) -> tuple[str, str]:
     window = (_utc_text(start, "start"), _utc_text(end, "end"))
     if end <= start:

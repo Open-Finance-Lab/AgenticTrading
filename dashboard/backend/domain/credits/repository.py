@@ -15,8 +15,7 @@ from dashboard.backend.database import DB_PATH
 from dashboard.backend.db_url import describe_database_url
 from dashboard.backend.domain.credits.repository_common import (
     LedgerDayTotal,
-    _LEDGER_BY_DAY_SQL,
-    _USAGE_BY_DAY_SQL,
+    _ledger_by_day_statements,
     _ledger_window,
     _merge_ledger_days,
     CreditAccountRestrictedStoreError,
@@ -1134,15 +1133,13 @@ class CreditsStore:
         ids = _unique_user_ids(user_ids)
         if not ids:
             return []
-        user_filter = f"user_id IN ({', '.join('?' for _ in ids)})"
+        ledger_sql, usage_sql = _ledger_by_day_statements(
+            user_filter=f"user_id IN ({', '.join('?' for _ in ids)})", ph="?"
+        )
         params = [*ids, *_ledger_window(start, end)]
         with self._get_connection() as conn:
-            ledger_rows = conn.execute(
-                _LEDGER_BY_DAY_SQL.format(user_filter=user_filter, ph="?"), params
-            ).fetchall()
-            usage_rows = conn.execute(
-                _USAGE_BY_DAY_SQL.format(user_filter=user_filter, ph="?"), params
-            ).fetchall()
+            ledger_rows = conn.execute(ledger_sql, params).fetchall()
+            usage_rows = conn.execute(usage_sql, params).fetchall()
         return _merge_ledger_days(ledger_rows, usage_rows)
 
     def list_credit_activity_timestamps(

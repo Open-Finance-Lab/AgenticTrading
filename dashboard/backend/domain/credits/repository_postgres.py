@@ -12,8 +12,7 @@ import psycopg
 from dashboard.backend.db_url import init_schema_unless_worker, require_postgres_url
 from dashboard.backend.domain.credits.repository_common import (
     LedgerDayTotal,
-    _LEDGER_BY_DAY_SQL,
-    _USAGE_BY_DAY_SQL,
+    _ledger_by_day_statements,
     _ledger_window,
     _merge_ledger_days,
     CreditAccountRestrictedStoreError,
@@ -979,18 +978,15 @@ class PostgresCreditsStore:
         ids = _unique_user_ids(user_ids)
         if not ids:
             return []
+        ledger_sql, usage_sql = _ledger_by_day_statements(
+            user_filter="user_id = ANY(%s)", ph="%s"
+        )
         params = (ids, *_ledger_window(start, end))
         with self._get_connection() as conn:
             with conn.cursor() as cur:
-                cur.execute(
-                    _LEDGER_BY_DAY_SQL.format(user_filter="user_id = ANY(%s)", ph="%s"),
-                    params,
-                )
+                cur.execute(ledger_sql, params)
                 ledger_rows = cur.fetchall()
-                cur.execute(
-                    _USAGE_BY_DAY_SQL.format(user_filter="user_id = ANY(%s)", ph="%s"),
-                    params,
-                )
+                cur.execute(usage_sql, params)
                 usage_rows = cur.fetchall()
         return _merge_ledger_days(ledger_rows, usage_rows)
 
