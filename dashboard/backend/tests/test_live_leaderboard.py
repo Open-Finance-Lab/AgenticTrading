@@ -365,16 +365,15 @@ def test_live_month_run_shows_llm_snapshot(no_alpaca):
     assert model["equity_curve"][-1]["timestamp"].startswith("2026-08-27T16:00")
     assert model["equity_curve"][-1]["equity"] == pytest.approx(SEED * 1.005)
     assert payload["live_status"]["models_cached"] >= 1
-    assert payload["live_status"]["models_pending"] == 2
+    assert payload["live_status"]["models_pending"] == 1
     pending = [e for e in payload["entries"] if e["status"] == "pending"]
     assert pending and all(e["rank"] is None for e in pending)
     assert payload["live_status"]["roster"] == [
-        "gpt_5_5",
         "deepseek_v4_pro",
         "nemotron_3_nano_30b",
     ]
     model_ids = {e["entry_id"] for e in payload["entries"] if e.get("is_model")}
-    assert model_ids == {"gpt_5_5", "deepseek_v4_pro", "nemotron_3_nano_30b"}
+    assert model_ids == {"deepseek_v4_pro", "nemotron_3_nano_30b"}
 
 
 def test_get_live_never_deploys_models(no_alpaca, monkeypatch):
@@ -415,7 +414,8 @@ def test_refresh_live_leaderboard_deploys_models(monkeypatch, tmp_path):
     assert result["skipped"] is False
     assert result["models_deployed"] is True
     assert "claude_haiku_4_5" not in deployed
-    assert set(deployed) == {"gpt_5_5", "deepseek_v4_pro", "nemotron_3_nano_30b"}
+    assert "gpt_5_5" not in deployed
+    assert set(deployed) == {"deepseek_v4_pro", "nemotron_3_nano_30b"}
 
 
 def test_model_deploys_default_off_everywhere(client, monkeypatch):
@@ -554,9 +554,9 @@ def test_deploy_live_increment_trades_only_the_new_session(monkeypatch):
     assert freeze_cfg is not None
     snapshot = {"cash": SEED * 0.2, "positions": {"AAPL": 3}, "entry_prices": {"AAPL": 50}}
     db.insert_run(
-        run_id="lb_gpt_5_5_20260801_20260826",
+        run_id="lb_nemotron_3_nano_30b_20260801_20260826",
         session_id="leaderboard-live",
-        agent_name="GPT-5.5",
+        agent_name="Nemotron 3 Nano 30B",
         mode="leaderboard",
         start_date="2026-08-01",
         end_date="2026-08-26",
@@ -566,7 +566,7 @@ def test_deploy_live_increment_trades_only_the_new_session(monkeypatch):
         sharpe_ratio=0.5,
         max_drawdown=-0.01,
         num_trades=2,
-        llm_model="gpt_5_5",
+        llm_model="nemotron_3_nano_30b",
         llm_calls=70,
         llm_decisions=70,
         input_tokens=1000,
@@ -574,7 +574,7 @@ def test_deploy_live_increment_trades_only_the_new_session(monkeypatch):
         metadata={live.LIVE_SNAPSHOT_KEY: snapshot},
     )
     db.insert_equity_points(
-        "lb_gpt_5_5_20260801_20260826",
+        "lb_nemotron_3_nano_30b_20260801_20260826",
         [
             {
                 "timestamp": "2026-08-03T13:00:00+00:00",
@@ -600,7 +600,7 @@ def test_deploy_live_increment_trades_only_the_new_session(monkeypatch):
             self.llm_decisions = 7
             self.decision_steps = 7
             self.used_llm = True
-            self.model_id = "openai/gpt-5.5"
+            self.model_id = "nvidia/nemotron-3-nano-30b-a3b"
             self.last_portfolio_snapshot = {
                 "cash": 500.0,
                 "positions": {"AAPL": 4},
@@ -631,7 +631,7 @@ def test_deploy_live_increment_trades_only_the_new_session(monkeypatch):
         lambda symbols, start, end: {"AAPL": type("Frame", (), {"attrs": {}})()},
     )
 
-    entry = next(e for e in live.live_llm_entries(freeze_cfg) if e["id"] == "gpt_5_5")
+    entry = next(e for e in live.live_llm_entries(freeze_cfg) if e["id"] == "nemotron_3_nano_30b")
     row = live.deploy_live_model_increment(entry, freeze_cfg)
     assert fake.windows == [("2026-08-27", "2026-08-27", snapshot)]
     assert row["increment"] is True
@@ -707,7 +707,7 @@ def test_null_equity_is_not_read_as_zero():
 def test_a_model_with_no_run_is_never_ranked(no_alpaca):
     """In a down month every printed entry is below the seed; a pending model
     published at the seed and 0% used to rank #1 without ever trading."""
-    for entry_id in ("spy_index", "gpt_5_5"):
+    for entry_id in ("spy_index", "nemotron_3_nano_30b"):
         _insert_live_run(
             f"lb_{entry_id}_20260801_20260826", entry_id, "2026-08-26",
             [_pt("2026-08-03T13:00:00+00:00", SEED),
@@ -716,14 +716,14 @@ def test_a_model_with_no_run_is_never_ranked(no_alpaca):
         )
     payload = live.get_live_leaderboard(as_of=datetime(2026, 8, 27, 17, 39, tzinfo=_ET))
     ranked = [e for e in payload["entries"] if e["rank"] is not None]
-    assert {e["entry_id"] for e in ranked} == {"spy_index", "gpt_5_5"}
+    assert {e["entry_id"] for e in ranked} == {"spy_index", "nemotron_3_nano_30b"}
     assert [e["rank"] for e in ranked] == [1, 2]
     assert payload["entries"][: len(ranked)] == ranked
     deepseek = next(e for e in payload["entries"] if e["entry_id"] == "deepseek_v4_pro")
     assert deepseek["status"] == "pending"
     assert deepseek["portfolio_value"] is None
-    gpt = next(e for e in ranked if e["entry_id"] == "gpt_5_5")
-    assert payload["leader"] == gpt["model"]
+    nemotron = next(e for e in ranked if e["entry_id"] == "nemotron_3_nano_30b")
+    assert payload["leader"] == nemotron["model"]
 
 
 def test_returns_come_off_the_stored_run_and_keep_the_first_hour(no_alpaca):
@@ -731,34 +731,34 @@ def test_returns_come_off_the_stored_run_and_keep_the_first_hour(no_alpaca):
     (``initial_equity``) inflated every point and erased that hour."""
     first_mark = SEED * 0.995
     _insert_live_run(
-        "lb_gpt_5_5_20260801_20260826", "gpt_5_5", "2026-08-26",
+        "lb_nemotron_3_nano_30b_20260801_20260826", "nemotron_3_nano_30b", "2026-08-26",
         [_pt("2026-08-03T13:00:00+00:00", first_mark),
          _pt("2026-08-26T19:00:00+00:00", SEED * 1.02)],
         total_return=0.02, sharpe=1.1, max_dd=-0.03,
         metadata={"initial_capital": SEED},
     )
     payload = live.get_live_leaderboard(as_of=datetime(2026, 8, 27, 17, 39, tzinfo=_ET))
-    gpt = next(e for e in payload["entries"] if e["entry_id"] == "gpt_5_5")
-    assert gpt["cumulative_return"] == pytest.approx(0.02)
-    assert gpt["sharpe_ratio"] == pytest.approx(1.1)
-    assert gpt["max_drawdown"] == pytest.approx(-0.03)
-    assert gpt["portfolio_value"] == pytest.approx(SEED * 1.02)
-    assert gpt["equity_curve"][0]["equity"] == pytest.approx(first_mark)
+    nemotron = next(e for e in payload["entries"] if e["entry_id"] == "nemotron_3_nano_30b")
+    assert nemotron["cumulative_return"] == pytest.approx(0.02)
+    assert nemotron["sharpe_ratio"] == pytest.approx(1.1)
+    assert nemotron["max_drawdown"] == pytest.approx(-0.03)
+    assert nemotron["portfolio_value"] == pytest.approx(SEED * 1.02)
+    assert nemotron["equity_curve"][0]["equity"] == pytest.approx(first_mark)
 
 
 def test_dollar_axis_scales_by_the_recorded_seed_only(no_alpaca):
     seed = SEED / 10
     _insert_live_run(
-        "lb_gpt_5_5_20260801_20260826", "gpt_5_5", "2026-08-26",
+        "lb_nemotron_3_nano_30b_20260801_20260826", "nemotron_3_nano_30b", "2026-08-26",
         [_pt("2026-08-03T13:00:00+00:00", seed * 0.99),
          _pt("2026-08-26T19:00:00+00:00", seed * 1.05)],
         total_return=0.05, metadata={"initial_capital": seed},
     )
     payload = live.get_live_leaderboard(as_of=datetime(2026, 8, 27, 17, 39, tzinfo=_ET))
-    gpt = next(e for e in payload["entries"] if e["entry_id"] == "gpt_5_5")
-    assert gpt["portfolio_value"] == pytest.approx(SEED * 1.05)
-    assert gpt["cumulative_return"] == pytest.approx(0.05)
-    assert gpt["equity_curve"][0]["equity"] == pytest.approx(SEED * 0.99)
+    nemotron = next(e for e in payload["entries"] if e["entry_id"] == "nemotron_3_nano_30b")
+    assert nemotron["portfolio_value"] == pytest.approx(SEED * 1.05)
+    assert nemotron["cumulative_return"] == pytest.approx(0.05)
+    assert nemotron["equity_curve"][0]["equity"] == pytest.approx(SEED * 0.99)
 
 
 def test_increment_lookback_is_relative_to_the_segment_and_shared(monkeypatch):
@@ -788,7 +788,7 @@ def test_increment_lookback_is_relative_to_the_segment_and_shared(monkeypatch):
         return {"AAPL": type("Frame", (), {"attrs": {}})()}
 
     monkeypatch.setattr(lb_service, "fetch_hourly_bars", fake_fetch)
-    for entry_id in ("gpt_5_5", "deepseek_v4_pro"):
+    for entry_id in ("nemotron_3_nano_30b", "deepseek_v4_pro"):
         _insert_live_run(
             f"lb_{entry_id}_20260801_20260826", entry_id, "2026-08-26",
             [_pt("2026-08-26T19:00:00+00:00", SEED)],
@@ -796,9 +796,73 @@ def test_increment_lookback_is_relative_to_the_segment_and_shared(monkeypatch):
         )
     memo = {}
     for entry in live.live_llm_entries(freeze_cfg):
-        if entry["id"] in ("gpt_5_5", "deepseek_v4_pro"):
+        if entry["id"] in ("nemotron_3_nano_30b", "deepseek_v4_pro"):
             live.deploy_live_model_increment(entry, freeze_cfg, bars_memo=memo)
     assert fetches == [(("AAPL", "MSFT"), "2026-07-27", "2026-08-27")]
+
+
+def test_catch_up_writes_a_row_per_day_and_resumes_after_a_crash(monkeypatch):
+    freeze_cfg = live.live_freeze_config(datetime(2026, 8, 27, 17, 39, tzinfo=_ET))
+    _insert_live_run(
+        "lb_deepseek_v4_pro_20260801_20260824", "deepseek_v4_pro", "2026-08-24",
+        [_pt("2026-08-24T19:00:00+00:00", SEED)],
+        metadata={live.LIVE_SNAPSHOT_KEY: {"cash": SEED, "positions": {}, "day": "08-24"}},
+    )
+    windows = []
+    crash_on = {"2026-08-26"}
+
+    class Agent:
+        input_tokens = output_tokens = 10
+        llm_calls = llm_decisions = decision_steps = 7
+        used_llm = True
+        model_id = "deepseek/deepseek-v4-pro"
+
+        def required_symbols(self):
+            return ["AAPL"]
+
+        def run(self, bars, start, end, capital, starting_snapshot=None):
+            windows.append((start, end, (starting_snapshot or {}).get("day")))
+            if start in crash_on:
+                raise RuntimeError("worker killed")
+            self.last_portfolio_snapshot = {"cash": SEED, "positions": {}, "day": start[5:]}
+            return [_pt(f"{start}T19:00:00+00:00", SEED + int(start[-2:]))]
+
+        def num_trades(self):
+            return 1
+
+    monkeypatch.setattr(lb_service, "get_strategy", lambda entry: Agent())
+    monkeypatch.setattr(lb_service, "_reject_if_llm_fallback", lambda *a, **k: None)
+    monkeypatch.setattr(
+        lb_service,
+        "fetch_hourly_bars",
+        lambda symbols, start, end: {"AAPL": type("Frame", (), {"attrs": {}})()},
+    )
+    entry = next(e for e in live.live_llm_entries(freeze_cfg) if e["id"] == "deepseek_v4_pro")
+
+    with pytest.raises(RuntimeError, match="worker killed"):
+        live.deploy_live_model_increment(entry, freeze_cfg)
+    assert windows == [
+        ("2026-08-25", "2026-08-25", "08-24"),
+        ("2026-08-26", "2026-08-26", "08-25"),
+    ]
+    saved = live.latest_live_month_runs("2026-08-01", "2026-08-27")["deepseek_v4_pro"]
+    assert saved["end_date"] == "2026-08-25"
+    assert live._snapshot_from_run(saved)["day"] == "08-25"
+
+    windows.clear()
+    crash_on.clear()
+    row = live.deploy_live_model_increment(entry, freeze_cfg)
+    assert windows == [
+        ("2026-08-26", "2026-08-26", "08-25"),
+        ("2026-08-27", "2026-08-27", "08-26"),
+    ]
+    assert row["segment"] == {"start_date": "2026-08-26", "end_date": "2026-08-27"}
+    stored = db.get_run(row["run_id"])
+    assert stored["end_date"] == "2026-08-27"
+    assert stored["llm_calls"] == 21
+    assert stored["num_trades"] == 3
+    curve = db.get_equity_curve(row["run_id"])
+    assert [p["equity"] for p in curve] == [SEED, SEED + 25, SEED + 26, SEED + 27]
 
 
 def test_restored_lot_with_an_unreadable_date_is_released_not_kept():

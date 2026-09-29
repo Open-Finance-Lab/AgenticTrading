@@ -59,9 +59,9 @@ _FREEZE_SETTLE_MARGIN_MINUTES = 15
 LIVE_SESSION_ID = "leaderboard-live"
 LIVE_PHASE = 1
 # Season-0 local roster: only these LLM curves are deployed and shown on Live.
-# Contest/daily still use the full leaderboard.json list.
+# Contest/daily still use the full leaderboard.json list. GPT-5.5 is left out
+# because it was most of the nightly token spend.
 LIVE_MODEL_IDS = (
-    "gpt_5_5",
     "deepseek_v4_pro",
     "nemotron_3_nano_30b",
 )
@@ -445,8 +445,9 @@ def deploy_live_model_increment(
 
     Trades only ``live_increment_bounds`` (usually one day) and restores cash
     plus positions from the previous freeze row. A missing snapshot falls back
-    to a full month-open → freeze replay once, then stores the book for later
-    nights. Does not change contest/daily ``deploy_model_run``.
+    to replaying from month-open. Either way the sessions run one at a time and
+    each writes its own row, so an interrupted catch-up resumes from the last
+    day it finished. Does not change contest/daily ``deploy_model_run``.
 
     ``bars_memo`` lets one refresh share a bar fetch across the roster: the
     on-disk bar cache refuses windows under 24 hours old, so without it every
@@ -506,13 +507,12 @@ def deploy_live_model_increment(
         prior_curve = db.get_equity_curve(prior["run_id"]) or []
         resumed = True
 
-    strategy_impl = lb_service.get_strategy(entry)
     # The indicator lookback is relative to the segment being traded, not to
     # month-open. ``freeze_cfg`` pins ``reference_start_date`` to a month before
     # the 1st, so passing it here made a one-day increment on the 28th fetch
     # about two months of bars.
     bars_start = reference_start_date(segment_start, None)
-    symbols = strategy_impl.required_symbols()
+    symbols = lb_service.get_strategy(entry).required_symbols()
     memo_key = (tuple(sorted(symbols)), bars_start, segment_end)
     if bars_memo is not None and memo_key in bars_memo:
         bars = bars_memo[memo_key]
@@ -529,118 +529,139 @@ def deploy_live_model_increment(
         f"(month {month_start} → {freeze_end}, resume={resumed})"
     )
 
-    curve = strategy_impl.run(
-        bars,
-        segment_start,
-        segment_end,
-        initial_capital,
-        starting_snapshot=snapshot,
+    # One row per trading day: a catch-up over many sessions (the month's
+    # first run, or nights the cron missed) runs for hours, and a restart
+    # must lose at most the day in progress, not everything since month-open.
+    days = _trading_days_inclusive(
+        date.fromisoformat(segment_start), date.fromisoformat(segment_end)
     )
-    if not curve:
+    provenance = lb_service.feed_provenance(bars)
+    base = prior if resumed else None
+    curve_so_far = prior_curve
+    totals = {
+        key: int((base or {}).get(key) or 0)
+        for key in ("input_tokens", "output_tokens", "llm_calls", "llm_decisions", "num_trades")
+    }
+    last: Optional[Dict[str, Any]] = None
+    written_from: Optional[str] = None
+
+    for day in days:
+        day_iso = day.isoformat()
+        strategy_impl = lb_service.get_strategy(entry)
+        curve = strategy_impl.run(
+            bars,
+            day_iso,
+            day_iso,
+            initial_capital,
+            starting_snapshot=snapshot,
+        )
+        if not curve:
+            print(f"⚠️ Live {entry_id}: no bars on {day_iso}; skipping that session")
+            continue
+
+        llm_decisions = lb_service._reported_int(strategy_impl, "llm_decisions")
+        model_id = getattr(strategy_impl, "model_id", None) or entry.get("model_id")
+        lb_service._reject_if_llm_fallback(
+            entry_id,
+            strategy_impl,
+            int(getattr(strategy_impl, "llm_calls", 0) or 0),
+            llm_decisions=llm_decisions,
+            decision_steps=int(getattr(strategy_impl, "decision_steps", 0) or 0),
+            model=entry.get("model"),
+            model_id=model_id,
+            allow_fallback=allow_fallback,
+        )
+
+        day_calls = int(getattr(strategy_impl, "llm_calls", 0) or 0)
+        totals["input_tokens"] += int(getattr(strategy_impl, "input_tokens", 0) or 0)
+        totals["output_tokens"] += int(getattr(strategy_impl, "output_tokens", 0) or 0)
+        totals["llm_calls"] += day_calls
+        totals["llm_decisions"] += day_calls if llm_decisions is None else int(llm_decisions)
+        totals["num_trades"] += int(strategy_impl.num_trades() or 0)
+        est_cost = lb_service.token_cost.estimate_cost_usd(
+            model_id, totals["input_tokens"], totals["output_tokens"]
+        )
+
+        curve_so_far = _stitch_equity_curves(curve_so_far, curve)
+        metrics = calc_metrics(curve_so_far, initial_capital)
+        run_id = lb_service._run_id(entry_id, month_start, day_iso)
+        snapshot = getattr(strategy_impl, "last_portfolio_snapshot", None)
+
+        meta = lb_service._llm_run_metadata(
+            entry_id,
+            entry,
+            strategy_impl,
+            model_id=model_id,
+            initial_capital=initial_capital,
+            start_date=month_start,
+            end_date=day_iso,
+        ) or {}
+        meta[LIVE_SNAPSHOT_KEY] = snapshot
+        meta["live_increment"] = {
+            "segment_start": day_iso,
+            "segment_end": day_iso,
+            "resumed_from_run_id": (base or {}).get("run_id"),
+            "full_replay": not resumed,
+        }
+
+        db.insert_run(
+            run_id=run_id,
+            session_id=session_id,
+            agent_name=entry["name"],
+            mode=lb_service.LEADERBOARD_MODE,
+            start_date=month_start,
+            end_date=day_iso,
+            initial_equity=metrics["initial_equity"],
+            final_equity=metrics["final_equity"],
+            total_return=metrics["total_return"],
+            sharpe_ratio=metrics["sharpe_ratio"],
+            max_drawdown=metrics["max_drawdown"],
+            num_trades=totals["num_trades"],
+            llm_model=entry_id,
+            llm_calls=totals["llm_calls"],
+            llm_decisions=totals["llm_decisions"],
+            input_tokens=totals["input_tokens"],
+            output_tokens=totals["output_tokens"],
+            est_cost_usd=est_cost,
+            metadata=lb_service._with_market_data_provenance(meta, provenance),
+        )
+        db.insert_equity_points(run_id, curve_so_far)
+
+        base = {"run_id": run_id}
+        written_from = written_from or day_iso
+        last = {
+            "run_id": run_id,
+            "model_id": model_id,
+            "end_date": day_iso,
+            "metrics": metrics,
+            "est_cost_usd": est_cost,
+        }
+
+    if last is None:
         raise RuntimeError(
             f"No equity curve produced for live increment '{entry_id}' "
             f"{segment_start} → {segment_end}"
         )
 
-    stitched = _stitch_equity_curves(prior_curve, curve)
-    metrics = calc_metrics(stitched, initial_capital)
-    run_id = lb_service._run_id(entry_id, month_start, freeze_end)
-
-    input_tokens = int(getattr(strategy_impl, "input_tokens", 0) or 0)
-    output_tokens = int(getattr(strategy_impl, "output_tokens", 0) or 0)
-    llm_calls = int(getattr(strategy_impl, "llm_calls", 0) or 0)
-    llm_decisions = lb_service._reported_int(strategy_impl, "llm_decisions")
-    decision_steps = int(getattr(strategy_impl, "decision_steps", 0) or 0)
-    model_id = getattr(strategy_impl, "model_id", None) or entry.get("model_id")
-    if resumed and prior:
-        input_tokens += int(prior.get("input_tokens") or 0)
-        output_tokens += int(prior.get("output_tokens") or 0)
-        llm_calls += int(prior.get("llm_calls") or 0)
-    est_cost = lb_service.token_cost.estimate_cost_usd(
-        model_id, input_tokens, output_tokens
-    )
-
-    lb_service._reject_if_llm_fallback(
-        entry_id,
-        strategy_impl,
-        int(getattr(strategy_impl, "llm_calls", 0) or 0),
-        llm_decisions=llm_decisions,
-        decision_steps=decision_steps,
-        model=entry.get("model"),
-        model_id=model_id,
-        allow_fallback=allow_fallback,
-    )
-
-    new_snapshot = getattr(strategy_impl, "last_portfolio_snapshot", None)
-    meta = lb_service._llm_run_metadata(
-        entry_id,
-        entry,
-        strategy_impl,
-        model_id=model_id,
-        initial_capital=initial_capital,
-        start_date=month_start,
-        end_date=freeze_end,
-    ) or {}
-    meta[LIVE_SNAPSHOT_KEY] = new_snapshot
-    meta["live_increment"] = {
-        "segment_start": segment_start,
-        "segment_end": segment_end,
-        "resumed_from_run_id": prior.get("run_id") if resumed else None,
-        "full_replay": not resumed,
-    }
-
-    trades = int(strategy_impl.num_trades() or 0)
-    if resumed and prior:
-        trades += int(prior.get("num_trades") or 0)
-
-    stored_decisions = llm_calls if llm_decisions is None else llm_decisions
-    if resumed and prior and llm_decisions is not None:
-        stored_decisions = int(prior.get("llm_decisions") or 0) + int(llm_decisions)
-
-    db.insert_run(
-        run_id=run_id,
-        session_id=session_id,
-        agent_name=entry["name"],
-        mode=lb_service.LEADERBOARD_MODE,
-        start_date=month_start,
-        end_date=freeze_end,
-        initial_equity=metrics["initial_equity"],
-        final_equity=metrics["final_equity"],
-        total_return=metrics["total_return"],
-        sharpe_ratio=metrics["sharpe_ratio"],
-        max_drawdown=metrics["max_drawdown"],
-        num_trades=trades,
-        llm_model=entry_id,
-        llm_calls=llm_calls,
-        llm_decisions=stored_decisions,
-        input_tokens=input_tokens,
-        output_tokens=output_tokens,
-        est_cost_usd=est_cost,
-        metadata=lb_service._with_market_data_provenance(
-            meta,
-            lb_service.feed_provenance(bars),
-        ),
-    )
-    db.insert_equity_points(run_id, stitched)
-
+    metrics = last["metrics"]
     return {
         "entry_id": entry_id,
-        "run_id": run_id,
+        "run_id": last["run_id"],
         "cached": False,
         "increment": resumed,
         "model": entry.get("model"),
-        "model_id": model_id,
-        "window": {"start_date": month_start, "end_date": freeze_end},
-        "segment": {"start_date": segment_start, "end_date": segment_end},
+        "model_id": last["model_id"],
+        "window": {"start_date": month_start, "end_date": last["end_date"]},
+        "segment": {"start_date": written_from, "end_date": last["end_date"]},
         "total_return": metrics["total_return"],
         "sharpe_ratio": metrics["sharpe_ratio"],
         "max_drawdown": metrics["max_drawdown"],
         "final_equity": metrics["final_equity"],
-        "num_trades": trades,
-        "llm_calls": llm_calls,
-        "input_tokens": input_tokens,
-        "output_tokens": output_tokens,
-        "est_cost_usd": est_cost,
+        "num_trades": totals["num_trades"],
+        "llm_calls": totals["llm_calls"],
+        "input_tokens": totals["input_tokens"],
+        "output_tokens": totals["output_tokens"],
+        "est_cost_usd": last["est_cost_usd"],
     }
 
 
