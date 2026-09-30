@@ -278,9 +278,9 @@
     const lanes = Array.isArray(overview?.billing_lane_mix) ? overview.billing_lane_mix : [];
     const laneMicro = (row, field) => Number(row?.[field]) || 0;
     const headline3 = s.formatCredits(lanes.reduce((acc, d) => acc + laneMicro(d, 'byok_estimated_micro'), 0));
-    // BYOK events written before the estimate was recorded carry 0, so a
-    // range reaching back past that deploy undercounts the BYOK lane. Say so
-    // only when it bites: a day with BYOK calls and no estimate.
+    // A BYOK call carries 0 when it predates the estimate or its provider
+    // reported no usage, so the lane can undercount. Say so only when it
+    // bites: a day with BYOK calls and no estimate.
     const byokUnpriced = lanes.some((d) => laneMicro(d, 'byok') > 0 && laneMicro(d, 'byok_estimated_micro') === 0);
     // Purchases are a second read (the purchase ledger) that fails on its own:
     // absent from an older route, or null when the ledger read failed. The
@@ -325,6 +325,9 @@
     const x = (index) => left + (days.length === 1 ? 0 : index / (days.length - 1) * plotWidth);
     const y = (value) => bottom - ((value - lo) / span) * plotHeight;
     const labels = days.map((d) => s.formatShortDay(d));
+    // Ticks sit span/2 apart; two significant digits of that step keep all
+    // three labels distinct whether a day is 7 Credits or 0.004.
+    const decimals = Math.min(6, Math.max(0, 2 - Math.floor(Math.log10(span / 2))));
 
     const svg = svgNode('svg', { viewBox: `0 0 ${width} ${height}`, role: 'img', 'aria-label': `Platform Credits, BYOK estimated Credits${purchasesAvailable ? ' and Purchased Credits' : ''} by date for ${s.state.range}` });
     const ticks = [lo + span, lo + span / 2, lo];
@@ -332,7 +335,7 @@
     if (lo < 0) svg.appendChild(svgNode('line', { class: 'credits-zero-line', x1: left, y1: y(0), x2: right, y2: y(0) }));
     svg.appendChild(svgNode('line', { class: 'revenue-axis', x1: left, y1: top, x2: left, y2: bottom }));
     svg.appendChild(svgNode('line', { class: 'revenue-axis', x1: left, y1: bottom, x2: right, y2: bottom }));
-    ticks.forEach((value) => svg.appendChild(svgNode('text', { class: 'revenue-axis-label', x: 5, y: y(value) + 3 }, axisLabel(value))));
+    ticks.forEach((value) => svg.appendChild(svgNode('text', { class: 'revenue-axis-label', x: 5, y: y(value) + 3 }, axisLabel(value, decimals))));
 
     series.forEach((entry) => {
       const path = entry.values
@@ -367,7 +370,7 @@
   }
 
   const PURCHASES_UNAVAILABLE = 'Purchased Credits unavailable — the purchase ledger could not be read.';
-  const BYOK_UNPRICED = 'Some BYOK calls in this range predate the list-price estimate and count as 0 est. Credits.';
+  const BYOK_UNPRICED = 'Some BYOK calls in this range have no list-price estimate (recorded before estimates shipped, or without provider usage) and count as 0 est. Credits.';
 
   function svgNode(name, attrs, text) {
     const node = document.createElementNS(SVG_NS, name);
@@ -376,12 +379,12 @@
     return node;
   }
 
-  // Credits per day are often fractions of one Credit, so small magnitudes
-  // keep two decimals where a call count only ever needed one.
-  function axisLabel(value) {
-    const magnitude = Math.abs(value);
-    const text = magnitude >= 100 ? String(Math.round(value)) : value.toFixed(magnitude >= 1 ? 1 : 2);
-    return text.replace(/\.0+$/, '').replace(/(\.\d*?)0+$/, '$1');
+  // Trailing zeros are dropped, and a value that rounds to zero prints "0",
+  // never "-0".
+  function axisLabel(value, decimals) {
+    const text = value.toFixed(decimals);
+    if (Number(text) === 0) return '0';
+    return text.includes('.') ? text.replace(/\.?0+$/, '') : text;
   }
 
   // --------------------------------------------------------- detail views

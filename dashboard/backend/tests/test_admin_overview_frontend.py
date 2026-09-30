@@ -184,6 +184,32 @@ def test_credits_axis_reaches_below_zero_when_refunds_outweigh_purchases():
     assert result == {"axis": ["1.3", "-0.35", "-2"], "zeroLine": 1, "inside": True}
 
 
+def test_credits_axis_labels_stay_distinct_for_sub_cent_ranges():
+    """A day's platform cost is often a fraction of a cent. Fixed two-decimal
+    labels printed 0 / 0 / 0 for a chart scaled to 0.004 Credits, and a tiny
+    net refund printed "-0"."""
+    result = _eval(
+        "(() => {"
+        f"  const commercial = {F['commercial']};"
+        "  const axis = (lanes, purchases) => texts(byClass(window.AdminOverview.renderCredits("
+        "    Object.assign({}, commercial, {purchased_by_day: purchases}), {billing_lane_mix: lanes}).body, 'revenue-axis-label'));"
+        "  const lane = (micro) => [{day: '2026-08-25', platform_credits: 1, byok: 0, platform_cost_micro: micro, byok_estimated_micro: 0}];"
+        "  return {"
+        "    tiny: axis(lane(4000), []),"
+        "    tinier: axis(lane(400), []),"
+        "    refund: axis([], [{day: '2026-08-25', amount_micro: -100}]),"
+        "    large: axis(lane(1500000000), []),"
+        "  };"
+        "})()"
+    )
+    assert result == {
+        "tiny": ["0.004", "0.002", "0"],
+        "tinier": ["0.0004", "0.0002", "0"],
+        "refund": ["0", "-0.00005", "-0.0001"],
+        "large": ["1500", "750", "0"],
+    }
+
+
 def test_credits_notes_byok_calls_that_predate_the_estimate_only_when_present():
     """BYOK events from before the estimate shipped carry 0. The note appears
     for a day with BYOK calls and no estimate, and never otherwise."""
@@ -199,7 +225,7 @@ def test_credits_notes_byok_calls_that_predate_the_estimate_only_when_present():
         "})()"
     )
     assert result == {
-        "unpriced": ["Some BYOK calls in this range predate the list-price estimate and count as 0 est. Credits."],
+        "unpriced": ["Some BYOK calls in this range have no list-price estimate (recorded before estimates shipped, or without provider usage) and count as 0 est. Credits."],
         "priced": [],
         "noByok": [],
     }
