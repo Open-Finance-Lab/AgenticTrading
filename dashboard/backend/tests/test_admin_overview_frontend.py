@@ -261,6 +261,8 @@ def test_credits_notes_unpriced_byok_calls_from_the_servers_count():
         "    free: run([day(3, 0, 0)]),"
         "    noByok: run([day(0, 0, 0)]),"
         "    tip: byTag(window.AdminOverview.renderCredits(commercial, {billing_lane_mix: [day(3, 0, 3)]}).body, 'title').map((t) => t.textContent),"
+        "    partTip: byTag(window.AdminOverview.renderCredits(commercial, {billing_lane_mix: [day(3, 2000, 1)]}).body, 'title').map((t) => t.textContent),"
+        "    rings: byTag(window.AdminOverview.renderCredits(commercial, {billing_lane_mix: [day(3, 2000, 1), {...day(2, 5, 0), day: '2026-08-26'}]}).body, 'circle').map((c) => c.getAttribute('class')).filter((c) => !c.includes('purchased')),"
         "  };"
         "})()"
     )
@@ -269,9 +271,21 @@ def test_credits_notes_unpriced_byok_calls_from_the_servers_count():
     ]
     assert result["free"] == []
     assert result["noByok"] == []
-    # A day whose BYOK calls are all unpriced keeps its point: the calls stay
-    # one hover away instead of vanishing into a flat zero.
-    assert "Aug 25 · BYOK est. Credits: 0.000000 Credits · 3 calls" in result["tip"]
+    # A day whose BYOK calls are all unpriced keeps its point, so the calls stay
+    # one hover away -- but it has no figure: "0 Credits" read as free calls.
+    assert "Aug 25 · BYOK est. Credits: no estimate · 3 calls" in result["tip"]
+    # A partly priced day names the calls its figure leaves out.
+    assert (
+        "Aug 25 · BYOK est. Credits: 0.002000 Credits · 3 calls (1 unpriced, not included)"
+        in result["partTip"]
+    )
+    # ...and draws a dashed ring; a fully priced day, and the platform lane, do not.
+    assert result["rings"] == [
+        "credits-chart-point credits-chart-platform",
+        "credits-chart-point credits-chart-platform",
+        "credits-chart-point credits-chart-byok is-unpriced",
+        "credits-chart-point credits-chart-byok",
+    ]
 
 
 def test_credits_chart_is_drawn_at_the_measured_width():
@@ -304,8 +318,12 @@ def test_credits_chart_is_drawn_at_the_measured_width():
 def test_credits_chart_repaints_when_its_width_changes_and_only_then():
     result = _eval(
         "(async () => {"
-        "  let callback = null;"
-        "  globalThis.ResizeObserver = class { constructor(fn) { callback = fn; } observe() {} };"
+        "  let notify = null;"
+        "  globalThis.ResizeObserver = class { constructor(fn) { notify = fn; } observe() {} };"
+        "  const frames = [];"
+        "  globalThis.requestAnimationFrame = (fn) => frames.push(fn);"
+        "  const flush = () => frames.splice(0).forEach((fn) => fn());"
+        "  const callback = () => { notify(); flush(); };"
         "  const stubs = {};"
         "  window.AdminOverview.PANELS.forEach((def) => { stubs[def.id] = panelStub(); register(def.id, stubs[def.id].panel); });"
         "  const {panel, parts} = stubs.panelCredits;"
@@ -331,7 +349,15 @@ def test_credits_chart_repaints_when_its_width_changes_and_only_then():
         "  const resized = viewBox();"
         "  parts.body.clientWidth = 0;"
         "  callback();"
-        "  return {first, sameWidthKeptTheDrawing, busySkipped, resized, hiddenSkipped: viewBox(), busy: panel.getAttribute('aria-busy')};"
+        "  const hiddenSkipped = viewBox();"
+        # The repaint never runs inside the observer's delivery, and a burst of
+        # notifications in one frame shares a single repaint.
+        "  parts.body.clientWidth = 900;"
+        "  notify(); notify(); notify();"
+        "  const deferred = viewBox();"
+        "  const queued = frames.length;"
+        "  flush();"
+        "  return {first, sameWidthKeptTheDrawing, busySkipped, resized, hiddenSkipped, deferred, queued, repainted: viewBox(), busy: panel.getAttribute('aria-busy')};"
         "})()"
     )
     assert result == {
@@ -344,8 +370,56 @@ def test_credits_chart_repaints_when_its_width_changes_and_only_then():
         "resized": "0 0 1100 200",
         # Hidden behind another route: no off-screen redraw at the fallback.
         "hiddenSkipped": "0 0 1100 200",
+        # Repainting inside the callback resized the observed body mid-delivery,
+        # which the browser reports as a ResizeObserver loop error.
+        "deferred": "0 0 1100 200",
+        "queued": 1,
+        "repainted": "0 0 900 200",
         "busy": "false",
     }
+
+
+def test_an_empty_credits_chart_records_the_width_it_was_painted_at():
+    """The empty early return used to skip recording the width, leaving the
+    resize guard comparing against undefined or an earlier range's width, so
+    every notification repainted an identical empty body."""
+    result = _eval(
+        "(() => {"
+        "  const {panel, parts} = panelStub();"
+        "  register('panelCredits', panel);"
+        "  parts.body.clientWidth = 640;"
+        f"  const commercial = {{...{F['commercial']}, purchased_by_day: []}};"
+        "  window.AdminOverview.state.creditsChartWidth = 1234;"
+        "  window.AdminOverview.renderCredits(commercial, {billing_lane_mix: []});"
+        "  return window.AdminOverview.state.creditsChartWidth;"
+        "})()"
+    )
+    assert result == 640
+
+
+def test_credits_detail_reads_platform_cost_from_the_overview_like_the_tile():
+    """The detail row read /commercial's copy, computed in a separate request,
+    so the tile and the row could name two figures for one range. Both read
+    the overview payload now, and a failed read there is a dash on both."""
+    result = _eval(
+        "(async () => {"
+        "  const detail = document.createElement('div');"
+        "  register('detail', detail);"
+        f"  const commercial = {F['commercial']};"
+        f"  const overview = {{...{F['overview']}, platform_model_cost_usd: 1.5}};"
+        "  fetchQueue.push({ok: true, status: 200, body: commercial});"
+        "  fetchQueue.push({ok: true, status: 200, body: overview});"
+        "  await window.AdminOverview.showDetail('credits');"
+        "  const row = (root) => byTag(root, 'tr').map((tr) => texts(tr.children)).find((cells) => cells[0] === 'Platform model cost');"
+        "  const failed = window.AdminOverview.detailCredits(commercial, {...overview, availability: {...overview.availability, growth: {available: false}}});"
+        "  return {needs: window.AdminOverview.DETAIL_NEEDS.credits, row: row(detail), failed: row(failed), tile: window.AdminOverview.renderCredits(commercial, overview).headline2};"
+        "})()"
+    )
+    assert result["needs"] == ["commercial", "overview"]
+    # commercial.json says 2,400,000 micro; the overview says $1.50.
+    assert result["row"][1] == "$1.50" == result["tile"]
+    assert result["failed"][1] == "—"
+
 
 
 def test_credits_tiles_blank_together_when_the_panel_fails():

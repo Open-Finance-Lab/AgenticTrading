@@ -29,7 +29,7 @@
   const SEGMENT_ORDER = ['new', 'onboarding', 'growing', 'core', 'at_risk', 'dormant'];
   const SVG_NS = 'http://www.w3.org/2000/svg';
   const DETAIL_NEEDS = Object.freeze({
-    sources: ['groups'], retention: ['retention'], credits: ['commercial'],
+    sources: ['groups'], retention: ['retention'], credits: ['commercial', 'overview'],
     lifecycle: ['lifecycle'], health: ['operational'],
   });
 
@@ -286,9 +286,9 @@
   }
 
   // The overview's own headline: the same payload and the same rollup rows as
-  // the Platform line, so the tile always equals the line's sum. The ledger
-  // route's copy of it was a second full overview computed in a separate
-  // request, a moment apart. Null when the read behind both failed.
+  // the Platform line, so the tile always equals the line's sum, and the
+  // detail page reads it from here too. The ledger route's copy was computed
+  // in a separate request, a moment apart. Null when the read behind it failed.
   function platformCostMicro(overview) {
     if (overview?.availability?.growth?.available === false) return null;
     const usd = overview?.platform_model_cost_usd;
@@ -320,6 +320,10 @@
 
   function renderCredits(commercial, overview) {
     const s = shell();
+    // Recorded on every paint, the empty one included: the resize guard
+    // compares against it, and a stale value repainted an unchanged body.
+    const width = creditsChartWidth();
+    state.creditsChartWidth = width;
     const period = commercial?.selected_period || {};
     const lanesState = laneState(overview);
     const purchasesState = purchaseState(commercial);
@@ -347,11 +351,13 @@
     }
     const laneByDay = new Map(lanes.map((d) => [String(d.day), d]));
     const purchasedByDay = new Map(purchases.map((d) => [String(d.day), Number(d.amount_micro) || 0]));
-    const laneSeries = (label, className, microKey, callsKey) => ({
+    const perDay = (key) => days.map((d) => Number(laneByDay.get(d)?.[key]) || 0);
+    const laneSeries = (label, className, microKey, callsKey, unpricedKey) => ({
       label,
       className,
-      micro: days.map((d) => Number(laneByDay.get(d)?.[microKey]) || 0),
-      calls: days.map((d) => Number(laneByDay.get(d)?.[callsKey]) || 0),
+      micro: perDay(microKey),
+      calls: perDay(callsKey),
+      unpriced: unpricedKey ? perDay(unpricedKey) : null,
       total: callCount(sum(lanes, callsKey)),
     });
 
@@ -362,7 +368,7 @@
     if (lanesState === 'ok') {
       series.push(
         laneSeries('Platform Credits', 'credits-chart-platform', 'platform_cost_micro', 'platform_credits'),
-        laneSeries('BYOK est. Credits', 'credits-chart-byok', 'byok_estimated_micro', 'byok'),
+        laneSeries('BYOK est. Credits', 'credits-chart-byok', 'byok_estimated_micro', 'byok', 'byok_unpriced'),
       );
     }
     if (purchasesState === 'ok') {
@@ -375,8 +381,6 @@
     }
     series.forEach((entry) => { entry.values = entry.micro.map((micro) => micro / 1000000); });
     const span = Math.max(0, ...series.flatMap((entry) => entry.values)) || 1;
-    const width = creditsChartWidth();
-    state.creditsChartWidth = width;
     const height = 200, left = 52, right = width - 16, top = 14, bottom = 154;
     const plotWidth = right - left, plotHeight = bottom - top;
     const x = (index) => left + (days.length === 1 ? 0 : index / (days.length - 1) * plotWidth);
@@ -400,12 +404,13 @@
       svg.appendChild(svgNode('path', { class: `credits-chart-line ${entry.className}`, d: path }));
       entry.values.forEach((value, index) => {
         // A day of calls that cost nothing (or went unpriced) keeps its point,
-        // so its call count stays one hover away.
+        // so its call count stays one hover away. A day with unpriced calls
+        // draws a dashed ring: its figure leaves those calls out.
         const calls = entry.calls?.[index] || 0;
         if (value === 0 && !calls) return;
-        const circle = svgNode('circle', { class: `credits-chart-point ${entry.className}`, cx: x(index), cy: y(value), r: 3 });
-        const tip = `${labels[index]} · ${entry.label}: ${s.formatCredits(entry.micro[index])}${entry.calls ? ` · ${callCount(calls)}` : ''}`;
-        circle.appendChild(svgNode('title', {}, tip));
+        const unpriced = entry.unpriced?.[index] || 0;
+        const circle = svgNode('circle', { class: `credits-chart-point ${entry.className}${unpriced ? ' is-unpriced' : ''}`, cx: x(index), cy: y(value), r: 3 });
+        circle.appendChild(svgNode('title', {}, pointTip(labels[index], entry, index)));
         svg.appendChild(circle);
       });
     });
@@ -429,6 +434,19 @@
     notes.forEach((note) => wrap.appendChild(s.el('p', 'credit-note', note)));
     body.appendChild(wrap);
     return { headline, headline2, headline3, body };
+  }
+
+  // A day none of whose calls has an estimate has no figure: the point sits
+  // at 0, but "0 Credits" would read as that many free calls. A partly
+  // priced day names how many calls its figure leaves out.
+  function pointTip(dayLabel, entry, index) {
+    const s = shell();
+    const calls = entry.calls?.[index] || 0;
+    const unpriced = entry.unpriced?.[index] || 0;
+    const figure = unpriced && unpriced >= calls ? 'no estimate' : s.formatCredits(entry.micro[index]);
+    const count = entry.calls ? ` · ${callCount(calls)}` : '';
+    const missing = unpriced && unpriced < calls ? ` (${s.formatNumber(unpriced)} unpriced, not included)` : '';
+    return `${dayLabel} · ${entry.label}: ${figure}${count}${missing}`;
   }
 
   const LANE_NOTES = Object.freeze({
@@ -595,7 +613,10 @@
     return root;
   }
 
-  function detailCredits(commercial) {
+  // Platform model cost is read off the overview payload, as the panel tile
+  // is: /commercial's copy was computed in a separate request, so the tile and
+  // this row could name two figures for one range.
+  function detailCredits(commercial, overview) {
     const s = shell();
     const period = commercial?.selected_period || {};
     const balances = commercial?.current_balances || {};
@@ -613,7 +634,7 @@
         ['Purchased Credits', s.formatCredits(period.purchased_micro), 'Selected period'],
         ['Refunds', s.formatCredits(period.refunded_micro), 'Selected period'],
         ['Admin Grants', s.formatCredits(period.admin_grant_activity_micro), 'Not customer-funded'],
-        ['Platform model cost', s.usdFromMicro(period.platform_model_cost_micro_usd), 'Platform Credits lane'],
+        ['Platform model cost', s.usdFromMicro(platformCostMicro(overview)), 'Platform Credits lane'],
         ['Lifetime net purchased', s.formatCredits(commercial?.lifetime_net_purchased_micro), 'Lifetime'],
       ],
       'No ledger activity.'
@@ -787,21 +808,37 @@
   // panel becoming visible), which is what keeps creditsChartWidth honest. A
   // repaint only ever redraws data already on hand: none while a request is in
   // flight (the busy panel would otherwise lose its busy state), none without
-  // both reads, none while hidden, and none when the width is unchanged -- the
-  // repaint itself resizes the body vertically and must not loop.
+  // both reads, none while hidden, and none when the width is unchanged.
+  //
+  // The repaint runs on the next frame, never inside the callback: it changes
+  // the observed body's own height, and a size change made during delivery is
+  // one the browser cannot deliver in the same pass -- it reports "ResizeObserver
+  // loop completed with undelivered notifications" to window.onerror on every
+  // width change. Notifications within one frame share one repaint.
+  function nextFrame(callback) {
+    if (typeof requestAnimationFrame === 'function') requestAnimationFrame(callback);
+    else setTimeout(callback, 16);
+  }
   let creditsObserver = null;
+  let creditsRepaintQueued = false;
+  function repaintCreditsIfResized() {
+    creditsRepaintQueued = false;
+    const def = PANELS.find((panel) => panel.id === 'panelCredits');
+    if (document.getElementById(def.id)?.getAttribute('aria-busy') === 'true') return;
+    if (!def.needs.every((name) => state.data[name])) return;
+    // Hidden (another route is showing): nothing to measure, so no redraw
+    // off-screen at the fallback width; the observer fires again on return.
+    if (!(Number(creditsBody()?.clientWidth) > 0)) return;
+    if (creditsChartWidth() === state.creditsChartWidth) return;
+    safePaint(def);
+  }
   function watchCreditsWidth() {
     const body = creditsBody();
     if (creditsObserver || !body || typeof ResizeObserver !== 'function') return;
     creditsObserver = new ResizeObserver(() => {
-      const def = PANELS.find((panel) => panel.id === 'panelCredits');
-      if (document.getElementById(def.id)?.getAttribute('aria-busy') === 'true') return;
-      if (!def.needs.every((name) => state.data[name])) return;
-      // Hidden (another route is showing): nothing to measure, so no redraw
-      // off-screen at the fallback width; the observer fires again on return.
-      if (!(Number(creditsBody()?.clientWidth) > 0)) return;
-      if (creditsChartWidth() === state.creditsChartWidth) return;
-      safePaint(def);
+      if (creditsRepaintQueued) return;
+      creditsRepaintQueued = true;
+      nextFrame(repaintCreditsIfResized);
     });
     creditsObserver.observe(body);
   }
@@ -809,7 +846,7 @@
   const DETAILS = Object.freeze({
     sources: (d) => detailSources(d.groups),
     retention: (d) => detailRetention(d.retention),
-    credits: (d) => detailCredits(d.commercial),
+    credits: (d) => detailCredits(d.commercial, d.overview),
     lifecycle: (d) => detailLifecycle(d.lifecycle),
     health: (d) => detailHealth(d.operational),
   });

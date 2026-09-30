@@ -475,6 +475,7 @@ dialog::backdrop{background:rgba(0,0,0,.64)}
 .credits-chart-point.credits-chart-platform{fill:var(--bg);stroke:var(--accent)}
 .credits-chart-point.credits-chart-byok{fill:var(--bg);stroke:var(--violet)}
 .credits-chart-point.credits-chart-purchased{fill:var(--bg);stroke:var(--green)}
+.credits-chart-point.is-unpriced{stroke-dasharray:2 1.5}
 .credits-chart-swatch{display:inline-block;width:12px;height:3px;border-radius:2px;margin-right:6px;vertical-align:middle}
 .credits-chart-swatch.credits-chart-platform{background:var(--accent)}
 .credits-chart-swatch.credits-chart-byok{background:var(--violet)}
