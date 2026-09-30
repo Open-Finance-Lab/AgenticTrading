@@ -111,7 +111,9 @@ def test_lifecycle_bar_and_legend_follow_segment_counts():
 
 def test_credits_plots_both_lanes_and_purchases_on_one_credits_axis():
     """Every series is in Credits, so they share one axis; the three tiles are
-    Credits consumed, Platform model cost (USD) and BYOK est. Credits."""
+    Credits consumed, Platform model cost (USD) and BYOK est. Credits. The
+    legend carries each series' range total -- call counts for the lanes, the
+    Credits purchased for the purchase line -- and a lane tooltip its calls."""
     result = _eval(
         "(() => {"
         f"  const commercial = {F['commercial']};"
@@ -122,29 +124,35 @@ def test_credits_plots_both_lanes_and_purchases_on_one_credits_axis():
         "  const xLabels = texts(byClass(r.body, 'revenue-x-label'));"
         "  const axis = texts(byClass(r.body, 'revenue-axis-label'));"
         "  const tips = byTag(r.body, 'title').map((t) => t.textContent);"
-        "  return {tiles: [r.headline, r.headline2, r.headline3], lineCount: lines.length, points: byTag(r.body, 'circle').length, legend, xLabels, axis, zeroLine: byClass(r.body, 'credits-zero-line').length, tip: tips[0], notes: byClass(r.body, 'credit-note').length};"
+        "  const viewBox = byTag(r.body, 'svg')[0].getAttribute('viewBox');"
+        "  return {tiles: [r.headline, r.headline2, r.headline3], lineCount: lines.length, points: byTag(r.body, 'circle').length, legend, xLabels, axis, tips: [tips[0], tips[tips.length - 1]], notes: byClass(r.body, 'credit-note').length, viewBox};"
         "})()"
     )
     assert result == {
+        # The Platform tile is the overview's own headline: the same payload
+        # and rows as the Platform line (1.1 + 1.3 Credits).
         "tiles": ["4.800000 Credits", "$2.40", "1.500000 Credits"],
         "lineCount": 3,
         # 4 lane points (Aug 25/26 x 2 lanes) + 2 purchase points (Sep 1/2).
         "points": 6,
-        "legend": ["Platform Credits", "BYOK est. Credits", "Purchased Credits"],
+        "legend": ["Platform Credits · 25 calls", "BYOK est. Credits · 15 calls", "Purchased Credits · 12.000000 Credits"],
         # Union of lane days (Aug 25/26) and purchase days (Sep 1/2); four
         # days -> first/middle/last labels shown.
         "xLabels": ["Aug 25", "Aug 26", "Sep 2"],
-        # One Credits axis, topped by the largest series (7 purchased Credits).
+        # One Credits axis from zero, topped by the largest series (7 purchased Credits).
         "axis": ["7", "3.5", "0"],
-        "zeroLine": 0,
         # Tooltips read the exact micro-Credit amount, not the rounded axis.
-        "tip": "Aug 25 · Platform Credits: 1.100000 Credits",
+        "tips": ["Aug 25 · Platform Credits: 1.100000 Credits · 11 calls", "Sep 2 · Purchased Credits: 7.000000 Credits"],
         "notes": 0,
+        # Nothing to measure under node: the fallback width.
+        "viewBox": "0 0 980 200",
     }
 
 
 def test_credits_lanes_still_draw_when_purchases_are_unavailable():
-    """A failed ledger read (null) or an absent field must not blank the lanes."""
+    """A failed ledger read (null) or an absent field must not blank the lanes,
+    and the two are named apart: absent is waiting on a data source, null is a
+    read that failed."""
     result = _eval(
         "(() => {"
         f"  const overview = {F['overview']};"
@@ -157,37 +165,68 @@ def test_credits_lanes_still_draw_when_purchases_are_unavailable():
         "  return {failed: run(failed), absent: run(absent)};"
         "})()"
     )
-    expected = {
+    common = {
         "lines": 2,
-        "legend": ["Platform Credits", "BYOK est. Credits"],
-        "notes": ["Purchased Credits unavailable — the purchase ledger could not be read."],
+        "legend": ["Platform Credits · 25 calls", "BYOK est. Credits · 15 calls"],
         "byok": "1.500000 Credits",
     }
-    assert result == {"failed": expected, "absent": expected}
+    assert result == {
+        "failed": {**common, "notes": ["Purchased Credits unavailable — the purchase ledger could not be read."]},
+        "absent": {**common, "notes": ["Purchased Credits are awaiting a data source."]},
+    }
 
 
-def test_credits_axis_reaches_below_zero_when_refunds_outweigh_purchases():
-    """purchased_by_day is net of refunds; a negative day must stay on the plot
-    with a zero line, not fall off the bottom of a zero-floored axis."""
+def test_credits_failed_usage_read_is_a_dash_not_a_quiet_range():
+    """A failed growth read ships billing_lane_mix: [] and a null platform cost.
+    Summing that printed "0.000000 Credits" for BYOK and "No Credits activity"
+    -- zeros nobody read, under a generic "Incomplete data" line. The usage
+    tiles are dashes, the lanes are named unavailable, and the purchase line
+    that did load still draws."""
     result = _eval(
         "(() => {"
-        f"  const commercial = {F['commercial']}; commercial.purchased_by_day = [{{day: '2026-08-26', amount_micro: -2000000}}];"
-        f"  const overview = {F['overview']};"
-        "  const r = window.AdminOverview.renderCredits(commercial, overview);"
-        "  const svg = byTag(r.body, 'svg')[0];"
-        "  const bottom = 154;"
-        "  const ys = byTag(r.body, 'circle').map((c) => Number(c.getAttribute('cy')));"
-        "  return {axis: texts(byClass(r.body, 'revenue-axis-label')), zeroLine: byClass(r.body, 'credits-zero-line').length, inside: ys.every((y) => y >= 14 && y <= bottom)};"
+        f"  const overview = {F['overview_partial_error']};"
+        "  const run = (commercial) => {"
+        "    const r = window.AdminOverview.renderCredits(commercial, overview);"
+        "    return {tiles: [r.headline, r.headline2, r.headline3], legend: byClass(r.body, 'credit-legend').map((l) => texts(l.children)), empty: texts(byClass(r.body, 'panel-empty')), notes: texts(byClass(r.body, 'credit-note'))};"
+        "  };"
+        f"  const quiet = {F['commercial']}; quiet.purchased_by_day = [];"
+        f"  return {{withPurchases: run({F['commercial']}), noPurchases: run(quiet)}};"
         "})()"
     )
-    # Range -2..1.3 Credits: top, midpoint, floor.
-    assert result == {"axis": ["1.3", "-0.35", "-2"], "zeroLine": 1, "inside": True}
+    lanes_down = "Platform and BYOK lanes unavailable — model usage could not be read."
+    assert result == {
+        "withPurchases": {
+            "tiles": ["4.800000 Credits", "—", "—"],
+            "legend": [["Purchased Credits · 12.000000 Credits"]],
+            "empty": [],
+            "notes": [lanes_down],
+        },
+        # Only the read that succeeded is allowed to claim a quiet range.
+        "noPurchases": {
+            "tiles": ["4.800000 Credits", "—", "—"],
+            "legend": [],
+            "empty": ["No purchases in this range."],
+            "notes": [lanes_down],
+        },
+    }
+
+
+def test_credits_platform_tile_keeps_sub_cent_costs_visible():
+    """A range of a few cheap calls costs a fraction of a cent. "$0.00" read as
+    "nothing spent" beside a Platform line and tooltip showing the spend."""
+    result = _eval(
+        "(() => {"
+        f"  const commercial = {F['commercial']};"
+        "  const tile = (usd) => window.AdminOverview.renderCredits(commercial, {billing_lane_mix: [], platform_model_cost_usd: usd}).headline2;"
+        "  return [tile(0.004), tile(0.000001), tile(0), tile(2.4), tile(null)];"
+        "})()"
+    )
+    assert result == ["$0.004", "$0.000001", "$0.00", "$2.40", "—"]
 
 
 def test_credits_axis_labels_stay_distinct_for_sub_cent_ranges():
     """A day's platform cost is often a fraction of a cent. Fixed two-decimal
-    labels printed 0 / 0 / 0 for a chart scaled to 0.004 Credits, and a tiny
-    net refund printed "-0"."""
+    labels printed 0 / 0 / 0 for a chart scaled to 0.004 Credits."""
     result = _eval(
         "(() => {"
         f"  const commercial = {F['commercial']};"
@@ -197,7 +236,6 @@ def test_credits_axis_labels_stay_distinct_for_sub_cent_ranges():
         "  return {"
         "    tiny: axis(lane(4000), []),"
         "    tinier: axis(lane(400), []),"
-        "    refund: axis([], [{day: '2026-08-25', amount_micro: -100}]),"
         "    large: axis(lane(1500000000), []),"
         "  };"
         "})()"
@@ -205,30 +243,138 @@ def test_credits_axis_labels_stay_distinct_for_sub_cent_ranges():
     assert result == {
         "tiny": ["0.004", "0.002", "0"],
         "tinier": ["0.0004", "0.0002", "0"],
-        "refund": ["0", "-0.00005", "-0.0001"],
         "large": ["1500", "750", "0"],
     }
 
 
-def test_credits_notes_byok_calls_that_predate_the_estimate_only_when_present():
-    """BYOK events from before the estimate shipped carry 0. The note appears
-    for a day with BYOK calls and no estimate, and never otherwise."""
+def test_credits_notes_unpriced_byok_calls_from_the_servers_count():
+    """The note used to be inferred from a day whose estimate was 0: silent for
+    a day with 499 of 500 calls unpriced, and wrong for a day of calls on a
+    model the price list lists at zero. It now reads the server's count."""
     result = _eval(
         "(() => {"
         f"  const commercial = {F['commercial']};"
         "  const run = (lanes) => texts(byClass(window.AdminOverview.renderCredits(commercial, {billing_lane_mix: lanes}).body, 'credit-note'));"
+        "  const day = (byok, estimate, unpriced) => ({day: '2026-08-25', platform_credits: 1, byok, platform_cost_micro: 1000, byok_estimated_micro: estimate, byok_unpriced: unpriced});"
         "  return {"
-        "    unpriced: run([{day: '2026-08-25', platform_credits: 1, byok: 3, platform_cost_micro: 1000, byok_estimated_micro: 0}]),"
-        "    priced: run([{day: '2026-08-25', platform_credits: 1, byok: 3, platform_cost_micro: 1000, byok_estimated_micro: 50}]),"
-        "    noByok: run([{day: '2026-08-25', platform_credits: 1, byok: 0, platform_cost_micro: 1000, byok_estimated_micro: 0}]),"
+        "    partly: run([day(500, 1, 499)]),"
+        "    free: run([day(3, 0, 0)]),"
+        "    noByok: run([day(0, 0, 0)]),"
+        "    tip: byTag(window.AdminOverview.renderCredits(commercial, {billing_lane_mix: [day(3, 0, 3)]}).body, 'title').map((t) => t.textContent),"
         "  };"
         "})()"
     )
+    assert result["partly"] == [
+        "499 of 500 BYOK calls in this range have no list-price estimate (model not on the price list, no provider usage reported, or recorded before estimates existed) and are left out of BYOK est. Credits."
+    ]
+    assert result["free"] == []
+    assert result["noByok"] == []
+    # A day whose BYOK calls are all unpriced keeps its point: the calls stay
+    # one hover away instead of vanishing into a flat zero.
+    assert "Aug 25 · BYOK est. Credits: 0.000000 Credits · 3 calls" in result["tip"]
+
+
+def test_credits_chart_is_drawn_at_the_measured_width():
+    """A fixed 980-wide viewBox under a pinned CSS height letterboxed: 6px labels
+    at a 900px viewport, a centred plot with wide gutters at 1920px. The
+    viewBox now takes the body's measured width, floored for a phone."""
+    result = _eval(
+        "(() => {"
+        "  const {panel, parts} = panelStub();"
+        "  register('panelCredits', panel);"
+        f"  const commercial = {F['commercial']};"
+        f"  const overview = {F['overview']};"
+        "  const draw = (width) => {"
+        "    parts.body.clientWidth = width;"
+        "    const svg = byTag(window.AdminOverview.renderCredits(commercial, overview).body, 'svg')[0];"
+        "    const baseline = byClass(svg, 'revenue-axis')[1];"
+        "    return [svg.getAttribute('viewBox'), baseline.getAttribute('x2')];"
+        "  };"
+        "  return {desktop: draw(1180), mid: draw(604), phone: draw(200), hidden: draw(0)};"
+        "})()"
+    )
     assert result == {
-        "unpriced": ["Some BYOK calls in this range have no list-price estimate (recorded before estimates shipped, or without provider usage) and count as 0 est. Credits."],
-        "priced": [],
-        "noByok": [],
+        "desktop": ["0 0 1180 200", "1164"],
+        "mid": ["0 0 604 200", "588"],
+        "phone": ["0 0 280 200", "264"],
+        "hidden": ["0 0 980 200", "964"],
     }
+
+
+def test_credits_chart_repaints_when_its_width_changes_and_only_then():
+    result = _eval(
+        "(async () => {"
+        "  let callback = null;"
+        "  globalThis.ResizeObserver = class { constructor(fn) { callback = fn; } observe() {} };"
+        "  const stubs = {};"
+        "  window.AdminOverview.PANELS.forEach((def) => { stubs[def.id] = panelStub(); register(def.id, stubs[def.id].panel); });"
+        "  const {panel, parts} = stubs.panelCredits;"
+        "  parts.body.clientWidth = 700;"
+        f"  fetchQueue.push({{ok: true, status: 200, body: {F['overview']}}});"
+        f"  fetchQueue.push({{ok: true, status: 200, body: {F['lifecycle']}}});"
+        f"  fetchQueue.push({{ok: true, status: 200, body: {F['retention']}}});"
+        f"  fetchQueue.push({{ok: true, status: 200, body: {F['commercial']}}});"
+        f"  fetchQueue.push({{ok: true, status: 200, body: {F['operational']}}});"
+        f"  fetchQueue.push({{ok: true, status: 200, body: {F['groups']}}});"
+        "  await window.AdminOverview.loadAll(['overview', 'lifecycle', 'retention', 'commercial', 'operational', 'groups']);"
+        "  const viewBox = () => byTag(parts.body, 'svg')[0].getAttribute('viewBox');"
+        "  const first = viewBox();"
+        "  const drawn = parts.body.children[0];"
+        "  callback();"
+        "  const sameWidthKeptTheDrawing = parts.body.children[0] === drawn;"
+        "  parts.body.clientWidth = 1100;"
+        "  panel.setAttribute('aria-busy', 'true');"
+        "  callback();"
+        "  const busySkipped = viewBox();"
+        "  panel.setAttribute('aria-busy', 'false');"
+        "  callback();"
+        "  return {first, sameWidthKeptTheDrawing, busySkipped, resized: viewBox(), busy: panel.getAttribute('aria-busy')};"
+        "})()"
+    )
+    assert result == {
+        "first": "0 0 700 200",
+        # The repaint itself resizes the body vertically; an unchanged width
+        # must not redraw, or the observer would loop.
+        "sameWidthKeptTheDrawing": True,
+        # A request in flight owns the panel; a resize does not repaint over it.
+        "busySkipped": "0 0 700 200",
+        "resized": "0 0 1100 200",
+        "busy": "false",
+    }
+
+
+def test_credits_tiles_blank_together_when_the_panel_fails():
+    """markPanelUnavailable blanks every headline slot, not only the first: a
+    failed refresh must not leave tile 2 or 3 showing the previous range. The
+    stub starts every tile at a dash, so each case paints real values first."""
+    result = _eval(
+        "(async () => {"
+        "  const stubs = {};"
+        "  window.AdminOverview.PANELS.forEach((def) => { stubs[def.id] = panelStub(); register(def.id, stubs[def.id].panel); });"
+        "  const {parts} = stubs.panelCredits;"
+        "  const tiles = () => [parts.headline.textContent, parts.headline2.textContent, parts.headline3.textContent];"
+        "  const def = window.AdminOverview.PANELS.find((d) => d.id === 'panelCredits');"
+        f"  const loaded = {{commercial: {F['commercial']}, overview: {F['overview']}}};"
+        "  window.AdminOverview.state.data = Object.assign({}, loaded);"
+        "  window.AdminOverview.state.errors = {};"
+        "  window.AdminOverview.paint(def);"
+        "  const painted = tiles();"
+        "  window.AdminOverview.state.data = {};"
+        "  window.AdminOverview.paint(def);"
+        "  const dataGone = tiles();"
+        "  window.AdminOverview.state.data = Object.assign({}, loaded);"
+        "  window.AdminOverview.paint(def);"
+        "  const render = def.render;"
+        "  def.render = () => { throw new TypeError('renderer blew up'); };"
+        f"  ['overview', 'lifecycle', 'retention', 'commercial', 'operational', 'groups'].forEach((name) => fetchQueue.push({{ok: true, status: 200, body: {{overview: {F['overview']}, lifecycle: {F['lifecycle']}, retention: {F['retention']}, commercial: {F['commercial']}, operational: {F['operational']}, groups: {F['groups']}}}[name]}}));"
+        "  await window.AdminOverview.loadAll(['overview', 'lifecycle', 'retention', 'commercial', 'operational', 'groups']);"
+        "  def.render = render;"
+        "  return {painted, dataGone, threw: tiles()};"
+        "})()"
+    )
+    assert result["painted"] == ["4.800000 Credits", "$2.40", "1.500000 Credits"]
+    assert result["dataGone"] == ["—", "—", "—"]
+    assert result["threw"] == ["—", "—", "—"]
 
 
 def test_attention_counts_and_top_reason():

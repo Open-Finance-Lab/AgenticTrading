@@ -269,70 +269,126 @@
     return { headline, body };
   }
 
+  // The lanes and the purchase series are two reads that fail on their own.
+  // Each resolves to 'pending' (the route does not serve the field yet),
+  // 'failed' (served, unreadable) or 'ok', so the panel names the half it is
+  // missing instead of drawing a zero it never read: a failed growth read
+  // still ships billing_lane_mix: [], which is byte-for-byte a quiet range.
+  function laneState(overview) {
+    if (shell().fieldPending(overview, 'billing_lane_mix')) return 'pending';
+    if (overview?.availability?.growth?.available === false || !Array.isArray(overview?.billing_lane_mix)) return 'failed';
+    return 'ok';
+  }
+
+  function purchaseState(commercial) {
+    if (shell().fieldPending(commercial, 'purchased_by_day')) return 'pending';
+    return Array.isArray(commercial?.purchased_by_day) ? 'ok' : 'failed';
+  }
+
+  // The overview's own headline: the same payload and the same rollup rows as
+  // the Platform line, so the tile always equals the line's sum. The ledger
+  // route's copy of it was a second full overview computed in a separate
+  // request, a moment apart. Null when the read behind both failed.
+  function platformCostMicro(overview) {
+    if (overview?.availability?.growth?.available === false) return null;
+    const usd = overview?.platform_model_cost_usd;
+    if (usd == null || usd === '') return null;
+    const numeric = Number(usd);
+    return Number.isFinite(numeric) ? Math.round(numeric * 1000000) : null;
+  }
+
+  function callCount(count) {
+    return `${shell().formatNumber(count)} call${count === 1 ? '' : 's'}`;
+  }
+
+  // The chart is drawn at the width its panel body measures, so one viewBox
+  // unit is one CSS pixel (the SVG's CSS height is auto) and 10px labels stay
+  // 10px. A fixed viewBox under a pinned CSS height letterboxed instead: 6px
+  // labels at mid widths, a centred plot with wide gutters on a large screen.
+  // Unmeasurable (hidden, or no layout) falls back; watchCreditsWidth repaints
+  // once the body has a width, and whenever that width changes.
+  const CREDITS_CHART = Object.freeze({ fallbackWidth: 980, minWidth: 280 });
+
+  function creditsBody() {
+    return document.getElementById('panelCredits')?.querySelector('[data-body]') || null;
+  }
+
+  function creditsChartWidth() {
+    const measured = Math.round(Number(creditsBody()?.clientWidth) || 0);
+    return measured > 0 ? Math.max(CREDITS_CHART.minWidth, measured) : CREDITS_CHART.fallbackWidth;
+  }
+
   function renderCredits(commercial, overview) {
     const s = shell();
     const period = commercial?.selected_period || {};
+    const lanesState = laneState(overview);
+    const purchasesState = purchaseState(commercial);
+    const lanes = lanesState === 'ok' ? overview.billing_lane_mix : [];
+    const purchases = purchasesState === 'ok' ? commercial.purchased_by_day : [];
     const headline = s.formatCredits(period.consumed_micro);
-    const headline2 = s.usdFromMicro(period.platform_model_cost_micro_usd);
-    if (s.fieldPending(overview, 'billing_lane_mix')) return { headline, headline2, headline3: s.DASH, body: emptyBody(s.PENDING) };
-    const lanes = Array.isArray(overview?.billing_lane_mix) ? overview.billing_lane_mix : [];
-    const laneMicro = (row, field) => Number(row?.[field]) || 0;
-    const headline3 = s.formatCredits(lanes.reduce((acc, d) => acc + laneMicro(d, 'byok_estimated_micro'), 0));
-    // A BYOK call carries 0 when it predates the estimate or its provider
-    // reported no usage, so the lane can undercount. Say so only when it
-    // bites: a day with BYOK calls and no estimate.
-    const byokUnpriced = lanes.some((d) => laneMicro(d, 'byok') > 0 && laneMicro(d, 'byok_estimated_micro') === 0);
-    // Purchases are a second read (the purchase ledger) that fails on its own:
-    // absent from an older route, or null when the ledger read failed. The
-    // lanes still draw either way, with a note: a lost purchase series must
-    // not blank the lanes beside it.
-    const purchasesAvailable = Array.isArray(commercial?.purchased_by_day);
-    const purchases = purchasesAvailable ? commercial.purchased_by_day : [];
+    const headline2 = s.usdFromMicro(platformCostMicro(overview));
+    const headline3 = lanesState === 'ok' ? s.formatCredits(sum(lanes, 'byok_estimated_micro')) : s.DASH;
     const notes = [];
-    if (!purchasesAvailable) notes.push(PURCHASES_UNAVAILABLE);
-    if (byokUnpriced) notes.push(BYOK_UNPRICED);
-    if (!lanes.length && !purchases.length) {
-      const body = emptyBody('No Credits activity in this range.');
-      notes.forEach((note) => body.appendChild(s.el('p', 'credit-note', note)));
-      return { headline, headline2, headline3, body };
-    }
+    if (lanesState !== 'ok') notes.push(LANE_NOTES[lanesState]);
+    if (purchasesState !== 'ok') notes.push(PURCHASE_NOTES[purchasesState]);
+    // Counted by the server per call, so the note fires exactly when some BYOK
+    // call has no estimate -- not inferred from a day whose estimate is 0,
+    // which missed a partly priced day and misread a legitimately free one.
+    const unpriced = sum(lanes, 'byok_unpriced');
+    if (unpriced > 0) notes.push(byokUnpricedNote(unpriced, sum(lanes, 'byok')));
 
     // Union of lane days and purchase days on one shared x-axis.
-    const daySet = new Set();
-    lanes.forEach((d) => daySet.add(String(d.day)));
-    purchases.forEach((d) => daySet.add(String(d.day)));
-    const days = [...daySet].sort();
-    const purchasedByDay = new Map(purchases.map((d) => [String(d.day), Number(d.amount_micro) || 0]));
+    const days = [...new Set([...lanes, ...purchases].map((d) => String(d.day)))].sort();
+    if (!days.length) {
+      const bothPending = lanesState === 'pending' && purchasesState === 'pending';
+      const body = emptyBody(emptyCreditsText(lanesState, purchasesState));
+      if (!bothPending) notes.forEach((note) => body.appendChild(s.el('p', 'credit-note', note)));
+      return { headline, headline2, headline3, body };
+    }
     const laneByDay = new Map(lanes.map((d) => [String(d.day), d]));
+    const purchasedByDay = new Map(purchases.map((d) => [String(d.day), Number(d.amount_micro) || 0]));
+    const laneSeries = (label, className, microKey, callsKey) => ({
+      label,
+      className,
+      micro: days.map((d) => Number(laneByDay.get(d)?.[microKey]) || 0),
+      calls: days.map((d) => Number(laneByDay.get(d)?.[callsKey]) || 0),
+      total: callCount(sum(lanes, callsKey)),
+    });
 
     // One unit, one axis: every series is in Credits ($1 = 1 Credit), read in
-    // micro-Credits and plotted in Credits. Purchases are net of refunds, so
-    // the axis reaches below zero when a day refunded more than it sold.
-    const series = [
-      { label: 'Platform Credits', className: 'credits-chart-platform', micro: days.map((d) => laneMicro(laneByDay.get(d), 'platform_cost_micro')) },
-      { label: 'BYOK est. Credits', className: 'credits-chart-byok', micro: days.map((d) => laneMicro(laneByDay.get(d), 'byok_estimated_micro')) },
-    ];
-    if (purchasesAvailable) {
-      series.push({ label: 'Purchased Credits', className: 'credits-chart-purchased', micro: days.map((d) => purchasedByDay.get(d) || 0) });
+    // micro-Credits and plotted in Credits. All three are non-negative -- the
+    // purchase series is gross purchases -- so the axis starts at zero.
+    const series = [];
+    if (lanesState === 'ok') {
+      series.push(
+        laneSeries('Platform Credits', 'credits-chart-platform', 'platform_cost_micro', 'platform_credits'),
+        laneSeries('BYOK est. Credits', 'credits-chart-byok', 'byok_estimated_micro', 'byok'),
+      );
+    }
+    if (purchasesState === 'ok') {
+      series.push({
+        label: 'Purchased Credits',
+        className: 'credits-chart-purchased',
+        micro: days.map((d) => purchasedByDay.get(d) || 0),
+        total: s.formatCredits(sum(purchases, 'amount_micro')),
+      });
     }
     series.forEach((entry) => { entry.values = entry.micro.map((micro) => micro / 1000000); });
-    const all = series.flatMap((entry) => entry.values);
-    const hi = Math.max(0, ...all);
-    const lo = Math.min(0, ...all);
-    const span = hi - lo || 1;
-    const width = 980, height = 200, left = 52, right = 964, top = 14, bottom = 154;
+    const span = Math.max(0, ...series.flatMap((entry) => entry.values)) || 1;
+    const width = creditsChartWidth();
+    state.creditsChartWidth = width;
+    const height = 200, left = 52, right = width - 16, top = 14, bottom = 154;
     const plotWidth = right - left, plotHeight = bottom - top;
     const x = (index) => left + (days.length === 1 ? 0 : index / (days.length - 1) * plotWidth);
-    const y = (value) => bottom - ((value - lo) / span) * plotHeight;
+    const y = (value) => bottom - (value / span) * plotHeight;
     const labels = days.map((d) => s.formatShortDay(d));
     // Ticks sit span/2 apart; two significant digits of that step keep all
     // three labels distinct whether a day is 7 Credits or 0.004.
     const decimals = Math.min(6, Math.max(0, 2 - Math.floor(Math.log10(span / 2))));
 
-    const svg = svgNode('svg', { viewBox: `0 0 ${width} ${height}`, role: 'img', 'aria-label': `Platform Credits, BYOK estimated Credits${purchasesAvailable ? ' and Purchased Credits' : ''} by date for ${s.state.range}` });
-    const ticks = [lo + span, lo + span / 2, lo];
+    const svg = svgNode('svg', { viewBox: `0 0 ${width} ${height}`, role: 'img', 'aria-label': `${series.map((entry) => entry.label).join(', ')} by date for ${s.state.range}` });
+    const ticks = [span, span / 2, 0];
     ticks.forEach((value) => svg.appendChild(svgNode('line', { class: 'revenue-grid', x1: left, y1: y(value), x2: right, y2: y(value) })));
-    if (lo < 0) svg.appendChild(svgNode('line', { class: 'credits-zero-line', x1: left, y1: y(0), x2: right, y2: y(0) }));
     svg.appendChild(svgNode('line', { class: 'revenue-axis', x1: left, y1: top, x2: left, y2: bottom }));
     svg.appendChild(svgNode('line', { class: 'revenue-axis', x1: left, y1: bottom, x2: right, y2: bottom }));
     ticks.forEach((value) => svg.appendChild(svgNode('text', { class: 'revenue-axis-label', x: 5, y: y(value) + 3 }, axisLabel(value, decimals))));
@@ -343,9 +399,13 @@
         .join(' ');
       svg.appendChild(svgNode('path', { class: `credits-chart-line ${entry.className}`, d: path }));
       entry.values.forEach((value, index) => {
-        if (value === 0) return;
+        // A day of calls that cost nothing (or went unpriced) keeps its point,
+        // so its call count stays one hover away.
+        const calls = entry.calls?.[index] || 0;
+        if (value === 0 && !calls) return;
         const circle = svgNode('circle', { class: `credits-chart-point ${entry.className}`, cx: x(index), cy: y(value), r: 3 });
-        circle.appendChild(svgNode('title', {}, `${labels[index]} · ${entry.label}: ${s.formatCredits(entry.micro[index])}`));
+        const tip = `${labels[index]} · ${entry.label}: ${s.formatCredits(entry.micro[index])}${entry.calls ? ` · ${callCount(calls)}` : ''}`;
+        circle.appendChild(svgNode('title', {}, tip));
         svg.appendChild(circle);
       });
     });
@@ -356,11 +416,13 @@
     const body = s.el('div');
     const wrap = s.el('div', 'revenue-viz');
     wrap.appendChild(svg);
+    // Each series' range total: call counts for the two lanes (their Credits
+    // are the tiles above), the Credits purchased for the purchase line.
     const legend = s.el('div', 'credit-legend');
     series.forEach((entry) => {
       const item = s.el('span');
       item.appendChild(s.el('i', `credits-chart-swatch ${entry.className}`));
-      item.append(entry.label);
+      item.append(`${entry.label} · ${entry.total}`);
       legend.appendChild(item);
     });
     wrap.appendChild(legend);
@@ -369,8 +431,28 @@
     return { headline, headline2, headline3, body };
   }
 
-  const PURCHASES_UNAVAILABLE = 'Purchased Credits unavailable — the purchase ledger could not be read.';
-  const BYOK_UNPRICED = 'Some BYOK calls in this range have no list-price estimate (recorded before estimates shipped, or without provider usage) and count as 0 est. Credits.';
+  const LANE_NOTES = Object.freeze({
+    pending: 'Platform and BYOK lanes are awaiting a data source.',
+    failed: 'Platform and BYOK lanes unavailable — model usage could not be read.',
+  });
+  const PURCHASE_NOTES = Object.freeze({
+    pending: 'Purchased Credits are awaiting a data source.',
+    failed: 'Purchased Credits unavailable — the purchase ledger could not be read.',
+  });
+
+  // An empty chart only claims "no activity" for the reads that succeeded.
+  function emptyCreditsText(lanesState, purchasesState) {
+    const s = shell();
+    if (lanesState === 'ok' && purchasesState === 'ok') return 'No Credits activity in this range.';
+    if (lanesState === 'ok') return 'No model calls in this range.';
+    if (purchasesState === 'ok') return 'No purchases in this range.';
+    return lanesState === 'pending' && purchasesState === 'pending' ? s.PENDING : s.SECTION_UNAVAILABLE;
+  }
+
+  function byokUnpricedNote(unpriced, calls) {
+    const s = shell();
+    return `${s.formatNumber(unpriced)} of ${s.formatNumber(calls)} BYOK calls in this range have no list-price estimate (model not on the price list, no provider usage reported, or recorded before estimates existed) and are left out of BYOK est. Credits.`;
+  }
 
   function svgNode(name, attrs, text) {
     const node = document.createElementNS(SVG_NS, name);
@@ -379,11 +461,9 @@
     return node;
   }
 
-  // Trailing zeros are dropped, and a value that rounds to zero prints "0",
-  // never "-0".
+  // Trailing zeros are dropped: "3.50" prints "3.5", "0.000" prints "0".
   function axisLabel(value, decimals) {
     const text = value.toFixed(decimals);
-    if (Number(text) === 0) return '0';
     return text.includes('.') ? text.replace(/\.?0+$/, '') : text;
   }
 
@@ -689,15 +769,38 @@
     // which is the one state this page must not publish. The reachable case was
     // formatCredits dereferencing a missing window.CreditFormat (now guarded in the
     // shell): renderCredits sat at PANELS index 7 and stranded the panel after it.
-    PANELS.forEach((def) => {
-      try {
-        paint(def);
-      } catch (error) {
-        console.error(`[admin] panel ${def.name} failed to render`, error);
-        const panel = document.getElementById(def.id);
-        if (panel) markPanelUnavailable(panel);
-      }
+    PANELS.forEach(safePaint);
+    watchCreditsWidth();
+  }
+
+  function safePaint(def) {
+    try {
+      paint(def);
+    } catch (error) {
+      console.error(`[admin] panel ${def.name} failed to render`, error);
+      const panel = document.getElementById(def.id);
+      if (panel) markPanelUnavailable(panel);
+    }
+  }
+
+  // Repaints the Credits chart when its body's width changes (a resize, the
+  // panel becoming visible), which is what keeps creditsChartWidth honest. A
+  // repaint only ever redraws data already on hand: none while a request is in
+  // flight (the busy panel would otherwise lose its busy state), none without
+  // both reads, and none when the width is unchanged -- the repaint itself
+  // resizes the body vertically and must not loop.
+  let creditsObserver = null;
+  function watchCreditsWidth() {
+    const body = creditsBody();
+    if (creditsObserver || !body || typeof ResizeObserver !== 'function') return;
+    creditsObserver = new ResizeObserver(() => {
+      const def = PANELS.find((panel) => panel.id === 'panelCredits');
+      if (document.getElementById(def.id)?.getAttribute('aria-busy') === 'true') return;
+      if (!def.needs.every((name) => state.data[name])) return;
+      if (creditsChartWidth() === state.creditsChartWidth) return;
+      safePaint(def);
     });
+    creditsObserver.observe(body);
   }
 
   const DETAILS = Object.freeze({
@@ -780,7 +883,7 @@
   });
 
   window.AdminOverview = {
-    PANELS, DETAIL_NEEDS, state,
+    PANELS, DETAIL_NEEDS, state, watchCreditsWidth,
     renderAttention, renderActiveUsers, renderActivation, renderSources, renderRetention,
     renderValue, renderLifecycle, renderCredits,
     detailSources, detailRetention, detailCredits, detailLifecycle, detailHealth,

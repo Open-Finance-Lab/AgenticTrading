@@ -233,23 +233,16 @@ main{width:100%;max-width:1420px;margin:0 auto;padding:30px 36px 50px}
 
 /* Credits & Cost — the combined chart (both lanes plus Purchased Credits, all
    in Credits) is drawn in the .revenue-viz SVG below; only its legend lives
-   outside the SVG. */
+   outside the SVG. renderCredits draws the viewBox at the body's measured
+   width, so height:auto keeps one viewBox unit = one CSS pixel at every width:
+   never pin a height here, or the viewBox letterboxes and the labels shrink. */
 .revenue-viz .credit-legend{display:flex;flex-wrap:wrap;gap:16px;color:var(--muted);font-size:11px;margin-top:10px}
 .credit-note{color:var(--muted);font-size:11px;margin:6px 0 0}
-
-/* Revenue — generated point line (mock lines 353-361) */
 .revenue-viz{min-height:190px;padding-top:8px;border-bottom:1px solid var(--line)}
-.revenue-viz svg{display:block;width:100%;height:174px;overflow:visible}
-.overview-row-single .revenue-viz{min-height:216px}
-.overview-row-single .revenue-viz svg{height:200px}
-.revenue-viz .credits-zero-line{stroke:var(--line-strong);stroke-width:1;stroke-dasharray:3 3}
+.revenue-viz svg{display:block;width:100%;height:auto;overflow:visible}
 .revenue-viz .revenue-grid{stroke:var(--line);stroke-width:1}
 .revenue-viz .revenue-axis{stroke:var(--line-strong);stroke-width:1}
 .revenue-viz .revenue-axis-label,.revenue-viz .revenue-x-label{fill:var(--muted);font-size:10px}
-.revenue-viz .revenue-area{fill:rgba(66,204,139,.11)}
-.revenue-viz .revenue-line{fill:none;stroke:var(--green);stroke-width:2.4;stroke-linecap:round;stroke-linejoin:round}
-.revenue-viz .revenue-point{fill:var(--green);stroke:var(--bg);stroke-width:2}
-.revenue-viz .revenue-point-label{fill:var(--text);font-size:10px;font-weight:600;text-anchor:middle}
 .credits-panel-note{margin:10px 0 0;font-size:11px}
 
 /* Detail views, tables, badges (mock line 25) */
@@ -460,7 +453,7 @@ dialog::backdrop{background:rgba(0,0,0,.64)}
 @media(max-width:600px){.header{padding:10px 12px}}
 
 @media(max-width:1040px){.filters{grid-template-columns:repeat(2,minmax(0,1fr))}.overview-row.priority-row{grid-template-columns:1fr;gap:0}.metric-strip{grid-template-columns:repeat(2,1fr)}.detail-metric:nth-child(3){padding-left:0;border-left:0;border-top:1px solid var(--line)}.detail-metric:nth-child(4){border-top:1px solid var(--line)}.admin-provider-grid{grid-template-columns:1fr}.admin-platform-key-form{grid-template-columns:repeat(2,minmax(0,1fr))}.admin-platform-key-form .auth-btn{grid-column:1/-1}.credits-metrics{grid-template-columns:1fr}.credits-metric,.credits-metric:first-child{padding:14px 0;border-left:0;border-top:1px solid var(--line)}.credits-metric:first-child{border-top:0}}
-@media(max-width:680px){.workspace{grid-template-columns:64px minmax(0,1fr)}aside{padding:18px 6px}aside>strong{display:none}.admin-rail{padding:5px}.admin-tab{justify-content:center;min-height:42px;padding:9px}.admin-tab span,.admin-tab-caret{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap;border:0}.analytics-subnav{display:none}main{padding:24px 16px 40px}.page-head{flex-direction:column;align-items:stretch}.page-controls{justify-items:stretch}.page-actions{flex-direction:row;align-items:center;justify-content:space-between}.live-row .live-head{flex-direction:column;align-items:flex-start}.range button{min-width:38px;padding-inline:7px}.filters{grid-template-columns:1fr}.snapshot-grid{grid-template-columns:1fr}.snapshot-tile+.snapshot-tile{border-left:0;border-top:1px solid var(--line)}.source-wrap{grid-template-columns:1fr;justify-items:center;gap:17px}.source-legend-six{width:100%;gap:10px 14px}.attention-note{align-items:flex-start;flex-direction:column;gap:8px}.retention-chart{grid-template-columns:55px repeat(4,1fr);gap:4px}.lifecycle-legend{grid-template-columns:repeat(2,1fr)}.value-step{grid-template-columns:112px 1fr auto;gap:8px}.value-step>span{white-space:normal}.layered-route{min-width:600px;overflow:visible}.priority-row:has(.layered-route){overflow-x:auto}.revenue-viz{min-height:184px}.revenue-viz svg{height:168px}.metric-strip{grid-template-columns:1fr}.overview-row-single .revenue-viz{min-height:0;overflow-x:auto}.overview-row-single .revenue-viz svg{min-width:640px;height:136px}.detail-metric,.detail-metric:first-child,.detail-metric:nth-child(3){padding:17px 0;border-left:0;border-top:1px solid var(--line)}.milestones{grid-template-columns:repeat(2,1fr)}.admin-platform-key-form{grid-template-columns:1fr}}
+@media(max-width:680px){.workspace{grid-template-columns:64px minmax(0,1fr)}aside{padding:18px 6px}aside>strong{display:none}.admin-rail{padding:5px}.admin-tab{justify-content:center;min-height:42px;padding:9px}.admin-tab span,.admin-tab-caret{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap;border:0}.analytics-subnav{display:none}main{padding:24px 16px 40px}.page-head{flex-direction:column;align-items:stretch}.page-controls{justify-items:stretch}.page-actions{flex-direction:row;align-items:center;justify-content:space-between}.live-row .live-head{flex-direction:column;align-items:flex-start}.range button{min-width:38px;padding-inline:7px}.filters{grid-template-columns:1fr}.snapshot-grid{grid-template-columns:1fr}.snapshot-tile+.snapshot-tile{border-left:0;border-top:1px solid var(--line)}.source-wrap{grid-template-columns:1fr;justify-items:center;gap:17px}.source-legend-six{width:100%;gap:10px 14px}.attention-note{align-items:flex-start;flex-direction:column;gap:8px}.retention-chart{grid-template-columns:55px repeat(4,1fr);gap:4px}.lifecycle-legend{grid-template-columns:repeat(2,1fr)}.value-step{grid-template-columns:112px 1fr auto;gap:8px}.value-step>span{white-space:normal}.layered-route{min-width:600px;overflow:visible}.priority-row:has(.layered-route){overflow-x:auto}.revenue-viz{min-height:184px}.metric-strip{grid-template-columns:1fr}.detail-metric,.detail-metric:first-child,.detail-metric:nth-child(3){padding:17px 0;border-left:0;border-top:1px solid var(--line)}.milestones{grid-template-columns:repeat(2,1fr)}.admin-platform-key-form{grid-template-columns:1fr}}
 @media(prefers-reduced-motion:reduce){.module-link:after{transition:none}}
 
 /* D5/PR2 layout additions: the app chrome and the absorbed sections ride on
