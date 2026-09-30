@@ -76,11 +76,10 @@ def compute_index_baseline_values(
     if levels.empty:
         return None
 
-    ts_idx = pd.DatetimeIndex(list(timestamps))
-    if ts_idx.tz is None:
-        ts_idx = ts_idx.tz_localize("UTC")
-    else:
-        ts_idx = ts_idx.tz_convert("UTC")
+    # utc=True, not DatetimeIndex(): a run spanning a DST switch carries two
+    # offsets (-05:00 and -04:00), which DatetimeIndex refuses outright. Naive
+    # stamps are still read as UTC, as before.
+    ts_idx = pd.DatetimeIndex(pd.to_datetime(list(timestamps), utc=True))
 
     aligned = levels.reindex(ts_idx, method="nearest", tolerance=pd.Timedelta("30min"))
     if aligned.isna().any():

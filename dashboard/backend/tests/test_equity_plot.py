@@ -294,3 +294,22 @@ def test_render_backtest_equity_png_bytes():
         ],
     )
     assert png[:8] == b"\x89PNG\r\n\x1a\n"
+
+
+def test_index_baseline_survives_a_dst_change(monkeypatch):
+    """A window crossing the US DST switch carries -05:00 and -04:00 stamps.
+
+    pd.DatetimeIndex refuses mixed offsets, so every chart whose run spanned
+    the second Sunday of March (or first of November) 404'd the whole chart.
+    """
+    from datetime import timedelta, timezone
+
+    est, edt = timezone(timedelta(hours=-5)), timezone(timedelta(hours=-4))
+    stamps = [datetime(2026, 3, 6, 14, tzinfo=est), datetime(2026, 3, 9, 14, tzinfo=edt)]
+    monkeypatch.setattr(
+        "dashboard.backend.equity_plot.fetch_index_hourly",
+        lambda *a, **k: [(s.astimezone(timezone.utc).replace(tzinfo=None), 100.0 + i)
+                         for i, s in enumerate(stamps)],
+    )
+    values = compute_index_baseline_values("^DJI", stamps, "2026-03-06", "2026-03-09", 1000.0)
+    assert values == [1000.0, 1010.0]
