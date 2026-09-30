@@ -250,16 +250,12 @@ class BalanceTotals(BaseModel):
     total_available_micro: int = Field(ge=0)
 
 
-def _parse_day(value: str) -> date:
-    return date.fromisoformat(str(value)[:10])
-
-
 class DailyMicroTotals(BaseModel):
     """One UTC day of ledger movement for the /admin Credits & revenue charts."""
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     day: date
-    amount_micro: int
+    amount_micro: int = Field(ge=0)
 
 
 class CommercialAnalyticsResponse(BaseModel):
@@ -270,9 +266,13 @@ class CommercialAnalyticsResponse(BaseModel):
     lifetime_net_purchased_micro: int = Field(ge=0)
     selected_period: CommercialPeriodSummary
     current_balances: BalanceTotals
-    # §9 chart series; empty when the range has no movement.
-    purchased_by_day: list[DailyMicroTotals]
-    consumed_by_day: list[DailyMicroTotals]
+    # §9 chart series, one entry per UTC day with movement. Each sums to the
+    # selected_period figure of the same name (gross purchases; model spend
+    # only), so a chart never disagrees with the headline drawn above it.
+    # None when the ledger read failed: "partial" alone cannot say which half
+    # of the section degraded, and [] is the real answer "no purchases".
+    purchased_by_day: list[DailyMicroTotals] | None
+    consumed_by_day: list[DailyMicroTotals] | None
     availability: SectionAvailability
 
 
@@ -556,22 +556,40 @@ class ValueAnalyticsQueryService:
             )
         return result
 
-    def _daily_ledger(
+    def _ledger_days(
         self,
         users: Sequence[dict[str, Any]],
         *,
         start: date,
         end: date,
-    ) -> list[dict[str, int]]:
-        """Per-day ledger movement for the Credits & revenue charts, read
-        through the credits domain (same SS6.14 seam as _commercial)."""
-        base = getattr(self.value_store, "credits_base", None)
-        if base is None or not hasattr(base, "list_daily_purchase_and_consumption"):
-            return []
-        return base.list_daily_purchase_and_consumption(
-            self._ids(users),
-            start=_day_start(start),
-            end=_day_start(end),
+    ) -> tuple[list[DailyMicroTotals], list[DailyMicroTotals]]:
+        """(purchased_by_day, consumed_by_day) for the Credits & revenue charts.
+
+        Chunked by 500 like ``_commercial`` so the bound-parameter count never
+        grows with the user table; per-day sums are additive across chunks.
+        """
+        purchased: dict[date, int] = defaultdict(int)
+        consumed: dict[date, int] = defaultdict(int)
+        ids = self._ids(users)
+        for offset in range(0, len(ids), 500):
+            for row in self.value_store.list_ledger_days(
+                ids[offset : offset + 500],
+                start=_day_start(start),
+                end=_day_start(end),
+            ):
+                purchased[row.day] += row.purchased_micro
+                consumed[row.day] += row.consumed_micro
+        return (
+            [
+                DailyMicroTotals(day=day, amount_micro=amount)
+                for day, amount in sorted(purchased.items())
+                if amount > 0
+            ],
+            [
+                DailyMicroTotals(day=day, amount_micro=amount)
+                for day, amount in sorted(consumed.items())
+                if amount > 0
+            ],
         )
 
     def _daily(
@@ -1027,7 +1045,21 @@ class ValueAnalyticsQueryService:
             now=current_time,
         )
         cost_available = overview.availability["growth"].available
-        daily = self._daily_ledger(users, start=start, end=end)
+        try:
+            purchased_by_day, consumed_by_day = self._ledger_days(
+                users, start=start, end=end
+            )
+            ledger_available = True
+        except Exception as exc:
+            # An empty series renders as "No settled purchases in this range",
+            # so a failed read must be distinguishable from a quiet one: say so
+            # in the log, ship None rather than [], and downgrade the section.
+            print(
+                "[analytics] ERROR commercial per-day ledger unavailable: "
+                f"{type(exc).__name__}"
+            )
+            purchased_by_day = consumed_by_day = None
+            ledger_available = False
         return CommercialAnalyticsResponse(
             as_of=current_time,
             tier_counts={
@@ -1058,22 +1090,11 @@ class ValueAnalyticsQueryService:
                     fact.total_available_micro for fact in facts.values()
                 ),
             ),
-            purchased_by_day=[
-                DailyMicroTotals(day=_parse_day(row["day_string"]), amount_micro=row["purchases_micro"])
-                for row in daily
-                if row["purchases_micro"] > 0
-            ],
-            consumed_by_day=[
-                DailyMicroTotals(
-                    day=_parse_day(row["day_string"]),
-                    amount_micro=row["consumption_micro"] + row["grants_micro"],
-                )
-                for row in daily
-                if row["consumption_micro"] + row["grants_micro"] > 0
-            ],
+            purchased_by_day=purchased_by_day,
+            consumed_by_day=consumed_by_day,
             availability=SectionAvailability(
                 available=True,
-                status="ready" if cost_available else "partial",
+                status="ready" if cost_available and ledger_available else "partial",
             ),
         )
 

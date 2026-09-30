@@ -813,6 +813,32 @@ class PostgresValueAnalyticsStore:
                 ),
             )
         return result
+    def list_ledger_days(
+        self,
+        user_ids: Sequence[int],
+        *,
+        start: datetime,
+        end: datetime,
+    ) -> list[Any]:
+        """Per-UTC-day ledger totals (``LedgerDayTotal``) for ``user_ids``.
+
+        Read through the credits domain (design SS6.14), like
+        ``list_commercial_values``. Unlike that method this one *raises* when
+        the credits reader is missing instead of answering empty: an empty
+        series is a real answer ("no purchases this range"), so an absent
+        reader must not be able to produce it.
+        """
+        ids = _ids(user_ids)
+        window_start, window_end = _validate_window(start, end)
+        if not ids:
+            return []
+        if not hasattr(self.credits_base, "sum_ledger_by_day"):
+            raise RuntimeError("credits ledger reader is not configured")
+        return list(
+            self.credits_base.sum_ledger_by_day(
+                ids, start=window_start, end=window_end
+            )
+        )
     def list_credit_activity(
         self,
         user_ids: Sequence[int],

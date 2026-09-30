@@ -126,13 +126,16 @@ class FakeBaseStore:
 
 
 class FakeValueStore:
-    def __init__(self, *, snapshots, commercial, daily=(), credit_activity=None):
+    def __init__(self, *, snapshots, commercial, daily=(), credit_activity=None, ledger_days=()):
         self.snapshots = dict(snapshots)
         self.commercial = dict(commercial)
         self.daily = list(daily)
         self.credit_activity = dict(credit_activity or {})
+        # user_id -> [LedgerDayTotal]; None stands for an unconfigured reader.
+        self.ledger_days = None if ledger_days is None else dict(ledger_days)
         self.commercial_windows = []
         self.daily_windows = []
+        self.ledger_calls = []
 
     def list_current_snapshots(self, user_ids):
         return {
@@ -160,6 +163,17 @@ class FakeValueStore:
             for row in self.daily
             if start <= row.snapshot_date < end
             and (selected is None or row.user_id in selected)
+        ]
+
+    def list_ledger_days(self, user_ids, *, start, end):
+        self.ledger_calls.append((list(user_ids), start, end))
+        if self.ledger_days is None:
+            raise RuntimeError("credits ledger reader is not configured")
+        return [
+            row
+            for user_id in user_ids
+            for row in self.ledger_days.get(user_id, ())
+            if start.date() <= row.day < end.date()
         ]
 
     def list_credit_activity(self, user_ids, *, start, end):
@@ -254,6 +268,7 @@ def _service(
     rollups=(),
     excluded=(),
     legacy_availability=None,
+    ledger_days=(),
 ):
     facts = commercial or {user_id: _commercial(user_id) for user_id in snapshots}
     group_values = dict(user_groups or {})
@@ -261,6 +276,7 @@ def _service(
         snapshots=snapshots,
         commercial=facts,
         daily=daily,
+        ledger_days=ledger_days,
     )
     legacy_service = FakeLegacyService(legacy_availability)
     service = ValueAnalyticsQueryService(
@@ -642,6 +658,65 @@ def test_commercial_response_keeps_revenue_usage_grants_cost_and_balances_separa
         "purchased_available_micro": 100_000,
         "total_available_micro": 1_400_000,
     }
+
+
+def test_commercial_series_sum_across_users_and_match_their_headlines():
+    """purchased_by_day is gross purchases and consumed_by_day is model spend,
+    the same two quantities as selected_period.purchased_micro/consumed_micro."""
+
+    from dashboard.backend.domain.credits.repository_common import LedgerDayTotal
+
+    service, value_store, _legacy = _service(
+        snapshots={1: _snapshot(1), 2: _snapshot(2)},
+        ledger_days={
+            1: [
+                LedgerDayTotal(day=date(2026, 8, 3), purchased_micro=5_000_000, refunded_micro=2_000_000, consumed_micro=100_000),
+                LedgerDayTotal(day=date(2026, 8, 5), refunded_micro=1_000_000),
+            ],
+            2: [LedgerDayTotal(day=date(2026, 8, 3), purchased_micro=1_000_000, consumed_micro=300_000)],
+        },
+    )
+
+    response = service.get_commercial(start=date(2026, 8, 1), end=date(2026, 9, 1), now=NOW)
+
+    assert [(row.day, row.amount_micro) for row in response.purchased_by_day] == [
+        (date(2026, 8, 3), 6_000_000)
+    ]
+    assert [(row.day, row.amount_micro) for row in response.consumed_by_day] == [
+        (date(2026, 8, 3), 400_000)
+    ]
+    assert response.availability.status == "ready"
+    assert value_store.ledger_calls[0][1:] == (
+        datetime(2026, 8, 1, tzinfo=UTC),
+        datetime(2026, 9, 1, tzinfo=UTC),
+    )
+
+
+def test_commercial_series_chunk_user_ids_like_the_headline():
+    user_ids = range(1, 1202)
+    service, value_store, _legacy = _service(
+        snapshots={user_id: _snapshot(user_id) for user_id in user_ids},
+    )
+
+    service.get_commercial(start=date(2026, 8, 1), end=date(2026, 9, 1), now=NOW)
+
+    assert [len(ids) for ids, _start, _end in value_store.ledger_calls] == [500, 500, 201]
+
+
+def test_commercial_series_failure_is_partial_and_logged_not_an_empty_ready(capsys):
+    service, _value_store, _legacy = _service(
+        snapshots={1: _snapshot(1)},
+        ledger_days=None,
+    )
+
+    response = service.get_commercial(start=date(2026, 8, 1), end=date(2026, 9, 1), now=NOW)
+
+    # None, not []: [] renders as "No settled purchases in this range".
+    assert response.purchased_by_day is None
+    assert response.consumed_by_day is None
+    assert response.availability.status == "partial"
+    assert response.tier_counts["unpaid"] == 1  # the rest is still served
+    assert "ERROR commercial per-day ledger unavailable" in capsys.readouterr().out
 
 
 def test_missing_operational_subsection_is_reported_as_partial():

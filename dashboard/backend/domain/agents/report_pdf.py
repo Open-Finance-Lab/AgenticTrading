@@ -9,7 +9,9 @@ professional document:
   cell-level Paragraph wrapping for long text.
 - **Page furniture** — report title in the header, page numbers in the
   footer.
-- **Page cap** — enforced during rendering via handle_pageBegin.
+- **Page cap** — enforced during rendering: once the cap is passed the
+  remaining story is replaced by a truncation notice, so a runaway report
+  still downloads as a (truncated) PDF instead of no PDF at all.
 
 reportlab is imported behind a guard: environments that don't install it
 still import this module (and the research router) fine — PDF generation
@@ -42,16 +44,32 @@ _LEADING = _BODY + 4
 _H_SIZES = {1: 15, 2: 12.5, 3: 11, 4: 10}
 
 
-class _PageCapExceeded(Exception):
-    pass
+def _escape(text):
+    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
 def _clean(text):
-    text = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    text = _escape(text)
     text = re.sub(r"\*\*([^*]+)\*\*", r"<b>\1</b>", text)
     text = re.sub(r"(?<!\w)\*([^*\n]+)\*(?!\w)", r"<i>\1</i>", text)
     text = re.sub(r"`([^`]+)`", r"<font face='Courier' size='7.5'>\1</font>", text)
     return text
+
+
+def _para(text, style, *, prefix="", italic=False, **kw):
+    """Paragraph from Markdown inline text, degrading to plain text.
+
+    The regexes in ``_clean`` do not nest: ``*a `b* c``` becomes
+    ``<i>a <font>b</i> c</font>``, which reportlab's parser rejects with a
+    ValueError *at construction*, outside ``doc.build``'s guard — so one
+    malformed line turned the whole download into a 500. Such a line keeps
+    its words and loses only its inline formatting.
+    """
+    markup = prefix + _clean(text)
+    try:
+        return Paragraph(f"<i>{markup}</i>" if italic else markup, style, **kw)
+    except ValueError:
+        return Paragraph(prefix + _escape(text), style, **kw)
 
 
 def _split_table_block(lines, start):
@@ -78,6 +96,7 @@ if _HAS_REPORTLAB:
             super().__init__(*args, **kw)
             self._report_title = title
             self._pages = 0
+            self._truncated = False
             frame = Frame(self.leftMargin, self.bottomMargin, self.width, self.height, id="body")
             self.addPageTemplates([PageTemplate(id="main", frames=[frame], onPage=self._furniture)])
 
@@ -97,9 +116,22 @@ if _HAS_REPORTLAB:
 
         def handle_pageBegin(self):
             self._pages += 1
-            if self._pages > _PDF_MAX_PAGES:
-                raise _PageCapExceeded()
             super().handle_pageBegin()
+
+        def handle_flowable(self, flowables):
+            # Raising out of the build (the old handle_pageBegin approach)
+            # aborted it before the canvas was saved: the buffer stayed empty
+            # and the report the cap exists for got a 404. Instead, once past
+            # the cap, swap what is left for one notice and let build finish.
+            if self._pages > _PDF_MAX_PAGES and not self._truncated:
+                self._truncated = True
+                flowables[:] = [Paragraph(
+                    f"[Report truncated at {_PDF_MAX_PAGES} pages — download "
+                    "the Markdown version for the full text.]",
+                    ParagraphStyle("truncated", fontName="STSong-Light",
+                                   fontSize=_BODY, textColor=_TEXT_MUTED),
+                )]
+            super().handle_flowable(flowables)
 
     def _ensure_fonts():
         if "STSong-Light" not in pdfmetrics.getRegisteredFontNames():
@@ -119,7 +151,7 @@ def _build_table(rows):
     data = []
     for ri, row in enumerate(padded):
         st = head_style if ri == 0 else cell_style
-        data.append([Paragraph(_clean(c), st) for c in row])
+        data.append([_para(c, st) for c in row])
     avail_width = A4[0] - 36 * mm
     if ncols > 0:
         w0 = min(avail_width * 0.28, avail_width / ncols * 1.4)
@@ -183,7 +215,7 @@ def markdown_to_pdf_bytes(markdown_text):
         m = re.match(r"^(#{1,4})\s+(.+)", line)
         if m:
             level = min(len(m.group(1)), 4)
-            story.append(Paragraph(_clean(m.group(2)), styles[level]))
+            story.append(_para(m.group(2), styles[level]))
             i += 1
             continue
         if line.strip().startswith("|"):
@@ -197,18 +229,18 @@ def markdown_to_pdf_bytes(markdown_text):
         m = re.match(r"^[-*]\s+(.+)", line)
         if m:
             bullet = ParagraphStyle("bullet", parent=base, leftIndent=14, bulletIndent=4)
-            story.append(Paragraph(_clean(m.group(1)), bullet, bulletText="•"))
+            story.append(_para(m.group(1), bullet, bulletText="•"))
             i += 1
             continue
         m = re.match(r"^(\d+)[.)]\s+(.+)", line)
         if m:
             numbered = ParagraphStyle("num", parent=base, leftIndent=18, firstLineIndent=-12)
-            story.append(Paragraph(f"{m.group(1)}. {_clean(m.group(2))}", numbered))
+            story.append(_para(m.group(2), numbered, prefix=f"{m.group(1)}. "))
             i += 1
             continue
         m = re.match(r"^>\s?(.+)", line)
         if m:
-            story.append(Paragraph(f"<i>{_clean(m.group(1))}</i>", quote_style))
+            story.append(_para(m.group(1), quote_style, italic=True))
             i += 1
             continue
         para = [line]
@@ -221,11 +253,9 @@ def markdown_to_pdf_bytes(markdown_text):
                 break
             para.append(nxt)
             i += 1
-        story.append(Paragraph(_clean(" ".join(para)), base))
+        story.append(_para(" ".join(para), base))
     try:
         doc.build(story)
-    except _PageCapExceeded:
-        pass
     except Exception:
         return None
     pdf = buf.getvalue()

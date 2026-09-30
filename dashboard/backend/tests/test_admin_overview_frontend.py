@@ -109,44 +109,81 @@ def test_lifecycle_bar_and_legend_follow_segment_counts():
     assert result == {"headline": "33", "shares": ["3", "6", "7", "8", "5", "4"], "legend": ["3", "6", "7", "8", "5", "4"]}
 
 
-def test_credits_combines_lanes_and_revenue_on_one_axis():
-    """Three series — platform, BYOK, revenue — share one x-axis and legend."""
+def test_credits_combines_lanes_and_revenue_on_one_x_axis():
+    """Two call-count lanes and net revenue share one x-axis and legend."""
     result = _eval(
         "(() => {"
         f"  const commercial = {F['commercial']};"
         f"  const overview = {F['overview']};"
         "  const r = window.AdminOverview.renderCredits(commercial, overview);"
         "  const lines = byTag(r.body, 'path').filter((p) => p.getAttribute('class')?.includes('credits-chart-line'));"
-        "  const points = byTag(r.body, 'circle');"
         "  const legend = texts(byClass(r.body, 'credit-legend')[0].children);"
         "  const xLabels = texts(byClass(r.body, 'revenue-x-label'));"
-        "  return {headline: r.headline, lineCount: lines.length, pointCount: points.length, legend, xLabels};"
+        "  const axis = texts(byClass(r.body, 'revenue-axis-label'));"
+        "  return {headline: r.headline, lineCount: lines.length, points: byTag(r.body, 'circle').length, legend, xLabels, axis, notes: byClass(r.body, 'credit-note').length};"
         "})()"
     )
-    assert result["headline"] == "4.800000 Credits"
-    assert result["lineCount"] == 3
-    assert result["legend"] == ["Platform Credits", "BYOK (est. Credits)", "Revenue (Credits)"]
-    # Union of lane days (Aug 25/26) and revenue days (Sep 1/2) on one axis;
-    # four days → first/middle/last labels shown
-    assert result["xLabels"] == ["Aug 25", "Aug 26", "Sep 2"]
+    assert result == {
+        "headline": "4.800000 Credits",
+        "lineCount": 3,
+        # 4 lane points (Aug 25/26 x 2 lanes) + 2 revenue points (Sep 1/2).
+        "points": 6,
+        "legend": ["Platform calls", "BYOK calls", "Revenue (Credits)"],
+        # Union of lane days (Aug 25/26) and revenue days (Sep 1/2); four
+        # days -> first/middle/last labels shown.
+        "xLabels": ["Aug 25", "Aug 26", "Sep 2"],
+        # Left axis counts calls (max 14), right axis is Credits (max 7).
+        "axis": ["14", "7", "0", "7", "3.5", "0"],
+        "notes": 0,
+    }
 
 
-
-def test_merged_credits_panel_carries_both_headlines():
-    """Credits usage and Revenue merged into one card: renderCredits returns the
-    settled headline, the purchased headline, the BYOK list-price estimate and
-    the chart body."""
+def test_credits_lanes_still_draw_when_revenue_is_unavailable():
+    """A failed ledger read (null) or an absent field must not blank the lanes."""
     result = _eval(
         "(() => {"
-        f"  const r = window.AdminOverview.renderCredits({F['commercial']}, {F['overview']});"
-        "  return {headline: r.headline, headline2: r.headline2, headline3: r.headline3, hasSVG: byTag(r.body, 'svg').length};"
+        f"  const overview = {F['overview']};"
+        "  const run = (commercial) => {"
+        "    const r = window.AdminOverview.renderCredits(commercial, overview);"
+        "    return {lines: byTag(r.body, 'path').length, legend: texts(byClass(r.body, 'credit-legend')[0].children), notes: texts(byClass(r.body, 'credit-note'))};"
+        "  };"
+        f"  const failed = {F['commercial']}; failed.purchased_by_day = null;"
+        f"  const absent = {F['commercial']}; delete absent.purchased_by_day;"
+        "  return {failed: run(failed), absent: run(absent)};"
         "})()"
     )
-    assert result["headline"] == "4.800000 Credits"
-    assert result["headline2"] == "12.000000 Credits"
-    assert result["headline3"] == "11.000000 Credits"
-    assert result["hasSVG"] == 1
+    expected = {
+        "lines": 2,
+        "legend": ["Platform calls", "BYOK calls"],
+        "notes": ["Revenue series unavailable — the purchase ledger could not be read."],
+    }
+    assert result == {"failed": expected, "absent": expected}
 
+
+def test_revenue_panel_points_to_the_combined_chart():
+    """Revenue's daily series moved onto the Credits chart; this panel keeps
+    the headline and says where the trend went."""
+    result = _eval(
+        "(() => {"
+        f"  const r = window.AdminOverview.renderRevenue({F['commercial']});"
+        "  return {headline: r.headline, hasSVG: byTag(r.body, 'svg').length, empty: texts(byClass(r.body, 'panel-empty'))};"
+        "})()"
+    )
+    assert result == {
+        "headline": "12.000000 Credits",
+        "hasSVG": 0,
+        "empty": ["The daily revenue series now lives on the Credits usage chart above."],
+    }
+
+
+def test_revenue_panel_says_when_the_ledger_read_failed():
+    result = _eval(
+        "(() => {"
+        f"  const commercial = {F['commercial']}; commercial.purchased_by_day = null;"
+        "  return texts(byClass(window.AdminOverview.renderRevenue(commercial).body, 'panel-empty'));"
+        "})()"
+    )
+    assert result == ["Revenue series unavailable — the purchase ledger could not be read."]
 
 
 def test_attention_counts_and_top_reason():
@@ -167,23 +204,26 @@ def test_recut_fields_absent_render_awaiting_data_source_not_an_empty_chart():
         f"  const commercial = {F['commercial']}; delete commercial.purchased_by_day;"
         f"  const operational = {F['operational']}; delete operational.top_operational_reasons;"
         "  const credits = window.AdminOverview.renderCredits(commercial, overview);"
+        "  const revenue = window.AdminOverview.renderRevenue(commercial);"
         f"  const attention = window.AdminOverview.renderAttention(operational, {F['lifecycle']});"
         "  const health = window.AdminOverview.detailHealth(operational);"
         "  const reasons = byTag(health, 'table')[1];"
-        "  const empty = window.AdminOverview.renderCredits(Object.assign({}, commercial, {purchased_by_day: []}), Object.assign({}, overview, {billing_lane_mix: []}));"
+        "  const empty = window.AdminOverview.renderRevenue(Object.assign({}, commercial, {purchased_by_day: []}));"
         "  return {"
-        "    credits: [credits.headline, credits.headline2, credits.headline3, texts(byClass(credits.body, 'panel-empty'))],"
+        "    credits: [credits.headline, texts(byClass(credits.body, 'panel-empty'))],"
+        "    revenue: [revenue.headline, texts(byClass(revenue.body, 'panel-empty'))],"
         "    attention: [attention.headline, texts(byClass(attention.body, 'attention-row').map((row) => byTag(row, 'b')[0])), byClass(attention.body, 'attention-note')[0].children[0].children[1].textContent],"
         "    health: byTag(reasons, 'tbody')[0].children.map((tr) => texts(tr.children)),"
-        "    empty: [empty.headline, empty.headline2, empty.headline3, texts(byClass(empty.body, 'panel-empty'))],"
+        "    empty: texts(byClass(empty.body, 'panel-empty')),"
         "  };"
         "})()"
     )
-    assert result["credits"] == ["4.800000 Credits", "12.000000 Credits", "—", ["Awaiting data source"]]
+    assert result["credits"] == ["4.800000 Credits", ["Awaiting data source"]]
+    assert result["revenue"] == ["12.000000 Credits", ["Awaiting data source"]]
     assert result["attention"] == ["11", ["2", "4", "5"], "Awaiting data source"]
     assert result["health"] == [["Awaiting data source"]]
     # Served-and-empty keeps the panel's own copy: the two states must never collapse into one.
-    assert result["empty"] == ["4.800000 Credits", "12.000000 Credits", "0.000000 Credits", ["No Credits activity in this range."]]
+    assert result["empty"] == ["No settled purchases in this range."]
 
 
 def test_health_detail_has_no_affected_users_column():
@@ -249,15 +289,15 @@ def test_paint_marks_partial_availability_as_incomplete_and_never_blanks_a_sibli
 def test_one_failing_renderer_does_not_strand_the_panels_behind_it():
     """A bare `PANELS.forEach(paint)` over an unguarded paint() meant any throw
     aborted the loop, leaving every later panel at aria-busy="true" with no body
-    and no error -- a spinner that never resolves. panelLifecycle sits right
-    before the merged Credits panel, so a throw there strands the panel that
-    now closes the page."""
+    and no error -- a spinner that never resolves. The reachable case was
+    formatCredits dereferencing a missing window.CreditFormat: renderCredits is
+    PANELS index 7, so it stranded panelRevenue behind it."""
     result = _eval(
         "(async () => {"
         "  const stubs = {};"
         "  window.AdminOverview.PANELS.forEach((def) => { stubs[def.id] = panelStub(); register(def.id, stubs[def.id].panel); });"
-        "  const lifecycle = window.AdminOverview.PANELS.find((def) => def.id === 'panelLifecycle');"
-        "  lifecycle.render = () => { throw new TypeError('renderer blew up'); };"
+        "  const credits = window.AdminOverview.PANELS.find((def) => def.id === 'panelCredits');"
+        "  credits.render = () => { throw new TypeError('renderer blew up'); };"
         f"  fetchQueue.push({{ok: true, status: 200, body: {F['overview']}}});"
         f"  fetchQueue.push({{ok: true, status: 200, body: {F['lifecycle']}}});"
         f"  fetchQueue.push({{ok: true, status: 200, body: {F['retention']}}});"
@@ -265,15 +305,14 @@ def test_one_failing_renderer_does_not_strand_the_panels_behind_it():
         f"  fetchQueue.push({{ok: true, status: 200, body: {F['operational']}}});"
         f"  fetchQueue.push({{ok: true, status: 200, body: {F['groups']}}});"
         "  await window.AdminOverview.loadAll(['overview', 'lifecycle', 'retention', 'commercial', 'operational', 'groups']);"
-        "  const read = (id) => ({headline: stubs[id].parts.headline.textContent, headline2: stubs[id].parts.headline2.textContent, headline3: stubs[id].parts.headline3.textContent, error: stubs[id].parts.errorText.textContent, busy: stubs[id].panel.getAttribute('aria-busy')});"
-        "  return {credits: read('panelCredits'), lifecycle: read('panelLifecycle'), attention: read('panelAttention')};"
+        "  const read = (id) => ({headline: stubs[id].parts.headline.textContent, error: stubs[id].parts.errorText.textContent, busy: stubs[id].panel.getAttribute('aria-busy')});"
+        "  return {credits: read('panelCredits'), revenue: read('panelRevenue'), attention: read('panelAttention')};"
         "})()"
     )
     # The panel whose renderer threw reports the failure it actually had...
-    assert result["lifecycle"] == {"headline": "—", "headline2": "—", "headline3": "—", "error": "This section is temporarily unavailable.", "busy": "false"}
-    # ...and the panel *after* it in PANELS still paints all three headline
-    # numbers, rather than spinning forever.
-    assert result["credits"] == {"headline": "4.800000 Credits", "headline2": "12.000000 Credits", "headline3": "11.000000 Credits", "error": "", "busy": "false"}
+    assert result["credits"] == {"headline": "—", "error": "This section is temporarily unavailable.", "busy": "false"}
+    # ...and the panel *after* it in PANELS still paints, rather than spinning forever.
+    assert result["revenue"] == {"headline": "12.000000 Credits", "error": "", "busy": "false"}
     assert result["attention"]["headline"] == "11"
 
 

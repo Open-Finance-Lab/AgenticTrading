@@ -7,8 +7,9 @@ name: Live Leaderboard refresh
 # LLM deploys are BILLABLE and strictly opt-in: the nightly run appends one
 # session onto each Live LLM snapshot (cash + positions carried forward) only
 # when the repository variable LIVE_LEADERBOARD_DEPLOY_MODELS is exactly
-# "true" — a recurring API cost for 3 models every weekday. Unset, the
-# schedule refreshes baselines only. A manual dispatch defaults to off too.
+# "true" — a recurring API cost for 2 models (DeepSeek V4 Pro, Nemotron 3
+# Nano) every weekday. Unset, the schedule refreshes baselines only. A manual
+# dispatch defaults to off too.
 #
 # Requires repository secret LEADERBOARD_DAILY_REFRESH_SECRET matching
 # the value configured on the Render service (same secret as the daily hook).

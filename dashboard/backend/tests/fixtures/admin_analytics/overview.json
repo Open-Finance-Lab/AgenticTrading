@@ -88,15 +88,13 @@
   "billing_lane_mix": [
     {
       "day": "2026-08-25",
-      "platform_credits_micro": 11000000,
-      "byok": 7,
-      "byok_estimated_micro": 5000000
+      "platform_credits": 11,
+      "byok": 7
     },
     {
       "day": "2026-08-26",
-      "platform_credits_micro": 14000000,
-      "byok": 8,
-      "byok_estimated_micro": 6000000
+      "platform_credits": 14,
+      "byok": 8
     }
   ]
 }

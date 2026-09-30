@@ -75,6 +75,77 @@ def _pt(ts, equity):
     return {"timestamp": ts, "equity": equity, "cash": equity, "positions_value": 0}
 
 
+class _ScriptedAgent:
+    """Stands in for LLMAgentStrategy: one continuous run over the segment, one
+    bar per session, the session-close hook fired at each close with the
+    counters already cumulative, as the real decision loop does."""
+
+    used_llm = True
+    model_id = "deepseek/deepseek-v4-pro"
+
+    def __init__(self, *, steps=7, misses=None, crash_on=(), no_bars=(), runs=None):
+        self.steps = steps
+        self.misses = misses or {}
+        self.crash_on = set(crash_on)
+        self.no_bars = set(no_bars)
+        self.runs = [] if runs is None else runs
+        self.traded = []
+        self.llm_calls = self.llm_decisions = self.decision_steps = 0
+        self.input_tokens = self.output_tokens = 0
+        self.planned_decision_steps = 0
+        self.last_portfolio_snapshot = None
+        self._trades = 0
+
+    def required_symbols(self):
+        return ["AAPL"]
+
+    def run(self, bars, start, end, capital, starting_snapshot=None, on_session_close=None):
+        self.runs.append((start, end, (starting_snapshot or {}).get("day")))
+        days = [
+            day for day in live._trading_days_inclusive(
+                date.fromisoformat(start), date.fromisoformat(end)
+            )
+            if day.isoformat() not in self.no_bars
+        ]
+        self.planned_decision_steps = self.steps * len(days)
+        curve = []
+        for day in days:
+            iso = day.isoformat()
+            if iso in self.crash_on:
+                raise RuntimeError("worker killed")
+            self.traded.append(iso)
+            self.llm_calls += self.steps
+            self.decision_steps += self.steps
+            self.llm_decisions += self.steps - self.misses.get(iso, 0)
+            self.input_tokens += 10
+            self.output_tokens += 10
+            self._trades += 1
+            curve.append(_pt(f"{iso}T19:00:00+00:00", SEED + day.day))
+            self.last_portfolio_snapshot = {"cash": SEED, "positions": {}, "day": iso[5:]}
+            if on_session_close is not None:
+                on_session_close(day, list(curve))
+        return curve
+
+    def num_trades(self):
+        return self._trades
+
+
+def _one_bar_frame():
+    return {"AAPL": type("Frame", (), {"attrs": {}})()}
+
+
+def _deepseek(freeze_cfg):
+    return next(e for e in live.live_llm_entries(freeze_cfg) if e["id"] == "deepseek_v4_pro")
+
+
+def _month_rows(entry_id):
+    return sorted(
+        (r for r in db.get_runs_by_session("leaderboard-live") or []
+         if r.get("llm_model") == entry_id),
+        key=lambda r: r["end_date"],
+    )
+
+
 def test_september_window_is_a_new_calendar_month():
     start, end = live.live_month_dates(datetime(2026, 9, 1, 10, 0, tzinfo=_ET))
     assert start == "2026-09-01"
@@ -365,16 +436,15 @@ def test_live_month_run_shows_llm_snapshot(no_alpaca):
     assert model["equity_curve"][-1]["timestamp"].startswith("2026-08-27T16:00")
     assert model["equity_curve"][-1]["equity"] == pytest.approx(SEED * 1.005)
     assert payload["live_status"]["models_cached"] >= 1
-    assert payload["live_status"]["models_pending"] == 2
+    assert payload["live_status"]["models_pending"] == 1
     pending = [e for e in payload["entries"] if e["status"] == "pending"]
     assert pending and all(e["rank"] is None for e in pending)
     assert payload["live_status"]["roster"] == [
-        "gpt_5_5",
         "deepseek_v4_pro",
         "nemotron_3_nano_30b",
     ]
     model_ids = {e["entry_id"] for e in payload["entries"] if e.get("is_model")}
-    assert model_ids == {"gpt_5_5", "deepseek_v4_pro", "nemotron_3_nano_30b"}
+    assert model_ids == {"deepseek_v4_pro", "nemotron_3_nano_30b"}
 
 
 def test_get_live_never_deploys_models(no_alpaca, monkeypatch):
@@ -415,7 +485,8 @@ def test_refresh_live_leaderboard_deploys_models(monkeypatch, tmp_path):
     assert result["skipped"] is False
     assert result["models_deployed"] is True
     assert "claude_haiku_4_5" not in deployed
-    assert set(deployed) == {"gpt_5_5", "deepseek_v4_pro", "nemotron_3_nano_30b"}
+    assert "gpt_5_5" not in deployed
+    assert set(deployed) == {"deepseek_v4_pro", "nemotron_3_nano_30b"}
 
 
 def test_model_deploys_default_off_everywhere(client, monkeypatch):
@@ -554,9 +625,9 @@ def test_deploy_live_increment_trades_only_the_new_session(monkeypatch):
     assert freeze_cfg is not None
     snapshot = {"cash": SEED * 0.2, "positions": {"AAPL": 3}, "entry_prices": {"AAPL": 50}}
     db.insert_run(
-        run_id="lb_gpt_5_5_20260801_20260826",
+        run_id="lb_nemotron_3_nano_30b_20260801_20260826",
         session_id="leaderboard-live",
-        agent_name="GPT-5.5",
+        agent_name="Nemotron 3 Nano 30B",
         mode="leaderboard",
         start_date="2026-08-01",
         end_date="2026-08-26",
@@ -566,7 +637,7 @@ def test_deploy_live_increment_trades_only_the_new_session(monkeypatch):
         sharpe_ratio=0.5,
         max_drawdown=-0.01,
         num_trades=2,
-        llm_model="gpt_5_5",
+        llm_model="nemotron_3_nano_30b",
         llm_calls=70,
         llm_decisions=70,
         input_tokens=1000,
@@ -574,7 +645,7 @@ def test_deploy_live_increment_trades_only_the_new_session(monkeypatch):
         metadata={live.LIVE_SNAPSHOT_KEY: snapshot},
     )
     db.insert_equity_points(
-        "lb_gpt_5_5_20260801_20260826",
+        "lb_nemotron_3_nano_30b_20260801_20260826",
         [
             {
                 "timestamp": "2026-08-03T13:00:00+00:00",
@@ -600,7 +671,7 @@ def test_deploy_live_increment_trades_only_the_new_session(monkeypatch):
             self.llm_decisions = 7
             self.decision_steps = 7
             self.used_llm = True
-            self.model_id = "openai/gpt-5.5"
+            self.model_id = "nvidia/nemotron-3-nano-30b-a3b"
             self.last_portfolio_snapshot = {
                 "cash": 500.0,
                 "positions": {"AAPL": 4},
@@ -609,9 +680,10 @@ def test_deploy_live_increment_trades_only_the_new_session(monkeypatch):
         def required_symbols(self):
             return ["AAPL"]
 
-        def run(self, bars, start, end, capital, starting_snapshot=None):
+        def run(self, bars, start, end, capital, starting_snapshot=None,
+                on_session_close=None):
             self.windows.append((start, end, starting_snapshot))
-            return [
+            curve = [
                 {
                     "timestamp": "2026-08-27T14:00:00+00:00",
                     "equity": SEED * 1.02,
@@ -619,6 +691,8 @@ def test_deploy_live_increment_trades_only_the_new_session(monkeypatch):
                     "positions_value": SEED * 1.02 - 500.0,
                 }
             ]
+            on_session_close(date(2026, 8, 27), curve)
+            return curve
 
         def num_trades(self):
             return 1
@@ -631,7 +705,7 @@ def test_deploy_live_increment_trades_only_the_new_session(monkeypatch):
         lambda symbols, start, end: {"AAPL": type("Frame", (), {"attrs": {}})()},
     )
 
-    entry = next(e for e in live.live_llm_entries(freeze_cfg) if e["id"] == "gpt_5_5")
+    entry = next(e for e in live.live_llm_entries(freeze_cfg) if e["id"] == "nemotron_3_nano_30b")
     row = live.deploy_live_model_increment(entry, freeze_cfg)
     assert fake.windows == [("2026-08-27", "2026-08-27", snapshot)]
     assert row["increment"] is True
@@ -707,7 +781,7 @@ def test_null_equity_is_not_read_as_zero():
 def test_a_model_with_no_run_is_never_ranked(no_alpaca):
     """In a down month every printed entry is below the seed; a pending model
     published at the seed and 0% used to rank #1 without ever trading."""
-    for entry_id in ("spy_index", "gpt_5_5"):
+    for entry_id in ("spy_index", "nemotron_3_nano_30b"):
         _insert_live_run(
             f"lb_{entry_id}_20260801_20260826", entry_id, "2026-08-26",
             [_pt("2026-08-03T13:00:00+00:00", SEED),
@@ -716,14 +790,14 @@ def test_a_model_with_no_run_is_never_ranked(no_alpaca):
         )
     payload = live.get_live_leaderboard(as_of=datetime(2026, 8, 27, 17, 39, tzinfo=_ET))
     ranked = [e for e in payload["entries"] if e["rank"] is not None]
-    assert {e["entry_id"] for e in ranked} == {"spy_index", "gpt_5_5"}
+    assert {e["entry_id"] for e in ranked} == {"spy_index", "nemotron_3_nano_30b"}
     assert [e["rank"] for e in ranked] == [1, 2]
     assert payload["entries"][: len(ranked)] == ranked
     deepseek = next(e for e in payload["entries"] if e["entry_id"] == "deepseek_v4_pro")
     assert deepseek["status"] == "pending"
     assert deepseek["portfolio_value"] is None
-    gpt = next(e for e in ranked if e["entry_id"] == "gpt_5_5")
-    assert payload["leader"] == gpt["model"]
+    nemotron = next(e for e in ranked if e["entry_id"] == "nemotron_3_nano_30b")
+    assert payload["leader"] == nemotron["model"]
 
 
 def test_returns_come_off_the_stored_run_and_keep_the_first_hour(no_alpaca):
@@ -731,34 +805,34 @@ def test_returns_come_off_the_stored_run_and_keep_the_first_hour(no_alpaca):
     (``initial_equity``) inflated every point and erased that hour."""
     first_mark = SEED * 0.995
     _insert_live_run(
-        "lb_gpt_5_5_20260801_20260826", "gpt_5_5", "2026-08-26",
+        "lb_nemotron_3_nano_30b_20260801_20260826", "nemotron_3_nano_30b", "2026-08-26",
         [_pt("2026-08-03T13:00:00+00:00", first_mark),
          _pt("2026-08-26T19:00:00+00:00", SEED * 1.02)],
         total_return=0.02, sharpe=1.1, max_dd=-0.03,
         metadata={"initial_capital": SEED},
     )
     payload = live.get_live_leaderboard(as_of=datetime(2026, 8, 27, 17, 39, tzinfo=_ET))
-    gpt = next(e for e in payload["entries"] if e["entry_id"] == "gpt_5_5")
-    assert gpt["cumulative_return"] == pytest.approx(0.02)
-    assert gpt["sharpe_ratio"] == pytest.approx(1.1)
-    assert gpt["max_drawdown"] == pytest.approx(-0.03)
-    assert gpt["portfolio_value"] == pytest.approx(SEED * 1.02)
-    assert gpt["equity_curve"][0]["equity"] == pytest.approx(first_mark)
+    nemotron = next(e for e in payload["entries"] if e["entry_id"] == "nemotron_3_nano_30b")
+    assert nemotron["cumulative_return"] == pytest.approx(0.02)
+    assert nemotron["sharpe_ratio"] == pytest.approx(1.1)
+    assert nemotron["max_drawdown"] == pytest.approx(-0.03)
+    assert nemotron["portfolio_value"] == pytest.approx(SEED * 1.02)
+    assert nemotron["equity_curve"][0]["equity"] == pytest.approx(first_mark)
 
 
 def test_dollar_axis_scales_by_the_recorded_seed_only(no_alpaca):
     seed = SEED / 10
     _insert_live_run(
-        "lb_gpt_5_5_20260801_20260826", "gpt_5_5", "2026-08-26",
+        "lb_nemotron_3_nano_30b_20260801_20260826", "nemotron_3_nano_30b", "2026-08-26",
         [_pt("2026-08-03T13:00:00+00:00", seed * 0.99),
          _pt("2026-08-26T19:00:00+00:00", seed * 1.05)],
         total_return=0.05, metadata={"initial_capital": seed},
     )
     payload = live.get_live_leaderboard(as_of=datetime(2026, 8, 27, 17, 39, tzinfo=_ET))
-    gpt = next(e for e in payload["entries"] if e["entry_id"] == "gpt_5_5")
-    assert gpt["portfolio_value"] == pytest.approx(SEED * 1.05)
-    assert gpt["cumulative_return"] == pytest.approx(0.05)
-    assert gpt["equity_curve"][0]["equity"] == pytest.approx(SEED * 0.99)
+    nemotron = next(e for e in payload["entries"] if e["entry_id"] == "nemotron_3_nano_30b")
+    assert nemotron["portfolio_value"] == pytest.approx(SEED * 1.05)
+    assert nemotron["cumulative_return"] == pytest.approx(0.05)
+    assert nemotron["equity_curve"][0]["equity"] == pytest.approx(SEED * 0.99)
 
 
 def test_increment_lookback_is_relative_to_the_segment_and_shared(monkeypatch):
@@ -774,8 +848,11 @@ def test_increment_lookback_is_relative_to_the_segment_and_shared(monkeypatch):
         def required_symbols(self):
             return ["AAPL", "MSFT"]
 
-        def run(self, bars, start, end, capital, starting_snapshot=None):
-            return [_pt(f"{end}T19:00:00+00:00", SEED)]
+        def run(self, bars, start, end, capital, starting_snapshot=None,
+                on_session_close=None):
+            curve = [_pt(f"{end}T19:00:00+00:00", SEED)]
+            on_session_close(date.fromisoformat(end), curve)
+            return curve
 
         def num_trades(self):
             return 0
@@ -788,7 +865,7 @@ def test_increment_lookback_is_relative_to_the_segment_and_shared(monkeypatch):
         return {"AAPL": type("Frame", (), {"attrs": {}})()}
 
     monkeypatch.setattr(lb_service, "fetch_hourly_bars", fake_fetch)
-    for entry_id in ("gpt_5_5", "deepseek_v4_pro"):
+    for entry_id in ("nemotron_3_nano_30b", "deepseek_v4_pro"):
         _insert_live_run(
             f"lb_{entry_id}_20260801_20260826", entry_id, "2026-08-26",
             [_pt("2026-08-26T19:00:00+00:00", SEED)],
@@ -796,9 +873,362 @@ def test_increment_lookback_is_relative_to_the_segment_and_shared(monkeypatch):
         )
     memo = {}
     for entry in live.live_llm_entries(freeze_cfg):
-        if entry["id"] in ("gpt_5_5", "deepseek_v4_pro"):
+        if entry["id"] in ("nemotron_3_nano_30b", "deepseek_v4_pro"):
             live.deploy_live_model_increment(entry, freeze_cfg, bars_memo=memo)
     assert fetches == [(("AAPL", "MSFT"), "2026-07-27", "2026-08-27")]
+
+
+def _live_aug27():
+    return live.live_freeze_config(datetime(2026, 8, 27, 17, 39, tzinfo=_ET))
+
+
+def _insert_checkpoint(end_date, day, equity=SEED):
+    _insert_live_run(
+        f"lb_deepseek_v4_pro_20260801_{end_date.replace('-', '')}",
+        "deepseek_v4_pro",
+        end_date,
+        [_pt(f"{end_date}T19:00:00+00:00", equity)],
+        metadata={live.LIVE_SNAPSHOT_KEY: {"cash": SEED, "positions": {}, "day": day}},
+    )
+
+
+def _use_agent(monkeypatch, agent):
+    monkeypatch.setattr(lb_service, "get_strategy", lambda entry: agent)
+    monkeypatch.setattr(lb_service, "fetch_hourly_bars", lambda *args: _one_bar_frame())
+    return agent
+
+
+def test_catch_up_is_one_run_checkpointed_per_session_and_resumes_after_a_crash(
+    monkeypatch,
+):
+    freeze_cfg = _live_aug27()
+    _insert_checkpoint("2026-08-24", "08-24")
+    runs = []
+    _use_agent(monkeypatch, _ScriptedAgent(crash_on={"2026-08-26"}, runs=runs))
+
+    with pytest.raises(RuntimeError, match="worker killed"):
+        live.deploy_live_model_increment(_deepseek(freeze_cfg), freeze_cfg)
+    # One continuous run for the segment: the book, prices and trade memory
+    # are never rebuilt at a day boundary; only the writes are per session.
+    assert runs == [("2026-08-25", "2026-08-27", "08-24")]
+    rows = _month_rows("deepseek_v4_pro")
+    assert [r["end_date"] for r in rows] == ["2026-08-25"]
+    assert live._snapshot_from_run(rows[0])["day"] == "08-25"
+
+    runs.clear()
+    _use_agent(monkeypatch, _ScriptedAgent(runs=runs))
+    row = live.deploy_live_model_increment(_deepseek(freeze_cfg), freeze_cfg)
+    assert runs == [("2026-08-26", "2026-08-27", "08-25")]
+    assert row["segment"] == {"start_date": "2026-08-26", "end_date": "2026-08-27"}
+    assert row["window"] == {"start_date": "2026-08-01", "end_date": "2026-08-27"}
+    stored = db.get_run(row["run_id"])
+    assert stored["end_date"] == "2026-08-27"
+    assert stored["llm_calls"] == 21
+    assert stored["num_trades"] == 3
+    assert stored["metadata"]["live_increment"] == {
+        "segment_start": "2026-08-26",
+        "segment_end": "2026-08-27",
+        "full_replay": False,
+        "forced": False,
+        "resumed_from_run_id": "lb_deepseek_v4_pro_20260801_20260825",
+        "resumed_from_end_date": "2026-08-25",
+    }
+    assert live.LIVE_CHECKPOINT_PENDING_KEY not in stored["metadata"]
+    curve = db.get_equity_curve(row["run_id"])
+    assert [p["equity"] for p in curve] == [SEED, SEED + 25, SEED + 26, SEED + 27]
+    assert [r["run_id"] for r in _month_rows("deepseek_v4_pro")] == [row["run_id"]]
+
+
+def test_a_checkpoint_cut_between_its_row_and_curve_is_never_resumed_or_shown(
+    monkeypatch,
+):
+    """The row and its curve are separate writes. A writer killed between them
+    used to leave a row with a snapshot and no curve, which the next refresh
+    resumed from, stitching the rest of the month onto nothing."""
+    freeze_cfg = _live_aug27()
+    _insert_checkpoint("2026-08-24", "08-24")
+    real_points = db.insert_equity_points
+
+    def killed_on_the_26th(run_id, points, *args, **kwargs):
+        if run_id.endswith("_20260826"):
+            raise RuntimeError("killed between the row and its curve")
+        return real_points(run_id, points, *args, **kwargs)
+
+    monkeypatch.setattr(db, "insert_equity_points", killed_on_the_26th)
+    _use_agent(monkeypatch, _ScriptedAgent())
+    with pytest.raises(RuntimeError, match="killed between"):
+        live.deploy_live_model_increment(_deepseek(freeze_cfg), freeze_cfg)
+
+    shown = live.latest_live_month_runs("2026-08-01", "2026-08-27")["deepseek_v4_pro"]
+    assert shown["end_date"] == "2026-08-25"
+    payload = live.get_live_leaderboard(as_of=datetime(2026, 8, 27, 17, 39, tzinfo=_ET))
+    deepseek = next(e for e in payload["entries"] if e["entry_id"] == "deepseek_v4_pro")
+    assert deepseek["snapshot_end"] == "2026-08-25"
+    assert deepseek["equity_curve"]
+
+    monkeypatch.setattr(db, "insert_equity_points", real_points)
+    runs = []
+    _use_agent(monkeypatch, _ScriptedAgent(runs=runs))
+    row = live.deploy_live_model_increment(_deepseek(freeze_cfg), freeze_cfg)
+    assert runs == [("2026-08-26", "2026-08-27", "08-25")]
+    curve = db.get_equity_curve(row["run_id"])
+    assert [p["equity"] for p in curve] == [SEED, SEED + 25, SEED + 26, SEED + 27]
+    assert [r["run_id"] for r in _month_rows("deepseek_v4_pro")] == [row["run_id"]]
+
+
+def test_a_snapshot_row_with_no_curve_is_dropped_not_resumed(monkeypatch):
+    """Rows written before the pending flag have no other tell of a cut write."""
+    freeze_cfg = _live_aug27()
+    _insert_checkpoint("2026-08-24", "08-24")
+    db.insert_run(
+        run_id="lb_deepseek_v4_pro_20260801_20260826",
+        session_id="leaderboard-live",
+        agent_name="DeepSeek V4 Pro",
+        mode="leaderboard",
+        start_date="2026-08-01",
+        end_date="2026-08-26",
+        initial_equity=SEED,
+        llm_model="deepseek_v4_pro",
+        metadata={live.LIVE_SNAPSHOT_KEY: {"cash": SEED, "positions": {}, "day": "08-26"}},
+    )
+    runs = []
+    _use_agent(monkeypatch, _ScriptedAgent(runs=runs))
+    live.deploy_live_model_increment(_deepseek(freeze_cfg), freeze_cfg)
+    assert runs == [("2026-08-25", "2026-08-27", "08-24")]
+
+
+def test_a_replay_with_no_snapshot_resumes_from_its_own_checkpoints(monkeypatch):
+    """A newer row without a snapshot used to win every resume, so each retry of
+    the month-open replay started from the 1st and re-billed the days done."""
+    freeze_cfg = _live_aug27()
+    _insert_live_run(
+        "lb_deepseek_v4_pro_20260801_20260826", "deepseek_v4_pro", "2026-08-26",
+        [_pt("2026-08-26T19:00:00+00:00", SEED * 1.1)],
+    )
+    runs = []
+    _use_agent(monkeypatch, _ScriptedAgent(crash_on={"2026-08-12"}, runs=runs))
+    with pytest.raises(RuntimeError, match="worker killed"):
+        live.deploy_live_model_increment(_deepseek(freeze_cfg), freeze_cfg)
+    assert runs == [("2026-08-01", "2026-08-27", None)]
+    # The old freeze keeps the board company while the replay catches up.
+    shown = live.latest_live_month_runs("2026-08-01", "2026-08-27")["deepseek_v4_pro"]
+    assert shown["end_date"] == "2026-08-26"
+
+    runs.clear()
+    _use_agent(monkeypatch, _ScriptedAgent(runs=runs))
+    row = live.deploy_live_model_increment(_deepseek(freeze_cfg), freeze_cfg)
+    assert runs == [("2026-08-12", "2026-08-27", "08-11")]
+    curve = db.get_equity_curve(row["run_id"])
+    assert len(curve) == 19
+    assert curve[0]["equity"] == SEED + 3
+    assert [r["run_id"] for r in _month_rows("deepseek_v4_pro")] == [row["run_id"]]
+
+
+def test_a_forced_replay_killed_part_way_is_not_undone_by_the_next_refresh(monkeypatch):
+    """The pre-force row ended at the freeze, so after a crash the next normal
+    refresh called the window done and pruned the forced rows."""
+    freeze_cfg = _live_aug27()
+    _insert_checkpoint("2026-08-27", "old", equity=SEED * 2)
+    _use_agent(monkeypatch, _ScriptedAgent(crash_on={"2026-08-12"}))
+    with pytest.raises(RuntimeError, match="worker killed"):
+        live.deploy_live_model_increment(
+            _deepseek(freeze_cfg), freeze_cfg, force_refresh=True
+        )
+    assert [r["end_date"] for r in _month_rows("deepseek_v4_pro")] == ["2026-08-11"]
+
+    runs = []
+    _use_agent(monkeypatch, _ScriptedAgent(runs=runs))
+    row = live.deploy_live_model_increment(_deepseek(freeze_cfg), freeze_cfg)
+    assert row["cached"] is False
+    assert runs == [("2026-08-12", "2026-08-27", "08-11")]
+    assert db.get_run(row["run_id"])["metadata"]["live_increment"]["forced"] is False
+
+
+def test_h6_judges_the_segment_not_each_session(monkeypatch):
+    """One unusable reply in a 7-step session is 85.7%. Judged per session it
+    failed a catch-up that clears 95% over the segment, as it always had to."""
+    freeze_cfg = _live_aug27()
+    agent = _use_agent(monkeypatch, _ScriptedAgent(misses={"2026-08-03": 1}))
+    written = []
+    real_write = live._write_live_checkpoint
+
+    def spy(*args, **kwargs):
+        written.append(kwargs["day_iso"])
+        return real_write(*args, **kwargs)
+
+    monkeypatch.setattr(live, "_write_live_checkpoint", spy)
+    row = live.deploy_live_model_increment(_deepseek(freeze_cfg), freeze_cfg)
+    assert len(agent.traded) == 19
+    # 6/7 and 13/14 are short of 95%, so those closes are not stored; 20/21 is.
+    assert written[0] == "2026-08-05"
+    assert written[-1] == "2026-08-27"
+    assert db.get_run(row["run_id"])["llm_decisions"] == 132
+
+
+def test_a_segment_that_can_no_longer_clear_h6_stops_billing(monkeypatch):
+    freeze_cfg = _live_aug27()
+    agent = _use_agent(monkeypatch, _ScriptedAgent(misses={"2026-08-03": 7}))
+    with pytest.raises(lb_service.LeaderboardFallbackError):
+        live.deploy_live_model_increment(_deepseek(freeze_cfg), freeze_cfg)
+    # 7 misses of 133 steps already caps the segment at 94.7%.
+    assert agent.traded == ["2026-08-03"]
+    assert _month_rows("deepseek_v4_pro") == []
+
+
+def test_a_session_with_no_bars_stops_the_run_loudly(monkeypatch, capsys):
+    """A trading day with no bars is broken data. Skipping it carried the book
+    across a session it never traded, and the window was marked deployed."""
+    freeze_cfg = _live_aug27()
+    _insert_checkpoint("2026-08-24", "08-24")
+    agent = _use_agent(monkeypatch, _ScriptedAgent(no_bars={"2026-08-26"}))
+    with pytest.raises(live.LiveSessionGapError, match="2026-08-26"):
+        live.deploy_live_model_increment(_deepseek(freeze_cfg), freeze_cfg)
+    assert agent.traded == ["2026-08-25", "2026-08-27"]
+    assert [r["end_date"] for r in _month_rows("deepseek_v4_pro")] == ["2026-08-25"]
+    assert "ERROR: live.session_gap entry=deepseek_v4_pro missing=2026-08-26" in (
+        capsys.readouterr().out
+    )
+
+
+def test_a_missing_last_session_fails_the_refresh_instead_of_marking_it_done(
+    monkeypatch, capsys,
+):
+    as_of = datetime(2026, 8, 27, 17, 39, tzinfo=_ET)
+    monkeypatch.setattr(lb_service, "ensure_leaderboard_runs", lambda **kwargs: {})
+    for entry_id in live.LIVE_MODEL_IDS:
+        _insert_live_run(
+            f"lb_{entry_id}_20260801_20260825", entry_id, "2026-08-25",
+            [_pt("2026-08-25T19:00:00+00:00", SEED)],
+            metadata={live.LIVE_SNAPSHOT_KEY: {"cash": SEED, "positions": {}}},
+        )
+    monkeypatch.setattr(
+        lb_service, "get_strategy",
+        lambda entry: _ScriptedAgent(no_bars={"2026-08-27"}),
+    )
+    monkeypatch.setattr(lb_service, "fetch_hourly_bars", lambda *args: _one_bar_frame())
+
+    result = live.refresh_live_leaderboard(deploy_models=True, as_of=as_of)
+    assert result["models_deployed"] is False
+    assert {f["entry_id"] for f in result["model_failures"]} == set(live.LIVE_MODEL_IDS)
+    assert result["model_results"] == []
+    out = capsys.readouterr().out
+    assert "ERROR: live.model_deploy_failed entry=deepseek_v4_pro" in out
+    # The session that did land is stored; the window is retried next time.
+    shown = live.latest_live_month_runs("2026-08-01", "2026-08-27")
+    assert {row["end_date"] for row in shown.values() if row["llm_model"] in live.LIVE_MODEL_IDS} == {
+        "2026-08-26"
+    }
+    assert live.refresh_live_leaderboard(deploy_models=True, as_of=as_of)["skipped"] is False
+
+
+@pytest.mark.parametrize(
+    ("start", "expected"),
+    [
+        ("2026-12-31", "2026-11-30"),
+        ("2026-03-31", "2026-02-28"),
+        ("2028-03-30", "2028-02-29"),
+        ("2026-01-31", "2025-12-31"),
+        ("2026-08-27", "2026-07-27"),
+    ],
+)
+def test_reference_start_clamps_to_the_prior_month(start, expected):
+    from dashboard.backend.domain.leaderboard.strategies._common import (
+        reference_start_date,
+    )
+
+    assert reference_start_date(start, None) == expected
+
+
+def test_an_entry_several_sessions_behind_is_shown_but_not_ranked(no_alpaca):
+    """A replay checkpoints as it goes, so hours into one the model's newest
+    row is weeks behind the baselines. Ranking that value against theirs
+    compares different days."""
+    for entry_id, end in (
+        ("spy_index", "2026-08-27"),
+        ("deepseek_v4_pro", "2026-08-20"),
+        ("nemotron_3_nano_30b", "2026-08-26"),
+    ):
+        _insert_live_run(
+            f"lb_{entry_id}_20260801_{end.replace('-', '')}", entry_id, end,
+            [_pt("2026-08-03T13:00:00+00:00", SEED),
+             _pt(f"{end}T19:00:00+00:00", SEED * 1.5)],
+            total_return=0.5,
+        )
+    payload = live.get_live_leaderboard(as_of=datetime(2026, 8, 27, 17, 39, tzinfo=_ET))
+    by_id = {e["entry_id"]: e for e in payload["entries"]}
+    deepseek = by_id["deepseek_v4_pro"]
+    assert deepseek["status"] == "catching_up"
+    assert deepseek["rank"] is None
+    assert deepseek["snapshot_end"] == "2026-08-20"
+    assert deepseek["equity_curve"]
+    # One session behind is the nightly append in flight, ranked as before.
+    assert by_id["nemotron_3_nano_30b"]["status"] == "frozen"
+    assert by_id["nemotron_3_nano_30b"]["rank"] is not None
+    assert payload["live_status"]["catching_up"] == ["deepseek_v4_pro"]
+    assert payload["leader"] == by_id["nemotron_3_nano_30b"]["model"]
+
+
+def test_llm_agent_fires_the_hook_per_session_from_one_book(monkeypatch):
+    import pandas as pd
+
+    from dashboard.backend.domain.leaderboard.strategies import llm_agent
+
+    class Manager:
+        instances = []
+
+        def __init__(self, **kwargs):
+            self.equity_history = []
+            self.trades = []
+            self.llm_calls = self.llm_decisions = 0
+            self.input_tokens = self.output_tokens = 0
+            Manager.instances.append(self)
+
+        def restore_state(self, snapshot):
+            pass
+
+        def snapshot_state(self):
+            return {"cash": 1.0, "positions": {}, "steps": len(self.equity_history)}
+
+        def get_portfolio_state(self, *args):
+            return {}
+
+        def make_trading_decision_with_llm(self, state, client, **kwargs):
+            self.llm_calls += 1
+            self.llm_decisions += 1
+            return {"actions": []}
+
+        def execute_actions(self, *args):
+            pass
+
+        def update_equity(self, market_data, price_cache, ts):
+            self.equity_history.append({"timestamp": ts, "equity": 100.0})
+
+        def get_equity_curve(self):
+            return self.equity_history
+
+    monkeypatch.setattr(llm_agent, "PortfolioManager", Manager)
+    stamps = [pd.Timestamp(f"2026-08-03T{h}:00:00Z") for h in range(13, 20)]
+    stamps += [pd.Timestamp(f"2026-08-04T{h}:00:00Z") for h in (13, 14)]
+    strategy = llm_agent.LLMAgentStrategy({"strategy": "llm_agent", "model_id": "m"})
+    seen = []
+
+    def hook(day, curve):
+        seen.append((
+            day, len(curve), strategy.decision_steps, strategy.llm_calls,
+            strategy.last_portfolio_snapshot["steps"], curve[-1]["timestamp"],
+        ))
+
+    strategy._run_decision_loop(
+        client=object(), timestamps=stamps, symbols=["AAPL"], data={},
+        price_cache={}, initial_capital=100.0, model_id="m", on_session_close=hook,
+    )
+    assert seen == [
+        (date(2026, 8, 3), 7, 7, 7, 7, "2026-08-03T19:00:00+00:00"),
+        (date(2026, 8, 4), 9, 9, 9, 9, "2026-08-04T14:00:00+00:00"),
+    ]
+    assert len(Manager.instances) == 1
+    # The hook gets a copy; the live history keeps its Timestamps.
+    assert isinstance(Manager.instances[0].equity_history[0]["timestamp"], pd.Timestamp)
 
 
 def test_restored_lot_with_an_unreadable_date_is_released_not_kept():

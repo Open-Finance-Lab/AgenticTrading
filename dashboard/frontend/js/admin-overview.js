@@ -272,15 +272,19 @@
   function renderCredits(commercial, overview) {
     const s = shell();
     const headline = s.formatCredits(commercial?.selected_period?.consumed_micro);
-    const headline2 = s.formatCredits(commercial?.selected_period?.purchased_micro);
+    if (s.fieldPending(overview, 'billing_lane_mix')) return { headline, body: emptyBody(s.PENDING) };
     const lanes = Array.isArray(overview?.billing_lane_mix) ? overview.billing_lane_mix : [];
-    const revenue = Array.isArray(commercial?.purchased_by_day) ? commercial.purchased_by_day : [];
-    if (s.fieldPending(overview, 'billing_lane_mix')) return { headline, headline2, headline3: s.DASH, body: emptyBody(s.PENDING) };
-    if (s.fieldPending(commercial, 'purchased_by_day')) return { headline, headline2, headline3: s.DASH, body: emptyBody(s.PENDING) };
-    const headline3 = s.formatCredits(
-      lanes.reduce((acc, d) => acc + (Number(d.byok_estimated_micro) || 0), 0)
-    );
-    if (!lanes.length && !revenue.length) return { headline, headline2, headline3, body: emptyBody('No Credits activity in this range.') };
+    // Revenue is a second read (the purchase ledger) that fails on its own:
+    // absent from an older route, or null when the ledger read failed. The
+    // lanes still draw either way, with a note — a lost revenue series must
+    // not blank the call counts beside it.
+    const revenueAvailable = Array.isArray(commercial?.purchased_by_day);
+    const revenue = revenueAvailable ? commercial.purchased_by_day : [];
+    if (!lanes.length && !revenue.length) {
+      const body = emptyBody('No Credits activity in this range.');
+      if (!revenueAvailable) body.appendChild(s.el('p', 'credit-note', REVENUE_UNAVAILABLE));
+      return { headline, body };
+    }
 
     // Union of lane days and revenue days on one shared x-axis.
     const daySet = new Set();
@@ -290,32 +294,46 @@
     const revenueByDay = new Map(revenue.map((d) => [String(d.day), (Number(d.amount_micro) || 0) / 1000000]));
     const laneByDay = new Map(lanes.map((d) => [String(d.day), d]));
 
+    // Two units, two axes: the lanes count model calls (left), revenue is
+    // gross purchased Credits (right, the same quantity as the Revenue
+    // headline). Sharing one scale drew a count and a currency against each other.
     const series = [
-      { key: 'platform', label: 'Platform Credits', className: 'credits-chart-platform', values: days.map((d) => (Number(laneByDay.get(d)?.platform_credits_micro) || 0) / 1000000) },
-      { key: 'byok', label: 'BYOK (est. Credits)', className: 'credits-chart-byok', values: days.map((d) => (Number(laneByDay.get(d)?.byok_estimated_micro) || 0) / 1000000) },
-      { key: 'revenue', label: 'Revenue (Credits)', className: 'credits-chart-revenue', values: days.map((d) => revenueByDay.get(d) || 0) },
+      { label: 'Platform calls', className: 'credits-chart-platform', axis: 'calls', values: days.map((d) => Number(laneByDay.get(d)?.platform_credits) || 0) },
+      { label: 'BYOK calls', className: 'credits-chart-byok', axis: 'calls', values: days.map((d) => Number(laneByDay.get(d)?.byok) || 0) },
     ];
-    const allValues = series.flatMap((s2) => s2.values.filter((v) => v > 0));
-    const max = Math.max(1, ...allValues);
-    const width = 980, height = 200, left = 42, right = 968, top = 14, bottom = 154;
+    if (revenueAvailable) {
+      series.push({ label: 'Revenue (Credits)', className: 'credits-chart-revenue', axis: 'credits', values: days.map((d) => revenueByDay.get(d) || 0) });
+    }
+    const callMax = Math.max(1, ...series.filter((e) => e.axis === 'calls').flatMap((e) => e.values));
+    const revMax = Math.max(1, ...series.filter((e) => e.axis === 'credits').flatMap((e) => e.values));
+    const width = 520, height = 200, left = 42, right = 474, top = 14, bottom = 154;
     const plotWidth = right - left, plotHeight = bottom - top;
     const x = (index) => left + (days.length === 1 ? 0 : index / (days.length - 1) * plotWidth);
-    const y = (value) => bottom - (value / max) * plotHeight;
+    const scale = {
+      calls: (value) => bottom - (value / callMax) * plotHeight,
+      credits: (value) => bottom - (value / revMax) * plotHeight,
+    };
     const labels = days.map((d) => s.formatShortDay(d));
 
-    const svg = svgNode('svg', { viewBox: `0 0 ${width} ${height}`, role: 'img', 'aria-label': `Platform Credits, BYOK estimated Credits and revenue by date for ${s.state.range}` });
+    const svg = svgNode('svg', { viewBox: `0 0 ${width} ${height}`, role: 'img', 'aria-label': `Model calls by billing lane${revenueAvailable ? ' and purchased Credits' : ''} by date for ${s.state.range}` });
+    const tickY = [top + 3, (top + bottom) / 2 + 3, bottom + 3];
     [0, 0.5, 1].forEach((fraction) => svg.appendChild(svgNode('line', { class: 'revenue-grid', x1: left, y1: bottom - fraction * plotHeight, x2: right, y2: bottom - fraction * plotHeight })));
     svg.appendChild(svgNode('line', { class: 'revenue-axis', x1: left, y1: top, x2: left, y2: bottom }));
     svg.appendChild(svgNode('line', { class: 'revenue-axis', x1: left, y1: bottom, x2: right, y2: bottom }));
-    [max, max / 2, 0].forEach((value, index) => svg.appendChild(svgNode('text', { class: 'revenue-axis-label', x: 5, y: [top + 3, (top + bottom) / 2 + 3, bottom + 3][index] }, axisLabel(value))));
+    [callMax, callMax / 2, 0].forEach((value, index) => svg.appendChild(svgNode('text', { class: 'revenue-axis-label', x: 5, y: tickY[index] }, axisLabel(value))));
+    if (revenueAvailable) {
+      svg.appendChild(svgNode('line', { class: 'revenue-axis', x1: right, y1: top, x2: right, y2: bottom }));
+      [revMax, revMax / 2, 0].forEach((value, index) => svg.appendChild(svgNode('text', { class: 'revenue-axis-label', x: right + 5, y: tickY[index] }, axisLabel(value))));
+    }
 
     series.forEach((entry) => {
+      const y = scale[entry.axis];
       const path = entry.values
         .map((value, index) => `${index ? 'L' : 'M'}${x(index).toFixed(1)} ${y(value).toFixed(1)}`)
         .join(' ');
       svg.appendChild(svgNode('path', { class: `credits-chart-line ${entry.className}`, d: path }));
       entry.values.forEach((value, index) => {
-        if (value <= 0) return;
+        if (value === 0) return;
         const circle = svgNode('circle', { class: `credits-chart-point ${entry.className}`, cx: x(index), cy: y(value), r: 3 });
         circle.appendChild(svgNode('title', {}, `${labels[index]} · ${entry.label}: ${axisLabel(value)}`));
         svg.appendChild(circle);
@@ -336,9 +354,12 @@
       legend.appendChild(item);
     });
     wrap.appendChild(legend);
+    if (!revenueAvailable) wrap.appendChild(s.el('p', 'credit-note', REVENUE_UNAVAILABLE));
     body.appendChild(wrap);
-    return { headline, headline2, headline3, body };
+    return { headline, body };
   }
+
+  const REVENUE_UNAVAILABLE = 'Revenue series unavailable — the purchase ledger could not be read.';
 
   function svgNode(name, attrs, text) {
     const node = document.createElementNS(SVG_NS, name);
@@ -349,6 +370,18 @@
 
   function axisLabel(value) {
     return value >= 100 ? String(Math.round(value)) : value.toFixed(1).replace(/\.0$/, '');
+  }
+
+  function renderRevenue(commercial) {
+    const s = shell();
+    const headline = s.formatCredits(commercial?.selected_period?.purchased_micro);
+    // The daily series draws on the Credits chart; this panel keeps the
+    // headline and still tells absent, unreadable and empty apart.
+    if (s.fieldPending(commercial, 'purchased_by_day')) return { headline, body: emptyBody(s.PENDING) };
+    const series = commercial?.purchased_by_day;
+    if (!Array.isArray(series)) return { headline, body: emptyBody(REVENUE_UNAVAILABLE) };
+    if (!series.length) return { headline, body: emptyBody('No settled purchases in this range.') };
+    return { headline, body: emptyBody('The daily revenue series now lives on the Credits usage chart above.') };
   }
 
   // --------------------------------------------------------- detail views
@@ -581,6 +614,7 @@
     { id: 'panelValue', name: 'value', needs: ['groups'], render: (d) => renderValue(d.groups) },
     { id: 'panelLifecycle', name: 'lifecycle', needs: ['lifecycle'], render: (d) => renderLifecycle(d.lifecycle) },
     { id: 'panelCredits', name: 'credits', needs: ['commercial', 'overview'], render: (d) => renderCredits(d.commercial, d.overview) },
+    { id: 'panelRevenue', name: 'revenue', needs: ['commercial'], render: (d) => renderRevenue(d.commercial) },
   ];
 
   function pathFor(name) {
@@ -595,10 +629,6 @@
     const s = shell();
     const headline = panel.querySelector('[data-headline]');
     if (headline) headline.textContent = s.DASH;
-    const headline2 = panel.querySelector('[data-headline2]');
-    if (headline2) headline2.textContent = s.DASH;
-    const headline3 = panel.querySelector('[data-headline3]');
-    if (headline3) headline3.textContent = s.DASH;
     const body = panel.querySelector('[data-body]');
     if (body) s.clear(body);
     s.setPanelState(panel, { busy: false, error: s.SECTION_UNAVAILABLE });
@@ -617,10 +647,6 @@
     const result = def.render(state.data);
     const headline = panel.querySelector('[data-headline]');
     if (headline) headline.textContent = result.headline;
-    const headline2 = panel.querySelector('[data-headline2]');
-    if (headline2 && result.headline2 != null) headline2.textContent = result.headline2;
-    const headline3 = panel.querySelector('[data-headline3]');
-    if (headline3 && result.headline3 != null) headline3.textContent = result.headline3;
     const body = panel.querySelector('[data-body]');
     if (body) {
       s.clear(body);
@@ -651,7 +677,7 @@
     // aria-busy="true" with no error and no body -- a spinner that never resolves,
     // which is the one state this page must not publish. The reachable case was
     // formatCredits dereferencing a missing window.CreditFormat (now guarded in the
-    // shell): renderCredits sat mid-list, so it stranded every panel behind it.
+    // shell): renderCredits is PANELS index 7, so it stranded panelRevenue behind it.
     PANELS.forEach((def) => {
       try {
         paint(def);
@@ -745,7 +771,7 @@
   window.AdminOverview = {
     PANELS, DETAIL_NEEDS, state,
     renderAttention, renderActiveUsers, renderActivation, renderSources, renderRetention,
-    renderValue, renderLifecycle, renderCredits,
+    renderValue, renderLifecycle, renderCredits, renderRevenue,
     detailSources, detailRetention, detailCredits, detailLifecycle, detailHealth,
     paint, loadAll, showDetail,
   };

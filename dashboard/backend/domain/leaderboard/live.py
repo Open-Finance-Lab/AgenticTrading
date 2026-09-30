@@ -59,13 +59,23 @@ _FREEZE_SETTLE_MARGIN_MINUTES = 15
 LIVE_SESSION_ID = "leaderboard-live"
 LIVE_PHASE = 1
 # Season-0 local roster: only these LLM curves are deployed and shown on Live.
-# Contest/daily still use the full leaderboard.json list.
+# Contest/daily still use the full leaderboard.json list. GPT-5.5 is left out
+# because it was most of the nightly token spend.
+#
+# A dropped model's rows are deliberately left in place, not pruned: GET only
+# renders roster entries, so they are inert, and if the model comes back
+# mid-month it resumes from its last snapshot and trades only the sessions it
+# missed. Deleting them would make a re-add replay the month from the 1st.
 LIVE_MODEL_IDS = (
-    "gpt_5_5",
     "deepseek_v4_pro",
     "nemotron_3_nano_30b",
 )
 LIVE_SNAPSHOT_KEY = "live_portfolio_snapshot"
+# Present (True) on a checkpoint row only while it is being written. The row
+# goes in first, then its curve, then the row again with the snapshot and
+# without this flag; a writer killed in between leaves a flagged row that no
+# reader treats as a freeze, instead of a row that has a snapshot and no curve.
+LIVE_CHECKPOINT_PENDING_KEY = "live_checkpoint_pending"
 _LIVE_REFRESH_STATE_PATH = DATA_DIR / "leaderboard_live_refresh.json"
 _live_refresh_lock = threading.Lock()
 _live_refresh_running = False
@@ -304,6 +314,21 @@ def clear_live_session_runs() -> int:
     return len(runs)
 
 
+def _is_month_row(run: Dict[str, Any], month_start: str, freeze_end: str) -> bool:
+    end = str(run.get("end_date") or "")
+    return bool(
+        run.get("llm_model")
+        and run.get("mode") == lb_service.LEADERBOARD_MODE
+        and run.get("start_date") == month_start
+        and end
+        and end <= freeze_end
+    )
+
+
+def _is_pending_checkpoint(run: Dict[str, Any]) -> bool:
+    return bool(_run_metadata_dict(run).get(LIVE_CHECKPOINT_PENDING_KEY))
+
+
 def latest_live_month_runs(
     month_start: str,
     freeze_end: str,
@@ -316,25 +341,33 @@ def latest_live_month_runs(
     month-open, ``end_date`` is that freeze), so GET keeps serving yesterday's
     snapshot after the clock rolls, until the next refresh lands. One session
     scan serves the whole board; pass ``runs`` to reuse a scan already made.
+    A checkpoint still being written is never the latest freeze.
     """
     if runs is None:
         runs = db.get_runs_by_session(LIVE_SESSION_ID) or []
     best: Dict[str, Dict[str, Any]] = {}
     for run in runs:
-        entry_id = run.get("llm_model")
-        if (
-            not entry_id
-            or run.get("mode") != lb_service.LEADERBOARD_MODE
-            or run.get("start_date") != month_start
-        ):
+        if not _is_month_row(run, month_start, freeze_end) or _is_pending_checkpoint(run):
             continue
-        end = str(run.get("end_date") or "")
-        if not end or end > freeze_end:
-            continue
+        entry_id = run["llm_model"]
+        end = str(run["end_date"])
         current = best.get(entry_id)
         if current is None or end > str(current.get("end_date") or ""):
             best[entry_id] = run
     return best
+
+
+def _entry_month_runs(
+    entry_id: str,
+    month_start: str,
+    freeze_end: str,
+) -> List[Dict[str, Any]]:
+    """Every row this entry has for the month, pending ones included, newest first."""
+    runs = [
+        run for run in db.get_runs_by_session(LIVE_SESSION_ID) or []
+        if run.get("llm_model") == entry_id and _is_month_row(run, month_start, freeze_end)
+    ]
+    return sorted(runs, key=lambda run: str(run["end_date"]), reverse=True)
 
 
 def prune_superseded_live_runs(month_start: str, freeze_end: str) -> int:
@@ -342,7 +375,9 @@ def prune_superseded_live_runs(month_start: str, freeze_end: str) -> int:
 
     Every row stores the whole month-to-date curve, so keeping one per day
     grows storage with the square of the day of the month while nothing but
-    the latest row per entry is ever read again.
+    the latest row per entry is ever read again. The row kept is the latest
+    *complete* one: a checkpoint still flagged pending at the end of a refresh
+    is a write that was cut short, and goes too.
     """
     runs = db.get_runs_by_session(LIVE_SESSION_ID) or []
     keep = {
@@ -433,6 +468,247 @@ def _set_live_refresh_running(value: bool) -> None:
     _live_refresh_running = value
 
 
+class LiveSessionGapError(RuntimeError):
+    """A trading day inside the segment came back from the tape with no bars."""
+
+
+def _session_gap(
+    entry_id: str,
+    missing: List[date],
+    segment_start: str,
+    segment_end: str,
+) -> LiveSessionGapError:
+    """Report a trading day with no bars, loudly, and build the error to raise.
+
+    Days are drawn from the NYSE calendar, so a session with no bars is broken
+    data, never an absent one: the feed failed, or the calendar is missing an
+    unscheduled closure. Skipping it would carry the book across a session it
+    never traded and mark the window deployed. Instead nothing from the gap on
+    is stored (a gap is only seen at the next session's close, so that session
+    is dropped too), the refresh reports the entry failed, and the next one
+    resumes from the gap.
+    """
+    days = ", ".join(day.isoformat() for day in missing)
+    print(
+        f"ERROR: live.session_gap entry={entry_id} missing={days} "
+        f"segment={segment_start}..{segment_end}",
+        flush=True,
+    )
+    return LiveSessionGapError(
+        f"Live '{entry_id}': no bars for trading day(s) {days} in "
+        f"{segment_start} → {segment_end}; stored nothing from there on rather "
+        f"than carry the book across a session it never traded"
+    )
+
+
+def _resume_point(
+    rows: List[Dict[str, Any]],
+) -> Tuple[Optional[Dict[str, Any]], List[Dict[str, Any]], List[str]]:
+    """Newest complete checkpoint among ``rows`` (newest first), with its curve.
+
+    A row counts only if it carries a snapshot *and* a stored curve. One with a
+    snapshot but no curve was cut short between its two writes (rows from
+    before the pending flag existed have no other tell); resuming from it
+    would stitch the rest of the month onto an empty curve, so it is dropped
+    and the next row down is tried. Returns the dropped run ids as well.
+    """
+    dropped: List[str] = []
+    for run in rows:
+        if _is_pending_checkpoint(run) or _snapshot_from_run(run) is None:
+            continue
+        curve = db.get_equity_curve(run["run_id"]) or []
+        if curve:
+            return run, curve, dropped
+        print(
+            f"⚠️ Live {run.get('llm_model')}: {run['run_id']} has a snapshot but "
+            f"no curve (its write was cut short); dropping it"
+        )
+        db.delete_run(run["run_id"])
+        dropped.append(run["run_id"])
+    return None, [], dropped
+
+
+def _checkpoint_passes_h6(
+    entry_id: str,
+    entry: Dict[str, Any],
+    strategy_impl: Any,
+    *,
+    allow_fallback: bool,
+) -> bool:
+    """Whether the segment traded so far clears H6; raises once it never can.
+
+    H6 applies to the segment this refresh trades, as it did when a segment
+    was one write. Checking each session on its own would put a catch-up's
+    every day to the test over seven steps, where a single unusable reply is
+    already below 95%. So a session whose running coverage falls short is just
+    not checkpointed, and the run carries on. It stops only when even a perfect
+    remainder could not bring the segment back over the threshold, so a dead
+    model is not billed for the rest of a multi-day replay.
+    """
+    llm_calls = int(getattr(strategy_impl, "llm_calls", 0) or 0)
+    decisions = lb_service._reported_int(strategy_impl, "llm_decisions")
+    steps = int(getattr(strategy_impl, "decision_steps", 0) or 0)
+    try:
+        lb_service._reject_if_llm_fallback(
+            entry_id,
+            strategy_impl,
+            llm_calls,
+            llm_decisions=decisions,
+            decision_steps=steps,
+            model=entry.get("model"),
+            model_id=getattr(strategy_impl, "model_id", None) or entry.get("model_id"),
+            allow_fallback=allow_fallback,
+        )
+        return True
+    except lb_service.LeaderboardFallbackError:
+        if not getattr(strategy_impl, "used_llm", False) or llm_calls == 0:
+            raise
+        planned = int(getattr(strategy_impl, "planned_decision_steps", 0) or 0)
+        misses = max(steps - (llm_calls if decisions is None else decisions), 0)
+        if planned > steps and planned - misses >= (
+            lb_service.MIN_LLM_DECISION_COVERAGE * planned
+        ):
+            return False
+        raise
+
+
+def _drop_superseded_live_rows(
+    entry_id: str,
+    month_start: str,
+    freeze_end: str,
+    *,
+    keep: str,
+    day_iso: str,
+    supersede_later: bool,
+) -> None:
+    """Leave ``keep`` as the entry's checkpoint once it is complete.
+
+    Every earlier row is a prefix of its curve, and a pending row is a write
+    that never finished. Later rows go too when the segment replaces them (a
+    forced replay): deleting them as the first checkpoint lands is what makes
+    the replay durable, since a killed replay would otherwise leave the
+    pre-force row as the newest and the next refresh would call it done.
+    Pruning here rather than at the end of the refresh also keeps an aborted
+    catch-up from leaving a row per day behind.
+    """
+    for run in _entry_month_runs(entry_id, month_start, freeze_end):
+        run_id = run.get("run_id")
+        if not run_id or run_id == keep:
+            continue
+        if (
+            str(run["end_date"]) < day_iso
+            or supersede_later
+            or _is_pending_checkpoint(run)
+        ):
+            db.delete_run(run_id)
+
+
+def _write_live_checkpoint(
+    entry: Dict[str, Any],
+    freeze_cfg: Dict[str, Any],
+    strategy_impl: Any,
+    *,
+    day_iso: str,
+    curve: List[Dict[str, Any]],
+    base: Optional[Dict[str, Any]],
+    lineage: Dict[str, Any],
+    provenance: Optional[Dict[str, Any]],
+    supersede_later: bool,
+) -> Dict[str, Any]:
+    """Store the month curve through ``day_iso`` as the entry's newest freeze.
+
+    Three writes, ordered so that no reader ever sees a snapshot without its
+    curve: the row flagged pending, the curve, then the row again carrying the
+    snapshot. ``equity_timeseries`` has a live foreign key on Postgres, so the
+    curve cannot go in before its row; the flag is what makes the gap safe.
+    Counters are the resumed row's plus the run's so far (the run is one
+    continuous segment, so its own counters are already cumulative).
+    """
+    entry_id = entry["id"]
+    month_start = freeze_cfg["start_date"]
+    initial_capital = float(freeze_cfg.get("initial_capital", INITIAL_CAPITAL))
+
+    def carried(key: str) -> int:
+        return int((base or {}).get(key) or 0)
+
+    llm_calls = int(getattr(strategy_impl, "llm_calls", 0) or 0)
+    decisions = lb_service._reported_int(strategy_impl, "llm_decisions")
+    totals = {
+        "input_tokens": carried("input_tokens")
+        + int(getattr(strategy_impl, "input_tokens", 0) or 0),
+        "output_tokens": carried("output_tokens")
+        + int(getattr(strategy_impl, "output_tokens", 0) or 0),
+        "llm_calls": carried("llm_calls") + llm_calls,
+        "llm_decisions": carried("llm_decisions")
+        + (llm_calls if decisions is None else decisions),
+        "num_trades": carried("num_trades") + int(strategy_impl.num_trades() or 0),
+    }
+    model_id = getattr(strategy_impl, "model_id", None) or entry.get("model_id")
+    est_cost = lb_service.token_cost.estimate_cost_usd(
+        model_id, totals["input_tokens"], totals["output_tokens"]
+    )
+    metrics = calc_metrics(curve, initial_capital)
+    run_id = lb_service._run_id(entry_id, month_start, day_iso)
+
+    meta = lb_service._llm_run_metadata(
+        entry_id,
+        entry,
+        strategy_impl,
+        model_id=model_id,
+        initial_capital=initial_capital,
+        start_date=month_start,
+        end_date=day_iso,
+    ) or {}
+    meta["live_increment"] = {**lineage, "segment_end": day_iso}
+    meta = lb_service._with_market_data_provenance(meta, provenance) or {}
+
+    row = {
+        "run_id": run_id,
+        "session_id": freeze_cfg["session_id"],
+        "agent_name": entry["name"],
+        "mode": lb_service.LEADERBOARD_MODE,
+        "start_date": month_start,
+        "end_date": day_iso,
+        "initial_equity": metrics["initial_equity"],
+        "final_equity": metrics["final_equity"],
+        "total_return": metrics["total_return"],
+        "sharpe_ratio": metrics["sharpe_ratio"],
+        "max_drawdown": metrics["max_drawdown"],
+        "num_trades": totals["num_trades"],
+        "llm_model": entry_id,
+        "llm_calls": totals["llm_calls"],
+        "llm_decisions": totals["llm_decisions"],
+        "input_tokens": totals["input_tokens"],
+        "output_tokens": totals["output_tokens"],
+        "est_cost_usd": est_cost,
+    }
+    db.insert_run(**row, metadata={**meta, LIVE_CHECKPOINT_PENDING_KEY: True})
+    db.insert_equity_points(run_id, curve)
+    db.insert_run(
+        **row,
+        metadata={
+            **meta,
+            LIVE_SNAPSHOT_KEY: getattr(strategy_impl, "last_portfolio_snapshot", None),
+        },
+    )
+    _drop_superseded_live_rows(
+        entry_id,
+        month_start,
+        freeze_cfg["end_date"],
+        keep=run_id,
+        day_iso=day_iso,
+        supersede_later=supersede_later,
+    )
+    return {
+        "run_id": run_id,
+        "model_id": model_id,
+        "end_date": day_iso,
+        "metrics": metrics,
+        "totals": totals,
+        "est_cost_usd": est_cost,
+    }
+
+
 def deploy_live_model_increment(
     entry: Dict[str, Any],
     freeze_cfg: Dict[str, Any],
@@ -444,9 +720,13 @@ def deploy_live_model_increment(
     """Append unseen cash sessions onto a live-month LLM snapshot.
 
     Trades only ``live_increment_bounds`` (usually one day) and restores cash
-    plus positions from the previous freeze row. A missing snapshot falls back
-    to a full month-open → freeze replay once, then stores the book for later
-    nights. Does not change contest/daily ``deploy_model_run``.
+    plus positions from the newest complete checkpoint. With none, or on
+    ``force_refresh``, it replays from month-open. Either way the segment is
+    one continuous run that checkpoints each session as it closes, so a
+    catch-up killed part-way resumes from the last session it stored rather
+    than from month-open, and nothing but the checkpoint writes depends on the
+    day boundary (the book, prices and trade memory run straight through).
+    Does not change contest/daily ``deploy_model_run``.
 
     ``bars_memo`` lets one refresh share a bar fetch across the roster: the
     on-disk bar cache refuses windows under 24 hours old, so without it every
@@ -455,47 +735,51 @@ def deploy_live_model_increment(
     entry_id = entry["id"]
     month_start = freeze_cfg["start_date"]
     freeze_end = freeze_cfg["end_date"]
-    session_id = freeze_cfg["session_id"]
     initial_capital = float(freeze_cfg.get("initial_capital", INITIAL_CAPITAL))
 
-    prior = None if force_refresh else latest_live_month_runs(
-        month_start, freeze_end
-    ).get(entry_id)
-    snapshot = _snapshot_from_run(prior)
-    if prior and str(prior.get("end_date") or "") == freeze_end and not force_refresh:
+    rows = _entry_month_runs(entry_id, month_start, freeze_end)
+    resume_from, prior_curve, dropped = _resume_point(rows)
+    latest = next(
+        (
+            run for run in rows
+            if not _is_pending_checkpoint(run) and run["run_id"] not in dropped
+        ),
+        None,
+    )
+    if latest and str(latest["end_date"]) == freeze_end and not force_refresh:
         return {
             "entry_id": entry_id,
-            "run_id": prior.get("run_id"),
+            "run_id": latest.get("run_id"),
             "cached": True,
             "increment": False,
             "model": entry.get("model"),
             "window": {"start_date": month_start, "end_date": freeze_end},
             "segment": None,
-            "total_return": prior.get("total_return"),
-            "final_equity": prior.get("final_equity"),
-            "llm_calls": prior.get("llm_calls"),
+            "total_return": latest.get("total_return"),
+            "final_equity": latest.get("final_equity"),
+            "llm_calls": latest.get("llm_calls"),
         }
 
-    if force_refresh or prior is None or snapshot is None:
+    if force_refresh:
+        resume_from, prior_curve = None, []
+    if resume_from is None:
         segment_start, segment_end = month_start, freeze_end
         snapshot = None
-        prior_curve: List[Dict[str, Any]] = []
-        resumed = False
-        if prior is not None and snapshot is None and not force_refresh:
+        if latest is not None and not force_refresh:
             print(
-                f"⚠️ Live {entry_id}: no portfolio snapshot on "
-                f"{prior.get('run_id')}; replaying {month_start} → {freeze_end} once"
+                f"⚠️ Live {entry_id}: no resumable snapshot on this month's rows; "
+                f"replaying {month_start} → {freeze_end}"
             )
     else:
         bounds = live_increment_bounds(
-            str(prior.get("end_date") or ""),
+            str(resume_from.get("end_date") or ""),
             month_start=month_start,
             freeze_end=freeze_end,
         )
         if bounds is None:
             return {
                 "entry_id": entry_id,
-                "run_id": prior.get("run_id"),
+                "run_id": resume_from.get("run_id"),
                 "cached": True,
                 "increment": False,
                 "model": entry.get("model"),
@@ -503,15 +787,15 @@ def deploy_live_model_increment(
                 "segment": None,
             }
         segment_start, segment_end = bounds
-        prior_curve = db.get_equity_curve(prior["run_id"]) or []
-        resumed = True
+        snapshot = _snapshot_from_run(resume_from)
+    resumed = resume_from is not None
 
-    strategy_impl = lb_service.get_strategy(entry)
     # The indicator lookback is relative to the segment being traded, not to
     # month-open. ``freeze_cfg`` pins ``reference_start_date`` to a month before
     # the 1st, so passing it here made a one-day increment on the 28th fetch
     # about two months of bars.
     bars_start = reference_start_date(segment_start, None)
+    strategy_impl = lb_service.get_strategy(entry)
     symbols = strategy_impl.required_symbols()
     memo_key = (tuple(sorted(symbols)), bars_start, segment_end)
     if bars_memo is not None and memo_key in bars_memo:
@@ -529,118 +813,108 @@ def deploy_live_model_increment(
         f"(month {month_start} → {freeze_end}, resume={resumed})"
     )
 
-    curve = strategy_impl.run(
+    expected = _trading_days_inclusive(
+        date.fromisoformat(segment_start), date.fromisoformat(segment_end)
+    )
+    provenance = lb_service.feed_provenance(bars)
+    # ``resumed_from_run_id`` names the row this segment started from, which
+    # the first checkpoint supersedes and deletes; the end date is the part of
+    # the lineage that stays readable after that.
+    lineage = {
+        "segment_start": segment_start,
+        "full_replay": not resumed,
+        "forced": bool(force_refresh),
+        "resumed_from_run_id": resume_from.get("run_id") if resume_from else None,
+        "resumed_from_end_date": resume_from.get("end_date") if resume_from else None,
+    }
+    cursor = {"next": 0}
+    written: List[Dict[str, Any]] = []
+
+    def on_session_close(day: date, segment_curve: List[Dict[str, Any]]) -> None:
+        missing: List[date] = []
+        while cursor["next"] < len(expected) and expected[cursor["next"]] < day:
+            missing.append(expected[cursor["next"]])
+            cursor["next"] += 1
+        if missing:
+            raise _session_gap(entry_id, missing, segment_start, segment_end)
+        if cursor["next"] < len(expected) and expected[cursor["next"]] == day:
+            cursor["next"] += 1
+        if not _checkpoint_passes_h6(
+            entry_id, entry, strategy_impl, allow_fallback=allow_fallback
+        ):
+            print(
+                f"  live {entry_id}: {day.isoformat()} not checkpointed; the "
+                f"segment's model coverage is below the H6 threshold so far"
+            )
+            return
+        written.append(
+            _write_live_checkpoint(
+                entry,
+                freeze_cfg,
+                strategy_impl,
+                day_iso=day.isoformat(),
+                curve=_stitch_equity_curves(prior_curve, segment_curve),
+                base=resume_from,
+                lineage=lineage,
+                provenance=provenance,
+                supersede_later=force_refresh,
+            )
+        )
+
+    strategy_impl.run(
         bars,
         segment_start,
         segment_end,
         initial_capital,
         starting_snapshot=snapshot,
-    )
-    if not curve:
-        raise RuntimeError(
-            f"No equity curve produced for live increment '{entry_id}' "
-            f"{segment_start} → {segment_end}"
-        )
-
-    stitched = _stitch_equity_curves(prior_curve, curve)
-    metrics = calc_metrics(stitched, initial_capital)
-    run_id = lb_service._run_id(entry_id, month_start, freeze_end)
-
-    input_tokens = int(getattr(strategy_impl, "input_tokens", 0) or 0)
-    output_tokens = int(getattr(strategy_impl, "output_tokens", 0) or 0)
-    llm_calls = int(getattr(strategy_impl, "llm_calls", 0) or 0)
-    llm_decisions = lb_service._reported_int(strategy_impl, "llm_decisions")
-    decision_steps = int(getattr(strategy_impl, "decision_steps", 0) or 0)
-    model_id = getattr(strategy_impl, "model_id", None) or entry.get("model_id")
-    if resumed and prior:
-        input_tokens += int(prior.get("input_tokens") or 0)
-        output_tokens += int(prior.get("output_tokens") or 0)
-        llm_calls += int(prior.get("llm_calls") or 0)
-    est_cost = lb_service.token_cost.estimate_cost_usd(
-        model_id, input_tokens, output_tokens
+        on_session_close=on_session_close,
     )
 
+    # Sessions still expected after the run returned had no bars at all; this
+    # also covers a segment with none (a run that returns before its first step
+    # reports no model use, which H6 below would misname as a fallback).
+    if cursor["next"] < len(expected):
+        raise _session_gap(entry_id, expected[cursor["next"]:], segment_start, segment_end)
+    # The segment as a whole must clear H6, as it did before it was split into
+    # checkpoints. The last session close has already checked this; repeat it
+    # here so a run that never reached that close cannot slip through.
     lb_service._reject_if_llm_fallback(
         entry_id,
         strategy_impl,
         int(getattr(strategy_impl, "llm_calls", 0) or 0),
-        llm_decisions=llm_decisions,
-        decision_steps=decision_steps,
+        llm_decisions=lb_service._reported_int(strategy_impl, "llm_decisions"),
+        decision_steps=int(getattr(strategy_impl, "decision_steps", 0) or 0),
         model=entry.get("model"),
-        model_id=model_id,
+        model_id=getattr(strategy_impl, "model_id", None) or entry.get("model_id"),
         allow_fallback=allow_fallback,
     )
+    if not written or written[-1]["end_date"] != segment_end:
+        raise RuntimeError(
+            f"Live '{entry_id}': no checkpoint stored through {segment_end} for "
+            f"{segment_start} → {segment_end}"
+        )
 
-    new_snapshot = getattr(strategy_impl, "last_portfolio_snapshot", None)
-    meta = lb_service._llm_run_metadata(
-        entry_id,
-        entry,
-        strategy_impl,
-        model_id=model_id,
-        initial_capital=initial_capital,
-        start_date=month_start,
-        end_date=freeze_end,
-    ) or {}
-    meta[LIVE_SNAPSHOT_KEY] = new_snapshot
-    meta["live_increment"] = {
-        "segment_start": segment_start,
-        "segment_end": segment_end,
-        "resumed_from_run_id": prior.get("run_id") if resumed else None,
-        "full_replay": not resumed,
-    }
-
-    trades = int(strategy_impl.num_trades() or 0)
-    if resumed and prior:
-        trades += int(prior.get("num_trades") or 0)
-
-    stored_decisions = llm_calls if llm_decisions is None else llm_decisions
-    if resumed and prior and llm_decisions is not None:
-        stored_decisions = int(prior.get("llm_decisions") or 0) + int(llm_decisions)
-
-    db.insert_run(
-        run_id=run_id,
-        session_id=session_id,
-        agent_name=entry["name"],
-        mode=lb_service.LEADERBOARD_MODE,
-        start_date=month_start,
-        end_date=freeze_end,
-        initial_equity=metrics["initial_equity"],
-        final_equity=metrics["final_equity"],
-        total_return=metrics["total_return"],
-        sharpe_ratio=metrics["sharpe_ratio"],
-        max_drawdown=metrics["max_drawdown"],
-        num_trades=trades,
-        llm_model=entry_id,
-        llm_calls=llm_calls,
-        llm_decisions=stored_decisions,
-        input_tokens=input_tokens,
-        output_tokens=output_tokens,
-        est_cost_usd=est_cost,
-        metadata=lb_service._with_market_data_provenance(
-            meta,
-            lb_service.feed_provenance(bars),
-        ),
-    )
-    db.insert_equity_points(run_id, stitched)
-
+    last = written[-1]
+    metrics = last["metrics"]
+    totals = last["totals"]
     return {
         "entry_id": entry_id,
-        "run_id": run_id,
+        "run_id": last["run_id"],
         "cached": False,
         "increment": resumed,
         "model": entry.get("model"),
-        "model_id": model_id,
-        "window": {"start_date": month_start, "end_date": freeze_end},
+        "model_id": last["model_id"],
+        "window": {"start_date": month_start, "end_date": last["end_date"]},
         "segment": {"start_date": segment_start, "end_date": segment_end},
         "total_return": metrics["total_return"],
         "sharpe_ratio": metrics["sharpe_ratio"],
         "max_drawdown": metrics["max_drawdown"],
         "final_equity": metrics["final_equity"],
-        "num_trades": trades,
-        "llm_calls": llm_calls,
-        "input_tokens": input_tokens,
-        "output_tokens": output_tokens,
-        "est_cost_usd": est_cost,
+        "num_trades": totals["num_trades"],
+        "llm_calls": totals["llm_calls"],
+        "input_tokens": totals["input_tokens"],
+        "output_tokens": totals["output_tokens"],
+        "est_cost_usd": last["est_cost_usd"],
     }
 
 
@@ -718,6 +992,13 @@ def refresh_live_leaderboard(
                 )
                 successes.append(row)
             except (lb_service.LeaderboardFallbackError, ValueError, RuntimeError) as exc:
+                # The background refresh keeps this list only in a state file on
+                # an ephemeral disk; the log line is the part an operator sees.
+                print(
+                    f"ERROR: live.model_deploy_failed entry={entry_id} "
+                    f"error={type(exc).__name__}: {exc}",
+                    flush=True,
+                )
                 failures.append({"entry_id": entry_id, "error": str(exc)})
         result["models_deployed"] = not failures
         result["model_results"] = successes
@@ -926,6 +1207,7 @@ def _entry_from_strategy(
     curve: List[Dict[str, Any]],
     run: Optional[Dict[str, Any]],
     scale: float = 1.0,
+    catching_up: bool = False,
 ) -> Dict[str, Any]:
     """One board row. Returns and risk come off the stored run untouched.
 
@@ -933,10 +1215,19 @@ def _entry_from_strategy(
     with, over exactly the curve this row plots, so only the dollar axis is
     scaled (the contest board's rule). A row with no run is *pending*: it has
     no value, return or rank — publishing the seed and 0% would rank an entry
-    that never traded against ones that did.
+    that never traded against ones that did. A row *catching up* is several
+    sessions behind the rest of the board (a replay checkpointing its way
+    through the month): it keeps its curve and figures, but is not ranked,
+    because its value is from a different day than the rows it would sit by.
     """
     is_model = strategy.get("strategy") == "llm_agent" or strategy.get("label") == "Model"
     printed = bool(run) and any(p.get("equity") is not None for p in curve)
+    if not printed:
+        status = "pending"
+    elif catching_up:
+        status = "catching_up"
+    else:
+        status = "frozen"
     if printed:
         final = run.get("final_equity")
         portfolio_value = float(final) * scale if final is not None else None
@@ -960,9 +1251,10 @@ def _entry_from_strategy(
         "cumulative_return": total_return,
         "sharpe_ratio": sharpe,
         "max_drawdown": max_dd,
-        "status": "frozen" if printed else "pending",
+        "status": status,
         "rank": None,
         "run_id": run.get("run_id") if run else None,
+        "snapshot_end": run.get("end_date") if run else None,
         "llm_calls": (run or {}).get("llm_calls") or 0,
         "input_tokens": (run or {}).get("input_tokens") or 0,
         "output_tokens": (run or {}).get("output_tokens") or 0,
@@ -1015,12 +1307,33 @@ def get_live_leaderboard(
     ranked: List[Dict[str, Any]] = []
     pending: List[Dict[str, Any]] = []
     snapshot_ends: List[str] = []
+    catching_up: List[str] = []
+    # One session behind the newest row is the nightly model append still in
+    # flight (baselines land first) and stays ranked, as it always has. More
+    # than that is a replay part-way through the month. Measured against the
+    # newest row rather than the clock, so a board the cron missed for days
+    # is stale as a whole (``snapshot_stale``) but still ranks like with like.
+    board_ends = [
+        str(runs_by_entry[s["id"]].get("end_date") or "")
+        for s in strategies
+        if s["id"] in runs_by_entry
+    ]
+    newest_end = max((end for end in board_ends if end), default=None)
+    catch_up_floor = (
+        _previous_trading_day(date.fromisoformat(newest_end)).isoformat()
+        if newest_end
+        else None
+    )
 
     for strategy in strategies:
         run = runs_by_entry.get(strategy["id"])
         curve: List[Dict[str, Any]] = []
         scale = 1.0
+        behind = False
         if run:
+            behind = bool(
+                catch_up_floor and str(run.get("end_date") or "") < catch_up_floor
+            )
             snapshot_ends.append(str(run.get("end_date") or freeze_end))
             curve_end = _clip_end(str(run.get("end_date") or freeze_end), freeze_end)
             seed = _recorded_seed(run)
@@ -1037,7 +1350,10 @@ def get_live_leaderboard(
             curve=curve,
             run=run,
             scale=scale,
+            catching_up=behind,
         )
+        if entry["status"] == "catching_up":
+            catching_up.append(entry["entry_id"])
         (ranked if entry["status"] == "frozen" else pending).append(entry)
 
     entries = lb_service._rank_entries(ranked) + pending
@@ -1073,6 +1389,9 @@ def get_live_leaderboard(
         "models_pending": max(models_total - models_cached, 0),
         "roster": list(LIVE_MODEL_IDS),
         "snapshot_end": snapshot_end,
+        # Entries shown but not ranked: their newest row is more than one
+        # session behind the board's, so their value is from another day.
+        "catching_up": catching_up,
         # The newest stored freeze is behind the clock's: tonight's refresh
         # has not landed (or failed). GET never fills that gap itself.
         "snapshot_stale": bool(

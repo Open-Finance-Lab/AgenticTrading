@@ -14,7 +14,8 @@ web request. It records token usage / cost so cost can be shown per run.
 from __future__ import annotations
 
 import math
-from typing import Any, Dict, List, Optional
+from datetime import date
+from typing import Any, Callable, Dict, List, Optional
 
 import pandas as pd
 
@@ -36,7 +37,20 @@ from dashboard.backend.infrastructure.llm.providers.openrouter import (
 )
 
 from .base import BaselineStrategy
-from ._common import build_price_cache, market_timestamps, subset_bars, timestamps_in_contest
+from ._common import (
+    build_price_cache,
+    market_timestamps,
+    subset_bars,
+    timestamp_date,
+    timestamps_in_contest,
+)
+
+
+# Called at the close of every session a run trades, with the ET trading day and
+# the run's equity curve so far (ISO timestamps, a copy). The strategy's counters
+# and ``last_portfolio_snapshot`` are current when it fires, so a caller can
+# checkpoint one continuous run a day at a time (the Live board's catch-up).
+SessionCloseHook = Callable[[date, List[Dict[str, Any]]], None]
 
 
 # Parity with api/routers/backtests.py::MAX_STRATEGY_PROMPT_CHARS, which caps the
@@ -134,6 +148,9 @@ class LLMAgentStrategy(BaselineStrategy):
         self.llm_calls = 0
         self.llm_decisions = 0  # steps the model actually drove (H6 guard numerator)
         self.decision_steps = 0  # total steps offered to the model (guard denominator)
+        # Steps the whole run will offer, known before the first one; lets a
+        # session-close hook stop a run that can no longer clear the guard.
+        self.planned_decision_steps = 0
         self.input_tokens = 0
         self.output_tokens = 0
         self._num_trades = 0
@@ -172,12 +189,18 @@ class LLMAgentStrategy(BaselineStrategy):
         initial_capital,
         model_id,
         starting_snapshot=None,
+        on_session_close: Optional[SessionCloseHook] = None,
     ):
         """One decision per timestamp, executed against a PortfolioManager.
 
         Extracted from run() so the strategy_prompt hand-off is reachable in a
         test without live bars or an LLM client — an untestable call site is
         exactly where a silently-dropped keyword hides.
+
+        ``on_session_close`` fires after the last bar of each trading day. The
+        book, price cache and 24h trade memory all carry straight on into the
+        next day: checkpointing from inside the loop is what lets a caller
+        resume a long run without restarting it every day.
         """
         # Contest entries replay the hourly DJIA window over Alpaca bars, so the
         # execution rules come from that profile rather than a constructor
@@ -221,6 +244,12 @@ class LLMAgentStrategy(BaselineStrategy):
             manager.execute_actions(decision.get("actions", []), market_data, ts)
             manager.update_equity(market_data, price_cache, ts)
 
+            if on_session_close is not None:
+                day = timestamp_date(ts)
+                if i + 1 == total or timestamp_date(timestamps[i + 1]) != day:
+                    self._record_progress(manager, decision_steps=i + 1)
+                    on_session_close(day, _iso_curve(manager.get_equity_curve()))
+
             if (i + 1) % 25 == 0 or (i + 1) == total:
                 equity = manager.equity_history[-1]["equity"] if manager.equity_history else initial_capital
                 print(f"      step {i + 1}/{total} · equity ${equity:,.0f} · calls {manager.llm_calls}")
@@ -234,6 +263,7 @@ class LLMAgentStrategy(BaselineStrategy):
         end_date: str,
         initial_capital: float,
         starting_snapshot: Optional[Dict[str, Any]] = None,
+        on_session_close: Optional[SessionCloseHook] = None,
     ) -> List[Dict[str, Any]]:
         symbols = self.required_symbols()
         bars_subset = subset_bars(bars_by_symbol, symbols)
@@ -262,8 +292,12 @@ class LLMAgentStrategy(BaselineStrategy):
         # slug vs native Anthropic id) rather than a hardcoded id the gateway
         # rejects.
         model_id = self.model_id or default_model_name(self.integration)
+        # Set before the loop, not after: a session-close hook reads it to price
+        # and label the checkpoint it writes mid-run.
+        self.model_id = model_id
 
         total = len(timestamps)
+        self.planned_decision_steps = total
         integration_label = self.integration or "auto"
         print(
             f"\n   🤖 LLM agent baseline: model={model_id} "
@@ -280,6 +314,7 @@ class LLMAgentStrategy(BaselineStrategy):
             initial_capital=initial_capital,
             model_id=model_id,
             starting_snapshot=starting_snapshot,
+            on_session_close=on_session_close,
         )
 
         curve = manager.get_equity_curve()
@@ -287,15 +322,37 @@ class LLMAgentStrategy(BaselineStrategy):
             if hasattr(entry["timestamp"], "isoformat"):
                 entry["timestamp"] = entry["timestamp"].isoformat()
 
+        self._record_progress(manager, decision_steps=total)
+        return curve
+
+    def _record_progress(self, manager: PortfolioManager, *, decision_steps: int) -> None:
+        """Publish the run's counters and book as of ``decision_steps`` steps."""
         self._num_trades = len(manager.trades)
         self.llm_calls = manager.llm_calls
         self.llm_decisions = manager.llm_decisions  # steps the model actually drove
-        self.decision_steps = total  # how many steps the model was asked to decide
+        self.decision_steps = decision_steps  # how many steps the model was asked to decide
         self.input_tokens = manager.input_tokens
         self.output_tokens = manager.output_tokens
-        self.model_id = model_id
         self.last_portfolio_snapshot = manager.snapshot_state()
-        return curve
 
     def num_trades(self) -> int:
         return self._num_trades
+
+
+def _iso_curve(points: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """A copy of an equity history with ISO timestamps.
+
+    ``PortfolioManager.get_equity_curve`` returns its live history list, not a
+    copy, and the run is still going when a session-close hook reads it.
+    """
+    return [
+        {
+            **point,
+            "timestamp": (
+                point["timestamp"].isoformat()
+                if hasattr(point["timestamp"], "isoformat")
+                else point["timestamp"]
+            ),
+        }
+        for point in points
+    ]
