@@ -140,7 +140,7 @@ def _expire_run(run: Dict[str, Any]) -> Dict[str, Any]:
             reservation_id,
             reason="research run exceeded maximum runtime",
         )
-    research_store.claim_terminal(
+    claimed = research_store.claim_terminal(
         run["run_id"],
         "failed",
         error=(
@@ -148,6 +148,16 @@ def _expire_run(run: Dict[str, Any]) -> Dict[str, Any]:
             "became available"
         ),
     )
+    if not claimed:
+        # Another worker won the terminal claim while this process was
+        # releasing the reservation. Never report a stale in-memory failure.
+        user_id = run.get("user_id")
+        fresh = (
+            research_store.get_run(run["run_id"], user_id)
+            if user_id is not None
+            else None
+        )
+        return fresh or run
     run["status"] = "failed"
     run["error"] = (
         "Research run exceeded the maximum runtime before its report became available"

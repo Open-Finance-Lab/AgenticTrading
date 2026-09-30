@@ -204,6 +204,25 @@ def test_expired_completed_upstream_without_result_is_failed(monkeypatch):
     assert _row(run_id)["status"] == "failed"
 
 
+def test_expiry_loser_returns_the_database_terminal_state(monkeypatch):
+    run_id = _new_run()
+    run = research_store.get_run(run_id, 7)
+    assert run is not None
+    monkeypatch.setattr(
+        research.credits_service,
+        "release_llm_credits",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(research.research_store, "claim_terminal", lambda *args, **kwargs: False)
+    fresh = {**run, "status": "completed", "completed_at": "2026-09-30T07:00:00+00:00"}
+    monkeypatch.setattr(research.research_store, "get_run", lambda *args: fresh)
+
+    result = research._expire_run(run)
+
+    assert result is fresh
+    assert result["status"] == "completed"
+
+
 def test_partial_completed_row_is_repaired_by_the_sweeper_queue():
     run_id = _new_run()
     _sql(
