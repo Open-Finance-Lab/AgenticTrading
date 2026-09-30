@@ -49,6 +49,7 @@ from dashboard.backend import users as users_module
 router = APIRouter(prefix="/v1/research", tags=["research"])
 
 POLL_TIMEOUT_SECONDS = 50.0
+DEFAULT_RUN_MAX_AGE_SECONDS = 30 * 60
 MANIFEST_CACHE_SECONDS = 300.0
 _manifest_cache: Dict[str, Any] = {}
 
@@ -96,6 +97,62 @@ def _agent_id(template: Dict[str, Any]) -> str:
 
 def _service_headers() -> Dict[str, str]:
     return {"X-Service-Token": _service_token()}
+
+
+def _run_max_age_seconds() -> int:
+    """Return the hard wall-clock limit for an external research run.
+
+    The external service advertises a ten-minute normal runtime, but Render
+    cold starts and a single retry can take longer.  Thirty minutes gives
+    those runs room while preventing a lost worker from leaving a run in
+    ``running`` forever.  Invalid operator values fail closed to the safe
+    default rather than disabling the guard.
+    """
+    raw = (os.getenv("RESEARCH_RUN_MAX_AGE_SECONDS") or "").strip()
+    try:
+        value = int(raw)
+    except ValueError:
+        return DEFAULT_RUN_MAX_AGE_SECONDS
+    return value if value > 0 else DEFAULT_RUN_MAX_AGE_SECONDS
+
+
+def _run_age_seconds(run: Dict[str, Any]) -> Optional[float]:
+    created_at = run.get("created_at")
+    if not created_at:
+        return None
+    try:
+        from datetime import datetime, timezone
+
+        value = str(created_at).replace("Z", "+00:00")
+        created = datetime.fromisoformat(value)
+        if created.tzinfo is None:
+            created = created.replace(tzinfo=timezone.utc)
+        return max(0.0, (datetime.now(timezone.utc) - created).total_seconds())
+    except (TypeError, ValueError):
+        return None
+
+
+def _expire_run(run: Dict[str, Any]) -> Dict[str, Any]:
+    """Fail an over-age run and release its reservation exactly once."""
+    reservation_id = run.get("reservation_id")
+    if reservation_id:
+        credits_service.release_llm_credits(
+            reservation_id,
+            reason="research run exceeded maximum runtime",
+        )
+    research_store.claim_terminal(
+        run["run_id"],
+        "failed",
+        error=(
+            "Research run exceeded the maximum runtime before its report "
+            "became available"
+        ),
+    )
+    run["status"] = "failed"
+    run["error"] = (
+        "Research run exceeded the maximum runtime before its report became available"
+    )
+    return run
 
 
 def _service_error(exc: httpx.HTTPError, action: str) -> HTTPException:
@@ -472,8 +529,15 @@ def _poll_run_once(run: Dict[str, Any], template: Dict[str, Any]) -> Dict[str, A
     Shared by the route poll and the background sweeper. Callers hold the
     run's `_single_flight` and pass a row read inside it.
     """
-    if run["status"] in ("completed", "failed"):
+    # A legacy/partial finalization can leave status=completed without a
+    # completion timestamp or stored report. Treat that shape as retryable so
+    # the repair path below can either finish it or expire it.
+    if run["status"] == "failed" or (
+        run["status"] == "completed" and run.get("completed_at")
+    ):
         return run
+    age_seconds = _run_age_seconds(run)
+    expired = age_seconds is not None and age_seconds >= _run_max_age_seconds()
     try:
         response = httpx.get(
             f"{_service_base(template)}/runs/{_service_run_id(run)}",
@@ -484,6 +548,8 @@ def _poll_run_once(run: Dict[str, Any], template: Dict[str, Any]) -> Dict[str, A
         service_status = response.json()
     except httpx.HTTPError:
         # A single poll failure is tolerated — the next frontend poll retries.
+        if expired:
+            return _expire_run(run)
         return run
 
     status = str(service_status.get("status") or "running")
@@ -501,6 +567,8 @@ def _poll_run_once(run: Dict[str, Any], template: Dict[str, Any]) -> Dict[str, A
         run["status"] = "failed"
         return run
     if status != "completed":
+        if expired:
+            return _expire_run(run)
         return run
 
     try:
@@ -514,7 +582,11 @@ def _poll_run_once(run: Dict[str, Any], template: Dict[str, Any]) -> Dict[str, A
     except httpx.HTTPError:
         # Result fetch failed but the run COMPLETED on the service — this is
         # retryable (next poll re-fetches), not a failed run. Making it
-        # terminal here would strand the reservation on a transient 5xx.
+        # terminal here would strand the reservation on a transient 5xx. Once
+        # the hard wall-clock limit is reached, though, keeping the run open
+        # would strand the UI forever when the upstream lost its worker.
+        if expired:
+            return _expire_run(run)
         return run
 
     _finalize_completed_run(run, payload)

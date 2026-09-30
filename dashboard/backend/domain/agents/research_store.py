@@ -145,10 +145,16 @@ def create_run(
 
 
 def list_nonterminal_runs() -> List[Dict[str, Any]]:
-    """All queued/running runs across users — the sweeper's work queue."""
+    """Runs the sweeper must reconcile across users.
+
+    A completed row without ``completed_at`` is a partial finalization and
+    remains eligible for repair; otherwise it would be invisible to the
+    sweeper forever.
+    """
     with _connect() as conn:
         rows = conn.execute(
             "SELECT * FROM research_runs WHERE status IN ('queued', 'running')"
+            " OR (status = 'completed' AND completed_at IS NULL)"
         ).fetchall()
     return [dict(row) for row in rows]
 
@@ -200,7 +206,8 @@ def claim_terminal(run_id: str, status: str, error: Optional[str] = None) -> boo
         cursor = conn.execute(
             "UPDATE research_runs SET status = ?, error = ?,"
             " completed_at = CURRENT_TIMESTAMP"
-            " WHERE run_id = ? AND status NOT IN ('completed', 'failed')",
+            " WHERE run_id = ? AND (status NOT IN ('completed', 'failed')"
+            " OR (status = 'completed' AND completed_at IS NULL))",
             (status, error, run_id),
         )
         return cursor.rowcount == 1
@@ -456,6 +463,18 @@ def _build_research_store():
                             (status, error, run_id),
                         )
 
+        def claim_terminal(self, run_id, status, error=None):
+            with self._conn() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "UPDATE research_runs SET status=%s, error=%s,"
+                        " completed_at=now()"
+                        " WHERE run_id=%s AND (status NOT IN ('completed','failed')"
+                        " OR (status='completed' AND completed_at IS NULL))",
+                        (status, error, run_id),
+                    )
+                    return cur.rowcount == 1
+
         def mark_emailed(self, run_id):
             with self._conn() as conn:
                 with conn.cursor() as cur:
@@ -509,7 +528,9 @@ def _build_research_store():
                         "SELECT run_id, user_id, template_id, service_run_id,"
                         " reservation_id, estimate_micro, status, settings_json,"
                         " email_me, emailed, error, created_at FROM research_runs"
-                        " WHERE status IN ('queued','running') ORDER BY created_at",
+                        " WHERE status IN ('queued','running')"
+                        " OR (status='completed' AND completed_at IS NULL)"
+                        " ORDER BY created_at",
                     )
                     rows = cur.fetchall()
                 # dict_row; settings_json kept raw — the sweeper only reads
@@ -532,6 +553,7 @@ if _backend != "sqlite":
     def get_run(run_id, user_id): return _pg.get_run(run_id, user_id)
     def list_runs_for_user(user_id, limit=50): return _pg.list_runs_for_user(user_id, limit)
     def update_run_status(run_id, status, error=None, completed=False): return _pg.update_run_status(run_id, status, error, completed)
+    def claim_terminal(run_id, status, error=None): return _pg.claim_terminal(run_id, status, error)
     def mark_emailed(run_id): return _pg.mark_emailed(run_id)
     def store_artifacts(run_id, artifacts, evidence, report_markdown): return _pg.store_artifacts(run_id, artifacts, evidence, report_markdown)
     def get_artifact(run_id, kind): return _pg.get_artifact(run_id, kind)

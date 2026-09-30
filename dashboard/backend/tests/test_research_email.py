@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import sqlite3
 import uuid
+from types import SimpleNamespace
 
 import pytest
 
@@ -119,6 +120,101 @@ def test_settle_failure_leaves_the_run_retryable(monkeypatch):
 
     assert _row(run_id)["status"] == "running"
     assert run_id in {r["run_id"] for r in research_store.list_nonterminal_runs()}
+
+
+def test_expired_running_run_is_failed_and_releases_reservation(monkeypatch):
+    run_id = _new_run()
+    _sql(
+        "UPDATE research_runs SET created_at = datetime('now', '-31 minutes')"
+        " WHERE run_id = ?",
+        run_id,
+    )
+    released: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        research.credits_service,
+        "release_llm_credits",
+        lambda reservation_id, *, reason: released.append((reservation_id, reason)),
+    )
+    monkeypatch.setattr(research, "_service_base", lambda template: "https://service")
+    monkeypatch.setattr(
+        research.httpx,
+        "get",
+        lambda *args, **kwargs: SimpleNamespace(
+            raise_for_status=lambda: None,
+            json=lambda: {"status": "running"},
+        ),
+    )
+
+    result = research._poll_run_once(
+        research_store.get_run(run_id, 7),
+        {"id": "tpl"},
+    )
+
+    assert result["status"] == "failed"
+    assert "maximum runtime" in result["error"]
+    assert released == [("res_1", "research run exceeded maximum runtime")]
+    assert _row(run_id)["status"] == "failed"
+
+
+def test_expired_completed_upstream_without_result_is_failed(monkeypatch):
+    run_id = _new_run()
+    _sql(
+        "UPDATE research_runs SET created_at = datetime('now', '-31 minutes')"
+        " WHERE run_id = ?",
+        run_id,
+    )
+    released: list[str] = []
+    monkeypatch.setattr(
+        research.credits_service,
+        "release_llm_credits",
+        lambda reservation_id, *, reason: released.append(reservation_id),
+    )
+    monkeypatch.setattr(research, "_service_base", lambda template: "https://service")
+
+    class Response:
+        def __init__(self, payload=None, error=None):
+            self.payload = payload
+            self.error = error
+
+        def raise_for_status(self):
+            if self.error:
+                raise self.error
+
+        def json(self):
+            return self.payload
+
+    upstream_error = research.httpx.HTTPStatusError(
+        "result not ready",
+        request=research.httpx.Request("GET", "https://service/runs/svc/result"),
+        response=research.httpx.Response(409),
+    )
+    responses = iter([
+        Response({"status": "completed"}),
+        Response(error=upstream_error),
+    ])
+    monkeypatch.setattr(research.httpx, "get", lambda *args, **kwargs: next(responses))
+
+    result = research._poll_run_once(
+        research_store.get_run(run_id, 7),
+        {"id": "tpl"},
+    )
+
+    assert result["status"] == "failed"
+    assert released == ["res_1"]
+    assert _row(run_id)["status"] == "failed"
+
+
+def test_partial_completed_row_is_repaired_by_the_sweeper_queue():
+    run_id = _new_run()
+    _sql(
+        "UPDATE research_runs SET status = 'completed', completed_at = NULL"
+        " WHERE run_id = ?",
+        run_id,
+    )
+
+    queued = {row["run_id"] for row in research_store.list_nonterminal_runs()}
+
+    assert run_id in queued
 
 
 def test_route_poll_skips_a_run_the_sweeper_is_polling(monkeypatch):
