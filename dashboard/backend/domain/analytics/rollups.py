@@ -364,10 +364,13 @@ def rollup_day(
         usage_dimensions[key]["output_tokens"] += int(
             event.properties.get("output_tokens", 0)
         )
-        if event.billing_mode == "platform_credits":
-            usage_dimensions[key]["cost_micro_usd"] += int(
-                event.properties.get("cost_micro_usd", 0)
-            )
+        # Summed for both lanes but published under separate metrics: the
+        # platform figure is a debit, the BYOK one a list-price estimate
+        # (see LLMExecutionService._emit_model_usage), and the two must
+        # never add into one another.
+        usage_dimensions[key]["cost_micro_usd"] += int(
+            event.properties.get("cost_micro_usd", 0)
+        )
     for (mode, provider, model), values in sorted(usage_dimensions.items()):
         rows.extend(
             [
@@ -396,6 +399,18 @@ def rollup_day(
                 _row(
                     day,
                     "platform_model_cost_usd",
+                    sum_micro=values["cost_micro_usd"],
+                    billing_mode=mode,
+                    provider_id=provider,
+                    model_id=model,
+                    updated_at=current,
+                )
+            )
+        elif mode == "byok":
+            rows.append(
+                _row(
+                    day,
+                    "byok_estimated_cost_usd",
                     sum_micro=values["cost_micro_usd"],
                     billing_mode=mode,
                     provider_id=provider,

@@ -22,7 +22,7 @@ EXPECTED_SCRIPTS = [
     # The app chrome's ticker (D5 layout pass) rides after the formatters.
     "js/admin-ticker.js?v=2",
     "js/admin-live.js?v=1",
-    "js/admin-overview.js?v=6",
+    "js/admin-overview.js?v=7",
     "js/admin-users.js?v=1",
     "js/admin-providers.js?v=1",
     # The absorbed credits console (design N2/PR2).
@@ -91,7 +91,7 @@ def test_gate_module_loads_first_and_every_script_is_pinned():
 
 
 def test_stylesheet_is_admin_css_and_the_page_does_not_inherit_styles_css():
-    assert '<link rel="stylesheet" href="admin.css?v=8">' in ADMIN_HTML
+    assert '<link rel="stylesheet" href="admin.css?v=9">' in ADMIN_HTML
     assert "styles.css" not in ADMIN_HTML
     assert "@import" not in ADMIN_CSS
     assert "cdn.jsdelivr.net" not in ADMIN_HTML
@@ -107,7 +107,7 @@ def test_panel_regions_carry_no_numeric_or_percentage_literal():
     names = [name for name, _body in regions]
     assert names == [
         "live", "attention", "active-users", "activation", "sources", "retention",
-        "value", "lifecycle", "credits", "revenue", "detail", "users", "profile", "providers",
+        "value", "lifecycle", "credits", "detail", "users", "profile", "providers",
         # The absorbed credits console's two routes (design N2/PR2).
         "account", "activity",
     ]

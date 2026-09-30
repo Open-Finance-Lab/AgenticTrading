@@ -271,63 +271,70 @@
 
   function renderCredits(commercial, overview) {
     const s = shell();
-    const headline = s.formatCredits(commercial?.selected_period?.consumed_micro);
-    if (s.fieldPending(overview, 'billing_lane_mix')) return { headline, body: emptyBody(s.PENDING) };
+    const period = commercial?.selected_period || {};
+    const headline = s.formatCredits(period.consumed_micro);
+    const headline2 = s.usdFromMicro(period.platform_model_cost_micro_usd);
+    if (s.fieldPending(overview, 'billing_lane_mix')) return { headline, headline2, headline3: s.DASH, body: emptyBody(s.PENDING) };
     const lanes = Array.isArray(overview?.billing_lane_mix) ? overview.billing_lane_mix : [];
-    // Revenue is a second read (the purchase ledger) that fails on its own:
+    const laneMicro = (row, field) => Number(row?.[field]) || 0;
+    const headline3 = s.formatCredits(lanes.reduce((acc, d) => acc + laneMicro(d, 'byok_estimated_micro'), 0));
+    // BYOK events written before the estimate was recorded carry 0, so a
+    // range reaching back past that deploy undercounts the BYOK lane. Say so
+    // only when it bites: a day with BYOK calls and no estimate.
+    const byokUnpriced = lanes.some((d) => laneMicro(d, 'byok') > 0 && laneMicro(d, 'byok_estimated_micro') === 0);
+    // Purchases are a second read (the purchase ledger) that fails on its own:
     // absent from an older route, or null when the ledger read failed. The
-    // lanes still draw either way, with a note — a lost revenue series must
-    // not blank the call counts beside it.
-    const revenueAvailable = Array.isArray(commercial?.purchased_by_day);
-    const revenue = revenueAvailable ? commercial.purchased_by_day : [];
-    if (!lanes.length && !revenue.length) {
+    // lanes still draw either way, with a note: a lost purchase series must
+    // not blank the lanes beside it.
+    const purchasesAvailable = Array.isArray(commercial?.purchased_by_day);
+    const purchases = purchasesAvailable ? commercial.purchased_by_day : [];
+    const notes = [];
+    if (!purchasesAvailable) notes.push(PURCHASES_UNAVAILABLE);
+    if (byokUnpriced) notes.push(BYOK_UNPRICED);
+    if (!lanes.length && !purchases.length) {
       const body = emptyBody('No Credits activity in this range.');
-      if (!revenueAvailable) body.appendChild(s.el('p', 'credit-note', REVENUE_UNAVAILABLE));
-      return { headline, body };
+      notes.forEach((note) => body.appendChild(s.el('p', 'credit-note', note)));
+      return { headline, headline2, headline3, body };
     }
 
-    // Union of lane days and revenue days on one shared x-axis.
+    // Union of lane days and purchase days on one shared x-axis.
     const daySet = new Set();
     lanes.forEach((d) => daySet.add(String(d.day)));
-    revenue.forEach((d) => daySet.add(String(d.day)));
+    purchases.forEach((d) => daySet.add(String(d.day)));
     const days = [...daySet].sort();
-    const revenueByDay = new Map(revenue.map((d) => [String(d.day), (Number(d.amount_micro) || 0) / 1000000]));
+    const purchasedByDay = new Map(purchases.map((d) => [String(d.day), Number(d.amount_micro) || 0]));
     const laneByDay = new Map(lanes.map((d) => [String(d.day), d]));
 
-    // Two units, two axes: the lanes count model calls (left), revenue is
-    // gross purchased Credits (right, the same quantity as the Revenue
-    // headline). Sharing one scale drew a count and a currency against each other.
+    // One unit, one axis: every series is in Credits ($1 = 1 Credit), read in
+    // micro-Credits and plotted in Credits. Purchases are net of refunds, so
+    // the axis reaches below zero when a day refunded more than it sold.
     const series = [
-      { label: 'Platform calls', className: 'credits-chart-platform', axis: 'calls', values: days.map((d) => Number(laneByDay.get(d)?.platform_credits) || 0) },
-      { label: 'BYOK calls', className: 'credits-chart-byok', axis: 'calls', values: days.map((d) => Number(laneByDay.get(d)?.byok) || 0) },
+      { label: 'Platform Credits', className: 'credits-chart-platform', micro: days.map((d) => laneMicro(laneByDay.get(d), 'platform_cost_micro')) },
+      { label: 'BYOK est. Credits', className: 'credits-chart-byok', micro: days.map((d) => laneMicro(laneByDay.get(d), 'byok_estimated_micro')) },
     ];
-    if (revenueAvailable) {
-      series.push({ label: 'Revenue (Credits)', className: 'credits-chart-revenue', axis: 'credits', values: days.map((d) => revenueByDay.get(d) || 0) });
+    if (purchasesAvailable) {
+      series.push({ label: 'Purchased Credits', className: 'credits-chart-purchased', micro: days.map((d) => purchasedByDay.get(d) || 0) });
     }
-    const callMax = Math.max(1, ...series.filter((e) => e.axis === 'calls').flatMap((e) => e.values));
-    const revMax = Math.max(1, ...series.filter((e) => e.axis === 'credits').flatMap((e) => e.values));
-    const width = 520, height = 200, left = 42, right = 474, top = 14, bottom = 154;
+    series.forEach((entry) => { entry.values = entry.micro.map((micro) => micro / 1000000); });
+    const all = series.flatMap((entry) => entry.values);
+    const hi = Math.max(0, ...all);
+    const lo = Math.min(0, ...all);
+    const span = hi - lo || 1;
+    const width = 980, height = 200, left = 52, right = 964, top = 14, bottom = 154;
     const plotWidth = right - left, plotHeight = bottom - top;
     const x = (index) => left + (days.length === 1 ? 0 : index / (days.length - 1) * plotWidth);
-    const scale = {
-      calls: (value) => bottom - (value / callMax) * plotHeight,
-      credits: (value) => bottom - (value / revMax) * plotHeight,
-    };
+    const y = (value) => bottom - ((value - lo) / span) * plotHeight;
     const labels = days.map((d) => s.formatShortDay(d));
 
-    const svg = svgNode('svg', { viewBox: `0 0 ${width} ${height}`, role: 'img', 'aria-label': `Model calls by billing lane${revenueAvailable ? ' and purchased Credits' : ''} by date for ${s.state.range}` });
-    const tickY = [top + 3, (top + bottom) / 2 + 3, bottom + 3];
-    [0, 0.5, 1].forEach((fraction) => svg.appendChild(svgNode('line', { class: 'revenue-grid', x1: left, y1: bottom - fraction * plotHeight, x2: right, y2: bottom - fraction * plotHeight })));
+    const svg = svgNode('svg', { viewBox: `0 0 ${width} ${height}`, role: 'img', 'aria-label': `Platform Credits, BYOK estimated Credits${purchasesAvailable ? ' and Purchased Credits' : ''} by date for ${s.state.range}` });
+    const ticks = [lo + span, lo + span / 2, lo];
+    ticks.forEach((value) => svg.appendChild(svgNode('line', { class: 'revenue-grid', x1: left, y1: y(value), x2: right, y2: y(value) })));
+    if (lo < 0) svg.appendChild(svgNode('line', { class: 'credits-zero-line', x1: left, y1: y(0), x2: right, y2: y(0) }));
     svg.appendChild(svgNode('line', { class: 'revenue-axis', x1: left, y1: top, x2: left, y2: bottom }));
     svg.appendChild(svgNode('line', { class: 'revenue-axis', x1: left, y1: bottom, x2: right, y2: bottom }));
-    [callMax, callMax / 2, 0].forEach((value, index) => svg.appendChild(svgNode('text', { class: 'revenue-axis-label', x: 5, y: tickY[index] }, axisLabel(value))));
-    if (revenueAvailable) {
-      svg.appendChild(svgNode('line', { class: 'revenue-axis', x1: right, y1: top, x2: right, y2: bottom }));
-      [revMax, revMax / 2, 0].forEach((value, index) => svg.appendChild(svgNode('text', { class: 'revenue-axis-label', x: right + 5, y: tickY[index] }, axisLabel(value))));
-    }
+    ticks.forEach((value) => svg.appendChild(svgNode('text', { class: 'revenue-axis-label', x: 5, y: y(value) + 3 }, axisLabel(value))));
 
     series.forEach((entry) => {
-      const y = scale[entry.axis];
       const path = entry.values
         .map((value, index) => `${index ? 'L' : 'M'}${x(index).toFixed(1)} ${y(value).toFixed(1)}`)
         .join(' ');
@@ -335,7 +342,7 @@
       entry.values.forEach((value, index) => {
         if (value === 0) return;
         const circle = svgNode('circle', { class: `credits-chart-point ${entry.className}`, cx: x(index), cy: y(value), r: 3 });
-        circle.appendChild(svgNode('title', {}, `${labels[index]} · ${entry.label}: ${axisLabel(value)}`));
+        circle.appendChild(svgNode('title', {}, `${labels[index]} · ${entry.label}: ${s.formatCredits(entry.micro[index])}`));
         svg.appendChild(circle);
       });
     });
@@ -354,12 +361,13 @@
       legend.appendChild(item);
     });
     wrap.appendChild(legend);
-    if (!revenueAvailable) wrap.appendChild(s.el('p', 'credit-note', REVENUE_UNAVAILABLE));
+    notes.forEach((note) => wrap.appendChild(s.el('p', 'credit-note', note)));
     body.appendChild(wrap);
-    return { headline, body };
+    return { headline, headline2, headline3, body };
   }
 
-  const REVENUE_UNAVAILABLE = 'Revenue series unavailable — the purchase ledger could not be read.';
+  const PURCHASES_UNAVAILABLE = 'Purchased Credits unavailable — the purchase ledger could not be read.';
+  const BYOK_UNPRICED = 'Some BYOK calls in this range predate the list-price estimate and count as 0 est. Credits.';
 
   function svgNode(name, attrs, text) {
     const node = document.createElementNS(SVG_NS, name);
@@ -368,20 +376,12 @@
     return node;
   }
 
+  // Credits per day are often fractions of one Credit, so small magnitudes
+  // keep two decimals where a call count only ever needed one.
   function axisLabel(value) {
-    return value >= 100 ? String(Math.round(value)) : value.toFixed(1).replace(/\.0$/, '');
-  }
-
-  function renderRevenue(commercial) {
-    const s = shell();
-    const headline = s.formatCredits(commercial?.selected_period?.purchased_micro);
-    // The daily series draws on the Credits chart; this panel keeps the
-    // headline and still tells absent, unreadable and empty apart.
-    if (s.fieldPending(commercial, 'purchased_by_day')) return { headline, body: emptyBody(s.PENDING) };
-    const series = commercial?.purchased_by_day;
-    if (!Array.isArray(series)) return { headline, body: emptyBody(REVENUE_UNAVAILABLE) };
-    if (!series.length) return { headline, body: emptyBody('No settled purchases in this range.') };
-    return { headline, body: emptyBody('The daily revenue series now lives on the Credits usage chart above.') };
+    const magnitude = Math.abs(value);
+    const text = magnitude >= 100 ? String(Math.round(value)) : value.toFixed(magnitude >= 1 ? 1 : 2);
+    return text.replace(/\.0+$/, '').replace(/(\.\d*?)0+$/, '$1');
   }
 
   // --------------------------------------------------------- detail views
@@ -517,8 +517,8 @@
     const period = commercial?.selected_period || {};
     const balances = commercial?.current_balances || {};
     const tiers = commercial?.tier_counts || {};
-    const root = detailShell('Credits & revenue', 'Review platform Credits usage and settled purchases together.', [
-      ['ATL Credits settled', s.formatCredits(period.consumed_micro)],
+    const root = detailShell('Credits & Cost', 'Review Credits consumed, platform model cost and purchases together.', [
+      ['Credits consumed', s.formatCredits(period.consumed_micro)],
       ['Purchased Credits', s.formatCredits(period.purchased_micro)],
       ['Refunds', s.formatCredits(period.refunded_micro)],
       ['Admin Grants', s.formatCredits(period.admin_grant_activity_micro)],
@@ -526,10 +526,10 @@
     section(root, 'Selected period', 'Ledger movement in the selected range', table(
       ['Measure', 'Value', 'Scope'],
       [
-        ['ATL Credits settled', s.formatCredits(period.consumed_micro), 'Selected period'],
+        ['Credits consumed', s.formatCredits(period.consumed_micro), 'Selected period'],
         ['Purchased Credits', s.formatCredits(period.purchased_micro), 'Selected period'],
         ['Refunds', s.formatCredits(period.refunded_micro), 'Selected period'],
-        ['Admin Grants', s.formatCredits(period.admin_grant_activity_micro), 'Excluded from revenue'],
+        ['Admin Grants', s.formatCredits(period.admin_grant_activity_micro), 'Not customer-funded'],
         ['Platform model cost', s.usdFromMicro(period.platform_model_cost_micro_usd), 'Platform Credits lane'],
         ['Lifetime net purchased', s.formatCredits(commercial?.lifetime_net_purchased_micro), 'Lifetime'],
       ],
@@ -543,7 +543,7 @@
     section(root, 'Current balances', 'Spendable Credits right now', table(
       ['Balance', 'Value', 'Note'],
       [
-        ['Grant balance', s.formatCredits(balances.grant_available_micro), 'Not revenue'],
+        ['Grant balance', s.formatCredits(balances.grant_available_micro), 'Not customer-funded'],
         ['Purchased balance', s.formatCredits(balances.purchased_available_micro), 'Customer-funded'],
         ['Total available', s.formatCredits(balances.total_available_micro), 'Current spendable balance'],
       ],
@@ -614,7 +614,6 @@
     { id: 'panelValue', name: 'value', needs: ['groups'], render: (d) => renderValue(d.groups) },
     { id: 'panelLifecycle', name: 'lifecycle', needs: ['lifecycle'], render: (d) => renderLifecycle(d.lifecycle) },
     { id: 'panelCredits', name: 'credits', needs: ['commercial', 'overview'], render: (d) => renderCredits(d.commercial, d.overview) },
-    { id: 'panelRevenue', name: 'revenue', needs: ['commercial'], render: (d) => renderRevenue(d.commercial) },
   ];
 
   function pathFor(name) {
@@ -622,13 +621,20 @@
     return `${ENDPOINTS[name]}?${s.analyticsParams({ withGroup: name === 'groups' })}`;
   }
 
+  // A panel's headline numbers: one slot for most, three for Credits & Cost.
+  // Blanked and painted together, so a failed refresh cannot leave one of the
+  // Credits tiles showing the previous range.
+  const HEADLINE_SLOTS = [['[data-headline]', 'headline'], ['[data-headline2]', 'headline2'], ['[data-headline3]', 'headline3']];
+
   // Blanks a panel down to its placeholder and names the failure. The headline and
   // body are cleared explicitly so a failed refresh can never leave the previous
   // range's numbers on screen at full brightness under an error notice.
   function markPanelUnavailable(panel) {
     const s = shell();
-    const headline = panel.querySelector('[data-headline]');
-    if (headline) headline.textContent = s.DASH;
+    HEADLINE_SLOTS.forEach(([selector]) => {
+      const slot = panel.querySelector(selector);
+      if (slot) slot.textContent = s.DASH;
+    });
     const body = panel.querySelector('[data-body]');
     if (body) s.clear(body);
     s.setPanelState(panel, { busy: false, error: s.SECTION_UNAVAILABLE });
@@ -645,8 +651,10 @@
       return;
     }
     const result = def.render(state.data);
-    const headline = panel.querySelector('[data-headline]');
-    if (headline) headline.textContent = result.headline;
+    HEADLINE_SLOTS.forEach(([selector, key]) => {
+      const slot = panel.querySelector(selector);
+      if (slot) slot.textContent = result[key] ?? s.DASH;
+    });
     const body = panel.querySelector('[data-body]');
     if (body) {
       s.clear(body);
@@ -677,7 +685,7 @@
     // aria-busy="true" with no error and no body -- a spinner that never resolves,
     // which is the one state this page must not publish. The reachable case was
     // formatCredits dereferencing a missing window.CreditFormat (now guarded in the
-    // shell): renderCredits is PANELS index 7, so it stranded panelRevenue behind it.
+    // shell): renderCredits sat at PANELS index 7 and stranded the panel after it.
     PANELS.forEach((def) => {
       try {
         paint(def);
@@ -771,7 +779,7 @@
   window.AdminOverview = {
     PANELS, DETAIL_NEEDS, state,
     renderAttention, renderActiveUsers, renderActivation, renderSources, renderRetention,
-    renderValue, renderLifecycle, renderCredits, renderRevenue,
+    renderValue, renderLifecycle, renderCredits,
     detailSources, detailRetention, detailCredits, detailLifecycle, detailHealth,
     paint, loadAll, showDetail,
   };

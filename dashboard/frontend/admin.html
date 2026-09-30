@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>ATL Admin</title>
   <link rel="icon" href="favicon.svg">
-  <link rel="stylesheet" href="admin.css?v=8">
+  <link rel="stylesheet" href="admin.css?v=9">
   <!-- The absorbed sections (N2/PR2) and the app chrome: component styles
        extracted from the app-wide stylesheet, which this page still must not
        inherit wholesale (its 15k lines would restyle the shell). -->
@@ -18,7 +18,7 @@
   <script src="js/credit-format.js?v=1" defer></script>
   <script src="js/admin-ticker.js?v=2" defer></script>
   <script src="js/admin-live.js?v=1" defer></script>
-  <script src="js/admin-overview.js?v=6" defer></script>
+  <script src="js/admin-overview.js?v=7" defer></script>
   <script src="js/admin-users.js?v=1" defer></script>
   <script src="js/admin-providers.js?v=1" defer></script>
   <script src="js/admin-credits.js?v=4" defer></script>
@@ -151,7 +151,7 @@
         <a class="active" href="#overview" data-route="overview">Overview</a>
         <a href="#sources" data-route="sources">User sources</a>
         <a href="#retention" data-route="retention">Retention</a>
-        <a href="#credits" data-route="credits">Credits &amp; revenue</a>
+        <a href="#credits" data-route="credits">Credits &amp; Cost</a>
         <a href="#lifecycle" data-route="lifecycle">User lifecycle</a>
         <a href="#health" data-route="health">System health</a>
         <a href="#users" data-route="users">Users</a>
@@ -270,22 +270,21 @@
           </section>
         </div>
 
-        <div class="overview-row priority-row">
+        <div class="overview-row priority-row overview-row-single">
           <section class="panel" id="panelCredits" data-panel="credits" aria-labelledby="creditsTitle" aria-busy="true">
-            <div class="section-head"><div><h2 id="creditsTitle">Credits usage</h2><small class="selected-range">Selected range</small></div><div class="section-meta"><strong class="headline-number" data-headline>—</strong><small>ATL Credits settled</small></div></div>
+            <div class="section-head"><div><h2 id="creditsTitle">Credits &amp; Cost</h2><small class="selected-range">Selected range</small></div></div>
+            <div class="credits-metrics">
+              <div class="credits-metric"><small>Credits consumed</small><strong class="headline-number" data-headline>—</strong></div>
+              <div class="credits-metric"><small><i class="credits-chart-swatch credits-chart-platform"></i>Platform model cost</small><strong class="headline-number" data-headline2>—</strong></div>
+              <div class="credits-metric"><small><i class="credits-chart-swatch credits-chart-byok"></i>BYOK est. Credits</small><strong class="headline-number" data-headline3>—</strong></div>
+            </div>
             <div class="panel-body" data-body></div>
-            <p class="panel-status muted" data-status hidden></p>
-            <p class="panel-error" data-error hidden><span></span> <button type="button" class="retry" data-retry>Retry</button></p>
-          </section>
-          <section class="panel" id="panelRevenue" data-panel="revenue" aria-labelledby="revenueTitle" aria-busy="true">
-            <div class="section-head"><div><h2 id="revenueTitle">Revenue</h2><small class="selected-range">Selected range</small></div><div class="section-meta"><strong class="headline-number" data-headline>—</strong><small>purchased Credits</small></div></div>
-            <div class="panel-body" data-body></div>
-            <p class="revenue-note muted">Admin Grants excluded from revenue</p>
+            <p class="credits-panel-note muted">Purchased Credits exclude Admin Grants, which are not customer-funded.</p>
             <p class="panel-status muted" data-status hidden></p>
             <p class="panel-error" data-error hidden><span></span> <button type="button" class="retry" data-retry>Retry</button></p>
           </section>
         </div>
-        <div class="shared-link-row"><a class="module-link" href="#credits">Open Credits &amp; revenue</a></div>
+        <div class="shared-link-row"><a class="module-link" href="#credits">Open Credits &amp; Cost</a></div>
       </section>
 
       <section id="detail" class="detail-view" data-panel="detail" hidden aria-live="polite"></section>

@@ -290,6 +290,11 @@ class LLMExecutionService:
             # Credits: record the platform list-price estimate of the same
             # tokens. The provider cost belongs to the user's own key and is
             # not the platform's equivalent, so it is deliberately ignored here.
+            # Safe to overload the field only because every platform-cost
+            # reader filters on billing_mode == "platform_credits" first
+            # (query_service, value_queries._safe_cost_micro_usd, rollups,
+            # metrics, admin-users.js); a new reader of cost_micro_usd must
+            # too, or it will add this estimate into real spend.
             cost_usd = result.billing.estimated_cost_usd or 0.0
         analytics_instrumentation.emit_resource_event(
             event_name="model_usage_recorded",
