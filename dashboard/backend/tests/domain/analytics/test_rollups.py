@@ -109,6 +109,49 @@ def test_rollup_records_platform_cost_as_micro_usd(tmp_path):
     assert cost.billing_mode == "platform_credits"
 
 
+def test_rollup_keeps_the_byok_estimate_out_of_platform_cost(tmp_path):
+    """BYOK events carry a list-price estimate in cost_micro_usd. It gets its
+    own metric per provider/model and never reaches platform_model_cost_usd,
+    neither the day's total nor any per-model row."""
+    analytics, rollups = _store(tmp_path)
+    service = AnalyticsService(analytics)
+    at = datetime(2026, 8, 25, 13, 0, tzinfo=timezone.utc)
+    for index, (billing_mode, cost) in enumerate(
+        (("platform_credits", 1_000_000), ("byok", 420_000), ("byok", 80_000))
+    ):
+        service.record_server_event(
+            event_name="model_usage_recorded",
+            user_id=1,
+            source_event_id=f"resource:model_usage_recorded:run-1:{index}",
+            source_record_type="run",
+            source_record_id="run-1",
+            billing_mode=billing_mode,
+            provider_id="openrouter",
+            model_id="openai/gpt-5.5",
+            properties={"input_tokens": 1, "output_tokens": 1, "cost_micro_usd": cost},
+            occurred_at=at + timedelta(minutes=index),
+        )
+
+    rollup_day(date(2026, 8, 25), store=rollups)
+    rows = rollups.list_rollups(start=date(2026, 8, 25), end=date(2026, 8, 26))
+    platform = {
+        (row.provider_id, row.model_id): row.value_sum_micro
+        for row in rows
+        if row.metric_name == "platform_model_cost_usd"
+    }
+    byok = [
+        (row.billing_mode, row.provider_id, row.model_id, row.value_sum_micro)
+        for row in rows
+        if row.metric_name == "byok_estimated_cost_usd"
+    ]
+
+    assert platform == {
+        ("", ""): 1_000_000,
+        ("openrouter", "openai/gpt-5.5"): 1_000_000,
+    }
+    assert byok == [("byok", "openrouter", "openai/gpt-5.5", 500_000)]
+
+
 def test_lifecycle_rollup_is_bounded_and_preserves_other_metrics(tmp_path):
     analytics, rollups = _store(tmp_path)
     values = ValueAnalyticsStore(

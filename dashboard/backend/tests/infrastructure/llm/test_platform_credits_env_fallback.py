@@ -595,6 +595,42 @@ def test_byok_usage_reports_tokens_with_zero_atl_cost(monkeypatch):
     }
 
 
+def test_byok_usage_records_the_platform_price_estimate(monkeypatch):
+    """BYOK debits nothing, but the lane must still be expressible in Credits:
+    the event carries the platform list-price estimate of the same tokens,
+    never the provider cost the user paid on their own key."""
+    events = []
+    monkeypatch.setattr(
+        execution_service_module.analytics_instrumentation,
+        "emit_resource_event",
+        lambda **kwargs: events.append(kwargs),
+    )
+    request = _request("analytics-byok-estimate-run").model_copy(
+        update={"billing_mode": BillingMode.BYOK}
+    )
+    result = LLMExecutionResult(
+        text="BUY",
+        provider_id="openrouter",
+        model_id=MODEL_ID,
+        usage=LLMUsage(input_tokens=50, output_tokens=25),
+        billing=BillingEvidence(
+            billing_source=BillingMode.BYOK,
+            usage_authority="provider_usage_pricing_snapshot",
+            provider_cost_usd=99.0,
+            estimated_cost_usd=0.42,
+        ),
+    )
+
+    LLMExecutionService._emit_model_usage(request, result)
+
+    assert events[0]["billing_mode"] == "byok"
+    assert events[0]["properties"] == {
+        "input_tokens": 50,
+        "output_tokens": 25,
+        "cost_micro_usd": 420_000,
+    }
+
+
 def test_execution_failure_emits_only_safe_error_category(
     tmp_path,
     monkeypatch,

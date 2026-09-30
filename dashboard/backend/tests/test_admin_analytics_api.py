@@ -360,6 +360,123 @@ def test_billing_lane_mix_counts_model_calls_from_rollups_and_today_honouring_fi
     assert mix(billing_mode="byok") == [(yesterday.isoformat(), 0, 2), (today, 0, 2)]
 
 
+def test_billing_lane_mix_carries_each_lane_in_credits_honouring_filters(tmp_path):
+    """Both lanes read cost off model_usage_recorded: completed days from the
+    platform_model_cost_usd / byok_estimated_cost_usd rollups, today from raw
+    events. The platform lane sums to the headline under every filter, and
+    the BYOK estimate never enters it."""
+    analytics, events, rollups, _states, users = _fixture(tmp_path)
+    yesterday = NOW.date() - timedelta(days=1)
+    stamp = datetime.combine(NOW.date(), datetime.min.time(), tzinfo=timezone.utc)
+
+    def cost_rollup(metric, billing_mode, sum_micro, provider_id="", model_id=""):
+        return DailyRollup(
+            rollup_date=yesterday,
+            metric_name=metric,
+            billing_mode=billing_mode,
+            provider_id=provider_id,
+            model_id=model_id,
+            value_sum_micro=sum_micro,
+            updated_at=stamp,
+        )
+
+    rollups.replace_day(
+        yesterday,
+        [
+            # The day's undimensioned total plus its per-model split: summing
+            # both would double the lane.
+            cost_rollup("platform_model_cost_usd", "platform_credits", 5_000_000),
+            cost_rollup("platform_model_cost_usd", "platform_credits", 3_000_000, "openrouter", "a"),
+            cost_rollup("platform_model_cost_usd", "platform_credits", 2_000_000, "commonstack", "b"),
+            cost_rollup("byok_estimated_cost_usd", "byok", 700_000, "openrouter", "a"),
+            cost_rollup("byok_estimated_cost_usd", "byok", 300_000, "commonstack", "b"),
+        ],
+    )
+    for index, (billing_mode, provider_id, model_id, cost) in enumerate(
+        (
+            ("platform_credits", "openrouter", "a", 400_000),
+            ("byok", "openrouter", "a", 90_000),
+            ("byok", "commonstack", "b", 10_000),
+        )
+    ):
+        _event(
+            events,
+            "model_usage_recorded",
+            NOW - timedelta(minutes=10 + index),
+            f"resource:model_usage_recorded:run-today:{index}",
+            correlation_id="run-today",
+            provider_id=provider_id,
+            model_id=model_id,
+            billing_mode=billing_mode,
+            outcome="succeeded",
+            properties={"input_tokens": 1, "output_tokens": 1, "cost_micro_usd": cost},
+        )
+    service = AnalyticsQueryService(store=analytics, user_store=users)
+    start = datetime.combine(yesterday, datetime.min.time(), tzinfo=timezone.utc)
+
+    def lanes(**filters):
+        overview = service.get_overview(
+            now=NOW,
+            filters=AnalyticsMetricFilters(start=start, end=NOW, **filters),
+        )
+        assert overview.availability["growth"].available is True
+        rows = [
+            (row.day, row.platform_cost_micro, row.byok_estimated_micro)
+            for row in overview.billing_lane_mix
+        ]
+        # The per-day platform lane and the headline are one figure.
+        assert sum(row[1] for row in rows) == round(
+            overview.platform_model_cost_usd * 1_000_000
+        )
+        return rows
+
+    day, today = yesterday.isoformat(), NOW.date().isoformat()
+    assert lanes() == [(day, 5_000_000, 1_000_000), (today, 400_000, 100_000)]
+    assert lanes(provider_id="openrouter") == [
+        (day, 3_000_000, 700_000),
+        (today, 400_000, 90_000),
+    ]
+    assert lanes(model_id="b") == [(day, 2_000_000, 300_000), (today, 0, 10_000)]
+    assert lanes(billing_mode="byok") == [(day, 0, 1_000_000), (today, 0, 100_000)]
+    assert lanes(billing_mode="platform_credits") == [
+        (day, 5_000_000, 0),
+        (today, 400_000, 0),
+    ]
+
+
+def test_billing_lane_mix_skips_a_day_with_no_calls_and_no_cost(tmp_path):
+    """Every rolled-up day carries a platform cost total, zero or not. A zero
+    day is not activity: listing it would replace the panel's empty state with
+    flat lines."""
+    analytics, _events, rollups, _states, users = _fixture(tmp_path)
+    yesterday = NOW.date() - timedelta(days=1)
+    stamp = datetime.combine(NOW.date(), datetime.min.time(), tzinfo=timezone.utc)
+    rollups.replace_day(
+        yesterday,
+        [
+            DailyRollup(
+                rollup_date=yesterday,
+                metric_name="platform_model_cost_usd",
+                billing_mode="platform_credits",
+                value_sum_micro=0,
+                updated_at=stamp,
+            )
+        ],
+    )
+    service = AnalyticsQueryService(store=analytics, user_store=users)
+
+    overview = service.get_overview(
+        now=NOW,
+        filters=AnalyticsMetricFilters(
+            start=datetime.combine(yesterday, datetime.min.time(), tzinfo=timezone.utc),
+            end=NOW,
+        ),
+    )
+
+    assert overview.availability["growth"].available is True
+    assert overview.billing_lane_mix == []
+
+
 def test_user_list_and_profile_are_display_safe(tmp_path):
     analytics, events, _rollups, states, users = _fixture(tmp_path)
     _event(

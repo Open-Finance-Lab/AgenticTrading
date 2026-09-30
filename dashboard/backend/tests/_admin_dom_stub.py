@@ -150,10 +150,12 @@ function byTag(node, tag) { return flatten(node).filter((item) => item.tagName =
 function texts(nodes) { return nodes.map((item) => item.textContent); }
 function panelStub() {
   const panel = new Node('section');
-  const parts = { headline: new Node('strong'), body: new Node('div'), status: new Node('p'), error: new Node('p'), errorText: new Node('span'), retry: new Node('button') };
+  const parts = { headline: new Node('strong'), headline2: new Node('strong'), headline3: new Node('strong'), body: new Node('div'), status: new Node('p'), error: new Node('p'), errorText: new Node('span'), retry: new Node('button') };
   parts.headline.textContent = '—';
+  parts.headline2.textContent = '—';
+  parts.headline3.textContent = '—';
   parts.error.appendChild(parts.errorText); parts.error.appendChild(parts.retry);
-  panel.querySelector = (selector) => ({ '[data-headline]': parts.headline, '[data-body]': parts.body, '[data-status]': parts.status, '[data-error]': parts.error, '[data-error] span': parts.errorText, '[data-retry]': parts.retry }[selector] || null);
+  panel.querySelector = (selector) => ({ '[data-headline]': parts.headline, '[data-headline2]': parts.headline2, '[data-headline3]': parts.headline3, '[data-body]': parts.body, '[data-status]': parts.status, '[data-error]': parts.error, '[data-error] span': parts.errorText, '[data-retry]': parts.retry }[selector] || null);
   return { panel, parts };
 }
 """

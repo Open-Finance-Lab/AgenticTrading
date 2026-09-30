@@ -34,8 +34,14 @@ from .states import (
 ActivitySection = Literal["timeline", "runs", "usage", "sessions"]
 _USER_STATES = {"blocked", "needs_attention", "dormant", "onboarding", "active"}
 _ATTENTION_STATES = {"blocked", "needs_attention"}
-# The two BillingLaneDay fields; also models.ALLOWED_BILLING_MODES.
+# The two BillingLaneDay call-count fields; also models.ALLOWED_BILLING_MODES.
 _BILLING_LANES = ("platform_credits", "byok")
+# Each lane's Credits field: the platform debit, the BYOK list-price estimate.
+_LANE_COST_FIELD = {
+    "platform_credits": "platform_cost_micro",
+    "byok": "byok_estimated_micro",
+}
+_LANE_FIELDS = (*_BILLING_LANES, *_LANE_COST_FIELD.values())
 _ACTIVATION_EVENTS = (
     "account_signed_up",
     "credential_verified",
@@ -204,12 +210,20 @@ class BillingLaneDay(BaseModel):
     so the two bars share a unit. ``credits_settled`` is not a run or a call
     counter: it fires once per non-zero credit bucket, and not at all for a
     zero-cost settlement.
+
+    The two ``*_micro`` fields sum ``cost_micro_usd`` off those same events,
+    in micro-Credits ($1 = 1 Credit): ``platform_cost_micro`` is what the
+    platform lane debited, ``byok_estimated_micro`` what the BYOK calls would
+    have debited at list price. BYOK events written before the estimate was
+    recorded carry 0.
     """
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     day: str
     platform_credits: int = Field(ge=0)
     byok: int = Field(ge=0)
+    platform_cost_micro: int = Field(default=0, ge=0)
+    byok_estimated_micro: int = Field(default=0, ge=0)
 
 
 class AnalyticsOverview(BaseModel):
@@ -602,6 +616,31 @@ def _matches_rollup_dimensions(
     return True
 
 
+def _counts_toward_platform_cost(
+    row: DailyRollup,
+    filters: AnalyticsMetricFilters,
+) -> bool:
+    """Which ``platform_model_cost_usd`` rollup rows make up the platform cost.
+
+    A day carries one undimensioned total plus one row per provider/model, so
+    exactly one of the two sets is summed: the per-model rows when a provider
+    or model filter is set, the total otherwise. Shared by the headline and
+    the Credits panel's per-day lane so the two always agree.
+    """
+    if row.metric_name != "platform_model_cost_usd":
+        return False
+    if row.billing_mode != "platform_credits" or filters.billing_mode == "byok":
+        return False
+    if filters.provider_id is not None or filters.model_id is not None:
+        return (
+            bool(row.provider_id)
+            and bool(row.model_id)
+            and (filters.provider_id is None or row.provider_id == filters.provider_id)
+            and (filters.model_id is None or row.model_id == filters.model_id)
+        )
+    return not row.provider_id and not row.model_id
+
+
 class AnalyticsQueryService:
     def __init__(
         self,
@@ -766,33 +805,11 @@ class AnalyticsQueryService:
             denominator = completed + failed
             success_rate = None if denominator == 0 else completed / denominator
 
-            if filters.billing_mode == "byok":
-                platform_micro = 0
-            elif filters.provider_id is not None or filters.model_id is not None:
-                platform_micro = sum(
-                    row.value_sum_micro
-                    for row in rollups
-                    if row.metric_name == "platform_model_cost_usd"
-                    and row.billing_mode == "platform_credits"
-                    and bool(row.provider_id)
-                    and bool(row.model_id)
-                    and (
-                        filters.provider_id is None
-                        or row.provider_id == filters.provider_id
-                    )
-                    and (
-                        filters.model_id is None or row.model_id == filters.model_id
-                    )
-                )
-            else:
-                platform_micro = sum(
-                    row.value_sum_micro
-                    for row in rollups
-                    if row.metric_name == "platform_model_cost_usd"
-                    and row.billing_mode == "platform_credits"
-                    and not row.provider_id
-                    and not row.model_id
-                )
+            platform_micro = sum(
+                row.value_sum_micro
+                for row in rollups
+                if _counts_toward_platform_cost(row, filters)
+            )
             platform_micro += sum(
                 int(event.properties.get("cost_micro_usd", 0))
                 for event in current_events
@@ -838,18 +855,35 @@ class AnalyticsQueryService:
             # billing_mode dimension, today from the same filtered raw events
             # as the rest of this block. Built locally and published only on
             # success, so a failure part-way never ships a half-counted series.
+            # Each lane also carries its cost in Credits, from the same
+            # model_usage_recorded events: the platform debit
+            # (platform_model_cost_usd, the headline's own rows) and the BYOK
+            # list-price estimate (byok_estimated_cost_usd). Never
+            # credits_settled, which has no provider or model to filter on.
             lanes: dict[str, dict[str, int]] = {}
             for row in rollups:
+                day_key = row.rollup_date.isoformat()
                 if (
                     row.metric_name == "event_count"
                     and row.event_name == "model_usage_recorded"
                     and row.billing_mode in _BILLING_LANES
                     and _matches_rollup_dimensions(row, filters)
                 ):
-                    lane = lanes.setdefault(
-                        row.rollup_date.isoformat(), dict.fromkeys(_BILLING_LANES, 0)
-                    )
-                    lane[row.billing_mode] += row.value_count
+                    lanes.setdefault(day_key, dict.fromkeys(_LANE_FIELDS, 0))[
+                        row.billing_mode
+                    ] += row.value_count
+                elif _counts_toward_platform_cost(row, filters):
+                    lanes.setdefault(day_key, dict.fromkeys(_LANE_FIELDS, 0))[
+                        "platform_cost_micro"
+                    ] += row.value_sum_micro
+                elif (
+                    row.metric_name == "byok_estimated_cost_usd"
+                    and row.billing_mode == "byok"
+                    and _matches_rollup_dimensions(row, filters)
+                ):
+                    lanes.setdefault(day_key, dict.fromkeys(_LANE_FIELDS, 0))[
+                        "byok_estimated_micro"
+                    ] += row.value_sum_micro
             for event in current_events:
                 if (
                     event.event_name == "model_usage_recorded"
@@ -857,10 +891,18 @@ class AnalyticsQueryService:
                 ):
                     lane = lanes.setdefault(
                         event.occurred_at.date().isoformat(),
-                        dict.fromkeys(_BILLING_LANES, 0),
+                        dict.fromkeys(_LANE_FIELDS, 0),
                     )
                     lane[event.billing_mode] += 1
-            lane_days = lanes
+                    lane[_LANE_COST_FIELD[event.billing_mode]] += int(
+                        event.properties.get("cost_micro_usd", 0)
+                    )
+            # Every rolled-up day carries a platform cost total, zero or not;
+            # a day with neither calls nor cost is not activity, and keeping
+            # it would hide the panel's "no activity" state behind flat lines.
+            lane_days = {
+                day: lane for day, lane in lanes.items() if any(lane.values())
+            }
         except Exception:
             availability["growth"] = _availability(False)
 
@@ -954,6 +996,8 @@ class AnalyticsQueryService:
                     day=day,
                     platform_credits=counts["platform_credits"],
                     byok=counts["byok"],
+                    platform_cost_micro=counts["platform_cost_micro"],
+                    byok_estimated_micro=counts["byok_estimated_micro"],
                 )
                 for day, counts in sorted(lane_days.items())
             ],

@@ -292,7 +292,10 @@ def test_synthetic_acceptance_scenario_has_no_real_credentials(monkeypatch):
             properties={
                 "input_tokens": 100,
                 "output_tokens": 20,
-                "cost_micro_usd": 0,
+                # The platform list-price estimate the emit side now records
+                # for the BYOK lane (the user's own provider spend is not
+                # the platform's equivalent).
+                "cost_micro_usd": 42_000,
             },
             occurred_at=now - timedelta(hours=1, minutes=59),
         )
@@ -354,6 +357,17 @@ def test_synthetic_acceptance_scenario_has_no_real_credentials(monkeypatch):
         overview = overview_response.json()
         profile = profile_response.json()
         assert overview["platform_model_cost_usd"] == 0.42
+        # The Credits panel's lane series, in Credits: the platform lane's
+        # debit off model_usage_recorded (the headline's figure), and the BYOK
+        # lane's list-price estimate. Completed days come from rollups, which
+        # this test never writes, so the BYOK call (1h59m before "now") is
+        # only visible when it falls on today's UTC date.
+        lanes = overview["billing_lane_mix"]
+        assert sum(row["platform_credits"] for row in lanes) == 1
+        assert sum(row["platform_cost_micro"] for row in lanes) == 420_000
+        if (now - timedelta(hours=1, minutes=59)).date() == now.date():
+            assert sum(row["byok"] for row in lanes) == 1
+            assert sum(row["byok_estimated_micro"] for row in lanes) == 42_000
         assert profile["billing_lane_mix"] == {
             "byok": 1,
             "platform_credits": 1,

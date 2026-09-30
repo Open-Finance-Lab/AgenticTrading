@@ -89,12 +89,16 @@
     {
       "day": "2026-08-25",
       "platform_credits": 11,
-      "byok": 7
+      "byok": 7,
+      "platform_cost_micro": 1100000,
+      "byok_estimated_micro": 700000
     },
     {
       "day": "2026-08-26",
       "platform_credits": 14,
-      "byok": 8
+      "byok": 8,
+      "platform_cost_micro": 1300000,
+      "byok_estimated_micro": 800000
     }
   ]
 }
