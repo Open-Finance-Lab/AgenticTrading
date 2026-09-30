@@ -127,7 +127,12 @@ class CSPHeaderMiddleware(BaseHTTPMiddleware):
             "script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; "
             "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
             "font-src 'self' https://fonts.gstatic.com data:; "
-            "connect-src *; img-src * data:;"
+            "connect-src *; img-src * data:; "
+            # Nothing embeds the app; refusing frames blocks clickjacking of
+            # the signed-in /app and /admin pages (billing, live-run buttons).
+            "frame-ancestors 'none';"
         )
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
         # DO NOT override CORS headers here — let CORSMiddleware handle them
         return response
