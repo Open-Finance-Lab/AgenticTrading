@@ -9,6 +9,7 @@ from typing import Iterable
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from .models import AnalyticsEventRecord
+from .usage_cost import atl_cost_micro
 
 
 _MEANINGFUL_EXPERIENCE_EVENTS = {"page_viewed"}
@@ -216,10 +217,9 @@ def calculate_overview_metrics(
         if event.event_name == "model_usage_recorded":
             input_tokens += int(event.properties.get("input_tokens", 0))
             output_tokens += int(event.properties.get("output_tokens", 0))
-            if event.billing_mode == "platform_credits":
-                platform_cost_micro += int(
-                    event.properties.get("cost_micro_usd", 0)
-                )
+            platform_cost_micro += atl_cost_micro(
+                event.billing_mode, event.properties
+            )
 
     return AnalyticsOverviewMetrics(
         active_users_7d=len(active_users),

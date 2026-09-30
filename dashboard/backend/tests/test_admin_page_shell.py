@@ -17,12 +17,12 @@ ADMIN_HTML = (FRONTEND / "admin.html").read_text(encoding="utf-8")
 ADMIN_CSS = (FRONTEND / "admin.css").read_text(encoding="utf-8")
 
 EXPECTED_SCRIPTS = [
-    "js/admin-shell.js?v=7",
+    "js/admin-shell.js?v=8",
     "js/credit-format.js?v=1",
     # The app chrome's ticker (D5 layout pass) rides after the formatters.
     "js/admin-ticker.js?v=2",
     "js/admin-live.js?v=1",
-    "js/admin-overview.js?v=7",
+    "js/admin-overview.js?v=9",
     "js/admin-users.js?v=1",
     "js/admin-providers.js?v=1",
     # The absorbed credits console (design N2/PR2).
@@ -85,13 +85,13 @@ def test_the_inline_script_guard_sees_tags_html_allows():
 def test_gate_module_loads_first_and_every_script_is_pinned():
     srcs = re.findall(r'<script src="([^"]+)" defer></script>', ADMIN_HTML)
     assert srcs == EXPECTED_SCRIPTS
-    assert srcs[0] == "js/admin-shell.js?v=7"
+    assert srcs[0] == "js/admin-shell.js?v=8"
     for src in srcs:
         assert "?v=" in src, src
 
 
 def test_stylesheet_is_admin_css_and_the_page_does_not_inherit_styles_css():
-    assert '<link rel="stylesheet" href="admin.css?v=9">' in ADMIN_HTML
+    assert '<link rel="stylesheet" href="admin.css?v=11">' in ADMIN_HTML
     assert "styles.css" not in ADMIN_HTML
     assert "@import" not in ADMIN_CSS
     assert "cdn.jsdelivr.net" not in ADMIN_HTML

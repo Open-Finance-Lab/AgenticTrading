@@ -25,6 +25,7 @@ from .query_service import (
 )
 from .repository import analytics_store
 from .repository_common import positive_limit, positive_user_id
+from .usage_cost import atl_cost_micro
 from .value_repository import (
     CommercialValueFact,
     UserLifecycleDailySnapshot,
@@ -239,7 +240,9 @@ class CommercialPeriodSummary(BaseModel):
     refunded_micro: int = Field(ge=0)
     consumed_micro: int = Field(ge=0)
     admin_grant_activity_micro: int = Field(ge=0)
-    platform_model_cost_micro_usd: int = Field(ge=0)
+    # None when the model-usage read behind it failed: 0 is a real answer
+    # ("no platform calls"), so it must not also stand for "unknown".
+    platform_model_cost_micro_usd: int | None = Field(ge=0)
 
 
 class BalanceTotals(BaseModel):
@@ -251,7 +254,7 @@ class BalanceTotals(BaseModel):
 
 
 class DailyMicroTotals(BaseModel):
-    """One UTC day of ledger movement for the /admin Credits & revenue charts."""
+    """One UTC day of ledger movement for the /admin Credits & Cost chart."""
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     day: date
@@ -282,11 +285,14 @@ class OperationalAnalyticsResponse(BaseModel):
     as_of: datetime
     operational_state_counts: dict[OperationalState, int]
     backtest_success_rate: float | None = Field(default=None, ge=0, le=1)
-    completed_runs: int = Field(ge=0)
-    failed_runs: int = Field(ge=0)
-    input_tokens: int = Field(ge=0)
-    output_tokens: int = Field(ge=0)
-    platform_model_cost_micro_usd: int = Field(ge=0)
+    # The growth read's figures, each None when that read failed: 0 is a real
+    # answer ("no runs", "no platform calls"), so it must not also stand for
+    # "unknown".
+    completed_runs: int | None = Field(ge=0)
+    failed_runs: int | None = Field(ge=0)
+    input_tokens: int | None = Field(ge=0)
+    output_tokens: int | None = Field(ge=0)
+    platform_model_cost_micro_usd: int | None = Field(ge=0)
     top_failure_categories: Sequence[FailureCategoryCount]
     availability: SectionAvailability
 
@@ -476,10 +482,7 @@ def _safe_cost_micro_usd(event: object) -> int:
     summary fail or turn into a negative cost.
     """
 
-    if (
-        getattr(event, "event_name", None) != "model_usage_recorded"
-        or getattr(event, "billing_mode", None) != "platform_credits"
-    ):
+    if getattr(event, "event_name", None) != "model_usage_recorded":
         return 0
     properties = getattr(event, "properties", {})
     if not isinstance(properties, dict):
@@ -487,7 +490,7 @@ def _safe_cost_micro_usd(event: object) -> int:
     value = properties.get("cost_micro_usd")
     if isinstance(value, bool) or not isinstance(value, int) or value < 0:
         return 0
-    return value
+    return atl_cost_micro(getattr(event, "billing_mode", None), properties)
 
 
 class ValueAnalyticsQueryService:
@@ -563,7 +566,7 @@ class ValueAnalyticsQueryService:
         start: date,
         end: date,
     ) -> tuple[list[DailyMicroTotals], list[DailyMicroTotals]]:
-        """(purchased_by_day, consumed_by_day) for the Credits & revenue charts.
+        """(purchased_by_day, consumed_by_day) for the Credits & Cost chart.
 
         Chunked by 500 like ``_commercial`` so the bound-parameter count never
         grows with the user table; per-day sums are additive across chunks.
@@ -1036,7 +1039,9 @@ class ValueAnalyticsQueryService:
         users = self._eligible_users(include_internal=include_internal)
         facts = self._commercial(users, start=start, end=end)
         tier_counts = Counter(fact.commercial_tier for fact in facts.values())
-        overview = self.legacy_service.get_overview(
+        # The overview's platform-cost headline alone, not a whole second
+        # overview: the page already draws that figure from /overview.
+        platform_cost_micro = self.legacy_service.get_platform_model_cost_micro(
             filters=AnalyticsMetricFilters(
                 start=_day_start(start),
                 end=_day_start(end),
@@ -1044,7 +1049,7 @@ class ValueAnalyticsQueryService:
             ),
             now=current_time,
         )
-        cost_available = overview.availability["growth"].available
+        cost_available = platform_cost_micro is not None
         try:
             purchased_by_day, consumed_by_day = self._ledger_days(
                 users, start=start, end=end
@@ -1075,9 +1080,8 @@ class ValueAnalyticsQueryService:
                 admin_grant_activity_micro=sum(
                     fact.admin_grant_activity_micro for fact in facts.values()
                 ),
-                platform_model_cost_micro_usd=round(
-                    (overview.platform_model_cost_usd or 0) * 1_000_000
-                ),
+                # None when the read behind it failed.
+                platform_model_cost_micro_usd=platform_cost_micro,
             ),
             current_balances=BalanceTotals(
                 grant_available_micro=sum(
@@ -1140,13 +1144,19 @@ class ValueAnalyticsQueryService:
             operational_state_counts={
                 state: int(counts.get(state, 0)) for state in _OPERATIONAL_STATES
             },
-            backtest_success_rate=overview.backtest_success_rate,
-            completed_runs=overview.completed_runs or 0,
-            failed_runs=overview.failed_runs or 0,
-            input_tokens=overview.input_tokens or 0,
-            output_tokens=overview.output_tokens or 0,
-            platform_model_cost_micro_usd=round(
-                (overview.platform_model_cost_usd or 0) * 1_000_000
+            # Unknown whenever the growth read failed, even part-way: the
+            # overview can compute a figure and then fail the block.
+            backtest_success_rate=(
+                overview.backtest_success_rate if growth_available else None
+            ),
+            completed_runs=overview.completed_runs if growth_available else None,
+            failed_runs=overview.failed_runs if growth_available else None,
+            input_tokens=overview.input_tokens if growth_available else None,
+            output_tokens=overview.output_tokens if growth_available else None,
+            platform_model_cost_micro_usd=(
+                None
+                if not growth_available or overview.platform_model_cost_usd is None
+                else round(overview.platform_model_cost_usd * 1_000_000)
             ),
             top_failure_categories=overview.top_failure_categories,
             availability=SectionAvailability(

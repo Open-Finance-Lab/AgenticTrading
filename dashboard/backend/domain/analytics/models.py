@@ -107,6 +107,55 @@ _EMPTY_SERVER_EVENTS = ALLOWED_SERVER_EVENT_NAMES - {
     "credits_refunded",
 }
 _CREDIT_BUCKETS = {"grant", "purchased"}
+_MODEL_USAGE_REQUIRED = frozenset({"input_tokens", "output_tokens", "cost_micro_usd"})
+# BYOK's list-price estimate; absent when the call is unpriced
+# (analytics.usage_cost), and never on another lane.
+_MODEL_USAGE_OPTIONAL = frozenset({"estimated_cost_micro_usd"})
+_CREDIT_PROPERTIES = frozenset({"amount_micro", "bucket"})
+
+
+def _known_property_keys(event_name: str) -> frozenset[str] | None:
+    """Every property key the validators below accept for ``event_name``, or
+    None for an event they do not know."""
+    if event_name == "page_viewed":
+        return frozenset()
+    if event_name in ALLOWED_FRONTEND_EVENT_NAMES:
+        return frozenset({"visible_ms"})
+    if event_name in _EMPTY_SERVER_EVENTS:
+        return frozenset()
+    if event_name == "model_usage_recorded":
+        return _MODEL_USAGE_REQUIRED | _MODEL_USAGE_OPTIONAL
+    if event_name in ALLOWED_SERVER_EVENT_NAMES:
+        return _CREDIT_PROPERTIES
+    return None
+
+
+_REPORTED_UNKNOWN_PROPERTIES: set[tuple[str, str]] = set()
+
+
+def stored_properties(event_name: object, properties: object) -> object:
+    """``properties`` read back from storage, less keys this build does not know.
+
+    Validation is strict on write, and a stored event is validated again on
+    read. Strict on read too, a property added by a later build -- or a later
+    build's row still read by this one, whether after a revert or on the old
+    instance during a deploy -- raised on every read of it, and failed every
+    rollup and activity page that touched its day. Dropping the unknown key
+    keeps the read forward-compatible: nothing this build does not understand
+    reaches it, and every key it does understand is still validated. Each
+    dropped key is reported once per process, so the drift is visible.
+    """
+    known = _known_property_keys(event_name) if isinstance(event_name, str) else None
+    if known is None or not isinstance(properties, dict):
+        return properties
+    for key in sorted(set(properties) - known):
+        if (event_name, key) not in _REPORTED_UNKNOWN_PROPERTIES:
+            _REPORTED_UNKNOWN_PROPERTIES.add((event_name, key))
+            print(
+                "[analytics] WARN ignoring a stored property this build does not "
+                f"know: event={event_name} property={key}"
+            )
+    return {key: value for key, value in properties.items() if key in known}
 
 
 def _canonical_uuid(value: str, field_name: str) -> str:
@@ -144,8 +193,7 @@ def sanitize_frontend_properties(
         raise ValueError("unknown frontend analytics event")
     if not isinstance(properties, dict):
         raise ValueError("analytics properties must be an object")
-    allowed_keys = set() if event_name == "page_viewed" else {"visible_ms"}
-    if set(properties) - allowed_keys:
+    if set(properties) - _known_property_keys(event_name):
         raise ValueError("unknown frontend analytics property")
     cleaned: dict[str, Any] = {}
     if "visible_ms" in properties:
@@ -191,8 +239,11 @@ def sanitize_server_properties(
             raise ValueError("server analytics event does not accept properties")
         return {}
     if event_name == "model_usage_recorded":
-        allowed = {"input_tokens", "output_tokens", "cost_micro_usd"}
-        if set(properties) != allowed:
+        if not (
+            _MODEL_USAGE_REQUIRED
+            <= set(properties)
+            <= _MODEL_USAGE_REQUIRED | _MODEL_USAGE_OPTIONAL
+        ):
             raise ValueError("model usage properties are incomplete or unknown")
         cleaned = {
             "input_tokens": _bounded_integer(
@@ -214,10 +265,16 @@ def sanitize_server_properties(
                 maximum=10_000_000_000,
             ),
         }
+        if "estimated_cost_micro_usd" in properties:
+            cleaned["estimated_cost_micro_usd"] = _bounded_integer(
+                properties["estimated_cost_micro_usd"],
+                "estimated_cost_micro_usd",
+                minimum=0,
+                maximum=10_000_000_000,
+            )
         return _bounded_properties(cleaned)
 
-    allowed = {"amount_micro", "bucket"}
-    if set(properties) != allowed:
+    if set(properties) != _CREDIT_PROPERTIES:
         raise ValueError("Credits properties are incomplete or unknown")
     bucket = properties["bucket"]
     if not isinstance(bucket, str) or bucket not in _CREDIT_BUCKETS:
@@ -350,6 +407,13 @@ class AnalyticsEventDraft(BaseModel):
                 self.event_name,
                 self.properties,
             )
+            # The estimate is BYOK's alone. Every reader ignores it on any
+            # other lane, so one written there would be silently dropped.
+            if (
+                "estimated_cost_micro_usd" in self.properties
+                and self.billing_mode != "byok"
+            ):
+                raise ValueError("estimated_cost_micro_usd is BYOK-only")
         return self
 
 

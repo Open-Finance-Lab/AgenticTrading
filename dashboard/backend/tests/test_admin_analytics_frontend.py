@@ -165,11 +165,11 @@ def test_app_lifecycle_and_cache_versions_are_wired():
     assert 'app.js?v=152' in APP_HTML
     assert 'js/admin-tabs.js?v=12' in APP_HTML
     for tag in (
-        'href="admin.css?v=9"',
-        'src="js/admin-shell.js?v=7"',
+        'href="admin.css?v=11"',
+        'src="js/admin-shell.js?v=8"',
         'src="js/credit-format.js?v=1"',
         'src="js/admin-live.js?v=1"',
-        'src="js/admin-overview.js?v=7"',
+        'src="js/admin-overview.js?v=9"',
         'src="js/admin-users.js?v=1"',
         'src="js/admin-providers.js?v=1"',
     ):

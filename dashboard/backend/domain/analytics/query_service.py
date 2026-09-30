@@ -18,6 +18,7 @@ from .metrics import (
 from .models import AnalyticsEventRecord
 from .repository import _row_to_event, analytics_store
 from .repository_common import (
+    AnalyticsStoreError,
     decode_event_cursor,
     encode_event_cursor,
     positive_limit,
@@ -25,6 +26,7 @@ from .repository_common import (
     utc_iso,
 )
 from .rollups import AnalyticsRollupStore, DailyRollup
+from .usage_cost import atl_cost_micro, byok_estimate_micro, byok_rollup_lane
 from .states import (
     AnalyticsStateStore,
     UserAnalyticsSnapshot,
@@ -36,12 +38,14 @@ _USER_STATES = {"blocked", "needs_attention", "dormant", "onboarding", "active"}
 _ATTENTION_STATES = {"blocked", "needs_attention"}
 # The two BillingLaneDay call-count fields; also models.ALLOWED_BILLING_MODES.
 _BILLING_LANES = ("platform_credits", "byok")
-# Each lane's Credits field: the platform debit, the BYOK list-price estimate.
-_LANE_COST_FIELD = {
-    "platform_credits": "platform_cost_micro",
-    "byok": "byok_estimated_micro",
-}
-_LANE_FIELDS = (*_BILLING_LANES, *_LANE_COST_FIELD.values())
+# Every BillingLaneDay counter: the two call counts, each lane's Credits (the
+# platform debit, the BYOK list-price estimate) and the BYOK calls left unpriced.
+_LANE_FIELDS = (
+    *_BILLING_LANES,
+    "platform_cost_micro",
+    "byok_estimated_micro",
+    "byok_unpriced",
+)
 _ACTIVATION_EVENTS = (
     "account_signed_up",
     "credential_verified",
@@ -211,11 +215,13 @@ class BillingLaneDay(BaseModel):
     counter: it fires once per non-zero credit bucket, and not at all for a
     zero-cost settlement.
 
-    The two ``*_micro`` fields sum ``cost_micro_usd`` off those same events,
-    in micro-Credits ($1 = 1 Credit): ``platform_cost_micro`` is what the
-    platform lane debited, ``byok_estimated_micro`` what the BYOK calls would
-    have debited at list price. BYOK events written before the estimate was
-    recorded carry 0.
+    The two ``*_micro`` fields are in micro-Credits ($1 = 1 Credit), off those
+    same events (analytics.usage_cost): ``platform_cost_micro`` is what the
+    platform lane debited, ``byok_estimated_micro`` what the priced BYOK calls
+    would have debited at list price. ``byok_unpriced`` counts the BYOK calls
+    that have no estimate -- model not on the price list, no provider usage
+    reported, or recorded before estimates existed -- so the estimate's gap is
+    a number rather than an inference from a zero.
     """
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -224,6 +230,7 @@ class BillingLaneDay(BaseModel):
     byok: int = Field(ge=0)
     platform_cost_micro: int = Field(default=0, ge=0)
     byok_estimated_micro: int = Field(default=0, ge=0)
+    byok_unpriced: int = Field(default=0, ge=0)
 
 
 class AnalyticsOverview(BaseModel):
@@ -641,6 +648,25 @@ def _counts_toward_platform_cost(
     return not row.provider_id and not row.model_id
 
 
+def _platform_cost_micro(
+    rollups: list[DailyRollup],
+    current_events: list[_MetricEvent],
+    filters: AnalyticsMetricFilters,
+) -> int:
+    """The platform model cost of a window: completed days from the rollups,
+    today from its raw events (already filtered). The one computation behind
+    the overview headline and ``get_platform_model_cost_micro``."""
+    return sum(
+        row.value_sum_micro
+        for row in rollups
+        if _counts_toward_platform_cost(row, filters)
+    ) + sum(
+        atl_cost_micro(event.billing_mode, event.properties)
+        for event in current_events
+        if event.event_name == "model_usage_recorded"
+    )
+
+
 class AnalyticsQueryService:
     def __init__(
         self,
@@ -688,6 +714,8 @@ class AnalyticsQueryService:
         funnel: dict[str, int] = {}
         failures: list[FailureCategoryCount] = []
         raw_events: list[_MetricEvent] = []
+        # An empty window has nothing to read, which is not a failed read.
+        raw_events_read = effective_end <= filters.start
 
         if effective_end > filters.start:
             try:
@@ -696,6 +724,7 @@ class AnalyticsQueryService:
                     end=effective_end,
                     include_internal=filters.include_internal,
                 )
+                raw_events_read = True
                 raw_metrics = calculate_overview_metrics(
                     raw_events,
                     start=filters.start,
@@ -738,6 +767,12 @@ class AnalyticsQueryService:
                 availability["friction"] = _availability(False)
 
         try:
+            if not raw_events_read:
+                # Today's lanes, today's platform cost and the token totals are
+                # all read off the raw events. Without them this block would
+                # publish a rollup-only figure as the whole range -- the quiet
+                # answer a failed read must never be mistaken for.
+                raise AnalyticsStoreError("raw analytics events are unavailable")
             historical_end = min(effective_end.date(), current.date())
             rollups = self.query_store.rollups.list_rollups(
                 start=filters.start.date(),
@@ -805,18 +840,9 @@ class AnalyticsQueryService:
             denominator = completed + failed
             success_rate = None if denominator == 0 else completed / denominator
 
-            platform_micro = sum(
-                row.value_sum_micro
-                for row in rollups
-                if _counts_toward_platform_cost(row, filters)
+            platform_cost = (
+                _platform_cost_micro(rollups, current_events, filters) / 1_000_000
             )
-            platform_micro += sum(
-                int(event.properties.get("cost_micro_usd", 0))
-                for event in current_events
-                if event.event_name == "model_usage_recorded"
-                and event.billing_mode == "platform_credits"
-            )
-            platform_cost = platform_micro / 1_000_000
             input_tokens = sum(
                 int(event.properties.get("input_tokens", 0))
                 for event in raw_events
@@ -858,44 +884,69 @@ class AnalyticsQueryService:
             # Each lane also carries its cost in Credits, from the same
             # model_usage_recorded events: the platform debit
             # (platform_model_cost_usd, the headline's own rows) and the BYOK
-            # list-price estimate (byok_estimated_cost_usd). Never
+            # list-price estimate (byok_estimated_cost_usd), plus the BYOK
+            # calls with no estimate (byok_unpriced_calls). Never
             # credits_settled, which has no provider or model to filter on.
-            lanes: dict[str, dict[str, int]] = {}
+            lanes: dict[str, dict[str, int]] = defaultdict(
+                lambda: dict.fromkeys(_LANE_FIELDS, 0)
+            )
+            # BYOK is gathered per provider/model before it is folded into a
+            # day: whether a legacy rollup's estimate can stand depends on the
+            # model, so deciding it per day made the unfiltered total and a
+            # per-model filter disagree about the same calls.
+            byok_rollups: dict[tuple[str, str, str], dict[str, int]] = defaultdict(
+                lambda: {"calls": 0, "estimate": 0, "unpriced": 0, "counted": 0}
+            )
             for row in rollups:
                 day_key = row.rollup_date.isoformat()
-                if (
-                    row.metric_name == "event_count"
-                    and row.event_name == "model_usage_recorded"
-                    and row.billing_mode in _BILLING_LANES
-                    and _matches_rollup_dimensions(row, filters)
-                ):
-                    lanes.setdefault(day_key, dict.fromkeys(_LANE_FIELDS, 0))[
-                        row.billing_mode
-                    ] += row.value_count
+                byok_key = (day_key, row.provider_id or "", row.model_id or "")
+                if row.metric_name == "event_count":
+                    if (
+                        row.event_name == "model_usage_recorded"
+                        and row.billing_mode in _BILLING_LANES
+                        and _matches_rollup_dimensions(row, filters)
+                    ):
+                        lanes[day_key][row.billing_mode] += row.value_count
+                        if row.billing_mode == "byok":
+                            byok_rollups[byok_key]["calls"] += row.value_count
                 elif _counts_toward_platform_cost(row, filters):
-                    lanes.setdefault(day_key, dict.fromkeys(_LANE_FIELDS, 0))[
-                        "platform_cost_micro"
-                    ] += row.value_sum_micro
-                elif (
-                    row.metric_name == "byok_estimated_cost_usd"
-                    and row.billing_mode == "byok"
-                    and _matches_rollup_dimensions(row, filters)
+                    lanes[day_key]["platform_cost_micro"] += row.value_sum_micro
+                elif row.billing_mode == "byok" and _matches_rollup_dimensions(
+                    row, filters
                 ):
-                    lanes.setdefault(day_key, dict.fromkeys(_LANE_FIELDS, 0))[
-                        "byok_estimated_micro"
-                    ] += row.value_sum_micro
+                    if row.metric_name == "byok_estimated_cost_usd":
+                        byok_rollups[byok_key]["estimate"] += row.value_sum_micro
+                    elif row.metric_name == "byok_unpriced_calls":
+                        byok_rollups[byok_key]["unpriced"] += row.value_count
+                        byok_rollups[byok_key]["counted"] = 1
+            for (day_key, _provider, model_id), totals in byok_rollups.items():
+                estimate, unpriced = byok_rollup_lane(
+                    model_id,
+                    calls=totals["calls"],
+                    estimate_micro=totals["estimate"],
+                    unpriced_calls=(
+                        totals["unpriced"] if totals["counted"] else None
+                    ),
+                )
+                lanes[day_key]["byok_estimated_micro"] += estimate
+                lanes[day_key]["byok_unpriced"] += unpriced
             for event in current_events:
                 if (
-                    event.event_name == "model_usage_recorded"
-                    and event.billing_mode in _BILLING_LANES
+                    event.event_name != "model_usage_recorded"
+                    or event.billing_mode not in _BILLING_LANES
                 ):
-                    lane = lanes.setdefault(
-                        event.occurred_at.date().isoformat(),
-                        dict.fromkeys(_LANE_FIELDS, 0),
-                    )
-                    lane[event.billing_mode] += 1
-                    lane[_LANE_COST_FIELD[event.billing_mode]] += int(
-                        event.properties.get("cost_micro_usd", 0)
+                    continue
+                lane = lanes[event.occurred_at.date().isoformat()]
+                lane[event.billing_mode] += 1
+                if event.billing_mode == "byok":
+                    estimate = byok_estimate_micro(event.properties, event.model_id)
+                    if estimate is None:
+                        lane["byok_unpriced"] += 1
+                    else:
+                        lane["byok_estimated_micro"] += estimate
+                else:
+                    lane["platform_cost_micro"] += atl_cost_micro(
+                        event.billing_mode, event.properties
                     )
             # Every rolled-up day carries a platform cost total, zero or not;
             # a day with neither calls nor cost is not activity, and keeping
@@ -998,6 +1049,7 @@ class AnalyticsQueryService:
                     byok=counts["byok"],
                     platform_cost_micro=counts["platform_cost_micro"],
                     byok_estimated_micro=counts["byok_estimated_micro"],
+                    byok_unpriced=counts["byok_unpriced"],
                 )
                 for day, counts in sorted(lane_days.items())
             ],
@@ -1009,6 +1061,55 @@ class AnalyticsQueryService:
             filters=filters,
             availability=availability,
         )
+
+    def get_platform_model_cost_micro(
+        self,
+        *,
+        filters: AnalyticsMetricFilters,
+        now: datetime | None = None,
+    ) -> int | None:
+        """``get_overview``'s platform-cost headline alone, in micro-Credits.
+
+        Reads what the headline reads -- the rollups for completed days, the
+        raw events for today only -- and none of the snapshots, users or
+        range-wide events the rest of the overview needs. None when either read
+        fails: 0 is a real answer ("no platform calls"), not an unknown one.
+        """
+        if not isinstance(filters, AnalyticsMetricFilters):
+            filters = AnalyticsMetricFilters.model_validate(filters)
+        current = _utc(now or datetime.now(timezone.utc), "now")
+        effective_end = min(filters.end, current)
+        if effective_end <= filters.start:
+            return 0
+        today_start = datetime.combine(
+            current.date(), datetime.min.time(), tzinfo=timezone.utc
+        )
+        current_start = max(filters.start, today_start)
+        try:
+            rollups = self.query_store.rollups.list_rollups(
+                start=filters.start.date(),
+                end=min(effective_end.date(), current.date()),
+            )
+            current_events = (
+                [
+                    event
+                    for event in self.query_store.list_metric_events(
+                        start=current_start,
+                        end=effective_end,
+                        include_internal=filters.include_internal,
+                    )
+                    if _event_matches_filters(event, filters)
+                ]
+                if effective_end > current_start
+                else []
+            )
+            return _platform_cost_micro(rollups, current_events, filters)
+        except Exception as exc:
+            print(
+                "[analytics] ERROR platform model cost unavailable: "
+                f"{type(exc).__name__}"
+            )
+            return None
 
     def get_user_profile(
         self,
@@ -1127,10 +1228,9 @@ class AnalyticsQueryService:
                 if event.event_name == "model_usage_recorded"
             ),
             platform_model_cost_usd=sum(
-                int(event.properties.get("cost_micro_usd", 0))
+                atl_cost_micro(event.billing_mode, event.properties)
                 for event in events
                 if event.event_name == "model_usage_recorded"
-                and event.billing_mode == "platform_credits"
             )
             / 1_000_000,
             credits_debited_micro=sum(
@@ -1207,8 +1307,11 @@ class AnalyticsQueryService:
                         if event.event_name == "model_usage_recorded"
                         else None
                     ),
+                    # ATL cost only: a BYOK call's list-price estimate is not
+                    # spend, and must not read as spend to a reader that does
+                    # not know to check billing_mode first.
                     cost_micro_usd=(
-                        int(properties.get("cost_micro_usd", 0))
+                        atl_cost_micro(event.billing_mode, properties)
                         if event.event_name == "model_usage_recorded"
                         else None
                     ),

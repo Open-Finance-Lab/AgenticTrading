@@ -3,7 +3,7 @@
   "first_success_conversion": 0.625,
   "backtest_success_rate": 0.8,
   "repeat_run_rate": 0.55,
-  "platform_model_cost_usd": 12.34,
+  "platform_model_cost_usd": 2.4,
   "completed_runs": 40,
   "failed_runs": 10,
   "input_tokens": 182500,
@@ -91,14 +91,16 @@
       "platform_credits": 11,
       "byok": 7,
       "platform_cost_micro": 1100000,
-      "byok_estimated_micro": 700000
+      "byok_estimated_micro": 700000,
+      "byok_unpriced": 0
     },
     {
       "day": "2026-08-26",
       "platform_credits": 14,
       "byok": 8,
       "platform_cost_micro": 1300000,
-      "byok_estimated_micro": 800000
+      "byok_estimated_micro": 800000,
+      "byok_unpriced": 0
     }
   ]
 }

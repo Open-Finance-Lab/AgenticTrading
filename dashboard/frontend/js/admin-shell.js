@@ -194,11 +194,18 @@
     return formatted === DASH ? DASH : `${formatted} Credits`;
   }
 
+  // Cents, except for a non-zero amount under one: "$0.00" there reads as
+  // "nothing was spent" beside a chart showing the spend, so it keeps up to
+  // six decimals -- the micro-dollar the value is stored in.
   function usdFromMicro(value) {
     if (value == null || value === '') return DASH;
     const numeric = Number(value);
     if (!Number.isFinite(numeric)) return DASH;
-    return new Intl.NumberFormat(LOCALE, { style: 'currency', currency: 'USD' }).format(numeric / 1000000);
+    const usd = numeric / 1000000;
+    const subCent = usd !== 0 && Math.abs(usd) < 0.01;
+    return new Intl.NumberFormat(LOCALE, {
+      style: 'currency', currency: 'USD', minimumFractionDigits: 2, maximumFractionDigits: subCent ? 6 : 2,
+    }).format(usd);
   }
 
   function formatDateOnly(value, fallback = DASH) {

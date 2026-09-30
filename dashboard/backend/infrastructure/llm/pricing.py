@@ -10,6 +10,7 @@ only held together because one side imported lazily inside a method.
 
 from __future__ import annotations
 
+import re
 from typing import Tuple
 
 # Approximate USD pricing per 1,000,000 tokens (input, output).
@@ -21,6 +22,7 @@ _PRICING_TABLE: list[Tuple[str, float, float]] = [
     ("openai/gpt-5.5", 5.0, 30.0),
     ("google/gemini-3.1-pro", 2.0, 12.0),
     ("anthropic/claude-sonnet-4-6", 3.0, 15.0),
+    ("anthropic/claude-haiku-4-5", 1.0, 5.0),
     ("deepseek/deepseek-v4-pro", 0.435, 0.87),
     ("qwen/qwen3.7-plus", 0.40, 1.60),
     ("x-ai/grok-4.20-reasoning", 1.25, 2.50),  # listed but unavailable on our account (no channel)
@@ -72,14 +74,63 @@ def is_free_model(model: str | None) -> bool:
     return any(marker in name for marker in _FREE_MODEL_MARKERS)
 
 
-def price_for_model(model: str | None) -> Tuple[float, float]:
-    """Return (input_usd_per_mtok, output_usd_per_mtok) for a model name."""
-    name = (model or "").strip().lower()
-    if not name:
-        return _DEFAULT_PRICING
+def _table_price(name: str) -> Tuple[float, float] | None:
     if any(marker in name for marker in _FREE_MODEL_MARKERS):
         return (0.0, 0.0)
     for needle, in_price, out_price in _PRICING_TABLE:
         if needle in name:
             return (in_price, out_price)
-    return _DEFAULT_PRICING
+    return None
+
+
+def price_for_model(model: str | None) -> Tuple[float, float]:
+    """Return (input_usd_per_mtok, output_usd_per_mtok) for a model name."""
+    name = (model or "").strip().lower()
+    return (_table_price(name) if name else None) or _DEFAULT_PRICING
+
+
+# A dated or preview snapshot of a model is that model: Anthropic's
+# ``claude-3-5-haiku-20241022``, OpenAI's ``gpt-4o-2024-08-06``, the catalog's
+# ``gemini-3.1-pro-preview``. Any other suffix names a different model.
+_SNAPSHOT_SUFFIX = re.compile(r"-(?:\d{8}|\d{4}-\d{2}-\d{2}|preview)$")
+
+
+def _listed_name(name: str) -> str:
+    """``name`` without its provider prefix or a snapshot suffix."""
+    return _SNAPSHOT_SUFFIX.sub("", name.rsplit("/", 1)[-1])
+
+
+def _build_listed_prices() -> dict[str, Tuple[float, float]]:
+    listed: dict[str, Tuple[float, float]] = {}
+    for needle, in_price, out_price in _PRICING_TABLE:
+        # First entry wins, as it does for the substring match.
+        listed.setdefault(_listed_name(needle), (in_price, out_price))
+    return listed
+
+
+_LISTED_PRICES = _build_listed_prices()
+
+
+def listed_price_for_model(model: str | None) -> Tuple[float, float] | None:
+    """The table's price for ``model``, or None when the table does not list it.
+
+    ``price_for_model`` never answers None: an unlisted name falls back to
+    ``_DEFAULT_PRICING`` so a reservation always has a ceiling. That fallback is
+    a guess, which is fine for bounding a hold and wrong for a figure published
+    as what a call would have cost (the admin BYOK estimate), where an unlisted
+    model must read as unpriced rather than as $1/$5.
+
+    The substring match is a guess of the same kind: ``gpt-4.1-nano`` would
+    borrow ``gpt-4.1``'s rate (~20x its own) and ``o3-pro`` ``o3``'s (~10x
+    below it). So a model is listed here only when its name, less the
+    provider prefix and a snapshot suffix, *is* a table entry's. OpenRouter's
+    ``:free`` variants are listed at zero, not at their paid sibling's rate,
+    and so are the free-model sentinels -- by exact name, since the substring
+    markers would price any model with ``none`` or ``demo`` in it at zero.
+    """
+    name = (model or "").strip().lower()
+    if not name:
+        return None
+    if name.endswith(":free") or name in _FREE_MODEL_MARKERS:
+        return (0.0, 0.0)
+    return _LISTED_PRICES.get(_listed_name(name))
