@@ -15,6 +15,7 @@ from dashboard.backend.domain.analytics.models import (
     AnalyticsEventRecord,
     FrontendAnalyticsEvent,
     sanitize_server_properties,
+    stored_properties,
 )
 from dashboard.backend.infrastructure.llm.execution.errors import (
     ExecutionErrorCategory,
@@ -230,6 +231,55 @@ def test_usage_metadata_accepts_only_the_optional_byok_estimate(extra, accepted)
     else:
         with pytest.raises(ValidationError):
             AnalyticsEventRecord.model_validate(payload)
+
+
+@pytest.mark.parametrize(
+    ("billing_mode", "accepted"),
+    [("byok", True), ("platform_credits", False), (None, False)],
+)
+def test_usage_estimate_is_accepted_on_the_byok_lane_only(billing_mode, accepted):
+    """Every reader ignores the estimate outside BYOK, so one written on another
+    lane would be stored and silently dropped. It is refused instead."""
+    payload = _record_payload(
+        event_name="model_usage_recorded",
+        event_group="resource",
+        event_source="server",
+        session_id=None,
+        page_view=None,
+        source_event_id="usage:run-1:0",
+        provider_id="openrouter",
+        model_id="openai/gpt-5.5",
+        billing_mode=billing_mode,
+        outcome="succeeded",
+        properties={
+            "input_tokens": 50,
+            "output_tokens": 20,
+            "cost_micro_usd": 0,
+            "estimated_cost_micro_usd": 900,
+        },
+    )
+    if accepted:
+        AnalyticsEventRecord.model_validate(payload)
+    else:
+        with pytest.raises(ValidationError, match="BYOK-only"):
+            AnalyticsEventRecord.model_validate(payload)
+
+
+def test_stored_properties_drop_keys_this_build_does_not_know(capsys):
+    """Strict on read, a property added by a later build failed every read of
+    its event -- after a revert, or on the old instance during a deploy. The
+    unknown key is dropped and reported once; known keys are untouched, and
+    still validated when the record is built."""
+    usage = {"input_tokens": 1, "output_tokens": 2, "cost_micro_usd": 3}
+
+    assert stored_properties("model_usage_recorded", {**usage, "future_key": 9}) == usage
+    assert stored_properties("model_usage_recorded", {**usage, "future_key": 1}) == usage
+    assert capsys.readouterr().out.count("property=future_key") == 1
+    assert stored_properties("page_viewed", {"visible_ms": 5}) == {}
+    assert stored_properties("page_hidden", {"visible_ms": 5}) == {"visible_ms": 5}
+    # Nothing to reconcile against: left for the validator to refuse.
+    assert stored_properties("not_an_event", {"x": 1}) == {"x": 1}
+    assert stored_properties("model_usage_recorded", None) is None
 
 
 def test_quota_exhausted_error_message_is_fixed():

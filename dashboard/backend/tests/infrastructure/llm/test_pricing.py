@@ -10,6 +10,8 @@ lives in ``pricing.py``, a leaf that both sides import.
 import ast
 from pathlib import Path
 
+import pytest
+
 from dashboard.backend.infrastructure.llm import pricing, token_cost
 from dashboard.backend.infrastructure.llm.execution.models import PricingSnapshot
 
@@ -82,3 +84,42 @@ def test_listed_price_of_a_free_variant_is_zero_not_its_paid_siblings():
     assert pricing.price_for_model("openai/gpt-5.5:free") == (5.0, 30.0)
     assert pricing.listed_price_for_model("openai/gpt-5.5:free") == (0.0, 0.0)
     assert pricing.listed_price_for_model("rule-based") == (0.0, 0.0)
+
+
+def test_listed_price_does_not_borrow_a_sibling_needles_rate():
+    """The billing match is by substring, so gpt-4.1-nano reads gpt-4.1's rate
+    (~20x its own) and o3-pro o3's (~10x below it). A published estimate lists
+    only a name that *is* a table entry's, less provider prefix and snapshot
+    suffix."""
+    assert pricing.price_for_model("openai/gpt-4.1-nano") == (2.0, 8.0)
+    assert pricing.listed_price_for_model("openai/gpt-4.1-nano") is None
+    assert pricing.listed_price_for_model("openai/o3-pro") is None
+    assert pricing.listed_price_for_model("claude-opus-4-5") is None
+    assert pricing.listed_price_for_model("openai/gpt-5.5:nitro") is None
+    # A substring free marker is no reason to call a real model free.
+    assert pricing.listed_price_for_model("acme/nonexistent") is None
+
+
+@pytest.mark.parametrize(
+    ("model", "price"),
+    [
+        # The ATL catalog, by catalog id and by the native providers' own id.
+        ("anthropic/claude-haiku-4-5", (1.0, 5.0)),
+        ("claude-haiku-4-5", (1.0, 5.0)),
+        ("anthropic/claude-sonnet-4-6", (3.0, 15.0)),
+        ("claude-sonnet-4-6", (3.0, 15.0)),
+        ("openai/gpt-5.5", (5.0, 30.0)),
+        ("gpt-5.5", (5.0, 30.0)),
+        ("google/gemini-3.1-pro-preview", (2.0, 12.0)),
+        ("gemini-3.1-pro-preview", (2.0, 12.0)),
+        ("deepseek/deepseek-v4-pro", (0.435, 0.87)),
+        ("qwen/qwen3.7-plus", (0.40, 1.60)),
+        # A dated snapshot is the model it snapshots.
+        ("claude-haiku-4-5-20251001", (1.0, 5.0)),
+        ("claude-3-5-haiku-20241022", (0.80, 4.0)),
+        ("gpt-4o-2024-08-06", (2.50, 10.0)),
+        ("gpt-4.1", (2.0, 8.0)),
+    ],
+)
+def test_listed_price_covers_the_catalog_and_its_snapshots(model, price):
+    assert pricing.listed_price_for_model(model) == price

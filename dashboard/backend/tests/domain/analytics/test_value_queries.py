@@ -220,9 +220,16 @@ class FakeQueryStore:
 class FakeLegacyService:
     def __init__(self, availability=None):
         self.profile_windows = []
+        self.overview_calls = 0
+        self.platform_cost_filters = []
         self.availability = availability or {"growth": True, "friction": True}
 
+    def get_platform_model_cost_micro(self, *, filters, now):
+        self.platform_cost_filters.append(filters)
+        return 250_000 if self.availability.get("growth", True) else None
+
     def get_overview(self, *, filters, now):
+        self.overview_calls += 1
         return SimpleNamespace(
             availability={
                 name: SimpleNamespace(available=available)
@@ -677,6 +684,25 @@ def test_commercial_platform_cost_is_unknown_not_zero_when_its_read_failed():
     assert response.availability.status == "partial"
 
 
+def test_commercial_reads_the_platform_cost_alone_not_a_whole_overview():
+    """The figure is one headline of the overview; building the whole overview
+    for it scanned the range's raw events, rollups, snapshots and users a
+    second time on every page load."""
+    service, _value_store, legacy = _service(snapshots={1: _snapshot(1)})
+
+    service.get_commercial(
+        start=date(2026, 8, 1), end=date(2026, 9, 1), include_internal=True, now=NOW
+    )
+
+    assert legacy.overview_calls == 0
+    (filters,) = legacy.platform_cost_filters
+    assert (filters.start, filters.end, filters.include_internal) == (
+        datetime(2026, 8, 1, tzinfo=UTC),
+        datetime(2026, 9, 1, tzinfo=UTC),
+        True,
+    )
+
+
 def test_commercial_series_sum_across_users_and_match_their_headlines():
     """purchased_by_day is gross purchases and consumed_by_day is model spend,
     the same two quantities as selected_period.purchased_micro/consumed_micro."""
@@ -734,6 +760,32 @@ def test_commercial_series_failure_is_partial_and_logged_not_an_empty_ready(caps
     assert response.availability.status == "partial"
     assert response.tier_counts["unpaid"] == 1  # the rest is still served
     assert "ERROR commercial per-day ledger unavailable" in capsys.readouterr().out
+
+
+def test_operational_growth_figures_are_unknown_not_zero_when_their_read_failed():
+    """Run counts, tokens and platform cost come from the overview's growth
+    read. When it failed they are None, not 0 -- which is the real answer "no
+    runs" -- even though the overview may have computed some before failing."""
+    service, _value_store, _legacy = _service(
+        snapshots={1: _snapshot(1)},
+        legacy_availability={"growth": False, "friction": True},
+    )
+
+    response = service.get_operational(start=date(2026, 8, 1), end=date(2026, 9, 1), now=NOW)
+
+    assert (
+        response.backtest_success_rate,
+        response.completed_runs,
+        response.failed_runs,
+        response.input_tokens,
+        response.output_tokens,
+        response.platform_model_cost_micro_usd,
+    ) == (None, None, None, None, None, None)
+    assert response.availability.status == "partial"
+
+    service, _value_store, _legacy = _service(snapshots={1: _snapshot(1)})
+    response = service.get_operational(start=date(2026, 8, 1), end=date(2026, 9, 1), now=NOW)
+    assert (response.completed_runs, response.platform_model_cost_micro_usd) == (9, 250_000)
 
 
 def test_missing_operational_subsection_is_reported_as_partial():

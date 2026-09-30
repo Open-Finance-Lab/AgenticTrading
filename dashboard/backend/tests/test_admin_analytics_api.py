@@ -21,6 +21,7 @@ from dashboard.backend.domain.analytics.query_service import (
     get_value_analytics_query_service,
 )
 from dashboard.backend.domain.analytics.repository import AnalyticsStore
+from dashboard.backend.domain.analytics.repository_common import AnalyticsStoreError
 from dashboard.backend.domain.analytics.rollups import (
     AnalyticsRollupStore,
     DailyRollup,
@@ -390,6 +391,10 @@ def test_billing_lane_mix_carries_each_lane_in_credits_honouring_filters(tmp_pat
             cost_rollup("platform_model_cost_usd", "platform_credits", 2_000_000, "commonstack", "b"),
             cost_rollup("byok_estimated_cost_usd", "byok", 700_000, "openrouter", "a"),
             cost_rollup("byok_estimated_cost_usd", "byok", 300_000, "commonstack", "b"),
+            # Written zero or not by the current rollup; without them the day
+            # would read as one rolled up before unpriced calls were counted.
+            cost_rollup("byok_unpriced_calls", "byok", 0, "openrouter", "a"),
+            cost_rollup("byok_unpriced_calls", "byok", 0, "commonstack", "b"),
         ],
     )
     for index, (billing_mode, provider_id, model_id, cost) in enumerate(
@@ -433,10 +438,14 @@ def test_billing_lane_mix_carries_each_lane_in_credits_honouring_filters(tmp_pat
             (row.day, row.platform_cost_micro, row.byok_estimated_micro)
             for row in overview.billing_lane_mix
         ]
-        # The per-day platform lane and the headline are one figure.
+        # The per-day platform lane and the headline are one figure, and so is
+        # the headline read alone (what /commercial publishes).
         assert sum(row[1] for row in rows) == round(
             overview.platform_model_cost_usd * 1_000_000
         )
+        assert service.get_platform_model_cost_micro(
+            filters=AnalyticsMetricFilters(start=start, end=NOW, **filters), now=NOW
+        ) == round(overview.platform_model_cost_usd * 1_000_000)
         return rows
 
     day, today = yesterday.isoformat(), NOW.date().isoformat()
@@ -453,15 +462,59 @@ def test_billing_lane_mix_carries_each_lane_in_credits_honouring_filters(tmp_pat
     ]
 
 
+def test_failed_raw_event_read_marks_growth_unavailable_not_a_rollup_only_range(
+    tmp_path, monkeypatch, capsys
+):
+    """Today's lanes, today's platform cost and the token totals come from the
+    raw events. When that read failed, growth stayed available and published
+    the rollups alone as the whole range -- yesterday's cost as the range's,
+    today's calls missing from every lane -- with status "ready"."""
+    analytics, events, rollups, _states, users = _fixture(tmp_path)
+    yesterday = NOW.date() - timedelta(days=1)
+    stamp = datetime.combine(NOW.date(), datetime.min.time(), tzinfo=timezone.utc)
+    rollups.replace_day(
+        yesterday,
+        [
+            DailyRollup(
+                rollup_date=yesterday,
+                metric_name="platform_model_cost_usd",
+                billing_mode="platform_credits",
+                value_sum_micro=5_000_000,
+                updated_at=stamp,
+            )
+        ],
+    )
+    service = AnalyticsQueryService(store=analytics, user_store=users)
+
+    def refuse(**_kwargs):
+        raise AnalyticsStoreError("stored Analytics properties are invalid")
+
+    monkeypatch.setattr(service.query_store, "list_metric_events", refuse)
+    filters = AnalyticsMetricFilters(
+        start=datetime.combine(yesterday, datetime.min.time(), tzinfo=timezone.utc),
+        end=NOW,
+    )
+    overview = service.get_overview(now=NOW, filters=filters)
+
+    assert overview.availability["growth"].available is False
+    assert overview.platform_model_cost_usd is None
+    assert overview.billing_lane_mix == []
+    assert service.get_platform_model_cost_micro(filters=filters, now=NOW) is None
+    assert "ERROR platform model cost unavailable" in capsys.readouterr().out
+
+
 def test_billing_lane_mix_counts_unpriced_byok_calls_honouring_filters(tmp_path):
     """A BYOK call with no list-price estimate is counted, not summed as 0, so
     the panel can say how much of the estimate is missing. Completed days read
-    byok_unpriced_calls; a day rolled up before that metric existed has none,
-    and then counts every BYOK call as unpriced only when it carries no
-    estimate at all (before PR #572, no BYOK call had one)."""
+    byok_unpriced_calls. A day rolled up before that metric existed has none,
+    and is read per provider/model: with no estimate the calls predate PR #572
+    and are all unpriced; with one, #572 priced an unlisted model at the $1/$5
+    fallback, so the estimate stands only for a listed model. Deciding that per
+    day instead made the unfiltered total and a per-model filter disagree."""
     analytics, events, rollups, _states, users = _fixture(tmp_path)
     stamp = datetime.combine(NOW.date(), datetime.min.time(), tzinfo=timezone.utc)
     counted, legacy, legacy_priced = (NOW.date() - timedelta(days=n) for n in (1, 2, 3))
+    listed = "openai/gpt-5.5"
 
     def row(day, metric, model_id, *, count=0, sum_micro=0, event_name=""):
         return DailyRollup(
@@ -493,7 +546,13 @@ def test_billing_lane_mix_counts_unpriced_byok_calls_honouring_filters(tmp_path)
     rollups.replace_day(legacy, [calls(legacy, "a", 5)])
     rollups.replace_day(
         legacy_priced,
-        [calls(legacy_priced, "a", 3), row(legacy_priced, "byok_estimated_cost_usd", "a", sum_micro=90)],
+        [
+            calls(legacy_priced, listed, 3),
+            row(legacy_priced, "byok_estimated_cost_usd", listed, sum_micro=90),
+            # "b" is not on the price list: #572's 40 is the $1/$5 guess.
+            calls(legacy_priced, "b", 2),
+            row(legacy_priced, "byok_estimated_cost_usd", "b", sum_micro=40),
+        ],
     )
     for index, properties in enumerate(
         (
@@ -530,16 +589,22 @@ def test_billing_lane_mix_counts_unpriced_byok_calls_honouring_filters(tmp_path)
 
     today = NOW.date().isoformat()
     assert unpriced() == [
-        (legacy_priced.isoformat(), 3, 90, 0),
+        (legacy_priced.isoformat(), 5, 90, 2),
         (legacy.isoformat(), 5, 0, 5),
         (counted.isoformat(), 6, 300, 3),
         (today, 3, 7, 2),
     ]
     assert unpriced(model_id="a") == [
-        (legacy_priced.isoformat(), 3, 90, 0),
         (legacy.isoformat(), 5, 0, 5),
         (counted.isoformat(), 4, 300, 1),
         (today, 2, 7, 1),
+    ]
+    # The filtered views partition the unfiltered one, legacy day included.
+    assert unpriced(model_id=listed) == [(legacy_priced.isoformat(), 3, 90, 0)]
+    assert unpriced(model_id="b") == [
+        (legacy_priced.isoformat(), 2, 0, 2),
+        (counted.isoformat(), 2, 0, 2),
+        (today, 1, 0, 1),
     ]
 
 

@@ -374,7 +374,7 @@ def rollup_day(
         # figure is a debit, the BYOK one a list-price estimate
         # (analytics.usage_cost), and the two must never add into one another.
         if event.billing_mode == "byok":
-            estimate = byok_estimate_micro(event.properties)
+            estimate = byok_estimate_micro(event.properties, event.model_id)
             if estimate is None:
                 usage_dimensions[key]["unpriced_calls"] += 1
             else:

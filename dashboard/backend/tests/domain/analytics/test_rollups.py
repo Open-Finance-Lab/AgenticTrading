@@ -109,7 +109,7 @@ def test_rollup_records_platform_cost_as_micro_usd(tmp_path):
     assert cost.billing_mode == "platform_credits"
 
 
-def _record_usage(service, index, billing_mode, properties, at):
+def _record_usage(service, index, billing_mode, properties, at, model_id="openai/gpt-5.5"):
     service.record_server_event(
         event_name="model_usage_recorded",
         user_id=1,
@@ -118,7 +118,7 @@ def _record_usage(service, index, billing_mode, properties, at):
         source_record_id="run-1",
         billing_mode=billing_mode,
         provider_id="openrouter",
-        model_id="openai/gpt-5.5",
+        model_id=model_id,
         properties={"input_tokens": 1, "output_tokens": 1, **properties},
         occurred_at=at + timedelta(minutes=index),
     )
@@ -181,13 +181,21 @@ def test_rollup_writes_the_unpriced_count_even_when_it_is_zero(tmp_path):
 
 def test_rollup_reads_the_pr_572_era_byok_estimate_from_cost_micro_usd(tmp_path):
     """Between PR #572 and the property split, a BYOK event carried its estimate
-    in cost_micro_usd. Rolled up now, that still reads as an estimate -- never as
-    platform cost -- and a zero from before #572 reads as unpriced."""
+    in cost_micro_usd. Rolled up now it still reads as an estimate -- never as
+    platform cost -- re-priced from its own tokens at the listed rate, because
+    #572 priced an unlisted model at the $1/$5 fallback: that call reads as
+    unpriced, like a zero from before #572."""
     analytics, rollups = _store(tmp_path)
     service = AnalyticsService(analytics)
     at = datetime(2026, 8, 25, 13, 0, tzinfo=timezone.utc)
-    _record_usage(service, 0, "byok", {"cost_micro_usd": 30_000}, at)
+    tokens = {"input_tokens": 1_000, "output_tokens": 100}
+    _record_usage(service, 0, "byok", {**tokens, "cost_micro_usd": 30_000}, at)
     _record_usage(service, 1, "byok", {"cost_micro_usd": 0}, at)
+    # gpt-4.1-nano is not listed; #572's snapshot priced it at $1/$5.
+    _record_usage(
+        service, 2, "byok", {**tokens, "cost_micro_usd": 1_500}, at,
+        model_id="openai/gpt-4.1-nano",
+    )
 
     rollup_day(date(2026, 8, 25), store=rollups)
 
@@ -195,12 +203,36 @@ def test_rollup_reads_the_pr_572_era_byok_estimate_from_cost_micro_usd(tmp_path)
     assert _usage_rows(rollups, "platform_model_cost_usd") == [
         ("platform_credits", "", "", 0, 0)
     ]
+    # gpt-5.5 at $5/$30 per million: 1,000 in + 100 out = $0.008.
     assert _usage_rows(rollups, "byok_estimated_cost_usd") == [
-        ("byok", "openrouter", "openai/gpt-5.5", 30_000, 0)
+        ("byok", "openrouter", "openai/gpt-4.1-nano", 0, 0),
+        ("byok", "openrouter", "openai/gpt-5.5", 8_000, 0),
     ]
     assert _usage_rows(rollups, "byok_unpriced_calls") == [
-        ("byok", "openrouter", "openai/gpt-5.5", 0, 1)
+        ("byok", "openrouter", "openai/gpt-4.1-nano", 0, 1),
+        ("byok", "openrouter", "openai/gpt-5.5", 0, 1),
     ]
+
+
+def test_rollup_survives_a_stored_property_this_build_does_not_know(tmp_path):
+    """A stored event is validated again on read. When that was strict, one
+    event carrying a property from a later build -- read after a revert, or by
+    the old instance mid-deploy -- failed the rollup of its whole day."""
+    analytics, rollups = _store(tmp_path)
+    service = AnalyticsService(analytics)
+    at = datetime(2026, 8, 25, 13, 0, tzinfo=timezone.utc)
+    _record_usage(service, 0, "platform_credits", {"cost_micro_usd": 250}, at)
+    with sqlite3.connect(analytics.db_path) as conn:
+        conn.execute(
+            "UPDATE analytics_events SET properties_json = "
+            "json_set(properties_json, '$.from_a_later_build', 1)"
+        )
+
+    rollup_day(date(2026, 8, 25), store=rollups)
+
+    assert ("platform_credits", "openrouter", "openai/gpt-5.5", 250, 0) in _usage_rows(
+        rollups, "platform_model_cost_usd"
+    )
 
 
 def test_lifecycle_rollup_is_bounded_and_preserves_other_metrics(tmp_path):

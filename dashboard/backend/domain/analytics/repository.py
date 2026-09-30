@@ -18,6 +18,7 @@ from .models import (
     AnalyticsEventRecord,
     AppendEventResult,
     RetentionResult,
+    stored_properties,
 )
 from .repository_common import (
     AnalyticsIdempotencyConflictError,
@@ -315,7 +316,7 @@ def _row_to_event(row: sqlite3.Row | dict[str, Any]) -> AnalyticsEventRecord:
         properties = json.loads(raw_properties)
     except (TypeError, json.JSONDecodeError) as exc:
         raise AnalyticsStoreError("stored Analytics properties are invalid") from exc
-    data["properties"] = properties
+    data["properties"] = stored_properties(data.get("event_name"), properties)
     return AnalyticsEventRecord.model_validate(data)
 
 
