@@ -188,6 +188,31 @@ def test_buy_is_clamped_to_the_notional_cap():
     assert accepted[0]["notional_usd"] == 25.0
 
 
+def test_repeated_symbol_side_is_one_order_not_n_capped_orders():
+    """N copies of one action used to become N orders, each under the cap."""
+    orders = [_order("AAPL", "buy", 100.0)] * 5 + [_order("MSFT", "sell", 1.0)] * 3
+    accepted, rejections = live_service._risk_gate_orders(
+        orders,
+        _snapshot(AAPL=100.0, MSFT=100.0),
+        {"cash": 50000.0, "holdings": {"MSFT": 0.2}},
+        25.0,
+    )
+    assert [(o["symbol"], o["side"]) for o in accepted] == [("AAPL", "buy"), ("MSFT", "sell")]
+    assert sum(o["notional_usd"] for o in accepted if o["side"] == "buy") == 25.0
+    assert [r["reason"] for r in rejections] == ["duplicate_order"] * 6
+
+
+def test_rejected_order_does_not_consume_the_symbol_side_slot():
+    accepted, rejections = live_service._risk_gate_orders(
+        [_order("AAPL", "buy", 0.00001), _order("AAPL", "buy", 1.0)],
+        _snapshot(AAPL=100.0),
+        {"cash": 50000.0, "holdings": {}},
+        25.0,
+    )
+    assert [r["reason"] for r in rejections] == ["below_min_quantity"]
+    assert len(accepted) == 1
+
+
 def test_symbol_without_a_quote_is_rejected_not_passed_through():
     """The multi-million-dollar bypass: no price used to mean no clamping."""
     orders = [_order("AAPL", "buy", 10000.0), _order("MSFT", "buy", 1.0)]
