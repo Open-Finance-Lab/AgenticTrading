@@ -322,7 +322,7 @@ Consequence to accept: a user's third successful backtest today promotes them to
 
 Analytics tables stay in the users database. Every read path joins `users` for role and exclusion, the data is small at the §2.3 scale, and the 2026-09-11 blast radius was an unbounded loop, not co-location. The auth surface maps a user-store `OperationalError` (including `PoolTimeout`) to 503 with an `ERROR: auth.user_store_unavailable` log line so the next outage is visible instead of a bare 500 (PR 0).
 
-**`agent_runs.owner_user_id`.** Nullable, written at run creation on both twins from the authenticated caller. Not backfilled: rows before the column stay unattributed. It is the source for per-user model cost (`est_cost_usd`, `input_tokens`, `output_tokens`). Run *counts* come from events so the three run surfaces share one column set. The plan confirmed this column is genuinely required: `model_usage_recorded` carries `cost_micro_usd` only on the historical backfill path; the live path emits `credits_reserved` / `credits_settled` / `credits_refunded`, which measure the user's own credit spend, not operator-funded cost. Operator cost lives in `agent_runs.est_cost_usd` and nowhere else.
+**`agent_runs.owner_user_id`.** Nullable, written at run creation on both twins from the authenticated caller. Not backfilled: rows before the column stay unattributed. It is the source for per-user model cost (`est_cost_usd`, `input_tokens`, `output_tokens`). Run *counts* come from events so the three run surfaces share one column set. The plan confirmed this column is genuinely required: `model_usage_recorded` carries `cost_micro_usd` only on the historical backfill path; the live path emits `credits_reserved` / `credits_settled` / `credits_refunded`, which measure the user's own credit spend, not operator-funded cost. Operator cost lives in `agent_runs.est_cost_usd` and nowhere else. (**Amended** 2026-09-30: no longer true of `model_usage_recorded`. The live path now emits it once per call. `cost_micro_usd` is the platform debit and is 0 for BYOK; a BYOK call's list-price estimate travels in its own `estimated_cost_micro_usd`, which is absent when the call is unpriced. Both writers build these in `domain/analytics/usage_cost.py`, and the Credits & Cost lanes read them rather than `agent_runs`.)
 
 ### 6.5 `user_activity` (replaces `user_analytics_snapshots`)
 
@@ -670,7 +670,7 @@ Three things the mock does not show, added because D12 puts them first: total us
 
 | Field | Route | Source | Why |
 |---|---|---|---|
-| `billing_lane_mix` (per day, platform vs BYOK run counts) | `/overview` | rollups `billing_mode` | D14 |
+| `billing_lane_mix` (per day: platform and BYOK model-call counts, each lane in Credits, and unpriced BYOK calls — **Amended** 2026-09-30; these were run counts) | `/overview` | rollups `billing_mode`, `platform_model_cost_usd`, `byok_estimated_cost_usd`, `byok_unpriced_calls` | D14 |
 | `top_operational_reasons` | `/operational` | `user_daily_facts.operational_reason_code` (new column, PR A) | the attention note; "why are users blocked" without per-user reads |
 | `purchased_by_day`, `consumed_by_day` | `/commercial` | `CreditsStore.sum_ledger_by_day` (both twins) | revenue and credits charts |
 | `user_group`, `role`, `group_badge`, `last_meaningful_activity_at` | `/users` items, `/users/{id}` | `users`, `resolve_group_badge` (§6.2) | D11; the users list is the group view |
