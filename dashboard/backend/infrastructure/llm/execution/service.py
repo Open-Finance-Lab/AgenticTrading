@@ -278,7 +278,6 @@ class LLMExecutionService:
         request: LLMExecutionRequest,
         result: LLMExecutionResult,
     ) -> None:
-        cost_usd = 0.0
         if request.billing_mode is BillingMode.PLATFORM_CREDITS:
             cost_usd = (
                 result.billing.provider_cost_usd
