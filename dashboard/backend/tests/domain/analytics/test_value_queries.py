@@ -233,8 +233,9 @@ class FakeLegacyService:
             failed_runs=3,
             input_tokens=120,
             output_tokens=80,
-            # The real overview leaves cost None when its growth read fails.
-            platform_model_cost_usd=0.25 if self.availability.get("growth") else None,
+            # Deliberately set even when growth is unavailable: the real
+            # overview can compute the cost before the block fails.
+            platform_model_cost_usd=0.25,
             top_failure_categories=[],
         )
 

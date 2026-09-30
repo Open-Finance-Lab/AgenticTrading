@@ -328,7 +328,10 @@ def test_credits_chart_repaints_when_its_width_changes_and_only_then():
         "  const busySkipped = viewBox();"
         "  panel.setAttribute('aria-busy', 'false');"
         "  callback();"
-        "  return {first, sameWidthKeptTheDrawing, busySkipped, resized: viewBox(), busy: panel.getAttribute('aria-busy')};"
+        "  const resized = viewBox();"
+        "  parts.body.clientWidth = 0;"
+        "  callback();"
+        "  return {first, sameWidthKeptTheDrawing, busySkipped, resized, hiddenSkipped: viewBox(), busy: panel.getAttribute('aria-busy')};"
         "})()"
     )
     assert result == {
@@ -339,6 +342,8 @@ def test_credits_chart_repaints_when_its_width_changes_and_only_then():
         # A request in flight owns the panel; a resize does not repaint over it.
         "busySkipped": "0 0 700 200",
         "resized": "0 0 1100 200",
+        # Hidden behind another route: no off-screen redraw at the fallback.
+        "hiddenSkipped": "0 0 1100 200",
         "busy": "false",
     }
 

@@ -1077,9 +1077,11 @@ class ValueAnalyticsQueryService:
                 admin_grant_activity_micro=sum(
                     fact.admin_grant_activity_micro for fact in facts.values()
                 ),
+                # Unknown whenever the read behind it failed, even part-way:
+                # the overview can compute the cost and then fail the block.
                 platform_model_cost_micro_usd=(
                     None
-                    if overview.platform_model_cost_usd is None
+                    if not cost_available or overview.platform_model_cost_usd is None
                     else round(overview.platform_model_cost_usd * 1_000_000)
                 ),
             ),

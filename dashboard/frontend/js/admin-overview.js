@@ -787,8 +787,8 @@
   // panel becoming visible), which is what keeps creditsChartWidth honest. A
   // repaint only ever redraws data already on hand: none while a request is in
   // flight (the busy panel would otherwise lose its busy state), none without
-  // both reads, and none when the width is unchanged -- the repaint itself
-  // resizes the body vertically and must not loop.
+  // both reads, none while hidden, and none when the width is unchanged -- the
+  // repaint itself resizes the body vertically and must not loop.
   let creditsObserver = null;
   function watchCreditsWidth() {
     const body = creditsBody();
@@ -797,6 +797,9 @@
       const def = PANELS.find((panel) => panel.id === 'panelCredits');
       if (document.getElementById(def.id)?.getAttribute('aria-busy') === 'true') return;
       if (!def.needs.every((name) => state.data[name])) return;
+      // Hidden (another route is showing): nothing to measure, so no redraw
+      // off-screen at the fallback width; the observer fires again on return.
+      if (!(Number(creditsBody()?.clientWidth) > 0)) return;
       if (creditsChartWidth() === state.creditsChartWidth) return;
       safePaint(def);
     });
