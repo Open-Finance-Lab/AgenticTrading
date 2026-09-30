@@ -199,6 +199,39 @@ def test_stored_event_accepts_safe_server_usage_metadata():
     assert record.properties["cost_micro_usd"] == 123
 
 
+@pytest.mark.parametrize(
+    ("extra", "accepted"),
+    [
+        ({}, True),
+        ({"estimated_cost_micro_usd": 900}, True),
+        ({"estimated_cost_micro_usd": -1}, False),
+        ({"estimated_cost_micro_usd": 10_000_000_001}, False),
+        ({"provider_cost_micro_usd": 1}, False),
+    ],
+)
+def test_usage_metadata_accepts_only_the_optional_byok_estimate(extra, accepted):
+    """BYOK's list-price estimate is the one optional usage property, bounded
+    like cost_micro_usd; any other key is still refused."""
+    payload = _record_payload(
+        event_name="model_usage_recorded",
+        event_group="resource",
+        event_source="server",
+        session_id=None,
+        page_view=None,
+        source_event_id="usage:run-1:0",
+        provider_id="openrouter",
+        model_id="openai/gpt-5.5",
+        billing_mode="byok",
+        outcome="succeeded",
+        properties={"input_tokens": 50, "output_tokens": 20, "cost_micro_usd": 0, **extra},
+    )
+    if accepted:
+        assert AnalyticsEventRecord.model_validate(payload).properties == payload["properties"]
+    else:
+        with pytest.raises(ValidationError):
+            AnalyticsEventRecord.model_validate(payload)
+
+
 def test_quota_exhausted_error_message_is_fixed():
     error = LLMExecutionError(ExecutionErrorCategory.PROVIDER_QUOTA_EXHAUSTED)
     assert str(error) == "The selected model provider has insufficient balance or quota."

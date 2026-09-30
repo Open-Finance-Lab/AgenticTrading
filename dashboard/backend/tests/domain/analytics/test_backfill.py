@@ -55,6 +55,57 @@ def test_one_call_backfill_uses_actual_provider_after_failover():
     assert candidate.model_id == "qwen/qwen3.7-plus"
 
 
+def _one_call_run(**evidence):
+    return {
+        "run_id": "backfill-one-call",
+        "created_at": NOW.isoformat(),
+        "metadata": {
+            "llm_execution": {
+                "billing_mode": "byok",
+                "provider_id": "openrouter",
+                "model_id": "openai/gpt-5.5",
+                "call_count": 1,
+                "input_tokens": 50,
+                "output_tokens": 25,
+                "usage_available": True,
+                "provider_cost_usd": 99.0,
+                "estimated_cost_usd": 0.42,
+                "pricing_snapshot": None,
+                "debited_credits_micro": 0,
+                "outstanding_credits_micro": 0,
+                "outcome": "byok",
+                **evidence,
+            }
+        },
+    }
+
+
+def test_backfilled_usage_carries_the_same_cost_properties_as_a_live_call():
+    """The backfill used to keep its own copy of the cost formula and wrote no
+    BYOK estimate, so a backfilled BYOK run drew 0 in the estimate lane for
+    good. Both writers now share analytics.usage_cost."""
+    from dashboard.backend.domain.analytics.usage_cost import model_usage_properties
+
+    byok = _usage_candidate(_one_call_run(), user_id=1)
+    unlisted = _usage_candidate(_one_call_run(model_id="acme/unlisted-model"), user_id=1)
+    platform = _usage_candidate(
+        _one_call_run(billing_mode="platform_credits", provider_cost_usd=None, outcome="settled"),
+        user_id=1,
+    )
+
+    assert byok.properties == model_usage_properties(
+        billing_mode="byok",
+        model_id="openai/gpt-5.5",
+        input_tokens=50,
+        output_tokens=25,
+        usage_available=True,
+        provider_cost_usd=99.0,
+        estimated_cost_usd=0.42,
+    ) == {"input_tokens": 50, "output_tokens": 25, "cost_micro_usd": 0, "estimated_cost_micro_usd": 1_000}
+    assert unlisted.properties == {"input_tokens": 50, "output_tokens": 25, "cost_micro_usd": 0}
+    assert platform.properties == {"input_tokens": 50, "output_tokens": 25, "cost_micro_usd": 420_000}
+
+
 class StaticSource:
     def __init__(self, candidates, *, skipped_unmapped_owner=0, skipped_invalid=0):
         self.collection = BackfillCollection(

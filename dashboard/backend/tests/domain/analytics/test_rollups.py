@@ -109,47 +109,98 @@ def test_rollup_records_platform_cost_as_micro_usd(tmp_path):
     assert cost.billing_mode == "platform_credits"
 
 
+def _record_usage(service, index, billing_mode, properties, at):
+    service.record_server_event(
+        event_name="model_usage_recorded",
+        user_id=1,
+        source_event_id=f"resource:model_usage_recorded:run-1:{index}",
+        source_record_type="run",
+        source_record_id="run-1",
+        billing_mode=billing_mode,
+        provider_id="openrouter",
+        model_id="openai/gpt-5.5",
+        properties={"input_tokens": 1, "output_tokens": 1, **properties},
+        occurred_at=at + timedelta(minutes=index),
+    )
+
+
+def _usage_rows(rollups, metric_name):
+    return [
+        (row.billing_mode, row.provider_id, row.model_id, row.value_sum_micro, row.value_count)
+        for row in rollups.list_rollups(start=date(2026, 8, 25), end=date(2026, 8, 26))
+        if row.metric_name == metric_name
+    ]
+
+
 def test_rollup_keeps_the_byok_estimate_out_of_platform_cost(tmp_path):
-    """BYOK events carry a list-price estimate in cost_micro_usd. It gets its
-    own metric per provider/model and never reaches platform_model_cost_usd,
-    neither the day's total nor any per-model row."""
+    """A BYOK call's list-price estimate gets its own metric per provider/model
+    and never reaches platform_model_cost_usd, neither the day's total nor any
+    per-model row. A BYOK call with no estimate is counted, not summed as 0."""
     analytics, rollups = _store(tmp_path)
     service = AnalyticsService(analytics)
     at = datetime(2026, 8, 25, 13, 0, tzinfo=timezone.utc)
-    for index, (billing_mode, cost) in enumerate(
-        (("platform_credits", 1_000_000), ("byok", 420_000), ("byok", 80_000))
-    ):
-        service.record_server_event(
-            event_name="model_usage_recorded",
-            user_id=1,
-            source_event_id=f"resource:model_usage_recorded:run-1:{index}",
-            source_record_type="run",
-            source_record_id="run-1",
-            billing_mode=billing_mode,
-            provider_id="openrouter",
-            model_id="openai/gpt-5.5",
-            properties={"input_tokens": 1, "output_tokens": 1, "cost_micro_usd": cost},
-            occurred_at=at + timedelta(minutes=index),
+    for index, (billing_mode, properties) in enumerate(
+        (
+            ("platform_credits", {"cost_micro_usd": 1_000_000}),
+            ("byok", {"cost_micro_usd": 0, "estimated_cost_micro_usd": 420_000}),
+            ("byok", {"cost_micro_usd": 0, "estimated_cost_micro_usd": 80_000}),
+            ("byok", {"cost_micro_usd": 0}),
         )
+    ):
+        _record_usage(service, index, billing_mode, properties, at)
 
     rollup_day(date(2026, 8, 25), store=rollups)
-    rows = rollups.list_rollups(start=date(2026, 8, 25), end=date(2026, 8, 26))
-    platform = {
-        (row.provider_id, row.model_id): row.value_sum_micro
-        for row in rows
-        if row.metric_name == "platform_model_cost_usd"
-    }
-    byok = [
-        (row.billing_mode, row.provider_id, row.model_id, row.value_sum_micro)
-        for row in rows
-        if row.metric_name == "byok_estimated_cost_usd"
+
+    assert {
+        (row[1], row[2]): row[3] for row in _usage_rows(rollups, "platform_model_cost_usd")
+    } == {("", ""): 1_000_000, ("openrouter", "openai/gpt-5.5"): 1_000_000}
+    assert _usage_rows(rollups, "byok_estimated_cost_usd") == [
+        ("byok", "openrouter", "openai/gpt-5.5", 500_000, 0)
+    ]
+    assert _usage_rows(rollups, "byok_unpriced_calls") == [
+        ("byok", "openrouter", "openai/gpt-5.5", 0, 1)
     ]
 
-    assert platform == {
-        ("", ""): 1_000_000,
-        ("openrouter", "openai/gpt-5.5"): 1_000_000,
-    }
-    assert byok == [("byok", "openrouter", "openai/gpt-5.5", 500_000)]
+
+def test_rollup_writes_the_unpriced_count_even_when_it_is_zero(tmp_path):
+    """Its presence is what tells a reader the day was rolled up after unpriced
+    calls began to be counted; a missing row means an older rollup."""
+    analytics, rollups = _store(tmp_path)
+    service = AnalyticsService(analytics)
+    at = datetime(2026, 8, 25, 13, 0, tzinfo=timezone.utc)
+    _record_usage(
+        service, 0, "byok", {"cost_micro_usd": 0, "estimated_cost_micro_usd": 5}, at
+    )
+
+    rollup_day(date(2026, 8, 25), store=rollups)
+
+    assert _usage_rows(rollups, "byok_unpriced_calls") == [
+        ("byok", "openrouter", "openai/gpt-5.5", 0, 0)
+    ]
+
+
+def test_rollup_reads_the_pr_572_era_byok_estimate_from_cost_micro_usd(tmp_path):
+    """Between PR #572 and the property split, a BYOK event carried its estimate
+    in cost_micro_usd. Rolled up now, that still reads as an estimate -- never as
+    platform cost -- and a zero from before #572 reads as unpriced."""
+    analytics, rollups = _store(tmp_path)
+    service = AnalyticsService(analytics)
+    at = datetime(2026, 8, 25, 13, 0, tzinfo=timezone.utc)
+    _record_usage(service, 0, "byok", {"cost_micro_usd": 30_000}, at)
+    _record_usage(service, 1, "byok", {"cost_micro_usd": 0}, at)
+
+    rollup_day(date(2026, 8, 25), store=rollups)
+
+    # Only the day's undimensioned platform total, and it is zero.
+    assert _usage_rows(rollups, "platform_model_cost_usd") == [
+        ("platform_credits", "", "", 0, 0)
+    ]
+    assert _usage_rows(rollups, "byok_estimated_cost_usd") == [
+        ("byok", "openrouter", "openai/gpt-5.5", 30_000, 0)
+    ]
+    assert _usage_rows(rollups, "byok_unpriced_calls") == [
+        ("byok", "openrouter", "openai/gpt-5.5", 0, 1)
+    ]
 
 
 def test_lifecycle_rollup_is_bounded_and_preserves_other_metrics(tmp_path):

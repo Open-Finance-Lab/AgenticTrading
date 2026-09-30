@@ -191,8 +191,11 @@ def sanitize_server_properties(
             raise ValueError("server analytics event does not accept properties")
         return {}
     if event_name == "model_usage_recorded":
-        allowed = {"input_tokens", "output_tokens", "cost_micro_usd"}
-        if set(properties) != allowed:
+        required = {"input_tokens", "output_tokens", "cost_micro_usd"}
+        # BYOK's list-price estimate; absent when the call is unpriced
+        # (analytics.usage_cost).
+        optional = {"estimated_cost_micro_usd"}
+        if not required <= set(properties) <= required | optional:
             raise ValueError("model usage properties are incomplete or unknown")
         cleaned = {
             "input_tokens": _bounded_integer(
@@ -214,6 +217,13 @@ def sanitize_server_properties(
                 maximum=10_000_000_000,
             ),
         }
+        if "estimated_cost_micro_usd" in properties:
+            cleaned["estimated_cost_micro_usd"] = _bounded_integer(
+                properties["estimated_cost_micro_usd"],
+                "estimated_cost_micro_usd",
+                minimum=0,
+                maximum=10_000_000_000,
+            )
         return _bounded_properties(cleaned)
 
     allowed = {"amount_micro", "bucket"}

@@ -23,6 +23,7 @@ from .models import (
     AnalyticsEventRecord,
 )
 from .repository import analytics_store
+from .usage_cost import model_usage_properties
 
 
 _BACKFILL_EVENT_NAMESPACE = UUID("bfa8a3a5-9691-5fe4-8871-6174934f73a8")
@@ -247,13 +248,6 @@ def _usage_candidate(
     if evidence.call_count != 1:
         raise ValueError("multi-call evidence lacks per-call usage")
     run_id = str(run["run_id"])
-    cost_usd = 0.0
-    if evidence.billing_mode.value == "platform_credits":
-        cost_usd = (
-            evidence.provider_cost_usd
-            if evidence.provider_cost_usd is not None
-            else evidence.estimated_cost_usd or 0.0
-        )
     return BackfillCandidate(
         event_name="model_usage_recorded",
         user_id=user_id,
@@ -269,11 +263,17 @@ def _usage_candidate(
         model_id=evidence.model_id,
         billing_mode=evidence.billing_mode.value,
         outcome="succeeded",
-        properties={
-            "input_tokens": evidence.input_tokens,
-            "output_tokens": evidence.output_tokens,
-            "cost_micro_usd": max(0, round(cost_usd * 1_000_000)),
-        },
+        # The live emitter's own builder, so a backfilled call carries the
+        # same cost properties -- the BYOK estimate included -- as a live one.
+        properties=model_usage_properties(
+            billing_mode=evidence.billing_mode.value,
+            model_id=evidence.model_id,
+            input_tokens=evidence.input_tokens,
+            output_tokens=evidence.output_tokens,
+            usage_available=evidence.usage_available,
+            provider_cost_usd=evidence.provider_cost_usd,
+            estimated_cost_usd=evidence.estimated_cost_usd,
+        ),
     )
 
 

@@ -409,7 +409,16 @@ def test_billing_lane_mix_carries_each_lane_in_credits_honouring_filters(tmp_pat
             model_id=model_id,
             billing_mode=billing_mode,
             outcome="succeeded",
-            properties={"input_tokens": 1, "output_tokens": 1, "cost_micro_usd": cost},
+            properties=(
+                {"input_tokens": 1, "output_tokens": 1, "cost_micro_usd": cost}
+                if billing_mode == "platform_credits"
+                else {
+                    "input_tokens": 1,
+                    "output_tokens": 1,
+                    "cost_micro_usd": 0,
+                    "estimated_cost_micro_usd": cost,
+                }
+            ),
         )
     service = AnalyticsQueryService(store=analytics, user_store=users)
     start = datetime.combine(yesterday, datetime.min.time(), tzinfo=timezone.utc)
@@ -442,6 +451,129 @@ def test_billing_lane_mix_carries_each_lane_in_credits_honouring_filters(tmp_pat
         (day, 5_000_000, 0),
         (today, 400_000, 0),
     ]
+
+
+def test_billing_lane_mix_counts_unpriced_byok_calls_honouring_filters(tmp_path):
+    """A BYOK call with no list-price estimate is counted, not summed as 0, so
+    the panel can say how much of the estimate is missing. Completed days read
+    byok_unpriced_calls; a day rolled up before that metric existed has none,
+    and then counts every BYOK call as unpriced only when it carries no
+    estimate at all (before PR #572, no BYOK call had one)."""
+    analytics, events, rollups, _states, users = _fixture(tmp_path)
+    stamp = datetime.combine(NOW.date(), datetime.min.time(), tzinfo=timezone.utc)
+    counted, legacy, legacy_priced = (NOW.date() - timedelta(days=n) for n in (1, 2, 3))
+
+    def row(day, metric, model_id, *, count=0, sum_micro=0, event_name=""):
+        return DailyRollup(
+            rollup_date=day,
+            metric_name=metric,
+            event_name=event_name,
+            billing_mode="byok",
+            provider_id="openrouter",
+            model_id=model_id,
+            value_count=count,
+            value_sum_micro=sum_micro,
+            updated_at=stamp,
+        )
+
+    def calls(day, model_id, count):
+        return row(day, "event_count", model_id, count=count, event_name="model_usage_recorded")
+
+    rollups.replace_day(
+        counted,
+        [
+            calls(counted, "a", 4),
+            calls(counted, "b", 2),
+            row(counted, "byok_estimated_cost_usd", "a", sum_micro=300),
+            row(counted, "byok_unpriced_calls", "a", count=1),
+            row(counted, "byok_estimated_cost_usd", "b", sum_micro=0),
+            row(counted, "byok_unpriced_calls", "b", count=2),
+        ],
+    )
+    rollups.replace_day(legacy, [calls(legacy, "a", 5)])
+    rollups.replace_day(
+        legacy_priced,
+        [calls(legacy_priced, "a", 3), row(legacy_priced, "byok_estimated_cost_usd", "a", sum_micro=90)],
+    )
+    for index, properties in enumerate(
+        (
+            {"cost_micro_usd": 0, "estimated_cost_micro_usd": 7},
+            {"cost_micro_usd": 0},
+            {"cost_micro_usd": 0},
+        )
+    ):
+        _event(
+            events,
+            "model_usage_recorded",
+            NOW - timedelta(minutes=10 + index),
+            f"resource:model_usage_recorded:run-today:{index}",
+            correlation_id="run-today",
+            provider_id="openrouter",
+            model_id="a" if index < 2 else "b",
+            billing_mode="byok",
+            outcome="succeeded",
+            properties={"input_tokens": 1, "output_tokens": 1, **properties},
+        )
+    service = AnalyticsQueryService(store=analytics, user_store=users)
+    start = datetime.combine(legacy_priced, datetime.min.time(), tzinfo=timezone.utc)
+
+    def unpriced(**filters):
+        overview = service.get_overview(
+            now=NOW,
+            filters=AnalyticsMetricFilters(start=start, end=NOW, **filters),
+        )
+        assert overview.availability["growth"].available is True
+        return [
+            (row.day, row.byok, row.byok_estimated_micro, row.byok_unpriced)
+            for row in overview.billing_lane_mix
+        ]
+
+    today = NOW.date().isoformat()
+    assert unpriced() == [
+        (legacy_priced.isoformat(), 3, 90, 0),
+        (legacy.isoformat(), 5, 0, 5),
+        (counted.isoformat(), 6, 300, 3),
+        (today, 3, 7, 2),
+    ]
+    assert unpriced(model_id="a") == [
+        (legacy_priced.isoformat(), 3, 90, 0),
+        (legacy.isoformat(), 5, 0, 5),
+        (counted.isoformat(), 4, 300, 1),
+        (today, 2, 7, 1),
+    ]
+
+
+def test_activity_reports_atl_cost_only_for_byok_usage(tmp_path):
+    """The activity API's cost_micro_usd is ATL cost. A BYOK call costs ATL
+    nothing -- including one from the PR #572 era, whose event carried the
+    list-price estimate in that very field."""
+    analytics, events, _rollups, _states, users = _fixture(tmp_path)
+    for index, (billing_mode, properties) in enumerate(
+        (
+            ("platform_credits", {"cost_micro_usd": 1_250}),
+            ("byok", {"cost_micro_usd": 0, "estimated_cost_micro_usd": 900}),
+            ("byok", {"cost_micro_usd": 420}),
+        )
+    ):
+        _event(
+            events,
+            "model_usage_recorded",
+            NOW - timedelta(minutes=10 + index),
+            f"resource:model_usage_recorded:run-activity:{index}",
+            correlation_id="run-activity",
+            provider_id="openrouter",
+            model_id="a",
+            billing_mode=billing_mode,
+            outcome="succeeded",
+            properties={"input_tokens": 1, "output_tokens": 1, **properties},
+        )
+    service = AnalyticsQueryService(store=analytics, user_store=users)
+
+    page = service.get_user_activity(user_id=1, section="usage", limit=10, cursor=None)
+
+    assert sorted(
+        (item.billing_mode, item.cost_micro_usd) for item in page.items
+    ) == [("byok", 0), ("byok", 0), ("platform_credits", 1_250)]
 
 
 def test_billing_lane_mix_skips_a_day_with_no_calls_and_no_cost(tmp_path):

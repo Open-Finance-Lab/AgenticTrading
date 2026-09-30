@@ -72,14 +72,34 @@ def is_free_model(model: str | None) -> bool:
     return any(marker in name for marker in _FREE_MODEL_MARKERS)
 
 
-def price_for_model(model: str | None) -> Tuple[float, float]:
-    """Return (input_usd_per_mtok, output_usd_per_mtok) for a model name."""
-    name = (model or "").strip().lower()
-    if not name:
-        return _DEFAULT_PRICING
+def _table_price(name: str) -> Tuple[float, float] | None:
     if any(marker in name for marker in _FREE_MODEL_MARKERS):
         return (0.0, 0.0)
     for needle, in_price, out_price in _PRICING_TABLE:
         if needle in name:
             return (in_price, out_price)
-    return _DEFAULT_PRICING
+    return None
+
+
+def price_for_model(model: str | None) -> Tuple[float, float]:
+    """Return (input_usd_per_mtok, output_usd_per_mtok) for a model name."""
+    name = (model or "").strip().lower()
+    return (_table_price(name) if name else None) or _DEFAULT_PRICING
+
+
+def listed_price_for_model(model: str | None) -> Tuple[float, float] | None:
+    """The table's price for ``model``, or None when the table does not list it.
+
+    ``price_for_model`` never answers None: an unlisted name falls back to
+    ``_DEFAULT_PRICING`` so a reservation always has a ceiling. That fallback is
+    a guess, which is fine for bounding a hold and wrong for a figure published
+    as what a call would have cost (the admin BYOK estimate), where an unlisted
+    model must read as unpriced rather than as $1/$5. OpenRouter's ``:free``
+    variants are listed at zero here, not at their paid sibling's rate.
+    """
+    name = (model or "").strip().lower()
+    if not name:
+        return None
+    if name.endswith(":free"):
+        return (0.0, 0.0)
+    return _table_price(name)

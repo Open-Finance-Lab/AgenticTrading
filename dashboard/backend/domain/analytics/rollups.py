@@ -16,6 +16,7 @@ from .metrics import calculate_overview_metrics
 from .models import AnalyticsEventRecord
 from .repository import _row_to_event, analytics_store
 from .repository_common import utc_iso
+from .usage_cost import atl_cost_micro, byok_estimate_micro
 from .value_repository import (
     LIFECYCLE_ROLLUP_METRICS,
     UserLifecycleDailySnapshot,
@@ -348,7 +349,12 @@ def rollup_day(
             )
         )
     usage_dimensions: dict[tuple[str, str, str], dict[str, int]] = defaultdict(
-        lambda: {"input_tokens": 0, "output_tokens": 0, "cost_micro_usd": 0}
+        lambda: {
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "cost_micro_usd": 0,
+            "unpriced_calls": 0,
+        }
     )
     for event in day_events:
         if event.event_name != "model_usage_recorded":
@@ -364,13 +370,19 @@ def rollup_day(
         usage_dimensions[key]["output_tokens"] += int(
             event.properties.get("output_tokens", 0)
         )
-        # Summed for both lanes but published under separate metrics: the
-        # platform figure is a debit, the BYOK one a list-price estimate
-        # (see LLMExecutionService._emit_model_usage), and the two must
-        # never add into one another.
-        usage_dimensions[key]["cost_micro_usd"] += int(
-            event.properties.get("cost_micro_usd", 0)
-        )
+        # One cost per lane, published under separate metrics: the platform
+        # figure is a debit, the BYOK one a list-price estimate
+        # (analytics.usage_cost), and the two must never add into one another.
+        if event.billing_mode == "byok":
+            estimate = byok_estimate_micro(event.properties)
+            if estimate is None:
+                usage_dimensions[key]["unpriced_calls"] += 1
+            else:
+                usage_dimensions[key]["cost_micro_usd"] += estimate
+        else:
+            usage_dimensions[key]["cost_micro_usd"] += atl_cost_micro(
+                event.billing_mode, event.properties
+            )
     for (mode, provider, model), values in sorted(usage_dimensions.items()):
         rows.extend(
             [
@@ -407,16 +419,29 @@ def rollup_day(
                 )
             )
         elif mode == "byok":
-            rows.append(
-                _row(
-                    day,
-                    "byok_estimated_cost_usd",
-                    sum_micro=values["cost_micro_usd"],
-                    billing_mode=mode,
-                    provider_id=provider,
-                    model_id=model,
-                    updated_at=current,
-                )
+            rows.extend(
+                [
+                    _row(
+                        day,
+                        "byok_estimated_cost_usd",
+                        sum_micro=values["cost_micro_usd"],
+                        billing_mode=mode,
+                        provider_id=provider,
+                        model_id=model,
+                        updated_at=current,
+                    ),
+                    # Written zero or not: its presence is how a reader tells
+                    # a day rolled up before unpriced calls were counted.
+                    _row(
+                        day,
+                        "byok_unpriced_calls",
+                        count=values["unpriced_calls"],
+                        billing_mode=mode,
+                        provider_id=provider,
+                        model_id=model,
+                        updated_at=current,
+                    ),
+                ]
             )
     failure_users: dict[str, set[int]] = defaultdict(set)
     for event in day_events:

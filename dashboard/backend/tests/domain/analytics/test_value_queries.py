@@ -233,7 +233,8 @@ class FakeLegacyService:
             failed_runs=3,
             input_tokens=120,
             output_tokens=80,
-            platform_model_cost_usd=0.25,
+            # The real overview leaves cost None when its growth read fails.
+            platform_model_cost_usd=0.25 if self.availability.get("growth") else None,
             top_failure_categories=[],
         )
 
@@ -658,6 +659,21 @@ def test_commercial_response_keeps_revenue_usage_grants_cost_and_balances_separa
         "purchased_available_micro": 100_000,
         "total_available_micro": 1_400_000,
     }
+
+
+def test_commercial_platform_cost_is_unknown_not_zero_when_its_read_failed():
+    """0 is a real answer ("no platform calls"). When the model-usage read
+    behind the figure failed, the field is None so the page draws a dash, and
+    the section is partial."""
+    service, _value_store, _legacy = _service(
+        snapshots={1: _snapshot(1)},
+        legacy_availability={"growth": False, "friction": True},
+    )
+
+    response = service.get_commercial(start=date(2026, 8, 1), end=date(2026, 9, 1), now=NOW)
+
+    assert response.selected_period.platform_model_cost_micro_usd is None
+    assert response.availability.status == "partial"
 
 
 def test_commercial_series_sum_across_users_and_match_their_headlines():

@@ -63,3 +63,22 @@ def test_haiku_on_commonstack_prices_at_the_listed_rate():
     # (checked 2026-09-23). The claude-haiku-4 entry already matches, so the
     # #535 allowlist addition needed no pricing-table change.
     assert pricing.price_for_model("anthropic/claude-haiku-4-5") == (1.0, 5.0)
+
+
+def test_listed_price_is_none_where_price_for_model_guesses():
+    """``price_for_model`` falls back to $1/$5 so a reservation always has a
+    ceiling. ``listed_price_for_model`` backs a published estimate, where that
+    guess would be an invented number, so an unlisted model answers None."""
+    assert pricing.price_for_model("acme/unlisted-model") == (1.0, 5.0)
+    assert pricing.listed_price_for_model("acme/unlisted-model") is None
+    assert pricing.listed_price_for_model("") is None
+    assert pricing.listed_price_for_model(None) is None
+    assert pricing.listed_price_for_model("openai/gpt-5.5") == (5.0, 30.0)
+
+
+def test_listed_price_of_a_free_variant_is_zero_not_its_paid_siblings():
+    # OpenRouter's ":free" variant matches the paid slug's needle; billing keeps
+    # that behaviour, the estimate must not.
+    assert pricing.price_for_model("openai/gpt-5.5:free") == (5.0, 30.0)
+    assert pricing.listed_price_for_model("openai/gpt-5.5:free") == (0.0, 0.0)
+    assert pricing.listed_price_for_model("rule-based") == (0.0, 0.0)

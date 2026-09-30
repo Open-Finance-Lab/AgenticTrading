@@ -15,6 +15,7 @@ from dashboard.backend.domain.credits.repository_common import (
     CreditAccountRestrictedStoreError,
 )
 from dashboard.backend.domain.analytics import instrumentation as analytics_instrumentation
+from dashboard.backend.domain.analytics.usage_cost import model_usage_properties
 from dashboard.backend.domain.model_providers.models import ProviderRecord
 from dashboard.backend.domain.model_providers.service import (
     ModelProviderService,
@@ -278,23 +279,10 @@ class LLMExecutionService:
         request: LLMExecutionRequest,
         result: LLMExecutionResult,
     ) -> None:
-        if request.billing_mode is BillingMode.PLATFORM_CREDITS:
-            cost_usd = (
-                result.billing.provider_cost_usd
-                if result.billing.provider_cost_usd is not None
-                else result.billing.estimated_cost_usd or 0.0
-            )
-        else:
-            # BYOK debits no Credits, but analytics still expresses the lane in
-            # Credits: record the platform list-price estimate of the same
-            # tokens. The provider cost belongs to the user's own key and is
-            # not the platform's equivalent, so it is deliberately ignored here.
-            # Safe to overload the field only because every platform-cost
-            # reader filters on billing_mode == "platform_credits" first
-            # (query_service, value_queries._safe_cost_micro_usd, rollups,
-            # metrics, admin-users.js); a new reader of cost_micro_usd must
-            # too, or it will add this estimate into real spend.
-            cost_usd = result.billing.estimated_cost_usd or 0.0
+        # BYOK debits no Credits, so its cost_micro_usd is 0; its list-price
+        # estimate travels in a separate property (analytics.usage_cost). The
+        # provider cost of a BYOK call belongs to the user's own key and is not
+        # the platform's equivalent, so it is deliberately not recorded.
         analytics_instrumentation.emit_resource_event(
             event_name="model_usage_recorded",
             user_id=request.user_id,
@@ -305,11 +293,15 @@ class LLMExecutionService:
             model_id=request.model_id,
             billing_mode=request.billing_mode.value,
             outcome="succeeded",
-            properties={
-                "input_tokens": result.usage.input_tokens,
-                "output_tokens": result.usage.output_tokens,
-                "cost_micro_usd": max(0, round(cost_usd * 1_000_000)),
-            },
+            properties=model_usage_properties(
+                billing_mode=request.billing_mode.value,
+                model_id=request.model_id,
+                input_tokens=result.usage.input_tokens,
+                output_tokens=result.usage.output_tokens,
+                usage_available=result.usage.usage_available,
+                provider_cost_usd=result.billing.provider_cost_usd,
+                estimated_cost_usd=result.billing.estimated_cost_usd,
+            ),
             version=request.call_index,
         )
 

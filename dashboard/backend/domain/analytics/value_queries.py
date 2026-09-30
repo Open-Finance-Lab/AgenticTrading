@@ -239,7 +239,9 @@ class CommercialPeriodSummary(BaseModel):
     refunded_micro: int = Field(ge=0)
     consumed_micro: int = Field(ge=0)
     admin_grant_activity_micro: int = Field(ge=0)
-    platform_model_cost_micro_usd: int = Field(ge=0)
+    # None when the model-usage read behind it failed: 0 is a real answer
+    # ("no platform calls"), so it must not also stand for "unknown".
+    platform_model_cost_micro_usd: int | None = Field(ge=0)
 
 
 class BalanceTotals(BaseModel):
@@ -251,7 +253,7 @@ class BalanceTotals(BaseModel):
 
 
 class DailyMicroTotals(BaseModel):
-    """One UTC day of ledger movement for the /admin Credits & revenue charts."""
+    """One UTC day of ledger movement for the /admin Credits & Cost chart."""
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     day: date
@@ -563,7 +565,7 @@ class ValueAnalyticsQueryService:
         start: date,
         end: date,
     ) -> tuple[list[DailyMicroTotals], list[DailyMicroTotals]]:
-        """(purchased_by_day, consumed_by_day) for the Credits & revenue charts.
+        """(purchased_by_day, consumed_by_day) for the Credits & Cost chart.
 
         Chunked by 500 like ``_commercial`` so the bound-parameter count never
         grows with the user table; per-day sums are additive across chunks.
@@ -1075,8 +1077,10 @@ class ValueAnalyticsQueryService:
                 admin_grant_activity_micro=sum(
                     fact.admin_grant_activity_micro for fact in facts.values()
                 ),
-                platform_model_cost_micro_usd=round(
-                    (overview.platform_model_cost_usd or 0) * 1_000_000
+                platform_model_cost_micro_usd=(
+                    None
+                    if overview.platform_model_cost_usd is None
+                    else round(overview.platform_model_cost_usd * 1_000_000)
                 ),
             ),
             current_balances=BalanceTotals(

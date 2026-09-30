@@ -106,23 +106,21 @@ def normalize_usage(payload: Any) -> LLMUsage:
     )
 
 
-def estimate_cost_from_snapshot(
-    snapshot: PricingSnapshot,
-    usage: LLMUsage,
+def _six_decimal_usd(
+    input_tokens: int,
+    output_tokens: int,
+    input_usd_per_million_tokens: float,
+    output_usd_per_million_tokens: float,
 ) -> float | None:
-    """Calculate exact six-decimal USD cost from the captured price snapshot."""
-
-    if not usage.usage_available:
-        return None
     try:
         input_cost = (
-            Decimal(usage.input_tokens)
-            * Decimal(str(snapshot.input_usd_per_million_tokens))
+            Decimal(input_tokens)
+            * Decimal(str(input_usd_per_million_tokens))
             / Decimal(1_000_000)
         )
         output_cost = (
-            Decimal(usage.output_tokens)
-            * Decimal(str(snapshot.output_usd_per_million_tokens))
+            Decimal(output_tokens)
+            * Decimal(str(output_usd_per_million_tokens))
             / Decimal(1_000_000)
         )
         total = (input_cost + output_cost).quantize(
@@ -131,6 +129,40 @@ def estimate_cost_from_snapshot(
     except (InvalidOperation, TypeError, ValueError):
         return None
     return float(total)
+
+
+def estimate_cost_from_snapshot(
+    snapshot: PricingSnapshot,
+    usage: LLMUsage,
+) -> float | None:
+    """Calculate exact six-decimal USD cost from the captured price snapshot."""
+
+    if not usage.usage_available:
+        return None
+    return _six_decimal_usd(
+        usage.input_tokens,
+        usage.output_tokens,
+        snapshot.input_usd_per_million_tokens,
+        snapshot.output_usd_per_million_tokens,
+    )
+
+
+def list_price_estimate_usd(model_id: str | None, usage: LLMUsage) -> float | None:
+    """What ``usage`` would cost at the table's listed price for ``model_id``.
+
+    None when the provider reported no usage or the table does not list the
+    model (``pricing.listed_price_for_model``), so the admin BYOK estimate
+    reads as unpriced instead of as a default-priced guess. Deliberately not
+    the call's own ``estimated_cost_usd``: that is priced off a snapshot which
+    falls back to ``_DEFAULT_PRICING`` for an unlisted model.
+    """
+
+    if not usage.usage_available:
+        return None
+    listed = _pricing.listed_price_for_model(model_id)
+    if listed is None:
+        return None
+    return _six_decimal_usd(usage.input_tokens, usage.output_tokens, *listed)
 
 
 def credits_micro_for_usd(cost_usd: float | Decimal | None) -> int:

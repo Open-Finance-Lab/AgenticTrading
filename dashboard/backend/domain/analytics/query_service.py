@@ -25,6 +25,7 @@ from .repository_common import (
     utc_iso,
 )
 from .rollups import AnalyticsRollupStore, DailyRollup
+from .usage_cost import atl_cost_micro, byok_estimate_micro
 from .states import (
     AnalyticsStateStore,
     UserAnalyticsSnapshot,
@@ -36,12 +37,14 @@ _USER_STATES = {"blocked", "needs_attention", "dormant", "onboarding", "active"}
 _ATTENTION_STATES = {"blocked", "needs_attention"}
 # The two BillingLaneDay call-count fields; also models.ALLOWED_BILLING_MODES.
 _BILLING_LANES = ("platform_credits", "byok")
-# Each lane's Credits field: the platform debit, the BYOK list-price estimate.
-_LANE_COST_FIELD = {
-    "platform_credits": "platform_cost_micro",
-    "byok": "byok_estimated_micro",
-}
-_LANE_FIELDS = (*_BILLING_LANES, *_LANE_COST_FIELD.values())
+# Every BillingLaneDay counter: the two call counts, each lane's Credits (the
+# platform debit, the BYOK list-price estimate) and the BYOK calls left unpriced.
+_LANE_FIELDS = (
+    *_BILLING_LANES,
+    "platform_cost_micro",
+    "byok_estimated_micro",
+    "byok_unpriced",
+)
 _ACTIVATION_EVENTS = (
     "account_signed_up",
     "credential_verified",
@@ -211,11 +214,13 @@ class BillingLaneDay(BaseModel):
     counter: it fires once per non-zero credit bucket, and not at all for a
     zero-cost settlement.
 
-    The two ``*_micro`` fields sum ``cost_micro_usd`` off those same events,
-    in micro-Credits ($1 = 1 Credit): ``platform_cost_micro`` is what the
-    platform lane debited, ``byok_estimated_micro`` what the BYOK calls would
-    have debited at list price. BYOK events written before the estimate was
-    recorded carry 0.
+    The two ``*_micro`` fields are in micro-Credits ($1 = 1 Credit), off those
+    same events (analytics.usage_cost): ``platform_cost_micro`` is what the
+    platform lane debited, ``byok_estimated_micro`` what the priced BYOK calls
+    would have debited at list price. ``byok_unpriced`` counts the BYOK calls
+    that have no estimate -- model not on the price list, no provider usage
+    reported, or recorded before estimates existed -- so the estimate's gap is
+    a number rather than an inference from a zero.
     """
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -224,6 +229,7 @@ class BillingLaneDay(BaseModel):
     byok: int = Field(ge=0)
     platform_cost_micro: int = Field(default=0, ge=0)
     byok_estimated_micro: int = Field(default=0, ge=0)
+    byok_unpriced: int = Field(default=0, ge=0)
 
 
 class AnalyticsOverview(BaseModel):
@@ -858,44 +864,67 @@ class AnalyticsQueryService:
             # Each lane also carries its cost in Credits, from the same
             # model_usage_recorded events: the platform debit
             # (platform_model_cost_usd, the headline's own rows) and the BYOK
-            # list-price estimate (byok_estimated_cost_usd). Never
+            # list-price estimate (byok_estimated_cost_usd), plus the BYOK
+            # calls with no estimate (byok_unpriced_calls). Never
             # credits_settled, which has no provider or model to filter on.
-            lanes: dict[str, dict[str, int]] = {}
+            lanes: dict[str, dict[str, int]] = defaultdict(
+                lambda: dict.fromkeys(_LANE_FIELDS, 0)
+            )
+            unpriced_counted: set[str] = set()
             for row in rollups:
-                day_key = row.rollup_date.isoformat()
-                if (
-                    row.metric_name == "event_count"
-                    and row.event_name == "model_usage_recorded"
-                    and row.billing_mode in _BILLING_LANES
-                    and _matches_rollup_dimensions(row, filters)
-                ):
-                    lanes.setdefault(day_key, dict.fromkeys(_LANE_FIELDS, 0))[
-                        row.billing_mode
-                    ] += row.value_count
+                if row.metric_name == "event_count":
+                    if (
+                        row.event_name == "model_usage_recorded"
+                        and row.billing_mode in _BILLING_LANES
+                        and _matches_rollup_dimensions(row, filters)
+                    ):
+                        lanes[row.rollup_date.isoformat()][
+                            row.billing_mode
+                        ] += row.value_count
                 elif _counts_toward_platform_cost(row, filters):
-                    lanes.setdefault(day_key, dict.fromkeys(_LANE_FIELDS, 0))[
+                    lanes[row.rollup_date.isoformat()][
                         "platform_cost_micro"
                     ] += row.value_sum_micro
-                elif (
-                    row.metric_name == "byok_estimated_cost_usd"
-                    and row.billing_mode == "byok"
-                    and _matches_rollup_dimensions(row, filters)
+                elif row.billing_mode == "byok" and _matches_rollup_dimensions(
+                    row, filters
                 ):
-                    lanes.setdefault(day_key, dict.fromkeys(_LANE_FIELDS, 0))[
-                        "byok_estimated_micro"
-                    ] += row.value_sum_micro
+                    if row.metric_name == "byok_estimated_cost_usd":
+                        lanes[row.rollup_date.isoformat()][
+                            "byok_estimated_micro"
+                        ] += row.value_sum_micro
+                    elif row.metric_name == "byok_unpriced_calls":
+                        day_key = row.rollup_date.isoformat()
+                        lanes[day_key]["byok_unpriced"] += row.value_count
+                        unpriced_counted.add(day_key)
+            # A day rolled up before unpriced calls were counted has no
+            # byok_unpriced_calls row, and its gap cannot be split after the
+            # fact. With no estimate at all it predates PR #572, when no BYOK
+            # call had one, so every call is unpriced; with some estimate it is
+            # the one day #572 was live, and it is left as rolled up.
+            for day_key, lane in lanes.items():
+                if (
+                    day_key not in unpriced_counted
+                    and lane["byok"]
+                    and not lane["byok_estimated_micro"]
+                ):
+                    lane["byok_unpriced"] = lane["byok"]
             for event in current_events:
                 if (
-                    event.event_name == "model_usage_recorded"
-                    and event.billing_mode in _BILLING_LANES
+                    event.event_name != "model_usage_recorded"
+                    or event.billing_mode not in _BILLING_LANES
                 ):
-                    lane = lanes.setdefault(
-                        event.occurred_at.date().isoformat(),
-                        dict.fromkeys(_LANE_FIELDS, 0),
-                    )
-                    lane[event.billing_mode] += 1
-                    lane[_LANE_COST_FIELD[event.billing_mode]] += int(
-                        event.properties.get("cost_micro_usd", 0)
+                    continue
+                lane = lanes[event.occurred_at.date().isoformat()]
+                lane[event.billing_mode] += 1
+                if event.billing_mode == "byok":
+                    estimate = byok_estimate_micro(event.properties)
+                    if estimate is None:
+                        lane["byok_unpriced"] += 1
+                    else:
+                        lane["byok_estimated_micro"] += estimate
+                else:
+                    lane["platform_cost_micro"] += atl_cost_micro(
+                        event.billing_mode, event.properties
                     )
             # Every rolled-up day carries a platform cost total, zero or not;
             # a day with neither calls nor cost is not activity, and keeping
@@ -998,6 +1027,7 @@ class AnalyticsQueryService:
                     byok=counts["byok"],
                     platform_cost_micro=counts["platform_cost_micro"],
                     byok_estimated_micro=counts["byok_estimated_micro"],
+                    byok_unpriced=counts["byok_unpriced"],
                 )
                 for day, counts in sorted(lane_days.items())
             ],
@@ -1207,8 +1237,11 @@ class AnalyticsQueryService:
                         if event.event_name == "model_usage_recorded"
                         else None
                     ),
+                    # ATL cost only: a BYOK call's list-price estimate is not
+                    # spend, and must not read as spend to a reader that does
+                    # not know to check billing_mode first.
                     cost_micro_usd=(
-                        int(properties.get("cost_micro_usd", 0))
+                        atl_cost_micro(event.billing_mode, properties)
                         if event.event_name == "model_usage_recorded"
                         else None
                     ),
