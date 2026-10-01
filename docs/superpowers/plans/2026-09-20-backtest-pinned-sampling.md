@@ -8,14 +8,17 @@
 > outstanding.
 >
 > Track B was sequenced behind Track A
-> (`2026-09-20-backtest-visible-start.md`, shipped as PR #501); that gate has
-> now cleared, so the branch can be cut. Update this line when it lands, and
-> do not infer status from the checkboxes — Track A shipped with all 56 of
-> its own still unticked.
+> (`2026-09-20-backtest-visible-start.md`, shipped as PR #501). That gate
+> cleared, and `feat/backtest-pinned-sampling` was cut 2026-10-01 from
+> `origin/main` `2589333a`. Update this line when it lands, and do not infer
+> status from the checkboxes — Track A shipped with all 56 of its own still
+> unticked.
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Every model call a dashboard backtest makes carries a pinned sampling policy chosen per catalog model, the run records what it asked for, the results panel shows it, and a rerun of one configuration is measured against the first run.
+
+> **Amendment 2026-10-01.** DeepSeek V4 Pro and Qwen3.7 Plus are now pinned to temperature 0 **and thinking off** (`PINNED_NO_THINKING`, `reasoning_effort="none"`), replacing temperature 0 + reasoning effort `low`. Reason: the 2026-10-01 probe on issue #539 found that CommonStack, the prod lane for both models, honours no graduated reasoning control for them. It ignored `reasoning.effort`, a top-level `reasoning_effort`, `reasoning.enabled:false` and `thinking.budget_tokens`, and by default each call randomly either thinks to the cap or does not think at all. Only `thinking: {type: "disabled"}` works, so Task 5 now sends it on the `openai_compatible` lane for an off value, and Task 6 renders that value as *thinking off*. GPT-5.5's `low` is unchanged, because CommonStack does honour it for that model.
 
 **Architecture:** The policy lives on the execution catalog (`CatalogModel.sampling`) and rides the resolved route the endpoint already preflights. It reaches the child as two argv flags, then engine → portfolio manager → pipeline runner → the worker client, which already validates `temperature` and `reasoning_effort`. The request builder adds each value only when set, so the CLI's plain Anthropic SDK client keeps working. The engine writes `llm_sampling` into `agent_runs.metadata`; the results panel renders it as a Sampling row. A dev script diffs two runs bar by bar and reports which axis it measured (`basis`: the decision log when one exists, otherwise the equity curve — and for every run this plan measures it is the equity curve, because the pipeline runtime writes no decision log at all).
 
@@ -26,13 +29,13 @@
 ## Global Constraints
 
 - Run everything from the repo root. Tests: `pytest dashboard/backend/tests/<file> -v`. Node must be on `PATH` for the node-harness tests (they skip without it).
-- The policy table is exactly: Claude Haiku 4.5 and Claude Sonnet 4.6 → temperature 0; GPT-5.5 → reasoning effort `low`, **no temperature**; Gemini 3.1 Pro Preview → temperature 0; DeepSeek V4 Pro and Qwen3.7 Plus → temperature 0 **and** reasoning effort `low`.
+- The policy table is exactly: Claude Haiku 4.5 and Claude Sonnet 4.6 → temperature 0; GPT-5.5 → reasoning effort `low`, **no temperature**; Gemini 3.1 Pro Preview → temperature 0; DeepSeek V4 Pro and Qwen3.7 Plus → temperature 0 **and** thinking off (reasoning effort `none`; amended 2026-10-01, see the note under **Goal**).
 - A sampling value is sent **only when set**. An unset value must leave the request byte-identical to today's.
 - Copy never says "deterministic". The row says *Pinned · …*, *Provider default*, or *Not recorded*.
 - Every change to `dashboard/frontend/app.js` bumps the `app.js?v=N` pin in **five** files (`dashboard/frontend/app.html` plus the four tests from `grep -rln "app.js?v=" dashboard/backend/tests/*.py`). `styles.css` is not touched.
-- Commit messages: `type: summary`, ending with `Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>`.
+- Commit messages: `type: summary`, ending with `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`.
 - Branch: `feat/backtest-pinned-sampling`, cut from `origin/main` **after** Track A's PR (`docs/superpowers/plans/2026-09-20-backtest-visible-start.md`) has merged.
-- **Line numbers below are read against `c68076ac` — `origin/main` plus this set's two docs commits, byte-identical to `origin/main` under `dashboard/`, which is the same reference the spec names — and this branch is cut two merges later: the largest drift of the three documents in this set.** The spec and the Track A plan each sit one merge from their anchors; this one sits behind *both* the spec's sequencing step 0 (#474's `feat/474-backtest-timeout-outcome`) **and** Track A's PR on top of it. The spec's own line-reference paragraph accounts for itself and for Track A; it does not cover this plan, so the accounting is here. Measured 2026-09-20 against that branch's merge-base: #474 changes `api/routers/backtests.py` by **+168/−10** and `frontend/app.js` by **+123/−15**, and touches nothing else this plan edits — `app.html` only in its two cache-buster `?v=` tags, both far below the markup this plan touches, so `app.html:1257` survives it. (Those two tags are `styles.css` at `:16` and the `app.js` tag at `:2701` on #474's branch — `:2342` on `main`, which has since moved it. The `13 and 2698` an earlier draft carried were the unified-diff **hunk headers**, not the changed lines; `git diff` prints the context start, and three lines of context is exactly the error. A number read off a hunk header is wrong in a paragraph whose only job is getting numbers right.) Track A then edits `backtests.py`, `app.js`, `engine.py` and `backtest_hourly_agent.py` again.
+- **The line anchors below are stale by many merges** (they were read against `c68076ac`; the branch is cut from `2589333a`). Re-derive every location with grep on the quoted anchor text, never by number.
 - **So: grep for the `def <name>(` / `function <name>(` line, never jump to the number.** Every number below is a hint about where to start grepping, not an address. Two of the four moving files are stale by both merges (`backtests.py`, `app.js`) and two by Track A alone (`engine.py`, `backtest_hourly_agent.py`); the **Files** entry for each carries its anchor text for that reason, and the quoted text beats the number wherever the two disagree. Already demonstrated, not hypothetical: `backtests.py:1381` is `def run_backtest_background(` here and `def _read_progress_file(` on the post-#474 tree — where the real signature has moved to `:1434`, and where Track A Task 3 Step 3 inserts `PROGRESS_PHASE_MESSAGES` + `_progress_message` directly above `def _read_progress_file(`. A reader who jumped to `:1381` would land inside Track A's new block and edit that. The files neither merge touches — `execution_catalog.py`, `pipeline_runner.py`, `backtest_harness.py`, `portfolio_manager.py`, `adapters/openai.py` and every test module this plan edits — should still land on their numbers; check anyway. The one test anchor worth a second look is the `ExecutionModelRoute(` stub list in Task 1's **Interfaces** (`test_backtests_router.py:348/383/407`): #474 adds 322 lines to that file (+322/−4) and Track A appends to it again, but both land far below `:407`, so the three survive — verified 2026-09-20 on `feat/474-backtest-timeout-outcome`, where they are still at `:348/383/407`.
 
 ---
@@ -44,7 +47,7 @@
 - Test: `dashboard/backend/tests/test_execution_catalog_sampling.py` (new)
 
 **Interfaces:**
-- Produces: `SamplingPolicy(temperature: float | None, reasoning_effort: str | None)` (frozen dataclass); constants `PINNED_TEMPERATURE`, `PINNED_REASONING_LOW`, `PINNED_BOTH`; `CatalogModel.sampling: SamplingPolicy` — **no default**, every catalog row states its policy at the construction site; `ExecutionModelRoute.sampling: SamplingPolicy | None = None` — a route nobody resolved from the catalog carries *no* policy rather than a pinned one, which is what the six existing `ExecutionModelRoute(...)` stubs in tests get and what the endpoint already renders as two absent flags.
+- Produces: `SamplingPolicy(temperature: float | None, reasoning_effort: str | None)` (frozen dataclass); constants `PINNED_TEMPERATURE`, `PINNED_REASONING_LOW`, `PINNED_NO_THINKING`; `CatalogModel.sampling: SamplingPolicy` — **no default**, every catalog row states its policy at the construction site; `ExecutionModelRoute.sampling: SamplingPolicy | None = None` — a route nobody resolved from the catalog carries *no* policy rather than a pinned one, which is what the six existing `ExecutionModelRoute(...)` stubs in tests get and what the endpoint already renders as two absent flags.
 
 The two fields are deliberately treated differently, and the asymmetry is the point. `CatalogModel` is the **declaration**: the catalog is the single owner of the policy table, and **all six** of its rows are written `CatalogModel("vendor/id", "Label", "vendor")` today — three positional arguments and nothing else, verified 2026-09-20 against `execution_catalog.py:28-51`. A `PINNED_TEMPERATURE` default would pin `temperature=0` on the next OpenAI reasoning model added in that house style — a model that answers 400 to any non-default temperature, so every backtest on that route would fail at the provider with nothing local to see. The spec already says it: a model not in the catalog cannot be launched from the dashboard, "so there is no default row" (the spec's **⚠ changed: the policy is a per-model table, not a flag** section, under the catalog table; cited by heading plus quoted sentence rather than by line, because the spec is being edited in the same pass as this plan). Re-derived 2026-09-20 with `grep -n "^#" docs/superpowers/specs/2026-09-20-backtest-speed-and-trust-design.md`: that `###` heading and the `## Track B — sampling pinned, recorded, shown` above it are the only two the sentence lives under, and **Track B — Sampling policy** — which an earlier draft of this paragraph named, having picked the citation *for* its robustness — is not a heading the spec has ever had. `ExecutionModelRoute` is a **derived value**: `list_execution_model_routes` always fills it from the model, so the only constructions that omit it are the six test stubs standing in for a preflight (`test_backtests_router.py:348/383/407`, `test_credit_metering.py:35`, `test_market_data_features.py:70`, `integration/test_ifind_ashare_backtest.py:195` — all keyword-style, all three fields, verified 2026-09-20). For those, `None` is the truthful answer, and the endpoint's `llm_sampling.temperature if llm_sampling else None` already turns it into "no flags". Requiring it there would make six stubs restate a policy they are not testing — the kind of noise that gets copy-pasted wrong — and would buy nothing that Step 1's `test_every_route_the_catalog_builds_carries_a_policy` does not already buy.
 
@@ -66,7 +69,7 @@ import pytest
 
 from dashboard.backend.domain.model_providers.execution_catalog import (
     ATL_EXECUTION_MODELS,
-    PINNED_BOTH,
+    PINNED_NO_THINKING,
     PINNED_REASONING_LOW,
     PINNED_TEMPERATURE,
     CatalogModel,
@@ -81,8 +84,8 @@ _EXPECTED = {
     "anthropic/claude-sonnet-4-6": PINNED_TEMPERATURE,
     "openai/gpt-5.5": PINNED_REASONING_LOW,
     "google/gemini-3.1-pro-preview": PINNED_TEMPERATURE,
-    "deepseek/deepseek-v4-pro": PINNED_BOTH,
-    "qwen/qwen3.7-plus": PINNED_BOTH,
+    "deepseek/deepseek-v4-pro": PINNED_NO_THINKING,
+    "qwen/qwen3.7-plus": PINNED_NO_THINKING,
 }
 
 
@@ -100,7 +103,7 @@ def test_each_model_pins_the_documented_policy(catalog_id):
 def test_the_three_policies_are_what_they_say():
     assert PINNED_TEMPERATURE == SamplingPolicy(temperature=0.0, reasoning_effort=None)
     assert PINNED_REASONING_LOW == SamplingPolicy(temperature=None, reasoning_effort="low")
-    assert PINNED_BOTH == SamplingPolicy(temperature=0.0, reasoning_effort="low")
+    assert PINNED_NO_THINKING == SamplingPolicy(temperature=0.0, reasoning_effort="none")
 
 
 def test_routes_carry_their_models_policy():
@@ -112,7 +115,7 @@ def test_routes_carry_their_models_policy():
     )
     by_id = {r.catalog_id: r for r in list_execution_model_routes(provider)}
     assert by_id["openai/gpt-5.5"].sampling == PINNED_REASONING_LOW
-    assert by_id["deepseek/deepseek-v4-pro"].sampling == PINNED_BOTH
+    assert by_id["deepseek/deepseek-v4-pro"].sampling == PINNED_NO_THINKING
     assert by_id["anthropic/claude-sonnet-4-6"].sampling == PINNED_TEMPERATURE
 
 
@@ -169,7 +172,7 @@ def test_every_route_the_catalog_builds_carries_a_policy():
 - [ ] **Step 2: Run the tests to verify they fail**
 
 Run: `pytest dashboard/backend/tests/test_execution_catalog_sampling.py -v`
-Expected: FAIL with `ImportError: cannot import name 'PINNED_BOTH'`.
+Expected: FAIL with `ImportError: cannot import name 'PINNED_NO_THINKING'`.
 
 - [ ] **Step 3: Add the policy to the catalog**
 
@@ -210,7 +213,10 @@ class SamplingPolicy:
 
 PINNED_TEMPERATURE = SamplingPolicy(temperature=0.0, reasoning_effort=None)
 PINNED_REASONING_LOW = SamplingPolicy(temperature=None, reasoning_effort="low")
-PINNED_BOTH = SamplingPolicy(temperature=0.0, reasoning_effort="low")
+# "none" switches thinking off rather than naming an effort level. The OpenAI
+# adapter sends it to an openai_compatible provider (CommonStack) as
+# `thinking: {type: "disabled"}`, the one reasoning control that lane honours.
+PINNED_NO_THINKING = SamplingPolicy(temperature=0.0, reasoning_effort="none")
 
 
 @dataclass(frozen=True)
@@ -268,16 +274,25 @@ ATL_EXECUTION_MODELS = (
         "google",
         PINNED_TEMPERATURE,
     ),
-    # Thinking models behind OpenRouter: temperature is accepted and ignored
-    # while thinking; the effort bound is what keeps the reply inside the
-    # 2000-token ceiling instead of spending it all on the thinking block.
+    # Thinking models served on CommonStack, which honours no graduated
+    # reasoning control for these two: reasoning.effort, a top-level
+    # reasoning_effort, reasoning.enabled=false and thinking.budget_tokens
+    # were all ignored in the 2026-10-01 probe (#539). Left alone, each call
+    # either thinks to the 2000-token ceiling or does not think at all.
+    # Thinking off is the one control it honours, and with thinking off the
+    # temperature applies as well.
     CatalogModel(
         "deepseek/deepseek-v4-pro",
         "DeepSeek V4 Pro",
         "deepseek",
-        PINNED_BOTH,
+        PINNED_NO_THINKING,
     ),
-    CatalogModel("qwen/qwen3.7-plus", "Qwen3.7 Plus", "qwen", PINNED_BOTH),
+    CatalogModel(
+        "qwen/qwen3.7-plus",
+        "Qwen3.7 Plus",
+        "qwen",
+        PINNED_NO_THINKING,
+    ),
 )
 ```
 
@@ -287,7 +302,7 @@ In `list_execution_model_routes` (`:80-96`), add `sampling=model.sampling,` to t
 
 **No test stub is edited.** The six existing `ExecutionModelRoute(...)` constructions (`test_backtests_router.py:348/383/407`, `test_credit_metering.py:35`, `test_market_data_features.py:70`, `integration/test_ifind_ashare_backtest.py:195`) keep compiling and now carry `sampling=None`, which is what they mean — none of them is standing in for a catalog lookup.
 
-Extend `__all__` with `"PINNED_BOTH"`, `"PINNED_REASONING_LOW"`, `"PINNED_TEMPERATURE"`, `"SamplingPolicy"`.
+Extend `__all__` with `"PINNED_NO_THINKING"`, `"PINNED_REASONING_LOW"`, `"PINNED_TEMPERATURE"`, `"SamplingPolicy"`.
 
 - [ ] **Step 4: Run the tests to verify they pass**
 
@@ -300,7 +315,7 @@ Expected: all pass.
 git add dashboard/backend/domain/model_providers/execution_catalog.py dashboard/backend/tests/test_execution_catalog_sampling.py
 git commit -m "feat: pin a sampling policy per catalog model
 
-Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ```
 
 ---
@@ -335,14 +350,14 @@ def test_run_pipeline_decision_sends_pinned_sampling_on_both_attempts():
         market_snapshot={"top_signals": {}},
         model="deepseek/deepseek-v4-pro",
         temperature=0.0,
-        reasoning_effort="low",
+        reasoning_effort="none",
     )
 
     assert decision == {"actions": []}
     assert len(client.messages.calls) == 2
     for call in client.messages.calls:
         assert call["temperature"] == 0.0
-        assert call["reasoning_effort"] == "low"
+        assert call["reasoning_effort"] == "none"
 
 
 def test_truncation_retry_keeps_the_sampling():
@@ -531,7 +546,7 @@ Expected: all pass, including the existing `"reasoning_effort" not in client.mes
 git add dashboard/backend/infrastructure/llm/pipeline_runner.py dashboard/backend/tests/infrastructure/llm/test_pipeline_runner.py
 git commit -m "feat: carry pinned sampling through every pipeline attempt
 
-Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ```
 
 ---
@@ -588,7 +603,8 @@ In `dashboard/backend/tests/test_agent_runs_metadata.py`, inside `test_engine_ll
 def test_engine_records_the_pinned_sampling(monkeypatch):
     """A row that does not say what it sent cannot be reproduced. `policy`
     names the runs that pinned nothing, so an *absent* key on an older row
-    reads as 'not recorded', never as 'default'."""
+    reads as 'not recorded', never as 'default'. Thinking off (`"none"`) is a
+    value the run sent, so it records as pinned like any other."""
     import dashboard.backend.domain.backtesting.engine as engine_mod
 
     backtester = engine_mod.HourlyBacktester.__new__(engine_mod.HourlyBacktester)
@@ -600,12 +616,12 @@ def test_engine_records_the_pinned_sampling(monkeypatch):
     backtester.use_llm = True
     backtester.model = "deepseek/deepseek-v4-pro"
     backtester.llm_temperature = 0.0
-    backtester.llm_reasoning_effort = "low"
+    backtester.llm_reasoning_effort = "none"
     monkeypatch.setattr(engine_mod.llm_harness, "DEFAULT_MAX_OUTPUT_TOKENS", 2000)
 
     assert backtester._agent_run_metadata()["llm_sampling"] == {
         "temperature": 0.0,
-        "reasoning_effort": "low",
+        "reasoning_effort": "none",
         "policy": "pinned_v1",
         "catalog_id": "deepseek/deepseek-v4-pro",
     }
@@ -716,9 +732,10 @@ def test_a_recovery_call_is_the_same_request_at_a_higher_ceiling():
 
     Two of them raise the ceiling: the final rescue after the empty-reply
     retries are spent, and the truncation retry after the parse fails. The
-    truncation one fires on exactly the reasoning-heavy models the policy pins
-    an effort for, so a recovery that re-asked without the sampling would be a
-    *different request* on the runs most likely to need it -- the thing the
+    truncation one fires on exactly the models the policy pins an effort for,
+    so a recovery that re-asked without the sampling would be a *different
+    request* on the runs most likely to need it -- for DeepSeek V4 Pro and
+    Qwen3.7 Plus, one with thinking switched back on -- the thing the
     spec forbids when it says the recovery retry "carries the same sampling,
     because it is the same request at a higher ceiling".
 
@@ -794,7 +811,7 @@ In **all three** `_request_trading_decision(` calls on the single-prompt branch,
 - `:534-540` — the **ordinary** attempt, every other time round that loop.
 - `:575-582` — the **truncation-recovery retry**, reached after `_parse_llm_response` returns `None` and `truncation_reason` names a reply the provider cut at the ceiling. Also already carries `max_tokens=RECOVERY_MAX_OUTPUT_TOKENS`.
 
-The third is the one an earlier draft of this plan missed, and it is the site that matters most. It fires on precisely the reasoning-heavy models the policy pins an effort for — GPT-5.5, DeepSeek V4 Pro, Qwen3.7 Plus — so leaving it unpatched would re-ask *a different request* on the runs most likely to reach it, which is exactly what the spec forbids when it says the recovery retry "carries the same sampling, because it is the same request at a higher ceiling" (the spec's **The wire** section). Worse than the nondeterminism itself: the step would silently change sampler mid-run while `agent_runs.metadata.llm_sampling` went on reporting `policy: pinned_v1`, so the row would claim a pinning the run did not have.
+The third is the one an earlier draft of this plan missed, and it is the site that matters most. It fires on precisely the models the policy pins a `reasoning_effort` for — GPT-5.5 (`low`), DeepSeek V4 Pro and Qwen3.7 Plus (`none`) — so leaving it unpatched would re-ask *a different request* on the runs most likely to reach it (for the latter two, one with thinking back on), which is exactly what the spec forbids when it says the recovery retry "carries the same sampling, because it is the same request at a higher ceiling" (the spec's **The wire** section). Worse than the nondeterminism itself: the step would silently change sampler mid-run while `agent_runs.metadata.llm_sampling` went on reporting `policy: pinned_v1`, so the row would claim a pinning the run did not have.
 
 After the edit the two recovery calls differ from the ordinary one by `max_tokens` and nothing else, which is the property Step 1's `test_a_recovery_call_is_the_same_request_at_a_higher_ceiling` asserts — an equality rather than a count, so a fourth call site added later has to satisfy the same rule instead of breaking a number.
 
@@ -884,7 +901,7 @@ Expected: all pass.
 git add dashboard/backend/infrastructure/llm/backtest_harness.py dashboard/backend/domain/backtesting/portfolio_manager.py dashboard/backend/domain/backtesting/engine.py dashboard/backend/tests/llm/test_backtest_harness.py dashboard/backend/tests/test_agent_runs_metadata.py dashboard/backend/tests/test_backtest_sampling_wiring.py
 git commit -m "feat: thread the sampling policy to every backtest model call
 
-Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ```
 
 ---
@@ -921,7 +938,7 @@ from fastapi.testclient import TestClient
 from dashboard.backend.app import app
 import dashboard.backend.api.routers.backtests as backtests
 from dashboard.backend.domain.model_providers.execution_catalog import (
-    PINNED_BOTH,
+    PINNED_NO_THINKING,
     PINNED_REASONING_LOW,
     PINNED_TEMPERATURE,
     ExecutionModelRoute,
@@ -986,9 +1003,9 @@ def _capture_command(monkeypatch, **kwargs):
 
 
 def test_both_flags_ride_argv_when_both_are_set(monkeypatch):
-    command = _capture_command(monkeypatch, llm_temperature=0.0, llm_reasoning_effort="low")
+    command = _capture_command(monkeypatch, llm_temperature=0.0, llm_reasoning_effort="none")
     assert command[command.index("--llm-temperature") + 1] == "0.0"
-    assert command[command.index("--llm-reasoning-effort") + 1] == "low"
+    assert command[command.index("--llm-reasoning-effort") + 1] == "none"
 
 
 def test_an_unset_temperature_is_absent_from_argv(monkeypatch):
@@ -1028,7 +1045,7 @@ def test_no_policy_means_no_flags(monkeypatch):
     [
         (PINNED_TEMPERATURE, {"llm_temperature": 0.0, "llm_reasoning_effort": None}),
         (PINNED_REASONING_LOW, {"llm_temperature": None, "llm_reasoning_effort": "low"}),
-        (PINNED_BOTH, {"llm_temperature": 0.0, "llm_reasoning_effort": "low"}),
+        (PINNED_NO_THINKING, {"llm_temperature": 0.0, "llm_reasoning_effort": "none"}),
     ],
 )
 def test_endpoint_hands_the_routes_policy_to_the_launcher(monkeypatch, sampling, expected):
@@ -1287,19 +1304,21 @@ Expected: all pass.
 git add dashboard/scripts/backtest_hourly_agent.py dashboard/backend/api/routers/backtests.py dashboard/backend/tests/test_backtest_sampling_argv.py
 git commit -m "feat: hand the route's sampling policy to the backtest child
 
-Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ```
 
 ---
 
-### Task 5: The native OpenAI adapter sends reasoning effort
+### Task 5: The OpenAI adapter sends reasoning effort natively, and thinking off to CommonStack
 
 **Files:**
-- Modify: `dashboard/backend/infrastructure/llm/execution/adapters/openai.py:113-131`
+- Modify: `dashboard/backend/infrastructure/llm/execution/adapters/openai.py` (the `if request.reasoning_effort and provider.adapter_type in {` block; grep for it)
 - Test: `dashboard/backend/tests/infrastructure/llm/test_execution_adapter_model_routes.py` (append)
 
 **Interfaces:**
-- Produces: for `provider.adapter_type == "openai"`, `reasoning_effort` is sent as the top-level Chat Completions parameter; OpenRouter / openai_compatible keep `extra_body.reasoning`; Anthropic and Gemini adapters keep ignoring it.
+- Produces: for `provider.adapter_type == "openai"`, `reasoning_effort` is sent as the top-level Chat Completions parameter. For `openai_compatible` (CommonStack), an off value (`none/off/false/0/disabled`) is sent as `extra_body={"thinking": {"type": "disabled"}}` **instead of** `extra_body.reasoning`, and any other value keeps `extra_body.reasoning.effort` as today. OpenRouter keeps `extra_body.reasoning`, including its existing off-branch (`enabled: false, exclude: true`): that branch is the failover lane and is unchanged. Anthropic and Gemini adapters keep ignoring it.
+
+Why CommonStack gets `thinking` and not `reasoning` for an off value (amended 2026-10-01): the probe on issue #539 found CommonStack ignores `reasoning.effort`, a top-level `reasoning_effort`, `reasoning.enabled:false` and `thinking.budget_tokens` for DeepSeek V4 Pro and Qwen3.7 Plus, and honours only `thinking: {type: "disabled"}`. That is the one wire shape that turns `PINNED_NO_THINKING` into an actual request on the prod lane. GPT-5.5 on CommonStack does honour `reasoning.effort` (`low` → 512 reasoning tokens), so a non-off value keeps today's shape.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -1357,26 +1376,125 @@ def test_native_openai_sends_nothing_extra_when_no_effort_is_requested(monkeypat
 
     assert "reasoning_effort" not in captured
     assert "extra_body" not in captured
+
+
+def _commonstack_capture(monkeypatch, reasoning_effort):
+    captured = {}
+
+    def create(**kwargs):
+        captured.update(kwargs)
+        return _openai_response("deepseek/deepseek-v4-pro")
+
+    client = _openai_client(create)
+    monkeypatch.setattr(
+        openai_module, "build_safe_http_client", lambda *_args, **_kwargs: _Closable()
+    )
+    adapter = openai_module.OpenAICompatibleAdapter(
+        client_factory=lambda **_kwargs: client,
+    )
+    provider = ProviderRecord(
+        provider_id="commonstack",
+        display_name="CommonStack",
+        adapter_type="openai_compatible",
+        approved_base_url="https://api.commonstack.ai/v1",
+        capabilities=ProviderCapabilities(
+            model_allowlist=("deepseek/deepseek-v4-pro",),
+            reasoning=True,
+        ),
+    )
+    adapter.complete(
+        _request(
+            "commonstack",
+            "deepseek/deepseek-v4-pro",
+            reasoning_effort=reasoning_effort,
+        ),
+        _credential("commonstack"),
+        provider,
+    )
+    return captured
+
+
+@pytest.mark.parametrize("off", ["none", "off", "false", "0", "disabled", "NONE"])
+def test_commonstack_sends_thinking_disabled_for_an_off_value(monkeypatch, off):
+    """CommonStack honours no graduated reasoning control for DeepSeek V4 Pro
+    or Qwen3.7 Plus. The 2026-10-01 probe (#539) found `reasoning.effort`, a
+    top-level `reasoning_effort`, `reasoning.enabled:false` and
+    `thinking.budget_tokens` all ignored, and only `thinking: {type:
+    "disabled"}` honoured. It is sent *instead of* `reasoning`, not beside it:
+    a `reasoning` key next to it would be the request the probe showed does
+    nothing."""
+    captured = _commonstack_capture(monkeypatch, off)
+
+    assert captured["extra_body"] == {"thinking": {"type": "disabled"}}
+    assert "reasoning" not in captured["extra_body"]
+    assert "reasoning_effort" not in captured
+
+
+def test_commonstack_keeps_reasoning_effort_for_a_graduated_value(monkeypatch):
+    """GPT-5.5 on CommonStack does honour `reasoning.effort` (`low` used 512
+    reasoning tokens in the probe), so anything outside the off-set keeps
+    today's shape."""
+    captured = _commonstack_capture(monkeypatch, "low")
+
+    assert captured["extra_body"] == {"reasoning": {"effort": "low"}}
+    assert "thinking" not in captured["extra_body"]
 ```
+
+The OpenRouter off-branch needs no new case: `test_openrouter_reasoning_none_disables_reasoning` already asserts `extra_body` is **exactly** `{"reasoning": {"effort": "none", "enabled": False, "exclude": True}}`, so a `thinking` key leaking onto the failover lane turns it red.
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
-Run: `pytest dashboard/backend/tests/infrastructure/llm/test_execution_adapter_model_routes.py -k native_openai -v`
-Expected: the first FAILs with `KeyError: 'reasoning_effort'`; the second passes already.
+Run: `pytest dashboard/backend/tests/infrastructure/llm/test_execution_adapter_model_routes.py -k "native_openai or commonstack_sends or commonstack_keeps" -v`
+Expected: 9 selected. `test_native_openai_sends_reasoning_effort_as_a_top_level_parameter` FAILs with `KeyError: 'reasoning_effort'`, and all six `test_commonstack_sends_thinking_disabled_for_an_off_value` cases FAIL on the `extra_body` equality (today's code sends `{"reasoning": {"effort": …}}`). The other two pass already, because they pin today's behaviour. Count the selection: `-k commonstack` alone would also pick up the existing `test_commonstack_openai_compatible_route_preserves_reasoning_and_ceiling`.
 
-- [ ] **Step 3: Add the native branch**
+- [ ] **Step 3: Add the CommonStack thinking-off branch and the native branch**
 
-In `dashboard/backend/infrastructure/llm/execution/adapters/openai.py`, directly after the existing block that ends with
+In `dashboard/backend/infrastructure/llm/execution/adapters/openai.py`, replace the existing block
 
 ```python
+            if request.reasoning_effort and provider.adapter_type in {
+                "openrouter",
+                "openai_compatible",
+            }:
+                effort = request.reasoning_effort.strip().lower()
+                reasoning = {"effort": request.reasoning_effort}
+                if provider.adapter_type == "openrouter" and effort in {
+                    "none",
+                    "off",
+                    "false",
+                    "0",
+                    "disabled",
+                }:
+                    reasoning.update({"enabled": False, "exclude": True})
                 kwargs["extra_body"] = {
                     "reasoning": reasoning,
                 }
 ```
 
-add:
+with:
 
 ```python
+            if request.reasoning_effort and provider.adapter_type in {
+                "openrouter",
+                "openai_compatible",
+            }:
+                effort = request.reasoning_effort.strip().lower()
+                reasoning_off = effort in {"none", "off", "false", "0", "disabled"}
+                if provider.adapter_type == "openai_compatible" and reasoning_off:
+                    # CommonStack honours no graduated reasoning control for
+                    # DeepSeek V4 Pro or Qwen3.7 Plus: reasoning.effort,
+                    # reasoning.enabled=false and thinking.budget_tokens were
+                    # all ignored in the 2026-10-01 probe (#539). Thinking
+                    # on/off is the one control it honours. Sent instead of
+                    # `reasoning`, not beside it.
+                    kwargs["extra_body"] = {"thinking": {"type": "disabled"}}
+                else:
+                    reasoning = {"effort": request.reasoning_effort}
+                    if provider.adapter_type == "openrouter" and reasoning_off:
+                        reasoning.update({"enabled": False, "exclude": True})
+                    kwargs["extra_body"] = {
+                        "reasoning": reasoning,
+                    }
             elif request.reasoning_effort and provider.adapter_type == "openai":
                 # Chat Completions takes it as a top-level parameter; only
                 # reasoning models accept it, and only the catalog's
@@ -1384,20 +1502,22 @@ add:
                 kwargs["reasoning_effort"] = request.reasoning_effort.strip().lower()
 ```
 
-(the preceding `if request.reasoning_effort and provider.adapter_type in {...}:` is unchanged; this is its `elif`).
+The off-set is the same five values the OpenRouter branch already used, now read once as `reasoning_off`; the OpenRouter lane's output is byte-identical. The branch keys on `adapter_type`, not on `provider_id == "commonstack"`, as the ruling specifies. CommonStack is the only `openai_compatible` row seeded today, and only `PINNED_NO_THINKING` ever sends an off value.
 
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `pytest dashboard/backend/tests/infrastructure/llm/test_execution_adapter_model_routes.py dashboard/backend/tests/infrastructure/llm/adapters -v`
-Expected: all pass.
+Expected: all pass, including the existing `test_openrouter_reasoning_none_disables_reasoning` and `test_commonstack_openai_compatible_route_preserves_reasoning_and_ceiling` (`"high"` → `extra_body.reasoning`, unchanged).
 
 - [ ] **Step 5: Commit**
 
 ```bash
 git add dashboard/backend/infrastructure/llm/execution/adapters/openai.py dashboard/backend/tests/infrastructure/llm/test_execution_adapter_model_routes.py
-git commit -m "feat: send reasoning_effort natively to OpenAI reasoning models
+git commit -m "feat: send thinking-off to CommonStack and reasoning_effort to OpenAI
 
-Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
+Refs #539.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ```
 
 ---
@@ -1424,7 +1544,9 @@ Create `dashboard/backend/tests/test_backtest_sampling_row.py`:
 One state per *shape* of recorded request. Three of those shapes are pinned
 ones, as the policy table stands: *Pinned · temperature 0*, *Pinned ·
 reasoning effort low (no temperature sent)*, and *Pinned · temperature 0 ·
-reasoning effort low*. Beside them sit *Provider default*, for a run that
+thinking off*. A recorded effort in the off-set (`none/off/false/0/disabled`)
+reads "thinking off"; any other value reads "reasoning effort <value>".
+Beside them sit *Provider default*, for a run that
 recorded pinning nothing, and *Not recorded*, for an LLM run written before
 the field existed.
 
@@ -1483,8 +1605,8 @@ def test_reasoning_only_says_the_temperature_was_not_sent():
     non-default temperature, which is precisely why the catalog withholds one
     (the spec's catalog table says the same). The models that genuinely
     ignore temperature while thinking are DeepSeek V4 Pro and Qwen3.7 Plus,
-    and they carry `PINNED_BOTH`, so the sentence rendered on every run it
-    could not be about.
+    and they carry `PINNED_NO_THINKING` (both values set), so the sentence
+    rendered on every run it could not be about.
 
     The replacement makes no claim about the provider at all: an absent
     temperature could otherwise read as a half-recorded row, and "not sent" is
@@ -1496,19 +1618,39 @@ def test_reasoning_only_says_the_temperature_was_not_sent():
 
 
 def test_both():
+    """The `PINNED_NO_THINKING` row: DeepSeek V4 Pro and Qwen3.7 Plus."""
+    assert _format("{temperature: 0, reasoning_effort: 'none', policy: 'pinned_v1'}") == (
+        "Pinned · temperature 0 · thinking off"
+    )
+
+
+@pytest.mark.parametrize("off", ["none", "off", "false", "0", "disabled", "NONE"])
+def test_every_off_value_reads_thinking_off(off):
+    """The off-set is the adapter's, value for value (Task 5). A recorded
+    "none" rendered as "reasoning effort none" would read as an effort level
+    on the one row whose request switched reasoning off."""
+    assert _format(
+        f"{{temperature: 0, reasoning_effort: '{off}', policy: 'pinned_v1'}}"
+    ) == "Pinned · temperature 0 · thinking off"
+
+
+def test_a_graduated_effort_beside_a_temperature_still_reads_as_an_effort():
+    """No catalog row has this shape today; the formatter reads shapes, so it
+    still has to say something true about one."""
     assert _format("{temperature: 0, reasoning_effort: 'low', policy: 'pinned_v1'}") == (
         "Pinned · temperature 0 · reasoning effort low"
     )
 
 
 def test_both_carries_no_caveat_about_what_the_model_does_with_it():
-    """No "(ignored while thinking)" here, even though today it would be true.
+    """No note on the both-values row, about the model or the provider.
 
-    DeepSeek V4 Pro and Qwen3.7 Plus are the only `PINNED_BOTH` rows and both
-    do ignore temperature while thinking -- but this formatter reads the
-    *shape* of a recorded request, not the catalog, so it would be asserting
-    that of any future both-set row as well, including one for a model that
-    honours it. The row's one job is to say what the run asked for. That
+    DeepSeek V4 Pro and Qwen3.7 Plus are the only `PINNED_NO_THINKING` rows.
+    Before the 2026-10-01 amendment they carried an effort of `low` and
+    ignored the temperature while thinking. With thinking off the temperature
+    applies, but this formatter reads the *shape* of a recorded request, not
+    the catalog, so any note would be asserted of every future both-set row,
+    true or not. The row's one job is to say what the run asked for. That
     "temperature 0" is a request and not an outcome is a claim about every row
     on this panel, and it is made where it can stay true: the copy rule that
     this cell never says "deterministic", the CLAUDE.md caveat, and
@@ -1516,7 +1658,7 @@ def test_both_carries_no_caveat_about_what_the_model_does_with_it():
     it.
     """
     assert "(" not in _format(
-        "{temperature: 0, reasoning_effort: 'low', policy: 'pinned_v1'}"
+        "{temperature: 0, reasoning_effort: 'none', policy: 'pinned_v1'}"
     )
 
 
@@ -1606,9 +1748,16 @@ In `dashboard/frontend/app.js`, directly after `function formatBacktestMarketDat
  * that a pinned request is not a reproducible run lives where it stays true
  * for every row: the CLAUDE.md bullet, and diff_backtest_runs.py, which
  * measures the spread rather than asserting there is none.
+ *
+ * An effort in the off-set reads "thinking off": that is what the request
+ * asked for (the OpenAI adapter sends it to CommonStack as thinking
+ * disabled), and "reasoning effort none" would read as an effort level.
  */
 function formatBacktestSampling(sampling) {
     if (!sampling || typeof sampling !== 'object') return 'Not recorded';
+    // Inside the function, not at module scope: the node harness lifts this
+    // function alone, and the set must match the adapter's off-set exactly.
+    const THINKING_OFF_VALUES = new Set(['none', 'off', 'false', '0', 'disabled']);
     const temperature = Number(sampling.temperature);
     const hasTemperature = sampling.temperature !== null
         && sampling.temperature !== undefined
@@ -1618,7 +1767,13 @@ function formatBacktestSampling(sampling) {
         : '';
     const parts = [];
     if (hasTemperature) parts.push(`temperature ${temperature}`);
-    if (effort) parts.push(`reasoning effort ${effort}`);
+    if (effort) {
+        parts.push(
+            THINKING_OFF_VALUES.has(effort.toLowerCase())
+                ? 'thinking off'
+                : `reasoning effort ${effort}`
+        );
+    }
     if (!parts.length) return 'Provider default';
     // Names why the temperature half is *absent*, which is the only thing a
     // recorded request can support. Without it an effort-only row is hard to
@@ -1629,7 +1784,7 @@ function formatBacktestSampling(sampling) {
 }
 ```
 
-Why the note sits on that branch and not the other one, since an earlier draft had it backwards. `PINNED_REASONING_LOW` — effort set, temperature `null` — is assigned to `openai/gpt-5.5` and nothing else, under the catalog's own comment *"OpenAI reasoning models reject a non-default temperature outright"* (the spec's catalog table row for `openai/gpt-5.5` says the same). So the temperature is missing from that row because it was deliberately withheld, and saying so is the useful thing. `PINNED_BOTH` — both set — is assigned to `deepseek/deepseek-v4-pro` and `qwen/qwen3.7-plus`, under the comment *"temperature is accepted and ignored while thinking"*: those are the two models that ignore it, and they get no note, because this function reads the shape of a request rather than the catalog and would be making the same claim about any future both-set row, including one for a model that honours the value.
+Why the note sits on that branch and not the other one, since an earlier draft had it backwards. `PINNED_REASONING_LOW` — effort set, temperature `null` — is assigned to `openai/gpt-5.5` and nothing else, under the catalog's own comment *"OpenAI reasoning models reject a non-default temperature outright"* (the spec's catalog table row for `openai/gpt-5.5` says the same). So the temperature is missing from that row because it was deliberately withheld, and saying so is the useful thing. `PINNED_NO_THINKING` — both set, effort `none` — is assigned to `deepseek/deepseek-v4-pro` and `qwen/qwen3.7-plus`, under the comment *"Thinking off is the one control it honours, and with thinking off the temperature applies as well"*. They get no note, because this function reads the shape of a request rather than the catalog and would be making the same claim about any future both-set row. Their row reads *Pinned · temperature 0 · thinking off*: the `none` is rendered as what it asked for, not as an effort level.
 
 - [ ] **Step 5: Renderer**
 
@@ -1694,7 +1849,7 @@ Expected: all pass.
 git add dashboard/frontend/app.js dashboard/frontend/app.html dashboard/backend/tests/
 git commit -m "feat: show the sampling a backtest asked for
 
-Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ```
 
 ---
@@ -2075,7 +2230,7 @@ Expected: all pass.
 git add dashboard/scripts/diff_backtest_runs.py dashboard/backend/tests/test_diff_backtest_runs.py
 git commit -m "feat: add a script that diffs two backtest runs bar by bar
 
-Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ```
 
 ---
@@ -2091,7 +2246,7 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
 Append this paragraph to the end of the `LLM backtest billing — the live path` bullet in `CLAUDE.md`:
 
 ```markdown
-**Sampling is pinned per catalog model** (`domain/model_providers/execution_catalog.py:SamplingPolicy`): Claude and Gemini get temperature 0; GPT-5.5 gets reasoning effort `low` and **no temperature** (OpenAI reasoning models reject one); DeepSeek V4 Pro and Qwen3.7 Plus get both. The route the endpoint preflights carries the policy (`CatalogModel.sampling` has **no default** — a new catalog row must state one, because a defaulted `temperature 0` on an OpenAI reasoning model 400s every call; `ExecutionModelRoute.sampling` defaults to `None`, so a hand-built route claims nothing), it rides the child's argv as `--llm-temperature` / `--llm-reasoning-effort` (each only when set; `--llm-reasoning-effort` is refused outside `--execution-handoff-stdin` at exit 2, because without a handoff the engine builds the plain Anthropic SDK client, which rejects the kwarg), and `pipeline_runner._create_pipeline_response` adds each value only when set so an unset half leaves the request byte-identical. Every model call on both branches carries it, including the truncation-recovery retry — the same request at a higher ceiling is still the same request. The engine records what it asked for as `agent_runs.metadata.llm_sampling` (`policy: pinned_v1 | provider_default`), and the results panel's **Sampling** row reads *Pinned · …*, *Provider default*, or *Not recorded* for rows written before the field existed. ⚠ **Pinned is not deterministic** — providers are not, at temperature 0 least of all with a mixture-of-experts model, and each bar's prompt embeds the previous bar's answer — so the claim on screen is the request, and the spread is measured with `dashboard/scripts/diff_backtest_runs.py <run_a> <run_b>` (first divergent bar, divergent bar count, final-equity gap). It reports a `basis`: a pipeline-runtime backtest writes no `backtest_decisions` rows (`engine.py` writes them for the AI Hedge Fund runtime only), so the decision fields come back `None` rather than `0` and the equity curve carries the number. The measured before/after is in `docs/superpowers/plans/2026-09-20-backtest-pinned-sampling.md`.
+**Sampling is pinned per catalog model** (`domain/model_providers/execution_catalog.py:SamplingPolicy`): Claude and Gemini get temperature 0; GPT-5.5 gets reasoning effort `low` and **no temperature** (OpenAI reasoning models reject one); DeepSeek V4 Pro and Qwen3.7 Plus get temperature 0 and **thinking off** (`reasoning_effort: "none"`), which `adapters/openai.py` sends to an `openai_compatible` provider as `thinking: {type: "disabled"}` because CommonStack honours no graduated reasoning control for those two (issue #539 probe, 2026-10-01). The route the endpoint preflights carries the policy (`CatalogModel.sampling` has **no default** — a new catalog row must state one, because a defaulted `temperature 0` on an OpenAI reasoning model 400s every call; `ExecutionModelRoute.sampling` defaults to `None`, so a hand-built route claims nothing), it rides the child's argv as `--llm-temperature` / `--llm-reasoning-effort` (each only when set; `--llm-reasoning-effort` is refused outside `--execution-handoff-stdin` at exit 2, because without a handoff the engine builds the plain Anthropic SDK client, which rejects the kwarg), and `pipeline_runner._create_pipeline_response` adds each value only when set so an unset half leaves the request byte-identical. Every model call on both branches carries it, including the truncation-recovery retry — the same request at a higher ceiling is still the same request. The engine records what it asked for as `agent_runs.metadata.llm_sampling` (`policy: pinned_v1 | provider_default`), and the results panel's **Sampling** row reads *Pinned · …*, *Provider default*, or *Not recorded* for rows written before the field existed. ⚠ **Pinned is not deterministic** — providers are not, at temperature 0 least of all with a mixture-of-experts model, and each bar's prompt embeds the previous bar's answer — so the claim on screen is the request, and the spread is measured with `dashboard/scripts/diff_backtest_runs.py <run_a> <run_b>` (first divergent bar, divergent bar count, final-equity gap). It reports a `basis`: a pipeline-runtime backtest writes no `backtest_decisions` rows (`engine.py` writes them for the AI Hedge Fund runtime only), so the decision fields come back `None` rather than `0` and the equity curve carries the number. The measured before/after is in `docs/superpowers/plans/2026-09-20-backtest-pinned-sampling.md`.
 ```
 
 Commit:
@@ -2100,7 +2255,7 @@ Commit:
 git add CLAUDE.md
 git commit -m "docs: describe the pinned sampling policy
 
-Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ```
 
 - [ ] **Step 2: Measure before and after, locally**
