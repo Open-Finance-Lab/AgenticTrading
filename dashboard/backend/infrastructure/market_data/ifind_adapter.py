@@ -43,8 +43,15 @@ def response_to_frames(
     start: datetime | date,
     end: datetime | date,
     min_bars: int,
+    *,
+    depth_start: datetime | date | None = None,
 ) -> dict[str, pd.DataFrame]:
     """Convert one official iFinD response into symbol-keyed OHLCV frames.
+
+    ``depth_start``, when given, is where ``min_bars`` starts counting: the
+    bars a run trades, when ``start`` reaches back further for the indicator
+    warm-up pad (#540). Counting the pad too let a reply truncated inside the
+    traded window clear the floor on its pad bars alone.
 
     ``min_bars`` is deliberately **required**. It used to default to 50, which
     was the flat floor this module and ``ifind_ashare.minimum_bars_for_window``
@@ -64,6 +71,11 @@ def response_to_frames(
         raise IFindBarValidationError("iFinD date window requires end after start")
     if isinstance(min_bars, bool) or not isinstance(min_bars, int) or min_bars < 0:
         raise IFindBarValidationError("min_bars must be a non-negative integer")
+    depth_timestamp = (
+        start_timestamp
+        if depth_start is None
+        else _normalize_boundary(depth_start, "depth_start")
+    )
 
     tables = _validate_top_level(payload)
     entries = _index_tables(tables)
@@ -85,6 +97,7 @@ def response_to_frames(
             start_timestamp,
             end_timestamp,
             min_bars,
+            depth_timestamp,
         )
     return frames
 
@@ -156,6 +169,7 @@ def _table_to_frame(
     start: pd.Timestamp,
     end: pd.Timestamp,
     min_bars: int,
+    depth_start: pd.Timestamp,
 ) -> pd.DataFrame:
     raw_times = _require_array(entry.get("time"), symbol, "time")
     raw_table = entry.get("table")
@@ -184,9 +198,10 @@ def _table_to_frame(
     _validate_prices(values, symbol, index)
 
     frame = pd.DataFrame(values, index=index).loc[:, list(OHLCV_COLUMNS)]
-    if len(frame) < min_bars:
+    depth = int((frame.index >= depth_start).sum())
+    if depth < min_bars:
         raise IFindBarValidationError(
-            f"symbol={symbol} has {len(frame)} valid bars; minimum={min_bars}"
+            f"symbol={symbol} has {depth} valid bars; minimum={min_bars}"
         )
     return frame
 

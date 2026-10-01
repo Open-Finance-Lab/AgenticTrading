@@ -140,6 +140,31 @@ def test_fetches_fixed_universe_once_and_passes_payload_to_adapter():
     ]
 
 
+def test_the_depth_floor_counts_from_depth_start_not_the_padded_start():
+    """A dashboard backtest asks for 30 days of indicator warm-up before its
+    window (#540). The depth floor guards the bars the run TRADES; judged over
+    the pad as well, a symbol suspended through the pad but trading the whole
+    window was refused by a run that passed before the pad existed."""
+    from dashboard.backend.infrastructure.market_data.ifind_ashare import (
+        IFindAshareProvider,
+    )
+
+    client = SpyClient()
+    adapter = SpyAdapter({})
+    provider = IFindAshareProvider(client=client, adapter=adapter)
+
+    provider.fetch_bars(
+        A_SHARE_DEMO_6_SYMBOLS, "2026-03-02", "2026-05-01", depth_start="2026-04-01"
+    )
+
+    assert client.calls == [(A_SHARE_DEMO_6_SYMBOLS, date(2026, 3, 2), END)]
+    kwargs = adapter.calls[0][1]
+    assert kwargs["start"] == date(2026, 3, 2)  # the pad's bars are still kept
+    assert kwargs["min_bars"] == 44  # the floor of 2026-04-01..2026-05-01 alone
+    # And the adapter counts from there, so pad bars cannot clear it.
+    assert kwargs["depth_start"] == date(2026, 4, 1)
+
+
 def test_fetches_historical_fx_for_the_same_registered_universe():
     from dashboard.backend.infrastructure.market_data.ifind_ashare import (
         IFindAshareProvider,

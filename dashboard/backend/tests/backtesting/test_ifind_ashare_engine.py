@@ -47,6 +47,9 @@ START = "2026-04-01"
 END = "2026-05-01"
 # The engine hands providers a half-open bound one day past the inclusive END.
 PROVIDER_END = "2026-05-02"
+# Bars are fetched from 30 days before START so indicators arrive warm (#540);
+# only the bar fetch is padded -- FX and market rules cover the traded window.
+WARMUP_START = "2026-03-02"
 
 
 class RecordingProvider:
@@ -414,7 +417,7 @@ def test_ifind_engine_uses_profile_symbols_in_explicit_rule_mode(monkeypatch):
     assert backtester.symbols == A_SHARE_DEMO_6_SYMBOLS
 
     backtester.load_data()
-    assert provider.calls == [(A_SHARE_DEMO_6_SYMBOLS, START, PROVIDER_END)]
+    assert provider.calls == [(A_SHARE_DEMO_6_SYMBOLS, WARMUP_START, PROVIDER_END)]
     assert provider.fx_calls == [(A_SHARE_DEMO_6_SYMBOLS, START, PROVIDER_END)]
     assert backtester.native_initial_capital == pytest.approx(7_000)
     backtester.calculate_indicators()
@@ -430,6 +433,12 @@ def test_ifind_engine_uses_profile_symbols_in_explicit_rule_mode(monkeypatch):
     assert len(recording_db.runs) == 2
 
     agent_metadata = recording_db.runs[0]["metadata"]
+    # This provider answers the window alone, so the pad came back empty and
+    # the record says so, symbol by symbol, rather than implying warm figures.
+    warmup = agent_metadata.pop("indicator_warmup")
+    assert warmup["fetch_start"] == WARMUP_START
+    assert warmup["min_pad_bars"] == 0
+    assert warmup["short_symbols"] == {s: 0 for s in sorted(A_SHARE_DEMO_6_SYMBOLS)}
     assert agent_metadata == {
         "data_source": IFIND_ASHARE,
         "market": "CN",
@@ -523,7 +532,7 @@ def test_ifind_engine_resolves_csi300_sample20_and_records_provenance(
 
     assert factory_calls == [(IFIND_ASHARE, CSI300_SAMPLE_20_2026H2)]
     assert backtester.symbols == CSI300_SAMPLE_20_2026H2_SYMBOLS
-    assert provider.calls == [(CSI300_SAMPLE_20_2026H2_SYMBOLS, START, PROVIDER_END)]
+    assert provider.calls == [(CSI300_SAMPLE_20_2026H2_SYMBOLS, WARMUP_START, PROVIDER_END)]
     assert provider.fx_calls == [(CSI300_SAMPLE_20_2026H2_SYMBOLS, START, PROVIDER_END)]
     assert backtester.use_llm is False
     metadata = backtester._run_metadata()

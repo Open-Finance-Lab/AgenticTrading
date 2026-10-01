@@ -43,6 +43,9 @@ _TRUTHY = {"1", "true", "yes", "on"}
 # a real overnight gain or loss that never happened. Detecting it does not fix
 # it; it stops it being silent.
 _CORPORATE_ACTION_GAP = Decimal("0.21")
+# Public for the indicator warm-up pad (`domain/backtesting/indicator_warmup`),
+# which trims unadjusted history at the same boundary rather than a second copy.
+CORPORATE_ACTION_GAP = _CORPORATE_ACTION_GAP
 
 
 def corporate_action_gaps_allowed() -> bool:
