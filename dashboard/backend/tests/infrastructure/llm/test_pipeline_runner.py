@@ -19,6 +19,7 @@ from dashboard.backend.infrastructure.llm.pipeline_runner import (
     pipeline_output_to_decision,
     recombine_pipeline,
     run_pipeline_decision,
+    run_post_trade_analysis,
     split_pipeline,
     trading_day_key,
     _build_step_prompt,
@@ -725,3 +726,118 @@ def test_run_pipeline_decision_thinking_only_reply_below_the_ceiling_ends_cleanl
     assert usage == (13, 40)
     assert calls == 1
     assert len(client.messages.calls) == 1
+
+
+def test_run_pipeline_decision_sends_pinned_sampling_on_both_attempts():
+    """The recovery retry is the same request at a higher ceiling; a retry
+    that dropped the sampling would be a different request."""
+    client = _PipelineClient(
+        [
+            LLMExecutionError(ExecutionErrorCategory.RESPONSE_INVALID),
+            _PipelineResponse('{"orders": []}'),
+        ]
+    )
+
+    decision, _usage, _calls, _steps = run_pipeline_decision(
+        client,
+        pipeline=_PIPELINE,
+        market_snapshot={"top_signals": {}},
+        model="deepseek/deepseek-v4-pro",
+        temperature=0.0,
+        reasoning_effort="none",
+    )
+
+    assert decision == {"actions": []}
+    assert len(client.messages.calls) == 2
+    for call in client.messages.calls:
+        assert call["temperature"] == 0.0
+        assert call["reasoning_effort"] == "none"
+
+
+def test_truncation_retry_keeps_the_sampling():
+    client = _PipelineClient(
+        [
+            _PipelineResponse(_truncated_json(), input_tokens=13, output_tokens=2000),
+            _PipelineResponse('{"orders": []}', input_tokens=11, output_tokens=4),
+        ]
+    )
+
+    run_pipeline_decision(
+        client,
+        pipeline=_PIPELINE,
+        market_snapshot={"top_signals": {}},
+        model="google/gemini-3.1-pro-preview",
+        temperature=0.0,
+    )
+
+    assert len(client.messages.calls) == 2
+    for call in client.messages.calls:
+        assert call["temperature"] == 0.0
+        assert "reasoning_effort" not in call
+
+
+def test_run_pipeline_decision_sends_only_the_set_half_of_a_policy():
+    client = _PipelineClient([_PipelineResponse('{"orders": []}')])
+
+    run_pipeline_decision(
+        client,
+        pipeline=_PIPELINE,
+        market_snapshot={"top_signals": {}},
+        model="openai/gpt-5.5",
+        reasoning_effort="low",
+    )
+
+    (call,) = client.messages.calls
+    assert call["reasoning_effort"] == "low"
+    assert "temperature" not in call
+
+
+def test_run_pipeline_decision_default_request_shape_is_unchanged():
+    """Unset means absent: the CLI's real Anthropic SDK client rejects an
+    unknown reasoning_effort kwarg, and a None temperature is not a request."""
+    client = _PipelineClient([_PipelineResponse('{"orders": []}')])
+
+    run_pipeline_decision(
+        client,
+        pipeline=_PIPELINE,
+        market_snapshot={"top_signals": {}},
+        model="qwen/qwen3.7-plus",
+    )
+
+    (call,) = client.messages.calls
+    assert set(call) == {"model", "max_tokens", "system", "messages"}
+
+
+_POST_TRADE_STEPS = [
+    {"id": "pt", "presetKey": "post_trade_analysis", "prompt": "review the day"}
+]
+
+
+def _run_post_trade(client, **sampling):
+    return run_post_trade_analysis(
+        client,
+        post_trade_steps=_POST_TRADE_STEPS,
+        episode_context={"trading_day": "2026-04-15"},
+        decision_pipeline=_PIPELINE,
+        model="deepseek/deepseek-v4-pro",
+        **sampling,
+    )
+
+
+def test_post_trade_call_carries_the_pinned_sampling():
+    client = _PipelineClient([_PipelineResponse("{}")])
+
+    _run_post_trade(client, temperature=0.0, reasoning_effort="none")
+
+    (call,) = client.messages.calls
+    assert call["temperature"] == 0.0
+    assert call["reasoning_effort"] == "none"
+
+
+def test_post_trade_call_omits_sampling_when_not_given():
+    client = _PipelineClient([_PipelineResponse("{}")])
+
+    _run_post_trade(client)
+
+    (call,) = client.messages.calls
+    assert set(call) == {"model", "max_tokens", "system", "messages"}

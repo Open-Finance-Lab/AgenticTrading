@@ -424,8 +424,13 @@ def run_post_trade_analysis(
     episode_context: Dict[str, Any],
     decision_pipeline: List[Dict[str, Any]],
     model: Optional[str] = None,
+    temperature: Optional[float] = None,
+    reasoning_effort: Optional[str] = None,
 ) -> Tuple[List[Dict[str, Any]], Dict[str, Any], Tuple[int, int], int]:
     """Run daily post-trade LLM analysis and patch decision prompts.
+
+    ``temperature`` / ``reasoning_effort`` are sent only when set, as in
+    ``_create_pipeline_response``.
 
     Returns ``(new_decision_pipeline, analysis_record, (in_tokens, out_tokens), llm_calls)``.
     On failure, returns the original decision pipeline unchanged.
@@ -452,12 +457,17 @@ def run_post_trade_analysis(
         print(f"\n📉 Post-trade analysis: {label} (day={episode_context.get('trading_day')})")
 
         try:
-            response = client.messages.create(
-                model=model or LLM_MODEL_NAME,
-                max_tokens=DEFAULT_MAX_OUTPUT_TOKENS,
-                system=POST_TRADE_SYSTEM_PROMPT,
-                messages=[{"role": "user", "content": prompt}],
-            )
+            request = {
+                "model": model or LLM_MODEL_NAME,
+                "max_tokens": DEFAULT_MAX_OUTPUT_TOKENS,
+                "system": POST_TRADE_SYSTEM_PROMPT,
+                "messages": [{"role": "user", "content": prompt}],
+            }
+            if temperature is not None:
+                request["temperature"] = temperature
+            if reasoning_effort is not None:
+                request["reasoning_effort"] = reasoning_effort
+            response = client.messages.create(**request)
             llm_calls += 1
             in_delta, out_delta = extract_token_usage(response)
             total_in += in_delta
@@ -508,8 +518,16 @@ def _create_pipeline_response(
     model: str,
     prompt: str,
     max_tokens: Optional[int] = None,
+    temperature: Optional[float] = None,
+    reasoning_effort: Optional[str] = None,
 ):
-    """Create one pipeline request, optionally with a recovery output budget."""
+    """Create one pipeline request, optionally with a recovery output budget.
+
+    Sampling values are added only when set. ``None`` keeps the request
+    byte-identical to what every run before the pinned policy sent, and the
+    CLI's plain Anthropic SDK client rejects an unknown ``reasoning_effort``
+    kwarg outright.
+    """
     request = {
         "model": model,
         "max_tokens": (
@@ -520,23 +538,37 @@ def _create_pipeline_response(
         "system": PIPELINE_SYSTEM_PROMPT,
         "messages": [{"role": "user", "content": prompt}],
     }
+    if temperature is not None:
+        request["temperature"] = temperature
+    if reasoning_effort is not None:
+        request["reasoning_effort"] = reasoning_effort
     return client.messages.create(**request)
 
 
-def _retry_with_recovery_budget(client, *, model: str, prompt: str):
+def _retry_with_recovery_budget(
+    client,
+    *,
+    model: str,
+    prompt: str,
+    temperature: Optional[float] = None,
+    reasoning_effort: Optional[str] = None,
+):
     """Second attempt for a step whose first attempt was unusable.
 
     The same request, reasoning preserved, with the output ceiling raised to
     ``RECOVERY_MAX_OUTPUT_TOKENS`` so a reasoning-heavy model has room for
     both its thinking and the final JSON. Both recovery paths send exactly
     this, which is why a step never gets a third attempt: a reply that is
-    still unusable after it has nothing different left to ask for.
+    still unusable after it has nothing different left to ask for. The
+    sampling travels with it for the same reason -- it is the same request.
     """
     return _create_pipeline_response(
         client,
         model=model,
         prompt=prompt,
         max_tokens=RECOVERY_MAX_OUTPUT_TOKENS,
+        temperature=temperature,
+        reasoning_effort=reasoning_effort,
     )
 
 
@@ -696,6 +728,8 @@ def run_pipeline_decision(
     pipeline: List[Dict[str, Any]],
     market_snapshot: Dict[str, Any],
     model: Optional[str] = None,
+    temperature: Optional[float] = None,
+    reasoning_effort: Optional[str] = None,
 ) -> Tuple[Optional[Dict[str, Any]], Tuple[int, int], int, List[Dict[str, Any]]]:
     """Execute decision pipeline steps sequentially.
 
@@ -747,6 +781,8 @@ def run_pipeline_decision(
                 client,
                 model=request_model,
                 prompt=prompt,
+                temperature=temperature,
+                reasoning_effort=reasoning_effort,
             )
         except LLMExecutionError as first_error:
             if first_error.category is not ExecutionErrorCategory.RESPONSE_INVALID:
@@ -756,7 +792,11 @@ def run_pipeline_decision(
                 f"and max_tokens={RECOVERY_MAX_OUTPUT_TOKENS}"
             )
             response = _retry_with_recovery_budget(
-                client, model=request_model, prompt=prompt
+                client,
+                model=request_model,
+                prompt=prompt,
+                temperature=temperature,
+                reasoning_effort=reasoning_effort,
             )
             retried = True
         out_delta = usage.record(response)
@@ -778,7 +818,11 @@ def run_pipeline_decision(
             retry_response = None
             try:
                 retry_response = _retry_with_recovery_budget(
-                    client, model=request_model, prompt=prompt
+                    client,
+                    model=request_model,
+                    prompt=prompt,
+                    temperature=temperature,
+                    reasoning_effort=reasoning_effort,
                 )
             except LLMExecutionError as retry_error:
                 # An empty second reply is the same class of outcome as the
