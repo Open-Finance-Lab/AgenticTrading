@@ -725,3 +725,117 @@ def test_run_pipeline_decision_thinking_only_reply_below_the_ceiling_ends_cleanl
     assert usage == (13, 40)
     assert calls == 1
     assert len(client.messages.calls) == 1
+
+
+# ---------------------------------------------------------------------------
+# Post-trade steps on a hosted (fail_closed) client: a provider outage holds
+# the prompts, every other execution failure stays fatal (#574).
+# ---------------------------------------------------------------------------
+
+_POST_TRADE_STEPS = [
+    {"id": "review", "label": "Review", "presetKey": "post_trade_analysis"}
+]
+_POST_TRADE_CONTEXT = {"trading_day": "2026-04-15"}
+
+
+class _HostedPipelineClient(_PipelineClient):
+    fail_closed = True
+
+
+def _run_post_trade(client):
+    from dashboard.backend.infrastructure.llm.pipeline_runner import (
+        run_post_trade_analysis,
+    )
+
+    return run_post_trade_analysis(
+        client,
+        post_trade_steps=_POST_TRADE_STEPS,
+        episode_context=_POST_TRADE_CONTEXT,
+        decision_pipeline=_PIPELINE,
+        model="test-model",
+    )
+
+
+@pytest.mark.parametrize(
+    "category",
+    [
+        ExecutionErrorCategory.PROVIDER_TIMEOUT,
+        ExecutionErrorCategory.PROVIDER_UNAVAILABLE,
+    ],
+)
+def test_post_trade_provider_outage_holds_prompts_on_hosted_client(category, capsys):
+    client = _HostedPipelineClient([LLMExecutionError(category)])
+
+    patched, record, tokens, calls = _run_post_trade(client)
+
+    assert patched == _PIPELINE
+    assert tokens == (0, 0)
+    assert calls == 0
+    assert record["applied_patches"] == []
+    assert len(client.messages.calls) == 1
+    # ``ERROR: llm.`` is the prefix the parent relays to the service log live.
+    lines = capsys.readouterr().out.splitlines()
+    assert (
+        f"ERROR: llm.post_trade_skipped category={category.value} step=Review"
+        in lines
+    )
+
+
+@pytest.mark.parametrize(
+    "category",
+    [
+        ExecutionErrorCategory.BILLING_FAILED,
+        ExecutionErrorCategory.PROVIDER_QUOTA_EXHAUSTED,
+        ExecutionErrorCategory.CREDENTIAL_INVALID,
+        ExecutionErrorCategory.CREDENTIAL_MISSING,
+        ExecutionErrorCategory.ACCOUNT_RESTRICTED,
+        ExecutionErrorCategory.RESPONSE_INVALID,
+    ],
+)
+def test_post_trade_other_execution_failures_stay_fatal(category):
+    client = _HostedPipelineClient([LLMExecutionError(category)])
+
+    with pytest.raises(LLMExecutionError) as excinfo:
+        _run_post_trade(client)
+
+    assert excinfo.value.category is category
+
+
+def test_post_trade_non_execution_error_on_hosted_client_stays_fatal():
+    client = _HostedPipelineClient([RuntimeError("boom")])
+
+    with pytest.raises(RuntimeError):
+        _run_post_trade(client)
+
+
+def test_post_trade_outage_does_not_spend_a_strike():
+    """A held post-trade step must leave the decision-step strike budget alone."""
+    from dashboard.backend.domain.backtesting.engine import HourlyBacktester
+    from dashboard.backend.domain.backtesting.portfolio_manager import (
+        PortfolioManager,
+    )
+
+    manager = PortfolioManager(100000)
+    manager.strict_llm_total_steps = 49
+    client = _HostedPipelineClient(
+        [LLMExecutionError(ExecutionErrorCategory.PROVIDER_TIMEOUT)]
+    )
+    backtester = SimpleNamespace(
+        use_llm=True,
+        llm_client=client,
+        model="test-model",
+        pipeline=list(_PIPELINE) + list(_POST_TRADE_STEPS),
+        prompt_adaptations=[],
+        _current_equity=lambda _manager: 100000.0,
+    )
+
+    HourlyBacktester._run_daily_post_trade(
+        backtester,
+        manager=manager,
+        day_episode={"trading_day": "2026-04-15", "day_start_equity": 100000.0},
+        post_trade_steps=_POST_TRADE_STEPS,
+    )
+
+    assert manager.strict_llm_fallbacks == 0
+    assert manager.llm_calls == 0
+    assert [step["id"] for step in backtester.pipeline] == ["decision", "review"]

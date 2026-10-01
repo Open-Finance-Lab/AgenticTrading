@@ -55,8 +55,7 @@ from dashboard.backend.infrastructure.llm.backtest_harness import (
     request_trading_decision as _request_trading_decision,
 )
 from dashboard.backend.infrastructure.llm.execution.errors import (
-    ExecutionErrorCategory,
-    LLMExecutionError,
+    is_transient_provider_failure,
 )
 from dashboard.backend.infrastructure.llm.pipeline_runner import (
     RECOVERY_MAX_OUTPUT_TOKENS,
@@ -85,25 +84,6 @@ STRICT_LLM_MAX_FALLBACK_RATIO = 0.02
 # had no tolerance at all. From this length on, one strike still leaves the run
 # above H6 (1/25 = 4% < 5%); ``test_strict_llm_budget_clears_h6`` pins that.
 STRICT_LLM_MIN_STEPS_FOR_ONE_STRIKE = 25
-
-# A hosted run (``fail_closed`` execution client) aborts on any model error,
-# because a billing or credential failure absorbed as a step would let the run
-# continue unbilled or unauthorised. A provider outage is neither: the failed
-# call's Credits reservation is already released before the error reaches
-# here, so absorbing it costs one held step and nothing else.
-_ABSORBABLE_EXECUTION_CATEGORIES = frozenset(
-    {
-        ExecutionErrorCategory.PROVIDER_UNAVAILABLE,
-        ExecutionErrorCategory.PROVIDER_TIMEOUT,
-    }
-)
-
-
-def _is_transient_provider_failure(error: BaseException) -> bool:
-    return (
-        isinstance(error, LLMExecutionError)
-        and error.category in _ABSORBABLE_EXECUTION_CATEGORIES
-    )
 
 
 class PortfolioManager:
@@ -898,7 +878,7 @@ class PortfolioManager:
         except Exception as e:
             if strict_llm:
                 if getattr(llm_client, "fail_closed", False) and not (
-                    _is_transient_provider_failure(e)
+                    is_transient_provider_failure(e)
                 ):
                     raise
                 # Same treatment as an explicit strict violation. Built rather
@@ -909,7 +889,7 @@ class PortfolioManager:
                 return self._absorb_strict_llm_failure(
                     portfolio_state,
                     strict_error,
-                    hold=_is_transient_provider_failure(e),
+                    hold=is_transient_provider_failure(e),
                 )
             print(f"\n❌ LLM decision error: {e}")
             print(f"   Falling back to rule-based logic\n")

@@ -111,3 +111,24 @@ class LLMExecutionError(RuntimeError):
 
 
 __all__ = ["ExecutionErrorCategory", "LLMExecutionError", "RetryHint"]
+
+
+# A hosted (``fail_closed``) run aborts on any model error, because a billing or
+# credential failure absorbed as a step would let the run continue unbilled or
+# unauthorised. A provider outage is neither: the failed call's Credits
+# reservation is already released before the error reaches the caller, so
+# absorbing it costs one held step and nothing else.
+_TRANSIENT_PROVIDER_CATEGORIES = frozenset(
+    {
+        ExecutionErrorCategory.PROVIDER_UNAVAILABLE,
+        ExecutionErrorCategory.PROVIDER_TIMEOUT,
+    }
+)
+
+
+def is_transient_provider_failure(error: BaseException) -> bool:
+    """True for a provider outage a hosted run may hold through."""
+    return (
+        isinstance(error, LLMExecutionError)
+        and error.category in _TRANSIENT_PROVIDER_CATEGORIES
+    )

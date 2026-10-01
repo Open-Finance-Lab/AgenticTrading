@@ -28,6 +28,7 @@ from dashboard.backend.infrastructure.llm.backtest_harness import (
 from dashboard.backend.infrastructure.llm.execution.errors import (
     ExecutionErrorCategory,
     LLMExecutionError,
+    is_transient_provider_failure,
 )
 
 POST_TRADE_PRESET_KEY = "post_trade_analysis"
@@ -417,6 +418,22 @@ def _build_post_trade_prompt(
     )
 
 
+def _report_post_trade_skipped(
+    exc: LLMExecutionError, step: Dict[str, Any], index: int
+) -> None:
+    """Print one line for a held post-trade step; the parent relays ``ERROR: llm.`` live.
+
+    The step name is user-authored, so it is reduced to a log-safe token: a
+    space or ``=`` would break the ``key=value`` shape the parent redacts.
+    """
+    name = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(step.get("label") or "")).strip("_")
+    print(
+        "ERROR: llm.post_trade_skipped "
+        f"category={exc.category.value} step={name[:40] or index + 1}",
+        flush=True,
+    )
+
+
 def run_post_trade_analysis(
     client,
     *,
@@ -466,7 +483,13 @@ def run_post_trade_analysis(
         except Exception as exc:
             print(f"   ⚠️  Post-trade analysis failed: {exc}")
             if getattr(client, "fail_closed", False):
-                raise
+                if not is_transient_provider_failure(exc):
+                    raise
+                # A provider outage holds the prompts, as an unparseable reply
+                # does. No strike: the step never touches ``llm_decisions``, so
+                # H6 coverage is not at stake, and spending the decision-step
+                # outage budget here would make the next one fatal.
+                _report_post_trade_skipped(exc, step, index)
             parsed = None
 
         if not isinstance(parsed, dict):
