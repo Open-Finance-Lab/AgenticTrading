@@ -10,6 +10,7 @@ from dashboard.backend.infrastructure.llm.execution.errors import (
     LLMExecutionError,
 )
 from dashboard.backend.infrastructure.llm.pipeline_runner import (
+    DEFAULT_CEILING_SNAPSHOT_SYMBOLS,
     DEFAULT_MAX_OUTPUT_TOKENS,
     RECOVERY_MAX_OUTPUT_TOKENS,
     _TRUNCATION_MIN_CHARS,
@@ -181,6 +182,64 @@ def test_build_step_prompt_includes_upstream_outputs():
     assert "UPSTREAM PIPELINE OUTPUTS" in prompt
     assert "EXECUTION RULES" in prompt
     assert "MARKET SNAPSHOT" not in prompt
+
+
+def _snapshot_of(n):
+    return {"top_signals": {f"S{i:02d}": {"price": 1.0} for i in range(n)}}
+
+
+def test_build_step_prompt_serializes_the_snapshot_compactly():
+    prompt = _build_step_prompt(
+        step_index=0, step=_PIPELINE[0], market_snapshot=_snapshot_of(2),
+        prior_outputs=[], is_last=True,
+    )
+    assert '{"top_signals":{"S00":{"price":1.0},"S01":{"price":1.0}}}' in prompt
+
+
+@pytest.mark.parametrize(
+    "n, expected",
+    [
+        (DEFAULT_CEILING_SNAPSHOT_SYMBOLS, DEFAULT_MAX_OUTPUT_TOKENS),
+        (DEFAULT_CEILING_SNAPSHOT_SYMBOLS + 1, RECOVERY_MAX_OUTPUT_TOKENS),
+        (30, RECOVERY_MAX_OUTPUT_TOKENS),
+    ],
+)
+def test_a_wide_snapshot_starts_at_the_recovery_ceiling(n, expected):
+    """A 30-order reply must not be paid for twice: truncated, then retried."""
+    client = _PipelineClient([_PipelineResponse('{"orders": []}')])
+    run_pipeline_decision(
+        client, pipeline=_PIPELINE, market_snapshot=_snapshot_of(n)
+    )
+    assert client.messages.calls[0]["max_tokens"] == expected
+
+
+def test_a_wide_snapshot_does_not_repeat_a_truncated_recovery_sized_reply():
+    """Already at the recovery ceiling: a retry would be the same request."""
+    client = _PipelineClient(
+        [_PipelineResponse(_truncated_json(), output_tokens=RECOVERY_MAX_OUTPUT_TOKENS)]
+    )
+    decision, _usage, calls, _steps = run_pipeline_decision(
+        client, pipeline=_PIPELINE, market_snapshot=_snapshot_of(30)
+    )
+    assert decision is None
+    assert calls == 1
+    assert len(client.messages.calls) == 1
+
+
+def test_a_wide_snapshot_still_retries_an_empty_reply():
+    client = _PipelineClient(
+        [
+            LLMExecutionError(ExecutionErrorCategory.RESPONSE_INVALID),
+            _PipelineResponse('{"orders": []}'),
+        ]
+    )
+    decision, _usage, _calls, _steps = run_pipeline_decision(
+        client, pipeline=_PIPELINE, market_snapshot=_snapshot_of(30)
+    )
+    assert decision == {"actions": []}
+    assert [c["max_tokens"] for c in client.messages.calls] == [
+        RECOVERY_MAX_OUTPUT_TOKENS, RECOVERY_MAX_OUTPUT_TOKENS,
+    ]
 
 
 def test_split_pipeline_strips_post_trade():
