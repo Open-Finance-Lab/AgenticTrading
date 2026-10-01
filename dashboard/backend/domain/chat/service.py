@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import os
 from collections import defaultdict
 from typing import Any
@@ -11,8 +12,10 @@ from dashboard.backend.infrastructure.llm.backtest_harness import (
     COMMONSTACK_MODEL_NAME,
     LLM_MODEL_NAME,
 )
-from dashboard.backend.infrastructure.llm.execution.adapters.base import (
+from dashboard.backend.infrastructure.llm.http_policy import (
     SDK_MAX_RETRIES,
+    acall_with_retries,
+    is_timeout_error,
     provider_http_timeout,
 )
 
@@ -64,8 +67,10 @@ def get_claude_client() -> AsyncAnthropic:
     otherwise uses native Anthropic via ``ANTHROPIC_API_KEY``.
 
     The SDK never replays (``SDK_MAX_RETRIES``) and the read deadline is the
-    shared ``LLM_PROVIDER_READ_TIMEOUT_SECONDS``: a replay regenerates and bills
-    the whole completion with no idempotency key, and a user can just resend.
+    shared ``LLM_PROVIDER_READ_TIMEOUT_SECONDS``: an SDK replay cannot tell a
+    read timeout from a refused connection, and regenerates and bills the
+    whole completion with no idempotency key. ``_create_message`` owns the
+    retries instead, repeating only what generated nothing.
     """
     global _claude_client
 
@@ -86,6 +91,42 @@ def get_claude_client() -> AsyncAnthropic:
             )
 
     return _claude_client
+
+
+# Monkeypatched by tests; looked up per call, so a patch takes effect.
+_retry_sleep = asyncio.sleep
+
+
+async def _create_message(client: AsyncAnthropic, *, label: str, **kwargs: Any) -> Any:
+    """One ``messages.create`` with the retries the SDK no longer makes.
+
+    Repeats the same model only for a failure that generated nothing (a
+    refused or dropped connection, a fast 429/529/5xx); never a read timeout.
+    """
+
+    return await acall_with_retries(
+        lambda: client.messages.create(**kwargs),
+        label=label,
+        sleep=_retry_sleep,
+    )
+
+
+def _should_fail_over(exc: APIError) -> bool:
+    """Whether a candidate's final error may move the request to another model.
+
+    Never after a timeout: that candidate's generation was abandoned and is
+    still billed upstream, so trying the next model would start another one
+    -- up to three billed generations and ~9 minutes for one message. The
+    user can resend.
+    """
+
+    return not is_timeout_error(exc)
+
+
+def _substitution_note(requested: str, answered: str) -> str:
+    return (
+        f"\n\n_(Answered by `{answered}`: `{requested}` was unavailable.)_"
+    )
 
 
 # CommonStack Anthropic-provider stub (2026-07): ignores body, returns this
@@ -204,7 +245,8 @@ async def chat_with_agent(
 
     Tries ``model`` (or ``resolve_chat_model()``) first, then CommonStack
     fallbacks if the primary provider returns a known stub greeting or a
-    request error.
+    request error that survived ``_create_message``'s same-model retries
+    (never a timeout). A reply from a fallback after an error says so.
 
     Future implementation:
     - authenticate the platform user,
@@ -241,21 +283,26 @@ async def chat_with_agent(
         client = get_claude_client()
         candidates = _chat_model_candidates(model)
         last_stub_model: str | None = None
+        failed_over_on_error = False
         answer = ""
         for index, candidate in enumerate(candidates):
             is_last = index == len(candidates) - 1
             try:
-                response = await client.messages.create(
+                response = await _create_message(
+                    client,
+                    label=f"chat model={candidate!r}",
                     model=candidate,
                     max_tokens=1200,
                     system=SYSTEM_PROMPT,
                     messages=history,
                 )
-            except APIError:
-                if is_last:
+            except APIError as exc:
+                if is_last or not _should_fail_over(exc):
                     raise
+                failed_over_on_error = True
                 print(
-                    f"chat: model={candidate!r} request failed; trying fallback"
+                    f"chat: model={candidate!r} request failed "
+                    f"({type(exc).__name__}); trying fallback"
                 )
                 continue
 
@@ -278,6 +325,7 @@ async def chat_with_agent(
             break
         else:
             raise _stub_reply_error(last_stub_model, action="chat")
+        answered_model = candidate
     except Exception:
         # Avoid retaining a user message that never received an answer.
         if history and history[-1]["role"] == "user":
@@ -298,6 +346,11 @@ async def chat_with_agent(
     if len(history) > 12:
         del history[:-12]
 
+    # The note is for the reader, not the model: history keeps the bare reply.
+    # Only an error moves a reply off the requested model silently; a stub
+    # greeting is the known-broken route the fallback list exists for.
+    if failed_over_on_error and answered_model != candidates[0]:
+        return answer + _substitution_note(candidates[0], answered_model)
     return answer
 
 
@@ -348,7 +401,7 @@ async def synthesize_strategy_prompt(
     ``model`` should be the selected agent's model when available (same as
     ``/ask``); otherwise ``resolve_chat_model()`` is used, with CommonStack
     fallbacks if the primary provider returns a known stub greeting or a
-    request error.
+    request error that survived the same-model retries (never a timeout).
     """
     key = (user_id, agent_id)
     history = list(conversation_history[key])
@@ -378,17 +431,20 @@ async def synthesize_strategy_prompt(
     for index, candidate in enumerate(candidates):
         is_last = index == len(candidates) - 1
         try:
-            response = await client.messages.create(
+            response = await _create_message(
+                client,
+                label=f"strategy synth model={candidate!r}",
                 model=candidate,
                 max_tokens=900,
                 system=STRATEGY_SYNTH_SYSTEM,
                 messages=messages,
             )
-        except APIError:
-            if is_last:
+        except APIError as exc:
+            if is_last or not _should_fail_over(exc):
                 raise
             print(
-                f"strategy synth: model={candidate!r} request failed; trying fallback"
+                f"strategy synth: model={candidate!r} request failed "
+                f"({type(exc).__name__}); trying fallback"
             )
             continue
 

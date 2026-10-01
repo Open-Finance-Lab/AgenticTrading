@@ -21,6 +21,11 @@ from typing import Dict, Optional, Any
 
 from anthropic import Anthropic
 
+from dashboard.backend.infrastructure.llm.http_policy import (
+    SDK_MAX_RETRIES,
+    call_with_retries,
+    provider_http_timeout,
+)
 # Import validation (from the same backend)
 from dashboard.backend.infrastructure.llm.validator import (
     validate_llm_response,
@@ -45,7 +50,13 @@ class SafeTradingLLMIntegration:
     
     def __init__(self, api_key: str):
         """Initialize LLM client (Claude via Anthropic SDK)"""
-        self.client = Anthropic(api_key=api_key)
+        # No SDK replays (each one regenerates and bills a whole completion);
+        # ``call_with_retries`` below repeats only what generated nothing.
+        self.client = Anthropic(
+            api_key=api_key,
+            max_retries=SDK_MAX_RETRIES,
+            timeout=provider_http_timeout(),
+        )
         self.model = "claude-opus-4-1"  # Latest, most capable Claude
     
     async def get_trading_decision(
@@ -90,23 +101,26 @@ class SafeTradingLLMIntegration:
             # ================================================================
             # STEP 2: Call LLM with STRICT constraints (NO TOOLS)
             # ================================================================
-            response = self.client.messages.create(
-                model=self.model,
-                max_tokens=1000,  # Small for JSON response only
-                system="""You are a trading decision advisor.
+            response = call_with_retries(
+                lambda: self.client.messages.create(
+                    model=self.model,
+                    max_tokens=1000,  # Small for JSON response only
+                    system="""You are a trading decision advisor.
                 
 CRITICAL: You CANNOT use tools, functions, or access any APIs.
 You CANNOT make any tool_use blocks.
 You MUST respond with ONLY valid JSON matching the schema provided.
 If you cannot make a valid decision, respond with: {"action": "hold"}""",
-                messages=[
-                    {
-                        "role": "user",
-                        "content": prompt
-                    }
-                ]
-                # IMPORTANT: NOT including tools parameter
-                # This prevents the model from attempting tool calling
+                    messages=[
+                        {
+                            "role": "user",
+                            "content": prompt
+                        }
+                    ]
+                    # IMPORTANT: NOT including tools parameter
+                    # This prevents the model from attempting tool calling
+                ),
+                label="safe trading llm",
             )
             
             # ================================================================

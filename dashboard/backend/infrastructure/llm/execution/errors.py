@@ -4,6 +4,9 @@ from __future__ import annotations
 
 from enum import StrEnum
 
+# ``RetryHint`` lives in the leaf ``http_policy``; re-exported here.
+from dashboard.backend.infrastructure.llm.http_policy import RetryHint
+
 
 class ExecutionErrorCategory(StrEnum):
     CREDENTIAL_MISSING = "credential_missing"
@@ -17,23 +20,6 @@ class ExecutionErrorCategory(StrEnum):
     ACCOUNT_RESTRICTED = "account_restricted"
     WORKER_FAILED = "worker_failed"
 
-
-class RetryHint(StrEnum):
-    """Whether one failed provider attempt may be repeated against that provider.
-
-    ``PRE_SEND`` — the request never reached the provider (DNS, connect, TLS,
-    a stalled request body): repeating it cannot regenerate anything.
-    ``REJECTED`` — the provider answered with a status that says "not now"
-    (408/409/429/5xx, ``x-should-retry: true``) or dropped the connection; it
-    may already have done work, so the service repeats it only when it failed
-    fast. ``NONE`` — never repeat: above all a read timeout, where a whole
-    generation was in flight and, with no idempotency key, is billed again on
-    every replay.
-    """
-
-    PRE_SEND = "pre_send"
-    REJECTED = "rejected"
-    NONE = "none"
 
 
 _SAFE_MESSAGES = {

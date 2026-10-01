@@ -39,6 +39,19 @@ def _reset_state(monkeypatch):
     conversation_history.clear()
 
 
+@pytest.fixture(autouse=True)
+def retry_sleeps(monkeypatch):
+    """Record same-model retry backoffs instead of sleeping through them."""
+
+    sleeps: list[float] = []
+
+    async def _sleep(seconds):
+        sleeps.append(seconds)
+
+    monkeypatch.setattr(chat_service, "_retry_sleep", _sleep)
+    return sleeps
+
+
 class _FakeMessages:
     def __init__(self, response=None, error=None):
         self._response = response
@@ -64,11 +77,26 @@ def _install_client(monkeypatch, *, response=None, error=None):
 
 
 def _provider_error(message: str = "boom") -> anthropic.APIConnectionError:
-    """A real anthropic SDK error, for testing the APIError-specific fallback."""
-    return anthropic.APIConnectionError(
-        message=message,
-        request=httpx.Request("POST", "https://api.commonstack.ai/v1/messages"),
-    )
+    """A real anthropic SDK error, for testing the APIError-specific fallback.
+
+    Chained like the SDK chains it (``raise APIConnectionError(...) from err``):
+    the httpx cause is what says nothing reached the provider.
+    """
+    request = httpx.Request("POST", "https://api.commonstack.ai/v1/messages")
+    error = anthropic.APIConnectionError(message=message, request=request)
+    error.__cause__ = httpx.ConnectError("connection refused", request=request)
+    return error
+
+
+def _timeout_error() -> anthropic.APITimeoutError:
+    """What the SDK raises when the read deadline passes mid-generation."""
+    request = httpx.Request("POST", "https://api.commonstack.ai/v1/messages")
+    try:
+        raise httpx.ReadTimeout("read timed out", request=request)
+    except httpx.ReadTimeout as cause:
+        error = anthropic.APITimeoutError(request=request)
+        error.__cause__ = cause
+        return error
 
 
 def _stub_response(*, input_tokens: int = 10):
@@ -211,12 +239,13 @@ def test_chat_skips_commonstack_stub_greeting_and_retries(monkeypatch):
     assert history[-1] == {"role": "assistant", "content": answer}
 
 
-def test_chat_falls_back_on_provider_request_error(monkeypatch):
+def test_chat_retries_the_same_model_before_falling_back(monkeypatch, retry_sleeps):
+    # A refused connection generated nothing, so it is repeated on the model
+    # the user picked -- the retries the SDK made before max_retries=0.
     monkeypatch.setenv("COMMONSTACK_API_KEY", "cs-test-key")
     monkeypatch.delenv("CHAT_MODEL", raising=False)
 
-    good = _text_response("ok")
-    fake_messages = _Seq(_provider_error(), good)
+    fake_messages = _Seq(_provider_error(), _text_response("ok"))
     monkeypatch.setattr(
         chat_service,
         "get_claude_client",
@@ -224,24 +253,86 @@ def test_chat_falls_back_on_provider_request_error(monkeypatch):
     )
 
     answer = asyncio.run(
-        chat_service.chat_with_agent(user_id="u1", agent_id="a1", message="hello")
+        chat_service.chat_with_agent(
+            user_id="u1", agent_id="a1", message="hello", model="deepseek/deepseek-v4-pro"
+        )
     )
 
     assert answer == "ok"
-    assert len(fake_messages.calls) == 2
-    assert fake_messages.calls[1]["model"] == "openai/gpt-4o-mini"
+    assert [call["model"] for call in fake_messages.calls] == [
+        "deepseek/deepseek-v4-pro",
+        "deepseek/deepseek-v4-pro",
+    ]
+    assert retry_sleeps == [4.0]
+
+
+def test_chat_falls_back_on_provider_request_error(monkeypatch, retry_sleeps):
+    monkeypatch.setenv("COMMONSTACK_API_KEY", "cs-test-key")
+    monkeypatch.delenv("CHAT_MODEL", raising=False)
+
+    good = _text_response("ok")
+    fake_messages = _Seq(_provider_error(), _provider_error(), _provider_error(), good)
+    monkeypatch.setattr(
+        chat_service,
+        "get_claude_client",
+        lambda: SimpleNamespace(messages=fake_messages),
+    )
+
+    answer = asyncio.run(
+        chat_service.chat_with_agent(
+            user_id="u1", agent_id="a1", message="hello", model="deepseek/deepseek-v4-pro"
+        )
+    )
+
+    assert [call["model"] for call in fake_messages.calls] == [
+        "deepseek/deepseek-v4-pro",
+        "deepseek/deepseek-v4-pro",
+        "deepseek/deepseek-v4-pro",
+        "openai/gpt-4o-mini",
+    ]
+    assert retry_sleeps == [4.0, 12.0]
+    # The substitution is visible to the reader, but not fed back to the model.
+    assert answer.startswith("ok")
+    assert "openai/gpt-4o-mini" in answer and "deepseek/deepseek-v4-pro" in answer
+    assert conversation_history[("u1", "a1")][-1] == {"role": "assistant", "content": "ok"}
+
+
+def test_chat_timeout_never_fails_over_to_another_model(monkeypatch, retry_sleeps):
+    # The timed-out generation is still billed upstream; the next candidate
+    # would start another one. Surface the error instead (#592 review).
+    monkeypatch.setenv("COMMONSTACK_API_KEY", "cs-test-key")
+    monkeypatch.delenv("CHAT_MODEL", raising=False)
+
+    fake_messages = _Seq(_timeout_error(), _text_response("never reached"))
+    monkeypatch.setattr(
+        chat_service,
+        "get_claude_client",
+        lambda: SimpleNamespace(messages=fake_messages),
+    )
+
+    with pytest.raises(anthropic.APITimeoutError):
+        asyncio.run(
+            chat_service.chat_with_agent(user_id="u1", agent_id="a1", message="hello")
+        )
+
+    assert len(fake_messages.calls) == 1
+    assert retry_sleeps == []
+    assert conversation_history[("u1", "a1")] == []
 
 
 def test_chat_last_candidate_request_error_propagates_and_pops_message(monkeypatch):
     monkeypatch.delenv("COMMONSTACK_API_KEY", raising=False)
     monkeypatch.setenv("ANTHROPIC_MODEL", "claude-test-model")
-    _install_client(monkeypatch, error=_provider_error("no route to host"))
+    fake_messages = _install_client(monkeypatch, error=_provider_error("no route to host"))
 
     with pytest.raises(anthropic.APIConnectionError, match="no route to host"):
         asyncio.run(
             chat_service.chat_with_agent(user_id="u1", agent_id="a1", message="hello")
         )
 
+    # One candidate on native Anthropic: the same-model retries are its only
+    # second chance, then the error surfaces.
+    assert len(fake_messages.calls) == 3
     assert conversation_history[("u1", "a1")] == []
 
 
@@ -333,7 +424,7 @@ def test_synthesize_strategy_falls_back_on_provider_request_error(monkeypatch):
     monkeypatch.delenv("CHAT_MODEL", raising=False)
 
     good = _text_response("Buy AAPL MSFT GOOGL AMZN NVDA META TSLA equal weight.")
-    fake_messages = _Seq(_provider_error(), good)
+    fake_messages = _Seq(_provider_error(), _provider_error(), _provider_error(), good)
     monkeypatch.setattr(
         chat_service,
         "get_claude_client",
@@ -347,8 +438,30 @@ def test_synthesize_strategy_falls_back_on_provider_request_error(monkeypatch):
     )
 
     assert "AAPL" in prompt
-    assert len(fake_messages.calls) == 2
-    assert fake_messages.calls[1]["model"] == "openai/gpt-4o-mini"
+    assert len(fake_messages.calls) == 4
+    assert fake_messages.calls[3]["model"] == "openai/gpt-4o-mini"
+
+
+def test_synthesize_strategy_timeout_never_fails_over(monkeypatch, retry_sleeps):
+    monkeypatch.setenv("COMMONSTACK_API_KEY", "cs-test-key")
+    monkeypatch.delenv("CHAT_MODEL", raising=False)
+
+    fake_messages = _Seq(_timeout_error(), _text_response("never reached"))
+    monkeypatch.setattr(
+        chat_service,
+        "get_claude_client",
+        lambda: SimpleNamespace(messages=fake_messages),
+    )
+
+    with pytest.raises(anthropic.APITimeoutError):
+        asyncio.run(
+            chat_service.synthesize_strategy_prompt(
+                user_id="u1", agent_id="a1", extra="buy big 7"
+            )
+        )
+
+    assert len(fake_messages.calls) == 1
+    assert retry_sleeps == []
 
 
 def test_synthesize_strategy_last_candidate_request_error_propagates(monkeypatch):
