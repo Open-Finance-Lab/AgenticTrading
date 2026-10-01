@@ -1791,8 +1791,15 @@ In `renderBacktestRunConfig`, directly after the `provenanceLabel` computation (
     // Only for a run that used a model: rule-based runs had no sampler, and
     // "Not recorded" beside one would read as an accusation. The ceiling is
     // written on every LLM run and never on a rule-based one.
+    // Read the top-level fields: the list route answers with RunMetadata, which
+    // has no `metadata` key (final-review C1). `metadata.*` is a fallback only.
     const usedModel = Boolean(
-        metadata.llm_sampling || metadata.llm_max_output_tokens !== undefined
+        run?.llm_sampling
+        || (run?.llm_max_output_tokens !== undefined && run?.llm_max_output_tokens !== null)
+        || Number(run?.llm_calls) > 0
+        || run?.llm_execution
+        || metadata.llm_sampling
+        || metadata.llm_max_output_tokens !== undefined
     );
     const samplingLabel = !running && usedModel
         ? formatBacktestSampling(run?.llm_sampling ?? metadata.llm_sampling ?? null)
