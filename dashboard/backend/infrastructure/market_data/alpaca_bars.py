@@ -531,11 +531,12 @@ class AlpacaDataLoader:
         100-symbol chunk and the chunking -- not the cache -- would decide what
         gets fetched. Above it, the recursion just sees a shorter list.
 
-        Keying per symbol rather than per request is what makes the index
-        baseline cheap: after a Mag7 run the DJIA_30 fetch (same window, same
-        timeframe, same feed) finds five of its thirty names on disk. A
-        per-request key would miss that entirely, because the symbol lists
-        differ.
+        Keying per symbol rather than per request means a fetch that names a
+        cached symbol over the same window pays only for the rest; a
+        per-request key would miss whenever the symbol lists differ. (A
+        backtest's agent fetch and its index-baseline fetch no longer share a
+        window -- the agent's starts at the indicator warm-up pad, #540 -- so
+        a Mag7 run no longer leaves Dow baseline names on disk.)
 
         Every returned frame is stamped with
         ``sessions.FRAME_ATTR_OPEN_STAMPED_MINUTES``: Alpaca stamps a bar at its

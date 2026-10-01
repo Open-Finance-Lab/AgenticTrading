@@ -115,8 +115,8 @@ def test_a_second_identical_request_makes_no_alpaca_call(cached_loader, fake_alp
 
 
 def test_a_mixed_request_fetches_only_the_missing_symbols(cached_loader, fake_alpaca):
-    """This is what makes the DJIA_30 index baseline cheap after a Mag7 run:
-    five of its thirty names are already on disk under the same window."""
+    """Per-symbol keys: a request naming cached symbols over the same window
+    fetches only the rest."""
     fake_alpaca["df"] = _bars_df(["AAPL"])
     cached_loader.fetch_bars(["AAPL"], "2026-05-04", "2026-05-12")
     fake_alpaca["df"] = _bars_df(["MSFT", "NVDA"])

@@ -161,6 +161,8 @@ def test_the_depth_floor_counts_from_depth_start_not_the_padded_start():
     kwargs = adapter.calls[0][1]
     assert kwargs["start"] == date(2026, 3, 2)  # the pad's bars are still kept
     assert kwargs["min_bars"] == 44  # the floor of 2026-04-01..2026-05-01 alone
+    # And the adapter counts from there, so pad bars cannot clear it.
+    assert kwargs["depth_start"] == date(2026, 4, 1)
 
 
 def test_fetches_historical_fx_for_the_same_registered_universe():

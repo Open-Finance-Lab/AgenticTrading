@@ -18,7 +18,14 @@ import pytz
 
 from dashboard.backend.domain.backtesting import engine as engine_mod
 from dashboard.backend.domain.backtesting.engine import HourlyBacktester
+from dashboard.backend.domain.agents.runtime import (
+    AI_HEDGE_FUND_RUNTIME_TYPE,
+    PIPELINE_RUNTIME_TYPE,
+)
 from dashboard.backend.domain.backtesting.features import TechnicalIndicators
+from dashboard.backend.domain.backtesting.indicator_warmup import (
+    PAD_BARS_FOR_WARM_FIRST_BAR,
+)
 from dashboard.backend.domain.backtesting.market_rules import (
     CorporateActionGap,
     CorporateActionGapError,
@@ -133,6 +140,10 @@ def _market_date(timestamp, zone=_ET):
     return pd.Timestamp(timestamp).tz_convert(zone).date()
 
 
+def _market_dates(index, zone=_ET):
+    return index.tz_convert(zone).date
+
+
 def test_the_pad_is_thirty_calendar_days():
     assert INDICATOR_WARMUP_CALENDAR_DAYS == 30
     assert warmup_fetch_start(START) == WARMUP_START
@@ -199,22 +210,107 @@ def test_no_pre_window_bar_reaches_the_run(loader):
     assert _market_date(agent_curve[0]["timestamp"]) == start
 
 
-def test_only_the_agent_row_records_the_warmup_start(loader):
+def test_only_the_agent_row_records_the_warmup_evidence(loader):
     bt = HourlyBacktester(START, END, use_llm=False, symbols=SYMBOLS)
     bt.load_data()
     metadata = bt._agent_run_metadata()
-    assert metadata["warmup_start_date"] == WARMUP_START
+    evidence = metadata["indicator_warmup"]
+    assert evidence["fetch_start"] == WARMUP_START
+    # Weekdays 2026-08-10..09-07 (the fake has no holidays), seven bars each.
+    assert evidence["min_pad_bars"] == 21 * 7
+    assert evidence["bars_for_warm_start"] == PAD_BARS_FOR_WARM_FIRST_BAR == 49
+    assert evidence["short_symbols"] == {}
+    assert evidence["unadjusted_gap_trims"] == {}
     assert metadata["provider_end_date"] == PROVIDER_END
     # Baseline rows compute no indicators, and the Dow row is fetched
     # unpadded, so the key would be false on them.
-    assert "warmup_start_date" not in bt._run_metadata()
+    assert "indicator_warmup" not in bt._run_metadata()
 
     bt.calculate_indicators()
     bt.run_agent_backtest()
     bt.run_buyhold_baseline()
     rows = {run["agent_name"]: run["metadata"] for run in engine_mod.db.runs}
-    assert rows["buy-and-hold"].get("warmup_start_date") is None
-    assert [m.get("warmup_start_date") for m in rows.values()].count(WARMUP_START) == 1
+    assert rows["buy-and-hold"].get("indicator_warmup") is None
+    assert sum("indicator_warmup" in m for m in rows.values()) == 1
+
+
+def test_a_thin_pad_is_recorded_not_reported_as_warm(monkeypatch, capsys):
+    """A pad that came back short -- a suspension, a recent listing, a
+    provider answering part of the range -- leaves the first bars on cold
+    fallbacks. The record must say so rather than name the requested start
+    as if the history had arrived."""
+
+    class _ThinPad(_RangeLoader):
+        def fetch_bars(self, symbols, start, end):
+            self.calls.append((tuple(symbols), start, end))
+            frames = _hourly_bars(symbols, start, end)
+            # MSFT's history begins three trading days before the window.
+            frames["MSFT"] = frames["MSFT"].loc["2026-09-03":]
+            return frames
+
+    monkeypatch.setattr(engine_mod, "create_market_data_provider", lambda *a, **k: _ThinPad())
+    bt = HourlyBacktester(START, END, use_llm=False, symbols=SYMBOLS)
+    bt.load_data()
+
+    evidence = bt._agent_run_metadata()["indicator_warmup"]
+    assert evidence["short_symbols"] == {"MSFT": 21}
+    assert evidence["min_pad_bars"] == 21
+    assert "1 symbol(s) have under 49 pad bars" in capsys.readouterr().out
+
+
+def test_an_unadjusted_split_in_the_pad_trims_the_pad(monkeypatch):
+    """Prices are unadjusted on both feeds. A 4-for-1 split in the pad would put
+    4x closes into the window's sma50 -- every early bar reads as a crash -- and
+    the window's own corporate-action check never sees pad dates. The pad is
+    cut at the break instead, and the cut is recorded."""
+    split_day = date(2026, 8, 24)
+
+    class _Split(_RangeLoader):
+        def fetch_bars(self, symbols, start, end):
+            self.calls.append((tuple(symbols), start, end))
+            frames = _hourly_bars(symbols, start, end)
+            aapl = frames["AAPL"]
+            before = _market_dates(aapl.index) < split_day
+            aapl.loc[before, ["open", "high", "low", "close"]] *= 4
+            return frames
+
+    monkeypatch.setattr(engine_mod, "create_market_data_provider", lambda *a, **k: _Split())
+    bt = HourlyBacktester(START, END, use_llm=False, symbols=SYMBOLS)
+    bt.load_data()
+
+    assert min(_market_dates(bt.warmup_data["AAPL"].index)) == split_day
+    # MSFT has no break, so its pad is whole.
+    assert min(_market_dates(bt.warmup_data["MSFT"].index)) == date(2026, 8, 10)
+    evidence = bt._agent_run_metadata()["indicator_warmup"]
+    assert evidence["unadjusted_gap_trims"] == {"AAPL": "2026-08-24"}
+
+    bt.calculate_indicators()
+    first = bt.all_data["AAPL"].iloc[0]
+    # On the post-split scale: no pre-split close reached the average.
+    assert first["sma50"] == pytest.approx(
+        bt.all_data["AAPL"]["close"].iloc[0], rel=0.1
+    )
+
+
+def test_a_break_on_start_date_drops_the_whole_pad(monkeypatch):
+    class _SplitOnStart(_RangeLoader):
+        def fetch_bars(self, symbols, start, end):
+            self.calls.append((tuple(symbols), start, end))
+            frames = _hourly_bars(symbols, start, end)
+            aapl = frames["AAPL"]
+            before = _market_dates(aapl.index) < date.fromisoformat(START)
+            aapl.loc[before, ["open", "high", "low", "close"]] *= 2
+            return frames
+
+    monkeypatch.setattr(
+        engine_mod, "create_market_data_provider", lambda *a, **k: _SplitOnStart()
+    )
+    bt = HourlyBacktester(START, END, use_llm=False, symbols=SYMBOLS)
+    bt.load_data()
+    assert "AAPL" not in bt.warmup_data
+    evidence = bt._agent_run_metadata()["indicator_warmup"]
+    assert evidence["unadjusted_gap_trims"] == {"AAPL": START}
+    assert evidence["short_symbols"] == {"AAPL": 0}
 
 
 def test_vnpy_simulation_is_not_padded(loader):
@@ -228,7 +324,21 @@ def test_vnpy_simulation_is_not_padded(loader):
     bt.load_data()
     assert loader.calls == [(tuple(SYMBOLS), START, PROVIDER_END)]
     assert bt.warmup_data == {}
-    assert bt._agent_run_metadata()["warmup_start_date"] == START
+    # No pad was fetched, so there is nothing to record -- not a pad that
+    # "began" at the window start.
+    assert "indicator_warmup" not in bt._agent_run_metadata()
+
+
+def test_a_hosted_runtime_is_not_padded():
+    """The AI Hedge Fund runtime decides off closes and loads its own lookback
+    upstream; it never reads the engine's indicators, so a pad is a ~4-5x
+    larger fetch bought for nothing on the memory-sensitive runtime (#308)."""
+    bt = HourlyBacktester.__new__(HourlyBacktester)
+    bt.data_source = "alpaca"
+    bt.runtime_type = AI_HEDGE_FUND_RUNTIME_TYPE
+    assert bt._wants_indicator_warmup() is False
+    bt.runtime_type = PIPELINE_RUNTIME_TYPE
+    assert bt._wants_indicator_warmup() is True
 
 
 def test_a_window_with_only_pad_bars_is_still_no_data(monkeypatch):
@@ -239,6 +349,27 @@ def test_a_window_with_only_pad_bars_is_still_no_data(monkeypatch):
 
     monkeypatch.setattr(engine_mod, "create_market_data_provider", lambda *a, **k: _PadOnly())
     bt = HourlyBacktester(START, END, use_llm=False, symbols=SYMBOLS)
+    with pytest.raises(MarketDataUnavailableError, match="No alpaca market data"):
+        bt.load_data()
+
+
+def test_a_minute_source_with_only_pad_bars_is_still_no_data(monkeypatch):
+    """The intraday branch -- the default US path -- must report a window with
+    no session of its own (a weekend, a holiday) as no data, not as the
+    data-quality fault "no completed decision bars could be built"."""
+
+    class _PadOnlyMinutes(_MinuteLoader):
+        def fetch_bars(self, symbols, start, end):
+            return super().fetch_bars(symbols, start, START)
+
+    loader = _PadOnlyMinutes()
+
+    def factory(data_source="alpaca", universe=None, *, source_timeframe=None):
+        loader.configure_source_timeframe(source_timeframe)
+        return loader
+
+    monkeypatch.setattr(engine_mod, "create_market_data_provider", factory)
+    bt = HourlyBacktester(START, END, use_llm=False, symbols=["AAPL"])
     with pytest.raises(MarketDataUnavailableError, match="No alpaca market data"):
         bt.load_data()
 
@@ -417,3 +548,81 @@ def test_an_ex_rights_date_in_the_pad_does_not_refuse_the_run(monkeypatch):
     assert first["macd"] != 0.0
     _, curve = bt.run_agent_backtest()
     assert curve[0]["timestamp"].startswith(CN_START)
+
+
+def test_a_forwarding_wrapper_is_not_offered_depth_start(monkeypatch):
+    """A caching/logging wrapper declaring only ``**kwargs`` says nothing about
+    whether the provider it forwards to takes ``depth_start``. Offering it
+    anyway turned every A-share run into an unexpected-keyword TypeError; not
+    offering it degrades to the floor counting the pad, as before #540."""
+    inner = _AshareProvider()
+
+    class _LegacyInner:
+        def fetch_bars(self, symbols, start, end):
+            return inner.fetch_bars(symbols, start, end)
+
+    legacy = _LegacyInner()
+
+    class _Wrapper:
+        def fetch_bars(self, symbols, start, end, **kwargs):
+            return legacy.fetch_bars(symbols, start, end, **kwargs)
+
+        def __getattr__(self, name):
+            return getattr(inner, name)
+
+    monkeypatch.setattr(
+        engine_mod, "create_market_data_provider", lambda _source, universe=None: _Wrapper()
+    )
+    monkeypatch.setattr(engine_mod, "db", _DB())
+    bt = HourlyBacktester(
+        CN_START,
+        CN_END,
+        use_llm=False,
+        data_source=IFIND_ASHARE,
+        decision_source=RULE_BASED_DECISION_SOURCE,
+    )
+    bt.load_data()
+    assert inner.calls == [(A_SHARE_DEMO_6_SYMBOLS, CN_WARMUP_START, CN_PROVIDER_END)]
+    assert inner.depth_starts == [None]
+    assert engine_mod._accepts_keyword(_Wrapper().fetch_bars, "depth_start") is True
+    assert (
+        engine_mod._accepts_keyword(
+            _Wrapper().fetch_bars, "depth_start", via_var_keyword=False
+        )
+        is False
+    )
+
+
+def test_an_ex_rights_break_in_an_a_share_pad_trims_it(monkeypatch):
+    """The window's corporate-action audit sees window dates only, so a
+    10-for-3 bonus issue inside the pad would warp the first ~50 bars' sma50
+    with no label anywhere. The pad is cut at the break and the cut recorded."""
+    symbol = A_SHARE_DEMO_6_SYMBOLS[0]
+
+    class _ExRights(_AshareProvider):
+        def fetch_bars(self, symbols, start, end, *, depth_start=None):
+            frames = super().fetch_bars(symbols, start, end, depth_start=depth_start)
+            frame = frames[symbol]
+            before = frame.index.date < EX_RIGHTS
+            frame.loc[before, ["open", "high", "low", "close"]] *= 1.3
+            return frames
+
+    provider = _ExRights()
+    monkeypatch.setattr(
+        engine_mod, "create_market_data_provider", lambda _source, universe=None: provider
+    )
+    monkeypatch.setattr(engine_mod, "db", _DB())
+    bt = HourlyBacktester(
+        CN_START,
+        CN_END,
+        use_llm=False,
+        data_source=IFIND_ASHARE,
+        decision_source=RULE_BASED_DECISION_SOURCE,
+    )
+    bt.load_data()
+    assert min(bt.warmup_data[symbol].index.date) == EX_RIGHTS
+    evidence = bt._agent_run_metadata()["indicator_warmup"]
+    assert evidence["unadjusted_gap_trims"] == {symbol: EX_RIGHTS.isoformat()}
+    # Every other symbol keeps its whole pad.
+    other = A_SHARE_DEMO_6_SYMBOLS[1]
+    assert min(bt.warmup_data[other].index.date) == date.fromisoformat(CN_WARMUP_START)

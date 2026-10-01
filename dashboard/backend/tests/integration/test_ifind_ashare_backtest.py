@@ -684,7 +684,6 @@ def test_ifind_offline_response_reaches_engine_database_and_chart(
         "end_date_inclusive": True,
         "provider_end_date": PROVIDER_END.isoformat(),
         "open_session_excluded": False,
-        "warmup_start_date": WARMUP_START.isoformat(),
         "fx_pair": "USD/CNY",
         "fx_source": "ifind_history_currency_conversion",
         "fx_policy": "daily_implied_median_forward_fill",
@@ -716,6 +715,11 @@ def test_ifind_offline_response_reaches_engine_database_and_chart(
     # asserted against the curve, not against itself, so a run that stopped
     # recording it cannot pass.
     decision_steps = agent_run["metadata"].pop("decision_steps")
+    # The offline response covers the window alone: an empty pad, recorded
+    # per symbol (#540) rather than passed off as warm indicators.
+    warmup = agent_run["metadata"].pop("indicator_warmup")
+    assert warmup["min_pad_bars"] == 0
+    assert set(warmup["short_symbols"]) == set(symbols)
     assert decision_steps == len(test_db.get_equity_curve(agent_run_id))
     assert agent_run["llm_decisions"] == 0
     # A run with no fills writes no cost totals. The baseline may have initial

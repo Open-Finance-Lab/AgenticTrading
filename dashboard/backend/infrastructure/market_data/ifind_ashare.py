@@ -143,12 +143,16 @@ class IFindAshareProvider:
             start_date,
             end_date,
         )
+        # Passed on only when asked for, so an injected adapter that predates
+        # it keeps working for the unpadded callers.
+        depth_options = {} if depth_start is None else {"depth_start": depth_date}
         return self._adapter(
             payload,
             expected_symbols=canonical_symbols,
             start=start_date,
             end=end_date,
             min_bars=minimum_bars_for_window(depth_date, end_date),
+            **depth_options,
         )
 
     def fetch_usd_cny(

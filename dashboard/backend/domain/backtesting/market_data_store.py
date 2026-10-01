@@ -35,7 +35,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import pandas as pd
 
-from dashboard.backend.domain.backtesting.features import TechnicalIndicators
+from dashboard.backend.domain.backtesting import indicator_warmup
 from dashboard.backend.domain.backtesting.bar_aggregation import (
     ExecutionFill,
     aggregate_bars_by_symbol,
@@ -50,6 +50,7 @@ from dashboard.backend.infrastructure.market_data.equity_metadata import (
 from dashboard.backend.infrastructure.market_data.provider import (
     parse_ymd,
     settled_exclusive_end,
+    warmup_fetch_start,
 )
 from dashboard.backend.infrastructure.market_data.frequency import (
     normalize_bar_timeframe,
@@ -90,6 +91,7 @@ class MarketDataset:
         "source_timeframe", "decision_timeframe",
         "data_quality",
         "equity_metadata",
+        "indicator_warmup",
     )
 
     @property
@@ -106,7 +108,8 @@ class MarketDataset:
                  source_timeframe: str = "60m",
                  decision_timeframe: str = "60m",
                  data_quality: Optional[Dict[str, Any]] = None,
-                 equity_metadata: Optional[Dict[str, Any]] = None):
+                 equity_metadata: Optional[Dict[str, Any]] = None,
+                 indicator_warmup: Optional[Dict[str, Any]] = None):
         self.key = key
         self.all_data = all_data
         self.timestamps = timestamps
@@ -135,6 +138,8 @@ class MarketDataset:
         self.decision_timeframe = decision_timeframe
         self.data_quality = data_quality or {}
         self.equity_metadata = equity_metadata or {}
+        # What the indicator pad delivered (`indicator_warmup.warmup_evidence`).
+        self.indicator_warmup = indicator_warmup or {}
 
 
 class _Entry:
@@ -388,7 +393,18 @@ def _build_dataset(
             f"No completed session in {start_date}..{end_date} yet; "
             "pick a window that ends before today."
         )
-    source_data = loader.fetch_bars(symbols, start_date, provider_end)
+    # From before the window, so the indicators are warm on its first bar --
+    # the same pad, split and trim as a dashboard backtest (#540), so a
+    # protocol / v2 run and a dashboard run over one window read one set of
+    # features. The key keeps `start_date`: the pad is a function of it.
+    fetch_start = warmup_fetch_start(str(start_date))
+    source_data = loader.fetch_bars(symbols, fetch_start, provider_end)
+    if not source_data:
+        raise RuntimeError("No market data returned from Alpaca")
+    # Split at once, so the padded dict is not held beside its two halves.
+    source_data, warmup_source = indicator_warmup.split_at_start(
+        source_data, str(start_date), timezone
+    )
     if not source_data:
         raise RuntimeError("No market data returned from Alpaca")
     # And pin the order of what came back, which is the loader's to choose.
@@ -402,7 +418,24 @@ def _build_dataset(
         )
     data_quality: Dict[str, Any] = {}
     aggregated = timeframe_minutes(actual_source) < timeframe_minutes(requested_decision)
+    def _decision_bars(frames):
+        if not aggregated:
+            return frames
+        return {
+            symbol: frame.loc[frame["is_complete"]].copy()
+            for symbol, frame in aggregate_bars_by_symbol(
+                frames,
+                source_timeframe=actual_source,
+                decision_timeframe=requested_decision,
+                market=market,
+                timezone=timezone,
+            ).items()
+            if not frame.empty
+        }
+
     if aggregated:
+        # Aggregated apart from the pad: a bucket never spans midnight, so the
+        # window's bars are the same, and quality describes the window alone.
         aggregated_data = aggregate_bars_by_symbol(
             source_data,
             source_timeframe=actual_source,
@@ -420,8 +453,27 @@ def _build_dataset(
         all_data = source_data
     if not all_data:
         raise RuntimeError("No completed decision bars returned from Alpaca")
+    warmup_data, trims = indicator_warmup.trim_at_unadjusted_gaps(
+        _decision_bars(warmup_source) if warmup_source else {},
+        all_data,
+        market=market,
+        timezone=timezone,
+    )
+    del warmup_source
+    warmup_evidence = indicator_warmup.warmup_evidence(
+        fetch_start=fetch_start,
+        warmup=warmup_data,
+        window_symbols=list(all_data),
+        trims=trims,
+    )
+    line = indicator_warmup.describe_evidence(warmup_evidence)
+    if line:
+        print(line)
     for symbol, df in all_data.items():
-        all_data[symbol] = TechnicalIndicators.calculate_indicators(df)
+        all_data[symbol] = indicator_warmup.warm_indicators(
+            df, warmup_data.get(symbol)
+        )
+    del warmup_data
     # US only, as in `engine.calculate_indicators`, which gates it on the
     # Alpaca source. It is not a no-op on another market once a US metadata
     # dataset is configured: A-share symbols get looked up in US market-cap and
@@ -474,6 +526,7 @@ def _build_dataset(
         decision_timeframe=requested_decision,
         data_quality=data_quality,
         equity_metadata=equity_metadata,
+        indicator_warmup=warmup_evidence,
     )
     mb = sum(float(df.memory_usage(deep=True).sum()) for df in all_data.values()) / 1e6
     print(f"📊 market-data dataset built: {key[1]}→{key[2]} "

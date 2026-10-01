@@ -433,6 +433,12 @@ def test_ifind_engine_uses_profile_symbols_in_explicit_rule_mode(monkeypatch):
     assert len(recording_db.runs) == 2
 
     agent_metadata = recording_db.runs[0]["metadata"]
+    # This provider answers the window alone, so the pad came back empty and
+    # the record says so, symbol by symbol, rather than implying warm figures.
+    warmup = agent_metadata.pop("indicator_warmup")
+    assert warmup["fetch_start"] == WARMUP_START
+    assert warmup["min_pad_bars"] == 0
+    assert warmup["short_symbols"] == {s: 0 for s in sorted(A_SHARE_DEMO_6_SYMBOLS)}
     assert agent_metadata == {
         "data_source": IFIND_ASHARE,
         "market": "CN",
@@ -460,7 +466,6 @@ def test_ifind_engine_uses_profile_symbols_in_explicit_rule_mode(monkeypatch):
         "end_date_inclusive": True,
         "provider_end_date": PROVIDER_END,
         "open_session_excluded": False,
-        "warmup_start_date": WARMUP_START,
         "fx_pair": "USD/CNY",
         "fx_source": "ifind_history_currency_conversion",
         "fx_policy": "daily_implied_median_forward_fill",

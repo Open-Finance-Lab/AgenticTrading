@@ -406,3 +406,24 @@ def test_rejects_symbol_with_fewer_than_fifty_valid_bars():
         match=r"600519\.SH.*49.*50",
     ):
         adapt(payload, expected_symbols=symbols)
+
+
+def test_the_depth_floor_ignores_pad_bars_before_depth_start():
+    """With the indicator warm-up pad (#540) ``start`` reaches back past the
+    traded window. A reply cut off inside that window must still fail the
+    floor, however many pad bars came before it."""
+    from dashboard.backend.infrastructure.market_data.ifind_adapter import (
+        IFindBarValidationError,
+        response_to_frames,
+    )
+
+    payload, symbols = one_symbol_payload(60)  # 15 trading days from START
+    # Bar 52 opens a trading day -- the "window" starts there, with 8 bars.
+    window_start = datetime.fromisoformat(trading_timestamps(60)[52]).replace(tzinfo=CN)
+    kwargs = dict(expected_symbols=symbols, start=START, end=END, min_bars=10)
+
+    assert len(response_to_frames(payload, **kwargs)[symbols[0]]) == 60
+    with pytest.raises(IFindBarValidationError, match="has 8 valid bars; minimum=10"):
+        response_to_frames(payload, **kwargs, depth_start=window_start)
+    frames = response_to_frames(payload, **{**kwargs, "min_bars": 8}, depth_start=window_start)
+    assert len(frames[symbols[0]]) == 60  # the pad is still returned

@@ -148,13 +148,18 @@ def store():
 
 def test_protocol_dataset_fetches_through_the_selected_end_date(store):
     dataset = mds.get_dataset(["AAPL"], START, END, loader_factory=_RecordingLoader)
-    assert _RecordingLoader.calls == [(("AAPL",), START, PROVIDER_END)]
+    # From the indicator warm-up pad, as a dashboard run fetches (#540).
+    assert _RecordingLoader.calls == [
+        (("AAPL",), provider_mod.warmup_fetch_start(START), PROVIDER_END)
+    ]
     assert dataset.provider_end == PROVIDER_END
 
 
 def test_a_one_day_protocol_run_gets_its_day(store):
     mds.get_dataset(["AAPL"], END, END, loader_factory=_RecordingLoader)
-    assert _RecordingLoader.calls == [(("AAPL",), END, PROVIDER_END)]
+    assert _RecordingLoader.calls == [
+        (("AAPL",), provider_mod.warmup_fetch_start(END), PROVIDER_END)
+    ]
 
 
 def test_peek_finds_what_get_dataset_built(store):
