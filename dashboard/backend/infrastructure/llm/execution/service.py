@@ -42,6 +42,7 @@ from dashboard.backend.infrastructure.llm.execution.models import (
     LLMUsage,
     PricingSnapshot,
 )
+from dashboard.backend.infrastructure.llm.http_policy import same_provider_retry_delay
 from dashboard.backend.infrastructure.llm.token_cost import (
     build_cost_evidence,
     credits_micro_for_usd,
@@ -62,36 +63,16 @@ _PLATFORM_FAILOVER_CATEGORIES = frozenset(
     }
 )
 
-# Same-provider retries. This service is the only retry owner: the SDKs run
-# with max_retries=0 (see the provider-timeout block in adapters/base.py),
-# because their retry loop replays read timeouts -- a whole billed generation
-# -- and sends no idempotency key. Here an attempt is repeated at the same
-# provider only when ``map_provider_error`` says nothing was generated:
-#   - ``RetryHint.PRE_SEND`` (DNS, connect, TLS, a stalled body), at any age;
-#   - ``RetryHint.REJECTED`` (408/409/429/5xx, a dropped connection) only when
-#     it came back within FAST_FAILURE_SECONDS. CommonStack's 2026-09-27 500s
-#     arrived ~24s in, after the generation, and three SDK replays of them
-#     bought nothing but 73s; a gateway that refuses outright answers in <2s,
-#     and the fastest DeepSeek completion seen is ~24s. The gate is calibrated
-#     on DeepSeek: a model that can finish in under 15s (Haiku, GPT-5.5) can
-#     have a fast post-generation 5xx or cut-off body repeated. That is still
-#     fewer replays than the SDK made unconditionally, each on its own
-#     reservation, and fail_closed makes a run abort the costlier outcome.
-# A read timeout is never repeated here: failover to the next candidate is the
-# only second chance, and it is a recorded, reserved one. Every attempt --
-# repeat or failover -- takes the next ``attempt_index`` of its call, because
-# a reservation is keyed on (user, run, call, attempt) and reusing an index
-# returns the already-released row (BILLING_FAILED).
-MAX_SAME_PROVIDER_RETRIES = 2
-SAME_PROVIDER_BACKOFF_SECONDS = (4.0, 12.0)
-FAST_FAILURE_SECONDS = 15.0
-# A stated Retry-After is waited out up to the SDKs' own ceiling (openai and
-# anthropic ``_calculate_retry_timeout`` honour <= 60s), so no refusal the SDK
-# used to wait out now fails the call -- which matters because "fail over
-# instead" means "abort the run" on BYOK and whenever the next lane is dead
-# (OpenRouter, #523). Above it the provider is saying "not this minute", and
-# repeating early would only be refused again.
-RETRY_AFTER_CAP_SECONDS = 60.0
+# Same-provider retries. This service is the only retry owner for billed
+# runs: the SDKs run with max_retries=0, and the policy -- what may be
+# repeated, the backoff, the fast-failure gate, the Retry-After cap -- is
+# ``http_policy.same_provider_retry_delay`` (see the comments there). On top
+# of it, this layer repeats only call-specific failures (below), and every
+# attempt -- repeat or failover -- takes the next ``attempt_index`` of its
+# call, because a reservation is keyed on (user, run, call, attempt) and
+# reusing an index returns the already-released row (BILLING_FAILED). A read
+# timeout is never repeated here: failover to the next candidate is the only
+# second chance, and it is a recorded, reserved one.
 # Failures of this one call at this one provider, as opposed to lane state
 # (quota, credentials) that is equally true of every call.
 _CALL_SPECIFIC_FAILURES = frozenset(
@@ -222,7 +203,7 @@ class LLMExecutionService:
     def execute(self, request: LLMExecutionRequest) -> LLMExecutionResult:
         """Run one logical model call with its selected payment lane.
 
-        One logical call is up to 1 + MAX_SAME_PROVIDER_RETRIES physical
+        One logical call is up to 1 + ``http_policy.MAX_SAME_PROVIDER_RETRIES``
         attempts per candidate, repeated only for pre-send failures and fast
         rejections, each billed on its own reservation; Platform Credits then
         fail over across the route's candidates.
@@ -470,30 +451,15 @@ class LLMExecutionService:
     ) -> float | None:
         """Seconds to wait before repeating ``exc``'s attempt, or None to stop."""
 
-        if retries_done >= MAX_SAME_PROVIDER_RETRIES:
-            return None
         if exc.category not in _CALL_SPECIFIC_FAILURES:
             return None
-        hint = getattr(exc, "retry_hint", RetryHint.NONE)
         elapsed = getattr(exc, "provider_elapsed_seconds", None)
-        if hint is RetryHint.PRE_SEND:
-            pass
-        elif (
-            hint is RetryHint.REJECTED
-            and isinstance(elapsed, float)
-            and elapsed <= FAST_FAILURE_SECONDS
-        ):
-            pass
-        else:
-            # A read timeout, a slow rejection, or anything unclassified.
-            return None
-        delay = SAME_PROVIDER_BACKOFF_SECONDS[retries_done]
-        retry_after = getattr(exc, "retry_after_seconds", None)
-        if retry_after is not None:
-            if retry_after > RETRY_AFTER_CAP_SECONDS:
-                return None
-            delay = max(delay, retry_after)
-        return delay
+        return same_provider_retry_delay(
+            getattr(exc, "retry_hint", RetryHint.NONE),
+            elapsed_seconds=elapsed if isinstance(elapsed, float) else None,
+            retry_after_seconds=getattr(exc, "retry_after_seconds", None),
+            retries_done=retries_done,
+        )
 
     def _execute_candidate(
         self,
@@ -543,7 +509,7 @@ class LLMExecutionService:
         candidates = tuple(request.provider_ids or (request.provider_id,))
         requested_provider_id = candidates[0]
         # One counter for the whole call: same-provider repeats and failover
-        # share it (see MAX_SAME_PROVIDER_RETRIES). With no repeats it is the
+        # share it (see http_policy.MAX_SAME_PROVIDER_RETRIES). With no repeats it is the
         # candidate position, as it always was.
         attempts = itertools.count()
         first_call_specific: LLMExecutionError | None = None
