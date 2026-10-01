@@ -501,8 +501,9 @@ def test_safe_trading_ranks_by_trend_not_rsi_extremity(monkeypatch):
         # ranking would surface this FIRST; trend ranking ranks it last.
         "OVERSOLD": _trend_sig(80.0, 15.0, 100.0, 110.0, macd=-1.0),
     }
-    # 12 solid-trend fillers to fill the top-12 and push OVERSOLD out.
-    for i in range(12):
+    # Enough solid-trend fillers that the universe exceeds the full-universe
+    # limit (a cut only happens above it) and push OVERSOLD out of the shortlist.
+    for i in range(portfolio_manager.SNAPSHOT_FULL_UNIVERSE_MAX):
         signals[f"F{i:02d}"] = _trend_sig(105.0, 50.0, 100.0, 98.0)
     state = {
         "timestamp": datetime(2026, 1, 1), "cash": 100000, "positions": [],
@@ -515,12 +516,15 @@ def test_safe_trading_ranks_by_trend_not_rsi_extremity(monkeypatch):
     top = captured["top"]
     assert "TREND" in top
     assert "OVERSOLD" not in top   # the old RSI-extremity ranking would include it
-    assert len(top) == 12          # top-12 cut, nothing appended (no holdings)
+    assert len(top) == portfolio_manager.SNAPSHOT_SHORTLIST_SIZE  # shortlist cut, nothing appended (no holdings)
 
 
 def test_safe_trading_always_includes_current_holdings(monkeypatch):
     captured = _capture_top_signals(monkeypatch)
-    signals = {f"F{i:02d}": _trend_sig(105.0, 50.0, 100.0, 98.0) for i in range(12)}
+    # Above the full-universe limit, or the whole universe is shown and the
+    # holdings rule is never exercised.
+    signals = {f"F{i:02d}": _trend_sig(105.0, 50.0, 100.0, 98.0)
+               for i in range(portfolio_manager.SNAPSHOT_FULL_UNIVERSE_MAX)}
     # A held name that ranks LAST under BOTH schemes: neutral RSI (|50-50|=0, so
     # the old RSI-extremity ranking excludes it too) AND a terrible trend score
     # (price below both SMAs, negative MACD). So its appearance can only be the
@@ -546,7 +550,7 @@ def test_safe_trading_ranking_survives_nan_indicator_bars(monkeypatch):
     trend score sorts below real scores) rather than surfacing them."""
     captured = _capture_top_signals(monkeypatch)
     signals = {"GOOD": _trend_sig(110.0, 55.0, 100.0, 95.0)}
-    for i in range(12):
+    for i in range(portfolio_manager.SNAPSHOT_FULL_UNIVERSE_MAX):
         signals[f"F{i:02d}"] = _trend_sig(105.0, 50.0, 100.0, 98.0)
     nan = float("nan")
     signals["NANBAR"] = _trend_sig(nan, nan, nan, nan, macd=nan, macd_signal=nan)
@@ -560,7 +564,7 @@ def test_safe_trading_ranking_survives_nan_indicator_bars(monkeypatch):
     top = captured["top"]
     assert "GOOD" in top
     assert "NANBAR" not in top  # NaN score ranked out, not surfaced
-    assert len(top) == 12
+    assert len(top) == portfolio_manager.SNAPSHOT_SHORTLIST_SIZE
 
 
 def test_safe_trading_threads_custom_strategy_prompt(monkeypatch):

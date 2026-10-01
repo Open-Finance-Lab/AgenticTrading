@@ -106,6 +106,17 @@ def _is_transient_provider_failure(error: BaseException) -> bool:
     )
 
 
+# Up to this many symbols the model's market snapshot carries the whole
+# universe, trend-ordered. A cut inside a universe this small (DJIA_30, the
+# 30-name pools) made "spread across the universe" mean "across today's top 12
+# by trend", and the shortlist changed bar to bar (#541).
+SNAPSHOT_FULL_UNIVERSE_MAX = 30
+
+# Above that, the snapshot keeps this many top-trend names plus current
+# holdings, and says so in the prompt (``universe_note``).
+SNAPSHOT_SHORTLIST_SIZE = 12
+
+
 class PortfolioManager:
     """Manages portfolio with hourly trading decisions based on indicators."""
     
@@ -491,7 +502,21 @@ class PortfolioManager:
                     key=lambda kv: _trend_score(kv[1]),
                     reverse=True,
                 )
-                symbols_to_include = [sym for sym, _ in trend_sorted[:12]]
+                if len(trend_sorted) <= SNAPSHOT_FULL_UNIVERSE_MAX:
+                    symbols_to_include = [sym for sym, _ in trend_sorted]
+                else:
+                    symbols_to_include = [
+                        sym for sym, _ in trend_sorted[:SNAPSHOT_SHORTLIST_SIZE]
+                    ]
+                    # The model must be told the snapshot is partial: the
+                    # pipeline prompt otherwise says only "trade ONLY symbols
+                    # listed in the market snapshot". Lives in the snapshot so
+                    # both prompt paths serialize it unchanged.
+                    market_snapshot["universe_note"] = (
+                        f"Snapshot shows the top {SNAPSHOT_SHORTLIST_SIZE} of "
+                        f"{len(trend_sorted)} symbols by trend score plus "
+                        "current holdings."
+                    )
                 # Guarantee every currently-held symbol is visible to the model
                 for sym in holdings:
                     if sym in signals and sym not in symbols_to_include:
