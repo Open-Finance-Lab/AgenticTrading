@@ -9,6 +9,8 @@ import importlib.util
 import sys
 from pathlib import Path
 
+import pytest
+
 from dashboard.backend.database import BacktestDatabase
 
 _SCRIPTS_DIR = Path(__file__).resolve().parents[2] / "scripts"
@@ -296,10 +298,10 @@ def test_cli_names_a_postgres_backend_without_credentials(monkeypatch, capsys):
 
     monkeypatch.setattr(module, "db", _FakePostgres())
 
-    try:
+    # Both ids are unknown to the fake, so the run itself exits; the backend
+    # line is printed before that, which is what this test is about.
+    with pytest.raises(SystemExit, match="unknown run id"):
         module.main(["a", "b"])
-    except SystemExit:
-        pass
     err = capsys.readouterr().err
     assert "postgres (ep-x.neon.tech/runs)" in err
     assert "hunter2" not in err
@@ -405,3 +407,67 @@ def test_a_run_that_never_recorded_a_pipeline_or_source_is_not_a_mismatch(
     _set_metadata(db, "run_b", {})
 
     assert module.compare_runs("run_a", "run_b")["mismatches"] == []
+
+
+@pytest.mark.parametrize(
+    ("field", "value_a", "value_b"),
+    [
+        # Curves priced off different tapes diverge from bar 1.
+        ("market_data_feed", "sip", "iex"),
+        ("sip_fallback_to_iex", False, True),
+        ("end_clamped", False, True),
+        # The ceiling truncation retries hinge on.
+        ("llm_max_output_tokens", 2000, 4096),
+        ("frequency_contract", {"decision_timeframe": "1h"}, {"decision_timeframe": "1d"}),
+    ],
+)
+def test_a_different_tape_cadence_or_ceiling_is_a_mismatch(
+    tmp_path, monkeypatch, field, value_a, value_b
+):
+    module = _load_script()
+    db = BacktestDatabase(tmp_path / "diff.db")
+    monkeypatch.setattr(module, "db", db)
+    _seed_pair(db)
+
+    _set_metadata(db, "run_a", {field: value_a})
+    _set_metadata(db, "run_b", {field: value_b})
+
+    assert module.compare_runs("run_a", "run_b")["mismatches"] == [field]
+
+
+def test_a_different_initial_capital_is_a_mismatch(tmp_path, monkeypatch):
+    module = _load_script()
+    db = BacktestDatabase(tmp_path / "diff.db")
+    monkeypatch.setattr(module, "db", db)
+    _seed_pair(db, initial_equity=1000.0)
+
+    assert module.compare_runs("run_a", "run_b")["mismatches"] == ["initial_equity"]
+
+
+def test_a_run_answered_on_two_lanes_is_warned_about(tmp_path, monkeypatch, capsys):
+    """Comparable configuration, but not one request shape for every bar."""
+    module = _load_script()
+    db = BacktestDatabase(tmp_path / "diff.db")
+    monkeypatch.setattr(module, "db", db)
+    _seed_pair(db)
+    _set_metadata(
+        db,
+        "run_b",
+        {
+            "llm_sampling": {
+                "policy": "pinned_v1",
+                "wire": {
+                    "commonstack": "temperature=0.0;thinking=disabled",
+                    "openrouter": "temperature=0.0;reasoning.effort=none,enabled=false",
+                },
+            }
+        },
+    )
+
+    report = module.compare_runs("run_a", "run_b")
+
+    assert report["comparable"] is True
+    assert len(report["warnings"]) == 1
+    assert report["warnings"][0].startswith("run_b answered on more than one lane")
+    assert module.main(["run_a", "run_b"]) == 0
+    assert "warning: run_b answered on more than one lane" in capsys.readouterr().err

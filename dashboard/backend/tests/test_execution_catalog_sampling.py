@@ -1,4 +1,4 @@
-"""Every dashboard-launchable model carries a pinned sampling policy.
+"""Every dashboard-launchable model states its sampling policy.
 
 The pipeline request builder sent model, max_tokens, system and messages and
 nothing else, so two runs of one configuration were two draws from the
@@ -14,18 +14,20 @@ from dashboard.backend.domain.model_providers.execution_catalog import (
     PINNED_NO_THINKING,
     PINNED_REASONING_LOW,
     PINNED_TEMPERATURE,
+    PROVIDER_DEFAULT,
     CatalogModel,
-    ExecutionModelRoute,
     SamplingPolicy,
-    list_execution_model_routes,
+    sampling_policy_for,
 )
-from dashboard.backend.domain.model_providers.models import ProviderRecord
 
 _EXPECTED = {
     "anthropic/claude-haiku-4-5": PINNED_TEMPERATURE,
     "anthropic/claude-sonnet-4-6": PINNED_TEMPERATURE,
     "openai/gpt-5.5": PINNED_REASONING_LOW,
-    "google/gemini-3.1-pro-preview": PINNED_TEMPERATURE,
+    # Google advises against low temperatures on Gemini 3 (looping, worse
+    # output); left at the provider default until a temperature-0 run is
+    # measured.
+    "google/gemini-3.1-pro-preview": PROVIDER_DEFAULT,
     "deepseek/deepseek-v4-pro": PINNED_NO_THINKING,
     "qwen/qwen3.7-plus": PINNED_NO_THINKING,
 }
@@ -39,26 +41,25 @@ def test_the_table_covers_the_catalog_exactly():
 def test_each_model_pins_the_documented_policy(catalog_id):
     model = next(m for m in ATL_EXECUTION_MODELS if m.catalog_id == catalog_id)
     assert model.sampling == _EXPECTED[catalog_id]
-    assert model.sampling.temperature is not None or model.sampling.reasoning_effort
+    assert sampling_policy_for(catalog_id) == _EXPECTED[catalog_id]
 
 
 def test_the_three_policies_are_what_they_say():
     assert PINNED_TEMPERATURE == SamplingPolicy(temperature=0.0, reasoning_effort=None)
     assert PINNED_REASONING_LOW == SamplingPolicy(temperature=None, reasoning_effort="low")
     assert PINNED_NO_THINKING == SamplingPolicy(temperature=0.0, reasoning_effort="none")
+    assert PROVIDER_DEFAULT == SamplingPolicy(temperature=None, reasoning_effort=None)
+    assert [p.pinned for p in (PINNED_TEMPERATURE, PINNED_REASONING_LOW,
+                               PINNED_NO_THINKING, PROVIDER_DEFAULT)] == [
+        True, True, True, False
+    ]
 
 
-def test_routes_carry_their_models_policy():
-    provider = ProviderRecord(
-        provider_id="openrouter",
-        display_name="OpenRouter",
-        adapter_type="openrouter",
-        approved_base_url="https://openrouter.ai/api/v1",
-    )
-    by_id = {r.catalog_id: r for r in list_execution_model_routes(provider)}
-    assert by_id["openai/gpt-5.5"].sampling == PINNED_REASONING_LOW
-    assert by_id["deepseek/deepseek-v4-pro"].sampling == PINNED_NO_THINKING
-    assert by_id["anthropic/claude-sonnet-4-6"].sampling == PINNED_TEMPERATURE
+def test_a_model_outside_the_catalog_has_no_policy():
+    """None, not PROVIDER_DEFAULT: nothing was resolved, so nothing is claimed."""
+    assert sampling_policy_for("openai/o5") is None
+    assert sampling_policy_for("") is None
+    assert sampling_policy_for(" deepseek/deepseek-v4-pro ") == PINNED_NO_THINKING
 
 
 def test_a_catalog_row_cannot_forget_to_state_its_policy():
@@ -78,34 +79,3 @@ def test_a_catalog_row_cannot_forget_to_state_its_policy():
     """
     with pytest.raises(TypeError):
         CatalogModel("openai/o5", "o5", "openai")
-
-
-def test_a_hand_built_route_claims_no_policy():
-    """`ExecutionModelRoute.sampling` defaults to None, not to a policy.
-
-    Only `list_execution_model_routes` builds a real route, and it always
-    fills this from the model. The constructions that omit it are the six test
-    stubs standing in for a preflight, and for those `None` is the truthful
-    answer: nothing was resolved. A `PINNED_TEMPERATURE` default would have
-    each of them claim a pinning nobody asked for, and the endpoint would then
-    hand the child `--llm-temperature 0` for a route it never looked up.
-    """
-    route = ExecutionModelRoute(
-        catalog_id="openai/gpt-5.5",
-        label="GPT-5.5",
-        provider_model_id="gpt-5.5",
-    )
-    assert route.sampling is None
-
-
-def test_every_route_the_catalog_builds_carries_a_policy():
-    """That None is reachable by hand only; the real builder never emits it."""
-    provider = ProviderRecord(
-        provider_id="openrouter",
-        display_name="OpenRouter",
-        adapter_type="openrouter",
-        approved_base_url="https://openrouter.ai/api/v1",
-    )
-    routes = list_execution_model_routes(provider)
-    assert routes
-    assert all(route.sampling is not None for route in routes)

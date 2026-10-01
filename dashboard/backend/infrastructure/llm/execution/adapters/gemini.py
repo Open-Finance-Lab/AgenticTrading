@@ -16,6 +16,7 @@ from .base import (
     CredentialMaterial,
     ProviderExecutionError,
     build_safe_http_client,
+    describe_sampling_wire,
     map_provider_error,
     normalize_finish_reason,
     optional_nonnegative_float,
@@ -57,8 +58,10 @@ class GeminiExecutionAdapter:
                 "parts": [{"text": request.system_message}]
             }
         generation = payload["generationConfig"]
+        wire: list[str] = []
         if request.temperature is not None:
             generation["temperature"] = request.temperature  # type: ignore[index]
+            wire.append(f"temperature={request.temperature}")
         client = None
         try:
             try:
@@ -107,6 +110,7 @@ class GeminiExecutionAdapter:
                 finish_reason=normalize_finish_reason(
                     value_at(first, "finishReason")
                 ),
+                sampling_wire=describe_sampling_wire(wire),
             )
         except ProviderExecutionError:
             raise

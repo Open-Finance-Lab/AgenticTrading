@@ -382,7 +382,6 @@ class PortfolioManager:
         strategy_prompt: str = None,
         pipeline: List[Dict] = None,
         temperature: Optional[float] = None,
-        reasoning_effort: Optional[str] = None,
         market_context: Optional[Dict] = None,
         strict_llm: bool = False,
     ) -> Dict:
@@ -643,8 +642,6 @@ class PortfolioManager:
                         pipeline=pipeline,
                         market_snapshot=market_snapshot,
                         model=model,
-                        temperature=temperature,
-                        reasoning_effort=reasoning_effort,
                     )
                 )
                 self.input_tokens += input_delta
@@ -709,7 +706,6 @@ class PortfolioManager:
                             model=model,
                             max_tokens=RECOVERY_MAX_OUTPUT_TOKENS,
                             temperature=temperature,
-                            reasoning_effort=reasoning_effort,
                             market_context=market_context,
                         )
                     else:
@@ -718,7 +714,6 @@ class PortfolioManager:
                             prompt=prompt,
                             model=model,
                             temperature=temperature,
-                            reasoning_effort=reasoning_effort,
                             market_context=market_context,
                         )
                     output_delta = self._record_llm_usage(response)
@@ -761,7 +756,6 @@ class PortfolioManager:
                             model=model,
                             max_tokens=RECOVERY_MAX_OUTPUT_TOKENS,
                             temperature=temperature,
-                            reasoning_effort=reasoning_effort,
                             market_context=market_context,
                         )
                         self._record_llm_usage(retry_response)

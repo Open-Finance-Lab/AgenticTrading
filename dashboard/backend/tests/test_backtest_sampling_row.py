@@ -7,7 +7,11 @@ thinking off*. A recorded effort in the off-set (`none/off/false/0/disabled`)
 reads "thinking off"; any other value reads "reasoning effort <value>".
 Beside them sit *Provider default*, for a run that
 recorded pinning nothing, and *Not recorded*, for an LLM run written before
-the field existed.
+the field existed -- or any block whose recorded `policy` the row does not
+recognise. The `policy` decides the prefix, never the presence of values: a
+pinned block whose values were dropped must not read as provider default.
+Leaderboard rows read *Entry config*, and a run answered on more than one
+lane names the lanes.
 
 This file enumerates the shapes and never asserts how many there are. The
 count moves with the policy table and with `SamplingPolicy` itself -- a new
@@ -130,6 +134,67 @@ def test_provider_default():
 def test_not_recorded():
     assert _format("null") == "Not recorded"
     assert _format("undefined") == "Not recorded"
+
+
+@pytest.mark.parametrize(
+    "block",
+    [
+        # No policy: values alone do not say who chose them.
+        "{temperature: 0, reasoning_effort: null}",
+        "{temperature: null, reasoning_effort: null}",
+        "{}",
+        "{temperature: 0, policy: 'something_new'}",
+        # A provider-default record carrying values contradicts itself.
+        "{temperature: 0, reasoning_effort: null, policy: 'provider_default'}",
+    ],
+)
+def test_a_block_the_row_cannot_vouch_for_reads_not_recorded(block):
+    assert _format(block) == "Not recorded"
+
+
+def test_a_pinned_block_whose_values_were_dropped_still_says_pinned():
+    """The route drops a string temperature; the policy still says pinned."""
+    assert _format("{policy: 'pinned_v1'}") == "Pinned · values not recorded"
+    assert _format("{temperature: '0', policy: 'pinned_v1'}") == (
+        "Pinned · values not recorded"
+    )
+
+
+def test_a_leaderboard_row_reads_entry_config():
+    assert _format(
+        "{temperature: 0.2, reasoning_effort: null, policy: 'leaderboard_entry'}"
+    ) == "Entry config · temperature 0.2"
+    assert _format(
+        "{temperature: null, reasoning_effort: null, policy: 'leaderboard_entry'}"
+    ) == "Entry config · integration default"
+
+
+def test_a_run_answered_on_more_than_one_lane_names_them():
+    """One policy takes a different shape per lane; say the run was split."""
+    assert _format(
+        "{temperature: 0, reasoning_effort: 'none', policy: 'pinned_v1', "
+        "wire: {commonstack: 'temperature=0.0;thinking=disabled', "
+        "openrouter: 'temperature=0.0;reasoning.effort=none,enabled=false'}}"
+    ) == "Pinned · temperature 0 · thinking off · lanes: commonstack, openrouter"
+    assert _format(
+        "{temperature: 0, reasoning_effort: 'none', policy: 'pinned_v1', "
+        "wire: {commonstack: 'temperature=0.0;thinking=disabled'}}"
+    ) == "Pinned · temperature 0 · thinking off"
+
+
+def test_the_off_set_matches_the_python_one():
+    """The one copy that cannot import the Python set is held equal to it."""
+    import re
+
+    from dashboard.backend.infrastructure.llm.reasoning_controls import (
+        REASONING_OFF_VALUES,
+    )
+
+    body = fn_body("function formatBacktestSampling(")
+    match = re.search(r"THINKING_OFF_VALUES = new Set\(\[([^\]]*)\]\)", body)
+    assert match, "THINKING_OFF_VALUES literal not found"
+    js_values = set(re.findall(r"'([^']*)'", match.group(1)))
+    assert js_values == set(REASONING_OFF_VALUES)
 
 
 def test_copy_never_claims_determinism():

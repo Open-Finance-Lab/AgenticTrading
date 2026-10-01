@@ -48,6 +48,7 @@ def _request(
     model_id: str,
     *,
     reasoning_effort: str | None = None,
+    temperature: float | None = None,
 ) -> LLMExecutionRequest:
     return LLMExecutionRequest(
         user_id=7,
@@ -59,6 +60,7 @@ def _request(
         messages=(LLMMessage(role="user", content="Return one word."),),
         usage_policy=UsagePolicy(max_output_tokens=16),
         reasoning_effort=reasoning_effort,
+        temperature=temperature,
     )
 
 
@@ -484,7 +486,13 @@ def test_native_openai_sends_nothing_extra_when_no_effort_is_requested(monkeypat
     assert "extra_body" not in captured
 
 
-def _commonstack_capture(monkeypatch, reasoning_effort):
+def _compatible_capture(
+    monkeypatch, reasoning_effort, *, provider_id="commonstack", temperature=None
+):
+    """Send one DeepSeek call through an openai_compatible provider.
+
+    Returns ``(kwargs sent to the SDK, adapter response)``.
+    """
     captured = {}
 
     def create(**kwargs):
@@ -499,8 +507,8 @@ def _commonstack_capture(monkeypatch, reasoning_effort):
         client_factory=lambda **_kwargs: client,
     )
     provider = ProviderRecord(
-        provider_id="commonstack",
-        display_name="CommonStack",
+        provider_id=provider_id,
+        display_name=provider_id,
         adapter_type="openai_compatible",
         approved_base_url="https://api.commonstack.ai/v1",
         capabilities=ProviderCapabilities(
@@ -508,16 +516,21 @@ def _commonstack_capture(monkeypatch, reasoning_effort):
             reasoning=True,
         ),
     )
-    adapter.complete(
+    response = adapter.complete(
         _request(
-            "commonstack",
+            provider_id,
             "deepseek/deepseek-v4-pro",
             reasoning_effort=reasoning_effort,
+            temperature=temperature,
         ),
-        _credential("commonstack"),
+        _credential(provider_id),
         provider,
     )
-    return captured
+    return captured, response
+
+
+def _commonstack_capture(monkeypatch, reasoning_effort):
+    return _compatible_capture(monkeypatch, reasoning_effort)[0]
 
 
 @pytest.mark.parametrize("off", ["none", "off", "false", "0", "disabled", "NONE"])
@@ -544,3 +557,75 @@ def test_commonstack_keeps_reasoning_effort_for_a_graduated_value(monkeypatch):
 
     assert captured["extra_body"] == {"reasoning": {"effort": "low"}}
     assert "thinking" not in captured["extra_body"]
+
+
+def test_thinking_disabled_is_commonstack_only(monkeypatch):
+    """Keyed on the provider, not on the openai_compatible adapter type.
+
+    An admin-registered OpenAI-shaped server (DeepSeek's own API, vLLM,
+    Together) was never probed with a `thinking` body field: a strict one
+    400s on the unknown key, a lenient one thinks anyway while the run says
+    thinking was off. It keeps the `reasoning` shape it was sent before.
+    """
+    captured, response = _compatible_capture(
+        monkeypatch, "none", provider_id="deepseek_direct"
+    )
+
+    assert captured["extra_body"] == {"reasoning": {"effort": "none"}}
+    assert response.sampling_wire == "reasoning.effort=none"
+
+
+def test_commonstack_reports_the_wire_shape_it_sent(monkeypatch):
+    _captured, response = _compatible_capture(monkeypatch, "none", temperature=0.0)
+
+    assert response.sampling_wire == "temperature=0.0;thinking=disabled"
+
+
+def test_an_adapter_that_sends_no_sampling_reports_none(monkeypatch):
+    captured, response = _compatible_capture(monkeypatch, None)
+
+    assert "extra_body" not in captured and "temperature" not in captured
+    assert response.sampling_wire is None
+
+
+def test_openrouter_reports_its_thinking_off_shape(monkeypatch):
+    captured = {}
+
+    def create(**kwargs):
+        captured.update(kwargs)
+        return _openai_response("deepseek/deepseek-v4-pro")
+
+    monkeypatch.setattr(
+        openai_module, "build_safe_http_client", lambda *_args, **_kwargs: _Closable()
+    )
+    adapter = openai_module.OpenRouterAdapter(
+        client_factory=lambda **_kwargs: _openai_client(create)
+    )
+    response = adapter.complete(
+        _request("openrouter", "deepseek/deepseek-v4-pro", reasoning_effort="none"),
+        _credential("openrouter"),
+        _provider("openrouter", "openrouter", "https://openrouter.ai/api/v1"),
+    )
+
+    assert captured["extra_body"] == {
+        "reasoning": {"effort": "none", "enabled": False, "exclude": True}
+    }
+    assert response.sampling_wire == "reasoning.effort=none,enabled=false"
+
+
+def test_native_openai_reports_its_top_level_effort(monkeypatch):
+    monkeypatch.setattr(
+        openai_module, "build_safe_http_client", lambda *_args, **_kwargs: _Closable()
+    )
+    adapter = openai_module.OpenAIAdapter(
+        client_factory=lambda **_kwargs: _openai_client(
+            lambda **_kw: _openai_response("gpt-5.5")
+        )
+    )
+    response = adapter.complete(
+        _request("openai", "openai/gpt-5.5", reasoning_effort="low"),
+        _credential("openai"),
+        _provider("openai", "openai", "https://api.openai.com/v1"),
+    )
+
+    assert response.sampling_wire == "reasoning_effort=low"

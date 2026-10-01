@@ -176,16 +176,6 @@ def test_request_omits_temperature_when_unset():
     assert "temperature" not in client.captured
 
 
-def test_request_sends_reasoning_effort_only_when_set():
-    client = _FakeClient(_FakeResponse('{"actions": []}'))
-    harness.request_trading_decision(client, prompt="HELLO", reasoning_effort="low")
-    assert client.captured["reasoning_effort"] == "low"
-
-    client = _FakeClient(_FakeResponse('{"actions": []}'))
-    harness.request_trading_decision(client, prompt="HELLO")
-    assert "reasoning_effort" not in client.captured
-
-
 def test_system_prompt_required_fragments():
     # Assert stable required fragments of the current (unchanged) prompt.
     assert "expert quantitative trading advisor" in harness.SYSTEM_PROMPT

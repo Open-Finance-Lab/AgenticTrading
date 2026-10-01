@@ -67,8 +67,7 @@ def spy(monkeypatch):
     _SENTINEL = object()
 
     def fake_request(client, *, prompt, model=None, max_tokens=_SENTINEL,
-                     temperature=None, reasoning_effort=None,
-                     market_context=None):
+                     temperature=None, market_context=None):
         # Records the sentinel when the kwarg was not passed at all, so the
         # "unescalated calls are identical" claim is tested on call shape and
         # not just on the resolved value.

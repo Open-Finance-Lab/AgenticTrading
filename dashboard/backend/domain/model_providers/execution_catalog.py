@@ -20,10 +20,20 @@ class SamplingPolicy:
     models return 400) or ignores it while thinking (DeepSeek). A value of
     ``None`` is *not sent*, which keeps the request byte-identical to what
     every run before this sent for that field.
+
+    Applied by ``AnthropicCompatibleExecutionClient``, which resolves it from
+    the signed handoff's ``model_id`` (``sampling_policy_for``) and imposes it
+    on every call the backtest child makes. Nothing upstream of that client
+    carries it, so no call site can forget to.
     """
 
     temperature: float | None
     reasoning_effort: str | None
+
+    @property
+    def pinned(self) -> bool:
+        """True when the policy sends anything at all."""
+        return self.temperature is not None or bool(self.reasoning_effort)
 
 
 PINNED_TEMPERATURE = SamplingPolicy(temperature=0.0, reasoning_effort=None)
@@ -32,6 +42,9 @@ PINNED_REASONING_LOW = SamplingPolicy(temperature=None, reasoning_effort="low")
 # adapter sends it to an openai_compatible provider (CommonStack) as
 # `thinking: {type: "disabled"}`, the one reasoning control that lane honours.
 PINNED_NO_THINKING = SamplingPolicy(temperature=0.0, reasoning_effort="none")
+# Sends nothing: the provider's own defaults, exactly as before any policy.
+# A stated choice, not an absence -- a row still has to name it.
+PROVIDER_DEFAULT = SamplingPolicy(temperature=None, reasoning_effort=None)
 
 
 @dataclass(frozen=True)
@@ -54,13 +67,6 @@ class ExecutionModelRoute:
     catalog_id: str
     label: str
     provider_model_id: str
-    # None, not a policy. Only `list_execution_model_routes` builds a real
-    # route and it always fills this from the model; the constructions that
-    # omit it are test stubs standing in for a preflight, and for those the
-    # honest answer is "nothing was resolved". A pinned default would have a
-    # hand-built route claim a policy nobody chose, and the endpoint would
-    # then send `--llm-temperature 0` for a route it never looked up.
-    sampling: SamplingPolicy | None = None
 
 
 ATL_EXECUTION_MODELS = (
@@ -78,11 +84,16 @@ ATL_EXECUTION_MODELS = (
     ),
     # OpenAI reasoning models reject a non-default temperature outright.
     CatalogModel("openai/gpt-5.5", "GPT-5.5", "openai", PINNED_REASONING_LOW),
+    # Provider default, not temperature 0: Google's Gemini 3 guidance is to
+    # keep the default 1.0 and warns that lower values can loop or degrade
+    # the answer. A loop fills the output ceiling and buys a 4096-token
+    # recovery retry, so pinning 0 unmeasured risks doubling the billed tokens
+    # per bar. Revisit once a temperature-0 Gemini run has been measured.
     CatalogModel(
         "google/gemini-3.1-pro-preview",
         "Gemini 3.1 Pro Preview",
         "google",
-        PINNED_TEMPERATURE,
+        PROVIDER_DEFAULT,
     ),
     # Thinking models served on CommonStack, which honours no graduated
     # reasoning control for these two: reasoning.effort, a top-level
@@ -146,10 +157,25 @@ def list_execution_model_routes(
                     catalog_id=model.catalog_id,
                     label=model.label,
                     provider_model_id=provider_model_id,
-                    sampling=model.sampling,
                 )
             )
     return tuple(routes)
+
+
+def sampling_policy_for(catalog_id: str) -> SamplingPolicy | None:
+    """The catalog model's policy, or None for an id the catalog lacks.
+
+    None, not ``PROVIDER_DEFAULT``: a model outside the catalog cannot be
+    launched by the dashboard at all, so reaching here with one is a caller
+    that resolved nothing, and the honest answer is "no policy" rather than a
+    policy nobody chose.
+    """
+
+    requested = str(catalog_id or "").strip()
+    for model in ATL_EXECUTION_MODELS:
+        if model.catalog_id == requested:
+            return model.sampling
+    return None
 
 
 def resolve_execution_model_route(
@@ -174,8 +200,10 @@ __all__ = [
     "PINNED_NO_THINKING",
     "PINNED_REASONING_LOW",
     "PINNED_TEMPERATURE",
+    "PROVIDER_DEFAULT",
     "SamplingPolicy",
     "UnsupportedExecutionModel",
     "list_execution_model_routes",
     "resolve_execution_model_route",
+    "sampling_policy_for",
 ]

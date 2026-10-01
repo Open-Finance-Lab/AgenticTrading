@@ -10186,17 +10186,25 @@ function formatBacktestMarketDataProvenance(provenance) {
  * An effort in the off-set reads "thinking off": that is what the request
  * asked for (the OpenAI adapter sends it to CommonStack as thinking
  * disabled), and "reasoning effort none" would read as an effort level.
+ *
+ * The recorded `policy` decides the prefix, not the presence of values: a
+ * block whose values were dropped (or never written) must not read as a run
+ * that pinned nothing. `pinned_v1` is the catalog policy the execution client
+ * imposed, `provider_default` a run that pinned nothing, `leaderboard_entry`
+ * a leaderboard row's configured values; anything else is "Not recorded".
+ * When the calls were answered on more than one lane, the lanes are named:
+ * one policy takes a different shape on each, and only some are probed.
  */
 function formatBacktestSampling(sampling) {
     if (!sampling || typeof sampling !== 'object') return 'Not recorded';
     // Python twin: REASONING_OFF_VALUES in
-    // infrastructure/llm/execution/adapters/openai.py -- keep the two equal.
-    // Inside the function, not at module scope: the node harness lifts this
-    // function alone.
+    // infrastructure/llm/reasoning_controls.py -- held equal by
+    // test_backtest_sampling_row.py. Inside the function, not at module
+    // scope: the node harness lifts this function alone.
     const THINKING_OFF_VALUES = new Set(['none', 'off', 'false', '0', 'disabled']);
+    const policy = typeof sampling.policy === 'string' ? sampling.policy : '';
     const temperature = Number(sampling.temperature);
-    const hasTemperature = sampling.temperature !== null
-        && sampling.temperature !== undefined
+    const hasTemperature = typeof sampling.temperature === 'number'
         && Number.isFinite(temperature);
     const effort = typeof sampling.reasoning_effort === 'string'
         ? sampling.reasoning_effort.trim()
@@ -10210,13 +10218,28 @@ function formatBacktestSampling(sampling) {
                 : `reasoning effort ${effort}`
         );
     }
-    if (!parts.length) return 'Provider default';
+    const wire = sampling.wire && typeof sampling.wire === 'object'
+        ? Object.keys(sampling.wire)
+        : [];
+    const lanes = wire.length > 1 ? ` · lanes: ${wire.join(', ')}` : '';
+    if (policy === 'provider_default') {
+        // A provider-default record that carries values contradicts itself;
+        // say nothing rather than pick a side.
+        return parts.length ? 'Not recorded' : `Provider default${lanes}`;
+    }
+    if (policy === 'leaderboard_entry') {
+        return parts.length
+            ? `Entry config · ${parts.join(' · ')}`
+            : 'Entry config · integration default';
+    }
+    if (policy !== 'pinned_v1') return 'Not recorded';
+    if (!parts.length) return `Pinned · values not recorded${lanes}`;
     // Names why the temperature half is *absent*, which is the only thing a
     // recorded request can support. Without it an effort-only row is hard to
     // tell from a half-recorded one, and this panel already has a separate
     // state for "we do not know".
     const note = effort && !hasTemperature ? ' (no temperature sent)' : '';
-    return `Pinned · ${parts.join(' · ')}${note}`;
+    return `Pinned · ${parts.join(' · ')}${note}${lanes}`;
 }
 
 function renderBacktestRunConfig(

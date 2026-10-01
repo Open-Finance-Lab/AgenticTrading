@@ -18,6 +18,7 @@ from .base import (
     CredentialMaterial,
     ProviderExecutionError,
     build_safe_http_client,
+    describe_sampling_wire,
     map_provider_error,
     normalize_finish_reason,
     optional_nonnegative_float,
@@ -90,8 +91,10 @@ class AnthropicExecutionAdapter:
             }
             if request.system_message:
                 kwargs["system"] = request.system_message
+            wire: list[str] = []
             if request.temperature is not None:
                 kwargs["temperature"] = request.temperature
+                wire.append(f"temperature={request.temperature}")
             response = client.messages.create(**kwargs)
             text = _content_text(response)
             if not text:
@@ -111,6 +114,7 @@ class AnthropicExecutionAdapter:
                 finish_reason=normalize_finish_reason(
                     value_at(response, "stop_reason")
                 ),
+                sampling_wire=describe_sampling_wire(wire),
             )
         except ProviderExecutionError:
             raise

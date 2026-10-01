@@ -48,6 +48,15 @@ from dashboard.backend.db_url import describe_database_url  # noqa: E402
 #: and ``data_source`` live in the row's metadata, and are as much a part of
 #: "one configuration" as the window: a pair that differs in either is not a
 #: sampling measurement.
+#:
+#: The rest are the inputs that move the curve without any model call
+#: changing. The tape (``market_data_feed``, ``sip_fallback_to_iex``,
+#: ``end_clamped``): curves priced off different feeds diverge from bar 1, so
+#: a before run that fell back to IEX is not a sampling measurement against an
+#: after run on SIP. ``initial_equity`` scales every order. ``frequency_contract``
+#: is the bar cadence the decisions ran on. ``llm_max_output_tokens`` is the
+#: ceiling truncation retries hinge on, which is how a ceiling change shows up
+#: as divergence.
 _COMPARABILITY_FIELDS = (
     "start_date",
     "end_date",
@@ -55,6 +64,23 @@ _COMPARABILITY_FIELDS = (
     "symbols",
     "initial_pipeline",
     "data_source",
+    "market_data_feed",
+    "sip_fallback_to_iex",
+    "end_clamped",
+    "initial_equity",
+    "frequency_contract",
+    "llm_max_output_tokens",
+)
+
+#: Read off the row's metadata rather than its columns.
+_METADATA_FIELDS = frozenset(
+    {
+        "data_source",
+        "market_data_feed",
+        "sip_fallback_to_iex",
+        "end_clamped",
+        "llm_max_output_tokens",
+    }
 )
 
 
@@ -168,8 +194,11 @@ def _run_field(row: Dict[str, Any], name: str) -> Any:
         # Normalised, so key order inside a step is not a difference.
         pipeline = metadata.get("initial_pipeline")
         return json.dumps(pipeline, sort_keys=True) if pipeline is not None else None
-    if name == "data_source":
-        return metadata.get("data_source")
+    if name == "frequency_contract":
+        contract = metadata.get("frequency_contract")
+        return json.dumps(contract, sort_keys=True) if contract is not None else None
+    if name in _METADATA_FIELDS:
+        return metadata.get(name)
     return row.get(name)
 
 
@@ -183,6 +212,22 @@ def _final_equity_gap(final_a: Any, final_b: Any) -> Tuple[Optional[float], Opti
     if not float(final_a):
         return None, "run_a final equity is zero"
     return 100.0 * (float(final_b) - float(final_a)) / float(final_a), None
+
+
+def _lane_warnings(label: str, row: Dict[str, Any]) -> List[str]:
+    """Say when a run's calls were answered on more than one lane.
+
+    One sampling policy takes a different shape per lane (``llm_sampling.wire``),
+    so a run that failed over part-way did not send every bar the same request,
+    and divergence after the switch is not sampling noise alone. A warning, not
+    a mismatch: the configuration was the same, the route was not.
+    """
+    sampling = (row.get("metadata") or {}).get("llm_sampling") or {}
+    wire = sampling.get("wire") if isinstance(sampling, dict) else None
+    if isinstance(wire, dict) and len(wire) > 1:
+        shapes = ", ".join(f"{lane}: {controls}" for lane, controls in wire.items())
+        return [f"{label} answered on more than one lane ({shapes})"]
+    return []
 
 
 def compare_runs(run_a: str, run_b: str) -> Dict[str, Any]:
@@ -231,6 +276,7 @@ def compare_runs(run_a: str, run_b: str) -> Dict[str, Any]:
             "final_equity_gap_pct": gap_pct,
             "sampling_a": (row_a.get("metadata") or {}).get("llm_sampling"),
             "sampling_b": (row_b.get("metadata") or {}).get("llm_sampling"),
+            "warnings": _lane_warnings("run_a", row_a) + _lane_warnings("run_b", row_b),
         }
     )
     if gap_reason:
@@ -260,12 +306,17 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument(
         "--allow-mismatch",
         action="store_true",
-        help="exit 0 even when the runs differ in window, model, universe, pipeline or data source",
+        help=(
+            "exit 0 even when the runs differ in window, model, universe, "
+            "pipeline, data source, tape, capital, cadence or output ceiling"
+        ),
     )
     args = parser.parse_args(argv)
     print(f"run history: {describe_run_history_backend()}", file=sys.stderr)
     report = compare_runs(args.run_a, args.run_b)
     print(json.dumps(report, indent=2, default=str))
+    for warning in report["warnings"]:
+        print(f"warning: {warning}", file=sys.stderr)
     if report["mismatches"] and not args.allow_mismatch:
         print(
             "runs are not comparable, they differ in: "

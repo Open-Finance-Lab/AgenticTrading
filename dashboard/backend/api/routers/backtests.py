@@ -88,7 +88,6 @@ from dashboard.backend.infrastructure.llm.execution.models import (
 )
 from dashboard.backend.infrastructure.llm.pipeline_runner import split_pipeline
 from dashboard.backend.domain.model_providers.execution_catalog import (
-    SamplingPolicy,
     UnsupportedExecutionModel,
 )
 from dashboard.backend.domain.model_providers.service import (
@@ -414,9 +413,28 @@ class BacktestChartData(BaseModel):
 # which the browser's `Number()` would quietly coerce -- is dropped here.
 _LLM_SAMPLING_FIELDS = ("temperature", "reasoning_effort", "policy", "model")
 _LLM_SAMPLING_TEXT_LIMIT = 128
+# `wire` maps a provider id to the controls that lane put on the request.
+# Bounded like the request's own candidate list (`provider_ids`, max 8).
+_LLM_SAMPLING_WIRE_LIMIT = 8
+# Leaderboard runs (`leaderboard/service.py::_llm_run_metadata`) record the
+# entry's configured temperature/reasoning_effort at the top level and carry no
+# `llm_sampling` block; `entry_id` is what marks such a row.
+LEADERBOARD_SAMPLING_POLICY = "leaderboard_entry"
+
+
+def _sanitized_text(item: Any) -> Optional[str]:
+    if isinstance(item, str) and len(item) <= _LLM_SAMPLING_TEXT_LIMIT:
+        return item
+    return None
 
 
 def _sanitized_llm_sampling(value: Any) -> Optional[Dict[str, Any]]:
+    """The recorded sampling block, or None when nothing in it is usable.
+
+    None rather than ``{}``: an empty dict is truthy in the browser, and the
+    panel would read it as a run that pinned nothing ("Provider default")
+    when it is a run whose record says nothing ("Not recorded").
+    """
     if not isinstance(value, dict):
         return None
     safe: Dict[str, Any] = {}
@@ -433,9 +451,41 @@ def _sanitized_llm_sampling(value: Any) -> Optional[Dict[str, Any]]:
                 and math.isfinite(item)
             ):
                 safe[name] = item
-        elif isinstance(item, str) and len(item) <= _LLM_SAMPLING_TEXT_LIMIT:
+        elif _sanitized_text(item) is not None:
             safe[name] = item
+    wire = value.get("wire")
+    if isinstance(wire, dict):
+        safe_wire: Dict[str, Optional[str]] = {}
+        for provider_id, controls in list(wire.items())[:_LLM_SAMPLING_WIRE_LIMIT]:
+            if _sanitized_text(provider_id) is None:
+                continue
+            if controls is None or _sanitized_text(controls) is not None:
+                safe_wire[provider_id] = controls
+        safe["wire"] = safe_wire
+    if not any(safe.get(name) is not None for name in _LLM_SAMPLING_FIELDS):
+        return None
     return safe
+
+
+def _leaderboard_llm_sampling(metadata: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """A sampling block for a leaderboard row, from the config it recorded.
+
+    Derived here rather than written by the leaderboard so the rows already
+    on the board get it too: their metadata has said what was sent all along,
+    and without this the panel called them "Not recorded".
+    """
+    if not metadata.get("entry_id") or not (
+        "temperature" in metadata or "reasoning_effort" in metadata
+    ):
+        return None
+    return _sanitized_llm_sampling(
+        {
+            "temperature": metadata.get("temperature"),
+            "reasoning_effort": metadata.get("reasoning_effort"),
+            "policy": LEADERBOARD_SAMPLING_POLICY,
+            "model": metadata.get("model_id"),
+        }
+    )
 
 
 def _run_metadata_response(run: Dict[str, Any]) -> RunMetadata:
@@ -547,6 +597,10 @@ def _run_metadata_response(run: Dict[str, Any]) -> RunMetadata:
                     }
                 else:
                     payload[field] = metadata[field]
+        if "llm_sampling" not in metadata:
+            leaderboard_sampling = _leaderboard_llm_sampling(metadata)
+            if leaderboard_sampling is not None:
+                payload["llm_sampling"] = leaderboard_sampling
     # After the metadata copy, so `decision_source` above is already the
     # requested value and this cannot overwrite it with the observed one. The
     # block is the single producer of both, so the two can never be computed
@@ -1626,8 +1680,6 @@ def run_backtest_background(
     financial_datasets_api_key: Optional[str] = None,
     execution_handoff_payload: Optional[str] = None,
     universe_selection: Optional[Dict[str, Any]] = None,
-    llm_temperature: Optional[float] = None,
-    llm_reasoning_effort: Optional[str] = None,
     # The billing lane, threaded from the route because it is NOT otherwise
     # reachable here: it is folded into the opaque signed
     # `execution_handoff_payload` before this function is called, and that
@@ -1780,14 +1832,6 @@ def run_backtest_background(
 
         if uses_llm and model and model.strip():
             cmd += ["--model", model.strip()]
-
-        # Each half of the sampling policy rides only when set: an absent flag
-        # is how "not sent" reaches the request builder, and neither value is
-        # a secret, so argv rather than the signed handoff.
-        if uses_llm and llm_temperature is not None:
-            cmd += ["--llm-temperature", repr(float(llm_temperature))]
-        if uses_llm and llm_reasoning_effort and str(llm_reasoning_effort).strip():
-            cmd += ["--llm-reasoning-effort", str(llm_reasoning_effort).strip().lower()]
 
         if execution_handoff_payload:
             cmd += ["--execution-handoff-stdin"]
@@ -3478,7 +3522,6 @@ def run_backtest_endpoint(
     live_run_id = f"agent_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}"
 
     execution_handoff_payload: Optional[str] = None
-    llm_sampling: Optional[SamplingPolicy] = None
     if (
         resolved_decision_source == LLM_DECISION_SOURCE
         and runtime_type == PIPELINE_RUNTIME_TYPE
@@ -3576,7 +3619,6 @@ def run_backtest_endpoint(
                 "universe_selection": universe_selection,
             },
         )
-        llm_sampling = route.sampling
 
     refusal = _try_acquire_backtest_slot(
         live_run_id=live_run_id,
@@ -3631,8 +3673,6 @@ def run_backtest_endpoint(
             "assets": selected_assets,
             "decision_source": resolved_decision_source,
             "execution_handoff_payload": execution_handoff_payload,
-            "llm_temperature": llm_sampling.temperature if llm_sampling else None,
-            "llm_reasoning_effort": llm_sampling.reasoning_effort if llm_sampling else None,
             # Only the lane the LLM preflight above actually validated.
             # `billing_mode` is a request field that reaches this scope on
             # EVERY run, including a rule-based one that never entered that

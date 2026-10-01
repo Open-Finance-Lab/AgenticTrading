@@ -98,6 +98,16 @@ The pre-change number comes from the **parent's own boot log** on the deploy tha
 
 > **Amendment 2026-10-01.** DeepSeek V4 Pro and Qwen3.7 Plus are now pinned to temperature 0 **and thinking off** (`reasoning_effort: "none"`), replacing temperature 0 + effort `low`. The probe on issue #539 found that CommonStack, the prod lane for both, honours no graduated reasoning control for them. It ignored `reasoning.effort`, a top-level `reasoning_effort`, `reasoning.enabled:false` and `thinking.budget_tokens`, and by default each call randomly either thinks to the cap or does not think at all. `thinking: {type: "disabled"}` is honoured, and with it plus temperature 0 DeepSeek returned identical decision sets 3/3. The OpenAI adapter therefore sends that shape on the `openai_compatible` lane for an off value, and the card reads *thinking off*. GPT-5.5 keeps `low`, which CommonStack honours for it.
 
+> **Amendment 2026-10-01 (review of #596).** The policy is no longer threaded. `AnthropicCompatibleExecutionClient` resolves it from the signed handoff's `model_id` (`sampling_policy_for`) and imposes it on every call. The argv flags (`--llm-temperature` / `--llm-reasoning-effort`), the `run_backtest_background` / engine / portfolio-manager / `pipeline_runner` / harness kwargs, `ExecutionModelRoute.sampling`, and the tests that pinned them (`test_backtest_sampling_argv.py`, `test_backtest_sampling_wiring.py`) are gone. They are replaced by `tests/infrastructure/llm/test_execution_client_sampling.py`, which drives the real pipeline runner through the real client. Reasons: every call site had to remember two kwargs; the argv values were unsigned and could disagree with the signed model id; and a CLI run without a handoff reached the legacy OpenRouter client with `--llm-temperature`, which pairs a temperature with an Anthropic `thinking` block that rejects it. Other changes from the same review:
+> - Gemini 3.1 Pro is `PROVIDER_DEFAULT`, not temperature 0, because Google advises against low temperatures on Gemini 3.
+> - `thinking: {type: "disabled"}` is sent to CommonStack only, keyed on provider id rather than on `openai_compatible`.
+> - Each adapter reports the controls it sent (`sampling_wire`). `llm_sampling.wire` records them per lane, so a failover run says which shape each lane carried.
+> - The Sampling row is decided by `policy`, and the route returns `None` for an empty block.
+> - Leaderboard rows render *Entry config*.
+> - `diff_backtest_runs.py` also compares tape, capital, cadence and output ceiling, and warns on multi-lane runs.
+>
+> The Track B text below predates this amendment; where they disagree, this note and CLAUDE.md win.
+
 ### ⚠ changed: the policy is a per-model table, not a flag
 
 The brainstorm said "models flagged `reasoning` in the catalog". The flag is on **`ProviderCapabilities.reasoning`** (`domain/model_providers/models.py:24`), a per-provider capability, and the execution catalog (`domain/model_providers/execution_catalog.py:28`) is six `CatalogModel(catalog_id, label, vendor)` entries with no per-model capability at all. A provider-level flag cannot say whether *this* model rejects temperature. The policy therefore lives on the catalog entry:

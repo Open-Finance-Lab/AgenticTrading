@@ -41,7 +41,6 @@ CHILD_ENTERED_STEADY = time.monotonic()
 
 import sys
 import json
-import math
 import argparse
 import signal
 from pathlib import Path
@@ -289,24 +288,6 @@ def main():
         ),
     )
     parser.add_argument(
-        "--llm-temperature",
-        type=float,
-        default=None,
-        help=(
-            "Sampling temperature sent with every model call. Dashboard runs "
-            "pin 0 for models that accept it (execution_catalog.SamplingPolicy)."
-        ),
-    )
-    parser.add_argument(
-        "--llm-reasoning-effort",
-        default=None,
-        help=(
-            "Reasoning effort sent with every model call. Requires "
-            "--execution-handoff-stdin: without a handoff the engine builds "
-            "the plain Anthropic SDK client, which rejects the kwarg."
-        ),
-    )
-    parser.add_argument(
         "--data-source",
         default=ALPACA,
         choices=[ALPACA, VNPY_SIMULATION, IFIND_ASHARE],
@@ -352,39 +333,6 @@ def main():
                 universe_selection = resolve_strategy_universe(args.stock_pool, args.pool_mode or "top30")
         except (ValueError, OSError) as exc:
             parser.error(str(exc))
-    # argparse accepts `nan`, `inf` and `-1` as floats, but the execution
-    # request bounds temperature to [0, 2], so a value outside that fails every
-    # model call as RESPONSE_INVALID (handoff path) or, on a non-strict plain
-    # SDK run, falls back to rule-based bar after bar. Refuse at the flag.
-    if args.llm_temperature is not None and not (
-        math.isfinite(args.llm_temperature) and 0.0 <= args.llm_temperature <= 2.0
-    ):
-        parser.error("--llm-temperature must be a finite number between 0 and 2")
-    # A blank value is "not set", on the wire and in metadata alike: normalise
-    # once here so the check below and the engine cannot disagree about "".
-    args.llm_reasoning_effort = (args.llm_reasoning_effort or "").strip().lower() or None
-    # A help string is not a guard. Without a handoff the engine builds
-    # make_llm_client() -- the plain Anthropic SDK -- and
-    # request_trading_decision would pass `reasoning_effort` straight to
-    # messages.create(), which raises TypeError on an unknown kwarg. That
-    # lands on bar 1, after the bar fetch and the indicator pass.
-    #
-    # The nearest thing to a guard today is a different rule further down:
-    # LLM decisions on the pipeline runtime already refuse a missing handoff
-    # ("explicit LLM execution requires a signed execution handoff"), which is
-    # about who pays for the call. It is skipped entirely for
-    # --runtime-type ai_hedge_fund, where this flag parses and is then
-    # silently ignored, and it is a billing rule somebody may well relax.
-    # Neither of those should decide whether a sampling kwarg is safe to send,
-    # so refuse at the flag, where the person reading the flag is.
-    #
-    # --llm-temperature needs no such check: request_trading_decision has
-    # accepted a temperature since long before this, on every client.
-    if args.llm_reasoning_effort and not args.execution_handoff_stdin:
-        parser.error(
-            "--llm-reasoning-effort requires --execution-handoff-stdin "
-            "(the plain Anthropic SDK client rejects the kwarg)"
-        )
     execution_handoff = None
     if args.execution_handoff_stdin:
         try:
@@ -601,8 +549,6 @@ def main():
             "child_entered_steady": CHILD_ENTERED_STEADY,
             "imports_done_steady": IMPORTS_DONE_STEADY,
         },
-        llm_temperature=args.llm_temperature,
-        llm_reasoning_effort=args.llm_reasoning_effort,
         **({"universe_selection": universe_selection} if universe_selection is not None else {}),
     )
     

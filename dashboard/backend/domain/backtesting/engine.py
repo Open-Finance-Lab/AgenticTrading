@@ -275,8 +275,6 @@ class HourlyBacktester:
         source_timeframe: Optional[str] = None,
         launched_at: Optional[float] = None,
         startup_clock: Optional[Dict[str, float]] = None,
-        llm_temperature: Optional[float] = None,
-        llm_reasoning_effort: Optional[str] = None,
     ):
         # Validate and swap dates if they're in the wrong order
         from datetime import datetime as dt_parser
@@ -309,10 +307,6 @@ class HourlyBacktester:
         self.t1_deferrals: List[Dict] = []
         # Model id; defaults to the gateway-appropriate slug (CommonStack vs native).
         self.model = model or default_model_name()
-        # The pinned sampling policy for this run (execution_catalog.SamplingPolicy),
-        # handed over by the parent as argv. None means "not sent".
-        self.llm_temperature = llm_temperature
-        self.llm_reasoning_effort = llm_reasoning_effort
         self.execution_client = execution_client
         self.live_run_id = (live_run_id or "").strip() or None
         self.owner_user_id = int(owner_user_id) if owner_user_id is not None else None
@@ -1666,20 +1660,26 @@ class HourlyBacktester:
 
         Recorded beside ``llm_max_output_tokens`` for the same reason: the
         request shape is what makes two runs of one configuration comparable,
-        and a row that does not say what it sent cannot be reproduced.
-        ``provider_default`` names the runs that pinned nothing, so an absent
-        key on an older row reads as "not recorded", never as "default".
-        getattr throughout: tests and legacy tools build the engine with
-        __new__.
+        and a row that does not say what it sent cannot be reproduced. The
+        execution client owns the answer, because it is what imposes the
+        catalog policy on every call (``sampling_record``), including the
+        per-lane ``wire`` shape a failover changes. A run without one -- an
+        in-process or CLI run on a plain SDK client -- pinned nothing, which
+        ``provider_default`` names so that an absent key on an older row
+        still reads as "not recorded", never as "default".
         """
-        temperature = getattr(self, "llm_temperature", None)
-        reasoning_effort = getattr(self, "llm_reasoning_effort", None)
-        pinned = temperature is not None or bool(reasoning_effort)
+        execution_client = getattr(self, "execution_client", None)
+        record = getattr(execution_client, "sampling_record", None)
+        if callable(record):
+            value = record()
+            if isinstance(value, dict):
+                return value
         return {
-            "temperature": temperature,
-            "reasoning_effort": reasoning_effort,
-            "policy": "pinned_v1" if pinned else "provider_default",
+            "temperature": None,
+            "reasoning_effort": None,
+            "policy": "provider_default",
             "model": getattr(self, "model", None),
+            "wire": {},
         }
 
     def _agent_run_metadata(self) -> Dict:
@@ -1970,10 +1970,6 @@ class HourlyBacktester:
             episode_context=episode_context,
             decision_pipeline=decision_steps,
             model=self.model,
-            # getattr, as in _llm_sampling_metadata: callers and tests invoke
-            # this on a stand-in `self` built without __init__.
-            temperature=getattr(self, "llm_temperature", None),
-            reasoning_effort=getattr(self, "llm_reasoning_effort", None),
         )
         manager.input_tokens += in_tok
         manager.output_tokens += out_tok
@@ -2164,9 +2160,6 @@ class HourlyBacktester:
                         model=self.model,
                         strategy_prompt=self.strategy_prompt,
                         pipeline=self.pipeline,
-                        # getattr: see _run_daily_post_trade.
-                        temperature=getattr(self, "llm_temperature", None),
-                        reasoning_effort=getattr(self, "llm_reasoning_effort", None),
                         market_context=self._llm_market_context(),
                         strict_llm=self.strict_llm,
                     )

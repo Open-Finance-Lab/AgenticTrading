@@ -25,6 +25,10 @@ from __future__ import annotations
 import os
 from typing import Any, Optional
 
+from dashboard.backend.infrastructure.llm.reasoning_controls import (
+    REASONING_OFF_VALUES,
+)
+
 INTEGRATION_ID = "openrouter"
 DEFAULT_MODEL = "nvidia/nemotron-3-nano-30b-a3b"
 DEFAULT_BASE_URL = "https://openrouter.ai/api"
@@ -36,7 +40,8 @@ DEFAULT_BASE_URL = "https://openrouter.ai/api"
 # often returns only thinking/redacted_thinking and no JSON text.
 # Override with none|auto, or set OPENROUTER_REASONING_MAX_TOKENS explicitly.
 _DEFAULT_REASONING_EFFORT = "medium"
-_OFF_VALUES = frozenset({"none", "off", "false", "0", "disabled"})
+# One set for every client: see infrastructure/llm/reasoning_controls.py.
+_OFF_VALUES = REASONING_OFF_VALUES
 _PASSTHROUGH_VALUES = frozenset({"auto", "default"})
 # OpenRouter minimum for reasoning.max_tokens is 1024.
 _EFFORT_TO_REASONING_BUDGET = {

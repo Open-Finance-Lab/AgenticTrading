@@ -386,6 +386,7 @@ class LLMExecutionService:
                 billing=billing,
                 text=response.text,
                 finish_reason=response.finish_reason,
+                sampling_wire=getattr(response, "sampling_wire", None),
                 requested_provider_id=requested_provider_id,
             )
         except LLMExecutionError as exc:
@@ -430,6 +431,7 @@ class LLMExecutionService:
                 billing=billing,
                 text=response.text,
                 finish_reason=response.finish_reason,
+                sampling_wire=getattr(response, "sampling_wire", None),
                 requested_provider_id=requested_provider_id,
             )
 
@@ -694,8 +696,13 @@ class LLMExecutionService:
         billing: BillingEvidence,
         text: str,
         finish_reason: str | None = None,
+        sampling_wire: str | None = None,
         requested_provider_id: str | None = None,
     ) -> LLMExecutionResult:
+        # Evidence, not part of the answer: a value the result model would
+        # reject must not turn a settled call into RESPONSE_INVALID.
+        if not isinstance(sampling_wire, str) or len(sampling_wire) > 128:
+            sampling_wire = None
         try:
             return LLMExecutionResult(
                 text=text,
@@ -707,6 +714,7 @@ class LLMExecutionService:
                 usage=usage,
                 billing=billing,
                 finish_reason=finish_reason,
+                sampling_wire=sampling_wire,
             )
         except Exception as exc:  # noqa: BLE001 - preserve the fixed public contract
             raise LLMExecutionError(ExecutionErrorCategory.RESPONSE_INVALID) from exc
