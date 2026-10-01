@@ -19,6 +19,7 @@ from anthropic import _base_client as anthropic_base_client
 
 import dashboard.backend.infrastructure.llm.execution.adapters.anthropic as anthropic_module
 import dashboard.backend.infrastructure.llm.execution.adapters.base as base_module
+import dashboard.backend.infrastructure.llm.http_policy as http_policy
 import dashboard.backend.infrastructure.llm.execution.adapters.gemini as gemini_module
 import dashboard.backend.infrastructure.llm.execution.adapters.openai as openai_module
 from dashboard.backend.domain.model_providers.models import (
@@ -229,7 +230,7 @@ def test_openai_sdk_default_would_regenerate_three_times(wire):
 
 
 def test_read_timeout_setting_reaches_the_wire(wire, monkeypatch):
-    monkeypatch.setattr(base_module, "PROVIDER_READ_TIMEOUT_SECONDS", 45)
+    monkeypatch.setattr(http_policy, "PROVIDER_READ_TIMEOUT_SECONDS", 45)
     wire.respond = _stall
     adapter_class, provider, model_id = _OPENAI_ROUTES["commonstack"]
 
@@ -368,7 +369,7 @@ def test_every_sdk_adapter_disables_sdk_retries(
 def test_sdk_adapter_sources_pass_max_retries_and_timeout():
     """Source guard: a later edit cannot quietly drop the kwargs or re-enable retries."""
 
-    assert base_module.SDK_MAX_RETRIES == 0
+    assert http_policy.SDK_MAX_RETRIES == 0
     for name in ("openai.py", "anthropic.py"):
         tree = ast.parse((ADAPTERS_DIR / name).read_text(encoding="utf-8"))
         factory_calls = []
@@ -421,27 +422,27 @@ def test_gemini_gets_provider_timeout_and_keeps_status_branch(wire):
 
 @pytest.mark.parametrize("raw", [None, "", "   "])
 def test_read_timeout_parse_defaults_silently(raw, capsys):
-    assert base_module._parse_provider_read_timeout(raw) == 180
+    assert http_policy._parse_provider_read_timeout(raw) == 180
     assert capsys.readouterr().out == ""
 
 
 @pytest.mark.parametrize(("raw", "expected"), [("30", 30), ("600", 600), (" 120 ", 120)])
 def test_read_timeout_parse_accepts_in_range(raw, expected, capsys):
-    assert base_module._parse_provider_read_timeout(raw) == expected
+    assert http_policy._parse_provider_read_timeout(raw) == expected
     assert capsys.readouterr().out == ""
 
 
 @pytest.mark.parametrize("raw", ["abc", "90.5", "0", "-5", "29", "601", "1800"])
 def test_read_timeout_parse_rejects_junk_and_out_of_range(raw, capsys):
-    assert base_module._parse_provider_read_timeout(raw) == 180
+    assert http_policy._parse_provider_read_timeout(raw) == 180
     lines = capsys.readouterr().out.splitlines()
     assert len(lines) == 1
     assert lines[0].startswith("WARNING: LLM_PROVIDER_READ_TIMEOUT_SECONDS ")
 
 
 def test_suite_runs_with_default_read_timeout():
-    # conftest strips LLM_PROVIDER_READ_TIMEOUT_SECONDS before base.py imports.
-    assert base_module.PROVIDER_READ_TIMEOUT_SECONDS == 180
+    # conftest strips LLM_PROVIDER_READ_TIMEOUT_SECONDS before http_policy imports.
+    assert http_policy.PROVIDER_READ_TIMEOUT_SECONDS == 180
     assert base_module.provider_http_timeout() == httpx.Timeout(
         connect=8.0, read=180.0, write=60.0, pool=60.0
     )
