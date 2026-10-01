@@ -558,7 +558,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 
 **Interfaces:**
 - Consumes: `run_pipeline_decision(..., temperature=, reasoning_effort=)` from Task 2.
-- Produces: `request_trading_decision(..., reasoning_effort: Optional[str] = None)`; `PortfolioManager.make_trading_decision_with_llm(..., temperature=None, reasoning_effort=None, ...)`; `HourlyBacktester(..., llm_temperature: Optional[float] = None, llm_reasoning_effort: Optional[str] = None)` with attributes of the same names; `HourlyBacktester._llm_sampling_metadata() -> Dict`; `agent_runs.metadata["llm_sampling"] = {"temperature", "reasoning_effort", "policy": "pinned_v1" | "provider_default", "catalog_id"}` on every LLM run.
+- Produces: `request_trading_decision(..., reasoning_effort: Optional[str] = None)`; `PortfolioManager.make_trading_decision_with_llm(..., temperature=None, reasoning_effort=None, ...)`; `HourlyBacktester(..., llm_temperature: Optional[float] = None, llm_reasoning_effort: Optional[str] = None)` with attributes of the same names; `HourlyBacktester._llm_sampling_metadata() -> Dict`; `agent_runs.metadata["llm_sampling"] = {"temperature", "reasoning_effort", "policy": "pinned_v1" | "provider_default", "model"}` on every LLM run.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -589,7 +589,7 @@ In `dashboard/backend/tests/test_agent_runs_metadata.py`, inside `test_engine_ll
             "temperature": None,
             "reasoning_effort": None,
             "policy": "provider_default",
-            "catalog_id": None,
+            "model": None,
         },
     }
 ```
@@ -620,7 +620,7 @@ def test_engine_records_the_pinned_sampling(monkeypatch):
         "temperature": 0.0,
         "reasoning_effort": "none",
         "policy": "pinned_v1",
-        "catalog_id": "deepseek/deepseek-v4-pro",
+        "model": "deepseek/deepseek-v4-pro",
     }
 ```
 
@@ -883,7 +883,7 @@ and add the helper directly above `def _agent_run_metadata(`:
             "temperature": temperature,
             "reasoning_effort": reasoning_effort,
             "policy": "pinned_v1" if pinned else "provider_default",
-            "catalog_id": getattr(self, "model", None),
+            "model": getattr(self, "model", None),
         }
 ```
 

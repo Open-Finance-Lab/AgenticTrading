@@ -155,7 +155,7 @@ def test_engine_llm_run_metadata_snapshot(monkeypatch):
             "temperature": None,
             "reasoning_effort": None,
             "policy": "provider_default",
-            "catalog_id": None,
+            "model": None,
         },
     }
     backtester.use_llm = False
@@ -191,7 +191,7 @@ def test_engine_records_the_pinned_sampling(monkeypatch):
         "temperature": 0.0,
         "reasoning_effort": "none",
         "policy": "pinned_v1",
-        "catalog_id": "deepseek/deepseek-v4-pro",
+        "model": "deepseek/deepseek-v4-pro",
     }
 
 

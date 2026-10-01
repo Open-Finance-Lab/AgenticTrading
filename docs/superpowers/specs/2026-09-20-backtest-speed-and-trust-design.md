@@ -142,7 +142,7 @@ The OpenAI adapter already sends `reasoning_effort` for `openrouter` and `openai
 The engine writes to `agent_runs.metadata` beside `llm_max_output_tokens` (`engine.py:1052`):
 
 ```json
-"llm_sampling": {"temperature": 0.0, "reasoning_effort": null, "policy": "pinned_v1", "catalog_id": "anthropic/claude-sonnet-4-6"}
+"llm_sampling": {"temperature": 0.0, "reasoning_effort": null, "policy": "pinned_v1", "model": "anthropic/claude-sonnet-4-6"}
 ```
 
 `policy` is `"pinned_v1" | "provider_default"`, written per run rather than per deployment. `pinned_v1` means the route carried a `SamplingPolicy` resolved from the catalog, so at least one value was sent. `provider_default` means the run reached a model with no policy on its route — `ExecutionModelRoute.sampling` defaults to `None`, so a route nobody resolved from the catalog claims nothing — and it is **written, not omitted**, because "this run pinned nothing" and "this run predates the field" are different facts and the row says them with different words.

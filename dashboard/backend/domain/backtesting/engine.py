@@ -1563,7 +1563,7 @@ class HourlyBacktester:
             "temperature": temperature,
             "reasoning_effort": reasoning_effort,
             "policy": "pinned_v1" if pinned else "provider_default",
-            "catalog_id": getattr(self, "model", None),
+            "model": getattr(self, "model", None),
         }
 
     def _agent_run_metadata(self) -> Dict:
