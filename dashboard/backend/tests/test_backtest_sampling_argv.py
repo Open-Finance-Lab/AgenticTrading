@@ -15,6 +15,7 @@ from fastapi.testclient import TestClient
 from dashboard.backend.app import app
 import dashboard.backend.api.routers.backtests as backtests
 from dashboard.backend.domain.model_providers.execution_catalog import (
+    ATL_EXECUTION_MODELS,
     PINNED_NO_THINKING,
     PINNED_REASONING_LOW,
     PINNED_TEMPERATURE,
@@ -166,6 +167,68 @@ def test_endpoint_hands_the_routes_policy_to_the_launcher(monkeypatch, sampling,
     assert response.status_code == 200, response.text
     (_args, kwargs), = spy.calls
     assert {k: kwargs[k] for k in expected} == expected
+
+
+class _PlatformPreflight:
+    """The ATL Credits branch: candidates come from the service and `route` is
+    assigned from `provider_ids[0]`, not from a posted provider_id."""
+
+    def resolve_platform_execution_candidates(self, catalog_model_id, preferred_provider_id=None):
+        return ("commonstack",)
+
+    def preflight_execution_model(self, provider_id, catalog_model_id):
+        # The real catalog row, so this pins what DeepSeek actually carries
+        # rather than a policy the test invented.
+        row = next(m for m in ATL_EXECUTION_MODELS if m.catalog_id == catalog_model_id)
+        return ExecutionModelRoute(
+            catalog_id=row.catalog_id,
+            label=row.label,
+            provider_model_id=row.catalog_id,
+            sampling=row.sampling,
+        )
+
+
+def test_platform_credits_branch_carries_the_policy_to_child_argv(monkeypatch):
+    """The prod DeepSeek/Qwen path: `billing_mode=platform_credits`.
+
+    `route` is bound in a different branch from the BYOK one above, so the
+    BYOK endpoint test cannot see a regression that drops `llm_sampling` there.
+    Chained through the real launcher: the kwargs the endpoint hands the
+    thread are fed to `run_backtest_background`, and the argv is asserted.
+    """
+    monkeypatch.setattr(backtests, "get_model_provider_service", lambda: _PlatformPreflight())
+    monkeypatch.setattr(
+        "dashboard.backend.api.dependencies._optional_user",
+        lambda *_args, **_kwargs: {"id": 7},
+    )
+    monkeypatch.setattr(backtests, "create_execution_handoff", lambda **_kw: "signed-handoff")
+    spy = _Spy()
+    monkeypatch.setattr(backtests, "run_backtest_background", spy)
+
+    response = TestClient(app).post(
+        "/backtest/run",
+        json={
+            "start_date": "2026-05-01",
+            "end_date": "2026-05-02",
+            "decision_source": "llm",
+            "billing_mode": "platform_credits",
+            "model": "deepseek/deepseek-v4-pro",
+        },
+        headers={"X-Session-Id": str(uuid.uuid4())},
+    )
+
+    assert response.status_code == 200, response.text
+    (_args, kwargs), = spy.calls
+    assert kwargs["llm_temperature"] == 0.0
+    assert kwargs["llm_reasoning_effort"] == "none"
+
+    command = _capture_command(
+        monkeypatch,
+        llm_temperature=kwargs["llm_temperature"],
+        llm_reasoning_effort=kwargs["llm_reasoning_effort"],
+    )
+    assert command[command.index("--llm-temperature") + 1] == "0.0"
+    assert command[command.index("--llm-reasoning-effort") + 1] == "none"
 
 
 def test_script_accepts_the_two_flags(tmp_path):
