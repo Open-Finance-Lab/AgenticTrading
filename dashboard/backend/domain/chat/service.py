@@ -11,6 +11,10 @@ from dashboard.backend.infrastructure.llm.backtest_harness import (
     COMMONSTACK_MODEL_NAME,
     LLM_MODEL_NAME,
 )
+from dashboard.backend.infrastructure.llm.execution.adapters.base import (
+    SDK_MAX_RETRIES,
+    provider_http_timeout,
+)
 
 
 load_dotenv()
@@ -58,6 +62,10 @@ def get_claude_client() -> AsyncAnthropic:
 
     Prefers CommonStack (the hosted gateway) when ``COMMONSTACK_API_KEY`` is set;
     otherwise uses native Anthropic via ``ANTHROPIC_API_KEY``.
+
+    The SDK never replays (``SDK_MAX_RETRIES``) and the read deadline is the
+    shared ``LLM_PROVIDER_READ_TIMEOUT_SECONDS``: a replay regenerates and bills
+    the whole completion with no idempotency key, and a user can just resend.
     """
     global _claude_client
 
@@ -67,9 +75,15 @@ def get_claude_client() -> AsyncAnthropic:
             _claude_client = AsyncAnthropic(
                 api_key=commonstack_key,
                 base_url=COMMONSTACK_BASE_URL,
+                max_retries=SDK_MAX_RETRIES,
+                timeout=provider_http_timeout(),
             )
         else:
-            _claude_client = AsyncAnthropic(api_key=require_env("ANTHROPIC_API_KEY"))
+            _claude_client = AsyncAnthropic(
+                api_key=require_env("ANTHROPIC_API_KEY"),
+                max_retries=SDK_MAX_RETRIES,
+                timeout=provider_http_timeout(),
+            )
 
     return _claude_client
 

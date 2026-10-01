@@ -28,6 +28,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from dashboard.backend.infrastructure.llm.execution.adapters.base import (
+    SDK_MAX_RETRIES,
+    provider_http_timeout,
+)
+
 # Resolves to the ``dashboard/`` directory — identical to the previous
 # ``Path(__file__).resolve().parent.parent`` when this module lived at
 # ``dashboard/backend/algo_service.py``.
@@ -150,7 +155,13 @@ def _get_anthropic_client():
         return None
     try:
         from anthropic import Anthropic
-        return Anthropic(api_key=api_key)
+
+        # No SDK replays: each one regenerates and bills a whole completion.
+        return Anthropic(
+            api_key=api_key,
+            max_retries=SDK_MAX_RETRIES,
+            timeout=provider_http_timeout(),
+        )
     except ImportError:
         return None
 
