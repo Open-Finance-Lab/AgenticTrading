@@ -44,8 +44,18 @@ from dashboard.backend.db_url import describe_database_url  # noqa: E402
 #: twice. A mismatch does not stop the report, it names itself in
 #: ``mismatches`` and fails the CLI: a before/after pair that differs in
 #: window, model or universe diverges for reasons that have nothing to do
-#: with sampling.
-_COMPARABILITY_FIELDS = ("start_date", "end_date", "llm_model", "symbols")
+#: with sampling. ``initial_pipeline`` (the strategy prompt and step count)
+#: and ``data_source`` live in the row's metadata, and are as much a part of
+#: "one configuration" as the window: a pair that differs in either is not a
+#: sampling measurement.
+_COMPARABILITY_FIELDS = (
+    "start_date",
+    "end_date",
+    "llm_model",
+    "symbols",
+    "initial_pipeline",
+    "data_source",
+)
 
 
 def _normalised_actions(entry: Dict[str, Any]) -> str:
@@ -150,9 +160,16 @@ _NO_DECISION_LOG = {
 
 def _run_field(row: Dict[str, Any], name: str) -> Any:
     """A comparability field off an ``agent_runs`` row, or its metadata."""
+    metadata = row.get("metadata") or {}
     if name == "symbols":
-        symbols = (row.get("metadata") or {}).get("symbols")
+        symbols = metadata.get("symbols")
         return sorted(symbols) if symbols else None
+    if name == "initial_pipeline":
+        # Normalised, so key order inside a step is not a difference.
+        pipeline = metadata.get("initial_pipeline")
+        return json.dumps(pipeline, sort_keys=True) if pipeline is not None else None
+    if name == "data_source":
+        return metadata.get("data_source")
     return row.get(name)
 
 
@@ -243,7 +260,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument(
         "--allow-mismatch",
         action="store_true",
-        help="exit 0 even when the runs differ in window, model or universe",
+        help="exit 0 even when the runs differ in window, model, universe, pipeline or data source",
     )
     args = parser.parse_args(argv)
     print(f"run history: {describe_run_history_backend()}", file=sys.stderr)

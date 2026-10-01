@@ -340,3 +340,68 @@ def test_a_different_universe_is_a_mismatch_and_a_missing_one_is_not(tmp_path, m
 
     set_symbols("run_b", ["MSFT", "AAPL"])  # order is not a difference
     assert module.compare_runs("run_a", "run_b")["comparable"] is True
+
+
+def _set_metadata(db, run_id, metadata):
+    db.insert_run(
+        run_id=run_id, session_id="diff-session", agent_name="diff-agent",
+        mode="backtest", start_date="2026-09-01", end_date="2026-09-08",
+        initial_equity=100000.0, final_equity=101000.0, metadata=metadata,
+    )
+
+
+def test_a_different_pipeline_is_a_mismatch(tmp_path, monkeypatch):
+    """A different strategy prompt or step count diverges for reasons that
+    have nothing to do with sampling, and would otherwise be attributed to it."""
+    module = _load_script()
+    db = BacktestDatabase(tmp_path / "diff.db")
+    monkeypatch.setattr(module, "db", db)
+    _seed_pair(db)
+
+    _set_metadata(db, "run_a", {"initial_pipeline": [{"presetKey": "momentum"}]})
+    _set_metadata(db, "run_b", {"initial_pipeline": [{"presetKey": "value"}]})
+
+    report = module.compare_runs("run_a", "run_b")
+
+    assert report["comparable"] is False
+    assert report["mismatches"] == ["initial_pipeline"]
+
+
+def test_pipeline_key_order_is_not_a_difference(tmp_path, monkeypatch):
+    module = _load_script()
+    db = BacktestDatabase(tmp_path / "diff.db")
+    monkeypatch.setattr(module, "db", db)
+    _seed_pair(db)
+
+    _set_metadata(db, "run_a", {"initial_pipeline": [{"presetKey": "m", "prompt": "p"}]})
+    _set_metadata(db, "run_b", {"initial_pipeline": [{"prompt": "p", "presetKey": "m"}]})
+
+    assert module.compare_runs("run_a", "run_b")["comparable"] is True
+
+
+def test_a_different_data_source_is_a_mismatch(tmp_path, monkeypatch):
+    module = _load_script()
+    db = BacktestDatabase(tmp_path / "diff.db")
+    monkeypatch.setattr(module, "db", db)
+    _seed_pair(db)
+
+    _set_metadata(db, "run_a", {"data_source": "alpaca"})
+    _set_metadata(db, "run_b", {"data_source": "ifind_ashare"})
+
+    assert module.compare_runs("run_a", "run_b")["mismatches"] == ["data_source"]
+
+
+def test_a_run_that_never_recorded_a_pipeline_or_source_is_not_a_mismatch(
+    tmp_path, monkeypatch
+):
+    module = _load_script()
+    db = BacktestDatabase(tmp_path / "diff.db")
+    monkeypatch.setattr(module, "db", db)
+    _seed_pair(db)
+
+    _set_metadata(
+        db, "run_a", {"initial_pipeline": [{"presetKey": "m"}], "data_source": "alpaca"}
+    )
+    _set_metadata(db, "run_b", {})
+
+    assert module.compare_runs("run_a", "run_b")["mismatches"] == []
