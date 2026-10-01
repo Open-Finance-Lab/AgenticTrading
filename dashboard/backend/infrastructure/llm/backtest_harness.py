@@ -202,6 +202,7 @@ def request_trading_decision(
     model: Optional[str] = None,
     max_tokens: Optional[int] = None,
     temperature: Optional[float] = None,
+    reasoning_effort: Optional[str] = None,
     market_context: Optional[Dict] = None,
 ):
     """Submit the prompt to the Anthropic client and return the raw response.
@@ -220,6 +221,8 @@ def request_trading_decision(
     }
     if temperature is not None:
         request_kwargs["temperature"] = temperature
+    if reasoning_effort is not None:
+        request_kwargs["reasoning_effort"] = reasoning_effort
     return client.messages.create(**request_kwargs)
 
 

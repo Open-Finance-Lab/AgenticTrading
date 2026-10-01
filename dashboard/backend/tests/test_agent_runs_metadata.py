@@ -151,6 +151,12 @@ def test_engine_llm_run_metadata_snapshot(monkeypatch):
         "reporting_currency": "USD",
         "lot_size": 1,
         "llm_max_output_tokens": 777,
+        "llm_sampling": {
+            "temperature": None,
+            "reasoning_effort": None,
+            "policy": "provider_default",
+            "catalog_id": None,
+        },
     }
     backtester.use_llm = False
     assert backtester._agent_run_metadata() == {
@@ -159,6 +165,33 @@ def test_engine_llm_run_metadata_snapshot(monkeypatch):
         "native_currency": "USD",
         "reporting_currency": "USD",
         "lot_size": 1,
+    }
+
+
+def test_engine_records_the_pinned_sampling(monkeypatch):
+    """A row that does not say what it sent cannot be reproduced. `policy`
+    names the runs that pinned nothing, so an *absent* key on an older row
+    reads as 'not recorded', never as 'default'. Thinking off (`"none"`) is a
+    value the run sent, so it records as pinned like any other."""
+    import dashboard.backend.domain.backtesting.engine as engine_mod
+
+    backtester = engine_mod.HourlyBacktester.__new__(engine_mod.HourlyBacktester)
+    backtester.prompt_adaptations = []
+    backtester.initial_pipeline = None
+    backtester.pipeline = None
+    backtester.symbols = ["AAPL"]
+    backtester.data_source = "alpaca"
+    backtester.use_llm = True
+    backtester.model = "deepseek/deepseek-v4-pro"
+    backtester.llm_temperature = 0.0
+    backtester.llm_reasoning_effort = "none"
+    monkeypatch.setattr(engine_mod.llm_harness, "DEFAULT_MAX_OUTPUT_TOKENS", 2000)
+
+    assert backtester._agent_run_metadata()["llm_sampling"] == {
+        "temperature": 0.0,
+        "reasoning_effort": "none",
+        "policy": "pinned_v1",
+        "catalog_id": "deepseek/deepseek-v4-pro",
     }
 
 

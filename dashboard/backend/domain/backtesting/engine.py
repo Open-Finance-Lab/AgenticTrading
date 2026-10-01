@@ -255,6 +255,8 @@ class HourlyBacktester:
         source_timeframe: Optional[str] = None,
         launched_at: Optional[float] = None,
         startup_clock: Optional[Dict[str, float]] = None,
+        llm_temperature: Optional[float] = None,
+        llm_reasoning_effort: Optional[str] = None,
     ):
         # Validate and swap dates if they're in the wrong order
         from datetime import datetime as dt_parser
@@ -287,6 +289,10 @@ class HourlyBacktester:
         self.t1_deferrals: List[Dict] = []
         # Model id; defaults to the gateway-appropriate slug (CommonStack vs native).
         self.model = model or default_model_name()
+        # The pinned sampling policy for this run (execution_catalog.SamplingPolicy),
+        # handed over by the parent as argv. None means "not sent".
+        self.llm_temperature = llm_temperature
+        self.llm_reasoning_effort = llm_reasoning_effort
         self.execution_client = execution_client
         self.live_run_id = (live_run_id or "").strip() or None
         self.owner_user_id = int(owner_user_id) if owner_user_id is not None else None
@@ -1539,6 +1545,27 @@ class HourlyBacktester:
             )
         return metadata
 
+    def _llm_sampling_metadata(self) -> Dict:
+        """What this run asked every model call to sample with.
+
+        Recorded beside ``llm_max_output_tokens`` for the same reason: the
+        request shape is what makes two runs of one configuration comparable,
+        and a row that does not say what it sent cannot be reproduced.
+        ``provider_default`` names the runs that pinned nothing, so an absent
+        key on an older row reads as "not recorded", never as "default".
+        getattr throughout: tests and legacy tools build the engine with
+        __new__.
+        """
+        temperature = getattr(self, "llm_temperature", None)
+        reasoning_effort = getattr(self, "llm_reasoning_effort", None)
+        pinned = temperature is not None or bool(reasoning_effort)
+        return {
+            "temperature": temperature,
+            "reasoning_effort": reasoning_effort,
+            "policy": "pinned_v1" if pinned else "provider_default",
+            "catalog_id": getattr(self, "model", None),
+        }
+
     def _agent_run_metadata(self) -> Dict:
         """Provenance plus the effective config the agent run actually used.
 
@@ -1584,6 +1611,7 @@ class HourlyBacktester:
             meta["decision_steps"] = int(decision_steps)
         if self.use_llm:
             meta["llm_max_output_tokens"] = llm_harness.DEFAULT_MAX_OUTPUT_TOKENS
+            meta["llm_sampling"] = self._llm_sampling_metadata()
         llm_execution = getattr(self, "_llm_execution_evidence", None)
         execution_client = getattr(self, "execution_client", None)
         if llm_execution is None and execution_client is not None:
@@ -1817,6 +1845,8 @@ class HourlyBacktester:
             episode_context=episode_context,
             decision_pipeline=decision_steps,
             model=self.model,
+            temperature=self.llm_temperature,
+            reasoning_effort=self.llm_reasoning_effort,
         )
         manager.input_tokens += in_tok
         manager.output_tokens += out_tok
@@ -2007,6 +2037,8 @@ class HourlyBacktester:
                         model=self.model,
                         strategy_prompt=self.strategy_prompt,
                         pipeline=self.pipeline,
+                        temperature=self.llm_temperature,
+                        reasoning_effort=self.llm_reasoning_effort,
                         market_context=self._llm_market_context(),
                         strict_llm=self.strict_llm,
                     )
