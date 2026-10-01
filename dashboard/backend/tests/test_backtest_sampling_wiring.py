@@ -25,6 +25,7 @@ from __future__ import annotations
 import ast
 import inspect
 import textwrap
+from types import SimpleNamespace
 
 from dashboard.backend.domain.backtesting import engine, portfolio_manager
 
@@ -62,14 +63,21 @@ def _kwargs(call: ast.Call) -> dict:
     return {kw.arg: ast.unparse(kw.value) for kw in call.keywords if kw.arg}
 
 
+# The engine reads its sampling attributes with getattr, because tests and
+# legacy tools call these methods on a stand-in `self` built without
+# __init__. Both spellings forward the same value.
+def _reads(attr: str) -> set[str]:
+    return {f"self.{attr}", f"getattr(self, '{attr}', None)"}
+
+
 def test_engine_forwards_both_values_to_the_manager():
     for call in _calls(
         engine.HourlyBacktester.run_agent_backtest,
         "make_trading_decision_with_llm",
     ):
         kwargs = _kwargs(call)
-        assert kwargs.get("temperature") == "self.llm_temperature"
-        assert kwargs.get("reasoning_effort") == "self.llm_reasoning_effort"
+        assert kwargs.get("temperature") in _reads("llm_temperature")
+        assert kwargs.get("reasoning_effort") in _reads("llm_reasoning_effort")
 
 
 def test_engine_forwards_both_values_to_the_post_trade_call():
@@ -85,12 +93,80 @@ def test_engine_forwards_both_values_to_the_post_trade_call():
         "run_post_trade_analysis",
     ):
         kwargs = _kwargs(call)
-        assert kwargs.get("temperature") == "self.llm_temperature", (
+        assert kwargs.get("temperature") in _reads("llm_temperature"), (
             f"post-trade call at line {call.lineno} of the method drops temperature"
         )
-        assert kwargs.get("reasoning_effort") == "self.llm_reasoning_effort", (
+        assert kwargs.get("reasoning_effort") in _reads("llm_reasoning_effort"), (
             f"post-trade call at line {call.lineno} of the method drops reasoning_effort"
         )
+
+
+def test_post_trade_runs_on_a_stand_in_without_the_sampling_attributes(monkeypatch):
+    """A stand-in `self` built without __init__ must not raise.
+
+    Open PR #594 calls `_run_daily_post_trade` on a SimpleNamespace that has
+    no `llm_temperature` / `llm_reasoning_effort`. Bare attribute reads there
+    raise AttributeError the moment both branches are merged -- nothing
+    textual conflicts, so the break would surface only as a red `main`. It is
+    the same reason `_llm_sampling_metadata` reads them with getattr.
+    """
+    captured = {}
+
+    def fake_post_trade(*_args, **kwargs):
+        captured.update(kwargs)
+        return [], None, (0, 0), 0
+
+    monkeypatch.setattr(engine, "run_post_trade_analysis", fake_post_trade)
+    stand_in = SimpleNamespace(
+        use_llm=True,
+        llm_client=object(),
+        model="m",
+        pipeline=[],
+        prompt_adaptations=[],
+        _current_equity=lambda _manager: 100.0,
+    )
+    manager = SimpleNamespace(trades=[], input_tokens=0, output_tokens=0, llm_calls=0)
+
+    engine.HourlyBacktester._run_daily_post_trade(
+        stand_in,
+        manager=manager,
+        day_episode={"trading_day": "2026-04-15", "day_start_equity": 100.0},
+        post_trade_steps=[{"presetKey": "post_trade_analysis"}],
+    )
+
+    assert captured["temperature"] is None
+    assert captured["reasoning_effort"] is None
+
+
+def test_post_trade_forwards_the_values_a_real_engine_holds(monkeypatch):
+    captured = {}
+
+    def fake_post_trade(*_args, **kwargs):
+        captured.update(kwargs)
+        return [], None, (0, 0), 0
+
+    monkeypatch.setattr(engine, "run_post_trade_analysis", fake_post_trade)
+    engine_like = SimpleNamespace(
+        use_llm=True,
+        llm_client=object(),
+        model="m",
+        pipeline=[],
+        prompt_adaptations=[],
+        llm_temperature=0.0,
+        llm_reasoning_effort="none",
+        _current_equity=lambda _manager: 100.0,
+    )
+    manager = SimpleNamespace(trades=[], input_tokens=0, output_tokens=0, llm_calls=0)
+
+    engine.HourlyBacktester._run_daily_post_trade(
+        engine_like,
+        manager=manager,
+        day_episode={"trading_day": "2026-04-15", "day_start_equity": 100.0},
+        post_trade_steps=[{"presetKey": "post_trade_analysis"}],
+    )
+
+    assert captured["temperature"] == 0.0
+    assert captured["reasoning_effort"] == "none"
 
 
 def test_every_model_call_in_the_manager_forwards_both_values():

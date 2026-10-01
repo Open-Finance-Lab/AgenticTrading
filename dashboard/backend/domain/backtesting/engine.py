@@ -1845,8 +1845,10 @@ class HourlyBacktester:
             episode_context=episode_context,
             decision_pipeline=decision_steps,
             model=self.model,
-            temperature=self.llm_temperature,
-            reasoning_effort=self.llm_reasoning_effort,
+            # getattr, as in _llm_sampling_metadata: callers and tests invoke
+            # this on a stand-in `self` built without __init__.
+            temperature=getattr(self, "llm_temperature", None),
+            reasoning_effort=getattr(self, "llm_reasoning_effort", None),
         )
         manager.input_tokens += in_tok
         manager.output_tokens += out_tok
@@ -2037,8 +2039,9 @@ class HourlyBacktester:
                         model=self.model,
                         strategy_prompt=self.strategy_prompt,
                         pipeline=self.pipeline,
-                        temperature=self.llm_temperature,
-                        reasoning_effort=self.llm_reasoning_effort,
+                        # getattr: see _run_daily_post_trade.
+                        temperature=getattr(self, "llm_temperature", None),
+                        reasoning_effort=getattr(self, "llm_reasoning_effort", None),
                         market_context=self._llm_market_context(),
                         strict_llm=self.strict_llm,
                     )
