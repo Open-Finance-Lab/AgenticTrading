@@ -33,6 +33,7 @@ from dashboard.backend.infrastructure.market_data.profiles import (
     A_SHARE_DEMO_6_SYMBOLS,
     IFIND_ASHARE,
     RULE_BASED_DECISION_SOURCE,
+    VNPY_SIMULATION,
 )
 from dashboard.backend.infrastructure.market_data.provider import (
     INDICATOR_WARMUP_CALENDAR_DAYS,
@@ -198,12 +199,36 @@ def test_no_pre_window_bar_reaches_the_run(loader):
     assert _market_date(agent_curve[0]["timestamp"]) == start
 
 
-def test_run_metadata_records_the_warmup_start(loader):
+def test_only_the_agent_row_records_the_warmup_start(loader):
     bt = HourlyBacktester(START, END, use_llm=False, symbols=SYMBOLS)
     bt.load_data()
-    metadata = bt._run_metadata()
+    metadata = bt._agent_run_metadata()
     assert metadata["warmup_start_date"] == WARMUP_START
     assert metadata["provider_end_date"] == PROVIDER_END
+    # Baseline rows compute no indicators, and the Dow row is fetched
+    # unpadded, so the key would be false on them.
+    assert "warmup_start_date" not in bt._run_metadata()
+
+    bt.calculate_indicators()
+    bt.run_agent_backtest()
+    bt.run_buyhold_baseline()
+    rows = {run["agent_name"]: run["metadata"] for run in engine_mod.db.runs}
+    assert rows["buy-and-hold"].get("warmup_start_date") is None
+    assert [m.get("warmup_start_date") for m in rows.values()].count(WARMUP_START) == 1
+
+
+def test_vnpy_simulation_is_not_padded(loader):
+    """The simulator scripts its prices by bar index from the fetch start and
+    seeds its base price on (symbol, start, end): a padded fetch would move the
+    scripted path into the pad and price the agent's AAPL off a different
+    series than the index baseline's."""
+    bt = HourlyBacktester(
+        START, END, use_llm=False, data_source=VNPY_SIMULATION, symbols=SYMBOLS
+    )
+    bt.load_data()
+    assert loader.calls == [(tuple(SYMBOLS), START, PROVIDER_END)]
+    assert bt.warmup_data == {}
+    assert bt._agent_run_metadata()["warmup_start_date"] == START
 
 
 def test_a_window_with_only_pad_bars_is_still_no_data(monkeypatch):

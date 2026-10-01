@@ -548,7 +548,6 @@ def test_ifind_engine_resolves_csi300_sample20_and_records_provenance(
         "end_date_inclusive": True,
         "provider_end_date": PROVIDER_END,
         "open_session_excluded": False,
-        "warmup_start_date": WARMUP_START,
         "fx_pair": "USD/CNY",
         "fx_source": "ifind_history_currency_conversion",
         "fx_policy": "daily_implied_median_forward_fill",

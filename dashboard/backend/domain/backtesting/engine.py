@@ -136,6 +136,7 @@ from dashboard.backend.infrastructure.market_data.profiles import (
     IFIND_ASHARE,
     LLM_DECISION_SOURCE,
     RULE_BASED_DECISION_SOURCE,
+    VNPY_SIMULATION,
     MarketProfile,
     get_market_profile,
     resolve_decision_source,
@@ -503,16 +504,7 @@ class HourlyBacktester:
     def _create_market_data_provider(self):
         """Create the selected provider without breaking legacy test doubles."""
         factory = create_market_data_provider
-        try:
-            parameters = inspect.signature(factory).parameters.values()
-            accepts_source_timeframe = any(
-                parameter.name == "source_timeframe"
-                or parameter.kind == inspect.Parameter.VAR_KEYWORD
-                for parameter in parameters
-            )
-        except (TypeError, ValueError):
-            accepts_source_timeframe = False
-        if accepts_source_timeframe:
+        if _accepts_keyword(factory, "source_timeframe"):
             return factory(
                 self.data_source,
                 self.profile.universe,
@@ -1193,7 +1185,15 @@ class HourlyBacktester:
         # From before the window, so the indicators are warm on its first bar
         # (#540). The pad is split off below, ahead of anything that trades,
         # values or gates on these frames.
-        self.warmup_start_date = warmup_fetch_start(self.start_date)
+        # Not for the simulator: it scripts prices by bar index from the fetch
+        # start and seeds its base price on the requested window, so a pad
+        # would move the scripted path into the pad and price the agent's
+        # symbols off a different series than the index baseline's.
+        self.warmup_start_date = (
+            self.start_date
+            if self.data_source == VNPY_SIMULATION
+            else warmup_fetch_start(self.start_date)
+        )
         fetch_options = {}
         if self.data_source == IFIND_ASHARE and _accepts_keyword(
             self.data_loader.fetch_bars, "depth_start"
@@ -1552,11 +1552,6 @@ class HourlyBacktester:
                 else {}
             ),
         }
-        warmup_start_date = getattr(self, "warmup_start_date", None)
-        if warmup_start_date:
-            # Where the indicator inputs began (#540): `start_date` is still
-            # the first bar traded, but its sma50 read bars from here.
-            metadata["warmup_start_date"] = warmup_start_date
         if getattr(self, "intraday_mode", False):
             frequency_contract = getattr(self, "frequency_contract", None)
             metadata["frequency_contract"] = dict(
@@ -1649,6 +1644,13 @@ class HourlyBacktester:
             transaction_cost_totals=getattr(self, "transaction_cost_totals", None),
             costs_applied=profile.transaction_cost_profile is not None,
         )
+        warmup_start_date = getattr(self, "warmup_start_date", None)
+        if warmup_start_date:
+            # Where the indicator inputs began (#540): `start_date` is still
+            # the first bar traded, but its sma50 read bars from here. Agent
+            # rows only -- the baselines compute no indicators, and the index
+            # baseline is fetched from `start_date`.
+            meta["warmup_start_date"] = warmup_start_date
         decision_source = getattr(self, "decision_source", None)
         if decision_source is not None:
             meta["decision_source"] = decision_source
