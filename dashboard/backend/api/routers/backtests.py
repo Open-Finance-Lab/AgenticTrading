@@ -87,6 +87,7 @@ from dashboard.backend.infrastructure.llm.execution.models import (
 )
 from dashboard.backend.infrastructure.llm.pipeline_runner import split_pipeline
 from dashboard.backend.domain.model_providers.execution_catalog import (
+    SamplingPolicy,
     UnsupportedExecutionModel,
 )
 from dashboard.backend.domain.model_providers.service import (
@@ -1578,6 +1579,8 @@ def run_backtest_background(
     financial_datasets_api_key: Optional[str] = None,
     execution_handoff_payload: Optional[str] = None,
     universe_selection: Optional[Dict[str, Any]] = None,
+    llm_temperature: Optional[float] = None,
+    llm_reasoning_effort: Optional[str] = None,
     # The billing lane, threaded from the route because it is NOT otherwise
     # reachable here: it is folded into the opaque signed
     # `execution_handoff_payload` before this function is called, and that
@@ -1730,6 +1733,14 @@ def run_backtest_background(
 
         if uses_llm and model and model.strip():
             cmd += ["--model", model.strip()]
+
+        # Each half of the sampling policy rides only when set: an absent flag
+        # is how "not sent" reaches the request builder, and neither value is
+        # a secret, so argv rather than the signed handoff.
+        if uses_llm and llm_temperature is not None:
+            cmd += ["--llm-temperature", repr(float(llm_temperature))]
+        if uses_llm and llm_reasoning_effort and str(llm_reasoning_effort).strip():
+            cmd += ["--llm-reasoning-effort", str(llm_reasoning_effort).strip().lower()]
 
         if execution_handoff_payload:
             cmd += ["--execution-handoff-stdin"]
@@ -3420,6 +3431,7 @@ def run_backtest_endpoint(
     live_run_id = f"agent_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}"
 
     execution_handoff_payload: Optional[str] = None
+    llm_sampling: Optional[SamplingPolicy] = None
     if (
         resolved_decision_source == LLM_DECISION_SOURCE
         and runtime_type == PIPELINE_RUNTIME_TYPE
@@ -3517,6 +3529,7 @@ def run_backtest_endpoint(
                 "universe_selection": universe_selection,
             },
         )
+        llm_sampling = route.sampling
 
     refusal = _try_acquire_backtest_slot(
         live_run_id=live_run_id,
@@ -3571,6 +3584,8 @@ def run_backtest_endpoint(
             "assets": selected_assets,
             "decision_source": resolved_decision_source,
             "execution_handoff_payload": execution_handoff_payload,
+            "llm_temperature": llm_sampling.temperature if llm_sampling else None,
+            "llm_reasoning_effort": llm_sampling.reasoning_effort if llm_sampling else None,
             # Only the lane the LLM preflight above actually validated.
             # `billing_mode` is a request field that reaches this scope on
             # EVERY run, including a rule-based one that never entered that
