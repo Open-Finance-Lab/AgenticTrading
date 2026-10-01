@@ -26,6 +26,10 @@ from .base import (
     value_at,
 )
 
+# Effort values that mean "no reasoning". Read by both the OpenRouter off-branch
+# and the CommonStack thinking-off branch below.
+REASONING_OFF_VALUES = frozenset({"none", "off", "false", "0", "disabled"})
+
 
 def _default_client_factory(**kwargs: Any) -> Any:
     try:
@@ -124,19 +128,29 @@ class OpenAIExecutionAdapter:
                 "openrouter",
                 "openai_compatible",
             }:
-                effort = request.reasoning_effort.strip().lower()
-                reasoning = {"effort": request.reasoning_effort}
-                if provider.adapter_type == "openrouter" and effort in {
-                    "none",
-                    "off",
-                    "false",
-                    "0",
-                    "disabled",
-                }:
-                    reasoning.update({"enabled": False, "exclude": True})
-                kwargs["extra_body"] = {
-                    "reasoning": reasoning,
-                }
+                reasoning_off = (
+                    request.reasoning_effort.strip().lower() in REASONING_OFF_VALUES
+                )
+                if provider.adapter_type == "openai_compatible" and reasoning_off:
+                    # CommonStack honours no graduated reasoning control for
+                    # DeepSeek V4 Pro or Qwen3.7 Plus: reasoning.effort,
+                    # reasoning.enabled=false and thinking.budget_tokens were
+                    # all ignored in the 2026-10-01 probe (#539). Thinking
+                    # on/off is the one control it honours. Sent instead of
+                    # `reasoning`, not beside it.
+                    kwargs["extra_body"] = {"thinking": {"type": "disabled"}}
+                else:
+                    reasoning = {"effort": request.reasoning_effort}
+                    if provider.adapter_type == "openrouter" and reasoning_off:
+                        reasoning.update({"enabled": False, "exclude": True})
+                    kwargs["extra_body"] = {
+                        "reasoning": reasoning,
+                    }
+            elif request.reasoning_effort and provider.adapter_type == "openai":
+                # Chat Completions takes it as a top-level parameter; only
+                # reasoning models accept it, and only the catalog's
+                # reasoning-only policy ever asks for it here.
+                kwargs["reasoning_effort"] = request.reasoning_effort.strip().lower()
             response = client.chat.completions.create(**kwargs)
             text = _response_text(response)
             if not text:

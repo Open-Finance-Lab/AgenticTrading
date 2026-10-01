@@ -429,3 +429,118 @@ def test_normalize_finish_reason_folds_vendor_spellings_and_stays_bounded():
     # An OpenAI-compatible provider may put anything here; it must never
     # exceed the result model's bound and fail a successful call.
     assert len(normalize_finish_reason("x" * 80)) == 32
+
+
+def test_native_openai_sends_reasoning_effort_as_a_top_level_parameter(monkeypatch):
+    captured = {}
+
+    def create(**kwargs):
+        captured.update(kwargs)
+        return _openai_response("gpt-5.5")
+
+    client = SimpleNamespace(
+        chat=SimpleNamespace(completions=SimpleNamespace(create=create)),
+        close=lambda: None,
+    )
+    monkeypatch.setattr(
+        openai_module, "build_safe_http_client", lambda *_args, **_kwargs: _Closable()
+    )
+    adapter = openai_module.OpenAIAdapter(client_factory=lambda **_kwargs: client)
+
+    adapter.complete(
+        _request("openai", "openai/gpt-5.5", reasoning_effort="low"),
+        _credential("openai"),
+        _provider("openai", "openai", "https://api.openai.com/v1"),
+    )
+
+    assert captured["reasoning_effort"] == "low"
+    assert "extra_body" not in captured
+    assert "temperature" not in captured
+
+
+def test_native_openai_sends_nothing_extra_when_no_effort_is_requested(monkeypatch):
+    captured = {}
+
+    def create(**kwargs):
+        captured.update(kwargs)
+        return _openai_response("gpt-5.5")
+
+    client = SimpleNamespace(
+        chat=SimpleNamespace(completions=SimpleNamespace(create=create)),
+        close=lambda: None,
+    )
+    monkeypatch.setattr(
+        openai_module, "build_safe_http_client", lambda *_args, **_kwargs: _Closable()
+    )
+    adapter = openai_module.OpenAIAdapter(client_factory=lambda **_kwargs: client)
+
+    adapter.complete(
+        _request("openai", "openai/gpt-5.5"),
+        _credential("openai"),
+        _provider("openai", "openai", "https://api.openai.com/v1"),
+    )
+
+    assert "reasoning_effort" not in captured
+    assert "extra_body" not in captured
+
+
+def _commonstack_capture(monkeypatch, reasoning_effort):
+    captured = {}
+
+    def create(**kwargs):
+        captured.update(kwargs)
+        return _openai_response("deepseek/deepseek-v4-pro")
+
+    client = _openai_client(create)
+    monkeypatch.setattr(
+        openai_module, "build_safe_http_client", lambda *_args, **_kwargs: _Closable()
+    )
+    adapter = openai_module.OpenAICompatibleAdapter(
+        client_factory=lambda **_kwargs: client,
+    )
+    provider = ProviderRecord(
+        provider_id="commonstack",
+        display_name="CommonStack",
+        adapter_type="openai_compatible",
+        approved_base_url="https://api.commonstack.ai/v1",
+        capabilities=ProviderCapabilities(
+            model_allowlist=("deepseek/deepseek-v4-pro",),
+            reasoning=True,
+        ),
+    )
+    adapter.complete(
+        _request(
+            "commonstack",
+            "deepseek/deepseek-v4-pro",
+            reasoning_effort=reasoning_effort,
+        ),
+        _credential("commonstack"),
+        provider,
+    )
+    return captured
+
+
+@pytest.mark.parametrize("off", ["none", "off", "false", "0", "disabled", "NONE"])
+def test_commonstack_sends_thinking_disabled_for_an_off_value(monkeypatch, off):
+    """CommonStack honours no graduated reasoning control for DeepSeek V4 Pro
+    or Qwen3.7 Plus. The 2026-10-01 probe (#539) found `reasoning.effort`, a
+    top-level `reasoning_effort`, `reasoning.enabled:false` and
+    `thinking.budget_tokens` all ignored, and only `thinking: {type:
+    "disabled"}` honoured. It is sent *instead of* `reasoning`, not beside it:
+    a `reasoning` key next to it would be the request the probe showed does
+    nothing."""
+    captured = _commonstack_capture(monkeypatch, off)
+
+    assert captured["extra_body"] == {"thinking": {"type": "disabled"}}
+    assert "reasoning" not in captured["extra_body"]
+    assert "reasoning_effort" not in captured
+
+
+def test_commonstack_keeps_reasoning_effort_for_a_graduated_value(monkeypatch):
+    """GPT-5.5 on CommonStack does honour `reasoning.effort` (`low` used 512
+    reasoning tokens in the probe), so anything outside the off-set keeps
+    today's shape."""
+    captured = _commonstack_capture(monkeypatch, "low")
+
+    assert captured["extra_body"] == {"reasoning": {"effort": "low"}}
+    assert "thinking" not in captured["extra_body"]
