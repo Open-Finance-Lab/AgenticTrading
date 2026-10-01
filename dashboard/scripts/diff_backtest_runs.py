@@ -29,7 +29,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 if not __package__:
     from _bootstrap import ensure_repo_root
@@ -37,60 +37,101 @@ if not __package__:
     ensure_repo_root()
 
 from dashboard.backend.database import db  # noqa: E402
+from dashboard.backend.db_url import describe_database_url  # noqa: E402
+
+
+#: Fields that must agree before two runs are one configuration measured
+#: twice. A mismatch does not stop the report, it names itself in
+#: ``mismatches`` and fails the CLI: a before/after pair that differs in
+#: window, model or universe diverges for reasons that have nothing to do
+#: with sampling.
+_COMPARABILITY_FIELDS = ("start_date", "end_date", "llm_model", "symbols")
 
 
 def _normalised_actions(entry: Dict[str, Any]) -> str:
     return json.dumps(entry.get("actions_submitted") or [], sort_keys=True)
 
 
+def _compare_keyed(
+    a: Dict[Any, Any], b: Dict[Any, Any], same
+) -> Tuple[int, int, List[Any], int, int]:
+    """Join two keyed series; return (shared, divergent, divergent_keys, only_a, only_b).
+
+    ``divergent_keys`` is in key order, so its first element is the earliest
+    shared key that differs.
+    """
+    shared = sorted(a.keys() & b.keys())
+    divergent_keys = [k for k in shared if not same(a[k], b[k])]
+    return (
+        len(shared),
+        len(divergent_keys),
+        divergent_keys,
+        len(a.keys() - b.keys()),
+        len(b.keys() - a.keys()),
+    )
+
+
 def compare_decisions(a: List[Dict[str, Any]], b: List[Dict[str, Any]]) -> Dict[str, Any]:
-    """Bar-by-bar comparison of two decision logs, in step order."""
-    divergent = 0
+    """Compare two decision logs, joined on ``step_index``.
+
+    ``step_index`` is the key ``backtest_decisions`` is ordered and indexed
+    on. Joining on it rather than zipping by position means a log with a
+    missing middle step, or one cut short by a timeout, is compared only
+    where both runs have an answer, and the unmatched steps are counted in
+    ``decisions_only_in_a`` / ``decisions_only_in_b`` instead of shifting every
+    later step against the wrong partner.
+    """
+    by_a = {int(x.get("step_index", 0)): x for x in a}
+    by_b = {int(y.get("step_index", 0)): y for y in b}
+    shared, divergent, keys, only_a, only_b = _compare_keyed(
+        by_a, by_b, lambda x, y: _normalised_actions(x) == _normalised_actions(y)
+    )
     first: Optional[Dict[str, Any]] = None
-    for x, y in zip(a, b):
-        if _normalised_actions(x) != _normalised_actions(y):
-            divergent += 1
-            if first is None:
-                first = {
-                    "step_index": int(x.get("step_index", 0)),
-                    "timestamp": x.get("timestamp"),
-                }
+    if keys:
+        first = {"step_index": keys[0], "timestamp": by_a[keys[0]].get("timestamp")}
     return {
-        "steps_compared": min(len(a), len(b)),
-        "steps_a": len(a),
-        "steps_b": len(b),
-        "divergent_steps": divergent,
+        "steps_compared": shared,
+        "steps_a": len(by_a),
+        "steps_b": len(by_b),
+        "decisions_only_in_a": only_a,
+        "decisions_only_in_b": only_b,
+        # Nothing shared is nothing measured, not agreement.
+        "divergent_steps": divergent if shared else None,
         "first_divergence": first,
     }
 
 
-def _normalised_point(point: Dict[str, Any]) -> str:
-    return json.dumps([str(point.get("timestamp")), point.get("equity")])
-
-
 def compare_equity(a: List[Dict[str, Any]], b: List[Dict[str, Any]]) -> Dict[str, Any]:
-    """Bar-by-bar comparison of two equity curves, in stored order.
+    """Compare two equity curves, joined on timestamp.
 
     The axis that always exists: ``run_agent_backtest`` writes
     ``equity_timeseries`` for every run, unconditionally.
+
+    Joined on timestamp, not position, so a partial or timed-out run is
+    compared only over the bars both runs have; the bars only one has are
+    counted in ``equity_only_in_a`` / ``equity_only_in_b`` and are not
+    divergence.
 
     Exact comparison, no tolerance. Two runs whose decisions agreed ran the
     same arithmetic over the same bars, so any difference at all is real, and
     a tolerance would swallow exactly the smallest and earliest divergence
     this script exists to find.
     """
-    divergent = 0
+    by_a = {str(p.get("timestamp")): p for p in a}
+    by_b = {str(p.get("timestamp")): p for p in b}
+    shared, divergent, keys, only_a, only_b = _compare_keyed(
+        by_a, by_b, lambda x, y: x.get("equity") == y.get("equity")
+    )
     first: Optional[Dict[str, Any]] = None
-    for index, (x, y) in enumerate(zip(a, b)):
-        if _normalised_point(x) != _normalised_point(y):
-            divergent += 1
-            if first is None:
-                first = {"index": index, "timestamp": x.get("timestamp")}
+    if keys:
+        first = {"index": sorted(by_a).index(keys[0]), "timestamp": keys[0]}
     return {
-        "equity_points_compared": min(len(a), len(b)),
-        "equity_points_a": len(a),
-        "equity_points_b": len(b),
-        "divergent_equity_points": divergent,
+        "equity_points_compared": shared,
+        "equity_points_a": len(by_a),
+        "equity_points_b": len(by_b),
+        "equity_only_in_a": only_a,
+        "equity_only_in_b": only_b,
+        "divergent_equity_points": divergent if shared else None,
         "first_equity_divergence": first,
     }
 
@@ -99,13 +140,32 @@ def compare_equity(a: List[Dict[str, Any]], b: List[Dict[str, Any]]) -> Dict[str
 #: ``None``, never ``0``: ``backtest_decisions`` is written only by the AI
 #: Hedge Fund runtime and the external-agent surface, so an empty log on a
 #: pipeline run means *unmeasured*. A ``0`` there is this script asserting
-#: that two runs agreed on every bar, out of a table nobody wrote to -- and
-#: that number is the headline of the table it gets pasted into.
+#: that two runs agreed on every bar, out of a table nobody wrote to.
 _NO_DECISION_LOG = {
     "steps_compared": None,
     "divergent_steps": None,
     "first_divergence": None,
 }
+
+
+def _run_field(row: Dict[str, Any], name: str) -> Any:
+    """A comparability field off an ``agent_runs`` row, or its metadata."""
+    if name == "symbols":
+        symbols = (row.get("metadata") or {}).get("symbols")
+        return sorted(symbols) if symbols else None
+    return row.get(name)
+
+
+def _final_equity_gap(final_a: Any, final_b: Any) -> Tuple[Optional[float], Optional[str]]:
+    if final_a is None or final_b is None:
+        return None, "final equity not recorded for " + " and ".join(
+            name
+            for name, value in (("run_a", final_a), ("run_b", final_b))
+            if value is None
+        )
+    if not float(final_a):
+        return None, "run_a final equity is zero"
+    return 100.0 * (float(final_b) - float(final_a)) / float(final_a), None
 
 
 def compare_runs(run_a: str, run_b: str) -> Dict[str, Any]:
@@ -128,13 +188,25 @@ def compare_runs(run_a: str, run_b: str) -> Dict[str, Any]:
     )
     final_a = row_a.get("final_equity")
     final_b = row_b.get("final_equity")
-    gap_pct = None
-    if final_a and final_b is not None:
-        gap_pct = 100.0 * (float(final_b) - float(final_a)) / float(final_a)
+    gap_pct, gap_reason = _final_equity_gap(final_a, final_b)
+
+    mismatches: List[str] = []
+    fields: Dict[str, Any] = {}
+    for name in _COMPARABILITY_FIELDS:
+        value_a, value_b = _run_field(row_a, name), _run_field(row_b, name)
+        fields[f"{name}_a"], fields[f"{name}_b"] = value_a, value_b
+        # A run that never recorded a field (a legacy row has no symbols)
+        # cannot be shown to differ on it; only two recorded values can.
+        if value_a is not None and value_b is not None and value_a != value_b:
+            mismatches.append(name)
+
     report.update(
         {
             "run_a": run_a,
             "run_b": run_b,
+            **fields,
+            "comparable": not mismatches,
+            "mismatches": mismatches,
             "decisions_recorded": decisions_recorded,
             "basis": "decisions" if decisions_recorded else "equity",
             "final_equity_a": final_a,
@@ -144,7 +216,22 @@ def compare_runs(run_a: str, run_b: str) -> Dict[str, Any]:
             "sampling_b": (row_b.get("metadata") or {}).get("llm_sampling"),
         }
     )
+    if gap_reason:
+        report["final_equity_gap_reason"] = gap_reason
     return report
+
+
+def describe_run_history_backend() -> str:
+    """Name the store ``db`` is bound to, credentials never included.
+
+    A wrong ``DATABASE_PATH`` (or a missing ``AGENT_RUNS_DATABASE_URL``)
+    answers "unknown run id" or, worse, reads a different file's runs, so the
+    source is printed on every invocation.
+    """
+    url = getattr(db, "database_url", None)
+    if url:
+        return f"postgres ({describe_database_url(url)})"
+    return f"sqlite ({getattr(db, 'db_path', '?')})"
 
 
 def main(argv: Optional[List[str]] = None) -> int:
@@ -153,8 +240,23 @@ def main(argv: Optional[List[str]] = None) -> int:
     )
     parser.add_argument("run_a")
     parser.add_argument("run_b")
+    parser.add_argument(
+        "--allow-mismatch",
+        action="store_true",
+        help="exit 0 even when the runs differ in window, model or universe",
+    )
     args = parser.parse_args(argv)
-    print(json.dumps(compare_runs(args.run_a, args.run_b), indent=2, default=str))
+    print(f"run history: {describe_run_history_backend()}", file=sys.stderr)
+    report = compare_runs(args.run_a, args.run_b)
+    print(json.dumps(report, indent=2, default=str))
+    if report["mismatches"] and not args.allow_mismatch:
+        print(
+            "runs are not comparable, they differ in: "
+            + ", ".join(report["mismatches"])
+            + " (pass --allow-mismatch to accept)",
+            file=sys.stderr,
+        )
+        return 2
     return 0
 
 
