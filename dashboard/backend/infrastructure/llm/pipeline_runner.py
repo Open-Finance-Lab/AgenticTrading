@@ -30,6 +30,7 @@ from dashboard.backend.infrastructure.llm.execution.errors import (
     LLMExecutionError,
     is_transient_provider_failure,
 )
+from dashboard.backend.infrastructure.llm.execution.log_safe import log_safe_token
 
 POST_TRADE_PRESET_KEY = "post_trade_analysis"
 
@@ -429,20 +430,49 @@ def _build_post_trade_prompt(
     )
 
 
+def _post_trade_failure_is_holdable(exc: BaseException) -> bool:
+    """Whether a hosted (``fail_closed``) run may hold its prompts through ``exc``.
+
+    A provider outage, or ``RESPONSE_INVALID`` -- the execution layer's
+    spelling of the empty reply a reasoning model gives when its thinking eats
+    the ceiling, which the unbilled local path already holds through as an
+    unparseable reply. Both release the call's Credits reservation before
+    raising, so holding costs a day's adaptation and nothing else. Billing,
+    credential and quota failures stay fatal: absorbing them would let the run
+    continue unbilled or unauthorised.
+    """
+    return is_transient_provider_failure(exc) or (
+        isinstance(exc, LLMExecutionError)
+        and exc.category is ExecutionErrorCategory.RESPONSE_INVALID
+    )
+
+
 def _report_post_trade_skipped(
-    exc: LLMExecutionError, step: Dict[str, Any], index: int
+    category: str, step: Dict[str, Any], ordinal: int
 ) -> None:
     """Print one line for a held post-trade step; the parent relays ``ERROR: llm.`` live.
 
-    The step name is user-authored, so it is reduced to a log-safe token: a
-    space or ``=`` would break the ``key=value`` shape the parent redacts.
+    ``step`` is the step's position among the post-trade steps -- the number
+    the ``📉 Post-trade analysis`` line prints -- and ``step_id`` its id when
+    that is log-safe. The user-authored label is never printed here.
     """
-    name = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(step.get("label") or "")).strip("_")
     print(
         "ERROR: llm.post_trade_skipped "
-        f"category={exc.category.value} step={name[:40] or index + 1}",
+        f"category={category} step={ordinal} "
+        f"step_id={log_safe_token(step.get('id'))}",
         flush=True,
     )
+
+
+def _skipped_post_trade_step(
+    step: Dict[str, Any], ordinal: int, reason: str
+) -> Dict[str, Any]:
+    return {
+        "step": ordinal,
+        "step_id": step.get("id"),
+        "label": step.get("label"),
+        "reason": reason,
+    }
 
 
 def run_post_trade_analysis(
@@ -457,6 +487,21 @@ def run_post_trade_analysis(
 
     Returns ``(new_decision_pipeline, analysis_record, (in_tokens, out_tokens), llm_calls)``.
     On failure, returns the original decision pipeline unchanged.
+
+    A step that produced no usable analysis holds the prompts and is listed in
+    the record's ``skipped_steps`` with its reason -- an execution category
+    such as ``provider_timeout``, ``no_text``, ``unparseable``, or
+    ``not_attempted`` for a step after a provider outage that day. Without it
+    an outage day and a malformed-reply day leave identical records.
+
+    On a hosted (``fail_closed``) client only failures that
+    ``_post_trade_failure_is_holdable`` admits are held; every other one
+    raises. A held step spends no strike: it never touches ``llm_decisions``,
+    so H6 coverage is not at stake, and spending the decision-step outage
+    budget here would make the next decision-step outage fatal. Nor is there a
+    post-trade budget: a review that never runs costs the run its adaptation,
+    not its correctness, and each hold is visible -- one relayed ``ERROR:
+    llm.post_trade_skipped`` line plus its ``skipped_steps`` entry.
     """
     if not post_trade_steps:
         return list(decision_pipeline or []), {}, (0, 0), 0
@@ -467,18 +512,30 @@ def run_post_trade_analysis(
     working = copy.deepcopy(decision_pipeline or [])
     last_parsed: Dict[str, Any] = {}
     applied: List[Dict[str, Any]] = []
+    skipped: List[Dict[str, Any]] = []
+    provider_down = False
 
     for index, step in enumerate(post_trade_steps):
         if not isinstance(step, dict):
+            continue
+        ordinal = index + 1
+        if provider_down:
+            # Another request now would pay the full retry and failover wait
+            # again, against the 3600s run budget, for the same answer.
+            skipped.append(_skipped_post_trade_step(step, ordinal, "not_attempted"))
             continue
         prompt = _build_post_trade_prompt(
             step=step,
             episode_context=episode_context,
             decision_pipeline=working,
         )
-        label = step.get("label") or f"Post-trade {index + 1}"
-        print(f"\n📉 Post-trade analysis: {label} (day={episode_context.get('trading_day')})")
+        label = step.get("label") or f"Post-trade {ordinal}"
+        print(
+            f"\n📉 Post-trade analysis {ordinal}/{len(post_trade_steps)}: "
+            f"{label} (day={episode_context.get('trading_day')})"
+        )
 
+        response_text: Optional[str] = None
         try:
             response = client.messages.create(
                 model=model or LLM_MODEL_NAME,
@@ -490,21 +547,30 @@ def run_post_trade_analysis(
             in_delta, out_delta = extract_token_usage(response)
             total_in += in_delta
             total_out += out_delta
-            parsed = parse_llm_response(extract_response_text(response))
+            response_text = response_text_or_none(response)
+            parsed = parse_llm_response(response_text) if response_text is not None else None
         except Exception as exc:
             print(f"   ⚠️  Post-trade analysis failed: {exc}")
-            if getattr(client, "fail_closed", False):
-                if not is_transient_provider_failure(exc):
-                    raise
-                # A provider outage holds the prompts, as an unparseable reply
-                # does. No strike: the step never touches ``llm_decisions``, so
-                # H6 coverage is not at stake, and spending the decision-step
-                # outage budget here would make the next one fatal.
-                _report_post_trade_skipped(exc, step, index)
-            parsed = None
+            if getattr(client, "fail_closed", False) and not _post_trade_failure_is_holdable(exc):
+                raise
+            reason = exc.category.value if isinstance(exc, LLMExecutionError) else "error"
+            skipped.append(_skipped_post_trade_step(step, ordinal, reason))
+            if isinstance(exc, LLMExecutionError):
+                _report_post_trade_skipped(reason, step, ordinal)
+            if is_transient_provider_failure(exc):
+                provider_down = True
+                print("   ⚠️  Provider unavailable; keeping prompts unchanged for the rest of this day")
+            else:
+                print("   ⚠️  No usable post-trade reply; keeping prompts unchanged")
+            continue
 
         if not isinstance(parsed, dict):
-            print("   ⚠️  Post-trade returned unparseable JSON; keeping prompts unchanged")
+            if response_text is None:
+                print("   ⚠️  Post-trade response carried no text block; keeping prompts unchanged")
+                skipped.append(_skipped_post_trade_step(step, ordinal, "no_text"))
+            else:
+                print("   ⚠️  Post-trade returned unparseable JSON; keeping prompts unchanged")
+                skipped.append(_skipped_post_trade_step(step, ordinal, "unparseable"))
             continue
 
         last_parsed = parsed
@@ -524,6 +590,7 @@ def run_post_trade_analysis(
         "summary": last_parsed.get("summary") if last_parsed else None,
         "prompt_problems": last_parsed.get("prompt_problems") if last_parsed else [],
         "applied_patches": applied,
+        "skipped_steps": skipped,
     }
     return working, record, (total_in, total_out), llm_calls
 

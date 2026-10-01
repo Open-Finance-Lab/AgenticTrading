@@ -787,32 +787,41 @@ def test_run_pipeline_decision_thinking_only_reply_below_the_ceiling_ends_cleanl
 
 
 # ---------------------------------------------------------------------------
-# Post-trade steps on a hosted (fail_closed) client: a provider outage holds
-# the prompts, every other execution failure stays fatal (#574).
+# Post-trade steps on a hosted (fail_closed) client (#574): a provider outage
+# or an empty reply holds the prompts and is recorded; every other execution
+# failure stays fatal.
 # ---------------------------------------------------------------------------
 
 _POST_TRADE_STEPS = [
     {"id": "review", "label": "Review", "presetKey": "post_trade_analysis"}
 ]
 _POST_TRADE_CONTEXT = {"trading_day": "2026-04-15"}
+_PATCH_REPLY = (
+    '{"summary": "tightened", "prompt_problems": [], "prompt_patches": '
+    '[{"step_id": "decision", "new_prompt": "Choose carefully."}]}'
+)
 
 
 class _HostedPipelineClient(_PipelineClient):
     fail_closed = True
 
 
-def _run_post_trade(client):
+def _run_post_trade(client, steps=_POST_TRADE_STEPS):
     from dashboard.backend.infrastructure.llm.pipeline_runner import (
         run_post_trade_analysis,
     )
 
     return run_post_trade_analysis(
         client,
-        post_trade_steps=_POST_TRADE_STEPS,
+        post_trade_steps=steps,
         episode_context=_POST_TRADE_CONTEXT,
         decision_pipeline=_PIPELINE,
         model="test-model",
     )
+
+
+def _skipped(reason, *, step=1, step_id="review", label="Review"):
+    return {"step": step, "step_id": step_id, "label": label, "reason": reason}
 
 
 @pytest.mark.parametrize(
@@ -820,9 +829,12 @@ def _run_post_trade(client):
     [
         ExecutionErrorCategory.PROVIDER_TIMEOUT,
         ExecutionErrorCategory.PROVIDER_UNAVAILABLE,
+        # The execution layer's empty reply: a reasoning model whose thinking
+        # ate the ceiling. Released like an outage, so holding is unbilled.
+        ExecutionErrorCategory.RESPONSE_INVALID,
     ],
 )
-def test_post_trade_provider_outage_holds_prompts_on_hosted_client(category, capsys):
+def test_post_trade_holdable_failure_holds_prompts_on_hosted_client(category, capsys):
     client = _HostedPipelineClient([LLMExecutionError(category)])
 
     patched, record, tokens, calls = _run_post_trade(client)
@@ -831,13 +843,16 @@ def test_post_trade_provider_outage_holds_prompts_on_hosted_client(category, cap
     assert tokens == (0, 0)
     assert calls == 0
     assert record["applied_patches"] == []
+    assert record["skipped_steps"] == [_skipped(category.value)]
     assert len(client.messages.calls) == 1
+    out = capsys.readouterr().out
     # ``ERROR: llm.`` is the prefix the parent relays to the service log live.
-    lines = capsys.readouterr().out.splitlines()
     assert (
-        f"ERROR: llm.post_trade_skipped category={category.value} step=Review"
-        in lines
+        f"ERROR: llm.post_trade_skipped category={category.value} step=1 step_id=review"
+        in out.splitlines()
     )
+    # An infrastructure failure must not be reported as a model output problem.
+    assert "unparseable JSON" not in out
 
 
 @pytest.mark.parametrize(
@@ -848,7 +863,7 @@ def test_post_trade_provider_outage_holds_prompts_on_hosted_client(category, cap
         ExecutionErrorCategory.CREDENTIAL_INVALID,
         ExecutionErrorCategory.CREDENTIAL_MISSING,
         ExecutionErrorCategory.ACCOUNT_RESTRICTED,
-        ExecutionErrorCategory.RESPONSE_INVALID,
+        ExecutionErrorCategory.USAGE_UNAVAILABLE,
     ],
 )
 def test_post_trade_other_execution_failures_stay_fatal(category):
@@ -867,17 +882,127 @@ def test_post_trade_non_execution_error_on_hosted_client_stays_fatal():
         _run_post_trade(client)
 
 
-def test_post_trade_outage_does_not_spend_a_strike():
-    """A held post-trade step must leave the decision-step strike budget alone."""
+def test_post_trade_thinking_only_reply_holds_with_usage_on_hosted_client():
+    """A reply with no text block is unparseable, not a fault (cf. the decision path)."""
+    client = _HostedPipelineClient([_ThinkingOnlyResponse(input_tokens=5, output_tokens=7)])
+
+    patched, record, tokens, calls = _run_post_trade(client)
+
+    assert patched == _PIPELINE
+    assert tokens == (5, 7)
+    assert calls == 1
+    assert record["skipped_steps"] == [_skipped("no_text")]
+
+
+def test_post_trade_unparseable_reply_is_recorded_as_such():
+    client = _HostedPipelineClient([_PipelineResponse("not json at all")])
+
+    patched, record, _tokens, calls = _run_post_trade(client)
+
+    assert patched == _PIPELINE
+    assert calls == 1
+    assert record["skipped_steps"] == [_skipped("unparseable")]
+
+
+_TWO_POST_TRADE_STEPS = [
+    {"id": "review", "label": "Review", "presetKey": "post_trade_analysis"},
+    {"id": "audit", "label": "Audit", "presetKey": "post_trade_analysis"},
+]
+
+
+@pytest.mark.parametrize(
+    "category",
+    [ExecutionErrorCategory.PROVIDER_TIMEOUT, ExecutionErrorCategory.PROVIDER_UNAVAILABLE],
+)
+def test_post_trade_outage_skips_the_rest_of_the_day(category):
+    """Each further request would pay the full retry and failover wait again."""
+    client = _HostedPipelineClient([LLMExecutionError(category)])
+
+    patched, record, _tokens, calls = _run_post_trade(client, _TWO_POST_TRADE_STEPS)
+
+    assert len(client.messages.calls) == 1
+    assert calls == 0
+    assert patched == _PIPELINE
+    assert record["skipped_steps"] == [
+        _skipped(category.value),
+        _skipped("not_attempted", step=2, step_id="audit", label="Audit"),
+    ]
+
+
+def test_post_trade_empty_reply_does_not_skip_the_next_step():
+    """An empty reply is about that prompt, not the provider: the next step still runs."""
+    client = _HostedPipelineClient(
+        [
+            LLMExecutionError(ExecutionErrorCategory.RESPONSE_INVALID),
+            _PipelineResponse(_PATCH_REPLY),
+        ]
+    )
+
+    patched, record, _tokens, calls = _run_post_trade(client, _TWO_POST_TRADE_STEPS)
+
+    assert len(client.messages.calls) == 2
+    assert calls == 1
+    assert patched[0]["prompt"] == "Choose carefully."
+    assert record["summary"] == "tightened"
+    assert record["skipped_steps"] == [_skipped("response_invalid")]
+
+
+def test_post_trade_success_records_no_skipped_steps():
+    client = _HostedPipelineClient([_PipelineResponse(_PATCH_REPLY)])
+
+    patched, record, _tokens, calls = _run_post_trade(client)
+
+    assert calls == 1
+    assert patched[0]["prompt"] == "Choose carefully."
+    assert record["skipped_steps"] == []
+
+
+@pytest.mark.parametrize(
+    ("step_id", "expected"),
+    [("review", "review"), (7, "7"), ("复盘", "-"), ("a b=c", "-"), (None, "-")],
+)
+def test_post_trade_skipped_line_never_prints_the_label(step_id, expected, capsys):
+    """The position and a validated id identify the step; the user-authored label never does."""
+    steps = [
+        {"id": step_id, "label": "复盘 分析=1", "presetKey": "post_trade_analysis"}
+    ]
+    client = _HostedPipelineClient(
+        [LLMExecutionError(ExecutionErrorCategory.PROVIDER_TIMEOUT)]
+    )
+
+    _run_post_trade(client, steps)
+
+    lines = capsys.readouterr().out.splitlines()
+    assert (
+        f"ERROR: llm.post_trade_skipped category=provider_timeout step=1 step_id={expected}"
+        in lines
+    )
+    # The step number matches the human-readable line printed just before it.
+    assert any(line.startswith("📉 Post-trade analysis 1/1: 复盘 分析=1") for line in lines)
+
+
+def test_post_trade_outages_leave_the_decision_step_strike_intact():
+    """A held post-trade step must not spend the decision-step outage budget.
+
+    The budget here is one strike. After two days of post-trade outages, a
+    decision-step outage must still be absorbed rather than abort the run --
+    the property the "no strike" design exists for, checked through the real
+    ``_run_daily_post_trade`` and the real strike accounting.
+    """
     from dashboard.backend.domain.backtesting.engine import HourlyBacktester
     from dashboard.backend.domain.backtesting.portfolio_manager import (
+        LLMDecisionError,
         PortfolioManager,
     )
 
     manager = PortfolioManager(100000)
     manager.strict_llm_total_steps = 49
+    assert manager.strict_llm_fallback_budget() == 1
     client = _HostedPipelineClient(
-        [LLMExecutionError(ExecutionErrorCategory.PROVIDER_TIMEOUT)]
+        [
+            LLMExecutionError(ExecutionErrorCategory.PROVIDER_TIMEOUT),
+            LLMExecutionError(ExecutionErrorCategory.PROVIDER_UNAVAILABLE),
+        ]
     )
     backtester = SimpleNamespace(
         use_llm=True,
@@ -888,13 +1013,19 @@ def test_post_trade_outage_does_not_spend_a_strike():
         _current_equity=lambda _manager: 100000.0,
     )
 
-    HourlyBacktester._run_daily_post_trade(
-        backtester,
-        manager=manager,
-        day_episode={"trading_day": "2026-04-15", "day_start_equity": 100000.0},
-        post_trade_steps=_POST_TRADE_STEPS,
-    )
+    for day in ("2026-04-15", "2026-04-16"):
+        HourlyBacktester._run_daily_post_trade(
+            backtester,
+            manager=manager,
+            day_episode={"trading_day": day, "day_start_equity": 100000.0},
+            post_trade_steps=_POST_TRADE_STEPS,
+        )
 
     assert manager.strict_llm_fallbacks == 0
     assert manager.llm_calls == 0
     assert [step["id"] for step in backtester.pipeline] == ["decision", "review"]
+    assert [len(r["skipped_steps"]) for r in backtester.prompt_adaptations] == [1, 1]
+    held = manager._absorb_strict_llm_failure(
+        {}, LLMDecisionError("decision-step outage"), hold=True
+    )
+    assert held == {"actions": []}
