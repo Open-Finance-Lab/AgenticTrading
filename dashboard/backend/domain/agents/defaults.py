@@ -41,10 +41,11 @@ SIMPLE_INSTRUCTION_LABEL = "Trading instruction"
 #
 # Known gaps between this text and the engine. Close them in the engine, not
 # here: the wording is what the A/B measured, so rewording it means a new run.
-# - "Listed stocks" are the per-bar snapshot, not the run's universe:
-#   make_trading_decision_with_llm shows the 12 best names by trend score plus
-#   holdings. The seven-name onboarding sleeve fits whole; a 30-name Dow run
-#   shows 12 of 30, so rule 1 cannot spread across all of them.
+# - "Listed stocks" are the per-bar snapshot, not the run's universe. Since
+#   #541 a pipeline agent's snapshot is the whole universe up to 30 names
+#   (Mag7, the Dow, the 30-name pools); above 30 it is the 12 best names by
+#   trend score plus holdings, announced by a ``universe_note``, so rule 1
+#   cannot spread across all of a larger pool.
 # - Rule 7's 0 is how macd and macd_signal warm up: both read 0 for a run's
 #   first 33 bars (features.py). RSI warms up at a neutral 50, harmless while
 #   rule 4 uses it only as an upper gate, and sma20 at the mean of the closes

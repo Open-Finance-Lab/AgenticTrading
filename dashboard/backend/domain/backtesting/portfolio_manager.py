@@ -12,8 +12,11 @@ the legacy script re-exports this exact class object so ``bha.PortfolioManager``
 and existing subclasses keep working unchanged. **The trading logic is not fully
 unchanged, though:** the ``safe_trading`` candidate selection in
 ``make_trading_decision_with_llm`` no longer ranks the top-10 candidates by RSI
-extremity (``|RSI - 50|``, a mean-reversion heuristic) — it ranks the top-12 by a
-multi-factor trend/momentum score *and always appends current holdings*. That
+extremity (``|RSI - 50|``, a mean-reversion heuristic) — it ranks candidates by a
+multi-factor trend/momentum score and shows the top
+``SNAPSHOT_SHORTLIST_SIZE`` -- the whole universe instead, for a pipeline agent
+on up to ``SNAPSHOT_FULL_UNIVERSE_MAX`` names -- *always appending current
+holdings*. That
 ranking change was made separately from (and independently of) this file's
 domain-layer move, so backtests from before it are **not** directly comparable
 with current ones (see the inline comment on that branch for the rationale).
@@ -104,6 +107,47 @@ def _is_transient_provider_failure(error: BaseException) -> bool:
         isinstance(error, LLMExecutionError)
         and error.category in _ABSORBABLE_EXECUTION_CATEGORIES
     )
+
+
+# Up to this many symbols a pipeline agent's market snapshot carries the whole
+# universe, trend-ordered. A cut inside a universe this small (DJIA_30, the
+# 30-name pools) made "spread across the universe" mean "across today's top 12
+# by trend", and the shortlist changed bar to bar (#541).
+SNAPSHOT_FULL_UNIVERSE_MAX = 30
+
+# Above that -- and always on the single-prompt path -- the snapshot keeps this
+# many top-trend names plus current holdings. A pipeline prompt says so
+# (``universe_note``); the single-prompt one lists every VALID SYMBOL instead.
+SNAPSHOT_SHORTLIST_SIZE = 12
+
+
+def _universe_note(*, ranked: int, held: int, universe_size: int) -> str:
+    """Describe a partial snapshot by what it actually holds this bar.
+
+    ``ranked`` can fall short of the shortlist size when few names have a bar,
+    and ``held`` counts only holdings the ranking did not already include.
+    """
+    shown = ranked + held
+    note = (
+        f"Snapshot shows {shown} of {universe_size} symbols: "
+        f"the top {ranked} by trend score"
+    )
+    if held:
+        noun = "holding" if held == 1 else "holdings"
+        note += f", plus {held} current {noun} outside them"
+    return note + "."
+
+
+def _insert_before(
+    mapping: Dict[str, Any], anchor: str, key: str, value: Any
+) -> Dict[str, Any]:
+    """A copy of ``mapping`` with ``key`` placed just ahead of ``anchor``."""
+    out: Dict[str, Any] = {}
+    for existing, existing_value in mapping.items():
+        if existing == anchor:
+            out[key] = value
+        out[existing] = existing_value
+    return out
 
 
 class PortfolioManager:
@@ -461,6 +505,13 @@ class PortfolioManager:
                 # opportunities, and ALWAYS include current holdings so it can
                 # actively manage / exit weak positions.
                 def _trend_score(sig: Dict) -> float:
+                    score = _raw_trend_score(sig)
+                    # A non-finite price or SMA makes the score NaN, and
+                    # ``sorted`` has no defined order with NaN keys: one such
+                    # name could scramble the ranking of every other name.
+                    return score if math.isfinite(score) else float("-inf")
+
+                def _raw_trend_score(sig: Dict) -> float:
                     price = float(sig.get("price", 0) or 0)
                     sma20 = float(sig.get("sma20", 0) or 0)
                     sma50 = float(sig.get("sma50", 0) or 0)
@@ -491,11 +542,50 @@ class PortfolioManager:
                     key=lambda kv: _trend_score(kv[1]),
                     reverse=True,
                 )
-                symbols_to_include = [sym for sym, _ in trend_sorted[:12]]
+                # Decide on the configured universe, not on how many names
+                # happen to have a bar this timestamp: a 31-name universe with
+                # one gap would otherwise flip between "everything" and "top 12
+                # plus a note" from bar to bar -- the same path dependence this
+                # cut was fixed for. ``max`` covers signals outside the
+                # configured list (and an empty one); the set, because the
+                # configured list is upper-cased but not de-duplicated.
+                universe_size = max(len(self._allowed_set), len(trend_sorted))
+                # Pipeline only. The single-prompt path keeps its shortlist:
+                # it already lists every VALID SYMBOL, its contract caps a
+                # reply at 10 actions, and the leaderboard's LLM entries run
+                # it -- their cached curves (matched on strategy, window,
+                # capital and prompt, nothing recording the snapshot) must
+                # stay comparable with any one re-run beside them.
+                show_whole_universe = (
+                    bool(pipeline) and universe_size <= SNAPSHOT_FULL_UNIVERSE_MAX
+                )
+                if show_whole_universe:
+                    symbols_to_include = [sym for sym, _ in trend_sorted]
+                else:
+                    symbols_to_include = [
+                        sym for sym, _ in trend_sorted[:SNAPSHOT_SHORTLIST_SIZE]
+                    ]
+                ranked_count = len(symbols_to_include)
                 # Guarantee every currently-held symbol is visible to the model
                 for sym in holdings:
                     if sym in signals and sym not in symbols_to_include:
                         symbols_to_include.append(sym)
+                if pipeline and not show_whole_universe:
+                    # The model must be told the snapshot is partial: the
+                    # pipeline prompt lists no VALID SYMBOLS and says only
+                    # "trade ONLY symbols listed in the market snapshot".
+                    # Placed just ahead of ``top_signals`` so the model reads
+                    # it first, without moving any other key.
+                    market_snapshot = _insert_before(
+                        market_snapshot,
+                        "top_signals",
+                        "universe_note",
+                        _universe_note(
+                            ranked=ranked_count,
+                            held=len(symbols_to_include) - ranked_count,
+                            universe_size=universe_size,
+                        ),
+                    )
             
             for symbol in symbols_to_include:
                 signal = signals[symbol]
