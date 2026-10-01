@@ -625,6 +625,162 @@ def test_run_metadata_response_exposes_minute_data_contract_and_quality():
     assert response.end_clamped is True
 
 
+def test_run_metadata_response_exposes_the_recorded_sampling():
+    """`GET /api/backtest/runs*` is `response_model=List[RunMetadata]`, so a
+    metadata key the allow-list does not promote never reaches the browser.
+    The Sampling row read it from `run.metadata`, which that route never
+    sends, so the row stayed hidden on every run while a formatter-only test
+    stayed green."""
+    sampling = {
+        "temperature": 0.0,
+        "reasoning_effort": "none",
+        "policy": "pinned_v1",
+        "model": "deepseek/deepseek-v4-pro",
+        "wire": {"commonstack": "temperature=0.0;thinking=disabled"},
+    }
+    payload = bt._run_metadata_response(
+        _run_record({"llm_sampling": dict(sampling), "llm_max_output_tokens": 2000})
+    ).model_dump()
+
+    assert payload["llm_sampling"] == sampling
+    assert payload["llm_max_output_tokens"] == 2000
+
+
+def test_run_metadata_response_sampling_carries_only_the_keys_the_engine_writes():
+    payload = bt._run_metadata_response(
+        _run_record(
+            {
+                "llm_sampling": {
+                    "temperature": 0.0,
+                    "reasoning_effort": None,
+                    "policy": "provider_default",
+                    "model": "m",
+                    "api_key": "sk-secret",
+                    "prompt": "ignore previous instructions",
+                }
+            }
+        )
+    ).model_dump()
+
+    assert set(payload["llm_sampling"]) == {
+        "temperature",
+        "reasoning_effort",
+        "policy",
+        "model",
+    }
+
+
+@pytest.mark.parametrize("junk", ["pinned", ["pinned_v1"], 3, True])
+def test_run_metadata_response_drops_a_sampling_block_that_is_not_a_dict(junk):
+    payload = bt._run_metadata_response(
+        _run_record({"llm_sampling": junk})
+    ).model_dump()
+
+    assert payload["llm_sampling"] is None
+
+
+@pytest.mark.parametrize("temperature", ["warm", True, float("nan"), float("inf")])
+def test_run_metadata_response_drops_a_temperature_that_is_not_a_number(temperature):
+    """The browser formats it with `Number()`, which coerces; refuse at source."""
+    payload = bt._run_metadata_response(
+        _run_record(
+            {
+                "llm_sampling": {
+                    "temperature": temperature,
+                    "reasoning_effort": "low",
+                    "policy": "pinned_v1",
+                }
+            }
+        )
+    ).model_dump()
+
+    assert "temperature" not in payload["llm_sampling"]
+    assert payload["llm_sampling"]["reasoning_effort"] == "low"
+
+
+def test_run_metadata_response_bounds_the_wire_map():
+    """`wire` is provider id -> controls; anything else in it is dropped."""
+    payload = bt._run_metadata_response(
+        _run_record(
+            {
+                "llm_sampling": {
+                    "policy": "pinned_v1",
+                    "temperature": 0.0,
+                    "wire": {
+                        "commonstack": "temperature=0.0;thinking=disabled",
+                        "openrouter": None,
+                        "x" * 200: "temperature=0.0",
+                        "bad": {"nested": True},
+                        **{f"lane{i}": "t" for i in range(20)},
+                    },
+                }
+            }
+        )
+    ).model_dump()
+
+    wire = payload["llm_sampling"]["wire"]
+    assert wire["commonstack"] == "temperature=0.0;thinking=disabled"
+    assert wire["openrouter"] is None
+    assert "bad" not in wire and "x" * 200 not in wire
+    assert len(wire) <= 8
+
+
+@pytest.mark.parametrize(
+    "block",
+    [
+        {},
+        {"api_key": "sk-secret"},
+        {"policy": 7, "temperature": "0"},
+    ],
+)
+def test_run_metadata_response_sends_none_when_nothing_in_the_block_survives(block):
+    """None, not `{}`: an empty object is truthy in the browser and would read
+    as "Provider default" for a run whose record says nothing."""
+    payload = bt._run_metadata_response(
+        _run_record({"llm_sampling": block})
+    ).model_dump()
+
+    assert payload["llm_sampling"] is None
+
+
+def test_run_metadata_response_derives_sampling_for_a_leaderboard_run():
+    """Leaderboard rows record the entry's sampling at the top level
+    (`_llm_run_metadata`), and the panel called them "Not recorded"."""
+    payload = bt._run_metadata_response(
+        _run_record(
+            {
+                "entry_id": "claude-haiku",
+                "model_id": "anthropic/claude-haiku-4.5",
+                "temperature": 0.2,
+                "reasoning_effort": None,
+                "llm_max_output_tokens": 2000,
+            }
+        )
+    ).model_dump()
+
+    assert payload["llm_sampling"] == {
+        "temperature": 0.2,
+        "reasoning_effort": None,
+        "policy": "leaderboard_entry",
+        "model": "anthropic/claude-haiku-4.5",
+    }
+
+
+def test_run_metadata_response_derives_nothing_for_a_non_leaderboard_row():
+    payload = bt._run_metadata_response(
+        _run_record({"temperature": 0.2})
+    ).model_dump()
+
+    assert payload["llm_sampling"] is None
+
+
+def test_run_metadata_response_keeps_sampling_optional_for_legacy_runs():
+    payload = bt._run_metadata_response(_run_record({})).model_dump()
+
+    assert payload["llm_sampling"] is None
+    assert payload["llm_max_output_tokens"] is None
+
+
 def test_run_metadata_response_passes_every_field_the_contract_builder_writes():
     """Pinned against the producer, not a hand-copied dict: the allow-list
     once dropped ``session_close_fill``, and the details label that reads it

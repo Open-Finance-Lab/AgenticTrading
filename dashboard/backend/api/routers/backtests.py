@@ -13,6 +13,7 @@ registered before ``/api/backtest/{run_id}`` and ``/runs/latest/metrics`` before
 """
 
 import json
+import math
 import os
 import re
 import signal
@@ -297,6 +298,14 @@ class RunMetadata(BaseModel):
     baseline_buyhold_run_id: Optional[str] = None
     llm_model: Optional[str] = None
     llm_execution: Optional[Dict[str, Any]] = None
+    # What the run asked every model call to sample with, and the output
+    # ceiling it asked under. Both are written on every LLM run and never on a
+    # rule-based one, which is what the results panel reads to decide whether
+    # a Sampling row applies at all. They have to be fields here: this model is
+    # the list route's whole response, so a metadata key it does not declare
+    # never reaches the browser.
+    llm_sampling: Optional[Dict[str, Any]] = None
+    llm_max_output_tokens: Optional[int] = None
     data_source: str = ALPACA
     market: Optional[str] = None
     universe: Optional[str] = None
@@ -398,6 +407,87 @@ class BacktestChartData(BaseModel):
     index_baselines_ok: bool = True
 
 
+# The keys the engine writes in `HourlyBacktester._llm_sampling_metadata`, with
+# the type each must have to be passed on. The row is rendered from this block
+# on a public list route, so anything else in it -- or a value of another type,
+# which the browser's `Number()` would quietly coerce -- is dropped here.
+_LLM_SAMPLING_FIELDS = ("temperature", "reasoning_effort", "policy", "model")
+_LLM_SAMPLING_TEXT_LIMIT = 128
+# `wire` maps a provider id to the controls that lane put on the request.
+# Bounded like the request's own candidate list (`provider_ids`, max 8).
+_LLM_SAMPLING_WIRE_LIMIT = 8
+# Leaderboard runs (`leaderboard/service.py::_llm_run_metadata`) record the
+# entry's configured temperature/reasoning_effort at the top level and carry no
+# `llm_sampling` block; `entry_id` is what marks such a row.
+LEADERBOARD_SAMPLING_POLICY = "leaderboard_entry"
+
+
+def _sanitized_text(item: Any) -> Optional[str]:
+    if isinstance(item, str) and len(item) <= _LLM_SAMPLING_TEXT_LIMIT:
+        return item
+    return None
+
+
+def _sanitized_llm_sampling(value: Any) -> Optional[Dict[str, Any]]:
+    """The recorded sampling block, or None when nothing in it is usable.
+
+    None rather than ``{}``: an empty dict is truthy in the browser, and the
+    panel would read it as a run that pinned nothing ("Provider default")
+    when it is a run whose record says nothing ("Not recorded").
+    """
+    if not isinstance(value, dict):
+        return None
+    safe: Dict[str, Any] = {}
+    for name in _LLM_SAMPLING_FIELDS:
+        if name not in value:
+            continue
+        item = value[name]
+        if item is None:
+            safe[name] = None
+        elif name == "temperature":
+            if (
+                isinstance(item, (int, float))
+                and not isinstance(item, bool)
+                and math.isfinite(item)
+            ):
+                safe[name] = item
+        elif _sanitized_text(item) is not None:
+            safe[name] = item
+    wire = value.get("wire")
+    if isinstance(wire, dict):
+        safe_wire: Dict[str, Optional[str]] = {}
+        for provider_id, controls in list(wire.items())[:_LLM_SAMPLING_WIRE_LIMIT]:
+            if _sanitized_text(provider_id) is None:
+                continue
+            if controls is None or _sanitized_text(controls) is not None:
+                safe_wire[provider_id] = controls
+        safe["wire"] = safe_wire
+    if not any(safe.get(name) is not None for name in _LLM_SAMPLING_FIELDS):
+        return None
+    return safe
+
+
+def _leaderboard_llm_sampling(metadata: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """A sampling block for a leaderboard row, from the config it recorded.
+
+    Derived here rather than written by the leaderboard so the rows already
+    on the board get it too: their metadata has said what was sent all along,
+    and without this the panel called them "Not recorded".
+    """
+    if not metadata.get("entry_id") or not (
+        "temperature" in metadata or "reasoning_effort" in metadata
+    ):
+        return None
+    return _sanitized_llm_sampling(
+        {
+            "temperature": metadata.get("temperature"),
+            "reasoning_effort": metadata.get("reasoning_effort"),
+            "policy": LEADERBOARD_SAMPLING_POLICY,
+            "model": metadata.get("model_id"),
+        }
+    )
+
+
 def _run_metadata_response(run: Dict[str, Any]) -> RunMetadata:
     """Expose data provenance while keeping historical runs backward compatible."""
     metadata = run.get("metadata")
@@ -440,6 +530,8 @@ def _run_metadata_response(run: Dict[str, Any]) -> RunMetadata:
             "t1_deferred_events",
             "t1_deferred_shares",
             "llm_execution",
+            "llm_sampling",
+            "llm_max_output_tokens",
             "frequency_contract",
             "market_data_quality",
             "market_data_feed",
@@ -459,6 +551,12 @@ def _run_metadata_response(run: Dict[str, Any]) -> RunMetadata:
                         ).model_dump(mode="json")
                     except Exception:  # noqa: BLE001 - legacy/malformed metadata
                         continue
+                elif field == "llm_sampling":
+                    payload[field] = _sanitized_llm_sampling(metadata[field])
+                elif field == "llm_max_output_tokens":
+                    ceiling = metadata[field]
+                    if isinstance(ceiling, int) and not isinstance(ceiling, bool):
+                        payload[field] = ceiling
                 elif field == "frequency_contract" and isinstance(
                     metadata[field], dict
                 ):
@@ -499,6 +597,10 @@ def _run_metadata_response(run: Dict[str, Any]) -> RunMetadata:
                     }
                 else:
                     payload[field] = metadata[field]
+        if "llm_sampling" not in metadata:
+            leaderboard_sampling = _leaderboard_llm_sampling(metadata)
+            if leaderboard_sampling is not None:
+                payload["llm_sampling"] = leaderboard_sampling
     # After the metadata copy, so `decision_source` above is already the
     # requested value and this cannot overwrite it with the observed one. The
     # block is the single producer of both, so the two can never be computed

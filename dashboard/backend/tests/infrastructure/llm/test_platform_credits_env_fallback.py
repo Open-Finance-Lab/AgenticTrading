@@ -1410,3 +1410,46 @@ def test_byok_waits_out_a_long_retry_after_rather_than_aborting(
 
     assert h.service.execute(request) == "ok"
     assert h.sleeps == [45.0]
+
+
+@pytest.mark.parametrize(
+    ("wire", "expected"),
+    [
+        ("temperature=0.0;thinking=disabled", "temperature=0.0;thinking=disabled"),
+        (None, None),
+        # Evidence, not the answer: an over-long value is dropped, never
+        # allowed to fail a call that has already been settled.
+        ("x" * 200, None),
+    ],
+)
+def test_the_adapters_sampling_wire_reaches_the_result(
+    tmp_path, monkeypatch, wire, expected
+):
+    monkeypatch.setenv("COMMONSTACK_API_KEY", "cs-fake-wire-abcd")
+    primary_adapter = ScriptedExecutionAdapter(
+        [ProviderExecutionError(ExecutionErrorCategory.PROVIDER_QUOTA_EXHAUSTED)]
+    )
+    fallback_adapter = ScriptedExecutionAdapter(
+        [
+            AdapterResponse(
+                text="BUY",
+                model_id="qwen/qwen3.7-plus",
+                usage=LLMUsage(input_tokens=40, output_tokens=20),
+                sampling_wire=wire,
+            )
+        ]
+    )
+    service, _credits_store = _execution_service(
+        tmp_path,
+        monkeypatch,
+        primary_adapter,
+        adapters={"openrouter": primary_adapter, "commonstack": fallback_adapter},
+    )
+    request = _failover_request("wire-run").model_copy(
+        update={"model_id": "qwen/qwen3.7-plus"}
+    )
+
+    result = service.execute(request)
+
+    assert result.provider_id == "commonstack"
+    assert result.sampling_wire == expected

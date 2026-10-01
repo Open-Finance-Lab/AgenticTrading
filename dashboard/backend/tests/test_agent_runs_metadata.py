@@ -151,6 +151,13 @@ def test_engine_llm_run_metadata_snapshot(monkeypatch):
         "reporting_currency": "USD",
         "lot_size": 1,
         "llm_max_output_tokens": 777,
+        "llm_sampling": {
+            "temperature": None,
+            "reasoning_effort": None,
+            "policy": "provider_default",
+            "model": None,
+            "wire": {},
+        },
     }
     backtester.use_llm = False
     assert backtester._agent_run_metadata() == {
@@ -160,6 +167,42 @@ def test_engine_llm_run_metadata_snapshot(monkeypatch):
         "reporting_currency": "USD",
         "lot_size": 1,
     }
+
+
+def test_engine_records_the_pinned_sampling(monkeypatch):
+    """A row that does not say what it sent cannot be reproduced. The block
+    comes from the execution client, which imposed the catalog policy on every
+    call; thinking off (`"none"`) is a value the run sent, so it records as
+    pinned like any other, and `wire` says which shape each lane carried."""
+    import dashboard.backend.domain.backtesting.engine as engine_mod
+
+    class _Client:
+        def sampling_record(self):
+            return {
+                "temperature": 0.0,
+                "reasoning_effort": "none",
+                "policy": "pinned_v1",
+                "model": "deepseek/deepseek-v4-pro",
+                "wire": {"commonstack": "temperature=0.0;thinking=disabled"},
+            }
+
+        def execution_summary(self):
+            return None
+
+    backtester = engine_mod.HourlyBacktester.__new__(engine_mod.HourlyBacktester)
+    backtester.prompt_adaptations = []
+    backtester.initial_pipeline = None
+    backtester.pipeline = None
+    backtester.symbols = ["AAPL"]
+    backtester.data_source = "alpaca"
+    backtester.use_llm = True
+    backtester.model = "deepseek/deepseek-v4-pro"
+    backtester.execution_client = _Client()
+    monkeypatch.setattr(engine_mod.llm_harness, "DEFAULT_MAX_OUTPUT_TOKENS", 2000)
+
+    assert backtester._agent_run_metadata()["llm_sampling"] == (
+        _Client().sampling_record()
+    )
 
 
 def test_baseline_metadata_is_provenance_only(monkeypatch):

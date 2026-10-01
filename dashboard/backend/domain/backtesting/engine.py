@@ -1655,6 +1655,33 @@ class HourlyBacktester:
             )
         return metadata
 
+    def _llm_sampling_metadata(self) -> Dict:
+        """What this run asked every model call to sample with.
+
+        Recorded beside ``llm_max_output_tokens`` for the same reason: the
+        request shape is what makes two runs of one configuration comparable,
+        and a row that does not say what it sent cannot be reproduced. The
+        execution client owns the answer, because it is what imposes the
+        catalog policy on every call (``sampling_record``), including the
+        per-lane ``wire`` shape a failover changes. A run without one -- an
+        in-process or CLI run on a plain SDK client -- pinned nothing, which
+        ``provider_default`` names so that an absent key on an older row
+        still reads as "not recorded", never as "default".
+        """
+        execution_client = getattr(self, "execution_client", None)
+        record = getattr(execution_client, "sampling_record", None)
+        if callable(record):
+            value = record()
+            if isinstance(value, dict):
+                return value
+        return {
+            "temperature": None,
+            "reasoning_effort": None,
+            "policy": "provider_default",
+            "model": getattr(self, "model", None),
+            "wire": {},
+        }
+
     def _agent_run_metadata(self) -> Dict:
         """Provenance plus the effective config the agent run actually used.
 
@@ -1709,6 +1736,7 @@ class HourlyBacktester:
             meta["decision_steps"] = int(decision_steps)
         if self.use_llm:
             meta["llm_max_output_tokens"] = llm_harness.DEFAULT_MAX_OUTPUT_TOKENS
+            meta["llm_sampling"] = self._llm_sampling_metadata()
         llm_execution = getattr(self, "_llm_execution_evidence", None)
         execution_client = getattr(self, "execution_client", None)
         if llm_execution is None and execution_client is not None:

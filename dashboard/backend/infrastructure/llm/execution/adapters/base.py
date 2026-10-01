@@ -91,6 +91,14 @@ class AdapterResponse:
     # the output ceiling, so an unparseable body is a truncation, not a
     # malformed answer. ``None`` when the provider reported nothing.
     finish_reason: str | None = None
+    # What the adapter sent for sampling, via ``describe_sampling_wire``.
+    sampling_wire: str | None = None
+
+
+def describe_sampling_wire(controls: list[str]) -> str | None:
+    """Join the sampling controls an adapter sent; ``None`` when it sent none."""
+
+    return ";".join(controls) if controls else None
 
 
 class ProviderExecutionError(LLMExecutionError):
@@ -261,6 +269,7 @@ __all__ = [
     "FINISH_REASON_MAX_TOKENS",
     "SDK_MAX_RETRIES",
     "AdapterResponse",
+    "describe_sampling_wire",
     "ClientFactory",
     "CredentialMaterial",
     "ProviderExecutionAdapter",

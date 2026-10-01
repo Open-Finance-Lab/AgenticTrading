@@ -6,6 +6,10 @@ from collections.abc import Mapping, Sequence
 from types import SimpleNamespace
 from typing import Any
 
+from dashboard.backend.domain.model_providers.execution_catalog import (
+    SamplingPolicy,
+    sampling_policy_for,
+)
 from dashboard.backend.infrastructure.llm.execution.errors import (
     ExecutionErrorCategory,
     LLMExecutionError,
@@ -78,6 +82,13 @@ class AnthropicCompatibleExecutionClient:
         self.fail_closed = True
         self._next_call_index = 0
         self._completed_results: list[LLMExecutionResult] = []
+        # The catalog's sampling policy for the signed model id. Resolved here,
+        # beside the one identity the child cannot forge, and imposed on every
+        # call below -- so no call site (pipeline step, recovery retry,
+        # failover, post-trade review, or one written later) can send
+        # something else by forgetting to thread it. None only for a model the
+        # catalog lacks, which the route refuses to launch.
+        self.sampling: SamplingPolicy | None = sampling_policy_for(handoff.model_id)
         self.messages = _Messages(self)
 
     def _create(self, **kwargs: Any) -> Any:
@@ -107,6 +118,12 @@ class AnthropicCompatibleExecutionClient:
             reasoning_effort = kwargs.get("reasoning_effort")
             if reasoning_effort is not None and not isinstance(reasoning_effort, str):
                 raise ValueError("reasoning_effort must be a string")
+            if self.sampling is not None:
+                # The policy wins over whatever the caller passed, both halves
+                # at once: a caller's temperature on GPT-5.5 is a 400, and on
+                # DeepSeek with thinking left on it is ignored.
+                temperature = self.sampling.temperature
+                reasoning_effort = self.sampling.reasoning_effort
             request = LLMExecutionRequest(
                 user_id=self.handoff.user_id,
                 run_id=self.handoff.run_id,
@@ -146,6 +163,36 @@ class AnthropicCompatibleExecutionClient:
             # without knowing which client built the response.
             stop_reason=getattr(result, "finish_reason", None),
         )
+
+    def sampling_record(self) -> dict[str, Any]:
+        """What this run asked every call to sample with, and what each lane sent.
+
+        ``wire`` maps each provider that answered a call to the controls the
+        adapter put on the wire there. The same policy takes a different shape
+        per lane (CommonStack ``thinking=disabled``, OpenRouter
+        ``reasoning.effort=none,enabled=false``), and only some of those
+        shapes have been probed, so a run that failed over says so here
+        instead of claiming one shape for every bar. A lane that answered with
+        nothing sent maps to ``None``.
+        """
+
+        policy = self.sampling
+        wire: dict[str, str | None] = {}
+        for result in self._completed_results:
+            wire.setdefault(result.provider_id, result.sampling_wire)
+        if policy is None:
+            label = "unresolved"
+        elif policy.pinned:
+            label = "pinned_v1"
+        else:
+            label = "provider_default"
+        return {
+            "temperature": policy.temperature if policy else None,
+            "reasoning_effort": policy.reasoning_effort if policy else None,
+            "policy": label,
+            "model": self.handoff.model_id,
+            "wire": wire,
+        }
 
     def execution_summary(self) -> LLMRunEvidence | None:
         """Return safe, backend-authoritative evidence for completed calls."""

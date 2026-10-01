@@ -196,6 +196,12 @@ class LLMExecutionResult(BaseModel):
     # Normalised provider stop reason (``"max_tokens"`` when the reply was cut
     # at the output ceiling); ``None`` when the provider reported none.
     finish_reason: str | None = Field(default=None, max_length=32)
+    # The sampling controls the adapter actually put on the wire for this
+    # attempt (``describe_sampling_wire``), e.g. ``temperature=0.0;
+    # thinking=disabled``. ``None`` when it sent none. Recorded because the
+    # same policy takes a different shape on each lane, and a run that failed
+    # over must be able to say which shape its decisions came from.
+    sampling_wire: str | None = Field(default=None, max_length=128)
 
 
 class LLMRunEvidence(BaseModel):
