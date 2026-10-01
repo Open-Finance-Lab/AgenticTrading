@@ -28,7 +28,9 @@ from dashboard.backend.infrastructure.llm.backtest_harness import (
 from dashboard.backend.infrastructure.llm.execution.errors import (
     ExecutionErrorCategory,
     LLMExecutionError,
+    is_transient_provider_failure,
 )
+from dashboard.backend.infrastructure.llm.execution.log_safe import log_safe_token
 
 POST_TRADE_PRESET_KEY = "post_trade_analysis"
 
@@ -48,6 +50,15 @@ beyond the episode context."""
 # for both reasoning tokens and the final JSON. This is intentionally scoped to
 # retries so reasoning stays enabled without doubling every successful call.
 RECOVERY_MAX_OUTPUT_TOKENS = max(DEFAULT_MAX_OUTPUT_TOKENS, 4096)
+
+# The widest snapshot the configured ceiling is calibrated for: pipeline
+# agents saw a 12-name shortlist until #541. A 30-name snapshot invites a
+# 30-order reply (the starter instruction buys "as many listed stocks as the
+# cash allows"), which with reasoning tokens can run past a 2000-token ceiling
+# and be paid for twice -- once truncated, once at the recovery ceiling.
+# Wider snapshots start at the recovery ceiling instead. Credits settle on
+# usage, so the higher ceiling raises only the per-call hold, not the bill.
+DEFAULT_CEILING_SNAPSHOT_SYMBOLS = 12
 
 
 def escalate_ceiling_on_retry() -> bool:
@@ -156,7 +167,9 @@ def _build_step_prompt(
             [
                 "",
                 "=== MARKET SNAPSHOT ===",
-                json.dumps(market_snapshot, indent=2),
+                # Compact: with indent=2 a 30-name snapshot is ~300 lines,
+                # and much of its token count is indentation.
+                json.dumps(market_snapshot, separators=(",", ":")),
             ]
         )
 
@@ -417,6 +430,51 @@ def _build_post_trade_prompt(
     )
 
 
+def _post_trade_failure_is_holdable(exc: BaseException) -> bool:
+    """Whether a hosted (``fail_closed``) run may hold its prompts through ``exc``.
+
+    A provider outage, or ``RESPONSE_INVALID`` -- the execution layer's
+    spelling of the empty reply a reasoning model gives when its thinking eats
+    the ceiling, which the unbilled local path already holds through as an
+    unparseable reply. Both release the call's Credits reservation before
+    raising, so holding costs a day's adaptation and nothing else. Billing,
+    credential and quota failures stay fatal: absorbing them would let the run
+    continue unbilled or unauthorised.
+    """
+    return is_transient_provider_failure(exc) or (
+        isinstance(exc, LLMExecutionError)
+        and exc.category is ExecutionErrorCategory.RESPONSE_INVALID
+    )
+
+
+def _report_post_trade_skipped(
+    category: str, step: Dict[str, Any], ordinal: int
+) -> None:
+    """Print one line for a held post-trade step; the parent relays ``ERROR: llm.`` live.
+
+    ``step`` is the step's position among the post-trade steps -- the number
+    the ``📉 Post-trade analysis`` line prints -- and ``step_id`` its id when
+    that is log-safe. The user-authored label is never printed here.
+    """
+    print(
+        "ERROR: llm.post_trade_skipped "
+        f"category={category} step={ordinal} "
+        f"step_id={log_safe_token(step.get('id'))}",
+        flush=True,
+    )
+
+
+def _skipped_post_trade_step(
+    step: Dict[str, Any], ordinal: int, reason: str
+) -> Dict[str, Any]:
+    return {
+        "step": ordinal,
+        "step_id": step.get("id"),
+        "label": step.get("label"),
+        "reason": reason,
+    }
+
+
 def run_post_trade_analysis(
     client,
     *,
@@ -434,6 +492,21 @@ def run_post_trade_analysis(
 
     Returns ``(new_decision_pipeline, analysis_record, (in_tokens, out_tokens), llm_calls)``.
     On failure, returns the original decision pipeline unchanged.
+
+    A step that produced no usable analysis holds the prompts and is listed in
+    the record's ``skipped_steps`` with its reason -- an execution category
+    such as ``provider_timeout``, ``no_text``, ``unparseable``, or
+    ``not_attempted`` for a step after a provider outage that day. Without it
+    an outage day and a malformed-reply day leave identical records.
+
+    On a hosted (``fail_closed``) client only failures that
+    ``_post_trade_failure_is_holdable`` admits are held; every other one
+    raises. A held step spends no strike: it never touches ``llm_decisions``,
+    so H6 coverage is not at stake, and spending the decision-step outage
+    budget here would make the next decision-step outage fatal. Nor is there a
+    post-trade budget: a review that never runs costs the run its adaptation,
+    not its correctness, and each hold is visible -- one relayed ``ERROR:
+    llm.post_trade_skipped`` line plus its ``skipped_steps`` entry.
     """
     if not post_trade_steps:
         return list(decision_pipeline or []), {}, (0, 0), 0
@@ -444,18 +517,30 @@ def run_post_trade_analysis(
     working = copy.deepcopy(decision_pipeline or [])
     last_parsed: Dict[str, Any] = {}
     applied: List[Dict[str, Any]] = []
+    skipped: List[Dict[str, Any]] = []
+    provider_down = False
 
     for index, step in enumerate(post_trade_steps):
         if not isinstance(step, dict):
+            continue
+        ordinal = index + 1
+        if provider_down:
+            # Another request now would pay the full retry and failover wait
+            # again, against the 3600s run budget, for the same answer.
+            skipped.append(_skipped_post_trade_step(step, ordinal, "not_attempted"))
             continue
         prompt = _build_post_trade_prompt(
             step=step,
             episode_context=episode_context,
             decision_pipeline=working,
         )
-        label = step.get("label") or f"Post-trade {index + 1}"
-        print(f"\n📉 Post-trade analysis: {label} (day={episode_context.get('trading_day')})")
+        label = step.get("label") or f"Post-trade {ordinal}"
+        print(
+            f"\n📉 Post-trade analysis {ordinal}/{len(post_trade_steps)}: "
+            f"{label} (day={episode_context.get('trading_day')})"
+        )
 
+        response_text: Optional[str] = None
         try:
             request = {
                 "model": model or LLM_MODEL_NAME,
@@ -472,15 +557,30 @@ def run_post_trade_analysis(
             in_delta, out_delta = extract_token_usage(response)
             total_in += in_delta
             total_out += out_delta
-            parsed = parse_llm_response(extract_response_text(response))
+            response_text = response_text_or_none(response)
+            parsed = parse_llm_response(response_text) if response_text is not None else None
         except Exception as exc:
             print(f"   ⚠️  Post-trade analysis failed: {exc}")
-            if getattr(client, "fail_closed", False):
+            if getattr(client, "fail_closed", False) and not _post_trade_failure_is_holdable(exc):
                 raise
-            parsed = None
+            reason = exc.category.value if isinstance(exc, LLMExecutionError) else "error"
+            skipped.append(_skipped_post_trade_step(step, ordinal, reason))
+            if isinstance(exc, LLMExecutionError):
+                _report_post_trade_skipped(reason, step, ordinal)
+            if is_transient_provider_failure(exc):
+                provider_down = True
+                print("   ⚠️  Provider unavailable; keeping prompts unchanged for the rest of this day")
+            else:
+                print("   ⚠️  No usable post-trade reply; keeping prompts unchanged")
+            continue
 
         if not isinstance(parsed, dict):
-            print("   ⚠️  Post-trade returned unparseable JSON; keeping prompts unchanged")
+            if response_text is None:
+                print("   ⚠️  Post-trade response carried no text block; keeping prompts unchanged")
+                skipped.append(_skipped_post_trade_step(step, ordinal, "no_text"))
+            else:
+                print("   ⚠️  Post-trade returned unparseable JSON; keeping prompts unchanged")
+                skipped.append(_skipped_post_trade_step(step, ordinal, "unparseable"))
             continue
 
         last_parsed = parsed
@@ -500,6 +600,7 @@ def run_post_trade_analysis(
         "summary": last_parsed.get("summary") if last_parsed else None,
         "prompt_problems": last_parsed.get("prompt_problems") if last_parsed else [],
         "applied_patches": applied,
+        "skipped_steps": skipped,
     }
     return working, record, (total_in, total_out), llm_calls
 
@@ -543,6 +644,14 @@ def _create_pipeline_response(
     if reasoning_effort is not None:
         request["reasoning_effort"] = reasoning_effort
     return client.messages.create(**request)
+
+
+def _first_attempt_ceiling(market_snapshot: Dict[str, Any]) -> int:
+    """Output ceiling for a step's first attempt (see ``DEFAULT_CEILING_SNAPSHOT_SYMBOLS``)."""
+    signals = market_snapshot.get("top_signals") if isinstance(market_snapshot, dict) else None
+    if len(signals or {}) > DEFAULT_CEILING_SNAPSHOT_SYMBOLS:
+        return RECOVERY_MAX_OUTPUT_TOKENS
+    return DEFAULT_MAX_OUTPUT_TOKENS
 
 
 def _retry_with_recovery_budget(
@@ -750,6 +859,10 @@ def run_pipeline_decision(
     step) rather than raising an error the provider never produced, so the
     usage already recorded for the step — a real, billed call — is returned to
     the caller instead of being lost with the exception.
+
+    A snapshot wider than ``DEFAULT_CEILING_SNAPSHOT_SYMBOLS`` starts every
+    step at ``RECOVERY_MAX_OUTPUT_TOKENS``, so a truncated reply there has no
+    second attempt (it would be the same request); an empty one still does.
     """
     decision_steps, _post_trade_steps = split_pipeline(pipeline)
     if not decision_steps:
@@ -759,6 +872,11 @@ def run_pipeline_decision(
     usage = _StepUsage()
     last_parsed: Optional[Dict[str, Any]] = None
     request_model = model or LLM_MODEL_NAME
+    first_ceiling = _first_attempt_ceiling(market_snapshot)
+    # A truncated reply that already had the recovery ceiling would be retried
+    # with the same request. (When the configured ceiling is itself at least
+    # the recovery one, nothing is raised and the retry stays as it was.)
+    truncation_retry_allowed = first_ceiling <= DEFAULT_MAX_OUTPUT_TOKENS
 
     for index, step in enumerate(decision_steps):
         if not isinstance(step, dict):
@@ -783,6 +901,7 @@ def run_pipeline_decision(
                 prompt=prompt,
                 temperature=temperature,
                 reasoning_effort=reasoning_effort,
+                max_tokens=first_ceiling,
             )
         except LLMExecutionError as first_error:
             if first_error.category is not ExecutionErrorCategory.RESPONSE_INVALID:
@@ -808,7 +927,7 @@ def run_pipeline_decision(
         else:
             parsed = parse_llm_response(response_text)
         reason = None
-        if parsed is None and not retried:
+        if parsed is None and not retried and truncation_retry_allowed:
             reason = truncation_reason(response, out_delta, response_text or "")
         if reason is not None:
             print(

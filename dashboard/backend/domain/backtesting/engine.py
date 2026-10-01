@@ -66,7 +66,6 @@ from dashboard.backend.domain.backtesting.currency import (
     CurrencyContext,
     CurrencyContextError,
 )
-from dashboard.backend.domain.backtesting.features import TechnicalIndicators
 from dashboard.backend.domain.backtesting.bar_aggregation import (
     ExecutionFill,
     aggregate_bars_by_symbol,
@@ -116,8 +115,10 @@ from dashboard.backend.infrastructure.market_data.provider import (
     exclusive_end,
     parse_ymd,
     settled_exclusive_end,
+    warmup_fetch_start,
     window_provenance,
 )
+from dashboard.backend.domain.backtesting import indicator_warmup
 from dashboard.backend.infrastructure.market_data.frequency import (
     FrequencyConfigError,
     build_verified_intraday_contract,
@@ -133,6 +134,7 @@ from dashboard.backend.infrastructure.market_data.profiles import (
     IFIND_ASHARE,
     LLM_DECISION_SOURCE,
     RULE_BASED_DECISION_SOURCE,
+    VNPY_SIMULATION,
     MarketProfile,
     get_market_profile,
     resolve_decision_source,
@@ -223,6 +225,24 @@ def _prior_market_date_by_decision_date(
         decision_date: market_dates[index - 1] if index else None
         for index, decision_date in enumerate(market_dates)
     }
+
+
+def _accepts_keyword(function, name: str, *, via_var_keyword: bool = True) -> bool:
+    """Whether ``function`` takes ``name``, so an optional argument can be
+    offered without breaking a provider (or test double) that predates it.
+
+    ``via_var_keyword=False`` requires ``name`` to be declared: a wrapper that
+    forwards ``**kwargs`` to an inner callable says nothing about whether the
+    INNER one takes it, and guessing wrong raises ``TypeError`` mid-load."""
+    try:
+        parameters = inspect.signature(function).parameters.values()
+    except (TypeError, ValueError):
+        return False
+    return any(
+        parameter.name == name
+        or (via_var_keyword and parameter.kind == inspect.Parameter.VAR_KEYWORD)
+        for parameter in parameters
+    )
 
 
 class HourlyBacktester:
@@ -406,6 +426,12 @@ class HourlyBacktester:
         else:
             self.symbols = list(DJIA_30)
         self.all_data = {}
+        # Bars before `start_date`, per symbol: indicator input only (#540).
+        self.warmup_data = {}
+        self.warmup_start_date = None
+        # What the pad delivered, per `indicator_warmup.warmup_evidence`; None
+        # when the run fetched no pad.
+        self.indicator_warmup = None
         wants_llm = self.decision_source == LLM_DECISION_SOURCE
         self.use_llm = wants_llm and (execution_client is not None or HAS_ANTHROPIC)
         if self.runtime_type != PIPELINE_RUNTIME_TYPE:
@@ -490,16 +516,7 @@ class HourlyBacktester:
     def _create_market_data_provider(self):
         """Create the selected provider without breaking legacy test doubles."""
         factory = create_market_data_provider
-        try:
-            parameters = inspect.signature(factory).parameters.values()
-            accepts_source_timeframe = any(
-                parameter.name == "source_timeframe"
-                or parameter.kind == inspect.Parameter.VAR_KEYWORD
-                for parameter in parameters
-            )
-        except (TypeError, ValueError):
-            accepts_source_timeframe = False
-        if accepts_source_timeframe:
+        if _accepts_keyword(factory, "source_timeframe"):
             return factory(
                 self.data_source,
                 self.profile.universe,
@@ -1177,9 +1194,23 @@ class HourlyBacktester:
                 f"No completed session in {self.start_date}..{self.end_date} yet; "
                 "pick a window that ends before today."
             )
+        # From before the window, so the indicators are warm on its first bar
+        # (#540). The pad is split off below, ahead of anything that trades,
+        # values or gates on these frames.
+        padded = self._wants_indicator_warmup()
+        self.warmup_start_date = (
+            warmup_fetch_start(self.start_date) if padded else self.start_date
+        )
+        fetch_options = {}
+        if padded and self.data_source == IFIND_ASHARE and _accepts_keyword(
+            self.data_loader.fetch_bars, "depth_start", via_var_keyword=False
+        ):
+            # iFinD refuses a symbol short of a depth floor; that floor guards
+            # the traded window, so a thin pad must not trip it.
+            fetch_options["depth_start"] = self.start_date
         fetch_started_at = steady_clock()
         self.source_data = self.data_loader.fetch_bars(
-            symbols, self.start_date, self.provider_end_date
+            symbols, self.warmup_start_date, self.provider_end_date, **fetch_options
         )
         # Everything after this point in `loading_bars` -- the frequency
         # verification and, in intraday mode, `aggregate_bars_by_symbol` -- is
@@ -1234,6 +1265,19 @@ class HourlyBacktester:
                 ) from exc
         self.source_timeframe = actual_source_timeframe
         self.market_data_provenance = feed_provenance(self.source_data) or {}
+        # Split BEFORE aggregating, and rebind `source_data` to the window at
+        # once: the padded dict is released here instead of outliving two
+        # copies of itself, and a fetch holding only pad bars is reported as
+        # the no-data window it is on BOTH branches below. Aggregating the two
+        # halves apart changes nothing in the window -- a bucket never spans
+        # midnight.
+        self.source_data, warmup_source = self._split_warmup(self.source_data)
+        if not self.source_data:
+            print("❌ No data fetched for the window itself.")
+            raise MarketDataUnavailableError(
+                f"No {self.data_source} market data available for "
+                f"{self.start_date}..{self.end_date}"
+            )
         self.intraday_mode = timeframe_minutes(actual_source_timeframe) < timeframe_minutes(
             self.decision_timeframe
         )
@@ -1252,15 +1296,24 @@ class HourlyBacktester:
                 f"   Aggregating {actual_source_timeframe} source bars into "
                 f"{self.decision_timeframe} decision bars..."
             )
-            aggregated_data = aggregate_bars_by_symbol(
-                self.source_data,
-                source_timeframe=actual_source_timeframe,
-                decision_timeframe=self.decision_timeframe,
-                market=self.profile.market,
-                timezone=self.profile.timezone,
-            )
+
+            def aggregate(frames):
+                return aggregate_bars_by_symbol(
+                    frames,
+                    source_timeframe=actual_source_timeframe,
+                    decision_timeframe=self.decision_timeframe,
+                    market=self.profile.market,
+                    timezone=self.profile.timezone,
+                )
+
+            aggregated_data = aggregate(self.source_data)
             self.data_quality = summarize_aggregation_quality(aggregated_data)
             self.all_data = self._completed_decision_bars(aggregated_data)
+            self.warmup_data = (
+                self._completed_decision_bars(aggregate(warmup_source))
+                if warmup_source
+                else {}
+            )
             if not self.all_data:
                 raise MarketDataUnavailableError(
                     "Source bars were fetched, but no completed decision bars "
@@ -1268,10 +1321,67 @@ class HourlyBacktester:
                 )
         else:
             self.all_data = self.source_data
+            self.warmup_data = warmup_source
+        del warmup_source
+        if padded:
+            self._settle_indicator_warmup()
         if self.data_source == IFIND_ASHARE:
             self._ifind_common_start = self._validate_ifind_loaded_data()
             self._initialize_ifind_market_rules()
             self._initialize_ifind_currency_context()
+
+    def _split_warmup(
+        self, frames: Dict[str, Any]
+    ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+        """``(window, warmup)``: each frame cut at ``start_date``'s midnight on
+        the market's clock.
+
+        The window side is everything that trades, values, gates or is
+        recorded -- decisions, fills, the equity curve, both baselines, the
+        A-share rule and FX checks -- so it holds no bar before ``start_date``.
+        The warmup side only ever reaches ``calculate_indicators``. A symbol
+        with no bar in the window is dropped, as a provider omits a symbol
+        with no bars in the range it was asked for.
+        """
+        return indicator_warmup.split_at_start(
+            frames, self.start_date, self._effective_profile().timezone
+        )
+
+    def _wants_indicator_warmup(self) -> bool:
+        """Whether this run fetches the indicator pad (#540).
+
+        Only the pipeline runtime decides off the engine's indicators. A
+        hosted runtime (AI Hedge Fund) gets closes and loads its own lookback
+        upstream, so a pad there is a ~4-5x larger fetch -- quota, and memory
+        on the runtime issue #308 is about -- bought for nothing.
+        Not for the simulator either: it scripts prices by bar index from the
+        fetch start and seeds its base price on the requested window, so a pad
+        would move the scripted path into the pad and price the agent's
+        symbols off a different series than the index baseline's.
+        """
+        return (
+            getattr(self, "runtime_type", PIPELINE_RUNTIME_TYPE) == PIPELINE_RUNTIME_TYPE
+            and self.data_source != VNPY_SIMULATION
+        )
+
+    def _settle_indicator_warmup(self) -> None:
+        """Trim the pad at unadjusted price breaks and record what it holds."""
+        profile = self._effective_profile()
+        self.warmup_data, trims = indicator_warmup.trim_at_unadjusted_gaps(
+            self.warmup_data,
+            self.all_data,
+            market=profile.market,
+            timezone=profile.timezone,
+        )
+        self.indicator_warmup = indicator_warmup.warmup_evidence(
+            fetch_start=self.warmup_start_date,
+            warmup=self.warmup_data,
+            window_symbols=list(self.all_data),
+            trims=trims,
+        )
+        line = indicator_warmup.describe_evidence(self.indicator_warmup)
+        if line:
+            print(line)
 
     def _initialize_ifind_market_rules(self) -> None:
         """Load and validate official rules before any order can execute."""
@@ -1410,11 +1520,17 @@ class HourlyBacktester:
         self.publish_phase("indicators")
         print("\n📈 Calculating technical indicators...")
         count = 0
+        warmup_data = getattr(self, "warmup_data", None) or {}
         for symbol, df in self.all_data.items():
-            self.all_data[symbol] = TechnicalIndicators.calculate_indicators(df)
+            self.all_data[symbol] = indicator_warmup.warm_indicators(
+                df, warmup_data.get(symbol)
+            )
             count += 1
             if count % 5 == 0:
                 print(f"  ✅ {count}/{len(self.all_data)} symbols...")
+        # Spent: nothing after the indicators reads the pad, and a child's
+        # bar window is the memory `MAX_ACTIVE_DASHBOARD_BACKTESTS` multiplies.
+        self.warmup_data = {}
         if getattr(self, "data_source", None) == ALPACA:
             try:
                 self.all_data, self.equity_metadata = load_and_enrich_us_equity_bars(
@@ -1581,6 +1697,15 @@ class HourlyBacktester:
             transaction_cost_totals=getattr(self, "transaction_cost_totals", None),
             costs_applied=profile.transaction_cost_profile is not None,
         )
+        evidence = getattr(self, "indicator_warmup", None)
+        if evidence:
+            # What the indicator pad delivered (#540): `start_date` is still
+            # the first bar traded, but its sma50 read pad bars -- as many as
+            # this says, which a thin pad makes fewer than were asked for.
+            # Agent rows only -- the baselines compute no indicators, and the
+            # index baseline is fetched from `start_date`. Absent when no pad
+            # was fetched (simulator, hosted runtimes).
+            meta["indicator_warmup"] = evidence
         decision_source = getattr(self, "decision_source", None)
         if decision_source is not None:
             meta["decision_source"] = decision_source
@@ -2352,6 +2477,13 @@ class HourlyBacktester:
         print(f"     • Trades: {len(manager.trades)}")
         if self.prompt_adaptations:
             print(f"     • Post-trade adaptations: {len(self.prompt_adaptations)} day(s)")
+            skipped_days = sum(
+                1
+                for record in self.prompt_adaptations
+                if isinstance(record, dict) and record.get("skipped_steps")
+            )
+            if skipped_days:
+                print(f"     • Post-trade held without analysis: {skipped_days} day(s)")
         print(f"     • Final: ${final_eq:,.0f}")
         print(f"     • Return: {total_return*100:+.2f}%\n")
         

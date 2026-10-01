@@ -101,6 +101,13 @@ five of its thirty symbols (`AAPL`, `AMZN`, `GOOGL`, `MSFT`, `NVDA`) already on 
 and requests twenty-five. Per-request keying would miss that entirely, because the
 symbol lists differ.
 
+> **No longer true as of #540 (2026-10-01).** The agent's fetch now starts at the
+> indicator warm-up pad (`warmup_fetch_start`, 30 days before `start_date`) while the
+> index baseline still fetches from `start_date`, so the two share no key and the
+> Dow baseline fetch after a Mag7 run is a full miss. Per-symbol keying still pays
+> off for repeated runs over one window; the cross-fetch saving described above is
+> gone.
+
 ### Two things a cache hit must restore
 
 A hit that skips these is a silent behaviour change, not a speed-up:

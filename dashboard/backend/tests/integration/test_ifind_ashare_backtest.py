@@ -43,6 +43,9 @@ START = date(2026, 4, 1)
 END = date(2026, 4, 15)
 # The engine hands providers a half-open bound one day past the inclusive END.
 PROVIDER_END = date(2026, 4, 16)
+# Bars are fetched from 30 days before START for indicator warm-up (#540); the
+# market rules and FX still cover the traded window.
+WARMUP_START = date(2026, 3, 2)
 
 
 def _official_payload(
@@ -504,7 +507,7 @@ def test_ifind_llm_request_reaches_engine_database_and_chart_without_fallback(
     thread.run_target()
 
     assert backtests_router.backtest_status["error"] is None
-    assert fake_ifind.calls == [(symbols, START, PROVIDER_END)]
+    assert fake_ifind.calls == [(symbols, WARMUP_START, PROVIDER_END)]
     assert [call[3] for call in fake_ifind.fx_calls] == ["RMB", "MHB"]
     assert len(fake_execution.requests) == 40
     assert all(
@@ -643,7 +646,7 @@ def test_ifind_offline_response_reaches_engine_database_and_chart(
     )
     backtest_hourly_agent.main()
 
-    assert fake_client.calls == [(symbols, START, PROVIDER_END)]
+    assert fake_client.calls == [(symbols, WARMUP_START, PROVIDER_END)]
     assert fake_client.market_rule_calls == [(symbols, START, PROVIDER_END)]
     assert [call[3] for call in fake_client.fx_calls] == ["RMB", "MHB"]
     frames = observed["frames"]
@@ -712,6 +715,11 @@ def test_ifind_offline_response_reaches_engine_database_and_chart(
     # asserted against the curve, not against itself, so a run that stopped
     # recording it cannot pass.
     decision_steps = agent_run["metadata"].pop("decision_steps")
+    # The offline response covers the window alone: an empty pad, recorded
+    # per symbol (#540) rather than passed off as warm indicators.
+    warmup = agent_run["metadata"].pop("indicator_warmup")
+    assert warmup["min_pad_bars"] == 0
+    assert set(warmup["short_symbols"]) == set(symbols)
     assert decision_steps == len(test_db.get_equity_curve(agent_run_id))
     assert agent_run["llm_decisions"] == 0
     # A run with no fills writes no cost totals. The baseline may have initial

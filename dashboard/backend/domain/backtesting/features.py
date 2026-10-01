@@ -48,6 +48,10 @@ _GROUPS = (
     (("sma50",), 50),
 )
 
+# The longest prefix any indicator needs before the library answers for it:
+# a row is warm in every column once it has this many usable closes.
+LONGEST_LOOKBACK_BARS = max(bars for _, bars in _GROUPS)
+
 
 def _usable_close(close: pd.Series) -> pd.Series:
     try:

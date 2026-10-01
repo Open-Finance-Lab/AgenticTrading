@@ -33,6 +33,7 @@ from dashboard.backend.infrastructure.market_data.alpaca_bars import (
 )
 from dashboard.backend.infrastructure.market_data.provider import (
     settled_exclusive_end,
+    warmup_fetch_start,
 )
 from dashboard.backend.infrastructure.market_data.sessions import DEFAULT_MARKET
 from dashboard.backend.paths import CONFIG_DIR
@@ -75,23 +76,30 @@ def _defaults_window():
 def warm_windows() -> List[Tuple[List[str], str, str]]:
     """The ``(symbols, start, end)`` triples worth holding warm, in order.
 
-    ``end`` is the inclusive date a run records, exactly as the run would be
-    asked for. ``warm_bar_cache`` converts it to the provider bound in ONE
-    place, so a window added here cannot forget to.
+    ``start`` is the start the run's fetch REQUESTS: the agent's bars come
+    from ``warmup_fetch_start`` (the indicator warm-up pad, #540), the index
+    baseline's from the run's own ``start_date``. ``end`` is the inclusive
+    date a run records, exactly as the run would be asked for.
+    ``warm_bar_cache`` converts it to the provider bound in ONE place, so a
+    window added here cannot forget to.
     """
     windows: List[Tuple[List[str], str, str]] = []
     defaults = _defaults_window()
     if defaults is not None:
         symbols, start, end = defaults
-        windows.append((symbols, start, end))
-        # Every default run ALSO fetches the full Dow over the same window for
-        # the index baseline (`engine.py`'s index-baseline block passes
-        # `self.start_date`/`self.provider_end_date`). Same key, so the five
-        # Mag7 names warmed above are hits and only twenty-five are requested.
+        windows.append((symbols, warmup_fetch_start(start), end))
+        # Every default run ALSO fetches the full Dow for the index baseline
+        # (`engine.py`'s index-baseline block passes
+        # `self.start_date`/`self.provider_end_date`). Unpadded -- the
+        # baseline computes no indicators -- so it shares no key with the
+        # Mag7 window above.
         windows.append((list(DJIA_30), start, end))
     # A bare `POST /backtest/run` resolves to the djia_30 profile, so its
-    # universe is the full Dow, not the modal's Mag7.
-    windows.append((list(DJIA_30), ROUTE_DEFAULT_START, ROUTE_DEFAULT_END))
+    # universe is the full Dow, not the modal's Mag7. Its index baseline
+    # reuses those bars, so this one window is the whole run.
+    windows.append(
+        (list(DJIA_30), warmup_fetch_start(ROUTE_DEFAULT_START), ROUTE_DEFAULT_END)
+    )
     return windows
 
 
@@ -143,10 +151,10 @@ def warm_bar_cache() -> int:
     except Exception as exc:  # noqa: BLE001 - a cold cache is the status quo
         print(f"📦 bar cache warm: skipped ({exc})", flush=True)
         return 0
-    # The (symbol, window) keys confirmed on disk. A SET because the first two
-    # windows share a `start`/`end` and therefore share keys for every symbol
-    # in both -- `warm_windows`' own comment says the Mag7 names are hits when
-    # the Dow window runs. Adding the per-window counts reported those symbols
+    # The (symbol, window) keys confirmed on disk. A SET because two windows
+    # sharing a `start`/`end` share keys for every symbol in both -- the Mag7
+    # and Dow windows did until the agent's fetch was padded for indicator
+    # warm-up (#540). Adding the per-window counts reported those symbols
     # twice: 67 "ready" for ~62 entries, a number that overstates by an amount
     # depending on the defaults file.
     ready: Set[Tuple[str, str, str]] = set()
@@ -162,11 +170,11 @@ def warm_bar_cache() -> int:
             continue
         wanted = {str(symbol) for symbol in symbols}
         # Sampled BEFORE the fetch so this window is judged on its own writes.
-        # Counting the directory afterwards asked the wrong question: window
-        # two found the overlap window one had stored and reported a non-zero
-        # `stored`, so the alarm below could not fire for it even when all
-        # twenty-five of its own writes were refused -- the alarm silenced by
-        # exactly the case it was added to catch.
+        # Counting the directory afterwards asked the wrong question: an
+        # overlapping window found what an earlier one had stored and reported
+        # a non-zero `stored`, so the alarm below could not fire for it even
+        # when all twenty-five of its own writes were refused -- the alarm
+        # silenced by exactly the case it was added to catch.
         before = _entries_on_disk(symbols, start=start, end=end, feed=feed)
         try:
             frames = loader.fetch_bars(list(symbols), start, end)
