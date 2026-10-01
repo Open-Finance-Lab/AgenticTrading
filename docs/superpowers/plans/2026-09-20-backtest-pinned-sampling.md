@@ -1,18 +1,15 @@
 # Backtest Pinned Sampling (Track B) Implementation Plan
 
-> **Status: NOT IMPLEMENTED — this file is a design, not a record of shipped work.**
-> Nothing under `dashboard/` implements it: there is no `sampling` field on
-> `CatalogModel` (`domain/model_providers/execution_catalog.py`) and no
-> `llm_sampling` key anywhere in the backend or the frontend. Verified
-> 2026-09-21. The unticked boxes below are therefore accurate — every task is
-> outstanding.
+> **Status: implemented on branch `feat/backtest-pinned-sampling` (2026-10-01),
+> Tasks 1-7 plus docs.** The checkboxes below are not ticked — do not infer
+> status from them (Track A shipped with all 56 of its own still unticked). The
+> before/after measurement is pending: it runs on the `platform_credits` path
+> after merge, and the **Final verification** table is filled then.
 >
 > Track B was sequenced behind Track A
 > (`2026-09-20-backtest-visible-start.md`, shipped as PR #501). That gate
 > cleared, and `feat/backtest-pinned-sampling` was cut 2026-10-01 from
-> `origin/main` `2589333a`. Update this line when it lands, and do not infer
-> status from the checkboxes — Track A shipped with all 56 of its own still
-> unticked.
+> `origin/main` `2589333a`.
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
@@ -2397,6 +2394,8 @@ EOF
 
 ## Final verification
 
+> **2026-10-01.** The local in-process Step 2 (`rerun.py`) was skipped by ruling. It could pin only temperature, not thinking-off, on the DeepSeek-via-Anthropic-surface client `make_llm_client()` resolves to, so it would have measured the wrong policy. The table below will be filled from post-merge prod runs via `diff_backtest_runs.py` with `AGENT_RUNS_DATABASE_URL`.
+
 | pair | basis | first divergent bar | divergent bars / compared | final-equity gap % |
 |---|---|---|---|---|
 | before 1 vs 2 | | | | |
@@ -2410,9 +2409,9 @@ EOF
 
 Model used for the reruns: _(whatever `make_llm_client()` resolved — copy the `client=… model=…` line `rerun.py` prints before each of the six, and say so if they are not all identical)_. Take it from there rather than from the run summary: `run_agent_backtest` does print the slug (`engine.py:1781`), but from one `print` whose two branches differ only by a `✅ LLM enabled` / `❌ fallback` marker, and reading past that marker is precisely how a rule-based run gets recorded as an LLM one. Bars per run: 49 (7 weekdays × 7 hourly bars). Driver: `<scratchpad>/rerun.py` in-process, **not** `backtest_hourly_agent.py`, which refuses an LLM run without a signed handoff (Task 8, Step 2).
 
-Full suite: `pytest dashboard/backend/tests/ -q` → _result_.
-Seed DB: clean.
-Cache-busters: one number per asset, **five** files (`dashboard/frontend/app.html` plus `test_frontend_fast_boot.py`, `test_backtest_comparison_frontend.py`, `test_analytics_frontend.py`, `test_admin_analytics_frontend.py`) — re-derived 2026-09-20 with `grep -rln "app.js?v=" dashboard/frontend/app.html dashboard/backend/tests/*.py`, unchanged by this plan. The count is per-document and moves when a test file starts or stops loading `app.js`; grep it, never carry it forward.
+Full suite (2026-10-01): `python3 -m pytest dashboard/backend/tests -q -p no:cacheprovider --deselect dashboard/backend/tests/test_report_pdf.py` → 5945 passed, 168 skipped, 9 deselected (`test_report_pdf.py`: reportlab is not installed locally).
+Seed DB: clean (`git status --short dashboard/storage/data/backtest.db` empty, 2026-10-01).
+Cache-busters (re-derived 2026-10-01): one number per asset — `app.js?v=153` in all five files, `styles.css?v=155` in the four that carry it — across **five** files (`dashboard/frontend/app.html` plus `test_frontend_fast_boot.py`, `test_backtest_comparison_frontend.py`, `test_analytics_frontend.py`, `test_admin_analytics_frontend.py`) — re-derived 2026-09-20 with `grep -rln "app.js?v=" dashboard/frontend/app.html dashboard/backend/tests/*.py`, unchanged by this plan. The count is per-document and moves when a test file starts or stops loading `app.js`; grep it, never carry it forward.
 
 ## Out of scope (from the spec)
 
