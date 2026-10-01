@@ -12,8 +12,10 @@ the legacy script re-exports this exact class object so ``bha.PortfolioManager``
 and existing subclasses keep working unchanged. **The trading logic is not fully
 unchanged, though:** the ``safe_trading`` candidate selection in
 ``make_trading_decision_with_llm`` no longer ranks the top-10 candidates by RSI
-extremity (``|RSI - 50|``, a mean-reversion heuristic) — it ranks the top-12 by a
-multi-factor trend/momentum score *and always appends current holdings*. That
+extremity (``|RSI - 50|``, a mean-reversion heuristic) — it ranks candidates by a
+multi-factor trend/momentum score, shows the whole universe up to
+``SNAPSHOT_FULL_UNIVERSE_MAX`` names and otherwise the top
+``SNAPSHOT_SHORTLIST_SIZE``, *always appending current holdings*. That
 ranking change was made separately from (and independently of) this file's
 domain-layer move, so backtests from before it are **not** directly comparable
 with current ones (see the inline comment on that branch for the rationale).
@@ -502,7 +504,14 @@ class PortfolioManager:
                     key=lambda kv: _trend_score(kv[1]),
                     reverse=True,
                 )
-                if len(trend_sorted) <= SNAPSHOT_FULL_UNIVERSE_MAX:
+                # Decide on the configured universe, not on how many names
+                # happen to have a bar this timestamp: a 31-name universe with
+                # one gap would otherwise flip between "everything" and "top 12
+                # plus a note" from bar to bar -- the same path dependence this
+                # cut was fixed for. ``max`` covers signals outside the
+                # configured list (and an empty one).
+                universe_size = max(len(self.allowed_symbols), len(trend_sorted))
+                if universe_size <= SNAPSHOT_FULL_UNIVERSE_MAX:
                     symbols_to_include = [sym for sym, _ in trend_sorted]
                 else:
                     symbols_to_include = [
@@ -511,12 +520,15 @@ class PortfolioManager:
                     # The model must be told the snapshot is partial: the
                     # pipeline prompt otherwise says only "trade ONLY symbols
                     # listed in the market snapshot". Lives in the snapshot so
-                    # both prompt paths serialize it unchanged.
+                    # both prompt paths serialize it unchanged; re-inserting
+                    # ``top_signals`` after it makes the model read it first.
+                    top_signals = market_snapshot.pop("top_signals")
                     market_snapshot["universe_note"] = (
                         f"Snapshot shows the top {SNAPSHOT_SHORTLIST_SIZE} of "
-                        f"{len(trend_sorted)} symbols by trend score plus "
+                        f"{universe_size} symbols by trend score plus "
                         "current holdings."
                     )
+                    market_snapshot["top_signals"] = top_signals
                 # Guarantee every currently-held symbol is visible to the model
                 for sym in holdings:
                     if sym in signals and sym not in symbols_to_include:

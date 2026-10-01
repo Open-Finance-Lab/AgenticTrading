@@ -147,3 +147,25 @@ def test_over_limit_universe_announces_on_the_single_prompt_path(seen):
 def test_constants_are_named():
     assert pm.SNAPSHOT_FULL_UNIVERSE_MAX == 30
     assert pm.SNAPSHOT_SHORTLIST_SIZE == 12
+
+
+def test_a_missing_bar_does_not_flip_a_31_name_universe_to_the_full_view(seen):
+    """31 configured names, one without a bar: still a cut, still N=31."""
+    state = _state(31)
+    del state["market_signals"]["S30"]  # 30 names have a bar this timestamp
+    manager = _manager(31)
+    manager.make_trading_decision_with_llm(
+        state, llm_client=object(), model="m", pipeline=_PIPELINE
+    )
+    snapshot = seen["snapshot"]
+    assert len(snapshot["top_signals"]) == pm.SNAPSHOT_SHORTLIST_SIZE
+    assert snapshot["universe_note"] == (
+        f"Snapshot shows the top {pm.SNAPSHOT_SHORTLIST_SIZE} of 31 symbols "
+        "by trend score plus current holdings."
+    )
+
+
+def test_the_note_precedes_the_signals_in_the_snapshot(seen):
+    _run(50, pipeline=True)
+    keys = list(seen["snapshot"])
+    assert keys.index("universe_note") < keys.index("top_signals")

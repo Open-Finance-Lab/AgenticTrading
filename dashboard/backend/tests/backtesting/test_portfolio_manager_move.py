@@ -546,7 +546,7 @@ def test_safe_trading_always_includes_current_holdings(monkeypatch):
 
 def test_safe_trading_ranking_survives_nan_indicator_bars(monkeypatch):
     """Early bars have NaN indicators (e.g. sma50 before 50 periods). The trend
-    ranking must not crash and must rank such names out of the top-12 (a NaN
+    ranking must not crash and must rank such names out of the shortlist (a NaN
     trend score sorts below real scores) rather than surfacing them."""
     captured = _capture_top_signals(monkeypatch)
     signals = {"GOOD": _trend_sig(110.0, 55.0, 100.0, 95.0)}
