@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import itertools
 import json
-import re
 import threading
 import time
 from collections.abc import Callable, Iterator
@@ -34,6 +33,7 @@ from dashboard.backend.infrastructure.llm.execution.errors import (
     LLMExecutionError,
     RetryHint,
 )
+from dashboard.backend.infrastructure.llm.execution.log_safe import log_safe_token
 from dashboard.backend.infrastructure.llm.execution.models import (
     BillingEvidence,
     BillingMode,
@@ -81,7 +81,6 @@ _CALL_SPECIFIC_FAILURES = frozenset(
         ExecutionErrorCategory.PROVIDER_UNAVAILABLE,
     }
 )
-_LOG_SAFE_RUN_ID = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
 
 
 def _report_provider_attempt_failed(
@@ -104,7 +103,7 @@ def _report_provider_attempt_failed(
     elapsed = getattr(exc, "provider_elapsed_seconds", None)
     status = getattr(exc, "provider_status_code", None)
     hint = getattr(exc, "retry_hint", RetryHint.NONE)
-    run_id = request.run_id if _LOG_SAFE_RUN_ID.match(request.run_id) else "-"
+    run_id = log_safe_token(request.run_id)
     print(
         "ERROR: llm.provider_attempt_failed "
         f"run={run_id} call={request.call_index} attempt={attempt_index} "

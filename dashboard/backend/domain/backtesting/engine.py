@@ -2317,6 +2317,13 @@ class HourlyBacktester:
         print(f"     • Trades: {len(manager.trades)}")
         if self.prompt_adaptations:
             print(f"     • Post-trade adaptations: {len(self.prompt_adaptations)} day(s)")
+            skipped_days = sum(
+                1
+                for record in self.prompt_adaptations
+                if isinstance(record, dict) and record.get("skipped_steps")
+            )
+            if skipped_days:
+                print(f"     • Post-trade held without analysis: {skipped_days} day(s)")
         print(f"     • Final: ${final_eq:,.0f}")
         print(f"     • Return: {total_return*100:+.2f}%\n")
         
