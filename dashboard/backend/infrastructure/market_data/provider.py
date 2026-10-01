@@ -36,6 +36,27 @@ def exclusive_end(end_date: str) -> str:
     return (parse_ymd(end_date) + timedelta(days=1)).isoformat()
 
 
+#: Calendar days of history a dashboard backtest fetches before its
+#: ``start_date``, so its indicators are warm on the first decision bar
+#: (#540). The longest window is sma50; at A-share's four sessions a day that
+#: is ~13 trading days, and 30 calendar days still clears it with a week-long
+#: exchange closure (National Day, Spring Festival) inside the pad.
+INDICATOR_WARMUP_CALENDAR_DAYS = 30
+
+
+def warmup_fetch_start(start_date: str) -> str:
+    """The provider ``start`` that covers ``start_date`` plus its indicator pad.
+
+    One owner for the engine's fetch and the boot-time bar-cache warm: the
+    cache is keyed on the requested ``start``, so a warm that padded by a
+    different amount would fill entries no run reads. Zero-padded and raising
+    on a malformed date, like ``exclusive_end``.
+    """
+    return (
+        parse_ymd(start_date) - timedelta(days=INDICATOR_WARMUP_CALENDAR_DAYS)
+    ).isoformat()
+
+
 def parse_ymd(value: object) -> date:
     """A ``YYYY-MM-DD`` date, parsed as leniently as the route parses it."""
     try:

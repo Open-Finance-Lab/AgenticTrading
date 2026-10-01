@@ -74,8 +74,9 @@ def engine(monkeypatch):
 def test_load_data_fetches_through_the_selected_end_date(engine):
     bt = HourlyBacktester(START, END, use_llm=False)
     bt.load_data()
+    # The start is padded for indicator warm-up (#540); the end is not.
     assert [(start, end) for _, start, end in _RecordingLoader.calls] == [
-        (START, PROVIDER_END)
+        (provider_mod.warmup_fetch_start(START), PROVIDER_END)
     ]
     assert bt.end_date == END  # the recorded window stays inclusive
 

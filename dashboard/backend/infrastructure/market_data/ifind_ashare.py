@@ -114,13 +114,29 @@ class IFindAshareProvider:
         symbols: Sequence[str],
         start: DateInput,
         end: DateInput,
+        *,
+        depth_start: DateInput | None = None,
     ) -> dict[str, pd.DataFrame]:
-        """Fetch one canonical batch and return validated OHLCV frames."""
+        """Fetch one canonical batch and return validated OHLCV frames.
+
+        ``depth_start`` is where the minimum-depth floor starts counting, when
+        ``start`` reaches further back than the bars a run trades -- the
+        engine's indicator warm-up pad (#540). The floor exists to catch a
+        wholesale-truncated reply for the traded window; judged over the pad
+        too, a symbol suspended through the pad but trading the whole window
+        was refused, so a short pad would turn a degraded indicator into a
+        failed run.
+        """
         canonical_symbols = self._validate_universe(symbols)
         start_date = self._as_market_date(start)
         end_date = self._as_market_date(end)
         if end_date <= start_date:
             raise IFindDateInputError("iFinD end date must be after start date")
+        depth_date = (
+            start_date
+            if depth_start is None
+            else min(max(self._as_market_date(depth_start), start_date), end_date)
+        )
 
         payload = self._client.fetch_hourly_bars(
             canonical_symbols,
@@ -132,7 +148,7 @@ class IFindAshareProvider:
             expected_symbols=canonical_symbols,
             start=start_date,
             end=end_date,
-            min_bars=minimum_bars_for_window(start_date, end_date),
+            min_bars=minimum_bars_for_window(depth_date, end_date),
         )
 
     def fetch_usd_cny(

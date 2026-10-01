@@ -51,6 +51,8 @@ from math import ceil
 from time import monotonic as steady_clock, time as wall_clock
 from typing import Any, Dict, List, Optional, Tuple
 
+import pandas as pd
+
 from dashboard.backend.database import db
 import dashboard.backend.infrastructure.llm.token_cost as token_cost
 from dashboard.backend.baseline_generator import generate_baselines
@@ -116,6 +118,7 @@ from dashboard.backend.infrastructure.market_data.provider import (
     exclusive_end,
     parse_ymd,
     settled_exclusive_end,
+    warmup_fetch_start,
     window_provenance,
 )
 from dashboard.backend.infrastructure.market_data.frequency import (
@@ -223,6 +226,19 @@ def _prior_market_date_by_decision_date(
         decision_date: market_dates[index - 1] if index else None
         for index, decision_date in enumerate(market_dates)
     }
+
+
+def _accepts_keyword(function, name: str) -> bool:
+    """Whether ``function`` takes ``name``, so an optional argument can be
+    offered without breaking a provider (or test double) that predates it."""
+    try:
+        parameters = inspect.signature(function).parameters.values()
+    except (TypeError, ValueError):
+        return False
+    return any(
+        parameter.name == name or parameter.kind == inspect.Parameter.VAR_KEYWORD
+        for parameter in parameters
+    )
 
 
 class HourlyBacktester:
@@ -400,6 +416,9 @@ class HourlyBacktester:
         else:
             self.symbols = list(DJIA_30)
         self.all_data = {}
+        # Bars before `start_date`, per symbol: indicator input only (#540).
+        self.warmup_data = {}
+        self.warmup_start_date = None
         wants_llm = self.decision_source == LLM_DECISION_SOURCE
         self.use_llm = wants_llm and (execution_client is not None or HAS_ANTHROPIC)
         if self.runtime_type != PIPELINE_RUNTIME_TYPE:
@@ -1171,9 +1190,20 @@ class HourlyBacktester:
                 f"No completed session in {self.start_date}..{self.end_date} yet; "
                 "pick a window that ends before today."
             )
+        # From before the window, so the indicators are warm on its first bar
+        # (#540). The pad is split off below, ahead of anything that trades,
+        # values or gates on these frames.
+        self.warmup_start_date = warmup_fetch_start(self.start_date)
+        fetch_options = {}
+        if self.data_source == IFIND_ASHARE and _accepts_keyword(
+            self.data_loader.fetch_bars, "depth_start"
+        ):
+            # iFinD refuses a symbol short of a depth floor; that floor guards
+            # the traded window, so a thin pad must not trip it.
+            fetch_options["depth_start"] = self.start_date
         fetch_started_at = steady_clock()
         self.source_data = self.data_loader.fetch_bars(
-            symbols, self.start_date, self.provider_end_date
+            symbols, self.warmup_start_date, self.provider_end_date, **fetch_options
         )
         # Everything after this point in `loading_bars` -- the frequency
         # verification and, in intraday mode, `aggregate_bars_by_symbol` -- is
@@ -1246,26 +1276,68 @@ class HourlyBacktester:
                 f"   Aggregating {actual_source_timeframe} source bars into "
                 f"{self.decision_timeframe} decision bars..."
             )
-            aggregated_data = aggregate_bars_by_symbol(
-                self.source_data,
-                source_timeframe=actual_source_timeframe,
-                decision_timeframe=self.decision_timeframe,
-                market=self.profile.market,
-                timezone=self.profile.timezone,
+            # Aggregated whole, then split: a bucket never spans midnight, so
+            # cutting after aggregation leaves the window's bars unchanged.
+            aggregated_data, warmup_aggregated = self._split_warmup(
+                aggregate_bars_by_symbol(
+                    self.source_data,
+                    source_timeframe=actual_source_timeframe,
+                    decision_timeframe=self.decision_timeframe,
+                    market=self.profile.market,
+                    timezone=self.profile.timezone,
+                )
             )
+            self.source_data, _ = self._split_warmup(self.source_data)
             self.data_quality = summarize_aggregation_quality(aggregated_data)
             self.all_data = self._completed_decision_bars(aggregated_data)
+            self.warmup_data = self._completed_decision_bars(warmup_aggregated)
             if not self.all_data:
                 raise MarketDataUnavailableError(
                     "Source bars were fetched, but no completed decision bars "
                     "could be built"
                 )
         else:
-            self.all_data = self.source_data
+            self.all_data, self.warmup_data = self._split_warmup(self.source_data)
+            self.source_data = self.all_data
+            if not self.all_data:
+                # Only pad bars came back: the window itself has no data, which
+                # is the case the empty-fetch check above reported before #540.
+                raise MarketDataUnavailableError(
+                    f"No {self.data_source} market data available for "
+                    f"{self.start_date}..{self.end_date}"
+                )
         if self.data_source == IFIND_ASHARE:
             self._ifind_common_start = self._validate_ifind_loaded_data()
             self._initialize_ifind_market_rules()
             self._initialize_ifind_currency_context()
+
+    def _split_warmup(
+        self, frames: Dict[str, Any]
+    ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+        """``(window, warmup)``: each frame cut at ``start_date``'s midnight on
+        the market's clock.
+
+        The window side is everything that trades, values, gates or is
+        recorded -- decisions, fills, the equity curve, both baselines, the
+        A-share rule and FX checks -- so it holds no bar before ``start_date``.
+        The warmup side only ever reaches ``calculate_indicators``. A symbol
+        with no bar in the window is dropped, as a provider omits a symbol
+        with no bars in the range it was asked for.
+        """
+        start = pd.Timestamp(parse_ymd(self.start_date))
+        timezone = self._effective_profile().timezone
+        window: Dict[str, Any] = {}
+        warmup: Dict[str, Any] = {}
+        for symbol, frame in frames.items():
+            index = frame.index
+            # A naive stamp is market-local, as `sessions.market_local` reads it.
+            boundary = start if index.tz is None else start.tz_localize(timezone)
+            in_window = index >= boundary
+            if in_window.any():
+                window[symbol] = frame.loc[in_window].copy()
+            if not in_window.all():
+                warmup[symbol] = frame.loc[~in_window].copy()
+        return window, warmup
 
     def _initialize_ifind_market_rules(self) -> None:
         """Load and validate official rules before any order can execute."""
@@ -1404,11 +1476,29 @@ class HourlyBacktester:
         self.publish_phase("indicators")
         print("\n📈 Calculating technical indicators...")
         count = 0
+        warmup_data = getattr(self, "warmup_data", None) or {}
         for symbol, df in self.all_data.items():
-            self.all_data[symbol] = TechnicalIndicators.calculate_indicators(df)
+            warmup = warmup_data.get(symbol)
+            if warmup is None or warmup.empty:
+                self.all_data[symbol] = TechnicalIndicators.calculate_indicators(df)
+            else:
+                # Computed over pad + window, then cut back to the window. Every
+                # indicator is causal (`features.py`), so a window row reads
+                # only bars at or before it; the pad just fills its lookback.
+                padded = TechnicalIndicators.calculate_indicators(
+                    pd.concat([warmup, df])
+                )
+                window = padded.iloc[len(warmup):].copy()
+                # `concat` keeps attrs only when every input agrees; the
+                # session filter reads the open-stamp convention off them.
+                window.attrs = dict(df.attrs)
+                self.all_data[symbol] = window
             count += 1
             if count % 5 == 0:
                 print(f"  ✅ {count}/{len(self.all_data)} symbols...")
+        # Spent: nothing after the indicators reads the pad, and a child's
+        # bar window is the memory `MAX_ACTIVE_DASHBOARD_BACKTESTS` multiplies.
+        self.warmup_data = {}
         if getattr(self, "data_source", None) == ALPACA:
             try:
                 self.all_data, self.equity_metadata = load_and_enrich_us_equity_bars(
@@ -1462,6 +1552,11 @@ class HourlyBacktester:
                 else {}
             ),
         }
+        warmup_start_date = getattr(self, "warmup_start_date", None)
+        if warmup_start_date:
+            # Where the indicator inputs began (#540): `start_date` is still
+            # the first bar traded, but its sma50 read bars from here.
+            metadata["warmup_start_date"] = warmup_start_date
         if getattr(self, "intraday_mode", False):
             frequency_contract = getattr(self, "frequency_contract", None)
             metadata["frequency_contract"] = dict(

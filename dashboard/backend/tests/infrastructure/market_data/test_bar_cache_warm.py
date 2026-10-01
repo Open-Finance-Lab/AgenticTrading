@@ -9,7 +9,10 @@ import pytest
 
 from dashboard.backend.infrastructure.llm.validator import DJIA_30
 from dashboard.backend.infrastructure.market_data import bar_cache, bar_cache_warm
-from dashboard.backend.infrastructure.market_data.provider import settled_exclusive_end
+from dashboard.backend.infrastructure.market_data.provider import (
+    settled_exclusive_end,
+    warmup_fetch_start,
+)
 from dashboard.backend.paths import BACKEND_DIR, CONFIG_DIR, REPO_ROOT
 
 
@@ -126,13 +129,20 @@ def test_the_first_window_is_the_onboarding_modal():
     settings = _defaults()["defaultSettings"]
     symbols, start, end = bar_cache_warm.warm_windows()[0]
     assert symbols == [s.upper() for s in settings["assetList"]]
-    # The run's own inclusive dates; `warm_bar_cache` converts them once.
-    assert (start, end) == (settings["startDate"], settings["endDate"])
+    # The engine fetches its bars from the indicator warm-up start (#540), and
+    # the cache is keyed on the requested start; the end is the run's
+    # inclusive date, which `warm_bar_cache` converts once.
+    assert (start, end) == (
+        warmup_fetch_start(settings["startDate"]),
+        settings["endDate"],
+    )
 
 
 def test_the_second_window_is_the_index_baseline_over_the_same_dates():
     """Every default run also fetches the full Dow for the index baseline,
-    over the SAME window (engine.py passes start_date/provider_end_date)."""
+    over the run's own window (engine.py passes start_date/provider_end_date).
+    Unpadded: the baseline computes no indicators, so it is not warmed from
+    the agent's padded start."""
     settings = _defaults()["defaultSettings"]
     symbols, start, end = bar_cache_warm.warm_windows()[1]
     assert symbols == list(DJIA_30)
@@ -143,7 +153,7 @@ def test_the_third_window_is_the_bare_post_default():
     symbols, start, end = bar_cache_warm.warm_windows()[2]
     assert symbols == list(DJIA_30)
     assert (start, end) == (
-        bar_cache_warm.ROUTE_DEFAULT_START,
+        warmup_fetch_start(bar_cache_warm.ROUTE_DEFAULT_START),
         bar_cache_warm.ROUTE_DEFAULT_END,
     )
 
@@ -192,18 +202,38 @@ def test_warm_fetches_every_window_at_the_intraday_source_timeframe(
     # Derived, not a literal 3: the window list is the one owner of the count.
     assert len(calls) == len(bar_cache_warm.warm_windows())
     assert {timeframe for timeframe, *_ in calls} == {"5m"}
-    # DISTINCT symbol-windows, derived from the window list rather than
-    # summed per window: windows one and two share a start/end, so every
-    # symbol in both is one entry counted twice by a running total. The fake
-    # loader writes each window whole (it does not consult the cache), which
-    # is what makes `sum(written)` the overstated figure here.
     expected = {
         (symbol, start, end)
         for symbols, start, end in bar_cache_warm.warm_windows()
         for symbol in symbols
     }  # distinct regardless of the end conversion, which is one-to-one
     assert warmed == len(expected) > 0
-    assert warmed < sum(written), "the windows no longer overlap; pick another pair"
+
+
+# Two windows sharing a start/end, as the Mag7 and Dow windows did until the
+# agent's fetch was padded for indicator warm-up (#540). The shipped windows no
+# longer overlap, but the counting below must stay right the day two do again.
+_OVERLAPPING_WINDOWS = [
+    (["AAPL", "MSFT"], "2026-05-04", "2026-05-12"),
+    (["AAPL", "MSFT", "IBM"], "2026-05-04", "2026-05-12"),
+    (["IBM"], "2026-05-01", "2026-05-07"),
+]
+
+
+def test_overlapping_windows_count_each_symbol_window_once(
+    warm_cache_dir, monkeypatch
+):
+    """DISTINCT symbol-windows, not summed per window: every symbol in two
+    windows sharing a start/end is one entry, counted twice by a running
+    total. The fake loader writes each window whole (it does not consult the
+    cache), which is what makes `sum(written)` the overstated figure here."""
+    calls, written = [], []
+    monkeypatch.setattr(bar_cache_warm, "warm_windows", lambda: _OVERLAPPING_WINDOWS)
+    monkeypatch.setattr(
+        bar_cache_warm, "AlpacaDataLoader", _writing_loader(calls, written)
+    )
+    warmed = bar_cache_warm.warm_bar_cache()
+    assert warmed == 4 < sum(written)
 
 
 def test_an_overlapping_window_cannot_silence_the_stored_none_alarm(
@@ -215,6 +245,7 @@ def test_an_overlapping_window_cannot_silence_the_stored_none_alarm(
     `stored` -- the alarm could not fire for it even with all twenty-five of
     its own writes refused. It is now judged on the entries IT added."""
     calls, written = [], []
+    monkeypatch.setattr(bar_cache_warm, "warm_windows", lambda: _OVERLAPPING_WINDOWS)
     stores = iter([True, False, False])
 
     class _Selective:
