@@ -41,6 +41,7 @@ CHILD_ENTERED_STEADY = time.monotonic()
 
 import sys
 import json
+import math
 import argparse
 import signal
 from pathlib import Path
@@ -351,6 +352,14 @@ def main():
                 universe_selection = resolve_strategy_universe(args.stock_pool, args.pool_mode or "top30")
         except (ValueError, OSError) as exc:
             parser.error(str(exc))
+    # argparse accepts `nan`, `inf` and `-1` as floats, but the execution
+    # request bounds temperature to [0, 2], so a value outside that fails every
+    # model call as RESPONSE_INVALID (handoff path) or, on a non-strict plain
+    # SDK run, falls back to rule-based bar after bar. Refuse at the flag.
+    if args.llm_temperature is not None and not (
+        math.isfinite(args.llm_temperature) and 0.0 <= args.llm_temperature <= 2.0
+    ):
+        parser.error("--llm-temperature must be a finite number between 0 and 2")
     # A blank value is "not set", on the wire and in metadata alike: normalise
     # once here so the check below and the engine cannot disagree about "".
     args.llm_reasoning_effort = (args.llm_reasoning_effort or "").strip().lower() or None

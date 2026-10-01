@@ -316,6 +316,47 @@ def test_temperature_alone_is_not_swept_up_by_that_refusal(tmp_path):
     assert "signed execution handoff" in result.stderr
 
 
+def _run_with_temperature(tmp_path, value):
+    import os
+
+    return subprocess.run(
+        [
+            sys.executable,
+            "dashboard/scripts/backtest_hourly_agent.py",
+            "--use-llm",
+            # `=` form: argparse reads a bare "-inf" as an option, and refuses
+            # it itself with a different message.
+            f"--llm-temperature={value}",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=180,
+        stdin=subprocess.DEVNULL,
+        env={**os.environ, "DATABASE_PATH": str(tmp_path / "backtest.db")},
+    )
+
+
+@pytest.mark.parametrize("bad", ["nan", "inf", "-inf", "-0.1", "2.1", "5"])
+def test_a_temperature_outside_zero_to_two_is_refused_at_the_flag(tmp_path, bad):
+    """`argparse` takes `nan`, `inf` and `-1` as floats. The execution request
+    bounds the value to [0, 2], so past the parser every model call would fail
+    `RESPONSE_INVALID` (handoff path), or a non-strict plain-SDK run would
+    fall back to rule-based bar after bar. Refuse where the operator typed it."""
+    result = _run_with_temperature(tmp_path, bad)
+
+    assert result.returncode == 2, result.stdout
+    assert "--llm-temperature must be a finite number between 0 and 2" in result.stderr
+
+
+@pytest.mark.parametrize("ok", ["0", "0.0", "1", "2"])
+def test_the_ends_of_the_temperature_range_are_accepted(tmp_path, ok):
+    """Still stops at the pre-existing handoff rule, which is not ours."""
+    result = _run_with_temperature(tmp_path, ok)
+
+    assert "--llm-temperature must be" not in result.stderr
+    assert "signed execution handoff" in result.stderr
+
+
 @pytest.mark.parametrize("blank", ["", "   "])
 def test_blank_reasoning_effort_means_unset(tmp_path, blank):
     """An empty `--llm-reasoning-effort` is "not set", on the wire and in metadata.
