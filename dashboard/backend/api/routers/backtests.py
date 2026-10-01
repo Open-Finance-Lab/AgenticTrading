@@ -13,6 +13,7 @@ registered before ``/api/backtest/{run_id}`` and ``/runs/latest/metrics`` before
 """
 
 import json
+import math
 import os
 import re
 import signal
@@ -298,6 +299,14 @@ class RunMetadata(BaseModel):
     baseline_buyhold_run_id: Optional[str] = None
     llm_model: Optional[str] = None
     llm_execution: Optional[Dict[str, Any]] = None
+    # What the run asked every model call to sample with, and the output
+    # ceiling it asked under. Both are written on every LLM run and never on a
+    # rule-based one, which is what the results panel reads to decide whether
+    # a Sampling row applies at all. They have to be fields here: this model is
+    # the list route's whole response, so a metadata key it does not declare
+    # never reaches the browser.
+    llm_sampling: Optional[Dict[str, Any]] = None
+    llm_max_output_tokens: Optional[int] = None
     data_source: str = ALPACA
     market: Optional[str] = None
     universe: Optional[str] = None
@@ -399,6 +408,36 @@ class BacktestChartData(BaseModel):
     index_baselines_ok: bool = True
 
 
+# The keys the engine writes in `HourlyBacktester._llm_sampling_metadata`, with
+# the type each must have to be passed on. The row is rendered from this block
+# on a public list route, so anything else in it -- or a value of another type,
+# which the browser's `Number()` would quietly coerce -- is dropped here.
+_LLM_SAMPLING_FIELDS = ("temperature", "reasoning_effort", "policy", "model")
+_LLM_SAMPLING_TEXT_LIMIT = 128
+
+
+def _sanitized_llm_sampling(value: Any) -> Optional[Dict[str, Any]]:
+    if not isinstance(value, dict):
+        return None
+    safe: Dict[str, Any] = {}
+    for name in _LLM_SAMPLING_FIELDS:
+        if name not in value:
+            continue
+        item = value[name]
+        if item is None:
+            safe[name] = None
+        elif name == "temperature":
+            if (
+                isinstance(item, (int, float))
+                and not isinstance(item, bool)
+                and math.isfinite(item)
+            ):
+                safe[name] = item
+        elif isinstance(item, str) and len(item) <= _LLM_SAMPLING_TEXT_LIMIT:
+            safe[name] = item
+    return safe
+
+
 def _run_metadata_response(run: Dict[str, Any]) -> RunMetadata:
     """Expose data provenance while keeping historical runs backward compatible."""
     metadata = run.get("metadata")
@@ -441,6 +480,8 @@ def _run_metadata_response(run: Dict[str, Any]) -> RunMetadata:
             "t1_deferred_events",
             "t1_deferred_shares",
             "llm_execution",
+            "llm_sampling",
+            "llm_max_output_tokens",
             "frequency_contract",
             "market_data_quality",
             "market_data_feed",
@@ -460,6 +501,12 @@ def _run_metadata_response(run: Dict[str, Any]) -> RunMetadata:
                         ).model_dump(mode="json")
                     except Exception:  # noqa: BLE001 - legacy/malformed metadata
                         continue
+                elif field == "llm_sampling":
+                    payload[field] = _sanitized_llm_sampling(metadata[field])
+                elif field == "llm_max_output_tokens":
+                    ceiling = metadata[field]
+                    if isinstance(ceiling, int) and not isinstance(ceiling, bool):
+                        payload[field] = ceiling
                 elif field == "frequency_contract" and isinstance(
                     metadata[field], dict
                 ):

@@ -171,3 +171,95 @@ def test_markup_and_renderer_carry_the_row():
         "setBacktestConfigText('backtestConfigSampling', samplingLabel || '—')"
         in body
     )
+
+
+# ---------------------------------------------------------------------------
+# The renderer, fed what the list route really sends.
+#
+# `GET /api/backtest/runs` answers with RunMetadata, which has no `metadata`
+# key. The row's visibility gate once read `metadata.llm_sampling`, so it was
+# hidden on every run in production while every test above -- formatter only,
+# plus a source-shape check on the renderer -- stayed green. These execute
+# `renderBacktestRunConfig` against a run object of the API's shape.
+# ---------------------------------------------------------------------------
+
+
+def _render_sampling_row(run_js: str) -> dict:
+    """Run the real renderer over a fake DOM; return the Sampling row's state."""
+    script = "\n".join(
+        [
+            "const cells = {};",
+            "const el = (id) => cells[id] || (cells[id] = {",
+            "  id, hidden: undefined, textContent: undefined,",
+            "  classList: { toggle() {} },",
+            "});",
+            "const document = { getElementById: el };",
+            "const IFIND_ASHARE_SOURCE = 'ifind_ashare';",
+            "const LLM_DECISION_SOURCE = 'llm';",
+            "const RULE_BASED_DECISION_SOURCE = 'rule_based';",
+            "const getBacktestLaunchConfig = () => null;",
+            "const formatBacktestFrequencyContract = () => null;",
+            "const formatBacktestMarketDataQuality = () => null;",
+            "const formatBacktestMarketDataProvenance = () => null;",
+            "const getIFindUniverseProfile = () => null;",
+            "const describeUniverseFromAssets = () => null;",
+            "const formatAgentModelLabel = (m) => m;",
+            "const formatTransactionCostProfile = () => '';",
+            "const formatTransactionCostTotals = () => '';",
+            "const formatCorporateActionGaps = () => '';",
+            "const showBacktestRunProgress = () => {};",
+            fn_body("function setBacktestConfigText("),
+            fn_body("function formatBacktestSampling("),
+            fn_body("function renderBacktestRunConfig("),
+            f"renderBacktestRunConfig({run_js}, {{ running: false }});",
+            "const row = el('backtestConfigSamplingRow');",
+            "const cell = el('backtestConfigSampling');",
+            "console.log(JSON.stringify({ hidden: row.hidden, text: cell.textContent }));",
+        ]
+    )
+    result = subprocess.run(
+        ["node", "-e", script], capture_output=True, text=True, timeout=30
+    )
+    assert result.returncode == 0, result.stderr
+    return json.loads(result.stdout)
+
+
+# A run in the shape `_run_metadata_response(...).model_dump()` produces: the
+# fields are top-level and there is no `metadata` key.
+_API_RUN = (
+    "run_id: 'run_1', agent_name: 'Agent', mode: 'backtest', "
+    "start_date: '2026-04-01', end_date: '2026-04-23', initial_equity: 100000, "
+    "created_at: '2026-04-23T16:00:00', data_source: 'alpaca', "
+)
+
+
+def test_a_pinned_run_in_the_api_shape_shows_the_row():
+    state = _render_sampling_row(
+        "{ " + _API_RUN + "llm_calls: 40, llm_max_output_tokens: 2000, "
+        "llm_sampling: {temperature: 0, reasoning_effort: 'none', "
+        "policy: 'pinned_v1', model: 'deepseek/deepseek-v4-pro'} }"
+    )
+    assert state == {"hidden": False, "text": "Pinned · temperature 0 · thinking off"}
+
+
+def test_a_provider_default_run_in_the_api_shape_shows_the_row():
+    state = _render_sampling_row(
+        "{ " + _API_RUN + "llm_calls: 40, llm_max_output_tokens: 2000, "
+        "llm_sampling: {temperature: null, reasoning_effort: null, "
+        "policy: 'provider_default', model: 'm'} }"
+    )
+    assert state == {"hidden": False, "text": "Provider default"}
+
+
+def test_an_llm_run_written_before_the_field_says_not_recorded():
+    """It made model calls, so the row applies; it just cannot say how."""
+    state = _render_sampling_row("{ " + _API_RUN + "llm_calls: 40 }")
+    assert state == {"hidden": False, "text": "Not recorded"}
+
+
+def test_a_rule_based_run_in_the_api_shape_hides_the_row():
+    state = _render_sampling_row(
+        "{ " + _API_RUN + "decision_source: 'rule_based', llm_calls: 0 }"
+    )
+    assert state["hidden"] is True
+    assert state["text"] == "—"

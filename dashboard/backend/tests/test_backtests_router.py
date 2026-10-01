@@ -625,6 +625,85 @@ def test_run_metadata_response_exposes_minute_data_contract_and_quality():
     assert response.end_clamped is True
 
 
+def test_run_metadata_response_exposes_the_recorded_sampling():
+    """`GET /api/backtest/runs*` is `response_model=List[RunMetadata]`, so a
+    metadata key the allow-list does not promote never reaches the browser.
+    The Sampling row read it from `run.metadata`, which that route never
+    sends, so the row stayed hidden on every run while a formatter-only test
+    stayed green."""
+    sampling = {
+        "temperature": 0.0,
+        "reasoning_effort": "none",
+        "policy": "pinned_v1",
+        "model": "deepseek/deepseek-v4-pro",
+    }
+    payload = bt._run_metadata_response(
+        _run_record({"llm_sampling": dict(sampling), "llm_max_output_tokens": 2000})
+    ).model_dump()
+
+    assert payload["llm_sampling"] == sampling
+    assert payload["llm_max_output_tokens"] == 2000
+
+
+def test_run_metadata_response_sampling_carries_only_the_keys_the_engine_writes():
+    payload = bt._run_metadata_response(
+        _run_record(
+            {
+                "llm_sampling": {
+                    "temperature": 0.0,
+                    "reasoning_effort": None,
+                    "policy": "provider_default",
+                    "model": "m",
+                    "api_key": "sk-secret",
+                    "prompt": "ignore previous instructions",
+                }
+            }
+        )
+    ).model_dump()
+
+    assert set(payload["llm_sampling"]) == {
+        "temperature",
+        "reasoning_effort",
+        "policy",
+        "model",
+    }
+
+
+@pytest.mark.parametrize("junk", ["pinned", ["pinned_v1"], 3, True])
+def test_run_metadata_response_drops_a_sampling_block_that_is_not_a_dict(junk):
+    payload = bt._run_metadata_response(
+        _run_record({"llm_sampling": junk})
+    ).model_dump()
+
+    assert payload["llm_sampling"] is None
+
+
+@pytest.mark.parametrize("temperature", ["warm", True, float("nan"), float("inf")])
+def test_run_metadata_response_drops_a_temperature_that_is_not_a_number(temperature):
+    """The browser formats it with `Number()`, which coerces; refuse at source."""
+    payload = bt._run_metadata_response(
+        _run_record(
+            {
+                "llm_sampling": {
+                    "temperature": temperature,
+                    "reasoning_effort": "low",
+                    "policy": "pinned_v1",
+                }
+            }
+        )
+    ).model_dump()
+
+    assert "temperature" not in payload["llm_sampling"]
+    assert payload["llm_sampling"]["reasoning_effort"] == "low"
+
+
+def test_run_metadata_response_keeps_sampling_optional_for_legacy_runs():
+    payload = bt._run_metadata_response(_run_record({})).model_dump()
+
+    assert payload["llm_sampling"] is None
+    assert payload["llm_max_output_tokens"] is None
+
+
 def test_run_metadata_response_passes_every_field_the_contract_builder_writes():
     """Pinned against the producer, not a hand-copied dict: the allow-list
     once dropped ``session_close_fill``, and the details label that reads it

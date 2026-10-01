@@ -10261,9 +10261,19 @@ function renderBacktestRunConfig(
     });
     // Only for a run that used a model: rule-based runs had no sampler, and
     // "Not recorded" beside one would read as an accusation. The ceiling is
-    // written on every LLM run and never on a rule-based one.
+    // written on every LLM run and never on a rule-based one. Read off the
+    // top-level fields: the list route answers with RunMetadata, which has no
+    // `metadata` key, so the first two are the ones a finished run really
+    // carries. The last two let a run written before either field existed
+    // still say "Not recorded" -- it made model calls, so the row applies --
+    // instead of vanishing. `metadata.*` is kept for payloads that embed it.
     const usedModel = Boolean(
-        metadata.llm_sampling || metadata.llm_max_output_tokens !== undefined
+        run?.llm_sampling
+        || (run?.llm_max_output_tokens !== undefined && run?.llm_max_output_tokens !== null)
+        || Number(run?.llm_calls) > 0
+        || run?.llm_execution
+        || metadata.llm_sampling
+        || metadata.llm_max_output_tokens !== undefined
     );
     const samplingLabel = !running && usedModel
         ? formatBacktestSampling(run?.llm_sampling ?? metadata.llm_sampling ?? null)
