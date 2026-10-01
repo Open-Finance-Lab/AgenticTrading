@@ -49,6 +49,15 @@ beyond the episode context."""
 # retries so reasoning stays enabled without doubling every successful call.
 RECOVERY_MAX_OUTPUT_TOKENS = max(DEFAULT_MAX_OUTPUT_TOKENS, 4096)
 
+# The widest snapshot the configured ceiling is calibrated for: pipeline
+# agents saw a 12-name shortlist until #541. A 30-name snapshot invites a
+# 30-order reply (the starter instruction buys "as many listed stocks as the
+# cash allows"), which with reasoning tokens can run past a 2000-token ceiling
+# and be paid for twice -- once truncated, once at the recovery ceiling.
+# Wider snapshots start at the recovery ceiling instead. Credits settle on
+# usage, so the higher ceiling raises only the per-call hold, not the bill.
+DEFAULT_CEILING_SNAPSHOT_SYMBOLS = 12
+
 
 def escalate_ceiling_on_retry() -> bool:
     """Whether a retry after an empty reply should raise the output ceiling.
@@ -156,7 +165,9 @@ def _build_step_prompt(
             [
                 "",
                 "=== MARKET SNAPSHOT ===",
-                json.dumps(market_snapshot, indent=2),
+                # Compact: with indent=2 a 30-name snapshot is ~300 lines,
+                # and much of its token count is indentation.
+                json.dumps(market_snapshot, separators=(",", ":")),
             ]
         )
 
@@ -523,6 +534,14 @@ def _create_pipeline_response(
     return client.messages.create(**request)
 
 
+def _first_attempt_ceiling(market_snapshot: Dict[str, Any]) -> int:
+    """Output ceiling for a step's first attempt (see ``DEFAULT_CEILING_SNAPSHOT_SYMBOLS``)."""
+    signals = market_snapshot.get("top_signals") if isinstance(market_snapshot, dict) else None
+    if len(signals or {}) > DEFAULT_CEILING_SNAPSHOT_SYMBOLS:
+        return RECOVERY_MAX_OUTPUT_TOKENS
+    return DEFAULT_MAX_OUTPUT_TOKENS
+
+
 def _retry_with_recovery_budget(client, *, model: str, prompt: str):
     """Second attempt for a step whose first attempt was unusable.
 
@@ -716,6 +735,10 @@ def run_pipeline_decision(
     step) rather than raising an error the provider never produced, so the
     usage already recorded for the step — a real, billed call — is returned to
     the caller instead of being lost with the exception.
+
+    A snapshot wider than ``DEFAULT_CEILING_SNAPSHOT_SYMBOLS`` starts every
+    step at ``RECOVERY_MAX_OUTPUT_TOKENS``, so a truncated reply there has no
+    second attempt (it would be the same request); an empty one still does.
     """
     decision_steps, _post_trade_steps = split_pipeline(pipeline)
     if not decision_steps:
@@ -725,6 +748,11 @@ def run_pipeline_decision(
     usage = _StepUsage()
     last_parsed: Optional[Dict[str, Any]] = None
     request_model = model or LLM_MODEL_NAME
+    first_ceiling = _first_attempt_ceiling(market_snapshot)
+    # A truncated reply that already had the recovery ceiling would be retried
+    # with the same request. (When the configured ceiling is itself at least
+    # the recovery one, nothing is raised and the retry stays as it was.)
+    truncation_retry_allowed = first_ceiling <= DEFAULT_MAX_OUTPUT_TOKENS
 
     for index, step in enumerate(decision_steps):
         if not isinstance(step, dict):
@@ -747,6 +775,7 @@ def run_pipeline_decision(
                 client,
                 model=request_model,
                 prompt=prompt,
+                max_tokens=first_ceiling,
             )
         except LLMExecutionError as first_error:
             if first_error.category is not ExecutionErrorCategory.RESPONSE_INVALID:
@@ -768,7 +797,7 @@ def run_pipeline_decision(
         else:
             parsed = parse_llm_response(response_text)
         reason = None
-        if parsed is None and not retried:
+        if parsed is None and not retried and truncation_retry_allowed:
             reason = truncation_reason(response, out_delta, response_text or "")
         if reason is not None:
             print(

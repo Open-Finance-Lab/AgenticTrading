@@ -22,11 +22,18 @@ import re
 import subprocess
 import sys
 import threading
+import time
 import uuid
 from copy import deepcopy
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+from dashboard.backend.infrastructure.llm.http_policy import (
+    SDK_MAX_RETRIES,
+    call_with_retries,
+    provider_http_timeout,
+)
 
 # Resolves to the ``dashboard/`` directory — identical to the previous
 # ``Path(__file__).resolve().parent.parent`` when this module lived at
@@ -150,9 +157,21 @@ def _get_anthropic_client():
         return None
     try:
         from anthropic import Anthropic
-        return Anthropic(api_key=api_key)
+
+        # No SDK replays: they cannot tell a read timeout from a refused
+        # connection, and each regenerates and bills a whole completion.
+        # ``process_chat`` owns the retries instead (``call_with_retries``).
+        return Anthropic(
+            api_key=api_key,
+            max_retries=SDK_MAX_RETRIES,
+            timeout=provider_http_timeout(),
+        )
     except ImportError:
         return None
+
+
+# Monkeypatched by tests; looked up per call, so a patch takes effect.
+_retry_sleep = time.sleep
 
 
 def _parse_chat_json(raw: str) -> dict[str, Any]:
@@ -199,12 +218,18 @@ JSON schema:
 }}"""
 
     try:
-        response = client.messages.create(
-            model=LLM_MODEL,
-            max_tokens=1500,
-            temperature=0.2,
-            system=system,
-            messages=[{"role": "user", "content": message.strip()}],
+        # Repeats only a failure that generated nothing; a read timeout or a
+        # slow rejection still lands in the rule-based fallback below.
+        response = call_with_retries(
+            lambda: client.messages.create(
+                model=LLM_MODEL,
+                max_tokens=1500,
+                temperature=0.2,
+                system=system,
+                messages=[{"role": "user", "content": message.strip()}],
+            ),
+            label="algo chat",
+            sleep=_retry_sleep,
         )
         parsed = _parse_chat_json(response.content[0].text)
         new_blocks = parsed.get("blocks", current)
