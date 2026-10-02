@@ -460,6 +460,53 @@ function liveZoneIndices(axis, status) {
   };
 }
 
+const LIVE_Y_PAD_RATIO = 0.2;
+const LIVE_Y_MIN_HALF_SPAN = 0.005;
+const LIVE_Y_TICK_TARGET = 5;
+
+function liveNiceStep(raw) {
+  if (!(raw > 0)) return 1;
+  const exp = Math.pow(10, Math.floor(Math.log10(raw)));
+  const frac = raw / exp;
+  const nice = frac <= 1 ? 1 : frac <= 2 ? 2 : frac <= 2.5 ? 2.5 : frac <= 5 ? 5 : 10;
+  return nice * exp;
+}
+
+// Fit the y axis to the visible curves: the data range plus 20% headroom on
+// each side, never narrower than ±0.5% of the start value, and always
+// containing the start value so the flat line reads as "break-even". Early in
+// the month every curve sits within a fraction of a percent of capital, and a
+// fixed ±10% window drew them as one line.
+function liveYAxisBounds(datasets, { isMoney, capital }) {
+  const reference = isMoney ? capital : 0;
+  const scale = isMoney ? capital : 1;
+  let lo = reference;
+  let hi = reference;
+  datasets.forEach((ds) => {
+    if (ds.hidden) return;
+    (ds.data || []).forEach((v) => {
+      if (v == null || !Number.isFinite(v)) return;
+      if (v < lo) lo = v;
+      if (v > hi) hi = v;
+    });
+  });
+  const pad = (hi - lo) * LIVE_Y_PAD_RATIO;
+  lo -= pad;
+  hi += pad;
+  const minHalf = scale * LIVE_Y_MIN_HALF_SPAN;
+  if (hi - lo < 2 * minHalf) {
+    const mid = (hi + lo) / 2;
+    lo = Math.min(mid - minHalf, reference);
+    hi = Math.max(mid + minHalf, reference);
+  }
+  const step = liveNiceStep((hi - lo) / LIVE_Y_TICK_TARGET);
+  return {
+    min: Math.floor(lo / step) * step,
+    max: Math.ceil(hi / step) * step,
+    stepSize: step,
+  };
+}
+
 function renderLiveChart() {
   const canvas = document.getElementById('liveEquityCurvesChart');
   if (!canvas || typeof Chart === 'undefined' || !livePayload) return;
@@ -497,6 +544,7 @@ function renderLiveChart() {
   if (liveChartInstance) liveChartInstance.destroy();
 
   const isMoney = liveChartView === 'absolute';
+  const yBounds = liveYAxisBounds(datasets, { isMoney, capital });
   liveChartInstance = new Chart(ctx, {
     type: 'line',
     data: { labels: axis, datasets },
@@ -539,9 +587,10 @@ function renderLiveChart() {
           grid: { color: 'rgba(148, 163, 184, 0.05)', drawTicks: false },
         },
         y: {
-          suggestedMin: isMoney ? capital * 0.9 : -0.05,
-          suggestedMax: isMoney ? capital * 1.1 : 0.05,
+          min: yBounds.min,
+          max: yBounds.max,
           ticks: {
+            stepSize: yBounds.stepSize,
             color: '#9ca3af',
             callback(value) {
               if (isMoney) return `$${liveFormatMoney(value)}`;
