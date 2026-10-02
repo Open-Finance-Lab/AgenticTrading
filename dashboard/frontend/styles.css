@@ -4472,6 +4472,14 @@ a.header-brand:hover .title-section h1 {
     color: var(--danger-color);
 }
 
+.leaderboard-sample-range {
+    display: block;
+    color: var(--text-secondary);
+    font-size: 11px;
+    font-weight: 400;
+    white-space: nowrap;
+}
+
 .metric-value-text {
     font-weight: 500;
 }

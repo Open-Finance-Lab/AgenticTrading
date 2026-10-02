@@ -49,6 +49,10 @@ downsample_daily = _baselines.downsample_daily
 fetch_hourly_bars = _baselines.fetch_hourly_bars
 
 LEADERBOARD_MODE = "leaderboard"
+# Repeat runs of one LLM entry (#602). A separate mode, not a flag, so every
+# lookup keyed on LEADERBOARD_MODE -- `_resolve_cached_run`, `_cached_run_index`,
+# the live board -- stays blind to them; see `_sample_run_id`.
+LEADERBOARD_SAMPLE_MODE = "leaderboard_sample"
 VALID_PERIODS = ("contest", "daily", "live")
 _SKIP_CACHE_PATH = DATA_DIR / "leaderboard_skip_cache.json"
 _DAILY_REFRESH_STATE_PATH = DATA_DIR / "leaderboard_daily_refresh.json"
@@ -856,6 +860,80 @@ def _run_id(strategy_id: str, start_date: str, end_date: str) -> str:
     return f"lb_{strategy_id}_{start_date.replace('-', '')}_{end_date.replace('-', '')}"
 
 
+def _sample_run_id(strategy_id: str, start_date: str, end_date: str, sample: int) -> str:
+    """Id of repeat run ``sample`` (1-based) of an LLM entry: ``_run_id`` + ``_s<n>``.
+
+    One model run is one draw: three DeepSeek reruns with identical inputs and
+    pinned sampling diverged on the first bar (#539), so a ranking that rests on
+    a single curve ranks the dice. Repeats are stored under
+    ``LEADERBOARD_SAMPLE_MODE``, which keeps the invariant ``_run_id`` defends:
+    the seed-free primary row is never replaced and never duplicated, and
+    deleting the sample rows restores the board exactly as it was.
+    """
+    if isinstance(sample, bool) or not isinstance(sample, int) or sample < 1:
+        raise ValueError(f"sample must be a positive integer; got {sample!r}")
+    return f"{_run_id(strategy_id, start_date, end_date)}_s{sample}"
+
+
+# The recorded config two repeat runs must share before they are pooled. A
+# sample run under a different model, prompt, ceiling, seed or tape is a
+# different experiment, and its spread is not the spread of this one.
+_SAMPLE_CONFIG_KEYS = (
+    "model_id",
+    "integration",
+    "temperature",
+    "reasoning_effort",
+    "strategy_prompt",
+    "llm_max_output_tokens",
+    "initial_capital",
+    "market_data_feed",
+)
+
+
+def _sample_config_key(run: Dict[str, Any]) -> Optional[Tuple[str, ...]]:
+    """The pooling key for one sample row, or None if it recorded no config."""
+    metadata = run.get("metadata")
+    if not isinstance(metadata, dict):
+        return None
+    return tuple(json.dumps(metadata.get(k), sort_keys=True) for k in _SAMPLE_CONFIG_KEYS)
+
+
+def _sample_index(
+    start_date: str, end_date: str, session_id: str
+) -> Dict[str, List[Dict[str, Any]]]:
+    """Every sample row for this window, by entry id. One session scan."""
+    index: Dict[str, List[Dict[str, Any]]] = {}
+    for run in db.get_runs_by_session(session_id) or []:
+        if (
+            run.get("mode") == LEADERBOARD_SAMPLE_MODE
+            and run.get("start_date") == start_date
+            and run.get("end_date") == end_date
+        ):
+            index.setdefault(run.get("llm_model"), []).append(run)
+    return index
+
+
+def _pooled_samples(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """The largest group of rows that recorded the same config, by return.
+
+    Rows that recorded no config never pool: nothing says they ran the same
+    experiment. Ties go to the group holding the newest row, so a config change
+    followed by fresh repeats moves the board to the new runs.
+    """
+    groups: Dict[Tuple[str, ...], List[Dict[str, Any]]] = {}
+    for row in rows:
+        key = _sample_config_key(row)
+        if key is not None and _finite(row.get("total_return")) is not None:
+            groups.setdefault(key, []).append(row)
+    if not groups:
+        return []
+    best = max(
+        groups.values(),
+        key=lambda g: (len(g), max(str(r.get("created_at") or "") for r in g)),
+    )
+    return sorted(best, key=lambda r: _finite(r.get("total_return")))
+
+
 def _skip_cache_key(session_id: str, start_date: str, end_date: str, strategy_id: str) -> str:
     return f"{session_id}|{start_date}|{end_date}|{strategy_id}"
 
@@ -1589,8 +1667,13 @@ def deploy_model_run(
     allow_fallback: bool = False,
     period: Optional[str] = "contest",
     config: Optional[Dict[str, Any]] = None,
+    sample: Optional[int] = None,
 ) -> Dict[str, Any]:
     """Compute and persist one (expensive) leaderboard model entry.
+
+    ``sample=n`` writes repeat run ``n`` instead of the primary row (#602): its
+    own id and mode (``_sample_run_id``), cached by that id alone. Once two or
+    more comparable samples exist, ``get_leaderboard`` publishes their median.
 
     Used by scripts/deploy_leaderboard_model.py to "deploy" an LLM model onto the
     leaderboard: it runs the model's hourly backtest over the contest window,
@@ -1623,14 +1706,25 @@ def deploy_model_run(
         available = [s.get("id") for s in config.get("strategies", [])]
         raise ValueError(f"Unknown leaderboard entry '{entry_id}'. Available: {available}")
 
-    existing, existing_rank = _resolve_cached_run(
-        entry_id,
-        start_date,
-        end_date,
-        session_id,
-        initial_capital,
-        entry.get("strategy_prompt"),
-    )
+    if sample is not None:
+        run_id = _sample_run_id(entry_id, start_date, end_date, sample)
+        run_mode = LEADERBOARD_SAMPLE_MODE
+        if entry.get("strategy") != "llm_agent":
+            # A baseline is deterministic; repeating it buys nothing.
+            raise ValueError(f"Entry '{entry_id}' is not an LLM entry; nothing to sample")
+        existing = None if force_refresh else db.get_run(run_id)
+        existing_rank = _CACHE_MATCH
+    else:
+        run_id = _run_id(entry_id, start_date, end_date)
+        run_mode = LEADERBOARD_MODE
+        existing, existing_rank = _resolve_cached_run(
+            entry_id,
+            start_date,
+            end_date,
+            session_id,
+            initial_capital,
+            entry.get("strategy_prompt"),
+        )
     if existing and not force_refresh:
         # A drifted row short-circuits here exactly like a matching one, and
         # that is the point: this function is reached from
@@ -1681,7 +1775,6 @@ def deploy_model_run(
         raise RuntimeError(f"No equity curve produced for entry '{entry_id}'")
 
     metrics = calc_metrics(curve, initial_capital)
-    run_id = _run_id(entry_id, start_date, end_date)
 
     input_tokens = int(getattr(strategy_impl, "input_tokens", 0) or 0)
     output_tokens = int(getattr(strategy_impl, "output_tokens", 0) or 0)
@@ -1706,7 +1799,7 @@ def deploy_model_run(
         run_id=run_id,
         session_id=session_id,
         agent_name=entry["name"],
-        mode=LEADERBOARD_MODE,
+        mode=run_mode,
         start_date=start_date,
         end_date=end_date,
         initial_equity=metrics["initial_equity"],
@@ -2050,6 +2143,8 @@ def get_leaderboard(
     # scale onto is a property of the board and not of any one row — see
     # `_board_capital_base`.
     resolved: List[Tuple[Dict[str, Any], Dict[str, Any], float, List[Dict[str, Any]]]] = []
+    samples_by_entry = _sample_index(start_date, end_date, session_id)
+    sample_summaries: Dict[str, Dict[str, Any]] = {}
     for strategy in config.get("strategies", []):
         run = _find_cached_run(
             strategy["id"],
@@ -2059,6 +2154,21 @@ def get_leaderboard(
             display_capital,
             strategy.get("strategy_prompt"),
         )
+        # #602: with two or more comparable repeats, the entry is their MEDIAN
+        # run -- curve, metrics and rank all from that one row, so the table and
+        # the chart cannot disagree. The lower middle on an even count: a real
+        # run, never an average of two curves nobody traded. The primary row is
+        # left alone and is published again the moment the samples are deleted.
+        pooled = _pooled_samples(samples_by_entry.get(strategy["id"], []))
+        if len(pooled) >= 2 or (pooled and not run):
+            run = pooled[(len(pooled) - 1) // 2]
+            returns = [float(r["total_return"]) for r in pooled]
+            sample_summaries[strategy["id"]] = {
+                "count": len(pooled),
+                "min_return": returns[0],
+                "max_return": returns[-1],
+                "returns": returns,
+            }
         if not run:
             continue
         board_runs.append(run)
@@ -2199,6 +2309,12 @@ def get_leaderboard(
                 "equity_curve": equity_curve,
             }
         )
+        if is_model:
+            # Every model row says how many runs it stands on, a single one
+            # included: "1" is the claim the frontend labels, not an absence.
+            entries[-1]["samples"] = sample_summaries.get(
+                strategy["id"], {"count": 1}
+            )
 
     # Yahoo index hours (:30 UTC) vs Alpaca stock hours (:00) — align every
     # chart series onto one shared axis so the frontend does not sparse-null.
