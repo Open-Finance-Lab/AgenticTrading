@@ -13,7 +13,6 @@ client would only re-assert what the fake was written to do.
 import json
 from datetime import datetime
 from pathlib import Path
-from types import SimpleNamespace
 
 import httpx
 import openai
