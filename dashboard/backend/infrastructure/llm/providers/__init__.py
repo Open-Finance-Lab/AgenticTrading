@@ -81,6 +81,11 @@ def make_llm_client(
             _Anthropic,
             reasoning_effort=reasoning_effort,
         )
+    if resolved == commonstack.INTEGRATION_ID:
+        return commonstack.make_client(
+            _Anthropic,
+            reasoning_effort=reasoning_effort,
+        )
     return PROVIDERS[resolved].make_client(_Anthropic)
 
 

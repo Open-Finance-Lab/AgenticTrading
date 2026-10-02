@@ -116,6 +116,8 @@
       "strategy": "llm_agent",
       "integration": "commonstack",
       "model_id": "deepseek/deepseek-v4-pro",
+      "temperature": 0,
+      "reasoning_effort": "none",
       "mode": "safe_trading",
       "symbols": [],
       "auto_compute": false
@@ -129,6 +131,8 @@
       "strategy": "llm_agent",
       "integration": "commonstack",
       "model_id": "qwen/qwen3.7-plus",
+      "temperature": 0,
+      "reasoning_effort": "none",
       "mode": "safe_trading",
       "symbols": [],
       "auto_compute": false

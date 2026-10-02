@@ -84,15 +84,16 @@ def test_make_llm_client_openrouter_uses_openrouter_key(monkeypatch):
     assert captured["default_headers"]["X-Title"] == "ATL Test"
 
 
-def test_make_llm_client_passes_reasoning_only_to_openrouter(monkeypatch):
+def test_make_llm_client_passes_reasoning_to_openrouter_and_commonstack(monkeypatch):
+    """CommonStack takes it to switch thinking off (chat completions)."""
     captured = {}
 
     def _openrouter_client(anthropic_cls, *, reasoning_effort=None):
         captured["openrouter"] = (anthropic_cls, reasoning_effort)
         return "openrouter-client"
 
-    def _commonstack_client(anthropic_cls):
-        captured["commonstack"] = anthropic_cls
+    def _commonstack_client(anthropic_cls, *, reasoning_effort=None):
+        captured["commonstack"] = (anthropic_cls, reasoning_effort)
         return "commonstack-client"
 
     def _anthropic_client(anthropic_cls):
@@ -109,7 +110,7 @@ def test_make_llm_client_passes_reasoning_only_to_openrouter(monkeypatch):
     assert (
         make_llm_client("commonstack", reasoning_effort="none") == "commonstack-client"
     )
-    assert captured["commonstack"] is providers_pkg._Anthropic
+    assert captured["commonstack"] == (providers_pkg._Anthropic, "none")
 
     assert make_llm_client("anthropic", reasoning_effort="none") == "anthropic-client"
     assert captured["anthropic"] is providers_pkg._Anthropic

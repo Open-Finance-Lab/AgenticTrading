@@ -136,16 +136,25 @@ def test_llm_agent_without_reasoning_keeps_legacy_factory_behavior(monkeypatch):
     }
 
 
-def test_only_nemotron_leaderboard_entry_disables_reasoning():
+# Entries that pin sampling. Every other entry keeps the provider default, so
+# its published curve is not silently re-specified. DeepSeek and Qwen joined
+# Nemotron on 2026-10-02: CommonStack's per-call thinking coin flip emptied
+# DeepSeek's replies past the H6 guard; thinking off is the catalog's
+# PINNED_NO_THINKING for both.
+_PINNED_SAMPLING_ENTRIES = {"nemotron_3_nano_30b", "deepseek_v4_pro", "qwen3_7_plus"}
+
+
+def test_only_the_pinned_entries_disable_reasoning():
     config = json.loads((CONFIG_DIR / "leaderboard.json").read_text(encoding="utf-8"))
     strategies = config["strategies"]
-    nemotron = next(s for s in strategies if s["id"] == "nemotron_3_nano_30b")
 
-    assert nemotron["reasoning_effort"] == "none"
+    assert {
+        s["id"] for s in strategies if "reasoning_effort" in s
+    } == _PINNED_SAMPLING_ENTRIES
     assert all(
-        "reasoning_effort" not in strategy
-        for strategy in strategies
-        if strategy["id"] != "nemotron_3_nano_30b"
+        s["reasoning_effort"] == "none"
+        for s in strategies
+        if s["id"] in _PINNED_SAMPLING_ENTRIES
     )
 
 
@@ -187,16 +196,17 @@ def test_llm_agent_allows_temperature_when_reasoning_off_or_passthrough(effort):
     assert strategy.temperature == 0
 
 
-def test_only_nemotron_leaderboard_entry_pins_temperature():
+def test_only_the_pinned_entries_pin_temperature():
     config = json.loads((CONFIG_DIR / "leaderboard.json").read_text(encoding="utf-8"))
     strategies = config["strategies"]
-    nemotron = next(s for s in strategies if s["id"] == "nemotron_3_nano_30b")
 
-    assert nemotron["temperature"] == 0
+    assert {s["id"] for s in strategies if "temperature" in s} == (
+        _PINNED_SAMPLING_ENTRIES
+    )
     assert all(
-        "temperature" not in strategy
-        for strategy in strategies
-        if strategy["id"] != "nemotron_3_nano_30b"
+        s["temperature"] == 0
+        for s in strategies
+        if s["id"] in _PINNED_SAMPLING_ENTRIES
     )
 
 
