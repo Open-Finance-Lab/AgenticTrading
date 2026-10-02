@@ -1385,8 +1385,9 @@
                 <!-- Issue #602, option 1. Identical model runs do not reproduce:
                      three DeepSeek V4 Pro reruns with every input and the
                      sampling pinned diverged on the first bar (#539). Shown
-                     for any run that made model calls; a rule-based curve is
-                     repeatable and gets no note. -->
+                     by initializeCharts() once it has painted a curve the
+                     model drove (see curveIsOneModelSample). A rule-based
+                     curve is repeatable and gets no note. -->
                 <p id="chartSingleSampleNotice" class="chart-sample-notice" hidden>
                     <strong>One sample.</strong> Model runs are not repeatable: rerunning
                     this exact setup can trade differently from the first bar and finish

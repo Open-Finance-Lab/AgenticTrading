@@ -6833,6 +6833,9 @@ function setPerformanceComparisonState(state, message = '') {
 function clearPerformanceComparison(state = 'empty', message = '') {
     document.getElementById('performanceComparisonHead')?.replaceChildren();
     document.getElementById('performanceComparisonBody')?.replaceChildren();
+    // Loading, live, empty and launch-failed views all pass through here, and
+    // in none of them is a finished curve of the selected run on screen.
+    renderChartSingleSampleNotice(null);
     renderPerformanceLegend({ columns: [] });
     setPerformanceComparisonState(state, message);
 }
@@ -10254,10 +10257,6 @@ function renderBacktestRunConfig(
     const empty = document.getElementById('backtestConfigEmpty');
     const list = document.getElementById('backtestConfigList');
     const cfg = launchConfig || (run?.run_id ? getBacktestLaunchConfig(run.run_id) : null);
-    // Hidden first so every exit -- including the no-run return just below --
-    // leaves no note from the previously selected run on the chart.
-    const sampleNotice = document.getElementById('chartSingleSampleNotice');
-    if (sampleNotice) sampleNotice.hidden = true;
 
     if (!run && !cfg) {
         if (empty) empty.hidden = false;
@@ -10526,10 +10525,6 @@ function renderBacktestRunConfig(
     // to buy by skipping it. '—' is the cell's own markup default, so a
     // hidden row holds exactly what the page shipped with.
     setBacktestConfigText('backtestConfigSampling', samplingLabel || '—');
-    // "One sample" (#602): any finished run that made model calls. Gated on
-    // usedModel, not on the sampling policy -- a pinned run is exactly the one
-    // a reader expects to reproduce, and three pinned DeepSeek reruns did not.
-    if (sampleNotice) sampleNotice.hidden = running || !usedModel;
     if (frequencyLabel) {
         setBacktestConfigText('backtestConfigFrequency', frequencyLabel);
     }
@@ -12123,8 +12118,7 @@ async function loadHistoricalBacktestSurfaces(selectedRun) {
         }
         const notice = document.getElementById('chartBaselineNotice');
         if (notice) notice.hidden = true;
-        const sampleNotice = document.getElementById('chartSingleSampleNotice');
-        if (sampleNotice) sampleNotice.hidden = true;
+        renderChartSingleSampleNotice(null);
         renderPerformanceLegend({ columns: [] });
         setPerformanceComparisonState(
             'error',
@@ -12283,10 +12277,50 @@ async function loadData({ liveRunId = null } = {}) {
 }
 
 /**
+ * True when the selected run's curve is one draw of a model (#602, option 1).
+ *
+ * Identical model runs do not reproduce: three DeepSeek V4 Pro reruns with every
+ * input and the sampling pinned diverged on the first bar (#539). A pinned run
+ * is exactly the one a reader expects to repeat, so the sampling policy does
+ * not gate this.
+ *
+ * Reads the server's `decision_provenance`, never `llm_calls` or the recorded
+ * output ceiling. Those two say the run *asked* for a model. The ceiling is
+ * written whenever one was requested, and `llm_calls` is a billing counter: it
+ * ticks on responses that then traded rule-based, and on an external SDK run it
+ * counts every submitted decision, whatever produced it. A total fallback and a
+ * deterministic SMA agent both carry them, and both curves are repeatable.
+ * `partial` counts, since every step the model drove makes the curve a draw.
+ *
+ * `unknown` gets no note. That covers external runs, which record no decision
+ * count, and rows written before #458 recorded one. Leaving the caveat off an
+ * old model run is the cheaper mistake. Telling a reader that a repeatable
+ * curve will not repeat is a false statement about the curve they are reading.
+ */
+function curveIsOneModelSample(run) {
+    const provenance = run?.decision_provenance;
+    return provenance === LLM_DECISION_SOURCE || provenance === 'partial';
+}
+
+/**
+ * The only writer of #chartSingleSampleNotice. initializeCharts() is the only
+ * caller that can show it, after it has painted the run's curve. Every other
+ * caller passes null, because it is clearing or tearing down the chart.
+ */
+function renderChartSingleSampleNotice(run) {
+    const notice = document.getElementById('chartSingleSampleNotice');
+    if (notice) notice.hidden = !curveIsOneModelSample(run);
+}
+
+/**
  * Initialize charts with real data from backend.
  * Agent vs DJIA index + Nasdaq-100 (same baselines as Discord plot.png).
  */
 function initializeCharts() {
+    // Hidden until this call paints. None of the early returns below puts
+    // the selected run's curve on screen, so none of them should leave a
+    // note describing it.
+    renderChartSingleSampleNotice(null);
     if (liveBacktestChartActive) {
         console.log('Skipping historical chart paint — live backtest view is active');
         return;
@@ -12419,6 +12453,7 @@ function initializeCharts() {
             }
         });
 
+        renderChartSingleSampleNotice(window.SELECTED_RUN);
         renderPerformanceComparison(comparisonPayload, window.SELECTED_RUN);
         renderPerformanceLegend(model);
         liveBacktestChartActive = false;

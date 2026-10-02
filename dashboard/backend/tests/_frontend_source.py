@@ -16,7 +16,9 @@ files also shipped its own `//`-stripping regex that ate the second slash of any
 URL. That is the failure this module's docstring is about, one directory over.
 """
 
+import json
 import re
+import subprocess
 from pathlib import Path
 
 FRONTEND = Path(__file__).resolve().parents[2] / "frontend"
@@ -243,3 +245,20 @@ def css_blocks(prelude: str) -> list[str]:
 def at_rule_blocks(prelude: str) -> list[str]:
     """`css_blocks` under its original name, kept for the Phase A guards."""
     return css_blocks(prelude)
+
+
+def run_node(script: str):
+    """Run `script` under node; return the one JSON value it printed.
+
+    The runner half of the guards that execute app.js under node, shared for
+    the reason this module's docstring gives: a runner copied into each test
+    file has to be fixed in each test file. Callers lift what they run
+    with `fn_body` / `js_const` / `js_let`, stub the rest, and print exactly
+    one JSON value to stdout. A script that throws fails here, with node's
+    stderr, rather than as a JSON decode error further down.
+    """
+    result = subprocess.run(
+        ["node", "-e", script], capture_output=True, text=True, timeout=30
+    )
+    assert result.returncode == 0, result.stderr
+    return json.loads(result.stdout)
