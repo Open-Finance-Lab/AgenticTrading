@@ -1363,6 +1363,8 @@ function getFilteredLeaderboardEntries() {
 // How many runs a model row stands on (#602). One model run is one draw, so a
 // row's return means something different at n=1 and n=3, and the board says
 // which. Baselines carry no `samples` and get no label: they are repeatable.
+// An even count has no median run -- the server publishes one of the two
+// middle runs -- so the label says "middle" there rather than claim a median.
 // Returns '' when there is nothing honest to say. `long` is a plain boolean,
 // not a destructured option: the test harnesses lift functions by matching the
 // first `{` after the signature.
@@ -1371,15 +1373,13 @@ function formatLeaderboardSamples(entry, long) {
   const count = Number(samples && samples.count);
   if (!Number.isFinite(count) || count < 1) return '';
   if (count === 1) return long ? 'Single run · not repeated' : '1 run';
-  const lo = Number(samples.min_return);
-  const hi = Number(samples.max_return);
-  const pct = (v) => `${v >= 0 ? '+' : ''}${(v * 100).toFixed(2)}%`;
-  const range = Number.isFinite(lo) && Number.isFinite(hi)
-    ? ` · ${pct(lo)} to ${pct(hi)}`
-    : '';
+  const lo = boardSignedPercent(samples.min_return);
+  const hi = boardSignedPercent(samples.max_return);
+  const range = lo && hi ? ` · ${lo} to ${hi}` : '';
+  const kind = count % 2 ? 'median' : 'middle';
   return long
-    ? `Median of ${count} runs${range}`
-    : `median of ${count}${range}`;
+    ? `${kind === 'median' ? 'Median' : 'Middle'} of ${count} runs${range}`
+    : `${kind} of ${count}${range}`;
 }
 
 // `entry.model` / `entry.team_name` are user-registered agent names, so every
@@ -1443,6 +1443,7 @@ function renderLeaderboardDetailHtml(entry, totalEntries) {
   const ret = Number(entry.cumulative_return || 0);
   const retColor = ret >= 0 ? 'var(--success-color)' : 'var(--danger-color)';
   const entryLabel = escapeHtml(entry.model || entry.team_name || '—');
+  const runsLabel = formatLeaderboardSamples(entry, true);
   return `
       <div class="team-detail-row">
         <span class="team-detail-label">Entry</span>
@@ -1460,9 +1461,9 @@ function renderLeaderboardDetailHtml(entry, totalEntries) {
         <span class="team-detail-label">Return</span>
         <span class="team-detail-value" style="color: ${retColor};">${(ret * 100).toFixed(2)}%</span>
       </div>
-      ${formatLeaderboardSamples(entry, true) ? `<div class="team-detail-row">
+      ${runsLabel ? `<div class="team-detail-row">
         <span class="team-detail-label">Runs</span>
-        <span class="team-detail-value">${escapeHtml(formatLeaderboardSamples(entry, true))}</span>
+        <span class="team-detail-value">${escapeHtml(runsLabel)}</span>
       </div>` : ''}
       <div class="team-detail-row">
         <span class="team-detail-label">Sharpe</span>

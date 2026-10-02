@@ -55,6 +55,7 @@ load_dotenv(DASHBOARD_DIR.parent / ".env")
 from dashboard.backend.domain.leaderboard.service import (  # noqa: E402
     LeaderboardFallbackError,
     deploy_model_run,
+    describe_entry_publication,
     load_leaderboard_config,
 )
 
@@ -162,8 +163,13 @@ def main() -> int:
 
 
 def _deploy_samples(args) -> int:
-    """Repeat runs 1..N, one line each, then the spread they publish."""
-    returns = []
+    """Repeat runs 1..N, one line each, then what the board will publish.
+
+    Stops at the first failure: a fallback or a broken run is likelier to
+    repeat than to clear on the next billable attempt. Whatever was written
+    still counts, so the closing line is printed either way.
+    """
+    status = 0
     for n in range(1, args.samples + 1):
         try:
             result = deploy_model_run(
@@ -177,23 +183,50 @@ def _deploy_samples(args) -> int:
             )
         except LeaderboardFallbackError as exc:
             print(f"\n❌ Sample {n} refused (rule-based fallback): {exc}")
-            return 2
+            status = 2
+            break
+        except (RuntimeError, ValueError) as exc:
+            print(f"\n❌ Sample {n} failed: {exc}")
+            status = 1
+            break
         ret = result.get("total_return")
-        if ret is not None:
-            returns.append(float(ret))
-        state = "cached" if result.get("cached") else "new"
+        drift = result.get("config_drift") or []
+        if not result.get("cached"):
+            state = "new"
+        elif drift:
+            state = f"cached, recorded under a different {', '.join(drift)}; --force re-runs it"
+        else:
+            state = "cached"
         ret_text = f"{ret * 100:+.2f}%" if ret is not None else "—"
         print(
             f"  sample {n}: {result['run_id']} ({state}) return {ret_text} "
             f"cost ${float(result.get('est_cost_usd') or 0):.4f}"
         )
-    if returns:
-        returns.sort()
-        print(
-            f"\n{len(returns)} sample(s): median {returns[(len(returns) - 1) // 2] * 100:+.2f}% "
-            f"range {returns[0] * 100:+.2f}% to {returns[-1] * 100:+.2f}%"
-        )
-    return 0
+    print(_publication_line(args))
+    return status
+
+
+def _publication_line(args) -> str:
+    """The board's own answer for this entry -- see ``describe_entry_publication``.
+
+    Not recomputed here from the runs just written: the board pools by recorded
+    config and counts repeats this invocation did not write, so a local median
+    can name a number the page never shows.
+    """
+    published = describe_entry_publication(
+        args.entry, period=args.period, start_date=args.start, end_date=args.end
+    )
+    samples = published["samples"]
+    if published["run_id"] is None:
+        return "\nBoard publishes nothing for this entry yet."
+    if not samples or samples["count"] < 2:
+        return f"\nBoard publishes a single run: {published['run_id']}."
+    kind = "median" if samples["count"] % 2 else "a middle run"
+    return (
+        f"\nBoard publishes {kind} of {samples['count']} runs "
+        f"({published['run_id']}, {float(published['total_return']) * 100:+.2f}%), "
+        f"range {samples['min_return'] * 100:+.2f}% to {samples['max_return'] * 100:+.2f}%."
+    )
 
 
 def _deploy_live(args):

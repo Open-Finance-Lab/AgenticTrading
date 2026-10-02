@@ -193,7 +193,9 @@ def _run_leaderboard_driver(js_body: str) -> dict:
             # keeps an absent value from rendering as `$0.00`.
             _extract_function(src, "finiteNumber"),
             _extract_function(src, "formatLeaderboardMoneyOrDash"),
-            # The "median of N" / "1 run" label (#602) both renderers print.
+            # The "median of N" / "1 run" label (#602) both renderers print,
+            # and the signed-percent formatter it shares with the board frame.
+            _extract_function(src, "boardSignedPercent"),
             _extract_function(src, "formatLeaderboardSamples"),
             _extract_function(src, "renderLeaderboardRowHtml"),
             _extract_function(src, "renderLeaderboardDetailHtml"),

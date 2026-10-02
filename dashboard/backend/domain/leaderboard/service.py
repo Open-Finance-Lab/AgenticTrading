@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import re
 import secrets
 import tempfile
 import threading
@@ -235,12 +236,14 @@ def _cached_run_index(
     session_id: str,
     initial_capital: Optional[float] = None,
     prompt_by_entry: Optional[Dict[str, Optional[str]]] = None,
+    runs: Optional[List[Dict[str, Any]]] = None,
 ) -> Tuple[Dict[str, Dict[str, Any]], set]:
     """``(cached run by llm_model, entry ids whose row drifted from the config)``.
 
     ``_find_cached_run`` rescans the whole session per lookup, so calling it in
     a loop is O(entries × runs) DB work on a request path. Same predicate and
-    the same ranking, one query — see ``_cache_match_rank``.
+    the same ranking, one query — see ``_cache_match_rank``. Pass ``runs`` (one
+    ``get_runs_by_session`` result) to share that query with ``_sample_index``.
 
     A drifted entry appears in **both** returns: it is still a cached row (so
     ``models_pending`` cannot count it and trigger a billable redeploy — see
@@ -251,7 +254,9 @@ def _cached_run_index(
     prompts = prompt_by_entry or {}
     index: Dict[str, Dict[str, Any]] = {}
     ranks: Dict[str, int] = {}
-    for run in db.get_runs_by_session(session_id) or []:
+    if runs is None:
+        runs = db.get_runs_by_session(session_id) or []
+    for run in runs:
         if not (
             run.get("mode") == LEADERBOARD_MODE
             and run.get("start_date") == start_date
@@ -267,23 +272,48 @@ def _cached_run_index(
     return index, drifted
 
 
+def _sampled_entry_ids(
+    config: Dict[str, Any], runs: Optional[List[Dict[str, Any]]] = None
+) -> set:
+    """Entry ids with at least one poolable repeat run in this board's window.
+
+    Such an entry publishes even with no primary row (``_entry_publication``),
+    so the automated paths must count it as present -- see the two callers.
+    """
+    index = _sample_index(
+        config["start_date"], config["end_date"], config["session_id"], runs=runs
+    )
+    return {
+        entry_id
+        for entry_id, rows in index.items()
+        if any(_usable_sample(row) for row in rows)
+    }
+
+
 def _daily_models_status(config: Dict[str, Any]) -> Dict[str, Any]:
     """How many competition LLM curves exist for the current daily window."""
     entries = llm_leaderboard_entries(config)
     # Single scan: this runs on every public GET of the daily board.
+    runs = db.get_runs_by_session(config["session_id"]) or []
     cached_runs, drifted_ids = _cached_run_index(
         config["start_date"],
         config["end_date"],
         config["session_id"],
         config.get("initial_capital", INITIAL_CAPITAL),
         {e["id"]: e.get("strategy_prompt") for e in entries},
+        runs=runs,
     )
+    sampled_ids = _sampled_entry_ids(config, runs)
     cached = 0
     drifted = 0
     pending_ids: List[str] = []
     for entry in entries:
         entry_id = entry["id"]
-        if cached_runs.get(entry_id):
+        if entry_id in sampled_ids and not cached_runs.get(entry_id):
+            # Published from repeat runs alone (#602). Pending would make the
+            # auto-deploy bill a primary for an entry the board already shows.
+            cached += 1
+        elif cached_runs.get(entry_id):
             # Drifted rows count as CACHED, never pending: pending is what
             # `maybe_schedule_daily_leaderboard_refresh` spends money on. See
             # `_resolve_cached_run`.
@@ -380,8 +410,17 @@ def refresh_daily_leaderboard(
     if deploy_models:
         failures: List[Dict[str, str]] = []
         successes: List[Dict[str, Any]] = []
+        # An entry the board publishes from repeat runs alone has no primary,
+        # so `deploy_model_run` would miss its cache and bill a full run for a
+        # row the board already shows. Only an explicit force re-runs it.
+        sampled_ids = set() if force_refresh else _sampled_entry_ids(config)
         for entry in llm_leaderboard_entries(config):
             entry_id = entry["id"]
+            if entry_id in sampled_ids:
+                successes.append(
+                    {"entry_id": entry_id, "cached": True, "published_from_samples": True}
+                )
+                continue
             try:
                 row = deploy_model_run(
                     entry_id,
@@ -877,7 +916,9 @@ def _sample_run_id(strategy_id: str, start_date: str, end_date: str, sample: int
 
 # The recorded config two repeat runs must share before they are pooled. A
 # sample run under a different model, prompt, ceiling, seed or tape is a
-# different experiment, and its spread is not the spread of this one.
+# different experiment, and its spread is not the spread of this one. The two
+# provenance flags belong to the tape: a clamped SIP window priced a shorter
+# series, and an IEX fallback a thinner one, under the same feed label.
 _SAMPLE_CONFIG_KEYS = (
     "model_id",
     "integration",
@@ -887,7 +928,22 @@ _SAMPLE_CONFIG_KEYS = (
     "llm_max_output_tokens",
     "initial_capital",
     "market_data_feed",
+    "end_clamped",
+    "sip_fallback_to_iex",
 )
+# The part of that config an entry pins in leaderboard.json and a run records
+# verbatim (`_llm_run_metadata`); capital and prompt are `_cache_match_rank`'s.
+# `model_id` is compared only when the entry sets one -- unset, the run records
+# the gateway's default, which no config names. The env-derived keys
+# (`llm_max_output_tokens`, the tape) are never compared: samples are deployed
+# from an operator's shell and the board is served from Render, and nothing
+# makes those two environments agree.
+_ENTRY_CONFIG_KEYS = ("model_id", "integration", "temperature", "reasoning_effort")
+_SAMPLE_SUFFIX = re.compile(r"_s(\d+)$")
+# (entry_id, pooled run ids) pairs already reported -- see _warn_on_ignored_samples.
+_warned_ignored_samples: set[Tuple[str, Tuple[str, ...]]] = set()
+# (start, end, rendered spans) already reported -- see _warn_on_window_drift.
+_warned_window_drift: set[Tuple[str, str, str]] = set()
 
 
 def _sample_config_key(run: Dict[str, Any]) -> Optional[Tuple[str, ...]]:
@@ -898,12 +954,74 @@ def _sample_config_key(run: Dict[str, Any]) -> Optional[Tuple[str, ...]]:
     return tuple(json.dumps(metadata.get(k), sort_keys=True) for k in _SAMPLE_CONFIG_KEYS)
 
 
+def _sample_draw(run: Dict[str, Any]) -> int:
+    """Which repeat a row is: ``n`` for an ``_s<n>`` id, 0 for the primary row.
+
+    Fixed before the run produced a return, which is why ``_median_run`` breaks
+    ties on it: it cannot lean toward the better draw or the worse one.
+    """
+    match = _SAMPLE_SUFFIX.search(str(run.get("run_id") or ""))
+    return int(match.group(1)) if match else 0
+
+
+def _written_at(run: Dict[str, Any]) -> str:
+    """When a row was last written, for "newest wins" tie-breaks.
+
+    ``updated_at`` first: Postgres keeps the first-seen ``created_at`` on a
+    re-insert while SQLite's REPLACE resets it, so a ``--force`` rerun looked
+    newer on one backend and not the other. Both refresh ``updated_at``.
+    """
+    return str(run.get("updated_at") or run.get("created_at") or "")
+
+
+def _entry_config_drift(
+    run: Dict[str, Any], entry: Dict[str, Any], wanted_capital: Optional[float]
+) -> Tuple[int, List[str]]:
+    """``(rank, the recorded dimensions that disagree)`` of one row against an entry.
+
+    ``_cache_match_rank`` widened to every dimension an entry pins, for the one
+    question that function never had to answer: which of two rows that *both
+    exist* -- a primary and a pool of repeats -- the board should publish. Same
+    rule: only a recorded disagreement is stale; an unrecorded one is unknown.
+    """
+    rank = _CACHE_MATCH
+    drift: List[str] = []
+    # One dimension per call, so the shared predicate also names the culprit.
+    for name, capital, prompt in (
+        ("initial_capital", _finite_positive(wanted_capital), None),
+        ("strategy_prompt", None, _wanted_prompt(entry.get("strategy_prompt"))),
+    ):
+        dimension = _cache_match_rank(run, capital, prompt)
+        if dimension == _CACHE_STALE:
+            drift.append(name)
+        rank = max(rank, dimension)
+    metadata = run.get("metadata")
+    for key in _ENTRY_CONFIG_KEYS:
+        if key == "model_id" and not entry.get("model_id"):
+            continue
+        if not isinstance(metadata, dict) or key not in metadata:
+            rank = max(rank, _CACHE_UNRECORDED)
+        elif metadata.get(key) != entry.get(key):
+            drift.append(key)
+            rank = _CACHE_STALE
+    return rank, drift
+
+
 def _sample_index(
-    start_date: str, end_date: str, session_id: str
+    start_date: str,
+    end_date: str,
+    session_id: str,
+    runs: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, List[Dict[str, Any]]]:
-    """Every sample row for this window, by entry id. One session scan."""
+    """Every sample row for this window, by entry id.
+
+    Pass ``runs`` (one ``get_runs_by_session`` result) to share a scan with
+    ``_cached_run_index``: the board reads both off the same rows.
+    """
+    if runs is None:
+        runs = db.get_runs_by_session(session_id) or []
     index: Dict[str, List[Dict[str, Any]]] = {}
-    for run in db.get_runs_by_session(session_id) or []:
+    for run in runs:
         if (
             run.get("mode") == LEADERBOARD_SAMPLE_MODE
             and run.get("start_date") == start_date
@@ -913,25 +1031,201 @@ def _sample_index(
     return index
 
 
-def _pooled_samples(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """The largest group of rows that recorded the same config, by return.
+def _usable_sample(run: Dict[str, Any]) -> bool:
+    """A sample that can be pooled: it recorded its config and a real return.
 
     Rows that recorded no config never pool: nothing says they ran the same
-    experiment. Ties go to the group holding the newest row, so a config change
-    followed by fresh repeats moves the board to the new runs.
+    experiment.
+    """
+    return (
+        _sample_config_key(run) is not None
+        and _finite(run.get("total_return")) is not None
+    )
+
+
+def _pooled_samples(
+    rows: List[Dict[str, Any]],
+    entry: Dict[str, Any],
+    wanted_capital: Optional[float],
+) -> Tuple[List[Dict[str, Any]], int]:
+    """``(the group of same-config rows to pool, how well it matches the entry)``.
+
+    Best is closest to the config the board publishes now, then largest, then
+    most recently written. **Match before size**: a group's size only says how
+    many times something was run, not that it is what the board now asks for,
+    so three runs under a replaced ``model_id`` must not outvote one fresh run
+    under the current one.
     """
     groups: Dict[Tuple[str, ...], List[Dict[str, Any]]] = {}
     for row in rows:
-        key = _sample_config_key(row)
-        if key is not None and _finite(row.get("total_return")) is not None:
-            groups.setdefault(key, []).append(row)
+        if _usable_sample(row):
+            groups.setdefault(_sample_config_key(row), []).append(row)
     if not groups:
-        return []
-    best = max(
-        groups.values(),
-        key=lambda g: (len(g), max(str(r.get("created_at") or "") for r in g)),
+        return [], _CACHE_STALE + 1
+    rank, best = max(
+        (
+            (max(_entry_config_drift(r, entry, wanted_capital)[0] for r in group), group)
+            for group in groups.values()
+        ),
+        key=lambda item: (
+            -item[0],
+            len(item[1]),
+            max(_written_at(r) for r in item[1]),
+        ),
     )
-    return sorted(best, key=lambda r: _finite(r.get("total_return")))
+    return best, rank
+
+
+def _median_run(pool: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """The run at the middle of ``pool`` by return -- a real run, never an average.
+
+    An even count has two middle runs and no median run. Always taking the
+    lower one published the worse draw every time (with two runs, the minimum)
+    and ranked the entry below what it measured. The tie-break is the draw
+    number instead, which was fixed before either run produced a return.
+    """
+    ordered = sorted(pool, key=lambda r: _finite(r.get("total_return")))
+    middle = len(ordered) // 2
+    if len(ordered) % 2:
+        return ordered[middle]
+    return min(ordered[middle - 1], ordered[middle], key=_sample_draw)
+
+
+def _curve_span(curve: List[Dict[str, Any]]) -> Optional[Tuple[str, str]]:
+    """The first and last US/Eastern trading day a stored curve covers."""
+    days: List[str] = []
+    for point in curve:
+        try:
+            stamp = datetime.fromisoformat(
+                str(point.get("timestamp")).replace("Z", "+00:00")
+            )
+        except ValueError:
+            continue
+        if stamp.tzinfo is None:
+            stamp = stamp.replace(tzinfo=timezone.utc)
+        days.append(stamp.astimezone(_US_EASTERN).date().isoformat())
+    return (min(days), max(days)) if days else None
+
+
+def _primary_joins_pool(primary: Dict[str, Any], pool: List[Dict[str, Any]]) -> bool:
+    """Whether the primary row is one more draw of the pool's experiment.
+
+    The same recorded config is necessary but not sufficient: a row written by
+    an earlier engine can record the same config and cover different days, so
+    the curves must also span the same trading days. Only reached when the
+    configs match, so the two extra curve reads are rare.
+    """
+    if (
+        not _usable_sample(primary)
+        or _sample_config_key(primary) != _sample_config_key(pool[0])
+    ):
+        return False
+    span = _curve_span(db.get_equity_curve(primary["run_id"]) or [])
+    return span is not None and span == _curve_span(
+        db.get_equity_curve(pool[0]["run_id"]) or []
+    )
+
+
+def _warn_on_ignored_samples(
+    entry: Dict[str, Any], pool: List[Dict[str, Any]], wanted_capital: Optional[float]
+) -> None:
+    """Say that an entry's repeat runs predate its config and are not published.
+
+    Once per (entry, pool) per process, like the drift warnings it sits beside.
+    """
+    entry_id = str(entry.get("id"))
+    key = (entry_id, tuple(sorted(str(r.get("run_id")) for r in pool)))
+    if key in _warned_ignored_samples:
+        return
+    _warned_ignored_samples.add(key)
+    drift = sorted(
+        {name for r in pool for name in _entry_config_drift(r, entry, wanted_capital)[1]}
+    )
+    print(
+        f"WARNING: leaderboard entry '{entry_id}' has {len(pool)} repeat run(s) "
+        f"recorded under a different {', '.join(drift) or 'config'} than "
+        "dashboard/config/leaderboard.json now configures; its primary run is "
+        "published instead. Re-run them with `deploy_leaderboard_model.py "
+        f"--entry {entry_id} --samples N --force`, or delete them."
+    )
+
+
+def _entry_publication(
+    entry: Dict[str, Any],
+    primary: Optional[Dict[str, Any]],
+    sample_rows: List[Dict[str, Any]],
+    wanted_capital: Optional[float],
+) -> Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
+    """``(the run an entry publishes, its samples block or None)`` (#602).
+
+    The single owner of this decision: ``get_leaderboard`` publishes it and the
+    deploy CLI reports it, so the two cannot disagree.
+
+    With two or more comparable repeats, the entry is their median run --
+    curve, metrics and rank all from that one row, so the table and the chart
+    cannot disagree. Repeats replace the primary only when they match the
+    current config at least as well as it does: a fresh primary deployed after
+    a config edit is never hidden behind repeats of the old config. The primary
+    itself counts as a draw when it is one (``_primary_joins_pool``); otherwise
+    it is left alone and publishes again the moment the samples are deleted.
+    """
+    pool, pool_rank = _pooled_samples(sample_rows, entry, wanted_capital)
+    if not pool:
+        return primary, None
+    if primary is not None:
+        primary_rank = _entry_config_drift(primary, entry, wanted_capital)[0]
+        if pool_rank > primary_rank:
+            _warn_on_ignored_samples(entry, pool, wanted_capital)
+            return primary, None
+        if _primary_joins_pool(primary, pool):
+            pool = pool + [primary]
+        elif len(pool) < 2 and (
+            primary_rank != _CACHE_STALE or pool_rank == _CACHE_STALE
+        ):
+            # One repeat is one more draw, not a better one -- unless the
+            # primary recorded a config the board no longer publishes.
+            return primary, None
+    returns = sorted(_finite(r.get("total_return")) for r in pool)
+    return _median_run(pool), {
+        "count": len(pool),
+        "min_return": returns[0],
+        "max_return": returns[-1],
+        "returns": returns,
+    }
+
+
+def _warn_on_window_drift(
+    start_date: str, end_date: str, spans: Dict[str, Tuple[str, str]]
+) -> None:
+    """Print when one board's published curves cover different trading days.
+
+    The trading-days twin of ``_warn_on_feed_drift`` and
+    ``_warn_on_capital_drift``: two curves under one window label that traded
+    different days were not measured over the same window, and the row's
+    labels cannot show it -- an engine change can move a run's last traded day
+    without changing its ``end_date``. Read off the curves themselves because
+    they are the only record every vintage of row has. A warning, once per
+    distinct drift per process, never a refusal: this runs on a public GET.
+    """
+    by_span: Dict[Tuple[str, str], List[str]] = {}
+    for entry_id, span in spans.items():
+        by_span.setdefault(span, []).append(entry_id)
+    if len(by_span) < 2:
+        return
+    rendered = "; ".join(
+        f"{first} → {last}: {', '.join(sorted(ids))}"
+        for (first, last), ids in sorted(by_span.items())
+    )
+    key = (start_date, end_date, rendered)
+    if key in _warned_window_drift:
+        return
+    _warned_window_drift.add(key)
+    print(
+        f"WARNING: leaderboard window {start_date} → {end_date} publishes curves "
+        f"that traded different days ({rendered}). Rows that did not trade the "
+        "same days cannot be ranked against each other honestly -- redeploy the "
+        "minority so every row covers the same sessions."
+    )
 
 
 def _skip_cache_key(session_id: str, start_date: str, end_date: str, strategy_id: str) -> str:
@@ -1607,7 +1901,9 @@ def _warn_on_capital_drift(
         "baselines, so it moves those to the new seed and strands the LLM "
         "entries at the old one — which mixes the board rather than aligning it, "
         "and drops whichever half lands in the minority. The LLM half is "
-        "redeployed by deploy_model_run(force_refresh=True)."
+        "redeployed by deploy_model_run(force_refresh=True); an entry published "
+        "from repeat runs needs those re-run too (`deploy_leaderboard_model.py "
+        "--samples N --force`), or deleted."
     )
 
 
@@ -1706,14 +2002,37 @@ def deploy_model_run(
         available = [s.get("id") for s in config.get("strategies", [])]
         raise ValueError(f"Unknown leaderboard entry '{entry_id}'. Available: {available}")
 
+    sample_drift: List[str] = []
     if sample is not None:
         run_id = _sample_run_id(entry_id, start_date, end_date, sample)
         run_mode = LEADERBOARD_SAMPLE_MODE
         if entry.get("strategy") != "llm_agent":
             # A baseline is deterministic; repeating it buys nothing.
             raise ValueError(f"Entry '{entry_id}' is not an LLM entry; nothing to sample")
-        existing = None if force_refresh else db.get_run(run_id)
-        existing_rank = _CACHE_MATCH
+        existing = db.get_run(run_id)
+        if existing and (
+            existing.get("session_id") != session_id
+            or existing.get("mode") != LEADERBOARD_SAMPLE_MODE
+        ):
+            # A sample id names an entry and a window, not a board, and
+            # `get_run` checks neither. Reusing the row would publish nothing on
+            # this board; overwriting it (INSERT OR REPLACE) would move it out
+            # of the board that owns it. Neither is a sample of this board.
+            raise ValueError(
+                f"Run '{run_id}' already belongs to session "
+                f"'{existing.get('session_id')}' (mode '{existing.get('mode')}'), "
+                f"not to '{session_id}'. Sample ids are per entry and window, so "
+                "this window is already sampled for another board; delete that "
+                "row first if this board should own it."
+            )
+        # Ranked like the primary, so a sample cached under a replaced config
+        # is reported rather than passing as a perfect hit.
+        if existing:
+            existing_rank, sample_drift = _entry_config_drift(
+                existing, entry, initial_capital
+            )
+        else:
+            existing_rank = _CACHE_MATCH
     else:
         run_id = _run_id(entry_id, start_date, end_date)
         run_mode = LEADERBOARD_MODE
@@ -1734,7 +2053,17 @@ def deploy_model_run(
         # config change would answer one edit to leaderboard.json with a
         # billable re-run of the whole board. `force_refresh=True` is the
         # operator's way to ask for it on purpose.
-        if existing_rank == _CACHE_STALE:
+        if sample is not None and sample_drift:
+            # Every drifted dimension in one line: a sample can also disagree
+            # on model, gateway or sampling, which the two below never check.
+            print(
+                f"WARNING: leaderboard entry '{entry_id}' sample {sample} "
+                f"(run {existing['run_id']}) was recorded under a different "
+                f"{', '.join(sample_drift)} than dashboard/config/leaderboard.json "
+                "now configures; it is reported as cached, not re-run. Pass "
+                "force_refresh=True (--force) to re-run it under the current config."
+            )
+        elif existing_rank == _CACHE_STALE:
             # Both reasons a row can be stale, because only one of them has a
             # board-wide scan behind it. `_warn_on_capital_drift` finds nothing
             # when the disagreement is the prompt, so before the second call a
@@ -1745,6 +2074,7 @@ def deploy_model_run(
             "entry_id": entry_id,
             "run_id": existing["run_id"],
             "cached": True,
+            "config_drift": sample_drift,
             "model": entry.get("model"),
             "total_return": existing.get("total_return"),
             "sharpe_ratio": existing.get("sharpe_ratio"),
@@ -1854,6 +2184,54 @@ def deploy_model_run(
         "input_tokens": input_tokens,
         "output_tokens": output_tokens,
         "est_cost_usd": est_cost,
+    }
+
+
+def describe_entry_publication(
+    entry_id: str,
+    *,
+    period: Optional[str] = "contest",
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    config: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """What ``get_leaderboard`` publishes for one entry, for the deploy CLI.
+
+    The same ``_entry_publication`` call the board makes, so the script's
+    closing line cannot report a median or range the page will not show.
+    ``samples`` is None when the entry publishes a single run.
+    """
+    config = config or resolve_leaderboard_config(period)
+    session_id = config["session_id"]
+    start_date = start_date or config["start_date"]
+    end_date = end_date or config["end_date"]
+    capital = float(config.get("initial_capital", INITIAL_CAPITAL))
+    entry = next(
+        (s for s in config.get("strategies", []) if s.get("id") == entry_id),
+        None,
+    )
+    if entry is None:
+        raise ValueError(f"Unknown leaderboard entry '{entry_id}'")
+    runs = db.get_runs_by_session(session_id) or []
+    primaries, _ = _cached_run_index(
+        start_date,
+        end_date,
+        session_id,
+        capital,
+        {entry_id: entry.get("strategy_prompt")},
+        runs=runs,
+    )
+    run, samples = _entry_publication(
+        entry,
+        primaries.get(entry_id),
+        _sample_index(start_date, end_date, session_id, runs=runs).get(entry_id, []),
+        capital,
+    )
+    return {
+        "entry_id": entry_id,
+        "run_id": run.get("run_id") if run else None,
+        "total_return": run.get("total_return") if run else None,
+        "samples": samples,
     }
 
 
@@ -2143,32 +2521,31 @@ def get_leaderboard(
     # scale onto is a property of the board and not of any one row — see
     # `_board_capital_base`.
     resolved: List[Tuple[Dict[str, Any], Dict[str, Any], float, List[Dict[str, Any]]]] = []
-    samples_by_entry = _sample_index(start_date, end_date, session_id)
+    # One session scan for every entry's primary AND its repeat runs, where this
+    # used to rescan the session once per entry (`_find_cached_run`) and once
+    # more for the samples -- on a public GET, against Postgres in prod.
+    session_runs = db.get_runs_by_session(session_id) or []
+    primaries, _ = _cached_run_index(
+        start_date,
+        end_date,
+        session_id,
+        display_capital,
+        {s["id"]: s.get("strategy_prompt") for s in config.get("strategies", [])},
+        runs=session_runs,
+    )
+    samples_by_entry = _sample_index(start_date, end_date, session_id, runs=session_runs)
     sample_summaries: Dict[str, Dict[str, Any]] = {}
     for strategy in config.get("strategies", []):
-        run = _find_cached_run(
-            strategy["id"],
-            start_date,
-            end_date,
-            session_id,
+        # #602: repeats can stand in for the primary; `_entry_publication` owns
+        # when, and the deploy CLI reports the same answer.
+        run, summary = _entry_publication(
+            strategy,
+            primaries.get(strategy["id"]),
+            samples_by_entry.get(strategy["id"], []),
             display_capital,
-            strategy.get("strategy_prompt"),
         )
-        # #602: with two or more comparable repeats, the entry is their MEDIAN
-        # run -- curve, metrics and rank all from that one row, so the table and
-        # the chart cannot disagree. The lower middle on an even count: a real
-        # run, never an average of two curves nobody traded. The primary row is
-        # left alone and is published again the moment the samples are deleted.
-        pooled = _pooled_samples(samples_by_entry.get(strategy["id"], []))
-        if len(pooled) >= 2 or (pooled and not run):
-            run = pooled[(len(pooled) - 1) // 2]
-            returns = [float(r["total_return"]) for r in pooled]
-            sample_summaries[strategy["id"]] = {
-                "count": len(pooled),
-                "min_return": returns[0],
-                "max_return": returns[-1],
-                "returns": returns,
-            }
+        if summary is not None:
+            sample_summaries[strategy["id"]] = summary
         if not run:
             continue
         board_runs.append(run)
@@ -2219,6 +2596,7 @@ def get_leaderboard(
     capital_base = _board_capital_base(recorded_seeds, display_capital)
 
     # SECOND PASS: publish the entries that share the board's one capital base.
+    published_spans: Dict[str, Tuple[str, str]] = {}
     for strategy, run, stored_initial, equity_hourly in resolved:
         if (
             capital_base is not None
@@ -2227,14 +2605,26 @@ def get_leaderboard(
         ):
             # An outlier in a board that otherwise agrees. Ranking it against
             # the rest would compare runs that were not measured the same way.
+            if run.get("mode") == LEADERBOARD_SAMPLE_MODE:
+                # A fresh primary cannot fix this one: repeats that match the
+                # config at least as well keep standing in for it.
+                remedy = (
+                    "this entry publishes from repeat runs, so re-run them "
+                    f"(`deploy_leaderboard_model.py --entry {strategy['id']} "
+                    "--samples N --force`) or delete them."
+                )
+            else:
+                remedy = (
+                    "a force-refresh does that only for an auto_compute "
+                    "baseline, an LLM entry needs "
+                    "deploy_model_run(force_refresh=True)."
+                )
             print(
                 f"WARNING: leaderboard entry '{strategy['id']}' (run "
                 f"{run['run_id']}) was run at ${stored_initial:,.2f} while the "
                 f"rest of this board was run at ${capital_base:,.2f} — omitted "
                 "rather than ranked against curves it is not comparable with "
-                "(issue #365). Re-run this entry at the board's seed: a "
-                "force-refresh does that only for an auto_compute baseline, an "
-                "LLM entry needs deploy_model_run(force_refresh=True)."
+                f"(issue #365). Re-run this entry at the board's seed: {remedy}"
             )
             continue
         # SCALING IS A COMPATIBILITY SHIM, NOT A RE-RUN, and it is only honest
@@ -2271,6 +2661,9 @@ def get_leaderboard(
             for pt in equity_hourly
         ]
         _report_curve_integrity(strategy["id"], run["run_id"], scaled_hourly)
+        span = _curve_span(equity_hourly)
+        if span is not None:
+            published_spans[strategy["id"]] = span
         equity_curve = chart_equity_curve(
             scaled_hourly,
             initial_equity=display_capital,
@@ -2315,6 +2708,8 @@ def get_leaderboard(
             entries[-1]["samples"] = sample_summaries.get(
                 strategy["id"], {"count": 1}
             )
+
+    _warn_on_window_drift(start_date, end_date, published_spans)
 
     # Yahoo index hours (:30 UTC) vs Alpaca stock hours (:00) — align every
     # chart series onto one shared axis so the frontend does not sparse-null.
