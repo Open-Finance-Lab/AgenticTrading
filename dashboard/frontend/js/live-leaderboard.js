@@ -8,8 +8,8 @@ let liveChartInstance = null;
 let liveChartView = 'absolute';
 let liveHiddenSeries = new Set();
 let liveListenersInitialized = false;
-let liveSortKey = 'rank';
-let liveSortDir = 'asc';
+let liveSortKey = 'return';
+let liveSortDir = 'desc';
 let liveSelectedId = null;
 let livePickerExpanded = new Set();
 
@@ -105,10 +105,11 @@ function liveSessionCopy(state) {
   return 'Cash session closed';
 }
 
-// A row with no stored run has no value, return or rank. The server leaves
-// those fields null rather than publishing the seed at 0%.
+// A row with no stored run has no value or return. Official rank still exists
+// on the payload for the header/rules, but this table does not render it —
+// catching-up rows are unranked and still have prints.
 function liveEntryIsPending(entry) {
-  return !entry || entry.rank == null || entry.status === 'pending';
+  return !entry || entry.status === 'pending' || entry.portfolio_value == null;
 }
 
 function liveModelRosterNote(entries) {
@@ -145,7 +146,7 @@ async function loadLiveLeaderboardData() {
   } catch (error) {
     console.error('Error loading live leaderboard:', error);
     if (tbody) {
-      tbody.innerHTML = `<tr><td colspan="6" style="text-align:center;padding:24px;color:var(--danger-color);">Error: ${escapeHtml(error.message)}</td></tr>`;
+      tbody.innerHTML = `<tr><td colspan="9" style="text-align:center;padding:24px;color:var(--danger-color);">Error: ${escapeHtml(error.message)}</td></tr>`;
     }
   }
 }
@@ -168,7 +169,9 @@ function updateLiveHeader(payload) {
   const elapsed = Number(status.trading_days_elapsed) || 0;
   const total = Number(status.trading_days_total) || 0;
   setText('liveProgressLabel', total ? `Day ${elapsed} of ${total}` : '—');
-  setText('liveStandingsTitle', payload.standings_label || 'Ranking');
+  // Live's table is Performance, not rank. Prod may still send the old
+  // standings_label until this backend ships; do not let that flip the title.
+  setText('liveStandingsTitle', 'Performance');
 
   const subtitle = document.getElementById('liveBoardSubtitle');
   if (subtitle) {
@@ -229,26 +232,63 @@ function updateLiveHeader(payload) {
   }
 }
 
+function liveSpyReturn() {
+  const spy = (livePayload?.entries || []).find((e) => e.entry_id === 'spy_index');
+  if (!spy || liveEntryIsPending(spy) || spy.cumulative_return == null) return null;
+  const n = Number(spy.cumulative_return);
+  return Number.isFinite(n) ? n : null;
+}
+
+function liveVsSpy(entry) {
+  const bench = liveSpyReturn();
+  if (bench == null || entry == null || entry.cumulative_return == null) return null;
+  const n = Number(entry.cumulative_return);
+  return Number.isFinite(n) ? n - bench : null;
+}
+
+function liveFormatPct(value, digits) {
+  if (value == null || !Number.isFinite(Number(value))) return '—';
+  return `${(Number(value) * 100).toFixed(digits)}%`;
+}
+
+function liveFormatHold(hours) {
+  if (hours == null || !Number.isFinite(Number(hours))) return '—';
+  const h = Number(hours);
+  if (h >= 24) return `${(h / 24).toFixed(1)}d`;
+  return `${h.toFixed(1)}h`;
+}
+
+function liveSortValue(entry, key) {
+  switch (key) {
+    case 'return': return Number(entry.cumulative_return);
+    case 'sharpe': return Number(entry.sharpe_ratio);
+    case 'dd': return Math.abs(Number(entry.max_drawdown));
+    case 'trades': return Number(entry.num_trades);
+    case 'hold': return Number(entry.avg_hold_hours);
+    case 'win_rate': return Number(entry.win_rate);
+    case 'vs_spy': return Number(liveVsSpy(entry));
+    case 'invested': return Number(entry.invested_pct);
+    default: return Number(entry.cumulative_return);
+  }
+}
+
 function liveSortedEntries() {
   const entries = (livePayload?.entries || []).slice();
   const dir = liveSortDir === 'asc' ? 1 : -1;
-  const num = (v) => Number(v) || 0;
   entries.sort((a, b) => {
-    // Pending rows have nothing to sort on; keep them below every ranked row
+    // Pending rows have nothing to sort on; keep them below every printed row
     // in either direction.
     const pa = liveEntryIsPending(a);
     const pb = liveEntryIsPending(b);
     if (pa !== pb) return pa ? 1 : -1;
     if (pa) return 0;
-    let cmp = 0;
-    switch (liveSortKey) {
-      case 'value': cmp = num(a.portfolio_value) - num(b.portfolio_value); break;
-      case 'return': cmp = num(a.cumulative_return) - num(b.cumulative_return); break;
-      case 'sharpe': cmp = num(a.sharpe_ratio) - num(b.sharpe_ratio); break;
-      case 'dd': cmp = Math.abs(num(a.max_drawdown)) - Math.abs(num(b.max_drawdown)); break;
-      default: cmp = num(a.rank) - num(b.rank);
-    }
-    return cmp * dir;
+    const av = liveSortValue(a, liveSortKey);
+    const bv = liveSortValue(b, liveSortKey);
+    const aOk = Number.isFinite(av);
+    const bOk = Number.isFinite(bv);
+    if (aOk !== bOk) return aOk ? -1 : 1;
+    if (!aOk) return 0;
+    return (av - bv) * dir;
   });
   return entries;
 }
@@ -258,33 +298,34 @@ function populateLiveTable() {
   if (!tbody) return;
   const rows = liveSortedEntries();
   if (!rows.length) {
-    tbody.innerHTML = `<tr><td colspan="6" style="text-align:center;padding:24px;color:var(--text-secondary);">No live-month entries configured.</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="9" style="text-align:center;padding:24px;color:var(--text-secondary);">No live-month entries configured.</td></tr>`;
     return;
   }
   tbody.innerHTML = rows.map((entry) => {
     const printed = !liveEntryIsPending(entry);
     const safeId = escapeHtml(String(entry.entry_id || ''));
     const label = escapeHtml(liveSeriesLabel(entry));
-    const ret = Number(entry.cumulative_return || 0);
-    const retClass = printed ? (ret >= 0 ? 'return-positive' : 'return-negative') : '';
-    const dd = (Math.abs(Number(entry.max_drawdown || 0)) * 100).toFixed(2);
-    const valueCell = printed && entry.portfolio_value != null
-      ? `$${liveFormatMoney(entry.portfolio_value)}`
-      : '—';
+    const ret = printed ? Number(entry.cumulative_return) : null;
+    const vs = printed ? liveVsSpy(entry) : null;
+    const retClass = (v) => (v == null || !Number.isFinite(v) ? '' : (v >= 0 ? 'return-positive' : 'return-negative'));
     const selected = liveSelectedId === entry.entry_id ? ' is-selected' : '';
+    const dash = (html) => (printed ? html : '—');
     return `
       <tr class="${selected}" data-live-entry="${safeId}">
-        <td class="rank-cell">${printed ? escapeHtml(entry.rank) : '—'}</td>
         <td>
           <div class="team-name-badge">
             <span>${label}</span>
             <span class="team-badge">${escapeHtml(liveFormatBadge(entry.team_badge))}</span>
           </div>
         </td>
-        <td style="text-align:right;font-family:var(--font-mono);">${valueCell}</td>
-        <td style="text-align:right;" class="${retClass}">${printed ? `${(ret * 100).toFixed(2)}%` : '—'}</td>
-        <td style="text-align:right;font-family:var(--font-mono);">${printed ? Number(entry.sharpe_ratio || 0).toFixed(2) : '—'}</td>
-        <td style="text-align:right;font-family:var(--font-mono);">${printed ? `${dd}%` : '—'}</td>
+        <td class="num-cell ${retClass(ret)}">${dash(liveFormatPct(ret, 2))}</td>
+        <td class="num-cell">${dash(entry.sharpe_ratio == null ? '—' : Number(entry.sharpe_ratio).toFixed(2))}</td>
+        <td class="num-cell">${dash(liveFormatPct(entry.max_drawdown == null ? null : -Math.abs(Number(entry.max_drawdown)), 2))}</td>
+        <td class="num-cell">${dash(entry.num_trades == null ? '—' : String(entry.num_trades))}</td>
+        <td class="num-cell">${dash(liveFormatHold(entry.avg_hold_hours))}</td>
+        <td class="num-cell">${dash(liveFormatPct(entry.win_rate, 0))}</td>
+        <td class="num-cell ${retClass(vs)}">${dash(liveFormatPct(vs, 2))}</td>
+        <td class="num-cell">${dash(liveFormatPct(entry.invested_pct, 0))}</td>
       </tr>`;
   }).join('');
 
@@ -310,8 +351,10 @@ function renderLiveDetail(entry) {
     <div class="team-detail-row"><span class="team-detail-label">Entry</span><span class="team-detail-value">${escapeHtml(liveSeriesLabel(entry))}</span></div>
     <div class="team-detail-row"><span class="team-detail-label">Type</span><span class="team-detail-value">${escapeHtml(liveFormatBadge(entry.team_badge))}</span></div>
     <div class="team-detail-row"><span class="team-detail-label">Value</span><span class="team-detail-value">${hasPrints ? `$${liveFormatMoney(entry.portfolio_value)}` : 'Awaiting freeze'}</span></div>
-    <div class="team-detail-row"><span class="team-detail-label">Return</span><span class="team-detail-value" style="color:${retColor};">${hasPrints ? `${(ret * 100).toFixed(2)}%` : '—'}</span></div>
-    <div class="team-detail-row"><span class="team-detail-label">Printed hours</span><span class="team-detail-value">${livePayload?.live_status?.printed_count ?? 0}</span></div>
+    <div class="team-detail-row"><span class="team-detail-label">Return</span><span class="team-detail-value" style="color:${retColor};">${hasPrints ? liveFormatPct(ret, 2) : '—'}</span></div>
+    <div class="team-detail-row"><span class="team-detail-label">Trades</span><span class="team-detail-value">${hasPrints && entry.num_trades != null ? entry.num_trades : '—'}</span></div>
+    <div class="team-detail-row"><span class="team-detail-label">Avg hold</span><span class="team-detail-value">${hasPrints ? liveFormatHold(entry.avg_hold_hours) : '—'}</span></div>
+    <div class="team-detail-row"><span class="team-detail-label">Through</span><span class="team-detail-value">${entry.snapshot_end || '—'}</span></div>
   `;
 }
 
@@ -641,7 +684,7 @@ function initLiveLeaderboardListeners() {
       if (liveSortKey === key) liveSortDir = liveSortDir === 'asc' ? 'desc' : 'asc';
       else {
         liveSortKey = key;
-        liveSortDir = key === 'dd' || key === 'rank' ? 'asc' : 'desc';
+        liveSortDir = key === 'dd' ? 'asc' : 'desc';
       }
       populateLiveTable();
     });

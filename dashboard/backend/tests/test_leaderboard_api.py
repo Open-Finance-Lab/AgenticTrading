@@ -792,6 +792,7 @@ def test_live_leaderboard_api_serves_the_calendar_month_freeze(client, monkeypat
     body = resp.json()
     assert body["period"] == "live"
     assert body["board_title"] == "Live Trading Leaderboard"
+    assert body["standings_label"] == "Performance"
     assert "live_status" in body
     status = body["live_status"]
     assert status["session_id"] == "leaderboard-live"
