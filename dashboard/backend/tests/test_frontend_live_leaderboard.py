@@ -119,6 +119,20 @@ def test_live_chart_uses_fitted_y_bounds():
     assert "capital * 0.9" not in source
 
 
+def test_live_table_is_performance_not_rank():
+    source = _strip_js_comments(_LIVE_JS)
+    assert 'id="liveStandingsTitle">Performance' in _APP_HTML
+    assert 'data-sort="rank"' not in _APP_HTML.split('id="liveLeaderboardView"')[1].split('id="leaderboardView"')[0]
+    assert 'data-sort="return"' in _APP_HTML
+    assert 'data-sort="trades"' in _APP_HTML
+    assert 'data-sort="hold"' in _APP_HTML
+    assert "liveSortKey = 'return'" in source
+    assert "liveFormatHold" in source
+    assert "liveVsSpy" in source
+    assert "data-sort=\"rank\"" not in source
+    assert "entry.rank" not in source
+
+
 def test_live_nav_round_trips():
     assert "live: { page: 'competition', competitionTab: 'live' }" in _APP_HTML
     body_start = _APP_JS.index("function viewParamForNavState")

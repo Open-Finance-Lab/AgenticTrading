@@ -14098,11 +14098,7 @@ html[data-nav-page="home"] #homeView .home-landing-board[data-home-board-slide="
     white-space: nowrap;
 }
 
-#liveLeaderboardView .live-board-table th.rank-col { width: 60px; text-align: center; }
-#liveLeaderboardView .live-board-table th.portfolio-col,
-#liveLeaderboardView .live-board-table th.return-col,
-#liveLeaderboardView .live-board-table th.sharpe-col,
-#liveLeaderboardView .live-board-table th.dd-col { text-align: right; }
+#liveLeaderboardView .live-board-table th.num-col { text-align: right; }
 
 #liveLeaderboardView .live-board-table th.sortable {
     cursor: pointer;
@@ -14130,9 +14126,11 @@ html[data-nav-page="home"] #homeView .home-landing-board[data-home-board-slide="
     color: var(--text-primary);
 }
 
-#liveLeaderboardView .live-board-table td.rank-cell {
-    text-align: center;
-    font-weight: 700;
+#liveLeaderboardView .live-board-table td.num-cell {
+    text-align: right;
+    font-family: var(--font-mono);
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
 }
 
 #liveLeaderboardView .legend-swatch,
