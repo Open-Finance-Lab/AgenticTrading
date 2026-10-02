@@ -1076,6 +1076,24 @@ a.header-brand:hover .title-section h1 {
     display: none;
 }
 
+.chart-sample-notice {
+    margin: 0 0 10px;
+    padding: 6px 8px;
+    border-left: 2px solid var(--info-color);
+    background: rgba(0, 191, 255, 0.06);
+    color: var(--text-secondary);
+    font-size: 12px;
+    line-height: 1.45;
+}
+
+.chart-sample-notice strong {
+    color: var(--text-primary);
+}
+
+.chart-sample-notice[hidden] {
+    display: none;
+}
+
 .date-separator {
     color: var(--text-secondary);
     font-size: 12px;

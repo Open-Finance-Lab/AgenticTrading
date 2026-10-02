@@ -10254,6 +10254,10 @@ function renderBacktestRunConfig(
     const empty = document.getElementById('backtestConfigEmpty');
     const list = document.getElementById('backtestConfigList');
     const cfg = launchConfig || (run?.run_id ? getBacktestLaunchConfig(run.run_id) : null);
+    // Hidden first so every exit -- including the no-run return just below --
+    // leaves no note from the previously selected run on the chart.
+    const sampleNotice = document.getElementById('chartSingleSampleNotice');
+    if (sampleNotice) sampleNotice.hidden = true;
 
     if (!run && !cfg) {
         if (empty) empty.hidden = false;
@@ -10522,6 +10526,10 @@ function renderBacktestRunConfig(
     // to buy by skipping it. '—' is the cell's own markup default, so a
     // hidden row holds exactly what the page shipped with.
     setBacktestConfigText('backtestConfigSampling', samplingLabel || '—');
+    // "One sample" (#602): any finished run that made model calls. Gated on
+    // usedModel, not on the sampling policy -- a pinned run is exactly the one
+    // a reader expects to reproduce, and three pinned DeepSeek reruns did not.
+    if (sampleNotice) sampleNotice.hidden = running || !usedModel;
     if (frequencyLabel) {
         setBacktestConfigText('backtestConfigFrequency', frequencyLabel);
     }
@@ -12115,6 +12123,8 @@ async function loadHistoricalBacktestSurfaces(selectedRun) {
         }
         const notice = document.getElementById('chartBaselineNotice');
         if (notice) notice.hidden = true;
+        const sampleNotice = document.getElementById('chartSingleSampleNotice');
+        if (sampleNotice) sampleNotice.hidden = true;
         renderPerformanceLegend({ columns: [] });
         setPerformanceComparisonState(
             'error',
