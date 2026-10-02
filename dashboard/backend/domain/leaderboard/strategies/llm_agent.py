@@ -73,10 +73,14 @@ class LLMAgentStrategy(BaselineStrategy):
         self.integration = self.config.get("integration")
         self.reasoning_effort = self.config.get("reasoning_effort")
         temperature = self.config.get("temperature")
-        # 0–1, not the OpenAI 0–2 range: every gateway here is reached through
-        # an Anthropic Messages client, which caps temperature at 1.0. A value
-        # above it would only surface as a per-request 400 — i.e. a silent
-        # rule-based fallback that the H6 guard then blocks from publishing.
+        # 0–1, not the OpenAI 0–2 range: native Anthropic, OpenRouter and
+        # CommonStack with thinking on are all reached through an Anthropic
+        # Messages client, which caps temperature at 1.0. CommonStack with
+        # thinking off speaks chat completions and would take up to 2, but
+        # one range keeps an entry valid on whichever gateway it is pointed
+        # at. A value above it would only surface as a per-request 400 — i.e.
+        # a silent rule-based fallback that the H6 guard then blocks from
+        # publishing.
         if temperature is not None and (
             isinstance(temperature, bool)
             or not isinstance(temperature, (int, float))

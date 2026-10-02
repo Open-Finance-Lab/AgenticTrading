@@ -27,6 +27,9 @@ from typing import Any, Optional
 
 from dashboard.backend.infrastructure.llm.reasoning_controls import (
     REASONING_OFF_VALUES,
+    REASONING_PASSTHROUGH_VALUES,
+    is_reasoning_off,
+    normalize_reasoning_effort,
 )
 
 INTEGRATION_ID = "openrouter"
@@ -42,7 +45,7 @@ DEFAULT_BASE_URL = "https://openrouter.ai/api"
 _DEFAULT_REASONING_EFFORT = "medium"
 # One set for every client: see infrastructure/llm/reasoning_controls.py.
 _OFF_VALUES = REASONING_OFF_VALUES
-_PASSTHROUGH_VALUES = frozenset({"auto", "default"})
+_PASSTHROUGH_VALUES = REASONING_PASSTHROUGH_VALUES
 # OpenRouter minimum for reasoning.max_tokens is 1024.
 _EFFORT_TO_REASONING_BUDGET = {
     "minimal": 1024,
@@ -137,7 +140,7 @@ def _reasoning_effort(override: Optional[str] = None) -> str:
     raw = override
     if raw is None or not str(raw).strip():
         raw = os.getenv("OPENROUTER_REASONING_EFFORT", _DEFAULT_REASONING_EFFORT)
-    return (raw or "").strip().lower()
+    return normalize_reasoning_effort(raw)
 
 
 def _reasoning_max_tokens_override() -> Optional[int]:
@@ -153,8 +156,7 @@ def _reasoning_max_tokens_override() -> Optional[int]:
 
 def reasoning_is_disabled(override: Optional[str] = None) -> bool:
     """True when we force non-reasoning (``OPENROUTER_REASONING_EFFORT=none``)."""
-    effort = _reasoning_effort(override)
-    return effort in _OFF_VALUES
+    return is_reasoning_off(_reasoning_effort(override))
 
 
 def reasoning_is_explicitly_enabled(override: Optional[str]) -> bool:
@@ -165,10 +167,8 @@ def reasoning_is_explicitly_enabled(override: Optional[str]) -> bool:
     something config validation can resolve, so it reads as "unknown", not
     "enabled".
     """
-    if override is None or not str(override).strip():
-        return False
-    effort = str(override).strip().lower()
-    return effort not in _OFF_VALUES and effort not in _PASSTHROUGH_VALUES
+    effort = normalize_reasoning_effort(override)
+    return bool(effort) and effort not in _OFF_VALUES and effort not in _PASSTHROUGH_VALUES
 
 
 def reasoning_extra_body(

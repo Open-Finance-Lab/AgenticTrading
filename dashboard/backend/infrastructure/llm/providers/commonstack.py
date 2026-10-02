@@ -1,6 +1,6 @@
-"""CommonStack gateway integration.
+"""CommonStack gateway integration (default multi-provider path).
 
-CommonStack exposes OpenAI / Google / xAI / DeepSeek / Qwen / Anthropic models
+CommonStack (https://commonstack.ai) exposes Anthropic, DeepSeek, Qwen, etc.
 behind one key on an Anthropic-compatible ``/v1/messages`` surface. Responses
 keep Anthropic shape (``content[0].text`` + ``usage.{input,output}_tokens``),
 so the shared backtest harness needs only a different ``base_url`` and a
@@ -16,16 +16,35 @@ left Qwen reasoning ~1k tokens for a ~100-token answer in the 2026-10-02 probe
 the H6 guard. So an entry that turns reasoning off is served by
 ``ChatCompletionsClient``, which speaks chat completions on the wire and hands
 the harness an Anthropic-shaped response.
+
+The wire body and the response reading are shared with the billed execution
+adapter through two leaves (``reasoning_controls``, ``chat_completions``),
+never by importing that layer, which would drag its registry, handoff and
+credential code into every backtest process.
 """
 
 from __future__ import annotations
 
 import os
+import time
 from types import SimpleNamespace
 from typing import Any, Optional
 
+from dashboard.backend.infrastructure.llm.chat_completions import (
+    first_choice,
+    normalize_finish_reason,
+    response_text,
+    usage_counts,
+    value_at,
+)
+from dashboard.backend.infrastructure.llm.http_policy import (
+    SDK_MAX_RETRIES,
+    call_with_retries,
+    provider_http_timeout,
+)
 from dashboard.backend.infrastructure.llm.reasoning_controls import (
-    REASONING_OFF_VALUES,
+    thinking_disabled_body,
+    wants_thinking_off,
 )
 
 INTEGRATION_ID = "commonstack"
@@ -35,6 +54,9 @@ INTEGRATION_ID = "commonstack"
 # and default LLM backtests). DeepSeek stays reliable on the same key.
 DEFAULT_MODEL = "deepseek/deepseek-v4-pro"
 DEFAULT_BASE_URL = "https://api.commonstack.ai"
+
+# Monkeypatched by tests; looked up per call, so a patch takes effect.
+_retry_sleep = time.sleep
 
 
 def base_url() -> str:
@@ -51,57 +73,50 @@ def chat_base_url() -> str:
     return root if root.endswith("/v1") else root + "/v1"
 
 
-def thinking_is_off(reasoning_effort: Optional[str]) -> bool:
-    """True when a config-supplied effort turns thinking off.
+class ChatCompletionsResponseError(RuntimeError):
+    """A 200 from chat completions that carried no choice at all.
 
-    ``None`` keeps the provider default: the native ``/v1/messages`` client,
-    exactly as every caller that passes no effort has always had.
+    Not an empty reply: an empty reply is a choice with no text, which the
+    harness retries and bills as a model turn. A body with no ``choices`` is a
+    gateway error or a contract change. Raising sends the step through the
+    harness's outer handler (one logged rule-based step) instead of five
+    billed retries that all read the same broken body as "the model said
+    nothing".
     """
-    if reasoning_effort is None:
-        return False
-    return str(reasoning_effort).strip().lower() in REASONING_OFF_VALUES
-
-
-# Chat-completions finish reasons, in the Anthropic spelling the harness reads
-# (``_hit_output_ceiling`` accepts both, but one vocabulary is less to audit).
-_STOP_REASONS = {"length": "max_tokens", "stop": "end_turn"}
 
 
 def _system_text(system: Any) -> Optional[str]:
     if system is None or isinstance(system, str):
         return system or None
     # Anthropic also takes a list of text blocks.
-    parts = [
-        block.get("text", "") if isinstance(block, dict) else getattr(block, "text", "")
-        for block in system
-    ]
+    parts = [value_at(block, "text", "") for block in system]
     return "\n".join(p for p in parts if p) or None
 
 
 def _as_anthropic_response(response: Any) -> SimpleNamespace:
     """Anthropic ``Message`` shape from a chat-completions response.
 
-    Empty or absent content becomes an empty ``content`` list, so
+    A choice with no text becomes an empty ``content`` list, so
     ``extract_response_text`` raises its usual "No text content" error and the
-    harness's empty-reply retry runs unchanged.
+    harness's empty-reply retry runs unchanged. ``stop_reason`` uses the
+    execution layer's vendor-neutral tag, which is what the harness already
+    reads on that path (``max_tokens`` at the ceiling).
     """
-    choices = getattr(response, "choices", None) or []
-    first = choices[0] if choices else None
-    message = getattr(first, "message", None)
-    text = getattr(message, "content", None)
-    content = (
-        [SimpleNamespace(type="text", text=text)]
-        if isinstance(text, str) and text.strip()
-        else []
-    )
-    finish = getattr(first, "finish_reason", None)
-    usage = getattr(response, "usage", None)
+    choice = first_choice(response)
+    if choice is None:
+        raise ChatCompletionsResponseError(
+            "CommonStack chat completions returned no choices "
+            f"(response type {type(response).__name__}; "
+            f"error field present: {value_at(response, 'error') is not None})"
+        )
+    text = response_text(response)
+    counts = usage_counts(response) or (0, 0)
     return SimpleNamespace(
-        content=content,
-        stop_reason=_STOP_REASONS.get(finish, finish),
+        content=[SimpleNamespace(type="text", text=text)] if text else [],
+        stop_reason=normalize_finish_reason(value_at(choice, "finish_reason")),
         usage=SimpleNamespace(
-            input_tokens=int(getattr(usage, "prompt_tokens", 0) or 0),
-            output_tokens=int(getattr(usage, "completion_tokens", 0) or 0),
+            input_tokens=int(counts[0] or 0),
+            output_tokens=int(counts[1] or 0),
         ),
     )
 
@@ -132,11 +147,18 @@ class _ChatCompletionsMessages:
             "messages": wire_messages,
             # Sent instead of any ``reasoning`` field, as the execution
             # adapter does for this provider (THINKING_TOGGLE_PROVIDERS).
-            "extra_body": {"thinking": {"type": "disabled"}},
+            "extra_body": thinking_disabled_body(),
         }
         if temperature is not None:
             kwargs["temperature"] = temperature
-        return _as_anthropic_response(self._client.chat.completions.create(**kwargs))
+        # The SDK runs with max_retries=0, so this owns the retries: only a
+        # failure that generated nothing is repeated, never a read timeout.
+        response = call_with_retries(
+            lambda: self._client.chat.completions.create(**kwargs),
+            label="CommonStack chat completions",
+            sleep=_retry_sleep,
+        )
+        return _as_anthropic_response(response)
 
 
 class ChatCompletionsClient:
@@ -150,34 +172,48 @@ class ChatCompletionsClient:
         self.messages = _ChatCompletionsMessages(openai_client)
 
 
-def _openai_cls() -> Any:
+def _chat_client(key: str) -> Any:
     from openai import OpenAI
 
-    return OpenAI
+    # SDK_MAX_RETRIES (0) and an explicit timeout, as every other SDK client
+    # here: the SDK's own retry loop replays a read timeout with no
+    # idempotency key, so one stall became three billed generations
+    # (http_policy.py). The /v1/messages client below predates that policy.
+    client = OpenAI(
+        api_key=key,
+        base_url=chat_base_url(),
+        max_retries=SDK_MAX_RETRIES,
+        timeout=provider_http_timeout(),
+    )
+    # The SDK fills these from OPENAI_ORG_ID / OPENAI_PROJECT_ID and sends them
+    # as headers on every request. They belong to the OpenAI account, never to
+    # a third-party gateway. Passing None to the constructor does not help,
+    # because None means "read the environment".
+    client.organization = None
+    client.project = None
+    return client
 
 
 def make_client(
     anthropic_cls: Any,
     *,
     reasoning_effort: Optional[str] = None,
-    openai_cls: Optional[Any] = None,
 ) -> Optional[Any]:
     """Build an Anthropic-compatible client for CommonStack, or ``None``.
 
     With thinking off the client speaks chat completions (see the module
-    docstring); otherwise the native ``/v1/messages`` client, unchanged.
+    docstring). With no effort, or a passthrough one, it is the native
+    ``/v1/messages`` client, unchanged. A graduated effort raises
+    ``UnsupportedReasoningEffort``: CommonStack honours on/off only, and a run
+    must not record an effort that never reached the wire.
     """
+    thinking_off = wants_thinking_off(reasoning_effort, integration=INTEGRATION_ID)
     key = os.getenv("COMMONSTACK_API_KEY")
     if not key:
         return None
-    if thinking_is_off(reasoning_effort):
+    if thinking_off:
         try:
-            # SDK defaults (retries, timeout) on purpose: the Anthropic client
-            # this replaces runs on its defaults too, so the only thing this
-            # changes is the surface the request reaches.
-            client = (openai_cls or _openai_cls())(
-                api_key=key, base_url=chat_base_url()
-            )
+            client = _chat_client(key)
         except Exception as exc:  # pragma: no cover - defensive
             print(f"⚠️  Failed to init CommonStack chat client: {exc}")
             return None

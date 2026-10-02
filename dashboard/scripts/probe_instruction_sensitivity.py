@@ -154,9 +154,13 @@ PROBE_INSTRUCTIONS: list[tuple[str, str]] = [
     ),
 ]
 
-# Gateways match dashboard/config/leaderboard.json so a probe return is
-# comparable with the published curve for the same model. Override with
-# --integration when only one gateway's key is available.
+# Gateways and sampling match dashboard/config/leaderboard.json, so a probe
+# return is comparable with board runs recorded under the same pin. For
+# deepseek that means runs made since 2026-10-02 (PR #605). Thinking off now
+# really reaches the wire, over CommonStack chat completions; before that,
+# /v1/messages ignored it. Those later runs are the comparison, not the July
+# primary row, which ran thinking on at the provider's default temperature.
+# Override with --integration when only one gateway's key is available.
 PROBE_MODELS: dict[str, dict] = {
     "nemotron": {
         "model_id": "nvidia/nemotron-3-nano-30b-a3b",
@@ -173,6 +177,9 @@ PROBE_MODELS: dict[str, dict] = {
 }
 
 # Recorded cost per 160-step contest run, from the published agent_runs rows.
+# The deepseek figure is a thinking-on run's; thinking off bills only the
+# visible JSON, so it now over-states the probe even more. It is kept anyway,
+# because this table is an upper bound (see the module docstring).
 COST_PER_RUN_USD = {"nemotron": 0.0715, "deepseek": 0.7561}
 
 KEY_BY_INTEGRATION = {
