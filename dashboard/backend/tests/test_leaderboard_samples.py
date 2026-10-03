@@ -36,6 +36,14 @@ from dashboard.backend.tests.test_leaderboard_curve_integrity import (  # noqa: 
 
 _ENTRY = "deepseek_v4_pro"
 _SCRIPTS_DIR = Path(__file__).resolve().parents[2] / "scripts"
+# The sampling pin leaderboard.json sets for _ENTRY, read rather than restated:
+# a fixture that hard-coded the pre-#605 values (none) drifted from the entry
+# the day it was re-pinned, and every "same experiment" case here read as stale.
+_PINNED = next(
+    s for s in lb_service.load_leaderboard_config()["strategies"] if s["id"] == _ENTRY
+)
+_TEMPERATURE = _PINNED.get("temperature")
+_REASONING_EFFORT = _PINNED.get("reasoning_effort")
 
 
 def _config(**overrides):
@@ -43,8 +51,8 @@ def _config(**overrides):
         "entry_id": _ENTRY,
         "model_id": "deepseek/deepseek-v4-pro",
         "integration": "commonstack",
-        "temperature": None,
-        "reasoning_effort": None,
+        "temperature": _TEMPERATURE,
+        "reasoning_effort": _REASONING_EFFORT,
         "strategy_prompt": None,
         "llm_max_output_tokens": 2000,
         "initial_capital": _DISPLAY_CAPITAL,
@@ -270,8 +278,8 @@ class _FakeLLMStrategy:
     """Just enough of LLMAgentStrategy for deploy_model_run's compute path."""
 
     integration = "commonstack"
-    temperature = None
-    reasoning_effort = None
+    temperature = _TEMPERATURE
+    reasoning_effort = _REASONING_EFFORT
     strategy_prompt = None
     model_id = "deepseek/deepseek-v4-pro"
     input_tokens = 1000
