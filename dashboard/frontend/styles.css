@@ -1062,7 +1062,8 @@ a.header-brand:hover .title-section h1 {
    provider was unreachable. Same treatment as .market-data-notice, including
    the explicit [hidden] rule — without it the display above would beat the
    hidden attribute and the notice would show on every healthy chart. */
-.chart-baseline-notice {
+.chart-baseline-notice,
+.chart-sample-notice {
     margin: 0 0 10px;
     padding: 6px 8px;
     border-left: 2px solid var(--warning-color);
@@ -1074,6 +1075,18 @@ a.header-brand:hover .title-section h1 {
 
 .chart-baseline-notice[hidden] {
     display: none;
+}
+
+/* Issue #602: a caveat about the curve rather than a fault in it, so the
+   shared notice box above takes the info accent instead of the warning one.
+   No [hidden] rule: nothing here sets `display`, so the UA rule already wins. */
+.chart-sample-notice {
+    border-left-color: var(--info-color);
+    background: rgba(0, 191, 255, 0.06);
+}
+
+.chart-sample-notice strong {
+    color: var(--text-primary);
 }
 
 .date-separator {

@@ -13,7 +13,7 @@
          because every API call is a CORS request. -->
     <link rel="preconnect" href="https://agentictrading.onrender.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="styles.css?v=156">
+    <link rel="stylesheet" href="styles.css?v=157">
     <!-- defer: ~200KB that was render-blocking. Deferred scripts execute in
          document order (this one first, the body-end ones after), all before
          DOMContentLoaded, so Chart is defined before any chart renders. -->
@@ -1382,6 +1382,18 @@
                     reached. Your agent's curve is complete; reload to retry the benchmarks.
                 </p>
 
+                <!-- Issue #602, option 1. Identical model runs do not reproduce:
+                     three DeepSeek V4 Pro reruns with every input and the
+                     sampling pinned diverged on the first bar (#539). Shown
+                     by initializeCharts() once it has painted a curve the
+                     model drove (see curveIsOneModelSample). A rule-based
+                     curve is repeatable and gets no note. -->
+                <p id="chartSingleSampleNotice" class="chart-sample-notice" hidden>
+                    <strong>One sample.</strong> Model runs are not repeatable: rerunning
+                    this exact setup can trade differently from the first bar and finish
+                    elsewhere. Read this curve as one outcome, not the model's expected return.
+                </p>
+
                 <div id="performanceLegend" class="performance-legend" role="group" aria-label="Chart series visibility"></div>
 
                 <div class="chart-container">
@@ -2551,7 +2563,7 @@
     <script src="market-events/MarketEventFeed.js" defer></script>
     <script src="js/portfolio.js?v=18" defer></script>
     <script src="js/backtest-comparison.js?v=1" defer></script>
-    <script src="app.js?v=153" defer></script>
+    <script src="app.js?v=154" defer></script>
     <script src="js/analytics.js?v=1" defer></script>
     <script src="js/agent-editor.js?v=32" defer></script>
     <script src="js/credit-format.js?v=1" defer></script>
