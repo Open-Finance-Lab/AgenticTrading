@@ -138,6 +138,10 @@ def test_every_sdk_client_constructor_pins_retries_and_timeout():
         "backend/domain/chat/service.py",
         "backend/domain/backtesting/algo_service.py",
         "backend/llm_integration_example.py",
+        # The legacy harness's CommonStack thinking-off client. It first
+        # shipped behind `(openai_cls or _openai_cls())(...)`, a call this
+        # scan cannot name, with SDK defaults.
+        "backend/infrastructure/llm/providers/commonstack.py",
     } <= relpaths
     for relpath, node, _tree in calls:
         where = f"{relpath}:{node.lineno}"
@@ -158,7 +162,11 @@ def _parents(tree: ast.Module) -> dict[ast.AST, ast.AST]:
 
 
 def test_every_messages_create_outside_the_adapters_goes_through_a_retry_runner():
-    """``max_retries=0`` with no retry owner fails a stale keep-alive or a 529 outright."""
+    """``max_retries=0`` with no retry owner fails a stale keep-alive or a 529 outright.
+
+    ``chat.completions.create`` counts too: it is the same SDK call on the
+    OpenAI surface, and the CommonStack thinking-off client makes it.
+    """
 
     trees = {relpath: tree for relpath, _node, tree in _sdk_constructor_calls()}
     checked = 0
@@ -171,7 +179,7 @@ def test_every_messages_create_outside_the_adapters_goes_through_a_retry_runner(
                 isinstance(node, ast.Call)
                 and isinstance(node.func, ast.Attribute)
                 and node.func.attr == "create"
-                and _keyword_names(node.func.value) == "messages"
+                and _keyword_names(node.func.value) in {"messages", "completions"}
             ):
                 continue
             checked += 1
@@ -192,7 +200,13 @@ def test_every_messages_create_outside_the_adapters_goes_through_a_retry_runner(
 
 @pytest.mark.parametrize(
     "module",
-    ["dashboard.backend.domain.chat.service", "dashboard.backend.domain.backtesting.algo_service"],
+    [
+        "dashboard.backend.domain.chat.service",
+        "dashboard.backend.domain.backtesting.algo_service",
+        # Shares the adapter's wire body and response reading through leaves;
+        # importing the adapter instead would load this layer per backtest.
+        "dashboard.backend.infrastructure.llm.providers.commonstack",
+    ],
 )
 def test_policy_callers_do_not_load_the_execution_layer(module, tmp_path):
     code = textwrap.dedent(

@@ -14,6 +14,9 @@ from dashboard.backend.infrastructure.llm.providers import (
     openrouter,
     resolve_integration,
 )
+from dashboard.backend.infrastructure.llm.reasoning_controls import (
+    UnsupportedReasoningEffort,
+)
 
 
 def test_known_integrations_are_parallel_siblings():
@@ -84,35 +87,42 @@ def test_make_llm_client_openrouter_uses_openrouter_key(monkeypatch):
     assert captured["default_headers"]["X-Title"] == "ATL Test"
 
 
-def test_make_llm_client_passes_reasoning_only_to_openrouter(monkeypatch):
+@pytest.mark.parametrize("integration", ["openrouter", "commonstack", "anthropic"])
+def test_make_llm_client_hands_every_provider_the_effort(monkeypatch, integration):
+    """One call shape for every provider: each decides what an effort means."""
     captured = {}
 
-    def _openrouter_client(anthropic_cls, *, reasoning_effort=None):
-        captured["openrouter"] = (anthropic_cls, reasoning_effort)
-        return "openrouter-client"
+    def _make_client(anthropic_cls, *, reasoning_effort=None):
+        captured["args"] = (anthropic_cls, reasoning_effort)
+        return f"{integration}-client"
 
-    def _commonstack_client(anthropic_cls):
-        captured["commonstack"] = anthropic_cls
-        return "commonstack-client"
+    monkeypatch.setattr(providers_pkg.PROVIDERS[integration], "make_client", _make_client)
 
-    def _anthropic_client(anthropic_cls):
-        captured["anthropic"] = anthropic_cls
+    assert make_llm_client(integration, reasoning_effort="none") == f"{integration}-client"
+    assert captured["args"] == (providers_pkg._Anthropic, "none")
+
+
+@pytest.mark.parametrize("effort", [None, "none", "off", "auto", "default"])
+def test_native_anthropic_builds_its_plain_client_for_on_off_efforts(monkeypatch, effort):
+    """Messages never thinks unless asked, so an off effort is already what is sent."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-fake-native")
+    built = []
+
+    def anthropic_cls(**kwargs):
+        built.append(kwargs)
         return "anthropic-client"
 
-    monkeypatch.setattr(openrouter, "make_client", _openrouter_client)
-    monkeypatch.setattr(commonstack, "make_client", _commonstack_client)
-    monkeypatch.setattr(anthropic_native, "make_client", _anthropic_client)
-
-    assert make_llm_client("openrouter", reasoning_effort="none") == "openrouter-client"
-    assert captured["openrouter"] == (providers_pkg._Anthropic, "none")
-
-    assert (
-        make_llm_client("commonstack", reasoning_effort="none") == "commonstack-client"
+    assert anthropic_native.make_client(anthropic_cls, reasoning_effort=effort) == (
+        "anthropic-client"
     )
-    assert captured["commonstack"] is providers_pkg._Anthropic
+    assert built == [{"api_key": "sk-fake-native"}]
 
-    assert make_llm_client("anthropic", reasoning_effort="none") == "anthropic-client"
-    assert captured["anthropic"] is providers_pkg._Anthropic
+
+@pytest.mark.parametrize("effort", ["low", "high"])
+def test_native_anthropic_refuses_an_effort_it_cannot_send(monkeypatch, effort):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-fake-native")
+    with pytest.raises(UnsupportedReasoningEffort):
+        anthropic_native.make_client(lambda **kw: "client", reasoning_effort=effort)
 
 
 def test_openrouter_messages_enable_medium_reasoning_by_default(monkeypatch):

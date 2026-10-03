@@ -971,6 +971,7 @@ def test_catch_up_is_one_run_checkpointed_per_session_and_resumes_after_a_crash(
         "segment_end": "2026-08-27",
         "full_replay": False,
         "forced": False,
+        "config_changed": None,
         "resumed_from_run_id": "lb_deepseek_v4_pro_20260801_20260825",
         "resumed_from_end_date": "2026-08-25",
     }
@@ -1083,6 +1084,105 @@ def test_a_forced_replay_killed_part_way_is_not_undone_by_the_next_refresh(monke
     assert row["cached"] is False
     assert runs == [("2026-08-12", "2026-08-27", "08-11")]
     assert db.get_run(row["run_id"])["metadata"]["live_increment"]["forced"] is False
+
+
+def _recorded_config(freeze_cfg, **overrides):
+    """The config keys a checkpoint records, as the current entry would write them."""
+    entry = _deepseek(freeze_cfg)
+    return {
+        "entry_id": entry["id"],
+        "model_id": entry["model_id"],
+        "integration": entry.get("integration"),
+        "temperature": entry.get("temperature"),
+        "reasoning_effort": entry.get("reasoning_effort"),
+        "strategy_prompt": None,
+        **overrides,
+    }
+
+
+def _insert_configured_checkpoint(end_date, day, config):
+    _insert_live_run(
+        f"lb_deepseek_v4_pro_20260801_{end_date.replace('-', '')}",
+        "deepseek_v4_pro",
+        end_date,
+        [_pt(f"{end_date}T19:00:00+00:00", SEED)],
+        metadata={
+            **config,
+            live.LIVE_SNAPSHOT_KEY: {"cash": SEED, "positions": {}, "day": day},
+        },
+    )
+
+
+def test_a_checkpoint_under_the_same_config_resumes(monkeypatch):
+    freeze_cfg = _live_aug27()
+    _insert_configured_checkpoint("2026-08-24", "08-24", _recorded_config(freeze_cfg))
+    runs = []
+    _use_agent(monkeypatch, _ScriptedAgent(runs=runs))
+    row = live.deploy_live_model_increment(_deepseek(freeze_cfg), freeze_cfg)
+    assert runs == [("2026-08-25", "2026-08-27", "08-24")]
+    assert db.get_run(row["run_id"])["metadata"]["live_increment"]["config_changed"] is None
+
+
+def test_an_entry_whose_config_changed_replays_the_month_instead_of_resuming(
+    monkeypatch, capsys
+):
+    """Resuming would trade the rest of the month under the new sampling and
+    re-record it over the whole curve, labelling sessions that ran under the
+    old one. PR #605 pinned DeepSeek thinking-off one session into October."""
+    freeze_cfg = _live_aug27()
+    _insert_configured_checkpoint(
+        "2026-08-24",
+        "08-24",
+        _recorded_config(freeze_cfg, temperature=None, reasoning_effort=None),
+    )
+    runs = []
+    _use_agent(monkeypatch, _ScriptedAgent(runs=runs))
+    row = live.deploy_live_model_increment(_deepseek(freeze_cfg), freeze_cfg)
+
+    assert runs == [("2026-08-01", "2026-08-27", None)]
+    out = capsys.readouterr().out
+    assert "WARNING: live.config_changed entry=deepseek_v4_pro" in out
+    assert "keys=temperature,reasoning_effort" in out
+    stored = db.get_run(row["run_id"])
+    assert stored["metadata"]["live_increment"]["full_replay"] is True
+    assert stored["metadata"]["live_increment"]["config_changed"] == [
+        "temperature",
+        "reasoning_effort",
+    ]
+    assert stored["metadata"]["temperature"] == 0
+    assert stored["metadata"]["reasoning_effort"] == "none"
+    # Counters start over with the replay, not on top of the old run's.
+    sessions = live._trading_days_inclusive(date(2026, 8, 1), date(2026, 8, 27))
+    assert stored["llm_calls"] == 7 * len(sessions)
+    assert [r["run_id"] for r in _month_rows("deepseek_v4_pro")] == [row["run_id"]]
+
+
+def test_a_config_replay_killed_part_way_never_resumes_the_old_config(monkeypatch):
+    """The old row outlives a replay killed before its first checkpoint, and the
+    next refresh must reach the same verdict rather than resume from it."""
+    freeze_cfg = _live_aug27()
+    _insert_configured_checkpoint(
+        "2026-08-24", "08-24", _recorded_config(freeze_cfg, temperature=0.7)
+    )
+    _use_agent(monkeypatch, _ScriptedAgent(crash_on={"2026-08-03"}))
+    with pytest.raises(RuntimeError, match="worker killed"):
+        live.deploy_live_model_increment(_deepseek(freeze_cfg), freeze_cfg)
+
+    runs = []
+    _use_agent(monkeypatch, _ScriptedAgent(runs=runs))
+    live.deploy_live_model_increment(_deepseek(freeze_cfg), freeze_cfg)
+    assert runs == [("2026-08-01", "2026-08-27", None)]
+
+
+def test_a_checkpoint_that_predates_a_config_key_is_not_a_change(monkeypatch):
+    """Absent is unknown: rows written before a key existed must not each force
+    a month-open replay of every model."""
+    freeze_cfg = _live_aug27()
+    _insert_checkpoint("2026-08-24", "08-24")
+    runs = []
+    _use_agent(monkeypatch, _ScriptedAgent(runs=runs))
+    live.deploy_live_model_increment(_deepseek(freeze_cfg), freeze_cfg)
+    assert runs == [("2026-08-25", "2026-08-27", "08-24")]
 
 
 def test_h6_judges_the_segment_not_each_session(monkeypatch):

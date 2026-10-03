@@ -9,10 +9,15 @@ from dashboard.backend.domain.model_providers.execution_catalog import (
     resolve_execution_model_route,
 )
 from dashboard.backend.domain.model_providers.models import ProviderRecord
+from dashboard.backend.infrastructure.llm.chat_completions import (
+    first_choice,
+    response_text,
+    usage_counts,
+)
 from dashboard.backend.infrastructure.llm.execution.models import LLMExecutionRequest
-
 from dashboard.backend.infrastructure.llm.reasoning_controls import (
-    REASONING_OFF_VALUES,
+    is_reasoning_off,
+    thinking_disabled_body,
 )
 
 from .base import (
@@ -49,35 +54,9 @@ def _default_client_factory(**kwargs: Any) -> Any:
     return OpenAI(**kwargs)
 
 
-def _first_choice(response: Any) -> Any:
-    choices = value_at(response, "choices", ())
-    return choices[0] if choices else None
-
-
-def _response_text(response: Any) -> str:
-    first = _first_choice(response)
-    message = value_at(first, "message")
-    content = value_at(message, "content")
-    if isinstance(content, str):
-        return content.strip()
-    if isinstance(content, list):
-        chunks: list[str] = []
-        for block in content:
-            text = value_at(block, "text")
-            if isinstance(text, str) and text.strip():
-                chunks.append(text.strip())
-        return "".join(chunks).strip()
-    return ""
-
-
 def _response_usage(response: Any):
-    usage = value_at(response, "usage")
-    if usage is None:
-        return None
-    return usage_from_fields(
-        value_at(usage, "prompt_tokens", value_at(usage, "input_tokens")),
-        value_at(usage, "completion_tokens", value_at(usage, "output_tokens")),
-    )
+    counts = usage_counts(response)
+    return None if counts is None else usage_from_fields(*counts)
 
 
 class OpenAIExecutionAdapter:
@@ -140,7 +119,7 @@ class OpenAIExecutionAdapter:
                 "openrouter",
                 "openai_compatible",
             }:
-                reasoning_off = request.reasoning_effort in REASONING_OFF_VALUES
+                reasoning_off = is_reasoning_off(request.reasoning_effort)
                 if reasoning_off and provider.provider_id in THINKING_TOGGLE_PROVIDERS:
                     # CommonStack honours no graduated reasoning control for
                     # DeepSeek V4 Pro or Qwen3.7 Plus: reasoning.effort,
@@ -148,7 +127,7 @@ class OpenAIExecutionAdapter:
                     # all ignored in the 2026-10-01 probe (#539). Thinking
                     # on/off is the one control it honours. Sent instead of
                     # `reasoning`, not beside it.
-                    kwargs["extra_body"] = {"thinking": {"type": "disabled"}}
+                    kwargs["extra_body"] = thinking_disabled_body()
                     wire.append("thinking=disabled")
                 else:
                     reasoning = {"effort": request.reasoning_effort}
@@ -169,7 +148,7 @@ class OpenAIExecutionAdapter:
                 kwargs["reasoning_effort"] = request.reasoning_effort
                 wire.append(f"reasoning_effort={request.reasoning_effort}")
             response = client.chat.completions.create(**kwargs)
-            text = _response_text(response)
+            text = response_text(response)
             if not text:
                 raise ProviderExecutionError("response_invalid")
             usage = _response_usage(response)
@@ -182,7 +161,7 @@ class OpenAIExecutionAdapter:
                 usage=usage,
                 provider_cost_usd=provider_cost_usd,
                 finish_reason=normalize_finish_reason(
-                    value_at(_first_choice(response), "finish_reason")
+                    value_at(first_choice(response), "finish_reason")
                 ),
                 sampling_wire=describe_sampling_wire(wire),
             )

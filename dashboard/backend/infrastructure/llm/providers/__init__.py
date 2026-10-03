@@ -4,7 +4,12 @@ Each integration is a sibling module exposing the same surface:
 
 * ``INTEGRATION_ID`` — config value for ``leaderboard.json`` ``integration``
 * ``DEFAULT_MODEL`` / ``default_model_name()``
-* ``make_client(anthropic_cls)`` → Anthropic-compatible client or ``None``
+* ``make_client(anthropic_cls, *, reasoning_effort=None)`` → a client exposing
+  Anthropic-shaped ``messages.create`` (the response a Messages client
+  returns), or ``None`` when the key is missing. Most are Anthropic SDK
+  clients; CommonStack with thinking off speaks chat completions behind the
+  same surface. An effort the integration cannot send raises
+  ``UnsupportedReasoningEffort`` rather than being dropped.
 
 Callers pick a gateway via ``make_llm_client(integration=...)`` (explicit) or
 omit it for legacy env auto-detect (CommonStack key → CommonStack, else native
@@ -72,16 +77,13 @@ def make_llm_client(
 
     Returns ``None`` when the SDK is missing or the integration's API key is
     unset / client init fails, so callers fall back to rule-based trading.
+    Raises ``UnsupportedReasoningEffort`` for an effort the integration cannot
+    send: that is a config error, and falling back would hide it.
     """
     if not HAS_ANTHROPIC or _Anthropic is None:
         return None
     resolved = resolve_integration(integration)
-    if resolved == openrouter.INTEGRATION_ID:
-        return openrouter.make_client(
-            _Anthropic,
-            reasoning_effort=reasoning_effort,
-        )
-    return PROVIDERS[resolved].make_client(_Anthropic)
+    return PROVIDERS[resolved].make_client(_Anthropic, reasoning_effort=reasoning_effort)
 
 
 def default_model_name(integration: Optional[str] = None) -> str:
