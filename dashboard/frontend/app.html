@@ -13,7 +13,7 @@
          because every API call is a CORS request. -->
     <link rel="preconnect" href="https://agentictrading.onrender.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="styles.css?v=157">
+    <link rel="stylesheet" href="styles.css?v=158">
     <!-- defer: ~200KB that was render-blocking. Deferred scripts execute in
          document order (this one first, the body-end ones after), all before
          DOMContentLoaded, so Chart is defined before any chart renders. -->
@@ -1722,18 +1722,21 @@
             <div class="leaderboard-bottom compact">
                 <section class="leaderboard-table-section compact">
                     <div class="table-header compact">
-                        <h3 id="liveStandingsTitle">Ranking</h3>
+                        <h3 id="liveStandingsTitle">Performance</h3>
                     </div>
                     <div class="table-wrapper compact">
                         <table class="live-board-table compact">
                             <thead>
                                 <tr>
-                                    <th class="rank-col sortable" data-sort="rank" aria-sort="ascending">Rank <span class="sort-arrow" aria-hidden="true"></span></th>
                                     <th class="name-col">Entry</th>
-                                    <th class="portfolio-col sortable" data-sort="value">Value <span class="sort-arrow" aria-hidden="true"></span></th>
-                                    <th class="return-col sortable" data-sort="return">Return <span class="sort-arrow" aria-hidden="true"></span></th>
-                                    <th class="sharpe-col sortable" data-sort="sharpe">Sharpe <span class="sort-arrow" aria-hidden="true"></span></th>
-                                    <th class="dd-col sortable" data-sort="dd">Max DD <span class="sort-arrow" aria-hidden="true"></span></th>
+                                    <th class="num-col sortable" data-sort="return" title="Return since the 1st of the month">Return <span class="sort-arrow" aria-hidden="true"></span></th>
+                                    <th class="num-col sortable" data-sort="sharpe" title="Annualized; noisy until a few weeks of sessions">Sharpe <span class="sort-arrow" aria-hidden="true"></span></th>
+                                    <th class="num-col sortable" data-sort="dd" title="Largest peak-to-trough drop this month">Max DD <span class="sort-arrow" aria-hidden="true"></span></th>
+                                    <th class="num-col sortable" data-sort="trades" title="Orders filled this month">Trades <span class="sort-arrow" aria-hidden="true"></span></th>
+                                    <th class="num-col sortable" data-sort="hold" title="Average time a share was held before it was sold. Closed positions only; calendar time.">Avg hold <span class="sort-arrow" aria-hidden="true"></span></th>
+                                    <th class="num-col sortable" data-sort="win_rate" title="Share of closing sells that made money (FIFO)">Win rate <span class="sort-arrow" aria-hidden="true"></span></th>
+                                    <th class="num-col sortable" data-sort="vs_spy" title="Return minus SPY over the same frozen sessions">vs SPY <span class="sort-arrow" aria-hidden="true"></span></th>
+                                    <th class="num-col sortable" data-sort="invested" title="Share of the account in positions at the latest close">Invested <span class="sort-arrow" aria-hidden="true"></span></th>
                                 </tr>
                             </thead>
                             <tbody id="liveLeaderboardTableBody"></tbody>
@@ -2568,7 +2571,7 @@
     <script src="js/admin-credits.js?v=9" defer></script>
     <script src="js/admin-tabs.js?v=12" defer></script>
     <script src="js/leaderboard.js?v=34" defer></script>
-    <script src="js/live-leaderboard.js?v=2" defer></script>
+    <script src="js/live-leaderboard.js?v=5" defer></script>
     <script src="home-page.js?v=54" defer></script>
     <!-- Load order: must come after app.js (API/API_BASE/escapeHtml) and
          market-events/marketEventRelativeTime.js (formatMarketEventRelativeTime),

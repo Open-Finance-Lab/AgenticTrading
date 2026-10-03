@@ -50,7 +50,7 @@ def no_alpaca(monkeypatch):
 
 def _insert_live_run(run_id, llm_model, end_date, points, *, final=None,
                      total_return=0.0, sharpe=0.0, max_dd=0.0, metadata=None,
-                     start_date="2026-08-01", **extra):
+                     start_date="2026-08-01", num_trades=0, **extra):
     db.insert_run(
         run_id=run_id,
         session_id="leaderboard-live",
@@ -63,7 +63,7 @@ def _insert_live_run(run_id, llm_model, end_date, points, *, final=None,
         total_return=total_return,
         sharpe_ratio=sharpe,
         max_drawdown=max_dd,
-        num_trades=0,
+        num_trades=num_trades,
         llm_model=llm_model,
         metadata=metadata,
         **extra,
@@ -818,6 +818,47 @@ def test_returns_come_off_the_stored_run_and_keep_the_first_hour(no_alpaca):
     assert nemotron["max_drawdown"] == pytest.approx(-0.03)
     assert nemotron["portfolio_value"] == pytest.approx(SEED * 1.02)
     assert nemotron["equity_curve"][0]["equity"] == pytest.approx(first_mark)
+
+
+def test_live_entry_publishes_trade_stats_and_invested(no_alpaca):
+    """The Performance table reads these off the GET entry, not the rank."""
+    from dashboard.backend.domain.leaderboard.live_trade_stats import TRADE_STATS_KEY
+
+    _insert_live_run(
+        "lb_nemotron_3_nano_30b_20260801_20260826", "nemotron_3_nano_30b", "2026-08-26",
+        [_pt("2026-08-03T13:00:00+00:00", SEED),
+         _pt("2026-08-26T19:00:00+00:00", SEED * 1.02)],
+        total_return=0.02, sharpe=1.1, max_dd=-0.03,
+        num_trades=3,
+        metadata={
+            "initial_capital": SEED,
+            live.LIVE_SNAPSHOT_KEY: {"cash": SEED * 1.02 * 0.4, "positions": {"AAPL": 10}},
+            TRADE_STATS_KEY: {
+                "version": 1,
+                "complete": True,
+                "buys": 2,
+                "sells": 1,
+                "closed_sells": 1,
+                "winning_sells": 1,
+                "held_share_hours": 12.0,
+                "held_shares": 4.0,
+                "open_lots": {},
+            },
+        },
+    )
+    payload = live.get_live_leaderboard(as_of=datetime(2026, 8, 27, 17, 39, tzinfo=_ET))
+    assert payload["standings_label"] == "Performance"
+    nemotron = next(e for e in payload["entries"] if e["entry_id"] == "nemotron_3_nano_30b")
+    assert nemotron["num_trades"] == 3
+    assert nemotron["win_rate"] == pytest.approx(1.0)
+    assert nemotron["avg_hold_hours"] == pytest.approx(3.0)
+    assert nemotron["closed_trades"] == 1
+    assert nemotron["invested_pct"] == pytest.approx(0.6)
+    spy = next(e for e in payload["entries"] if e["entry_id"] == "spy_index")
+    assert spy["status"] == "pending"
+    assert spy["num_trades"] is None
+    assert spy["win_rate"] is None
+    assert spy["invested_pct"] is None
 
 
 def test_dollar_axis_scales_by_the_recorded_seed_only(no_alpaca):

@@ -29,6 +29,11 @@ from zoneinfo import ZoneInfo
 
 from dashboard.backend.database import db
 from dashboard.backend.domain.leaderboard.baselines import INITIAL_CAPITAL, calc_metrics
+from dashboard.backend.domain.leaderboard.live_trade_stats import (
+    TRADE_STATS_KEY,
+    fold_trade_stats,
+    summarize_trade_stats,
+)
 from dashboard.backend.domain.leaderboard.strategies._common import reference_start_date
 from dashboard.backend.domain.leaderboard.us_market_calendar import is_trading_day
 from dashboard.backend.infrastructure.market_data.alpaca_bars import (
@@ -276,7 +281,7 @@ def live_freeze_config(
         "period": "live",
         "board_title": "Live Trading Leaderboard",
         "phase_label": "Season 0",
-        "standings_label": "Ranking",
+        "standings_label": "Performance",
     }
 
 
@@ -660,6 +665,13 @@ def _write_live_checkpoint(
         end_date=day_iso,
     ) or {}
     meta["live_increment"] = {**lineage, "segment_end": day_iso}
+    segment_trades = getattr(strategy_impl, "trades", None)
+    if segment_trades is not None:
+        meta[TRADE_STATS_KEY] = fold_trade_stats(
+            _run_metadata_dict(base).get(TRADE_STATS_KEY),
+            segment_trades,
+            prior_has_history=carried("num_trades") > 0,
+        )
     meta = lb_service._with_market_data_provenance(meta, provenance) or {}
 
     row = {
@@ -1200,6 +1212,25 @@ def _recorded_seed(run: Dict[str, Any]) -> Optional[float]:
     return seed if seed > 0 else None
 
 
+def _invested_fraction(run: Dict[str, Any]) -> Optional[float]:
+    """Share of the book in positions at the stored close, from the snapshot.
+
+    Only model rows carry a snapshot; baselines answer None rather than a
+    guess. Cash and equity are both in the run's own capital units.
+    """
+    snapshot = _snapshot_from_run(run)
+    if not snapshot:
+        return None
+    try:
+        cash = float(snapshot.get("cash"))
+        equity = float(run.get("final_equity"))
+    except (TypeError, ValueError):
+        return None
+    if equity <= 0:
+        return None
+    return min(max(1.0 - cash / equity, 0.0), 1.0)
+
+
 def _entry_from_strategy(
     strategy: Dict[str, Any],
     *,
@@ -1239,6 +1270,9 @@ def _entry_from_strategy(
         total_return = None
         sharpe = None
         max_dd = None
+    trade_figures = summarize_trade_stats(
+        _run_metadata_dict(run).get(TRADE_STATS_KEY) if printed else None
+    )
     return {
         "entry_id": strategy["id"],
         "team_name": strategy.get("name") or "Agentic Trading Lab",
@@ -1255,6 +1289,9 @@ def _entry_from_strategy(
         "rank": None,
         "run_id": run.get("run_id") if run else None,
         "snapshot_end": run.get("end_date") if run else None,
+        "num_trades": int(run.get("num_trades") or 0) if printed else None,
+        **trade_figures,
+        "invested_pct": _invested_fraction(run) if printed else None,
         "llm_calls": (run or {}).get("llm_calls") or 0,
         "input_tokens": (run or {}).get("input_tokens") or 0,
         "output_tokens": (run or {}).get("output_tokens") or 0,
@@ -1406,7 +1443,7 @@ def get_live_leaderboard(
         "period": "live",
         "board_title": "Live Trading Leaderboard",
         "phase_label": "Season 0",
-        "standings_label": "Ranking",
+        "standings_label": "Performance",
         "window": {
             "start_date": start_date,
             "end_date": end_date,
