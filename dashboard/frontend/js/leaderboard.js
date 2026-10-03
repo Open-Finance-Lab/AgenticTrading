@@ -1360,6 +1360,28 @@ function getFilteredLeaderboardEntries() {
   return entries;
 }
 
+// How many runs a model row stands on (#602). One model run is one draw, so a
+// row's return means something different at n=1 and n=3, and the board says
+// which. Baselines carry no `samples` and get no label: they are repeatable.
+// An even count has no median run -- the server publishes one of the two
+// middle runs -- so the label says "middle" there rather than claim a median.
+// Returns '' when there is nothing honest to say. `long` is a plain boolean,
+// not a destructured option: the test harnesses lift functions by matching the
+// first `{` after the signature.
+function formatLeaderboardSamples(entry, long) {
+  const samples = entry && entry.samples;
+  const count = Number(samples && samples.count);
+  if (!Number.isFinite(count) || count < 1) return '';
+  if (count === 1) return long ? 'Single run · not repeated' : '1 run';
+  const lo = boardSignedPercent(samples.min_return);
+  const hi = boardSignedPercent(samples.max_return);
+  const range = lo && hi ? ` · ${lo} to ${hi}` : '';
+  const kind = count % 2 ? 'median' : 'middle';
+  return long
+    ? `${kind === 'median' ? 'Median' : 'Middle'} of ${count} runs${range}`
+    : `${kind} of ${count}${range}`;
+}
+
 // `entry.model` / `entry.team_name` are user-registered agent names, so every
 // string field must go through `escapeHtml` (a global from app.js, loaded
 // first). The onclick id additionally needs JS-string escaping — backslash
@@ -1374,6 +1396,7 @@ function renderLeaderboardRowHtml(entry) {
   const retClass = ret >= 0 ? 'return-positive' : 'return-negative';
   const ddRaw = Number(entry.max_drawdown || 0);
   const dd = (Math.abs(ddRaw) * 100).toFixed(2);
+  const sampleLabel = formatLeaderboardSamples(entry);
 
   return `
       <tr onclick="selectLeaderboardTeam('${safeId}')">
@@ -1387,6 +1410,7 @@ function renderLeaderboardRowHtml(entry) {
         <td style="text-align: right; font-family: var(--font-mono);">${formatLeaderboardMoneyOrDash(entry.portfolio_value)}</td>
         <td style="text-align: right;" class="${retClass}">
           <span class="metric-value-text">${(ret * 100).toFixed(2)}%</span>
+          ${sampleLabel ? `<span class="leaderboard-sample-range">${escapeHtml(sampleLabel)}</span>` : ''}
         </td>
         <td style="text-align: right; font-family: var(--font-mono);">${Number(entry.sharpe_ratio || 0).toFixed(2)}</td>
         <td style="text-align: right; font-family: var(--font-mono);">${dd}%</td>
@@ -1419,6 +1443,7 @@ function renderLeaderboardDetailHtml(entry, totalEntries) {
   const ret = Number(entry.cumulative_return || 0);
   const retColor = ret >= 0 ? 'var(--success-color)' : 'var(--danger-color)';
   const entryLabel = escapeHtml(entry.model || entry.team_name || '—');
+  const runsLabel = formatLeaderboardSamples(entry, true);
   return `
       <div class="team-detail-row">
         <span class="team-detail-label">Entry</span>
@@ -1436,6 +1461,10 @@ function renderLeaderboardDetailHtml(entry, totalEntries) {
         <span class="team-detail-label">Return</span>
         <span class="team-detail-value" style="color: ${retColor};">${(ret * 100).toFixed(2)}%</span>
       </div>
+      ${runsLabel ? `<div class="team-detail-row">
+        <span class="team-detail-label">Runs</span>
+        <span class="team-detail-value">${escapeHtml(runsLabel)}</span>
+      </div>` : ''}
       <div class="team-detail-row">
         <span class="team-detail-label">Sharpe</span>
         <span class="team-detail-value">${Number(entry.sharpe_ratio || 0).toFixed(2)}</span>

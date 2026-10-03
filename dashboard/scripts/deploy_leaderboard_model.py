@@ -19,6 +19,15 @@ without recomputing. This is how you "permanently deploy" a model:
 
   3. Refresh the leaderboard — the model appears as a provided baseline.
 
+One model run is one draw (#602). To publish a median and a range instead:
+
+       python3 dashboard/scripts/deploy_leaderboard_model.py \
+         --entry deepseek_v4_pro --samples 3
+
+writes repeat runs 1..N beside the primary row (existing ones are skipped
+unless --force). The board publishes the median once two comparable repeats
+exist; the primary row is left untouched. Each repeat is billed in full.
+
 Requires the API key for the entry's integration in dashboard/.env
 (COMMONSTACK_API_KEY, OPENROUTER_API_KEY, and/or ANTHROPIC_API_KEY).
 """
@@ -46,6 +55,7 @@ load_dotenv(DASHBOARD_DIR.parent / ".env")
 from dashboard.backend.domain.leaderboard.service import (  # noqa: E402
     LeaderboardFallbackError,
     deploy_model_run,
+    describe_entry_publication,
     load_leaderboard_config,
 )
 
@@ -68,6 +78,13 @@ def main() -> int:
         help="Publish even if the LLM entry fell back to rule-based trading "
         "(by default that is refused so a rule-based curve is not shown as an LLM result)",
     )
+    parser.add_argument(
+        "--samples",
+        type=int,
+        default=None,
+        help="Write repeat runs 1..N (#602); the board publishes their median. "
+        "Contest/daily only. Each repeat is a full billable run.",
+    )
     parser.add_argument("--list", action="store_true", help="List configured entries and exit")
     args = parser.parse_args()
 
@@ -87,6 +104,15 @@ def main() -> int:
     print(f"Deploying '{args.entry}' to the {args.period} leaderboard...")
     if args.start or args.end:
         print(f"  (test window override: {args.start or 'config'} → {args.end or 'config'})")
+
+    if args.samples is not None:
+        if args.period == "live":
+            print("--samples is not supported for the live board")
+            return 1
+        if args.samples < 1:
+            print("--samples must be at least 1")
+            return 1
+        return _deploy_samples(args)
 
     try:
         if args.period == "live":
@@ -134,6 +160,73 @@ def main() -> int:
     print(f"  Est. Cost    : ${float(result.get('est_cost_usd') or 0):.4f}")
     print("\nRefresh the leaderboard (or GET /api/v1/leaderboard?refresh=true) to see it.")
     return 0
+
+
+def _deploy_samples(args) -> int:
+    """Repeat runs 1..N, one line each, then what the board will publish.
+
+    Stops at the first failure: a fallback or a broken run is likelier to
+    repeat than to clear on the next billable attempt. Whatever was written
+    still counts, so the closing line is printed either way.
+    """
+    status = 0
+    for n in range(1, args.samples + 1):
+        try:
+            result = deploy_model_run(
+                args.entry,
+                force_refresh=args.force,
+                start_date=args.start,
+                end_date=args.end,
+                allow_fallback=args.allow_fallback,
+                period=args.period,
+                sample=n,
+            )
+        except LeaderboardFallbackError as exc:
+            print(f"\n❌ Sample {n} refused (rule-based fallback): {exc}")
+            status = 2
+            break
+        except (RuntimeError, ValueError) as exc:
+            print(f"\n❌ Sample {n} failed: {exc}")
+            status = 1
+            break
+        ret = result.get("total_return")
+        drift = result.get("config_drift") or []
+        if not result.get("cached"):
+            state = "new"
+        elif drift:
+            state = f"cached, recorded under a different {', '.join(drift)}; --force re-runs it"
+        else:
+            state = "cached"
+        ret_text = f"{ret * 100:+.2f}%" if ret is not None else "—"
+        print(
+            f"  sample {n}: {result['run_id']} ({state}) return {ret_text} "
+            f"cost ${float(result.get('est_cost_usd') or 0):.4f}"
+        )
+    print(_publication_line(args))
+    return status
+
+
+def _publication_line(args) -> str:
+    """The board's own answer for this entry -- see ``describe_entry_publication``.
+
+    Not recomputed here from the runs just written: the board pools by recorded
+    config and counts repeats this invocation did not write, so a local median
+    can name a number the page never shows.
+    """
+    published = describe_entry_publication(
+        args.entry, period=args.period, start_date=args.start, end_date=args.end
+    )
+    samples = published["samples"]
+    if published["run_id"] is None:
+        return "\nBoard publishes nothing for this entry yet."
+    if not samples or samples["count"] < 2:
+        return f"\nBoard publishes a single run: {published['run_id']}."
+    kind = "median" if samples["count"] % 2 else "a middle run"
+    return (
+        f"\nBoard publishes {kind} of {samples['count']} runs "
+        f"({published['run_id']}, {float(published['total_return']) * 100:+.2f}%), "
+        f"range {samples['min_return'] * 100:+.2f}% to {samples['max_return'] * 100:+.2f}%."
+    )
 
 
 def _deploy_live(args):

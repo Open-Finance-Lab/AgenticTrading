@@ -4467,6 +4467,18 @@ a.header-brand:hover .title-section h1 {
     color: var(--danger-color);
 }
 
+/* Relative, so it stays a sub-label under the return in the 10px compact
+   table, and allowed to wrap, so "median of 3 · -1.25% to +2.10%" breaks onto
+   a second line instead of widening the 110px Return column. */
+.leaderboard-sample-range {
+    display: block;
+    color: var(--text-secondary);
+    font-size: 0.9em;
+    font-weight: 400;
+    line-height: 1.25;
+    white-space: normal;
+}
+
 .metric-value-text {
     font-weight: 500;
 }
