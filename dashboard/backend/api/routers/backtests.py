@@ -4411,7 +4411,7 @@ def _render_run_plot_png(run_id: str) -> bytes:
     else:
         baselines = [
             (label, baseline_run_id, align_equity(
-                timestamps, equity_lookup(curve)
+                timestamps, equity_lookup(curve), initial_value=initial_capital
             ))
             for label, baseline_run_id, curve in _stored_buyhold_baseline(run)
         ]

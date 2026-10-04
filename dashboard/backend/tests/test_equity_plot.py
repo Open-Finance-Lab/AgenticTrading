@@ -1,6 +1,6 @@
 """Tests for gapless equity plot rendering."""
 
-from datetime import datetime
+from datetime import datetime, timezone
 
 import pytest
 import pytz
@@ -8,8 +8,10 @@ import requests
 
 from dashboard.backend.domain.leaderboard.strategies._yahoo import YahooChartError
 from dashboard.backend.equity_plot import (
+    align_equity,
     build_backtest_chart_data,
     compute_index_baseline_values,
+    equity_lookup,
     gapless_chart_x_labels,
     gapless_market_axis,
     market_index_baselines_with_status,
@@ -294,6 +296,47 @@ def test_render_backtest_equity_png_bytes():
         ],
     )
     assert png[:8] == b"\x89PNG\r\n\x1a\n"
+
+
+def test_align_equity_backfills_before_the_baselines_first_point():
+    """Production shape (reproduced live 2026-10-04, run agent_20261004_120710):
+
+    the engine records the agent curve every 5 minutes from the open, while
+    the stored hourly buy-and-hold baseline first records at the close of the
+    first hourly bar — an hour later. ``align_equity`` used to raise on that
+    prefix and 404 the whole chart-data / plot.png render ("Performance
+    comparison is unavailable" on the backtest page). The prefix must
+    backfill the initial capital; later gaps keep the forward fill.
+    """
+    utc = timezone.utc
+    agent_ts = [
+        datetime(2026, 5, 4, 13, 30, tzinfo=utc),  # open, no baseline yet
+        datetime(2026, 5, 4, 13, 35, tzinfo=utc),
+        datetime(2026, 5, 4, 14, 30, tzinfo=utc),  # first hourly close
+        datetime(2026, 5, 4, 15, 30, tzinfo=utc),
+    ]
+    baseline_curve = [
+        {"timestamp": "2026-05-04T14:30:00+00:00", "equity": 1010.0},
+        {"timestamp": "2026-05-04T15:30:00+00:00", "equity": 1020.0},
+    ]
+    values = align_equity(
+        agent_ts, equity_lookup(baseline_curve), initial_value=1000.0
+    )
+    assert values == [1000.0, 1000.0, 1010.0, 1020.0]
+
+
+def test_align_equity_without_initial_value_uses_baseline_first_point():
+    utc = timezone.utc
+    agent_ts = [datetime(2026, 5, 4, 13, 30, tzinfo=utc), datetime(2026, 5, 4, 14, 30, tzinfo=utc)]
+    lookup = {datetime(2026, 5, 4, 14, 30, tzinfo=utc): 1010.0}
+    assert align_equity(agent_ts, lookup) == [1010.0, 1010.0]
+
+
+def test_align_equity_still_rejects_an_empty_baseline():
+    with pytest.raises(ValueError, match="missing equity"):
+        align_equity(
+            [datetime(2026, 5, 4, 13, 30, tzinfo=timezone.utc)], {}
+        )
 
 
 def test_index_baseline_survives_a_dst_change(monkeypatch):
