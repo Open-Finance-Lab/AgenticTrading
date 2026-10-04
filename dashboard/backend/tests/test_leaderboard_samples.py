@@ -83,7 +83,9 @@ def _seed_sample(
     capital=_DISPLAY_CAPITAL,
     session_id=_SESSION,
     days=2,
+    curve=None,
 ):
+    """One repeat row; ``curve`` replaces the flat ``_curve`` path (see ``_path``)."""
     run_id = lb_service._sample_run_id(entry, _START, _END, n)
     final = capital * (1 + total_return)
     board.db.insert_run(
@@ -103,8 +105,23 @@ def _seed_sample(
         llm_calls=10,
         metadata=_config(initial_capital=capital) if metadata == "default" else metadata,
     )
-    board._curves[run_id] = _curve(capital, final, days)
+    board._curves[run_id] = curve if curve is not None else _curve(capital, final, days)
     return run_id
+
+
+def _path(capital, levels):
+    """A stored curve from ``{april_day: multiple of capital}``; None is a NULL.
+
+    The interior is what a band is about, and ``_curve`` is flat until its last
+    point, so every member of a band case is given its own path here.
+    """
+    return [
+        {"timestamp": f"2026-04-{day:02d}T14:00:00+00:00",
+         "equity": None if m is None else capital * m,
+         "cash": None if m is None else capital * m,
+         "positions_value": 0, "daily_return": 0}
+        for day, m in sorted(levels.items())
+    ]
 
 
 def _seed_primary(board, total_return=0.0749, *, metadata=None, days=2):
@@ -743,3 +760,250 @@ def test_the_cli_stops_on_a_failed_sample_and_still_reports(board, monkeypatch, 
     out = capsys.readouterr().out
     assert "Sample 2 failed" in out
     assert f"Board publishes a single run: {only}" in out
+
+
+# --------------------------------------------------------------------------
+# the chart band: the pooled runs' min/max envelope behind the median
+# --------------------------------------------------------------------------
+
+_CAP = _DISPLAY_CAPITAL
+
+
+def _index_of_day(entry, day):
+    """Where the ``2026-04-<day>`` bar lands on the entry's aligned axis.
+
+    Matched on the bar's hour: the 15th also carries the midnight open tick.
+    """
+    return next(
+        i for i, pt in enumerate(entry["equity_curve"])
+        if pt["timestamp"].startswith(f"2026-04-{day:02d}T14")
+    )
+
+
+def _seed_three_paths(board):
+    """Three repeats whose interiors differ: a dip, a flat median, a spike."""
+    _seed_sample(board, 1, -0.0125, curve=_path(_CAP, {15: 1.0, 16: 0.97, 17: 0.9875}))
+    median = _seed_sample(board, 2, -0.0048, curve=_path(_CAP, {15: 1.0, 16: 1.0, 17: 0.9952}))
+    _seed_sample(board, 3, 0.0210, curve=_path(_CAP, {15: 1.0, 16: 1.04, 17: 1.021}))
+    return median
+
+
+def _assert_band_brackets_the_median(entry):
+    band = entry["sample_band"]
+    assert len(band["lower"]) == len(band["upper"]) == len(entry["equity_curve"])
+    for lo, pt, hi in zip(band["lower"], entry["equity_curve"], band["upper"]):
+        if None not in (lo, pt["equity"], hi):
+            assert lo <= pt["equity"] <= hi
+
+
+def test_a_sampled_entry_draws_a_band_around_its_median(board):
+    median = _seed_three_paths(board)
+
+    entry = _entry(lb_service.get_leaderboard(), _ENTRY)
+
+    assert entry["run_id"] == median
+    band = entry["sample_band"]
+    assert band["runs"] == 3
+    # A sibling, never inside the samples block the table labels.
+    assert "sample_band" not in entry["samples"]
+    _assert_band_brackets_the_median(entry)
+    # Opens at the board's capital, like every curve's open tick.
+    assert entry["equity_curve"][0]["equity"] == pytest.approx(_CAP)
+    assert band["lower"][0] == pytest.approx(_CAP)
+    assert band["upper"][0] == pytest.approx(_CAP)
+    # Closes on the range the label prints.
+    assert band["lower"][-1] == pytest.approx(_CAP * (1 + entry["samples"]["min_return"]))
+    assert band["upper"][-1] == pytest.approx(_CAP * (1 + entry["samples"]["max_return"]))
+    # And the interior is the members' paths, not a line between the endpoints.
+    mid = _index_of_day(entry, 16)
+    assert entry["equity_curve"][mid]["equity"] == pytest.approx(_CAP)
+    assert band["lower"][mid] == pytest.approx(_CAP * 0.97)
+    assert band["upper"][mid] == pytest.approx(_CAP * 1.04)
+
+
+def test_a_single_run_entry_has_no_band(board):
+    _seed_primary(board)
+    _seed_sample(board, 1, -0.02)
+
+    entry = _entry(lb_service.get_leaderboard(), _ENTRY)
+
+    assert entry["samples"] == {"count": 1}
+    assert "sample_band" not in entry
+
+
+def test_a_lone_sample_has_no_band(board):
+    _seed_sample(board, 1, 0.01)
+    assert "sample_band" not in _entry(lb_service.get_leaderboard(), _ENTRY)
+
+
+def test_baselines_have_no_band(board):
+    _seed_baseline(board)
+    _seed_three_paths(board)
+    payload = lb_service.get_leaderboard()
+    assert "sample_band" not in _entry(payload, "djia_index")
+    assert "sample_band" in _entry(payload, _ENTRY)
+
+
+def test_a_sample_of_another_config_does_not_widen_the_band(board):
+    _seed_three_paths(board)
+    _seed_sample(
+        board, 4, 0.50,
+        metadata=_config(reasoning_effort="disabled"),
+        curve=_path(_CAP, {15: 1.0, 16: 2.0, 17: 1.5}),
+    )
+
+    entry = _entry(lb_service.get_leaderboard(), _ENTRY)
+
+    band = entry["sample_band"]
+    assert band["runs"] == 3
+    assert max(v for v in band["upper"] if v is not None) == pytest.approx(_CAP * 1.04)
+
+
+def test_a_primary_that_joins_the_pool_contributes_its_curve(board):
+    primary = _seed_primary(board, 0.03, metadata=_config(), days=3)
+    board._curves[primary] = _path(_CAP, {15: 1.0, 16: 1.06, 17: 1.03})
+    _seed_sample(board, 1, -0.01, curve=_path(_CAP, {15: 1.0, 16: 0.99, 17: 0.99}))
+    median = _seed_sample(board, 2, 0.0, curve=_path(_CAP, {15: 1.0, 16: 1.0, 17: 1.0}))
+
+    entry = _entry(lb_service.get_leaderboard(), _ENTRY)
+
+    assert entry["run_id"] == median
+    assert entry["samples"]["count"] == 3
+    band = entry["sample_band"]
+    assert band["runs"] == 3
+    assert band["upper"][_index_of_day(entry, 16)] == pytest.approx(_CAP * 1.06)
+    assert band["upper"][-1] == pytest.approx(_CAP * 1.03)
+
+
+def test_a_member_at_a_refused_seed_withholds_the_band(board, capsys):
+    """The rule that omits a median run at another seed (issue #365, see
+    test_an_outlier_published_from_repeats_names_the_repeat_remedy) also keeps
+    such a member out of the band: its dollars are not the median's dollars.
+
+    But the samples block still counts it, so the label reads "Median of 3 runs
+    · -1.00% to +1.00%". A band from the two survivors would close at 0% beside
+    that +1%: drawing a narrower spread than the label prints. No band at all,
+    and the log says which run cost it."""
+    _seed_baseline(board)
+    _seed_sample(board, 1, -0.01, curve=_path(_CAP, {15: 1.0, 16: 0.99, 17: 0.99}))
+    median = _seed_sample(board, 2, 0.0, curve=_path(_CAP, {15: 1.0, 16: 1.0, 17: 1.0}))
+    # Recorded the board's config but was run at another seed.
+    stray = _seed_sample(
+        board, 3, 0.01,
+        capital=_OTHER_CAPITAL,
+        metadata=_config(),
+        curve=_path(_OTHER_CAPITAL, {15: 1.0, 16: 1.5, 17: 1.01}),
+    )
+
+    lb_service.get_leaderboard()
+    entry = _entry(lb_service.get_leaderboard(), _ENTRY)
+
+    assert entry["run_id"] == median
+    assert entry["samples"]["count"] == 3
+    assert entry["samples"]["max_return"] == pytest.approx(0.01)
+    assert "sample_band" not in entry
+    lines = [ln for ln in capsys.readouterr().out.splitlines() if "sample band" in ln]
+    assert len(lines) == 1, lines
+    assert stray in lines[0] and _ENTRY in lines[0]
+
+
+def test_a_band_always_covers_every_run_the_label_counts(board):
+    """Two or more survivors are not enough: a 4-run pool losing one member
+    would draw a 3-run band under a 4-run label."""
+    _seed_three_paths(board)
+    _seed_sample(
+        board, 4, 0.03,
+        capital=_OTHER_CAPITAL,
+        metadata=_config(),
+        curve=_path(_OTHER_CAPITAL, {15: 1.0, 16: 1.05, 17: 1.03}),
+    )
+
+    entry = _entry(lb_service.get_leaderboard(), _ENTRY)
+
+    assert entry["samples"]["count"] == 4
+    assert "sample_band" not in entry
+
+
+def test_a_member_left_with_only_the_median_draws_no_band(board, capsys):
+    _seed_baseline(board)
+    median = _seed_sample(board, 1, 0.0)
+    _seed_sample(board, 2, 0.01, capital=_OTHER_CAPITAL, metadata=_config())
+
+    entry = _entry(lb_service.get_leaderboard(), _ENTRY)
+
+    assert entry["run_id"] == median
+    assert entry["samples"]["count"] == 2
+    assert "sample_band" not in entry
+
+
+def test_a_null_member_point_is_a_gap_never_a_zero(board):
+    _seed_sample(board, 1, -0.01, curve=_path(_CAP, {15: 1.0, 16: None, 17: 0.99}))
+    _seed_sample(board, 2, 0.0, curve=_path(_CAP, {15: 1.0, 16: 1.0, 17: 1.0}))
+    _seed_sample(board, 3, 0.01, curve=_path(_CAP, {15: 1.0, 16: 1.02, 17: 1.01}))
+
+    payload = lb_service.get_leaderboard()
+    entry = _entry(payload, _ENTRY)
+
+    band = entry["sample_band"]
+    mid = _index_of_day(entry, 16)
+    assert band["lower"][mid] == pytest.approx(_CAP)
+    assert band["upper"][mid] == pytest.approx(_CAP * 1.02)
+    json.dumps(payload, allow_nan=False)
+
+
+def test_a_point_no_member_has_is_null_and_the_payload_serializes(board):
+    for n, r in enumerate((-0.01, 0.0, 0.01), start=1):
+        _seed_sample(board, n, r, curve=_path(_CAP, {15: 1.0, 16: None, 17: 1 + r}))
+
+    payload = lb_service.get_leaderboard()
+    entry = _entry(payload, _ENTRY)
+
+    mid = _index_of_day(entry, 16)
+    assert entry["sample_band"]["lower"][mid] is None
+    assert entry["sample_band"]["upper"][mid] is None
+    _assert_band_brackets_the_median(entry)
+    json.dumps(payload, allow_nan=False)
+
+
+def test_members_of_different_lengths_align_by_timestamp(board):
+    """A skipped bar or an early end carries the last value forward, the way
+    the board aligns every curve -- never the next point by position."""
+    median = _seed_sample(board, 1, -0.001, curve=_path(_CAP, {15: 1.0, 16: 1.0, 17: 0.999}))
+    _seed_sample(board, 2, 0.001, curve=_path(_CAP, {15: 1.0, 16: 1.0, 17: 1.001}))
+    _seed_sample(board, 3, -0.10, curve=_path(_CAP, {15: 1.10, 17: 0.90}))  # skips the 16th
+    _seed_sample(board, 4, 0.20, curve=_path(_CAP, {15: 1.0, 16: 1.20}))  # ends early
+
+    entry = _entry(lb_service.get_leaderboard(), _ENTRY)
+
+    assert entry["run_id"] == median
+    band = entry["sample_band"]
+    assert band["runs"] == 4
+    # Matched from the end by position, the short members would be shifted one
+    # bar late: the 15th would read their open ticks and the 16th would miss
+    # the early-ender's 1.20.
+    first = _index_of_day(entry, 15)
+    assert band["upper"][first] == pytest.approx(_CAP * 1.10)
+    mid = _index_of_day(entry, 16)
+    assert band["lower"][mid] == pytest.approx(_CAP)
+    assert band["upper"][mid] == pytest.approx(_CAP * 1.20)
+    assert band["lower"][-1] == pytest.approx(_CAP * 0.90)
+    assert band["upper"][-1] == pytest.approx(_CAP * 1.20)
+    _assert_band_brackets_the_median(entry)
+
+
+def test_band_members_are_read_in_one_batch_without_the_median(board, monkeypatch):
+    primary = _seed_primary(board)
+    _seed_baseline(board)
+    first = _seed_sample(board, 1, -0.01)
+    median = _seed_sample(board, 2, 0.0)
+    last = _seed_sample(board, 3, 0.01)
+    calls = []
+    real = board.db.get_equity_curves
+    monkeypatch.setattr(
+        board.db, "get_equity_curves", lambda ids: calls.append(list(ids)) or real(ids)
+    )
+
+    entry = _entry(lb_service.get_leaderboard(), _ENTRY)
+
+    assert entry["run_id"] == median and entry["run_id"] != primary
+    assert [sorted(c) for c in calls] == [sorted([first, last])]

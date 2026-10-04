@@ -1279,6 +1279,66 @@ function buildEquityCurvesFromEntries(entries) {
   return { times, days: times, curves, trajectories, initials };
 }
 
+/** An entry's run envelope (#602), mapped onto the chart's shared time axis.
+ *
+ *  The server publishes `sample_band.lower/upper` index-parallel to the
+ *  entry's OWN `equity_curve`; the chart plots on the union of every entry's
+ *  timestamps (`buildEquityCurvesFromEntries`), so each bound is re-keyed
+ *  through the same `chartTimeKey` the curve was. Returns null whenever there
+ *  is no envelope worth drawing -- absent, a lone run, arrays that are not
+ *  parallel to the curve (the alignment is the only thing tying a bound to an
+ *  x position, so a length mismatch has no right answer), a band over fewer
+ *  runs than `samples.count`, or no index where both bounds are numbers.
+ *
+ *  `onGrid` is what keeps the band from vanishing, and it is not optional.
+ *  Series sit on different hour grids (SPY :30 vs LLM :00), so on the shared
+ *  axis roughly every other slot is one this entry never had. The median's
+ *  line spans those (`spanGaps: true`); a band that split at every null would
+ *  be a row of zero-width slivers. So the draw bridges slots OFF this entry's
+ *  grid and breaks only at slots ON it where no run recorded a number -- the
+ *  one gap that is a real absence rather than another series' clock.
+ *
+ *  Non-numbers stay null via `finiteNumber`, never 0: a $0 bound is a -100%
+ *  envelope, and on a shared y-axis it would flatten every curve (#390). */
+function buildSampleBandSeries(entry, times) {
+  const band = entry && entry.sample_band;
+  const points = (entry && entry.equity_curve) || [];
+  if (!band || !Array.isArray(band.lower) || !Array.isArray(band.upper)) return null;
+  if (!Array.isArray(times) || !times.length || !points.length) return null;
+  if (band.lower.length !== points.length || band.upper.length !== points.length) return null;
+  const runs = finiteNumber(band.runs);
+  if (!(runs >= 2)) return null;
+  // The label beside this curve prints "Median of N runs · lo to hi" from
+  // `samples`; a band over fewer runs would draw a narrower spread than that
+  // range. The server withholds such a band (#602) -- this is the same rule,
+  // held here too so a payload that disagrees is not drawn.
+  const counted = finiteNumber(entry.samples && entry.samples.count);
+  if (Number.isFinite(counted) && counted !== runs) return null;
+
+  const slot = new Map();
+  times.forEach((t, i) => slot.set(t, i));
+  const lower = times.map(() => null);
+  const upper = times.map(() => null);
+  const onGrid = times.map(() => false);
+  points.forEach((pt, k) => {
+    const i = slot.get(chartTimeKey(pt && pt.timestamp));
+    if (i === undefined) return;
+    onGrid[i] = true;
+    const lo = finiteNumber(band.lower[k]);
+    const hi = finiteNumber(band.upper[k]);
+    // Last point wins on a repeated key, as it does for the curve itself.
+    if (Number.isFinite(lo) && Number.isFinite(hi)) {
+      lower[i] = Math.min(lo, hi);
+      upper[i] = Math.max(lo, hi);
+    } else {
+      lower[i] = null;
+      upper[i] = null;
+    }
+  });
+  if (!lower.some((v) => v != null)) return null;
+  return { lower, upper, onGrid, runs };
+}
+
 // Default chart visibility: top 5 teams + benchmarks. Strategy baselines are
 // hidden by default (selectable via legend) — unless there are no teams yet,
 // in which case we show them so the chart isn't just two gray lines.
@@ -1706,6 +1766,125 @@ const hoverMarkerPlugin = {
     ctx.restore();
   },
 };
+
+// Fill opacity of a run envelope (#602), keyed the way `styleDatasets` keys
+// its strokes: the hovered (or, idle, the selected) curve's band comes up, a
+// band whose curve another hover is dimming drops nearly out, the rest sit at
+// a wash light enough that three overlapping bands still read as lines.
+const SAMPLE_BAND_ALPHA = { base: 0.14, emphasis: 0.22, faded: 0.05 };
+
+function sampleBandAlpha(chart, ds, i) {
+  if (hoveredDatasetIndex != null) {
+    return i === hoveredDatasetIndex ? SAMPLE_BAND_ALPHA.emphasis : SAMPLE_BAND_ALPHA.faded;
+  }
+  return ds.label === chart.$emphasisLabel ? SAMPLE_BAND_ALPHA.emphasis : SAMPLE_BAND_ALPHA.base;
+}
+
+/** Contiguous index runs where `band` has both bounds, bridging off-grid slots.
+ *
+ *  A slot off this entry's grid is skipped without ending the run -- the
+ *  median's line spans it too (see `buildSampleBandSeries`). A slot ON the
+ *  grid with a missing bound ends it: no run recorded a number there. */
+function sampleBandRuns(band) {
+  const runs = [];
+  let current = [];
+  for (let i = 0; i < band.lower.length; i += 1) {
+    if (!band.onGrid[i]) continue;
+    const lo = band.lower[i];
+    const hi = band.upper[i];
+    if (Number.isFinite(lo) && Number.isFinite(hi)) {
+      current.push(i);
+    } else if (current.length) {
+      runs.push(current);
+      current = [];
+    }
+  }
+  if (current.length) runs.push(current);
+  return runs;
+}
+
+/** The shaded min/max envelope of an entry's pooled runs, behind its median.
+ *
+ *  A plugin and deliberately NOT a dataset: hover resolution, the tooltip, the
+ *  endpoint labels, the legend and the curve picker all iterate
+ *  `chart.data.datasets`, and every one of them would have to learn to skip a
+ *  band -- the first one that did not would let the pointer "hover" an
+ *  envelope, or give it a gutter label and a legend row. Here it is paint and
+ *  nothing else.
+ *
+ *  `beforeDatasetsDraw`, so every line -- this entry's median included -- sits
+ *  on top of every band. `afterDataLimits` widens the y scale to the visible
+ *  bands: Chart.js sizes the axis from datasets alone, and a band that runs
+ *  past the board's extremes would otherwise be clipped at the frame. */
+function createSampleBandPlugin() {
+  return {
+    id: 'sampleBand',
+    afterDataLimits(chart, args) {
+      const scale = args && args.scale;
+      if (!scale || scale.id !== 'y') return;
+      let lo = Infinity;
+      let hi = -Infinity;
+      chart.data.datasets.forEach((ds, i) => {
+        if (!ds._band || !chart.isDatasetVisible(i)) return;
+        ds._band.lower.forEach((v) => { if (Number.isFinite(v)) lo = Math.min(lo, v); });
+        ds._band.upper.forEach((v) => { if (Number.isFinite(v)) hi = Math.max(hi, v); });
+      });
+      if (Number.isFinite(lo) && (!Number.isFinite(scale.min) || lo < scale.min)) scale.min = lo;
+      if (Number.isFinite(hi) && (!Number.isFinite(scale.max) || hi > scale.max)) scale.max = hi;
+    },
+    beforeDatasetsDraw(chart) {
+      const { ctx, chartArea, scales } = chart;
+      if (!chartArea || !scales || !scales.x || !scales.y) return;
+      chart.data.datasets.forEach((ds, i) => {
+        if (!ds._band || !chart.isDatasetVisible(i)) return;
+        const runs = sampleBandRuns(ds._band);
+        if (!runs.length) return;
+        const x = (k) => scales.x.getPixelForValue(k);
+        ctx.save();
+        ctx.beginPath();
+        ctx.rect(chartArea.left, chartArea.top,
+          chartArea.right - chartArea.left, chartArea.bottom - chartArea.top);
+        ctx.clip();
+        ctx.fillStyle = hexToRgba((ds._style && ds._style.color) || '#94a3b8',
+          sampleBandAlpha(chart, ds, i));
+        runs.forEach((run) => {
+          // One polygon per run: upper bound left to right, lower bound back.
+          // A one-slot run closes to a zero-width sliver, which fills nothing.
+          ctx.beginPath();
+          run.forEach((k, n) => {
+            const y = scales.y.getPixelForValue(ds._band.upper[k]);
+            if (n === 0) ctx.moveTo(x(k), y);
+            else ctx.lineTo(x(k), y);
+          });
+          for (let n = run.length - 1; n >= 0; n -= 1) {
+            ctx.lineTo(x(run[n]), scales.y.getPixelForValue(ds._band.lower[run[n]]));
+          }
+          ctx.closePath();
+          ctx.fill();
+        });
+        ctx.restore();
+      });
+    },
+  };
+}
+
+/** The tooltip's range line for a banded curve at `idx`, or '' without one.
+ *
+ *  Rendered in the chart's current unit, from the raw dollars rather than the
+ *  plotted values, the way the Return/Value lines above it are -- a percent
+ *  bound is relative to the curve's own starting capital, as its Return is. */
+function formatSampleBandTooltipLine(ds, idx, view) {
+  const band = ds && ds._band;
+  if (!band || !band.rawLower || !band.rawUpper) return '';
+  const lo = finiteNumber(band.rawLower[idx]);
+  const hi = finiteNumber(band.rawUpper[idx]);
+  if (!Number.isFinite(lo) || !Number.isFinite(hi)) return '';
+  const base = ds._initial || 1;
+  const fmt = view === 'absolute'
+    ? (v) => `$${formatLeaderboardNumber(v)}`
+    : (v) => `${(((v - base) / base) * 100).toFixed(2)}%`;
+  return `Range of ${band.runs} runs: ${fmt(lo)} to ${fmt(hi)}`;
+}
 
 /** The endpoint of each visible curve, and the two strings that label it.
  *
@@ -2177,6 +2356,10 @@ async function renderEquityCurvesChart() {
     if (!raw || !raw.length) return;
     const initial = initials[label] || raw[0] || 10000;
     const style = getSeriesStyle(label, entry);
+    // The run envelope rides on its median's dataset rather than being one
+    // (#602, see createSampleBandPlugin), through the same transform as the
+    // curve so the percent view plots it against the same starting capital.
+    const band = buildSampleBandSeries(entry, axisLabels);
 
     datasets.push({
       label,
@@ -2185,6 +2368,14 @@ async function renderEquityCurvesChart() {
       _initial: initial,
       _entry: entry,
       _style: style,
+      _band: band ? {
+        lower: transformLeaderboardChartData(band.lower, currentChartView, initial),
+        upper: transformLeaderboardChartData(band.upper, currentChartView, initial),
+        rawLower: band.lower,
+        rawUpper: band.upper,
+        onGrid: band.onGrid,
+        runs: band.runs,
+      } : null,
       borderColor: style.color,
       backgroundColor: 'transparent',
       borderDash: style.dash || [],
@@ -2215,6 +2406,7 @@ async function renderEquityCurvesChart() {
     type: 'line',
     data: { labels: axisLabels, datasets },
     plugins: [
+      createSampleBandPlugin(),
       selectedGlowPlugin,
       hoverMarkerPlugin,
       createAxisArrowPlugin(),
@@ -2291,6 +2483,8 @@ async function renderEquityCurvesChart() {
                 `Value: ${equity == null ? '—' : `$${formatLeaderboardNumber(equity)}`}`,
                 `Rank: ${entry.rank ?? '—'} / ${leaderboardPayload?.total_entries || '—'}`,
               ];
+              const bandLine = formatSampleBandTooltipLine(ds, idx, currentChartView);
+              if (bandLine) lines.splice(3, 0, bandLine);
 
               const benchDs = context.chart.data.datasets.find((d) => d.label === selectedBenchmarkLabel);
               const benchEquity = finiteNumber(benchDs && benchDs._raw ? benchDs._raw[idx] : null);
