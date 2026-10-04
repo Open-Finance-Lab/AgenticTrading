@@ -211,8 +211,30 @@ def equity_lookup(curve: Sequence[Dict[str, Any]]) -> Dict[datetime, float]:
     return out
 
 
-def align_equity(reference: Sequence[datetime], lookup: Dict[datetime, float]) -> List[float]:
-    """Align a baseline curve to the agent run's market-hour timestamps."""
+def align_equity(
+    reference: Sequence[datetime],
+    lookup: Dict[datetime, float],
+    initial_value: Optional[float] = None,
+) -> List[float]:
+    """Align a baseline curve to the agent run's market-hour timestamps.
+
+    The agent curve and the stored buy-and-hold baseline are recorded at
+    different granularities by design: the engine ticks every 5 minutes from
+    the open, while the hourly baseline first records at the *close* of the
+    first hourly bar — an hour later. So the segment of the agent curve that
+    precedes the baseline's first point is normal, not a data defect, and it
+    used to raise here, failing the whole comparison (HTTP 404 from
+    chart-data / plot.png → the "Performance comparison is unavailable"
+    notice on every affected run). Backfill that segment with
+    ``initial_value`` (the run's initial capital: buy-and-hold before its
+    first recorded bar is exactly the initial capital) or, when unknown, the
+    baseline's own first value. Gaps *between* baseline points keep the
+    existing forward fill.
+    """
+    if not lookup:
+        # An entirely empty baseline cannot be drawn at all.
+        raise ValueError("baseline curve missing equity for agent timestamps")
+    backfill = initial_value if initial_value is not None else lookup[min(lookup)]
     values: List[float] = []
     last: Optional[float] = None
     for ts in reference:
@@ -225,9 +247,7 @@ def align_equity(reference: Sequence[datetime], lookup: Dict[datetime, float]) -
                     break
         if val is not None:
             last = val
-        if last is None:
-            raise ValueError("baseline curve missing equity for agent timestamps")
-        values.append(last)
+        values.append(last if last is not None else backfill)
     return values
 
 
@@ -306,7 +326,13 @@ def build_backtest_chart_data(
     baseline_values: List[Tuple[str, str, List[float]]] = []
     for bl_label, bl_run_id, bl_curve in stored_baselines:
         baseline_values.append(
-            (bl_label, bl_run_id, align_equity(timestamps, equity_lookup(bl_curve)))
+            (
+                bl_label,
+                bl_run_id,
+                align_equity(
+                    timestamps, equity_lookup(bl_curve), initial_value=initial_capital
+                ),
+            )
         )
 
     index_baselines_ok = True
