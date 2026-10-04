@@ -139,13 +139,16 @@ def test_scripts_are_deferred():
 
 def test_agents_grid_ships_loading_skeleton():
     # Pre-JS, My Agents must show placeholder cards instead of a blank panel,
-    # in every shelf that renders agents. Prompted Models, Open Agents, and
-    # External all have grids. The Crypto/Futures rows are locked and have no
-    # grid at all, so there is nothing to skeleton there.
+    # in every shelf that renders agents. Prompted Models, Open Agents,
+    # External, and Research all have grids. The Crypto/Futures rows are
+    # locked and have no grid at all, so there is nothing to skeleton there.
+    # Research matters most: its manifest is fetched from the remote research
+    # service, so the pre-JS blank window is the longest of any shelf.
     grid_ids = (
         "agentsGridPrompted",
         "agentsGridOpen",
         "agentsGridExternal",
+        "agentsGridResearch",
     )
     skeletons = [
         m for m in range(len(APP_HTML)) if APP_HTML.startswith("agent-card--skeleton", m)
