@@ -3268,7 +3268,44 @@ def _resolve_backtest_session(request: Request, agent_id: Optional[str]) -> str:
             status_code=422,
             detail="agent_id must reference a built-in agent",
         )
+    if not _caller_may_run_agent(request, agent):
+        raise HTTPException(status_code=403, detail="Not your agent")
     return agent["session_id"]
+
+
+def _caller_may_run_agent(request: Request, agent: Dict[str, Any]) -> bool:
+    """Only the agent's owner may file a run under its session.
+
+    The agent's ``session_id`` is echoed back to whoever starts the run, and
+    ``reclaim_on_session_match`` re-stamps an unclaimed guest agent's owner for
+    anyone presenting it, so answering a stranger here handed over the agent.
+    Owners are the signed-in account or the browser that owns the row, or the
+    Discord bot acting for the account linked to ``X-Discord-User-Id``.
+    """
+    from dashboard.backend import users as users_module
+    from dashboard.backend.api import discord_oauth
+    from dashboard.backend.api.dependencies import _browser_context, _optional_user
+
+    user = _optional_user(
+        request,
+        request.headers.get("authorization") or request.headers.get("Authorization"),
+    )
+    if agent_service.agents.owns_agent(
+        agent,
+        owner_user_id=user["id"] if user else None,
+        owner_browser_session=_browser_context(request)["browser_session"],
+    ):
+        return True
+    if discord_oauth.verify_bot_secret(request.headers.get("X-Discord-Bot-Secret")):
+        discord_user_id = (request.headers.get("X-Discord-User-Id") or "").strip()
+        linked = (
+            users_module.user_store.get_user_by_discord_id(discord_user_id)
+            if discord_user_id
+            else None
+        )
+        if linked and agent_service.agents.owns_agent(agent, owner_user_id=linked["id"]):
+            return True
+    return False
 
 
 @router.post("/backtest/run")
