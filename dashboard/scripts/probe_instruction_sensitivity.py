@@ -164,7 +164,7 @@ PROBE_INSTRUCTIONS: list[tuple[str, str]] = [
 PROBE_MODELS: dict[str, dict] = {
     "nemotron": {
         "model_id": "nvidia/nemotron-3-nano-30b-a3b",
-        "integration": "openrouter",
+        "integration": "commonstack",
         "temperature": 0,
         "reasoning_effort": "none",
     },

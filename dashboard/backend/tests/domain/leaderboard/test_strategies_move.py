@@ -158,6 +158,22 @@ def test_only_the_pinned_entries_disable_reasoning():
     )
 
 
+def test_every_leaderboard_llm_entry_uses_commonstack():
+    """Live and contest deploys share this file; OpenRouter is quota-dead on prod.
+
+    A single leftover ``integration: openrouter`` (Nemotron, historically)
+    silently rule-falls-back and H6 then refuses to publish the curve.
+    """
+    config = json.loads((CONFIG_DIR / "leaderboard.json").read_text(encoding="utf-8"))
+    llm_entries = [
+        strategy
+        for strategy in config["strategies"]
+        if strategy.get("strategy") == "llm_agent"
+    ]
+    assert llm_entries
+    assert {strategy["integration"] for strategy in llm_entries} == {"commonstack"}
+
+
 @pytest.mark.parametrize("temperature", [0, 0.5, 1])
 def test_llm_agent_accepts_valid_temperature(temperature):
     strategy = LLMAgentStrategy({"temperature": temperature})

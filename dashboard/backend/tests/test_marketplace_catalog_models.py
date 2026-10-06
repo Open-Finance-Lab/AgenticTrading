@@ -21,7 +21,7 @@ _CATALOG = json.loads(
 
 _SUPPORTED_SLUGS = set(re.findall(r"slug:\s*'([^']+)'", js_const("SUPPORTED_MODELS")))
 
-# Nemotron is on the Competition Leaderboard via OpenRouter but is not in
+# Nemotron is on the Competition Leaderboard via CommonStack but is not in
 # SUPPORTED_MODELS (the user-facing picker). The supermarket still ships a
 # card for it so the catalog matches the board.
 _LEADERBOARD_ONLY_SLUGS = {"nvidia/nemotron-3-nano-30b-a3b"}
