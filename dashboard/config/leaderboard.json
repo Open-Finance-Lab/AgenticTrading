@@ -140,7 +140,7 @@
       "model": "Nemotron 3 Nano 30B",
       "provider": "NVIDIA",
       "strategy": "llm_agent",
-      "integration": "openrouter",
+      "integration": "commonstack",
       "model_id": "nvidia/nemotron-3-nano-30b-a3b",
       "reasoning_effort": "none",
       "temperature": 0,
