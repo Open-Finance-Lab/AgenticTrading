@@ -653,8 +653,19 @@ def test_credits_refusals_survive_the_ifind_error_mapper():
     paused = LLMExecutionError.account_restricted("refund_reconciliation").safe_message
     assert _map_backtest_error_with_status(paused, 403) == paused
 
-    refused = "This run needs about 2.40 ATL Credits (49 model calls on x)."
+    # The 402 arm on its own: no "ATL Credits" in the text to lean on.
+    refused = "Payment required for this run."
     assert _map_backtest_error_with_status(refused, 402) == refused
+
+    # Any in-run model failure, not only Credits: these contain 'credential'
+    # and 'response', which the iFinD arms would otherwise claim.
+    for category in (
+        ExecutionErrorCategory.CREDENTIAL_INVALID,
+        ExecutionErrorCategory.RESPONSE_INVALID,
+        ExecutionErrorCategory.PROVIDER_TIMEOUT,
+    ):
+        message = "Backtest stopped: " + LLMExecutionError(category).safe_message
+        assert _map_backtest_error(message) == message
     # And the iFinD arms still own iFinD's own 403.
     assert "iFinD A-share access is disabled" in _map_backtest_error_with_status(
         "Forbidden", 403

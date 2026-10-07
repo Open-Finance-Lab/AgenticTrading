@@ -3305,6 +3305,53 @@ def test_child_llm_failure_reads_only_known_categories():
     assert bt._child_llm_failure("", None) is None
 
 
+def test_every_category_round_trips_through_the_child_line():
+    # Producer-driven: the child prints errors.run_failed_line, so a format
+    # change on either side fails here instead of silently falling back to
+    # the traceback tail and `internal_error`.
+    from dashboard.backend.infrastructure.llm.execution.errors import (
+        ExecutionErrorCategory,
+        LLMExecutionError as _Err,
+        run_failed_line,
+    )
+
+    for category in ExecutionErrorCategory:
+        exc = _Err(category)
+        failure = bt._child_llm_failure("noise\n" + run_failed_line(exc) + "\n")
+        assert failure is not None, category
+        assert failure.category is category
+        assert failure.safe_message == exc.safe_message
+    restricted = _Err.account_restricted("refund_reconciliation")
+    rebuilt = bt._child_llm_failure(run_failed_line(restricted))
+    assert rebuilt.safe_message == restricted.safe_message
+
+
+@pytest.mark.parametrize(
+    ("reason", "expected"),
+    [
+        ("refund_reconciliation", "Contact an administrator"),
+        ("llm_overage", "exceeded its reserved amount"),
+    ],
+)
+def test_child_llm_failure_keeps_the_restriction_reason(reason, expected):
+    # The reason picks the remedy; without it a refund-review pause was told
+    # to "Add Credits", which cannot lift it.
+    from dashboard.backend.infrastructure.llm.execution.errors import (
+        LLMExecutionError as _Err,
+    )
+
+    exc = _Err.account_restricted(reason, 12_345)
+    assert exc.restriction_reason == reason
+    line = f"ERROR: llm.run_failed category=account_restricted reason={reason}\n"
+    failure = bt._child_llm_failure(line)
+    assert failure.category.value == "account_restricted"
+    assert expected in failure.safe_message
+    unknown = bt._child_llm_failure(
+        "ERROR: llm.run_failed category=account_restricted reason=made_up\n"
+    )
+    assert unknown.safe_message.startswith("Your Credits account is paused.")
+
+
 def test_a_run_that_runs_out_of_credits_reports_it_and_its_category(monkeypatch):
     emitted = []
     monkeypatch.setattr(

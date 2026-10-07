@@ -195,7 +195,10 @@ from dashboard.backend.infrastructure.llm.execution.handoff import (
 from dashboard.backend.infrastructure.llm.execution.client import (
     AnthropicCompatibleExecutionClient,
 )
-from dashboard.backend.infrastructure.llm.execution.errors import LLMExecutionError
+from dashboard.backend.infrastructure.llm.execution.errors import (
+    LLMExecutionError,
+    run_failed_line,
+)
 from dashboard.backend.infrastructure.llm.execution.service import LLMExecutionService
 from dashboard.backend.domain.credits.service import credits_service
 from dashboard.backend.domain.model_providers.service import get_model_provider_service
@@ -590,7 +593,7 @@ def main():
         # this process's traceback tail to show the user. The ``ERROR: llm.``
         # prefix also has the parent relay it to the service log live. The
         # category is a fixed enum value, never upstream text.
-        print(f"ERROR: llm.run_failed category={exc.category.value}", flush=True)
+        print(run_failed_line(exc), flush=True)
         raise
     finally:
         if execution_service is not None and execution_handoff is not None:

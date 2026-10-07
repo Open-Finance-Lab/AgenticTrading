@@ -82,6 +82,10 @@ class LLMExecutionError(RuntimeError):
         ):
             allowed_message = message
         self.safe_message = allowed_message or _SAFE_MESSAGES[self.category]
+        # Set by ``account_restricted``; lets a process boundary that can carry
+        # only fixed tokens (the backtest child's run_failed line) rebuild the
+        # restriction-specific message rather than the generic one.
+        self.restriction_reason: str | None = None
         super().__init__(self.safe_message)
 
     @classmethod
@@ -103,7 +107,10 @@ class LLMExecutionError(RuntimeError):
             message = _SAFE_RESTRICTED_MESSAGES.get(
                 reason, _SAFE_MESSAGES[ExecutionErrorCategory.ACCOUNT_RESTRICTED]
             )
-        return cls(ExecutionErrorCategory.ACCOUNT_RESTRICTED, message)
+        error = cls(ExecutionErrorCategory.ACCOUNT_RESTRICTED, message)
+        if reason in _SAFE_RESTRICTED_MESSAGES:
+            error.restriction_reason = reason
+        return error
 
 
 # A hosted (``fail_closed``) run aborts on any model error, because a billing or
@@ -127,9 +134,24 @@ def is_transient_provider_failure(error: BaseException) -> bool:
     )
 
 
+def run_failed_line(error: LLMExecutionError) -> str:
+    """The line a backtest child prints when a model call ends its run.
+
+    Parsed by ``api/routers/backtests._child_llm_failure``. Fixed tokens only
+    (enum values), never upstream text, and the ``ERROR: llm.`` prefix makes
+    the parent relay it to the service log live.
+    """
+    line = f"ERROR: llm.run_failed category={error.category.value}"
+    reason = getattr(error, "restriction_reason", None)
+    if reason:
+        line += f" reason={reason}"
+    return line
+
+
 __all__ = [
     "ExecutionErrorCategory",
     "LLMExecutionError",
     "RetryHint",
     "is_transient_provider_failure",
+    "run_failed_line",
 ]

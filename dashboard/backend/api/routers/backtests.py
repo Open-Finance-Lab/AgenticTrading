@@ -2874,7 +2874,9 @@ class _BoundedStreamCapture:
 
 
 _RELAYED_CHILD_LINE_PREFIX = "ERROR: llm."
-_RUN_FAILED_LINE = re.compile(r"^ERROR: llm\.run_failed category=([a-z_]+)\s*$", re.M)
+_RUN_FAILED_LINE = re.compile(
+    r"^ERROR: llm\.run_failed category=([a-z_]+)(?: reason=([a-z_]+))?\s*$", re.M
+)
 
 
 def _child_llm_failure(*streams: Optional[str]) -> Optional[LLMExecutionError]:
@@ -2893,10 +2895,18 @@ def _child_llm_failure(*streams: Optional[str]) -> Optional[LLMExecutionError]:
         matches = _RUN_FAILED_LINE.findall(text)
         if not matches:
             continue
+        category_value, reason = matches[-1]
         try:
-            return LLMExecutionError(ExecutionErrorCategory(matches[-1]))
+            category = ExecutionErrorCategory(category_value)
         except ValueError:
             return None
+        if category is ExecutionErrorCategory.ACCOUNT_RESTRICTED:
+            # The reason picks the remedy ("add Credits" vs "contact an
+            # administrator"); account_restricted() ignores an unknown one.
+            # The outstanding amount does not cross the boundary, so an
+            # overage reads "add Credits" without the figure.
+            return LLMExecutionError.account_restricted(reason or None)
+        return LLMExecutionError(category)
     return None
 
 
