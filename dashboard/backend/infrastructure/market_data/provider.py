@@ -133,7 +133,7 @@ class TraceAwareMarketDataProvider:
     def __getattr__(self, name: str):
         return getattr(self._provider, name)
 
-    def fetch_bars(self, symbols, start, end, **kwargs):
+    def fetch_bars(self, symbols, start, end, *, depth_start=None):
         from dashboard.backend.domain.traces import service as trace_service
 
         started = perf_counter()
@@ -142,6 +142,7 @@ class TraceAwareMarketDataProvider:
             "symbols": [str(symbol) for symbol in symbols],
             "start": str(start), "end": str(end),
         }
+        kwargs = {} if depth_start is None else {"depth_start": depth_start}
         query.update({key: str(value) for key, value in kwargs.items()})
         key = f"{self._source}:{start}:{end}:{','.join(query['symbols'])}"
         def record(**event):

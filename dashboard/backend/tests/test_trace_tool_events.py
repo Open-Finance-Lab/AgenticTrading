@@ -1,6 +1,7 @@
 """Tool and retrieval trace adapters stay bounded and best effort."""
 
 from pathlib import Path
+import inspect
 
 import pandas as pd
 
@@ -44,6 +45,10 @@ def test_market_data_wrapper_records_counts_and_does_not_break_provider(tmp_path
     assert events[0]["payload"]["result_summary"] == {
         "bar_counts": {"AAPL": 2, "MSFT": 2}, "symbol_count": 2,
     }
+
+
+def test_market_data_wrapper_preserves_explicit_depth_start_signature():
+    assert "depth_start" in inspect.signature(TraceAwareMarketDataProvider.fetch_bars).parameters
 
 
 def test_trace_observability_failure_is_best_effort(tmp_path: Path, monkeypatch):
