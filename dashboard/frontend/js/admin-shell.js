@@ -11,7 +11,7 @@
   const ANALYTICS_ROUTES = ['overview', 'sources', 'retention', 'credits', 'lifecycle', 'health', 'users'];
   // The absorbed old-console sections (design N2/PR2) are routes like providers,
   // minus the analytics chrome: no range, no filters, no freshness legend.
-  const CONSOLE_ROUTES = ['providers', 'account', 'activity'];
+  const CONSOLE_ROUTES = ['providers', 'account', 'activity', 'traces'];
   const ROUTES = [...ANALYTICS_ROUTES, ...CONSOLE_ROUTES];
   const DETAIL_ROUTES = ['sources', 'retention', 'credits', 'lifecycle', 'health'];
   // 1D is cut (§8.2): no cross-user source finer than a day exists. 1Y is 180
@@ -101,6 +101,9 @@
     const [head, tail] = path.split('/');
     if (head === 'users') {
       return { route: 'users', id: /^\d+$/.test(tail || '') ? tail : null, query };
+    }
+    if (head === 'traces') {
+      return { route: 'traces', id: tail || null, query };
     }
     return { route: ROUTES.includes(head) ? head : 'overview', id: null, query };
   }
@@ -650,6 +653,7 @@
     showView('providersView', parsed.route === 'providers');
     showView('accountView', parsed.route === 'account');
     showView('activityView', parsed.route === 'activity');
+    showView('tracesView', parsed.route === 'traces');
     state.routeQuery = parsed.query;
     // The range group, the filter form and the freshness legend all describe
     // *daily analytics* figures. On the absorbed console sections they describe

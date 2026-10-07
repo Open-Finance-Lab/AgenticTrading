@@ -126,6 +126,12 @@ _TWINS = [
         "dashboard.backend.domain.analytics.value_repository_postgres",
         "PostgresValueAnalyticsStore",
     ),
+    (
+        "dashboard.backend.domain.traces.repository",
+        "TraceStore",
+        "dashboard.backend.domain.traces.repository_postgres",
+        "PostgresTraceStore",
+    ),
 ]
 
 _TWIN_IDS = [pg_cls for _, _, _, pg_cls in _TWINS]
@@ -1371,6 +1377,7 @@ _DUPLICATED_BODIES: dict[str, frozenset[str]] = {
             "list_ledger_days",
         }
     ),
+    "PostgresTraceStore": frozenset(),
 }
 
 

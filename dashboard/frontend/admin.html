@@ -22,6 +22,7 @@
   <script src="js/admin-users.js?v=1" defer></script>
   <script src="js/admin-providers.js?v=1" defer></script>
   <script src="js/admin-credits.js?v=4" defer></script>
+  <script src="js/admin-traces.js?v=1" defer></script>
 </head>
 <body>
   <!-- Icon sprite (design §6). Markup, not script, so the no-inline-script
@@ -161,6 +162,7 @@
       <a class="admin-tab" data-rail="account" href="#account"><svg aria-hidden="true"><use href="#icon-users"/></svg><span>Account Management</span></a>
       <a class="admin-tab" data-rail="providers" href="#providers"><svg aria-hidden="true"><use href="#icon-network"/></svg><span>Providers</span></a>
       <a class="admin-tab" data-rail="activity" href="#activity"><svg aria-hidden="true"><use href="#icon-activity"/></svg><span>Activity</span></a>
+      <a class="admin-tab" data-rail="traces" href="#traces"><svg aria-hidden="true"><use href="#icon-activity"/></svg><span>Agent traces</span></a>
     </aside>
     <main>
       <div class="page-header">
@@ -461,6 +463,7 @@
                 </div>
             </div>
       </section>
+      <section id="tracesView" class="detail-view trace-view" data-panel="traces" hidden aria-live="polite"></section>
       <!-- ===== end absorbed sections ===== -->
       <footer id="freshnessLegend" class="freshness-legend">Daily figures complete through — UTC; live tiles are this instance's process state</footer>
     </main>

@@ -4,8 +4,13 @@
 shipped source as text -- the convention set by test_ai_hedge_fund_frontend.py.
 This file replaces test_frontend_daily_leaderboard.py: the Daily Leaderboard was
 retired in favour of a forward-running board that carries a portfolio across
-trading days in two-week seasons, and the poll/visibility machinery moved with
-it under new names.
+trading days, and the poll/visibility machinery moved with it under new names.
+
+⚠ Most of leaderboard.js's live branch is now unreachable: the Live tab renders
+through js/live-leaderboard.js (a calendar-month board) and app.js only calls
+loadLeaderboardData('contest'). The season strip, preview banner and gap list
+were deleted with their markup and their guards; what remains here pins the
+leftover live branch until it is removed the same way.
 
 Three things here are load-bearing for reasons the code alone does not show.
 
@@ -16,17 +21,10 @@ re-check inside the timeout callback, a refresh that is in progress keeps the
 30s poll re-fetching and re-rendering a hidden Chart.js canvas for the whole
 (possibly multi-hour) model deploy.
 
-**The preview banner.** The season engine is not deployed. The server now
-answers ``?period=live`` with ``period: 'live'`` and a real ``season`` block --
-it no longer coerces the period back to 'contest' -- but that block is
-hardcoded to the not-yet-advanced state, so the hazard is unchanged: every
-other element on the tab (chart, table, curve picker, rankings) renders
-identically whether or not a season ran, because those shapes are shared
-between the two boards. The banner is the *only* thing on screen that
-distinguishes "no season has ever run" from "these are the live standings", and
-it can only do that by testing a field an advance had to write. See the
-fail-closed-is-not-fail-visible section of CLAUDE.md, and the FinSearch news
-adapter it was written about. The server half of this contract is pinned in
+**The preview state.** The leftover live branch still decides "preview" from
+a field only a real advance can write (``season.last_advanced_date``), never
+from the period string -- see the fail-closed-is-not-fail-visible section of
+CLAUDE.md. The server half of this contract is pinned in
 tests/test_leaderboard_season.py.
 
 **Season 0.** The current season is numbered zero, which is falsy. Every
@@ -208,7 +206,7 @@ def test_live_board_subtitle_matches_the_cash_session_window():
     assert "weekday" not in body
 
 
-# ── The preview banner: the one control that can report an absent engine ─────
+# ── Preview state: anchored on evidence that an advance ran ─────────────────
 
 
 def test_preview_is_anchored_on_evidence_that_a_season_ran():
@@ -236,77 +234,6 @@ def test_preview_is_anchored_on_evidence_that_a_season_ran():
     assert not re.search(r"period\s*!==?\s*'live'", _SOURCE), (
         "no disclaimer on this tab may hang on the period string; a backend that "
         "learns the word has not run a season"
-    )
-
-
-def test_preview_banner_is_reachable_from_the_header_render():
-    """The banner must be wired into the path every board render takes."""
-    assert "renderLivePreviewBanner(" in _fn_body("updateLeaderboardHeader")
-    banner = _fn_body("renderLivePreviewBanner")
-    assert "isLivePreview(" in banner
-    assert "seasonPreviewBanner" in banner
-    assert "hidden = false" in banner, "the banner must actually be shown, not only computed"
-
-
-def test_hidden_season_containers_are_actually_hidden():
-    """`display: flex` on a class outranks the UA stylesheet's [hidden] rule.
-
-    Every season container ships with the `hidden` attribute and is un-hidden by
-    JS only on the live tab. A `display` declaration without a matching
-    `[hidden]` override renders it on the Competition board anyway -- and it is
-    invisible to any test that checks `element.hidden`, because the attribute is
-    set correctly; only computed style disagrees.
-    """
-    css = (_FRONTEND / "styles.css").read_text(encoding="utf-8")
-    # The containers that both ship hidden and declare a `display`.
-    for selector in (".season-strip", ".season-gaps"):
-        block = re.search(re.escape(selector) + r"\s*\{([^}]*)\}", css)
-        assert block, f"{selector} not found in styles.css"
-        if "display:" not in block.group(1):
-            continue
-        assert re.search(re.escape(selector) + r"\[hidden\]", css), (
-            f"{selector} sets `display` but has no `{selector}[hidden]` override, "
-            "so the hidden attribute cannot hide it"
-        )
-
-
-def test_preview_banner_markup_exists_and_starts_hidden():
-    assert 'id="seasonPreviewBanner"' in _APP_HTML
-    match = re.search(r'<div id="seasonPreviewBanner"[^>]*>', _APP_HTML)
-    assert match and "hidden" in match.group(0), (
-        "the preview banner must ship hidden; a banner that flashes on the "
-        "Competition board trains people to ignore it"
-    )
-
-
-def test_preview_banner_has_a_boot_state():
-    """The honesty control needs to exist before any script does.
-
-    ?view=live is revealed by the boot stylesheet during parse, so without a boot
-    rule the banner stays `hidden` through first paint and the contest identity
-    below it is what the visitor reads. The identity is suppressed for the same
-    window rather than shown wrong.
-    """
-    assert re.search(
-        r'html\[data-nav-boot\][^{]*data-nav-competition-tab="live"[^{]*'
-        r"#seasonPreviewBanner\s*\{[^}]*display:\s*block\s*!important",
-        _APP_HTML,
-    ), "the live tab must reveal the preview banner at boot"
-    assert re.search(
-        r'html\[data-nav-boot\][^{]*data-nav-competition-tab="live"[^{]*'
-        r"\.contest-identity[^{]*\{[^}]*visibility:\s*hidden",
-        _APP_HTML,
-    ), "the Competition identity must not paint on the live tab before JS runs"
-
-
-def test_preview_banner_ships_with_real_text_not_an_empty_div():
-    """A revealed empty div is indistinguishable from no disclaimer at all."""
-    match = re.search(r'<div id="seasonPreviewBanner"[^>]*>(.*?)</div>', _APP_HTML, re.DOTALL)
-    assert match, "the preview banner element must exist"
-    static = match.group(1)
-    assert "not deployed" in static, (
-        "the boot-visible banner must carry the disclaimer itself; JS replaces it "
-        "with the fuller wording once the payload names the window"
     )
 
 
@@ -338,44 +265,6 @@ def test_competition_only_chrome_is_hidden_on_the_live_board():
     assert 'id="boardPhaseLabel"' in _APP_HTML
 
 
-def test_relative_time_never_renders_a_dangling_label():
-    """Both call sites interpolate the phrase straight into a caption.
-
-    An empty string renders "Next advance " or "Entries open - 42 entered -
-    closes " -- a label with its value silently deleted, which reads as a broken
-    template rather than as missing data.
-    """
-    body = _fn_body("formatRelativeFromNow")
-    assert re.search(r"return\s+null", body), (
-        "an unparseable timestamp must return null, not an empty string"
-    )
-    assert "'due now'" not in body, (
-        "the phrase is composed into 'closes ...' as well as 'Next advance ...', "
-        "and an entry window cannot be 'closes due now'"
-    )
-    strip = _fn_body("renderSeasonStrip")
-    # The formatted phrase, not the raw field, decides whether the clause ships.
-    assert re.search(r"closesIn\s*\?", strip), (
-        "the entry line must test the formatted phrase; testing the raw field "
-        "renders a bare '- closes '"
-    )
-    assert not re.search(r"season\?\.next_advance_at\s*\)\s*\{", strip), (
-        "the next-advance line must branch on the formatted phrase too, or an "
-        "unparseable timestamp renders 'Next advance null'"
-    )
-
-
-def test_preview_banner_says_the_numbers_are_not_real():
-    """Copy, not just presence. A banner that only says 'preview' is decoration."""
-    banner = _fn_body("renderLivePreviewBanner")
-    lowered = banner.lower()
-    assert "not deployed" in lowered
-    assert "has not been run" in lowered, (
-        "the banner must state that the season has not run, not merely that "
-        "this is a preview"
-    )
-
-
 def test_preview_never_claims_a_completed_advance():
     """The subtitle used to print the *board window's* first day as "last completed".
 
@@ -399,15 +288,6 @@ def test_preview_never_claims_a_completed_advance():
     assert "last_advanced_date" in body, (
         "the subtitle must read season.last_advanced_date -- the only field the "
         "season payload contract defines for a completed advance"
-    )
-
-
-def test_preview_never_promises_a_scheduled_advance():
-    """"Next advance: nightly after the close" is a promise no deployed job keeps."""
-    body = _fn_body("renderSeasonStrip")
-    assert "isLivePreview(" in body, (
-        "the next-advance line must branch on preview; describing the cadence "
-        "unconditionally advertises a nightly job that does not exist"
     )
 
 
@@ -447,11 +327,9 @@ def test_preview_season_is_zero():
 
 
 def test_every_rendered_season_number_goes_through_the_resolver():
-    """Four places print the number: strip badge, Phase stat, banner, subtitle."""
+    """The places that print the number: the Phase stat and the subtitle."""
     for fn in (
-        "renderSeasonStrip",
         "updateLeaderboardHeader",
-        "renderLivePreviewBanner",
         "formatLiveBoardSubtitle",
     ):
         body = _fn_body(fn)
@@ -495,12 +373,12 @@ def test_the_season_label_never_prints_a_null_number():
 
 
 def test_the_season_constants_are_the_same_number_in_all_three_places():
-    """10 and 0 are declared in Python, in JS, and in leaderboard.json.
+    """Season length (10) lives in Python and leaderboard.json; the preview
+    season (0) in Python and JS.
 
     Nothing but a comment tied them together, and the comment is in the file a
     reader is already looking at -- so the drift it warns about is invisible
-    from either of the other two. Season length in particular is the divisor
-    behind the progress bar on one side and the window builder on the other.
+    from either of the other two.
     """
     import json
 
@@ -510,48 +388,15 @@ def test_the_season_constants_are_the_same_number_in_all_three_places():
         (Path(__file__).resolve().parents[2] / "config" / "leaderboard.json")
         .read_text(encoding="utf-8")
     )
-    js_days = re.search(r"const SEASON_TRADING_DAYS\s*=\s*(\d+)", _SOURCE)
     js_preview = re.search(r"const PREVIEW_SEASON_NUMBER\s*=\s*(\d+)", _SOURCE)
-    assert js_days and js_preview, "the JS season constants moved -- re-point this guard"
+    assert js_preview, "the JS season constant moved -- re-point this guard"
 
-    assert int(js_days.group(1)) == service.DEFAULT_SEASON_TRADING_DAYS, (
-        "js/leaderboard.js and service.py disagree on the length of a season"
-    )
     assert config["season"]["length_trading_days"] == service.DEFAULT_SEASON_TRADING_DAYS, (
         "leaderboard.json and service.py disagree on the length of a season"
     )
     assert int(js_preview.group(1)) == service.PREVIEW_SEASON_NUMBER, (
         "js/leaderboard.js and service.py disagree on which season is the preview"
     )
-
-
-# ── Gap markers: a missed night must not read like a flat market ─────────────
-
-
-def test_gap_copy_distinguishes_failure_kinds():
-    """One shared string for every failure_kind would defeat the whole list.
-
-    CLAUDE.md's rule is that 'the market was flat' and 'our job died' must never
-    render identically. Distinct copy per kind is how that holds on this board.
-    """
-    match = re.search(r"const SEASON_GAP_COPY = \{(.*?)\n\};", _SOURCE, re.DOTALL)
-    assert match, "SEASON_GAP_COPY moved -- re-point this guard or it checks nothing"
-    phrases = re.findall(r":\s*'([^']+)'", match.group(1))
-    assert len(phrases) >= 3, f"expected a copy line per failure_kind, found {phrases}"
-    assert len(set(phrases)) == len(phrases), f"duplicate gap copy: {phrases}"
-
-
-def test_gap_renderer_states_that_positions_carried_forward():
-    """The policy is carry-flat-and-mark, never backfill -- the UI has to say so."""
-    body = _fn_body("renderSeasonGaps")
-    assert "carried forward" in body
-
-
-def test_gap_renderer_never_builds_html_from_server_text():
-    """``detail`` is server-supplied prose; it goes in via textContent only."""
-    body = _fn_body("renderSeasonGaps")
-    assert "innerHTML" not in body
-    assert "textContent" in body
 
 
 # ── Naming: the board is named, and the name does not over-claim ─────────────

@@ -49,7 +49,7 @@
    "shelf": "llms",
    "name": "DeepSeek V4 Pro",
    "model_name": "deepseek/deepseek-v4-pro",
-   "description": "The Competition Leaderboard's DeepSeek V4 Pro agent — the only model that beat the passive baselines in the April 2026 contest window. Same long-only DJIA hourly backtest; add it and edit the instruction to try this model yourself.",
+   "description": "The Competition Leaderboard's DeepSeek V4 Pro agent, as run in the April 2026 contest window. Same long-only DJIA hourly backtest; add it and edit the instruction to try this model yourself.",
    "category": "us_stocks",
    "tags": [
     "competition model",
@@ -374,7 +374,7 @@
    "shelf": "open",
    "name": "Volatility Guard",
    "model_name": "deepseek/deepseek-v4-pro",
-   "description": "Holds a steady portfolio in calm markets and cuts exposure when prices start swinging. Runs on the only model that has beaten the passive baselines on our leaderboard.",
+   "description": "Holds a steady portfolio in calm markets and cuts exposure when prices start swinging. Runs on DeepSeek V4 Pro.",
    "category": "us_stocks",
    "tags": [
     "risk management",

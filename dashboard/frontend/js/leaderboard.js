@@ -572,13 +572,17 @@ function setCurvePickerOpen(open) {
   if (open) renderCurvePicker();
 }
 
-// A season is two calendar weeks of US cash sessions, Monday through Friday.
-const SEASON_TRADING_DAYS = 10;
-
-// The season the board is in before the engine ships. Season 0 is the shakedown
-// season by convention: numbered, so the board has a real identity to show and
-// so Season 1 means "the first one that counted", but explicitly the one whose
-// results nobody should read as a standing. The preview banner says the rest.
+// ⚠ UNREACHABLE TODAY: every `isLiveBoard()` branch in this file. The Live tab
+// renders through js/live-leaderboard.js into #liveLeaderboardView, and app.js
+// only ever calls loadLeaderboardData('contest'). The season strip, preview
+// banner and gap list this file used to paint into #leaderboardView were
+// deleted with their markup (they described a two-week season engine the
+// calendar-month board replaced); the remaining live branches are slated for
+// the same removal rather than for revival.
+//
+// Season 0 is the shakedown season by convention: numbered, so the board has a
+// real identity to show, but explicitly the one whose results nobody should
+// read as a standing.
 const PREVIEW_SEASON_NUMBER = 0;
 
 /** The board on screen, from the request that produced the payload being shown. */
@@ -653,28 +657,6 @@ function displayedSeasonNumber(payload) {
 function displayedSeasonLabel(payload) {
   const n = displayedSeasonNumber(payload);
   return n === null ? 'This season' : `Season ${n}`;
-}
-
-/** A relative phrase, or null when the timestamp is absent or unparseable.
- *
- * Null rather than '': both call sites interpolate this into a label, so an
- * empty string renders as a dangling "Next advance " or "closes " — a caption
- * with its value silently deleted, which reads as a broken template rather than
- * as missing data. Callers drop the whole clause on null instead.
- *
- * Past timestamps say "now", not "due now": the phrase is composed into
- * "closes …" as well as "Next advance …", and an entry window cannot be
- * "closes due now".
- */
-function formatRelativeFromNow(iso) {
-  const then = new Date(iso).getTime();
-  if (!Number.isFinite(then)) return null;
-  const minutes = Math.round((then - Date.now()) / 60000);
-  if (minutes <= 0) return 'now';
-  if (minutes < 60) return `in ${minutes} min`;
-  const hours = Math.round(minutes / 60);
-  if (hours < 24) return `in ${hours}h`;
-  return `in ${Math.round(hours / 24)}d`;
 }
 
 /** Repaint the whole board identity for `payload`, which `board` was asked for.
@@ -771,9 +753,6 @@ function updateLeaderboardHeader(payload, board = renderedBoardPeriod) {
       ? formatLiveBoardSubtitle(payload)
       : 'Sep 1 – Oct 30, 2026';
   }
-  renderLivePreviewBanner(payload);
-  renderSeasonStrip(payload);
-  renderSeasonGaps(payload);
   updateCurvePickerCount();
 }
 
@@ -784,8 +763,7 @@ function formatLiveBoardSubtitle(payload) {
     : '';
   if (isLivePreview(payload)) {
     // Stating the cadence here would promise a nightly advance that no deployed
-    // job performs. The banner above carries the full explanation; this is the
-    // one-line version that has to survive next to it.
+    // job performs.
     return `${dates}${displayedSeasonLabel(payload)} preview — no advance has run`;
   }
   // `window.start_date` is the board's display window, NOT a record that an
@@ -799,166 +777,6 @@ function formatLiveBoardSubtitle(payload) {
   return advanced
     ? `${dates}${cadence} · last completed ${advanced}`
     : `${dates}${cadence}`;
-}
-
-/** The load-bearing honesty control for this tab.
- *
- * Everything else on the board renders identically whether or not a season ran,
- * because the entry/curve/table shapes are shared with the Competition board.
- * This banner is the only element that distinguishes them, so it is written
- * first and deleted last.
- */
-function renderLivePreviewBanner(payload) {
-  const host = document.getElementById('seasonPreviewBanner');
-  if (!host) return;
-  host.textContent = '';
-  if (!isLivePreview(payload)) {
-    host.hidden = true;
-    return;
-  }
-  host.hidden = false;
-  const lead = document.createElement('strong');
-  lead.textContent = 'Preview — the season engine is not deployed.';
-  const body = document.createElement('span');
-  const label = payload.window?.label || 'the Competition window';
-  body.textContent = ` ${displayedSeasonLabel(payload)} has not been run. The curves below are the Competition board's fixed window (${label}), shown so this layout can be reviewed: nothing here is a live standing, and no ranking on this tab counts.`;
-  host.append(lead, body);
-}
-
-function renderSeasonStrip(payload) {
-  const host = document.getElementById('seasonStrip');
-  if (!host) return;
-  const season = payload.season || null;
-  if (!isLiveBoard()) {
-    host.hidden = true;
-    return;
-  }
-  host.hidden = false;
-  host.classList.toggle('is-placeholder', !season);
-
-  // Both clamped before either is divided by the other. The server clamps
-  // `trading_days_total` too, and that is the real fix — but this value reaches
-  // `(elapsed / total) * 100` as a CSS width, so a zero or negative one draws a
-  // full or backwards bar under the banner that says nothing has advanced.
-  const rawTotal = Number(season?.trading_days_total);
-  const total = Number.isFinite(rawTotal) && rawTotal >= 1
-    ? Math.floor(rawTotal)
-    : SEASON_TRADING_DAYS;
-  const elapsed = Math.min(Math.max(Number(season?.trading_days_elapsed) || 0, 0), total);
-
-  const badge = document.getElementById('seasonBadge');
-  if (badge) {
-    const seasonNo = displayedSeasonNumber(payload);
-    badge.textContent = seasonNo === null ? 'Season —' : `Season ${seasonNo}`;
-  }
-
-  const dates = document.getElementById('seasonDates');
-  if (dates) {
-    dates.textContent = season?.start_date && season?.end_date
-      ? `${formatShortDate(season.start_date)} – ${formatShortDate(season.end_date)}`
-      : 'Dates set when the first season opens';
-  }
-
-  const entryText = document.getElementById('seasonEntryText');
-  const entryState = document.getElementById('seasonEntryState');
-  if (entryText && entryState) {
-    let state = 'pending';
-    let text = 'Entries not open yet';
-    if (season?.entries_open) {
-      state = 'open';
-      // Composed from the formatted value, not from the raw field: an
-      // unparseable `entry_closes_at` is present-but-useless, and testing the
-      // field instead of the phrase renders a bare "· closes ".
-      const closesIn = formatRelativeFromNow(season.entry_closes_at);
-      const closes = closesIn ? ` · closes ${closesIn}` : '';
-      const count = Number(season.entry_count);
-      text = `Entries open${Number.isFinite(count) ? ` · ${count} entered` : ''}${closes}`;
-    } else if (season?.status === 'running') {
-      state = 'closed';
-      text = 'Entries closed — season in progress';
-    } else if (season?.status === 'closed') {
-      state = 'closed';
-      text = 'Season finished';
-    }
-    entryState.className = `season-entry-state is-${state}`;
-    entryText.textContent = text;
-  }
-
-  const fill = document.getElementById('seasonProgressFill');
-  const bar = document.getElementById('seasonProgressBar');
-  const label = document.getElementById('seasonProgressLabel');
-  if (fill) fill.style.width = `${total ? (elapsed / total) * 100 : 0}%`;
-  if (bar) {
-    bar.setAttribute('aria-valuemax', String(total));
-    bar.setAttribute('aria-valuenow', String(elapsed));
-  }
-  if (label) {
-    label.textContent = season
-      ? `Day ${elapsed} of ${total}`
-      : `${total} trading days per season`;
-  }
-
-  const advance = document.getElementById('seasonNextAdvance');
-  if (advance) {
-    // The formatted phrase is the only proof the timestamp was readable, so an
-    // unparseable `next_advance_at` is treated as absent. Branching on the raw
-    // field instead renders "Next advance null".
-    const relative = formatRelativeFromNow(season?.next_advance_at);
-    if (isLivePreview(payload)) {
-      // Tested ahead of the timestamp rather than after it: a payload carrying
-      // a schedule but no completed advance would otherwise announce a nightly
-      // job that is not deployed — the one claim this tab exists to deny.
-      advance.textContent = 'No advance scheduled';
-    } else if (season?.status === 'closed') {
-      advance.textContent = 'No further advances';
-    } else if (relative) {
-      advance.textContent = `Next advance ${relative} (${new Date(season.next_advance_at).toLocaleString()})`;
-    } else {
-      advance.textContent = 'Next advance: nightly after the 16:00 ET close';
-    }
-  }
-}
-
-// Copy is deliberately different per failure_kind. A gap that reads the same
-// whatever caused it is worse than no gap marker at all: it teaches the reader
-// that a flat day and a dead job look alike, which is the thing this list exists
-// to prevent.
-const SEASON_GAP_COPY = {
-  market_data_unavailable: 'no usable market data for the session',
-  model_error: 'the model returned no usable decision',
-  job_not_run: 'the nightly advance never ran',
-  budget_exhausted: 'the model budget for the month was exhausted',
-};
-
-function renderSeasonGaps(payload) {
-  const host = document.getElementById('seasonGaps');
-  if (!host) return;
-  host.textContent = '';
-  const gaps = (isLiveBoard() && payload.season?.gaps) || [];
-  if (!gaps.length) {
-    host.hidden = true;
-    return;
-  }
-  host.hidden = false;
-  gaps.forEach((gap) => {
-    const item = document.createElement('li');
-    item.className = 'season-gap';
-    const date = document.createElement('span');
-    date.className = 'season-gap-date';
-    date.textContent = formatShortDate(gap.date) || gap.date || 'Unknown date';
-    const why = document.createElement('span');
-    why.className = 'season-gap-why';
-    const reason = SEASON_GAP_COPY[gap.failure_kind] || 'the advance did not complete';
-    why.textContent = `${reason} — positions carried forward unchanged, no trading counted`;
-    item.append(date, why);
-    if (gap.detail) {
-      const detail = document.createElement('span');
-      detail.className = 'season-gap-detail';
-      detail.textContent = gap.detail;
-      item.append(detail);
-    }
-    host.append(item);
-  });
 }
 
 /** Resolve a caller's board name to one of the two the API actually serves.

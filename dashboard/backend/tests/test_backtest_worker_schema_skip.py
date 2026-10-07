@@ -40,6 +40,7 @@ _TWINS = [
     ("dashboard.backend.domain.model_providers.repository_postgres", "PostgresModelProviderStore", "model_provider_store"),
     ("dashboard.backend.domain.portfolios.repository_postgres", "PostgresPortfolioStore", "portfolio_store"),
     ("dashboard.backend.domain.strategies.repository_postgres", "PostgresStrategyStore", "strategy_store"),
+    ("dashboard.backend.domain.traces.repository_postgres", "PostgresTraceStore", "trace_store"),
 ]
 _IDS = [name for _m, name, _l in _TWINS]
 

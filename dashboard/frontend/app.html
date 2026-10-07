@@ -13,7 +13,7 @@
          because every API call is a CORS request. -->
     <link rel="preconnect" href="https://agentictrading.onrender.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="styles.css?v=158">
+    <link rel="stylesheet" href="styles.css?v=159">
     <!-- defer: ~200KB that was render-blocking. Deferred scripts execute in
          document order (this one first, the body-end ones after), all before
          DOMContentLoaded, so Chart is defined before any chart renders. -->
@@ -171,19 +171,6 @@
     html[data-nav-boot][data-nav-page="competition"][data-nav-competition-tab="leaderboard"] #leaderboardView { display: flex !important; }
     html[data-nav-boot][data-nav-page="competition"][data-nav-competition-tab="participants"] #competitionParticipantsPanel { display: block !important; }
     html[data-nav-boot][data-nav-page="competition"][data-nav-competition-tab="about"] #competitionAboutPanel { display: block !important; }
-    /* The rule above reveals #leaderboardView for the live tab, but every word
-       inside it is still the Competition board's: its title, its Sep–Oct dates,
-       its "Upcoming" badge and its contest Rules button, with the preview banner
-       shipped `hidden`. Painted as-is, a shared ?view=live link opens on the
-       contest's identity with no disclaimer at all. So for that tab the wrong
-       identity is suppressed and the banner — which ships with real static text,
-       not an empty div — is revealed until leaderboard.js repaints both.
-       (This only covers up to app.js executing; loadLeaderboardData repaints the
-       chrome synchronously before its fetch, which is what covers the cold-start
-       window after data-nav-boot is gone.) */
-    html[data-nav-boot][data-nav-page="competition"][data-nav-competition-tab="live"] #leaderboardView .contest-identity,
-    html[data-nav-boot][data-nav-page="competition"][data-nav-competition-tab="live"] #competitionRulesBtn { visibility: hidden; }
-    html[data-nav-boot][data-nav-page="competition"][data-nav-competition-tab="live"] #seasonPreviewBanner { display: block !important; }
     </style>
 </head>
 <body>
@@ -281,7 +268,7 @@
         <div class="auth-modal-panel" role="dialog" aria-labelledby="authModalTitle">
             <button id="authModalClose" class="auth-modal-close" type="button" aria-label="Close">×</button>
             <h2 id="authModalTitle" class="auth-modal-title">Sign in</h2>
-            <p id="authModalSubtitle" class="auth-modal-subtitle">Optional — backtests work without an account.</p>
+            <p id="authModalSubtitle" class="auth-modal-subtitle">Optional for browsing and rule-based backtests. AI-model backtests billed to ATL Credits or your own API key need an account.</p>
             <form id="authForm" class="auth-form">
                 <label class="auth-field">
                     <span>Email</span>
@@ -601,7 +588,7 @@
                                     <button class="hm-inline-link" id="homeModuleLiveBtn" type="button">Live Trading Leaderboard</button>
                                     is the other board &mdash; designed to move forward one trading
                                     session at a time, on prices nobody has seen yet. It is a
-                                    Season 0 preview and has not moved forward yet.
+                                    Season 0 preview: the current calendar month, updated after each trading session closes.
                                 </p>
                                 <button class="hm-footer-btn" id="homeModuleRankingBtn" type="button">See both leaderboards</button>
                             </article>
@@ -737,7 +724,7 @@
                                 </div>
                                 <div class="hm-community-stat">
                                     <span id="homeMetricTrades" class="hm-community-value tabular-nums">37</span>
-                                    <span class="hm-community-label">Paper trades today</span>
+                                    <span class="hm-community-label">Trades today</span>
                                 </div>
                             </div>
                             <p class="hm-activity-label">Recent Activity</p>
@@ -1252,7 +1239,7 @@
                             <h3 class="agent-editor-history-title">Backtest history</h3>
                             <span id="agentEditorRunCount" class="agent-editor-run-count">0 runs</span>
                         </div>
-                        <p class="agent-editor-history-hint">All backtest runs for this agent. Click a run to open it in Playground.</p>
+                        <p class="agent-editor-history-hint">All backtest runs for this agent. Click a run to open its results.</p>
                         <div id="agentEditorRunHistory" class="agent-editor-run-history" role="list"></div>
                     </div>
                 </aside>
@@ -1602,11 +1589,10 @@
                 </div>
                 <div class="section-card">
                     <h3 class="section-title">Live Trading Leaderboard</h3>
-                    <p class="about-text">This board runs <strong>forward</strong>, in seasons of <strong>two weeks</strong>, Monday to Friday. &ldquo;Live&rdquo; describes the direction, not the money: this is <strong>simulated trading on real market data</strong> &mdash; no broker account, no real capital, and no order ever leaves this system.</p>
-                    <p class="about-text">Each night after the 16:00 ET cash close, every entry is advanced one trading day: the model sees that day's real bars for the first time and its portfolio carries forward from where the previous day left it. Nobody &mdash; including us &mdash; knows what the next bar does when an entry locks, which is what separates this board from the fixed-window Competition one.</p>
-                    <p class="about-text">Seasons do not accumulate. Every season starts flat at $100,000, ranks only the days inside it, and ends. Entries do not carry over, so joining is a per-season decision.</p>
-                    <p class="about-text">If a night's advance fails, that day is <strong>marked as a gap</strong> and positions carry forward unchanged. It is never quietly re-run days later against a market that has already moved.</p>
-                    <p class="about-text about-text-muted">We are in <strong>Season 0</strong>, the shakedown season: the engine that advances it is not deployed yet, so nothing on this tab is a standing. Until it ships, the board renders in preview and says so across the top. Season 1 is the first one that will count.</p>
+                    <p class="about-text">This board runs <strong>forward</strong>, one calendar month at a time, on NYSE trading days. &ldquo;Live&rdquo; describes the direction, not the money: this is <strong>simulated trading on real market data</strong> &mdash; no broker account, no real capital, and no order ever leaves this system.</p>
+                    <p class="about-text">Each night after the 16:00 ET cash close, each entry is advanced one trading day: the model sees that day's real bars for the first time and its portfolio carries forward from where the previous day left it. Nobody &mdash; including us &mdash; knows what the next bar does when an entry locks, which is what separates this board from the fixed-window Competition one.</p>
+                    <p class="about-text">Each entry is one continuous book that starts the month flat at $100,000 and ranks only the days inside it; the board resets on the 1st. Entries are a curated roster of AI models and baselines &mdash; there are no user submissions.</p>
+                    <p class="about-text about-text-muted">We are in <strong>Season 0</strong>, the shakedown season, so read the standings as a preview rather than an official result. An entry more than one trading session behind is shown but not ranked.</p>
                 </div>
                 <div class="section-card">
                     <h3 class="section-title">Competition Leaderboard</h3>
@@ -1798,46 +1784,6 @@
                     <a class="discord-nav-btn discord-nav-btn-sm" href="https://discord.gg/9HnQ6XDG98" target="_blank" rel="noopener noreferrer">Join our Discord community</a>
                 </div>
             </div>
-            <!-- Live Trading season chrome. Hidden entirely on the Competition board:
-                 every element below describes a season, and a season is the one
-                 thing the fixed contest window is not. -->
-            <!-- Ships with real text rather than empty. The boot stylesheet
-                 reveals this element for ?view=live before any script runs, and
-                 an empty div revealed at boot is indistinguishable from no
-                 disclaimer. leaderboard.js replaces the body once the payload
-                 names the window the curves actually came from. -->
-            <div id="seasonPreviewBanner" class="season-preview-banner" role="status" hidden><strong>Preview — the season engine is not deployed.</strong><span> Season 0 has not been run: nothing on this tab is a live standing, and no ranking on it counts.</span></div>
-
-            <section id="seasonStrip" class="season-strip" aria-label="Season status" hidden>
-                <div class="season-strip-top">
-                    <div class="season-identity">
-                        <span class="season-badge" id="seasonBadge">Season —</span>
-                        <span class="season-dates" id="seasonDates">—</span>
-                    </div>
-                    <div class="season-entry-state" id="seasonEntryState">
-                        <span class="season-entry-dot" aria-hidden="true"></span>
-                        <span id="seasonEntryText">—</span>
-                    </div>
-                </div>
-                <div class="season-strip-progress">
-                    <div class="season-progress-track" role="progressbar" id="seasonProgressBar"
-                         aria-valuemin="0" aria-valuemax="10" aria-valuenow="0"
-                         aria-label="Trading days completed this season">
-                        <div class="season-progress-fill" id="seasonProgressFill" style="width: 0%"></div>
-                    </div>
-                    <span class="season-progress-label" id="seasonProgressLabel">—</span>
-                    <span class="season-next-advance" id="seasonNextAdvance">—</span>
-                </div>
-                <p class="season-reset-note">
-                    Every season starts flat at $100,000 and ranks only the days inside it.
-                    Entries do not carry over &mdash; re-enter each season.
-                </p>
-            </section>
-
-            <!-- Missed nights are a hole in a cumulative curve, so they are stated
-                 rather than smoothed over. Copy differs by failure_kind on purpose:
-                 "the market was flat" and "our job died" must never read alike. -->
-            <ul id="seasonGaps" class="season-gaps" aria-label="Days this season did not advance" hidden></ul>
 
             <!-- Combined Header with Stats + Controls -->
             <div class="leaderboard-header-bar compact">
@@ -2566,14 +2512,14 @@
     <script src="market-events/MarketEventFeed.js" defer></script>
     <script src="js/portfolio.js?v=18" defer></script>
     <script src="js/backtest-comparison.js?v=1" defer></script>
-    <script src="app.js?v=155" defer></script>
+    <script src="app.js?v=157" defer></script>
     <script src="js/analytics.js?v=1" defer></script>
     <script src="js/agent-editor.js?v=32" defer></script>
     <script src="js/credit-format.js?v=1" defer></script>
     <script src="js/credits.js?v=8" defer></script>
     <script src="js/admin-credits.js?v=9" defer></script>
     <script src="js/admin-tabs.js?v=12" defer></script>
-    <script src="js/leaderboard.js?v=34" defer></script>
+    <script src="js/leaderboard.js?v=36" defer></script>
     <script src="js/live-leaderboard.js?v=5" defer></script>
     <script src="home-page.js?v=54" defer></script>
     <!-- Load order: must come after app.js (API/API_BASE/escapeHtml) and

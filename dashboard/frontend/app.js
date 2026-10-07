@@ -5396,7 +5396,7 @@ function setAuthMode(mode) {
   if (subtitle) {
     subtitle.textContent = mode === 'reset'
       ? "Enter your account email and we'll send a 6-character reset code."
-      : 'Optional — backtests work without an account.';
+      : 'Optional for browsing and rule-based backtests. AI-model backtests billed to ATL Credits or your own API key need an account.';
   }
   if (submitBtn) {
     submitBtn.textContent = mode === 'signup' ? 'Create account' : mode === 'reset' ? 'Send code' : 'Sign in';
@@ -6660,13 +6660,13 @@ document.addEventListener('DOMContentLoaded', async () => {
     ]);
 
     // If the head boot script's warmup ping is still pending after a beat,
-    // say so — a free-tier cold start otherwise looks like a broken page.
+    // say so — a slow cold start otherwise looks like a broken page.
     if (window.API_WARMUP) {
         let warmupSettled = false;
         window.API_WARMUP.then(() => { warmupSettled = true; });
         setTimeout(() => {
             if (!warmupSettled) {
-                showAppToast('Waking up the server — the first load can take up to a minute on our free hosting.');
+                showAppToast('Still connecting to the server — this first load is taking longer than usual.');
             }
         }, SLOW_BOOT_NOTICE_MS);
     }
@@ -13167,7 +13167,7 @@ function renderAlgoSetupStatus(setup, errorMsg) {
         el.className = 'algo-setup-status error';
         el.innerHTML =
             '⚠️ Cannot reach My Trading Algo API (HTTP 404). <strong>Restart the backend</strong>: ' +
-            '<code>python backend/app.py</code>, then open <code>http://localhost:8000</code>';
+            '<code>uvicorn dashboard.backend.app:app --reload</code>, then open <code>http://localhost:8000</code>';
         return;
     }
 
@@ -13193,7 +13193,7 @@ async function pollAlgoBacktestStatus() {
         } catch (err) {
             if (String(err.message).includes('404')) {
                 throw new Error(
-                    'Backend missing /api/algo/status (old version). Stop with Ctrl+C and run: python backend/app.py'
+                    'Backend missing /api/algo/status (old version). Stop with Ctrl+C and run: uvicorn dashboard.backend.app:app --reload'
                 );
             }
             throw err;
