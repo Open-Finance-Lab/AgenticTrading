@@ -1368,7 +1368,7 @@ async def forgot_password(
         )
         raise HTTPException(
             status_code=503,
-            detail="Could not send the confirmation email. Please try again later.",
+            detail="Could not send the reset code. Please try again later.",
         )
 
     # Address gates, CHECKED longest window first so a refusal carries the

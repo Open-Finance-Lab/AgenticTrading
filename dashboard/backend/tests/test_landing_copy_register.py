@@ -269,15 +269,17 @@ def test_race_names_the_two_boards_the_app_actually_serves():
     assert "Competition" in text
 
 
-def test_race_discloses_that_the_live_board_is_not_ranking_yet():
-    """Naming the board on the acquisition page while its nightly advance is
-    undeployed is the landing-side version of the preview banner. Without this
-    sentence the bullet above it ("runs forward in two-week seasons") reads as a
-    board that is running now — the same over-claim the banner exists to stop,
-    just moved one page upstream where nothing renders the banner."""
+def test_race_discloses_that_the_live_board_is_a_preview():
+    """The nightly advance now runs (calendar-month board, domain/leaderboard/live.py),
+    but Season 0 is a shakedown. Without this sentence the bullet above it reads
+    as an official standing. It used to say the board had never advanced, and
+    that sentence outlived the engine shipping because this test pinned it."""
     text = _shipped_text()
     assert "in preview for Season 0" in text
-    assert "Season 1 is the first that counts" in text
+    assert "the current calendar month" in text
+    assert "not an official result" in text
+    for stale in ("two-week seasons", "has not moved forward", "Season 1 is the first that counts"):
+        assert stale not in text, f"retired Live board claim still ships: {stale!r}"
 
 
 _LANDING_HOME = _RACE_TSX.parent
@@ -302,10 +304,6 @@ _CLAIM_DISCLAIMERS = (
     # needs would delete the disclaimer in order to satisfy the guard against the
     # claim.
     "No real money. Simulated money only.",
-    # Hero's gloss on what a Lab paper-trading run is. Accurate as written: the
-    # prices are real, the money is not, and the sentence says exactly that.
-    '<span className="text-primary font-semibold">paper trading</span> '
-    '{" "}— practice trading with simulated money at live market prices —',
 )
 
 # Claim shapes, not vocabulary. "live trading" is deliberately absent: it is now
@@ -362,10 +360,10 @@ def test_the_disclaimer_allowlist_is_not_stale():
     test above starts failing on a sentence that was always fine — which reads as
     the guard being broken and invites deleting it.
 
-    Scanned across every component rather than Hero.tsx alone. Both sentences
-    started in Hero; the second travelled to ChatSimulation.tsx when the board
-    took the hero's right column and the conversation demo moved down to the
-    Talk act. A file-scoped freshness check turns any such relocation into a
+    Scanned across every component rather than Hero.tsx alone. The list once
+    held a second sentence that started in Hero and travelled to
+    ChatSimulation.tsx when the conversation demo moved down to the Talk act
+    (since deleted along with its entry). A file-scoped freshness check turns any such relocation into a
     failure that looks like a deleted disclaimer, when the disclaimer is right
     there one file over — and the pressure then is to drop the allowlist entry,
     which re-arms the ban on a sentence that must keep shipping.
@@ -781,3 +779,40 @@ def test_the_illustrative_placeholders_source_and_shipped_bundle_agree():
         "them, so prod still renders the previous illustrative run report — "
         "rebuild per dashboard/landing/README.md"
     )
+
+
+# The Live board's contract (calendar month, advanced after each session, Season 0
+# a preview) is stated on three surfaces with no shared source: the app's Home
+# blurb, its About card, and the landing's Race section. PR #619 updated two and
+# missed the third, and a per-surface pin kept CI green over the contradiction
+# -- so the three are checked together, against one vocabulary.
+_LIVE_BOARD_CURRENT = "calendar month"
+_LIVE_BOARD_RETIRED = (
+    "two-week season",
+    "seasons of <strong>two weeks",
+    "has not moved forward",
+    "Season 1 is the first",
+    "season engine is not deployed",
+    "Entries do not carry over",
+)
+
+
+def _app_html_live_surfaces() -> dict[str, str]:
+    app_html = (
+        Path(__file__).resolve().parents[2] / "frontend" / "app.html"
+    ).read_text(encoding="utf-8")
+    visible = re.sub(r"<!--.*?-->", "", app_html, flags=re.DOTALL)
+    blurb_at = visible.index('id="homeModuleLiveBtn"')
+    blurb = visible[blurb_at : visible.index("</p>", blurb_at)]
+    about_at = visible.index("Live Trading Leaderboard</h3>")
+    about = visible[about_at : visible.index("</div>", about_at)]
+    return {"app.html Home blurb": blurb, "app.html About card": about}
+
+
+def test_live_board_copy_agrees_across_surfaces():
+    surfaces = _app_html_live_surfaces()
+    surfaces["landing bundle"] = _shipped_text()
+    for name, text in surfaces.items():
+        assert _LIVE_BOARD_CURRENT in text, f"{name} no longer describes the calendar-month board"
+        for retired in _LIVE_BOARD_RETIRED:
+            assert retired not in text, f"{name} still ships a retired Live board claim: {retired!r}"
