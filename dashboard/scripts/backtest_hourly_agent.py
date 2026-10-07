@@ -585,6 +585,13 @@ def main():
     
     try:
         agent_id, agent_eq = backtester.run_agent_backtest()
+    except LLMExecutionError as exc:
+        # One machine-readable line for the parent, which otherwise only has
+        # this process's traceback tail to show the user. The ``ERROR: llm.``
+        # prefix also has the parent relay it to the service log live. The
+        # category is a fixed enum value, never upstream text.
+        print(f"ERROR: llm.run_failed category={exc.category.value}", flush=True)
+        raise
     finally:
         if execution_service is not None and execution_handoff is not None:
             try:

@@ -366,6 +366,7 @@ def test_platform_quota_error_retries_once_through_commonstack(
         ExecutionErrorCategory.USAGE_UNAVAILABLE,
         ExecutionErrorCategory.BILLING_FAILED,
         ExecutionErrorCategory.ACCOUNT_RESTRICTED,
+        ExecutionErrorCategory.INSUFFICIENT_CREDITS,
     ],
 )
 def test_non_quota_platform_failures_do_not_fail_over(
@@ -722,6 +723,34 @@ def test_restricted_account_execution_error_is_actionable(
     assert exc_info.value.category is ExecutionErrorCategory.ACCOUNT_RESTRICTED
     assert expected in exc_info.value.safe_message
     assert "CreditAccountRestrictedStoreError" not in exc_info.value.safe_message
+
+
+def test_a_balance_that_cannot_cover_the_reservation_says_so(tmp_path, monkeypatch):
+    # It used to fall through `_execute_platform`'s catch-all and reach the
+    # user as "Model usage billing could not be completed." -- which read as a
+    # billing bug to someone whose welcome grant had simply run out.
+    adapter = FakeExecutionAdapter(LLMUsage(input_tokens=100, output_tokens=100))
+    service, credits_store = _execution_service(tmp_path, monkeypatch, adapter)
+    available = credits_store.get_balance_micro(USER_ID)
+    credits_store.reserve_llm_credits(
+        reservation_id="drain-the-balance",
+        user_id=USER_ID,
+        run_id="another-run",
+        call_index=0,
+        provider_id="openrouter",
+        attempt_index=0,
+        reserved_micro=available - 1,
+        operation_key="drain-the-balance",
+        request_digest="d" * 64,
+    )
+
+    with pytest.raises(LLMExecutionError) as exc_info:
+        service.execute(_request("insufficient-balance"))
+
+    assert exc_info.value.category is ExecutionErrorCategory.INSUFFICIENT_CREDITS
+    assert "Not enough ATL Credits" in exc_info.value.safe_message
+    # Refused at the reservation, before any provider was asked.
+    assert adapter.secrets == []
 
 
 def _platform_request(run_id: str, provider_ids: tuple[str, ...]) -> LLMExecutionRequest:
@@ -1122,6 +1151,7 @@ def test_retry_after_is_honoured_up_to_cap(
         ExecutionErrorCategory.USAGE_UNAVAILABLE,
         ExecutionErrorCategory.BILLING_FAILED,
         ExecutionErrorCategory.ACCOUNT_RESTRICTED,
+        ExecutionErrorCategory.INSUFFICIENT_CREDITS,
     ],
 )
 def test_non_failover_categories_never_retry_even_with_a_stray_hint(

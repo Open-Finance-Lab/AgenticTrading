@@ -1497,6 +1497,7 @@ def test_platform_credits_resolves_candidates_without_provider_input(monkeypatch
     spy = _Spy()
     service = _AutoPlatformExecutionPreflightService()
     captured_handoff = {}
+    monkeypatch.setattr(bt, "credits_service", _FakeBalanceCredits(100_000_000))
     monkeypatch.setattr(bt, "run_backtest_background", spy)
     monkeypatch.setattr(bt, "get_model_provider_service", lambda: service)
     monkeypatch.setattr(
@@ -3130,3 +3131,255 @@ def test_write_back_baseline_is_the_stored_pipeline_not_its_substitute(monkeypat
     )
     # Without a route-supplied baseline the passed pipeline is the baseline.
     assert bt._writeback_start_pipeline(stored, None, None) == stored
+
+
+# --- ATL Credits launch preflight (B/C: an empty balance is refused up front,
+# and one that runs dry mid-run is reported as such, not as a billing bug) ----
+
+
+class _FakeBalance:
+    def __init__(self, available_micro, *, status="active", reason=None, outstanding=0):
+        self.total_available_micro = available_micro
+        self.account_status = status
+        self.restriction_reason = reason
+        self.outstanding_credits_micro = outstanding
+
+
+class _FakeBalanceCredits:
+    def __init__(self, available_micro, **kwargs):
+        self.balance = _FakeBalance(available_micro, **kwargs)
+        self.balance_reads = []
+
+    def get_balance(self, user_id):
+        self.balance_reads.append(user_id)
+        return self.balance
+
+
+def _post_platform_run(monkeypatch, credits, *, model="openai/gpt-5.5", billing_mode="platform_credits"):
+    spy = _Spy()
+    handoffs = []
+    service = _AutoPlatformExecutionPreflightService()
+    if billing_mode == "byok":
+        service = _ExecutionPreflightService()
+    monkeypatch.setattr(bt, "credits_service", credits)
+    monkeypatch.setattr(bt, "run_backtest_background", spy)
+    monkeypatch.setattr(bt, "get_model_provider_service", lambda: service)
+    monkeypatch.setattr(
+        "dashboard.backend.api.dependencies._optional_user",
+        lambda *_args, **_kwargs: {"id": 7},
+    )
+    monkeypatch.setattr(
+        bt, "create_execution_handoff", lambda **kw: handoffs.append(kw) or "h"
+    )
+    body = {
+        # The shipped modal window: 7 weekdays, 49 US bars.
+        "start_date": "2026-09-21",
+        "end_date": "2026-09-29",
+        "decision_source": "llm",
+        "billing_mode": billing_mode,
+        "model": model,
+    }
+    if billing_mode == "byok":
+        body["provider_id"] = "openai"
+    response = TestClient(app).post("/backtest/run", json=body, headers=_sess())
+    return response, spy, handoffs
+
+
+def test_platform_credits_run_the_balance_cannot_finish_is_refused_with_402(monkeypatch):
+    # The 2026-10-07 report: 1.5 Credits, GPT-5.5, DJIA 30. The run spent
+    # 1.32 Credits over 39 bars and then failed; now it never starts.
+    credits = _FakeBalanceCredits(1_500_000)
+
+    response, spy, handoffs = _post_platform_run(monkeypatch, credits)
+
+    assert response.status_code == 402, response.text
+    detail = response.json()["detail"]
+    assert "ATL Credits" in detail
+    assert "49 model calls on openai/gpt-5.5" in detail
+    assert "your balance is 1.50 Credits" in detail
+    assert credits.balance_reads == [7]
+    # Refused before anything was held: no handoff signed, no worker started.
+    assert handoffs == []
+    assert spy.calls == 0
+
+
+def test_platform_credits_run_the_balance_covers_proceeds(monkeypatch):
+    credits = _FakeBalanceCredits(8_000_000)
+
+    response, spy, handoffs = _post_platform_run(monkeypatch, credits)
+
+    assert response.status_code == 200, response.text
+    assert spy.calls == 1
+    assert len(handoffs) == 1
+
+
+def test_restricted_account_is_refused_with_its_restriction_message(monkeypatch):
+    credits = _FakeBalanceCredits(
+        50_000_000, status="restricted", reason="refund_reconciliation"
+    )
+
+    response, spy, _ = _post_platform_run(monkeypatch, credits)
+
+    assert response.status_code == 403
+    assert "paused for payment refund review" in response.json()["detail"]
+    assert spy.calls == 0
+
+
+def test_an_unreadable_balance_lets_the_run_through(monkeypatch, capsys):
+    # The per-call reservation still refuses what the balance cannot cover;
+    # a broken courtesy check must not take the whole lane down with it.
+    class _Broken:
+        def get_balance(self, _user_id):
+            raise RuntimeError("store down")
+
+    response, spy, _ = _post_platform_run(monkeypatch, _Broken())
+
+    assert response.status_code == 200, response.text
+    assert spy.calls == 1
+    assert "credits.preflight_balance_unavailable" in capsys.readouterr().out
+
+
+def test_byok_runs_never_read_the_credits_balance(monkeypatch):
+    credits = _FakeBalanceCredits(0)
+    monkeypatch.setattr(
+        bt._backtest_rate_limiter, "allow", lambda *_a, **_k: True
+    )
+
+    response, spy, _ = _post_platform_run(monkeypatch, credits, billing_mode="byok")
+
+    assert response.status_code == 200, response.text
+    assert credits.balance_reads == []
+
+
+def test_platform_credits_estimate_matches_the_observed_reservation_shape():
+    pipeline = [{"label": "Step 1", "prompt": "trade"}]
+    calls = bt._estimated_pipeline_llm_calls(
+        "2026-09-21", "2026-09-29", pipeline, "alpaca"
+    )
+    assert calls == 49
+    one_call = bt._estimated_platform_credits_micro(
+        model_id="openai/gpt-5.5",
+        provider_id="commonstack",
+        calls=1,
+        universe_size=30,
+        pipeline=pipeline,
+    )
+    # A single call needs a whole reservation free: prod reserved 0.178-0.187
+    # Credits per GPT-5.5 DJIA 30 call.
+    assert 170_000 <= one_call <= 200_000
+    full = bt._estimated_platform_credits_micro(
+        model_id="openai/gpt-5.5",
+        provider_id="commonstack",
+        calls=calls,
+        universe_size=30,
+        pipeline=pipeline,
+    )
+    # Prod's dead run implied ~1.81 Credits for 49 calls. The estimate must
+    # sit above that (or the 1.5-Credit account is let through to fail again)
+    # and well below "every call at its ceiling" (~9 Credits), which would
+    # refuse runs that finish.
+    assert 1_810_000 < full < 3_500_000
+    assert bt._estimated_platform_credits_micro(
+        model_id="openai/gpt-5.5",
+        provider_id="commonstack",
+        calls=0,
+        universe_size=30,
+        pipeline=pipeline,
+    ) is None
+
+
+def test_snapshot_width_follows_the_portfolio_manager_rule():
+    pipeline = [{"label": "Step 1"}]
+    assert bt._snapshot_symbols_shown(30, pipeline) == 30
+    assert bt._snapshot_symbols_shown(31, pipeline) == bt.SNAPSHOT_SHORTLIST_SIZE
+    assert bt._snapshot_symbols_shown(30, None) == bt.SNAPSHOT_SHORTLIST_SIZE
+    assert bt._snapshot_symbols_shown(7, None) == 7
+
+
+def test_child_llm_failure_reads_only_known_categories():
+    line = "ERROR: llm.run_failed category=insufficient_credits\n"
+    failure = bt._child_llm_failure("noise\n" + line, "Traceback ...")
+    assert failure is not None
+    assert failure.category.value == "insufficient_credits"
+    assert bt._child_llm_failure("ERROR: llm.run_failed category=made_up\n") is None
+    assert bt._child_llm_failure("", None) is None
+
+
+def test_a_run_that_runs_out_of_credits_reports_it_and_its_category(monkeypatch):
+    emitted = []
+    monkeypatch.setattr(
+        bt.analytics_instrumentation,
+        "emit_run_event",
+        lambda **kwargs: emitted.append(kwargs),
+    )
+    run_id = "agent_out_of_credits"
+    session_id = str(uuid.uuid4())
+    assert (
+        bt._try_acquire_backtest_slot(
+            live_run_id=run_id, session_id=session_id, user_id=4242
+        )
+        is None
+    )
+    child = FakeChild(
+        returncode=1,
+        stdout=(
+            "3️⃣ Running backtests...\n"
+            "ERROR: llm.run_failed category=insufficient_credits\n"
+        ),
+        stderr=(
+            "Traceback (most recent call last):\n"
+            "dashboard.backend.infrastructure.llm.execution.errors."
+            "LLMExecutionError: Not enough ATL Credits to continue this run.\n"
+        ),
+    )
+
+    class FakeExecutionService:
+        def __init__(self, **_kwargs):
+            pass
+
+        def finalize_run(self, execution_run_id, *, billing_mode=None):
+            return []
+
+    monkeypatch.setattr(subprocess, "Popen", lambda cmd, **kwargs: child)
+    monkeypatch.setattr(bt, "LLMExecutionService", FakeExecutionService)
+    monkeypatch.setattr(bt, "get_model_provider_service", object)
+    monkeypatch.setattr(bt, "run_backtest_background", _REAL_RUN_BACKTEST_BACKGROUND)
+
+    bt.run_backtest_background(
+        start_date="2026-01-01",
+        end_date="2026-01-02",
+        session_id=session_id,
+        live_run_id=run_id,
+        decision_source="rule_based",
+        execution_handoff_payload="opaque-test-handoff",
+        billing_mode="platform_credits",
+    )
+
+    slot = bt._recent_slots[run_id]
+    assert slot["error"] == (
+        "Backtest stopped: Not enough ATL Credits to continue this run. Add "
+        "Credits on the Credits page, choose a lower-cost model, or use your "
+        "own API key."
+    )
+    assert "Traceback" not in slot["error"]
+    assert emitted[-1]["event_name"] == "backtest_failed"
+    assert emitted[-1]["error_category"] == "credits_insufficient"
+
+
+def test_a_failure_without_a_category_line_keeps_the_generic_category(monkeypatch):
+    emitted = []
+    monkeypatch.setattr(
+        bt.analytics_instrumentation,
+        "emit_run_event",
+        lambda **kwargs: emitted.append(kwargs),
+    )
+    run_id = "agent_generic_failure"
+    session_id = str(uuid.uuid4())
+    assert (
+        bt._try_acquire_backtest_slot(
+            live_run_id=run_id, session_id=session_id, user_id=4242
+        )
+        is None
+    )
+    bt._finalize_slot(run_id, error="Backtest failed with return code 1. boom", runs_count=0)
+    assert emitted[-1]["error_category"] == "internal_error"

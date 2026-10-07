@@ -7772,6 +7772,14 @@ function getSelectedAssets() {
 function formatBacktestError(error, dataSource = null) {
     const source = dataSource || window.ACTIVE_BACKTEST_DATA_SOURCE || 'alpaca';
     const raw = String(error?.message || error?.detail || error || 'Backtest failed.');
+    // Credits refusals are about the account, not the tape: the launch 402,
+    // the in-run "Not enough ATL Credits" stop and a paused account. Below,
+    // an iFinD run maps every unrecognised message to a generic iFinD
+    // failure (and every 403 to "iFinD access is disabled"), which would
+    // hide the one thing the user can fix.
+    if (Number(error?.status || 0) === 402 || /ATL Credits|Credits account is paused/.test(raw)) {
+        return raw;
+    }
     if (source !== IFIND_ASHARE_SOURCE) return raw;
 
     const status = Number(error?.status || 0);

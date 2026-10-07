@@ -18,6 +18,7 @@ class ExecutionErrorCategory(StrEnum):
     BILLING_FAILED = "billing_failed"
     PROVIDER_QUOTA_EXHAUSTED = "provider_quota_exhausted"
     ACCOUNT_RESTRICTED = "account_restricted"
+    INSUFFICIENT_CREDITS = "insufficient_credits"
     WORKER_FAILED = "worker_failed"
 
 
@@ -36,6 +37,15 @@ _SAFE_MESSAGES = {
     ExecutionErrorCategory.ACCOUNT_RESTRICTED: (
         "Your Credits account is paused. Add Credits to settle model usage "
         "or contact an administrator."
+    ),
+    # The balance cannot cover the next call's reservation. Kept apart from
+    # BILLING_FAILED, which it used to fall into via the catch-all in
+    # ``_execute_platform``: "you are out of Credits" is the user's to fix,
+    # "billing broke" is ours, and one message for both sent users hunting
+    # for a bug that was an empty balance.
+    ExecutionErrorCategory.INSUFFICIENT_CREDITS: (
+        "Not enough ATL Credits to continue this run. Add Credits on the "
+        "Credits page, choose a lower-cost model, or use your own API key."
     ),
     ExecutionErrorCategory.WORKER_FAILED: "The model worker failed before completion.",
 }

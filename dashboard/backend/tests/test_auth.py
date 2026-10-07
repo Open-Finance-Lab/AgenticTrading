@@ -61,7 +61,7 @@ def test_signup_and_login_keep_one_welcome_credit_grant(client):
     )
     assert signup.status_code == 200
     user_id = signup.json()["user"]["id"]
-    assert auth.credits_service.get_balance(user_id).display_credits == "1.500000"
+    assert auth.credits_service.get_balance(user_id).display_credits == "8.000000"
 
     login = client.post(
         "/api/auth/login",

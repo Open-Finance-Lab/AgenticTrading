@@ -408,6 +408,9 @@ def calculate_user_state(
         "credential_missing",
         "provider_unavailable",
         "credits_unavailable",
+        # Split out of credits_unavailable; an empty balance still blocks the
+        # platform lane, so it keeps the operational state it always had.
+        "credits_insufficient",
         "model_not_allowed",
     }
     resolvers = {

@@ -12,6 +12,7 @@ from dashboard.backend.domain.credits.models import LLMSettlementResult
 from dashboard.backend.domain.credits.service import CreditsService
 from dashboard.backend.domain.credits.repository_common import (
     CreditAccountRestrictedStoreError,
+    InsufficientCreditsError,
 )
 from dashboard.backend.domain.analytics import instrumentation as analytics_instrumentation
 from dashboard.backend.domain.analytics.usage_cost import model_usage_properties
@@ -178,6 +179,24 @@ def _reservation_ceiling_micro(
     return credits_micro_for_usd(ceiling_cost)
 
 
+def analytics_error_category(category: ExecutionErrorCategory) -> str:
+    """The analytics ``error_category`` for an execution failure category.
+
+    Module-level so the backtest parent can label a child's failure without
+    constructing (or depending on) the service.
+    """
+    return {
+        ExecutionErrorCategory.CREDENTIAL_MISSING: "credential_missing",
+        ExecutionErrorCategory.CREDENTIAL_INVALID: "credential_invalid",
+        ExecutionErrorCategory.PROVIDER_UNAVAILABLE: "provider_unavailable",
+        ExecutionErrorCategory.PROVIDER_TIMEOUT: "provider_timeout",
+        ExecutionErrorCategory.PROVIDER_QUOTA_EXHAUSTED: "provider_quota_exhausted",
+        ExecutionErrorCategory.BILLING_FAILED: "credits_unavailable",
+        ExecutionErrorCategory.ACCOUNT_RESTRICTED: "account_restricted",
+        ExecutionErrorCategory.INSUFFICIENT_CREDITS: "credits_insufficient",
+    }.get(category, "internal_error")
+
+
 class LLMExecutionService:
     """Resolve one credential lane, run one model call, and settle its cost."""
 
@@ -244,15 +263,7 @@ class LLMExecutionService:
     def _analytics_error_category(
         category: ExecutionErrorCategory,
     ) -> str:
-        return {
-            ExecutionErrorCategory.CREDENTIAL_MISSING: "credential_missing",
-            ExecutionErrorCategory.CREDENTIAL_INVALID: "credential_invalid",
-            ExecutionErrorCategory.PROVIDER_UNAVAILABLE: "provider_unavailable",
-            ExecutionErrorCategory.PROVIDER_TIMEOUT: "provider_timeout",
-            ExecutionErrorCategory.PROVIDER_QUOTA_EXHAUSTED: "provider_quota_exhausted",
-            ExecutionErrorCategory.BILLING_FAILED: "credits_unavailable",
-            ExecutionErrorCategory.ACCOUNT_RESTRICTED: "account_restricted",
-        }.get(category, "internal_error")
+        return analytics_error_category(category)
 
     @staticmethod
     def _emit_model_usage(
@@ -344,6 +355,10 @@ class LLMExecutionService:
                         outstanding_micro = 0
                     raise LLMExecutionError.account_restricted(
                         reason, outstanding_micro
+                    ) from exc
+                except InsufficientCreditsError as exc:
+                    raise LLMExecutionError(
+                        ExecutionErrorCategory.INSUFFICIENT_CREDITS
                     ) from exc
                 reservation_id = reservation.reservation_id
                 self._platform_runs.add(request.run_id)
