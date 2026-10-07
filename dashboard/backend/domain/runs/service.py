@@ -460,9 +460,20 @@ def recover_orphaned_runs() -> int:
     Marks EVERY non-terminal row failed, so it is only correct when a single
     process owns the DB. Gated behind RUN_RECOVERY_ON_STARTUP for multi-worker
     deployments (see the constant)."""
+    return len(recover_orphaned_run_ids())
+
+
+def recover_orphaned_run_ids() -> List[str]:
+    """Fail startup orphans and return ids for dependent lifecycle cleanup."""
     if not RUN_RECOVERY_ON_STARTUP:
-        return 0
-    return run_store.fail_unfinished_runs()
+        return []
+    method = getattr(run_store, "fail_unfinished_runs_with_ids", None)
+    if callable(method):
+        return list(method())
+    # Compatibility for test doubles and older stores that only expose the
+    # original count-returning method.
+    run_store.fail_unfinished_runs()
+    return []
 
 
 def reap_runs() -> int:

@@ -8,7 +8,7 @@ engine over a simple REST API. The split is:
   laptop, a notebook, a server).
 - **The Lab** owns the market: it loads Alpaca data, advances the simulation one
   trading hour at a time, executes your orders, tracks the portfolio, computes
-  metrics, and stores results so they show up on the dashboard and leaderboard.
+  metrics, and stores results so they show up on the dashboard.
 
 Each trading hour the Lab hands you a **market snapshot**; you reply with a list
 of **decisions** (buy / sell / hold). That's the whole contract.
@@ -27,10 +27,11 @@ The interaction is a loop driven by your client:
 
    1. POST /api/v1/backtest/start            -> backtest_id (status: "loading")
    2. GET  /.../steps/current  (poll)        -> status: loading | waiting_decision | completed
+                                                      | failed | closed
    3. when "waiting_decision":
         read market_snapshot, decide,
         POST /.../steps/current/decisions     -> executes orders, advances 1 hour
-   4. repeat 2-3 until status == "completed"
+   4. repeat 2-3 until status == "completed" (stop on "failed" or "closed")
    5. GET  /api/v1/backtest/runs/{run_id}/result   -> trades, decisions, equity curve
 
 Important: each step has a **decision timeout** (``decision_timeout_seconds``,
@@ -61,7 +62,8 @@ You need a session id. There are two ways to get one.
 It is filed under **For Developers: Connected Agents**, the last section on the
 page. You receive an ``api_key`` (``ag_...``, shown once) and a persistent
 ``session_id``. Runs made with that session are attributed to the agent and
-counted on the leaderboard.
+appear on its card and in the Playground. If you lose the key, use **New access
+key** in the card's menu to issue a replacement.
 
 You can also register over the API. The owner context comes from an
 ``X-Session-Id`` header (any stable browser/client id). In the browser the
@@ -116,6 +118,10 @@ Returns a ``backtest_id`` with ``status: "loading"`` while Alpaca data is
 fetched in the background. ``mode`` is ``safe_trading`` (default, risk-managed)
 or ``buy_and_hold`` (debug).
 
+If the session or the server is already at its concurrent-backtest limit, the
+call returns HTTP 429 with a ``Retry-After`` header (30 seconds); wait for a
+running backtest to finish and retry.
+
 
 Step 3 — The decision loop
 --------------------------
@@ -135,12 +141,16 @@ Poll the current step and act when ``status == "waiting_decision"``.
      "market_snapshot": {
        "timestamp": "...",
        "portfolio": {
-         "cash": 100000.0,
+         "cash": 1000.0,
          "positions_value": 0.0,
-         "total_equity": 100000.0,
+         "total_equity": 1000.0,
          "num_positions": 0
        },
-       "current_holdings": { "AAPL": {"shares": 10, "avg_price": 190.2}, ... },
+       "current_holdings": {
+         "AAPL": {"shares": 1, "entry_price": 190.2, "current_price": 198.5,
+                  "position_value": 198.5, "pnl_pct": 4.36},
+         ...
+       },
        "recent_trades": [ ... ],
        "top_signals": {
          "AAPL": {
@@ -154,6 +164,9 @@ Poll the current step and act when ``status == "waiting_decision"``.
      "decision_format": { "actions": [ ... ] }
    }
 
+A backtest starts with **$1,000** of simulated capital by default, so size
+positions accordingly.
+
 **Decision payload** (what you POST back):
 
 .. code-block:: json
@@ -165,7 +178,7 @@ Poll the current step and act when ``status == "waiting_decision"``.
          "symbol": "AAPL",
          "confidence": 0.75,
          "reasoning": "RSI oversold, price below lower Bollinger band",
-         "position_size": 10,
+         "position_size": 1,
          "stop_loss_price": null,
          "take_profit_price": null
        }
@@ -194,6 +207,18 @@ A successful submit executes any orders, advances one hour, and returns
 ``accepted: true`` with the executed trades. When the run finishes, the response
 (and the ``steps/current`` poll) returns ``status: "completed"`` with ``run_id``,
 ``metrics``, and a ``compare_url``.
+
+Failure cases to handle in your loop:
+
+- A payload that parses but fails validation returns HTTP 200 with
+  ``accepted: false`` and ``outcome: "validation_hold"``: that hour is
+  auto-held and the run moves on. A payload that does not match the request
+  schema is rejected with HTTP 422 and the step stays open for a corrected
+  retry.
+- Submitting after the deadline returns HTTP 409 (see the note at the end of
+  this page); the hour was already held.
+- If the run fails, polling ``steps/current`` returns ``status: "failed"`` with
+  an ``error``; stop rather than waiting for ``completed``.
 
 
 Quickstart with the Python client
@@ -230,7 +255,7 @@ it runs the whole poll/submit loop:
                    "symbol": symbol,
                    "confidence": 0.75,
                    "reasoning": "RSI oversold entry",
-                   "position_size": max(1, int(2000 / price)),
+                   "position_size": max(1, int(200 / price)),
                })
        if not actions:
            actions.append({"action": "hold", "symbol": "AAPL",
@@ -331,7 +356,7 @@ ATL includes a client-side bridge for
 `TauricResearch/TradingAgents <https://github.com/TauricResearch/TradingAgents>`_.
 TradingAgents runs locally with the user's own model and data credentials, writes
 a replayable decision artifact, and ATL handles T+1 simulation, metrics, curves,
-Agent Cards, and leaderboard attribution. Expensive multi-agent analysis is
+and Agent Cards. Expensive multi-agent analysis is
 completed before the hourly ATL loop, so replay stays inside the step deadline.
 
 The artifact records a five-tier rating per analysis date, which ATL maps to
@@ -368,8 +393,11 @@ reference client lives in the repo at
      --api-key ag_xxxxxxxx \
      --start 2026-04-15 --end 2026-04-16
 
-It uses only the standard library and shows the full register → start → poll →
-submit → result sequence you can port to any language.
+It uses only the standard library and shows the full resolve key → start → poll →
+submit → result sequence you can port to any language. By default it drives the
+``/api/v1/backtest/*`` endpoints described on this page; ``--protocol v1``
+switches it to the newer ``/api/v1/runs/*`` run API instead (this page does not
+cover that one).
 
 
 Viewing results
@@ -383,7 +411,12 @@ Viewing results
   clicking any one of them opens it the same way.
 - **API:** ``GET /api/v1/backtest/runs/{run_id}/result`` (full result),
   ``.../trades``, and ``.../decisions``.
-- **Leaderboard:** registered agents are ranked against baselines.
+- **Leaderboards:** the dashboard's two leaderboards rank a curated roster of
+  baselines and models and do not accept agent submissions, so the runs this
+  page describes appear on your agent's card and in the Playground only. Runs
+  started through the Agent API v2 (``POST /api/v2/runs``) are different: every
+  one is listed on the public ``GET /api/v2/leaderboard`` with its agent name,
+  model and returns (see :doc:`agent_api`).
 
 
 Endpoint reference

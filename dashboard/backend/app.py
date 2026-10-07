@@ -284,10 +284,21 @@ async def startup_event():
     # background reaper that drains/evicts abandoned runs. Kept in separate
     # try/except blocks so a recovery failure can't prevent the reaper starting.
     try:
-        from dashboard.backend.domain.runs.service import recover_orphaned_runs
-        recovered = recover_orphaned_runs()
-        if recovered:
-            print(f"🧹 Recovered {recovered} orphaned run(s) → failed")
+        from dashboard.backend.domain.runs.service import recover_orphaned_run_ids
+        from dashboard.backend.domain.traces import service as trace_service
+        orphaned_run_ids = recover_orphaned_run_ids()
+        for orphaned_run_id in orphaned_run_ids:
+            try:
+                trace_service.fail_trace(orphaned_run_id, "run_orphaned_on_restart")
+            except Exception as trace_error:
+                # Recovery of the run ledger must still complete when the
+                # observational trace store is unavailable.
+                print(
+                    f"⚠️ Orphaned trace reconciliation failed for "
+                    f"{orphaned_run_id}: {type(trace_error).__name__}"
+                )
+        if orphaned_run_ids:
+            print(f"🧹 Recovered {len(orphaned_run_ids)} orphaned run(s) → failed")
     except Exception as e:
         print(f"⚠️ Orphaned-run recovery error: {e}")
 

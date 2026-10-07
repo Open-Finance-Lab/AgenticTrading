@@ -39,6 +39,7 @@ from dashboard.backend.domain.runs.service import (
     _analytics_owner_user_id,
 )
 from dashboard.backend.domain.analytics import instrumentation as analytics_instrumentation
+from dashboard.backend.domain.traces import service as trace_service
 # Late-bound module reference (run_repo.run_store) so tests that swap the
 # run_store singleton cover this module too.
 from dashboard.backend.domain.runs import repository as run_repo
@@ -130,6 +131,18 @@ def _archive_run(run_id: str, entry: Dict[str, Any], backend: Any) -> None:
         # Keep the backend live so the next sweep retries.
         print(f"⚠️ v2 archive: row update failed for {run_id}, retrying next sweep: {exc}")
         return
+    try:
+        if status == "completed":
+            trace_service.complete_trace(
+                run_id,
+                {"step_index": step_index, "total_steps": total_steps},
+            )
+        else:
+            trace_service.fail_trace(
+                run_id, "run_cancelled" if status == "closed" else "run_failed"
+            )
+    except Exception as exc:
+        print(f"⚠️ v2 trace finalization failed for {run_id}: {type(exc).__name__}")
     owner_user_id = _analytics_owner_user_id(entry.get("agent_id"))
     if owner_user_id is not None:
         event_name = {
@@ -327,6 +340,31 @@ def _submit_for(run_id: str, session_id: str, idem_key: str,
         if not valid:
             ack["decision_source"] = "validation_hold"
     db.put_idempotency(run_id, step, idem_key, ack)
+    try:
+        decision_id = f"dec_{run_id}_{step}"
+        step_id = f"step_{run_id}_{step}"
+        trace_service.record_decision_event(
+            run_id=run_id,
+            step_id=step_id,
+            decision_id=decision_id,
+            actions=valid,
+            reasoning_summaries=[
+                str(action.get("reasoning", ""))[:500] for action in valid
+            ],
+            accepted=bool(ack.get("accepted")),
+            idempotency_key=idem_key,
+        )
+        trace_service.record_execution_event(
+            run_id=run_id,
+            step_id=step_id,
+            decision_id=decision_id,
+            result=ack,
+            idempotency_key=idem_key,
+        )
+        if ack.get("status") == "completed":
+            trace_service.complete_trace(run_id, {"step_index": step + 1})
+    except Exception as exc:
+        print(f"⚠️ v2 trace event failed for {run_id}: {type(exc).__name__}")
     return ack
 
 
@@ -412,7 +450,7 @@ def create_run(body: CreateRunBody, response: Response,
         # The run's protocol_runs row: the ledger shared with /api/v1 that the
         # cap counts, startup recovery fails, and post-restart reads rehydrate.
         # Inserted under the create lock so a concurrent create sees it.
-        run_repo.run_store.create_run(
+        run_record = run_repo.run_store.create_run(
             run_id=run_id,
             agent_id=agent["agent_id"],
             agent_version_id=None,
@@ -426,6 +464,18 @@ def create_run(body: CreateRunBody, response: Response,
             backtest_id=None,
             status="loading",
         )
+        try:
+            trace_service.start_trace_for_run(
+                run=run_record,
+                initial_input={
+                    "start_date": body.start_date,
+                    "end_date": body.end_date,
+                    "mode": body.strategy_mode,
+                    "universe": body.universe,
+                },
+            )
+        except Exception as exc:
+            print(f"⚠️ v2 trace start failed for {run_id}: {type(exc).__name__}")
         owner_user_id = agent.get("owner_user_id")
         if owner_user_id is not None:
             analytics_instrumentation.emit_run_event(
@@ -446,6 +496,7 @@ def create_run(body: CreateRunBody, response: Response,
             # Never leak an active-looking row for a run that never started.
             try:
                 run_repo.run_store.update_run(run_id, status="failed")
+                trace_service.fail_trace(run_id, "run_start_failed")
                 if owner_user_id is not None:
                     analytics_instrumentation.emit_run_event(
                         event_name="backtest_failed",

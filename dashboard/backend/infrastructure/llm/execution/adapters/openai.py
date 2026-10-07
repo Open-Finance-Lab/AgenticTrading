@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from typing import Any
+from time import perf_counter
 
 from dashboard.backend.domain.model_providers.execution_catalog import (
     UnsupportedExecutionModel,
@@ -19,6 +20,7 @@ from dashboard.backend.infrastructure.llm.reasoning_controls import (
     is_reasoning_off,
     thinking_disabled_body,
 )
+from dashboard.backend.domain.traces import service as trace_service
 
 from .base import (
     SDK_MAX_RETRIES,
@@ -83,6 +85,21 @@ class OpenAIExecutionAdapter:
         messages.extend(message.model_dump() for message in request.messages)
         client = None
         owned_http_client = None
+        tool_name = f"llm.{provider.provider_id}.chat_completion"
+        call_key = f"{request.call_index}:{provider.provider_id}:{request.model_id}"
+        trace_service.record_tool_call(
+            run_id=request.run_id,
+            tool_name=tool_name,
+            input_summary={
+                "provider_id": provider.provider_id,
+                "model_id": request.model_id,
+                "message_count": len(messages),
+                "max_output_tokens": request.usage_policy.max_output_tokens,
+                "reasoning_effort": request.reasoning_effort,
+            },
+            idempotency_key=call_key,
+        )
+        started = perf_counter()
         try:
             try:
                 provider_model_id = resolve_execution_model_route(
@@ -155,7 +172,7 @@ class OpenAIExecutionAdapter:
             provider_cost_usd = optional_nonnegative_float(
                 value_at(response, "cost", value_at(value_at(response, "usage"), "cost"))
             )
-            return AdapterResponse(
+            adapter_response = AdapterResponse(
                 text=text,
                 model_id=request.model_id,
                 usage=usage,
@@ -165,9 +182,28 @@ class OpenAIExecutionAdapter:
                 ),
                 sampling_wire=describe_sampling_wire(wire),
             )
+            trace_service.record_tool_result(
+                run_id=request.run_id, tool_name=tool_name, outcome="success",
+                duration_ms=(perf_counter() - started) * 1000,
+                result_summary={
+                    "text_available": True,
+                    "usage_available": usage is not None,
+                }, idempotency_key=call_key,
+            )
+            return adapter_response
         except ProviderExecutionError:
+            trace_service.record_tool_result(
+                run_id=request.run_id, tool_name=tool_name, outcome="failed",
+                duration_ms=(perf_counter() - started) * 1000,
+                error_code="provider_execution_error", idempotency_key=call_key,
+            )
             raise
         except Exception as exc:  # noqa: BLE001 - mapped to a fixed safe category
+            trace_service.record_tool_result(
+                run_id=request.run_id, tool_name=tool_name, outcome="failed",
+                duration_ms=(perf_counter() - started) * 1000,
+                error_code="provider_error", idempotency_key=call_key,
+            )
             raise map_provider_error(exc) from exc
         finally:
             close = getattr(client, "close", None)
