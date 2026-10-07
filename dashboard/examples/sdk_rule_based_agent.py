@@ -26,8 +26,11 @@ import sys
 
 from agentictrading import ATLClient, Decision, Order
 
+# The us-equity-hourly-v1 environment starts with $1,000 and caps one position at 25% of
+# equity ($250), so five $200 orders fit. A name priced above $200 would round to zero
+# shares and be rejected, so the examples skip those.
 NUM_NAMES = 5
-DOLLARS_PER_NAME = 15_000
+DOLLARS_PER_NAME = 200
 
 
 def resolve_agent_version_id(client: ATLClient) -> str:
@@ -62,7 +65,8 @@ def decide(step) -> Decision:
     tradable = [
         sym
         for sym, feat in features.items()
-        if float(feat.get("price") or 0) > 0 and (not allowed or sym in allowed)
+        if 0 < float(feat.get("price") or 0) <= DOLLARS_PER_NAME
+        and (not allowed or sym in allowed)
     ]
 
     orders = [

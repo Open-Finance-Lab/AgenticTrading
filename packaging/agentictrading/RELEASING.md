@@ -32,15 +32,20 @@ PyPI versions are immutable — every release needs a new version number.
 
 1. Bump the version in the single source of truth:
 
-   `src/agentictrading/__init__.py` → `__version__ = "0.1.1"`
+   `src/agentictrading/__init__.py` → `__version__ = "<new version>"`
+
+   The new number must be higher than the latest on PyPI (check
+   https://pypi.org/project/agentictrading/). The source already reads `0.2.0`,
+   which has not been published; PyPI is still at `0.1.0`.
 
    (`pyproject.toml` reads this automatically via `dynamic = ["version"]`.)
 
 2. Commit, then tag and push:
 
    ```bash
-   git add -A && git commit -m "Release agentictrading 0.1.1"
-   git tag v0.1.1
+   git add packaging/agentictrading/src/agentictrading/__init__.py
+   git commit -m "Release agentictrading <new version>"
+   git tag v<new version>
    git push origin main --tags
    ```
 

@@ -27,7 +27,7 @@ from agentictrading import AgentRunner, ATLClient
 class MomentumAgent:
     """Buys the strongest positive-momentum names once, then holds."""
 
-    def __init__(self, num_names: int = 5, dollars_per_name: float = 15_000) -> None:
+    def __init__(self, num_names: int = 5, dollars_per_name: float = 200) -> None:
         self.num_names = num_names
         self.dollars_per_name = dollars_per_name
         self._invested = False
@@ -54,7 +54,7 @@ class MomentumAgent:
                 "order_type": "market",
             }
             for sym, price, _ in ranked
-            if price > 0
+            if 0 < price <= self.dollars_per_name
         ][: self.num_names]
 
         if orders:

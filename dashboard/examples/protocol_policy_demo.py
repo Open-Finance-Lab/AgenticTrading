@@ -46,8 +46,11 @@ def call(method: str, url: str, api_key: str, body: dict | None = None, timeout:
 
 
 # How many names to buy on the first step, and dollars per name.
+# The us-equity-hourly-v1 environment starts with $1,000 and caps one position at 25% of
+# equity ($250), so five $200 orders fit. A name priced above $200 would round to zero
+# shares and be rejected, so the examples skip those.
 NUM_NAMES = 5
-DOLLARS_PER_NAME = 15000
+DOLLARS_PER_NAME = 200
 
 
 def decide(observation: dict, sequence: int) -> list[dict]:
@@ -59,7 +62,7 @@ def decide(observation: dict, sequence: int) -> list[dict]:
     if sequence != 0:
         return []  # HOLD
     features = (observation.get("market") or {}).get("features") or {}
-    tradable = [s for s, f in features.items() if float(f.get("price") or 0) > 0]
+    tradable = [s for s, f in features.items() if 0 < float(f.get("price") or 0) <= DOLLARS_PER_NAME]
     orders = []
     for symbol in tradable[:NUM_NAMES]:
         orders.append({

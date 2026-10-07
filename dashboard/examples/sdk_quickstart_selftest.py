@@ -13,7 +13,7 @@ Neither the password nor the API key is ever printed.
 
 Prerequisites:
   - Backend running, e.g.:
-      cd dashboard/backend && python -m uvicorn app:app --host 127.0.0.1 --port 8000
+      uvicorn dashboard.backend.app:app --host 127.0.0.1 --port 8000   # from the repo root
   - The agentictrading package importable (run via the command below).
   - Your account credentials in the environment:
       export ATL_EMAIL="you@example.com"
@@ -39,8 +39,11 @@ import uuid
 
 from agentictrading import AgentRunner, ATLClient
 
+# The us-equity-hourly-v1 environment starts with $1,000 and caps one position at 25% of
+# equity ($250), so five $200 orders fit. A name priced above $200 would round to zero
+# shares and be rejected, so the examples skip those.
 NUM_NAMES = 5
-DOLLARS_PER_NAME = 15_000
+DOLLARS_PER_NAME = 200
 
 
 def login(base_url: str, email: str, password: str) -> tuple[str, dict]:
@@ -92,7 +95,7 @@ class EqualDollarAgent:
             return {"orders": [], "rationale": "Holding."}
         tradable = [
             sym for sym, feat in observation.features.items()
-            if float(feat.get("price") or 0) > 0
+            if 0 < float(feat.get("price") or 0) <= DOLLARS_PER_NAME
         ]
         orders = [
             {
