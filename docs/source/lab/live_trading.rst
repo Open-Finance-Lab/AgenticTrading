@@ -3,8 +3,8 @@ Live Trading with Robinhood
 
 Agents can be connected to a **real Robinhood brokerage account** and asked to
 propose and place orders against it. This is separate from :doc:`backtesting
-<getting_started>` (historical data) and from Alpaca paper trading (simulated
-money): here the account, the positions, and the orders are real.
+<getting_started>`, which runs on historical data: here the account, the
+positions, and the orders are real. Paper trading is coming in the future.
 
 .. warning::
 
@@ -44,8 +44,13 @@ Connect your brokerage account
 3. Robinhood returns you to the dashboard, which finishes the link against the
    account you are signed in as.
 
-The status line then reads **Connected**. Clicking **Connect Robinhood** again
-refreshes the account details rather than starting a second link.
+Signed out, the button reads **Sign in to connect**. Linking works only on a
+desktop computer, on the same address you started from.
+
+The status line then reads **Connected**, the **Connect Robinhood** button is
+replaced by **Disconnect**, and a line shows your buying power, portfolio value
+and the server's execute switch (*ON*, or *OFF (review only)*). To link a
+different Robinhood account, disconnect first.
 
 .. note::
 
@@ -64,8 +69,13 @@ Run an agent live
 
 1. Tick **Enable live trading for this agent**. This is per agent, so connecting
    your brokerage account does not arm every agent you own.
-2. Click **Run Live**. The button stays disabled until a Robinhood account is
-   connected, so it never looks ready before the broker behind it is.
+2. **Save** the agent. Run Live refuses with *Save changes before Run Live*
+   while there are unsaved edits.
+3. Click **Run Live** and confirm the prompt. The button stays disabled until a
+   Robinhood account is connected, so it never looks ready before the broker
+   behind it is. The dashboard sends ``dry_run: false``, so whether orders are
+   actually placed is decided by the server (:ref:`the two gates
+   <live-two-gates>`).
 
 The run then:
 
@@ -76,8 +86,9 @@ The run then:
 - reviews each surviving order with Robinhood, and places it only if the
   deployment allows execution.
 
-The result panel reports what was proposed, what was rejected and why, and what
-was actually submitted.
+The result panel shows one summary line: how many orders were reviewed and how
+many were actually submitted. The full response also lists the proposed and
+rejected orders, with the reason for each rejection.
 
 .. _live-two-gates:
 
@@ -87,12 +98,12 @@ The two gates
 Orders reach the market only when **both** are true:
 
 1. The agent has **live trading enabled** (the per-agent tick box), and
-2. the server has execution turned on (``ROBINHOOD_EXECUTE=true``).
+2. the server has execution turned on (``ROBINHOOD_EXECUTE`` set to ``1``, ``true`` or ``yes``).
 
 The second gate is a deployment setting, not a UI control. With it off — the
 default — the run still fetches your real portfolio, asks the model, and reviews
 each order with Robinhood, but every order is recorded as ``skipped`` instead of
-being submitted. The panel says *Live review completed (execute off)*, and the
+being submitted. The panel says *Dry run … none submitted (ROBINHOOD_EXECUTE is off)*, and the
 response carries ``"execute_enabled": false``. This is the intended way to watch
 what an agent would do with your real account before letting it act.
 
@@ -112,6 +123,12 @@ Every proposed order is clamped or rejected before it reaches the broker, on
   of that symbol — an agent can never open a short.
 - Quantities are rounded **down**, so rounding cannot push an order back over
   the cap. A residual below the minimum order quantity is rejected.
+- **One order per symbol and side per run.** A repeat of the same buy or sell
+  is rejected as ``duplicate_order``.
+
+Orders that pass the gate are then reviewed with Robinhood; one the review
+rejects, returns empty, or fails on is recorded as ``skipped`` rather than
+placed.
 
 One live run at a time is allowed per account; a second request while one is in
 flight returns *A live run is already in progress*. Supply an
@@ -144,8 +161,9 @@ and on mutating requests echo the CSRF cookie's value (``__Host-atl_csrf``, or
    * - ``POST /api/auth/robinhood/complete``
      - Redeem the link code returned by the OAuth callback.
 
-``dry_run: true`` forces a review-only cycle even on a server with execution
-enabled. ``dry_run: false`` defers to ``ROBINHOOD_EXECUTE``.
+``dry_run`` defaults to ``true`` when omitted, which forces a review-only cycle
+even on a server with execution enabled. ``dry_run: false`` (what the
+dashboard sends) defers to ``ROBINHOOD_EXECUTE``.
 
 
 Troubleshooting
@@ -200,11 +218,12 @@ Set these in ``dashboard/.env`` (see ``.env.example``):
    * - ``ROBINHOOD_REDIRECT_URI``
      - OAuth callback. Must match the URL registered with Robinhood.
    * - ``ROBINHOOD_OAUTH_STATE_SECRET``
-     - Signs the OAuth ``state``. Unset generates a random per-process key,
-       which is safe but breaks in-flight links across restarts and across
-       multiple workers. Set it in production.
+     - Signs the OAuth ``state``. If unset, ``DISCORD_CLIENT_SECRET`` is used
+       when present; failing that, a random per-process key is generated, which
+       is safe but breaks in-flight links across restarts and across multiple
+       workers. Set it in production.
    * - ``ROBINHOOD_EXECUTE``
-     - ``false`` by default. Only ``true`` lets orders reach the market.
+     - ``false`` by default. Only ``1``, ``true`` or ``yes`` lets orders reach the market.
    * - ``ROBINHOOD_MAX_ORDER_USD``
      - Per-order notional ceiling, both sides. Defaults to ``25``; an
        unparseable or non-positive value falls back to ``25`` rather than
@@ -216,6 +235,6 @@ Generate an encryption key with:
 
    python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
 
-Linked accounts are stored in the ``CONTENT_DATABASE_URL`` Postgres database
-when one is configured. Leave that unset only for local development — on an
+Linked accounts are stored in the Postgres database named by
+``USERS_DATABASE_URL`` or, if that is unset, ``CONTENT_DATABASE_URL``. Leave both unset only for local development — on an
 ephemeral deployment, links do not survive a redeploy.
