@@ -2274,7 +2274,11 @@ def test_backtest_run_refuses_an_uncompletable_pipeline_window(client):
             "decision_source": "llm",
             "model": "claude-haiku-4-5-20251001",
             "billing_mode": "byok",
-            "pipeline": [{"label": f"Step {i}"} for i in range(4)],
+            # Prompted: a step with no prompt is no instruction, and the route
+            # would replace a pipeline of them with the one-step default.
+            "pipeline": [
+                {"label": f"Step {i}", "prompt": "Decide."} for i in range(4)
+            ],
         },
         headers=_sess(),
     )
@@ -2832,3 +2836,297 @@ def test_timed_out_run_emits_backtest_failed_with_the_timeout_reason(monkeypatch
             "error_category": "run_timeout",
         }
     ]
+
+
+# --- Empty instruction -> the default starter instruction -------------------
+#
+# Configure tells the user "Leave this empty and the agent uses the platform's
+# default trading strategy" and shows DEFAULT_STARTER_INSTRUCTION under "See the
+# default instruction". An empty pipeline used to reach create_prompt() with no
+# custom prompt and run the legacy SAFE_TRADING_PROMPT instead.
+
+_BYOK_LLM_BODY = {
+    "start_date": "2026-05-01",
+    "end_date": "2026-05-02",
+    "decision_source": "llm",
+    "billing_mode": "byok",
+    "provider_id": "openrouter",
+    "model": "openai/gpt-5.5",
+}
+
+
+def _assert_default_starter_pipeline(pipeline):
+    from dashboard.backend.domain.agents.defaults import (
+        DEFAULT_STARTER_INSTRUCTION,
+        SIMPLE_INSTRUCTION_PRESET_KEY,
+    )
+
+    assert isinstance(pipeline, list) and len(pipeline) == 1
+    assert pipeline[0]["prompt"] == DEFAULT_STARTER_INSTRUCTION
+    assert pipeline[0]["presetKey"] == SIMPLE_INSTRUCTION_PRESET_KEY
+
+
+def _patch_agent(monkeypatch, pipeline):
+    agent = {
+        "agent_id": "agent-empty-instruction",
+        "agent_type": "builtin",
+        "runtime_type": "pipeline",
+        "model_name": "openai/gpt-5.5",
+        "pipeline": pipeline,
+    }
+    monkeypatch.setattr(bt.agent_service, "get_agent", lambda _agent_id: dict(agent))
+    return agent["agent_id"]
+
+
+def test_llm_run_with_no_instruction_runs_the_default_starter_instruction(monkeypatch):
+    _enable_authenticated_openrouter_byok(monkeypatch)
+    spy = _Spy()
+    monkeypatch.setattr(bt, "run_backtest_background", spy)
+
+    resp = TestClient(app).post("/backtest/run", json=_BYOK_LLM_BODY, headers=_sess())
+
+    assert resp.status_code == 200, resp.text
+    assert spy.calls == 1
+    _assert_default_starter_pipeline(spy.last_kwargs["pipeline"])
+    assert not spy.last_kwargs["strategy_prompt"]
+    # The browser states the default only on the server's word.
+    assert resp.json()["default_instruction"] is True
+
+
+@pytest.mark.parametrize("stored", [[], None])
+def test_agent_with_a_cleared_instruction_runs_the_default_starter_instruction(
+    monkeypatch, stored
+):
+    """Saving an empty instruction in Configure stores `pipeline: []`."""
+    _enable_authenticated_openrouter_byok(monkeypatch)
+    spy = _Spy()
+    monkeypatch.setattr(bt, "run_backtest_background", spy)
+    monkeypatch.setattr(bt, "_resolve_backtest_session", lambda *_a, **_k: "agent-sess")
+    agent_id = _patch_agent(monkeypatch, stored)
+
+    resp = TestClient(app).post(
+        "/backtest/run",
+        json={**_BYOK_LLM_BODY, "agent_id": agent_id},
+        headers=_sess(),
+    )
+
+    assert resp.status_code == 200, resp.text
+    _assert_default_starter_pipeline(spy.last_kwargs["pipeline"])
+
+
+def test_agent_instruction_is_not_replaced_by_the_default(monkeypatch):
+    _enable_authenticated_openrouter_byok(monkeypatch)
+    spy = _Spy()
+    monkeypatch.setattr(bt, "run_backtest_background", spy)
+    monkeypatch.setattr(bt, "_resolve_backtest_session", lambda *_a, **_k: "agent-sess")
+    own = [{"id": "s1", "presetKey": "simple_instruction", "prompt": "Only buy AAPL."}]
+    agent_id = _patch_agent(monkeypatch, own)
+
+    resp = TestClient(app).post(
+        "/backtest/run",
+        json={**_BYOK_LLM_BODY, "agent_id": agent_id},
+        headers=_sess(),
+    )
+
+    assert resp.status_code == 200, resp.text
+    assert spy.last_kwargs["pipeline"] == own
+    assert resp.json()["default_instruction"] is False
+
+
+def test_free_form_strategy_prompt_is_not_replaced_by_the_default(monkeypatch):
+    """A caller-supplied strategy_prompt is an instruction; it keeps its own path."""
+    _enable_authenticated_openrouter_byok(monkeypatch)
+    spy = _Spy()
+    monkeypatch.setattr(bt, "run_backtest_background", spy)
+
+    resp = TestClient(app).post(
+        "/backtest/run",
+        json={**_BYOK_LLM_BODY, "strategy_prompt": "Buy the dip."},
+        headers=_sess(),
+    )
+
+    assert resp.status_code == 200, resp.text
+    assert spy.last_kwargs["pipeline"] is None
+    assert spy.last_kwargs["strategy_prompt"] == "Buy the dip."
+    assert "default_instruction" not in resp.json()
+
+
+def test_explicit_empty_pipeline_is_still_refused(monkeypatch):
+    _enable_authenticated_openrouter_byok(monkeypatch)
+    spy = _Spy()
+    monkeypatch.setattr(bt, "run_backtest_background", spy)
+
+    resp = TestClient(app).post(
+        "/backtest/run", json={**_BYOK_LLM_BODY, "pipeline": []}, headers=_sess()
+    )
+
+    assert resp.status_code == 422
+    assert spy.calls == 0
+
+
+def test_rule_based_run_gets_no_default_pipeline(monkeypatch):
+    spy = _Spy()
+    monkeypatch.setattr(bt, "run_backtest_background", spy)
+
+    resp = TestClient(app).post(
+        "/backtest/run",
+        json={"start_date": "2026-05-01", "end_date": "2026-05-02",
+              "decision_source": "rule_based"},
+        headers=_sess(),
+    )
+
+    assert resp.status_code == 200, resp.text
+    assert spy.last_kwargs["pipeline"] is None
+
+
+_BLANK_STEP = {"id": "s1", "presetKey": "simple_instruction", "prompt": "   "}
+_POST_TRADE_STEP = {
+    "id": "pt1",
+    "presetKey": "post_trade_analysis",
+    "prompt": "Review the day.",
+}
+
+
+@pytest.mark.parametrize("where", ["body", "stored"])
+def test_pipeline_with_only_blank_prompts_runs_the_default_instruction(
+    monkeypatch, where
+):
+    """Both the agent PATCH and the backtest body accept a step with a blank
+    prompt; without this the model was sent a step with no task at all. The
+    post-trade step is kept -- only the empty decision side is replaced."""
+    _enable_authenticated_openrouter_byok(monkeypatch)
+    spy = _Spy()
+    monkeypatch.setattr(bt, "run_backtest_background", spy)
+    monkeypatch.setattr(bt, "_resolve_backtest_session", lambda *_a, **_k: "agent-sess")
+    blank = [dict(_BLANK_STEP), dict(_POST_TRADE_STEP)]
+    agent_id = _patch_agent(monkeypatch, blank if where == "stored" else None)
+    body = {**_BYOK_LLM_BODY, "agent_id": agent_id}
+    if where == "body":
+        body["pipeline"] = blank
+
+    resp = TestClient(app).post("/backtest/run", json=body, headers=_sess())
+
+    assert resp.status_code == 200, resp.text
+    pipeline = spy.last_kwargs["pipeline"]
+    _assert_default_starter_pipeline(pipeline[:1])
+    assert pipeline[1:] == [_POST_TRADE_STEP]
+    assert resp.json()["default_instruction"] is True
+
+
+def test_run_metadata_flags_a_recorded_default_instruction_without_the_text():
+    """/runs is public, so the list model carries a boolean, never a user's own
+    instruction; the default is published copy the browser already holds."""
+    from dashboard.backend.domain.agents.defaults import default_starter_pipeline
+
+    base = {
+        "run_id": "r1",
+        "agent_name": "Agent",
+        "mode": "backtest",
+        "start_date": "2026-05-01",
+        "end_date": "2026-05-02",
+        "initial_equity": 10000.0,
+        "created_at": "2026-05-02 00:00:00",
+    }
+    default_run = bt._run_metadata_response(
+        {**base, "metadata": {"initial_pipeline": default_starter_pipeline()}}
+    )
+    own_run = bt._run_metadata_response(
+        {**base, "metadata": {"initial_pipeline": [{"prompt": "Only buy AAPL."}]}}
+    )
+    legacy_run = bt._run_metadata_response({**base, "metadata": {}})
+
+    assert default_run.default_instruction is True
+    assert own_run.default_instruction is False
+    assert legacy_run.default_instruction is None
+    assert "Only buy AAPL." not in own_run.model_dump_json()
+
+
+def test_strategy_prompt_runs_in_place_of_a_blank_stored_pipeline(monkeypatch):
+    """`[blank]` is as empty as no pipeline, so the caller's strategy_prompt
+    must win on both shapes -- it used to be dropped for the blank one, and
+    the run executed the default under default_instruction=true."""
+    _enable_authenticated_openrouter_byok(monkeypatch)
+    spy = _Spy()
+    monkeypatch.setattr(bt, "run_backtest_background", spy)
+    monkeypatch.setattr(bt, "_resolve_backtest_session", lambda *_a, **_k: "agent-sess")
+    agent_id = _patch_agent(monkeypatch, [dict(_BLANK_STEP)])
+
+    resp = TestClient(app).post(
+        "/backtest/run",
+        json={**_BYOK_LLM_BODY, "agent_id": agent_id, "strategy_prompt": "Buy the dip."},
+        headers=_sess(),
+    )
+
+    assert resp.status_code == 200, resp.text
+    assert spy.last_kwargs["pipeline"] is None
+    assert spy.last_kwargs["strategy_prompt"] == "Buy the dip."
+    assert "default_instruction" not in resp.json()
+
+
+@pytest.mark.parametrize(
+    "pipeline",
+    [
+        [{"prompt": ""} for _ in range(bt.MAX_PIPELINE_STEPS + 1)],
+        [{"prompt": "", "label": "x" * (bt.MAX_PIPELINE_JSON_CHARS + 1)}],
+    ],
+    ids=["too-many-steps", "too-large"],
+)
+def test_malformed_blank_pipeline_is_refused_not_replaced(monkeypatch, pipeline):
+    """Validated before effective_pipeline: a substitute would pass every
+    check and start a billable run for input the route calls malformed."""
+    _enable_authenticated_openrouter_byok(monkeypatch)
+    spy = _Spy()
+    monkeypatch.setattr(bt, "run_backtest_background", spy)
+
+    resp = TestClient(app).post(
+        "/backtest/run", json={**_BYOK_LLM_BODY, "pipeline": pipeline}, headers=_sess()
+    )
+
+    assert resp.status_code == 422, resp.text
+    assert spy.calls == 0
+
+
+def test_partly_blank_decision_pipeline_is_refused(monkeypatch):
+    """A blank step beside a prompted one would bill a call with no task --
+    and here it is the last step, whose orders execute."""
+    _enable_authenticated_openrouter_byok(monkeypatch)
+    spy = _Spy()
+    monkeypatch.setattr(bt, "run_backtest_background", spy)
+    pipeline = [{"prompt": "Pick candidates"}, dict(_POST_TRADE_STEP), {"prompt": " "}]
+
+    resp = TestClient(app).post(
+        "/backtest/run", json={**_BYOK_LLM_BODY, "pipeline": pipeline}, headers=_sess()
+    )
+
+    assert resp.status_code == 422, resp.text
+    assert "step(s) 3 have no prompt" in resp.json()["detail"]
+    assert spy.calls == 0
+
+
+def test_write_back_baseline_is_the_stored_pipeline_not_its_substitute(monkeypatch):
+    """The worker compares the agent row with what the run started from. The
+    substitute's default step is minted fresh, so comparing against it skipped
+    every adaptation of a blank agent as an edit nobody made."""
+    _enable_authenticated_openrouter_byok(monkeypatch)
+    spy = _Spy()
+    monkeypatch.setattr(bt, "run_backtest_background", spy)
+    monkeypatch.setattr(bt, "_resolve_backtest_session", lambda *_a, **_k: "agent-sess")
+    stored = [dict(_BLANK_STEP), dict(_POST_TRADE_STEP)]
+    agent_id = _patch_agent(monkeypatch, stored)
+
+    resp = TestClient(app).post(
+        "/backtest/run", json={**_BYOK_LLM_BODY, "agent_id": agent_id}, headers=_sess()
+    )
+
+    assert resp.status_code == 200, resp.text
+    kwargs = spy.last_kwargs
+    assert kwargs["pipeline"] != stored
+    assert kwargs["writeback_baseline"] == stored
+    assert (
+        bt._writeback_start_pipeline(
+            kwargs["pipeline"], kwargs["writeback_baseline"], agent_id
+        )
+        == bt._agent_pipeline_snapshot(agent_id)
+    )
+    # Without a route-supplied baseline the passed pipeline is the baseline.
+    assert bt._writeback_start_pipeline(stored, None, None) == stored

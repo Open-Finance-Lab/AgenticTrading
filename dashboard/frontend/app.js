@@ -278,10 +278,19 @@ const SIMPLE_INSTRUCTION_OUTPUT_FORMAT =
 // same preset key + output format at call time instead of keeping its own copy.
 window.SIMPLE_INSTRUCTION_PRESET_KEY = SIMPLE_INSTRUCTION_PRESET_KEY;
 window.SIMPLE_INSTRUCTION_OUTPUT_FORMAT = SIMPLE_INSTRUCTION_OUTPUT_FORMAT;
+// Mirror SIMPLE_INSTRUCTION_LABEL and POST_TRADE_PRESET_KEY in
+// domain/agents/defaults.py (pinned by tests/test_agent_starter_defaults.py).
+// Up here rather than beside their readers: the Run Backtest modal's syncs read
+// them, and a const declared further down is in its temporal dead zone until
+// the file has evaluated that far.
+const SIMPLE_INSTRUCTION_LABEL = 'Trading instruction';
+const POST_TRADE_PRESET_KEY = 'post_trade_analysis';
 // Mirrors DEFAULT_STARTER_INSTRUCTION in dashboard/backend/domain/agents/defaults.py,
-// which is what actually seeds new agents. The copy here populates the
-// "See the default instruction" disclosure in Configure's empty-instruction
-// state, so the editor can show what an agent falls back to without a pipeline.
+// which seeds new agents and is also what an LLM backtest with an empty
+// instruction runs (domain/agents/defaults.py::effective_pipeline). The copy
+// here populates the "See the default instruction" disclosure in Configure's
+// empty-instruction state, the Run Backtest preview, and the results panel's
+// Instruction row once the server confirms the run used it.
 // tests/test_agent_starter_defaults.py pins the two copies together.
 const DEFAULT_STARTER_INSTRUCTION =
   'Manage this account like a disciplined portfolio manager. The goal is to keep pace with, and ideally beat, simply buying equal amounts of every listed stock and holding them.\n\n1. Stay invested. At the start (all cash), buy roughly equal dollar amounts of as many listed stocks as the cash allows, keeping about 3% in cash. Skip a stock if one share costs more than a third of the account.\n2. Holding is the default. Most hours the right move is to change nothing. Never trade on small moves.\n3. Sell a stock only when its trend has clearly broken: price at least 2% below its 20-hour average (sma20) AND momentum (macd) below its signal line (macd_signal). A sell always closes the whole position.\n4. Reinvest cash quickly. When cash is above 10% of the account, buy the stock you own the least of among those with price above sma20, macd above macd_signal and RSI below 75. If none qualifies, buy the stock you own the least of anyway.\n5. Keep any one stock under 35% of the account, and do not add to a stock that is already above 25%.\n6. Do not buy back a stock you sold in the last day, or sell one you bought in the last day (check recent_trades).\n7. An indicator showing 0 does not have enough history yet: ignore it.\n\nOrders: list each stock at most once, use whole-share quantities, and keep the total cost of all buys within available cash. If you make no trades, return one "hold" order for any listed stock. Keep each reason under 15 words.';
@@ -2573,6 +2582,7 @@ function syncBacktestModelFieldMode() {
       : 'Rule-based — simulated practice data, no AI involved';
   }
   if (billingGroup) billingGroup.hidden = isHostedRuntime || isRuleBased;
+  syncRunBacktestInstructionPreview();
   syncRunBacktestSubmitAvailability();
 }
 
@@ -7394,6 +7404,9 @@ function syncIFindModelControl({ resetDecisionSource = false } = {}) {
             ? "Uses this agent's AI model by default. Choose Rule-based for repeatable decisions without AI."
             : 'This universe supports rule-based decisions only.';
     }
+    // A universe change can force Rule-based without touching the model
+    // select's change event, so the preview has to follow it from here too.
+    syncRunBacktestInstructionPreview();
 }
 
 function renderIFindAshareUniverse({ resetDecisionSource = false } = {}) {
@@ -10071,6 +10084,97 @@ function formatPromptFromPipeline(pipeline) {
         .join('\n');
 }
 
+// Mirrors domain/agents/defaults.py::has_trading_instruction: a pipeline whose
+// decision steps all have blank prompts is "empty", and the server runs the
+// default instruction for it exactly as it does for no pipeline at all.
+function pipelineHasTradingInstruction(pipeline) {
+    if (!Array.isArray(pipeline)) return false;
+    return pipeline.some((step) => step
+        && typeof step === 'object'
+        && step.presetKey !== POST_TRADE_PRESET_KEY
+        && String(step.prompt || '').trim());
+}
+
+// Mirrors domain/agents/defaults.py::effective_pipeline for a request with no
+// strategy_prompt (the dashboard never sends one): an empty decision side is
+// replaced by the default instruction step, and post-trade steps are kept.
+// (An explicit [] differs -- the route refuses it -- but this page never sends
+// one: loadAgentPipelineForBacktest answers null for an empty pipeline.)
+// tests/test_backtest_default_instruction_frontend.py runs both on the same
+// inputs, so the preview cannot drift from what the route executes.
+function effectiveBacktestPipeline(pipeline) {
+    if (Array.isArray(pipeline) && pipeline.length && pipelineHasTradingInstruction(pipeline)) {
+        return pipeline;
+    }
+    const postTrade = Array.isArray(pipeline)
+        ? pipeline.filter((step) => step
+            && typeof step === 'object'
+            && step.presetKey === POST_TRADE_PRESET_KEY)
+        : [];
+    return [
+        {
+            id: `sub_starter_${Math.random().toString(16).slice(2, 10)}`,
+            presetKey: SIMPLE_INSTRUCTION_PRESET_KEY,
+            label: SIMPLE_INSTRUCTION_LABEL,
+            prompt: DEFAULT_STARTER_INSTRUCTION,
+            outputFormat: SIMPLE_INSTRUCTION_OUTPUT_FORMAT,
+        },
+        ...postTrade,
+    ];
+}
+
+// The pipeline an LLM launch sends. Always one, so the run executes what the
+// modal previewed: with no body pipeline the server reads the stored agent
+// row, which this tab's cached copy may not match, and a preview of the
+// default would then describe a run that executes something else. A cached
+// pipeline goes as-is (the server applies effective_pipeline to it, as the
+// preview does), so a blank-plus-post-trade agent still matches its stored row
+// and keeps its adapted-pipeline write-back.
+function backtestRequestPipeline(agent) {
+    return loadAgentPipelineForBacktest(agent) || effectiveBacktestPipeline(null);
+}
+
+// The decision source a launch from the modal's current state sends. Shared
+// by runBacktest and the instruction preview, so the preview can never
+// describe a run the submit will not make.
+function runBacktestModalDecisionSource() {
+    const dataSource = document.getElementById('marketDataSourceSelect')?.value || 'alpaca';
+    if (dataSource === 'vnpy_simulation') return RULE_BASED_DECISION_SOURCE;
+    if (dataSource !== IFIND_ASHARE_SOURCE) return LLM_DECISION_SOURCE;
+    const profile = getIFindUniverseProfile(getSelectedIFindUniverse());
+    const allowsLLM = profile?.allowedDecisionSources.includes(LLM_DECISION_SOURCE) === true;
+    const selectedModel = document.getElementById('modelSelect')?.value || '';
+    return allowsLLM && selectedModel !== RULE_BASED_DECISION_SOURCE
+        ? LLM_DECISION_SOURCE
+        : RULE_BASED_DECISION_SOURCE;
+}
+
+// The instruction the open modal's run would execute, or null when it runs
+// none: a rule-based run drops the pipeline server-side and a hosted runtime
+// never had one. Re-run on every control that can change the decision source,
+// not just on open -- a preview computed once outlived a switch to Rule-based.
+function syncRunBacktestInstructionPreview() {
+    const group = document.getElementById('runBacktestPromptGroup');
+    const preview = document.getElementById('runBacktestPromptPreview');
+    const defaultNote = document.getElementById('runBacktestPromptDefaultNote');
+    const agent = runBacktestModalAgent;
+    let prompt = null;
+    let usesDefault = false;
+    if (
+        agent
+        && (agent.runtime_type || 'pipeline') === 'pipeline'
+        && runBacktestModalDecisionSource() === LLM_DECISION_SOURCE
+    ) {
+        usesDefault = !pipelineHasTradingInstruction(loadAgentPipelineForBacktest(agent));
+        prompt = formatPromptFromPipeline(
+            effectiveBacktestPipeline(backtestRequestPipeline(agent))
+        );
+    }
+    if (preview) preview.textContent = prompt || '';
+    if (group) group.hidden = !prompt;
+    if (defaultNote) defaultNote.hidden = !(prompt && usesDefault);
+}
+
 function describeUniverseFromAssets(assets) {
     if (!Array.isArray(assets) || !assets.length) return null;
     const sorted = [...assets].map(String).sort().join(',');
@@ -10393,7 +10497,13 @@ function renderBacktestRunConfig(
         : (cfg?.startedAt
             ? new Date(cfg.startedAt).toLocaleString()
             : (running ? 'Just now' : '—'));
-    const prompt = cfg?.prompt || null;
+    // The run's own record wins over nothing: a run reopened from history has
+    // no launch config, and the server flags a recorded default instruction
+    // (never a user's own text -- /runs is public).
+    const prompt = cfg?.prompt
+        || ((run?.default_instruction ?? metadata.default_instruction) === true
+            ? DEFAULT_STARTER_INSTRUCTION
+            : null);
 
     setBacktestConfigText('backtestConfigAgent', agentName);
     setBacktestConfigText('backtestConfigModel', model || '—');
@@ -10666,16 +10776,7 @@ async function openRunBacktestModal(agent) {
     if (builtinTabBtn) handleUniverseTabSwitch(builtinTabBtn);
     syncMarketDataSourceUI({ resetIFindDecisionSource: true });
 
-    const pipeline = loadAgentPipelineForBacktest(agent);
-    const prompt = formatPromptFromPipeline(pipeline);
-    const promptGroup = document.getElementById('runBacktestPromptGroup');
-    const promptPreview = document.getElementById('runBacktestPromptPreview');
-    if (prompt) {
-        if (promptGroup) promptGroup.hidden = false;
-        if (promptPreview) promptPreview.textContent = prompt;
-    } else if (promptGroup) {
-        promptGroup.hidden = true;
-    }
+    syncRunBacktestInstructionPreview();
 
     const err = document.getElementById('runBacktestModalError');
     if (err) {
@@ -10787,16 +10888,7 @@ async function runBacktest() {
     const selectedIFindProfile = isIFind
         ? getIFindUniverseProfile(selectedIFindUniverse)
         : null;
-    const selectedModel = modelSelect?.value || '';
-    const ifindAllowsLLM = selectedIFindProfile
-        ?.allowedDecisionSources.includes(LLM_DECISION_SOURCE) === true;
-    const decisionSource = isSimulation
-        ? RULE_BASED_DECISION_SOURCE
-        : (isIFind
-            ? (ifindAllowsLLM && selectedModel !== RULE_BASED_DECISION_SOURCE
-                ? LLM_DECISION_SOURCE
-                : RULE_BASED_DECISION_SOURCE)
-            : LLM_DECISION_SOURCE);
+    const decisionSource = runBacktestModalDecisionSource();
     const isRuleBasedDecision = decisionSource === RULE_BASED_DECISION_SOURCE;
     const activeAgent = runBacktestModalAgent || getSelectedBacktestAgent();
     if (!activeAgent) {
@@ -10808,7 +10900,7 @@ async function runBacktest() {
     const isHostedRuntime = (activeAgent.runtime_type || 'pipeline') !== 'pipeline';
     const pipeline = isRuleBasedDecision
         ? null
-        : (isHostedRuntime ? null : loadAgentPipelineForBacktest(activeAgent));
+        : (isHostedRuntime ? null : backtestRequestPipeline(activeAgent));
     const model = isRuleBasedDecision
         ? null
         : (isHostedRuntime ? null : resolveBacktestModelRequest(modelSelect, activeAgent));
@@ -10850,7 +10942,12 @@ async function runBacktest() {
 
     const initialCapital = resolveBacktestCapital(activeAgent);
 
-    const promptSummary = formatPromptFromPipeline(pipeline);
+    // What the server runs for the body sent: an LLM launch always carries a
+    // pipeline (backtestRequestPipeline), and the route resolves an empty one
+    // exactly as effectiveBacktestPipeline does -- post-trade steps included.
+    const promptSummary = pipeline
+        ? formatPromptFromPipeline(effectiveBacktestPipeline(pipeline))
+        : null;
     const universeLabel = isIFind
         ? selectedIFindProfile.name
         : (document.getElementById('builtinTab')?.classList.contains('active')

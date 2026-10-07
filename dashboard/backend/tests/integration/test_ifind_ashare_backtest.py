@@ -18,12 +18,14 @@ from dashboard.backend.app import app
 from dashboard.backend.tests._fake_child import FakeChild
 from dashboard.backend.api.routers import backtests as backtests_router
 from dashboard.backend.database import BacktestDatabase
+from dashboard.backend.domain.agents.defaults import DEFAULT_STARTER_INSTRUCTION
 from dashboard.backend.domain.backtesting import engine as engine_module
 from dashboard.backend.domain.backtesting import portfolio_manager as portfolio_module
 from dashboard.backend.domain.model_providers.execution_catalog import (
     ExecutionModelRoute,
 )
 from dashboard.backend import equity_plot
+from dashboard.backend.infrastructure.llm.pipeline_runner import PIPELINE_SYSTEM_PROMPT
 from dashboard.backend.infrastructure.market_data import provider as provider_module
 from dashboard.backend.infrastructure.market_data.ifind_adapter import response_to_frames
 from dashboard.backend.infrastructure.market_data.ifind_ashare import IFindAshareProvider
@@ -514,15 +516,22 @@ def test_ifind_llm_request_reaches_engine_database_and_chart_without_fallback(
         request.model_id == "openai/gpt-5.5"
         for request in fake_execution.requests
     )
+    # The request carries no instruction, so the route substitutes the default
+    # starter pipeline: the same pipeline_runner path every starter agent runs,
+    # whose system prompt is market-neutral. The A-share facts therefore have to
+    # arrive through the snapshot's `market` block -- assert they do.
     assert all(
-        "Chinese A-share" in request.system_message
-        for request in fake_execution.requests
-    )
-    assert all(
-        "DJIA" not in request.system_message
+        request.system_message == PIPELINE_SYSTEM_PROMPT
         for request in fake_execution.requests
     )
     first_prompt = fake_execution.requests[0].messages[0].content
+    assert DEFAULT_STARTER_INSTRUCTION in first_prompt
+    assert '"native_currency":"CNY"' in first_prompt
+    assert '"timezone":"Asia/Shanghai"' in first_prompt
+    assert "DJIA" not in first_prompt
+    # The default instruction says "whole-share quantities"; the board lot has
+    # to reach the execution rules, or every off-lot order is rejected in full.
+    assert "positive whole multiples of 100 shares" in first_prompt
     assert all(symbol in first_prompt for symbol in symbols)
 
     runs = test_db.get_runs_by_session(session_id)
