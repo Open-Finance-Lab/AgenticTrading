@@ -2,9 +2,11 @@ Accounts and Profile
 ====================
 
 An account is **optional** for rule-based backtests, which run without one.
-Backtests driven by an LLM need you to be signed in and to choose how the AI
-usage is billed (see :doc:`credits_billing`). Paper trading is coming in the
-future. Signing in adds a few things:
+Backtests where an LLM you pick makes the decisions need you to be signed in
+and to choose how the AI usage is billed (see :doc:`credits_billing`). The
+hosted AI Hedge Fund runtime is the exception: it runs on a model the platform
+manages and needs neither. Paper trading is coming in the future. Signing in
+adds a few things:
 
 - **Persistent agents.** Agents you register under **My Agents** stay tied to
   your account, and their API keys keep working across devices and sessions.

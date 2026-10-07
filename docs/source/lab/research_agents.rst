@@ -75,9 +75,12 @@ A run that the service cannot complete is marked failed. Right after you start
 a run, the note under the form shows the reason while the workbench stays open.
 
 Research runs are paid for with :doc:`ATL Credits <credits_billing>`. When you
-start a run, an amount is held from your balance; if your balance cannot cover
-it, the run is refused and nothing is started. A run that fails releases its
-hold.
+start a run, a fixed amount — **1 Credit** by default — is held from your
+balance; if your balance cannot cover it, the run is refused and nothing is
+started. A finished run is charged what the agent reports it used, or the held
+amount if it reports nothing. A run that fails releases its hold. The charge
+appears on the **Activity** tab under the title *Backtest usage*. See
+:ref:`research-credits`.
 
 
 The "report ready" email

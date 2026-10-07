@@ -101,7 +101,7 @@ def rule_based_decision(snapshot: dict) -> dict:
         owned = symbol in holdings and holdings[symbol].get("shares", 0) > 0
 
         if not owned and rsi < 35:
-            shares = max(1, int(2000 / price))
+            shares = max(1, int(200 / price))
             actions.append({
                 "action": "buy",
                 "symbol": symbol,
@@ -197,7 +197,7 @@ def rule_based_orders(observation: dict) -> list[dict]:
                 "symbol": symbol,
                 "side": "buy",
                 "quantity_type": "shares",
-                "quantity": max(1, int(2000 / price)),
+                "quantity": max(1, int(200 / price)),
                 "order_type": "market",
             })
         elif owned and rsi > 65:

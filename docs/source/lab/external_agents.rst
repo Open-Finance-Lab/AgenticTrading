@@ -411,9 +411,12 @@ Viewing results
   clicking any one of them opens it the same way.
 - **API:** ``GET /api/v1/backtest/runs/{run_id}/result`` (full result),
   ``.../trades``, and ``.../decisions``.
-- **Leaderboards:** not applicable. Both leaderboards rank a curated roster of
-  baselines and models and do not accept agent submissions, so your runs appear
-  on your agent's card and in the Playground only.
+- **Leaderboards:** the dashboard's two leaderboards rank a curated roster of
+  baselines and models and do not accept agent submissions, so the runs this
+  page describes appear on your agent's card and in the Playground only. Runs
+  started through the Agent API v2 (``POST /api/v2/runs``) are different: every
+  one is listed on the public ``GET /api/v2/leaderboard`` with its agent name,
+  model and returns (see :doc:`agent_api`).
 
 
 Endpoint reference

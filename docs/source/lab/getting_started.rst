@@ -19,8 +19,9 @@ signed in and to choose how the model calls are paid for, in the same dialog:
 **Provider** where offered, and choose the **Model for this run**; if no key is
 saved and Credits are unavailable, **Go to API Keys** takes you to where keys
 are stored. See :doc:`credits_billing` for how each option is charged. Runs where
-no AI model is involved (rule-based decisions) work without signing in, and the
-hosted AI Hedge Fund runtime does not show this billing choice.
+no AI model is involved (rule-based decisions) work without signing in. So does
+the hosted AI Hedge Fund runtime: its model is managed by the platform, so it
+shows no billing choice and spends no Credits.
 
 A run does not start pricing hours the moment you click. The card names the
 stage it is in while it gets there — ``Loading market data``, then
@@ -41,9 +42,13 @@ model decide, the run's configuration shows an "N of M steps model-driven" row.
 The backtest runs with the starting capital saved on the agent; change it from
 the agent's **Configure** screen rather than at run time. If you
 have edited the agent, save first — **Run Backtest** refuses to start on unsaved
-changes so a run never uses an instruction you can no longer see. Clearing the
-**Trading instruction** box on an agent that uses a custom multi-step pipeline
-asks for confirmation first, because saving replaces that pipeline.
+changes so a run never uses an instruction you can no longer see.
+
+Leaving **Trading instruction** empty in **Configure** is a supported state, not
+an error: the agent then trades on the default instruction. Expand **See the
+default instruction** in the editor to read exactly what that is. Clearing the
+box on an agent that uses a custom multi-step pipeline asks for confirmation
+first, because saving replaces that pipeline.
 
 .. _my-agents-sections:
 
@@ -64,8 +69,8 @@ without opening it:
 
 **Research Agents**
    Deep Research agents that produce analyst reports rather than trades. Add
-   them from **Community**, fill in a mandate, and download the report. See
-   :doc:`research_agents`.
+   them from **Community**, fill in a mandate, and download the report. Shown
+   only when you are signed in. See :doc:`research_agents`.
 
 **Crypto** and **Futures**
    Shown as *Not yet available*. Nothing in them can be run.
@@ -82,9 +87,11 @@ change how it trades, what it can buy, or any of its settings. Connected agents
 have no **Market** picker; neither do the sample agents shown before you create
 one of your own.
 
-Shelves are always shown, empty or not. An empty **LLMs**, **Open Agents** or
-**Research Agents** shelf links straight to the matching shelf in **Community**,
-which is where ready-made agents come from.
+Shelves are shown even when empty (except **Research Agents**, which is hidden
+while you are signed out). An empty **LLMs**, **Open Agents** or **Research
+Agents** shelf has a **Community** button that opens the full catalog, which is
+where ready-made agents come from. On **LLMs** with a market chip selected, it
+opens Community filtered to that market instead.
 
 .. _allocated-capital:
 
@@ -124,10 +131,11 @@ Accounts (optional)
 -------------------
 
 You can try rule-based backtests without signing in. Creating an account
-persists the agents you register, is required for any backtest where an AI model
-makes the decisions (together with an AI billing choice, above), and lets you
-link Discord. Neither leaderboard takes user submissions, so your own agents'
-backtests never appear on one. See :doc:`accounts` to sign up and manage your
+persists the agents you register, is required for any backtest driven by an AI
+model you pick (together with an AI billing choice, above — the hosted AI Hedge
+Fund runtime is the exception), and lets you link Discord. Neither dashboard
+leaderboard takes user submissions, so your dashboard backtests never appear on
+one. See :doc:`accounts` to sign up and manage your
 profile, and :doc:`credits_billing` for the AI billing options.
 
 CLI backtest (optional)

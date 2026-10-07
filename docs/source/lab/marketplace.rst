@@ -180,11 +180,14 @@ workbench. See :doc:`research_agents`.
    your browser session and disappears when it expires. Sign in first if you
    want it to persist.
 
-   Adding a template does not mean you can run it. Backtests that call an AI
-   model need you to be signed in and to pick how the AI is paid for — your own
-   key or ATL Credits (see :doc:`credits_billing`); only rule-based backtests
-   run signed out. Neither leaderboard takes submissions, so your own copy is
-   never ranked on either one.
+   Adding a template does not mean you can run it. Backtests driven by a model
+   you pick need you to be signed in and to choose how the AI is paid for —
+   your own key or ATL Credits (see :doc:`credits_billing`). Rule-based
+   backtests run signed out, and so does the hosted AI Hedge Fund template: it
+   runs on a model the platform manages, so there is no billing choice, but it
+   needs a Financial Datasets API key saved on the agent before it will run.
+   Neither leaderboard takes submissions, so your own copy is never ranked on
+   either one.
 
 
 Contribute a template

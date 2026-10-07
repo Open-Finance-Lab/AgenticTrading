@@ -2,7 +2,7 @@ Operating Modes
 ===============
 
 **Backtesting**
-   Evaluate agents on historical market data and compare results to market baselines (buy-and-hold and, for US runs, the Dow index). Rule-based runs work signed out; LLM-driven runs need you to sign in and choose how the AI calls are paid for (your own API key, or ATL Credits) — see :doc:`credits_billing`.
+   Evaluate agents on historical market data and compare results to market baselines (buy-and-hold and, for US runs, the Dow index). Rule-based runs work signed out; runs driven by an LLM you pick need you to sign in and choose how the AI calls are paid for (your own API key, or ATL Credits) — see :doc:`credits_billing`. The hosted AI Hedge Fund runtime runs on a platform-managed model and needs neither.
 
 **Paper trading**
    Not available yet. Paper trading is coming in the future.

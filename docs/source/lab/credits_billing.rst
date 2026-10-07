@@ -3,10 +3,15 @@
 Credits & Billing
 =================
 
-A backtest driven by a language model makes one model call per decision, and
-those calls cost money. Before an LLM backtest can start you sign in and choose
-who pays for them: **your own API key**, or **ATL Credits**. Rule-based
-backtests make no model calls, need no account and cost nothing.
+A backtest driven by a language model calls the model at every decision — once
+per step of the agent's pipeline, so a three-step agent makes three calls per
+decision, plus any post-trade review — and those calls cost money. Before such a
+backtest can start you sign in and choose who pays for them: **your own API
+key**, or **ATL Credits**. Rule-based backtests make no model calls, need no
+account and cost nothing. The hosted AI Hedge Fund runtime runs on a model the
+platform manages: it needs no sign-in, shows no billing choice and spends no
+Credits. :doc:`Research Agents <research_agents>` runs are paid for with ATL
+Credits too (see :ref:`research-credits`).
 
 Open the page from the account menu: click your avatar, then **Credits &
 Billing**. It has three tabs: **API Keys**, **Credits** and **Activity**.
@@ -76,7 +81,7 @@ The conversion is fixed: **$1 = 1 Credit**. Balances are shown to six decimal
 places, for example ``1.500000 Credits``, because a single model call costs a
 small fraction of a Credit.
 
-Billing is by use, not by run. For every model call:
+Backtests are billed by use, not by run. For every model call:
 
 1. Before the call, ATL puts a hold on your balance for the most that call
    could cost. The hold is not a charge.
@@ -91,6 +96,18 @@ more calls, and more assets make each call larger, so both cost more, and a shor
 run ends early for any reason, holds that were never settled are released too.
 
 Welcome Credits are spent before purchased Credits.
+
+.. _research-credits:
+
+Research runs
+~~~~~~~~~~~~~
+
+A :doc:`Research Agents <research_agents>` run is billed per run instead. When
+you start it, ATL holds a fixed amount — **1 Credit** by default, though a
+deployment can set a different amount. When the report is ready the run is
+charged what the agent reports it used, or the held amount if it reports
+nothing; a run that fails releases its hold and costs nothing. While the run
+is in progress its hold is not available to spend on backtests.
 
 
 Welcome Credits
@@ -148,7 +165,8 @@ recent entries). Each entry has a title, a timestamp and an amount:
 - **Credit purchase** — a Test Mode purchase (``+``).
 - **Backtest usage** — what a run's model calls cost. It names the provider and
   model (or *Multiple providers* / *Multiple models*), how many model calls the
-  run made, and the run it belongs to.
+  run made, and the run it belongs to. Research runs are listed under this
+  same title.
 - **Refund** — a refund of a purchase.
 
 BYOK runs never appear here, because they cost no Credits. Their cost is on your
