@@ -218,7 +218,7 @@ def board(tmp_path, monkeypatch):
     monkeypatch.setattr(lb_service, "_warned_curve_integrity", set())
     monkeypatch.setattr(lb_service, "_warned_ignored_samples", set())
     monkeypatch.setattr(lb_service, "_warned_window_drift", set())
-    monkeypatch.setattr(lb_service, "_warned_band_member", set())
+    monkeypatch.setattr(lb_service, "_warned_pool_member", set())
     return _Board(test_db, monkeypatch)
 
 

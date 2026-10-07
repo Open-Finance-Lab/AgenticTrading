@@ -1128,8 +1128,9 @@ function buildSampleBandSeries(entry, times) {
   if (!(runs >= 2)) return null;
   // The label beside this curve prints "Median of N runs · lo to hi" from
   // `samples`; a band over fewer runs would draw a narrower spread than that
-  // range. The server withholds such a band (#602) -- this is the same rule,
-  // held here too so a payload that disagrees is not drawn.
+  // range. The server builds both from one vetted pool (#602), so they agree
+  // by construction -- this holds the contract here too, so a payload that
+  // disagrees is not drawn.
   const counted = finiteNumber(entry.samples && entry.samples.count);
   if (Number.isFinite(counted) && counted !== runs) return null;
 
@@ -1633,7 +1634,12 @@ function sampleBandRuns(band) {
  *  `beforeDatasetsDraw`, so every line -- this entry's median included -- sits
  *  on top of every band. `afterDataLimits` widens the y scale to the visible
  *  bands: Chart.js sizes the axis from datasets alone, and a band that runs
- *  past the board's extremes would otherwise be clipped at the frame. */
+ *  past the board's extremes would otherwise be clipped at the frame. That
+ *  widening is safe only because every bound is a run the board would publish:
+ *  the server holds each pooled run to the median's seed, days and stored
+ *  values before it can join the band (`_vetted_pool`, #602), so an extreme
+ *  here is a measured one -- never a mis-seeded or curveless repeat flattening
+ *  the board the way a NULL-as-$0 did (#390). */
 function createSampleBandPlugin() {
   return {
     id: 'sampleBand',
@@ -1690,7 +1696,8 @@ function createSampleBandPlugin() {
  *
  *  Rendered in the chart's current unit, from the raw dollars rather than the
  *  plotted values, the way the Return/Value lines above it are -- a percent
- *  bound is relative to the curve's own starting capital, as its Return is. */
+ *  bound is relative to the curve's own starting capital, as its Return is,
+ *  and signed by `boardSignedPercent` like the "lo to hi" label beside it. */
 function formatSampleBandTooltipLine(ds, idx, view) {
   const band = ds && ds._band;
   if (!band || !band.rawLower || !band.rawUpper) return '';
@@ -1700,7 +1707,7 @@ function formatSampleBandTooltipLine(ds, idx, view) {
   const base = ds._initial || 1;
   const fmt = view === 'absolute'
     ? (v) => `$${formatLeaderboardNumber(v)}`
-    : (v) => `${(((v - base) / base) * 100).toFixed(2)}%`;
+    : (v) => boardSignedPercent((v - base) / base);
   return `Range of ${band.runs} runs: ${fmt(lo)} to ${fmt(hi)}`;
 }
 
@@ -2201,7 +2208,10 @@ async function renderEquityCurvesChart() {
       pointRadius: 0,
       // Marker comes from hoverMarkerPlugin, which honours the proximity gate.
       pointHoverRadius: 0,
-      tension: 0.1,
+      // A banded median is drawn straight, like the band's edges: the band
+      // plugin joins its bounds with lineTo, so a bezier median would bow
+      // outside its own envelope wherever it is itself the min or max (#602).
+      tension: band ? 0 : 0.1,
       fill: false,
       // Series use different hour grids (e.g. SPY :30 vs LLM :00). On a shared
       // axis that leaves many nulls; span across them so each curve still draws.

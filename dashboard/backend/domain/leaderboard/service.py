@@ -18,7 +18,7 @@ import secrets
 import tempfile
 import threading
 from datetime import date, datetime, timedelta, timezone
-from typing import Any, Callable, Dict, List, Optional, Tuple, Union
+from typing import Any, Callable, Dict, List, NamedTuple, Optional, Tuple, Union
 from zoneinfo import ZoneInfo
 
 import dashboard.backend.infrastructure.llm.token_cost as token_cost
@@ -78,8 +78,8 @@ _warned_prompt_drift: set[Tuple[str, str]] = set()
 # (entry_id, run_id, rendered_condition) triples already reported — see
 # _report_curve_integrity.
 _warned_curve_integrity: set[Tuple[str, str, str]] = set()
-# (entry_id, run_id) pairs already reported -- see _warn_on_band_member.
-_warned_band_member: set[Tuple[str, str]] = set()
+# (entry_id, run_id, reason) triples already reported -- see _warn_on_pool_member.
+_warned_pool_member: set[Tuple[str, str, str]] = set()
 # How a cached row compares to what the board is asking for. STALE is the only
 # value that refuses a row, and it is deliberately the only one a *recorded*
 # disagreement can produce — see _cache_match_rank.
@@ -1110,23 +1110,123 @@ def _curve_span(curve: List[Dict[str, Any]]) -> Optional[Tuple[str, str]]:
     return (min(days), max(days)) if days else None
 
 
-def _primary_joins_pool(primary: Dict[str, Any], pool: List[Dict[str, Any]]) -> bool:
-    """Whether the primary row is one more draw of the pool's experiment.
-
-    The same recorded config is necessary but not sufficient: a row written by
-    an earlier engine can record the same config and cover different days, so
-    the curves must also span the same trading days. Only reached when the
-    configs match, so the two extra curve reads are rare.
-    """
-    if (
-        not _usable_sample(primary)
-        or _sample_config_key(primary) != _sample_config_key(pool[0])
-    ):
-        return False
-    span = _curve_span(db.get_equity_curve(primary["run_id"]) or [])
-    return span is not None and span == _curve_span(
-        db.get_equity_curve(pool[0]["run_id"]) or []
+def _may_join_pool(primary: Dict[str, Any], pool: List[Dict[str, Any]]) -> bool:
+    """Whether the primary row recorded the pool's experiment -- necessary, not
+    sufficient: it must then pass the same ``_pool_member_fault`` check as every
+    repeat, since a row written by an earlier engine can record the same config
+    and cover different days."""
+    return _usable_sample(primary) and _sample_config_key(primary) == _sample_config_key(
+        pool[0]
     )
+
+
+def _seed_refused(
+    run: Dict[str, Any], stored_initial: float, base: Optional[float]
+) -> bool:
+    """Whether a run was *recorded* at a seed other than ``base`` (issue #365).
+
+    One predicate for the board's capital base and a pool's: only a recorded
+    seed is held to the tolerance -- a derived one is the curve's first point,
+    seed plus an hour of P&L, and cannot carry the signal (see the second pass
+    of ``get_leaderboard``).
+    """
+    return (
+        base is not None
+        and _run_seed(run) is not None
+        and abs(stored_initial - base) > _SEED_MATCH_TOLERANCE
+    )
+
+
+def _pool_member_fault(
+    run: Dict[str, Any],
+    curve: List[Dict[str, Any]],
+    base: Optional[float],
+    span: Optional[Tuple[str, str]],
+) -> Optional[str]:
+    """Why one row cannot be a draw of a pool, or None when it can (#602).
+
+    A draw has to be measured the way its siblings were, or the median, the
+    "lo to hi" label and the chart band each summarize something different:
+    a stored value at all, a seed (the board refuses to scale without one), the
+    pool's recorded seed, and the pool's trading days -- a curve that ends early
+    would be carried flat across the rest of the window by as-of alignment, a
+    path nobody measured.
+    """
+    if not any(_finite(pt.get("equity")) is not None for pt in curve):
+        return "has no stored equity value"
+    seed = _stored_seed(run, curve)
+    if seed is None:
+        return "records no seed capital and no usable first point"
+    if _seed_refused(run, seed, base):
+        return f"was run at ${seed:,.2f} while its other runs were run at ${base:,.2f}"
+    if span is not None:
+        own = _curve_span(curve)
+        if own != span:
+            covers = f"{own[0]} → {own[1]}" if own else "no parseable day"
+            return f"covers {covers} while its other runs cover {span[0]} → {span[1]}"
+    return None
+
+
+def _warn_on_pool_member(entry_id: str, run_id: str, reason: str) -> None:
+    """Say that one repeat run was left out of an entry's pooled median (#602).
+
+    Once per (entry, run, reason) per process, like the drift warnings beside
+    it: this runs on a public GET.
+    """
+    key = (entry_id, run_id, reason)
+    if key in _warned_pool_member:
+        return
+    _warned_pool_member.add(key)
+    print(
+        f"WARNING: leaderboard entry '{entry_id}' (repeat run {run_id}) {reason} "
+        "-- left out of the median, the range and the chart band it publishes. "
+        "Re-run it with `deploy_leaderboard_model.py "
+        f"--entry {entry_id} --samples N --force`, or delete it."
+    )
+
+
+def _vetted_pool(
+    entry_id: str,
+    pool: List[Dict[str, Any]],
+    curves: Dict[str, List[Dict[str, Any]]],
+    wanted_capital: Optional[float],
+) -> Tuple[List[Dict[str, Any]], Optional[float], Optional[Tuple[str, str]]]:
+    """``(the rows that are draws of one experiment, their seed, their days)``.
+
+    The pool's seed is chosen the way the board's is (``_board_capital_base``:
+    the largest group of recorded seeds, ties to the config), and its days are
+    the span most of the seeded rows cover, ties to the newest write. Every row
+    is then held to both by ``_pool_member_fault`` -- one rule, applied where
+    the pool is formed, so the label, the median and the band cannot disagree
+    about which runs they stand on.
+    """
+    seeded = [
+        r for r in pool
+        if _pool_member_fault(r, curves.get(r["run_id"], []), None, None) is None
+    ]
+    base = _board_capital_base(
+        [s for s in (_run_seed(r) for r in seeded) if s is not None],
+        wanted_capital if wanted_capital is not None else INITIAL_CAPITAL,
+    )
+    tally: Dict[Tuple[str, str], List[str]] = {}
+    for r in seeded:
+        curve = curves.get(r["run_id"], [])
+        span = _curve_span(curve)
+        if span is not None and not _seed_refused(r, _stored_seed(r, curve), base):
+            tally.setdefault(span, []).append(_written_at(r))
+    span = (
+        max(tally, key=lambda k: (len(tally[k]), max(tally[k]))) if tally else None
+    )
+    kept: List[Dict[str, Any]] = []
+    for r in pool:
+        curve = curves.get(r["run_id"], [])
+        _report_curve_integrity(entry_id, str(r.get("run_id")), curve)
+        fault = _pool_member_fault(r, curve, base, span)
+        if fault is None:
+            kept.append(r)
+        else:
+            _warn_on_pool_member(entry_id, str(r.get("run_id")), fault)
+    return kept, base, span
 
 
 def _warn_on_ignored_samples(
@@ -1164,10 +1264,25 @@ def _entry_publication(
     ``_entry_publication_with_pool`` without the pool, for the deploy CLI's
     ``describe_entry_publication``, whose answer the chart band does not touch.
     """
-    run, samples, _ = _entry_publication_with_pool(
+    publication = _entry_publication_with_pool(
         entry, primary, sample_rows, wanted_capital
     )
-    return run, samples
+    return publication.run, publication.samples
+
+
+class _Publication(NamedTuple):
+    """What ``_entry_publication_with_pool`` decided for one entry."""
+
+    run: Optional[Dict[str, Any]]
+    samples: Optional[Dict[str, Any]]
+    # The rows the samples block summarizes -- the median among them -- and
+    # empty exactly when ``samples`` is None. The chart band is drawn from
+    # these (#602), so the band and the "lo to hi" label cannot be computed off
+    # two different sets of runs.
+    pool: List[Dict[str, Any]]
+    # Every pooled row's stored curve, read once to vet the pool and reused by
+    # ``get_leaderboard`` for both the published curve and the band.
+    curves: Dict[str, List[Dict[str, Any]]]
 
 
 def _entry_publication_with_pool(
@@ -1175,13 +1290,14 @@ def _entry_publication_with_pool(
     primary: Optional[Dict[str, Any]],
     sample_rows: List[Dict[str, Any]],
     wanted_capital: Optional[float],
-) -> Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]], List[Dict[str, Any]]]:
-    """``(the run an entry publishes, its samples block or None, the pooled rows)``.
+) -> _Publication:
+    """The run an entry publishes, its samples block, and the pool behind them.
 
-    The pool is the rows the samples block summarizes -- the median among them
-    -- and is empty exactly when the samples block is None. ``get_leaderboard``
-    draws the chart band from it (#602), so the band and the "lo to hi" label
-    cannot be computed off two different sets of runs.
+    Repeats are vetted against each other where the pool is formed
+    (``_vetted_pool``): a row at another seed, over other days or with no
+    stored value is not a draw of the experiment, so it is left out of the
+    median and the range as well as the band -- never counted in one and
+    refused by another.
 
     The single owner of this decision: ``get_leaderboard`` publishes it and the
     deploy CLI reports it, so the two cannot disagree.
@@ -1191,32 +1307,52 @@ def _entry_publication_with_pool(
     cannot disagree. Repeats replace the primary only when they match the
     current config at least as well as it does: a fresh primary deployed after
     a config edit is never hidden behind repeats of the old config. The primary
-    itself counts as a draw when it is one (``_primary_joins_pool``); otherwise
-    it is left alone and publishes again the moment the samples are deleted.
+    itself counts as a draw when it is one (``_may_join_pool``, then the same
+    ``_pool_member_fault`` as every repeat); otherwise it is left alone and
+    publishes again the moment the samples are deleted.
     """
+    alone = _Publication(primary, None, [], {})
     pool, pool_rank = _pooled_samples(sample_rows, entry, wanted_capital)
     if not pool:
-        return primary, None, []
+        return alone
+    primary_rank = None
     if primary is not None:
         primary_rank = _entry_config_drift(primary, entry, wanted_capital)[0]
         if pool_rank > primary_rank:
             _warn_on_ignored_samples(entry, pool, wanted_capital)
-            return primary, None, []
-        if _primary_joins_pool(primary, pool):
+            return alone
+    joinable = primary is not None and _may_join_pool(primary, pool)
+    # One read for every row that can be a draw (batched on Postgres).
+    ids = [r["run_id"] for r in pool] + ([primary["run_id"]] if joinable else [])
+    curves = {
+        run_id: curve or [] for run_id, curve in db.get_equity_curves(ids).items()
+    }
+    pool, base, span = _vetted_pool(str(entry.get("id")), pool, curves, wanted_capital)
+    if not pool:
+        return alone
+    if primary is not None:
+        if joinable and _pool_member_fault(
+            primary, curves.get(primary["run_id"], []), base, span
+        ) is None:
             pool = pool + [primary]
         elif len(pool) < 2 and (
             primary_rank != _CACHE_STALE or pool_rank == _CACHE_STALE
         ):
             # One repeat is one more draw, not a better one -- unless the
             # primary recorded a config the board no longer publishes.
-            return primary, None, []
+            return alone
     returns = sorted(_finite(r.get("total_return")) for r in pool)
-    return _median_run(pool), {
-        "count": len(pool),
-        "min_return": returns[0],
-        "max_return": returns[-1],
-        "returns": returns,
-    }, pool
+    return _Publication(
+        _median_run(pool),
+        {
+            "count": len(pool),
+            "min_return": returns[0],
+            "max_return": returns[-1],
+            "returns": returns,
+        },
+        pool,
+        {r["run_id"]: curves.get(r["run_id"], []) for r in pool},
+    )
 
 
 def _warn_on_window_drift(
@@ -2361,67 +2497,16 @@ def _scaled_hourly(
     ]
 
 
-def _warn_on_band_member(entry_id: str, run_id: str, reason: str) -> None:
-    """Say that one pooled run cost an entry its chart band (#602).
-
-    The samples block still counts this run's return, so a band drawn from the
-    survivors would be narrower than the "Median of N runs · lo to hi" printed
-    beside it. ``get_leaderboard`` therefore withholds the whole band rather
-    than draw that spread, and this line is how an operator learns why the
-    entry has none. Once per (entry, run) per process, like the drift warnings
-    above: this runs on a public GET.
-    """
-    key = (entry_id, run_id)
-    if key in _warned_band_member:
-        return
-    _warned_band_member.add(key)
-    print(
-        f"WARNING: leaderboard entry '{entry_id}' (repeat run {run_id}) {reason} "
-        "-- the chart draws no sample band for this entry, since one without "
-        "this run would not span the published range. Re-run it with "
-        "`deploy_leaderboard_model.py "
-        f"--entry {entry_id} --samples N --force`, or delete it."
-    )
-
-
 def _band_member_curve(
-    entry_id: str,
     run: Dict[str, Any],
     equity_hourly: List[Dict[str, Any]],
-    capital_base: Optional[float],
     display_capital: float,
     start_date: str,
-) -> Optional[List[Dict[str, Any]]]:
-    """One pooled run's chart curve, built exactly as the published run's is.
-
-    Same seed resolution, same capital-base refusal (issue #365), same scale,
-    same open tick. A member the board would refuse to publish must not widen
-    the band either: its dollar levels are not comparable with the median's. A
-    member with no stored value at all is refused too -- as-of fill would carry
-    its open tick across the window and draw a flat path nobody measured.
-    """
-    run_id = str(run.get("run_id"))
+) -> List[Dict[str, Any]]:
+    """One pooled run's chart curve, built exactly as the published run's is:
+    same seed resolution, same scale, same open tick. Only reached for a row
+    ``_vetted_pool`` kept, so it has a seed and a stored value to draw."""
     stored_initial = _stored_seed(run, equity_hourly)
-    if stored_initial is None:
-        _warn_on_band_member(
-            entry_id, run_id, "records no seed capital and no usable first point"
-        )
-        return None
-    if (
-        capital_base is not None
-        and _run_seed(run) is not None
-        and abs(stored_initial - capital_base) > _SEED_MATCH_TOLERANCE
-    ):
-        _warn_on_band_member(
-            entry_id,
-            run_id,
-            f"was run at ${stored_initial:,.2f} while this board was run at "
-            f"${capital_base:,.2f}",
-        )
-        return None
-    if not any(_finite(pt.get("equity")) is not None for pt in equity_hourly):
-        _warn_on_band_member(entry_id, run_id, "has no stored equity value")
-        return None
     return chart_equity_curve(
         _scaled_hourly(equity_hourly, display_capital / stored_initial),
         initial_equity=display_capital,
@@ -2440,16 +2525,24 @@ def _sample_band(
     ``members`` are chart curves aligned onto its timestamps here, never through
     ``align_equity_curves`` with the board: that would let a member's timestamps
     re-pick the board's shared axis. Positions are matched by timestamp, so a
-    member that ends early or skips a bar carries its last value forward the way
-    every board curve does. A point no member has a finite value for is None:
-    the payload is serialized with ``allow_nan=False``, so a NaN is a 500.
+    member that skips a bar carries its last value forward the way every board
+    curve does (one that ends early never gets here -- ``_vetted_pool`` holds
+    every member to the pool's days).
+
+    **Every drawn point covers every run**, which is what ``runs`` claims: a
+    member's NULL is dropped before alignment, so it carries its last real
+    value like any skipped bar instead of leaving a hole, and a slot where the
+    median itself has no value is None -- the band breaks there rather than
+    shrinking to the other runs. None, never NaN: the payload is serialized
+    with ``allow_nan=False``, so a NaN is a 500.
     """
     reference = [str(pt.get("timestamp")) for pt in published]
     if not reference or not members:
         return None
     columns = [[_finite(pt.get("equity")) for pt in published]]
     for curve in members:
-        aligned = align_equity_curve_asof(curve, reference)
+        observed = [pt for pt in curve if _finite(pt.get("equity")) is not None]
+        aligned = align_equity_curve_asof(observed, reference)
         # As-of fill emits nothing before a curve's first point, so the output
         # is a suffix of the reference; pad its head back to index-parallel.
         head = [None] * (len(reference) - len(aligned))
@@ -2457,9 +2550,9 @@ def _sample_band(
     lower: List[Optional[float]] = []
     upper: List[Optional[float]] = []
     for values in zip(*columns):
-        finite = [v for v in values if v is not None]
-        lower.append(min(finite) if finite else None)
-        upper.append(max(finite) if finite else None)
+        whole = None not in values
+        lower.append(min(values) if whole else None)
+        upper.append(max(values) if whole else None)
     return {"lower": lower, "upper": upper, "runs": len(columns)}
 
 
@@ -2679,26 +2772,29 @@ def get_leaderboard(
     )
     samples_by_entry = _sample_index(start_date, end_date, session_id, runs=session_runs)
     sample_summaries: Dict[str, Dict[str, Any]] = {}
-    # The runs each sampled entry's chart band is drawn from (#602).
-    sample_pools: Dict[str, List[Dict[str, Any]]] = {}
+    # What each sampled entry's chart band is drawn from (#602).
+    publications: Dict[str, _Publication] = {}
     for strategy in config.get("strategies", []):
         # #602: repeats can stand in for the primary; `_entry_publication` owns
         # when, and the deploy CLI reports the same answer.
-        run, summary, pool = _entry_publication_with_pool(
+        publication = _entry_publication_with_pool(
             strategy,
             primaries.get(strategy["id"]),
             samples_by_entry.get(strategy["id"], []),
             display_capital,
         )
-        if summary is not None:
-            sample_summaries[strategy["id"]] = summary
-        if len(pool) >= 2:
-            sample_pools[strategy["id"]] = pool
+        run = publication.run
+        if publication.samples is not None:
+            sample_summaries[strategy["id"]] = publication.samples
+            publications[strategy["id"]] = publication
         if not run:
             continue
         board_runs.append(run)
 
-        equity_hourly = db.get_equity_curve(run["run_id"]) or []
+        # A pooled run's curve was read to vet its pool; never read it twice.
+        equity_hourly = publication.curves.get(run["run_id"])
+        if equity_hourly is None:
+            equity_hourly = db.get_equity_curve(run["run_id"]) or []
         stored_initial = _stored_seed(run, equity_hourly)
         if stored_initial is None:
             # A published leaderboard row is a claim, and with no recorded seed
@@ -2743,26 +2839,12 @@ def get_leaderboard(
     ]
     capital_base = _board_capital_base(recorded_seeds, display_capital)
 
-    # Every band member's curve in one read (batched on Postgres). The published
-    # run's own curve is already loaded above and is not read again.
-    published_ids = {run["run_id"] for _, run, _, _ in resolved}
-    member_ids = [
-        member["run_id"]
-        for pool in sample_pools.values()
-        for member in pool
-        if member["run_id"] not in published_ids
-    ]
-    member_curves = db.get_equity_curves(member_ids) if member_ids else {}
     band_members: Dict[str, List[List[Dict[str, Any]]]] = {}
 
     # SECOND PASS: publish the entries that share the board's one capital base.
     published_spans: Dict[str, Tuple[str, str]] = {}
     for strategy, run, stored_initial, equity_hourly in resolved:
-        if (
-            capital_base is not None
-            and _run_seed(run) is not None
-            and abs(stored_initial - capital_base) > _SEED_MATCH_TOLERANCE
-        ):
+        if _seed_refused(run, stored_initial, capital_base):
             # An outlier in a board that otherwise agrees. Ranking it against
             # the rest would compare runs that were not measured the same way.
             if run.get("mode") == LEADERBOARD_SAMPLE_MODE:
@@ -2861,23 +2943,20 @@ def get_leaderboard(
                 strategy["id"], {"count": 1}
             )
             # The other pooled runs' curves, for the band drawn behind this one
-            # once the board's axis is fixed (#602).
-            if strategy["id"] in sample_pools:
+            # once the board's axis is fixed (#602). Every one shares this
+            # run's seed and days -- `_vetted_pool` held them to it -- so none
+            # is refused here and the band covers every run the label counts.
+            publication = publications.get(strategy["id"])
+            if publication is not None and len(publication.pool) >= 2:
                 band_members[strategy["id"]] = [
-                    curve
-                    for curve in (
-                        _band_member_curve(
-                            strategy["id"],
-                            member,
-                            member_curves.get(member["run_id"]) or [],
-                            capital_base,
-                            display_capital,
-                            start_date,
-                        )
-                        for member in sample_pools[strategy["id"]]
-                        if member["run_id"] != run["run_id"]
+                    _band_member_curve(
+                        member,
+                        publication.curves[member["run_id"]],
+                        display_capital,
+                        start_date,
                     )
-                    if curve is not None
+                    for member in publication.pool
+                    if member["run_id"] != run["run_id"]
                 ]
 
     _warn_on_window_drift(start_date, end_date, published_spans)
@@ -2888,15 +2967,9 @@ def get_leaderboard(
     for entry, curve in zip(entries, aligned):
         entry["equity_curve"] = curve
         # A sibling of `samples`, never inside it: the band is chart geometry,
-        # the samples block is the claim the table labels. Published only when
-        # it covers EVERY run that claim counts: a pool member refused by
-        # `_band_member_curve` still widens "lo to hi" in the label, so a band
-        # from the survivors would print one range and draw a narrower one.
-        # Withheld, the entry's label stands alone, and the refusal is in the
-        # log (_warn_on_band_member).
+        # the samples block is the claim the table labels.
         band = _sample_band(curve, band_members.get(entry["entry_id"], []))
-        counted = (entry.get("samples") or {}).get("count")
-        if band is not None and band["runs"] == counted:
+        if band is not None:
             entry["sample_band"] = band
 
     entries = _rank_entries(entries)

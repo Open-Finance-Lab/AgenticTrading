@@ -39,6 +39,7 @@ def _prelude() -> str:
             fn_body("function hexToRgb(", _LEADERBOARD_JS),
             fn_body("function hexToRgba(", _LEADERBOARD_JS),
             fn_body("function formatLeaderboardNumber(", _LEADERBOARD_JS),
+            fn_body("function boardSignedPercent(", _LEADERBOARD_JS),
             fn_body("function transformLeaderboardChartData(", _LEADERBOARD_JS),
             fn_body("function buildSampleBandSeries(", _LEADERBOARD_JS),
             fn_body("function sampleBandAlpha(", _LEADERBOARD_JS),
@@ -350,7 +351,8 @@ console.log(JSON.stringify({
     )
     assert out == {
         "money": "Range of 3 runs: $99,000.00 to $102,500.00",
-        "pct": "Range of 3 runs: -1.00% to 2.50%",
+        # Signed like the "lo to hi" label beside the same curve.
+        "pct": "Range of 3 runs: -1.00% to +2.50%",
         "missing": "",
         "none": "",
     }
@@ -386,6 +388,16 @@ def test_the_band_is_never_a_dataset():
 
 def test_the_tooltip_reads_the_band_line():
     assert "formatSampleBandTooltipLine(ds, idx, currentChartView)" in _RENDER
+
+
+def test_a_banded_median_is_drawn_straight_like_its_band():
+    """The plugin joins the bounds with lineTo; a bezier median (tension 0.1)
+    overshoots between points and pokes outside its own envelope wherever it
+    is itself the min or max -- always, with two runs."""
+    assert "tension: band ? 0 : 0.1," in _RENDER
+    plugin = strip_comments(fn_body("function createSampleBandPlugin(", _LEADERBOARD_JS))
+    assert "lineTo(" in plugin
+    assert "bezierCurveTo" not in plugin and "quadraticCurveTo" not in plugin
 
 
 def test_the_shared_curve_builder_does_not_carry_the_band():
