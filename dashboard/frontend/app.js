@@ -278,6 +278,13 @@ const SIMPLE_INSTRUCTION_OUTPUT_FORMAT =
 // same preset key + output format at call time instead of keeping its own copy.
 window.SIMPLE_INSTRUCTION_PRESET_KEY = SIMPLE_INSTRUCTION_PRESET_KEY;
 window.SIMPLE_INSTRUCTION_OUTPUT_FORMAT = SIMPLE_INSTRUCTION_OUTPUT_FORMAT;
+// Mirror SIMPLE_INSTRUCTION_LABEL and POST_TRADE_PRESET_KEY in
+// domain/agents/defaults.py (pinned by tests/test_agent_starter_defaults.py).
+// Up here rather than beside their readers: the Run Backtest modal's syncs read
+// them, and a const declared further down is in its temporal dead zone until
+// the file has evaluated that far.
+const SIMPLE_INSTRUCTION_LABEL = 'Trading instruction';
+const POST_TRADE_PRESET_KEY = 'post_trade_analysis';
 // Mirrors DEFAULT_STARTER_INSTRUCTION in dashboard/backend/domain/agents/defaults.py,
 // which seeds new agents and is also what an LLM backtest with an empty
 // instruction runs (domain/agents/defaults.py::effective_pipeline). The copy
@@ -10080,14 +10087,51 @@ function formatPromptFromPipeline(pipeline) {
 // Mirrors domain/agents/defaults.py::has_trading_instruction: a pipeline whose
 // decision steps all have blank prompts is "empty", and the server runs the
 // default instruction for it exactly as it does for no pipeline at all.
-// A literal, not a top-level const: the modal syncs can run before this part of
-// the file has evaluated, and a const read there throws (temporal dead zone).
 function pipelineHasTradingInstruction(pipeline) {
     if (!Array.isArray(pipeline)) return false;
     return pipeline.some((step) => step
         && typeof step === 'object'
-        && step.presetKey !== 'post_trade_analysis'
+        && step.presetKey !== POST_TRADE_PRESET_KEY
         && String(step.prompt || '').trim());
+}
+
+// Mirrors domain/agents/defaults.py::effective_pipeline for a request with no
+// strategy_prompt (the dashboard never sends one): an empty decision side is
+// replaced by the default instruction step, and post-trade steps are kept.
+// (An explicit [] differs -- the route refuses it -- but this page never sends
+// one: loadAgentPipelineForBacktest answers null for an empty pipeline.)
+// tests/test_backtest_default_instruction_frontend.py runs both on the same
+// inputs, so the preview cannot drift from what the route executes.
+function effectiveBacktestPipeline(pipeline) {
+    if (Array.isArray(pipeline) && pipeline.length && pipelineHasTradingInstruction(pipeline)) {
+        return pipeline;
+    }
+    const postTrade = Array.isArray(pipeline)
+        ? pipeline.filter((step) => step
+            && typeof step === 'object'
+            && step.presetKey === POST_TRADE_PRESET_KEY)
+        : [];
+    return [
+        {
+            id: `sub_starter_${Math.random().toString(16).slice(2, 10)}`,
+            presetKey: SIMPLE_INSTRUCTION_PRESET_KEY,
+            label: SIMPLE_INSTRUCTION_LABEL,
+            prompt: DEFAULT_STARTER_INSTRUCTION,
+            outputFormat: SIMPLE_INSTRUCTION_OUTPUT_FORMAT,
+        },
+        ...postTrade,
+    ];
+}
+
+// The pipeline an LLM launch sends. Always one, so the run executes what the
+// modal previewed: with no body pipeline the server reads the stored agent
+// row, which this tab's cached copy may not match, and a preview of the
+// default would then describe a run that executes something else. A cached
+// pipeline goes as-is (the server applies effective_pipeline to it, as the
+// preview does), so a blank-plus-post-trade agent still matches its stored row
+// and keeps its adapted-pipeline write-back.
+function backtestRequestPipeline(agent) {
+    return loadAgentPipelineForBacktest(agent) || effectiveBacktestPipeline(null);
 }
 
 // The decision source a launch from the modal's current state sends. Shared
@@ -10112,20 +10156,23 @@ function runBacktestModalDecisionSource() {
 function syncRunBacktestInstructionPreview() {
     const group = document.getElementById('runBacktestPromptGroup');
     const preview = document.getElementById('runBacktestPromptPreview');
+    const defaultNote = document.getElementById('runBacktestPromptDefaultNote');
     const agent = runBacktestModalAgent;
     let prompt = null;
+    let usesDefault = false;
     if (
         agent
         && (agent.runtime_type || 'pipeline') === 'pipeline'
         && runBacktestModalDecisionSource() === LLM_DECISION_SOURCE
     ) {
-        const pipeline = loadAgentPipelineForBacktest(agent);
-        prompt = pipelineHasTradingInstruction(pipeline)
-            ? formatPromptFromPipeline(pipeline)
-            : DEFAULT_STARTER_INSTRUCTION;
+        usesDefault = !pipelineHasTradingInstruction(loadAgentPipelineForBacktest(agent));
+        prompt = formatPromptFromPipeline(
+            effectiveBacktestPipeline(backtestRequestPipeline(agent))
+        );
     }
     if (preview) preview.textContent = prompt || '';
     if (group) group.hidden = !prompt;
+    if (defaultNote) defaultNote.hidden = !(prompt && usesDefault);
 }
 
 function describeUniverseFromAssets(assets) {
@@ -10853,7 +10900,7 @@ async function runBacktest() {
     const isHostedRuntime = (activeAgent.runtime_type || 'pipeline') !== 'pipeline';
     const pipeline = isRuleBasedDecision
         ? null
-        : (isHostedRuntime ? null : loadAgentPipelineForBacktest(activeAgent));
+        : (isHostedRuntime ? null : backtestRequestPipeline(activeAgent));
     const model = isRuleBasedDecision
         ? null
         : (isHostedRuntime ? null : resolveBacktestModelRequest(modelSelect, activeAgent));
@@ -10895,12 +10942,11 @@ async function runBacktest() {
 
     const initialCapital = resolveBacktestCapital(activeAgent);
 
-    // Only an instruction this request carries: the server runs a body
-    // pipeline as sent. With none, it reads the stored agent row, which this
-    // tab's cached copy may not match -- so the default instruction is shown
-    // only once the response's `default_instruction` confirms it (below).
-    const promptSummary = pipelineHasTradingInstruction(pipeline)
-        ? formatPromptFromPipeline(pipeline)
+    // What the server runs for the body sent: an LLM launch always carries a
+    // pipeline (backtestRequestPipeline), and the route resolves an empty one
+    // exactly as effectiveBacktestPipeline does -- post-trade steps included.
+    const promptSummary = pipeline
+        ? formatPromptFromPipeline(effectiveBacktestPipeline(pipeline))
         : null;
     const universeLabel = isIFind
         ? selectedIFindProfile.name
@@ -11063,9 +11109,6 @@ async function runBacktest() {
             return;
         }
 
-        if (data.default_instruction === true) {
-            launchConfigBase.prompt = DEFAULT_STARTER_INSTRUCTION;
-        }
         const liveRunId = data.live_run_id || data.run_id;
         if (liveRunId) {
             stashBacktestLaunchConfig(liveRunId, launchConfigBase);

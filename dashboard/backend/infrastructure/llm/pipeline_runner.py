@@ -32,7 +32,13 @@ from dashboard.backend.infrastructure.llm.execution.errors import (
 )
 from dashboard.backend.infrastructure.llm.execution.log_safe import log_safe_token
 
-POST_TRADE_PRESET_KEY = "post_trade_analysis"
+# Owned by domain/agents/defaults.py and re-exported here, where the engine,
+# the route and the tests have always imported them from.
+from dashboard.backend.domain.agents.defaults import (  # noqa: F401 - re-exported
+    POST_TRADE_PRESET_KEY,
+    is_post_trade_step,
+    split_pipeline,
+)
 
 PIPELINE_SYSTEM_PROMPT = """You are a sub-agent in a multi-step trading pipeline.
 Follow your task instructions precisely.
@@ -91,28 +97,6 @@ def escalate_ceiling_on_retry() -> bool:
     if raw not in ("1", "true", "yes", "on"):
         return False
     return RECOVERY_MAX_OUTPUT_TOKENS > DEFAULT_MAX_OUTPUT_TOKENS
-
-
-def is_post_trade_step(step: Any) -> bool:
-    return isinstance(step, dict) and step.get("presetKey") == POST_TRADE_PRESET_KEY
-
-
-def split_pipeline(
-    pipeline: Optional[List[Dict[str, Any]]],
-) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
-    """Split a mixed pipeline into hourly decision steps and post-trade steps."""
-    decision_steps: List[Dict[str, Any]] = []
-    post_trade_steps: List[Dict[str, Any]] = []
-    if not pipeline:
-        return decision_steps, post_trade_steps
-    for step in pipeline:
-        if not isinstance(step, dict):
-            continue
-        if is_post_trade_step(step):
-            post_trade_steps.append(step)
-        else:
-            decision_steps.append(step)
-    return decision_steps, post_trade_steps
 
 
 def trading_day_key(timestamp: Any) -> str:

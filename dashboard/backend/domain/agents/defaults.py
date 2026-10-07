@@ -14,7 +14,7 @@ drift, ``isSimplePipeline()`` stops matching and every default agent renders the
 from __future__ import annotations
 
 import uuid
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 SIMPLE_INSTRUCTION_PRESET_KEY = "simple_instruction"
 
@@ -133,20 +133,37 @@ def default_starter_pipeline() -> List[Dict[str, Any]]:
     ]
 
 
-# pipeline_runner.POST_TRADE_PRESET_KEY. Not imported: this module is a leaf the
-# frontend mirror and the seeding path read, and pipeline_runner pulls in the
-# LLM execution layer. tests/test_agent_starter_defaults.py pins the two equal.
-_POST_TRADE_PRESET_KEY = "post_trade_analysis"
+# The post-trade split is owned here and imported by pipeline_runner (which
+# re-exports it), so "is this a decision step?" has one answer for the runner,
+# the route and effective_pipeline below. This module stays a leaf: it imports
+# nothing from the backend.
+POST_TRADE_PRESET_KEY = "post_trade_analysis"
 
 
-def _decision_steps(pipeline: Any) -> List[Dict[str, Any]]:
-    if not isinstance(pipeline, list):
-        return []
-    return [
-        step
-        for step in pipeline
-        if isinstance(step, dict) and step.get("presetKey") != _POST_TRADE_PRESET_KEY
-    ]
+def is_post_trade_step(step: Any) -> bool:
+    return isinstance(step, dict) and step.get("presetKey") == POST_TRADE_PRESET_KEY
+
+
+def split_pipeline(
+    pipeline: Optional[List[Dict[str, Any]]],
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """Split a mixed pipeline into hourly decision steps and post-trade steps."""
+    decision_steps: List[Dict[str, Any]] = []
+    post_trade_steps: List[Dict[str, Any]] = []
+    if not pipeline or not isinstance(pipeline, (list, tuple)):
+        return decision_steps, post_trade_steps
+    for step in pipeline:
+        if not isinstance(step, dict):
+            continue
+        if is_post_trade_step(step):
+            post_trade_steps.append(step)
+        else:
+            decision_steps.append(step)
+    return decision_steps, post_trade_steps
+
+
+def _has_prompt(step: Dict[str, Any]) -> bool:
+    return bool(str(step.get("prompt") or "").strip())
 
 
 def has_trading_instruction(pipeline: Any) -> bool:
@@ -156,9 +173,32 @@ def has_trading_instruction(pipeline: Any) -> bool:
     agent PATCH and the backtest body alike, and would otherwise send the model
     a step with no task at all.
     """
-    return any(
-        str(step.get("prompt") or "").strip() for step in _decision_steps(pipeline)
-    )
+    decision_steps, _ = split_pipeline(pipeline)
+    return any(_has_prompt(step) for step in decision_steps)
+
+
+def blank_decision_step_numbers(pipeline: Any) -> List[int]:
+    """1-based positions of blank decision steps in a pipeline that has an
+    instruction elsewhere.
+
+    effective_pipeline replaces an all-blank decision side; a partly blank one
+    cannot be repaired the same way (which step's task would the default
+    take?), and run as-is it bills a call that carries no task -- for the last
+    step, the one whose orders execute. The route refuses it instead.
+    """
+    if not has_trading_instruction(pipeline):
+        return []
+    return [
+        index + 1
+        for index, step in enumerate(pipeline)
+        if isinstance(step, dict) and not is_post_trade_step(step) and not _has_prompt(step)
+    ]
+
+
+def _instruction_step(prompt: str) -> Dict[str, Any]:
+    step = default_starter_pipeline()[0]
+    step["prompt"] = prompt
+    return step
 
 
 def effective_pipeline(
@@ -170,36 +210,41 @@ def effective_pipeline(
     An empty trading instruction means the platform default: the starter
     instruction every new agent is seeded with, i.e. the text Configure shows
     under "See the default instruction". "Empty" is no pipeline, or one whose
-    decision steps carry no prompt; its post-trade steps are kept. A
-    ``strategy_prompt`` is an instruction in its own right, and an explicit
-    ``[]`` or a non-list is returned untouched so the caller's validator can
-    refuse it as malformed.
+    decision steps all carry no prompt; its post-trade steps are kept. An
+    explicit ``[]`` or a non-list is returned untouched so the caller's
+    validator can refuse it as malformed.
 
-    The substitute is the exact pipeline a starter agent runs, so it costs what
-    a starter agent costs -- on a universe above 12 names that is the full
-    snapshot and the recovery output ceiling from the first call
+    A ``strategy_prompt`` is an instruction in its own right and fills an
+    empty decision side in place of the default, on both empty shapes. With no
+    post-trade steps to keep, that is ``None`` -- the single-prompt path the
+    worker takes for a strategy_prompt and no pipeline. With post-trade steps,
+    it becomes the instruction step, so those steps still run.
+
+    The default substitute is the exact pipeline a starter agent runs, so it
+    costs what a starter agent costs -- on a universe above 12 names that is
+    the full snapshot and the recovery output ceiling from the first call
     (pipeline_runner.DEFAULT_CEILING_SNAPSHOT_SYMBOLS), not the single-prompt
     path's shortlist. That parity is the point: the disclosure promises this
-    strategy, so the run has to be the one a starter agent would produce.
+    strategy, so the run has to be the one a starter agent would produce. The
+    Run Backtest modal says so when it previews the default.
 
-    Owned here rather than in a route so every consumer of an agent's pipeline
-    resolves "empty" the same way. ``robinhood_live_service`` does not call it
-    yet: its empty-instruction fallback trades real money and is a separate
-    decision.
+    The only caller today is the dashboard ``/backtest/run`` route. The one
+    other reader of an agent's pipeline, ``robinhood_live_service``, does not
+    call it: its empty-instruction fallback trades real money and is a separate
+    decision. The protocol and /api/v2 surfaces run external agents, which have
+    no stored pipeline, and the leaderboard runs its curated entries with no
+    instruction on purpose (see the route's comment).
     """
-    if pipeline is None:
-        if (strategy_prompt or "").strip():
-            return None
-        return default_starter_pipeline()
-    if not isinstance(pipeline, list) or not pipeline:
+    if pipeline is not None and (not isinstance(pipeline, list) or not pipeline):
         return pipeline
     if has_trading_instruction(pipeline):
         return pipeline
-    post_trade = [
-        step
-        for step in pipeline
-        if isinstance(step, dict) and step.get("presetKey") == _POST_TRADE_PRESET_KEY
-    ]
+    _, post_trade = split_pipeline(pipeline)
+    instruction = (strategy_prompt or "").strip()
+    if instruction:
+        if not post_trade:
+            return None
+        return [_instruction_step(instruction)] + post_trade
     return default_starter_pipeline() + post_trade
 
 
@@ -207,12 +252,21 @@ def is_default_instruction_pipeline(pipeline: Any) -> bool:
     """Whether a recorded pipeline's decision side is exactly the default.
 
     True for an empty-instruction run and for a starter agent whose instruction
-    was never edited: both ran DEFAULT_STARTER_INSTRUCTION. Judged on content,
-    never on step ids, which seeding mints at random.
+    was never edited: both ran DEFAULT_STARTER_INSTRUCTION. Judged on what
+    reaches the model -- the step's label, prompt and output format, the three
+    fields pipeline_runner._build_step_prompt sends -- and never on step ids,
+    which seeding mints at random. A step that reuses the default wording under
+    its own output contract ran a different request and is not the default.
     """
-    steps = _decision_steps(pipeline)
-    return (
-        len(steps) == 1
-        and str(steps[0].get("prompt") or "").strip()
-        == DEFAULT_STARTER_INSTRUCTION.strip()
+    steps, _ = split_pipeline(pipeline)
+    if len(steps) != 1:
+        return False
+    step = steps[0]
+    return all(
+        str(step.get(field) or "").strip() == expected.strip()
+        for field, expected in (
+            ("label", SIMPLE_INSTRUCTION_LABEL),
+            ("prompt", DEFAULT_STARTER_INSTRUCTION),
+            ("outputFormat", SIMPLE_INSTRUCTION_OUTPUT_FORMAT),
+        )
     )

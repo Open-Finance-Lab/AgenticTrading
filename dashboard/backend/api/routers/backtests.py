@@ -104,6 +104,7 @@ from dashboard.backend.domain.credits.service import credits_service
 from dashboard.backend.db_url import BACKTEST_WORKER_ENV
 from dashboard.backend.api.rate_limit import FixedWindowRateLimiter, client_key
 from dashboard.backend.domain.agents.defaults import (
+    blank_decision_step_numbers,
     effective_pipeline,
     is_default_instruction_pipeline,
 )
@@ -1700,6 +1701,9 @@ def run_backtest_background(
     # to decide whether a timeout has a Credits cost worth reporting.
     billing_mode: Optional[str] = None,
     owner_user_id: Optional[int] = None,
+    # The pipeline as the agent stored it, when the route substituted
+    # `pipeline` (effective_pipeline). None means `pipeline` is the baseline.
+    writeback_baseline: Optional[List[Dict[str, Any]]] = None,
 ):
     """Run backtest in background thread.
 
@@ -1719,7 +1723,7 @@ def run_backtest_background(
     # Snapshot the agent's pipeline as this run sees it, so the adapted-pipeline
     # write-back at the end can tell "nobody touched it" from "the user edited
     # it mid-run" (Configure stays open, and sibling runs adapt too).
-    baseline_pipeline = _normalized_pipeline(pipeline) or _agent_pipeline_snapshot(agent_id)
+    baseline_pipeline = _writeback_start_pipeline(pipeline, writeback_baseline, agent_id)
     try:
         import sys
         import tempfile
@@ -2913,6 +2917,24 @@ def _agent_pipeline_snapshot(agent_id: Optional[str]) -> Optional[List[Dict[str,
     return _normalized_pipeline(agent.get("pipeline"))
 
 
+def _writeback_start_pipeline(
+    pipeline: Any,
+    writeback_baseline: Any,
+    agent_id: Optional[str],
+) -> Optional[List[Dict[str, Any]]]:
+    """The pipeline a run started from, as the agent row held it.
+
+    The route hands the worker effective_pipeline's substitute for an empty
+    instruction, whose default step is minted fresh and so never equals the
+    stored row; compared against that, every adaptation of a blank agent was
+    skipped as a mid-run edit nobody made. ``writeback_baseline`` is the
+    pre-substitution pipeline when the route has one.
+    """
+    return _normalized_pipeline(
+        writeback_baseline if writeback_baseline is not None else pipeline
+    ) or _agent_pipeline_snapshot(agent_id)
+
+
 def _maybe_writeback_adapted_pipeline(
     agent_id: Optional[str],
     run_id: Optional[str],
@@ -3426,16 +3448,38 @@ def run_backtest_endpoint(
             )
 
     ignored_llm_fields: List[str] = []
+    writeback_baseline: Any = None
     if resolved_decision_source == LLM_DECISION_SOURCE:
         if runtime_type == PIPELINE_RUNTIME_TYPE:
-            pipeline = _resolve_backtest_pipeline(agent_id, pipeline)
+            requested_pipeline = _resolve_backtest_pipeline(agent_id, pipeline)
+            # Judge what the caller sent, not its substitute: an oversized or
+            # malformed all-blank pipeline would otherwise be swapped for the
+            # one-step default and start a billable run instead of a 422.
+            _validate_backtest_params(
+                start_date, end_date, strategy_prompt, model, requested_pipeline
+            )
+            blank_steps = blank_decision_step_numbers(requested_pipeline)
+            if blank_steps:
+                raise HTTPException(
+                    status_code=422,
+                    detail=(
+                        "pipeline step(s) "
+                        + ", ".join(str(n) for n in blank_steps)
+                        + " have no prompt. Give every decision step an "
+                        "instruction, or remove it."
+                    ),
+                )
             # An empty instruction means the platform default -- the starter
             # instruction Configure discloses. Applied here, not in
             # create_prompt(): the curated leaderboard entries run with no
             # instruction on purpose and their cached rows are matched on
             # strategy_prompt=None, so changing that fallback would re-label
             # every published curve.
-            pipeline = effective_pipeline(pipeline, strategy_prompt)
+            pipeline = effective_pipeline(requested_pipeline, strategy_prompt)
+            # The adapted-pipeline write-back compares the agent row against
+            # what the run started from. That is the stored pipeline, not the
+            # substitute: a minted default never equals the row it replaced.
+            writeback_baseline = requested_pipeline
             if agent_id and not model:
                 agent = agent_service.get_agent(agent_id)
                 if agent and agent.get("model_name"):
@@ -3680,6 +3724,7 @@ def run_backtest_endpoint(
             "strategy_prompt": strategy_prompt,
             "model": model,
             "pipeline": pipeline,
+            "writeback_baseline": writeback_baseline,
             "runtime_type": runtime_type,
             "runtime_config": runtime_config,
             "financial_datasets_api_key": financial_datasets_api_key,

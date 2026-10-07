@@ -382,11 +382,25 @@ def test_the_simple_panel_is_always_visible():
 # ---------------------------------------------------------------------------
 
 
-def test_post_trade_preset_key_matches_pipeline_runner():
+def test_pipeline_runner_reexports_the_one_post_trade_split():
+    """One owner: the runner, the route and effective_pipeline classify steps
+    with the same function, not three copies held together by a pin."""
     from dashboard.backend.domain.agents import defaults
     from dashboard.backend.infrastructure.llm import pipeline_runner
 
-    assert defaults._POST_TRADE_PRESET_KEY == pipeline_runner.POST_TRADE_PRESET_KEY
+    assert pipeline_runner.POST_TRADE_PRESET_KEY is defaults.POST_TRADE_PRESET_KEY
+    assert pipeline_runner.split_pipeline is defaults.split_pipeline
+    assert pipeline_runner.is_post_trade_step is defaults.is_post_trade_step
+
+
+def test_js_mirrors_the_label_and_post_trade_key():
+    from dashboard.backend.domain.agents.defaults import (
+        POST_TRADE_PRESET_KEY,
+        SIMPLE_INSTRUCTION_LABEL,
+    )
+
+    assert _js_const("SIMPLE_INSTRUCTION_LABEL") == SIMPLE_INSTRUCTION_LABEL
+    assert _js_const("POST_TRADE_PRESET_KEY") == POST_TRADE_PRESET_KEY
 
 
 def test_effective_pipeline_resolves_empty_to_the_default_instruction():
@@ -408,6 +422,48 @@ def test_effective_pipeline_resolves_empty_to_the_default_instruction():
     resolved = effective_pipeline([{"prompt": ""}, post_trade])
     assert is_default_instruction_pipeline(resolved)
     assert resolved[-1] == post_trade
+
+
+def test_strategy_prompt_fills_either_empty_shape():
+    """`[blank]` and `None` are both "no instruction", so a strategy_prompt
+    must win on both -- it used to be dropped for the blank pipeline."""
+    from dashboard.backend.domain.agents.defaults import effective_pipeline
+
+    blank = [{"presetKey": "simple_instruction", "prompt": "  "}]
+    assert effective_pipeline(None, "Buy the dip.") is None
+    assert effective_pipeline(blank, "Buy the dip.") is None
+
+    post_trade = {"presetKey": "post_trade_analysis", "prompt": "Review."}
+    resolved = effective_pipeline(blank + [post_trade], "  Buy the dip. ")
+    assert [step.get("prompt") for step in resolved] == ["Buy the dip.", "Review."]
+    assert resolved[-1] is post_trade
+
+
+def test_blank_decision_steps_are_named_only_beside_an_instruction():
+    from dashboard.backend.domain.agents.defaults import blank_decision_step_numbers
+
+    post_trade = {"presetKey": "post_trade_analysis", "prompt": ""}
+    assert blank_decision_step_numbers(None) == []
+    assert blank_decision_step_numbers([{"prompt": ""}]) == []  # all blank: default
+    assert blank_decision_step_numbers(
+        [{"prompt": "Pick candidates"}, post_trade, {"prompt": " "}]
+    ) == [3]
+    assert blank_decision_step_numbers([{"prompt": "Go"}, post_trade]) == []
+
+
+def test_default_wording_under_another_contract_is_not_the_default():
+    """The flag claims the run made the default's request; label, prompt and
+    output format all reach the model, so all three must match."""
+    from dashboard.backend.domain.agents.defaults import is_default_instruction_pipeline
+
+    for field, value in (("outputFormat", "JSON: {}"), ("label", "Mine")):
+        step = default_starter_pipeline()[0]
+        step[field] = value
+        assert not is_default_instruction_pipeline([step])
+    step = default_starter_pipeline()[0]
+    step["id"] = "renamed"
+    step["presetKey"] = "custom"
+    assert is_default_instruction_pipeline([step])
 
 
 def test_unedited_starter_agent_counts_as_the_default_instruction():
