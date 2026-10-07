@@ -13,6 +13,7 @@ from dashboard.backend.api.routers.discord import router as discord_router
 from dashboard.backend.api.routers.credits import router as credits_router
 from dashboard.backend.api.routers.admin_credits import router as admin_credits_router
 from dashboard.backend.api.routers.admin_model_providers import router as admin_model_providers_router
+from dashboard.backend.api.routers.admin_traces import router as admin_traces_router
 from dashboard.backend.api.routers.model_credentials import router as model_credentials_router
 from dashboard.backend.api.routers.environments import router as environments_router
 from dashboard.backend.api.routers.external_backtest import router as external_backtest_router
@@ -39,6 +40,7 @@ api_router.include_router(discord_router)
 api_router.include_router(credits_router)
 api_router.include_router(admin_credits_router)
 api_router.include_router(admin_model_providers_router)
+api_router.include_router(admin_traces_router)
 api_router.include_router(model_credentials_router)
 api_router.include_router(agent_versions_router)
 api_router.include_router(external_backtest_router)

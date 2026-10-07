@@ -127,6 +127,40 @@ class PostgresTraceStore:
                 row = cur.fetchone()
         return _public_trace(row) if row else None
 
+    def list_traces(
+        self,
+        *,
+        agent_id: Optional[str] = None,
+        run_id: Optional[str] = None,
+        status: Optional[str] = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> Dict[str, Any]:
+        limit = max(1, min(int(limit), 100))
+        offset = max(0, int(offset))
+        clauses = []
+        params: list[Any] = []
+        for column, value in (("agent_id", agent_id), ("run_id", run_id), ("status", status)):
+            if value is not None:
+                clauses.append(f"{column} = %s")
+                params.append(value)
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        with self._get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"SELECT * FROM agent_traces {where} "
+                    "ORDER BY created_at DESC, trace_id DESC LIMIT %s OFFSET %s",
+                    (*params, limit + 1, offset),
+                )
+                rows = cur.fetchall()
+        has_more = len(rows) > limit
+        items = [_public_trace(row) for row in rows[:limit]]
+        return {
+            "items": items,
+            "has_more": has_more,
+            "next_cursor": str(offset + limit) if has_more else None,
+        }
+
     def update_trace(
         self,
         trace_id: str,

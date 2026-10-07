@@ -115,3 +115,14 @@ def test_update_trace_closes_the_envelope(trace_store):
     assert updated["status"] == "completed"
     assert updated["ended_at"] == "2026-10-07T12:00:00+00:00"
     assert json.loads(updated["final_output_summary"]) == {"decision_count": 1}
+
+
+def test_list_traces_filters_and_returns_cursor(trace_store):
+    trace_store.create_trace(trace_id="trace_list_1", run_id="run_list_1", agent_id="agent_a")
+    trace_store.create_trace(trace_id="trace_list_2", run_id="run_list_2", agent_id="agent_b")
+
+    page = trace_store.list_traces(agent_id="agent_a", limit=1)
+
+    assert [item["trace_id"] for item in page["items"]] == ["trace_list_1"]
+    assert page["has_more"] is False
+    assert page["next_cursor"] is None
