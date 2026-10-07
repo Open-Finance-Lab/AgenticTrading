@@ -32,6 +32,7 @@ from dashboard.backend.infrastructure.market_data.alpaca_bars import (
     configured_feed_name,
 )
 from dashboard.backend.infrastructure.market_data.provider import (
+    default_backtest_window,
     settled_exclusive_end,
     warmup_fetch_start,
 )
@@ -53,7 +54,12 @@ WARM_SOURCE_TIMEFRAME = "5m"
 
 
 def _defaults_window():
-    """``(symbols, start, end)`` from ``config/defaults.json``, or None."""
+    """The modal's ``(symbols, start, end)``, or None.
+
+    Symbols from ``config/defaults.json``; dates from ``default_backtest_window``,
+    the same rolling week ``/config/defaults`` serves -- the file's own dates
+    are no longer what the modal shows.
+    """
     try:
         payload = json.loads(
             (CONFIG_DIR / "defaults.json").read_text(encoding="utf-8")
@@ -66,10 +72,9 @@ def _defaults_window():
         for symbol in (settings.get("assetList") or [])
         if str(symbol).strip()
     ]
-    start = str(settings.get("startDate") or "").strip()
-    end = str(settings.get("endDate") or "").strip()
-    if not symbols or not start or not end:
+    if not symbols:
         return None
+    start, end = default_backtest_window()
     return symbols, start, end
 
 

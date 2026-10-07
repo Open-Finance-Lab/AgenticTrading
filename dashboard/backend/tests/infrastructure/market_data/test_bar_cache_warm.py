@@ -10,6 +10,7 @@ import pytest
 from dashboard.backend.infrastructure.llm.validator import DJIA_30
 from dashboard.backend.infrastructure.market_data import bar_cache, bar_cache_warm
 from dashboard.backend.infrastructure.market_data.provider import (
+    default_backtest_window,
     settled_exclusive_end,
     warmup_fetch_start,
 )
@@ -128,13 +129,14 @@ def test_warm_bar_cache_is_a_no_op_when_disabled(monkeypatch):
 def test_the_first_window_is_the_onboarding_modal():
     settings = _defaults()["defaultSettings"]
     symbols, start, end = bar_cache_warm.warm_windows()[0]
+    modal_start, modal_end = default_backtest_window()
     assert symbols == [s.upper() for s in settings["assetList"]]
     # The engine fetches its bars from the indicator warm-up start (#540), and
     # the cache is keyed on the requested start; the end is the run's
     # inclusive date, which `warm_bar_cache` converts once.
     assert (start, end) == (
-        warmup_fetch_start(settings["startDate"]),
-        settings["endDate"],
+        warmup_fetch_start(modal_start),
+        modal_end,
     )
 
 
@@ -143,10 +145,9 @@ def test_the_second_window_is_the_index_baseline_over_the_same_dates():
     over the run's own window (engine.py passes start_date/provider_end_date).
     Unpadded: the baseline computes no indicators, so it is not warmed from
     the agent's padded start."""
-    settings = _defaults()["defaultSettings"]
     symbols, start, end = bar_cache_warm.warm_windows()[1]
     assert symbols == list(DJIA_30)
-    assert (start, end) == (settings["startDate"], settings["endDate"])
+    assert (start, end) == default_backtest_window()
 
 
 def test_the_third_window_is_the_bare_post_default():

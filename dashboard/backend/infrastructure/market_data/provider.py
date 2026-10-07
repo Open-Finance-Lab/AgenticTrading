@@ -11,6 +11,8 @@ from typing import Protocol
 import pandas as pd
 import pytz
 
+from dashboard.backend.domain.leaderboard.us_market_calendar import latest_complete_week
+
 from .alpaca_bars import AlpacaDataLoader
 from .frequency import normalize_bar_timeframe
 from .profiles import ALPACA, IFIND_ASHARE, VNPY_SIMULATION
@@ -69,6 +71,16 @@ def parse_ymd(value: object) -> date:
 def market_today(market: object = None) -> date:
     """Today's date on ``market``'s own clock."""
     return datetime.now(pytz.timezone(timezone_for_market(market))).date()
+
+
+def default_backtest_window(today: date | None = None) -> tuple[str, str]:
+    """The Run Backtest modal's default period: the latest complete US trading week.
+
+    One owner for the modal (`/config/defaults`) and the boot-time bar cache
+    warm, so the warm holds the window a first visitor actually runs.
+    """
+    start, end = latest_complete_week(today or market_today("US"))
+    return start.isoformat(), end.isoformat()
 
 
 def settled_exclusive_end(

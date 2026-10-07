@@ -76,3 +76,25 @@ def nyse_holidays(year: int) -> FrozenSet[date]:
 
 def is_trading_day(day: date) -> bool:
     return day.weekday() < 5 and day not in nyse_holidays(day.year)
+
+
+def latest_complete_week(today: date) -> tuple[date, date]:
+    """First and last trading day of the most recent Mon-Fri week that has ended.
+
+    The default backtest window. On a weekday the current week is still
+    trading, so the answer is the week before it; on a weekend it is the week
+    that just closed. Holidays trim the ends (Good Friday makes the week end
+    on Thursday); a week with no session at all is skipped.
+    """
+    monday = today - timedelta(days=today.weekday())
+    if today.weekday() < 5:
+        monday -= timedelta(days=7)
+    while True:
+        sessions = [
+            day
+            for day in (monday + timedelta(days=offset) for offset in range(5))
+            if is_trading_day(day)
+        ]
+        if sessions:
+            return sessions[0], sessions[-1]
+        monday -= timedelta(days=7)

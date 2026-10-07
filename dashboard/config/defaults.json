@@ -15,7 +15,8 @@
   "notes": [
     "These are the seed defaults loaded when the website initializes",
     "Update the defaultRuns IDs if you want different baseline comparisons",
-    "Update defaultSettings to change the default date range and assets",
+    "Update defaultSettings to change the default assets",
+    "startDate/endDate here are NOT the Run Backtest modal's period: /config/defaults overrides them with the latest complete US trading week (provider.default_backtest_window). Only the Trading Algo panel (algo_service) still reads them",
     "The frontend will load these values if no other runs are available"
   ]
 }
