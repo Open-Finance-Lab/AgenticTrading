@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib.util
 import os
+from time import perf_counter
 from datetime import date, datetime, timedelta
 from typing import Protocol
 
@@ -119,6 +120,56 @@ class MarketDataProvider(Protocol):
         end: str,
     ) -> dict[str, pd.DataFrame]:
         """Return symbol-keyed OHLCV frames for the half-open window ``[start, end)``."""
+
+
+class TraceAwareMarketDataProvider:
+    """Observability wrapper that preserves the provider contract."""
+
+    def __init__(self, provider: MarketDataProvider, *, run_id: str, source: str):
+        self._provider = provider
+        self._run_id = run_id
+        self._source = source
+
+    def __getattr__(self, name: str):
+        return getattr(self._provider, name)
+
+    def fetch_bars(self, symbols, start, end, **kwargs):
+        from dashboard.backend.domain.traces import service as trace_service
+
+        started = perf_counter()
+        symbols = list(symbols)
+        query = {
+            "symbols": [str(symbol) for symbol in symbols],
+            "start": str(start), "end": str(end),
+        }
+        query.update({key: str(value) for key, value in kwargs.items()})
+        key = f"{self._source}:{start}:{end}:{','.join(query['symbols'])}"
+        def record(**event):
+            try:
+                trace_service.record_data_retrieval(**event)
+            except Exception:
+                pass
+        try:
+            frames = self._provider.fetch_bars(symbols, start, end, **kwargs)
+            record(
+                run_id=self._run_id, source=self._source, query_summary=query,
+                result_summary={
+                    "symbol_count": len(frames or {}),
+                    "bar_counts": {str(symbol): int(len(frame)) for symbol, frame in (frames or {}).items()},
+                }, duration_ms=(perf_counter() - started) * 1000, idempotency_key=key,
+            )
+            return frames
+        except Exception:
+            record(
+                run_id=self._run_id, source=self._source, query_summary=query,
+                result_summary={}, duration_ms=(perf_counter() - started) * 1000,
+                idempotency_key=key, outcome="failed",
+            )
+            raise
+
+
+def with_trace(provider: MarketDataProvider, *, run_id: str, source: str) -> MarketDataProvider:
+    return TraceAwareMarketDataProvider(provider, run_id=run_id, source=source)
 
 
 class UnsupportedMarketDataSource(ValueError):

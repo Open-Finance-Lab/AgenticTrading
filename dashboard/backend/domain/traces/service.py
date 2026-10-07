@@ -120,3 +120,67 @@ def fail_trace(run_id: str, error_code: str = "run_failed") -> Optional[Dict[str
         idempotency_key=f"run_failed:{run_id}:{error_code}",
     )
     return trace_store.update_trace(trace["trace_id"], status="failed")
+
+
+def _best_effort_event(**kwargs: Any) -> Optional[Dict[str, Any]]:
+    """Trace observability must never make the underlying run fail."""
+    try:
+        return trace_store.append_event(**kwargs)
+    except Exception:
+        return None
+
+
+def record_tool_call(
+    *, run_id: str, tool_name: str, input_summary: Dict[str, Any],
+    idempotency_key: str, actor_type: str = "agent",
+) -> Optional[Dict[str, Any]]:
+    trace = trace_for_run(run_id)
+    if trace is None:
+        return None
+    return _best_effort_event(
+        trace_id=trace["trace_id"], event_type="tool_call", actor_type=actor_type,
+        payload={"tool_name": tool_name, "input_summary": input_summary},
+        idempotency_key=f"tool_call:{run_id}:{idempotency_key}",
+    )
+
+
+def record_tool_result(
+    *, run_id: str, tool_name: str, outcome: str, duration_ms: float,
+    result_summary: Optional[Dict[str, Any]] = None,
+    error_code: Optional[str] = None, idempotency_key: str,
+) -> Optional[Dict[str, Any]]:
+    trace = trace_for_run(run_id)
+    if trace is None:
+        return None
+    payload: Dict[str, Any] = {
+        "tool_name": tool_name, "outcome": outcome,
+        "duration_ms": max(0.0, round(float(duration_ms), 3)),
+        "result_summary": result_summary or {},
+    }
+    if error_code:
+        payload["error_code"] = error_code
+    return _best_effort_event(
+        trace_id=trace["trace_id"], event_type="tool_result", actor_type="system",
+        payload=payload,
+        idempotency_key=f"tool_result:{run_id}:{idempotency_key}",
+    )
+
+
+def record_data_retrieval(
+    *, run_id: str, source: str, query_summary: Dict[str, Any],
+    result_summary: Dict[str, Any], duration_ms: float, idempotency_key: str,
+    outcome: str = "success",
+) -> Optional[Dict[str, Any]]:
+    trace = trace_for_run(run_id)
+    if trace is None:
+        return None
+    return _best_effort_event(
+        trace_id=trace["trace_id"], event_type="data_retrieval", actor_type="system",
+        payload={
+            "source": source, "query_summary": query_summary,
+            "result_summary": result_summary,
+            "duration_ms": max(0.0, round(float(duration_ms), 3)),
+            "outcome": outcome,
+        },
+        idempotency_key=f"data_retrieval:{run_id}:{idempotency_key}",
+    )

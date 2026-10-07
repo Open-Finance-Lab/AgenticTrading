@@ -112,6 +112,7 @@ from dashboard.backend.domain.backtesting.market_rules import (
 from dashboard.backend.infrastructure.market_data.provider import (
     ALPACA,
     create_market_data_provider,
+    with_trace,
     exclusive_end,
     parse_ymd,
     settled_exclusive_end,
@@ -511,12 +512,16 @@ class HourlyBacktester:
         """Create the selected provider without breaking legacy test doubles."""
         factory = create_market_data_provider
         if _accepts_keyword(factory, "source_timeframe"):
-            return factory(
+            provider = factory(
                 self.data_source,
                 self.profile.universe,
                 source_timeframe=self.requested_source_timeframe,
             )
-        return factory(self.data_source, self.profile.universe)
+        else:
+            provider = factory(self.data_source, self.profile.universe)
+        if self.live_run_id:
+            provider = with_trace(provider, run_id=self.live_run_id, source=self.data_source)
+        return provider
     
     def _serialize_trades(self, trades: List[Dict]) -> List[Dict]:
         serialized = []
