@@ -302,10 +302,6 @@ _CLAIM_DISCLAIMERS = (
     # needs would delete the disclaimer in order to satisfy the guard against the
     # claim.
     "No real money. Simulated money only.",
-    # Hero's gloss on what a Lab paper-trading run is. Accurate as written: the
-    # prices are real, the money is not, and the sentence says exactly that.
-    '<span className="text-primary font-semibold">paper trading</span> '
-    '{" "}— practice trading with simulated money at live market prices —',
 )
 
 # Claim shapes, not vocabulary. "live trading" is deliberately absent: it is now

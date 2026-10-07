@@ -24,7 +24,7 @@ const ACTS = [
     // Not "everyone else's agents": no user agent is on any board, and the
     // roster is curated (`dashboard/config/leaderboard.json`). The comparison
     // that actually exists is against the AI models and the passive baselines.
-    body: "The same days and the same starting capital as every AI model on the board.",
+    body: "Compare your run with the AI models and passive baselines on the Competition board.",
   },
 ] as const;
 

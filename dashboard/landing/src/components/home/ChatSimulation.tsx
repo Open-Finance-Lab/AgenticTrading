@@ -128,11 +128,11 @@ function ChatSimulation() {
           <AgentBubble>
             <div className="flex items-center gap-2 text-foreground mb-1.5">
               <LineChart className="w-3.5 h-3.5 text-primary" />
-              <span>Running backtest · 24 months, $10k start...</span>
+              <span>Running backtest · 14 days, $3k start...</span>
             </div>
             <div className="flex items-center gap-2 text-xs">
               <CheckCircle2 className="w-3.5 h-3.5 text-muted-foreground shrink-0" />
-              <span>22 trades · avg hold 63 days</span>
+              <span>22 trades · avg hold 2 days</span>
             </div>
           </AgentBubble>
         </FadeIn>
@@ -150,10 +150,10 @@ function ChatSimulation() {
             </div>
             <EquityCurve />
             <div className="grid grid-cols-4 gap-2 text-xs mt-1">
-              <div>Return <span className="text-positive font-semibold">+41.2%</span></div>
+              <div>Return <span className="text-positive font-semibold">+3.8%</span></div>
               <div>Sharpe <span className="text-foreground font-semibold">1.31</span></div>
               <div>Win Rate <span className="text-foreground font-semibold">68%</span></div>
-              <div>Max DD <span className="text-destructive font-semibold">-9.4%</span></div>
+              <div>Max DD <span className="text-destructive font-semibold">-1.9%</span></div>
             </div>
           </AgentBubble>
         </FadeIn>
@@ -163,14 +163,12 @@ function ChatSimulation() {
         <FadeIn>
           <AgentBubble>
             <p className="text-foreground mb-3">
-              Looks solid. Want me to run this in{" "}
-              <span className="text-primary font-semibold">paper trading</span>
-              {" "}— practice trading with simulated money at live market prices —
-              and alert you when Berkshire&apos;s next 13F drops?
+              Looks solid. Want me to tweak the rules and run it again on a
+              different window?
             </p>
             <div className="flex flex-wrap gap-2">
               <span className="inline-flex items-center rounded-md border border-primary/50 bg-primary/10 px-3 py-1.5 text-xs font-semibold text-primary">
-                Yes, start now
+                Yes, tweak it
               </span>
               <span className="inline-flex items-center rounded-md border border-border px-3 py-1.5 text-xs font-semibold text-muted-foreground">
                 Not yet

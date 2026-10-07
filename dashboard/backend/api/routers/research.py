@@ -401,17 +401,18 @@ def _send_report_ready_email(to: str, template_name: str) -> bool:
     """Drive the async sender from sync code. Never raises: False on failure."""
     from dashboard.backend.infrastructure.email.sender import send_email
 
-    base = os.getenv("PUBLIC_APP_URL", "https://agentic-trading-lab.vercel.app")
-    link = f"{base}/app?view=research"
+    base = os.getenv("PUBLIC_APP_URL", "https://agentic-trading-lab.vercel.app").rstrip("/")
+    link = f"{base}/app?view=agents"
     try:
         # Only ever called from the sweeper thread, which has no running
         # event loop; asyncio.run would raise inside one, so it is guarded.
         return bool(asyncio.run(send_email(
             to,
             f"[ATL] Your research report is ready — {template_name}",
-            "Your research report has completed.\n\n"
-            f"Open it here: {link}\n"
-            "(The report page offers Markdown / DOCX / PDF downloads.)\n",
+            "Your Agentic Trading Lab research report has completed.\n\n"
+            f"Open My Agents here: {link}\n"
+            "Click Open workbench on the agent, then the run under Runs, to read the report "
+            "and download it.\n",
         )))
     except Exception as exc:  # noqa: BLE001 - the outbox retries; never kill the sweep
         print(f"ERROR: research report email raised: {exc!r}")
