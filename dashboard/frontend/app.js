@@ -279,9 +279,10 @@ const SIMPLE_INSTRUCTION_OUTPUT_FORMAT =
 window.SIMPLE_INSTRUCTION_PRESET_KEY = SIMPLE_INSTRUCTION_PRESET_KEY;
 window.SIMPLE_INSTRUCTION_OUTPUT_FORMAT = SIMPLE_INSTRUCTION_OUTPUT_FORMAT;
 // Mirrors DEFAULT_STARTER_INSTRUCTION in dashboard/backend/domain/agents/defaults.py,
-// which is what actually seeds new agents. The copy here populates the
-// "See the default instruction" disclosure in Configure's empty-instruction
-// state, so the editor can show what an agent falls back to without a pipeline.
+// which seeds new agents and is also what an LLM backtest with an empty
+// instruction runs (backtests.py::_default_pipeline_for_empty_instruction). The
+// copy here populates the "See the default instruction" disclosure in
+// Configure's empty-instruction state and the results panel's Instruction row.
 // tests/test_agent_starter_defaults.py pins the two copies together.
 const DEFAULT_STARTER_INSTRUCTION =
   'Manage this account like a disciplined portfolio manager. The goal is to keep pace with, and ideally beat, simply buying equal amounts of every listed stock and holding them.\n\n1. Stay invested. At the start (all cash), buy roughly equal dollar amounts of as many listed stocks as the cash allows, keeping about 3% in cash. Skip a stock if one share costs more than a third of the account.\n2. Holding is the default. Most hours the right move is to change nothing. Never trade on small moves.\n3. Sell a stock only when its trend has clearly broken: price at least 2% below its 20-hour average (sma20) AND momentum (macd) below its signal line (macd_signal). A sell always closes the whole position.\n4. Reinvest cash quickly. When cash is above 10% of the account, buy the stock you own the least of among those with price above sma20, macd above macd_signal and RSI below 75. If none qualifies, buy the stock you own the least of anyway.\n5. Keep any one stock under 35% of the account, and do not add to a stock that is already above 25%.\n6. Do not buy back a stock you sold in the last day, or sell one you bought in the last day (check recent_trades).\n7. An indicator showing 0 does not have enough history yet: ignore it.\n\nOrders: list each stock at most once, use whole-share quantities, and keep the total cost of all buys within available cash. If you make no trades, return one "hold" order for any listed stock. Keep each reason under 15 words.';
@@ -10667,7 +10668,9 @@ async function openRunBacktestModal(agent) {
     syncMarketDataSourceUI({ resetIFindDecisionSource: true });
 
     const pipeline = loadAgentPipelineForBacktest(agent);
-    const prompt = formatPromptFromPipeline(pipeline);
+    // An empty instruction runs the default one (see runBacktest), so preview it.
+    const prompt = formatPromptFromPipeline(pipeline)
+        || (!isHostedRuntime && !pipeline?.length ? DEFAULT_STARTER_INSTRUCTION : null);
     const promptGroup = document.getElementById('runBacktestPromptGroup');
     const promptPreview = document.getElementById('runBacktestPromptPreview');
     if (prompt) {
@@ -10850,7 +10853,12 @@ async function runBacktest() {
 
     const initialCapital = resolveBacktestCapital(activeAgent);
 
-    const promptSummary = formatPromptFromPipeline(pipeline);
+    // No pipeline on an LLM pipeline-runtime run means the server substitutes
+    // the default instruction, so show that rather than hiding the row.
+    const promptSummary = formatPromptFromPipeline(pipeline)
+        || (!pipeline?.length && !isRuleBasedDecision && !isHostedRuntime
+            ? DEFAULT_STARTER_INSTRUCTION
+            : null);
     const universeLabel = isIFind
         ? selectedIFindProfile.name
         : (document.getElementById('builtinTab')?.classList.contains('active')
