@@ -9,6 +9,7 @@ the next loop.
 from __future__ import annotations
 
 import json
+import os
 import re
 import sqlite3
 import uuid
@@ -187,6 +188,7 @@ class TraceStore:
         occurred_at = occurred_at or _utcnow_iso()
         event_id = _new_event_id()
         with self._get_connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
             trace = conn.execute(
                 "SELECT trace_id FROM agent_traces WHERE trace_id = ?", (trace_id,)
             ).fetchone()
@@ -244,4 +246,15 @@ class TraceStore:
         }
 
 
-trace_store = TraceStore()
+def _build_trace_store():
+    database_url = os.getenv("CONTENT_DATABASE_URL")
+    if database_url:
+        from dashboard.backend.domain.traces.repository_postgres import PostgresTraceStore
+
+        print("trace_store backend: postgres")
+        return PostgresTraceStore(database_url)
+    print("trace_store backend: sqlite (ephemeral on Render)")
+    return TraceStore()
+
+
+trace_store = _build_trace_store()
