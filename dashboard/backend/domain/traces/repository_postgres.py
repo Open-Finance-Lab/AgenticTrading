@@ -120,6 +120,44 @@ class PostgresTraceStore:
                 row = cur.fetchone()
         return _public_trace(row) if row else None
 
+    def get_trace_for_run(self, run_id: str) -> Optional[Dict[str, Any]]:
+        with self._get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT * FROM agent_traces WHERE run_id = %s", (run_id,))
+                row = cur.fetchone()
+        return _public_trace(row) if row else None
+
+    def update_trace(
+        self,
+        trace_id: str,
+        *,
+        status: Optional[str] = None,
+        final_output_summary: Optional[Dict[str, Any]] = None,
+        ended_at: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        summary_json = (
+            _json_text(final_output_summary, field="final_output_summary")
+            if final_output_summary is not None
+            else None
+        )
+        if final_output_summary is not None:
+            _reject_sensitive(final_output_summary, "final_output_summary")
+        with self._get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE agent_traces
+                    SET status = COALESCE(%s, status),
+                        final_output_summary = COALESCE(%s, final_output_summary),
+                        ended_at = COALESCE(%s, ended_at)
+                    WHERE trace_id = %s
+                    """,
+                    (status, summary_json, ended_at, trace_id),
+                )
+                cur.execute("SELECT * FROM agent_traces WHERE trace_id = %s", (trace_id,))
+                row = cur.fetchone()
+        return _public_trace(row) if row else None
+
     def append_event(
         self,
         *,

@@ -100,3 +100,18 @@ def test_payload_is_rejected_when_it_contains_credentials(trace_store):
             actor_type="tool",
             payload={"authorization": "Bearer secret"},
         )
+
+
+def test_update_trace_closes_the_envelope(trace_store):
+    trace_store.create_trace(trace_id="trace_test_6", run_id="run_6")
+
+    updated = trace_store.update_trace(
+        "trace_test_6",
+        status="completed",
+        final_output_summary={"decision_count": 1},
+        ended_at="2026-10-07T12:00:00+00:00",
+    )
+
+    assert updated["status"] == "completed"
+    assert updated["ended_at"] == "2026-10-07T12:00:00+00:00"
+    assert json.loads(updated["final_output_summary"]) == {"decision_count": 1}
