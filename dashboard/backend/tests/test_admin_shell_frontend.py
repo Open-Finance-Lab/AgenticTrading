@@ -28,13 +28,15 @@ def test_hash_router_knows_the_analytics_routes_plus_providers_and_the_profile()
     assert _eval("window.AdminShell.ROUTES") == [
         "overview", "sources", "retention", "credits", "lifecycle", "health", "users", "providers",
         # The absorbed console routes (design N2/PR2).
-        "account", "activity",
+        "account", "activity", "traces",
     ]
     assert _eval("window.AdminShell.parseHash('')") == {"route": "overview", "id": None, "query": {}}
     assert _eval("window.AdminShell.parseHash('#health')") == {"route": "health", "id": None, "query": {}}
     assert _eval("window.AdminShell.parseHash('#providers')") == {"route": "providers", "id": None, "query": {}}
     assert _eval("window.AdminShell.parseHash('#account')") == {"route": "account", "id": None, "query": {}}
     assert _eval("window.AdminShell.parseHash('#activity')") == {"route": "activity", "id": None, "query": {}}
+    assert _eval("window.AdminShell.parseHash('#traces')") == {"route": "traces", "id": None, "query": {}}
+    assert _eval("window.AdminShell.parseHash('#traces/trace_1')") == {"route": "traces", "id": "trace_1", "query": {}}
     assert _eval("window.AdminShell.parseHash('#users')") == {"route": "users", "id": None, "query": {}}
     assert _eval("window.AdminShell.parseHash('#users/42')") == {"route": "users", "id": "42", "query": {}}
     assert _eval("window.AdminShell.parseHash('#users/abc')") == {"route": "users", "id": None, "query": {}}

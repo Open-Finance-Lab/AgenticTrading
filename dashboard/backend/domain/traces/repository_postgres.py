@@ -29,11 +29,6 @@ class PostgresTraceStore:
     def _init_schema(self) -> None:
         with self._get_connection() as conn:
             with conn.cursor() as cur:
-                cur.execute("SELECT status FROM agent_traces WHERE trace_id = %s", (trace_id,))
-                current = cur.fetchone()
-                if current and current["status"] in {"completed", "failed"}:
-                    if status and status != current["status"]:
-                        status = None
                 cur.execute(
                     """
                     CREATE TABLE IF NOT EXISTS agent_traces (
@@ -188,6 +183,11 @@ class PostgresTraceStore:
             _reject_sensitive(final_output_summary, "final_output_summary")
         with self._get_connection() as conn:
             with conn.cursor() as cur:
+                cur.execute("SELECT status FROM agent_traces WHERE trace_id = %s", (trace_id,))
+                current = cur.fetchone()
+                if current and current["status"] in {"completed", "failed"}:
+                    if status and status != current["status"]:
+                        status = None
                 cur.execute(
                     """
                     UPDATE agent_traces

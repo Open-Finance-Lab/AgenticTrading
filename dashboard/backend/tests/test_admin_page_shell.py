@@ -27,6 +27,7 @@ EXPECTED_SCRIPTS = [
     "js/admin-providers.js?v=1",
     # The absorbed credits console (design N2/PR2).
     "js/admin-credits.js?v=4",
+    "js/admin-traces.js?v=1",
 ]
 
 # This guard's whole job is "no inline script anywhere in this page", so a
@@ -109,7 +110,7 @@ def test_panel_regions_carry_no_numeric_or_percentage_literal():
         "live", "attention", "active-users", "activation", "sources", "retention",
         "value", "lifecycle", "credits", "detail", "users", "profile", "providers",
         # The absorbed credits console's two routes (design N2/PR2).
-        "account", "activity",
+        "account", "activity", "traces",
     ]
     for name, body in regions:
         text = TAG.sub(" ", body)
@@ -253,7 +254,7 @@ def test_the_rail_is_anchors_with_icons_not_a_tablist():
     end = ADMIN_HTML.index("</aside>", start)
     rail = ADMIN_HTML[start:end]
     entries = re.findall(r'<a class="admin-tab[^"]*"[^>]*data-rail="([a-z-]+)"[^>]*>(.*?)</a>', rail, re.S)
-    assert [name for name, _ in entries] == ["analytics", "account", "providers", "activity"]
+    assert [name for name, _ in entries] == ["analytics", "account", "providers", "activity", "traces"]
     for name, body in entries:
         assert "<use href=\"#icon-" in body, name          # every entry has an icon
         assert re.search(r"<span>[^<]+</span>", body), name  # ...and a text label
