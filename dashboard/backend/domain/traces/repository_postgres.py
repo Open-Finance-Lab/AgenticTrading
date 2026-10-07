@@ -29,6 +29,11 @@ class PostgresTraceStore:
     def _init_schema(self) -> None:
         with self._get_connection() as conn:
             with conn.cursor() as cur:
+                cur.execute("SELECT status FROM agent_traces WHERE trace_id = %s", (trace_id,))
+                current = cur.fetchone()
+                if current and current["status"] in {"completed", "failed"}:
+                    if status and status != current["status"]:
+                        status = None
                 cur.execute(
                     """
                     CREATE TABLE IF NOT EXISTS agent_traces (
@@ -43,7 +48,8 @@ class PostgresTraceStore:
                         final_output_summary TEXT,
                         started_at TEXT NOT NULL,
                         ended_at TEXT,
-                        created_at TEXT NOT NULL
+                        created_at TEXT NOT NULL,
+                        parent_trace_id TEXT
                     )
                     """
                 )
@@ -59,6 +65,7 @@ class PostgresTraceStore:
                         step_id TEXT,
                         decision_id TEXT,
                         artifact_id TEXT,
+                        parent_event_id TEXT,
                         payload_json TEXT NOT NULL DEFAULT '{}',
                         occurred_at TEXT NOT NULL,
                         ingested_at TEXT NOT NULL,
@@ -77,6 +84,8 @@ class PostgresTraceStore:
                     "CREATE INDEX IF NOT EXISTS idx_agent_traces_agent_created "
                     "ON agent_traces(agent_id, created_at DESC)"
                 )
+                cur.execute("ALTER TABLE agent_traces ADD COLUMN IF NOT EXISTS parent_trace_id TEXT")
+                cur.execute("ALTER TABLE agent_trace_events ADD COLUMN IF NOT EXISTS parent_event_id TEXT")
 
     def create_trace(
         self,
@@ -89,6 +98,7 @@ class PostgresTraceStore:
         trace_kind: str = "trading_run",
         initial_input: Optional[Dict[str, Any]] = None,
         started_at: Optional[str] = None,
+        parent_trace_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         import uuid
 
@@ -103,12 +113,12 @@ class PostgresTraceStore:
                     """
                     INSERT INTO agent_traces (
                         trace_id, agent_id, agent_version_id, run_id, user_id,
-                        trace_kind, status, initial_input_json, started_at, created_at
-                    ) VALUES (%s, %s, %s, %s, %s, %s, 'running', %s, %s, %s)
+                        trace_kind, status, initial_input_json, started_at, created_at, parent_trace_id
+                    ) VALUES (%s, %s, %s, %s, %s, %s, 'running', %s, %s, %s, %s)
                     RETURNING *
                     """,
                     (trace_id, agent_id, agent_version_id, run_id, user_id,
-                     trace_kind, input_json, started_at, _utcnow_iso()),
+                     trace_kind, input_json, started_at, _utcnow_iso(), parent_trace_id),
                 )
                 row = cur.fetchone()
         return _public_trace(row)
@@ -206,6 +216,7 @@ class PostgresTraceStore:
         occurred_at: Optional[str] = None,
         idempotency_key: Optional[str] = None,
         schema_version: int = 1,
+        parent_event_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         payload = payload or {}
         _reject_sensitive(payload)
@@ -235,13 +246,13 @@ class PostgresTraceStore:
                     """
                     INSERT INTO agent_trace_events (
                         event_id, trace_id, sequence_no, event_type, actor_type,
-                        actor_id, step_id, decision_id, artifact_id, payload_json,
+                        actor_id, step_id, decision_id, artifact_id, parent_event_id, payload_json,
                         occurred_at, ingested_at, idempotency_key, schema_version
-                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     RETURNING *
                     """,
                     (event_id, trace_id, sequence_no, event_type, actor_type,
-                     actor_id, step_id, decision_id, artifact_id, payload_json,
+                     actor_id, step_id, decision_id, artifact_id, parent_event_id, payload_json,
                      occurred_at, _utcnow_iso(), idempotency_key, int(schema_version)),
                 )
                 saved = cur.fetchone()

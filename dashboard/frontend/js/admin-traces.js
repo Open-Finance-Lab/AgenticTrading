@@ -91,7 +91,7 @@
       heading.appendChild(node('strong', '', shell().humanize(event.event_type)));
       heading.appendChild(node('time', '', shell().formatTimestamp(event.occurred_at)));
       item.appendChild(heading);
-      const meta = [event.actor_type, event.step_id, event.decision_id, event.artifact_id]
+      const meta = [event.actor_type, event.step_id, event.decision_id, event.artifact_id, event.parent_event_id ? `parent ${event.parent_event_id}` : null]
         .filter((part) => part !== null && part !== undefined && part !== '')
         .map((part) => String(part));
       if (meta.length) item.appendChild(node('p', 'trace-event-meta', meta.join(' · ')));
@@ -134,6 +134,11 @@
     const copy = node('div');
     copy.appendChild(node('h1', '', value(trace?.trace_id)));
     copy.appendChild(node('p', 'muted', `${value(trace?.agent_id)} · ${value(trace?.run_id)}`));
+    if (trace?.parent_trace_id) {
+      const parent = node('a', 'trace-parent-link', `Parent trace: ${trace.parent_trace_id}`);
+      parent.setAttribute('href', `#traces/${encodeURIComponent(trace.parent_trace_id)}`);
+      copy.appendChild(parent);
+    }
     head.append(copy, statusBadge(trace?.status));
     section.appendChild(head);
     const metrics = node('div', 'trace-metrics');

@@ -127,6 +127,12 @@ class TraceStore:
                     ON agent_traces(agent_id, created_at DESC);
                 """
             )
+            columns = {row[1] for row in conn.execute("PRAGMA table_info(agent_traces)")}
+            if "parent_trace_id" not in columns:
+                conn.execute("ALTER TABLE agent_traces ADD COLUMN parent_trace_id TEXT")
+            event_columns = {row[1] for row in conn.execute("PRAGMA table_info(agent_trace_events)")}
+            if "parent_event_id" not in event_columns:
+                conn.execute("ALTER TABLE agent_trace_events ADD COLUMN parent_event_id TEXT")
 
     def create_trace(
         self,
@@ -139,6 +145,7 @@ class TraceStore:
         trace_kind: str = "trading_run",
         initial_input: Optional[Dict[str, Any]] = None,
         started_at: Optional[str] = None,
+        parent_trace_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         trace_id = trace_id or f"trace_{uuid.uuid4().hex[:16]}"
         started_at = started_at or _utcnow_iso()
@@ -149,11 +156,11 @@ class TraceStore:
                 """
                 INSERT INTO agent_traces (
                     trace_id, agent_id, agent_version_id, run_id, user_id,
-                    trace_kind, status, initial_input_json, started_at, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, 'running', ?, ?, ?)
+                    trace_kind, status, initial_input_json, started_at, created_at, parent_trace_id
+                ) VALUES (?, ?, ?, ?, ?, ?, 'running', ?, ?, ?, ?)
                 """,
                 (trace_id, agent_id, agent_version_id, run_id, user_id,
-                 trace_kind, input_json, started_at, _utcnow_iso()),
+                 trace_kind, input_json, started_at, _utcnow_iso(), parent_trace_id),
             )
             row = conn.execute(
                 "SELECT * FROM agent_traces WHERE trace_id = ?", (trace_id,)
@@ -222,6 +229,12 @@ class TraceStore:
         if final_output_summary is not None:
             _reject_sensitive(final_output_summary, "final_output_summary")
         with self._get_connection() as conn:
+            current = conn.execute(
+                "SELECT status FROM agent_traces WHERE trace_id = ?", (trace_id,)
+            ).fetchone()
+            if current and current["status"] in {"completed", "failed"}:
+                if status and status != current["status"]:
+                    status = None
             conn.execute(
                 """
                 UPDATE agent_traces
@@ -251,6 +264,7 @@ class TraceStore:
         occurred_at: Optional[str] = None,
         idempotency_key: Optional[str] = None,
         schema_version: int = 1,
+        parent_event_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         payload = payload or {}
         _reject_sensitive(payload)
@@ -282,12 +296,12 @@ class TraceStore:
                 """
                 INSERT INTO agent_trace_events (
                     event_id, trace_id, sequence_no, event_type, actor_type,
-                    actor_id, step_id, decision_id, artifact_id, payload_json,
+                    actor_id, step_id, decision_id, artifact_id, parent_event_id, payload_json,
                     occurred_at, ingested_at, idempotency_key, schema_version
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (event_id, trace_id, sequence_no, event_type, actor_type,
-                 actor_id, step_id, decision_id, artifact_id, payload_json,
+                 actor_id, step_id, decision_id, artifact_id, parent_event_id, payload_json,
                  occurred_at, _utcnow_iso(), idempotency_key, int(schema_version)),
             )
             saved = conn.execute(

@@ -117,6 +117,22 @@ def test_update_trace_closes_the_envelope(trace_store):
     assert json.loads(updated["final_output_summary"]) == {"decision_count": 1}
 
 
+def test_parent_links_and_terminal_status_are_stable(trace_store):
+    parent = trace_store.create_trace(trace_id="trace_parent", run_id="run_parent")
+    child = trace_store.create_trace(
+        trace_id="trace_child", run_id="run_child", parent_trace_id=parent["trace_id"]
+    )
+    event = trace_store.append_event(
+        trace_id=child["trace_id"], event_type="tool_call", actor_type="agent",
+        parent_event_id="event_parent", payload={}, idempotency_key="child-call",
+    )
+    assert child["parent_trace_id"] == "trace_parent"
+    assert event["parent_event_id"] == "event_parent"
+    trace_store.update_trace(child["trace_id"], status="failed")
+    stable = trace_store.update_trace(child["trace_id"], status="completed")
+    assert stable["status"] == "failed"
+
+
 def test_list_traces_filters_and_returns_cursor(trace_store):
     trace_store.create_trace(trace_id="trace_list_1", run_id="run_list_1", agent_id="agent_a")
     trace_store.create_trace(trace_id="trace_list_2", run_id="run_list_2", agent_id="agent_b")

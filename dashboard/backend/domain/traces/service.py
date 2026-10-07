@@ -2,9 +2,14 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
 from dashboard.backend.domain.traces.repository import trace_store
+
+
+def _utcnow_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
 
 
 def start_trace_for_run(
@@ -104,7 +109,7 @@ def complete_trace(run_id: str, result_summary: Optional[Dict[str, Any]] = None)
         idempotency_key=f"run_completed:{run_id}",
     )
     return trace_store.update_trace(
-        trace["trace_id"], status="completed", final_output_summary=result_summary or {}
+        trace["trace_id"], status="completed", final_output_summary=result_summary or {}, ended_at=_utcnow_iso()
     )
 
 
@@ -119,7 +124,7 @@ def fail_trace(run_id: str, error_code: str = "run_failed") -> Optional[Dict[str
         payload={"error_code": error_code},
         idempotency_key=f"run_failed:{run_id}:{error_code}",
     )
-    return trace_store.update_trace(trace["trace_id"], status="failed")
+    return trace_store.update_trace(trace["trace_id"], status="failed", ended_at=_utcnow_iso())
 
 
 def _best_effort_event(**kwargs: Any) -> Optional[Dict[str, Any]]:
