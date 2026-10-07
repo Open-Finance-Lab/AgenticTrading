@@ -1,20 +1,22 @@
 import { motion } from "framer-motion";
 import { Bot, User, Search, LineChart, CheckCircle2, MessageSquare } from "lucide-react";
 import { useState, useEffect } from "react";
+import { STORY_SPECS } from "./storyline";
 
 /**
  * The agent conversation demo. Lived inside Hero.tsx until the board took the
  * hero's right column; it now runs under the Talk act, which is the beat it
  * actually illustrates.
  *
- * Step 4's simulated-money gloss is one of the two sentences allowlisted by
- * `test_landing_copy_register.py::_CLAIM_DISCLAIMERS`. Keep it byte-identical —
- * an allowlist entry that stops matching silently re-arms the brokered-claim
- * ban against a sentence that was always fine.
+ * The run figures (window, capital, trades, hold, metrics) are read from
+ * STORY_SPECS rather than typed here: this is the same Berkshire 13F run that
+ * DiscordMock and Test report, and hardcoded copies drifted into two different
+ * runs of one strategy on the same scroll.
  *
- * (This comment deliberately does not spell the banned phrase out: the scan
- * reads the whole file, comments included, and an explanatory mention reddens
- * the guard exactly as a real claim would.)
+ * Nothing in this file is on `test_landing_copy_register.py::_CLAIM_DISCLAIMERS`
+ * any more; the closing offer no longer mentions a forward-running mode, so
+ * the brokered-claim scan has nothing here to strip. (Do not spell the banned
+ * phrase out in a comment: the scan reads the whole file, comments included.)
  */
 
 /** User messages sit on the RIGHT. */
@@ -128,11 +130,11 @@ function ChatSimulation() {
           <AgentBubble>
             <div className="flex items-center gap-2 text-foreground mb-1.5">
               <LineChart className="w-3.5 h-3.5 text-primary" />
-              <span>Running backtest · 14 days, $3k start...</span>
+              <span>Running backtest · {STORY_SPECS.timePeriodLabel}, {STORY_SPECS.initialCapital} start...</span>
             </div>
             <div className="flex items-center gap-2 text-xs">
               <CheckCircle2 className="w-3.5 h-3.5 text-muted-foreground shrink-0" />
-              <span>22 trades · avg hold 2 days</span>
+              <span>{STORY_SPECS.trades} trades · avg hold {STORY_SPECS.avgHoldDays} days</span>
             </div>
           </AgentBubble>
         </FadeIn>
@@ -150,10 +152,10 @@ function ChatSimulation() {
             </div>
             <EquityCurve />
             <div className="grid grid-cols-4 gap-2 text-xs mt-1">
-              <div>Return <span className="text-positive font-semibold">+3.8%</span></div>
-              <div>Sharpe <span className="text-foreground font-semibold">1.31</span></div>
-              <div>Win Rate <span className="text-foreground font-semibold">68%</span></div>
-              <div>Max DD <span className="text-destructive font-semibold">-1.9%</span></div>
+              <div>Return <span className="text-positive font-semibold">{STORY_SPECS.returnPct}</span></div>
+              <div>Sharpe <span className="text-foreground font-semibold">{STORY_SPECS.sharpe}</span></div>
+              <div>Win Rate <span className="text-foreground font-semibold">{STORY_SPECS.winRate}</span></div>
+              <div>Max DD <span className="text-destructive font-semibold">{STORY_SPECS.maxDd}</span></div>
             </div>
           </AgentBubble>
         </FadeIn>

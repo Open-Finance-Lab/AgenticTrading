@@ -5386,7 +5386,7 @@ function setAuthMode(mode) {
   if (subtitle) {
     subtitle.textContent = mode === 'reset'
       ? "Enter your account email and we'll send a 6-character reset code."
-      : 'Optional for browsing and rule-based backtests. AI-model backtests need an account.';
+      : 'Optional for browsing and rule-based backtests. AI-model backtests billed to ATL Credits or your own API key need an account.';
   }
   if (submitBtn) {
     submitBtn.textContent = mode === 'signup' ? 'Create account' : mode === 'reset' ? 'Send code' : 'Sign in';

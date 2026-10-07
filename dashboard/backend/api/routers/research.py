@@ -397,12 +397,28 @@ def _sweep_pending_runs() -> None:
                 print(f"research sweeper: run {run_id} sweep error: {exc}")
 
 
+_DEFAULT_PUBLIC_APP = "https://agentic-trading-lab.vercel.app"
+
+
+def _public_app_base() -> str:
+    """Absolute ``…/app`` URL for an email link.
+
+    Same normalization as ``auth._app_redirect`` and
+    ``discord_bot.public_app_base`` (which cannot be imported here: it pulls in
+    the optional ``discord`` dependency): a ``PUBLIC_APP_URL`` that already ends
+    in ``/app`` is not suffixed again. Unlike the redirect, an empty value falls
+    back to the hosted app rather than to ``/app`` -- a mail client has no origin
+    to resolve a relative link against.
+    """
+    base = (os.getenv("PUBLIC_APP_URL") or "").strip().rstrip("/") or _DEFAULT_PUBLIC_APP
+    return base if base.endswith("/app") else f"{base}/app"
+
+
 def _send_report_ready_email(to: str, template_name: str) -> bool:
     """Drive the async sender from sync code. Never raises: False on failure."""
     from dashboard.backend.infrastructure.email.sender import send_email
 
-    base = os.getenv("PUBLIC_APP_URL", "https://agentic-trading-lab.vercel.app").rstrip("/")
-    link = f"{base}/app?view=agents"
+    link = f"{_public_app_base()}?view=agents"
     try:
         # Only ever called from the sweeper thread, which has no running
         # event loop; asyncio.run would raise inside one, so it is guarded.

@@ -24,7 +24,10 @@ const ACTS = [
     // Not "everyone else's agents": no user agent is on any board, and the
     // roster is curated (`dashboard/config/leaderboard.json`). The comparison
     // that actually exists is against the AI models and the passive baselines.
-    body: "Compare your run with the AI models and passive baselines on the Competition board.",
+    // Nor "compare your run with" them: the board is one fixed window on its
+    // own capital, and a backtest picks its own window, so the two returns
+    // measure different things. The board is a reference, not a peer group.
+    body: "See how AI models rank against buy-and-hold and the index on the Competition board — one fixed window, the same capital for each.",
   },
 ] as const;
 
