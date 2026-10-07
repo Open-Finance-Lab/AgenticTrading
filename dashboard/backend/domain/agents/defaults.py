@@ -14,7 +14,7 @@ drift, ``isSimplePipeline()`` stops matching and every default agent renders the
 from __future__ import annotations
 
 import uuid
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 SIMPLE_INSTRUCTION_PRESET_KEY = "simple_instruction"
 
@@ -131,3 +131,88 @@ def default_starter_pipeline() -> List[Dict[str, Any]]:
             "outputFormat": SIMPLE_INSTRUCTION_OUTPUT_FORMAT,
         }
     ]
+
+
+# pipeline_runner.POST_TRADE_PRESET_KEY. Not imported: this module is a leaf the
+# frontend mirror and the seeding path read, and pipeline_runner pulls in the
+# LLM execution layer. tests/test_agent_starter_defaults.py pins the two equal.
+_POST_TRADE_PRESET_KEY = "post_trade_analysis"
+
+
+def _decision_steps(pipeline: Any) -> List[Dict[str, Any]]:
+    if not isinstance(pipeline, list):
+        return []
+    return [
+        step
+        for step in pipeline
+        if isinstance(step, dict) and step.get("presetKey") != _POST_TRADE_PRESET_KEY
+    ]
+
+
+def has_trading_instruction(pipeline: Any) -> bool:
+    """Whether any decision step tells the model what to do.
+
+    A pipeline whose decision steps all have blank prompts is accepted by the
+    agent PATCH and the backtest body alike, and would otherwise send the model
+    a step with no task at all.
+    """
+    return any(
+        str(step.get("prompt") or "").strip() for step in _decision_steps(pipeline)
+    )
+
+
+def effective_pipeline(
+    pipeline: Any,
+    strategy_prompt: Optional[str] = None,
+) -> Any:
+    """The pipeline an LLM run executes once "empty means default" is applied.
+
+    An empty trading instruction means the platform default: the starter
+    instruction every new agent is seeded with, i.e. the text Configure shows
+    under "See the default instruction". "Empty" is no pipeline, or one whose
+    decision steps carry no prompt; its post-trade steps are kept. A
+    ``strategy_prompt`` is an instruction in its own right, and an explicit
+    ``[]`` or a non-list is returned untouched so the caller's validator can
+    refuse it as malformed.
+
+    The substitute is the exact pipeline a starter agent runs, so it costs what
+    a starter agent costs -- on a universe above 12 names that is the full
+    snapshot and the recovery output ceiling from the first call
+    (pipeline_runner.DEFAULT_CEILING_SNAPSHOT_SYMBOLS), not the single-prompt
+    path's shortlist. That parity is the point: the disclosure promises this
+    strategy, so the run has to be the one a starter agent would produce.
+
+    Owned here rather than in a route so every consumer of an agent's pipeline
+    resolves "empty" the same way. ``robinhood_live_service`` does not call it
+    yet: its empty-instruction fallback trades real money and is a separate
+    decision.
+    """
+    if pipeline is None:
+        if (strategy_prompt or "").strip():
+            return None
+        return default_starter_pipeline()
+    if not isinstance(pipeline, list) or not pipeline:
+        return pipeline
+    if has_trading_instruction(pipeline):
+        return pipeline
+    post_trade = [
+        step
+        for step in pipeline
+        if isinstance(step, dict) and step.get("presetKey") == _POST_TRADE_PRESET_KEY
+    ]
+    return default_starter_pipeline() + post_trade
+
+
+def is_default_instruction_pipeline(pipeline: Any) -> bool:
+    """Whether a recorded pipeline's decision side is exactly the default.
+
+    True for an empty-instruction run and for a starter agent whose instruction
+    was never edited: both ran DEFAULT_STARTER_INSTRUCTION. Judged on content,
+    never on step ids, which seeding mints at random.
+    """
+    steps = _decision_steps(pipeline)
+    return (
+        len(steps) == 1
+        and str(steps[0].get("prompt") or "").strip()
+        == DEFAULT_STARTER_INSTRUCTION.strip()
+    )

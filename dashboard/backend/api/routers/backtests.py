@@ -103,7 +103,10 @@ from dashboard.backend.domain.backtesting.provenance import (
 from dashboard.backend.domain.credits.service import credits_service
 from dashboard.backend.db_url import BACKTEST_WORKER_ENV
 from dashboard.backend.api.rate_limit import FixedWindowRateLimiter, client_key
-from dashboard.backend.domain.agents.defaults import default_starter_pipeline
+from dashboard.backend.domain.agents.defaults import (
+    effective_pipeline,
+    is_default_instruction_pipeline,
+)
 from dashboard.backend.domain.agents.service import agent_service
 from dashboard.backend.domain.agents.credential_store import (
     FINANCIAL_DATASETS_CREDENTIAL,
@@ -375,6 +378,10 @@ class RunMetadata(BaseModel):
     market_data_feed: Optional[str] = None
     sip_fallback_to_iex: Optional[bool] = None
     end_clamped: Optional[bool] = None
+    # Whether the run's recorded pipeline is the platform default instruction.
+    # A boolean, never the instruction: /runs is public and unauthenticated,
+    # and a user's own instruction is theirs. The default is published copy.
+    default_instruction: Optional[bool] = None
 
 
 class EquityCurve(BaseModel):
@@ -598,6 +605,10 @@ def _run_metadata_response(run: Dict[str, Any]) -> RunMetadata:
                     }
                 else:
                     payload[field] = metadata[field]
+        if metadata.get("initial_pipeline") is not None:
+            payload["default_instruction"] = is_default_instruction_pipeline(
+                metadata["initial_pipeline"]
+            )
         if "llm_sampling" not in metadata:
             leaderboard_sampling = _leaderboard_llm_sampling(metadata)
             if leaderboard_sampling is not None:
@@ -3188,37 +3199,6 @@ def _resolve_backtest_pipeline(
     return None
 
 
-DEFAULT_INSTRUCTION_STEP_ID = "sub_default_instruction"
-
-
-# An empty trading instruction means "use the platform default", and the
-# platform default is the starter instruction every new agent is seeded with
-# (domain/agents/defaults.py) -- the text Configure shows under "See the
-# default instruction". Without this an empty pipeline fell through
-# create_prompt() to the legacy SAFE_TRADING_PROMPT, so the disclosure named a
-# strategy the run never used. Applied here, not in create_prompt(): the
-# curated leaderboard entries run with no instruction on purpose, and their
-# cached rows are matched on strategy_prompt=None, so changing that fallback
-# would silently re-label every published curve (the leaderboard calls
-# create_prompt() directly and never reaches this route).
-def _default_pipeline_for_empty_instruction(
-    pipeline: Optional[List[Dict[str, Any]]],
-    strategy_prompt: Optional[str],
-) -> Optional[List[Dict[str, Any]]]:
-    # Keyed on None, not falsiness: an explicit `"pipeline": []` in the body is
-    # still refused as malformed by _validate_backtest_params.
-    if pipeline is not None or (strategy_prompt or "").strip():
-        return pipeline
-    # A fixed step id, not the random one seeding mints: the pipeline is
-    # recorded as agent_runs.metadata.initial_pipeline, which
-    # diff_backtest_runs.py compares, so a per-run id would make two
-    # empty-instruction runs permanently "incomparable".
-    return [
-        {**step, "id": DEFAULT_INSTRUCTION_STEP_ID}
-        for step in default_starter_pipeline()
-    ]
-
-
 def _resolve_backtest_runtime(
     agent_id: Optional[str],
 ) -> tuple[str, Dict[str, Any]]:
@@ -3449,9 +3429,13 @@ def run_backtest_endpoint(
     if resolved_decision_source == LLM_DECISION_SOURCE:
         if runtime_type == PIPELINE_RUNTIME_TYPE:
             pipeline = _resolve_backtest_pipeline(agent_id, pipeline)
-            pipeline = _default_pipeline_for_empty_instruction(
-                pipeline, strategy_prompt
-            )
+            # An empty instruction means the platform default -- the starter
+            # instruction Configure discloses. Applied here, not in
+            # create_prompt(): the curated leaderboard entries run with no
+            # instruction on purpose and their cached rows are matched on
+            # strategy_prompt=None, so changing that fallback would re-label
+            # every published curve.
+            pipeline = effective_pipeline(pipeline, strategy_prompt)
             if agent_id and not model:
                 agent = agent_service.get_agent(agent_id)
                 if agent and agent.get("model_name"):
@@ -3766,6 +3750,12 @@ def run_backtest_endpoint(
         response["runtime_type"] = runtime_type
     if universe_selection is not None:
         response["universe_selection"] = universe_selection
+    if pipeline is not None:
+        # Whether the run executes the platform default instruction. The
+        # browser cannot know: it decides "empty" from its cached agent, while
+        # this route reads the stored row, so the results panel states the
+        # default only when the server says that is what runs.
+        response["default_instruction"] = is_default_instruction_pipeline(pipeline)
     if ignored_llm_fields:
         # Say what a rule-based run threw away. Dropping LLM-only fields is
         # correct, doing it invisibly is not: the caller otherwise cannot tell

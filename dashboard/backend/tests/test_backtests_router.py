@@ -2274,7 +2274,11 @@ def test_backtest_run_refuses_an_uncompletable_pipeline_window(client):
             "decision_source": "llm",
             "model": "claude-haiku-4-5-20251001",
             "billing_mode": "byok",
-            "pipeline": [{"label": f"Step {i}"} for i in range(4)],
+            # Prompted: a step with no prompt is no instruction, and the route
+            # would replace a pipeline of them with the one-step default.
+            "pipeline": [
+                {"label": f"Step {i}", "prompt": "Decide."} for i in range(4)
+            ],
         },
         headers=_sess(),
     )
@@ -2860,8 +2864,6 @@ def _assert_default_starter_pipeline(pipeline):
     assert isinstance(pipeline, list) and len(pipeline) == 1
     assert pipeline[0]["prompt"] == DEFAULT_STARTER_INSTRUCTION
     assert pipeline[0]["presetKey"] == SIMPLE_INSTRUCTION_PRESET_KEY
-    # Fixed, so diff_backtest_runs.py can compare two such runs' initial_pipeline.
-    assert pipeline[0]["id"] == bt.DEFAULT_INSTRUCTION_STEP_ID
 
 
 def _patch_agent(monkeypatch, pipeline):
@@ -2887,6 +2889,8 @@ def test_llm_run_with_no_instruction_runs_the_default_starter_instruction(monkey
     assert spy.calls == 1
     _assert_default_starter_pipeline(spy.last_kwargs["pipeline"])
     assert not spy.last_kwargs["strategy_prompt"]
+    # The browser states the default only on the server's word.
+    assert resp.json()["default_instruction"] is True
 
 
 @pytest.mark.parametrize("stored", [[], None])
@@ -2926,6 +2930,7 @@ def test_agent_instruction_is_not_replaced_by_the_default(monkeypatch):
 
     assert resp.status_code == 200, resp.text
     assert spy.last_kwargs["pipeline"] == own
+    assert resp.json()["default_instruction"] is False
 
 
 def test_free_form_strategy_prompt_is_not_replaced_by_the_default(monkeypatch):
@@ -2943,6 +2948,7 @@ def test_free_form_strategy_prompt_is_not_replaced_by_the_default(monkeypatch):
     assert resp.status_code == 200, resp.text
     assert spy.last_kwargs["pipeline"] is None
     assert spy.last_kwargs["strategy_prompt"] == "Buy the dip."
+    assert "default_instruction" not in resp.json()
 
 
 def test_explicit_empty_pipeline_is_still_refused(monkeypatch):
@@ -2971,3 +2977,65 @@ def test_rule_based_run_gets_no_default_pipeline(monkeypatch):
 
     assert resp.status_code == 200, resp.text
     assert spy.last_kwargs["pipeline"] is None
+
+
+_BLANK_STEP = {"id": "s1", "presetKey": "simple_instruction", "prompt": "   "}
+_POST_TRADE_STEP = {
+    "id": "pt1",
+    "presetKey": "post_trade_analysis",
+    "prompt": "Review the day.",
+}
+
+
+@pytest.mark.parametrize("where", ["body", "stored"])
+def test_pipeline_with_only_blank_prompts_runs_the_default_instruction(
+    monkeypatch, where
+):
+    """Both the agent PATCH and the backtest body accept a step with a blank
+    prompt; without this the model was sent a step with no task at all. The
+    post-trade step is kept -- only the empty decision side is replaced."""
+    _enable_authenticated_openrouter_byok(monkeypatch)
+    spy = _Spy()
+    monkeypatch.setattr(bt, "run_backtest_background", spy)
+    monkeypatch.setattr(bt, "_resolve_backtest_session", lambda *_a, **_k: "agent-sess")
+    blank = [dict(_BLANK_STEP), dict(_POST_TRADE_STEP)]
+    agent_id = _patch_agent(monkeypatch, blank if where == "stored" else None)
+    body = {**_BYOK_LLM_BODY, "agent_id": agent_id}
+    if where == "body":
+        body["pipeline"] = blank
+
+    resp = TestClient(app).post("/backtest/run", json=body, headers=_sess())
+
+    assert resp.status_code == 200, resp.text
+    pipeline = spy.last_kwargs["pipeline"]
+    _assert_default_starter_pipeline(pipeline[:1])
+    assert pipeline[1:] == [_POST_TRADE_STEP]
+    assert resp.json()["default_instruction"] is True
+
+
+def test_run_metadata_flags_a_recorded_default_instruction_without_the_text():
+    """/runs is public, so the list model carries a boolean, never a user's own
+    instruction; the default is published copy the browser already holds."""
+    from dashboard.backend.domain.agents.defaults import default_starter_pipeline
+
+    base = {
+        "run_id": "r1",
+        "agent_name": "Agent",
+        "mode": "backtest",
+        "start_date": "2026-05-01",
+        "end_date": "2026-05-02",
+        "initial_equity": 10000.0,
+        "created_at": "2026-05-02 00:00:00",
+    }
+    default_run = bt._run_metadata_response(
+        {**base, "metadata": {"initial_pipeline": default_starter_pipeline()}}
+    )
+    own_run = bt._run_metadata_response(
+        {**base, "metadata": {"initial_pipeline": [{"prompt": "Only buy AAPL."}]}}
+    )
+    legacy_run = bt._run_metadata_response({**base, "metadata": {}})
+
+    assert default_run.default_instruction is True
+    assert own_run.default_instruction is False
+    assert legacy_run.default_instruction is None
+    assert "Only buy AAPL." not in own_run.model_dump_json()

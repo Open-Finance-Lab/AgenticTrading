@@ -381,6 +381,23 @@ def test_pipeline_key_order_is_not_a_difference(tmp_path, monkeypatch):
     assert module.compare_runs("run_a", "run_b")["comparable"] is True
 
 
+def test_step_ids_are_not_a_difference(tmp_path, monkeypatch):
+    """Seeding mints a random step id per agent, so two agents running the same
+    instruction -- or a starter agent and an empty-instruction run -- must still
+    compare. A different prompt under the same id is still a mismatch."""
+    module = _load_script()
+    db = BacktestDatabase(tmp_path / "diff.db")
+    monkeypatch.setattr(module, "db", db)
+    _seed_pair(db)
+
+    _set_metadata(db, "run_a", {"initial_pipeline": [{"id": "sub_starter_1a2b", "prompt": "p"}]})
+    _set_metadata(db, "run_b", {"initial_pipeline": [{"id": "sub_starter_9f8e", "prompt": "p"}]})
+    assert module.compare_runs("run_a", "run_b")["comparable"] is True
+
+    _set_metadata(db, "run_b", {"initial_pipeline": [{"id": "sub_starter_1a2b", "prompt": "q"}]})
+    assert module.compare_runs("run_a", "run_b")["mismatches"] == ["initial_pipeline"]
+
+
 def test_a_different_data_source_is_a_mismatch(tmp_path, monkeypatch):
     module = _load_script()
     db = BacktestDatabase(tmp_path / "diff.db")

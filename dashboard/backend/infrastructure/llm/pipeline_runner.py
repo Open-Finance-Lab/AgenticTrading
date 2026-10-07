@@ -142,6 +142,15 @@ def is_last_bar_of_trading_day(
     return trading_day_key(timestamps[index]) != trading_day_key(timestamps[index + 1])
 
 
+def _market_lot_size(market_snapshot: Any) -> int:
+    """The board lot the snapshot's ``market`` block declares, else 1."""
+    market = market_snapshot.get("market") if isinstance(market_snapshot, dict) else None
+    raw = market.get("lot_size") if isinstance(market, dict) else None
+    if isinstance(raw, bool) or not isinstance(raw, int):
+        return 1
+    return raw
+
+
 def _build_step_prompt(
     *,
     step_index: int,
@@ -193,6 +202,24 @@ def _build_step_prompt(
                 "- Use integer share quantities.",
             ]
         )
+        lot_size = _market_lot_size(market_snapshot)
+        if lot_size > 1:
+            # The single-prompt path states this in A_SHARE_SYSTEM_PROMPT; this
+            # path's system prompt is market-neutral, and the snapshot's
+            # lot_size_note sits in a JSON blob a step instruction can
+            # contradict (the default starter instruction says "whole-share
+            # quantities" and prices affordability per share). An off-lot order
+            # is rejected in full, so the rule belongs with the other execution
+            # rules. Conditional, so a US prompt stays byte-identical.
+            parts.extend(
+                [
+                    f"- Order quantities must be positive whole multiples of "
+                    f"{lot_size} shares (one board lot); any other quantity is "
+                    "rejected in full, not rounded.",
+                    f"- Judge affordability per lot ({lot_size} x price), not "
+                    "per share.",
+                ]
+            )
 
     parts.extend(["", "Return ONLY valid JSON matching the required output format."])
     return "\n".join(parts)

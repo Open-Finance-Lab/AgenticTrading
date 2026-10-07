@@ -26,6 +26,8 @@ from pathlib import Path
 
 import pytest
 
+from dashboard.backend.tests._frontend_source import fn_body
+
 _FRONTEND = Path(__file__).resolve().parents[2] / "frontend"
 _APP_HTML = _FRONTEND / "app.html"
 _APP_JS = _FRONTEND / "app.js"
@@ -105,9 +107,15 @@ def test_vnpy_option_is_feature_gated_and_updates_model_state(js):
     assert re.search(r"features\.vnpy_simulation_enabled\s*===\s*true", js)
     assert re.search(r"option\.value\s*=\s*['\"]vnpy_simulation['\"]", js)
     assert re.search(r"modelSelect\.disabled\s*=\s*isSimulation", js)
+    # One resolver decides the decision source for both the launch and the
+    # Run Backtest instruction preview, so the two cannot disagree.
     assert re.search(
-        r"decisionSource\s*=\s*isSimulation\s*\?\s*RULE_BASED_DECISION_SOURCE",
-        js,
+        r"dataSource\s*===\s*'vnpy_simulation'\)\s*return\s+RULE_BASED_DECISION_SOURCE",
+        fn_body("function runBacktestModalDecisionSource(", js),
+    )
+    assert re.search(
+        r"const\s+decisionSource\s*=\s*runBacktestModalDecisionSource\(\)",
+        fn_body("async function runBacktest(", js),
     )
 
 

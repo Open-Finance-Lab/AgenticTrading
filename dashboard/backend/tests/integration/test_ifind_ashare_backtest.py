@@ -529,6 +529,9 @@ def test_ifind_llm_request_reaches_engine_database_and_chart_without_fallback(
     assert '"native_currency":"CNY"' in first_prompt
     assert '"timezone":"Asia/Shanghai"' in first_prompt
     assert "DJIA" not in first_prompt
+    # The default instruction says "whole-share quantities"; the board lot has
+    # to reach the execution rules, or every off-lot order is rejected in full.
+    assert "positive whole multiples of 100 shares" in first_prompt
     assert all(symbol in first_prompt for symbol in symbols)
 
     runs = test_db.get_runs_by_session(session_id)

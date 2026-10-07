@@ -34,6 +34,8 @@ def run_picker(script, setup=""):
         fn_body("function getSelectedStockPoolRequest("),
         fn_body("function selectPreset("),
         fn_body("function getSelectedAssets("),
+        fn_body("function runBacktestModalDecisionSource("),
+        fn_body("function pipelineHasTradingInstruction("),
         fn_body("async function runBacktest("),
         setup,
         "(async()=>{" + script + "})().catch(e=>{console.error(e);process.exit(1)});",
