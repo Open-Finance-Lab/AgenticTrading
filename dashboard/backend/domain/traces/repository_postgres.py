@@ -2,11 +2,10 @@
 
 from __future__ import annotations
 
-import json
 from typing import Any, Dict, Optional
 
 from dashboard.backend.db_url import init_schema_unless_worker, require_postgres_url
-from dashboard.backend.domain.traces.repository import (
+from dashboard.backend.domain.traces.common import (
     _json_text,
     _new_event_id,
     _public_event,

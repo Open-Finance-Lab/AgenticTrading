@@ -71,3 +71,51 @@ def test_trace_observability_failure_is_best_effort(tmp_path: Path, monkeypatch)
         assert str(exc) == "provider down"
     else:
         raise AssertionError("provider failure was swallowed")
+
+
+def test_trace_lookup_failure_does_not_escape_tool_adapters(monkeypatch):
+    def broken(*_args, **_kwargs):
+        raise RuntimeError("trace db down")
+
+    monkeypatch.setattr(service, "trace_for_run", broken)
+    assert service.record_tool_call(
+        run_id="run-failure", tool_name="llm.call", input_summary={}, idempotency_key="call"
+    ) is None
+    assert service.record_tool_result(
+        run_id="run-failure", tool_name="llm.call", outcome="failed",
+        duration_ms=1, idempotency_key="result",
+    ) is None
+    assert service.record_data_retrieval(
+        run_id="run-failure", source="alpaca", query_summary={}, result_summary={},
+        duration_ms=1, idempotency_key="data",
+    ) is None
+
+
+def test_hourly_provider_path_ensures_trace(monkeypatch):
+    from types import SimpleNamespace
+
+    import dashboard.backend.domain.backtesting.engine as engine_module
+
+    provider = object()
+    monkeypatch.setattr(engine_module, "create_market_data_provider", lambda *_args, **_kwargs: provider)
+    captured = {}
+
+    def ensure(**kwargs):
+        captured.update(kwargs)
+        return {"trace_id": "trace-live"}
+
+    monkeypatch.setattr(service, "ensure_trace_for_run", ensure)
+    backtester = engine_module.HourlyBacktester.__new__(engine_module.HourlyBacktester)
+    backtester.data_source = "alpaca"
+    backtester.profile = SimpleNamespace(universe=None)
+    backtester.requested_source_timeframe = "1h"
+    backtester.live_run_id = "run-live"
+    backtester.symbols = ["AAPL"]
+    backtester.start_date = "2026-10-01"
+    backtester.end_date = "2026-10-02"
+    backtester.decision_source = "rule_based"
+
+    wrapped = backtester._create_market_data_provider()
+    assert isinstance(wrapped, TraceAwareMarketDataProvider)
+    assert captured["run_id"] == "run-live"
+    assert captured["initial_input"]["symbols"] == ["AAPL"]

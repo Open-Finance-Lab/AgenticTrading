@@ -520,6 +520,18 @@ class HourlyBacktester:
         else:
             provider = factory(self.data_source, self.profile.universe)
         if self.live_run_id:
+            from dashboard.backend.domain.traces import service as trace_service
+
+            trace_service.ensure_trace_for_run(
+                run_id=self.live_run_id,
+                initial_input={
+                    "data_source": self.data_source,
+                    "symbols": list(getattr(self, "symbols", ())),
+                    "start_date": self.start_date,
+                    "end_date": self.end_date,
+                    "decision_source": self.decision_source,
+                },
+            )
             provider = with_trace(provider, run_id=self.live_run_id, source=self.data_source)
         return provider
     

@@ -19,24 +19,37 @@ def start_trace_for_run(
 ) -> Dict[str, Any]:
     """Create a trace and its first event for an already-persisted Run."""
 
-    trace = trace_store.create_trace(
-        agent_id=run.get("agent_id"),
-        agent_version_id=run.get("agent_version_id"),
-        run_id=run["run_id"],
-        user_id=run.get("user_id"),
-        initial_input=initial_input or run.get("config") or {},
-    )
-    trace_store.append_event(
-        trace_id=trace["trace_id"],
-        event_type="run_started",
-        actor_type="system",
-        payload={
-            "environment_id": run.get("environment_id"),
-            "environment_type": run.get("environment_type"),
-            "config_summary": initial_input or run.get("config") or {},
-        },
-        idempotency_key=f"run_started:{run['run_id']}",
-    )
+    existing = trace_for_run(run["run_id"])
+    if existing is not None:
+        return existing
+
+    try:
+        trace = trace_store.create_trace(
+            agent_id=run.get("agent_id"),
+            agent_version_id=run.get("agent_version_id"),
+            run_id=run["run_id"],
+            user_id=run.get("user_id"),
+            initial_input=initial_input or run.get("config") or {},
+        )
+        trace_store.append_event(
+            trace_id=trace["trace_id"],
+            event_type="run_started",
+            actor_type="system",
+            payload={
+                "environment_id": run.get("environment_id"),
+                "environment_type": run.get("environment_type"),
+                "config_summary": initial_input or run.get("config") or {},
+            },
+            idempotency_key=f"run_started:{run['run_id']}",
+        )
+    except Exception:
+        # A concurrent creator may have won the unique run_id race. Preserve
+        # the existing trace when possible; callers may decide whether a trace
+        # persistence failure should be visible for their lifecycle.
+        existing = trace_for_run(run["run_id"])
+        if existing is None:
+            raise
+        return existing
     return trace_store.get_trace(trace["trace_id"]) or trace
 
 
@@ -127,10 +140,28 @@ def fail_trace(run_id: str, error_code: str = "run_failed") -> Optional[Dict[str
     return trace_store.update_trace(trace["trace_id"], status="failed", ended_at=_utcnow_iso())
 
 
-def _best_effort_event(**kwargs: Any) -> Optional[Dict[str, Any]]:
-    """Trace observability must never make the underlying run fail."""
+def _best_effort_trace_event(
+    *,
+    run_id: str,
+    event_type: str,
+    actor_type: str,
+    payload: Dict[str, Any],
+    idempotency_key: str,
+    **links: Any,
+) -> Optional[Dict[str, Any]]:
+    """Look up and append observational events without affecting a run."""
     try:
-        return trace_store.append_event(**kwargs)
+        trace = trace_for_run(run_id)
+        if trace is None:
+            return None
+        return trace_store.append_event(
+            trace_id=trace["trace_id"],
+            event_type=event_type,
+            actor_type=actor_type,
+            payload=payload,
+            idempotency_key=idempotency_key,
+            **links,
+        )
     except Exception:
         return None
 
@@ -139,11 +170,8 @@ def record_tool_call(
     *, run_id: str, tool_name: str, input_summary: Dict[str, Any],
     idempotency_key: str, actor_type: str = "agent",
 ) -> Optional[Dict[str, Any]]:
-    trace = trace_for_run(run_id)
-    if trace is None:
-        return None
-    return _best_effort_event(
-        trace_id=trace["trace_id"], event_type="tool_call", actor_type=actor_type,
+    return _best_effort_trace_event(
+        run_id=run_id, event_type="tool_call", actor_type=actor_type,
         payload={"tool_name": tool_name, "input_summary": input_summary},
         idempotency_key=f"tool_call:{run_id}:{idempotency_key}",
     )
@@ -154,9 +182,6 @@ def record_tool_result(
     result_summary: Optional[Dict[str, Any]] = None,
     error_code: Optional[str] = None, idempotency_key: str,
 ) -> Optional[Dict[str, Any]]:
-    trace = trace_for_run(run_id)
-    if trace is None:
-        return None
     payload: Dict[str, Any] = {
         "tool_name": tool_name, "outcome": outcome,
         "duration_ms": max(0.0, round(float(duration_ms), 3)),
@@ -164,8 +189,8 @@ def record_tool_result(
     }
     if error_code:
         payload["error_code"] = error_code
-    return _best_effort_event(
-        trace_id=trace["trace_id"], event_type="tool_result", actor_type="system",
+    return _best_effort_trace_event(
+        run_id=run_id, event_type="tool_result", actor_type="system",
         payload=payload,
         idempotency_key=f"tool_result:{run_id}:{idempotency_key}",
     )
@@ -176,11 +201,8 @@ def record_data_retrieval(
     result_summary: Dict[str, Any], duration_ms: float, idempotency_key: str,
     outcome: str = "success",
 ) -> Optional[Dict[str, Any]]:
-    trace = trace_for_run(run_id)
-    if trace is None:
-        return None
-    return _best_effort_event(
-        trace_id=trace["trace_id"], event_type="data_retrieval", actor_type="system",
+    return _best_effort_trace_event(
+        run_id=run_id, event_type="data_retrieval", actor_type="system",
         payload={
             "source": source, "query_summary": query_summary,
             "result_summary": result_summary,
@@ -189,3 +211,20 @@ def record_data_retrieval(
         },
         idempotency_key=f"data_retrieval:{run_id}:{idempotency_key}",
     )
+
+
+def ensure_trace_for_run(
+    *, run_id: str, initial_input: Dict[str, Any], run: Optional[Dict[str, Any]] = None
+) -> Optional[Dict[str, Any]]:
+    """Create a provider trace when a legacy engine path has no envelope yet."""
+    try:
+        existing = trace_for_run(run_id)
+        if existing is not None:
+            return existing
+        record = dict(run or {})
+        record["run_id"] = run_id
+        return start_trace_for_run(run=record, initial_input=initial_input)
+    except Exception:
+        # Market-data tracing is observational; a missing trace must never
+        # prevent a backtest from loading its provider data.
+        return None

@@ -37,10 +37,9 @@ def test_build_trace_store_picks_postgres_without_exposing_url(monkeypatch, caps
 )
 def test_trace_postgres_round_trip():
     import os
+    import dashboard.backend.domain.traces.repository_postgres as repo_pg_module
 
-    from dashboard.backend.domain.traces.repository_postgres import PostgresTraceStore
-
-    store = PostgresTraceStore(os.environ["TEST_POSTGRES_URL"])
+    store = repo_pg_module.PostgresTraceStore(os.environ["TEST_POSTGRES_URL"])
     trace_id = "trace_pg_test"
     with store._get_connection() as conn:
         with conn.cursor() as cur:

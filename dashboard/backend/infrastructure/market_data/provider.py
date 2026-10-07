@@ -149,7 +149,9 @@ class TraceAwareMarketDataProvider:
             try:
                 trace_service.record_data_retrieval(**event)
             except Exception:
-                pass
+                # Trace persistence is observational; provider results and
+                # provider errors must remain the source of truth.
+                return
         try:
             frames = self._provider.fetch_bars(symbols, start, end, **kwargs)
             record(
