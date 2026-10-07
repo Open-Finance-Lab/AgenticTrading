@@ -3,7 +3,7 @@
   'use strict';
 
   const SURFACE = 'traces';
-  const state = { traceId: null, events: [], nextSequence: 0 };
+  const state = { traceId: null, trace: null, events: [], nextSequence: 0, pollTimer: null, stale: false };
 
   function shell() {
     return window.AdminShell;
@@ -149,6 +149,11 @@
     return section;
   }
 
+  function renderStaleNotice(host, message) {
+    const notice = node('p', 'trace-stale panel-status', message);
+    host.appendChild(notice);
+  }
+
   function setMessage(message, error = false) {
     const host = element('tracesView');
     if (!host) return;
@@ -159,6 +164,7 @@
   }
 
   async function loadList() {
+    stopPolling();
     const seq = shell().nextSeq(SURFACE);
     try {
       const payload = await shell().request('/api/admin/traces');
@@ -175,6 +181,7 @@
   }
 
   async function loadDetail(traceId) {
+    stopPolling();
     const seq = shell().nextSeq(SURFACE);
     try {
       const [trace, eventPayload] = await Promise.all([
@@ -183,17 +190,61 @@
       ]);
       if (!shell().isCurrent(SURFACE, seq)) return;
       state.traceId = traceId;
+      state.trace = trace;
       state.events = Array.isArray(eventPayload?.items) ? eventPayload.items : [];
-      state.nextSequence = eventPayload?.next_sequence_no || 0;
+      state.nextSequence = state.events.length ? state.events[state.events.length - 1].sequence_no : 0;
+      state.stale = false;
       const host = element('tracesView');
       if (!host) return;
       shell().clear(host);
       host.appendChild(renderTraceDetail(trace, state.events));
+      if (trace.status === 'running') startPolling();
     } catch (error) {
       if (await shell().handleAccessLost(error)) return;
       if (!shell().isCurrent(SURFACE, seq)) return;
       setMessage(error.message || 'Agent trace could not be loaded.', true);
     }
+  }
+
+  function stopPolling() {
+    if (state.pollTimer !== null) {
+      clearTimeout(state.pollTimer);
+      state.pollTimer = null;
+    }
+  }
+
+  async function pollEvents() {
+    if (!state.traceId || !state.trace || state.trace.status !== 'running') return;
+    try {
+      const payload = await shell().request(
+        `/api/admin/traces/${encodeURIComponent(state.traceId)}/events?after_sequence=${state.nextSequence}&limit=100`,
+      );
+      const fresh = Array.isArray(payload?.items) ? payload.items : [];
+      if (fresh.length) {
+        state.events = state.events.concat(fresh.filter((event) => event.sequence_no > state.nextSequence));
+        state.nextSequence = state.events.length ? state.events[state.events.length - 1].sequence_no : state.nextSequence;
+        const terminal = [...state.events].reverse().find((event) => ['run_completed', 'run_failed'].includes(event.event_type));
+        if (terminal) state.trace.status = terminal.event_type === 'run_completed' ? 'completed' : 'failed';
+        const host = element('tracesView');
+        if (host && state.trace) {
+          shell().clear(host);
+          host.appendChild(renderTraceDetail(state.trace, state.events));
+        }
+      }
+      state.stale = false;
+      if (state.trace.status === 'running') state.pollTimer = setTimeout(pollEvents, 3000);
+    } catch (error) {
+      if (await shell().handleAccessLost(error)) return;
+      state.stale = true;
+      const host = element('tracesView');
+      if (host) renderStaleNotice(host, 'Showing recorded events; refresh failed.');
+      state.pollTimer = setTimeout(pollEvents, 5000);
+    }
+  }
+
+  function startPolling() {
+    stopPolling();
+    state.pollTimer = setTimeout(pollEvents, 3000);
   }
 
   function onRoute(event) {
@@ -203,5 +254,5 @@
   }
 
   document.addEventListener('admin:route', onRoute);
-  window.AdminTraces = { renderTraceRows, renderEventTimeline, renderTraceList, renderTraceDetail };
+  window.AdminTraces = { renderTraceRows, renderEventTimeline, renderTraceList, renderTraceDetail, pollEvents, stopPolling };
 })();
