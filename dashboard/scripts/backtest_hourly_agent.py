@@ -188,6 +188,7 @@ PortfolioManager = _portfolio_manager.PortfolioManager
 # legacy public path (bha.HourlyBacktester), main() below, and existing
 # subclasses (e.g. backtest_custom_algo) keep working unchanged.
 from dashboard.backend.domain.backtesting.engine import HourlyBacktester
+from dashboard.backend.domain.backtesting.decision_tape import trace_lifecycle
 from dashboard.backend.infrastructure.llm.execution.handoff import (
     ExecutionHandoffError,
     consume_execution_handoff,
@@ -503,98 +504,112 @@ def main():
         print(f"Custom strategy prompt: {len(strategy_prompt)} chars")
     print(f"{'='*70}\n")
     
-    # Initialize backtester (with LLM if available and enabled)
-    # Note: dates are validated in __init__ if they somehow got reversed again
-    backtester = HourlyBacktester(
-        args.start,
-        args.end,
-        session_id,
-        use_llm=decision_source == LLM_DECISION_SOURCE,
-        mode=args.mode,
-        strategy_prompt=strategy_prompt,
-        model=args.model,
-        pipeline=pipeline,
-        live_run_id=args.run_id,
-        owner_user_id=args.owner_user_id,
-        progress_file=args.progress_file,
-        data_source=args.data_source,
-        initial_capital=capital,
-        symbols=symbols,
-        universe=market_profile.universe,
-        decision_source=decision_source,
-        runtime_type=args.runtime_type,
-        runtime_config=runtime_config,
-        execution_client=execution_client,
-        launched_at=args.launched_at,
-        # All three are module-scope constants rather than reads taken here,
-        # on purpose. They describe an interval that ended before the engine
-        # existed, and the third (`db_url.schema_init_seconds()`) is a
-        # process-global counter that never resets: an engine that read it for
-        # itself would report the PARENT's boot DDL as this run's schema cost
-        # on every in-process path (the external-run session, the algo
-        # service, the suite), and reading it *here* would charge this window
-        # for any store built after the imports finished. Handed in, an
-        # in-process engine passes nothing and the key is simply absent.
-        startup_clock={
-            "child_entered_at": CHILD_ENTERED_AT,
-            "imports_done_at": IMPORTS_DONE_AT,
-            "schema_init_seconds": IMPORTS_SCHEMA_INIT_SECONDS,
-            # The steady pair is handed over raw rather than pre-differenced:
-            # `imports+stores` closes here, but `preflight` closes in the
-            # engine, so only the engine can compute it -- and one owner for
-            # both keeps the two splits on the same clock by construction.
-            # The engine keeps these two OUT of `phases[]`: a raw
-            # `monotonic()` reading has a per-process epoch and means nothing
-            # to whoever reads the file. It publishes the durations instead.
-            "child_entered_steady": CHILD_ENTERED_STEADY,
-            "imports_done_steady": IMPORTS_DONE_STEADY,
-        },
-        **({"universe_selection": universe_selection} if universe_selection is not None else {}),
-    )
+    # The run's agent trace is created in HourlyBacktester.__init__ and closed
+    # here: completed with the decision tape's counts, run_failed on an
+    # exception anywhere from the constructor through the run (a SIP refusal
+    # in load_data() is a failure, not a kill). The SIGTERM SystemExit writes
+    # nothing -- the parent sends it from both the cancel and the timeout
+    # arms and labels the trace by the arm (api/routers/backtests.py).
+    tape_owner = {"backtester": None}
+
+    def _tape_summary():
+        owner = tape_owner["backtester"]
+        return owner.decision_tape_summary() if owner is not None else {}
+
+    with trace_lifecycle(args.run_id, summary=_tape_summary):
+        # Initialize backtester (with LLM if available and enabled)
+        # Note: dates are validated in __init__ if they somehow got reversed again
+        backtester = HourlyBacktester(
+            args.start,
+            args.end,
+            session_id,
+            use_llm=decision_source == LLM_DECISION_SOURCE,
+            mode=args.mode,
+            strategy_prompt=strategy_prompt,
+            model=args.model,
+            pipeline=pipeline,
+            live_run_id=args.run_id,
+            owner_user_id=args.owner_user_id,
+            progress_file=args.progress_file,
+            data_source=args.data_source,
+            initial_capital=capital,
+            symbols=symbols,
+            universe=market_profile.universe,
+            decision_source=decision_source,
+            runtime_type=args.runtime_type,
+            runtime_config=runtime_config,
+            execution_client=execution_client,
+            launched_at=args.launched_at,
+            # All three are module-scope constants rather than reads taken here,
+            # on purpose. They describe an interval that ended before the engine
+            # existed, and the third (`db_url.schema_init_seconds()`) is a
+            # process-global counter that never resets: an engine that read it for
+            # itself would report the PARENT's boot DDL as this run's schema cost
+            # on every in-process path (the external-run session, the algo
+            # service, the suite), and reading it *here* would charge this window
+            # for any store built after the imports finished. Handed in, an
+            # in-process engine passes nothing and the key is simply absent.
+            startup_clock={
+                "child_entered_at": CHILD_ENTERED_AT,
+                "imports_done_at": IMPORTS_DONE_AT,
+                "schema_init_seconds": IMPORTS_SCHEMA_INIT_SECONDS,
+                # The steady pair is handed over raw rather than pre-differenced:
+                # `imports+stores` closes here, but `preflight` closes in the
+                # engine, so only the engine can compute it -- and one owner for
+                # both keeps the two splits on the same clock by construction.
+                # The engine keeps these two OUT of `phases[]`: a raw
+                # `monotonic()` reading has a per-process epoch and means nothing
+                # to whoever reads the file. It publishes the durations instead.
+                "child_entered_steady": CHILD_ENTERED_STEADY,
+                "imports_done_steady": IMPORTS_DONE_STEADY,
+            },
+            **({"universe_selection": universe_selection} if universe_selection is not None else {}),
+        )
+        tape_owner["backtester"] = backtester
     
-    if args.runtime_type == AI_HEDGE_FUND_RUNTIME_TYPE:
-        print("🧠 Using hosted AI Hedge Fund runtime for trading decisions\n")
-    elif backtester.use_llm:
-        # The engine's resolved model, not the module default: printing
-        # LLM_MODEL_NAME named Claude Haiku on every DeepSeek or Qwen run.
-        print(f"🧠 Using {backtester.model} for trading decisions (Mode: {mode_display})\n")
-    else:
-        print("⚙️  Using rule-based logic for trading decisions\n")
+        if args.runtime_type == AI_HEDGE_FUND_RUNTIME_TYPE:
+            print("🧠 Using hosted AI Hedge Fund runtime for trading decisions\n")
+        elif backtester.use_llm:
+            # The engine's resolved model, not the module default: printing
+            # LLM_MODEL_NAME named Claude Haiku on every DeepSeek or Qwen run.
+            print(f"🧠 Using {backtester.model} for trading decisions (Mode: {mode_display})\n")
+        else:
+            print("⚙️  Using rule-based logic for trading decisions\n")
     
-    # Step 1: Load data
-    print(
-        f"1️⃣ Loading historical source data from {args.data_source} "
-        f"(decisions remain hourly)..."
-    )
-    backtester.load_data()
+        # Step 1: Load data
+        print(
+            f"1️⃣ Loading historical source data from {args.data_source} "
+            f"(decisions remain hourly)..."
+        )
+        backtester.load_data()
     
-    # Step 2: Calculate indicators
-    print("\n2️⃣ Calculating technical indicators...")
-    backtester.calculate_indicators()
+        # Step 2: Calculate indicators
+        print("\n2️⃣ Calculating technical indicators...")
+        backtester.calculate_indicators()
     
-    # DEBUG: Show loaded symbols
-    print(f"\n📊 DEBUG - Loaded Symbols:")
-    print(f"   Total symbols loaded: {len(backtester.all_data)}")
-    print(f"   Symbols: {', '.join(sorted(backtester.all_data.keys())[:10])}{'...' if len(backtester.all_data) > 10 else ''}")
-    print(f"   Agent universe: {', '.join(backtester.symbols)}")
-    print(f"   Baselines will use: {market_profile.benchmark}")
-    print(f"   Loaded bars for: {len(backtester.all_data)} symbols")
+        # DEBUG: Show loaded symbols
+        print(f"\n📊 DEBUG - Loaded Symbols:")
+        print(f"   Total symbols loaded: {len(backtester.all_data)}")
+        print(f"   Symbols: {', '.join(sorted(backtester.all_data.keys())[:10])}{'...' if len(backtester.all_data) > 10 else ''}")
+        print(f"   Agent universe: {', '.join(backtester.symbols)}")
+        print(f"   Baselines will use: {market_profile.benchmark}")
+        print(f"   Loaded bars for: {len(backtester.all_data)} symbols")
     
-    # Step 3: Run backtests
-    print("\n3️⃣ Running backtests...\n")
+        # Step 3: Run backtests
+        print("\n3️⃣ Running backtests...\n")
     
-    try:
-        agent_id, agent_eq = backtester.run_agent_backtest()
-    finally:
-        if execution_service is not None and execution_handoff is not None:
-            try:
-                execution_service.finalize_run(
-                    execution_handoff.run_id,
-                    billing_mode=execution_handoff.billing_mode,
-                )
-            except LLMExecutionError as exc:
-                print(f"❌ LLM execution finalization failed: {exc.safe_message}")
-                raise
+        try:
+            agent_id, agent_eq = backtester.run_agent_backtest()
+        finally:
+            if execution_service is not None and execution_handoff is not None:
+                try:
+                    execution_service.finalize_run(
+                        execution_handoff.run_id,
+                        billing_mode=execution_handoff.billing_mode,
+                    )
+                except LLMExecutionError as exc:
+                    print(f"❌ LLM execution finalization failed: {exc.safe_message}")
+                    raise
     
     # DEBUG: Show what agent bought
     print(f"\n📋 DEBUG - Agent Holdings Summary:")

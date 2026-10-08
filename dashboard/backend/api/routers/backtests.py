@@ -95,6 +95,7 @@ from dashboard.backend.domain.model_providers.service import (
     get_model_provider_service,
 )
 from dashboard.backend.domain.analytics import instrumentation as analytics_instrumentation
+from dashboard.backend.domain.traces import service as trace_service
 from dashboard.backend.domain.backtesting.provenance import (
     DECISION_STEPS_KEY,
     describe_decision_provenance,
@@ -1241,6 +1242,13 @@ def _killpg(pgid: Optional[int], sig: int) -> bool:
     return True
 
 
+def _label_trace(run_id: Optional[str], error_code: str) -> None:
+    """Label a trace the child left ``running``. No-op on a closed trace, so
+    every arm may call it; the first arm to reach a running trace names it."""
+    if run_id:
+        trace_service.fail_trace_if_running(run_id, error_code)
+
+
 def _signal_backtest_process(process: Any) -> bool:
     """SIGTERM the child and everything it started. True when a signal landed.
 
@@ -1719,6 +1727,10 @@ def run_backtest_background(
     progress_file = None
     # Bound so finally can always finalize even if minting the id fails early.
     resolved_live_run_id = live_run_id
+    # Captured separately: the except arm below clears resolved_live_run_id
+    # once the slot is finalized, but the finally still needs the id to close
+    # a trace the child could not (killed by the timeout or SIGKILL).
+    trace_run_id: Optional[str] = None
     execution_run_id = None
     # Snapshot the agent's pipeline as this run sees it, so the adapted-pipeline
     # write-back at the end can tell "nobody touched it" from "the user edited
@@ -1740,6 +1752,7 @@ def run_backtest_background(
             resolved_live_run_id = (
                 f"agent_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}"
             )
+        trace_run_id = resolved_live_run_id
         if execution_handoff_payload:
             execution_run_id = resolved_live_run_id
         progress_file = str(
@@ -1944,10 +1957,12 @@ def run_backtest_background(
                 f"Backtest failed with return code {result.returncode}. {summary}"
             )
             print(f"❌ Backtest failed (returncode={result.returncode})", flush=True)
+            _label_trace(trace_run_id, "run_failed")
         else:
             runs = db.get_runs_by_mode("backtest")
             slot_runs_count = len(runs)
             print(f"✅ Backtest completed. Found {len(runs)} runs in database.", flush=True)
+            _label_trace(trace_run_id, "trace_close_failed")
             if len(runs) > 0:
                 print(f"   Latest run IDs: {[r['run_id'] for r in runs[:3]]}", flush=True)
             _maybe_writeback_adapted_pipeline(
@@ -1959,6 +1974,7 @@ def run_backtest_background(
             )
             resolved_live_run_id = None  # finally must not double-finalize
     except _BacktestCancelled:
+        _label_trace(trace_run_id, "run_cancelled")
         print(f"🛑 Backtest cancelled: {resolved_live_run_id}", flush=True)
         # The cancel route finalized this slot under the ledger lock as it
         # accepted the request — that is what frees the owner's quota
@@ -1968,6 +1984,7 @@ def run_backtest_background(
         # poller reporting "no backtest has been run yet".
         resolved_live_run_id = None
     except subprocess.TimeoutExpired:
+        _label_trace(trace_run_id, "run_timed_out")
         # Ahead of the generic arm, which would send this through
         # `_sanitize_backtest_error` -- `_redact_credentials(...)[-max_chars:]`,
         # a TAIL truncation. That is right for a stack trace and wrong for a
@@ -2081,6 +2098,9 @@ def run_backtest_background(
             _finalize_slot(resolved_live_run_id, error=summary, runs_count=0)
             resolved_live_run_id = None
     finally:
+        # Reached none of the arms above (SIGKILL with no grace, a parent
+        # exception): the only label left is a kill. No-op otherwise.
+        _label_trace(trace_run_id, "run_killed")
         if execution_handoff_payload and execution_run_id:
             try:
                 # The child normally finalizes itself. Repeating this from the

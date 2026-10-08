@@ -3130,3 +3130,59 @@ def test_write_back_baseline_is_the_stored_pipeline_not_its_substitute(monkeypat
     )
     # Without a route-supplied baseline the passed pipeline is the baseline.
     assert bt._writeback_start_pipeline(stored, None, None) == stored
+
+
+def _run_parent_with_child(monkeypatch, child, *, run_id):
+    """Drive the real run_backtest_background against ``child`` and return
+    the (run_id, label) pairs the parent handed fail_trace_if_running."""
+    session_id = str(uuid.uuid4())
+    assert bt._try_acquire_backtest_slot(live_run_id=run_id, session_id=session_id, user_id=None) is None
+    labelled = []
+    monkeypatch.setattr(subprocess, "Popen", lambda cmd, **kwargs: child)
+    monkeypatch.setattr(bt, "run_backtest_background", _REAL_RUN_BACKTEST_BACKGROUND)
+    monkeypatch.setattr(
+        bt.trace_service, "fail_trace_if_running",
+        lambda rid, code: labelled.append((rid, code)) or True,
+    )
+    bt.run_backtest_background(
+        start_date="2026-01-01",
+        end_date="2026-01-02",
+        session_id=session_id,
+        live_run_id=run_id,
+        decision_source="rule_based",
+    )
+    return labelled
+
+
+def test_parent_labels_a_timed_out_child_run_timed_out(monkeypatch):
+    """The timeout arm SIGTERMs first (grace, then SIGKILL); a child that
+    unwinds in the grace exits via SystemExit and writes nothing. The label
+    must say timed out -- not cancelled, which is what the child would have
+    guessed -- and the finally's run_killed must not fire over it."""
+    run_id = "agent_trace_timed_out"
+    labelled = _run_parent_with_child(
+        monkeypatch, FakeChild(stdout="run header line\n", timeout_waits=1), run_id=run_id,
+    )
+    assert labelled[0] == (run_id, "run_timed_out")
+    assert (run_id, "run_cancelled") not in labelled
+    # The finally still runs; fail_trace_if_running is a no-op by then on the
+    # real store. Here it is a stub, so the finally's call is visible:
+    assert labelled[-1] == (run_id, "run_killed") and len(labelled) == 2
+
+
+def test_parent_labels_a_failed_child_run_failed(monkeypatch):
+    run_id = "agent_trace_failed"
+    labelled = _run_parent_with_child(
+        monkeypatch, FakeChild(returncode=1, stderr="Traceback: boom\n"), run_id=run_id,
+    )
+    assert labelled[0] == (run_id, "run_failed")
+
+
+def test_parent_labels_an_unclosed_completed_run_trace_close_failed(monkeypatch):
+    """returncode 0 but the trace still running: the child finished and its
+    own complete_trace did not land. Distinct from a kill on purpose."""
+    run_id = "agent_trace_unclosed"
+    labelled = _run_parent_with_child(
+        monkeypatch, FakeChild(returncode=0, stdout="ok\n"), run_id=run_id,
+    )
+    assert labelled[0] == (run_id, "trace_close_failed")
