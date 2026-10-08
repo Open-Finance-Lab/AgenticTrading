@@ -14,6 +14,7 @@ from dashboard.backend.domain.credits.repository_common import (
 from dashboard.backend.domain.credits.service import (
     DEFAULT_SIGNUP_CREDIT_CAMPAIGN,
     DEFAULT_SIGNUP_CREDITS_MICRO,
+    SUPERSEDED_SIGNUP_CREDIT_CAMPAIGNS,
     CreditsService,
 )
 
@@ -56,7 +57,7 @@ def test_welcome_grant_is_exactly_once_and_visible_in_activity(tmp_path):
 
     balance = service.get_balance(1)
     assert balance.grant_available_micro == DEFAULT_SIGNUP_CREDITS_MICRO
-    assert balance.display_grant_credits == "1.500000"
+    assert balance.display_grant_credits == "8.000000"
     activity = service.list_ledger(1, limit=10, cursor=None)["items"]
     assert len(activity) == 1
     assert activity[0]["entry_type"] == "system_promotion_grant"
@@ -146,7 +147,10 @@ def test_welcome_grant_funds_platform_credit_reservations(tmp_path):
     )
 
     assert reservation.status == "open"
-    assert service.get_balance(1).grant_available_micro == 500_000
+    assert (
+        service.get_balance(1).grant_available_micro
+        == DEFAULT_SIGNUP_CREDITS_MICRO - 1_000_000
+    )
 
 
 def test_restricted_account_receives_campaign_but_cannot_spend_it(tmp_path):
@@ -165,3 +169,32 @@ def test_restricted_account_receives_campaign_but_cannot_spend_it(tmp_path):
             attempt_index=0,
             amount_micro=1,
         )
+
+
+def test_account_holding_the_v1_welcome_grant_does_not_get_v2_on_top(tmp_path):
+    # Every account that existed before v2 holds the 1.5-Credit v1 grant, and
+    # the boot backfill replays the campaign over every account. Without the
+    # superseded-campaign check that replay would credit each of them another
+    # 8 Credits on the next deploy.
+    store = _store(tmp_path, user_count=2)
+    service = CreditsService(store=store)
+    legacy_key = SUPERSEDED_SIGNUP_CREDIT_CAMPAIGNS[0]
+    store.grant_promotion_credits(
+        user_id=1,
+        campaign_key=legacy_key,
+        amount_micro=1_500_000,
+        operation_id=f"legacy-op-{legacy_key}-1",
+        idempotency_key=f"promotion:{legacy_key}:user:1",
+        request_digest="legacy-digest",
+        source="system_promotion",
+        reason="Automatic welcome Credits.",
+    )
+
+    assert service.grant_default_signup_credits(1) is False
+    assert service.get_balance(1).grant_available_micro == 1_500_000
+
+    report = service.backfill_default_signup_credits()
+    assert report == {"total": 2, "granted": 1, "existing": 1, "failed": 0}
+    assert service.get_balance(1).grant_available_micro == 1_500_000
+    assert service.get_balance(2).grant_available_micro == DEFAULT_SIGNUP_CREDITS_MICRO
+    assert DEFAULT_SIGNUP_CREDIT_CAMPAIGN not in SUPERSEDED_SIGNUP_CREDIT_CAMPAIGNS

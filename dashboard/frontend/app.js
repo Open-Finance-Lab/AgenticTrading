@@ -7791,6 +7791,20 @@ function getSelectedAssets() {
 function formatBacktestError(error, dataSource = null) {
     const source = dataSource || window.ACTIVE_BACKTEST_DATA_SOURCE || 'alpaca';
     const raw = String(error?.message || error?.detail || error || 'Backtest failed.');
+    // Model-execution and Credits failures are not about the tape: the launch
+    // 402, an in-run model stop and a paused account. Below,
+    // an iFinD run maps every unrecognised message to a generic iFinD
+    // failure (and every 403 to "iFinD access is disabled"), which would
+    // hide the one thing the user can fix.
+    // "Backtest stopped: " is only ever the parent's rendering of a fixed model
+    // execution message (credential, provider, Credits), never tape text.
+    if (
+        Number(error?.status || 0) === 402
+        || raw.startsWith('Backtest stopped: ')
+        || /ATL Credits|Credits account is paused/.test(raw)
+    ) {
+        return raw;
+    }
     if (source !== IFIND_ASHARE_SOURCE) return raw;
 
     const status = Number(error?.status || 0);

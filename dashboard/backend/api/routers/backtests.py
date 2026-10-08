@@ -77,16 +77,40 @@ from dashboard.backend.infrastructure.market_data.profiles import (
 from dashboard.backend.infrastructure.market_data.ifind_ashare import (
     ASHARE_SESSIONS_PER_TRADING_DAY,
 )
-from dashboard.backend.infrastructure.llm.execution.errors import LLMExecutionError
-from dashboard.backend.infrastructure.llm.execution.service import LLMExecutionService
+from dashboard.backend.infrastructure.llm.execution.errors import (
+    ExecutionErrorCategory,
+    LLMExecutionError,
+)
+from dashboard.backend.infrastructure.llm.execution.service import (
+    LLMExecutionService,
+    analytics_error_category,
+)
 from dashboard.backend.infrastructure.llm.execution.handoff import (
     create_execution_handoff,
 )
 from dashboard.backend.infrastructure.llm.execution.models import (
     BillingMode,
     LLMRunEvidence,
+    LLMUsage,
+    PricingSnapshot,
 )
-from dashboard.backend.infrastructure.llm.pipeline_runner import split_pipeline
+from dashboard.backend.infrastructure.llm.pipeline_runner import (
+    DEFAULT_CEILING_SNAPSHOT_SYMBOLS,
+    RECOVERY_MAX_OUTPUT_TOKENS,
+    split_pipeline,
+)
+from dashboard.backend.infrastructure.llm.backtest_harness import (
+    DEFAULT_MAX_OUTPUT_TOKENS,
+)
+from dashboard.backend.infrastructure.llm.token_cost import (
+    CHARS_PER_TOKEN,
+    credits_micro_for_usd,
+    estimate_cost_from_snapshot,
+)
+from dashboard.backend.domain.backtesting.portfolio_manager import (
+    SNAPSHOT_FULL_UNIVERSE_MAX,
+    SNAPSHOT_SHORTLIST_SIZE,
+)
 from dashboard.backend.domain.model_providers.execution_catalog import (
     UnsupportedExecutionModel,
 )
@@ -991,6 +1015,7 @@ def _finalize_slot(
     cancelled: bool = False,
     timed_out: bool = False,
     timeout_detail: Optional[Dict[str, Any]] = None,
+    error_category: Optional[str] = None,
 ) -> None:
     """Move a slot to its terminal state.
 
@@ -1026,6 +1051,7 @@ def _finalize_slot(
             cancelled=cancelled,
             timed_out=timed_out,
             timeout_detail=timeout_detail,
+            error_category=error_category,
         )
     _emit_slot_run_event(event)
 
@@ -1038,6 +1064,7 @@ def _finalize_slot_locked(
     cancelled: bool = False,
     timed_out: bool = False,
     timeout_detail: Optional[Dict[str, Any]] = None,
+    error_category: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
     """The terminal transition itself. THE CALLER MUST HOLD THE LEDGER LOCK.
 
@@ -1144,7 +1171,9 @@ def _finalize_slot_locked(
         "event_name": "backtest_completed" if succeeded else "backtest_failed",
         "user_id": int(user_id),
         "run_id": live_run_id,
-        "error_category": None if succeeded else "internal_error",
+        "error_category": (
+            None if succeeded else (error_category or "internal_error")
+        ),
     }
 
 
@@ -1932,6 +1961,7 @@ def run_backtest_background(
             raise _BacktestCancelled()
 
         slot_error = None
+        slot_error_category = None
         slot_runs_count = 0
         if result.returncode != 0:
             error_msg = result.stderr if result.stderr else result.stdout
@@ -1943,6 +1973,14 @@ def run_backtest_background(
             slot_error = (
                 f"Backtest failed with return code {result.returncode}. {summary}"
             )
+            llm_failure = _child_llm_failure(result.stdout, result.stderr)
+            if llm_failure is not None:
+                # The safe message is the whole story for the user; the
+                # traceback stays in the service log via the dump above.
+                slot_error = f"Backtest stopped: {llm_failure.safe_message}"
+                slot_error_category = analytics_error_category(
+                    llm_failure.category
+                )
             print(f"❌ Backtest failed (returncode={result.returncode})", flush=True)
         else:
             runs = db.get_runs_by_mode("backtest")
@@ -1955,7 +1993,10 @@ def run_backtest_background(
             )
         if resolved_live_run_id:
             _finalize_slot(
-                resolved_live_run_id, error=slot_error, runs_count=slot_runs_count
+                resolved_live_run_id,
+                error=slot_error,
+                runs_count=slot_runs_count,
+                error_category=slot_error_category,
             )
             resolved_live_run_id = None  # finally must not double-finalize
     except _BacktestCancelled:
@@ -2535,6 +2576,157 @@ def _max_pipeline_llm_calls() -> int:
     return usable // max(1, PIPELINE_SECONDS_PER_LLM_CALL)
 
 
+# --- ATL Credits launch preflight ------------------------------------------
+#
+# Every platform-credits call reserves its worst case before it runs and settles
+# to actual usage after, one call at a time. A run therefore dies at the first
+# call whose reservation the remaining balance cannot cover -- possibly forty
+# bars in, after most of the balance is spent (2026-10-07: a 1.5-Credit account
+# spent 1.32 Credits on 39 GPT-5.5 DJIA 30 calls, then failed the run). This
+# refuses that run up front instead.
+#
+# The estimate is ``(calls - 1) x expected + one reservation ceiling``: the
+# last call must still find a whole ceiling free. It is a refusal, so
+# over-estimating is the unsafe direction -- it turns away a run that would have
+# finished. The constants are therefore typical, not worst case, calibrated on
+# prod platform-credits usage (30 days to 2026-10-07): median output tokens per
+# call were 420 (Sonnet 4.6), 574 (GPT-5.5), 1058 (DeepSeek V4 Pro), 1335
+# (Qwen3.7 Plus). The reservation itself stays the hard gate.
+#
+# Prompt size follows the step-0 market snapshot: about 3000 bytes of fixed
+# framing plus about 254 bytes per symbol shown, and about 57 more per symbol
+# for a half-invested book's holdings and trades. Measured by rebuilding the
+# snapshot; on GPT-5.5 / DJIA 30 the ceiling it gives (0.186 Credits) matches
+# the 0.178-0.187 prod reservations.
+_PREFLIGHT_PROMPT_FIXED_BYTES = 3000
+_PREFLIGHT_PROMPT_BYTES_PER_SYMBOL = 311
+_PREFLIGHT_PROMPT_FRAMING_TOKENS = 256  # service._PROMPT_FRAMING_TOKEN_ALLOWANCE
+_PREFLIGHT_EXPECTED_OUTPUT_TOKENS = 1000
+
+
+def _snapshot_symbols_shown(
+    universe_size: int, pipeline: Optional[List[Dict[str, Any]]]
+) -> int:
+    """How many symbols the step-0 prompt lists (portfolio_manager's rule)."""
+    universe_size = max(0, int(universe_size))
+    if pipeline and universe_size <= SNAPSHOT_FULL_UNIVERSE_MAX:
+        return universe_size
+    return min(universe_size, SNAPSHOT_SHORTLIST_SIZE)
+
+
+def _estimated_platform_credits_micro(
+    *,
+    model_id: str,
+    provider_id: str,
+    calls: int,
+    universe_size: int,
+    pipeline: Optional[List[Dict[str, Any]]],
+) -> Optional[int]:
+    """Credits (micro) a platform-credits run needs to finish, or None.
+
+    None means "cannot price it" (no calls, or no cost from the snapshot), and
+    the caller lets the run through: the per-call reservation is still there.
+    """
+    if calls <= 0:
+        return None
+    shown = _snapshot_symbols_shown(universe_size, pipeline)
+    prompt_bytes = (
+        _PREFLIGHT_PROMPT_FIXED_BYTES + _PREFLIGHT_PROMPT_BYTES_PER_SYMBOL * shown
+    )
+    # Mirrors pipeline_runner._first_attempt_ceiling: a wide snapshot asks for
+    # the recovery ceiling on its first attempt.
+    ceiling_output = (
+        RECOVERY_MAX_OUTPUT_TOKENS
+        if shown > DEFAULT_CEILING_SNAPSHOT_SYMBOLS
+        else DEFAULT_MAX_OUTPUT_TOKENS
+    )
+    snapshot = PricingSnapshot.from_model(model_id, provider_id)
+    ceiling_usd = estimate_cost_from_snapshot(
+        snapshot,
+        LLMUsage(
+            # Bytes as tokens, exactly as the reservation counts them.
+            input_tokens=prompt_bytes + _PREFLIGHT_PROMPT_FRAMING_TOKENS,
+            output_tokens=ceiling_output,
+        ),
+    )
+    expected_usd = estimate_cost_from_snapshot(
+        snapshot,
+        LLMUsage(
+            input_tokens=math.ceil(prompt_bytes / CHARS_PER_TOKEN),
+            output_tokens=min(_PREFLIGHT_EXPECTED_OUTPUT_TOKENS, ceiling_output),
+        ),
+    )
+    if ceiling_usd is None or expected_usd is None:
+        return None
+    return (calls - 1) * credits_micro_for_usd(expected_usd) + credits_micro_for_usd(
+        ceiling_usd
+    )
+
+
+def _format_credits(micro: int) -> str:
+    return f"{max(0, int(micro)) / 1_000_000:.2f}"
+
+
+def _enforce_platform_credits_balance(
+    *,
+    user_id: int,
+    model_id: str,
+    provider_id: str,
+    start_date: str,
+    end_date: str,
+    pipeline: Optional[List[Dict[str, Any]]],
+    data_source: Optional[str],
+    universe_size: int,
+) -> None:
+    """Refuse an ATL Credits run the account cannot pay to finish.
+
+    402 for a short balance, 403 for a restricted account (no reservation can
+    succeed there at all). A failed balance read lets the run through with a
+    log line: this check is a courtesy in front of the reservation, which
+    still refuses every call the balance cannot cover.
+    """
+    calls = _estimated_pipeline_llm_calls(start_date, end_date, pipeline, data_source)
+    needed = _estimated_platform_credits_micro(
+        model_id=model_id,
+        provider_id=provider_id,
+        calls=calls,
+        universe_size=universe_size,
+        pipeline=pipeline,
+    )
+    if needed is None:
+        return
+    try:
+        balance = credits_service.get_balance(int(user_id))
+    except Exception as exc:  # noqa: BLE001 - the reservation remains the gate
+        print(
+            "WARNING: credits.preflight_balance_unavailable "
+            f"category={type(exc).__name__}",
+            flush=True,
+        )
+        return
+    if balance.account_status == "restricted":
+        raise HTTPException(
+            status_code=403,
+            detail=LLMExecutionError.account_restricted(
+                balance.restriction_reason,
+                int(balance.outstanding_credits_micro or 0),
+            ).safe_message,
+        )
+    available = int(balance.total_available_micro)
+    if available >= needed:
+        return
+    raise HTTPException(
+        status_code=402,
+        detail=(
+            f"This run needs about {_format_credits(needed)} ATL Credits "
+            f"({calls} model calls on {model_id}), and your balance is "
+            f"{_format_credits(available)} Credits. Add Credits on the Credits "
+            "page, shorten the date range, choose a lower-cost model, or use "
+            "your own API key."
+        ),
+    )
+
+
 def _enforce_pipeline_llm_window(
     runtime_type: str,
     decision_source: str,
@@ -2682,6 +2874,40 @@ class _BoundedStreamCapture:
 
 
 _RELAYED_CHILD_LINE_PREFIX = "ERROR: llm."
+_RUN_FAILED_LINE = re.compile(
+    r"^ERROR: llm\.run_failed category=([a-z_]+)(?: reason=([a-z_]+))?\s*$", re.M
+)
+
+
+def _child_llm_failure(*streams: Optional[str]) -> Optional[LLMExecutionError]:
+    """The model-execution failure the child reported, if it reported one.
+
+    The child prints ``ERROR: llm.run_failed category=<value>`` just before an
+    ``LLMExecutionError`` ends its run. Without it the parent has only a
+    traceback tail, so an empty Credits balance reached the user as "Backtest
+    failed with return code 1. ...Traceback..." and analytics as
+    ``internal_error``. An unknown value is ignored rather than trusted: the
+    category picks the user-facing sentence, so only the enum may choose it.
+    """
+    for text in streams:
+        if not text:
+            continue
+        matches = _RUN_FAILED_LINE.findall(text)
+        if not matches:
+            continue
+        category_value, reason = matches[-1]
+        try:
+            category = ExecutionErrorCategory(category_value)
+        except ValueError:
+            return None
+        if category is ExecutionErrorCategory.ACCOUNT_RESTRICTED:
+            # The reason picks the remedy ("add Credits" vs "contact an
+            # administrator"); account_restricted() ignores an unknown one.
+            # The outstanding amount does not cross the boundary, so an
+            # overage reads "add Credits" without the figure.
+            return LLMExecutionError.account_restricted(reason or None)
+        return LLMExecutionError(category)
+    return None
 
 
 def _without_relayed_lines(text: str) -> str:
@@ -3663,6 +3889,21 @@ def run_backtest_endpoint(
                 status_code=503,
                 detail=LLMExecutionError.safe("provider_unavailable").safe_message,
             ) from exc
+
+        if billing_mode is BillingMode.PLATFORM_CREDITS:
+            # After the route resolves (so the price is the model the run will
+            # bill) and before a slot or handoff exists, so a refusal holds
+            # nothing.
+            _enforce_platform_credits_balance(
+                user_id=int(user_id),
+                model_id=route.catalog_id,
+                provider_id=provider_id,
+                start_date=start_date,
+                end_date=end_date,
+                pipeline=pipeline,
+                data_source=data_source,
+                universe_size=len(selected_assets or ()) or len(profile.symbols),
+            )
 
         execution_handoff_payload = create_execution_handoff(
             user_id=int(user_id),

@@ -42,8 +42,18 @@ from dashboard.backend.domain.credits.stripe_gateway import (
 from dashboard.backend.domain.analytics import instrumentation as analytics_instrumentation
 
 
-DEFAULT_SIGNUP_CREDIT_CAMPAIGN = "default_signup_credits_v1"
-DEFAULT_SIGNUP_CREDITS_MICRO = 1_500_000
+# v2 (8 Credits) replaced v1 (1.5 Credits) on 2026-10-07: 1.5 could not pay for
+# one default GPT-5.5 DJIA 30 backtest (~1.8 Credits), so a new account's first
+# run on the default agent died partway. A new key rather than a new amount
+# under the old one: the grant is idempotent per (campaign, user) and the
+# amount is part of its digest, so changing it in place would raise an
+# idempotency conflict for every existing account at each login and boot.
+DEFAULT_SIGNUP_CREDIT_CAMPAIGN = "default_signup_credits_v2"
+DEFAULT_SIGNUP_CREDITS_MICRO = 8_000_000
+# Welcome campaigns this one supersedes. An account holding any of them has had
+# its welcome grant and does not get v2 on top -- without this the boot
+# backfill would credit every existing account another 8 Credits.
+SUPERSEDED_SIGNUP_CREDIT_CAMPAIGNS = ("default_signup_credits_v1",)
 DEFAULT_SIGNUP_CREDIT_SOURCE = "system_promotion"
 DEFAULT_SIGNUP_CREDIT_REASON = "Automatic welcome Credits."
 
@@ -159,6 +169,10 @@ class CreditsService:
     def grant_default_signup_credits(self, user_id: int) -> bool:
         """Give one account this campaign's welcome grant exactly once."""
         user_id = int(user_id)
+        if self.store.has_promotion_grant(
+            user_id, SUPERSEDED_SIGNUP_CREDIT_CAMPAIGNS
+        ):
+            return False
         parts = {
             "campaign_key": DEFAULT_SIGNUP_CREDIT_CAMPAIGN,
             "user_id": user_id,

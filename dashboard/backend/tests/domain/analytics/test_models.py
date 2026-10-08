@@ -300,3 +300,19 @@ def test_safe_error_accepts_provider_quota_exhausted():
         )
     )
     assert record.error_category == "provider_quota_exhausted"
+
+
+def test_every_execution_failure_category_maps_into_the_allow_list():
+    # `account_restricted` was mapped but not admitted, so emit_safe_error_event
+    # raised inside its own guard and every restricted-account failure was
+    # dropped with a WARNING line. Any category added to the mapping must be
+    # admitted here in the same change.
+    from dashboard.backend.infrastructure.llm.execution.errors import (
+        ExecutionErrorCategory,
+    )
+    from dashboard.backend.infrastructure.llm.execution.service import (
+        analytics_error_category,
+    )
+
+    for category in ExecutionErrorCategory:
+        assert analytics_error_category(category) in ALLOWED_ERROR_CATEGORIES, category

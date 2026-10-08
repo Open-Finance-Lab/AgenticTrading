@@ -71,6 +71,13 @@ ALLOWED_ERROR_CATEGORIES = {
     # field carries the reason. `provider_timeout` is a different fact with a
     # different remedy.
     "run_timeout",
+    # The account cannot take model usage at all (restricted) or cannot cover
+    # the next call's reservation. Both were being emitted already --
+    # `account_restricted` since the restricted lane shipped -- but neither
+    # was admitted here, so `emit_safe_error_event` raised inside its own
+    # guard and the event was dropped with only a WARNING line.
+    "account_restricted",
+    "credits_insufficient",
 }
 
 EVENT_GROUP_BY_NAME = {
