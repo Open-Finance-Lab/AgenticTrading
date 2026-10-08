@@ -77,6 +77,17 @@ from dashboard.backend.domain.backtesting.metrics import (
     calculate_max_drawdown,
 )
 from dashboard.backend.domain.backtesting.portfolio_manager import PortfolioManager
+from dashboard.backend.domain.backtesting.decision_tape import (
+    DecisionTapeRecorder,
+    build_decision_payload,
+    build_execution_payload,
+    build_state,
+    driver_for,
+    fills_since,
+    intent_from_outputs,
+    order_events_snapshot,
+    rejections_since,
+)
 from dashboard.backend.domain.agents.runtime import (
     AI_HEDGE_FUND_RUNTIME_TYPE,
     DEFAULT_RUNTIME_TYPE,
@@ -1079,6 +1090,12 @@ class HourlyBacktester:
         except OSError as exc:
             print(f"   ⚠️  Could not write live progress: {exc}")
 
+    def decision_tape_summary(self) -> Dict[str, Any]:
+        """Counts for the trace's ``run_completed`` summary; ``{}`` when this
+        run kept no tape (no run id, or a hosted runtime)."""
+        tape = getattr(self, "_decision_tape", None)
+        return tape.summary() if tape is not None else {}
+
     def _publish_live_progress(self, step: int, total_steps: int, manager) -> None:
         """Write incremental equity curve snapshots for live dashboard charting."""
         # Above the early return, not below it. The phase clock is state, not a
@@ -2063,6 +2080,17 @@ class HourlyBacktester:
                 f"   Post-trade analysis: {len(post_trade_steps)} step(s), "
                 "once per trading day\n"
             )
+        # Decision tape (spec 2026-10-08): the run's order sequence, recorded
+        # per bar into its agent trace so it can be replayed through another
+        # engine. Observational -- the recorder never raises into this loop.
+        tape = (
+            DecisionTapeRecorder(self.live_run_id)
+            if self.runtime_type == PIPELINE_RUNTIME_TYPE and self.live_run_id
+            else None
+        )
+        self._decision_tape = tape
+        tape_decision_steps = len(_decision_steps)
+        tape_uses_llm = bool(self.use_llm and self.llm_client)
         
         # Decision timestamps come from the completed decision-bar dataset.
         all_timestamps = self._timestamps_for_data(self.all_data)
@@ -2164,6 +2192,21 @@ class HourlyBacktester:
             state = manager.get_portfolio_state(market_data, price_cache, timestamp)
             state["timestamp"] = timestamp  # Add timestamp for LLM context
             runtime_invoked = False
+            if tape is not None:
+                # Snapshots taken before the decision: identity of the step
+                # outputs (a new list means the pipeline ran this bar), the LLM
+                # success counter, the order-event repeat counts (collapsed
+                # repeats only show up there) and the pre-decision portfolio.
+                tape_outputs_before = manager.last_pipeline_step_outputs
+                tape_llm_before = manager.llm_decisions
+                tape_events_before = order_events_snapshot(
+                    getattr(manager, "order_events", None)
+                )
+                tape_state = build_state(
+                    cash=state["cash"],
+                    equity=state["total_equity"],
+                    positions=manager.positions,
+                )
             
             # Keep the established pipeline execution path unchanged. Hosted
             # runtimes alone cross the runtime-dispatch boundary, then return
@@ -2274,6 +2317,37 @@ class HourlyBacktester:
             if runtime_invoked:
                 self.runtime_dispatcher.record_latest_execution(
                     len(manager.trades) - trades_before_execution
+                )
+            if tape is not None:
+                tape.record_bar_from(
+                    lambda: (
+                        build_decision_payload(
+                            bar_index=i,
+                            decision_at=timestamp,
+                            driver=driver_for(
+                                use_llm=tape_uses_llm,
+                                llm_decisions_before=tape_llm_before,
+                                llm_decisions_after=manager.llm_decisions,
+                            ),
+                            intent=intent_from_outputs(
+                                manager.last_pipeline_step_outputs,
+                                outputs_before=tape_outputs_before,
+                                decision_step_count=tape_decision_steps,
+                            ),
+                            state=tape_state,
+                            actions=decision["actions"],
+                        ),
+                        build_execution_payload(
+                            bar_index=i,
+                            fill=fill,
+                            fills=fills_since(manager.trades, trades_before_execution),
+                            rejected=rejections_since(
+                                getattr(manager, "order_events", None),
+                                tape_events_before,
+                            ),
+                        ),
+                    ),
+                    bar_index=i,
                 )
             
             # Update equity. The minute path emits one mark for every source
