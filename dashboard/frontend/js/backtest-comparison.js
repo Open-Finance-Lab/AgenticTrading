@@ -28,7 +28,26 @@
     }, []);
   }
 
-  function calculateMetrics(values) {
+  function periodsPerYearFromTimestamps(timestamps) {
+    // Chart valuation frequency can differ from agent decision frequency.
+    // Use the most common intraday interval, ignoring overnight gaps.
+    const hourly = 252 * 6.5;
+    if (!Array.isArray(timestamps) || timestamps.length < 2) return hourly;
+    const gaps = new Map();
+    for (let i = 1; i < timestamps.length; i += 1) {
+      const before = Date.parse(timestamps[i - 1]);
+      const after = Date.parse(timestamps[i]);
+      if (!Number.isFinite(before) || !Number.isFinite(after)) continue;
+      const minutes = (after - before) / 60000;
+      if (minutes > 0 && minutes <= 390)
+        gaps.set(minutes, (gaps.get(minutes) || 0) + 1);
+    }
+    if (!gaps.size) return hourly;
+    const interval = [...gaps].sort((a, b) => b[1] - a[1] || a[0] - b[0])[0][0];
+    return hourly * 60 / interval;
+  }
+
+  function calculateMetrics(values, periodsPerYear = 252 * 6.5) {
     const clean = finiteValues(values);
     const result = {
       finalValue: clean.length ? clean[clean.length - 1] : null,
@@ -61,8 +80,8 @@
       0,
     ) / returns.length;
     const deviation = Math.sqrt(variance);
-    if (deviation > 0) {
-      result.sharpe = mean / deviation * Math.sqrt(252 * 6.5);
+    if (deviation > 0 && Number.isFinite(periodsPerYear) && periodsPerYear > 0) {
+      result.sharpe = mean / deviation * Math.sqrt(periodsPerYear);
     }
     return result;
   }
@@ -85,6 +104,7 @@
       : ['agent', 'djia', 'nasdaq', 'buyhold'];
     const indexBaselinesOk = payload?.index_baselines_ok !== false;
     const found = new Map();
+    const periodsPerYear = periodsPerYearFromTimestamps(payload?.timestamps);
 
     for (const entry of payload?.series || []) {
       const key = classify(entry, payload, run);
@@ -103,7 +123,7 @@
         available: Boolean(entry),
         runId: entry?.run_id || null,
         values: entry?.values || [],
-        metrics: entry ? calculateMetrics(entry.values) : calculateMetrics([]),
+        metrics: entry ? calculateMetrics(entry.values, periodsPerYear) : calculateMetrics([]),
         dashed: Boolean(entry?.dashed),
       };
     });
