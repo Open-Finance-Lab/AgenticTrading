@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from dashboard.backend.domain.traces.repository import trace_store
 
@@ -228,3 +228,104 @@ def ensure_trace_for_run(
         # Market-data tracing is observational; a missing trace must never
         # prevent a backtest from loading its provider data.
         return None
+
+
+# --------------------------------------------------------------------------
+# Decision tape (My Agents backtests; spec 2026-10-08-backtest-decision-tape)
+# --------------------------------------------------------------------------
+
+
+def record_tape_bar(
+    *,
+    trace_id: str,
+    run_id: str,
+    bar_index: int,
+    decision_payload: Dict[str, Any],
+    execution_payload: Dict[str, Any],
+) -> None:
+    """Append one bar's ``decision_recorded`` + ``execution_result`` pair.
+
+    Takes the caller's cached ``trace_id`` (one lookup per run, not two per
+    bar) and raises on failure: ``DecisionTapeRecorder`` is the single place
+    that swallows and counts, so it can say what failed.
+    """
+    step_id = f"step_{run_id}_{bar_index}"
+    decision_id = f"dec_{run_id}_{bar_index}"
+    trace_store.append_event(
+        trace_id=trace_id,
+        event_type="decision_recorded",
+        actor_type="agent",
+        step_id=step_id,
+        decision_id=decision_id,
+        payload=decision_payload,
+        idempotency_key=f"decision:{run_id}:{step_id}:tape",
+    )
+    trace_store.append_event(
+        trace_id=trace_id,
+        event_type="execution_result",
+        actor_type="system",
+        step_id=step_id,
+        decision_id=decision_id,
+        payload=execution_payload,
+        idempotency_key=f"execution:{run_id}:{step_id}:tape",
+    )
+
+
+_TAPE_EVENT_KINDS = {"decision_recorded": "decision", "execution_result": "execution"}
+
+
+def load_decision_tape(run_id: str) -> List[Dict[str, Any]]:
+    """The run's tape as ordered ``{bar_index, decision, execution}`` pairs.
+
+    Only events carrying ``tape_version`` count, so v2 decision events on the
+    same vocabulary are never mistaken for tape bars.
+    """
+    trace = trace_for_run(run_id)
+    if trace is None:
+        return []
+    bars: Dict[int, Dict[str, Any]] = {}
+    after = 0
+    while True:
+        page = trace_store.list_events(trace["trace_id"], after_sequence=after, limit=100)
+        for event in page["items"]:
+            kind = _TAPE_EVENT_KINDS.get(event.get("event_type"))
+            payload = event.get("payload") or {}
+            if kind is None or payload.get("tape_version") is None:
+                continue
+            index = int(payload["bar_index"])
+            bars.setdefault(index, {"bar_index": index})[kind] = payload
+        if not page["has_more"]:
+            break
+        after = page["next_sequence_no"] - 1
+    return [bars[index] for index in sorted(bars)]
+
+
+def finish_trace_best_effort(
+    run_id: str,
+    *,
+    error_code: Optional[str] = None,
+    result_summary: Optional[Dict[str, Any]] = None,
+) -> bool:
+    """Close a run's trace as completed (or failed with ``error_code``)
+    without ever raising -- the run's outcome is already decided."""
+    try:
+        if error_code:
+            fail_trace(run_id, error_code)
+        else:
+            complete_trace(run_id, result_summary)
+        return True
+    except Exception:
+        return False
+
+
+def fail_trace_if_running(run_id: str, error_code: str) -> bool:
+    """Fail a trace its process left ``running`` (killed child). A trace the
+    child already closed is left alone, so this is safe on every exit path."""
+    try:
+        trace = trace_for_run(run_id)
+        if trace is None or trace.get("status") != "running":
+            return False
+        fail_trace(run_id, error_code)
+        return True
+    except Exception:
+        return False

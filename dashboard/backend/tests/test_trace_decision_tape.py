@@ -1,0 +1,100 @@
+"""Trace-service side of the decision tape (spec 2026-10-08)."""
+
+import pytest
+
+from dashboard.backend.domain.traces import service
+from dashboard.backend.domain.traces.repository import TraceStore
+
+RUN = "agent_tape_service"
+
+
+@pytest.fixture
+def store(tmp_path, monkeypatch):
+    store = TraceStore(tmp_path / "traces.db")
+    monkeypatch.setattr(service, "trace_store", store)
+    return store
+
+
+def _trace(store):
+    service.ensure_trace_for_run(run_id=RUN, initial_input={})
+    return service.trace_for_run(RUN)["trace_id"]
+
+
+def _pair(i):
+    return (
+        {"tape_version": 1, "bar_index": i, "actions": [{"symbol": "AAPL", "action": "buy", "shares": i}]},
+        {"tape_version": 1, "bar_index": i, "fills": [], "rejected": []},
+    )
+
+
+def test_record_tape_bar_writes_a_linked_pair_with_v2_ids(store):
+    trace_id = _trace(store)
+    decision, execution = _pair(3)
+    service.record_tape_bar(trace_id=trace_id, run_id=RUN, bar_index=3,
+                            decision_payload=decision, execution_payload=execution)
+    events = store.list_events(trace_id)["items"]
+    assert [e["event_type"] for e in events] == ["run_started", "decision_recorded", "execution_result"]
+    assert events[1]["step_id"] == events[2]["step_id"] == f"step_{RUN}_3"
+    assert events[1]["decision_id"] == events[2]["decision_id"] == f"dec_{RUN}_3"
+    assert events[1]["actor_type"] == "agent" and events[2]["actor_type"] == "system"
+
+
+def test_record_tape_bar_is_idempotent_per_bar(store):
+    trace_id = _trace(store)
+    decision, execution = _pair(0)
+    for _ in range(2):
+        service.record_tape_bar(trace_id=trace_id, run_id=RUN, bar_index=0,
+                                decision_payload=decision, execution_payload=execution)
+    assert len(store.list_events(trace_id)["items"]) == 3
+
+
+def test_load_decision_tape_pairs_bars_in_order_across_pages(store):
+    trace_id = _trace(store)
+    for i in range(60):  # 120 tape events: more than one 100-event page
+        decision, execution = _pair(i)
+        service.record_tape_bar(trace_id=trace_id, run_id=RUN, bar_index=i,
+                                decision_payload=decision, execution_payload=execution)
+    tape = service.load_decision_tape(RUN)
+    assert [bar["bar_index"] for bar in tape] == list(range(60))
+    assert tape[7]["decision"]["actions"][0]["shares"] == 7
+    assert tape[7]["execution"]["bar_index"] == 7
+
+
+def test_load_decision_tape_is_empty_without_a_trace(store):
+    assert service.load_decision_tape("agent_missing") == []
+
+
+def test_finish_trace_best_effort_completes_and_fails(store):
+    _trace(store)
+    assert service.finish_trace_best_effort(RUN, result_summary={"bars_recorded": 2}) is True
+    assert service.trace_for_run(RUN)["status"] == "completed"
+
+
+def test_finish_trace_best_effort_never_raises(store, monkeypatch):
+    _trace(store)
+
+    def boom(*_a, **_k):
+        raise RuntimeError("store down")
+
+    monkeypatch.setattr(store, "append_event", boom)
+    assert service.finish_trace_best_effort(RUN, error_code="run_failed") is False
+
+
+def test_fail_trace_if_running_marks_a_running_trace(store):
+    _trace(store)
+    assert service.fail_trace_if_running(RUN, "run_killed") is True
+    trace = service.trace_for_run(RUN)
+    assert trace["status"] == "failed"
+    events = store.list_events(trace["trace_id"])["items"]
+    assert events[-1]["payload"] == {"error_code": "run_killed"}
+
+
+def test_fail_trace_if_running_leaves_a_completed_trace_alone(store):
+    _trace(store)
+    service.complete_trace(RUN, {"ok": True})
+    assert service.fail_trace_if_running(RUN, "run_killed") is False
+    assert service.trace_for_run(RUN)["status"] == "completed"
+
+
+def test_fail_trace_if_running_without_trace_is_a_no_op(store):
+    assert service.fail_trace_if_running("agent_missing", "run_killed") is False
