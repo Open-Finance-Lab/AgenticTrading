@@ -174,7 +174,8 @@ _ORDER_SIDES = {"buy", "sell"}
 
 def _order_triples(orders: Iterable[Mapping[str, Any]], size_field: str):
     """``(symbol, side, size)`` per buy/sell order; ``size`` is ``None`` when
-    the order carries none, and a ``None`` size matches any size."""
+    the order carries none or an unparseable one (the model supplies it, so it
+    can be any text), and a ``None`` size matches any size."""
     triples = []
     for order in orders or ():
         if not isinstance(order, Mapping):
@@ -182,8 +183,11 @@ def _order_triples(orders: Iterable[Mapping[str, Any]], size_field: str):
         side = str(order.get("action") or order.get("side") or "").lower()
         if side not in _ORDER_SIDES:
             continue  # hold / unknown: not an order the gate can rewrite
-        size = order.get(size_field)
-        triples.append((str(order.get("symbol") or "").upper(), side, None if size is None else float(size)))
+        try:
+            size = None if order.get(size_field) is None else float(order.get(size_field))
+        except (TypeError, ValueError, OverflowError):
+            size = None  # model-supplied junk ("ten", "[1, 2]"): matches any size
+        triples.append((str(order.get("symbol") or "").upper(), side, size))
     return sorted(triples, key=lambda t: (t[0], t[1], -1.0 if t[2] is None else t[2]))
 
 

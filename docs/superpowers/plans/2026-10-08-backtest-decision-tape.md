@@ -838,7 +838,7 @@ git commit -m "feat(traces): tape bar writer, reader and best-effort finalizers"
 **Interfaces:**
 - Consumes: Task 1 builders; Task 2 `trace_service.trace_for_run`, `record_tape_bar`, `finish_trace_best_effort` — **imported lazily inside each function**, never at module top (Global Constraints).
 - Produces:
-  - `class DecisionTapeRecorder(run_id: str)` with `record_bar(*, bar_index: int, decision_payload: dict, execution_payload: dict) -> None` (never raises; reads `decision_payload["gate_rewrote"]` to count) and `summary() -> dict` returning `{"tape_version", "traced", "bars_recorded", "gate_rewrites", "write_failures", "oversize_skipped"}`.
+  - `class DecisionTapeRecorder(run_id: str)` with `record_bar(*, bar_index: int, decision_payload: dict, execution_payload: dict) -> None` (never raises; reads `decision_payload["gate_rewrote"]` to count), `record_bar_from(build: Callable[[], Tuple[dict, dict]], *, bar_index: int) -> None` (never raises; calls `build()` -> `(decision_payload, execution_payload)` **inside** the same swallow-and-count layer, so a builder bug counts as a `write_failure` instead of aborting the bar loop; the engine hook in Task 4 must use this, never call the builders inline), and `summary() -> dict` returning `{"tape_version", "traced", "bars_recorded", "gate_rewrites", "write_failures", "oversize_skipped"}`.
   - `trace_lifecycle(run_id: Optional[str], *, summary: Callable[[], dict])` — a `contextlib.contextmanager`. On normal exit: `complete` with `summary()`. On `SystemExit`: **writes nothing**, re-raises (the parent labels it). On any other `BaseException`: `fail(run_failed)`, re-raises. With no `run_id`: touches no trace.
 
 - [ ] **Step 1: Write the failing tests**
@@ -955,6 +955,20 @@ def test_recorder_counts_oversize_bars_without_writing(monkeypatch):
     assert fake.writes == [] and recorder.summary()["oversize_skipped"] == 1
 
 
+def test_record_bar_from_swallows_a_builder_exception(monkeypatch, capsys):
+    fake = _FakeTraceService(trace={"trace_id": "trc_1"})
+    _install(monkeypatch, fake)
+    recorder = tape.DecisionTapeRecorder("agent_x")
+
+    def broken():
+        raise ValueError("builder bug")
+
+    recorder.record_bar_from(broken, bar_index=0)  # must not raise
+    recorder.record_bar_from(lambda: (_bar(1)["decision_payload"], _bar(1)["execution_payload"]), bar_index=1)
+    summary = recorder.summary()
+    assert summary["write_failures"] == 1 and summary["bars_recorded"] == 1
+
+
 def _capture_finish(monkeypatch):
     calls = []
     monkeypatch.setattr(trace_service, "finish_trace_best_effort",
@@ -1025,7 +1039,7 @@ Expected: new tests FAIL — `AttributeError: ... has no attribute 'DecisionTape
 
 - [ ] **Step 3: Implement**
 
-In `decision_tape.py`, extend the typing import to `from typing import Any, Callable, Dict, Iterable, Iterator, List, Mapping, Optional, Sequence`, add `from contextlib import contextmanager` to the stdlib imports, and **do not** add a module-level import of the trace service. Append:
+In `decision_tape.py`, extend the typing import to `from typing import Any, Callable, Dict, Iterable, Iterator, List, Mapping, Optional, Sequence, Tuple`, add `from contextlib import contextmanager` to the stdlib imports, and **do not** add a module-level import of the trace service. Append:
 
 ```python
 def _trace_service():
@@ -1102,6 +1116,27 @@ class DecisionTapeRecorder:
         except Exception as exc:  # observational: never reaches the bar loop
             self.write_failures += 1
             self._warn(exc)
+
+    def record_bar_from(
+        self,
+        build: Callable[[], Tuple[Dict[str, Any], Dict[str, Any]]],
+        *,
+        bar_index: int,
+    ) -> None:
+        """``record_bar`` with the payload builders inside the swallow layer:
+        they read model-supplied text, so a builder bug must cost a tape bar,
+        never the backtest."""
+        try:
+            decision_payload, execution_payload = build()
+        except Exception as exc:
+            self.write_failures += 1
+            self._warn(exc)
+            return
+        self.record_bar(
+            bar_index=bar_index,
+            decision_payload=decision_payload,
+            execution_payload=execution_payload,
+        )
 
     def summary(self) -> Dict[str, Any]:
         return {
@@ -1587,33 +1622,35 @@ add:
 
 ```python
             if tape is not None:
-                tape.record_bar(
+                tape.record_bar_from(
+                    lambda: (
+                        build_decision_payload(
+                            bar_index=i,
+                            decision_at=timestamp,
+                            driver=driver_for(
+                                use_llm=tape_uses_llm,
+                                llm_decisions_before=tape_llm_before,
+                                llm_decisions_after=manager.llm_decisions,
+                            ),
+                            intent=intent_from_outputs(
+                                manager.last_pipeline_step_outputs,
+                                outputs_before=tape_outputs_before,
+                                decision_step_count=tape_decision_steps,
+                            ),
+                            state=tape_state,
+                            actions=decision["actions"],
+                        ),
+                        build_execution_payload(
+                            bar_index=i,
+                            fill=fill,
+                            fills=fills_since(manager.trades, trades_before_execution),
+                            rejected=rejections_since(
+                                getattr(manager, "order_events", None),
+                                tape_events_before,
+                            ),
+                        ),
+                    ),
                     bar_index=i,
-                    decision_payload=build_decision_payload(
-                        bar_index=i,
-                        decision_at=timestamp,
-                        driver=driver_for(
-                            use_llm=tape_uses_llm,
-                            llm_decisions_before=tape_llm_before,
-                            llm_decisions_after=manager.llm_decisions,
-                        ),
-                        intent=intent_from_outputs(
-                            manager.last_pipeline_step_outputs,
-                            outputs_before=tape_outputs_before,
-                            decision_step_count=tape_decision_steps,
-                        ),
-                        state=tape_state,
-                        actions=decision["actions"],
-                    ),
-                    execution_payload=build_execution_payload(
-                        bar_index=i,
-                        fill=fill,
-                        fills=fills_since(manager.trades, trades_before_execution),
-                        rejected=rejections_since(
-                            getattr(manager, "order_events", None),
-                            tape_events_before,
-                        ),
-                    ),
                 )
 ```
 

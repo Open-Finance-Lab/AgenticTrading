@@ -108,6 +108,16 @@ def test_fills_since_slices_and_allow_lists():
     }]
 
 
+def test_gate_rewrote_tolerates_non_numeric_model_sizes():
+    action = [{"symbol": "AAPL", "action": "buy", "shares": 5}]
+    for junk in ("ten", "all", "[1, 2]", "{'a': 1}", [1, 2], {"a": 1}, ""):
+        intent = {"orders": [{"symbol": "AAPL", "action": "buy", "position_size": junk}]}
+        assert tape.gate_rewrote(intent, action) is False  # unparseable size matches any size
+    assert tape.gate_rewrote(
+        {"orders": [{"symbol": "AAPL", "action": "buy", "position_size": "ten"}]}, []
+    ) is True
+
+
 def test_gate_rewrote_compares_symbol_side_size_triples():
     buy5 = {"orders": [{"symbol": "AAPL", "action": "buy", "position_size": 5}]}
     assert tape.gate_rewrote(buy5, [{"symbol": "AAPL", "action": "buy", "shares": 5}]) is False
