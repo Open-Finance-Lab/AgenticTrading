@@ -3852,8 +3852,44 @@ async function submitCreateExternalAgent(event) {
   }
 }
 
+// The modal's date inputs ship empty: the default period is the server's
+// rolling week (`/config/defaults`), and any date baked into app.html goes
+// stale the week it is written -- and was what a cold start submitted while
+// the defaults were still loading. One request at a time: boot starts it, and
+// the modal and the submit path reuse whatever is in flight.
+let defaultsInFlight = null;
+
+function loadDefaults() {
+  if (!defaultsInFlight) {
+    defaultsInFlight = fetchAndApplyDefaults().finally(() => {
+      defaultsInFlight = null;
+    });
+  }
+  return defaultsInFlight;
+}
+
+// Write a server default into a date input unless the user has chosen a date
+// of their own. "Their own" = anything but empty or the default this function
+// wrote last, so a late response never overwrites an edit (or the iFinD
+// window, which is set programmatically).
+function applyDefaultDate(input, value) {
+  if (!input || !value) return;
+  if (input.value && input.value !== input.dataset.serverDefault) return;
+  input.value = value;
+  input.dataset.serverDefault = value;
+}
+
+// Called before a submit: if either date is still empty, wait for the
+// defaults (retrying a failed boot fetch) rather than submitting nothing.
+async function ensureDefaultBacktestDates() {
+  const startInput = document.getElementById('startDate');
+  const endInput = document.getElementById('endDate');
+  if (startInput?.value && endInput?.value) return;
+  await loadDefaults();
+}
+
 // Load default configuration from backend
-async function loadDefaults() {
+async function fetchAndApplyDefaults() {
   try {
     const defaultsUrl = `${API_BASE}/config/defaults`;
     
@@ -3883,25 +3919,8 @@ async function loadDefaults() {
       const settings = defaults.defaultSettings;
       
       // Set date inputs (using correct ID selectors)
-      if (settings.startDate) {
-        const startInput = document.getElementById('startDate');
-        if (startInput) {
-          startInput.value = settings.startDate;
-          console.log('✅ Set startDate to:', settings.startDate);
-        } else {
-          console.warn('⚠️  Could not find #startDate input');
-        }
-      }
-      
-      if (settings.endDate) {
-        const endInput = document.getElementById('endDate');
-        if (endInput) {
-          endInput.value = settings.endDate;
-          console.log('✅ Set endDate to:', settings.endDate);
-        } else {
-          console.warn('⚠️  Could not find #endDate input');
-        }
-      }
+      applyDefaultDate(document.getElementById('startDate'), settings.startDate);
+      applyDefaultDate(document.getElementById('endDate'), settings.endDate);
       
       // Set asset universe
       if (settings.assetList && settings.assetList.length > 0) {
@@ -10775,6 +10794,9 @@ async function openRunBacktestModal(agent) {
     const builtinTabBtn = document.querySelector('#runBacktestModal .universe-tab[data-tab="builtin"]');
     if (builtinTabBtn) handleUniverseTabSwitch(builtinTabBtn);
     syncMarketDataSourceUI({ resetIFindDecisionSource: true });
+    // Not awaited: the modal opens at once and the dates fill in when the
+    // defaults land (submit awaits them if they have not).
+    ensureDefaultBacktestDates();
 
     syncRunBacktestInstructionPreview();
 
@@ -10811,6 +10833,8 @@ function goToApiKeys() {
 }
 
 async function runBacktest() {
+    // A cold start can reach here before /config/defaults has answered.
+    await ensureDefaultBacktestDates();
     // Get dates from form
     const startDateInput = document.getElementById('startDate');
     const endDateInput = document.getElementById('endDate');

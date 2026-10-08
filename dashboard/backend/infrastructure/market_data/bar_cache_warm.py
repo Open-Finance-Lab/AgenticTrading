@@ -6,8 +6,10 @@ is precisely the user this cache exists for. Runs on a daemon thread from
 (a child never runs ``app.py``, so there is nothing to suppress there).
 
 Cost, named rather than discovered later: three batched Alpaca calls per
-deploy, and merging to ``main`` auto-deploys prod via the CI hook. Negligible
-quota, but it is a new recurring outbound call -- which is why
+boot, and merging to ``main`` auto-deploys prod via the CI hook -- plus two
+more each Saturday evening on an instance that lives through one, because the
+modal's default period rolls weekly (``warm_bar_cache_each_week``). Negligible
+quota, but it is a recurring outbound call -- which is why
 ``ATL_BAR_CACHE_WARM`` is **strict opt-in** and this module does nothing until
 an operator sets it. Default-on billed the Docker image, every fork and
 self-host, and every ``uvicorn --reload`` save on a developer machine holding
@@ -22,7 +24,8 @@ This module is separate from ``bar_cache`` for one reason: it imports
 from __future__ import annotations
 
 import json
-from typing import List, Set, Tuple
+import threading
+from typing import List, Optional, Set, Tuple
 
 from dashboard.backend.infrastructure.llm.validator import DJIA_30
 from dashboard.backend.infrastructure.market_data import bar_cache
@@ -45,6 +48,11 @@ from dashboard.backend.paths import CONFIG_DIR
 #: ``test_route_defaults_match_the_route_signature``.
 ROUTE_DEFAULT_START = "2026-05-01"
 ROUTE_DEFAULT_END = "2026-05-07"
+
+#: How often the warm thread asks whether the modal's default week has rolled.
+#: Pure arithmetic per tick -- no I/O -- so the interval buys freshness after
+#: the Saturday-evening rollover, not cost.
+ROLLOVER_POLL_SECONDS = 3600.0
 
 #: The default US profile fetches 5m source bars and aggregates to 60m
 #: decisions (``profiles.py``, the ``(ALPACA, "djia_30")`` entry). The cache
@@ -210,3 +218,42 @@ def warm_bar_cache() -> int:
         ready.update((symbol, start, end) for symbol in after)
     print(f"📦 bar cache warm: {len(ready)} symbol-windows ready", flush=True)
     return len(ready)
+
+
+def _warm_logged() -> None:
+    try:
+        warm_bar_cache()
+    except Exception as exc:  # noqa: BLE001 - a cold cache is the status quo
+        # "bar cache warm:" -- the live-call detector greps that exact prefix.
+        print(f"⚠️ bar cache warm: error: {exc}", flush=True)
+
+
+def warm_bar_cache_each_week(
+    *,
+    poll_seconds: float = ROLLOVER_POLL_SECONDS,
+    stop: Optional[threading.Event] = None,
+) -> None:
+    """Warm once, then again each time the modal's default week rolls over.
+
+    A one-shot boot warm went stale on the first Saturday evening an instance
+    lived through: ``/config/defaults`` moved to the new week, the cache still
+    held the old one, and every first visitor until the next deploy paid a
+    cold fetch while the boot's calls had bought a window no modal showed.
+
+    Re-running the whole of ``warm_bar_cache`` is deliberate: the route
+    default window never moves, so its symbols are cache hits and
+    ``fetch_bars`` spends nothing on them -- only the two rolled windows go
+    to Alpaca. Blocks; run it on the daemon thread ``app.py`` starts. Returns
+    at once when the warm is not armed, so an unarmed deployment holds no
+    loop at all.
+    """
+    if not bar_cache.enabled() or not bar_cache.warm_enabled():
+        return
+    stop = stop or threading.Event()
+    warmed_for = default_backtest_window()
+    _warm_logged()
+    while not stop.wait(poll_seconds):
+        current = default_backtest_window()
+        if current != warmed_for:
+            warmed_for = current
+            _warm_logged()
