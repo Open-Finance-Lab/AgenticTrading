@@ -97,8 +97,9 @@ from agentictrading import Decision, Order
 
 decision = Decision(
     orders=[
-        Order(symbol="AAPL", side="buy", quantity_type="shares",
-              quantity=10, order_type="market"),
+        # 20% of equity: stays under the 25% position cap at any capital.
+        Order(symbol="AAPL", side="buy", quantity_type="weight",
+              quantity=0.2, order_type="market"),
     ],
     confidence=0.8,
     rationale="Positive momentum signal.",

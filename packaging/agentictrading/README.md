@@ -54,7 +54,12 @@ print(result.metrics)
 > **Environment limits.** `us-equity-hourly-v1` trades the DJIA-30 only, starts
 > with $1,000 (the SDK currently accepts only that default), allows at most 25%
 > of equity in one position ($250 at the start) and at most 10 orders per step.
-> Orders breaking a limit are rejected, not clipped.
+> An order over the position cap is rejected on its own, not clipped, and the
+> rest of the decision still executes. A decision with more than 10 orders is
+> refused whole: `submit_decision` raises `ATLValidationError`
+> (`too_many_orders`) and nothing fills. Size orders from
+> `observation.portfolio` (cash, equity) and `step.constraints` rather than
+> fixed dollar amounts.
 
 > **Decision deadline.** Each step has a decision window (default **60s**). If
 > your `decide()` plus submission takes longer, the backend auto-holds that step
@@ -89,17 +94,23 @@ client = AgenticTradingClient(
 
 def strategy(snapshot: dict) -> list:
     """Return a list of action dicts for the current hour."""
+    # Up to five buys an hour, each an equal slice of the cash on hand, with 5%
+    # kept back for the next bar's fill price. A buy costing more than the cash
+    # is dropped without an error, so never size from a fixed dollar amount.
+    cash = float((snapshot.get("portfolio") or {}).get("cash") or 0)
+    budget = 0.95 * cash / 5
     actions = []
     for symbol, sig in (snapshot.get("top_signals") or {}).items():
         rsi = float(sig.get("rsi") or 50)
         price = float(sig.get("price") or 0)
-        if price > 0 and rsi < 35:
+        shares = int(budget // price) if price > 0 else 0
+        if shares > 0 and rsi < 35 and len(actions) < 5:
             actions.append({
                 "action": "buy",
                 "symbol": symbol,
                 "confidence": 0.75,
                 "reasoning": "RSI oversold entry",
-                "position_size": max(1, int(2000 / price)),
+                "position_size": shares,
             })
     if not actions:
         actions.append({"action": "hold", "symbol": "AAPL",

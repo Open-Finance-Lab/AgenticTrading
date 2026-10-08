@@ -6,7 +6,7 @@ This is a readable, hackable reference: it authenticates with an Agent API key,
 creates an immutable AgentVersion, opens a Run, then steps through the protocol
 (Observation -> Decision -> ExecutionResult) printing what happens each step.
 
-Policy = "equal-weight buy & hold": on the first step it buys a fixed dollar
+Policy = "equal-weight buy & hold": on the first step it buys an equal dollar
 amount (notional order) of a few symbols, then holds for the rest of the run.
 Swap out `decide()` to plug in your own logic / LLM.
 
@@ -45,31 +45,47 @@ def call(method: str, url: str, api_key: str, body: dict | None = None, timeout:
         raise RuntimeError(f"HTTP {exc.code} {url}: {detail}") from exc
 
 
-# How many names to buy on the first step, and dollars per name.
-# The us-equity-hourly-v1 environment starts with $1,000 and caps one position at 25% of
-# equity ($250), so five $200 orders fit. A name priced above $200 would round to zero
-# shares and be rejected, so the examples skip those.
+# How many names to buy on the first step.
 NUM_NAMES = 5
-DOLLARS_PER_NAME = 200
+# Orders are sized at this bar's price but fill at the next bar's, plus costs, so
+# keep 5% back or the last buy can come up short of cash.
+FILL_BUFFER = 0.95
 
 
-def decide(observation: dict, sequence: int) -> list[dict]:
+def dollars_per_name(portfolio: dict, constraints: dict, num_names: int) -> float:
+    """Size each buy from this step's cash, equity and position cap.
+
+    Reading these off the step (rather than hard-coding the environment's
+    starting cash) keeps the demo valid if the capital or the cap changes.
+    """
+    cash = float(portfolio.get("cash") or 0)
+    equity = float(portfolio.get("equity") or cash)
+    position_cap = float(constraints.get("max_position_weight") or 1.0) * equity
+    return min(position_cap, cash / num_names) * FILL_BUFFER
+
+
+def decide(step: dict) -> list[dict]:
     """Return protocol orders for this step. First step buys, then holds.
 
     Buys the symbols actually present in the observation (the environment only
     surfaces its top signals each step), so the demo reliably produces fills.
     """
-    if sequence != 0:
+    if step["sequence"] != 0:
         return []  # HOLD
+    observation = step.get("observation") or {}
+    constraints = step.get("constraints") or {}
+    num_names = min(NUM_NAMES, int(constraints.get("max_orders") or NUM_NAMES))
+    budget = dollars_per_name(observation.get("portfolio") or {}, constraints, num_names)
     features = (observation.get("market") or {}).get("features") or {}
-    tradable = [s for s, f in features.items() if 0 < float(f.get("price") or 0) <= DOLLARS_PER_NAME]
+    # A name priced above the budget would round to zero shares; skip it.
+    tradable = [s for s, f in features.items() if 0 < float(f.get("price") or 0) <= budget]
     orders = []
-    for symbol in tradable[:NUM_NAMES]:
+    for symbol in tradable[:num_names]:
         orders.append({
             "symbol": symbol,
             "side": "buy",
             "quantity_type": "notional",   # spend a dollar amount; server -> shares
-            "quantity": DOLLARS_PER_NAME,
+            "quantity": round(budget, 2),
             "order_type": "market",
         })
     return orders
@@ -120,7 +136,7 @@ def main() -> int:
         seq = step["sequence"]
         obs = step["observation"]
         pf = obs["portfolio"]
-        orders = decide(obs, seq)
+        orders = decide(step)
         res = call(
             "POST",
             f"{base}/api/v1/runs/{run_id}/steps/{step['step_id']}/decision",

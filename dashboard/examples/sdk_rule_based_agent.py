@@ -26,11 +26,22 @@ import sys
 
 from agentictrading import ATLClient, Decision, Order
 
-# The us-equity-hourly-v1 environment starts with $1,000 and caps one position at 25% of
-# equity ($250), so five $200 orders fit. A name priced above $200 would round to zero
-# shares and be rejected, so the examples skip those.
 NUM_NAMES = 5
-DOLLARS_PER_NAME = 200
+# Orders are sized at this bar's price but fill at the next bar's, plus costs, so
+# keep 5% back or the last buy can come up short of cash.
+FILL_BUFFER = 0.95
+
+
+def dollars_per_name(portfolio: dict, constraints: dict, num_names: int) -> float:
+    """Size each buy from this step's cash, equity and position cap.
+
+    Reading these off the step (rather than hard-coding the environment's
+    starting cash) keeps the agent valid if the capital or the cap changes.
+    """
+    cash = float(portfolio.get("cash") or 0)
+    equity = float(portfolio.get("equity") or cash)
+    position_cap = float(constraints.get("max_position_weight") or 1.0) * equity
+    return min(position_cap, cash / num_names) * FILL_BUFFER
 
 
 def resolve_agent_version_id(client: ATLClient) -> str:
@@ -61,11 +72,14 @@ def decide(step) -> Decision:
     constraints = step.constraints or {}
     allowed = set(constraints.get("allowed_symbols") or [])
     max_orders = int(constraints.get("max_orders") or NUM_NAMES)
+    num_names = min(NUM_NAMES, max_orders)
+    budget = dollars_per_name(step.observation.portfolio, constraints, num_names)
 
+    # A name priced above the budget would round to zero shares; skip it.
     tradable = [
         sym
         for sym, feat in features.items()
-        if 0 < float(feat.get("price") or 0) <= DOLLARS_PER_NAME
+        if 0 < float(feat.get("price") or 0) <= budget
         and (not allowed or sym in allowed)
     ]
 
@@ -74,10 +88,10 @@ def decide(step) -> Decision:
             symbol=sym,
             side="buy",
             quantity_type="notional",
-            quantity=DOLLARS_PER_NAME,
+            quantity=round(budget, 2),
             order_type="market",
         )
-        for sym in tradable[: min(NUM_NAMES, max_orders)]
+        for sym in tradable[:num_names]
     ]
     rationale = (
         f"Equal-dollar entry into {len(orders)} names." if orders else "No tradable names."

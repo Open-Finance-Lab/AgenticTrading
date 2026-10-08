@@ -12,7 +12,7 @@ install is dependency-free on macOS and Linux; on Windows it also pulls the
 Links:
   - Live demo: https://agentic-trading-lab.vercel.app/
   - Docs:      https://finagent-orchestration.readthedocs.io/
-  - Source:    https://github.com/Allan-Feng/AgenticTrading
+  - Source:    https://github.com/Open-Finance-Lab/AgenticTrading
 """
 
 from __future__ import annotations
@@ -73,7 +73,7 @@ __version__ = "0.2.0"
 
 LIVE_DEMO_URL = "https://agentic-trading-lab.vercel.app/"
 DOCS_URL = "https://finagent-orchestration.readthedocs.io/"
-SOURCE_URL = "https://github.com/Allan-Feng/AgenticTrading"
+SOURCE_URL = "https://github.com/Open-Finance-Lab/AgenticTrading"
 
 
 def info() -> dict:
