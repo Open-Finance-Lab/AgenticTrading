@@ -21,7 +21,8 @@ from __future__ import annotations
 import copy
 import json
 import math
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence
+from contextlib import contextmanager
+from typing import Any, Callable, Dict, Iterable, Iterator, List, Mapping, Optional, Sequence, Tuple
 
 from dashboard.backend.infrastructure.llm.pipeline_runner import (
     pipeline_output_to_decision,
@@ -298,3 +299,145 @@ def bound_payload(payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     if _payload_size(trimmed) <= MAX_PAYLOAD_BYTES:
         return trimmed
     return None
+
+
+def _trace_service():
+    """Lazy on purpose: ``domain/traces/service.py`` constructs its store on
+    import (schema DDL on DB_PATH, or a Neon dial). The engine imports this
+    module, and the engine is imported by scripts that must not touch a
+    database (``diff_backtest_runs.py``, a ``python -c`` probe). Same pattern
+    as ``engine.py`` and ``market_data/provider.py``. Returns the module
+    object, so tests patching attributes on it are honoured."""
+    from dashboard.backend.domain.traces import service as trace_service
+
+    return trace_service
+
+
+class DecisionTapeRecorder:
+    """Writes one run's tape. Never raises: a broken trace store costs the
+    tape, never the backtest. The trace is looked up once; a lookup that
+    raised (a transient store error) is retried on the next bar, one that
+    found no trace turns the recorder into a no-op for the run."""
+
+    def __init__(self, run_id: str):
+        self.run_id = run_id
+        self._trace_id: Optional[str] = None
+        self._resolved = False
+        self._warned = False
+        self.bars_recorded = 0
+        self.gate_rewrites = 0
+        self.write_failures = 0
+        self.oversize_skipped = 0
+
+    def _resolve_trace(self) -> Optional[str]:
+        if not self._resolved:
+            trace = _trace_service().trace_for_run(self.run_id)
+            self._resolved = True
+            self._trace_id = trace["trace_id"] if trace else None
+        return self._trace_id
+
+    def _warn(self, exc: BaseException) -> None:
+        if self._warned:
+            return
+        self._warned = True
+        print(
+            f"   ⚠️  decision tape write failed ({type(exc).__name__}: {exc}); "
+            "later failures are counted, not printed",
+            flush=True,
+        )
+
+    def record_bar(
+        self,
+        *,
+        bar_index: int,
+        decision_payload: Dict[str, Any],
+        execution_payload: Dict[str, Any],
+    ) -> None:
+        try:
+            trace_id = self._resolve_trace()
+            if trace_id is None:
+                return
+            decision = bound_payload(decision_payload)
+            execution = bound_payload(execution_payload)
+            if decision is None or execution is None:
+                self.oversize_skipped += 1
+                return
+            _trace_service().record_tape_bar(
+                trace_id=trace_id,
+                run_id=self.run_id,
+                bar_index=bar_index,
+                decision_payload=decision,
+                execution_payload=execution,
+            )
+            self.bars_recorded += 1
+            if decision.get("gate_rewrote"):
+                self.gate_rewrites += 1
+        except Exception as exc:  # observational: never reaches the bar loop
+            self.write_failures += 1
+            self._warn(exc)
+
+    def record_bar_from(
+        self,
+        build: Callable[[], Tuple[Dict[str, Any], Dict[str, Any]]],
+        *,
+        bar_index: int,
+    ) -> None:
+        """``record_bar`` with the payload builders inside the swallow layer:
+        they read model-supplied text, so a builder bug must cost a tape bar,
+        never the backtest."""
+        try:
+            decision_payload, execution_payload = build()
+        except Exception as exc:
+            self.write_failures += 1
+            self._warn(exc)
+            return
+        self.record_bar(
+            bar_index=bar_index,
+            decision_payload=decision_payload,
+            execution_payload=execution_payload,
+        )
+
+    def summary(self) -> Dict[str, Any]:
+        return {
+            "tape_version": TAPE_VERSION,
+            "traced": self._trace_id is not None,
+            "bars_recorded": self.bars_recorded,
+            "gate_rewrites": self.gate_rewrites,
+            "write_failures": self.write_failures,
+            "oversize_skipped": self.oversize_skipped,
+        }
+
+
+@contextmanager
+def trace_lifecycle(
+    run_id: Optional[str],
+    *,
+    summary: Callable[[], Dict[str, Any]],
+) -> Iterator[None]:
+    """Close the run's trace on the way out of the block: completed with
+    ``summary()`` (read at exit, so it may reference objects built inside the
+    block), failed with ``run_failed`` on an exception.
+
+    ``SystemExit`` writes **nothing** and re-raises. That exit is the
+    dashboard's SIGTERM (``_exit_on_sigterm``), which the parent sends from
+    two arms -- the user's cancel and the timeout's grace before SIGKILL --
+    and only the parent knows which; it labels a trace left ``running`` by
+    the arm it is in (``api/routers/backtests.py``). Open the block before
+    ``HourlyBacktester(...)``: the trace is created in its constructor, so a
+    ``load_data()`` failure outside the block would be labelled a kill.
+    """
+    if not run_id:
+        yield
+        return
+    try:
+        yield
+    except SystemExit:
+        raise
+    except BaseException:
+        _trace_service().finish_trace_best_effort(run_id, error_code="run_failed")
+        raise
+    try:
+        result_summary = summary()
+    except Exception:
+        result_summary = {}
+    _trace_service().finish_trace_best_effort(run_id, result_summary=result_summary)

@@ -179,3 +179,189 @@ def test_bound_payload_returns_none_when_orders_alone_are_too_big():
         state={"cash": 0, "equity": 0, "positions": []}, actions=actions,
     )
     assert tape.bound_payload(payload) is None
+
+
+import pytest
+
+from dashboard.backend.domain.traces import service as trace_service
+
+
+class _FakeTraceService:
+    def __init__(self, trace=None, lookup_error=None, write_error=None):
+        self.trace = trace
+        self.lookup_error = lookup_error
+        self.write_error = write_error
+        self.lookups = 0
+        self.writes = []
+
+    def trace_for_run(self, run_id):
+        self.lookups += 1
+        if self.lookup_error is not None:
+            error, self.lookup_error = self.lookup_error, None  # transient: fails once
+            raise error
+        return self.trace
+
+    def record_tape_bar(self, **kwargs):
+        if self.write_error is not None:
+            raise self.write_error
+        self.writes.append(kwargs)
+
+
+def _install(monkeypatch, fake):
+    monkeypatch.setattr(trace_service, "trace_for_run", fake.trace_for_run)
+    monkeypatch.setattr(trace_service, "record_tape_bar", fake.record_tape_bar)
+
+
+def _bar(i, rewrote=False):
+    return {
+        "bar_index": i,
+        "decision_payload": {"tape_version": 1, "gate_rewrote": rewrote},
+        "execution_payload": {"tape_version": 1},
+    }
+
+
+def test_decision_tape_module_does_not_import_the_trace_service_at_top():
+    """The trace service builds its store on import (schema DDL / a Neon
+    dial); the engine imports it lazily and so must this module, or every
+    engine import touches a database."""
+    import ast, inspect
+    tree = ast.parse(inspect.getsource(tape))
+    offenders = [
+        node for node in tree.body
+        if isinstance(node, (ast.Import, ast.ImportFrom))
+        and "traces" in ((getattr(node, "module", None) or "") + "".join(a.name for a in node.names))
+    ]
+    assert offenders == [], "import domain.traces.service inside the function that needs it"
+
+
+def test_recorder_resolves_trace_once_and_writes_each_bar(monkeypatch):
+    fake = _FakeTraceService(trace={"trace_id": "trc_1"})
+    _install(monkeypatch, fake)
+    recorder = tape.DecisionTapeRecorder("agent_x")
+    recorder.record_bar(**_bar(0))
+    recorder.record_bar(**_bar(1, rewrote=True))
+    recorder.record_bar(**_bar(2))
+    assert fake.lookups == 1
+    assert [w["bar_index"] for w in fake.writes] == [0, 1, 2]
+    assert fake.writes[0]["trace_id"] == "trc_1" and fake.writes[0]["run_id"] == "agent_x"
+    assert recorder.summary() == {
+        "tape_version": 1, "traced": True, "bars_recorded": 3, "gate_rewrites": 1,
+        "write_failures": 0, "oversize_skipped": 0,
+    }
+
+
+def test_recorder_is_a_no_op_without_a_trace(monkeypatch):
+    fake = _FakeTraceService(trace=None)
+    _install(monkeypatch, fake)
+    recorder = tape.DecisionTapeRecorder("agent_x")
+    recorder.record_bar(**_bar(0))
+    recorder.record_bar(**_bar(1))
+    assert fake.lookups == 1 and fake.writes == []
+    assert recorder.summary()["traced"] is False
+
+
+def test_recorder_retries_a_lookup_that_raised(monkeypatch):
+    fake = _FakeTraceService(trace={"trace_id": "trc_1"}, lookup_error=RuntimeError("neon blip"))
+    _install(monkeypatch, fake)
+    recorder = tape.DecisionTapeRecorder("agent_x")
+    recorder.record_bar(**_bar(0))
+    recorder.record_bar(**_bar(1))
+    assert fake.lookups == 2
+    assert [w["bar_index"] for w in fake.writes] == [1]
+    assert recorder.summary()["write_failures"] == 1
+
+
+def test_recorder_swallows_write_failures_and_logs_once(monkeypatch, capsys):
+    fake = _FakeTraceService(trace={"trace_id": "trc_1"}, write_error=ValueError("payload exceeds"))
+    _install(monkeypatch, fake)
+    recorder = tape.DecisionTapeRecorder("agent_x")
+    for i in range(3):
+        recorder.record_bar(**_bar(i))  # must not raise
+    assert recorder.summary()["write_failures"] == 3
+    assert capsys.readouterr().out.count("decision tape write failed") == 1
+
+
+def test_recorder_counts_oversize_bars_without_writing(monkeypatch):
+    fake = _FakeTraceService(trace={"trace_id": "trc_1"})
+    _install(monkeypatch, fake)
+    monkeypatch.setattr(tape, "bound_payload", lambda payload: None)
+    recorder = tape.DecisionTapeRecorder("agent_x")
+    recorder.record_bar(**_bar(0))
+    assert fake.writes == [] and recorder.summary()["oversize_skipped"] == 1
+
+
+def test_record_bar_from_swallows_a_builder_exception(monkeypatch, capsys):
+    fake = _FakeTraceService(trace={"trace_id": "trc_1"})
+    _install(monkeypatch, fake)
+    recorder = tape.DecisionTapeRecorder("agent_x")
+
+    def broken():
+        raise ValueError("builder bug")
+
+    recorder.record_bar_from(broken, bar_index=0)  # must not raise
+    recorder.record_bar_from(lambda: (_bar(1)["decision_payload"], _bar(1)["execution_payload"]), bar_index=1)
+    summary = recorder.summary()
+    assert summary["write_failures"] == 1 and summary["bars_recorded"] == 1
+
+
+def _capture_finish(monkeypatch):
+    calls = []
+    monkeypatch.setattr(trace_service, "finish_trace_best_effort",
+                        lambda run_id, **kw: calls.append((run_id, kw)) or True)
+    return calls
+
+
+def test_lifecycle_completes_with_summary(monkeypatch):
+    calls = _capture_finish(monkeypatch)
+    with tape.trace_lifecycle("agent_x", summary=lambda: {"bars_recorded": 4}):
+        pass
+    assert calls == [("agent_x", {"result_summary": {"bars_recorded": 4}})]
+
+
+def test_lifecycle_summary_is_read_at_exit_not_entry(monkeypatch):
+    """The child's summary comes from a backtester that does not exist yet
+    when the context opens (it spans the constructor), so it is late-bound."""
+    calls = _capture_finish(monkeypatch)
+    holder = {"bt": None}
+    with tape.trace_lifecycle("agent_x", summary=lambda: holder["bt"].summary() if holder["bt"] else {}):
+        holder["bt"] = type("BT", (), {"summary": staticmethod(lambda: {"bars_recorded": 9})})()
+    assert calls == [("agent_x", {"result_summary": {"bars_recorded": 9}})]
+
+
+def test_lifecycle_fails_on_an_exception_and_reraises(monkeypatch):
+    calls = _capture_finish(monkeypatch)
+    with pytest.raises(RuntimeError):
+        with tape.trace_lifecycle("agent_x", summary=lambda: {}):
+            raise RuntimeError("boom")
+    assert calls == [("agent_x", {"error_code": "run_failed"})]
+
+
+def test_lifecycle_fails_on_an_exception_raised_before_run(monkeypatch):
+    """Review Focus 7: load_data()/calculate_indicators() fail after the
+    trace exists; that must read run_failed, never run_killed."""
+    calls = _capture_finish(monkeypatch)
+
+    class _FeedRefused(Exception):
+        pass
+
+    with pytest.raises(_FeedRefused):
+        with tape.trace_lifecycle("agent_x", summary=lambda: pytest.fail("no summary on failure")):
+            raise _FeedRefused("SIP refused")  # stands in for load_data()
+    assert calls == [("agent_x", {"error_code": "run_failed"})]
+
+
+def test_lifecycle_writes_nothing_on_system_exit(monkeypatch):
+    """The SIGTERM exit is sent by both the cancel and the timeout arms; only
+    the parent knows which, so the child leaves the trace running for it."""
+    monkeypatch.setattr(trace_service, "finish_trace_best_effort",
+                        lambda *a, **k: pytest.fail("the parent labels a SIGTERM exit"))
+    with pytest.raises(SystemExit):
+        with tape.trace_lifecycle("agent_x", summary=lambda: {}):
+            raise SystemExit(143)
+
+
+def test_lifecycle_without_run_id_touches_no_trace(monkeypatch):
+    monkeypatch.setattr(trace_service, "finish_trace_best_effort",
+                        lambda *a, **k: pytest.fail("no run id, no trace"))
+    with tape.trace_lifecycle(None, summary=lambda: {}):
+        pass
