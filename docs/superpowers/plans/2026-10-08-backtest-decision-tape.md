@@ -2,9 +2,11 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Record every decision bar of a My Agents pipeline backtest — raw model orders, post-gate actions, pre-decision portfolio, fill plan, fills, rejections — as `decision_recorded` / `execution_result` event pairs in the run's #622 agent trace, so a run's order sequence can be replayed through another engine.
+**Goal:** Record every decision bar of a My Agents pipeline backtest — raw model orders (`intent`), post-gate actions, pre-decision portfolio (`state`), fill plan, fills, rejections, and whether the gate rewrote the model — as `decision_recorded` / `execution_result` event pairs in the run's #622 agent trace, so a run's **model intent** can be replayed through another engine's own gate and fill model, and its recorded actions can reproduce the run on this one.
 
-**Architecture:** A new pure module `domain/backtesting/decision_tape.py` builds bounded, allow-listed payloads and owns a `DecisionTapeRecorder` that swallows every failure. `HourlyBacktester.run_agent_backtest` snapshots ledger state before each decision and hands the recorder one bar after `execute_actions`. `domain/traces/service.py` gains a raising `record_tape_bar`, a `load_decision_tape` reader, and two best-effort lifecycle helpers; the child script finalizes the trace around `run_agent_backtest`, and the parent route fails a trace the child left `running`.
+**Architecture:** A new pure module `domain/backtesting/decision_tape.py` builds bounded, allow-listed payloads and owns a `DecisionTapeRecorder` that swallows every failure; it imports the trace service lazily (the service builds its store at import). `HourlyBacktester.run_agent_backtest` snapshots ledger state before each decision and hands the recorder one bar after `execute_actions`. `domain/traces/service.py` gains a raising `record_tape_bar`, a `load_decision_tape` reader, and two best-effort lifecycle helpers; the child script closes the trace from a `trace_lifecycle` context that spans the engine constructor through `run_agent_backtest` and writes nothing on `SystemExit`; the parent route labels any trace the child left `running` by the arm it is in (`run_cancelled`, `run_timed_out`, `run_failed`, `trace_close_failed`, `run_killed`).
+
+**Amended 2026-10-08 after review.** Three changes against the first draft: (1) `intent` + `state` is the replay unit, `actions` the same-engine reproduction check — replaying post-gate absolute sizes through a second engine isolates it only until the first divergent fill; (2) the parent owns the terminal label, because the child's `SystemExit` is sent by both the cancel and the timeout arms; (3) realism (fees, slippage, latency, corporate actions) is **not** retrofitted here — the conformance suite (#623, groups F/L/T/CA) is the realism target and the current engine's failures on it are already on record. See the spec's "Market realism" section.
 
 **Tech Stack:** Python 3, pandas, pytest, the existing SQLite/Postgres `TraceStore` twins.
 
@@ -21,8 +23,12 @@
 - Ids/keys match `/api/v2`: `step_id = f"step_{run_id}_{i}"`, `decision_id = f"dec_{run_id}_{i}"`, idempotency keys `decision:{run_id}:{step_id}:tape` and `execution:{run_id}:{step_id}:tape`.
 - Reasoning text ≤ 500 chars (`MAX_REASONING_CHARS`).
 - Driver labels: `"llm"`, `"llm_fallback"`, `"rule_based"`.
+- **`intent` + `state` is the replay unit; `actions` is the reproduction check.** Nothing in the loader or a harness may surface `actions` as the only thing to replay. A test named "replay" must replay `intent`.
+- **`decision_tape.py` never imports `domain.traces.service` at module top.** That module constructs `trace_store` on import (schema DDL on `DB_PATH`, or a Neon dial); `engine.py:523` and `provider.py:173` import it lazily for that reason, and so does every function here. Tests still `monkeypatch.setattr(trace_service, ...)` on the module object — a lazy `from … import service` returns the same object.
+- **The child writes no terminal label on `SystemExit`.** The parent sends SIGTERM from two arms (cancel, and the timeout's grace before SIGKILL) and is the only party that knows which; it writes one of five labels (Task 5).
+- **No realism retrofit.** Do not add fees, slippage, latency or adjustment handling to the engine, PM or the Alpaca loader in this PR; those are follow-ups 1–2 in the spec. The perturbed-engine test in Task 4 injects a cost profile on the *test's* `MarketProfile` copy, never in `profiles.py`.
 - Tests run from the repo root: `pytest dashboard/backend/tests/... -v`. `tests/conftest.py` already strips `CONTENT_DATABASE_URL`, so the trace store is SQLite in tests.
-- Commits end with the session's attribution lines.
+- Every commit ends with the trailer `Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>`; the commit snippets below carry it, copy them whole.
 
 ## Review Focus
 
@@ -30,7 +36,11 @@
 2. **A repeated same-day rejection** collapses into `repeat_count` on the first `order_events` record; the later bar must still list it. Pinned in Task 1 (`test_rejections_since_reports_a_collapsed_repeat`) and Task 4 (`test_collapsed_repeat_rejection_appears_on_its_own_bar`).
 3. **Model JSON carrying a sensitive-looking key** (`api_key`, `max_tokens`) or numpy scalars — the store would raise and the bar's events vanish. Pinned in Task 1 (`test_intent_allow_list_drops_unknown_and_sensitive_keys`, `test_jsonable_converts_numpy_and_timestamps`).
 4. **Trace store down or slow mid-run** — the backtest must finish with an identical curve. Pinned in Task 4 (`test_broken_trace_writes_do_not_change_the_run`).
-5. **Child killed by the timeout** — the trace must not stay `running` forever; a completed trace must never be re-marked failed. Pinned in Task 5 (`test_parent_fails_a_trace_the_child_left_running`, `test_fail_trace_if_running_leaves_a_completed_trace_alone`).
+5. **Child killed by the timeout** — the trace must not stay `running` forever, must read `run_timed_out` (not `run_cancelled` — the child's SIGTERM exit cannot tell the two arms apart), and a completed trace must never be re-marked failed. Pinned in Task 5 (`test_parent_labels_a_timed_out_child_run_timed_out`, `test_parent_labels_a_failed_child_run_failed`, `test_parent_labels_an_unclosed_completed_run_trace_close_failed`) and Task 2 (`test_fail_trace_if_running_leaves_a_completed_trace_alone`).
+6. **Replay through a second engine must stay engine-isolating** — the harness replays `intent` through the gate, and a perturbed engine's divergence is localized to the first bar a fill touched, never absorbed by a later recorded size. Pinned in Task 4 (`test_intent_replay_through_the_gate_reproduces_an_llm_run`, `test_perturbed_engine_diverges_at_the_first_filled_bar`).
+7. **Failure before the loop** — a `load_data()` or `calculate_indicators()` failure happens after the trace exists (`HourlyBacktester.__init__`) and must end `run_failed`, not `run_killed`. Pinned in Task 3 (`test_lifecycle_fails_on_an_exception_raised_before_run`) and by the child-side `with` spanning the constructor (Task 5).
+8. **Importing the engine must not touch a database** — `decision_tape.py`'s trace import is lazy. Pinned in Task 3 (`test_decision_tape_module_does_not_import_the_trace_service_at_top`).
+9. **`PortfolioManager` must keep assigning a new outputs list per pipeline call** — the tape's freshness check is identity. Pinned on the manager itself in Task 4 (`test_portfolio_manager_reassigns_pipeline_outputs_per_call`).
 
 ---
 
@@ -38,15 +48,15 @@
 
 | File | Responsibility |
 |---|---|
-| `dashboard/backend/domain/backtesting/decision_tape.py` (create) | Pure payload builders, size bounding, `DecisionTapeRecorder`, `run_with_trace_lifecycle`. |
+| `dashboard/backend/domain/backtesting/decision_tape.py` (create) | Pure payload builders (incl. `gate_rewrote`), size bounding, `DecisionTapeRecorder`, `trace_lifecycle` context manager. Lazy trace-service import. |
 | `dashboard/backend/domain/traces/service.py` (modify) | `record_tape_bar`, `load_decision_tape`, `finish_trace_best_effort`, `fail_trace_if_running`. |
 | `dashboard/backend/domain/backtesting/engine.py` (modify) | Snapshot before decision, record after execution, `decision_tape_summary()`. |
-| `dashboard/scripts/backtest_hourly_agent.py` (modify) | Wrap `run_agent_backtest` in `run_with_trace_lifecycle`. |
-| `dashboard/backend/api/routers/backtests.py` (modify) | `fail_trace_if_running(..., "run_killed")` in `run_backtest_background`'s `finally`. |
-| `dashboard/backend/tests/domain/backtesting/test_decision_tape.py` (create) | Unit tests for builders, recorder, lifecycle. |
+| `dashboard/scripts/backtest_hourly_agent.py` (modify) | `with trace_lifecycle(...)` spanning `HourlyBacktester(...)` through `run_agent_backtest`. |
+| `dashboard/backend/api/routers/backtests.py` (modify) | `fail_trace_if_running(...)` with one label per arm of `run_backtest_background`. |
+| `dashboard/backend/tests/domain/backtesting/test_decision_tape.py` (create) | Unit tests for builders, recorder, lifecycle, lazy-import guard. |
 | `dashboard/backend/tests/test_trace_decision_tape.py` (create) | Service tests on a real SQLite `TraceStore`. |
-| `dashboard/backend/tests/domain/backtesting/test_decision_tape_engine.py` (create) | Engine integration + replay round-trip. |
-| `dashboard/backend/tests/test_backtests_router.py` (modify) | Parent `run_killed` test. |
+| `dashboard/backend/tests/domain/backtesting/test_decision_tape_engine.py` (create) | Engine integration, same-engine reproduction, intent replay, perturbed-engine divergence, PM identity invariant. |
+| `dashboard/backend/tests/test_backtests_router.py` (modify) | Parent label-per-arm tests. |
 
 ---
 
@@ -68,7 +78,8 @@
   - `order_events_snapshot(order_events) -> List[int]`
   - `rejections_since(order_events, snapshot: Sequence[int]) -> List[dict]`
   - `fills_since(trades, start: int) -> List[dict]`
-  - `build_decision_payload(*, bar_index: int, decision_at, driver: str, intent: Optional[dict], state: dict, actions) -> dict`
+  - `gate_rewrote(intent: Optional[dict], actions) -> bool`
+  - `build_decision_payload(*, bar_index: int, decision_at, driver: str, intent: Optional[dict], state: dict, actions) -> dict` (sets `gate_rewrote` itself)
   - `build_execution_payload(*, bar_index: int, fill, fills: List[dict], rejected: List[dict]) -> dict`
   - `bound_payload(payload: dict) -> Optional[dict]`
 
@@ -187,6 +198,25 @@ def test_fills_since_slices_and_allow_lists():
     }]
 
 
+def test_gate_rewrote_compares_symbol_side_size_triples():
+    buy5 = {"orders": [{"symbol": "AAPL", "action": "buy", "position_size": 5}]}
+    assert tape.gate_rewrote(buy5, [{"symbol": "AAPL", "action": "buy", "shares": 5}]) is False
+    # resized, dropped, added, and a SELL widened to the whole position
+    assert tape.gate_rewrote(buy5, [{"symbol": "AAPL", "action": "buy", "shares": 3}]) is True
+    assert tape.gate_rewrote(buy5, []) is True
+    assert tape.gate_rewrote({"orders": []}, [{"symbol": "AAPL", "action": "buy", "shares": 1}]) is True
+    trim = {"orders": [{"symbol": "AAPL", "action": "sell", "position_size": 2}]}
+    assert tape.gate_rewrote(trim, [{"symbol": "AAPL", "action": "sell", "shares": 10}]) is True
+    # no intent, or unparsed intent: there was no model order for the gate to rewrite
+    assert tape.gate_rewrote(None, [{"symbol": "AAPL", "action": "buy", "shares": 1}]) is False
+    assert tape.gate_rewrote({"unparsed": True, "completed_steps": 0}, []) is False
+    # a hold is not an order; a sizeless intent compares on symbol/side only
+    hold = {"orders": [{"symbol": "AAPL", "action": "hold"}]}
+    assert tape.gate_rewrote(hold, []) is False
+    sized_only_by_side = {"orders": [{"symbol": "AAPL", "action": "buy"}]}
+    assert tape.gate_rewrote(sized_only_by_side, [{"symbol": "AAPL", "action": "buy", "shares": 7}]) is False
+
+
 def test_decision_and_execution_payload_shapes():
     actions = [{"symbol": "AAPL", "action": "buy", "shares": 3, "reason": "why", "confidence": 0.7, "extra": 1}]
     decision = tape.build_decision_payload(
@@ -196,6 +226,7 @@ def test_decision_and_execution_payload_shapes():
     assert decision["tape_version"] == 1 and decision["bar_index"] == 4
     assert decision["actions"] == [{"symbol": "AAPL", "action": "buy", "shares": 3, "reason": "why", "confidence": 0.7}]
     assert decision["reasoning_summaries"] == ["why"] and decision["accepted"] is True
+    assert decision["gate_rewrote"] is True  # the model ordered nothing; the gate produced a buy
 
     fill = SimpleNamespace(bar=pd.Timestamp("2026-03-02 11:30"), price_field="open", filled_at=pd.Timestamp("2026-03-02 11:30"))
     execution = tape.build_execution_payload(
@@ -411,6 +442,48 @@ def fills_since(trades: Sequence[Mapping[str, Any]], start: int) -> List[Dict[st
     return [_pick(trade, _FILL_FIELDS) for trade in trades[start:]]
 
 
+_ORDER_SIDES = {"buy", "sell"}
+
+
+def _order_triples(orders: Iterable[Mapping[str, Any]], size_field: str):
+    """``(symbol, side, size)`` per buy/sell order; ``size`` is ``None`` when
+    the order carries none, and a ``None`` size matches any size."""
+    triples = []
+    for order in orders or ():
+        if not isinstance(order, Mapping):
+            continue
+        side = str(order.get("action") or order.get("side") or "").lower()
+        if side not in _ORDER_SIDES:
+            continue  # hold / unknown: not an order the gate can rewrite
+        size = order.get(size_field)
+        triples.append((str(order.get("symbol") or "").upper(), side, None if size is None else float(size)))
+    return sorted(triples, key=lambda t: (t[0], t[1], -1.0 if t[2] is None else t[2]))
+
+
+def gate_rewrote(intent: Optional[Mapping[str, Any]], actions: Iterable[Mapping[str, Any]]) -> bool:
+    """Whether the pre-trade gate changed what the model asked for.
+
+    Compares the sorted ``(symbol, side, size)`` triples of ``intent.orders``
+    (size = ``position_size``) with those of the post-gate ``actions`` (size =
+    ``shares``). A dropped, added or resized order, or a SELL widened to the
+    whole position, is a rewrite. ``False`` with no intent or an unparsed one:
+    a rule-based or fallback bar had no model order to rewrite. An intent
+    order without a size compares on symbol and side only.
+    """
+    if not isinstance(intent, Mapping) or "orders" not in intent:
+        return False
+    wanted = _order_triples(intent.get("orders") or (), "position_size")
+    got = _order_triples(actions or (), "shares")
+    if len(wanted) != len(got):
+        return True
+    for (ws, wside, wsize), (gs, gside, gsize) in zip(wanted, got):
+        if ws != gs or wside != gside:
+            return True
+        if wsize is not None and gsize is not None and wsize != gsize:
+            return True
+    return False
+
+
 def build_decision_payload(
     *,
     bar_index: int,
@@ -434,6 +507,7 @@ def build_decision_payload(
         "intent": intent,
         "state": state,
         "actions": picked,
+        "gate_rewrote": gate_rewrote(intent, picked),
         "reasoning_summaries": [action.get("reason", "") for action in picked],
         "accepted": True,
     }
@@ -504,7 +578,7 @@ Expected: all PASS.
 
 ```bash
 git add dashboard/backend/domain/backtesting/decision_tape.py dashboard/backend/tests/domain/backtesting/test_decision_tape.py
-git commit -m "feat(backtest): decision tape payload builders"
+git commit -m "feat(backtest): decision tape payload builders" -m "Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
 ```
 
 ---
@@ -750,22 +824,22 @@ Expected: all PASS.
 
 ```bash
 git add dashboard/backend/domain/traces/service.py dashboard/backend/tests/test_trace_decision_tape.py
-git commit -m "feat(traces): tape bar writer, reader and best-effort finalizers"
+git commit -m "feat(traces): tape bar writer, reader and best-effort finalizers" -m "Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
 ```
 
 ---
 
-### Task 3: Recorder and trace lifecycle wrapper
+### Task 3: Recorder and trace lifecycle context
 
 **Files:**
 - Modify: `dashboard/backend/domain/backtesting/decision_tape.py` (append)
 - Test: `dashboard/backend/tests/domain/backtesting/test_decision_tape.py` (append)
 
 **Interfaces:**
-- Consumes: Task 1 builders; Task 2 `trace_service.trace_for_run`, `record_tape_bar`, `finish_trace_best_effort`.
+- Consumes: Task 1 builders; Task 2 `trace_service.trace_for_run`, `record_tape_bar`, `finish_trace_best_effort` — **imported lazily inside each function**, never at module top (Global Constraints).
 - Produces:
-  - `class DecisionTapeRecorder(run_id: str)` with `record_bar(*, bar_index: int, decision_payload: dict, execution_payload: dict) -> None` (never raises) and `summary() -> dict` returning `{"tape_version", "traced", "bars_recorded", "write_failures", "oversize_skipped"}`.
-  - `run_with_trace_lifecycle(run_id: Optional[str], run: Callable[[], T], *, summary: Callable[[], dict]) -> T`.
+  - `class DecisionTapeRecorder(run_id: str)` with `record_bar(*, bar_index: int, decision_payload: dict, execution_payload: dict) -> None` (never raises; reads `decision_payload["gate_rewrote"]` to count) and `summary() -> dict` returning `{"tape_version", "traced", "bars_recorded", "gate_rewrites", "write_failures", "oversize_skipped"}`.
+  - `trace_lifecycle(run_id: Optional[str], *, summary: Callable[[], dict])` — a `contextlib.contextmanager`. On normal exit: `complete` with `summary()`. On `SystemExit`: **writes nothing**, re-raises (the parent labels it). On any other `BaseException`: `fail(run_failed)`, re-raises. With no `run_id`: touches no trace.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -803,21 +877,40 @@ def _install(monkeypatch, fake):
     monkeypatch.setattr(trace_service, "record_tape_bar", fake.record_tape_bar)
 
 
-def _bar(i):
-    return {"bar_index": i, "decision_payload": {"tape_version": 1}, "execution_payload": {"tape_version": 1}}
+def _bar(i, rewrote=False):
+    return {
+        "bar_index": i,
+        "decision_payload": {"tape_version": 1, "gate_rewrote": rewrote},
+        "execution_payload": {"tape_version": 1},
+    }
+
+
+def test_decision_tape_module_does_not_import_the_trace_service_at_top():
+    """The trace service builds its store on import (schema DDL / a Neon
+    dial); the engine imports it lazily and so must this module, or every
+    engine import touches a database."""
+    import ast, inspect
+    tree = ast.parse(inspect.getsource(tape))
+    offenders = [
+        node for node in tree.body
+        if isinstance(node, (ast.Import, ast.ImportFrom))
+        and "traces" in ((getattr(node, "module", None) or "") + "".join(a.name for a in node.names))
+    ]
+    assert offenders == [], "import domain.traces.service inside the function that needs it"
 
 
 def test_recorder_resolves_trace_once_and_writes_each_bar(monkeypatch):
     fake = _FakeTraceService(trace={"trace_id": "trc_1"})
     _install(monkeypatch, fake)
     recorder = tape.DecisionTapeRecorder("agent_x")
-    for i in range(3):
-        recorder.record_bar(**_bar(i))
+    recorder.record_bar(**_bar(0))
+    recorder.record_bar(**_bar(1, rewrote=True))
+    recorder.record_bar(**_bar(2))
     assert fake.lookups == 1
     assert [w["bar_index"] for w in fake.writes] == [0, 1, 2]
     assert fake.writes[0]["trace_id"] == "trc_1" and fake.writes[0]["run_id"] == "agent_x"
     assert recorder.summary() == {
-        "tape_version": 1, "traced": True, "bars_recorded": 3,
+        "tape_version": 1, "traced": True, "bars_recorded": 3, "gate_rewrites": 1,
         "write_failures": 0, "oversize_skipped": 0,
     }
 
@@ -862,36 +955,67 @@ def test_recorder_counts_oversize_bars_without_writing(monkeypatch):
     assert fake.writes == [] and recorder.summary()["oversize_skipped"] == 1
 
 
-def test_lifecycle_completes_with_summary(monkeypatch):
+def _capture_finish(monkeypatch):
     calls = []
     monkeypatch.setattr(trace_service, "finish_trace_best_effort",
                         lambda run_id, **kw: calls.append((run_id, kw)) or True)
-    result = tape.run_with_trace_lifecycle("agent_x", lambda: ("id", []), summary=lambda: {"bars_recorded": 4})
-    assert result == ("id", [])
+    return calls
+
+
+def test_lifecycle_completes_with_summary(monkeypatch):
+    calls = _capture_finish(monkeypatch)
+    with tape.trace_lifecycle("agent_x", summary=lambda: {"bars_recorded": 4}):
+        pass
     assert calls == [("agent_x", {"result_summary": {"bars_recorded": 4}})]
 
 
-@pytest.mark.parametrize(
-    "error, code",
-    [(RuntimeError("boom"), "run_failed"), (SystemExit(143), "run_cancelled")],
-)
-def test_lifecycle_fails_and_reraises(monkeypatch, error, code):
-    calls = []
+def test_lifecycle_summary_is_read_at_exit_not_entry(monkeypatch):
+    """The child's summary comes from a backtester that does not exist yet
+    when the context opens (it spans the constructor), so it is late-bound."""
+    calls = _capture_finish(monkeypatch)
+    holder = {"bt": None}
+    with tape.trace_lifecycle("agent_x", summary=lambda: holder["bt"].summary() if holder["bt"] else {}):
+        holder["bt"] = type("BT", (), {"summary": staticmethod(lambda: {"bars_recorded": 9})})()
+    assert calls == [("agent_x", {"result_summary": {"bars_recorded": 9}})]
+
+
+def test_lifecycle_fails_on_an_exception_and_reraises(monkeypatch):
+    calls = _capture_finish(monkeypatch)
+    with pytest.raises(RuntimeError):
+        with tape.trace_lifecycle("agent_x", summary=lambda: {}):
+            raise RuntimeError("boom")
+    assert calls == [("agent_x", {"error_code": "run_failed"})]
+
+
+def test_lifecycle_fails_on_an_exception_raised_before_run(monkeypatch):
+    """Review Focus 7: load_data()/calculate_indicators() fail after the
+    trace exists; that must read run_failed, never run_killed."""
+    calls = _capture_finish(monkeypatch)
+
+    class _FeedRefused(Exception):
+        pass
+
+    with pytest.raises(_FeedRefused):
+        with tape.trace_lifecycle("agent_x", summary=lambda: pytest.fail("no summary on failure")):
+            raise _FeedRefused("SIP refused")  # stands in for load_data()
+    assert calls == [("agent_x", {"error_code": "run_failed"})]
+
+
+def test_lifecycle_writes_nothing_on_system_exit(monkeypatch):
+    """The SIGTERM exit is sent by both the cancel and the timeout arms; only
+    the parent knows which, so the child leaves the trace running for it."""
     monkeypatch.setattr(trace_service, "finish_trace_best_effort",
-                        lambda run_id, **kw: calls.append((run_id, kw)) or True)
-
-    def run():
-        raise error
-
-    with pytest.raises(type(error)):
-        tape.run_with_trace_lifecycle("agent_x", run, summary=lambda: {})
-    assert calls == [("agent_x", {"error_code": code})]
+                        lambda *a, **k: pytest.fail("the parent labels a SIGTERM exit"))
+    with pytest.raises(SystemExit):
+        with tape.trace_lifecycle("agent_x", summary=lambda: {}):
+            raise SystemExit(143)
 
 
 def test_lifecycle_without_run_id_touches_no_trace(monkeypatch):
     monkeypatch.setattr(trace_service, "finish_trace_best_effort",
                         lambda *a, **k: pytest.fail("no run id, no trace"))
-    assert tape.run_with_trace_lifecycle(None, lambda: 5, summary=lambda: {}) == 5
+    with tape.trace_lifecycle(None, summary=lambda: {}):
+        pass
 ```
 
 - [ ] **Step 2: Run tests to verify they fail**
@@ -901,15 +1025,21 @@ Expected: new tests FAIL — `AttributeError: ... has no attribute 'DecisionTape
 
 - [ ] **Step 3: Implement**
 
-In `decision_tape.py`, extend the typing import to `from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, TypeVar`, add below the `pipeline_output_to_decision` import:
+In `decision_tape.py`, extend the typing import to `from typing import Any, Callable, Dict, Iterable, Iterator, List, Mapping, Optional, Sequence`, add `from contextlib import contextmanager` to the stdlib imports, and **do not** add a module-level import of the trace service. Append:
 
 ```python
-from dashboard.backend.domain.traces import service as trace_service
-```
+def _trace_service():
+    """Lazy on purpose: ``domain/traces/service.py`` constructs its store on
+    import (schema DDL on DB_PATH, or a Neon dial). The engine imports this
+    module, and the engine is imported by scripts that must not touch a
+    database (``diff_backtest_runs.py``, a ``python -c`` probe). Same pattern
+    as ``engine.py`` and ``market_data/provider.py``. Returns the module
+    object, so tests patching attributes on it are honoured."""
+    from dashboard.backend.domain.traces import service as trace_service
 
-and append:
+    return trace_service
 
-```python
+
 class DecisionTapeRecorder:
     """Writes one run's tape. Never raises: a broken trace store costs the
     tape, never the backtest. The trace is looked up once; a lookup that
@@ -922,12 +1052,13 @@ class DecisionTapeRecorder:
         self._resolved = False
         self._warned = False
         self.bars_recorded = 0
+        self.gate_rewrites = 0
         self.write_failures = 0
         self.oversize_skipped = 0
 
     def _resolve_trace(self) -> Optional[str]:
         if not self._resolved:
-            trace = trace_service.trace_for_run(self.run_id)
+            trace = _trace_service().trace_for_run(self.run_id)
             self._resolved = True
             self._trace_id = trace["trace_id"] if trace else None
         return self._trace_id
@@ -958,7 +1089,7 @@ class DecisionTapeRecorder:
             if decision is None or execution is None:
                 self.oversize_skipped += 1
                 return
-            trace_service.record_tape_bar(
+            _trace_service().record_tape_bar(
                 trace_id=trace_id,
                 run_id=self.run_id,
                 bar_index=bar_index,
@@ -966,6 +1097,8 @@ class DecisionTapeRecorder:
                 execution_payload=execution,
             )
             self.bars_recorded += 1
+            if decision.get("gate_rewrote"):
+                self.gate_rewrites += 1
         except Exception as exc:  # observational: never reaches the bar loop
             self.write_failures += 1
             self._warn(exc)
@@ -975,40 +1108,45 @@ class DecisionTapeRecorder:
             "tape_version": TAPE_VERSION,
             "traced": self._trace_id is not None,
             "bars_recorded": self.bars_recorded,
+            "gate_rewrites": self.gate_rewrites,
             "write_failures": self.write_failures,
             "oversize_skipped": self.oversize_skipped,
         }
 
 
-T = TypeVar("T")
-
-
-def run_with_trace_lifecycle(
+@contextmanager
+def trace_lifecycle(
     run_id: Optional[str],
-    run: Callable[[], T],
     *,
     summary: Callable[[], Dict[str, Any]],
-) -> T:
-    """Run ``run`` and close the run's trace on the way out: completed with
-    ``summary()``, failed on an exception, cancelled on ``SystemExit`` (the
-    dashboard's SIGTERM, see ``_exit_on_sigterm``). A kill that skips this is
-    caught by the parent's ``fail_trace_if_running``."""
+) -> Iterator[None]:
+    """Close the run's trace on the way out of the block: completed with
+    ``summary()`` (read at exit, so it may reference objects built inside the
+    block), failed with ``run_failed`` on an exception.
+
+    ``SystemExit`` writes **nothing** and re-raises. That exit is the
+    dashboard's SIGTERM (``_exit_on_sigterm``), which the parent sends from
+    two arms -- the user's cancel and the timeout's grace before SIGKILL --
+    and only the parent knows which; it labels a trace left ``running`` by
+    the arm it is in (``api/routers/backtests.py``). Open the block before
+    ``HourlyBacktester(...)``: the trace is created in its constructor, so a
+    ``load_data()`` failure outside the block would be labelled a kill.
+    """
     if not run_id:
-        return run()
+        yield
+        return
     try:
-        result = run()
+        yield
     except SystemExit:
-        trace_service.finish_trace_best_effort(run_id, error_code="run_cancelled")
         raise
     except BaseException:
-        trace_service.finish_trace_best_effort(run_id, error_code="run_failed")
+        _trace_service().finish_trace_best_effort(run_id, error_code="run_failed")
         raise
     try:
         result_summary = summary()
     except Exception:
         result_summary = {}
-    trace_service.finish_trace_best_effort(run_id, result_summary=result_summary)
-    return result
+    _trace_service().finish_trace_best_effort(run_id, result_summary=result_summary)
 ```
 
 - [ ] **Step 4: Run tests to verify they pass**
@@ -1020,12 +1158,12 @@ Expected: all PASS.
 
 ```bash
 git add dashboard/backend/domain/backtesting/decision_tape.py dashboard/backend/tests/domain/backtesting/test_decision_tape.py
-git commit -m "feat(backtest): decision tape recorder and trace lifecycle"
+git commit -m "feat(backtest): decision tape recorder and trace lifecycle" -m "Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
 ```
 
 ---
 
-### Task 4: Engine wiring and replay round-trip
+### Task 4: Engine wiring, reproduction, intent replay, divergence
 
 **Files:**
 - Modify: `dashboard/backend/domain/backtesting/engine.py` (imports; `run_agent_backtest` ~2060 and loop ~2147–2276; new method `decision_tape_summary`)
@@ -1046,6 +1184,7 @@ Harness: the conformance suite's in-memory 5m bars and recording DB, so no
 network, plus a real SQLite TraceStore patched into the trace service.
 """
 
+import dataclasses
 import json
 from datetime import timedelta
 from types import SimpleNamespace
@@ -1057,6 +1196,7 @@ from dashboard.backend.domain.backtesting.engine import HourlyBacktester
 from dashboard.backend.domain.backtesting.portfolio_manager import PortfolioManager
 from dashboard.backend.domain.traces import service as trace_service
 from dashboard.backend.domain.traces.repository import TraceStore
+from dashboard.backend.infrastructure.market_data.profiles import TransactionCostProfile
 from dashboard.backend.tests.conformance.adapters.current_engine import (
     _CaseLoader,
     _RecordingDB,
@@ -1080,7 +1220,10 @@ def store(tmp_path, monkeypatch):
     return store
 
 
-def _run(monkeypatch, *, run_id="agent_tape_engine", decide=None, llm_client=None, pipeline=None):
+def _run(monkeypatch, *, run_id="agent_tape_engine", decide=None, llm_client=None, pipeline=None, configure=None):
+    """``configure(backtester)`` runs after construction and before
+    ``load_data()`` -- the hook the perturbed-engine test uses to hand this
+    run a cost profile without touching ``profiles.py``."""
     loader = _CaseLoader(synthesize_source_bars(SimpleNamespace(bars=BARS)))
 
     def factory(data_source="alpaca", universe=None, *, source_timeframe=None):
@@ -1115,10 +1258,22 @@ def _run(monkeypatch, *, run_id="agent_tape_engine", decide=None, llm_client=Non
         backtester.llm_client = llm_client
         backtester.pipeline = pipeline
         backtester.strict_llm = False
+    if configure is not None:
+        configure(backtester)
     backtester.load_data()
     backtester.calculate_indicators()
     _run_id, curve = backtester.run_agent_backtest()
     return backtester, holder, curve
+
+
+def _first_divergent_bar(curve_a, curve_b):
+    """Index of the first equity point that differs; ``None`` when none does.
+    The same question ``scripts/diff_backtest_runs.py`` answers for two
+    stored runs."""
+    for index, (a, b) in enumerate(zip(curve_a, curve_b)):
+        if a["equity"] != b["equity"]:
+            return index
+    return None if len(curve_a) == len(curve_b) else min(len(curve_a), len(curve_b))
 
 
 def _script(index, pm):
@@ -1141,11 +1296,13 @@ def test_every_bar_records_one_decision_execution_pair_in_order(monkeypatch, sto
     assert first["decision"]["intent"] is None
     assert first["decision"]["state"] == {"cash": float(CASH), "equity": float(CASH), "positions": []}
     assert first["decision"]["actions"] == [{"symbol": "AAPL", "action": "buy", "shares": 3, "reason": "open AAPL"}]
+    assert first["decision"]["gate_rewrote"] is False  # rule-based: no model order to rewrite
     assert [(f["symbol"], f["side"], f["shares"]) for f in first["execution"]["fills"]] == [("AAPL", "BUY", 3)]
     assert set(first["execution"]["fill_plan"]) == {"bar", "price_field", "filled_at"}
     assert tape[1]["decision"]["state"]["positions"] == [["AAPL", 3]]
     summary = backtester.decision_tape_summary()
     assert summary["bars_recorded"] == holder.calls and summary["write_failures"] == 0
+    assert summary["gate_rewrites"] == 0
 
 
 def test_collapsed_repeat_rejection_appears_on_its_own_bar(monkeypatch, store):
@@ -1158,9 +1315,17 @@ def test_collapsed_repeat_rejection_appears_on_its_own_bar(monkeypatch, store):
     ]
 
 
-def test_tape_replays_to_identical_trades_and_curve(monkeypatch, store):
-    """The proof the tape is replay-grade: a second run driven only by the
-    recorded actions reproduces the first run's trades and equity curve."""
+def _comparable(trades):
+    return json.dumps(
+        [{k: str(v) for k, v in trade.items()} for trade in trades], sort_keys=True
+    )
+
+
+def test_recorded_actions_reproduce_the_run_on_the_same_engine(monkeypatch, store):
+    """Reproducibility, not replay-grade: a second run of THIS engine driven
+    by the recorded post-gate actions reproduces the first run's trades and
+    curve. It proves the tape survives _pick + JSON and that the engine is
+    deterministic on a fixed sequence -- nothing about another engine."""
     _bt, first, first_curve = _run(monkeypatch, run_id="agent_tape_original", decide=_script)
     tape = trace_service.load_decision_tape("agent_tape_original")
 
@@ -1169,15 +1334,47 @@ def test_tape_replays_to_identical_trades_and_curve(monkeypatch, store):
 
     _bt, second, second_curve = _run(monkeypatch, run_id="agent_tape_replay", decide=replay)
 
-    def comparable(trades):
-        return json.dumps(
-            [{k: str(v) for k, v in trade.items()} for trade in trades], sort_keys=True
-        )
-
     assert first.pm is not second.pm
     assert first.pm.trades, "the script must trade, or the replay proves nothing"
-    assert comparable(second.pm.trades) == comparable(first.pm.trades)
+    assert _comparable(second.pm.trades) == _comparable(first.pm.trades)
     assert [p["equity"] for p in second_curve] == [p["equity"] for p in first_curve]
+
+
+def test_perturbed_engine_diverges_at_the_first_filled_bar(monkeypatch, store):
+    """Review Focus 6: replaying recorded ACTIONS into an engine whose fills
+    differ must diverge where the fill is, visibly, and never be absorbed by
+    a later recorded size. The perturbation is one tick of slippage on the
+    test's own MarketProfile copy (the mechanism A-share uses); profiles.py
+    is untouched. This is also the shape diff_backtest_runs.py reports."""
+    _bt, first, first_curve = _run(monkeypatch, run_id="agent_tape_clean", decide=_script)
+    tape = trace_service.load_decision_tape("agent_tape_clean")
+    first_fill_bar = next(i for i, bar in enumerate(tape) if bar["execution"]["fills"])
+
+    def replay(index, pm):
+        return tape[index]["decision"]["actions"]
+
+    def slip(backtester):
+        backtester.profile = dataclasses.replace(
+            backtester.profile,
+            transaction_cost_profile=TransactionCostProfile(
+                version="test-slip-1tick", currency="USD",
+                commission_rate=0.0, minimum_commission=0.0,
+                stamp_duty_sell_rate=0.0, transfer_fee_rate=0.0,
+                buy_slippage_rate=0.001, sell_slippage_rate=0.001, price_tick=0.01,
+            ),
+        )
+
+    _bt, second, second_curve = _run(monkeypatch, run_id="agent_tape_slipped", decide=replay, configure=slip)
+
+    assert _first_divergent_bar(first_curve, second_curve) == first_fill_bar
+    assert any(float(t.get("slippage_amount") or 0) > 0 for t in second.pm.trades)
+    # The recorded SELL sizes are the clean engine's; the slipped engine held
+    # the same shares (slippage moves price, not quantity), so the trade list
+    # keeps its shape and only prices differ -- which is exactly why actions
+    # cannot be the replay unit once quantities, not prices, diverge.
+    assert [(t["symbol"], t["side"], t["shares"]) for t in second.pm.trades] == \
+        [(t["symbol"], t["side"], t["shares"]) for t in first.pm.trades]
+    assert _comparable(second.pm.trades) != _comparable(first.pm.trades)
 
 
 class _PipelineStub:
@@ -1217,9 +1414,83 @@ def test_llm_pipeline_bars_record_intent_and_fallback(monkeypatch, store):
         "confidence": 0.9, "reasoning": "buy five",
     }]}
     assert tape[0]["decision"]["actions"][0]["shares"] == 5
+    assert tape[0]["decision"]["gate_rewrote"] is False  # asked 5, admitted 5
 
     assert tape[1]["decision"]["driver"] == "llm_fallback"
     assert tape[1]["decision"]["intent"] == {"unparsed": True, "completed_steps": 0}
+    assert tape[1]["decision"]["gate_rewrote"] is False  # nothing parsed, nothing to rewrite
+
+
+def test_llm_sell_widened_by_the_gate_is_counted_as_a_rewrite(monkeypatch, store):
+    """Finding 1: every model SELL becomes 'sell all sellable'. The tape must
+    say so per bar and per run, so the gate's rewrite rate is a number."""
+    stub = _PipelineStub([
+        json.dumps({"actions": [{"symbol": "AAPL", "action": "buy", "position_size": 4, "confidence": 0.9, "reasoning": "open"}]}),
+        json.dumps({"actions": [{"symbol": "AAPL", "action": "sell", "position_size": 1, "confidence": 0.9, "reasoning": "trim one"}]}),
+    ])
+    backtester, _holder, _curve = _run(monkeypatch, llm_client=stub, pipeline=[{"label": "Decision", "prompt": "Decide."}])
+    tape = trace_service.load_decision_tape("agent_tape_engine")
+    assert tape[0]["decision"]["gate_rewrote"] is False
+    assert tape[1]["decision"]["intent"]["orders"][0]["position_size"] == 1
+    assert tape[1]["decision"]["actions"][0]["shares"] == 4  # the whole position
+    assert tape[1]["decision"]["gate_rewrote"] is True
+    assert backtester.decision_tape_summary()["gate_rewrites"] == 1
+
+
+def test_intent_replay_through_the_gate_reproduces_an_llm_run(monkeypatch, store):
+    """The replay-grade proof (Review Focus 6): a second run whose MODEL
+    answers each bar with the first run's recorded intent -- so the orders go
+    through the gate and the fill model again rather than around them --
+    reproduces the trades and the curve. This is the path a candidate engine
+    takes with a tape; the actions path above is not."""
+    script = [
+        json.dumps({"actions": [{"symbol": "AAPL", "action": "buy", "position_size": 3, "confidence": 0.9, "reasoning": "open"}]}),
+        json.dumps({"actions": [
+            {"symbol": "MSFT", "action": "buy", "position_size": 2, "confidence": 0.8, "reasoning": "add"},
+            {"symbol": "AAPL", "action": "sell", "position_size": 1, "confidence": 0.7, "reasoning": "trim"},
+        ]}),
+    ]
+    pipeline = [{"label": "Decision", "prompt": "Decide."}]
+    _bt, first, first_curve = _run(monkeypatch, run_id="agent_intent_original", llm_client=_PipelineStub(script), pipeline=pipeline)
+    tape = trace_service.load_decision_tape("agent_intent_original")
+    assert all(bar["decision"]["driver"] == "llm" for bar in tape)
+    assert all("orders" in bar["decision"]["intent"] for bar in tape), "every bar must carry parsed intent"
+
+    replies = [json.dumps({"actions": bar["decision"]["intent"]["orders"]}) for bar in tape]
+    _bt, second, second_curve = _run(monkeypatch, run_id="agent_intent_replay", llm_client=_PipelineStub(replies), pipeline=pipeline)
+    replayed = trace_service.load_decision_tape("agent_intent_replay")
+
+    assert first.pm.trades, "the script must trade, or the replay proves nothing"
+    assert _comparable(second.pm.trades) == _comparable(first.pm.trades)
+    assert [p["equity"] for p in second_curve] == [p["equity"] for p in first_curve]
+    assert [b["decision"]["intent"] for b in replayed] == [b["decision"]["intent"] for b in tape]
+    assert [b["decision"]["gate_rewrote"] for b in replayed] == [b["decision"]["gate_rewrote"] for b in tape]
+
+
+def test_portfolio_manager_reassigns_pipeline_outputs_per_call(monkeypatch, store):
+    """Review Focus 9, pinned on the manager, not through the tape: the
+    tape's freshness check is `outputs is outputs_before`. A refactor of
+    portfolio_manager.py:650 to `.clear()` + `.extend()` would keep one list
+    object alive across bars, null `intent` on every bar, and leave every
+    tape unit test green. This is the test that must go red, with this name."""
+    stub = _PipelineStub([
+        json.dumps({"actions": [{"symbol": "AAPL", "action": "buy", "position_size": 1, "confidence": 0.9, "reasoning": "a"}]}),
+        json.dumps({"actions": [{"symbol": "AAPL", "action": "hold", "confidence": 1.0, "reasoning": "b"}]}),
+    ])
+    seen = []
+    original = PortfolioManager.make_trading_decision_with_llm
+
+    def spy(pm, *args, **kwargs):
+        before = pm.last_pipeline_step_outputs
+        result = original(pm, *args, **kwargs)
+        seen.append((before, pm.last_pipeline_step_outputs))
+        return result
+
+    monkeypatch.setattr(PortfolioManager, "make_trading_decision_with_llm", spy)
+    _run(monkeypatch, llm_client=stub, pipeline=[{"label": "Decision", "prompt": "Decide."}])
+    assert len(seen) >= 2
+    for before, after in seen:
+        assert after is not before, "PortfolioManager must assign a NEW list per pipeline call"
 
 
 def test_run_without_live_run_id_writes_no_tape(monkeypatch, store):
@@ -1372,7 +1643,7 @@ Expected: same pass/skip/xfail counts as on `main` (conformance: 99 passed, 7 sk
 
 ```bash
 git add dashboard/backend/domain/backtesting/engine.py dashboard/backend/tests/domain/backtesting/test_decision_tape_engine.py
-git commit -m "feat(backtest): record a per-bar decision tape for pipeline runs"
+git commit -m "feat(backtest): record a per-bar decision tape for pipeline runs" -m "Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
 ```
 
 ---
@@ -1385,30 +1656,36 @@ git commit -m "feat(backtest): record a per-bar decision tape for pipeline runs"
 - Test: `dashboard/backend/tests/test_backtests_router.py` (append), `dashboard/backend/tests/test_trace_decision_tape.py` (already has the service tests)
 
 **Interfaces:**
-- Consumes: `run_with_trace_lifecycle` (Task 3), `HourlyBacktester.decision_tape_summary` (Task 4), `trace_service.fail_trace_if_running` (Task 2).
+- Consumes: `trace_lifecycle` (Task 3), `HourlyBacktester.decision_tape_summary` (Task 4), `trace_service.fail_trace_if_running` (Task 2).
 - Produces: none for later tasks.
 
-- [ ] **Step 1: Write the failing parent test**
+**Why the parent owns the label.** The child's `SystemExit` is the SIGTERM the parent sends from *two* arms — the user's cancel (`_BacktestCancelled`) and the timeout's grace period before SIGKILL (`_signal_backtest_process`, `backtests.py:2833`). The child cannot tell them apart; the parent is in the arm. So the child writes nothing on `SystemExit` (Task 3) and the parent calls `fail_trace_if_running` with one label per arm. Every call is a status-checked no-op on a trace the child already closed, so a completed trace is never re-marked.
 
-Append to `dashboard/backend/tests/test_backtests_router.py` (it already defines `bt`, `FakeChild`, `_REAL_RUN_BACKTEST_BACKGROUND`, and imports `subprocess`, `uuid`):
+| Arm of `run_backtest_background` | label |
+|---|---|
+| success branch (`returncode == 0`) | `trace_close_failed` — the run finished; the child's own `complete_trace` did not land |
+| failure branch (`returncode != 0`) | `run_failed` — no-op when the child recorded it itself |
+| `except _BacktestCancelled` | `run_cancelled` |
+| `except subprocess.TimeoutExpired` | `run_timed_out` (matches `/backtest/status`'s `timed_out`) |
+| outer `finally` | `run_killed` — reached none of the above |
+
+- [ ] **Step 1: Write the failing parent tests**
+
+Append to `dashboard/backend/tests/test_backtests_router.py` (it already defines `bt`, `FakeChild`, `_REAL_RUN_BACKTEST_BACKGROUND`, and imports `subprocess`, `uuid`). `FakeChild(returncode=…, timeout_waits=…)` are the two knobs (`tests/_fake_child.py`):
 
 ```python
-def test_parent_fails_a_trace_the_child_left_running(monkeypatch):
-    """A child killed by the timeout cannot close its own trace; the parent's
-    finally does, and only while the trace still reads ``running``."""
-    run_id = "agent_trace_killed"
+def _run_parent_with_child(monkeypatch, child, *, run_id):
+    """Drive the real run_backtest_background against ``child`` and return
+    the (run_id, label) pairs the parent handed fail_trace_if_running."""
     session_id = str(uuid.uuid4())
     assert bt._try_acquire_backtest_slot(live_run_id=run_id, session_id=session_id, user_id=None) is None
-
-    failed = []
-    child = FakeChild(stdout="run header line\n", timeout_waits=1)
+    labelled = []
     monkeypatch.setattr(subprocess, "Popen", lambda cmd, **kwargs: child)
     monkeypatch.setattr(bt, "run_backtest_background", _REAL_RUN_BACKTEST_BACKGROUND)
     monkeypatch.setattr(
         bt.trace_service, "fail_trace_if_running",
-        lambda rid, code: failed.append((rid, code)) or True,
+        lambda rid, code: labelled.append((rid, code)) or True,
     )
-
     bt.run_backtest_background(
         start_date="2026-01-01",
         end_date="2026-01-02",
@@ -1416,13 +1693,46 @@ def test_parent_fails_a_trace_the_child_left_running(monkeypatch):
         live_run_id=run_id,
         decision_source="rule_based",
     )
+    return labelled
 
-    assert failed == [(run_id, "run_killed")]
+
+def test_parent_labels_a_timed_out_child_run_timed_out(monkeypatch):
+    """The timeout arm SIGTERMs first (grace, then SIGKILL); a child that
+    unwinds in the grace exits via SystemExit and writes nothing. The label
+    must say timed out -- not cancelled, which is what the child would have
+    guessed -- and the finally's run_killed must not fire over it."""
+    run_id = "agent_trace_timed_out"
+    labelled = _run_parent_with_child(
+        monkeypatch, FakeChild(stdout="run header line\n", timeout_waits=1), run_id=run_id,
+    )
+    assert labelled[0] == (run_id, "run_timed_out")
+    assert (run_id, "run_cancelled") not in labelled
+    # The finally still runs; fail_trace_if_running is a no-op by then on the
+    # real store. Here it is a stub, so the finally's call is visible:
+    assert labelled[-1] == (run_id, "run_killed") and len(labelled) == 2
+
+
+def test_parent_labels_a_failed_child_run_failed(monkeypatch):
+    run_id = "agent_trace_failed"
+    labelled = _run_parent_with_child(
+        monkeypatch, FakeChild(returncode=1, stderr="Traceback: boom\n"), run_id=run_id,
+    )
+    assert labelled[0] == (run_id, "run_failed")
+
+
+def test_parent_labels_an_unclosed_completed_run_trace_close_failed(monkeypatch):
+    """returncode 0 but the trace still running: the child finished and its
+    own complete_trace did not land. Distinct from a kill on purpose."""
+    run_id = "agent_trace_unclosed"
+    labelled = _run_parent_with_child(
+        monkeypatch, FakeChild(returncode=0, stdout="ok\n"), run_id=run_id,
+    )
+    assert labelled[0] == (run_id, "trace_close_failed")
 ```
 
-- [ ] **Step 2: Run it to verify it fails**
+- [ ] **Step 2: Run them to verify they fail**
 
-Run: `pytest dashboard/backend/tests/test_backtests_router.py::test_parent_fails_a_trace_the_child_left_running -v`
+Run: `pytest dashboard/backend/tests/test_backtests_router.py -k "parent_labels" -v`
 Expected: FAIL — `AttributeError: module ... has no attribute 'trace_service'`.
 
 - [ ] **Step 3: Implement the parent side**
@@ -1450,52 +1760,85 @@ then, right after the block that mints `resolved_live_run_id` when it is empty (
         trace_run_id = resolved_live_run_id
 ```
 
-(c) In the function's outer `finally:` (~2083), add as its **first** statement:
+(c) Add a one-line helper next to `_signal_backtest_process`:
 
 ```python
-        if trace_run_id:
-            # No-op unless the child left its trace running (a clean exit and
-            # a failed run both close it themselves; see decision_tape.py
-            # run_with_trace_lifecycle). Never raises.
-            trace_service.fail_trace_if_running(trace_run_id, "run_killed")
+def _label_trace(run_id: Optional[str], error_code: str) -> None:
+    """Label a trace the child left ``running``. No-op on a closed trace, so
+    every arm may call it; the first arm to reach a running trace names it."""
+    if run_id:
+        trace_service.fail_trace_if_running(run_id, error_code)
 ```
 
-Make sure `trace_run_id = resolved_live_run_id` sits inside the `try:` whose `finally` you edited, and that `trace_run_id: Optional[str] = None` is assigned before that `try:` (so the `finally` never sees an unbound name). `Optional` is already imported in this module.
+(d) Call it from each arm, **before** the arm clears `resolved_live_run_id` (use `trace_run_id`, which is never cleared):
 
-- [ ] **Step 4: Run it to verify it passes**
+- In the `if result.returncode != 0:` branch (~1936), after the `print(f"❌ Backtest failed …")`: `_label_trace(trace_run_id, "run_failed")`.
+- In its `else:` branch (~1947), after the `print(f"✅ Backtest completed …")`: `_label_trace(trace_run_id, "trace_close_failed")`.
+- In `except _BacktestCancelled:` (~1961), first statement: `_label_trace(trace_run_id, "run_cancelled")`.
+- In `except subprocess.TimeoutExpired:` (~1970), first statement: `_label_trace(trace_run_id, "run_timed_out")`.
+- In the outer `finally:` (~2083), **first** statement:
 
-Run: `pytest dashboard/backend/tests/test_backtests_router.py::test_parent_fails_a_trace_the_child_left_running dashboard/backend/tests/test_backtests_router.py::test_pipeline_timeout_finalizes_execution_and_slot_once -v`
-Expected: both PASS.
+```python
+        # Reached none of the arms above (SIGKILL with no grace, a parent
+        # exception): the only label left is a kill. No-op otherwise.
+        _label_trace(trace_run_id, "run_killed")
+```
+
+Make sure `trace_run_id = resolved_live_run_id` sits inside the `try:` whose `finally` you edited, and that `trace_run_id: Optional[str] = None` is assigned before that `try:` (so the `finally` never sees an unbound name). `Optional` is already imported in this module. Do **not** label from the generic `except Exception` arm: that arm is a parent-side failure, the child may still be alive and closing its own trace, and the `finally`'s `run_killed` is the honest label if it is not.
+
+- [ ] **Step 4: Run them to verify they pass**
+
+Run: `pytest dashboard/backend/tests/test_backtests_router.py -k "parent_labels or test_pipeline_timeout_finalizes_execution_and_slot_once" -v`
+Expected: all PASS.
 
 - [ ] **Step 5: Implement the child side**
 
 In `dashboard/scripts/backtest_hourly_agent.py`, next to `from dashboard.backend.domain.backtesting.engine import HourlyBacktester` (~190), add:
 
 ```python
-from dashboard.backend.domain.backtesting.decision_tape import run_with_trace_lifecycle
+from dashboard.backend.domain.backtesting.decision_tape import trace_lifecycle
 ```
 
-and replace (~586):
+Then open the context **before** the `backtester = HourlyBacktester(` call (~508; the trace is created inside that constructor, so `load_data()` / `calculate_indicators()` failures must be inside the block too) and close it after the `run_agent_backtest` `try/finally` (~596). Concretely, replace:
 
 ```python
-    try:
-        agent_id, agent_eq = backtester.run_agent_backtest()
-    finally:
+    # Initialize backtester (with LLM if available and enabled)
+    # Note: dates are validated in __init__ if they somehow got reversed again
+    backtester = HourlyBacktester(
 ```
 
 with:
 
 ```python
-    try:
-        # Closes the run's agent trace: completed with the decision tape's
-        # counts, failed on an exception, cancelled on the SIGTERM SystemExit.
-        agent_id, agent_eq = run_with_trace_lifecycle(
-            args.run_id,
-            backtester.run_agent_backtest,
-            summary=backtester.decision_tape_summary,
-        )
-    finally:
+    # The run's agent trace is created in HourlyBacktester.__init__ and closed
+    # here: completed with the decision tape's counts, run_failed on an
+    # exception anywhere from the constructor through the run (a SIP refusal
+    # in load_data() is a failure, not a kill). The SIGTERM SystemExit writes
+    # nothing -- the parent sends it from both the cancel and the timeout
+    # arms and labels the trace by the arm (api/routers/backtests.py).
+    tape_owner = {"backtester": None}
+
+    def _tape_summary():
+        bt = tape_owner["backtester"]
+        return bt.decision_tape_summary() if bt is not None else {}
+
+    with trace_lifecycle(args.run_id, summary=_tape_summary):
+      # Initialize backtester (with LLM if available and enabled)
+      # Note: dates are validated in __init__ if they somehow got reversed again
+      backtester = HourlyBacktester(
 ```
+
+and indent everything from that call through the end of the existing
+
+```python
+    try:
+        agent_id, agent_eq = backtester.run_agent_backtest()
+    finally:
+        …
+                raise
+```
+
+by one level, adding `tape_owner["backtester"] = backtester` as the first statement after the constructor call closes. The block ends after that `finally`; the holdings DEBUG print and the baselines below it stay at function level. The re-indent is ~90 lines and is the whole cost of spanning the constructor; `test_backtest_launch_phases.py` AST-checks the *import* block only, so it is unaffected, but run it (Step 6).
 
 - [ ] **Step 6: Run the launch-script guards and router suite**
 
@@ -1506,7 +1849,7 @@ Expected: no new failures. If `test_backtest_launch_phases.py` asserts on the im
 
 ```bash
 git add dashboard/scripts/backtest_hourly_agent.py dashboard/backend/api/routers/backtests.py dashboard/backend/tests/test_backtests_router.py
-git commit -m "feat(backtest): close the agent trace when a dashboard backtest ends"
+git commit -m "feat(backtest): close the agent trace when a dashboard backtest ends" -m "Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
 ```
 
 ---
@@ -1519,20 +1862,22 @@ git commit -m "feat(backtest): close the agent trace when a dashboard backtest e
 
 - [ ] **Step 1: Sync the spec with the implementation**
 
-In the spec: set `Status: implemented`; replace `"llm_fallback_rule_based"` with `"llm_fallback"` (a fallback bar may also hold with no actions, so the label names who did not drive it rather than what replaced it); in "domain/traces/service.py" replace the sentence about best-effort `record_tape_decision`/`record_tape_execution` with: "`record_tape_bar(trace_id, ...)` writes the pair and raises; `DecisionTapeRecorder` is the one swallow-and-count layer. `finish_trace_best_effort` and `fail_trace_if_running` never raise."
+In the spec: set `Status: implemented`; in "domain/traces/service.py" replace the sentence about best-effort `record_tape_decision`/`record_tape_execution` with: "`record_tape_bar(trace_id, ...)` writes the pair and raises; `DecisionTapeRecorder` is the one swallow-and-count layer. `finish_trace_best_effort` and `fail_trace_if_running` never raise." Check the "Follow-ups this spec hands off" list still matches what this PR did **not** do (no adjustment, no latency case, no PM envelope change).
 
 - [ ] **Step 2: Full backend suite**
 
 Run: `pytest dashboard/backend/tests/ -q -p no:cacheprovider`
-Expected: green except the known-environmental `test_report_pdf` failures (local python lacks reportlab — see project memory); compare the failing set against a run on `main` if anything else is red. Also confirm `git status` shows no change to `dashboard/storage/data/backtest.db`.
+Expected: green except the known-environmental `test_report_pdf` failures (local python lacks reportlab — see project memory); compare the failing set against a run on `main` if anything else is red. Also confirm `git status` shows no change to `dashboard/storage/data/backtest.db` — that file changing is the lazy-import rule (Review Focus 8) failing in practice even if its test passed.
 
 - [ ] **Step 3: Commit, push, open PR**
 
 ```bash
 git add docs/superpowers/specs/2026-10-08-backtest-decision-tape-design.md docs/superpowers/plans/2026-10-08-backtest-decision-tape.md
-git commit -m "docs(backtest): decision tape spec matches implementation"
+git commit -m "docs(backtest): decision tape spec matches implementation" -m "Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
 git push -u origin feat/backtest-decision-tape
 gh pr create --title "feat(backtest): per-bar decision tape" --body-file <scratchpad>/pr-body.md
 ```
 
-PR body (short): what the tape records, where (trace events), the replay round-trip test as the proof, the two side findings (no US fees/slippage/volume cap; gate drops/rewrites model orders unrecorded), and the attribution footer.
+PR body (short): what the tape records and where (trace events); **`intent` + `state` is the replay unit, `actions` the same-engine reproduction check**, with the three Task 4 tests named as the evidence (reproduction, intent replay, perturbed-engine divergence); the per-run `gate_rewrites` count; the parent's label-per-arm table; and the realism sentence — the recorded engine is frictionless, latency-free and on unadjusted bars, realism is scored by the conformance suite, and the four follow-ups are listed in the spec (adjusted bars with provenance first). End with the attribution footer `🤖 Generated with [Claude Code](https://claude.com/claude-code)`.
+
+- [ ] **Step 4: File the follow-ups as issues at merge** (ask before filing on the shared repo — it assigns work): adjusted US bars + `market_data_adjustment` provenance; a decision-latency conformance case; a driver field on PM's return envelope; realism scoring of the leaderboard medians. Link them from the PR's closing comment so the trail connects both ways.
