@@ -216,7 +216,7 @@
         <div class="metric"><div class="v">${pct(m.max_drawdown)}</div><div class="k">Max Drawdown</div></div>
         <div class="metric"><div class="v">${m.num_trades ?? "—"}</div><div class="k">Trades</div></div>
         <div class="metric"><div class="v">$${m.final_equity ? Number(m.final_equity).toLocaleString() : "—"}</div><div class="k">Final Equity</div></div>
-        <div class="metric"><div class="v"><a href="${API}/" >Dashboard →</a></div><div class="k">${m.llm_model || ""}</div></div>
+        <div class="metric"><div class="v"><a href="${API}/app" >Dashboard →</a></div><div class="k">${m.llm_model || ""}</div></div>
       `;
     }
 

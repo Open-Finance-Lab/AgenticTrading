@@ -35,12 +35,12 @@ from dashboard.backend.domain.leaderboard.live_trade_stats import (
     summarize_trade_stats,
 )
 from dashboard.backend.domain.leaderboard.strategies._common import reference_start_date
-from dashboard.backend.domain.leaderboard.us_market_calendar import is_trading_day
 from dashboard.backend.infrastructure.market_data.alpaca_bars import (
     allow_recent_sip,
     sip_delay_minutes,
 )
 from dashboard.backend.infrastructure.market_data.sessions import session_windows
+from dashboard.backend.infrastructure.market_data.us_market_calendar import is_trading_day
 from dashboard.backend.paths import DATA_DIR
 import dashboard.backend.domain.leaderboard.service as lb_service
 

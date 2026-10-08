@@ -24,7 +24,7 @@ const BOARD_RULES = [
   },
   {
     icon: TrendingUp,
-    text: "Live Trading Leaderboard: designed to move forward one trading session at a time, in two-week seasons.",
+    text: "Live Trading Leaderboard: moves forward one trading session at a time, over the current calendar month.",
   },
   {
     icon: ShieldCheck,
@@ -148,12 +148,17 @@ export function Race() {
                 back up the page to look for something that is not there. */}
             <p className="text-foreground/70 mb-6">{boardPointerSentence(standings)}</p>
             {/* "Live" names the direction the board runs, not brokered execution, and
-                Season 0 is a shakedown with no nightly advance deployed yet. Both are
-                stated on the board's own About card; saying it here too keeps the
-                landing from selling a standing that does not exist. */}
+                Season 0 is a shakedown: the nightly advance runs
+                (domain/leaderboard/live.py, .github/workflows/live-leaderboard.yml),
+                but its standings are not a record yet. Both are stated on the
+                board's own About card; saying it here too keeps the landing from
+                selling an official result. Same wording contract as app.html's
+                Home blurb and About card -- pinned together by
+                test_live_board_copy_agrees_across_surfaces. */}
             <p className="text-xs text-muted-foreground mb-8">
-              The Live Trading Leaderboard is in preview for Season 0. It has not moved forward a
-              session yet, and nothing on it is a record. Season 1 is the first that counts.
+              The Live Trading Leaderboard is in preview for Season 0: the current calendar month,
+              updated after each trading session closes. Read its standings as a preview, not an
+              official result.
             </p>
             <LandingCTA size="lg" className="bg-primary text-primary-foreground hover:bg-primary/90" />
           </div>

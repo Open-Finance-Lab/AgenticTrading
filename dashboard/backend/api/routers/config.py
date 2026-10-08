@@ -7,6 +7,7 @@ Moved verbatim from ``dashboard/backend/app.py``. The external path
 from fastapi import APIRouter, HTTPException
 
 from dashboard.backend.infrastructure.market_data.provider import (
+    default_backtest_window,
     ifind_ashare_enabled,
     vnpy_simulation_enabled,
 )
@@ -65,5 +66,19 @@ def get_defaults():
     import json
     with open(defaults_path, 'r') as f:
         defaults = json.load(f)
-    
+
+    # The Run Backtest period rolls: the latest complete trading week, not the
+    # dates in the file, which went stale the week they were written. The
+    # description keeps the file's universe -- it describes these settings,
+    # and the window is only half of them. `defaultRuns` is untouched: those
+    # are seed runs over the file's own dates, not over this window.
+    settings = defaults.get("defaultSettings")
+    if isinstance(settings, dict):
+        start, end = default_backtest_window()
+        settings["startDate"], settings["endDate"] = start, end
+        universe = str(settings.get("assets") or "").strip() or "Default universe"
+        settings["description"] = (
+            f"{universe} over the latest complete trading week, {start} to {end}"
+        )
+
     return defaults

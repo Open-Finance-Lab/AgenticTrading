@@ -53,8 +53,12 @@ export const STORY_SPECS = {
   sharpe: "1.84",
   maxDd: "-8.6%",
   vsBuyHold: "+4.3%",
+  winRate: "68%",
   trades: 22,
-  avgHoldDays: 63,
+  // Must fit inside timePeriodLabel. It read 63 against a one-month window --
+  // a hold longer than the run -- because it outlived the 24-month window the
+  // chat demo used to state; every surface now reads this one value.
+  avgHoldDays: 9,
   /** @deprecated use timePeriod — kept for older refs */
   window: "Sep 3 – Oct 3, 2025",
 } as const;

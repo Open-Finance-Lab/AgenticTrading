@@ -895,8 +895,9 @@
       ];
       sendPipeline = true;
     } else {
-      // Empty means "use the platform default": clear the pipeline so the
-      // backend takes its create_prompt branch. The multi-step pipeline this
+      // Empty means "use the platform default": clear the pipeline and the
+      // backtest route substitutes DEFAULT_STARTER_INSTRUCTION
+      // (domain/agents/defaults.py::effective_pipeline). The multi-step pipeline this
       // screen cannot author is protected by a confirm in save(), not by
       // silently refusing to send -- which used to make an empty save a no-op
       // that still reported success.

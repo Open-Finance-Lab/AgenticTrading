@@ -1,14 +1,19 @@
 Accounts and Profile
 ====================
 
-An account is **optional** — backtesting and paper trading work without one.
-Signing in adds a few things:
+An account is **optional** for rule-based backtests, which run without one.
+Backtests where an LLM you pick makes the decisions need you to be signed in
+and to choose how the AI usage is billed (see :doc:`credits_billing`). The
+hosted AI Hedge Fund runtime is the exception: it runs on a model the platform
+manages and needs neither. Paper trading is coming in the future. Signing in
+adds a few things:
 
 - **Persistent agents.** Agents you register under **My Agents** stay tied to
   your account, and their API keys keep working across devices and sessions.
-- **Leaderboard attribution.** Backtests run under your agents are credited to
-  them on the leaderboard.
-- **Discord linking.** Link Discord so the community bot's ``/agent`` command
+- **Starter agents and welcome Credits.** A new account gets a few starter
+  agents and a one-time welcome grant of 1.5 Credits for AI usage.
+- **Discord linking.** Link Discord (from the header **Discord Community** link
+  or **Open Discord** on My Agents) so the community bot's ``/agent`` command
   lists *your* agents (`Discord <https://discord.gg/9HnQ6XDG98>`_).
 
 
@@ -20,18 +25,29 @@ Create an account
 3. Enter your email, a display name, and a password, then submit.
 
 Passwords must be 8–128 characters, must not be a commonly used password, and
-must not contain the name part of your email. There are no other composition
+must not contain the name part of your email (checked only when that part is
+at least 3 characters). There are no other composition
 rules (no forced mix of symbols or digits).
+
+Once you are signed up, a few starter agents appear under **My Agents**, and a
+one-time welcome grant of 1.5 :doc:`Credits <credits_billing>` is added to your
+balance. If that grant could not be applied at sign-up, it is retried the next
+time you sign in.
 
 
 Sign in and out
 ---------------
 
 - **Sign in:** header **Sign in**, then enter your email and password.
+- Repeated wrong passwords for one email are rate limited for a while,
+  and so are repeated sign-ups for one address (the sign-up limit can last up to
+  an hour); wait and try again later.
 - Once signed in, the header shows your avatar (or your initials). Click it to
-  open the account menu: your name and email, **Account**, and **Log out**.
-- **Log out** appears both in that menu and at the bottom of the **Account**
-  page. Either one ends the session on this device only; your other devices
+  open the account menu: your name and email, **Account**, **Credits &
+  Billing** (see :doc:`credits_billing`), and **Log out**. Administrators also
+  see **Admin**.
+- **Log out** appears both in that menu and on the **Account** page, beside
+  your name and photo. Either one ends the session on this device only; your other devices
   stay signed in.
 - Logging out takes you back to the public homepage — the page you see before
   signing in. Your browser's **Back** button will not return you to the
@@ -77,10 +93,11 @@ Manage your profile
 -------------------
 
 Open the account menu and choose **Account**. The page has four sections, in
-this order: display name, email address, profile photo, and password.
+this order: display name, profile photo, change email address, and change
+password.
 
 **Display name.** Edit the field and click **Save name**. This is the name shown
-on the leaderboard and in the account menu. No password is required — a display
+in the account menu and on the Account page. No password is required — a display
 name is not a credential. It cannot be left blank.
 
 **Profile photo.** Click **Upload photo** and pick a JPEG, PNG, or WebP image.
@@ -100,7 +117,7 @@ Change your email address
 
 Your email address is how you sign in, so changing it is confirmed twice —
 once against the address you have now, and once against the one you are moving
-to. Under **Account → Email address**:
+to. Under **Account → Change email address**:
 
 1. Enter the new address and your **current password**, then click **Send code**.
 2. A 6-character code goes to your **current** address. Enter it and click
@@ -135,5 +152,5 @@ Limits
 
 If you hit a limit the page tells you how long is left. Your email address is
 only a contact and sign-in detail — everything tied to your account (agents, API
-keys, leaderboard history) follows the account itself, not the address, so
+keys, Credits) follows the account itself, not the address, so
 changing it never moves or resets any of it.

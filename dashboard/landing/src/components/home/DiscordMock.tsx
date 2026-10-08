@@ -111,7 +111,7 @@ const MESSAGES: Msg[] = [
               </div>
             </div>
             <div className="discord-embed-note">
-              22 trades · avg hold 63 days · universe derived from recent Berkshire 13F holdings
+              {STORY_SPECS.trades} trades · avg hold {STORY_SPECS.avgHoldDays} days · universe derived from recent Berkshire 13F holdings
             </div>
             <a href="#test" className="discord-embed-link">
               View full equity curve &amp; decision log ↓

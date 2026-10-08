@@ -420,6 +420,26 @@ class RunStore:
         conn.close()
         return int(updated)
 
+    def fail_unfinished_runs_with_ids(self) -> List[str]:
+        """Fail startup orphans and return their canonical ids atomically."""
+        placeholders = ",".join("?" for _ in self._ACTIVE_STATUSES)
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            f"SELECT run_id FROM protocol_runs WHERE status IN ({placeholders})",
+            self._ACTIVE_STATUSES,
+        )
+        run_ids = [str(row[0]) for row in cursor.fetchall()]
+        if run_ids:
+            cursor.execute(
+                f"UPDATE protocol_runs SET status = 'failed', updated_at = ? "
+                f"WHERE status IN ({placeholders})",
+                (_utcnow_iso(), *self._ACTIVE_STATUSES),
+            )
+        conn.commit()
+        conn.close()
+        return run_ids
+
     def heartbeat_runs(self, run_ids: List[str]) -> None:
         """Refresh heartbeat_at (and claim owner_instance) for live runs.
 

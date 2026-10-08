@@ -35,6 +35,7 @@ from dashboard.backend.domain.agents.defaults import (
     STARTER_AGENT_MODEL,
     STARTER_AGENT_NAME,
     STARTER_AGENTS,
+    default_starter_pipeline,
 )
 from dashboard.backend.tests._frontend_source import js_string_const
 
@@ -373,3 +374,139 @@ def test_the_simple_panel_is_always_visible():
     match = re.search(r'<div id="agentEditorSimplePanel"[^>]*>', _APP_HTML)
     assert match, "the simple panel is missing from app.html"
     assert "hidden" not in match.group(0)
+
+
+# ---------------------------------------------------------------------------
+# "Empty means the platform default" (effective_pipeline) and the A-share lot
+# rule the default instruction's per-share wording would otherwise contradict.
+# ---------------------------------------------------------------------------
+
+
+def test_pipeline_runner_reexports_the_one_post_trade_split():
+    """One owner: the runner, the route and effective_pipeline classify steps
+    with the same function, not three copies held together by a pin."""
+    from dashboard.backend.domain.agents import defaults
+    from dashboard.backend.infrastructure.llm import pipeline_runner
+
+    assert pipeline_runner.POST_TRADE_PRESET_KEY is defaults.POST_TRADE_PRESET_KEY
+    assert pipeline_runner.split_pipeline is defaults.split_pipeline
+    assert pipeline_runner.is_post_trade_step is defaults.is_post_trade_step
+
+
+def test_js_mirrors_the_label_and_post_trade_key():
+    from dashboard.backend.domain.agents.defaults import (
+        POST_TRADE_PRESET_KEY,
+        SIMPLE_INSTRUCTION_LABEL,
+    )
+
+    assert _js_const("SIMPLE_INSTRUCTION_LABEL") == SIMPLE_INSTRUCTION_LABEL
+    assert _js_const("POST_TRADE_PRESET_KEY") == POST_TRADE_PRESET_KEY
+
+
+def test_effective_pipeline_resolves_empty_to_the_default_instruction():
+    from dashboard.backend.domain.agents.defaults import (
+        effective_pipeline,
+        is_default_instruction_pipeline,
+    )
+
+    assert is_default_instruction_pipeline(effective_pipeline(None))
+    # A free-form strategy_prompt is an instruction on its own path.
+    assert effective_pipeline(None, "Buy the dip.") is None
+    # Malformed shapes reach the route's validator untouched.
+    assert effective_pipeline([]) == []
+    assert effective_pipeline("nope") == "nope"
+    own = [{"presetKey": "simple_instruction", "prompt": "Only buy AAPL."}]
+    assert effective_pipeline(own) is own
+    assert not is_default_instruction_pipeline(own)
+    post_trade = {"presetKey": "post_trade_analysis", "prompt": "Review."}
+    resolved = effective_pipeline([{"prompt": ""}, post_trade])
+    assert is_default_instruction_pipeline(resolved)
+    assert resolved[-1] == post_trade
+
+
+def test_strategy_prompt_fills_either_empty_shape():
+    """`[blank]` and `None` are both "no instruction", so a strategy_prompt
+    must win on both -- it used to be dropped for the blank pipeline."""
+    from dashboard.backend.domain.agents.defaults import effective_pipeline
+
+    blank = [{"presetKey": "simple_instruction", "prompt": "  "}]
+    assert effective_pipeline(None, "Buy the dip.") is None
+    assert effective_pipeline(blank, "Buy the dip.") is None
+
+    post_trade = {"presetKey": "post_trade_analysis", "prompt": "Review."}
+    resolved = effective_pipeline(blank + [post_trade], "  Buy the dip. ")
+    assert [step.get("prompt") for step in resolved] == ["Buy the dip.", "Review."]
+    assert resolved[-1] is post_trade
+
+
+def test_blank_decision_steps_are_named_only_beside_an_instruction():
+    from dashboard.backend.domain.agents.defaults import blank_decision_step_numbers
+
+    post_trade = {"presetKey": "post_trade_analysis", "prompt": ""}
+    assert blank_decision_step_numbers(None) == []
+    assert blank_decision_step_numbers([{"prompt": ""}]) == []  # all blank: default
+    assert blank_decision_step_numbers(
+        [{"prompt": "Pick candidates"}, post_trade, {"prompt": " "}]
+    ) == [3]
+    assert blank_decision_step_numbers([{"prompt": "Go"}, post_trade]) == []
+
+
+def test_default_wording_under_another_contract_is_not_the_default():
+    """The flag claims the run made the default's request; label, prompt and
+    output format all reach the model, so all three must match."""
+    from dashboard.backend.domain.agents.defaults import is_default_instruction_pipeline
+
+    for field, value in (("outputFormat", "JSON: {}"), ("label", "Mine")):
+        step = default_starter_pipeline()[0]
+        step[field] = value
+        assert not is_default_instruction_pipeline([step])
+    step = default_starter_pipeline()[0]
+    step["id"] = "renamed"
+    step["presetKey"] = "custom"
+    assert is_default_instruction_pipeline([step])
+
+
+def test_unedited_starter_agent_counts_as_the_default_instruction():
+    """Judged on content: a starter's random step id must not hide that it
+    runs exactly the instruction the disclosure names."""
+    from dashboard.backend.domain.agents.defaults import is_default_instruction_pipeline
+
+    assert is_default_instruction_pipeline(default_starter_pipeline())
+
+
+def _last_step_prompt(market):
+    from dashboard.backend.infrastructure.llm.pipeline_runner import _build_step_prompt
+
+    snapshot = {"portfolio": {}, "top_signals": {}}
+    if market is not None:
+        snapshot["market"] = market
+    return _build_step_prompt(
+        step_index=0,
+        step=default_starter_pipeline()[0],
+        market_snapshot=snapshot,
+        prior_outputs=[],
+        is_last=True,
+    )
+
+
+def test_a_share_execution_rules_state_the_board_lot():
+    prompt = _last_step_prompt({"market": "CN", "lot_size": 100})
+    rules = prompt.split("=== EXECUTION RULES ===", 1)[1]
+
+    assert "positive whole multiples of 100 shares" in rules
+    assert "per lot (100 x price)" in rules
+
+
+@pytest.mark.parametrize("market", [None, {"market": "US"}, {"lot_size": 1}, {"lot_size": True}])
+def test_single_share_markets_keep_the_execution_rules_byte_identical(market):
+    """US prompts must not move: cached leaderboard and A/B rows compare on them."""
+    prompt = _last_step_prompt(market)
+    rules = prompt.split("=== EXECUTION RULES ===", 1)[1]
+
+    assert rules.startswith(
+        "\n- Trade ONLY symbols listed in the market snapshot.\n"
+        "- Only SELL symbols that appear in current_holdings.\n"
+        "- Respect available cash for buy orders.\n"
+        "- Use integer share quantities.\n\n"
+    )
+    assert "board lot" not in prompt

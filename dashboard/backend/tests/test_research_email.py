@@ -366,3 +366,25 @@ def test_outbox_columns_migrate_onto_an_existing_table(tmp_path, monkeypatch):
     with sqlite3.connect(legacy) as conn:
         columns = {row[1] for row in conn.execute("PRAGMA table_info(research_runs)")}
     assert {"email_attempts", "email_next_attempt_at"} <= columns
+
+
+@pytest.mark.parametrize(
+    ("configured", "expected"),
+    [
+        (None, "https://agentic-trading-lab.vercel.app/app"),
+        ("", "https://agentic-trading-lab.vercel.app/app"),
+        ("https://host.example", "https://host.example/app"),
+        ("https://host.example/", "https://host.example/app"),
+        ("https://host.example/app", "https://host.example/app"),
+        ("https://host.example/app/", "https://host.example/app"),
+    ],
+)
+def test_report_email_link_is_absolute_and_suffixed_once(monkeypatch, configured, expected):
+    """The other PUBLIC_APP_URL readers accept a value ending in /app; this one
+    used to append another (``/app/app`` — a dead link in every email), and an
+    empty value produced a relative link a mail client cannot open."""
+    if configured is None:
+        monkeypatch.delenv("PUBLIC_APP_URL", raising=False)
+    else:
+        monkeypatch.setenv("PUBLIC_APP_URL", configured)
+    assert research._public_app_base() == expected

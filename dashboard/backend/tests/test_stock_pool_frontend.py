@@ -34,6 +34,8 @@ def run_picker(script, setup=""):
         fn_body("function getSelectedStockPoolRequest("),
         fn_body("function selectPreset("),
         fn_body("function getSelectedAssets("),
+        fn_body("function runBacktestModalDecisionSource("),
+        fn_body("function pipelineHasTradingInstruction("),
         fn_body("async function runBacktest("),
         setup,
         "(async()=>{" + script + "})().catch(e=>{console.error(e);process.exit(1)});",
@@ -84,6 +86,8 @@ def test_submission_freezes_category_and_does_not_mix_it_with_explicit_assets():
       const applyAgentFilters=()=>{};
       const updateBacktestRunProgress=()=>{};
       const formatBacktestError=()=>'';
+      // The dates are already set here; the defaults fetch is not under test.
+      const ensureDefaultBacktestDates=async()=>{};
       const showBacktestLaunchFailure=()=>{};
       API.post=async(url,payload)=>{posted.push({url,payload});return {success:false}};
     """)

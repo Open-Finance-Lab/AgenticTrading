@@ -191,9 +191,21 @@ def _run_field(row: Dict[str, Any], name: str) -> Any:
         symbols = metadata.get("symbols")
         return sorted(symbols) if symbols else None
     if name == "initial_pipeline":
-        # Normalised, so key order inside a step is not a difference.
+        # Normalised, so key order inside a step is not a difference, and
+        # without step ids: seeding mints a random id per agent, so two agents
+        # running the same instruction would otherwise never compare. An id is
+        # identity, not configuration -- nothing the model sees depends on it.
         pipeline = metadata.get("initial_pipeline")
-        return json.dumps(pipeline, sort_keys=True) if pipeline is not None else None
+        if pipeline is None:
+            return None
+        if isinstance(pipeline, list):
+            pipeline = [
+                {key: value for key, value in step.items() if key != "id"}
+                if isinstance(step, dict)
+                else step
+                for step in pipeline
+            ]
+        return json.dumps(pipeline, sort_keys=True)
     if name == "frequency_contract":
         contract = metadata.get("frequency_contract")
         return json.dumps(contract, sort_keys=True) if contract is not None else None

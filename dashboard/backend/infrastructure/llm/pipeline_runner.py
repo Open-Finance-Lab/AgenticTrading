@@ -32,7 +32,13 @@ from dashboard.backend.infrastructure.llm.execution.errors import (
 )
 from dashboard.backend.infrastructure.llm.execution.log_safe import log_safe_token
 
-POST_TRADE_PRESET_KEY = "post_trade_analysis"
+# Owned by domain/agents/defaults.py and re-exported here, where the engine,
+# the route and the tests have always imported them from.
+from dashboard.backend.domain.agents.defaults import (  # noqa: F401 - re-exported
+    POST_TRADE_PRESET_KEY,
+    is_post_trade_step,
+    split_pipeline,
+)
 
 PIPELINE_SYSTEM_PROMPT = """You are a sub-agent in a multi-step trading pipeline.
 Follow your task instructions precisely.
@@ -93,28 +99,6 @@ def escalate_ceiling_on_retry() -> bool:
     return RECOVERY_MAX_OUTPUT_TOKENS > DEFAULT_MAX_OUTPUT_TOKENS
 
 
-def is_post_trade_step(step: Any) -> bool:
-    return isinstance(step, dict) and step.get("presetKey") == POST_TRADE_PRESET_KEY
-
-
-def split_pipeline(
-    pipeline: Optional[List[Dict[str, Any]]],
-) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
-    """Split a mixed pipeline into hourly decision steps and post-trade steps."""
-    decision_steps: List[Dict[str, Any]] = []
-    post_trade_steps: List[Dict[str, Any]] = []
-    if not pipeline:
-        return decision_steps, post_trade_steps
-    for step in pipeline:
-        if not isinstance(step, dict):
-            continue
-        if is_post_trade_step(step):
-            post_trade_steps.append(step)
-        else:
-            decision_steps.append(step)
-    return decision_steps, post_trade_steps
-
-
 def trading_day_key(timestamp: Any) -> str:
     """Calendar-day key for day-boundary post-trade triggers."""
     if timestamp is None:
@@ -140,6 +124,15 @@ def is_last_bar_of_trading_day(
     if index == len(timestamps) - 1:
         return True
     return trading_day_key(timestamps[index]) != trading_day_key(timestamps[index + 1])
+
+
+def _market_lot_size(market_snapshot: Any) -> int:
+    """The board lot the snapshot's ``market`` block declares, else 1."""
+    market = market_snapshot.get("market") if isinstance(market_snapshot, dict) else None
+    raw = market.get("lot_size") if isinstance(market, dict) else None
+    if isinstance(raw, bool) or not isinstance(raw, int):
+        return 1
+    return raw
 
 
 def _build_step_prompt(
@@ -193,6 +186,24 @@ def _build_step_prompt(
                 "- Use integer share quantities.",
             ]
         )
+        lot_size = _market_lot_size(market_snapshot)
+        if lot_size > 1:
+            # The single-prompt path states this in A_SHARE_SYSTEM_PROMPT; this
+            # path's system prompt is market-neutral, and the snapshot's
+            # lot_size_note sits in a JSON blob a step instruction can
+            # contradict (the default starter instruction says "whole-share
+            # quantities" and prices affordability per share). An off-lot order
+            # is rejected in full, so the rule belongs with the other execution
+            # rules. Conditional, so a US prompt stays byte-identical.
+            parts.extend(
+                [
+                    f"- Order quantities must be positive whole multiples of "
+                    f"{lot_size} shares (one board lot); any other quantity is "
+                    "rejected in full, not rounded.",
+                    f"- Judge affordability per lot ({lot_size} x price), not "
+                    "per share.",
+                ]
+            )
 
     parts.extend(["", "Return ONLY valid JSON matching the required output format."])
     return "\n".join(parts)

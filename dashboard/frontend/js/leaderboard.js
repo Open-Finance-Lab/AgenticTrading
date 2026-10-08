@@ -572,13 +572,17 @@ function setCurvePickerOpen(open) {
   if (open) renderCurvePicker();
 }
 
-// A season is two calendar weeks of US cash sessions, Monday through Friday.
-const SEASON_TRADING_DAYS = 10;
-
-// The season the board is in before the engine ships. Season 0 is the shakedown
-// season by convention: numbered, so the board has a real identity to show and
-// so Season 1 means "the first one that counted", but explicitly the one whose
-// results nobody should read as a standing. The preview banner says the rest.
+// ⚠ UNREACHABLE TODAY: every `isLiveBoard()` branch in this file. The Live tab
+// renders through js/live-leaderboard.js into #liveLeaderboardView, and app.js
+// only ever calls loadLeaderboardData('contest'). The season strip, preview
+// banner and gap list this file used to paint into #leaderboardView were
+// deleted with their markup (they described a two-week season engine the
+// calendar-month board replaced); the remaining live branches are slated for
+// the same removal rather than for revival.
+//
+// Season 0 is the shakedown season by convention: numbered, so the board has a
+// real identity to show, but explicitly the one whose results nobody should
+// read as a standing.
 const PREVIEW_SEASON_NUMBER = 0;
 
 /** The board on screen, from the request that produced the payload being shown. */
@@ -653,28 +657,6 @@ function displayedSeasonNumber(payload) {
 function displayedSeasonLabel(payload) {
   const n = displayedSeasonNumber(payload);
   return n === null ? 'This season' : `Season ${n}`;
-}
-
-/** A relative phrase, or null when the timestamp is absent or unparseable.
- *
- * Null rather than '': both call sites interpolate this into a label, so an
- * empty string renders as a dangling "Next advance " or "closes " — a caption
- * with its value silently deleted, which reads as a broken template rather than
- * as missing data. Callers drop the whole clause on null instead.
- *
- * Past timestamps say "now", not "due now": the phrase is composed into
- * "closes …" as well as "Next advance …", and an entry window cannot be
- * "closes due now".
- */
-function formatRelativeFromNow(iso) {
-  const then = new Date(iso).getTime();
-  if (!Number.isFinite(then)) return null;
-  const minutes = Math.round((then - Date.now()) / 60000);
-  if (minutes <= 0) return 'now';
-  if (minutes < 60) return `in ${minutes} min`;
-  const hours = Math.round(minutes / 60);
-  if (hours < 24) return `in ${hours}h`;
-  return `in ${Math.round(hours / 24)}d`;
 }
 
 /** Repaint the whole board identity for `payload`, which `board` was asked for.
@@ -771,9 +753,6 @@ function updateLeaderboardHeader(payload, board = renderedBoardPeriod) {
       ? formatLiveBoardSubtitle(payload)
       : 'Sep 1 – Oct 30, 2026';
   }
-  renderLivePreviewBanner(payload);
-  renderSeasonStrip(payload);
-  renderSeasonGaps(payload);
   updateCurvePickerCount();
 }
 
@@ -784,8 +763,7 @@ function formatLiveBoardSubtitle(payload) {
     : '';
   if (isLivePreview(payload)) {
     // Stating the cadence here would promise a nightly advance that no deployed
-    // job performs. The banner above carries the full explanation; this is the
-    // one-line version that has to survive next to it.
+    // job performs.
     return `${dates}${displayedSeasonLabel(payload)} preview — no advance has run`;
   }
   // `window.start_date` is the board's display window, NOT a record that an
@@ -799,166 +777,6 @@ function formatLiveBoardSubtitle(payload) {
   return advanced
     ? `${dates}${cadence} · last completed ${advanced}`
     : `${dates}${cadence}`;
-}
-
-/** The load-bearing honesty control for this tab.
- *
- * Everything else on the board renders identically whether or not a season ran,
- * because the entry/curve/table shapes are shared with the Competition board.
- * This banner is the only element that distinguishes them, so it is written
- * first and deleted last.
- */
-function renderLivePreviewBanner(payload) {
-  const host = document.getElementById('seasonPreviewBanner');
-  if (!host) return;
-  host.textContent = '';
-  if (!isLivePreview(payload)) {
-    host.hidden = true;
-    return;
-  }
-  host.hidden = false;
-  const lead = document.createElement('strong');
-  lead.textContent = 'Preview — the season engine is not deployed.';
-  const body = document.createElement('span');
-  const label = payload.window?.label || 'the Competition window';
-  body.textContent = ` ${displayedSeasonLabel(payload)} has not been run. The curves below are the Competition board's fixed window (${label}), shown so this layout can be reviewed: nothing here is a live standing, and no ranking on this tab counts.`;
-  host.append(lead, body);
-}
-
-function renderSeasonStrip(payload) {
-  const host = document.getElementById('seasonStrip');
-  if (!host) return;
-  const season = payload.season || null;
-  if (!isLiveBoard()) {
-    host.hidden = true;
-    return;
-  }
-  host.hidden = false;
-  host.classList.toggle('is-placeholder', !season);
-
-  // Both clamped before either is divided by the other. The server clamps
-  // `trading_days_total` too, and that is the real fix — but this value reaches
-  // `(elapsed / total) * 100` as a CSS width, so a zero or negative one draws a
-  // full or backwards bar under the banner that says nothing has advanced.
-  const rawTotal = Number(season?.trading_days_total);
-  const total = Number.isFinite(rawTotal) && rawTotal >= 1
-    ? Math.floor(rawTotal)
-    : SEASON_TRADING_DAYS;
-  const elapsed = Math.min(Math.max(Number(season?.trading_days_elapsed) || 0, 0), total);
-
-  const badge = document.getElementById('seasonBadge');
-  if (badge) {
-    const seasonNo = displayedSeasonNumber(payload);
-    badge.textContent = seasonNo === null ? 'Season —' : `Season ${seasonNo}`;
-  }
-
-  const dates = document.getElementById('seasonDates');
-  if (dates) {
-    dates.textContent = season?.start_date && season?.end_date
-      ? `${formatShortDate(season.start_date)} – ${formatShortDate(season.end_date)}`
-      : 'Dates set when the first season opens';
-  }
-
-  const entryText = document.getElementById('seasonEntryText');
-  const entryState = document.getElementById('seasonEntryState');
-  if (entryText && entryState) {
-    let state = 'pending';
-    let text = 'Entries not open yet';
-    if (season?.entries_open) {
-      state = 'open';
-      // Composed from the formatted value, not from the raw field: an
-      // unparseable `entry_closes_at` is present-but-useless, and testing the
-      // field instead of the phrase renders a bare "· closes ".
-      const closesIn = formatRelativeFromNow(season.entry_closes_at);
-      const closes = closesIn ? ` · closes ${closesIn}` : '';
-      const count = Number(season.entry_count);
-      text = `Entries open${Number.isFinite(count) ? ` · ${count} entered` : ''}${closes}`;
-    } else if (season?.status === 'running') {
-      state = 'closed';
-      text = 'Entries closed — season in progress';
-    } else if (season?.status === 'closed') {
-      state = 'closed';
-      text = 'Season finished';
-    }
-    entryState.className = `season-entry-state is-${state}`;
-    entryText.textContent = text;
-  }
-
-  const fill = document.getElementById('seasonProgressFill');
-  const bar = document.getElementById('seasonProgressBar');
-  const label = document.getElementById('seasonProgressLabel');
-  if (fill) fill.style.width = `${total ? (elapsed / total) * 100 : 0}%`;
-  if (bar) {
-    bar.setAttribute('aria-valuemax', String(total));
-    bar.setAttribute('aria-valuenow', String(elapsed));
-  }
-  if (label) {
-    label.textContent = season
-      ? `Day ${elapsed} of ${total}`
-      : `${total} trading days per season`;
-  }
-
-  const advance = document.getElementById('seasonNextAdvance');
-  if (advance) {
-    // The formatted phrase is the only proof the timestamp was readable, so an
-    // unparseable `next_advance_at` is treated as absent. Branching on the raw
-    // field instead renders "Next advance null".
-    const relative = formatRelativeFromNow(season?.next_advance_at);
-    if (isLivePreview(payload)) {
-      // Tested ahead of the timestamp rather than after it: a payload carrying
-      // a schedule but no completed advance would otherwise announce a nightly
-      // job that is not deployed — the one claim this tab exists to deny.
-      advance.textContent = 'No advance scheduled';
-    } else if (season?.status === 'closed') {
-      advance.textContent = 'No further advances';
-    } else if (relative) {
-      advance.textContent = `Next advance ${relative} (${new Date(season.next_advance_at).toLocaleString()})`;
-    } else {
-      advance.textContent = 'Next advance: nightly after the 16:00 ET close';
-    }
-  }
-}
-
-// Copy is deliberately different per failure_kind. A gap that reads the same
-// whatever caused it is worse than no gap marker at all: it teaches the reader
-// that a flat day and a dead job look alike, which is the thing this list exists
-// to prevent.
-const SEASON_GAP_COPY = {
-  market_data_unavailable: 'no usable market data for the session',
-  model_error: 'the model returned no usable decision',
-  job_not_run: 'the nightly advance never ran',
-  budget_exhausted: 'the model budget for the month was exhausted',
-};
-
-function renderSeasonGaps(payload) {
-  const host = document.getElementById('seasonGaps');
-  if (!host) return;
-  host.textContent = '';
-  const gaps = (isLiveBoard() && payload.season?.gaps) || [];
-  if (!gaps.length) {
-    host.hidden = true;
-    return;
-  }
-  host.hidden = false;
-  gaps.forEach((gap) => {
-    const item = document.createElement('li');
-    item.className = 'season-gap';
-    const date = document.createElement('span');
-    date.className = 'season-gap-date';
-    date.textContent = formatShortDate(gap.date) || gap.date || 'Unknown date';
-    const why = document.createElement('span');
-    why.className = 'season-gap-why';
-    const reason = SEASON_GAP_COPY[gap.failure_kind] || 'the advance did not complete';
-    why.textContent = `${reason} — positions carried forward unchanged, no trading counted`;
-    item.append(date, why);
-    if (gap.detail) {
-      const detail = document.createElement('span');
-      detail.className = 'season-gap-detail';
-      detail.textContent = gap.detail;
-      item.append(detail);
-    }
-    host.append(item);
-  });
 }
 
 /** Resolve a caller's board name to one of the two the API actually serves.
@@ -1277,6 +1095,67 @@ function buildEquityCurvesFromEntries(entries) {
 
   // Keep `days` alias so any older callers still unpack a familiar key.
   return { times, days: times, curves, trajectories, initials };
+}
+
+/** An entry's run envelope (#602), mapped onto the chart's shared time axis.
+ *
+ *  The server publishes `sample_band.lower/upper` index-parallel to the
+ *  entry's OWN `equity_curve`; the chart plots on the union of every entry's
+ *  timestamps (`buildEquityCurvesFromEntries`), so each bound is re-keyed
+ *  through the same `chartTimeKey` the curve was. Returns null whenever there
+ *  is no envelope worth drawing -- absent, a lone run, arrays that are not
+ *  parallel to the curve (the alignment is the only thing tying a bound to an
+ *  x position, so a length mismatch has no right answer), a band over fewer
+ *  runs than `samples.count`, or no index where both bounds are numbers.
+ *
+ *  `onGrid` is what keeps the band from vanishing, and it is not optional.
+ *  Series sit on different hour grids (SPY :30 vs LLM :00), so on the shared
+ *  axis roughly every other slot is one this entry never had. The median's
+ *  line spans those (`spanGaps: true`); a band that split at every null would
+ *  be a row of zero-width slivers. So the draw bridges slots OFF this entry's
+ *  grid and breaks only at slots ON it where no run recorded a number -- the
+ *  one gap that is a real absence rather than another series' clock.
+ *
+ *  Non-numbers stay null via `finiteNumber`, never 0: a $0 bound is a -100%
+ *  envelope, and on a shared y-axis it would flatten every curve (#390). */
+function buildSampleBandSeries(entry, times) {
+  const band = entry && entry.sample_band;
+  const points = (entry && entry.equity_curve) || [];
+  if (!band || !Array.isArray(band.lower) || !Array.isArray(band.upper)) return null;
+  if (!Array.isArray(times) || !times.length || !points.length) return null;
+  if (band.lower.length !== points.length || band.upper.length !== points.length) return null;
+  const runs = finiteNumber(band.runs);
+  if (!(runs >= 2)) return null;
+  // The label beside this curve prints "Median of N runs · lo to hi" from
+  // `samples`; a band over fewer runs would draw a narrower spread than that
+  // range. The server builds both from one vetted pool (#602), so they agree
+  // by construction -- this holds the contract here too, so a payload that
+  // disagrees is not drawn.
+  const counted = finiteNumber(entry.samples && entry.samples.count);
+  if (Number.isFinite(counted) && counted !== runs) return null;
+
+  const slot = new Map();
+  times.forEach((t, i) => slot.set(t, i));
+  const lower = times.map(() => null);
+  const upper = times.map(() => null);
+  const onGrid = times.map(() => false);
+  points.forEach((pt, k) => {
+    const i = slot.get(chartTimeKey(pt && pt.timestamp));
+    if (i === undefined) return;
+    onGrid[i] = true;
+    const lo = finiteNumber(band.lower[k]);
+    const hi = finiteNumber(band.upper[k]);
+    // Last point wins on a repeated key, as it does for the curve itself.
+    if (Number.isFinite(lo) && Number.isFinite(hi)) {
+      lower[i] = Math.min(lo, hi);
+      upper[i] = Math.max(lo, hi);
+    } else {
+      lower[i] = null;
+      upper[i] = null;
+    }
+  });
+  if (!lower.some((v) => v != null)) return null;
+  return { lower, upper, onGrid, runs };
 }
 
 // Default chart visibility: top 5 teams + benchmarks. Strategy baselines are
@@ -1706,6 +1585,131 @@ const hoverMarkerPlugin = {
     ctx.restore();
   },
 };
+
+// Fill opacity of a run envelope (#602), keyed the way `styleDatasets` keys
+// its strokes: the hovered (or, idle, the selected) curve's band comes up, a
+// band whose curve another hover is dimming drops nearly out, the rest sit at
+// a wash light enough that three overlapping bands still read as lines.
+const SAMPLE_BAND_ALPHA = { base: 0.14, emphasis: 0.22, faded: 0.05 };
+
+function sampleBandAlpha(chart, ds, i) {
+  if (hoveredDatasetIndex != null) {
+    return i === hoveredDatasetIndex ? SAMPLE_BAND_ALPHA.emphasis : SAMPLE_BAND_ALPHA.faded;
+  }
+  return ds.label === chart.$emphasisLabel ? SAMPLE_BAND_ALPHA.emphasis : SAMPLE_BAND_ALPHA.base;
+}
+
+/** Contiguous index runs where `band` has both bounds, bridging off-grid slots.
+ *
+ *  A slot off this entry's grid is skipped without ending the run -- the
+ *  median's line spans it too (see `buildSampleBandSeries`). A slot ON the
+ *  grid with a missing bound ends it: no run recorded a number there. */
+function sampleBandRuns(band) {
+  const runs = [];
+  let current = [];
+  for (let i = 0; i < band.lower.length; i += 1) {
+    if (!band.onGrid[i]) continue;
+    const lo = band.lower[i];
+    const hi = band.upper[i];
+    if (Number.isFinite(lo) && Number.isFinite(hi)) {
+      current.push(i);
+    } else if (current.length) {
+      runs.push(current);
+      current = [];
+    }
+  }
+  if (current.length) runs.push(current);
+  return runs;
+}
+
+/** The shaded min/max envelope of an entry's pooled runs, behind its median.
+ *
+ *  A plugin and deliberately NOT a dataset: hover resolution, the tooltip, the
+ *  endpoint labels, the legend and the curve picker all iterate
+ *  `chart.data.datasets`, and every one of them would have to learn to skip a
+ *  band -- the first one that did not would let the pointer "hover" an
+ *  envelope, or give it a gutter label and a legend row. Here it is paint and
+ *  nothing else.
+ *
+ *  `beforeDatasetsDraw`, so every line -- this entry's median included -- sits
+ *  on top of every band. `afterDataLimits` widens the y scale to the visible
+ *  bands: Chart.js sizes the axis from datasets alone, and a band that runs
+ *  past the board's extremes would otherwise be clipped at the frame. That
+ *  widening is safe only because every bound is a run the board would publish:
+ *  the server holds each pooled run to the median's seed, days and stored
+ *  values before it can join the band (`_vetted_pool`, #602), so an extreme
+ *  here is a measured one -- never a mis-seeded or curveless repeat flattening
+ *  the board the way a NULL-as-$0 did (#390). */
+function createSampleBandPlugin() {
+  return {
+    id: 'sampleBand',
+    afterDataLimits(chart, args) {
+      const scale = args && args.scale;
+      if (!scale || scale.id !== 'y') return;
+      let lo = Infinity;
+      let hi = -Infinity;
+      chart.data.datasets.forEach((ds, i) => {
+        if (!ds._band || !chart.isDatasetVisible(i)) return;
+        ds._band.lower.forEach((v) => { if (Number.isFinite(v)) lo = Math.min(lo, v); });
+        ds._band.upper.forEach((v) => { if (Number.isFinite(v)) hi = Math.max(hi, v); });
+      });
+      if (Number.isFinite(lo) && (!Number.isFinite(scale.min) || lo < scale.min)) scale.min = lo;
+      if (Number.isFinite(hi) && (!Number.isFinite(scale.max) || hi > scale.max)) scale.max = hi;
+    },
+    beforeDatasetsDraw(chart) {
+      const { ctx, chartArea, scales } = chart;
+      if (!chartArea || !scales || !scales.x || !scales.y) return;
+      chart.data.datasets.forEach((ds, i) => {
+        if (!ds._band || !chart.isDatasetVisible(i)) return;
+        const runs = sampleBandRuns(ds._band);
+        if (!runs.length) return;
+        const x = (k) => scales.x.getPixelForValue(k);
+        ctx.save();
+        ctx.beginPath();
+        ctx.rect(chartArea.left, chartArea.top,
+          chartArea.right - chartArea.left, chartArea.bottom - chartArea.top);
+        ctx.clip();
+        ctx.fillStyle = hexToRgba((ds._style && ds._style.color) || '#94a3b8',
+          sampleBandAlpha(chart, ds, i));
+        runs.forEach((run) => {
+          // One polygon per run: upper bound left to right, lower bound back.
+          // A one-slot run closes to a zero-width sliver, which fills nothing.
+          ctx.beginPath();
+          run.forEach((k, n) => {
+            const y = scales.y.getPixelForValue(ds._band.upper[k]);
+            if (n === 0) ctx.moveTo(x(k), y);
+            else ctx.lineTo(x(k), y);
+          });
+          for (let n = run.length - 1; n >= 0; n -= 1) {
+            ctx.lineTo(x(run[n]), scales.y.getPixelForValue(ds._band.lower[run[n]]));
+          }
+          ctx.closePath();
+          ctx.fill();
+        });
+        ctx.restore();
+      });
+    },
+  };
+}
+
+/** The tooltip's range line for a banded curve at `idx`, or '' without one.
+ *
+ *  Rendered in the chart's current unit, from the raw dollars rather than the
+ *  plotted values, the way the Return/Value lines above it are -- a percent
+ *  bound is relative to the curve's own starting capital, as its Return is,
+ *  and signed by `boardSignedPercent` like the "lo to hi" label beside it. */
+function formatSampleBandTooltipLine(ds, idx, view) {
+  const band = ds && ds._band;
+  if (!band || !band.rawLower || !band.rawUpper) return '';
+  const lo = finiteNumber(band.rawLower[idx]);
+  const hi = finiteNumber(band.rawUpper[idx]);
+  if (!Number.isFinite(lo) || !Number.isFinite(hi)) return '';
+  const base = ds._initial || 1;
+  const fmt = view === 'absolute'
+    ? (v) => `$${formatLeaderboardNumber(v)}`
+    : (v) => boardSignedPercent((v - base) / base);
+  return `Range of ${band.runs} runs: ${fmt(lo)} to ${fmt(hi)}`;
+}
 
 /** The endpoint of each visible curve, and the two strings that label it.
  *
@@ -2177,6 +2181,10 @@ async function renderEquityCurvesChart() {
     if (!raw || !raw.length) return;
     const initial = initials[label] || raw[0] || 10000;
     const style = getSeriesStyle(label, entry);
+    // The run envelope rides on its median's dataset rather than being one
+    // (#602, see createSampleBandPlugin), through the same transform as the
+    // curve so the percent view plots it against the same starting capital.
+    const band = buildSampleBandSeries(entry, axisLabels);
 
     datasets.push({
       label,
@@ -2185,6 +2193,14 @@ async function renderEquityCurvesChart() {
       _initial: initial,
       _entry: entry,
       _style: style,
+      _band: band ? {
+        lower: transformLeaderboardChartData(band.lower, currentChartView, initial),
+        upper: transformLeaderboardChartData(band.upper, currentChartView, initial),
+        rawLower: band.lower,
+        rawUpper: band.upper,
+        onGrid: band.onGrid,
+        runs: band.runs,
+      } : null,
       borderColor: style.color,
       backgroundColor: 'transparent',
       borderDash: style.dash || [],
@@ -2192,7 +2208,10 @@ async function renderEquityCurvesChart() {
       pointRadius: 0,
       // Marker comes from hoverMarkerPlugin, which honours the proximity gate.
       pointHoverRadius: 0,
-      tension: 0.1,
+      // A banded median is drawn straight, like the band's edges: the band
+      // plugin joins its bounds with lineTo, so a bezier median would bow
+      // outside its own envelope wherever it is itself the min or max (#602).
+      tension: band ? 0 : 0.1,
       fill: false,
       // Series use different hour grids (e.g. SPY :30 vs LLM :00). On a shared
       // axis that leaves many nulls; span across them so each curve still draws.
@@ -2215,6 +2234,7 @@ async function renderEquityCurvesChart() {
     type: 'line',
     data: { labels: axisLabels, datasets },
     plugins: [
+      createSampleBandPlugin(),
       selectedGlowPlugin,
       hoverMarkerPlugin,
       createAxisArrowPlugin(),
@@ -2291,6 +2311,8 @@ async function renderEquityCurvesChart() {
                 `Value: ${equity == null ? '—' : `$${formatLeaderboardNumber(equity)}`}`,
                 `Rank: ${entry.rank ?? '—'} / ${leaderboardPayload?.total_entries || '—'}`,
               ];
+              const bandLine = formatSampleBandTooltipLine(ds, idx, currentChartView);
+              if (bandLine) lines.splice(3, 0, bandLine);
 
               const benchDs = context.chart.data.datasets.find((d) => d.label === selectedBenchmarkLabel);
               const benchEquity = finiteNumber(benchDs && benchDs._raw ? benchDs._raw[idx] : null);

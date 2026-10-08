@@ -4,16 +4,20 @@ from __future__ import annotations
 
 import importlib.util
 import os
+import time
+from time import perf_counter
 from datetime import date, datetime, timedelta
 from typing import Protocol
 
 import pandas as pd
 import pytz
 
+from . import bar_cache
 from .alpaca_bars import AlpacaDataLoader
 from .frequency import normalize_bar_timeframe
 from .profiles import ALPACA, IFIND_ASHARE, VNPY_SIMULATION
-from .sessions import timezone_for_market
+from .sessions import DEFAULT_MARKET, timezone_for_market
+from .us_market_calendar import trading_weeks_back
 
 
 SUPPORTED_DATA_SOURCES = (ALPACA, VNPY_SIMULATION, IFIND_ASHARE)
@@ -70,6 +74,39 @@ def market_today(market: object = None) -> date:
     return datetime.now(pytz.timezone(timezone_for_market(market))).date()
 
 
+def default_backtest_window(now: float | None = None) -> tuple[str, str]:
+    """The Run Backtest modal's default period: the latest settled US trading week.
+
+    One owner for the modal (``/config/defaults``) and the bar cache warm, so
+    the warm holds the window a first visitor actually runs.
+
+    A week becomes the default once the bar cache would store it
+    (``bar_cache.window_is_settled``: its provider end at least a day old),
+    not when its last session closes. A Friday week therefore rolls in on
+    Saturday at 20:00 ET (19:00 in winter), not at Friday's close or at
+    midnight. Rolling earlier served a window every write refused: each
+    Saturday-daytime run paid a cold fetch, and a boot warm then reported
+    "stored none" for a window that was merely young. The cost is that the
+    newest week reaches the modal about a day after its close.
+
+    ``now`` is an epoch timestamp, not a date, because the settle rule is a
+    point in time: a host clock in Shanghai on Saturday morning cannot make
+    New York's still-trading Friday look finished.
+    """
+    clock = time.time() if now is None else float(now)
+    zone = pytz.timezone(timezone_for_market(DEFAULT_MARKET))
+    today = datetime.fromtimestamp(clock, zone).date()
+    # Plain `exclusive_end`, not `settled_exclusive_end`: the latter clamps at
+    # today's date on the real clock, which `now` exists to override. For any
+    # week that passes this test the two are equal anyway.
+    first, last = next(
+        (first, last)
+        for first, last in trading_weeks_back(today)
+        if bar_cache.window_is_settled(exclusive_end(last.isoformat()), now=clock)
+    )
+    return first.isoformat(), last.isoformat()
+
+
 def settled_exclusive_end(
     end_date: str,
     *,
@@ -119,6 +156,59 @@ class MarketDataProvider(Protocol):
         end: str,
     ) -> dict[str, pd.DataFrame]:
         """Return symbol-keyed OHLCV frames for the half-open window ``[start, end)``."""
+
+
+class TraceAwareMarketDataProvider:
+    """Observability wrapper that preserves the provider contract."""
+
+    def __init__(self, provider: MarketDataProvider, *, run_id: str, source: str):
+        self._provider = provider
+        self._run_id = run_id
+        self._source = source
+
+    def __getattr__(self, name: str):
+        return getattr(self._provider, name)
+
+    def fetch_bars(self, symbols, start, end, *, depth_start=None):
+        from dashboard.backend.domain.traces import service as trace_service
+
+        started = perf_counter()
+        symbols = list(symbols)
+        query = {
+            "symbols": [str(symbol) for symbol in symbols],
+            "start": str(start), "end": str(end),
+        }
+        kwargs = {} if depth_start is None else {"depth_start": depth_start}
+        query.update({key: str(value) for key, value in kwargs.items()})
+        key = f"{self._source}:{start}:{end}:{','.join(query['symbols'])}"
+        def record(**event):
+            try:
+                trace_service.record_data_retrieval(**event)
+            except Exception:
+                # Trace persistence is observational; provider results and
+                # provider errors must remain the source of truth.
+                return
+        try:
+            frames = self._provider.fetch_bars(symbols, start, end, **kwargs)
+            record(
+                run_id=self._run_id, source=self._source, query_summary=query,
+                result_summary={
+                    "symbol_count": len(frames or {}),
+                    "bar_counts": {str(symbol): int(len(frame)) for symbol, frame in (frames or {}).items()},
+                }, duration_ms=(perf_counter() - started) * 1000, idempotency_key=key,
+            )
+            return frames
+        except Exception:
+            record(
+                run_id=self._run_id, source=self._source, query_summary=query,
+                result_summary={}, duration_ms=(perf_counter() - started) * 1000,
+                idempotency_key=key, outcome="failed",
+            )
+            raise
+
+
+def with_trace(provider: MarketDataProvider, *, run_id: str, source: str) -> MarketDataProvider:
+    return TraceAwareMarketDataProvider(provider, run_id=run_id, source=source)
 
 
 class UnsupportedMarketDataSource(ValueError):

@@ -278,6 +278,23 @@ th:first-child,td:first-child{padding-left:0}
 .users-toolbar form{display:flex;gap:8px;flex:1;min-width:260px;max-width:460px}
 .users-table td .who{display:grid;gap:2px}
 .users-table td .who small{font-size:11px}
+
+/* Agent execution traces */
+.trace-table{min-width:760px}
+.trace-table th,.trace-table td{vertical-align:top}
+.trace-id-cell{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.trace-link{color:var(--accent);font-weight:600}
+.trace-metrics{display:grid;grid-template-columns:repeat(4,1fr);margin:26px 0 8px;border-top:1px solid var(--line);border-bottom:1px solid var(--line)}
+.trace-metrics .detail-metric{min-width:0}
+.trace-section-title{margin:30px 0 12px;font-size:18px}
+.trace-timeline{display:grid;gap:12px;margin:0;padding:0;list-style:none}
+.trace-event{padding:16px 18px;border:1px solid var(--line);border-radius:4px;background:var(--surface)}
+.trace-event-head{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.trace-event-head time{margin-left:auto;color:var(--muted);font-size:11px}
+.trace-sequence{color:var(--accent);font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px}
+.trace-event-meta{margin:8px 0 0;color:var(--muted);font-size:11px}
+.trace-event-payload{overflow:auto;margin:12px 0 0;padding:10px;background:var(--bg);color:var(--text);font:11px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace;white-space:pre-wrap;overflow-wrap:anywhere}
+@media(max-width:680px){.trace-metrics{grid-template-columns:repeat(2,1fr)}.trace-metrics .detail-metric{padding:14px 10px}.trace-event-head time{width:100%;margin-left:0}}
 .users-table td .row-action{min-height:32px;padding:4px 10px;font-size:12px}
 .pager{display:flex;align-items:center;gap:12px;margin-top:14px;color:var(--muted);font-size:12px}
 .pager span{flex:1}
