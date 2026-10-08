@@ -162,15 +162,23 @@ leaderboard refresh, a `python -c` probe).
   sorted `(symbol, side, size)` triples of intent and actions differ (a
   dropped order, an added one, a resized one, a SELL widened to the whole
   position). `False` when intent is `null` or unparsed — a rule-based bar has
-  no gate to rewrite. Carried per bar as `gate_rewrote`; counted per run as
-  `gate_rewrites` in the recorder summary.
+  no gate to rewrite — and on every `llm_fallback` bar, whose actions are
+  rule-based substitutes rather than a rewrite. Carried per bar as
+  `gate_rewrote`; counted per run as `gate_rewrites` (LLM-driven bars only;
+  fallbacks are counted by `driver`) in the recorder summary.
 - `normalize_intent(raw_output)` → the raw model orders through a fixed
   allow-list of fields (`symbol`, `action`/`side`, `position_size`/`qty`,
   `size_pct`, `confidence`, `reasoning` ≤500 chars, `stop_loss_price`,
   `take_profit_price`), read from `actions`, `orders` and `risk_actions`. The
   allow-list is what keeps arbitrary model keys away from the sensitive-key
   check. Output that is not a parseable order object is recorded as
-  `{"unparsed": true, "excerpt": <≤1000 chars>}`.
+  `{"unparsed": true, "excerpt": <≤1000 chars>}`. Orders are recorded so
+  `orders_for_replay(intent)` hands the gate exactly what the model sent: an
+  absent field stays absent and a `null` one stays `null` (the gate reads each
+  with a default, and `confidence: null` raises where an absent one trades); a
+  non-finite number or an object/array value is recorded readably with its
+  exact JSON text under `raw[field]`; a non-object entry as `{"raw_entry": …}`.
+  (Amended 2026-10-08 after the whole-branch review.)
 - `build_decision_payload(...)` → superset of the v2 `decision_recorded`
   payload: `actions` (post-gate), `reasoning_summaries`, `accepted`, plus
   `tape_version`, `bar_index`, `decision_at`, `driver`, `intent`

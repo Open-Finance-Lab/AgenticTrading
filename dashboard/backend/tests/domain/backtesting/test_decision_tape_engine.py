@@ -9,6 +9,7 @@ import json
 from datetime import timedelta
 from types import SimpleNamespace
 
+import pandas as pd
 import pytest
 
 from dashboard.backend.domain.backtesting import decision_tape as decision_tape_mod
@@ -97,6 +98,31 @@ def _first_divergent_bar(curve_a, curve_b):
     return None if len(curve_a) == len(curve_b) else min(len(curve_a), len(curve_b))
 
 
+def _decision_bar_at(tape, timestamp):
+    """The decision bar whose valuation pass marked an equity point.
+
+    The curve is marked per SOURCE bar (78 points for seven hourly bars in
+    intraday mode), so a curve index is not a bar index. After executing bar
+    ``i`` the engine marks every source bar up to and including
+    ``fill_plan.bar`` (``engine.py``'s ``valuation_cursor`` loop), so a point
+    belongs to the first bar whose fill bar is at or after it. Points past the
+    last fill bar (the window's closing marks) belong to no bar: ``None``."""
+    at = pd.Timestamp(timestamp)
+    for bar in tape:
+        if pd.Timestamp(bar["execution"]["fill_plan"]["bar"]) >= at:
+            return bar["bar_index"]
+    return None
+
+
+def _late_script(index, pm):
+    """First fill on bar 2, so curve index and bar index cannot agree at 0."""
+    return {
+        2: [{"symbol": "AAPL", "action": "buy", "shares": 3, "reason": "open AAPL"}],
+        4: [{"symbol": "MSFT", "action": "buy", "shares": 2, "reason": "open MSFT"},
+            {"symbol": "AAPL", "action": "sell", "shares": 1, "reason": "trim AAPL"}],
+    }.get(index, [])
+
+
 def _script(index, pm):
     return {
         0: [{"symbol": "AAPL", "action": "buy", "shares": 3, "reason": "open AAPL"}],
@@ -161,15 +187,18 @@ def test_recorded_actions_reproduce_the_run_on_the_same_engine(monkeypatch, stor
     assert [p["equity"] for p in second_curve] == [p["equity"] for p in first_curve]
 
 
-def test_perturbed_engine_diverges_at_the_first_filled_bar(monkeypatch, store):
+@pytest.mark.parametrize("script", [_script, _late_script], ids=["fill_on_bar_0", "fill_on_bar_2"])
+def test_perturbed_engine_diverges_at_the_first_filled_bar(monkeypatch, store, script):
     """Review Focus 6: replaying recorded ACTIONS into an engine whose fills
     differ must diverge where the fill is, visibly, and never be absorbed by
     a later recorded size. The perturbation is one tick of slippage on the
     test's own MarketProfile copy (the mechanism A-share uses); profiles.py
     is untouched. This is also the shape diff_backtest_runs.py reports."""
-    _bt, first, first_curve = _run(monkeypatch, run_id="agent_tape_clean", decide=_script)
+    _bt, first, first_curve = _run(monkeypatch, run_id="agent_tape_clean", decide=script)
     tape = trace_service.load_decision_tape("agent_tape_clean")
     first_fill_bar = next(i for i, bar in enumerate(tape) if bar["execution"]["fills"])
+    if script is _late_script:
+        assert first_fill_bar == 2
 
     def replay(index, pm):
         return tape[index]["decision"]["actions"]
@@ -187,7 +216,11 @@ def test_perturbed_engine_diverges_at_the_first_filled_bar(monkeypatch, store):
 
     _bt, second, second_curve = _run(monkeypatch, run_id="agent_tape_slipped", decide=replay, configure=slip)
 
-    assert _first_divergent_bar(first_curve, second_curve) == first_fill_bar
+    divergent = _first_divergent_bar(first_curve, second_curve)
+    assert divergent is not None
+    # Localized: the first equity point that moves belongs to the first bar
+    # that filled, mapped through the fill plan -- not compared as raw indexes.
+    assert _decision_bar_at(tape, first_curve[divergent]["timestamp"]) == first_fill_bar
     assert any(float(t.get("slippage_amount") or 0) > 0 for t in second.pm.trades)
     # The recorded SELL sizes are the clean engine's; the slipped engine held
     # the same shares (slippage moves price, not quantity), so the trade list
@@ -277,7 +310,7 @@ def test_intent_replay_through_the_gate_reproduces_an_llm_run(monkeypatch, store
     assert all(bar["decision"]["driver"] == "llm" for bar in tape)
     assert all("orders" in bar["decision"]["intent"] for bar in tape), "every bar must carry parsed intent"
 
-    replies = [json.dumps({"actions": bar["decision"]["intent"]["orders"]}) for bar in tape]
+    replies = [json.dumps({"actions": decision_tape_mod.orders_for_replay(bar["decision"]["intent"])}) for bar in tape]
     _bt, second, second_curve = _run(monkeypatch, run_id="agent_intent_replay", llm_client=_PipelineStub(replies), pipeline=pipeline)
     replayed = trace_service.load_decision_tape("agent_intent_replay")
 
@@ -286,6 +319,40 @@ def test_intent_replay_through_the_gate_reproduces_an_llm_run(monkeypatch, store
     assert [p["equity"] for p in second_curve] == [p["equity"] for p in first_curve]
     assert [b["decision"]["intent"] for b in replayed] == [b["decision"]["intent"] for b in tape]
     assert [b["decision"]["gate_rewrote"] for b in replayed] == [b["decision"]["gate_rewrote"] for b in tape]
+
+
+def test_intent_replay_keeps_null_and_non_finite_fields(monkeypatch, store):
+    """Finding 3: ``confidence: null`` makes the gate raise (the bar falls back
+    to rule-based) while an absent confidence reads as 0.5 and trades; an
+    ``Infinity`` position_size is skipped while ``null`` becomes a
+    confidence-sized buy. The tape must hand the replay the same values."""
+    script = [
+        json.dumps({"actions": [{"symbol": "AAPL", "action": "buy", "position_size": 3, "confidence": None, "reasoning": "null conf"}]}),
+        json.dumps({"actions": [{"symbol": "MSFT", "action": "buy", "position_size": float("inf"), "confidence": 0.9, "reasoning": "inf size"}]}),
+        json.dumps({"actions": [{"symbol": "AAPL", "action": "buy", "position_size": 2, "confidence": 0.9, "reasoning": None}]}),
+        json.dumps({"actions": [{"symbol": "AAPL", "action": "buy", "position_size": 1, "confidence": 0.9, "reasoning": "ok"}]}),
+    ]
+    pipeline = [{"label": "Decision", "prompt": "Decide."}]
+    _bt, first, first_curve = _run(monkeypatch, run_id="agent_intent_edge", llm_client=_PipelineStub(script), pipeline=pipeline)
+    tape = trace_service.load_decision_tape("agent_intent_edge")
+
+    assert tape[0]["decision"]["driver"] == "llm_fallback"
+    assert tape[0]["decision"]["intent"]["orders"][0]["confidence"] is None
+    assert tape[0]["decision"]["gate_rewrote"] is False  # a fallback is not a rewrite
+    assert tape[1]["decision"]["intent"]["orders"][0]["position_size"] is None
+    assert tape[1]["decision"]["intent"]["orders"][0]["raw"] == {"position_size": "Infinity"}
+    assert tape[2]["decision"]["driver"] == "llm_fallback"  # reasoning[:60] on None
+    assert tape[3]["decision"]["driver"] == "llm"
+
+    replies = [json.dumps({"actions": decision_tape_mod.orders_for_replay(bar["decision"]["intent"])}) for bar in tape]
+    _bt, second, second_curve = _run(monkeypatch, run_id="agent_intent_edge_replay", llm_client=_PipelineStub(replies), pipeline=pipeline)
+    replayed = trace_service.load_decision_tape("agent_intent_edge_replay")
+
+    assert first.pm.trades, "the script must trade, or the replay proves nothing"
+    assert [b["decision"]["driver"] for b in replayed] == [b["decision"]["driver"] for b in tape]
+    assert [b["decision"]["actions"] for b in replayed] == [b["decision"]["actions"] for b in tape]
+    assert _comparable(second.pm.trades) == _comparable(first.pm.trades)
+    assert [p["equity"] for p in second_curve] == [p["equity"] for p in first_curve]
 
 
 def test_portfolio_manager_reassigns_pipeline_outputs_per_call(monkeypatch, store):

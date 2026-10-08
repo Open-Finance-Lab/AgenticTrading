@@ -3132,7 +3132,7 @@ def test_write_back_baseline_is_the_stored_pipeline_not_its_substitute(monkeypat
     assert bt._writeback_start_pipeline(stored, None, None) == stored
 
 
-def _run_parent_with_child(monkeypatch, child, *, run_id):
+def _run_parent_with_child(monkeypatch, child, *, run_id, label_stub=None):
     """Drive the real run_backtest_background against ``child`` and return
     the (run_id, label) pairs the parent handed fail_trace_if_running."""
     session_id = str(uuid.uuid4())
@@ -3142,7 +3142,7 @@ def _run_parent_with_child(monkeypatch, child, *, run_id):
     monkeypatch.setattr(bt, "run_backtest_background", _REAL_RUN_BACKTEST_BACKGROUND)
     monkeypatch.setattr(
         bt.trace_service, "fail_trace_if_running",
-        lambda rid, code: labelled.append((rid, code)) or True,
+        label_stub or (lambda rid, code: labelled.append((rid, code)) or True),
     )
     bt.run_backtest_background(
         start_date="2026-01-01",
@@ -3163,11 +3163,86 @@ def test_parent_labels_a_timed_out_child_run_timed_out(monkeypatch):
     labelled = _run_parent_with_child(
         monkeypatch, FakeChild(stdout="run header line\n", timeout_waits=1), run_id=run_id,
     )
-    assert labelled[0] == (run_id, "run_timed_out")
-    assert (run_id, "run_cancelled") not in labelled
-    # The finally still runs; fail_trace_if_running is a no-op by then on the
-    # real store. Here it is a stub, so the finally's call is visible:
-    assert labelled[-1] == (run_id, "run_killed") and len(labelled) == 2
+    # One write, carrying the arm's label: the arms only record it, and the
+    # finally writes it once instead of falling back to run_killed.
+    assert labelled == [(run_id, "run_timed_out")]
+
+
+def test_parent_labels_an_unclaimed_exit_run_killed(monkeypatch):
+    """No arm claimed the exit (a parent exception): the label is a kill."""
+    run_id = "agent_trace_killed"
+    monkeypatch.setattr(
+        bt, "_maybe_writeback_adapted_pipeline",
+        lambda *_a, **_k: (_ for _ in ()).throw(RuntimeError("boom")),
+    )
+    labelled = _run_parent_with_child(
+        monkeypatch, FakeChild(returncode=0, stdout="ok\n"), run_id=run_id,
+    )
+    # The success branch claimed trace_close_failed before the exception; the
+    # recorded label survives the generic arm.
+    assert labelled == [(run_id, "trace_close_failed")]
+
+
+def _record_slot_finalizes(monkeypatch, events):
+    real = bt._finalize_slot
+
+    def _spy(*args, **kwargs):
+        events.append("slot")
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(bt, "_finalize_slot", _spy)
+
+
+@pytest.mark.parametrize(
+    "child",
+    [
+        lambda: FakeChild(stdout="run header line\n", timeout_waits=1),
+        lambda: FakeChild(returncode=1, stderr="Traceback: boom\n"),
+        lambda: FakeChild(returncode=0, stdout="ok\n"),
+    ],
+    ids=["timeout", "failed", "completed"],
+)
+def test_a_hung_trace_label_does_not_delay_slot_finalization(monkeypatch, child):
+    """The trace store has no statement timeout. A label write that never
+    returns must not hold the slot: the slot finalizes first, and the worker
+    abandons the write at the deadline instead of waiting on it."""
+    run_id = "agent_trace_hung_label"
+    events = []
+    release = threading.Event()
+    _record_slot_finalizes(monkeypatch, events)
+    monkeypatch.setattr(bt, "TRACE_LABEL_DEADLINE_SECONDS", 0.2)
+
+    def _hang(rid, code):
+        events.append("label")
+        release.wait(30)
+        return True
+
+    started = time.monotonic()
+    try:
+        _run_parent_with_child(monkeypatch, child(), run_id=run_id, label_stub=_hang)
+        elapsed = time.monotonic() - started
+    finally:
+        release.set()
+    assert events.index("slot") < events.index("label")
+    assert elapsed < 10
+    assert run_id not in bt._active_slots
+
+
+def test_a_raising_trace_label_does_not_lose_the_outcome(monkeypatch):
+    run_id = "agent_trace_raising_label"
+    events = []
+    _record_slot_finalizes(monkeypatch, events)
+
+    def _raise(rid, code):
+        events.append("label")
+        raise RuntimeError("trace store down")
+
+    _run_parent_with_child(
+        monkeypatch, FakeChild(returncode=1, stderr="Traceback: boom\n"),
+        run_id=run_id, label_stub=_raise,
+    )
+    assert events == ["slot", "label"]
+    assert run_id not in bt._active_slots
 
 
 def test_parent_labels_a_failed_child_run_failed(monkeypatch):

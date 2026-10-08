@@ -84,6 +84,77 @@ def _pick(record: Mapping[str, Any], fields: Iterable[str], *, text_fields=()) -
     return picked
 
 
+def _raw_json(value: Any) -> str:
+    """The exact JSON text of a model-supplied value. ``json.loads`` produced
+    it, so ``json.dumps`` with ``allow_nan`` round-trips it -- NaN and
+    Infinity included, which the store's strict JSON cannot carry as numbers."""
+    try:
+        return json.dumps(value, allow_nan=True, ensure_ascii=False)
+    except (TypeError, ValueError):
+        return json.dumps(str(value))
+
+
+def _intent_order(entry: Any) -> Dict[str, Any]:
+    """One raw model order, recorded so ``orders_for_replay`` hands the gate
+    exactly what the model handed it.
+
+    Not ``_pick``: the gate in ``make_trading_decision_with_llm`` reads each
+    field with a default, so dropping a key changes the outcome -- a present
+    ``confidence: null`` raises in the gate's format string (the bar falls back
+    to rule-based) while an absent one reads as 0.5 and trades. So:
+
+    - an absent field stays absent, and a ``null`` one stays ``null``;
+    - a string ``reasoning`` is cut to ``MAX_REASONING_CHARS`` (the gate only
+      interpolates it into the action's ``reason`` text);
+    - a value the store cannot carry as itself -- a non-finite number, an
+      object or array -- is recorded readably (``null`` / ``str()``) and its
+      exact JSON text is kept under ``raw[field]``;
+    - a non-object entry (the gate raises on it) is kept whole as
+      ``{"raw_entry": <json>}``.
+    """
+    if not isinstance(entry, Mapping):
+        return {"raw_entry": _raw_json(entry)}
+    order: Dict[str, Any] = {}
+    raw: Dict[str, str] = {}
+    for field in _INTENT_FIELDS:
+        if field not in entry:
+            continue
+        value = entry[field]
+        if value is None or isinstance(value, (bool, int)):
+            order[field] = value
+        elif isinstance(value, str):
+            order[field] = value[:MAX_REASONING_CHARS] if field == "reasoning" else value
+        elif isinstance(value, float) and math.isfinite(value):
+            order[field] = value
+        else:
+            order[field] = None if isinstance(value, float) else str(value)[:MAX_REASONING_CHARS]
+            raw[field] = _raw_json(value)
+    if raw:
+        order["raw"] = raw
+    return order
+
+
+def orders_for_replay(intent: Optional[Mapping[str, Any]]) -> List[Any]:
+    """The model orders of one tape bar, as the gate first received them:
+    ``raw`` fields and ``raw_entry`` entries restored from their JSON text.
+    Raises ``ValueError`` on an order ``bound_payload`` had to cut a raw value
+    from (``unreplayable``) -- replaying it would silently differ."""
+    if not isinstance(intent, Mapping) or "orders" not in intent:
+        return []
+    replay: List[Any] = []
+    for order in intent.get("orders") or ():
+        if isinstance(order, Mapping) and "raw_entry" in order:
+            replay.append(json.loads(order["raw_entry"]))
+            continue
+        if order.get("unreplayable"):
+            raise ValueError(f"tape order cannot be replayed exactly: {order['unreplayable']}")
+        restored = {key: value for key, value in order.items() if key != "raw"}
+        for field, text in (order.get("raw") or {}).items():
+            restored[field] = json.loads(text)
+        replay.append(restored)
+    return replay
+
+
 def driver_for(*, use_llm: bool, llm_decisions_before: int, llm_decisions_after: int) -> str:
     """Which path drove the bar. ``llm_decisions`` moves only at the LLM
     path's success exit, so an unchanged count on an LLM run is a fallback."""
@@ -118,13 +189,7 @@ def intent_from_outputs(
     decision = pipeline_output_to_decision(last.get("output"))
     if not decision:
         return {"unparsed": True, "completed_steps": completed}
-    return {
-        "orders": [
-            _pick(action, _INTENT_FIELDS, text_fields=("reasoning",))
-            for action in decision.get("actions") or []
-            if isinstance(action, Mapping)
-        ]
-    }
+    return {"orders": [_intent_order(action) for action in decision.get("actions") or []]}
 
 
 def build_state(*, cash: Any, equity: Any, positions: Mapping[str, Any]) -> Dict[str, Any]:
@@ -201,6 +266,11 @@ def gate_rewrote(intent: Optional[Mapping[str, Any]], actions: Iterable[Mapping[
     whole position, is a rewrite. ``False`` with no intent or an unparsed one:
     a rule-based or fallback bar had no model order to rewrite. An intent
     order without a size compares on symbol and side only.
+
+    ``build_decision_payload`` applies this only on ``driver == "llm"`` bars:
+    on an ``llm_fallback`` bar the gate raised and the actions are rule-based
+    substitutes, not a rewrite of the orders, so ``gate_rewrites`` counts the
+    gate's rewrites of bars the model drove. Fallbacks are counted by driver.
     """
     if not isinstance(intent, Mapping) or "orders" not in intent:
         return False
@@ -239,7 +309,7 @@ def build_decision_payload(
         "intent": intent,
         "state": state,
         "actions": picked,
-        "gate_rewrote": gate_rewrote(intent, picked),
+        "gate_rewrote": driver == DRIVER_LLM and gate_rewrote(intent, picked),
         "reasoning_summaries": [action.get("reason", "") for action in picked],
         "accepted": True,
     }
@@ -282,7 +352,12 @@ def _payload_size(payload: Mapping[str, Any]) -> int:
 def bound_payload(payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """Fit ``payload`` under ``MAX_PAYLOAD_BYTES`` by dropping reasoning text
     first, then intent reasoning; orders are never dropped. ``None`` when the
-    orders alone do not fit."""
+    orders alone do not fit.
+
+    Dropping a string ``reasoning`` keeps the replay exact (the gate reads an
+    absent one as ``""`` and uses it only in ``reason`` text). A ``null`` one is
+    kept, since the gate raises on it. A non-string one cut from ``raw`` marks
+    the order ``unreplayable`` so ``orders_for_replay`` refuses it."""
     if _payload_size(payload) <= MAX_PAYLOAD_BYTES:
         return payload
     trimmed = copy.deepcopy(payload)
@@ -295,7 +370,15 @@ def bound_payload(payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     intent = trimmed.get("intent")
     if isinstance(intent, dict):
         for order in intent.get("orders") or []:
-            order.pop("reasoning", None)
+            raw = order.get("raw") or {}
+            if "reasoning" in raw:
+                raw.pop("reasoning")
+                if not raw:
+                    order.pop("raw")
+                order.pop("reasoning", None)
+                order["unreplayable"] = ["reasoning"]
+            elif isinstance(order.get("reasoning"), str):
+                order.pop("reasoning")
     if _payload_size(trimmed) <= MAX_PAYLOAD_BYTES:
         return trimmed
     return None

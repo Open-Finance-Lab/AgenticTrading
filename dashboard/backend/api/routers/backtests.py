@@ -39,6 +39,8 @@ from threading import Thread as _StreamReaderThread
 # when a test has swapped the launch seam out.
 from threading import Thread as _CancelWatchdogThread
 from threading import Thread as _SpendLookupThread
+# ...and the trace label the worker writes as its very last act.
+from threading import Thread as _TraceLabelThread
 from typing import Any, Dict, List, Literal, NamedTuple, Optional, Tuple
 
 import pytz
@@ -1242,11 +1244,41 @@ def _killpg(pgid: Optional[int], sig: int) -> bool:
     return True
 
 
+# How long the worker waits for the trace label before giving up on it. The
+# tape is observational: a label that cannot be written within this bound is
+# abandoned, never waited on.
+TRACE_LABEL_DEADLINE_SECONDS = 10
+
+
 def _label_trace(run_id: Optional[str], error_code: str) -> None:
-    """Label a trace the child left ``running``. No-op on a closed trace, so
-    every arm may call it; the first arm to reach a running trace names it."""
-    if run_id:
-        trace_service.fail_trace_if_running(run_id, error_code)
+    """Label a trace the child left ``running``. No-op on a closed trace.
+
+    Called exactly once, as the LAST statement of the worker's ``finally`` --
+    after ``finalize_run`` has released reservations and ``_finalize_slot`` has
+    freed the slot. ``fail_trace_if_running`` makes up to four pooled checkouts
+    on the trace store with no statement timeout, so it runs on a daemon thread
+    joined with ``TRACE_LABEL_DEADLINE_SECONDS`` (the ``sum_run_llm_spend``
+    pattern): a resuming Neon instance or a lock wait costs at most the
+    deadline and one abandoned thread, never a stranded slot or reservation.
+    """
+    if not run_id:
+        return
+
+    def _write() -> None:
+        try:
+            trace_service.fail_trace_if_running(run_id, error_code)
+        except Exception as exc:  # noqa: BLE001 - observational write
+            print(f"⚠️ trace label {error_code} failed for {run_id}: {exc}", flush=True)
+
+    writer = _TraceLabelThread(target=_write, daemon=True)
+    writer.start()
+    writer.join(timeout=TRACE_LABEL_DEADLINE_SECONDS)
+    if writer.is_alive():
+        print(
+            f"⚠️ trace label {error_code} exceeded {TRACE_LABEL_DEADLINE_SECONDS}s "
+            f"for {run_id}; abandoned",
+            flush=True,
+        )
 
 
 def _signal_backtest_process(process: Any) -> bool:
@@ -1731,6 +1763,11 @@ def run_backtest_background(
     # once the slot is finalized, but the finally still needs the id to close
     # a trace the child could not (killed by the timeout or SIGKILL).
     trace_run_id: Optional[str] = None
+    # Which label a still-``running`` trace gets. Each arm only RECORDS it; the
+    # write happens once, last in ``finally``, so a slow trace store can never
+    # delay slot or reservation finalization. Unset means no arm claimed the
+    # exit (SIGKILL with no grace, a parent exception): the label is a kill.
+    trace_label: Optional[str] = None
     execution_run_id = None
     # Snapshot the agent's pipeline as this run sees it, so the adapted-pipeline
     # write-back at the end can tell "nobody touched it" from "the user edited
@@ -1957,12 +1994,12 @@ def run_backtest_background(
                 f"Backtest failed with return code {result.returncode}. {summary}"
             )
             print(f"❌ Backtest failed (returncode={result.returncode})", flush=True)
-            _label_trace(trace_run_id, "run_failed")
+            trace_label = "run_failed"
         else:
             runs = db.get_runs_by_mode("backtest")
             slot_runs_count = len(runs)
             print(f"✅ Backtest completed. Found {len(runs)} runs in database.", flush=True)
-            _label_trace(trace_run_id, "trace_close_failed")
+            trace_label = "trace_close_failed"
             if len(runs) > 0:
                 print(f"   Latest run IDs: {[r['run_id'] for r in runs[:3]]}", flush=True)
             _maybe_writeback_adapted_pipeline(
@@ -1974,7 +2011,7 @@ def run_backtest_background(
             )
             resolved_live_run_id = None  # finally must not double-finalize
     except _BacktestCancelled:
-        _label_trace(trace_run_id, "run_cancelled")
+        trace_label = "run_cancelled"
         print(f"🛑 Backtest cancelled: {resolved_live_run_id}", flush=True)
         # The cancel route finalized this slot under the ledger lock as it
         # accepted the request — that is what frees the owner's quota
@@ -1984,7 +2021,7 @@ def run_backtest_background(
         # poller reporting "no backtest has been run yet".
         resolved_live_run_id = None
     except subprocess.TimeoutExpired:
-        _label_trace(trace_run_id, "run_timed_out")
+        trace_label = "run_timed_out"
         # Ahead of the generic arm, which would send this through
         # `_sanitize_backtest_error` -- `_redact_credentials(...)[-max_chars:]`,
         # a TAIL truncation. That is right for a stack trace and wrong for a
@@ -2098,9 +2135,6 @@ def run_backtest_background(
             _finalize_slot(resolved_live_run_id, error=summary, runs_count=0)
             resolved_live_run_id = None
     finally:
-        # Reached none of the arms above (SIGKILL with no grace, a parent
-        # exception): the only label left is a kill. No-op otherwise.
-        _label_trace(trace_run_id, "run_killed")
         if execution_handoff_payload and execution_run_id:
             try:
                 # The child normally finalizes itself. Repeating this from the
@@ -2167,6 +2201,9 @@ def run_backtest_background(
                 # This is best-effort cleanup after the worker has finished;
                 # failing here must not replace the backtest's own outcome.
                 pass
+        # Last, after every slot and reservation finalization above: the tape
+        # is observational and must not delay either. Bounded by a deadline.
+        _label_trace(trace_run_id, trace_label or "run_killed")
         print("✋ Backtest background thread finished", flush=True)
 
 

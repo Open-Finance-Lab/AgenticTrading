@@ -68,6 +68,81 @@ def test_intent_allow_list_drops_unknown_and_sensitive_keys():
     assert len(order["reasoning"]) == tape.MAX_REASONING_CHARS
 
 
+def _one_order(entry):
+    raw = [{"step": 1, "output": {"actions": [entry]}}]
+    return tape.intent_from_outputs(raw, outputs_before=[], decision_step_count=1)
+
+
+def test_intent_keeps_present_null_fields_and_omits_absent_ones():
+    """The gate reads each field with a default: a null confidence raises in
+    its format string, an absent one reads as 0.5. Dropping null is not exact."""
+    intent = _one_order({"symbol": "AAPL", "action": "buy", "confidence": None, "reasoning": None})
+    assert intent["orders"][0] == {"symbol": "AAPL", "action": "buy", "confidence": None, "reasoning": None}
+    assert tape.orders_for_replay(intent) == [intent["orders"][0]]
+
+
+def test_intent_records_non_finite_and_container_values_exactly():
+    intent = _one_order({
+        "symbol": "AAPL", "action": ["buy"], "position_size": float("inf"),
+        "confidence": float("nan"), "reasoning": {"why": "x"},
+    })
+    order = intent["orders"][0]
+    # Readable in the store (strict JSON), exact under raw.
+    assert order["position_size"] is None and order["confidence"] is None
+    assert order["action"] == "['buy']" and order["reasoning"] == "{'why': 'x'}"
+    assert order["raw"] == {
+        "action": '["buy"]', "position_size": "Infinity",
+        "confidence": "NaN", "reasoning": '{"why": "x"}',
+    }
+    json.dumps(intent, allow_nan=False)  # the store's payload stays strict JSON
+    [replayed] = tape.orders_for_replay(intent)
+    assert replayed["action"] == ["buy"] and replayed["position_size"] == float("inf")
+    assert replayed["confidence"] != replayed["confidence"]  # NaN
+    assert replayed["reasoning"] == {"why": "x"} and "raw" not in replayed
+
+
+def test_intent_keeps_a_non_object_entry_whole():
+    intent = _one_order("buy AAPL")
+    assert intent["orders"] == [{"raw_entry": '"buy AAPL"'}]
+    assert tape.orders_for_replay(intent) == ["buy AAPL"]
+    assert tape.orders_for_replay(None) == [] and tape.orders_for_replay({"unparsed": True}) == []
+
+
+def test_gate_rewrote_is_false_on_a_fallback_bar():
+    """A fallback's actions are rule-based substitutes, not a rewrite."""
+    intent = {"orders": [{"symbol": "AAPL", "action": "buy", "confidence": None}]}
+    actions = [{"symbol": "MSFT", "action": "buy", "shares": 1}]
+    state = {"cash": 1.0, "equity": 1.0, "positions": []}
+    common = dict(bar_index=0, decision_at="t", intent=intent, state=state, actions=actions)
+    assert tape.build_decision_payload(driver="llm_fallback", **common)["gate_rewrote"] is False
+    assert tape.build_decision_payload(driver="llm", **common)["gate_rewrote"] is True
+
+
+def test_bound_payload_keeps_replay_exact_or_marks_the_order():
+    """String reasoning drops (the gate reads absent as ""); a null one is kept
+    (the gate raises on it); a raw one cut marks the order unreplayable."""
+    orders = [
+        {"symbol": "AAPL", "action": "buy", "reasoning": "r" * 500},
+        {"symbol": "MSFT", "action": "buy", "reasoning": None},
+        tape._intent_order({"symbol": "GOOG", "action": "buy", "reasoning": {"k": "v" * 400}, "confidence": float("inf")}),
+    ]
+    actions = [{"symbol": f"S{i}", "action": "buy", "shares": 1, "reason": "r" * 500} for i in range(110)]
+    payload = tape.build_decision_payload(
+        bar_index=0, decision_at="t", driver="llm", intent={"orders": orders * 40},
+        state={"cash": 0, "equity": 0, "positions": []}, actions=actions,
+    )
+    bounded = tape.bound_payload(payload)
+    assert bounded is not None
+    aapl, msft, goog = bounded["intent"]["orders"][:3]
+    assert "reasoning" not in aapl
+    assert msft["reasoning"] is None
+    assert goog["unreplayable"] == ["reasoning"] and "reasoning" not in goog
+    assert goog["raw"] == {"confidence": "Infinity"}
+    with pytest.raises(ValueError):
+        tape.orders_for_replay(bounded["intent"])
+    assert payload["intent"]["orders"][2]["raw"]["reasoning"]  # the original is untouched
+
+
 def test_build_state_uses_pairs_and_skips_flat_positions():
     state = tape.build_state(cash=np.float64(100.0), equity=250.0, positions={"MSFT": 2, "AAPL": 3, "TOKEN": 0})
     assert state == {"cash": 100.0, "equity": 250.0, "positions": [["AAPL", 3], ["MSFT", 2]]}
