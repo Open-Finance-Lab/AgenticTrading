@@ -120,6 +120,35 @@ def test_metrics_use_population_stddev_and_hourly_annualization():
     assert metrics["sharpe"] == pytest.approx(expected_sharpe)
 
 
+
+def test_five_minute_chart_uses_valuation_frequency():
+    result = run_helper(
+        "(() => { const chart = {...fixture.chart, timestamps: ["
+        "'2026-05-04T14:30:00Z', '2026-05-04T14:35:00Z', "
+        "'2026-05-04T14:40:00Z', '2026-05-04T14:45:00Z']}; "
+        "return {hourly: BacktestComparison.buildModel(fixture.chart, fixture.run)"
+        ".columns[0].metrics.sharpe, "
+        "five: BacktestComparison.buildModel(chart, fixture.run)"
+        ".columns[0].metrics.sharpe}; })()"
+    )
+    assert result["five"] == pytest.approx(result["hourly"] * math.sqrt(12))
+
+
+def test_market_close_and_anomalous_gap_do_not_change_five_minute_frequency():
+    result = run_helper(
+        "(() => { const chart = {...fixture.chart, timestamps: ["
+        "'2026-05-04T14:30:00Z', '2026-05-04T14:31:00Z', "
+        "'2026-05-04T14:35:00Z', '2026-05-05T14:30:00Z', "
+        "'2026-05-05T14:35:00Z']}; "
+        "return {hourly: BacktestComparison.buildModel(fixture.chart, fixture.run)"
+        ".columns[0].metrics.sharpe, "
+        "five: BacktestComparison.buildModel(chart, fixture.run)"
+        ".columns[0].metrics.sharpe}; })()"
+    )
+    assert result["five"] == pytest.approx(result["hourly"] * math.sqrt(12))
+
+
+
 def test_invalid_and_flat_series_are_unavailable_not_zero():
     result = run_helper(
         "({"
