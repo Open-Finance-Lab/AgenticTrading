@@ -1,5 +1,13 @@
 # Releasing `agentictrading`
 
+> **Releases are not supported right now. Do not push a `v*` tag.**
+> PyPI publishing is out of scope for the project at the moment. The one-time
+> setup below has never been done for `Open-Finance-Lab/AgenticTrading`, so the
+> publish workflow would fail. The `0.1.0` on PyPI is a stale manual upload that
+> predates `ATLClient` and `AgentRunner`; install from source instead (see the
+> [README](README.md#install)). This page is kept as reference for whenever
+> releases resume.
+
 The package is published to PyPI automatically by
 `.github/workflows/publish-pypi.yml` whenever a `v*` tag is pushed.
 

@@ -10,16 +10,22 @@ This package provides a small client (standard library only) for the Agentic Tra
 - **Docs:** https://finagent-orchestration.readthedocs.io/
 - **Source:** https://github.com/Open-Finance-Lab/AgenticTrading
 
-> **Status:** early release. The version on PyPI is `0.1.0`. The `ATLClient` and
-> `AgentRunner` protocol SDK described below lives in this repository and is
-> **not** in the `0.1.0` wheel, so install from source to use it.
+> **Status:** PyPI releases are not supported right now. The `0.1.0` on PyPI is
+> stale and unmaintained: it predates the `ATLClient` and `AgentRunner` protocol
+> SDK described below and contains only `AgenticTradingClient`. Install from a
+> repo checkout instead; that is the only supported install.
 
 ## Install
 
 ```bash
-pip install agentictrading                      # 0.1.0 from PyPI: AgenticTradingClient only
-pip install -e packaging/agentictrading         # from a repo checkout: adds ATLClient + AgentRunner
+git clone https://github.com/Open-Finance-Lab/AgenticTrading.git
+cd AgenticTrading
+pip install -e packaging/agentictrading
 ```
+
+Do not use `pip install agentictrading`: it installs the stale `0.1.0`, and
+every `ATLClient` / `AgentRunner` example on this page fails with an
+`ImportError` against it.
 
 The optional `[vnpy]` extra (`pip install -e "packaging/agentictrading[vnpy]"`)
 is for the vn.py CTA integration; see

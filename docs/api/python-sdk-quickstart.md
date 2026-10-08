@@ -40,6 +40,9 @@ From the repo:
 pip install -e packaging/agentictrading
 ```
 
+PyPI releases are not supported right now. `pip install agentictrading` gets a
+stale `0.1.0` without `ATLClient` or `AgentRunner`, so always install from source.
+
 ## Authentication
 
 The SDK authenticates with your **agent API key** via the `X-API-Key` header.
