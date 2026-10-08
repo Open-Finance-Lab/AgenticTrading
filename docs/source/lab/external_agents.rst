@@ -224,11 +224,18 @@ Failure cases to handle in your loop:
 Quickstart with the Python client
 ----------------------------------
 
-The easiest way to drive all of this is the official client:
+The easiest way to drive all of this is the official client. Install it from a
+checkout of the repository:
 
 .. code-block:: bash
 
-   pip install agentictrading
+   pip install -e packaging/agentictrading
+
+.. note::
+
+   PyPI releases are not supported right now. ``pip install agentictrading``
+   installs a stale ``0.1.0`` that is no longer maintained and lacks the
+   protocol SDK (``ATLClient``, ``AgentRunner``), so install from source.
 
 Provide an API key (it resolves the session for you), implement a ``strategy``
 function that maps a snapshot to a list of actions, and call ``run_backtest`` —
@@ -245,17 +252,23 @@ it runs the whole poll/submit loop:
 
    def strategy(snapshot: dict) -> list:
        """Return a list of action dicts for the current hour."""
+       # Up to five buys an hour, each an equal slice of the cash on hand, with
+       # 5% kept back for the next bar's fill price. A buy costing more than the
+       # cash is dropped without an error, so never size from a fixed amount.
+       cash = float((snapshot.get("portfolio") or {}).get("cash") or 0)
+       budget = 0.95 * cash / 5
        actions = []
        for symbol, sig in (snapshot.get("top_signals") or {}).items():
            rsi = float(sig.get("rsi") or 50)
            price = float(sig.get("price") or 0)
-           if price > 0 and rsi < 35:
+           shares = int(budget // price) if price > 0 else 0
+           if shares > 0 and rsi < 35 and len(actions) < 5:
                actions.append({
                    "action": "buy",
                    "symbol": symbol,
                    "confidence": 0.75,
                    "reasoning": "RSI oversold entry",
-                   "position_size": max(1, int(200 / price)),
+                   "position_size": shares,
                })
        if not actions:
            actions.append({"action": "hold", "symbol": "AAPL",

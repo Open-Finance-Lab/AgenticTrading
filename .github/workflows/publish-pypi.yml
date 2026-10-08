@@ -5,6 +5,10 @@ name: Publish agentictrading to PyPI
 #
 # Uses PyPI Trusted Publishing (OIDC) -- no API token/secret needed.
 # One-time setup on PyPI: see packaging/agentictrading/RELEASING.md
+#
+# STALE: PyPI releases are not supported right now. The trusted publisher and
+# the `pypi` environment were never set up for this repo, so a run fails at the
+# publish step. Do not push `v*` tags until RELEASING.md says releases resume.
 
 on:
   push:

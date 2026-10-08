@@ -2,27 +2,40 @@
 
 **Lightweight Python client for [Agentic Trading Lab](https://agentic-trading-lab.vercel.app/)** — an open-source experimental playground for LLM-powered trading agents.
 
-Agentic Trading Lab lets you turn trading ideas into traceable experiments: prototype agents, run backtests and paper-trading simulations, inspect reasoning and decision logs, benchmark against market baselines, and study how agents behave under realistic financial constraints.
+Agentic Trading Lab lets you turn trading ideas into traceable experiments: prototype agents, run backtests, inspect reasoning and decision logs, benchmark against market baselines, and study how agents behave under realistic financial constraints.
 
 This package provides a small client (standard library only) for the Agentic Trading Lab REST API, so you can drive backtests and read results directly from Python. The install is **dependency-free on macOS and Linux**; on Windows it also pulls the `tzdata` data wheel, because `zoneinfo` has no system IANA time-zone database there.
 
 - **Live demo:** https://agentic-trading-lab.vercel.app/
 - **Docs:** https://finagent-orchestration.readthedocs.io/
-- **Source:** https://github.com/Allan-Feng/AgenticTrading
+- **Source:** https://github.com/Open-Finance-Lab/AgenticTrading
 
-> **Status:** early release (`0.2.0`). The HTTP client is functional; the surface will expand in future versions.
+> **Status:** PyPI releases are not supported right now. The `0.1.0` on PyPI is
+> stale and unmaintained: it predates the `ATLClient` and `AgentRunner` protocol
+> SDK described below and contains only `AgenticTradingClient`. Install from a
+> repo checkout instead; that is the only supported install.
 
 ## Install
 
 ```bash
-pip install agentictrading
+git clone https://github.com/Open-Finance-Lab/AgenticTrading.git
+cd AgenticTrading
+pip install -e packaging/agentictrading
 ```
+
+Do not use `pip install agentictrading`: it installs the stale `0.1.0`, and
+every `ATLClient` / `AgentRunner` example on this page fails with an
+`ImportError` against it.
+
+The optional `[vnpy]` extra (`pip install -e "packaging/agentictrading[vnpy]"`)
+is for the vn.py CTA integration; see
+[`docs/integrations/vnpy-cta.md`](https://github.com/Open-Finance-Lab/AgenticTrading/blob/main/docs/integrations/vnpy-cta.md).
 
 ## Agent–Environment Protocol SDK (`ATLClient`)
 
 For the versioned Agent–Environment Protocol (runs, steps, decisions), use
 `ATLClient`. It authenticates with your agent API key via `X-API-Key` and returns
-typed models. See [`docs/api/python-sdk-quickstart.md`](https://github.com/Allan-Feng/AgenticTrading/blob/main/docs/api/python-sdk-quickstart.md).
+typed models. See [`docs/api/python-sdk-quickstart.md`](https://github.com/Open-Finance-Lab/AgenticTrading/blob/main/docs/api/python-sdk-quickstart.md).
 
 ```python
 import os
@@ -35,7 +48,7 @@ class MyAgent:
         return {"orders": [], "rationale": "Hold."}
 
 result = AgentRunner(client=client, agent=MyAgent()).run_backtest(
-    agent_version_id="agv_xxx",      # create once, reuse across runs
+    agent_version_id="agv_xxx",      # from client.create_agent_version(...); reuse across runs
     environment_id="us-equity-hourly-v1",
     start_date="2026-04-15",
     end_date="2026-04-16",
@@ -43,6 +56,16 @@ result = AgentRunner(client=client, agent=MyAgent()).run_backtest(
 )
 print(result.metrics)
 ```
+
+> **Environment limits.** `us-equity-hourly-v1` trades the DJIA-30 only, starts
+> with $1,000 (the SDK currently accepts only that default), allows at most 25%
+> of equity in one position ($250 at the start) and at most 10 orders per step.
+> An order over the position cap is rejected on its own, not clipped, and the
+> rest of the decision still executes. A decision with more than 10 orders is
+> refused whole: `submit_decision` raises `ATLValidationError`
+> (`too_many_orders`) and nothing fills. Size orders from
+> `observation.portfolio` (cash, equity) and `step.constraints` rather than
+> fixed dollar amounts.
 
 > **Decision deadline.** Each step has a decision window (default **60s**). If
 > your `decide()` plus submission takes longer, the backend auto-holds that step
@@ -77,17 +100,23 @@ client = AgenticTradingClient(
 
 def strategy(snapshot: dict) -> list:
     """Return a list of action dicts for the current hour."""
+    # Up to five buys an hour, each an equal slice of the cash on hand, with 5%
+    # kept back for the next bar's fill price. A buy costing more than the cash
+    # is dropped without an error, so never size from a fixed dollar amount.
+    cash = float((snapshot.get("portfolio") or {}).get("cash") or 0)
+    budget = 0.95 * cash / 5
     actions = []
     for symbol, sig in (snapshot.get("top_signals") or {}).items():
         rsi = float(sig.get("rsi") or 50)
         price = float(sig.get("price") or 0)
-        if price > 0 and rsi < 35:
+        shares = int(budget // price) if price > 0 else 0
+        if shares > 0 and rsi < 35 and len(actions) < 5:
             actions.append({
                 "action": "buy",
                 "symbol": symbol,
                 "confidence": 0.75,
                 "reasoning": "RSI oversold entry",
-                "position_size": max(1, int(2000 / price)),
+                "position_size": shares,
             })
     if not actions:
         actions.append({"action": "hold", "symbol": "AAPL",
@@ -121,11 +150,11 @@ agentictrading ticker AAPL,NVDA --api https://... # latest quotes
 | `config_defaults()` | `GET /config/defaults` |
 | `ticker(symbols)` | `GET /ticker` |
 | `runs(mode=None)` | `GET /runs` |
-| `run(run_id)` | `GET /runs/{id}` |
-| `equity(run_id)` | `GET /runs/{id}/equity` |
+| `run(run_id)` | `GET /runs/{id}` (needs the session that created the run) |
+| `equity(run_id)` | `GET /runs/{id}/equity` (needs the session that created the run) |
 | `compare(run_ids)` | `GET /compare` |
 | `leaderboard()` | `GET /api/v1/leaderboard` |
-| `paper_account()` / `paper_positions()` / `paper_trades()` | `GET /paper/...` |
+| `paper_account()` / `paper_positions()` / `paper_trades()` | `GET /paper/...` (the API routes exist; paper trading in the dashboard is coming in the future) |
 | `resolve()` | `GET /api/v1/agents/resolve` |
 | `backtest_schema()` | `GET /api/v1/backtest/schema` |
 | `start_backtest(...)` | `POST /api/v1/backtest/start` |
