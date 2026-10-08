@@ -246,7 +246,7 @@ def test_recorder_resolves_trace_once_and_writes_each_bar(monkeypatch):
     assert fake.writes[0]["trace_id"] == "trc_1" and fake.writes[0]["run_id"] == "agent_x"
     assert recorder.summary() == {
         "tape_version": 1, "traced": True, "bars_recorded": 3, "gate_rewrites": 1,
-        "write_failures": 0, "oversize_skipped": 0,
+        "write_failures": 0, "oversize_skipped": 0, "suspended_skipped": 0,
     }
 
 
@@ -279,6 +279,66 @@ def test_recorder_swallows_write_failures_and_logs_once(monkeypatch, capsys):
         recorder.record_bar(**_bar(i))  # must not raise
     assert recorder.summary()["write_failures"] == 3
     assert capsys.readouterr().out.count("decision tape write failed") == 1
+
+
+class _CountingStore(_FakeTraceService):
+    def __init__(self, fail_writes):
+        super().__init__(trace={"trace_id": "trc_1"})
+        self.fail_writes = set(fail_writes)
+        self.write_calls = 0
+
+    def record_tape_bar(self, **kwargs):
+        index = self.write_calls
+        self.write_calls += 1
+        if index in self.fail_writes:
+            raise TimeoutError("connect timed out")  # a hung store, already waited out
+        self.writes.append(kwargs)
+
+
+def test_recorder_stops_calling_a_store_that_keeps_failing(monkeypatch, capsys):
+    """Review Focus 4, the slow half: a store that hangs before raising costs
+    that hang on every call, so the recorder must stop calling it, not just
+    swallow what it raises."""
+    fake = _CountingStore(fail_writes=range(100))
+    _install(monkeypatch, fake)
+    recorder = tape.DecisionTapeRecorder("agent_x")
+    for i in range(10):
+        recorder.record_bar(**_bar(i))
+    recorder.record_bar_from(lambda: (_bar(10)["decision_payload"], _bar(10)["execution_payload"]), bar_index=10)
+    assert fake.write_calls == tape.MAX_CONSECUTIVE_STORE_FAILURES
+    summary = recorder.summary()
+    assert summary["write_failures"] == tape.MAX_CONSECUTIVE_STORE_FAILURES
+    assert summary["suspended_skipped"] == 11 - tape.MAX_CONSECUTIVE_STORE_FAILURES
+    assert summary["bars_recorded"] == 0
+    assert capsys.readouterr().out.count("decision tape suspended") == 1
+
+
+def test_recorder_stops_retrying_a_lookup_that_keeps_failing(monkeypatch):
+    class _LookupDown(_FakeTraceService):
+        def trace_for_run(self, run_id):
+            self.lookups += 1
+            raise TimeoutError("neon dial timed out")
+
+    fake = _LookupDown(trace=None)
+    _install(monkeypatch, fake)
+    recorder = tape.DecisionTapeRecorder("agent_x")
+    for i in range(10):
+        recorder.record_bar(**_bar(i))
+    assert fake.lookups == tape.MAX_CONSECUTIVE_STORE_FAILURES
+
+
+def test_a_successful_write_resets_the_failure_streak(monkeypatch):
+    n = tape.MAX_CONSECUTIVE_STORE_FAILURES
+    # n-1 failures, one success, n-1 failures, one success: never n in a row.
+    fails = [i for i in range(2 * n) if i not in (n - 1, 2 * n - 1)]
+    fake = _CountingStore(fail_writes=fails)
+    _install(monkeypatch, fake)
+    recorder = tape.DecisionTapeRecorder("agent_x")
+    for i in range(2 * n):
+        recorder.record_bar(**_bar(i))
+    summary = recorder.summary()
+    assert fake.write_calls == 2 * n
+    assert summary["bars_recorded"] == 2 and summary["suspended_skipped"] == 0
 
 
 def test_recorder_counts_oversize_bars_without_writing(monkeypatch):

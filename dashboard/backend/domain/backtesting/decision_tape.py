@@ -313,21 +313,36 @@ def _trace_service():
     return trace_service
 
 
+# Consecutive store failures after which a run stops calling the trace store.
+# Swallowing an exception bounds what a broken store costs the run only when
+# the store fails fast; one that hangs (a Neon dial or a TCP timeout) costs
+# that hang on every bar, and enough bars of it push the run into the
+# subprocess timeout -- the tape would then change the run's outcome. Three
+# rides out a transient blip and caps a hung store at three waits per run.
+MAX_CONSECUTIVE_STORE_FAILURES = 3
+
+
 class DecisionTapeRecorder:
     """Writes one run's tape. Never raises: a broken trace store costs the
     tape, never the backtest. The trace is looked up once; a lookup that
     raised (a transient store error) is retried on the next bar, one that
-    found no trace turns the recorder into a no-op for the run."""
+    found no trace turns the recorder into a no-op for the run. After
+    ``MAX_CONSECUTIVE_STORE_FAILURES`` failed bars in a row the recorder
+    suspends for the rest of the run and counts each later bar in
+    ``suspended_skipped`` without touching the store."""
 
     def __init__(self, run_id: str):
         self.run_id = run_id
         self._trace_id: Optional[str] = None
         self._resolved = False
         self._warned = False
+        self._consecutive_failures = 0
+        self._suspended = False
         self.bars_recorded = 0
         self.gate_rewrites = 0
         self.write_failures = 0
         self.oversize_skipped = 0
+        self.suspended_skipped = 0
 
     def _resolve_trace(self) -> Optional[str]:
         if not self._resolved:
@@ -346,6 +361,18 @@ class DecisionTapeRecorder:
             flush=True,
         )
 
+    def _store_failed(self, exc: BaseException) -> None:
+        self.write_failures += 1
+        self._warn(exc)
+        self._consecutive_failures += 1
+        if self._consecutive_failures >= MAX_CONSECUTIVE_STORE_FAILURES:
+            self._suspended = True
+            print(
+                f"   ⚠️  decision tape suspended after {self._consecutive_failures} "
+                "consecutive failures; the rest of this run is not taped",
+                flush=True,
+            )
+
     def record_bar(
         self,
         *,
@@ -353,6 +380,9 @@ class DecisionTapeRecorder:
         decision_payload: Dict[str, Any],
         execution_payload: Dict[str, Any],
     ) -> None:
+        if self._suspended:
+            self.suspended_skipped += 1
+            return
         try:
             trace_id = self._resolve_trace()
             if trace_id is None:
@@ -369,12 +399,12 @@ class DecisionTapeRecorder:
                 decision_payload=decision,
                 execution_payload=execution,
             )
+            self._consecutive_failures = 0
             self.bars_recorded += 1
             if decision.get("gate_rewrote"):
                 self.gate_rewrites += 1
         except Exception as exc:  # observational: never reaches the bar loop
-            self.write_failures += 1
-            self._warn(exc)
+            self._store_failed(exc)
 
     def record_bar_from(
         self,
@@ -384,7 +414,10 @@ class DecisionTapeRecorder:
     ) -> None:
         """``record_bar`` with the payload builders inside the swallow layer:
         they read model-supplied text, so a builder bug must cost a tape bar,
-        never the backtest."""
+        never the backtest. A suspended recorder skips the builders too."""
+        if self._suspended:
+            self.suspended_skipped += 1
+            return
         try:
             decision_payload, execution_payload = build()
         except Exception as exc:
@@ -405,6 +438,7 @@ class DecisionTapeRecorder:
             "gate_rewrites": self.gate_rewrites,
             "write_failures": self.write_failures,
             "oversize_skipped": self.oversize_skipped,
+            "suspended_skipped": self.suspended_skipped,
         }
 
 

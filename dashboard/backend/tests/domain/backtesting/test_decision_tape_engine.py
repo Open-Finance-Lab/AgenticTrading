@@ -11,6 +11,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from dashboard.backend.domain.backtesting import decision_tape as decision_tape_mod
 from dashboard.backend.domain.backtesting import engine as engine_mod
 from dashboard.backend.domain.backtesting.engine import HourlyBacktester
 from dashboard.backend.domain.backtesting.portfolio_manager import PortfolioManager
@@ -321,8 +322,10 @@ def test_run_without_live_run_id_writes_no_tape(monkeypatch, store):
 
 def test_broken_trace_writes_do_not_change_the_run(monkeypatch, store):
     _bt, healthy, healthy_curve = _run(monkeypatch, run_id="agent_tape_healthy", decide=_script)
+    attempts = []
 
     def broken(**_kwargs):
+        attempts.append(1)
         raise RuntimeError("trace store down")
 
     monkeypatch.setattr(trace_service, "record_tape_bar", broken)
@@ -330,4 +333,10 @@ def test_broken_trace_writes_do_not_change_the_run(monkeypatch, store):
     assert [p["equity"] for p in broken_curve] == [p["equity"] for p in healthy_curve]
     assert len(broken_holder.pm.trades) == len(healthy.pm.trades)
     summary = backtester.decision_tape_summary()
-    assert summary["write_failures"] == broken_holder.calls and summary["bars_recorded"] == 0
+    # The store is called at most MAX_CONSECUTIVE_STORE_FAILURES times: a
+    # store that hangs rather than raising would otherwise cost every bar.
+    limit = decision_tape_mod.MAX_CONSECUTIVE_STORE_FAILURES
+    assert broken_holder.calls > limit
+    assert len(attempts) == summary["write_failures"] == limit
+    assert summary["suspended_skipped"] == broken_holder.calls - limit
+    assert summary["bars_recorded"] == 0
