@@ -16,7 +16,7 @@ import pytest
 
 from . import cases
 from .cases import ALL_CASES, CASES, PREDICTIONS_D, PREDICTIONS_DL, PREDICTION_DELTAS
-from .model import CHECKS, SHARPE_NULL, Case, CostModel, OrderIntent
+from .model import CHECKS, SHARPE_NULL, Case, CostModel, OrderIntent, rate_on
 from .reference import (
     ZERO,
     check_orders,
@@ -134,15 +134,28 @@ def test_sec_fee_function_table():
 
 
 def test_f05_summed_eod_rounding_variant():
-    """F05's unscored alternative: one ceiling over the summed regulatory fees."""
+    """F05's unscored alternative: one ceiling over the summed regulatory fees.
+
+    Every input is read off ``cases.F05`` and the dated fee tables, so a change
+    to F05's bars, fills or the fee schedule cannot leave the variant behind.
+    """
     from .reference import ceil_cent
 
-    principal, qty = Decimal("1248.75"), Decimal("4.995")
-    summed = ceil_cent(principal * Decimal("20.60") / 1_000_000 + qty * Decimal("0.000195"))
-    fees = Decimal("1.00") + summed
+    f05 = cases.F05
+    buy, sell = (next(f for f in f05.expected.fills if f.order_id == oid) for oid in ("o1", "o2"))
+    principal, qty = sell.qty * sell.price, sell.qty
+    trade_date = sell.bar.date()
+    sec_rate = rate_on(f05.costs.sec_fee, trade_date).rate
+    taf_rate = rate_on(f05.costs.taf, trade_date).rate
+    summed = ceil_cent(principal * sec_rate / 1_000_000 + qty * taf_rate)
+    fees = sell.commission + summed
     assert fees == cases.F05_SUMMED_EOD_ROUNDING["o2_fees"]
-    assert principal - fees == cases.F05_SUMMED_EOD_ROUNDING["cash"]
-    assert Decimal("-1.00") + qty * 50 - fees == cases.F05_SUMMED_EOD_ROUNDING["realized_pnl"]
+    cash = f05.initial_cash - (buy.qty * buy.price + buy.commission) + principal - fees
+    assert cash == cases.F05_SUMMED_EOD_ROUNDING["cash"]
+    realized = -buy.commission + qty * (sell.price - buy.price) - fees
+    assert realized == cases.F05_SUMMED_EOD_ROUNDING["realized_pnl"]
+    # The variant differs from the scored per-fee rounding, or it pins nothing.
+    assert summed != sell.sec_fee + sell.taf
 
 
 def test_exactness_is_not_float():

@@ -317,6 +317,5 @@ class Adapter(Protocol):
     """One per engine. ``run`` raises ``NotExpressible(reason)``."""
 
     name: str
-    capabilities: frozenset
 
     def run(self, case: Case) -> Expected: ...

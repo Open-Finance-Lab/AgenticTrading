@@ -6,11 +6,19 @@ Each case is scored by ``scoring.score`` and held to its *measured* outcome:
 * PASS runs plainly.
 * FAIL is ``xfail(strict=True, raises=ConformanceFailure)``. The test raises
   ``ConformanceFailure`` only when the failing checks are exactly the ones the
-  prediction names; failing on a different set is a plain failure, and so is
-  passing (strict XPASS). **Fixing an engine defect therefore turns its tests
-  red** -- by design: the fix must update the inventory in ``cases.py``
-  (``PREDICTIONS_D`` / ``PREDICTIONS_DL``, and ``PREDICTION_DELTAS`` if the
-  design doc said otherwise) in the same change.
+  prediction names *and* every failing line matches the measured baseline in
+  ``known_failures.json``; failing on a different set, or with different
+  expected/actual values, is a plain failure, and so is passing (strict XPASS).
+  The set alone cannot see a known defect getting worse (C04's cash going from
+  -500 to -5000 fails the same checks), and this suite is the baseline the
+  engine rewrite is measured against. **Changing an engine defect therefore
+  turns its tests red** -- by design: the change must update the inventory in
+  ``cases.py`` (``PREDICTIONS_D`` / ``PREDICTIONS_DL``, and
+  ``PREDICTION_DELTAS`` if the design doc said otherwise) and re-record the
+  baseline (``CONFORMANCE_UPDATE_KNOWN_FAILURES=1 pytest <this file>``, then
+  review the JSON diff) in the same change. Numbers in the baseline are
+  normalized to 10 significant digits, so float noise across library versions
+  does not move it.
 * N/E (not expressible) is skipped with the design doc's reason, but only
   after the adapter has actually refused the case; an adapter that runs a case
   predicted N/E fails.
@@ -20,6 +28,11 @@ and no optional dependency.
 """
 
 from __future__ import annotations
+
+import json
+import os
+import re
+from pathlib import Path
 
 import pandas as pd
 import pytest
@@ -32,6 +45,46 @@ from .model import NotExpressible
 from .scoring import ConformanceFailure, report, score
 
 
+KNOWN_FAILURES = Path(__file__).with_name("known_failures.json")
+UPDATE_ENV = "CONFORMANCE_UPDATE_KNOWN_FAILURES"
+_NUMBER = re.compile(r"-?\d+\.\d+(?:[eE][-+]?\d+)?|-?\d+[eE][-+]?\d+")
+
+
+def _normalized(failures):
+    """The failure detail with every decimal number cut to 10 significant
+    digits: still pins a value that moved, not float noise in its last bits."""
+    def short(match):
+        return format(float(match.group(0)), ".10g")
+
+    return {check: [_NUMBER.sub(short, line) for line in lines] for check, lines in sorted(failures.items())}
+
+
+def _load_known():
+    return json.loads(KNOWN_FAILURES.read_text()) if KNOWN_FAILURES.exists() else {}
+
+
+def _check_known(key, failures, text):
+    detail = _normalized(failures)
+    if os.environ.get(UPDATE_ENV) == "1":
+        known = _load_known()
+        known[key] = detail
+        KNOWN_FAILURES.write_text(json.dumps(dict(sorted(known.items())), indent=2) + "\n")
+        return
+    pinned = _load_known().get(key)
+    if pinned is None:
+        pytest.fail(f"{key}: no baseline in {KNOWN_FAILURES.name}; re-record with {UPDATE_ENV}=1\n{text}")
+    if pinned != detail:
+        moved = [
+            f"  [{check}] pinned {pinned.get(check)}\n  [{check}] now    {detail.get(check)}"
+            for check in sorted(set(pinned) | set(detail))
+            if pinned.get(check) != detail.get(check)
+        ]
+        pytest.fail(
+            f"{key}: the known failure changed -- review, then re-record with {UPDATE_ENV}=1\n"
+            + "\n".join(moved)
+        )
+
+
 def _param(case, prediction):
     marks = ()
     if prediction.verdict == FAIL:
@@ -40,7 +93,7 @@ def _param(case, prediction):
     return pytest.param(case, prediction, id=case.id, marks=marks)
 
 
-def _assert_outcome(case, prediction, adapter):
+def _assert_outcome(case, prediction, adapter, path):
     try:
         actual = adapter.run(case)
     except NotExpressible as exc:
@@ -65,6 +118,7 @@ def _assert_outcome(case, prediction, adapter):
             f"{case.id}: prediction drift -- predicted failing checks "
             f"{sorted(prediction.fails)}, measured {sorted(failures)}\n{text}"
         )
+    _check_known(f"{case.id}/{path}", failures, text)
     raise ConformanceFailure(text)
 
 
@@ -72,7 +126,7 @@ def _assert_outcome(case, prediction, adapter):
     "case, prediction", [_param(case, PREDICTIONS_D[case.id]) for case in ALL_CASES]
 )
 def test_dashboard_engine(case, prediction, monkeypatch):
-    _assert_outcome(case, prediction, CurrentEngineAdapter(monkeypatch))
+    _assert_outcome(case, prediction, CurrentEngineAdapter(monkeypatch), "D")
 
 
 @pytest.mark.parametrize(
@@ -81,7 +135,25 @@ def test_dashboard_engine(case, prediction, monkeypatch):
 )
 def test_dashboard_llm_translator(case, prediction, monkeypatch):
     adapter = CurrentEngineAdapter(monkeypatch, llm=True)
-    _assert_outcome(case, prediction, adapter)
+    _assert_outcome(case, prediction, adapter, "DL")
+
+
+def test_known_failures_cover_exactly_the_fail_predictions():
+    """A baseline entry per FAIL prediction, and none left for a fixed one."""
+    want = {f"{cid}/D" for cid, p in PREDICTIONS_D.items() if p.verdict == FAIL}
+    want |= {f"{cid}/DL" for cid, p in PREDICTIONS_DL.items() if p.verdict == FAIL}
+    assert set(_load_known()) == want
+
+
+def test_known_failure_normalization_keeps_magnitude():
+    """Float noise collapses; a value that moved does not."""
+    noisy = {"cash": ["cash: expected 500, actual -500.00000000000006"]}
+    clean = {"cash": ["cash: expected 500, actual -500.0"]}
+    worse = {"cash": ["cash: expected 500, actual -5000.0"]}
+    assert _normalized(noisy) == _normalized(clean) != _normalized(worse)
+    assert _normalized({"x": ["2026-03-02T10:30:00-05:00 qty 1E-15"]}) == {
+        "x": ["2026-03-02T10:30:00-05:00 qty 1e-15"]
+    }
 
 
 def test_dl_probe_never_falls_back_to_rule_based(monkeypatch):
@@ -122,28 +194,52 @@ def test_synthesized_bars_aggregate_back_to_the_case(case):
         assert got == want, f"{case.id} {bar.symbol} {bar.ts}: aggregated {got}, case {want}"
 
 
-def test_collapsed_rejections_expand_to_one_order_final_per_intent(monkeypatch):
-    """The executor folds a repeated pure rejection on one trading day into a
-    single event with a ``repeat_count`` (execution.py:197-240); the adapter
-    must still give every intent its own ``OrderFinal`` (invariant 7)."""
+def _rejected_buys(fill_bars):
+    """Two unaffordable buys executed at ``fill_bars``; returns the manager and
+    the ``executed`` records the adapter's ``execute`` hook would have kept."""
     from dashboard.backend.domain.backtesting.portfolio_manager import PortfolioManager
 
-    from .cases import DAY, H, HC, mkt
-
     pm = PortfolioManager(initial_capital=100.0, allowed_symbols=["AAPL"])
-    submitted = []
-    for k, oid in enumerate(("o1", "o2")):
-        fill_bar = pd.Timestamp(H(DAY, k + 1))
+    executed = []
+    for oid, fill_bar in zip(("o1", "o2"), fill_bars):
+        stamp = pd.Timestamp(fill_bar)
         pm.execute_actions(
             [{"symbol": "AAPL", "action": "buy", "shares": 10, "reason": oid}],
             {"AAPL": {"close": 100.0}},
-            fill_bar,
+            stamp,
         )
-        submitted.append((pd.Timestamp(HC(DAY, k)).tz_convert("UTC"), mkt(oid, H(DAY, k), "AAPL", "buy", "10")))
+        executed.append((stamp.tz_convert("UTC"), "AAPL", "buy", oid))
+    return pm, executed
+
+
+def test_collapsed_rejections_expand_to_one_order_final_per_intent(monkeypatch):
+    """The executor folds a repeated pure rejection on one trading day into a
+    single event with a ``repeat_count`` (trading/execution.py:207-219); the
+    adapter must still give every intent its own ``OrderFinal`` (invariant 7)."""
+    from .cases import DAY, H
+
+    pm, executed = _rejected_buys([H(DAY, 1), H(DAY, 2)])
     assert len(pm.order_events) == 1 and pm.order_events[0]["repeat_count"] == 2
 
-    orders = CurrentEngineAdapter(monkeypatch)._orders(pm, submitted, {"o1", "o2"})
+    orders = CurrentEngineAdapter(monkeypatch)._orders(pm, executed, {"o1", "o2"})
     assert [(o.order_id, o.status, o.reason) for o in orders] == [
         ("o1", "rejected", "insufficient_cash"),
         ("o2", "rejected", "insufficient_cash"),
     ]
+
+
+def test_collapsed_rejection_expands_onto_overnight_and_sideless_intents(monkeypatch):
+    """The collapse is keyed on the *execution* day and the action's side, so
+    the expansion matches on what was executed, never on the intent: a 16:00
+    decision executed at the next session's open, and a target-weight intent
+    whose side exists only once the translator sizes it, both find their copy.
+    Here o2 is decided on DAY's close and executed on the next session, the
+    same trading day as o1's execution."""
+    from .cases import H
+
+    next_day = "2026-03-03"
+    pm, executed = _rejected_buys([H(next_day, 0), H(next_day, 1)])
+    assert len(pm.order_events) == 1 and pm.order_events[0]["repeat_count"] == 2
+
+    orders = CurrentEngineAdapter(monkeypatch)._orders(pm, executed, {"o1", "o2"})
+    assert [o.order_id for o in orders] == ["o1", "o2"]

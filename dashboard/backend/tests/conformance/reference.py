@@ -201,7 +201,7 @@ def replay(case: Case, fills: Sequence[Fill]) -> Ledger:
         day = ts.date()
         if day not in seen_days:
             seen_days.add(day)
-            _apply_corporate_actions(case, ledger, day, ts, bars)
+            apply_corporate_actions(case, ledger, day, ts, bars)
 
         # P8: one E_open snapshot per bar, after corporate actions, before fills.
         e_open = ledger.cash + sum(ledger.receivables.values(), ZERO)
@@ -218,20 +218,26 @@ def replay(case: Case, fills: Sequence[Fill]) -> Ledger:
             target = _target_qty(intent, e_open, bars[(intent.symbol, ts)].open, costs)
             return "buy" if target > held_at_open.get(intent.symbol, ZERO) else "sell"
 
+        # Guard before sorting: the sort key reads the intent and its bar, so a
+        # fill naming an unknown order or a bar its symbol lacks must be
+        # recorded and dropped here, not raise a KeyError from inside sorted().
+        valid = []
+        for fill in fills_at.get(ts, ()):
+            intent = intents.get(fill.order_id)
+            if intent is None:
+                problems.append(f"fill for unknown order {fill.order_id}")
+            elif (intent.symbol, ts) not in bars:
+                problems.append(f"{fill.order_id}: {intent.symbol} has no bar at {ts}")
+            else:
+                valid.append(fill)
         todays = sorted(
-            fills_at.get(ts, ()),
+            valid,
             # P4: sells before buys, each side in submission order.
             key=lambda f: (0 if side_of(f) == "sell" else 1, order[f.order_id]),
         )
         for fill in todays:
-            intent = intents.get(fill.order_id)
-            if intent is None:
-                problems.append(f"fill for unknown order {fill.order_id}")
-                continue
-            bar = bars.get((intent.symbol, ts))
-            if bar is None:
-                problems.append(f"{fill.order_id}: {intent.symbol} has no bar at {ts}")
-                continue
+            intent = intents[fill.order_id]
+            bar = bars[(intent.symbol, ts)]
             _apply_fill(
                 case, ledger, intent, fill, bar, side_of(fill), e_open,
                 held_at_open, statuses.get(fill.order_id), stamps, position_in_grid,
@@ -255,8 +261,10 @@ def _target_qty(intent: OrderIntent, e_open: Decimal, open_price: Decimal, costs
     return floor_step(intent.target_weight * e_open / open_price, costs.qty_step)
 
 
-def _apply_corporate_actions(case, ledger: Ledger, day: date, ts: datetime, bars) -> None:
-    """P16/P17 at the open of the first bar of ``day``, before any fill."""
+def apply_corporate_actions(case, ledger: Ledger, day: date, ts: datetime, bars) -> None:
+    """P16/P17 at the open of the first bar of ``day`` (stamped ``ts``), before
+    any fill. Shared with ``scoring.actual_invariants``, which runs it over an
+    engine's fills so a split or dividend is not read as a cash/position breach."""
     for split in case.splits:
         if split.ex_date != day or split.symbol not in ledger.positions:
             continue

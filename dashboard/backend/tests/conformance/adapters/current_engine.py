@@ -24,9 +24,14 @@ Mapping the engine onto the ``OrderFinal`` vocabulary. Orders come from the
 in-memory ledger ``pm.order_events``, never from run metadata, which keeps
 only unfilled events, caps them at 200 and carries no ids (``engine.py:193-217``).
 A pure rejection that repeats on one trading day is collapsed into one event
-with a ``repeat_count`` (``execution.py:197-240``); it is expanded back, the
-first copy to the intent named in its ``strategy_reason`` and each further copy
-to the next submitted intent with the same symbol, side and trading date.
+with a ``repeat_count`` (``trading/execution.py:207-219``), keyed on symbol,
+side, reason and the *execution* timestamp's trading date. It is expanded back
+the same way: the first copy goes to the intent named in its
+``strategy_reason``, each further copy to the next intent the engine actually
+*executed* with that symbol, action side and trading date. Matching on what
+reached ``execute_actions`` -- not on the intent -- is what lets a
+target-weight intent (no side until the translator sizes it) and an overnight
+decision (executed on the next session) find their copy.
 
 =========================  ==========================================
 engine ``status/reason``   ``OrderFinal``
@@ -40,9 +45,12 @@ anything else              passed through verbatim (and so fails)
 
 An intent with no ledger entry -- a decision that is not a step, or a fill
 bar with no source bar (``execution.py:526-527``) -- yields no ``OrderFinal``.
-Fills come from the persisted trade rows (``engine._serialize_trades``), whose
-``quantity`` is an int; every quantity the D runs submit is whole. Fields the
-engine has no output for (realized P&L, regulatory fees) are ``None``.
+Fills come from the persisted trade rows (``engine._serialize_trades``), except
+the quantity: the rows store ``int(shares)``, so it is read off the engine's
+own ledger (``pm.trades``, one entry per row) and a fractional fill is scored as
+filled, not as the persistence layer's floor. A fractional ``qty`` intent is
+refused on the D path (D9, whole shares only). Fields the engine has no output
+for (realized P&L, regulatory fees) are ``None``.
 """
 
 from __future__ import annotations
@@ -240,7 +248,6 @@ class _StubLLMClient:
 
 class CurrentEngineAdapter:
     name = "atl-dashboard"
-    capabilities = frozenset({"market"})
 
     def __init__(self, monkeypatch, *, llm: bool = False):
         self.monkeypatch = monkeypatch
@@ -258,6 +265,10 @@ class CurrentEngineAdapter:
                 raise NotExpressible(f"D12: {intent.id} is an OCO leg; actions carry no order links")
             if intent.target_weight is not None and not self.llm:
                 raise NotExpressible(f"D9: {intent.id} is a target weight; actions carry shares only")
+        for intent in case.intents:
+            fractional = isinstance(intent.qty, Decimal) and intent.qty != intent.qty.to_integral_value()
+            if fractional and not self.llm:
+                raise NotExpressible(f"D9: {intent.id} asks for {intent.qty} shares; actions carry whole shares only")
 
     def run(self, case: Case) -> Expected:
         self._check_expressible(case)
@@ -280,7 +291,7 @@ class CurrentEngineAdapter:
         mp.setattr(engine_mod, "create_market_data_provider", factory)
         mp.setattr(engine_mod, "db", fake_db)
 
-        holder = SimpleNamespace(pm=None, submitted=[], avg_path=[], fallbacks=0)
+        holder = SimpleNamespace(pm=None, executed=[], avg_path=[], fallbacks=0)
         original_init = PortfolioManager.__init__
         original_execute = PortfolioManager.execute_actions
         original_rule_based = PortfolioManager.make_trading_decision
@@ -291,6 +302,11 @@ class CurrentEngineAdapter:
             holder.pm = pm
 
         def execute(pm, actions, market_data, timestamp, *args, **kwargs):
+            for action in actions:
+                if action.get("action") in {"buy", "sell"}:
+                    holder.executed.append(
+                        (_utc(timestamp), action["symbol"], action["action"], action.get("reason", ""))
+                    )
             before = len(pm.trades)
             original_execute(pm, actions, market_data, timestamp, *args, **kwargs)
             for trade in pm.trades[before:]:
@@ -301,7 +317,6 @@ class CurrentEngineAdapter:
             ts = _utc(state["timestamp"])
             actions = []
             for intent in intents_at.get(ts, ()):
-                holder.submitted.append((ts, intent))
                 shares = pm.positions.get(intent.symbol, 0) if intent.qty == "all" else _number(intent.qty)
                 actions.append(
                     {"symbol": intent.symbol, "action": intent.side, "shares": shares, "reason": intent.id}
@@ -317,8 +332,6 @@ class CurrentEngineAdapter:
 
             def via_llm(pm, state, *args, **kwargs):
                 stub.state, stub.pm = state, pm
-                for intent in intents_at.get(_utc(state["timestamp"]), ()):
-                    holder.submitted.append((_utc(state["timestamp"]), intent))
                 return original_llm(pm, state, *args, **kwargs)
 
             def counted_fallback(pm, state):
@@ -375,14 +388,17 @@ class CurrentEngineAdapter:
             earlier = [ts for key, ts in opens.items() if key < stamp]
             return max(earlier) if earlier else stamp.tz_convert(NEW_YORK).to_pydatetime()
 
+        if len(fake_db.trades) != len(pm.trades):
+            raise AssertionError(f"{len(fake_db.trades)} persisted trade rows for {len(pm.trades)} ledger trades")
         fills = []
-        for row in fake_db.trades:
+        for row, trade in zip(fake_db.trades, pm.trades):
             fills.append(
                 Fill(
                     order_id=self._intent_id(row.get("reason", ""), ids) or row.get("reason", ""),
                     bar=case_bar(row["timestamp"]),
                     price=to_decimal(row["price"]),
-                    qty=to_decimal(row["quantity"]),
+                    # The row's quantity is int(shares); the ledger keeps the fill.
+                    qty=to_decimal(trade.get("shares") or trade.get("quantity") or 0),
                     commission=to_decimal(row.get("commission")),
                     sec_fee=None,
                     taf=None,
@@ -391,7 +407,7 @@ class CurrentEngineAdapter:
                 )
             )
 
-        orders = self._orders(pm, holder.submitted, ids)
+        orders = self._orders(pm, holder.executed, ids)
 
         by_stamp = {_utc(point["timestamp"]): to_decimal(point["equity"]) for point in curve}
         equity = []
@@ -421,10 +437,15 @@ class CurrentEngineAdapter:
             avg_cost_path=avg_path,
         )
 
-    def _orders(self, pm, submitted: List[Tuple[pd.Timestamp, OrderIntent]], ids) -> List[OrderFinal]:
+    def _orders(self, pm, executed: List[Tuple[pd.Timestamp, str, str, str]], ids) -> List[OrderFinal]:
+        """``executed``: ``(timestamp, symbol, action side, reason)`` for every
+        buy/sell action handed to ``execute_actions``, in order."""
         named = {self._intent_id(e.get("strategy_reason", ""), ids) for e in pm.order_events}
         claimed = set()
         out: List[OrderFinal] = []
+
+        def trading_day(stamp):
+            return _utc(stamp).tz_convert(NEW_YORK).date()
 
         def emit(order_id: str, event: dict) -> None:
             status, reason = _map_status(event)
@@ -434,20 +455,23 @@ class CurrentEngineAdapter:
         for event in pm.order_events:
             order_id = self._intent_id(event.get("strategy_reason", ""), ids)
             emit(order_id or event.get("strategy_reason", ""), event)
-            day = _utc(event["timestamp"]).tz_convert(NEW_YORK).date()
+            day = trading_day(event["timestamp"])
             side = str(event["side"]).lower()
             for _ in range(int(event.get("repeat_count", 1)) - 1):
-                # A collapsed repeat: the next submitted intent with the same
-                # symbol, side and trading day that has no event of its own.
-                for ts, intent in submitted:
+                # A collapsed repeat: the next executed action with the
+                # collapse key's symbol, side and trading day whose intent has
+                # no event of its own.
+                for ts, symbol, action_side, reason in executed:
+                    intent_id = self._intent_id(reason, ids)
                     if (
-                        intent.symbol == event["symbol"]
-                        and intent.side == side
-                        and ts.tz_convert(NEW_YORK).date() == day
-                        and intent.id not in claimed
-                        and intent.id not in named
+                        intent_id is not None
+                        and symbol == event["symbol"]
+                        and action_side == side
+                        and trading_day(ts) == day
+                        and intent_id not in claimed
+                        and intent_id not in named
                     ):
-                        emit(intent.id, event)
+                        emit(intent_id, event)
                         break
         return out
 
