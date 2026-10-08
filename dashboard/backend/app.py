@@ -266,10 +266,12 @@ async def startup_event():
             print(f"⚠️ bar cache: sweep error: {e}")
         try:
             from dashboard.backend.infrastructure.market_data.bar_cache_warm import (
-                warm_bar_cache,
+                warm_bar_cache_each_week,
             )
 
-            warm_bar_cache()
+            # Blocks for the life of the process when armed (re-warming as
+            # the modal's default week rolls); returns at once when not.
+            warm_bar_cache_each_week()
         except Exception as e:  # noqa: BLE001 - a cold cache is the status quo
             # "bar cache warm:", lowercase, like every other line this
             # feature prints: the live-call detector greps that exact string
