@@ -138,8 +138,9 @@ def test_market_close_and_anomalous_gap_do_not_change_five_minute_frequency():
     result = run_helper(
         "(() => { const chart = {...fixture.chart, timestamps: ["
         "'2026-05-04T14:30:00Z', '2026-05-04T14:31:00Z', "
-        "'2026-05-04T14:35:00Z', '2026-05-05T14:30:00Z', "
-        "'2026-05-05T14:35:00Z']}; "
+        "'2026-05-04T14:35:00Z', '2026-05-04T14:40:00Z', "
+        "'2026-05-05T14:30:00Z', '2026-05-05T14:35:00Z', "
+        "'2026-05-05T14:40:00Z']}; "
         "return {hourly: BacktestComparison.buildModel(fixture.chart, fixture.run)"
         ".columns[0].metrics.sharpe, "
         "five: BacktestComparison.buildModel(chart, fixture.run)"
