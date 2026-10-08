@@ -318,4 +318,5 @@ class Adapter(Protocol):
 
     name: str
 
-    def run(self, case: Case) -> Expected: ...
+    def run(self, case: Case) -> Expected:
+        """Run ``case`` end to end and return the engine's result."""

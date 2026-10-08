@@ -100,6 +100,7 @@ def _assert_outcome(case, prediction, adapter, path):
         if prediction.verdict != NOT_EXPRESSIBLE:
             pytest.fail(f"{case.id}: predicted {prediction.verdict}, adapter refused it: {exc}")
         pytest.skip(f"N/E -- {prediction.note} (adapter: {exc})")
+        return  # pytest.skip raises; the return keeps `actual` visibly bound below
     if prediction.verdict == NOT_EXPRESSIBLE:
         pytest.fail(f"{case.id}: predicted N/E ({prediction.note}), but the adapter ran it")
 
