@@ -5,7 +5,7 @@
   const SURFACE = 'traces';
   const state = {
     traceId: null, trace: null, events: [], nextSequence: 0,
-    pollTimer: null, stale: false, listItems: [], listHasMore: false, listNextCursor: 0,
+    pollTimer: null, stale: false, context: {}, listItems: [], listHasMore: false, listNextCursor: 0,
   };
 
   function shell() {
@@ -133,12 +133,12 @@
     return section;
   }
 
-  function renderTraceDetail(trace, events) {
+  function renderTraceDetail(trace, events, context = {}) {
     const section = node('section', 'trace-detail-panel');
     const breadcrumb = node('nav', 'breadcrumb');
     breadcrumb.setAttribute('aria-label', 'Breadcrumb');
-    const back = node('a', '', 'Agent traces');
-    back.setAttribute('href', '#traces');
+    const back = node('a', '', context.user_id ? 'Back to user analytics' : 'Agent traces');
+    back.setAttribute('href', context.user_id ? `#users/${encodeURIComponent(String(context.user_id))}` : '#traces');
     breadcrumb.append(back, node('span', '', '/'), node('span', '', value(trace?.trace_id)));
     section.appendChild(breadcrumb);
     const head = node('div', 'page-head');
@@ -228,7 +228,7 @@
     return shell().request(`/api/admin/traces/${encodeURIComponent(traceId)}`);
   }
 
-  async function loadDetail(traceId) {
+  async function loadDetail(traceId, context = {}) {
     stopPolling();
     const seq = shell().nextSeq(SURFACE);
     try {
@@ -238,6 +238,7 @@
       if (terminal) trace = await refreshTraceEnvelope(traceId);
       if (!shell().isCurrent(SURFACE, seq)) return;
       state.traceId = traceId;
+      state.context = { ...context };
       state.trace = trace;
       state.events = events;
       state.nextSequence = state.events.length ? state.events[state.events.length - 1].sequence_no : 0;
@@ -245,7 +246,7 @@
       const host = element('tracesView');
       if (!host) return;
       shell().clear(host);
-      host.appendChild(renderTraceDetail(trace, state.events));
+      host.appendChild(renderTraceDetail(trace, state.events, context));
       if (trace.status === 'running') startPolling();
     } catch (error) {
       if (await shell().handleAccessLost(error)) return;
@@ -275,7 +276,7 @@
         const host = element('tracesView');
         if (host && state.trace) {
           shell().clear(host);
-          host.appendChild(renderTraceDetail(state.trace, state.events));
+          host.appendChild(renderTraceDetail(state.trace, state.events, state.context));
         }
       }
       state.stale = false;
@@ -296,7 +297,7 @@
 
   function onRoute(event) {
     if (event.detail.route !== SURFACE) return;
-    if (event.detail.id) loadDetail(event.detail.id);
+    if (event.detail.id) loadDetail(event.detail.id, event.detail.query || {});
     else loadList();
   }
 
