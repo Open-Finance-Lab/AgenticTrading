@@ -59,7 +59,7 @@
       const time = Date.parse(decision.payload?.decision_at);
       const equity = decision.payload?.state?.equity;
       const label = e.payload.fills.map(f => `${f.side} ${f.symbol}`).join(', ');
-      const jump = target => { const n = document.getElementById(`trace-event-${target.sequence_no}`); n?.scrollIntoView?.({block: 'center', behavior: 'smooth'}); n?.focus?.({preventScroll: true}); };
+      const jump = target => window.AdminTraceTimeline?.reveal(target.sequence_no);
       if (Number.isFinite(time) && typeof equity === 'number' && Number.isFinite(equity) && time >= points[0].time && time <= points.at(-1).time) {
         // A marker indicates the decision snapshot, not equity at fill time.
         const marker = shape('circle', { cx: x(time), cy: Math.max(30, Math.min(210, y(equity))), r: 5, fill: '#fbbf24', tabindex: 0, role: 'button', 'aria-label': `Decision: ${label}` });

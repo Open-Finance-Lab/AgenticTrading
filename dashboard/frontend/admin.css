@@ -499,3 +499,5 @@ dialog::backdrop{background:rgba(0,0,0,.64)}
 .credits-chart-swatch.credits-chart-purchased{background:var(--green)}
 
 .trace-performance{margin:24px 0;padding:20px;border:1px solid #334155;border-radius:8px}.trace-performance svg{width:100%;display:block;max-height:360px}.trace-performance-notice{color:#fbbf24}.trace-performance-links{display:flex;flex-wrap:wrap;gap:8px;max-height:180px;overflow:auto}.trace-event:focus{outline:2px solid #38bdf8}
+
+.trace-group{border:1px solid #334155;border-radius:8px;margin:12px 0}.trace-group-summary{padding:16px;cursor:pointer}.trace-group-summary span{display:block;margin-top:6px}.trace-event-group{list-style:none}.trace-group .trace-event{margin:8px 16px}.trace-technical summary,.trace-run-overview summary{cursor:pointer;padding:12px 0}.trace-downloads{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin:20px 0}.trace-reason{border-left:2px solid #38bdf8;padding-left:12px}

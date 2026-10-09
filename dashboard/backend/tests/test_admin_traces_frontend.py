@@ -12,6 +12,7 @@ def _eval(expression: str) -> object:
     return run_node(
         SHELL,
         source("admin-trace-performance.js"),
+        source("admin-trace-timeline.js"),
         TRACES,
         f"Promise.resolve({expression}).then((result) => console.log(JSON.stringify(result)));",
     )
@@ -43,9 +44,9 @@ def test_timeline_keeps_order_and_serializes_payload_as_text():
         "  return {events: node.children.map((item) => item.textContent), pre: byTag(node, 'pre').map((item) => item.textContent)};"
         "})()"
     )
-    assert result["events"][0].startswith("#1Run Started")
+    assert "#1 Run Started" in result["events"][0]
     assert "<safe>" in result["pre"][0]
-    assert result["events"][1].startswith("#2Decision Recorded")
+    assert "#2 Decision Recorded" in result["events"][1]
 
 
 def test_empty_trace_states_are_explicit():
@@ -66,3 +67,13 @@ def test_failed_performance_renders_partial_and_links_by_decision_id():
     assert 'Snapshot change: -10.00%' in result['text']
     assert result['circles'] == 1
     assert result['buttons'][1] == 'Execution'
+
+
+def test_groups_only_by_explicit_links_and_keeps_event_order():
+    result = _eval("window.AdminTraceTimeline.groupEvents([{sequence_no:1,event_type:'data_retrieval',step_id:'s'},{sequence_no:2,event_type:'decision_recorded',step_id:'s',decision_id:'d'},{sequence_no:3,event_type:'execution_result',decision_id:'d'},{sequence_no:4,event_type:'run_failed'}]).map(g=>g.events.map(e=>e.sequence_no))")
+    assert result == [[1, 2, 3], [4]]
+
+
+def test_failure_opens_by_default_and_explicit_collapse_is_preserved():
+    result = _eval("(() => {const events=[{sequence_no:1,event_type:'run_failed',payload:{error_code:'timeout'}}];return [window.AdminTraceTimeline.render(events).children[0].children[0].open,window.AdminTraceTimeline.render(events,{'event:1':false}).children[0].children[0].open];})()")
+    assert result == [True, False]

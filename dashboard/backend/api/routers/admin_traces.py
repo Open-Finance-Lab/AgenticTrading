@@ -117,3 +117,44 @@ def get_trace_performance(trace_id: str):
         "points": points, "point_count": count, "sampled": count > 1000,
         "metrics": metrics, "partial": trace.get("status") != "completed",
     }
+
+
+@router.get("/{trace_id}/export")
+def export_trace(trace_id: str, format: str = Query(default="json", pattern="^(json|markdown)$")):
+    from fastapi.responses import StreamingResponse
+    from starlette.background import BackgroundTask
+    from dashboard.backend.domain.traces.export import build_export
+
+    trace = trace_store.get_trace(trace_id)
+    if trace is None:
+        raise HTTPException(status_code=404, detail="Trace not found")
+    file = build_export(trace_store, _public_trace(trace), format)
+    def chunks():
+        try:
+            while chunk := file.read(65536):
+                yield chunk
+        finally:
+            file.close()
+    extension = 'json' if format == 'json' else 'md'
+    return StreamingResponse(chunks(), media_type='application/json' if format == 'json' else 'text/markdown',
+                             headers={'Content-Disposition': f'attachment; filename="agent-trace.{extension}"', 'Cache-Control': 'no-store'},
+                             background=BackgroundTask(file.close))
+
+
+@router.get("/{trace_id}/backtest")
+def get_trace_backtest(trace_id: str):
+    """Administrator view across owners, resolved only by the trace's run ID."""
+    from dashboard.backend.database import db
+    from dashboard.backend.domain.traces.export import redact
+    trace = trace_store.get_trace(trace_id)
+    if trace is None:
+        raise HTTPException(status_code=404, detail="Trace not found")
+    run = db.get_run(trace.get('run_id')) if trace.get('run_id') else None
+    if run is None:
+        return {'available': False, 'run_id': trace.get('run_id')}
+    fields = ('run_id', 'agent_name', 'model_name', 'mode', 'start_date', 'end_date',
+              'initial_equity', 'final_equity', 'total_return', 'max_drawdown', 'sharpe_ratio',
+              'num_trades', 'llm_calls', 'llm_decisions', 'input_tokens', 'output_tokens', 'est_cost_usd')
+    return {'available': True, 'run_id': trace['run_id'],
+            'run': {key: run.get(key) for key in fields},
+            'configuration': redact(run.get('metadata') or {})}
