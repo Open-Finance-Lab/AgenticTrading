@@ -4,7 +4,7 @@ import pytest
 def test_build_trace_store_defaults_to_sqlite(monkeypatch, capsys):
     import dashboard.backend.domain.traces.repository as repo_module
 
-    monkeypatch.delenv("CONTENT_DATABASE_URL", raising=False)
+    monkeypatch.delenv("AGENT_RUNS_DATABASE_URL", raising=False)
     store = repo_module._build_trace_store()
 
     assert isinstance(store, repo_module.TraceStore)
@@ -22,13 +22,30 @@ def test_build_trace_store_picks_postgres_without_exposing_url(monkeypatch, caps
             created["database_url"] = database_url
 
     monkeypatch.setattr(repo_pg_module, "PostgresTraceStore", FakePostgresTraceStore)
-    monkeypatch.setenv("CONTENT_DATABASE_URL", "postgresql://user:secret@host/db")
+    monkeypatch.setenv("AGENT_RUNS_DATABASE_URL", "postgresql://user:secret@host/db")
 
     store = repo_module._build_trace_store()
 
     assert isinstance(store, FakePostgresTraceStore)
     assert created["database_url"].endswith("/db")
-    assert "secret" not in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "secret" not in out
+    assert "trace_store backend: postgres (host/db)" in out
+
+
+def test_build_trace_store_ignores_the_content_database(monkeypatch, capsys):
+    """Traces are run data: the decision tape writes a pair per bar of every
+    dashboard backtest. They live with run history (AGENT_RUNS_DATABASE_URL),
+    never in the auth-critical users/content database, and never fall back
+    to it."""
+    import dashboard.backend.domain.traces.repository as repo_module
+
+    monkeypatch.delenv("AGENT_RUNS_DATABASE_URL", raising=False)
+    monkeypatch.setenv("CONTENT_DATABASE_URL", "postgresql://user:secret@content/db")
+    store = repo_module._build_trace_store()
+
+    assert isinstance(store, repo_module.TraceStore)
+    assert "trace_store backend: sqlite" in capsys.readouterr().out
 
 
 @pytest.mark.skipif(
@@ -61,3 +78,12 @@ def test_trace_postgres_round_trip():
         payload={"changed": True},
         idempotency_key="start:pg",
     ) == first
+    batch = [
+        {"event_type": "decision_recorded", "actor_type": "agent", "payload": {"i": i},
+         "idempotency_key": f"batch:pg:{i}"}
+        for i in range(3)
+    ]
+    assert store.append_events(trace_id=trace_id, events=batch) == 3
+    assert store.append_events(trace_id=trace_id, events=batch) == 0
+    sequences = [e["sequence_no"] for e in store.list_events(trace_id)["items"]]
+    assert sequences == [1, 2, 3, 4]
