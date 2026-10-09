@@ -172,6 +172,31 @@ def test_rejections_since_reports_a_collapsed_repeat():
     assert tape.rejections_since(events, snapshot)[0]["reason"] == "insufficient_cash"
 
 
+def test_rejections_since_truncates_reasoning_text():
+    """``strategy_reason`` embeds the action's ``reason`` -- the model's whole
+    reasoning -- so it is cut like any other reasoning field."""
+    events = [{"symbol": "AAPL", "side": "BUY", "status": "rejected",
+               "reason": "x" * 5000, "strategy_reason": "y" * 5000}]
+    rejected = tape.rejections_since(events, [])
+    assert len(rejected[0]["reason"]) == tape.MAX_REASONING_CHARS
+    assert len(rejected[0]["strategy_reason"]) == tape.MAX_REASONING_CHARS
+
+
+def test_bound_payload_sheds_rejection_text_before_dropping_the_bar():
+    events = [{"symbol": f"S{i}", "side": "BUY", "status": "rejected", "requested_shares": 1,
+               "reason": "r" * 500, "strategy_reason": "s" * 500} for i in range(80)]
+    payload = tape.build_execution_payload(
+        bar_index=0, fill=SimpleNamespace(bar="t", price_field="open", filled_at="t"),
+        fills=[], rejected=tape.rejections_since(events, []),
+    )
+    assert _size(payload) > tape.MAX_PAYLOAD_BYTES
+    bounded = tape.bound_payload(payload)
+    assert bounded is not None and _size(bounded) <= tape.MAX_PAYLOAD_BYTES
+    assert [r["symbol"] for r in bounded["rejected"]] == [f"S{i}" for i in range(80)]
+    assert "reason" not in bounded["rejected"][0] and "strategy_reason" not in bounded["rejected"][0]
+    assert bounded["rejected"][0]["status"] == "rejected"
+
+
 def test_fills_since_slices_and_allow_lists():
     trades = [
         {"timestamp": pd.Timestamp("2026-03-02 10:30"), "symbol": "AAPL", "side": "BUY", "shares": 5, "price": 10.0, "cost": 50.0},
@@ -493,6 +518,38 @@ def test_lifecycle_writes_nothing_on_system_exit(monkeypatch):
     with pytest.raises(SystemExit):
         with tape.trace_lifecycle("agent_x", summary=lambda: {}):
             raise SystemExit(143)
+
+
+def test_lifecycle_writes_nothing_when_cleanup_replaces_a_system_exit(monkeypatch):
+    """The launch script's ``finally`` re-raises a ``finalize_run`` error while
+    the SIGTERM exit unwinds through it: the exit is still the cause, so the
+    child must not stamp ``run_failed`` over the parent's cancel/timeout label."""
+    monkeypatch.setattr(trace_service, "finish_trace_best_effort",
+                        lambda *a, **k: pytest.fail("the parent labels a SIGTERM exit"))
+
+    class _CleanupFailed(Exception):
+        pass
+
+    with pytest.raises(_CleanupFailed):
+        with tape.trace_lifecycle("agent_x", summary=lambda: {}):
+            try:
+                raise SystemExit(143)
+            finally:
+                try:
+                    raise _CleanupFailed("finalize_run")
+                except _CleanupFailed:
+                    raise  # nested once more: the exit is two links up the chain
+
+
+def test_lifecycle_still_fails_an_exception_handled_without_a_system_exit(monkeypatch):
+    calls = _capture_finish(monkeypatch)
+    with pytest.raises(RuntimeError):
+        with tape.trace_lifecycle("agent_x", summary=lambda: {}):
+            try:
+                raise ValueError("inner")
+            except ValueError:
+                raise RuntimeError("outer")
+    assert calls == [("agent_x", {"error_code": "run_failed"})]
 
 
 def test_lifecycle_without_run_id_touches_no_trace(monkeypatch):

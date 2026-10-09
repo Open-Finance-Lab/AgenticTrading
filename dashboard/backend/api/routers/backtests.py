@@ -1253,10 +1253,11 @@ TRACE_LABEL_DEADLINE_SECONDS = 10
 def _label_trace(run_id: Optional[str], error_code: str) -> None:
     """Label a trace the child left ``running``. No-op on a closed trace.
 
-    Called exactly once, as the LAST statement of the worker's ``finally`` --
-    after ``finalize_run`` has released reservations and ``_finalize_slot`` has
-    freed the slot. ``fail_trace_if_running`` makes up to four pooled checkouts
-    on the trace store with no statement timeout, so it runs on a daemon thread
+    Called exactly once, from the inner ``finally`` that closes the worker's
+    ``finally`` -- after ``finalize_run`` has released reservations and
+    ``_finalize_slot`` has freed the slot, and even when one of those raised.
+    ``fail_trace_if_running`` makes up to four pooled checkouts on the trace
+    store with no statement timeout, so it runs on a daemon thread
     joined with ``TRACE_LABEL_DEADLINE_SECONDS`` (the ``sum_run_llm_spend``
     pattern): a resuming Neon instance or a lock wait costs at most the
     deadline and one abandoned thread, never a stranded slot or reservation.
@@ -1994,7 +1995,11 @@ def run_backtest_background(
                 f"Backtest failed with return code {result.returncode}. {summary}"
             )
             print(f"❌ Backtest failed (returncode={result.returncode})", flush=True)
-            trace_label = "run_failed"
+            # A negative return code is a signal death, and the parent's own
+            # signals were claimed above (cancel) or raise TimeoutExpired
+            # (timeout): this one came from elsewhere -- a cgroup OOM SIGKILL
+            # is the likely sender -- so the child was killed, not failed.
+            trace_label = "run_killed" if result.returncode < 0 else "run_failed"
         else:
             runs = db.get_runs_by_mode("backtest")
             slot_runs_count = len(runs)
@@ -2135,76 +2140,81 @@ def run_backtest_background(
             _finalize_slot(resolved_live_run_id, error=summary, runs_count=0)
             resolved_live_run_id = None
     finally:
-        if execution_handoff_payload and execution_run_id:
-            try:
-                # The child normally finalizes itself. Repeating this from the
-                # parent also clears reservations when the subprocess is killed
-                # by timeout or exits before its own finally block runs.
-                # `finalize_run` tests `billing_mode is BillingMode.BYOK`, so
-                # the lane must arrive as the enum -- the string this thread
-                # carries would miss that identity check silently and send a
-                # BYOK run into the release path the docstring says it skips.
-                # Matched rather than constructed so an unrecognised value
-                # degrades to None (the pre-existing one-argument behaviour)
-                # instead of raising ValueError out of a `finally`.
-                lane = next(
-                    (mode for mode in BillingMode if mode.value == billing_mode),
-                    None,
-                )
-                LLMExecutionService(
-                    providers=get_model_provider_service(),
-                    credits=credits_service,
-                ).finalize_run(execution_run_id, billing_mode=lane)
-            except LLMExecutionError as exc:
-                print(
-                    f"❌ LLM execution cleanup failed: {exc.safe_message}",
-                    flush=True,
-                )
-        if resolved_live_run_id:
-            _finalize_slot(resolved_live_run_id, error=None, runs_count=0)
-        elif not live_run_id:
-            # No slot was ever registered (a caller that minted no run id), so
-            # _finalize_slot never ran and the legacy mirror is the only record
-            # of this run. Clear it, or the single-flight fallback stays wedged
-            # at running=True for the life of the process.
-            backtest_status["running"] = False
-            backtest_status["started_at"] = None
-            backtest_status["live_run_id"] = None
-            backtest_status["progress_file"] = None
-        if progress_file:
-            try:
-                Path(progress_file).unlink(missing_ok=True)
-            except OSError:
-                pass
-        if strategy_prompt_path:
-            try:
-                os.remove(strategy_prompt_path)
-            except OSError:
-                pass
-        if pipeline_path:
-            try:
-                os.remove(pipeline_path)
-            except OSError:
-                pass
-        if runtime_config_path:
-            try:
-                os.remove(runtime_config_path)
-            except OSError:
-                # Best-effort cleanup of a temp file the run no longer needs;
-                # the OS reclaims it regardless, and failing here would mask
-                # the backtest's own outcome.
-                pass
-        if universe_selection_path:
-            try:
-                os.remove(universe_selection_path)
-            except OSError:
-                # This is best-effort cleanup after the worker has finished;
-                # failing here must not replace the backtest's own outcome.
-                pass
-        # Last, after every slot and reservation finalization above: the tape
-        # is observational and must not delay either. Bounded by a deadline.
-        _label_trace(trace_run_id, trace_label or "run_killed")
-        print("✋ Backtest background thread finished", flush=True)
+        try:
+            if execution_handoff_payload and execution_run_id:
+                try:
+                    # The child normally finalizes itself. Repeating this from the
+                    # parent also clears reservations when the subprocess is killed
+                    # by timeout or exits before its own finally block runs.
+                    # `finalize_run` tests `billing_mode is BillingMode.BYOK`, so
+                    # the lane must arrive as the enum -- the string this thread
+                    # carries would miss that identity check silently and send a
+                    # BYOK run into the release path the docstring says it skips.
+                    # Matched rather than constructed so an unrecognised value
+                    # degrades to None (the pre-existing one-argument behaviour)
+                    # instead of raising ValueError out of a `finally`.
+                    lane = next(
+                        (mode for mode in BillingMode if mode.value == billing_mode),
+                        None,
+                    )
+                    LLMExecutionService(
+                        providers=get_model_provider_service(),
+                        credits=credits_service,
+                    ).finalize_run(execution_run_id, billing_mode=lane)
+                except LLMExecutionError as exc:
+                    print(
+                        f"❌ LLM execution cleanup failed: {exc.safe_message}",
+                        flush=True,
+                    )
+            if resolved_live_run_id:
+                _finalize_slot(resolved_live_run_id, error=None, runs_count=0)
+            elif not live_run_id:
+                # No slot was ever registered (a caller that minted no run id), so
+                # _finalize_slot never ran and the legacy mirror is the only record
+                # of this run. Clear it, or the single-flight fallback stays wedged
+                # at running=True for the life of the process.
+                backtest_status["running"] = False
+                backtest_status["started_at"] = None
+                backtest_status["live_run_id"] = None
+                backtest_status["progress_file"] = None
+            if progress_file:
+                try:
+                    Path(progress_file).unlink(missing_ok=True)
+                except OSError:
+                    pass
+            if strategy_prompt_path:
+                try:
+                    os.remove(strategy_prompt_path)
+                except OSError:
+                    pass
+            if pipeline_path:
+                try:
+                    os.remove(pipeline_path)
+                except OSError:
+                    pass
+            if runtime_config_path:
+                try:
+                    os.remove(runtime_config_path)
+                except OSError:
+                    # Best-effort cleanup of a temp file the run no longer needs;
+                    # the OS reclaims it regardless, and failing here would mask
+                    # the backtest's own outcome.
+                    pass
+            if universe_selection_path:
+                try:
+                    os.remove(universe_selection_path)
+                except OSError:
+                    # This is best-effort cleanup after the worker has finished;
+                    # failing here must not replace the backtest's own outcome.
+                    pass
+        finally:
+            # Last, after every slot and reservation finalization above: the
+            # tape is observational and must not delay either. Bounded by a
+            # deadline. In its own ``finally`` so a cleanup statement above
+            # that raises (``finalize_run`` with a non-LLMExecutionError,
+            # ``_finalize_slot``) cannot leave the trace ``running`` forever.
+            _label_trace(trace_run_id, trace_label or "run_killed")
+            print("✋ Backtest background thread finished", flush=True)
 
 
 # The dashboard pipeline parent has a bounded 60-minute wall-clock budget. A

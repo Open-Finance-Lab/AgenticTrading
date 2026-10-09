@@ -275,10 +275,17 @@ _TAPE_EVENT_KINDS = {"decision_recorded": "decision", "execution_result": "execu
 
 
 def load_decision_tape(run_id: str) -> List[Dict[str, Any]]:
-    """The run's tape as ordered ``{bar_index, decision, execution}`` pairs.
+    """The run's tape as ordered ``{bar_index, decision, execution, complete}``
+    pairs.
 
     Only events carrying ``tape_version`` count, so v2 decision events on the
     same vocabulary are never mistaken for tape bars.
+
+    ``complete`` is True only when the bar has both halves. A bar whose
+    ``execution_result`` append failed, or whose child was SIGTERMed between
+    the two appends, comes back with its ``decision`` alone and
+    ``complete: False`` -- a replay harness must not read the missing fills
+    as "nothing filled".
     """
     trace = trace_for_run(run_id)
     if trace is None:
@@ -297,7 +304,10 @@ def load_decision_tape(run_id: str) -> List[Dict[str, Any]]:
         if not page["has_more"]:
             break
         after = page["next_sequence_no"] - 1
-    return [bars[index] for index in sorted(bars)]
+    return [
+        {**bars[index], "complete": "decision" in bars[index] and "execution" in bars[index]}
+        for index in sorted(bars)
+    ]
 
 
 def finish_trace_best_effort(

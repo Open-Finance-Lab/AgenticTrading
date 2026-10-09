@@ -212,8 +212,10 @@ Ids and keys, matching `/api/v2`: `step_id = f"step_{run_id}_{i}"`,
 `decision:{run_id}:{step_id}:tape` / `execution:{run_id}:{step_id}:tape`.
 
 Add `load_decision_tape(run_id)` → the ordered list of
-`{bar_index, decision, execution}` pairs read back from the trace — the reader
-the replay harness will use. Each `decision` carries the whole payload, so a
+`{bar_index, decision, execution, complete}` pairs read back from the trace — the reader
+the replay harness will use. `complete` is false on a bar missing a half (its
+`execution_result` append failed, or SIGTERM landed between the two appends),
+so missing fills are never read as "nothing filled". Each `decision` carries the whole payload, so a
 harness reads `intent` (the replay unit) and `state` (to re-seed or to diff
 one-bar deltas) as readily as `actions`; a loader that surfaced only `actions`
 would quietly make the current engine's answer the replay unit again.
@@ -252,13 +254,21 @@ child already closed, so a completed trace is never re-marked:
 | Arm | `error_code` | Meaning |
 |---|---|---|
 | `returncode == 0` success branch | `trace_close_failed` | The run finished; the child's own `complete_trace` did not land (a Neon blip). Distinct from a kill on purpose. |
-| `returncode != 0` branch | `run_failed` | The child died on an exception it could not record (or recorded, in which case this is a no-op). |
+| `returncode > 0` branch | `run_failed` | The child died on an exception it could not record (or recorded, in which case this is a no-op). |
+| `returncode < 0` branch | `run_killed` | A signal death the parent did not send (its cancel and timeout are claimed by their own arms) — a cgroup OOM SIGKILL is the likely sender. |
 | `_BacktestCancelled` arm | `run_cancelled` | The user's cancel. |
 | `TimeoutExpired` arm | `run_timed_out` | Matches `/backtest/status`'s `timed_out`. |
-| outer `finally` | `run_killed` | Reached none of the above: SIGKILL, parent exception. |
+| outer `finally` | `run_killed` | Reached none of the above: a parent exception. |
 
 A tape consumer reads the terminal code as its completeness marker, which is
-why the five are kept distinct rather than collapsed to "not completed".
+why the five codes are kept distinct rather than collapsed to "not completed".
+The label is written in an inner `finally` that closes the worker's `finally`,
+so it still lands after slot/reservation cleanup when one of those raises.
+
+On `SystemExit` "writes nothing" includes an exception a cleanup `finally`
+raised while that exit was unwinding (a `SystemExit` on its `__context__`
+chain): `finalize_run` failing during the SIGTERM unwind must not stamp
+`run_failed` over the parent's cancel/timeout label.
 
 ## Error handling
 
@@ -302,7 +312,8 @@ with a broken trace store behaves exactly like today plus one log line.
   `.clear()`/`.extend()` refactor in the manager would silently null `intent`
   on every bar while every tape unit test stayed green. The failing test must
   be the one that names the invariant.
-- Parent: each of the five arms writes its own label; a completed trace is
+- Parent: each arm (including a signal death the parent did not send, and a
+  cleanup statement that raises) writes its own label; a completed trace is
   untouched by all of them.
 - The conformance suite (#623) and the existing trace tests stay green.
 

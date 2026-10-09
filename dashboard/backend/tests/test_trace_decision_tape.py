@@ -58,6 +58,29 @@ def test_load_decision_tape_pairs_bars_in_order_across_pages(store):
     assert [bar["bar_index"] for bar in tape] == list(range(60))
     assert tape[7]["decision"]["actions"][0]["shares"] == 7
     assert tape[7]["execution"]["bar_index"] == 7
+    assert all(bar["complete"] is True for bar in tape)
+
+
+def test_load_decision_tape_marks_a_bar_missing_its_execution_half(store, monkeypatch):
+    trace_id = _trace(store)
+    decision, execution = _pair(0)
+    service.record_tape_bar(trace_id=trace_id, run_id=RUN, bar_index=0,
+                            decision_payload=decision, execution_payload=execution)
+    real_append = store.append_event
+
+    def fail_execution(**kwargs):
+        if kwargs["event_type"] == "execution_result":
+            raise RuntimeError("store down between the two appends")
+        return real_append(**kwargs)
+
+    monkeypatch.setattr(store, "append_event", fail_execution)
+    decision, execution = _pair(1)
+    with pytest.raises(RuntimeError):
+        service.record_tape_bar(trace_id=trace_id, run_id=RUN, bar_index=1,
+                                decision_payload=decision, execution_payload=execution)
+    tape = service.load_decision_tape(RUN)
+    assert [bar["complete"] for bar in tape] == [True, False]
+    assert "execution" not in tape[1] and tape[1]["decision"]["bar_index"] == 1
 
 
 def test_load_decision_tape_is_empty_without_a_trace(store):

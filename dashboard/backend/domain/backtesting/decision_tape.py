@@ -51,6 +51,9 @@ _REJECTION_FIELDS = (
     "timestamp", "symbol", "side", "requested_shares", "executed_shares",
     "unfilled_shares", "price", "status", "reason", "strategy_reason",
 )
+# Free text on a rejection: ``strategy_reason`` embeds the action's ``reason``,
+# which carries the model's reasoning, so it is cut like any other reasoning.
+_REJECTION_TEXT_FIELDS = ("reason", "strategy_reason")
 
 
 def jsonable(value: Any) -> Any:
@@ -210,6 +213,10 @@ def order_events_snapshot(order_events: Optional[Sequence[Mapping[str, Any]]]) -
     return [int(event.get("repeat_count", 1) or 1) for event in order_events or ()]
 
 
+def _rejection(event: Mapping[str, Any]) -> Dict[str, Any]:
+    return _pick(event, _REJECTION_FIELDS, text_fields=_REJECTION_TEXT_FIELDS)
+
+
 def rejections_since(
     order_events: Optional[Sequence[Mapping[str, Any]]], snapshot: Sequence[int]
 ) -> List[Dict[str, Any]]:
@@ -225,9 +232,9 @@ def rejections_since(
         if index < len(snapshot):
             grew = count - snapshot[index]
             if grew > 0:
-                rejected.append({**_pick(event, _REJECTION_FIELDS), "count": grew, "collapsed": True})
+                rejected.append({**_rejection(event), "count": grew, "collapsed": True})
         elif event.get("status") != "filled":
-            rejected.append({**_pick(event, _REJECTION_FIELDS), "count": count, "collapsed": False})
+            rejected.append({**_rejection(event), "count": count, "collapsed": False})
     return rejected
 
 
@@ -351,8 +358,9 @@ def _payload_size(payload: Mapping[str, Any]) -> int:
 
 def bound_payload(payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """Fit ``payload`` under ``MAX_PAYLOAD_BYTES`` by dropping reasoning text
-    first, then intent reasoning; orders are never dropped. ``None`` when the
-    orders alone do not fit.
+    first (action ``reason``s and rejection ``reason``/``strategy_reason``),
+    then intent reasoning; orders, fills and rejections themselves are never
+    dropped. ``None`` when they alone do not fit.
 
     Dropping a string ``reasoning`` keeps the replay exact (the gate reads an
     absent one as ``""`` and uses it only in ``reason`` text). A ``null`` one is
@@ -365,6 +373,9 @@ def bound_payload(payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         trimmed["reasoning_summaries"] = []
     for action in trimmed.get("actions") or []:
         action.pop("reason", None)
+    for rejection in trimmed.get("rejected") or []:
+        for field in _REJECTION_TEXT_FIELDS:
+            rejection.pop(field, None)
     if _payload_size(trimmed) <= MAX_PAYLOAD_BYTES:
         return trimmed
     intent = trimmed.get("intent")
@@ -525,6 +536,19 @@ class DecisionTapeRecorder:
         }
 
 
+def _unwinding_system_exit(exc: BaseException) -> bool:
+    """Whether ``exc`` was raised while a ``SystemExit`` was being handled --
+    a ``SystemExit`` anywhere on its ``__context__`` chain."""
+    seen = set()
+    current: Optional[BaseException] = exc.__context__
+    while current is not None and id(current) not in seen:
+        if isinstance(current, SystemExit):
+            return True
+        seen.add(id(current))
+        current = current.__context__
+    return False
+
+
 @contextmanager
 def trace_lifecycle(
     run_id: Optional[str],
@@ -539,7 +563,8 @@ def trace_lifecycle(
     dashboard's SIGTERM (``_exit_on_sigterm``), which the parent sends from
     two arms -- the user's cancel and the timeout's grace before SIGKILL --
     and only the parent knows which; it labels a trace left ``running`` by
-    the arm it is in (``api/routers/backtests.py``). Open the block before
+    the arm it is in (``api/routers/backtests.py``). An exception a cleanup
+    ``finally`` raised while that exit was unwinding counts as the exit. Open the block before
     ``HourlyBacktester(...)``: the trace is created in its constructor, so a
     ``load_data()`` failure outside the block would be labelled a kill.
     """
@@ -550,7 +575,13 @@ def trace_lifecycle(
         yield
     except SystemExit:
         raise
-    except BaseException:
+    except BaseException as exc:
+        if _unwinding_system_exit(exc):
+            # A cleanup ``finally`` raised while the SIGTERM SystemExit was
+            # unwinding through it (``finalize_run`` in the launch script):
+            # the new exception replaced the exit, but the exit is still the
+            # cause, so the parent still owns the label.
+            raise
         _trace_service().finish_trace_best_effort(run_id, error_code="run_failed")
         raise
     try:

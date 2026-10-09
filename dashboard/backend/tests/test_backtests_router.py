@@ -3168,8 +3168,9 @@ def test_parent_labels_a_timed_out_child_run_timed_out(monkeypatch):
     assert labelled == [(run_id, "run_timed_out")]
 
 
-def test_parent_labels_an_unclaimed_exit_run_killed(monkeypatch):
-    """No arm claimed the exit (a parent exception): the label is a kill."""
+def test_a_parent_exception_after_success_keeps_the_trace_close_failed_label(monkeypatch):
+    """A parent exception after the success branch claimed its label goes
+    through the generic arm, which records nothing over it."""
     run_id = "agent_trace_killed"
     monkeypatch.setattr(
         bt, "_maybe_writeback_adapted_pipeline",
@@ -3181,6 +3182,64 @@ def test_parent_labels_an_unclaimed_exit_run_killed(monkeypatch):
     # The success branch claimed trace_close_failed before the exception; the
     # recorded label survives the generic arm.
     assert labelled == [(run_id, "trace_close_failed")]
+
+
+def test_parent_labels_an_unclaimed_exit_run_killed(monkeypatch):
+    """No arm claimed the exit -- the parent raised before the child's outcome
+    was read -- so the finally's fallback labels the trace a kill."""
+    run_id = "agent_trace_unclaimed"
+
+    def _boom(*_a, **_k):
+        raise RuntimeError("parent died mid-wait")
+
+    monkeypatch.setattr(bt, "_run_backtest_subprocess", _boom)
+    labelled = _run_parent_with_child(monkeypatch, FakeChild(returncode=0), run_id=run_id)
+    assert labelled == [(run_id, "run_killed")]
+    assert run_id not in bt._active_slots
+
+
+def test_parent_labels_a_cancelled_child_run_cancelled(monkeypatch):
+    run_id = "agent_trace_cancelled"
+    monkeypatch.setattr(bt, "_backtest_cancel_requested", lambda rid: rid == run_id)
+    try:
+        labelled = _run_parent_with_child(
+            monkeypatch, FakeChild(returncode=-15, stdout="ok\n"), run_id=run_id,
+        )
+    finally:
+        # The cancel route finalizes the slot in production; this test
+        # bypassed it, so release the slot the arm deliberately left alone.
+        with bt._backtest_slots_lock:
+            bt._active_slots.pop(run_id, None)
+    assert labelled == [(run_id, "run_cancelled")]
+
+
+def test_parent_labels_a_signal_death_it_did_not_send_run_killed(monkeypatch):
+    """returncode -9 with no cancel and no timeout: a SIGKILL from elsewhere
+    (a cgroup OOM kill). The child was killed, not failed."""
+    run_id = "agent_trace_oom_killed"
+    labelled = _run_parent_with_child(monkeypatch, FakeChild(returncode=-9), run_id=run_id)
+    assert labelled == [(run_id, "run_killed")]
+
+
+def test_a_raising_cleanup_still_labels_the_trace(monkeypatch):
+    """A cleanup statement in the finally that raises must not skip the
+    label: it would leave the trace ``running`` forever."""
+    run_id = "agent_trace_cleanup_raises"
+    real = bt._finalize_slot
+
+    def _finalize_then_raise(*args, **kwargs):
+        real(*args, **kwargs)
+        raise RuntimeError("slot ledger write failed")
+
+    monkeypatch.setattr(bt, "_finalize_slot", _finalize_then_raise)
+    labelled = []
+    with pytest.raises(RuntimeError, match="slot ledger write failed"):
+        _run_parent_with_child(
+            monkeypatch, FakeChild(returncode=1, stderr="Traceback: boom\n"), run_id=run_id,
+            label_stub=lambda rid, code: labelled.append((rid, code)) or True,
+        )
+    assert labelled == [(run_id, "run_failed")]
+    assert run_id not in bt._active_slots
 
 
 def _record_slot_finalizes(monkeypatch, events):
