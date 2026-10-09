@@ -1,6 +1,6 @@
 # Backtest decision tape — design
 
-Date: 2026-10-08 · Status: approved in chat; amended 2026-10-08 after review
+Date: 2026-10-08 · Status: implemented; amended 2026-10-08 after review
 (intent is the replay unit, realism is scored by the conformance suite, the
 parent owns the trace's terminal label).
 Phase 1, item 3 of the backtest-engine rewrite (see the `backtest-engine-rewrite-mandate`
@@ -202,10 +202,11 @@ leaderboard refresh, a `python -c` probe).
 
 ### `domain/traces/service.py`
 
-Add best-effort `record_tape_decision(trace_id, ...)` /
-`record_tape_execution(trace_id, ...)` that take the cached `trace_id` and a
-prebuilt payload, keep the existing event types and the v2 id/key shapes, and
-never raise. The raising v2 functions are left as they are.
+`record_tape_bar(trace_id, ...)` writes the pair and raises;
+`DecisionTapeRecorder` is the one swallow-and-count layer.
+`finish_trace_best_effort` and `fail_trace_if_running` never raise. The pair
+keeps the existing event types and the v2 id/key shapes; the raising v2
+functions are left as they are.
 
 Ids and keys, matching `/api/v2`: `step_id = f"step_{run_id}_{i}"`,
 `decision_id = f"dec_{run_id}_{i}"`, idempotency keys
@@ -340,3 +341,12 @@ open items; a default week is ~70 events per run.
    engine passes groups F/L/T/CA, rerun the contest tapes through it and
    publish the gap. That number, not fidelity to the current engine, is what
    the rewrite is for.
+5. **Pin the intraday marking rule before comparing engines.** In intraday
+   mode the engine marks every source bar up to and including the current
+   `fill_plan.bar` *after* executing bar *i* (the `valuation_cursor` loop), so
+   a fill's slippage already shows on up to an hour of earlier curve points.
+   Found while localizing the perturbed-engine test; the harness's
+   `_decision_bar_at` maps a divergent curve point forward to the first
+   `fill_plan.bar` at or after it for that reason. A candidate engine that
+   marks causally will diverge from this one at every fill, so the comparison
+   must state which rule it scores.
