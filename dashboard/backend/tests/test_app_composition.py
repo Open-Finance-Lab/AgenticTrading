@@ -155,6 +155,7 @@ EXPECTED_FULL_CONTRACT = {
     ("GET", "/api/admin/traces"),
     ("GET", "/api/admin/traces/{trace_id}"),
     ("GET", "/api/admin/traces/{trace_id}/events"),
+    ("GET", "/api/admin/traces/{trace_id}/performance"),
     ("POST", "/api/admin/bootstrap"),
     ("POST", "/api/algo/chat"),
     ("GET", "/api/algo/defaults"),

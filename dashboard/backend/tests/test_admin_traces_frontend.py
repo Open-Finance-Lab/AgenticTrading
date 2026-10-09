@@ -11,6 +11,7 @@ TRACES = source("admin-traces.js")
 def _eval(expression: str) -> object:
     return run_node(
         SHELL,
+        source("admin-trace-performance.js"),
         TRACES,
         f"Promise.resolve({expression}).then((result) => console.log(JSON.stringify(result)));",
     )
@@ -50,3 +51,18 @@ def test_timeline_keeps_order_and_serializes_payload_as_text():
 def test_empty_trace_states_are_explicit():
     assert _eval("window.AdminTraces.renderTraceRows({items: []}).children[0].textContent") == "No traces yet."
     assert _eval("window.AdminTraces.renderEventTimeline([]).children[0].textContent") == "No events recorded yet."
+
+
+def test_performance_filters_invalid_snapshots_and_uses_market_time():
+    result = _eval("window.AdminTracePerformance.series([{event_type:'decision_recorded', occurred_at:'2026-10-09', payload:{decision_at:'2026-05-04T10:00:00Z',state:{equity:100}}}, {event_type:'decision_recorded',payload:{decision_at:'bad',state:{equity:99}}}], null)")
+    assert result['snapshots'] is True
+    assert len(result['points']) == 1
+    assert result['points'][0]['timestamp'] == '2026-05-04T10:00:00Z'
+
+
+def test_failed_performance_renders_partial_and_links_by_decision_id():
+    result = _eval("(() => { const n = window.AdminTracePerformance.render({status:'failed'}, [{sequence_no:1,event_type:'decision_recorded',decision_id:'d',payload:{decision_at:'2026-05-04T10:00:00Z',state:{equity:100}}},{sequence_no:2,event_type:'decision_recorded',payload:{decision_at:'2026-05-04T11:00:00Z',state:{equity:90}}},{sequence_no:3,event_type:'execution_result',decision_id:'d',payload:{fills:[{side:'BUY',symbol:'AAPL'}]}}],null); return {text:n.textContent, circles:byTag(n,'circle').length, buttons:byTag(n,'button').map(b=>b.textContent)}; })()")
+    assert 'Run failed' in result['text']
+    assert 'Snapshot change: -10.00%' in result['text']
+    assert result['circles'] == 1
+    assert result['buttons'][1] == 'Execution'

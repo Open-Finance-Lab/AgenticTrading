@@ -89,6 +89,8 @@
     }
     items.forEach((event) => {
       const item = node('li', 'trace-event');
+      item.setAttribute('id', `trace-event-${event.sequence_no}`);
+      item.setAttribute('tabindex', '-1');
       const heading = node('div', 'trace-event-head');
       heading.appendChild(node('span', 'trace-sequence', `#${value(event.sequence_no)}`));
       heading.appendChild(node('strong', '', shell().humanize(event.event_type)));
@@ -133,7 +135,7 @@
     return section;
   }
 
-  function renderTraceDetail(trace, events, context = {}) {
+  function renderTraceDetail(trace, events, context = {}, performance = null) {
     const section = node('section', 'trace-detail-panel');
     const breadcrumb = node('nav', 'breadcrumb');
     breadcrumb.setAttribute('aria-label', 'Breadcrumb');
@@ -159,6 +161,7 @@
       metrics.appendChild(metric);
     });
     section.appendChild(metrics);
+    if (window.AdminTracePerformance) section.appendChild(window.AdminTracePerformance.render(trace, events, performance));
     const title = node('h2', 'trace-section-title', 'Timeline');
     section.appendChild(title);
     section.appendChild(renderEventTimeline(events));
@@ -234,19 +237,21 @@
     try {
       let trace = await shell().request(`/api/admin/traces/${encodeURIComponent(traceId)}`);
       const events = await loadAllEvents(traceId);
+      const performance = await loadPerformance(traceId);
       const terminal = [...events].reverse().find((event) => ['run_completed', 'run_failed'].includes(event.event_type));
       if (terminal) trace = await refreshTraceEnvelope(traceId);
       if (!shell().isCurrent(SURFACE, seq)) return;
       state.traceId = traceId;
       state.context = { ...context };
       state.trace = trace;
+      state.performance = performance;
       state.events = events;
       state.nextSequence = state.events.length ? state.events[state.events.length - 1].sequence_no : 0;
       state.stale = false;
       const host = element('tracesView');
       if (!host) return;
       shell().clear(host);
-      host.appendChild(renderTraceDetail(trace, state.events, context));
+      host.appendChild(renderTraceDetail(trace, state.events, context, state.performance));
       if (trace.status === 'running') startPolling();
     } catch (error) {
       if (await shell().handleAccessLost(error)) return;
@@ -262,27 +267,37 @@
     }
   }
 
+  async function loadPerformance(traceId, previous = null) {
+    try { return await shell().request(`/api/admin/traces/${encodeURIComponent(traceId)}/performance`); }
+    catch (_error) { return { ...(previous || {}), unavailable: true }; }
+  }
+
   async function pollEvents() {
     if (!state.traceId || !state.trace || state.trace.status !== 'running') return;
+    const traceId = state.traceId;
+    const seq = shell().nextSeq(SURFACE);
     try {
-      const fresh = await loadAllEvents(state.traceId, state.nextSequence);
-      if (fresh.length) {
+      const fresh = await loadAllEvents(traceId, state.nextSequence);
+      const performance = await loadPerformance(traceId, state.performance);
+      const envelope = await refreshTraceEnvelope(traceId);
+      if (!shell().isCurrent(SURFACE, seq) || state.traceId !== traceId) return;
+      state.trace = envelope;
+      state.performance = performance;
+      {
         state.events = state.events.concat(fresh.filter((event) => event.sequence_no > state.nextSequence));
         state.nextSequence = state.events.length ? state.events[state.events.length - 1].sequence_no : state.nextSequence;
-        const terminal = [...state.events].reverse().find((event) => ['run_completed', 'run_failed'].includes(event.event_type));
-        if (terminal) {
-          state.trace = await refreshTraceEnvelope(state.traceId);
-        }
+
         const host = element('tracesView');
         if (host && state.trace) {
           shell().clear(host);
-          host.appendChild(renderTraceDetail(state.trace, state.events, state.context));
+          host.appendChild(renderTraceDetail(state.trace, state.events, state.context, state.performance));
         }
       }
       state.stale = false;
       if (state.trace.status === 'running') state.pollTimer = setTimeout(pollEvents, 3000);
     } catch (error) {
       if (await shell().handleAccessLost(error)) return;
+      if (!shell().isCurrent(SURFACE, seq) || state.traceId !== traceId) return;
       state.stale = true;
       const host = element('tracesView');
       if (host) renderStaleNotice(host, 'Showing recorded events; refresh failed.');
@@ -296,7 +311,12 @@
   }
 
   function onRoute(event) {
-    if (event.detail.route !== SURFACE) return;
+    if (event.detail.route !== SURFACE) {
+      stopPolling();
+      shell().nextSeq(SURFACE);
+      state.traceId = null;
+      return;
+    }
     if (event.detail.id) loadDetail(event.detail.id, event.detail.query || {});
     else loadList();
   }

@@ -27,7 +27,8 @@ EXPECTED_SCRIPTS = [
     "js/admin-providers.js?v=1",
     # The absorbed credits console (design N2/PR2).
     "js/admin-credits.js?v=4",
-    "js/admin-traces.js?v=1",
+    "js/admin-trace-performance.js?v=1",
+    "js/admin-traces.js?v=2",
 ]
 
 # This guard's whole job is "no inline script anywhere in this page", so a
@@ -92,7 +93,7 @@ def test_gate_module_loads_first_and_every_script_is_pinned():
 
 
 def test_stylesheet_is_admin_css_and_the_page_does_not_inherit_styles_css():
-    assert '<link rel="stylesheet" href="admin.css?v=11">' in ADMIN_HTML
+    assert '<link rel="stylesheet" href="admin.css?v=12">' in ADMIN_HTML
     assert "styles.css" not in ADMIN_HTML
     assert "@import" not in ADMIN_CSS
     assert "cdn.jsdelivr.net" not in ADMIN_HTML

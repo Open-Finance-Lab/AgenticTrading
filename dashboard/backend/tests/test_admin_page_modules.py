@@ -24,7 +24,7 @@ FRONTEND = Path(__file__).resolve().parents[2] / "frontend"
 # exact, not a subset, so adding a verb is a test failure rather than a silent
 # pass. Deleting the verb list and dropping api_key from the prohibited names
 # would have left two tests that run, pass, and protect nothing.
-READ_MODULES = ("admin-shell.js", "admin-live.js", "admin-overview.js", "admin-users.js", "admin-traces.js")
+READ_MODULES = ("admin-shell.js", "admin-live.js", "admin-overview.js", "admin-users.js", "admin-traces.js", "admin-trace-performance.js")
 WRITE_MODULES = {
     "admin-providers.js": {"PUT", "POST", "DELETE"},
     # The absorbed credits console mutates groups, roles, grants and the pool.
@@ -48,6 +48,7 @@ GLOBALS = {
     "admin-providers.js": "AdminProviders",
     "admin-credits.js": "AdminCredits",
     "admin-traces.js": "AdminTraces",
+    "admin-trace-performance.js": "AdminTracePerformance",
 }
 
 CREDENTIAL = re.compile(r"\w*(?:api_key|secret|credential|token|password)\w*", re.I)
