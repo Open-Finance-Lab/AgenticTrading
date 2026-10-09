@@ -25,9 +25,21 @@ def test_admin_user_agent_activity_joins_agents_runs_and_traces(monkeypatch):
             return [{"run_id": "run-1", "status": "running", "created_at": "t2"}]
 
     class Traces:
-        def get_trace_for_run(self, run_id):
-            assert run_id == "run-1"
-            return {"trace_id": "trace-1", "status": "running"}
+        def list_traces(self, *, agent_ids, limit, offset):
+            assert agent_ids == ["agent-1"]
+            assert limit == 50
+            assert offset == 0
+            return {
+                "items": [{
+                    "agent_id": "agent-1",
+                    "run_id": "run-1",
+                    "trace_id": "trace-1",
+                    "status": "running",
+                    "created_at": "t3",
+                }],
+                "has_more": False,
+                "next_cursor": None,
+            }
 
     monkeypatch.setattr(module.users_module, "user_store", Users())
     monkeypatch.setattr(agents, "agent_store", Agents())

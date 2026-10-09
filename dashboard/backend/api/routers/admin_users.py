@@ -229,38 +229,58 @@ def get_user(user_id: int, _admin: dict = Depends(require_admin)):
 
 
 @admin_router.get("/users/{user_id}/agent-activity")
-def get_user_agent_activity(user_id: int, _admin: dict = Depends(require_admin)):
+def get_user_agent_activity(
+    user_id: int,
+    limit: int = Query(default=50, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+    _admin: dict = Depends(require_admin),
+):
     """Return the admin projection from a user to traceable agent runs."""
     if users_module.user_store.get_user_admin(user_id) is None:
         raise HTTPException(status_code=404, detail="User not found")
 
-    # Agent content and protocol runs use separate persistence boundaries, so
-    # join them in Python by stable IDs. An older run without a trace remains
-    # visible instead of disappearing from the operator's history.
+    # Trace persistence is durable in production while protocol runs are
+    # diskless. Read the durable projection first, then use local runs only to
+    # enrich matching rows that still exist after a deploy.
     from dashboard.backend.domain.agents.repository import agent_store
     from dashboard.backend.domain.runs.repository import run_store
     from dashboard.backend.domain.traces.repository import trace_store
 
+    agents = agent_store.list_agents(owner_user_id=user_id)
+    agent_ids = [agent["agent_id"] for agent in agents]
+    traces = trace_store.list_traces(agent_ids=agent_ids, limit=limit, offset=offset)
+    local_runs = {
+        run["run_id"]: run
+        for agent_id in agent_ids
+        for run in run_store.list_runs(agent_id)
+    }
     activity = []
-    for agent in agent_store.list_agents(owner_user_id=user_id):
-        runs = []
-        for run in run_store.list_runs(agent["agent_id"]):
-            trace = trace_store.get_trace_for_run(run["run_id"])
-            runs.append({
-                "run_id": run["run_id"],
-                "status": run.get("status"),
-                "created_at": run.get("created_at"),
-                "trace_id": trace.get("trace_id") if trace else None,
-                "trace_status": trace.get("status") if trace else None,
-            })
+    traces_by_agent = {agent_id: [] for agent_id in agent_ids}
+    for trace in traces["items"]:
+        run = local_runs.get(trace.get("run_id"), {})
+        traces_by_agent.setdefault(trace.get("agent_id"), []).append({
+            "run_id": trace.get("run_id"),
+            "status": run.get("status") or trace.get("status"),
+            "created_at": run.get("created_at") or trace.get("created_at"),
+            "trace_id": trace.get("trace_id"),
+            "trace_status": trace.get("status"),
+        })
+    for agent in agents:
         activity.append({
             "agent_id": agent["agent_id"],
             "name": agent.get("name") or agent["agent_id"],
             "agent_type": agent.get("agent_type") or "external",
             "created_at": agent.get("created_at"),
-            "runs": runs,
+            "runs": traces_by_agent.get(agent["agent_id"], []),
         })
-    return {"user_id": user_id, "agents": activity}
+    return {
+        "user_id": user_id,
+        "agents": activity,
+        "limit": limit,
+        "offset": offset,
+        "has_more": traces["has_more"],
+        "next_cursor": traces["next_cursor"],
+    }
 
 
 @admin_router.patch("/users/{user_id}")

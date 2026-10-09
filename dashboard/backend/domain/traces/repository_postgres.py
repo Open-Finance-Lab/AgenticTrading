@@ -136,6 +136,7 @@ class PostgresTraceStore:
         self,
         *,
         agent_id: Optional[str] = None,
+        agent_ids: Optional[Sequence[str]] = None,
         run_id: Optional[str] = None,
         status: Optional[str] = None,
         limit: int = 50,
@@ -149,6 +150,12 @@ class PostgresTraceStore:
             if value is not None:
                 clauses.append(f"{column} = %s")
                 params.append(value)
+        if agent_ids is not None:
+            ids = [str(value) for value in agent_ids]
+            if not ids:
+                return {"items": [], "has_more": False, "next_cursor": None}
+            clauses.append("agent_id = ANY(%s)")
+            params.append(ids)
         where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
         with self._get_connection() as conn:
             with conn.cursor() as cur:
