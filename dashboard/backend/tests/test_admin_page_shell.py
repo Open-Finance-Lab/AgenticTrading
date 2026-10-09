@@ -235,7 +235,13 @@ def test_pruned_css_carries_none_of_the_dead_mock_passes():
         assert selector in ADMIN_CSS, selector
 
 
-RAIL_ICONS = ("icon-chart", "icon-users", "icon-network", "icon-activity")
+RAIL_ICONS = (
+    "icon-chart",
+    "icon-users",
+    "icon-network",
+    "icon-activity",
+    "icon-file-text",
+)
 HEADER_ICONS = ("icon-github", "icon-discord", "icon-chevron-right")
 SPRITE_ICONS = (
     RAIL_ICONS

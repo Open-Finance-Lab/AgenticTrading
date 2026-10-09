@@ -144,6 +144,7 @@ class TraceStore:
         self,
         *,
         agent_id: Optional[str] = None,
+        agent_ids: Optional[Sequence[str]] = None,
         run_id: Optional[str] = None,
         status: Optional[str] = None,
         limit: int = 50,
@@ -157,6 +158,13 @@ class TraceStore:
             if value is not None:
                 clauses.append(f"{column} = ?")
                 params.append(value)
+        if agent_ids is not None:
+            ids = [str(value) for value in agent_ids]
+            if not ids:
+                return {"items": [], "has_more": False, "next_cursor": None}
+            placeholders = ", ".join("?" for _ in ids)
+            clauses.append(f"agent_id IN ({placeholders})")
+            params.extend(ids)
         where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
         with self._get_connection() as conn:
             rows = conn.execute(
