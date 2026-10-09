@@ -881,29 +881,34 @@ def test_backtest_run_valid_request_ok():
     assert "session_id" in body
 
 
+def _create_builtin_agent(client, owner_session):
+    created = client.post(
+        "/api/v1/agents",
+        json={"name": "Discord Card Bot", "agent_type": "builtin"},
+        headers={"X-Session-Id": owner_session},
+    ).json()
+    return created["agent"]["agent_id"], created["session_id"]
+
+
+_RULE_BASED_RUN = {
+    "start_date": "2026-05-01",
+    "end_date": "2026-05-02",
+    "decision_source": "rule_based",
+}
+
+
 def test_backtest_run_targets_builtin_agent_session(client, monkeypatch):
-    """Discord (and website) can pass agent_id so runs land on the agent card."""
+    """The agent's owner can pass agent_id so the run lands on the agent card."""
     spy = _Spy()
     monkeypatch.setattr(bt, "run_backtest_background", spy)
 
     owner = str(uuid.uuid4())
-    created = client.post(
-        "/api/v1/agents",
-        json={"name": "Discord Card Bot", "agent_type": "builtin"},
-        headers={"X-Session-Id": owner},
-    ).json()
-    agent_session = created["session_id"]
-    agent_id = created["agent"]["agent_id"]
+    agent_id, agent_session = _create_builtin_agent(client, owner)
 
     resp = client.post(
         "/backtest/run",
-        json={
-            "start_date": "2026-05-01",
-            "end_date": "2026-05-02",
-            "agent_id": agent_id,
-            "decision_source": "rule_based",
-        },
-        headers={"X-Session-Id": str(uuid.uuid4())},
+        json={**_RULE_BASED_RUN, "agent_id": agent_id},
+        headers={"X-Session-Id": owner},
     )
     assert resp.status_code == 200
     assert resp.json()["session_id"] == agent_session
@@ -911,6 +916,82 @@ def test_backtest_run_targets_builtin_agent_session(client, monkeypatch):
     assert spy.last_kwargs["session_id"] == agent_session
     assert spy.last_kwargs["runtime_type"] == "pipeline"
     assert spy.last_kwargs["runtime_config"] == {}
+
+
+def test_backtest_run_refuses_a_strangers_builtin_agent(client, monkeypatch):
+    """A stranger naming someone's agent_id must not learn its session_id.
+
+    That session_id is what reclaim_on_session_match accepts as proof of
+    ownership, so echoing it back here let anyone take over a guest agent.
+    """
+    spy = _Spy()
+    monkeypatch.setattr(bt, "run_backtest_background", spy)
+    agent_id, agent_session = _create_builtin_agent(client, str(uuid.uuid4()))
+
+    resp = client.post(
+        "/backtest/run",
+        json={**_RULE_BASED_RUN, "agent_id": agent_id},
+        headers={"X-Session-Id": str(uuid.uuid4())},
+    )
+    assert resp.status_code == 403
+    assert agent_session not in resp.text
+    assert spy.calls == 0
+
+
+def _bind_agent_to_user(agent_id, user_id):
+    conn = bt.agent_service.agents._get_connection()
+    conn.execute(
+        "UPDATE external_agents SET owner_user_id = ? WHERE agent_id = ?",
+        (user_id, agent_id),
+    )
+    conn.commit()
+    conn.close()
+
+
+def _discord_bot(monkeypatch, linked_user_id=42):
+    import dashboard.backend.users as users_module
+
+    monkeypatch.setenv("DISCORD_BOT_API_SECRET", "test-bot-secret")
+    monkeypatch.setattr(
+        users_module.user_store,
+        "get_user_by_discord_id",
+        lambda discord_id: {"id": linked_user_id} if discord_id == "discord-owner" else None,
+    )
+
+
+@pytest.mark.parametrize(
+    "secret, discord_id, bound_to, expected",
+    [
+        ("test-bot-secret", "discord-owner", 42, 200),   # bot, for the linked owner
+        ("wrong-secret", "discord-owner", 42, 403),      # forged bot secret
+        ("test-bot-secret", "discord-other", 42, 403),   # unlinked Discord user
+        ("test-bot-secret", "discord-owner", 7, 403),    # linked, but not the owner
+    ],
+)
+def test_discord_bot_runs_only_the_linked_owners_agent(
+    client, monkeypatch, secret, discord_id, bound_to, expected
+):
+    spy = _Spy()
+    monkeypatch.setattr(bt, "run_backtest_background", spy)
+    _discord_bot(monkeypatch)
+    agent_id, agent_session = _create_builtin_agent(client, str(uuid.uuid4()))
+    _bind_agent_to_user(agent_id, bound_to)
+
+    resp = client.post(
+        "/backtest/run",
+        json={**_RULE_BASED_RUN, "agent_id": agent_id},
+        headers={
+            "X-Session-Id": str(uuid.uuid4()),
+            "X-Discord-Bot-Secret": secret,
+            "X-Discord-User-Id": discord_id,
+        },
+    )
+    assert resp.status_code == expected
+    if expected == 200:
+        assert spy.last_kwargs["session_id"] == agent_session
+    else:
+        assert agent_session not in resp.text
+        assert spy.calls == 0
 
 
 def _stub_hosted_runtime_installed(monkeypatch):

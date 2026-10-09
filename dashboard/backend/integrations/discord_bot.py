@@ -845,7 +845,9 @@ async def execute_backtest(
     """
     selected = selected_agent_for(discord_user_id)
     session_id = session_for(discord_user_id)
-    headers = {"X-Session-Id": session_id}
+    # The bot service headers let /backtest/run verify that the linked account
+    # owns the selected built-in agent; a bare session id cannot prove that.
+    headers = {"X-Session-Id": session_id, **bot_api_headers(discord_user_id)}
 
     share_url: Optional[str] = None
     label = "custom"
