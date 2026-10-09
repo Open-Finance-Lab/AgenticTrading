@@ -66,6 +66,23 @@ but remain physically co-located so Admin queries do not require cross-database
 joins. A later split is allowed only after measured volume or retention needs
 justify it.
 
+### Admin navigation
+
+The operator path is layered rather than a second trace surface:
+
+```text
+User Analytics -> User profile -> Agents & traces -> Run -> Reasoning trace
+```
+
+The profile's `Agents & traces` section reads the admin-only
+`GET /api/admin/users/{user_id}/agent-activity` projection. It joins Agent,
+Run, and Trace records by stable IDs in the application layer because those
+records may live in different persistence boundaries. A run without a trace
+remains visible and is labeled as unavailable. Runs with a running trace link
+to the polling timeline, while completed and failed runs link to the same
+timeline in read-only mode. The global `Agent traces` Admin entry remains the
+cross-user operational view.
+
 ## Data model
 
 ### `agent_traces`
@@ -262,4 +279,3 @@ verification -> regression check -> short review note.
 - Exact retention duration and archival schedule.
 - SSE versus WebSocket after polling proves the event contract.
 - Additional event types for LLM provider requests and child Agents.
-
