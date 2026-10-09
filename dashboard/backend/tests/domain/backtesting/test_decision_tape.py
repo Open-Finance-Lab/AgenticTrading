@@ -577,8 +577,9 @@ def test_capture_runs_the_snapshot_inside_the_swallow_layer(monkeypatch, capsys)
     def broken():
         raise TypeError("'<' not supported between instances of 'int' and 'str'")
 
-    assert recorder.capture(broken) is None  # must not raise into the bar loop
-    assert recorder.capture(lambda: "snap") == "snap"
+    failed = recorder.capture(broken)  # must not raise into the bar loop
+    captured = recorder.capture(lambda: "snap")
+    assert failed is None and captured == "snap"
     assert recorder.summary()["write_failures"] == 1
     assert "decision tape write failed" in capsys.readouterr().out
 
@@ -587,9 +588,14 @@ def test_capture_skips_snapshot_work_without_a_trace_or_once_suspended(monkeypat
     fake = _FakeTraceService(trace=None)
     _install(monkeypatch, fake)
     built = []
+
+    def build():
+        built.append(1)
+        return "snapshot"
+
     recorder = tape.DecisionTapeRecorder("agent_x")
-    assert recorder.capture(lambda: built.append(1)) is None
-    assert recorder.capture(lambda: built.append(1)) is None
+    first, second = recorder.capture(build), recorder.capture(build)
+    assert first is None and second is None
     assert built == [] and fake.lookups == 1
 
     down = _CountingStore(fail_writes=range(100))
@@ -597,7 +603,8 @@ def test_capture_skips_snapshot_work_without_a_trace_or_once_suspended(monkeypat
     recorder = tape.DecisionTapeRecorder("agent_x", flush_bars=1)
     for i in range(tape.MAX_CONSECUTIVE_STORE_FAILURES):
         recorder.record_bar(**_bar(i))
-    assert recorder.capture(lambda: built.append(1)) is None
+    snapshot = recorder.capture(build)
+    assert snapshot is None
     assert built == [] and recorder.summary()["suspended_skipped"] == 1
 
 
