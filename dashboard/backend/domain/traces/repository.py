@@ -13,12 +13,14 @@ import os
 import sqlite3
 import uuid
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Sequence
 
 from dashboard.backend.database import DB_PATH, enable_wal
+from dashboard.backend.db_url import describe_database_url
 from dashboard.backend.domain.traces.common import (
     _json_text,
     _new_event_id,
+    _prepare_batch_event,
     _public_event,
     _public_trace,
     _reject_sensitive,
@@ -266,6 +268,73 @@ class TraceStore:
             ).fetchone()
         return _public_event(saved)
 
+    def append_events(self, *, trace_id: str, events: Sequence[Dict[str, Any]]) -> int:
+        """Append several events in one transaction; returns how many were new.
+
+        ``append_event`` costs a lock, an idempotency probe, a sequence read and
+        an insert per event. A caller writing a burst of events (the decision
+        tape flushes many bars at once) pays that once per batch instead. Every
+        event is validated before the transaction opens, so one bad payload
+        rejects the batch without writing a partial one. Events whose
+        ``idempotency_key`` already exists are skipped, as ``append_event``
+        would return the stored row for them.
+        """
+        prepared = [_prepare_batch_event(event) for event in events]
+        if not prepared:
+            return 0
+        with self._get_connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            if conn.execute(
+                "SELECT trace_id FROM agent_traces WHERE trace_id = ?", (trace_id,)
+            ).fetchone() is None:
+                raise KeyError(f"unknown trace: {trace_id}")
+            keys = [event["idempotency_key"] for event in prepared if event["idempotency_key"]]
+            existing = set()
+            if keys:
+                placeholders = ",".join("?" for _ in keys)
+                existing = {
+                    row["idempotency_key"]
+                    for row in conn.execute(
+                        "SELECT idempotency_key FROM agent_trace_events "
+                        f"WHERE trace_id = ? AND idempotency_key IN ({placeholders})",
+                        (trace_id, *keys),
+                    )
+                }
+            fresh = []
+            for event in prepared:
+                key = event["idempotency_key"]
+                if key and key in existing:
+                    continue
+                if key:
+                    existing.add(key)  # a key repeated inside the batch lands once
+                fresh.append(event)
+            if not fresh:
+                return 0
+            next_sequence = int(conn.execute(
+                "SELECT COALESCE(MAX(sequence_no), 0) + 1 AS next_sequence "
+                "FROM agent_trace_events WHERE trace_id = ?",
+                (trace_id,),
+            ).fetchone()["next_sequence"])
+            ingested_at = _utcnow_iso()
+            conn.executemany(
+                """
+                INSERT INTO agent_trace_events (
+                    event_id, trace_id, sequence_no, event_type, actor_type,
+                    actor_id, step_id, decision_id, artifact_id, parent_event_id, payload_json,
+                    occurred_at, ingested_at, idempotency_key, schema_version
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                [
+                    (_new_event_id(), trace_id, next_sequence + offset, event["event_type"],
+                     event["actor_type"], event["actor_id"], event["step_id"],
+                     event["decision_id"], event["artifact_id"], event["parent_event_id"],
+                     event["payload_json"], event["occurred_at"], ingested_at,
+                     event["idempotency_key"], event["schema_version"])
+                    for offset, event in enumerate(fresh)
+                ],
+            )
+        return len(fresh)
+
     def list_events(
         self, trace_id: str, *, after_sequence: int = 0, limit: int = 100
     ) -> Dict[str, Any]:
@@ -288,11 +357,19 @@ class TraceStore:
 
 
 def _build_trace_store():
-    database_url = os.getenv("CONTENT_DATABASE_URL")
+    # AGENT_RUNS_DATABASE_URL, not CONTENT_DATABASE_URL: a trace is run data
+    # (keyed by run_id, one event per step), and since the decision tape writes
+    # a decision/execution pair per bar of every dashboard backtest it is the
+    # fastest-growing run data there is. That growth belongs in the dedicated
+    # run-history project, isolated from the auth-critical users/content
+    # database -- the reason AGENT_RUNS_DATABASE_URL exists. No fallback to
+    # CONTENT_DATABASE_URL, by the same rule database.py's _build_backtest_db
+    # follows.
+    database_url = os.getenv("AGENT_RUNS_DATABASE_URL")
     if database_url:
         from dashboard.backend.domain.traces.repository_postgres import PostgresTraceStore
 
-        print("trace_store backend: postgres")
+        print(f"trace_store backend: postgres ({describe_database_url(database_url)})")
         return PostgresTraceStore(database_url)
     print("trace_store backend: sqlite (ephemeral on Render)")
     return TraceStore()

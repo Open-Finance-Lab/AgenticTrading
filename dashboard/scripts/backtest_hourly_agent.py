@@ -516,7 +516,16 @@ def main():
         owner = tape_owner["backtester"]
         return owner.decision_tape_summary() if owner is not None else {}
 
-    with trace_lifecycle(args.run_id, summary=_tape_summary):
+    def _flush_tape():
+        owner = tape_owner["backtester"]
+        if owner is not None:
+            owner.flush_decision_tape()
+
+    # The block runs through update_run_baselines, not just the agent loop: a
+    # baseline that raises fails the whole run as the parent sees it, so a
+    # trace closed `completed` before the baselines would contradict the
+    # dashboard's `failed` / `cancelled` / `timed_out` for good.
+    with trace_lifecycle(args.run_id, summary=_tape_summary, flush=_flush_tape):
         # Initialize backtester (with LLM if available and enabled)
         # Note: dates are validated in __init__ if they somehow got reversed again
         backtester = HourlyBacktester(
@@ -611,30 +620,30 @@ def main():
                     print(f"❌ LLM execution finalization failed: {exc.safe_message}")
                     raise
     
-    # DEBUG: Show what agent bought
-    print(f"\n📋 DEBUG - Agent Holdings Summary:")
-    if agent_eq:
-        agent_final = agent_eq[-1]
-        print(f"   Final equity: ${agent_final['equity']:,.0f}")
-    
-    bh_id, bh_eq = backtester.run_buyhold_baseline()
-    
-    # DEBUG: Show what baseline bought
-    print(f"\n📋 DEBUG - Baseline Holdings Summary:")
-    if bh_eq:
-        bh_final = bh_eq[-1]
-        print(f"   Final equity: ${bh_final['equity']:,.0f}")
-    
-    if market_profile.index_baseline_enabled:
-        djia_id, djia_eq = backtester.run_djia_baseline()
-    else:
-        djia_id, djia_eq = None, []
+        # DEBUG: Show what agent bought
+        print(f"\n📋 DEBUG - Agent Holdings Summary:")
+        if agent_eq:
+            agent_final = agent_eq[-1]
+            print(f"   Final equity: ${agent_final['equity']:,.0f}")
 
-    db.update_run_baselines(
-        agent_id,
-        djia_run_id=djia_id,
-        buyhold_run_id=bh_id,
-    )
+        bh_id, bh_eq = backtester.run_buyhold_baseline()
+
+        # DEBUG: Show what baseline bought
+        print(f"\n📋 DEBUG - Baseline Holdings Summary:")
+        if bh_eq:
+            bh_final = bh_eq[-1]
+            print(f"   Final equity: ${bh_final['equity']:,.0f}")
+
+        if market_profile.index_baseline_enabled:
+            djia_id, djia_eq = backtester.run_djia_baseline()
+        else:
+            djia_id, djia_eq = None, []
+
+        db.update_run_baselines(
+            agent_id,
+            djia_run_id=djia_id,
+            buyhold_run_id=bh_id,
+        )
     
     # Summary
     print(f"{'='*70}")

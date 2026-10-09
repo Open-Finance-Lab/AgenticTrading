@@ -1096,6 +1096,12 @@ class HourlyBacktester:
         tape = getattr(self, "_decision_tape", None)
         return tape.summary() if tape is not None else {}
 
+    def flush_decision_tape(self) -> None:
+        """Write the tape's buffered bars. Never raises; a no-op without one."""
+        tape = getattr(self, "_decision_tape", None)
+        if tape is not None:
+            tape.flush()
+
     def _publish_live_progress(self, step: int, total_steps: int, manager) -> None:
         """Write incremental equity curve snapshots for live dashboard charting."""
         # Above the early return, not below it. The phase clock is state, not a
@@ -2192,20 +2198,26 @@ class HourlyBacktester:
             state = manager.get_portfolio_state(market_data, price_cache, timestamp)
             state["timestamp"] = timestamp  # Add timestamp for LLM context
             runtime_invoked = False
+            # Snapshots taken before the decision: identity of the step
+            # outputs (a new list means the pipeline ran this bar), the LLM
+            # success counter, the repeat counts of the order events this bar
+            # could collapse into, and the pre-decision portfolio. Built inside
+            # the recorder's swallow layer; None skips this bar's tape.
+            tape_pre = None
             if tape is not None:
-                # Snapshots taken before the decision: identity of the step
-                # outputs (a new list means the pipeline ran this bar), the LLM
-                # success counter, the order-event repeat counts (collapsed
-                # repeats only show up there) and the pre-decision portfolio.
-                tape_outputs_before = manager.last_pipeline_step_outputs
-                tape_llm_before = manager.llm_decisions
-                tape_events_before = order_events_snapshot(
-                    getattr(manager, "order_events", None)
-                )
-                tape_state = build_state(
-                    cash=state["cash"],
-                    equity=state["total_equity"],
-                    positions=manager.positions,
+                tape_pre = tape.capture(
+                    lambda: (
+                        manager.last_pipeline_step_outputs,
+                        manager.llm_decisions,
+                        order_events_snapshot(
+                            getattr(manager, "order_events", None), since=timestamp
+                        ),
+                        build_state(
+                            cash=state["cash"],
+                            equity=state["total_equity"],
+                            positions=manager.positions,
+                        ),
+                    )
                 )
             
             # Keep the established pipeline execution path unchanged. Hosted
@@ -2318,7 +2330,8 @@ class HourlyBacktester:
                 self.runtime_dispatcher.record_latest_execution(
                     len(manager.trades) - trades_before_execution
                 )
-            if tape is not None:
+            if tape_pre is not None:
+                tape_outputs_before, tape_llm_before, tape_events_before, tape_state = tape_pre
                 tape.record_bar_from(
                     lambda: (
                         build_decision_payload(
@@ -2344,6 +2357,7 @@ class HourlyBacktester:
                             rejected=rejections_since(
                                 getattr(manager, "order_events", None),
                                 tape_events_before,
+                                actions=decision["actions"],
                             ),
                         ),
                     ),
@@ -2399,6 +2413,9 @@ class HourlyBacktester:
                 equity = manager.equity_history[-1]["equity"]
                 pct_return = fractional_return(equity, self.initial_capital) * 100
                 print(f"   Decision {i+1}/{len(all_timestamps)}: Equity ${equity:,.0f} ({pct_return:+.1f}%)")
+
+        if tape is not None:
+            tape.flush()
 
         if self.intraday_mode:
             # Mark any remaining source bars after the final decision/fill so

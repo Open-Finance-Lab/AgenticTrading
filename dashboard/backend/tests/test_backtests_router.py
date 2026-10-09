@@ -3287,7 +3287,10 @@ def test_a_hung_trace_label_does_not_delay_slot_finalization(monkeypatch, child)
     assert run_id not in bt._active_slots
 
 
-def test_a_raising_trace_label_does_not_lose_the_outcome(monkeypatch):
+def test_a_raising_trace_label_does_not_lose_the_outcome(monkeypatch, capsys):
+    """And it says so: a broken trace store must not read like a trace that
+    was already closed. ``fail_trace_if_running`` raises on a store error
+    rather than returning False, and the worker logs it."""
     run_id = "agent_trace_raising_label"
     events = []
     _record_slot_finalizes(monkeypatch, events)
@@ -3302,6 +3305,9 @@ def test_a_raising_trace_label_does_not_lose_the_outcome(monkeypatch):
     )
     assert events == ["slot", "label"]
     assert run_id not in bt._active_slots
+    out = capsys.readouterr().out
+    assert f"ERROR: trace.label_failed run={run_id} label=run_failed" in out
+    assert "trace store down" in out
 
 
 def test_parent_labels_a_failed_child_run_failed(monkeypatch):

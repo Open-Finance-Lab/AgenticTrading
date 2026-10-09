@@ -132,15 +132,30 @@ metadata is where that fact lives.
 
 ## Approach
 
-Per-bar, synchronous, best-effort emission (approach A). Chosen over a buffered
-end-of-run batch (loses the tape of a killed run — the run you most want to
-debug — and needs a new batch method on both store twins) and a background
-writer thread (thread lifecycle and flush-on-exit in a subprocess that can be
-killed; not worth it).
+Best-effort emission in **batches of `TAPE_FLUSH_BARS` (25) bars**, one store
+transaction per batch (`append_events` on both trace-store twins), flushed at
+the end of the agent loop and by `trace_lifecycle` before the trace closes on
+either outcome. The first draft wrote each bar synchronously (two
+`append_event` calls, ~10 Postgres statements including a `SELECT … FOR
+UPDATE`); review measured that against a long rule-based window on Neon and it
+could add minutes of wall clock inside the decision loop — enough to push a run
+into its subprocess timeout, i.e. the observational tape changing the run's
+outcome. Batching cuts that ~25×.
 
-Cost: the trace id is resolved once and cached, so each bar is two
-`append_event` calls — two pooled Neon checkouts. That is well under 1% of an
-LLM bar and acceptable for a rule-based run of ~35 bars.
+What it costs: a run killed by SIGTERM (cancel, or the timeout's grace before
+SIGKILL) loses its unflushed buffer — at most 24 bars. A *failed* run keeps
+them, because `trace_lifecycle` flushes before writing `run_failed`. A
+background writer thread was rejected again (thread lifecycle and
+flush-on-exit in a subprocess that can be killed).
+
+**Storage.** The trace store moved from `CONTENT_DATABASE_URL` to
+`AGENT_RUNS_DATABASE_URL` in this PR. #622 put traces on the content database
+because its initial workload was small; a decision/execution pair per bar of
+every dashboard backtest is run data and the fastest-growing run data there
+is, and `ATL-runs-main` exists to keep exactly that growth away from the
+auth-critical users/content database. Traces written to the content database
+between #622's merge (2026-10-07) and this PR's deploy stay there, invisible
+to the admin timeline; they are not copied.
 
 ## Components
 
@@ -321,7 +336,9 @@ with a broken trace store behaves exactly like today plus one log line.
 ## Open questions
 
 None blocking. Retention and admin-UI pagination for long windows remain #622's
-open items; a default week is ~70 events per run.
+open items; a default week is ~70 events per run. `AGENT_RUNS_DATABASE_URL`
+must be set on Render before this deploys, or traces fall back to ephemeral
+SQLite (logged at boot as `trace_store backend: sqlite (ephemeral on Render)`).
 
 ## Follow-ups this spec hands off (not in this PR)
 

@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Sequence
 
 from dashboard.backend.db_url import init_schema_unless_worker, require_postgres_url
 from dashboard.backend.domain.traces.common import (
     _json_text,
     _new_event_id,
+    _prepare_batch_event,
     _public_event,
     _public_trace,
     _reject_sensitive,
@@ -256,6 +257,62 @@ class PostgresTraceStore:
                 )
                 saved = cur.fetchone()
         return _public_event(saved)
+
+    def append_events(self, *, trace_id: str, events: Sequence[Dict[str, Any]]) -> int:
+        """Twin of ``TraceStore.append_events``: one transaction, one row lock
+        and one sequence read for the whole batch."""
+        prepared = [_prepare_batch_event(event) for event in events]
+        if not prepared:
+            return 0
+        with self._get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT trace_id FROM agent_traces WHERE trace_id = %s FOR UPDATE", (trace_id,))
+                if cur.fetchone() is None:
+                    raise KeyError(f"unknown trace: {trace_id}")
+                keys = [event["idempotency_key"] for event in prepared if event["idempotency_key"]]
+                existing = set()
+                if keys:
+                    cur.execute(
+                        "SELECT idempotency_key FROM agent_trace_events "
+                        "WHERE trace_id = %s AND idempotency_key = ANY(%s)",
+                        (trace_id, keys),
+                    )
+                    existing = {row["idempotency_key"] for row in cur.fetchall()}
+                fresh = []
+                for event in prepared:
+                    key = event["idempotency_key"]
+                    if key and key in existing:
+                        continue
+                    if key:
+                        existing.add(key)  # a key repeated inside the batch lands once
+                    fresh.append(event)
+                if not fresh:
+                    return 0
+                cur.execute(
+                    "SELECT COALESCE(MAX(sequence_no), 0) + 1 AS next_sequence "
+                    "FROM agent_trace_events WHERE trace_id = %s",
+                    (trace_id,),
+                )
+                next_sequence = int(cur.fetchone()["next_sequence"])
+                ingested_at = _utcnow_iso()
+                cur.executemany(
+                    """
+                    INSERT INTO agent_trace_events (
+                        event_id, trace_id, sequence_no, event_type, actor_type,
+                        actor_id, step_id, decision_id, artifact_id, parent_event_id, payload_json,
+                        occurred_at, ingested_at, idempotency_key, schema_version
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    """,
+                    [
+                        (_new_event_id(), trace_id, next_sequence + offset, event["event_type"],
+                         event["actor_type"], event["actor_id"], event["step_id"],
+                         event["decision_id"], event["artifact_id"], event["parent_event_id"],
+                         event["payload_json"], event["occurred_at"], ingested_at,
+                         event["idempotency_key"], event["schema_version"])
+                        for offset, event in enumerate(fresh)
+                    ],
+                )
+        return len(fresh)
 
     def list_events(
         self, trace_id: str, *, after_sequence: int = 0, limit: int = 100

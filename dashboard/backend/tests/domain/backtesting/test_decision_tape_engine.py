@@ -275,19 +275,24 @@ def test_llm_pipeline_bars_record_intent_and_fallback(monkeypatch, store):
     assert tape[1]["decision"]["gate_rewrote"] is False  # nothing parsed, nothing to rewrite
 
 
-def test_llm_sell_widened_by_the_gate_is_counted_as_a_rewrite(monkeypatch, store):
-    """Finding 1: every model SELL becomes 'sell all sellable'. The tape must
-    say so per bar and per run, so the gate's rewrite rate is a number."""
+def test_llm_sell_widened_by_the_gate_is_not_a_rewrite(monkeypatch, store):
+    """Every model SELL becomes 'sell all sellable' -- the gate's documented
+    sizing, not a rewrite, or ``gate_rewrites`` would count prompt habits. A
+    BUY the gate drops (confidence under 0.3) is a rewrite, per bar and per
+    run."""
     stub = _PipelineStub([
         json.dumps({"actions": [{"symbol": "AAPL", "action": "buy", "position_size": 4, "confidence": 0.9, "reasoning": "open"}]}),
         json.dumps({"actions": [{"symbol": "AAPL", "action": "sell", "position_size": 1, "confidence": 0.9, "reasoning": "trim one"}]}),
+        json.dumps({"actions": [{"symbol": "MSFT", "action": "buy", "position_size": 2, "confidence": 0.1, "reasoning": "unsure"}]}),
     ])
     backtester, _holder, _curve = _run(monkeypatch, llm_client=stub, pipeline=[{"label": "Decision", "prompt": "Decide."}])
     tape = trace_service.load_decision_tape("agent_tape_engine")
     assert tape[0]["decision"]["gate_rewrote"] is False
     assert tape[1]["decision"]["intent"]["orders"][0]["position_size"] == 1
     assert tape[1]["decision"]["actions"][0]["shares"] == 4  # the whole position
-    assert tape[1]["decision"]["gate_rewrote"] is True
+    assert tape[1]["decision"]["gate_rewrote"] is False
+    assert tape[2]["decision"]["actions"] == []  # dropped for low confidence
+    assert tape[2]["decision"]["gate_rewrote"] is True
     assert backtester.decision_tape_summary()["gate_rewrites"] == 1
 
 
@@ -395,7 +400,9 @@ def test_broken_trace_writes_do_not_change_the_run(monkeypatch, store):
         attempts.append(1)
         raise RuntimeError("trace store down")
 
-    monkeypatch.setattr(trace_service, "record_tape_bar", broken)
+    # One bar per store call, so the suspension bound is visible in bars.
+    monkeypatch.setattr(decision_tape_mod, "TAPE_FLUSH_BARS", 1)
+    monkeypatch.setattr(trace_service, "record_tape_bars", broken)
     backtester, broken_holder, broken_curve = _run(monkeypatch, run_id="agent_tape_broken", decide=_script)
     assert [p["equity"] for p in broken_curve] == [p["equity"] for p in healthy_curve]
     assert len(broken_holder.pm.trades) == len(healthy.pm.trades)
@@ -406,4 +413,24 @@ def test_broken_trace_writes_do_not_change_the_run(monkeypatch, store):
     assert broken_holder.calls > limit
     assert len(attempts) == summary["write_failures"] == limit
     assert summary["suspended_skipped"] == broken_holder.calls - limit
-    assert summary["bars_recorded"] == 0
+    assert summary["bars_recorded"] == 0 and summary["bars_dropped"] == limit
+
+
+def test_the_tape_is_written_in_batches_and_flushed_at_the_end(monkeypatch, store):
+    """Per-bar appends cost the decision loop ~10 store round trips a bar; the
+    engine hands the store ``TAPE_FLUSH_BARS`` bars per call and flushes the
+    remainder when the loop ends, so every bar still lands."""
+    monkeypatch.setattr(decision_tape_mod, "TAPE_FLUSH_BARS", 3)
+    batches = []
+    real = trace_service.record_tape_bars
+
+    def spy(**kwargs):
+        batches.append(len(kwargs["bars"]))
+        return real(**kwargs)
+
+    monkeypatch.setattr(trace_service, "record_tape_bars", spy)
+    _bt, holder, _curve = _run(monkeypatch, decide=_script)
+    assert sum(batches) == holder.calls
+    assert all(size == 3 for size in batches[:-1]) and 1 <= batches[-1] <= 3
+    tape = trace_service.load_decision_tape("agent_tape_engine")
+    assert [bar["bar_index"] for bar in tape] == list(range(holder.calls))

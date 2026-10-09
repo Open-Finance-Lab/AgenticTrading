@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
+from dashboard.backend.domain.traces.common import _json_text, _reject_sensitive
 from dashboard.backend.domain.traces.repository import trace_store
 
 
@@ -235,6 +236,60 @@ def ensure_trace_for_run(
 # --------------------------------------------------------------------------
 
 
+def validate_tape_payload(payload: Dict[str, Any]) -> None:
+    """Raise ``ValueError`` on a payload the trace store would refuse (a
+    sensitive-looking key, unserializable or over the size cap). The decision
+    tape checks each bar as it buffers it, so one bad bar is dropped alone
+    instead of rejecting the whole batch it would have been flushed in."""
+    _reject_sensitive(payload)
+    _json_text(payload, field="payload")
+
+
+def _tape_events(run_id: str, bar_index: int, decision_payload, execution_payload):
+    step_id = f"step_{run_id}_{bar_index}"
+    decision_id = f"dec_{run_id}_{bar_index}"
+    return [
+        {
+            "event_type": "decision_recorded",
+            "actor_type": "agent",
+            "step_id": step_id,
+            "decision_id": decision_id,
+            "payload": decision_payload,
+            "idempotency_key": f"decision:{run_id}:{step_id}:tape",
+        },
+        {
+            "event_type": "execution_result",
+            "actor_type": "system",
+            "step_id": step_id,
+            "decision_id": decision_id,
+            "payload": execution_payload,
+            "idempotency_key": f"execution:{run_id}:{step_id}:tape",
+        },
+    ]
+
+
+def record_tape_bars(
+    *,
+    trace_id: str,
+    run_id: str,
+    bars: Sequence[Tuple[int, Dict[str, Any], Dict[str, Any]]],
+) -> int:
+    """Append ``(bar_index, decision_payload, execution_payload)`` bars as
+    ``decision_recorded`` + ``execution_result`` pairs in one transaction.
+
+    Takes the caller's cached ``trace_id`` (one lookup per run) and raises on
+    failure: ``DecisionTapeRecorder`` is the single place that swallows and
+    counts, so it can say what failed. Batched because per-bar appends cost the
+    hot decision loop ~10 store round trips a bar -- on Neon, minutes over a
+    long rule-based window, which is enough to push a run into its subprocess
+    timeout.
+    """
+    events: List[Dict[str, Any]] = []
+    for bar_index, decision_payload, execution_payload in bars:
+        events.extend(_tape_events(run_id, bar_index, decision_payload, execution_payload))
+    return trace_store.append_events(trace_id=trace_id, events=events)
+
+
 def record_tape_bar(
     *,
     trace_id: str,
@@ -243,31 +298,11 @@ def record_tape_bar(
     decision_payload: Dict[str, Any],
     execution_payload: Dict[str, Any],
 ) -> None:
-    """Append one bar's ``decision_recorded`` + ``execution_result`` pair.
-
-    Takes the caller's cached ``trace_id`` (one lookup per run, not two per
-    bar) and raises on failure: ``DecisionTapeRecorder`` is the single place
-    that swallows and counts, so it can say what failed.
-    """
-    step_id = f"step_{run_id}_{bar_index}"
-    decision_id = f"dec_{run_id}_{bar_index}"
-    trace_store.append_event(
+    """One bar of ``record_tape_bars``."""
+    record_tape_bars(
         trace_id=trace_id,
-        event_type="decision_recorded",
-        actor_type="agent",
-        step_id=step_id,
-        decision_id=decision_id,
-        payload=decision_payload,
-        idempotency_key=f"decision:{run_id}:{step_id}:tape",
-    )
-    trace_store.append_event(
-        trace_id=trace_id,
-        event_type="execution_result",
-        actor_type="system",
-        step_id=step_id,
-        decision_id=decision_id,
-        payload=execution_payload,
-        idempotency_key=f"execution:{run_id}:{step_id}:tape",
+        run_id=run_id,
+        bars=[(bar_index, decision_payload, execution_payload)],
     )
 
 
@@ -317,25 +352,37 @@ def finish_trace_best_effort(
     result_summary: Optional[Dict[str, Any]] = None,
 ) -> bool:
     """Close a run's trace as completed (or failed with ``error_code``)
-    without ever raising -- the run's outcome is already decided."""
+    without ever raising -- the run's outcome is already decided.
+
+    A store failure is printed, not swallowed silently: the parent's fallback
+    label (``trace_close_failed``) says *that* the child could not close its
+    trace, and this line is the only record of *why*."""
     try:
         if error_code:
             fail_trace(run_id, error_code)
         else:
             complete_trace(run_id, result_summary)
         return True
-    except Exception:
+    except Exception as exc:  # noqa: BLE001 - observational write
+        print(
+            f"ERROR: trace.close_failed run={run_id} "
+            f"outcome={error_code or 'completed'} error={type(exc).__name__}: {exc}",
+            flush=True,
+        )
         return False
 
 
 def fail_trace_if_running(run_id: str, error_code: str) -> bool:
     """Fail a trace its process left ``running`` (killed child). A trace the
-    child already closed is left alone, so this is safe on every exit path."""
-    try:
-        trace = trace_for_run(run_id)
-        if trace is None or trace.get("status") != "running":
-            return False
-        fail_trace(run_id, error_code)
-        return True
-    except Exception:
+    child already closed, or one that never existed, is left alone and returns
+    False, so this is safe on every exit path.
+
+    A store error **raises**: "absent", "already closed" and "store down" must
+    not all come back as the same quiet False, or every killed run's trace
+    stays ``running`` with nothing in the log saying why. The caller
+    (``_label_trace`` in ``api/routers/backtests.py``) logs it."""
+    trace = trace_for_run(run_id)
+    if trace is None or trace.get("status") != "running":
         return False
+    fail_trace(run_id, error_code)
+    return True

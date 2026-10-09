@@ -38,9 +38,9 @@ from threading import Thread as _StreamReaderThread
 # ...and likewise the cancel route's SIGKILL escalation, which must still run
 # when a test has swapped the launch seam out.
 from threading import Thread as _CancelWatchdogThread
-from threading import Thread as _SpendLookupThread
-# ...and the trace label the worker writes as its very last act.
-from threading import Thread as _TraceLabelThread
+# ...and the bounded observational store calls (`_run_with_deadline`): the
+# timeout arm's spend lookup and the trace label.
+from threading import Thread as _DeadlineThread
 from typing import Any, Dict, List, Literal, NamedTuple, Optional, Tuple
 
 import pytz
@@ -1244,6 +1244,43 @@ def _killpg(pgid: Optional[int], sig: int) -> bool:
     return True
 
 
+class _DeadlineResult(NamedTuple):
+    """``finished`` False means the call was still running at the deadline."""
+
+    finished: bool
+    value: Any = None
+    error: Optional[BaseException] = None
+
+
+def _run_with_deadline(target, seconds: float) -> _DeadlineResult:
+    """Run ``target()`` on a daemon thread joined with ``seconds``.
+
+    For a store call the worker must not wait on: ``except Exception`` answers
+    a query that raises, never one that does not return, and these reach
+    Postgres with no statement timeout beneath them (`db_pool`'s
+    POOL_TIMEOUT_SECONDS bounds the checkout, not the query). An overrun thread
+    is abandoned, not joined -- one leaked thread holding a pooled connection
+    is strictly cheaper than a stranded concurrency slot or reservation. The
+    caller logs both failure outcomes (raised, overran), because "nothing to
+    report" and "could not read it" must not become the same silence."""
+    box: Dict[str, Any] = {}
+
+    def _call() -> None:
+        try:
+            box["value"] = target()
+        except Exception as exc:  # noqa: BLE001 - handed back to the caller
+            box["error"] = exc
+
+    worker = _DeadlineThread(target=_call, daemon=True)
+    worker.start()
+    worker.join(timeout=seconds)
+    if "error" in box:
+        return _DeadlineResult(True, error=box["error"])
+    if "value" in box:
+        return _DeadlineResult(True, value=box["value"])
+    return _DeadlineResult(False)
+
+
 # How long the worker waits for the trace label before giving up on it. The
 # tape is observational: a label that cannot be written within this bound is
 # abandoned, never waited on.
@@ -1256,28 +1293,29 @@ def _label_trace(run_id: Optional[str], error_code: str) -> None:
     Called exactly once, from the inner ``finally`` that closes the worker's
     ``finally`` -- after ``finalize_run`` has released reservations and
     ``_finalize_slot`` has freed the slot, and even when one of those raised.
-    ``fail_trace_if_running`` makes up to four pooled checkouts on the trace
-    store with no statement timeout, so it runs on a daemon thread
-    joined with ``TRACE_LABEL_DEADLINE_SECONDS`` (the ``sum_run_llm_spend``
-    pattern): a resuming Neon instance or a lock wait costs at most the
-    deadline and one abandoned thread, never a stranded slot or reservation.
+
+    Also on a clean exit (label ``trace_close_failed``): the child closes its
+    own trace there, so the lookup normally finds it closed and writes nothing
+    -- but a child whose close failed exits 0 all the same, and this lookup is
+    the only thing that stops that trace reading ``running`` forever. It is one
+    read, on this background thread, after the slot is already free.
     """
     if not run_id:
         return
-
-    def _write() -> None:
-        try:
-            trace_service.fail_trace_if_running(run_id, error_code)
-        except Exception as exc:  # noqa: BLE001 - observational write
-            print(f"⚠️ trace label {error_code} failed for {run_id}: {exc}", flush=True)
-
-    writer = _TraceLabelThread(target=_write, daemon=True)
-    writer.start()
-    writer.join(timeout=TRACE_LABEL_DEADLINE_SECONDS)
-    if writer.is_alive():
+    result = _run_with_deadline(
+        lambda: trace_service.fail_trace_if_running(run_id, error_code),
+        TRACE_LABEL_DEADLINE_SECONDS,
+    )
+    if result.error is not None:
         print(
-            f"⚠️ trace label {error_code} exceeded {TRACE_LABEL_DEADLINE_SECONDS}s "
-            f"for {run_id}; abandoned",
+            f"ERROR: trace.label_failed run={run_id} label={error_code} "
+            f"error={type(result.error).__name__}: {result.error}",
+            flush=True,
+        )
+    elif not result.finished:
+        print(
+            f"ERROR: trace.label_timeout run={run_id} label={error_code} "
+            f"deadline_s={TRACE_LABEL_DEADLINE_SECONDS}; abandoned",
             flush=True,
         )
 
@@ -2065,28 +2103,22 @@ def run_backtest_background(
                 # still reporting "Backtest is running…", and the `finally`'s
                 # `finalize_run` never releasing the run's reservations. The
                 # outcome must not depend on a disclosure being fetchable.
-                lookup: Dict[str, Any] = {}
-
-                def _read_settled_spend() -> None:
-                    try:
-                        lookup["value"] = credits_service.sum_run_llm_spend(
-                            timeout_user_id, resolved_live_run_id
-                        )
-                    except Exception as exc:  # noqa: BLE001 - reported below
-                        lookup["error"] = exc
-
-                reader = _SpendLookupThread(target=_read_settled_spend, daemon=True)
-                reader.start()
-                reader.join(timeout=TIMEOUT_SPEND_LOOKUP_SECONDS)
-                if "value" in lookup:
-                    spent_micro, model_calls = lookup["value"]
-                elif "error" in lookup:
+                spend_run_id = resolved_live_run_id
+                lookup = _run_with_deadline(
+                    lambda: credits_service.sum_run_llm_spend(
+                        timeout_user_id, spend_run_id
+                    ),
+                    TIMEOUT_SPEND_LOOKUP_SECONDS,
+                )
+                if lookup.error is not None:
                     # A read, and never worth losing the outcome over.
                     print(
                         f"⚠️ timeout spend lookup failed for "
-                        f"{resolved_live_run_id}: {lookup['error']}",
+                        f"{resolved_live_run_id}: {lookup.error}",
                         flush=True,
                     )
+                elif lookup.finished:
+                    spent_micro, model_calls = lookup.value
                 else:
                     # Still running past the deadline. The thread is a daemon
                     # and is abandoned rather than joined: leaking one blocked
@@ -2181,16 +2213,20 @@ def run_backtest_background(
                 try:
                     Path(progress_file).unlink(missing_ok=True)
                 except OSError:
+                    # Best-effort: the run is over and its outcome recorded; a
+                    # stale progress file is harmless and must not replace it.
                     pass
             if strategy_prompt_path:
                 try:
                     os.remove(strategy_prompt_path)
                 except OSError:
+                    # Best-effort temp-file cleanup; the OS reclaims it anyway.
                     pass
             if pipeline_path:
                 try:
                     os.remove(pipeline_path)
                 except OSError:
+                    # Best-effort temp-file cleanup; the OS reclaims it anyway.
                     pass
             if runtime_config_path:
                 try:

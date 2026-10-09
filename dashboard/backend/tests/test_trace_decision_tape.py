@@ -61,26 +61,46 @@ def test_load_decision_tape_pairs_bars_in_order_across_pages(store):
     assert all(bar["complete"] is True for bar in tape)
 
 
-def test_load_decision_tape_marks_a_bar_missing_its_execution_half(store, monkeypatch):
+def test_load_decision_tape_marks_a_bar_missing_its_execution_half(store):
+    """Tape bars are written a batch per transaction now, but a reader must
+    still not read a missing half as "nothing filled" -- whatever wrote it."""
     trace_id = _trace(store)
     decision, execution = _pair(0)
     service.record_tape_bar(trace_id=trace_id, run_id=RUN, bar_index=0,
                             decision_payload=decision, execution_payload=execution)
-    real_append = store.append_event
-
-    def fail_execution(**kwargs):
-        if kwargs["event_type"] == "execution_result":
-            raise RuntimeError("store down between the two appends")
-        return real_append(**kwargs)
-
-    monkeypatch.setattr(store, "append_event", fail_execution)
-    decision, execution = _pair(1)
-    with pytest.raises(RuntimeError):
-        service.record_tape_bar(trace_id=trace_id, run_id=RUN, bar_index=1,
-                                decision_payload=decision, execution_payload=execution)
+    decision, _execution = _pair(1)
+    store.append_event(trace_id=trace_id, event_type="decision_recorded", actor_type="agent",
+                       payload=decision, idempotency_key="decision-only")
     tape = service.load_decision_tape(RUN)
     assert [bar["complete"] for bar in tape] == [True, False]
     assert "execution" not in tape[1] and tape[1]["decision"]["bar_index"] == 1
+
+
+def test_record_tape_bars_writes_a_batch_in_order_in_one_call(store):
+    trace_id = _trace(store)
+    bars = [(i, *_pair(i)) for i in range(4)]
+    assert service.record_tape_bars(trace_id=trace_id, run_id=RUN, bars=bars) == 8
+    events = store.list_events(trace_id)["items"]
+    tape_events = [e for e in events if e["payload"].get("tape_version")]
+    assert [(e["event_type"], e["payload"]["bar_index"]) for e in tape_events] == [
+        (kind, i) for i in range(4) for kind in ("decision_recorded", "execution_result")
+    ]
+    sequences = [e["sequence_no"] for e in events]
+    assert sequences == sorted(sequences) and len(set(sequences)) == len(sequences)
+    # Re-sending a batch (and a bar repeated inside one) writes nothing new.
+    assert service.record_tape_bars(trace_id=trace_id, run_id=RUN, bars=bars + bars[:1]) == 0
+    assert len(store.list_events(trace_id)["items"]) == len(events)
+
+
+def test_a_batch_with_one_refused_payload_writes_nothing(store):
+    """Validated before the transaction opens: no partial batch."""
+    trace_id = _trace(store)
+    before = len(store.list_events(trace_id)["items"])
+    good = (0, *_pair(0))
+    bad = (1, {"tape_version": 1, "bar_index": 1, "secret": "x"}, _pair(1)[1])
+    with pytest.raises(ValueError):
+        service.record_tape_bars(trace_id=trace_id, run_id=RUN, bars=[good, bad])
+    assert len(store.list_events(trace_id)["items"]) == before
 
 
 def test_load_decision_tape_is_empty_without_a_trace(store):
@@ -103,6 +123,16 @@ def test_finish_trace_best_effort_never_raises(store, monkeypatch):
     assert service.finish_trace_best_effort(RUN, error_code="run_failed") is False
 
 
+def test_finish_trace_best_effort_says_why_it_failed(store, monkeypatch, capsys):
+    """The parent's ``trace_close_failed`` label says THAT the child could not
+    close its trace; this line is the only record of WHY."""
+    _trace(store)
+    monkeypatch.setattr(store, "append_event", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("neon down")))
+    service.finish_trace_best_effort(RUN, result_summary={})
+    out = capsys.readouterr().out
+    assert "ERROR: trace.close_failed" in out and "neon down" in out and RUN in out
+
+
 def test_fail_trace_if_running_marks_a_running_trace(store):
     _trace(store)
     assert service.fail_trace_if_running(RUN, "run_killed") is True
@@ -121,3 +151,14 @@ def test_fail_trace_if_running_leaves_a_completed_trace_alone(store):
 
 def test_fail_trace_if_running_without_trace_is_a_no_op(store):
     assert service.fail_trace_if_running("agent_missing", "run_killed") is False
+
+
+def test_fail_trace_if_running_raises_when_the_store_is_broken(store, monkeypatch):
+    """Absent, already closed and store-down must not all read as a quiet
+    False: the store error propagates so the parent logs it."""
+    def boom(*_a, **_k):
+        raise RuntimeError("store down")
+
+    monkeypatch.setattr(store, "get_trace_for_run", boom)
+    with pytest.raises(RuntimeError, match="store down"):
+        service.fail_trace_if_running(RUN, "run_killed")
