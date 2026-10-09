@@ -239,7 +239,7 @@ always empty — do not wait for them to populate.
   "step_id": "step_xxx",
   "idempotency_key": "unique-client-generated-key",
   "orders": [
-    { "symbol": "AAPL", "side": "buy", "quantity_type": "shares", "quantity": 10, "order_type": "market" }
+    { "symbol": "AAPL", "side": "buy", "quantity_type": "weight", "quantity": 0.2, "order_type": "market" }
   ],
   "confidence": 0.76,
   "rationale": "Momentum remains positive.",
@@ -251,6 +251,10 @@ always empty — do not wait for them to populate.
 - `quantity_type`: `shares` (default), `notional` (cash amount), or `weight`
   (fraction of current equity). Non-share types are converted to whole shares
   using the step's prices and equity.
+- A buy that would take one position past `max_position_weight` of equity is
+  rejected on its own (`exceeds_max_position_weight`), not clipped; the example's
+  `weight` of 0.2 stays under the 0.25 cap. More than `max_orders` orders
+  refuses the whole decision (400 `too_many_orders`).
 - `order_type`: only `market` is supported.
 - `trace` is **optional**; agents are never required to disclose prompts or
   internal reasoning.

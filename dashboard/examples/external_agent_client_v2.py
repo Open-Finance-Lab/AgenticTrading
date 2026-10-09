@@ -56,14 +56,19 @@ def main() -> None:
             break
 
         # ---- CLIENT-SIDE decision (replace with your LLM call) ----
+        # Size each buy as a third of the cash on hand, 5% kept back for the next
+        # bar's fill price: a fixed share count overshoots cash on pricier names.
+        cash = float((ctx.get("portfolio") or {}).get("cash") or 0)
+        budget = 0.95 * cash / 3
         actions = []
         for sym, sig in list(ctx.get("top_signals", {}).items())[:3]:
             news = ctx.get("news_sentiment", {}).get(sym, {})
-            if sig["rsi"] < 35 or news.get("sentiment") == "bullish":
+            shares = int(budget // sig["price"]) if sig["price"] > 0 else 0
+            if shares > 0 and (sig["rsi"] < 35 or news.get("sentiment") == "bullish"):
                 actions.append({
                     "action": "buy", "symbol": sym, "confidence": 0.7,
                     "reasoning": f"rsi={sig['rsi']:.0f}, news={news.get('sentiment','n/a')}",
-                    "position_size": 5,
+                    "position_size": shares,
                 })
 
         ack = requests.post(f"{base}/api/v2/runs/{run_id}/decisions", headers=headers, json={

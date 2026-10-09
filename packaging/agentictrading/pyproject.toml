@@ -53,8 +53,8 @@ vnpy = [
 [project.urls]
 Homepage = "https://agentic-trading-lab.vercel.app/"
 Documentation = "https://finagent-orchestration.readthedocs.io/"
-Source = "https://github.com/Allan-Feng/AgenticTrading"
-Issues = "https://github.com/Allan-Feng/AgenticTrading/issues"
+Source = "https://github.com/Open-Finance-Lab/AgenticTrading"
+Issues = "https://github.com/Open-Finance-Lab/AgenticTrading/issues"
 
 [project.scripts]
 agentictrading = "agentictrading.cli:main"

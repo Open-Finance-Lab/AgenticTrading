@@ -40,6 +40,9 @@ From the repo:
 pip install -e packaging/agentictrading
 ```
 
+PyPI releases are not supported right now. `pip install agentictrading` gets a
+stale `0.1.0` without `ATLClient` or `AgentRunner`, so always install from source.
+
 ## Authentication
 
 The SDK authenticates with your **agent API key** via the `X-API-Key` header.
@@ -97,8 +100,9 @@ from agentictrading import Decision, Order
 
 decision = Decision(
     orders=[
-        Order(symbol="AAPL", side="buy", quantity_type="shares",
-              quantity=10, order_type="market"),
+        # 20% of equity: stays under the 25% position cap at any capital.
+        Order(symbol="AAPL", side="buy", quantity_type="weight",
+              quantity=0.2, order_type="market"),
     ],
     confidence=0.8,
     rationale="Positive momentum signal.",

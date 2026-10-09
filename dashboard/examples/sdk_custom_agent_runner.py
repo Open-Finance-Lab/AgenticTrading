@@ -27,15 +27,28 @@ from agentictrading import AgentRunner, ATLClient
 class MomentumAgent:
     """Buys the strongest positive-momentum names once, then holds."""
 
-    def __init__(self, num_names: int = 5, dollars_per_name: float = 15_000) -> None:
+    # AgentRunner hands decide() the observation only, not step.constraints, so the
+    # position cap is a parameter. 0.25 is us-equity-hourly-v1's max_position_weight.
+    def __init__(self, num_names: int = 5, max_position_weight: float = 0.25) -> None:
         self.num_names = num_names
-        self.dollars_per_name = dollars_per_name
+        self.max_position_weight = max_position_weight
         self._invested = False
+
+    def dollars_per_name(self, portfolio: dict) -> float:
+        """Size each buy from the current cash and equity, under the position cap.
+
+        Orders are sized at this bar's price but fill at the next bar's, plus
+        costs, so 5% is kept back or the last buy can come up short of cash.
+        """
+        cash = float(portfolio.get("cash") or 0)
+        equity = float(portfolio.get("equity") or cash)
+        return min(self.max_position_weight * equity, cash / self.num_names) * 0.95
 
     def decide(self, observation):
         if self._invested:
             return {"orders": [], "rationale": "Holding."}
 
+        budget = self.dollars_per_name(observation.portfolio)
         features = observation.features
         ranked = sorted(
             (
@@ -50,11 +63,11 @@ class MomentumAgent:
                 "symbol": sym,
                 "side": "buy",
                 "quantity_type": "notional",
-                "quantity": self.dollars_per_name,
+                "quantity": round(budget, 2),
                 "order_type": "market",
             }
             for sym, price, _ in ranked
-            if price > 0
+            if 0 < price <= budget  # a pricier name would round to zero shares
         ][: self.num_names]
 
         if orders:
