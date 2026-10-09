@@ -141,6 +141,7 @@ EXPECTED_FULL_CONTRACT = {
     ("GET", "/api/admin/stats"),
     ("GET", "/api/admin/users"),
     ("GET", "/api/admin/users/{user_id}"),
+    ("GET", "/api/admin/users/{user_id}/agent-activity"),
     ("PATCH", "/api/admin/users/{user_id}"),
     ("GET", "/api/admin/analytics/overview"),
     ("GET", "/api/admin/analytics/lifecycle"),

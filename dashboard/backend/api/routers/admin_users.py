@@ -228,6 +228,41 @@ def get_user(user_id: int, _admin: dict = Depends(require_admin)):
     return {"user": payload}
 
 
+@admin_router.get("/users/{user_id}/agent-activity")
+def get_user_agent_activity(user_id: int, _admin: dict = Depends(require_admin)):
+    """Return the admin projection from a user to traceable agent runs."""
+    if users_module.user_store.get_user_admin(user_id) is None:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    # Agent content and protocol runs use separate persistence boundaries, so
+    # join them in Python by stable IDs. An older run without a trace remains
+    # visible instead of disappearing from the operator's history.
+    from dashboard.backend.domain.agents.repository import agent_store
+    from dashboard.backend.domain.runs.repository import run_store
+    from dashboard.backend.domain.traces.repository import trace_store
+
+    activity = []
+    for agent in agent_store.list_agents(owner_user_id=user_id):
+        runs = []
+        for run in run_store.list_runs(agent["agent_id"]):
+            trace = trace_store.get_trace_for_run(run["run_id"])
+            runs.append({
+                "run_id": run["run_id"],
+                "status": run.get("status"),
+                "created_at": run.get("created_at"),
+                "trace_id": trace.get("trace_id") if trace else None,
+                "trace_status": trace.get("status") if trace else None,
+            })
+        activity.append({
+            "agent_id": agent["agent_id"],
+            "name": agent.get("name") or agent["agent_id"],
+            "agent_type": agent.get("agent_type") or "external",
+            "created_at": agent.get("created_at"),
+            "runs": runs,
+        })
+    return {"user_id": user_id, "agents": activity}
+
+
 @admin_router.patch("/users/{user_id}")
 def patch_user(
     user_id: int,
