@@ -81,28 +81,7 @@
   }
 
   function renderEventTimeline(events) {
-    const list = node('ol', 'trace-timeline');
-    const items = Array.isArray(events) ? events : [];
-    if (!items.length) {
-      list.appendChild(node('li', 'panel-empty', 'No events recorded yet.'));
-      return list;
-    }
-    items.forEach((event) => {
-      const item = node('li', 'trace-event');
-      const heading = node('div', 'trace-event-head');
-      heading.appendChild(node('span', 'trace-sequence', `#${value(event.sequence_no)}`));
-      heading.appendChild(node('strong', '', shell().humanize(event.event_type)));
-      heading.appendChild(node('time', '', shell().formatTimestamp(event.occurred_at)));
-      item.appendChild(heading);
-      const meta = [event.actor_type, event.step_id, event.decision_id, event.artifact_id, event.parent_event_id ? `parent ${event.parent_event_id}` : null]
-        .filter((part) => part !== null && part !== undefined && part !== '')
-        .map((part) => String(part));
-      if (meta.length) item.appendChild(node('p', 'trace-event-meta', meta.join(' · ')));
-      const payload = node('pre', 'trace-event-payload', payloadText(event.payload));
-      item.appendChild(payload);
-      list.appendChild(item);
-    });
-    return list;
+    return window.AdminTraceTimeline.render(events, state.openState || {});
   }
 
   function renderTraceList(payload) {
@@ -133,7 +112,7 @@
     return section;
   }
 
-  function renderTraceDetail(trace, events, context = {}) {
+  function renderTraceDetail(trace, events, context = {}, performance = null) {
     const section = node('section', 'trace-detail-panel');
     const breadcrumb = node('nav', 'breadcrumb');
     breadcrumb.setAttribute('aria-label', 'Breadcrumb');
@@ -159,9 +138,59 @@
       metrics.appendChild(metric);
     });
     section.appendChild(metrics);
+    const columns = node('div', 'trace-three-column');
+    const leftRail = node('aside', 'trace-context-rail');
+    const centerColumn = node('div', 'trace-analysis-column');
+    const rightRail = node('aside', 'trace-trading-log');
+    const config = trace?.initial_input || events.find(e => e.event_type === 'run_started')?.payload?.config_summary || {};
+    const overview = node('details', 'trace-run-overview');
+    overview.setAttribute('data-trace-expand', 'run-configuration');
+    overview.open = Boolean(state.openState?.['run-configuration']);
+    overview.appendChild(node('summary', '', 'Run configuration'));
+    const fields = [['Agent', trace?.agent_id], ['Run', trace?.run_id], ['Model', config.model || config.model_name], ['Market / data source', config.market || config.data_source], ['Start date', config.start_date], ['End date', config.end_date], ['Initial capital', config.initial_capital ?? config.initial_equity]];
+    fields.forEach(([label, v]) => overview.appendChild(node('p', '', `${label}: ${v == null ? 'Not recorded' : String(v)}`)));
+    const configRaw = node('details'); configRaw.appendChild(node('summary', '', 'Recorded configuration (JSON)'));
+    configRaw.appendChild(node('pre', 'trace-event-payload', payloadText(config))); overview.appendChild(configRaw);
+    leftRail.appendChild(overview);
+    const report = node('details', 'trace-backtest-report');
+    report.setAttribute('data-trace-expand', 'backtest-report');
+    report.appendChild(node('summary', '', 'View this backtest · admin read-only'));
+    const reportBody = node('div'); report.appendChild(reportBody);
+    let reportLoaded = false;
+    report.addEventListener('toggle', async () => {
+      if (!report.open || reportLoaded) return;
+      reportLoaded = true; reportBody.textContent = 'Loading backtest…';
+      try {
+        const data = await shell().request(`/api/admin/traces/${encodeURIComponent(trace.trace_id)}/backtest`);
+        shell().clear(reportBody);
+        if (!data.available) { reportBody.textContent = 'No stored backtest result for this exact run. Trace events remain available.'; return; }
+        Object.entries(data.run).forEach(([key, v]) => reportBody.appendChild(node('p', '', `${shell().humanize(key)}: ${v == null ? 'Not recorded' : String(v)}`)));
+        const raw = node('details'); raw.appendChild(node('summary', '', 'Recorded backtest configuration'));
+        raw.appendChild(node('pre', 'trace-event-payload', payloadText(data.configuration))); reportBody.appendChild(raw);
+      } catch (error) {
+        if (await shell().handleAccessLost(error)) return;
+        reportLoaded = false; reportBody.textContent = 'Backtest details unavailable. Close and reopen to retry.';
+      }
+    });
+    report.open = Boolean(state.openState?.['backtest-report']);
+    leftRail.appendChild(report);
+    const downloads = node('div', 'trace-downloads');
+    [['json', 'Export JSON'], ['markdown', 'Export Markdown']].forEach(([format, label]) => {
+      const link = node('a', 'auth-btn auth-btn-secondary', label);
+      link.setAttribute('href', `/api/admin/traces/${encodeURIComponent(trace.trace_id)}/export?format=${format}`);
+      link.setAttribute('download', ''); downloads.appendChild(link);
+    });
+    downloads.appendChild(node('span', 'muted', 'All recorded events · running traces export a fixed snapshot'));
+    leftRail.appendChild(downloads);
+    if (window.AdminTracePerformance) centerColumn.appendChild(window.AdminTracePerformance.render(trace, events, performance));
     const title = node('h2', 'trace-section-title', 'Timeline');
-    section.appendChild(title);
-    section.appendChild(renderEventTimeline(events));
+    centerColumn.appendChild(title);
+    centerColumn.appendChild(renderEventTimeline(events));
+    const fills = events.flatMap(e => (e.event_type === 'execution_result' ? (e.payload?.fills || []) : [])).slice(0, 50);
+    const logHead = node('div', 'trace-log-head'); logHead.append(node('h2', '', 'Trading log'), node('span', 'eyebrow', `${fills.length} fills`)); rightRail.appendChild(logHead);
+    if (!fills.length) rightRail.appendChild(node('p', 'panel-empty', 'No execution fills recorded.'));
+    fills.forEach(fill => { const item = node('article', 'trace-log-item'); const side = String(fill.side || fill.action || 'ORDER').toUpperCase(); item.append(node('div', 'trace-log-order', `${side} ${value(fill.symbol || 'Unknown symbol')}`), node('p', 'muted', `${fill.quantity ?? fill.shares ?? '—'} shares · ${fill.price == null ? 'Price not recorded' : fill.price}`)); const decision = events.find(e => e.event_type === 'decision_recorded' && e.decision_id === fill.decision_id); if (decision?.payload?.reasoning_summary) item.append(node('p', 'trace-reason', decision.payload.reasoning_summary)); rightRail.appendChild(item); });
+    columns.append(leftRail, centerColumn, rightRail); section.appendChild(columns);
     return section;
   }
 
@@ -234,19 +263,22 @@
     try {
       let trace = await shell().request(`/api/admin/traces/${encodeURIComponent(traceId)}`);
       const events = await loadAllEvents(traceId);
+      const performance = await loadPerformance(traceId);
       const terminal = [...events].reverse().find((event) => ['run_completed', 'run_failed'].includes(event.event_type));
       if (terminal) trace = await refreshTraceEnvelope(traceId);
       if (!shell().isCurrent(SURFACE, seq)) return;
+      if (state.traceId !== traceId) state.openState = {};
       state.traceId = traceId;
       state.context = { ...context };
       state.trace = trace;
+      state.performance = performance;
       state.events = events;
       state.nextSequence = state.events.length ? state.events[state.events.length - 1].sequence_no : 0;
       state.stale = false;
       const host = element('tracesView');
       if (!host) return;
       shell().clear(host);
-      host.appendChild(renderTraceDetail(trace, state.events, context));
+      host.appendChild(renderTraceDetail(trace, state.events, context, state.performance));
       if (trace.status === 'running') startPolling();
     } catch (error) {
       if (await shell().handleAccessLost(error)) return;
@@ -262,27 +294,38 @@
     }
   }
 
+  async function loadPerformance(traceId, previous = null) {
+    try { return await shell().request(`/api/admin/traces/${encodeURIComponent(traceId)}/performance`); }
+    catch (_error) { return { ...(previous || {}), unavailable: true }; }
+  }
+
   async function pollEvents() {
     if (!state.traceId || !state.trace || state.trace.status !== 'running') return;
+    const traceId = state.traceId;
+    const seq = shell().nextSeq(SURFACE);
     try {
-      const fresh = await loadAllEvents(state.traceId, state.nextSequence);
-      if (fresh.length) {
+      const fresh = await loadAllEvents(traceId, state.nextSequence);
+      const performance = await loadPerformance(traceId, state.performance);
+      const envelope = await refreshTraceEnvelope(traceId);
+      if (!shell().isCurrent(SURFACE, seq) || state.traceId !== traceId) return;
+      state.trace = envelope;
+      state.performance = performance;
+      {
         state.events = state.events.concat(fresh.filter((event) => event.sequence_no > state.nextSequence));
         state.nextSequence = state.events.length ? state.events[state.events.length - 1].sequence_no : state.nextSequence;
-        const terminal = [...state.events].reverse().find((event) => ['run_completed', 'run_failed'].includes(event.event_type));
-        if (terminal) {
-          state.trace = await refreshTraceEnvelope(state.traceId);
-        }
+
         const host = element('tracesView');
         if (host && state.trace) {
+          state.openState = window.AdminTraceTimeline.capture(host);
           shell().clear(host);
-          host.appendChild(renderTraceDetail(state.trace, state.events, state.context));
+          host.appendChild(renderTraceDetail(state.trace, state.events, state.context, state.performance));
         }
       }
       state.stale = false;
       if (state.trace.status === 'running') state.pollTimer = setTimeout(pollEvents, 3000);
     } catch (error) {
       if (await shell().handleAccessLost(error)) return;
+      if (!shell().isCurrent(SURFACE, seq) || state.traceId !== traceId) return;
       state.stale = true;
       const host = element('tracesView');
       if (host) renderStaleNotice(host, 'Showing recorded events; refresh failed.');
@@ -296,7 +339,12 @@
   }
 
   function onRoute(event) {
-    if (event.detail.route !== SURFACE) return;
+    if (event.detail.route !== SURFACE) {
+      stopPolling();
+      shell().nextSeq(SURFACE);
+      state.traceId = null;
+      return;
+    }
     if (event.detail.id) loadDetail(event.detail.id, event.detail.query || {});
     else loadList();
   }
