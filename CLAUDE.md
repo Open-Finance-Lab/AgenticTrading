@@ -317,6 +317,8 @@ Two step-driven agent surfaces coexist; they are **not peers**:
 
 ### Fail-closed is not fail-visible
 
+**The Home news panel is frozen since 2026-10-11.** FinSearch's feed timers are paused, so `GET /api/news/signals` serves `dashboard/config/news_demo_snapshot.json` (the last live payload, `demo: true` → a "Demo news" line, `staleness_hours: null`) while `api/routers/news.py::NEWS_FEED_FROZEN` is `True`, and never calls FinSearch. To resume: re-enable the FinSearch timers first, then flip the flag. The adapter below still backs `/api/v2` backtest steps (`?as_of=`) and is the live path once unfrozen.
+
 The FinSearch news adapter (`dashboard/backend/integrations/news_sentiment.py`) is the cautionary case. `get_latest_panel_payload`'s `if not feed:` fallback to the Phase-A representative feed makes **"the upstream endpoint isn't deployed"** and **"the endpoint is live and every story is being silently rejected"** produce a byte-identical `status: ok` HTTP 200. The 404 path logs *nothing* (a bare `pass`). A field rename upstream therefore degraded prod for hours with no error, no metric, and a green test suite.
 
 - When adding a fallback, ask **what distinguishes *absent* from *broken***. If nothing does, log ERROR at the wholesale-drift boundary (a per-item warning cannot report a total contract break).
