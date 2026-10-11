@@ -24,6 +24,16 @@
       : '';
   }
 
+  // A frozen demo snapshot (`demo: true`, api/routers/news.py) gets a fixed
+  // date: a relative time keeps growing on a paused feed. Mirrors
+  // home-page.js homeFeedTime.
+  function feedTime(publishedEpochSeconds, demo) {
+    if (!demo) return relTime(publishedEpochSeconds);
+    const ms = Number(publishedEpochSeconds) * 1000;
+    if (!Number.isFinite(ms) || ms <= 0) return '';
+    return new Date(ms).toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+  }
+
   function render(payload) {
     const updated = document.getElementById('nnsUpdated');
     const badge = document.getElementById('nnsStatusBadge');
@@ -43,8 +53,14 @@
     // the producer unvalidated, so a string/non-number must not throw and mask
     // an otherwise-valid payload as "unavailable". null stays "" as before.
     const staleness = Number(payload.staleness_hours);
-    updated.textContent = (payload.staleness_hours != null && Number.isFinite(staleness))
-      ? `Updated ${staleness.toFixed(1)}h ago` : '';
+    // `demo`: a frozen snapshot served while FinSearch is paused. It must say
+    // so — status 'ok' and real stories otherwise read as a live feed.
+    if (payload.demo) {
+      updated.textContent = 'Demo news';
+    } else {
+      updated.textContent = (payload.staleness_hours != null && Number.isFinite(staleness))
+        ? `Updated ${staleness.toFixed(1)}h ago` : '';
+    }
     badge.hidden = payload.status !== 'degraded';
     if (!badge.hidden) badge.textContent = `degraded: ${payload.status_reason || 'partial data'}`;
     overview.textContent = payload.news_overview || '';
@@ -56,7 +72,7 @@
       // an absent relTime helper) collapses cleanly instead of leaving a
       // dangling " · " separator. relTime is a controlled string, not producer
       // data, so it stays unescaped like before.
-      const meta = [escapeHtml(item.source), escapeHtml(item.ticker), relTime(item.published)]
+      const meta = [escapeHtml(item.source), escapeHtml(item.ticker), feedTime(item.published, payload.demo)]
         .filter(Boolean).join(' · ');
       return `
       <li class="nns-item">
