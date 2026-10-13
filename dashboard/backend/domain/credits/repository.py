@@ -1041,6 +1041,20 @@ class CreditsStore:
     def get_balance_micro(self, user_id: int) -> int:
         return self.get_balance_projection(user_id)["total_available_micro"]
 
+    def has_promotion_grant(self, user_id: int, campaign_keys: Sequence[str]) -> bool:
+        """Whether the account already holds a grant from any of these campaigns."""
+        keys = [str(key) for key in campaign_keys]
+        if not keys:
+            return False
+        placeholders = ", ".join("?" for _ in keys)
+        with self._get_connection() as conn:
+            row = conn.execute(
+                "SELECT 1 FROM credit_promotion_grants "
+                f"WHERE user_id = ? AND campaign_key IN ({placeholders}) LIMIT 1",
+                (int(user_id), *keys),
+            ).fetchone()
+        return row is not None
+
     def list_user_ids(self) -> list[int]:
         """Return account IDs for an idempotent promotion backfill."""
         with self._get_connection() as conn:

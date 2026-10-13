@@ -614,3 +614,59 @@ def test_the_client_outlives_the_server_budget_it_draws(js):
         int(ceiling.group(1))
         == PIPELINE_SUBPROCESS_TIMEOUT_SECONDS + SUBPROCESS_TIMEOUT_OVERHEAD_SECONDS
     )
+
+
+def _map_backtest_error_with_status(message: str, status: int) -> str:
+    script = "\n".join(
+        [
+            js_const("IFIND_ASHARE_SOURCE"),
+            "const window = {};",
+            fn_body("function formatBacktestError("),
+            "process.stdout.write(JSON.stringify(formatBacktestError("
+            f"{json.dumps({'message': message, 'status': status})}, IFIND_ASHARE_SOURCE)));",
+        ]
+    )
+    result = subprocess.run(
+        ["node", "-e", script], capture_output=True, text=True, timeout=30
+    )
+    assert result.returncode == 0, result.stderr
+    return json.loads(result.stdout)
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node is not installed")
+def test_credits_refusals_survive_the_ifind_error_mapper():
+    """An A-share LLM run bills ATL Credits like any other, and the iFinD
+    mapper otherwise rewrites every message it does not recognise into "The
+    iFinD backtest failed" -- and every 403 into "iFinD access is disabled".
+    The messages come from their producers, not typed here."""
+    from dashboard.backend.infrastructure.llm.execution.errors import (
+        ExecutionErrorCategory,
+        LLMExecutionError,
+    )
+
+    stopped = (
+        "Backtest stopped: "
+        + LLMExecutionError(ExecutionErrorCategory.INSUFFICIENT_CREDITS).safe_message
+    )
+    assert _map_backtest_error(stopped) == stopped
+
+    paused = LLMExecutionError.account_restricted("refund_reconciliation").safe_message
+    assert _map_backtest_error_with_status(paused, 403) == paused
+
+    # The 402 arm on its own: no "ATL Credits" in the text to lean on.
+    refused = "Payment required for this run."
+    assert _map_backtest_error_with_status(refused, 402) == refused
+
+    # Any in-run model failure, not only Credits: these contain 'credential'
+    # and 'response', which the iFinD arms would otherwise claim.
+    for category in (
+        ExecutionErrorCategory.CREDENTIAL_INVALID,
+        ExecutionErrorCategory.RESPONSE_INVALID,
+        ExecutionErrorCategory.PROVIDER_TIMEOUT,
+    ):
+        message = "Backtest stopped: " + LLMExecutionError(category).safe_message
+        assert _map_backtest_error(message) == message
+    # And the iFinD arms still own iFinD's own 403.
+    assert "iFinD A-share access is disabled" in _map_backtest_error_with_status(
+        "Forbidden", 403
+    )

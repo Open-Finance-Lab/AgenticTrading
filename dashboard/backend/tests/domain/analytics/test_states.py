@@ -649,3 +649,23 @@ def test_value_snapshot_repair_isolates_one_user_failure(tmp_path, capsys):
     assert "analytics.value_snapshot_repair_failed" in output
     assert "category=RuntimeError" in output
     assert "private first-user failure" not in output
+
+
+def test_a_restricted_account_is_blocked_like_an_empty_balance(tmp_path):
+    service, store = _fixture(tmp_path)
+    _run(service, "backtest_failed", 0, NOW - timedelta(hours=2), error_category="internal_error")
+    blocked = service.record_server_event(
+        event_name="safe_error_recorded",
+        user_id=1,
+        source_event_id="resource:safe_error_recorded:run-restricted:account_restricted",
+        source_record_type="run",
+        source_record_id="run-restricted",
+        error_category="account_restricted",
+        occurred_at=NOW - timedelta(hours=1),
+    ).event
+
+    snapshot = calculate_user_state(1, now=NOW, store=store)
+
+    assert snapshot.status == "blocked"
+    assert snapshot.reason_code == "billing_lane_unavailable"
+    assert snapshot.evidence_event_ids == [blocked.event_id]

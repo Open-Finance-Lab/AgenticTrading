@@ -12,6 +12,7 @@ from dashboard.backend.domain.credits.models import LLMSettlementResult
 from dashboard.backend.domain.credits.service import CreditsService
 from dashboard.backend.domain.credits.repository_common import (
     CreditAccountRestrictedStoreError,
+    InsufficientCreditsError,
 )
 from dashboard.backend.domain.analytics import instrumentation as analytics_instrumentation
 from dashboard.backend.domain.analytics.usage_cost import model_usage_properties
@@ -149,6 +150,11 @@ def _pricing_snapshot_for(model_id: str, provider_id: str) -> PricingSnapshot:
     return PricingSnapshot.from_model(model_id, provider_id)
 
 
+def prompt_token_ceiling_for_bytes(prompt_bytes: int) -> int:
+    """The input-token ceiling a reservation charges for ``prompt_bytes``."""
+    return max(0, int(prompt_bytes)) + _PROMPT_FRAMING_TOKEN_ALLOWANCE
+
+
 def _prompt_token_ceiling(request: LLMExecutionRequest) -> int:
     payload = {
         "system_message": request.system_message,
@@ -159,7 +165,38 @@ def _prompt_token_ceiling(request: LLMExecutionRequest) -> int:
         ensure_ascii=False,
         separators=(",", ":"),
     ).encode("utf-8")
-    return len(encoded) + _PROMPT_FRAMING_TOKEN_ALLOWANCE
+    return prompt_token_ceiling_for_bytes(len(encoded))
+
+
+def _ceiling_micro(
+    input_tokens: int, output_tokens: int, pricing_snapshot: PricingSnapshot
+) -> int | None:
+    ceiling_cost = estimate_cost_from_snapshot(
+        pricing_snapshot,
+        LLMUsage(input_tokens=int(input_tokens), output_tokens=int(output_tokens)),
+    )
+    if ceiling_cost is None:
+        return None
+    return credits_micro_for_usd(ceiling_cost)
+
+
+def reservation_ceiling_micro_for(
+    *,
+    prompt_bytes: int,
+    max_output_tokens: int,
+    pricing_snapshot: PricingSnapshot,
+) -> int | None:
+    """The reservation one request of this shape holds, or None if unpriceable.
+
+    Shared with the backtest launch preflight so the two cannot drift: its
+    "the last call must find a whole ceiling free" is only true while it prices
+    exactly what ``_reservation_ceiling_micro`` does.
+    """
+    return _ceiling_micro(
+        prompt_token_ceiling_for_bytes(prompt_bytes),
+        max_output_tokens,
+        pricing_snapshot,
+    )
 
 
 def _reservation_ceiling_micro(
@@ -168,14 +205,32 @@ def _reservation_ceiling_micro(
 ) -> int:
     """Return the maximum billable cost for this one provider request."""
 
-    ceiling_usage = LLMUsage(
-        input_tokens=_prompt_token_ceiling(request),
-        output_tokens=request.usage_policy.max_output_tokens,
+    ceiling = _ceiling_micro(
+        _prompt_token_ceiling(request),
+        request.usage_policy.max_output_tokens,
+        pricing_snapshot,
     )
-    ceiling_cost = estimate_cost_from_snapshot(pricing_snapshot, ceiling_usage)
-    if ceiling_cost is None:
+    if ceiling is None:
         raise LLMExecutionError(ExecutionErrorCategory.BILLING_FAILED)
-    return credits_micro_for_usd(ceiling_cost)
+    return ceiling
+
+
+def analytics_error_category(category: ExecutionErrorCategory) -> str:
+    """The analytics ``error_category`` for an execution failure category.
+
+    Module-level so the backtest parent can label a child's failure without
+    constructing (or depending on) the service.
+    """
+    return {
+        ExecutionErrorCategory.CREDENTIAL_MISSING: "credential_missing",
+        ExecutionErrorCategory.CREDENTIAL_INVALID: "credential_invalid",
+        ExecutionErrorCategory.PROVIDER_UNAVAILABLE: "provider_unavailable",
+        ExecutionErrorCategory.PROVIDER_TIMEOUT: "provider_timeout",
+        ExecutionErrorCategory.PROVIDER_QUOTA_EXHAUSTED: "provider_quota_exhausted",
+        ExecutionErrorCategory.BILLING_FAILED: "credits_unavailable",
+        ExecutionErrorCategory.ACCOUNT_RESTRICTED: "account_restricted",
+        ExecutionErrorCategory.INSUFFICIENT_CREDITS: "credits_insufficient",
+    }.get(category, "internal_error")
 
 
 class LLMExecutionService:
@@ -244,15 +299,7 @@ class LLMExecutionService:
     def _analytics_error_category(
         category: ExecutionErrorCategory,
     ) -> str:
-        return {
-            ExecutionErrorCategory.CREDENTIAL_MISSING: "credential_missing",
-            ExecutionErrorCategory.CREDENTIAL_INVALID: "credential_invalid",
-            ExecutionErrorCategory.PROVIDER_UNAVAILABLE: "provider_unavailable",
-            ExecutionErrorCategory.PROVIDER_TIMEOUT: "provider_timeout",
-            ExecutionErrorCategory.PROVIDER_QUOTA_EXHAUSTED: "provider_quota_exhausted",
-            ExecutionErrorCategory.BILLING_FAILED: "credits_unavailable",
-            ExecutionErrorCategory.ACCOUNT_RESTRICTED: "account_restricted",
-        }.get(category, "internal_error")
+        return analytics_error_category(category)
 
     @staticmethod
     def _emit_model_usage(
@@ -344,6 +391,10 @@ class LLMExecutionService:
                         outstanding_micro = 0
                     raise LLMExecutionError.account_restricted(
                         reason, outstanding_micro
+                    ) from exc
+                except InsufficientCreditsError as exc:
+                    raise LLMExecutionError(
+                        ExecutionErrorCategory.INSUFFICIENT_CREDITS
                     ) from exc
                 reservation_id = reservation.reservation_id
                 self._platform_runs.add(request.run_id)

@@ -18,6 +18,7 @@ class ExecutionErrorCategory(StrEnum):
     BILLING_FAILED = "billing_failed"
     PROVIDER_QUOTA_EXHAUSTED = "provider_quota_exhausted"
     ACCOUNT_RESTRICTED = "account_restricted"
+    INSUFFICIENT_CREDITS = "insufficient_credits"
     WORKER_FAILED = "worker_failed"
 
 
@@ -36,6 +37,15 @@ _SAFE_MESSAGES = {
     ExecutionErrorCategory.ACCOUNT_RESTRICTED: (
         "Your Credits account is paused. Add Credits to settle model usage "
         "or contact an administrator."
+    ),
+    # The balance cannot cover the next call's reservation. Kept apart from
+    # BILLING_FAILED, which it used to fall into via the catch-all in
+    # ``_execute_platform``: "you are out of Credits" is the user's to fix,
+    # "billing broke" is ours, and one message for both sent users hunting
+    # for a bug that was an empty balance.
+    ExecutionErrorCategory.INSUFFICIENT_CREDITS: (
+        "Not enough ATL Credits to continue this run. Add Credits on the "
+        "Credits page, choose a lower-cost model, or use your own API key."
     ),
     ExecutionErrorCategory.WORKER_FAILED: "The model worker failed before completion.",
 }
@@ -72,6 +82,10 @@ class LLMExecutionError(RuntimeError):
         ):
             allowed_message = message
         self.safe_message = allowed_message or _SAFE_MESSAGES[self.category]
+        # Set by ``account_restricted``; lets a process boundary that can carry
+        # only fixed tokens (the backtest child's run_failed line) rebuild the
+        # restriction-specific message rather than the generic one.
+        self.restriction_reason: str | None = None
         super().__init__(self.safe_message)
 
     @classmethod
@@ -93,7 +107,10 @@ class LLMExecutionError(RuntimeError):
             message = _SAFE_RESTRICTED_MESSAGES.get(
                 reason, _SAFE_MESSAGES[ExecutionErrorCategory.ACCOUNT_RESTRICTED]
             )
-        return cls(ExecutionErrorCategory.ACCOUNT_RESTRICTED, message)
+        error = cls(ExecutionErrorCategory.ACCOUNT_RESTRICTED, message)
+        if reason in _SAFE_RESTRICTED_MESSAGES:
+            error.restriction_reason = reason
+        return error
 
 
 # A hosted (``fail_closed``) run aborts on any model error, because a billing or
@@ -117,9 +134,24 @@ def is_transient_provider_failure(error: BaseException) -> bool:
     )
 
 
+def run_failed_line(error: LLMExecutionError) -> str:
+    """The line a backtest child prints when a model call ends its run.
+
+    Parsed by ``api/routers/backtests._child_llm_failure``. Fixed tokens only
+    (enum values), never upstream text, and the ``ERROR: llm.`` prefix makes
+    the parent relay it to the service log live.
+    """
+    line = f"ERROR: llm.run_failed category={error.category.value}"
+    reason = getattr(error, "restriction_reason", None)
+    if reason:
+        line += f" reason={reason}"
+    return line
+
+
 __all__ = [
     "ExecutionErrorCategory",
     "LLMExecutionError",
     "RetryHint",
     "is_transient_provider_failure",
+    "run_failed_line",
 ]
