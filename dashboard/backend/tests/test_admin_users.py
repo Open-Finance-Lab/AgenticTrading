@@ -195,6 +195,9 @@ def test_every_admin_route_refuses_a_non_admin(isolated_auth):
         ("GET", "/api/admin/users/{user_id}"): lambda: client.get(
             f"/api/admin/users/{user['id']}"
         ),
+        ("GET", "/api/admin/users/{user_id}/agent-activity"): lambda: client.get(
+            f"/api/admin/users/{user['id']}/agent-activity"
+        ),
         ("PATCH", "/api/admin/users/{user_id}"): lambda: client.patch(
             f"/api/admin/users/{user['id']}", json={"role": "admin"}
         ),

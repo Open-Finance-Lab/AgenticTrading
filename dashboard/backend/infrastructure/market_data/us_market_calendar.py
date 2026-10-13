@@ -1,9 +1,15 @@
 """NYSE full-day holidays, computed by rule (no data file, no dependency).
 
-The Live Trading Leaderboard is the one board that walks a calendar forward
-day by day, so it is the one place a weekday-only calendar breaks: a holiday
-became a freeze day whose one-day increment had no bars and failed every model,
-and it padded "Day N of M" and the chart axis with a session that never trades.
+Shared US market-data infrastructure: the Live Trading Leaderboard walks it
+forward day by day, and the Run Backtest modal's default period
+(``provider.default_backtest_window``) walks it back week by week. It lived
+under ``domain/leaderboard/`` while the board was its only reader; a calendar
+the market-data layer needs belongs beside ``sessions.py``, not behind an
+import into ``domain/``.
+
+The board is where a weekday-only calendar first broke: a holiday became a
+freeze day whose one-day increment had no bars and failed every model, and it
+padded "Day N of M" and the chart axis with a session that never trades.
 
 Covers the ten NYSE holidays in force since 2022 (Juneteenth added that year).
 Early closes (13:00 ET) are not modelled; they are still trading days.
@@ -13,7 +19,7 @@ from __future__ import annotations
 
 from datetime import date, timedelta
 from functools import lru_cache
-from typing import FrozenSet
+from typing import FrozenSet, Iterator, Tuple
 
 
 def _nth_weekday(year: int, month: int, weekday: int, n: int) -> date:
@@ -76,3 +82,25 @@ def nyse_holidays(year: int) -> FrozenSet[date]:
 
 def is_trading_day(day: date) -> bool:
     return day.weekday() < 5 and day not in nyse_holidays(day.year)
+
+
+def trading_weeks_back(day: date) -> Iterator[Tuple[date, date]]:
+    """First and last session of the Mon-Fri week holding ``day``, then of each
+    earlier week, newest first. Unbounded: the caller stops it.
+
+    Holidays trim the ends (Good Friday makes a week end on Thursday); a week
+    with no session at all is skipped. Whether a week has *finished* is not a
+    calendar question -- it depends on the clock and on when its data settles
+    -- so this yields the current, still-trading week too and leaves that
+    judgement to the caller (``provider.default_backtest_window``).
+    """
+    monday = day - timedelta(days=day.weekday())
+    while True:
+        sessions = [
+            session
+            for session in (monday + timedelta(days=offset) for offset in range(5))
+            if is_trading_day(session)
+        ]
+        if sessions:
+            yield sessions[0], sessions[-1]
+        monday -= timedelta(days=7)

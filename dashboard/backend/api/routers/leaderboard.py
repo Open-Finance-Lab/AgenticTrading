@@ -32,8 +32,31 @@ _daily_refresh_rate_limiter = FixedWindowRateLimiter(max_events=20, window_secon
 _live_refresh_rate_limiter = FixedWindowRateLimiter(max_events=20, window_seconds=3600)
 
 
+def _may_force_refresh(request: Request, refresh_secret: str | None) -> bool:
+    """``?refresh=true`` recomputes every baseline and refetches market data.
+
+    It used to be honoured for anyone, which made this public GET a free way to
+    burn the platform's Alpaca quota and threadpool and to append agent_runs
+    rows. It is an operator action: the cron secret, or a signed-in admin via
+    the one admin gate (``require_admin``), never an inline role check.
+    """
+    try:
+        verify_daily_refresh_secret(refresh_secret)
+        return True
+    except (ValueError, PermissionError):
+        pass
+    from dashboard.backend.api.auth import get_current_user, require_admin
+
+    try:
+        require_admin(get_current_user(request, request.headers.get("authorization")))
+        return True
+    except HTTPException:
+        return False
+
+
 @router.get("")
 def api_get_leaderboard(
+    request: Request,
     refresh: bool = Query(default=False),
     period: str = Query(
         default="contest",
@@ -42,12 +65,14 @@ def api_get_leaderboard(
             "'daily' (last completed weekday), or 'live' (current calendar month)."
         ),
     ),
+    x_leaderboard_refresh_secret: str | None = Header(default=None, alias="X-Leaderboard-Refresh-Secret"),
 ):
     """
     Official competition / daily / live leaderboard for the requested period.
 
     Baselines are computed from Alpaca hourly backtest data and cached in SQLite.
-    Pass ?refresh=true to recompute (e.g. after config change).
+    Pass ?refresh=true to recompute (e.g. after config change); operators only,
+    with X-Leaderboard-Refresh-Secret or an admin session, else 403.
     Pass ?period=daily for the rolling one-day board (weekends show Friday).
     Pass ?period=live for the current calendar-month Live Trading Leaderboard
     (freeze-window snapshots under leaderboard-live; GET never deploys models).
@@ -65,6 +90,11 @@ def api_get_leaderboard(
     # MarketDataCredentialsError, IFindClientError), all of which reach here
     # through ensure_leaderboard_runs -> fetch_hourly_bars. It only selects the
     # 503 status code, never the message.
+    if refresh and not _may_force_refresh(request, x_leaderboard_refresh_secret):
+        raise HTTPException(
+            status_code=403,
+            detail="refresh=true needs X-Leaderboard-Refresh-Secret or an admin session",
+        )
     try:
         if period.strip().lower() == "live":
             # Isolated from contest/daily: live GET never deploys LLM models.

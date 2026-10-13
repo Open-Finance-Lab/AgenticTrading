@@ -2149,6 +2149,16 @@ function homeRelTime(publishedEpochSeconds) {
     return '';
 }
 
+// A frozen demo snapshot (`demo: true`, api/routers/news.py) gets a fixed date,
+// not a relative time: "3w ago" keeps growing on a paused feed and reads as an
+// abandoned product rather than a paused one.
+function homeFeedTime(publishedEpochSeconds, demo) {
+    if (!demo) return homeRelTime(publishedEpochSeconds);
+    const ms = Number(publishedEpochSeconds) * 1000;
+    if (!Number.isFinite(ms) || ms <= 0) return '';
+    return new Date(ms).toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+}
+
 const HOME_MOCK_NEWS = {
     status: 'ok',
     _mock: true,
@@ -2239,7 +2249,13 @@ function renderHomeMarketNews(payload) {
     setHomeMarketDemoBadge(!live);
 
     if (status) {
-        if (live && Number.isFinite(Number(data.staleness_hours))) {
+        // `demo`: the backend serves a frozen FinSearch snapshot while the feed
+        // is paused (api/routers/news.py NEWS_FEED_FROZEN) — real stories, not
+        // HOME_MOCK_NEWS, so they render normally under a "Demo news" line.
+        if (live && data.demo) {
+            status.hidden = false;
+            status.textContent = 'Demo news';
+        } else if (live && Number.isFinite(Number(data.staleness_hours))) {
             status.hidden = false;
             status.textContent = `Updated ${Number(data.staleness_hours).toFixed(1)}h ago`;
         } else {
@@ -2252,7 +2268,7 @@ function renderHomeMarketNews(payload) {
     list.innerHTML = items.map((item) => {
         const sent = homeSentimentClass(item.sentiment || item.category);
         const logo = (item.ticker || item.source || '?').toString().slice(0, 2).toUpperCase();
-        const meta = [item.ticker, item.category || item.source || 'FinSearch', homeRelTime(item.published)]
+        const meta = [item.ticker, item.category || item.source || 'FinSearch', homeFeedTime(item.published, data.demo)]
             .filter(Boolean).join(' · ');
         const label = sent === 'bullish' ? 'Bullish' : sent === 'bearish' ? 'Bearish' : 'Neutral';
         return `<li>
@@ -2283,7 +2299,8 @@ function renderHomeMarketSignals(payload) {
     if (status) {
         if (live) {
             status.hidden = false;
-            status.textContent = `${signals.length} signal${signals.length === 1 ? '' : 's'}`;
+            const count = `${signals.length} signal${signals.length === 1 ? '' : 's'}`;
+            status.textContent = data.demo ? `Demo news · ${count}` : count;
         } else {
             status.hidden = true;
             status.textContent = '';
@@ -2296,7 +2313,7 @@ function renderHomeMarketSignals(payload) {
         return `<li>
             <span class="hm-news-logo hm-news-logo--${sent === 'bullish' ? 'bull' : sent === 'bearish' ? 'bear' : 'neut'}">${homeEscape(String(sym).slice(0, 2))}</span>
             <div class="hm-news-main">
-                <a href="${homeEscape(homeSafeUrl(s.url || 'https://agenticfinsearch.org/'))}" target="_blank" rel="noopener noreferrer">${homeEscape(sym)} · score ${Number(s.score || 0).toFixed(2)}</a>
+                <a href="${homeEscape(homeSafeUrl(s.url || 'https://agenticfinsearch.org/'))}" target="_blank" rel="noopener noreferrer">${homeEscape(sym)} · score ${Number(s.sentiment_score ?? s.score ?? 0).toFixed(2)}</a>
                 <span class="hm-news-meta">${homeEscape(s.rationale || s.source || 'FinSearch')}</span>
             </div>
             <span class="hm-sent hm-sent--${sent}">${label}</span>

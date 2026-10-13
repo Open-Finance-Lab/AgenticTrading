@@ -881,29 +881,34 @@ def test_backtest_run_valid_request_ok():
     assert "session_id" in body
 
 
+def _create_builtin_agent(client, owner_session):
+    created = client.post(
+        "/api/v1/agents",
+        json={"name": "Discord Card Bot", "agent_type": "builtin"},
+        headers={"X-Session-Id": owner_session},
+    ).json()
+    return created["agent"]["agent_id"], created["session_id"]
+
+
+_RULE_BASED_RUN = {
+    "start_date": "2026-05-01",
+    "end_date": "2026-05-02",
+    "decision_source": "rule_based",
+}
+
+
 def test_backtest_run_targets_builtin_agent_session(client, monkeypatch):
-    """Discord (and website) can pass agent_id so runs land on the agent card."""
+    """The agent's owner can pass agent_id so the run lands on the agent card."""
     spy = _Spy()
     monkeypatch.setattr(bt, "run_backtest_background", spy)
 
     owner = str(uuid.uuid4())
-    created = client.post(
-        "/api/v1/agents",
-        json={"name": "Discord Card Bot", "agent_type": "builtin"},
-        headers={"X-Session-Id": owner},
-    ).json()
-    agent_session = created["session_id"]
-    agent_id = created["agent"]["agent_id"]
+    agent_id, agent_session = _create_builtin_agent(client, owner)
 
     resp = client.post(
         "/backtest/run",
-        json={
-            "start_date": "2026-05-01",
-            "end_date": "2026-05-02",
-            "agent_id": agent_id,
-            "decision_source": "rule_based",
-        },
-        headers={"X-Session-Id": str(uuid.uuid4())},
+        json={**_RULE_BASED_RUN, "agent_id": agent_id},
+        headers={"X-Session-Id": owner},
     )
     assert resp.status_code == 200
     assert resp.json()["session_id"] == agent_session
@@ -911,6 +916,82 @@ def test_backtest_run_targets_builtin_agent_session(client, monkeypatch):
     assert spy.last_kwargs["session_id"] == agent_session
     assert spy.last_kwargs["runtime_type"] == "pipeline"
     assert spy.last_kwargs["runtime_config"] == {}
+
+
+def test_backtest_run_refuses_a_strangers_builtin_agent(client, monkeypatch):
+    """A stranger naming someone's agent_id must not learn its session_id.
+
+    That session_id is what reclaim_on_session_match accepts as proof of
+    ownership, so echoing it back here let anyone take over a guest agent.
+    """
+    spy = _Spy()
+    monkeypatch.setattr(bt, "run_backtest_background", spy)
+    agent_id, agent_session = _create_builtin_agent(client, str(uuid.uuid4()))
+
+    resp = client.post(
+        "/backtest/run",
+        json={**_RULE_BASED_RUN, "agent_id": agent_id},
+        headers={"X-Session-Id": str(uuid.uuid4())},
+    )
+    assert resp.status_code == 403
+    assert agent_session not in resp.text
+    assert spy.calls == 0
+
+
+def _bind_agent_to_user(agent_id, user_id):
+    conn = bt.agent_service.agents._get_connection()
+    conn.execute(
+        "UPDATE external_agents SET owner_user_id = ? WHERE agent_id = ?",
+        (user_id, agent_id),
+    )
+    conn.commit()
+    conn.close()
+
+
+def _discord_bot(monkeypatch, linked_user_id=42):
+    import dashboard.backend.users as users_module
+
+    monkeypatch.setenv("DISCORD_BOT_API_SECRET", "test-bot-secret")
+    monkeypatch.setattr(
+        users_module.user_store,
+        "get_user_by_discord_id",
+        lambda discord_id: {"id": linked_user_id} if discord_id == "discord-owner" else None,
+    )
+
+
+@pytest.mark.parametrize(
+    "secret, discord_id, bound_to, expected",
+    [
+        ("test-bot-secret", "discord-owner", 42, 200),   # bot, for the linked owner
+        ("wrong-secret", "discord-owner", 42, 403),      # forged bot secret
+        ("test-bot-secret", "discord-other", 42, 403),   # unlinked Discord user
+        ("test-bot-secret", "discord-owner", 7, 403),    # linked, but not the owner
+    ],
+)
+def test_discord_bot_runs_only_the_linked_owners_agent(
+    client, monkeypatch, secret, discord_id, bound_to, expected
+):
+    spy = _Spy()
+    monkeypatch.setattr(bt, "run_backtest_background", spy)
+    _discord_bot(monkeypatch)
+    agent_id, agent_session = _create_builtin_agent(client, str(uuid.uuid4()))
+    _bind_agent_to_user(agent_id, bound_to)
+
+    resp = client.post(
+        "/backtest/run",
+        json={**_RULE_BASED_RUN, "agent_id": agent_id},
+        headers={
+            "X-Session-Id": str(uuid.uuid4()),
+            "X-Discord-Bot-Secret": secret,
+            "X-Discord-User-Id": discord_id,
+        },
+    )
+    assert resp.status_code == expected
+    if expected == 200:
+        assert spy.last_kwargs["session_id"] == agent_session
+    else:
+        assert agent_session not in resp.text
+        assert spy.calls == 0
 
 
 def _stub_hosted_runtime_installed(monkeypatch):
@@ -3131,6 +3212,202 @@ def test_write_back_baseline_is_the_stored_pipeline_not_its_substitute(monkeypat
     )
     # Without a route-supplied baseline the passed pipeline is the baseline.
     assert bt._writeback_start_pipeline(stored, None, None) == stored
+
+
+def _run_parent_with_child(monkeypatch, child, *, run_id, label_stub=None):
+    """Drive the real run_backtest_background against ``child`` and return
+    the (run_id, label) pairs the parent handed fail_trace_if_running."""
+    session_id = str(uuid.uuid4())
+    assert bt._try_acquire_backtest_slot(live_run_id=run_id, session_id=session_id, user_id=None) is None
+    labelled = []
+    monkeypatch.setattr(subprocess, "Popen", lambda cmd, **kwargs: child)
+    monkeypatch.setattr(bt, "run_backtest_background", _REAL_RUN_BACKTEST_BACKGROUND)
+    monkeypatch.setattr(
+        bt.trace_service, "fail_trace_if_running",
+        label_stub or (lambda rid, code: labelled.append((rid, code)) or True),
+    )
+    bt.run_backtest_background(
+        start_date="2026-01-01",
+        end_date="2026-01-02",
+        session_id=session_id,
+        live_run_id=run_id,
+        decision_source="rule_based",
+    )
+    return labelled
+
+
+def test_parent_labels_a_timed_out_child_run_timed_out(monkeypatch):
+    """The timeout arm SIGTERMs first (grace, then SIGKILL); a child that
+    unwinds in the grace exits via SystemExit and writes nothing. The label
+    must say timed out -- not cancelled, which is what the child would have
+    guessed -- and the finally's run_killed must not fire over it."""
+    run_id = "agent_trace_timed_out"
+    labelled = _run_parent_with_child(
+        monkeypatch, FakeChild(stdout="run header line\n", timeout_waits=1), run_id=run_id,
+    )
+    # One write, carrying the arm's label: the arms only record it, and the
+    # finally writes it once instead of falling back to run_killed.
+    assert labelled == [(run_id, "run_timed_out")]
+
+
+def test_a_parent_exception_after_success_keeps_the_trace_close_failed_label(monkeypatch):
+    """A parent exception after the success branch claimed its label goes
+    through the generic arm, which records nothing over it."""
+    run_id = "agent_trace_killed"
+    monkeypatch.setattr(
+        bt, "_maybe_writeback_adapted_pipeline",
+        lambda *_a, **_k: (_ for _ in ()).throw(RuntimeError("boom")),
+    )
+    labelled = _run_parent_with_child(
+        monkeypatch, FakeChild(returncode=0, stdout="ok\n"), run_id=run_id,
+    )
+    # The success branch claimed trace_close_failed before the exception; the
+    # recorded label survives the generic arm.
+    assert labelled == [(run_id, "trace_close_failed")]
+
+
+def test_parent_labels_an_unclaimed_exit_run_killed(monkeypatch):
+    """No arm claimed the exit -- the parent raised before the child's outcome
+    was read -- so the finally's fallback labels the trace a kill."""
+    run_id = "agent_trace_unclaimed"
+
+    def _boom(*_a, **_k):
+        raise RuntimeError("parent died mid-wait")
+
+    monkeypatch.setattr(bt, "_run_backtest_subprocess", _boom)
+    labelled = _run_parent_with_child(monkeypatch, FakeChild(returncode=0), run_id=run_id)
+    assert labelled == [(run_id, "run_killed")]
+    assert run_id not in bt._active_slots
+
+
+def test_parent_labels_a_cancelled_child_run_cancelled(monkeypatch):
+    run_id = "agent_trace_cancelled"
+    monkeypatch.setattr(bt, "_backtest_cancel_requested", lambda rid: rid == run_id)
+    try:
+        labelled = _run_parent_with_child(
+            monkeypatch, FakeChild(returncode=-15, stdout="ok\n"), run_id=run_id,
+        )
+    finally:
+        # The cancel route finalizes the slot in production; this test
+        # bypassed it, so release the slot the arm deliberately left alone.
+        with bt._backtest_slots_lock:
+            bt._active_slots.pop(run_id, None)
+    assert labelled == [(run_id, "run_cancelled")]
+
+
+def test_parent_labels_a_signal_death_it_did_not_send_run_killed(monkeypatch):
+    """returncode -9 with no cancel and no timeout: a SIGKILL from elsewhere
+    (a cgroup OOM kill). The child was killed, not failed."""
+    run_id = "agent_trace_oom_killed"
+    labelled = _run_parent_with_child(monkeypatch, FakeChild(returncode=-9), run_id=run_id)
+    assert labelled == [(run_id, "run_killed")]
+
+
+def test_a_raising_cleanup_still_labels_the_trace(monkeypatch):
+    """A cleanup statement in the finally that raises must not skip the
+    label: it would leave the trace ``running`` forever."""
+    run_id = "agent_trace_cleanup_raises"
+    real = bt._finalize_slot
+
+    def _finalize_then_raise(*args, **kwargs):
+        real(*args, **kwargs)
+        raise RuntimeError("slot ledger write failed")
+
+    monkeypatch.setattr(bt, "_finalize_slot", _finalize_then_raise)
+    labelled = []
+    with pytest.raises(RuntimeError, match="slot ledger write failed"):
+        _run_parent_with_child(
+            monkeypatch, FakeChild(returncode=1, stderr="Traceback: boom\n"), run_id=run_id,
+            label_stub=lambda rid, code: labelled.append((rid, code)) or True,
+        )
+    assert labelled == [(run_id, "run_failed")]
+    assert run_id not in bt._active_slots
+
+
+def _record_slot_finalizes(monkeypatch, events):
+    real = bt._finalize_slot
+
+    def _spy(*args, **kwargs):
+        events.append("slot")
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(bt, "_finalize_slot", _spy)
+
+
+@pytest.mark.parametrize(
+    "child",
+    [
+        lambda: FakeChild(stdout="run header line\n", timeout_waits=1),
+        lambda: FakeChild(returncode=1, stderr="Traceback: boom\n"),
+        lambda: FakeChild(returncode=0, stdout="ok\n"),
+    ],
+    ids=["timeout", "failed", "completed"],
+)
+def test_a_hung_trace_label_does_not_delay_slot_finalization(monkeypatch, child):
+    """The trace store has no statement timeout. A label write that never
+    returns must not hold the slot: the slot finalizes first, and the worker
+    abandons the write at the deadline instead of waiting on it."""
+    run_id = "agent_trace_hung_label"
+    events = []
+    release = threading.Event()
+    _record_slot_finalizes(monkeypatch, events)
+    monkeypatch.setattr(bt, "TRACE_LABEL_DEADLINE_SECONDS", 0.2)
+
+    def _hang(rid, code):
+        events.append("label")
+        release.wait(30)
+        return True
+
+    started = time.monotonic()
+    try:
+        _run_parent_with_child(monkeypatch, child(), run_id=run_id, label_stub=_hang)
+        elapsed = time.monotonic() - started
+    finally:
+        release.set()
+    assert events.index("slot") < events.index("label")
+    assert elapsed < 10
+    assert run_id not in bt._active_slots
+
+
+def test_a_raising_trace_label_does_not_lose_the_outcome(monkeypatch, capsys):
+    """And it says so: a broken trace store must not read like a trace that
+    was already closed. ``fail_trace_if_running`` raises on a store error
+    rather than returning False, and the worker logs it."""
+    run_id = "agent_trace_raising_label"
+    events = []
+    _record_slot_finalizes(monkeypatch, events)
+
+    def _raise(rid, code):
+        events.append("label")
+        raise RuntimeError("trace store down")
+
+    _run_parent_with_child(
+        monkeypatch, FakeChild(returncode=1, stderr="Traceback: boom\n"),
+        run_id=run_id, label_stub=_raise,
+    )
+    assert events == ["slot", "label"]
+    assert run_id not in bt._active_slots
+    out = capsys.readouterr().out
+    assert f"ERROR: trace.label_failed run={run_id} label=run_failed" in out
+    assert "trace store down" in out
+
+
+def test_parent_labels_a_failed_child_run_failed(monkeypatch):
+    run_id = "agent_trace_failed"
+    labelled = _run_parent_with_child(
+        monkeypatch, FakeChild(returncode=1, stderr="Traceback: boom\n"), run_id=run_id,
+    )
+    assert labelled[0] == (run_id, "run_failed")
+
+
+def test_parent_labels_an_unclosed_completed_run_trace_close_failed(monkeypatch):
+    """returncode 0 but the trace still running: the child finished and its
+    own complete_trace did not land. Distinct from a kill on purpose."""
+    run_id = "agent_trace_unclosed"
+    labelled = _run_parent_with_child(
+        monkeypatch, FakeChild(returncode=0, stdout="ok\n"), run_id=run_id,
+    )
+    assert labelled[0] == (run_id, "trace_close_failed")
 
 
 # --- ATL Credits launch preflight (B/C: an empty balance is refused up front,

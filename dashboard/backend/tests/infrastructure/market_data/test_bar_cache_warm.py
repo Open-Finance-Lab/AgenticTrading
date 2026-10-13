@@ -3,6 +3,7 @@
 import json
 import os
 import re
+import threading
 
 import pandas as pd
 import pytest
@@ -14,6 +15,17 @@ from dashboard.backend.infrastructure.market_data.provider import (
     warmup_fetch_start,
 )
 from dashboard.backend.paths import BACKEND_DIR, CONFIG_DIR, REPO_ROOT
+
+
+#: The modal window every test in this module sees. Pinned rather than read
+#: off the clock: `warm_windows()` and an assertion each asking the live clock
+#: could straddle the Saturday-evening rollover and compare different weeks.
+MODAL_WINDOW = ("2026-09-28", "2026-10-02")
+
+
+@pytest.fixture(autouse=True)
+def _pinned_modal_window(monkeypatch):
+    monkeypatch.setattr(bar_cache_warm, "default_backtest_window", lambda: MODAL_WINDOW)
 
 
 def _defaults():
@@ -128,13 +140,14 @@ def test_warm_bar_cache_is_a_no_op_when_disabled(monkeypatch):
 def test_the_first_window_is_the_onboarding_modal():
     settings = _defaults()["defaultSettings"]
     symbols, start, end = bar_cache_warm.warm_windows()[0]
+    modal_start, modal_end = MODAL_WINDOW
     assert symbols == [s.upper() for s in settings["assetList"]]
     # The engine fetches its bars from the indicator warm-up start (#540), and
     # the cache is keyed on the requested start; the end is the run's
     # inclusive date, which `warm_bar_cache` converts once.
     assert (start, end) == (
-        warmup_fetch_start(settings["startDate"]),
-        settings["endDate"],
+        warmup_fetch_start(modal_start),
+        modal_end,
     )
 
 
@@ -143,10 +156,9 @@ def test_the_second_window_is_the_index_baseline_over_the_same_dates():
     over the run's own window (engine.py passes start_date/provider_end_date).
     Unpadded: the baseline computes no indicators, so it is not warmed from
     the agent's padded start."""
-    settings = _defaults()["defaultSettings"]
     symbols, start, end = bar_cache_warm.warm_windows()[1]
     assert symbols == list(DJIA_30)
-    assert (start, end) == (settings["startDate"], settings["endDate"])
+    assert (start, end) == MODAL_WINDOW
 
 
 def test_the_third_window_is_the_bare_post_default():
@@ -424,3 +436,66 @@ def test_the_boot_sweep_runs_whether_or_not_the_warm_is_armed():
     assert "enforce_size_cap()" in body
     assert body.index("enforce_size_cap()") < body.index("warm_bar_cache")
     assert "warm_enabled" not in body, "the sweep must not be gated on the warm flag"
+
+
+def test_the_warm_loop_does_nothing_when_unarmed(monkeypatch):
+    """An unarmed deployment must hold no loop: the boot thread returns."""
+    monkeypatch.setenv("ATL_BAR_CACHE_WARM", "0")
+    calls = []
+    monkeypatch.setattr(bar_cache_warm, "warm_bar_cache", lambda: calls.append(1))
+    bar_cache_warm.warm_bar_cache_each_week(poll_seconds=0)
+    assert calls == []
+
+
+def test_the_warm_loop_rewarms_only_when_the_week_rolls(warm_cache_dir, monkeypatch):
+    """A boot warm went stale on the first Saturday evening an instance lived
+    through. The loop re-warms on a rollover, and only then -- each re-warm
+    is two billable calls, so an unchanged week must cost nothing."""
+    weeks = iter(
+        [
+            ("2026-09-28", "2026-10-02"),  # boot
+            ("2026-09-28", "2026-10-02"),  # same week: no re-warm
+            ("2026-10-05", "2026-10-09"),  # rolled: re-warm
+            ("2026-10-05", "2026-10-09"),
+        ]
+    )
+    stop = threading.Event()
+
+    def _next_week():
+        try:
+            return next(weeks)
+        except StopIteration:
+            stop.set()
+            return ("2026-10-05", "2026-10-09")
+
+    warmed = []
+    monkeypatch.setattr(bar_cache_warm, "default_backtest_window", _next_week)
+    monkeypatch.setattr(bar_cache_warm, "warm_bar_cache", lambda: warmed.append(1))
+    bar_cache_warm.warm_bar_cache_each_week(poll_seconds=0, stop=stop)
+    assert len(warmed) == 2
+
+
+def test_a_failed_rewarm_does_not_end_the_loop(warm_cache_dir, monkeypatch, capsys):
+    """The loop outlives a failure: an exception escaping one warm would kill
+    the thread and freeze the cache on whatever week it last held."""
+    weeks = iter([("2026-09-28", "2026-10-02"), ("2026-10-05", "2026-10-09")])
+    stop = threading.Event()
+
+    def _next_week():
+        try:
+            return next(weeks)
+        except StopIteration:
+            stop.set()
+            return ("2026-10-05", "2026-10-09")
+
+    attempts = []
+
+    def _boom():
+        attempts.append(1)
+        raise RuntimeError("alpaca down")
+
+    monkeypatch.setattr(bar_cache_warm, "default_backtest_window", _next_week)
+    monkeypatch.setattr(bar_cache_warm, "warm_bar_cache", _boom)
+    bar_cache_warm.warm_bar_cache_each_week(poll_seconds=0, stop=stop)
+    assert len(attempts) == 2
+    assert "bar cache warm: error: alpaca down" in capsys.readouterr().out

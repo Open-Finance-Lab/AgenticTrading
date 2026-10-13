@@ -4,8 +4,8 @@
 
   const USERS_PATH = '/api/admin/analytics/users';
   const PAGE_SIZE = 50;
-  const SECTIONS = ['overview', 'timeline', 'runs', 'usage', 'sessions'];
-  const SECTION_LABELS = Object.freeze({ overview: 'Overview', timeline: 'Timeline', runs: 'Runs', usage: 'Usage', sessions: 'Sessions' });
+  const SECTIONS = ['overview', 'agents', 'timeline', 'runs', 'usage', 'sessions'];
+  const SECTION_LABELS = Object.freeze({ overview: 'Overview', agents: 'Agents & traces', timeline: 'Timeline', runs: 'Runs', usage: 'Usage', sessions: 'Sessions' });
   // Harvested from the retired admin-analytics.js:35-50 (deleted in PR C; see git history).
   const EVENT_LABELS = Object.freeze({
     account_signed_up: 'Account signed up',
@@ -446,6 +446,31 @@
     const s = shell();
     const rows = Array.isArray(items) ? items : [];
     if (!rows.length) return s.el('p', 'panel-empty', 'No activity in this section.');
+    if (section === 'agents') {
+      const root = s.el('div', 'agent-activity-list');
+      rows.forEach((agent) => {
+        const card = s.el('article', 'agent-activity-card');
+        card.appendChild(s.el('h3', '', agent.name || agent.agent_id || s.DASH));
+        card.appendChild(s.el('p', 'muted', `${agent.agent_type || 'external'} · ${agent.agent_id || s.DASH}`));
+        const runs = s.el('ul', 'agent-run-list');
+        (agent.runs || []).forEach((run) => {
+          const item = s.el('li');
+          item.appendChild(s.el('span', '', `${run.run_id || s.DASH} · ${s.humanize(run.status || 'unknown')}`));
+          if (run.trace_id) {
+            const link = s.el('a', 'module-link', run.trace_status === 'running' ? 'View live trace' : 'View trace');
+            link.setAttribute('href', `#traces/${encodeURIComponent(String(run.trace_id))}?user_id=${encodeURIComponent(String(state.profile.userId))}&agent_id=${encodeURIComponent(String(agent.agent_id))}&run_id=${encodeURIComponent(String(run.run_id))}`);
+            item.appendChild(link);
+          } else {
+            item.appendChild(s.el('span', 'muted', 'Trace unavailable'));
+          }
+          runs.appendChild(item);
+        });
+        if (!runs.children.length) runs.appendChild(s.el('li', 'panel-empty', 'No runs recorded.'));
+        card.appendChild(runs);
+        root.appendChild(card);
+      });
+      return root;
+    }
     if (section === 'timeline') {
       const list = s.el('ol', 'timeline');
       rows.forEach((item) => {
@@ -527,12 +552,15 @@
     sectionState.error = null;
     const seq = ++sectionState.requestSeq;
     renderSectionPanel(section);
-    const params = new URLSearchParams({ section, limit: String(PAGE_SIZE) });
+      const params = new URLSearchParams({ section, limit: String(PAGE_SIZE) });
     if (append) params.set('cursor', sectionState.nextCursor);
     try {
-      const payload = await s.request(`${USERS_PATH}/${encodeURIComponent(String(userId))}/activity?${params}`);
+      const path = section === 'agents'
+        ? `/api/admin/users/${encodeURIComponent(String(userId))}/agent-activity`
+        : `${USERS_PATH}/${encodeURIComponent(String(userId))}/activity?${params}`;
+      const payload = await s.request(path);
       if (String(state.profile.userId) !== String(userId) || seq !== sectionState.requestSeq) return;
-      const next = Array.isArray(payload.items) ? payload.items : [];
+      const next = section === 'agents' ? (Array.isArray(payload.agents) ? payload.agents : []) : (Array.isArray(payload.items) ? payload.items : []);
       sectionState.items = append ? sectionState.items.concat(next) : next;
       sectionState.nextCursor = payload.next_cursor || null;
       sectionState.loaded = true;

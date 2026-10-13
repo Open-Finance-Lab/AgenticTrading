@@ -86,11 +86,22 @@ def api_request(
         ) from exc
 
 
+# At most this many new buys a step, each an equal slice of cash. 5% is kept back
+# because a buy is sized at this bar's price but fills at the next bar's, plus costs.
+MAX_BUYS_PER_STEP = 5
+FILL_BUFFER = 0.95
+
+
 def rule_based_decision(snapshot: dict) -> dict:
     """Demo agent: buy oversold, sell overbought, else hold."""
     actions = []
     holdings = snapshot.get("current_holdings") or {}
     signals = snapshot.get("top_signals") or {}
+    # Size from the cash the snapshot reports, not a fixed dollar amount: a buy
+    # costing more than the cash on hand is dropped without an error.
+    cash = float((snapshot.get("portfolio") or {}).get("cash") or 0)
+    budget = FILL_BUFFER * cash / MAX_BUYS_PER_STEP
+    buys = 0
 
     for symbol, sig in signals.items():
         rsi = float(sig.get("rsi") or 50)
@@ -101,7 +112,10 @@ def rule_based_decision(snapshot: dict) -> dict:
         owned = symbol in holdings and holdings[symbol].get("shares", 0) > 0
 
         if not owned and rsi < 35:
-            shares = max(1, int(200 / price))
+            shares = int(budget // price)
+            if shares <= 0 or buys >= MAX_BUYS_PER_STEP:
+                continue
+            buys += 1
             actions.append({
                 "action": "buy",
                 "symbol": symbol,
@@ -178,14 +192,12 @@ def api_request_key(
         raise RuntimeError(f"HTTP {exc.code} {url}: {detail}") from exc
 
 
-def rule_based_orders(observation: dict) -> list[dict]:
+def rule_based_orders(observation: dict, constraints: dict) -> list[dict]:
     """Demo agent: translate features into protocol orders (orders-v1)."""
-    orders = []
     features = (observation.get("market") or {}).get("features") or {}
-    holdings = {
-        p["symbol"]: p
-        for p in (observation.get("portfolio", {}).get("positions") or [])
-    }
+    portfolio = observation.get("portfolio") or {}
+    holdings = {p["symbol"]: p for p in (portfolio.get("positions") or [])}
+    sells, candidates = [], []
     for symbol, sig in features.items():
         rsi = float(sig.get("rsi") or 50)
         price = float(sig.get("price") or 0)
@@ -193,19 +205,39 @@ def rule_based_orders(observation: dict) -> list[dict]:
             continue
         owned = symbol in holdings and holdings[symbol].get("quantity", 0) > 0
         if not owned and rsi < 35:
-            orders.append({
-                "symbol": symbol,
-                "side": "buy",
-                "quantity_type": "shares",
-                "quantity": max(1, int(200 / price)),
-                "order_type": "market",
-            })
+            candidates.append((symbol, price))
         elif owned and rsi > 65:
-            orders.append({
+            sells.append({
                 "symbol": symbol,
                 "side": "sell",
                 "quantity_type": "shares",
                 "quantity": holdings[symbol]["quantity"],
+                "order_type": "market",
+            })
+
+    # A decision with more than max_orders orders is refused whole (HTTP 400
+    # too_many_orders), so the buys only get the room the sells leave.
+    max_orders = int(constraints.get("max_orders") or 10)
+    sells = sells[:max_orders]
+    buys = candidates[: max(0, min(MAX_BUYS_PER_STEP, max_orders - len(sells)))]
+    if not buys:
+        return sells
+
+    # Size each buy under both the cash on hand and the per-position cap, which
+    # rejects (not clips) an order over max_position_weight of equity.
+    cash = float(portfolio.get("cash") or 0)
+    equity = float(portfolio.get("equity") or cash)
+    position_cap = float(constraints.get("max_position_weight") or 1.0) * equity
+    budget = min(position_cap, cash / len(buys)) * FILL_BUFFER
+    orders = list(sells)
+    for symbol, price in buys:
+        shares = int(budget // price)
+        if shares > 0:
+            orders.append({
+                "symbol": symbol,
+                "side": "buy",
+                "quantity_type": "shares",
+                "quantity": shares,
                 "order_type": "market",
             })
     return orders
@@ -262,7 +294,7 @@ def run_protocol_v1(base: str, api_key: str, args) -> int:
         step_id = step["step_id"]
         seq = step.get("sequence")
         print(f"Step seq={seq} step_id={step_id} deadline={step.get('deadline_at')}")
-        orders = rule_based_orders(step.get("observation") or {})
+        orders = rule_based_orders(step.get("observation") or {}, step.get("constraints") or {})
         idem += 1
         result = api_request_key(
             "POST",

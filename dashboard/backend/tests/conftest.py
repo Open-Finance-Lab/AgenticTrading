@@ -206,6 +206,11 @@ os.environ.pop("ATL_PLATFORM_PROVIDER_ORDER", None)
 # mismatches. base.py reads it at import, which this module precedes.
 os.environ.pop("LLM_PROVIDER_READ_TIMEOUT_SECONDS", None)
 
+# Decides whether /api/news/signals serves the frozen snapshot or proxies
+# FinSearch. The router tests set it explicitly per case; a developer who
+# exported it would otherwise see the default-path test assert the wrong mode.
+os.environ.pop("NEWS_FEED_FROZEN", None)
+
 
 @atexit.register
 def _cleanup_test_db_dir() -> None:

@@ -76,8 +76,26 @@ ARTIFACT_CONTENT_TYPES = {
 }
 
 
+_DEV_SERVICE_TOKEN = "dev-token"
+
+
 def _service_token() -> str:
-    return os.getenv("RESEARCH_SERVICE_TOKEN", "dev-token")
+    """The X-Service-Token sent to the external research service.
+
+    Unset, this used to send the guessable "dev-token" in every deployment,
+    production included, so a forgotten Render variable authenticated as a
+    well-known default instead of failing. Production now refuses (503, logged)
+    like SESSION_HASH_SECRET does; local runs keep the dev default.
+    """
+    from dashboard.backend.session_tokens import _is_production
+
+    token = (os.getenv("RESEARCH_SERVICE_TOKEN") or "").strip()
+    if token:
+        return token
+    if _is_production():
+        print("[research] ERROR RESEARCH_SERVICE_TOKEN is not set; refusing to call the research service")
+        raise HTTPException(status_code=503, detail="Research service is not configured")
+    return _DEV_SERVICE_TOKEN
 
 
 def _template_or_404(template_id: str) -> Dict[str, Any]:

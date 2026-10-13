@@ -1,0 +1,350 @@
+{
+  "C01/D": {
+    "cash": [
+      "cash: expected 0, actual 500"
+    ],
+    "fills": [
+      "fills[o2@2026-03-02T11:30:00-05:00]: expected price 50 qty 10, actual no fill on that bar"
+    ],
+    "orders": [
+      "orders[o2]: expected filled/- filled 10, actual rejected/insufficient_cash filled 0"
+    ],
+    "positions": [
+      "positions[MSFT]: expected 10, actual not held"
+    ]
+  },
+  "C01/DL": {
+    "cash": [
+      "cash: expected 0, actual 1000"
+    ],
+    "fills": [
+      "fills[o3@2026-03-02T11:30:00-05:00].qty: expected 5, actual 10",
+      "fills[o2@2026-03-02T11:30:00-05:00]: expected price 50 qty 10, actual no fill on that bar"
+    ],
+    "invariants": [
+      "invariant 7: o2 has 0 terminal OrderFinal(s), expected 1"
+    ],
+    "orders": [
+      "orders[o2]: expected filled/- filled 10, actual no terminal OrderFinal",
+      "orders[o3]: expected filled/- filled 5, actual filled/- filled 10"
+    ],
+    "positions": [
+      "positions[AAPL]: expected 5, actual not held",
+      "positions[MSFT]: expected 10, actual not held"
+    ]
+  },
+  "C02/D": {
+    "cash": [
+      "cash: expected 0, actual 1000"
+    ],
+    "fills": [
+      "fills[o1@2026-03-02T10:30:00-05:00]: expected price 125 qty 8, actual no fill on that bar"
+    ],
+    "orders": [
+      "orders[o1]: expected partially_filled/insufficient_cash filled 8, actual rejected/insufficient_cash filled 0"
+    ],
+    "positions": [
+      "positions[AAPL]: expected 8, actual not held"
+    ]
+  },
+  "C03/D": {
+    "cash": [
+      "cash: expected 0, actual 400"
+    ],
+    "fills": [
+      "fills[o2@2026-03-02T10:30:00-05:00]: expected price 50 qty 8, actual no fill on that bar"
+    ],
+    "orders": [
+      "orders[o2]: expected partially_filled/insufficient_cash filled 8, actual rejected/insufficient_cash filled 0"
+    ],
+    "positions": [
+      "positions[MSFT]: expected 8, actual not held"
+    ]
+  },
+  "C04/D": {
+    "cash": [
+      "cash: expected 1000, actual 700"
+    ],
+    "fills": [
+      "fills[o4@2026-03-02T11:30:00-05:00].qty: expected 10, actual 12",
+      "fills[o2@2026-03-02T11:30:00-05:00]: expected no fill, actual price 100 qty -5",
+      "fills[o3@2026-03-02T11:30:00-05:00]: expected no fill, actual price 100 qty 0"
+    ],
+    "invariants": [
+      "invariant 1: cash -500 after o2@2026-03-02T11:30:00-05:00",
+      "invariant 1: cash -500 after o3@2026-03-02T11:30:00-05:00"
+    ],
+    "orders": [
+      "orders[o2]: expected rejected/invalid_quantity filled 0, actual filled/- filled -5",
+      "orders[o3]: expected rejected/invalid_quantity filled 0, actual filled/- filled 0",
+      "orders[o4]: expected partially_filled/clipped_to_position filled 10, actual filled/- filled 12"
+    ],
+    "positions": [
+      "positions[AAPL]: expected not held, actual 3"
+    ]
+  },
+  "C04/DL": {
+    "fills": [
+      "fills[o4@2026-03-02T11:30:00-05:00]: expected price 100 qty 10, actual no fill on that bar",
+      "fills[o2@2026-03-02T11:30:00-05:00]: expected no fill, actual price 100 qty 10"
+    ],
+    "invariants": [
+      "invariant 7: o4 has 0 terminal OrderFinal(s), expected 1",
+      "invariant 7: o5 has 0 terminal OrderFinal(s), expected 1"
+    ],
+    "orders": [
+      "orders[o2]: expected rejected/invalid_quantity filled 0, actual filled/- filled 10",
+      "orders[o3]: expected rejected/invalid_quantity filled 0, actual rejected/no_position filled 0",
+      "orders[o4]: expected partially_filled/clipped_to_position filled 10, actual no terminal OrderFinal",
+      "orders[o5]: expected rejected/no_position filled 0, actual no terminal OrderFinal"
+    ]
+  },
+  "CA01/D": {
+    "avg_cost": [
+      "avg_cost[AAPL]: expected 100, actual 200"
+    ],
+    "equity": [
+      "equity[2026-06-03T16:00:00-04:00]: expected 1016, actual 608",
+      "equity[2026-06-04T16:00:00-04:00]: expected 1026, actual 610"
+    ],
+    "positions": [
+      "positions[AAPL]: expected 5, actual 1"
+    ],
+    "realized_pnl": [
+      "realized_pnl: expected 6, actual None (engine has no such output)"
+    ]
+  },
+  "CA02/D": {
+    "cash": [
+      "cash: expected 510, actual 500"
+    ],
+    "equity": [
+      "equity[2026-05-06T16:00:00-04:00]: expected 1000, actual 990",
+      "equity[2026-05-07T16:00:00-04:00]: expected 1000, actual 990",
+      "equity[2026-05-08T16:00:00-04:00]: expected 1000, actual 990"
+    ]
+  },
+  "CA03/D": {
+    "cash": [
+      "cash: expected 510, actual 500"
+    ],
+    "equity": [
+      "equity[2026-05-06T16:00:00-04:00]: expected 1000, actual 990",
+      "equity[2026-05-08T16:00:00-04:00]: expected 1000, actual 990"
+    ]
+  },
+  "F01/D": {
+    "cash": [
+      "cash: expected 995.5, actual 1000"
+    ],
+    "fills": [
+      "fills[o1@2026-03-02T10:30:00-05:00].commission: expected 1, actual None (engine has no such output)",
+      "fills[o2@2026-03-02T10:30:00-05:00].commission: expected 1.25, actual None (engine has no such output)",
+      "fills[o3@2026-03-02T11:30:00-05:00].commission: expected 1, actual None (engine has no such output)",
+      "fills[o4@2026-03-02T11:30:00-05:00].commission: expected 1.25, actual None (engine has no such output)"
+    ],
+    "realized_pnl": [
+      "realized_pnl: expected -4.5, actual None (engine has no such output)"
+    ]
+  },
+  "F02/D": {
+    "cash": [
+      "cash: expected 999.98, actual 1000"
+    ],
+    "fills": [
+      "fills[o1@2026-04-01T09:30:00-04:00]: expected price 100 qty 10, actual no fill on that bar",
+      "fills[o2@2026-04-02T09:30:00-04:00]: expected price 100 qty 5, actual no fill on that bar",
+      "fills[o3@2026-04-06T09:30:00-04:00]: expected price 100 qty 5, actual no fill on that bar",
+      "fills[o1@2026-03-31T09:30:00-04:00]: expected no fill, actual price 100 qty 10",
+      "fills[o2@2026-04-01T09:30:00-04:00]: expected no fill, actual price 100 qty 5",
+      "fills[o3@2026-04-02T09:30:00-04:00]: expected no fill, actual price 100 qty 5"
+    ]
+  },
+  "F03/D": {
+    "cash": [
+      "cash: expected 99985.22, actual 100000"
+    ],
+    "fills": [
+      "fills[o1@2025-12-30T09:30:00-05:00]: expected price 1 qty 90000, actual no fill on that bar",
+      "fills[o2@2025-12-31T09:30:00-05:00]: expected price 1 qty 30000, actual no fill on that bar",
+      "fills[o3@2026-01-02T09:30:00-05:00]: expected price 1 qty 59990, actual no fill on that bar",
+      "fills[o4@2026-01-02T09:30:00-05:00]: expected price 1 qty 10, actual no fill on that bar",
+      "fills[o1@2025-12-29T09:30:00-05:00]: expected no fill, actual price 1 qty 90000",
+      "fills[o2@2025-12-30T09:30:00-05:00]: expected no fill, actual price 1 qty 30000",
+      "fills[o3@2025-12-31T09:30:00-05:00]: expected no fill, actual price 1 qty 59990",
+      "fills[o4@2025-12-31T09:30:00-05:00]: expected no fill, actual price 1 qty 10"
+    ]
+  },
+  "F04/D": {
+    "cash": [
+      "cash: expected 1048.95, actual 1050"
+    ],
+    "fills": [
+      "fills[o1@2026-03-02T10:30:00-05:00].price: expected 100.1, actual 100",
+      "fills[o1@2026-03-02T10:30:00-05:00].slippage_cost: expected 0.5, actual None (engine has no such output)",
+      "fills[o2@2026-03-02T11:30:00-05:00].price: expected 109.89, actual 110",
+      "fills[o2@2026-03-02T11:30:00-05:00].slippage_cost: expected 0.55, actual None (engine has no such output)"
+    ],
+    "realized_pnl": [
+      "realized_pnl: expected 48.95, actual None (engine has no such output)"
+    ]
+  },
+  "F05/D": {
+    "cash": [
+      "cash: expected 1247.71, actual 1250"
+    ],
+    "fills": [
+      "fills[o1@2026-05-04T10:30:00-04:00].qty: expected 4.995, actual 5",
+      "fills[o1@2026-05-04T10:30:00-04:00].commission: expected 1, actual None (engine has no such output)",
+      "fills[o1@2026-05-04T10:30:00-04:00].sec_fee: expected 0, actual None (engine has no such output)",
+      "fills[o1@2026-05-04T10:30:00-04:00].taf: expected 0, actual None (engine has no such output)",
+      "fills[o2@2026-05-04T11:30:00-04:00].qty: expected 4.995, actual 5",
+      "fills[o2@2026-05-04T11:30:00-04:00].commission: expected 1, actual None (engine has no such output)",
+      "fills[o2@2026-05-04T11:30:00-04:00].sec_fee: expected 0.03, actual None (engine has no such output)",
+      "fills[o2@2026-05-04T11:30:00-04:00].taf: expected 0.01, actual None (engine has no such output)"
+    ],
+    "orders": [
+      "orders[o1]: expected partially_filled/insufficient_cash filled 4.995, actual filled/- filled 5",
+      "orders[o2]: expected filled/- filled 4.995, actual filled/- filled 5"
+    ],
+    "realized_pnl": [
+      "realized_pnl: expected 247.71, actual None (engine has no such output)"
+    ]
+  },
+  "L01/D": {
+    "cash": [
+      "cash: expected 500, actual 200"
+    ],
+    "equity": [
+      "equity[2026-03-02T12:30:00-05:00]: expected 1010, actual 1016"
+    ],
+    "fills": [
+      "fills[o1@2026-03-02T10:30:00-05:00].qty: expected 5, actual 8"
+    ],
+    "orders": [
+      "orders[o1]: expected partially_filled/volume_cap filled 5, actual filled/- filled 8"
+    ]
+  },
+  "M01/D": {
+    "avg_cost": [
+      "avg_cost[AAPL]: expected 110, actual 120"
+    ],
+    "equity": [
+      "equity[2026-03-02T10:30:00-05:00]: expected 1000, actual 990",
+      "equity[2026-03-02T11:30:00-05:00]: expected 1040, actual 1000"
+    ],
+    "initial_equity": [
+      "initial_equity: expected 1000, actual 990"
+    ],
+    "max_drawdown": [
+      "max_drawdown: expected 0, actual -0.03846153846"
+    ]
+  },
+  "M02/D": {
+    "avg_cost": [
+      "avg_cost[AAPL]: expected 105, actual 90",
+      "avg_cost after o2: expected 110, actual 120",
+      "avg_cost after o3: expected 110, actual 120",
+      "avg_cost after o4: expected 105, actual 90"
+    ],
+    "realized_pnl": [
+      "realized_pnl: expected 40, actual None (engine has no such output)"
+    ]
+  },
+  "M03/D": {
+    "sharpe": [
+      "sharpe: expected 2.568186, actual 2.876100418"
+    ]
+  },
+  "M03b/D": {
+    "sharpe": [
+      "sharpe: expected null, actual 0"
+    ]
+  },
+  "S01/DL": {
+    "avg_cost": [
+      "avg_cost[AAPL]: expected 320, actual not held"
+    ],
+    "cash": [
+      "cash: expected 782.2265625, actual 1000"
+    ],
+    "equity": [
+      "equity[2026-03-02T11:30:00-05:00]: expected 1007.8125, actual 1000",
+      "equity[2026-03-02T12:30:00-05:00]: expected 1042.96875, actual 1000"
+    ],
+    "fills": [
+      "fills[o1@2026-03-02T10:30:00-05:00]: expected price 320 qty 0.78125, actual no fill on that bar",
+      "fills[o2@2026-03-02T11:30:00-05:00]: expected price 375 qty 0.0859375, actual no fill on that bar"
+    ],
+    "invariants": [
+      "invariant 7: o1 has 0 terminal OrderFinal(s), expected 1",
+      "invariant 7: o2 has 0 terminal OrderFinal(s), expected 1"
+    ],
+    "positions": [
+      "positions[AAPL]: expected 0.6953125, actual not held"
+    ],
+    "realized_pnl": [
+      "realized_pnl: expected 4.7265625, actual None (engine has no such output)"
+    ]
+  },
+  "T02/D": {
+    "cash": [
+      "cash: expected 525, actual 500"
+    ],
+    "fills": [
+      "fills[o1@2026-03-03T09:30:00-05:00]: expected price 95 qty 5, actual no fill on that bar",
+      "fills[o1@2026-03-02T15:30:00-05:00]: expected no fill, actual price 100 qty 5"
+    ],
+    "final_equity": [
+      "final_equity: expected 1005, actual 980"
+    ]
+  },
+  "T02d/D": {
+    "cash": [
+      "cash: expected 525, actual 500"
+    ],
+    "fills": [
+      "fills[o1@2026-03-03T09:30:00-05:00]: expected price 95 qty 5, actual no fill on that bar",
+      "fills[o1@2026-03-02T09:30:00-05:00]: expected no fill, actual price 100 qty 5"
+    ],
+    "final_equity": [
+      "final_equity: expected 1005, actual 980"
+    ]
+  },
+  "T03/D": {
+    "invariants": [
+      "invariant 7: o1 has 0 terminal OrderFinal(s), expected 1"
+    ],
+    "orders": [
+      "orders[o1]: expected expired/no_next_bar filled 0, actual no terminal OrderFinal"
+    ]
+  },
+  "T04/D": {
+    "invariants": [
+      "invariant 7: o2 has 0 terminal OrderFinal(s), expected 1"
+    ],
+    "orders": [
+      "orders[o2]: expected cancelled/no_bar filled 0, actual no terminal OrderFinal"
+    ]
+  },
+  "T05/D": {
+    "cash": [
+      "cash: expected 490, actual 1000"
+    ],
+    "equity": [
+      "equity[2026-11-30T10:30:00-05:00]: expected 1005, actual 1000"
+    ],
+    "fills": [
+      "fills[o1@2026-11-30T09:30:00-05:00]: expected price 102 qty 5, actual no fill on that bar"
+    ],
+    "invariants": [
+      "invariant 7: o1 has 0 terminal OrderFinal(s), expected 1"
+    ],
+    "orders": [
+      "orders[o1]: expected filled/- filled 5, actual no terminal OrderFinal"
+    ],
+    "positions": [
+      "positions[AAPL]: expected 5, actual not held"
+    ]
+  }
+}

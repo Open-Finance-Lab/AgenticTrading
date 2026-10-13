@@ -235,7 +235,7 @@ def test_month_opening_on_a_holiday_has_no_freeze_yet():
 
 
 def test_nyse_holiday_rules():
-    from dashboard.backend.domain.leaderboard.us_market_calendar import nyse_holidays
+    from dashboard.backend.infrastructure.market_data.us_market_calendar import nyse_holidays
 
     assert sorted(d.isoformat() for d in nyse_holidays(2026)) == [
         "2026-01-01", "2026-01-19", "2026-02-16", "2026-04-03", "2026-05-25",

@@ -75,7 +75,7 @@ def main() -> int:
         return 1
 
     print(f"Done — created {meta.get('created', 0)} run(s).")
-    print(f"Refresh the Competition tab or GET /api/v1/leaderboard?refresh=true")
+    print("Refresh the Competition tab, or force a recompute: GET /api/v1/leaderboard?refresh=true with X-Leaderboard-Refresh-Secret or an admin session")
     return 0
 
 

@@ -158,7 +158,7 @@ def main() -> int:
         f"{int(result.get('output_tokens') or 0):,} out"
     )
     print(f"  Est. Cost    : ${float(result.get('est_cost_usd') or 0):.4f}")
-    print("\nRefresh the leaderboard (or GET /api/v1/leaderboard?refresh=true) to see it.")
+    print("\nRefresh the leaderboard to see it (forcing a recompute: GET /api/v1/leaderboard?refresh=true with X-Leaderboard-Refresh-Secret or an admin session).")
     return 0
 
 

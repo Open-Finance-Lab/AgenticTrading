@@ -86,6 +86,8 @@ def test_submission_freezes_category_and_does_not_mix_it_with_explicit_assets():
       const applyAgentFilters=()=>{};
       const updateBacktestRunProgress=()=>{};
       const formatBacktestError=()=>'';
+      // The dates are already set here; the defaults fetch is not under test.
+      const ensureDefaultBacktestDates=async()=>{};
       const showBacktestLaunchFailure=()=>{};
       API.post=async(url,payload)=>{posted.push({url,payload});return {success:false}};
     """)

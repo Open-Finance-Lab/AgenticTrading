@@ -13,7 +13,7 @@ Neither the password nor the API key is ever printed.
 
 Prerequisites:
   - Backend running, e.g.:
-      cd dashboard/backend && python -m uvicorn app:app --host 127.0.0.1 --port 8000
+      uvicorn dashboard.backend.app:app --host 127.0.0.1 --port 8000   # from the repo root
   - The agentictrading package importable (run via the command below).
   - Your account credentials in the environment:
       export ATL_EMAIL="you@example.com"
@@ -40,7 +40,20 @@ import uuid
 from agentictrading import AgentRunner, ATLClient
 
 NUM_NAMES = 5
-DOLLARS_PER_NAME = 15_000
+# AgentRunner hands decide() the observation only, not step.constraints, so the
+# position cap is restated here: us-equity-hourly-v1's max_position_weight.
+MAX_POSITION_WEIGHT = 0.25
+
+
+def dollars_per_name(portfolio: dict) -> float:
+    """Size each buy from the current cash and equity, under the position cap.
+
+    Orders are sized at this bar's price but fill at the next bar's, plus costs,
+    so 5% is kept back or the last buy can come up short of cash.
+    """
+    cash = float(portfolio.get("cash") or 0)
+    equity = float(portfolio.get("equity") or cash)
+    return min(MAX_POSITION_WEIGHT * equity, cash / NUM_NAMES) * 0.95
 
 
 def login(base_url: str, email: str, password: str) -> tuple[str, dict]:
@@ -90,16 +103,18 @@ class EqualDollarAgent:
     def decide(self, observation):
         if self._invested:
             return {"orders": [], "rationale": "Holding."}
+        budget = dollars_per_name(observation.portfolio)
+        # A name priced above the budget would round to zero shares; skip it.
         tradable = [
             sym for sym, feat in observation.features.items()
-            if float(feat.get("price") or 0) > 0
+            if 0 < float(feat.get("price") or 0) <= budget
         ]
         orders = [
             {
                 "symbol": sym,
                 "side": "buy",
                 "quantity_type": "notional",
-                "quantity": DOLLARS_PER_NAME,
+                "quantity": round(budget, 2),
                 "order_type": "market",
             }
             for sym in tradable[:NUM_NAMES]

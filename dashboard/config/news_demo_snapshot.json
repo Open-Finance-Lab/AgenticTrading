@@ -1,0 +1,504 @@
+{
+  "status": "ok",
+  "status_reason": null,
+  "generated_at": "2026-10-11T11:20:47+00:00",
+  "staleness_hours": null,
+  "news_overview": "Mixed signals across major tech and finance stocks, with some facing operational challenges while others show growth potential.",
+  "signals": {
+    "AAPL": {
+      "sentiment": "bullish",
+      "sentiment_score": 0.3,
+      "rationale": "Tim Cook's transition to executive chair and the upcoming iPhone launch suggest stability, but lack of strong growth indicators.",
+      "headline": "Tim Cook Told Apple CEO John Ternus ‘Don’t Mimic Me’ Before Stepping Aside Ahead of Apple’s Big iPhone Launch: 'I’m Not a Meddler'",
+      "source": "Yahoo Finance",
+      "url": "https://finance.yahoo.com/technology/articles/tim-cook-told-apple-ceo-094507099.html?.tsrc=rss",
+      "published": 1791711907.0,
+      "guid": "5e0f585f-5b39-30ca-936c-46053bf0833b",
+      "n_articles": 5
+    },
+    "AMZN": {
+      "sentiment": "bearish",
+      "sentiment_score": -0.5,
+      "rationale": "Concerns over heavy AI spending and security flaws in AWS indicate potential operational risks.",
+      "headline": "Amazon (AMZN) Wants Investors to Finance $8 Billion of Nvidia Chips. Is AI Spending Getting Too Heavy?",
+      "source": "Yahoo Finance",
+      "url": "https://finance.yahoo.com/technology/ai/articles/amazon-amzn-wants-investors-finance-221126922.html?.tsrc=rss",
+      "published": 1791670286.0,
+      "guid": "571676f3-668c-36a0-ac54-c725a0e00a0a",
+      "n_articles": 6
+    },
+    "BA": {
+      "sentiment": "bearish",
+      "sentiment_score": -0.6,
+      "rationale": "Boeing's stock decline amidst new orders raises questions about market confidence.",
+      "headline": "Boeing Stock Is Down 12% in 2026 Even as Avolon Orders 140 More MAX Jets. Time to Sell or Load Up?",
+      "source": "tikr.com",
+      "url": "https://www.tikr.com/blog/boeing-stock-is-down-12-in-2026-even-as-avolon-orders-140-more-max-jets-time-to-sell-or-load-up?ref=yahoofinance&.tsrc=rss",
+      "published": 1791646031.0,
+      "guid": "78849b9d-ef3d-32f5-a81b-78b44f124fe0",
+      "n_articles": 1
+    },
+    "CVX": {
+      "sentiment": "bearish",
+      "sentiment_score": -0.4,
+      "rationale": "Chevron's ability to maintain dividends amidst oil market challenges raises concerns about future stability.",
+      "headline": "Chevron’s Dividend Has Survived Every Oil Crash. Can It Survive This One?",
+      "source": "24/7 Wall St",
+      "url": "https://247wallst.com/investing/2026/10/10/chevrons-dividend-has-survived-every-oil-crash-can-it-survive-this-one/",
+      "published": 1791632755.0,
+      "guid": "3914775f-7b1b-3be8-9b4b-beac106f62df",
+      "n_articles": 1
+    },
+    "DIS": {
+      "sentiment": "bullish",
+      "sentiment_score": 0.2,
+      "rationale": "CEO's comments on box office performance suggest a strategic pivot, but lack of strong indicators for recovery.",
+      "headline": "Walt Disney’s CEO explains why box office bombs may no longer matter",
+      "source": "TheStreet",
+      "url": "https://www.thestreet.com/entertainment/walt-disney-plans-to-give-fans-more-of-what-they-love",
+      "published": 1791670797.0,
+      "guid": "fe5804b0-39d0-3743-a320-093bc3860042",
+      "n_articles": 1
+    },
+    "GOOGL": {
+      "sentiment": "bullish",
+      "sentiment_score": 0.4,
+      "rationale": "Investments in AI and autonomous driving show growth potential, but execution remains critical.",
+      "headline": "Alphabet Is the Robotaxi Stock to Buy as Waymo Chases 1 Million Rides a Week",
+      "source": "Motley Fool",
+      "url": "https://www.fool.com/investing/2026/10/11/alphabet-is-the-robotaxi-stock-to-buy-as-waymo-chases-1-million-rides-a-week/",
+      "published": 1791711422.0,
+      "guid": "ab7823e1-daed-3a38-a2be-e275c3d5e1d9",
+      "n_articles": 4
+    },
+    "IBM": {
+      "sentiment": "bullish",
+      "sentiment_score": 0.3,
+      "rationale": "New security collaboration indicates a proactive approach to enterprise needs, suggesting potential growth.",
+      "headline": "International Business Machines (IBM) Unveils Real Time App Security Collaboration",
+      "source": "Yahoo Finance",
+      "url": "https://finance.yahoo.com/technology/articles/international-business-machines-ibm-unveils-031626945.html?.tsrc=rss",
+      "published": 1791688586.0,
+      "guid": "4704c1af-0ba7-3b93-9df1-e04c22d7c031",
+      "n_articles": 1
+    },
+    "MMM": {
+      "sentiment": "bullish",
+      "sentiment_score": 0.4,
+      "rationale": "Strong historical performance raises interest in current valuation, indicating potential for investment.",
+      "headline": "3M (MMM) Stock Could Be A Bargain On Future Cash Flow",
+      "source": "Yahoo Finance",
+      "url": "https://finance.yahoo.com/markets/stocks/articles/3m-mmm-stock-could-bargain-111606490.html?.tsrc=rss",
+      "published": 1791630966.0,
+      "guid": "67e89eef-eadb-3694-95e6-5fb3e532efa2",
+      "n_articles": 1
+    },
+    "MRK": {
+      "sentiment": "bullish",
+      "sentiment_score": 0.3,
+      "rationale": "Positive study results could enhance Merck's market position, but further validation needed.",
+      "headline": "Merck Presents One-Year Results from the Pivotal Phase 2b/3 BRUNELLO Study Evaluating Remigromig, a Tri-specific Agonist of the Wingless-related Integration Site (Wnt) Pathway, in Adults with Diabetic Macular Edema at AAO 2026",
+      "source": "Yahoo Finance",
+      "url": "https://finance.yahoo.com/healthcare/articles/merck-presents-one-results-pivotal-221000461.html?.tsrc=rss",
+      "published": 1791670200.0,
+      "guid": "7317f687-ee94-3b32-a090-433f49172915",
+      "n_articles": 1
+    },
+    "MSFT": {
+      "sentiment": "bullish",
+      "sentiment_score": 0.5,
+      "rationale": "Strong Azure growth indicates solid performance, but valuation concerns persist.",
+      "headline": "Microsoft (MSFT) Posted 43% Azure Growth, Yet Trades Below Its Own Five-Year P/E. A Real Discount?",
+      "source": "Yahoo Finance",
+      "url": "https://finance.yahoo.com/markets/stocks/articles/microsoft-msft-posted-43-azure-132642768.html?.tsrc=rss",
+      "published": 1791652302.0,
+      "guid": "ee2d800d-3332-3de6-9dee-71d270913fb8",
+      "n_articles": 2
+    },
+    "NKE": {
+      "sentiment": "bearish",
+      "sentiment_score": -0.3,
+      "rationale": "Recent stock decline suggests potential challenges ahead for Nike.",
+      "headline": "Here's What History Says October Will Bring for Nike Stock",
+      "source": "Motley Fool",
+      "url": "https://www.fool.com/investing/2026/10/10/what-history-says-october-will-bring-nike-stock/",
+      "published": 1791653820.0,
+      "guid": "9773ecd3-0448-3705-b658-dbbd1e736de3",
+      "n_articles": 1
+    },
+    "UNH": {
+      "sentiment": "bullish",
+      "sentiment_score": 0.3,
+      "rationale": "Medicare Advantage overhaul could enhance investment case, but execution will be key.",
+      "headline": "How UnitedHealth’s 2027 Medicare Advantage Overhaul Could Reshape the Investment Case for UNH",
+      "source": "Yahoo Finance",
+      "url": "https://finance.yahoo.com/healthcare/articles/unitedhealth-2027-medicare-advantage-overhaul-111237401.html?.tsrc=rss",
+      "published": 1791630757.0,
+      "guid": "54025a5c-c98c-3495-8b1a-94215c2adc79",
+      "n_articles": 1
+    },
+    "WMT": {
+      "sentiment": "bearish",
+      "sentiment_score": -0.4,
+      "rationale": "Operational hurdles in supply chain automation raise concerns about Walmart's efficiency.",
+      "headline": "Is Walmart (WMT) Taking Too Long To Make Supply Chain Automation Pay Off?",
+      "source": "Yahoo Finance",
+      "url": "https://finance.yahoo.com/markets/stocks/articles/walmart-wmt-taking-too-long-041848805.html?.tsrc=rss",
+      "published": 1791692328.0,
+      "guid": "921cce11-60f6-3dbb-a88b-8696ca9cf88d",
+      "n_articles": 3
+    }
+  },
+  "feed": [
+    {
+      "headline": "The Stock Market Is on the Verge of Doing Something for the First Time in 156 Years -- and if Historical Precedent Is Accurate, a Crash May Follow",
+      "source": "Motley Fool",
+      "url": "https://www.fool.com/investing/2026/10/11/stock-market-on-verge-doing-something-first-time-156-years-historical-precedent-crash-may-follow/",
+      "published": 1791716162.0,
+      "ticker": "NVDA"
+    },
+    {
+      "headline": "Better Cryptocurrency to Buy Now With $1,000: Chainlink vs. XRP",
+      "source": "Motley Fool",
+      "url": "https://www.fool.com/investing/2026/10/11/better-cryptocurrency-to-buy-now-with-1000-chainli/",
+      "published": 1791715800.0,
+      "ticker": "NVDA"
+    },
+    {
+      "headline": "‘We’re looking at a bubble here’: Experts including Ray Dalio advise on how to protect your wealth as bond yields spike",
+      "source": "Yahoo Finance",
+      "url": "https://finance.yahoo.com/markets/stocks/articles/looking-bubble-experts-including-ray-104500189.html?.tsrc=rss",
+      "published": 1791715500.0,
+      "ticker": "AMZN"
+    },
+    {
+      "headline": "Schwab's Dividend ETF's Worst Year Since 2012 Was a 5.5% Loss. The Cost Showed Up in the Good Years.",
+      "source": "Motley Fool",
+      "url": "https://www.fool.com/investing/2026/10/11/schwab-s-dividend-etf-s-worst-year-since-2012-was-a-5-5-loss-the-cost-showed-up-in-the-good-years/",
+      "published": 1791715322.0,
+      "ticker": "NVDA"
+    },
+    {
+      "headline": "Meet the Only AI Stock I'd Buy Over Nvidia in October",
+      "source": "Motley Fool",
+      "url": "https://www.fool.com/investing/2026/10/11/meet-the-only-ai-stock-id-buy-over-nvidia-in-octob/",
+      "published": 1791715020.0,
+      "ticker": "NVDA"
+    },
+    {
+      "headline": "Symbotic Has a $22.5 Billion Backlog. Here's Why It Could Be the Best Robotics Stock Nobody Talks About.",
+      "source": "Motley Fool",
+      "url": "https://www.fool.com/investing/2026/10/11/symbotic-billion-backlog-why-robotic-stock/",
+      "published": 1791714900.0,
+      "ticker": "NVDA"
+    },
+    {
+      "headline": "3 Things to Watch When Taiwan Semiconductor (TSMC) Reports Earnings on Oct. 15",
+      "source": "Motley Fool",
+      "url": "https://www.fool.com/investing/2026/10/11/3-things-to-watch-when-taiwan-semiconductor-report/",
+      "published": 1791714300.0,
+      "ticker": "NVDA"
+    },
+    {
+      "headline": "1 Reason to Buy Carnival Stock (CCL) in October",
+      "source": "Motley Fool",
+      "url": "https://www.fool.com/investing/2026/10/11/1-reason-to-buy-carnival-stock-ccl-in-october/",
+      "published": 1791714180.0,
+      "ticker": "NVDA"
+    },
+    {
+      "headline": "3 Surging Cryptocurrencies to Buy Now and Hold for 5 Years or More",
+      "source": "Motley Fool",
+      "url": "https://www.fool.com/investing/2026/10/11/3-surging-cryptocurrencies-to-buy-now-and-hold-for/",
+      "published": 1791714000.0,
+      "ticker": "NVDA"
+    },
+    {
+      "headline": "By 1995, A Retired IRS Auditor Had Turned $5,000 Into $22 Million Using A Surprisingly Boring Investing Strategy.",
+      "source": "24/7 Wall St",
+      "url": "https://247wallst.com/investing/2026/10/11/by-1995-a-retired-irs-auditor-had-turned-5000-into-22-million-using-a-surprisingly-boring-investing-strategy/",
+      "published": 1791713875.0,
+      "ticker": "KO"
+    },
+    {
+      "headline": "Vanguard's S&P 500 Index Fund Charges About $3 a Year on $10,000. The Average Stock Fund Charges About $40.",
+      "source": "Motley Fool",
+      "url": "https://www.fool.com/investing/2026/10/11/vanguard-s-s-and-p-500-index-fund-charges-about-usd3-a-year-on-usd10-000-the-average-stock-fund-charges-about-usd40/",
+      "published": 1791713221.0,
+      "ticker": "NVDA"
+    },
+    {
+      "headline": "Crypto Investors Can Now Buy a Cathie Wood Investment Fund That Holds SpaceX and OpenAI. Here's What You Need to Know to Get Started.",
+      "source": "Motley Fool",
+      "url": "https://www.fool.com/investing/2026/10/11/crypto-investors-can-now-buy-a-cathie-wood-investm/",
+      "published": 1791713100.0,
+      "ticker": "NVDA"
+    },
+    {
+      "headline": "Welcome back to earnings season: What to watch this week",
+      "source": "Yahoo Finance",
+      "url": "https://finance.yahoo.com/markets/article/welcome-back-to-earnings-season-what-to-watch-this-week-100000102.html?.tsrc=rss",
+      "published": 1791712800.0,
+      "ticker": "JNJ"
+    },
+    {
+      "headline": "IREN Leans On NVIDIA AI Validation As SemiAnalysis Questions Its Infrastructure Claims",
+      "source": "Stocktwits",
+      "url": "https://stocktwits.com/news-articles/markets/equity/iren-leans-on-nvidia-ai-validation-as-semi-analysis-questions-its-infrastructure-claims/cZx5zBmRBFG",
+      "published": 1791712343.0,
+      "ticker": "BTC-USD"
+    },
+    {
+      "headline": "Bank of America Pays Out $0.32 Per Share Each Quarter. Here's How Many Shares You'd Need for $1,000 a Year in Dividends.",
+      "source": "Motley Fool",
+      "url": "https://www.fool.com/investing/2026/10/11/bank-of-america-payout-shares-dividend/",
+      "published": 1791712200.0,
+      "ticker": "NVDA"
+    },
+    {
+      "headline": "Tim Cook Told Apple CEO John Ternus ‘Don’t Mimic Me’ Before Stepping Aside Ahead of Apple’s Big iPhone Launch: 'I’m Not a Meddler'",
+      "source": "Yahoo Finance",
+      "url": "https://finance.yahoo.com/technology/articles/tim-cook-told-apple-ceo-094507099.html?.tsrc=rss",
+      "published": 1791711907.0,
+      "ticker": "AAPL"
+    },
+    {
+      "headline": "Alphabet Is the Robotaxi Stock to Buy as Waymo Chases 1 Million Rides a Week",
+      "source": "Motley Fool",
+      "url": "https://www.fool.com/investing/2026/10/11/alphabet-is-the-robotaxi-stock-to-buy-as-waymo-chases-1-million-rides-a-week/",
+      "published": 1791711422.0,
+      "ticker": "GOOGL"
+    },
+    {
+      "headline": "As GLP-1 Drugs Change How People Eat, Drugmakers Collect and Snack Makers Feel the Squeeze",
+      "source": "Motley Fool",
+      "url": "https://www.fool.com/investing/2026/10/11/as-glp-1-drugs-change-how-people-eat-drugmakers-co/",
+      "published": 1791711300.0,
+      "ticker": "NVDA"
+    },
+    {
+      "headline": "Prediction: This Is How Much Micron Stock Will Be Worth By the End of 2027",
+      "source": "Motley Fool",
+      "url": "https://www.fool.com/investing/2026/10/11/prediction-this-is-how-much-micron-stock-will-be-worth-by-the-end-of-2027/",
+      "published": 1791711002.0,
+      "ticker": "NVDA"
+    },
+    {
+      "headline": "Solana ETFs Just Set a New Record With $188 Million in Weekly Inflows. Here's Why I'm Bullish on Solana for 2027.",
+      "source": "Motley Fool",
+      "url": "https://www.fool.com/investing/2026/10/11/solana-etfs-just-set-a-new-record-with-188-million/",
+      "published": 1791710640.0,
+      "ticker": "NVDA"
+    },
+    {
+      "headline": "AbbVie's Dividend Yield Is at Its Lowest Level Since 2018. Here's Why the Stock Is Still a Great Pick for Income Investors Anyway.",
+      "source": "Motley Fool",
+      "url": "https://www.fool.com/investing/2026/10/11/abbvies-dividend-yield-is-at-its-lowest-level-sinc/",
+      "published": 1791709440.0,
+      "ticker": "NVDA"
+    },
+    {
+      "headline": "Costco Stock Is 14% Below Its Record. History Says Buyers Have Usually Been Rewarded.",
+      "source": "Motley Fool",
+      "url": "https://www.fool.com/investing/2026/10/11/costco-stock-is-14-below-its-record-history-says-buyers-have-usually-been-rewarded/",
+      "published": 1791708062.0,
+      "ticker": "NVDA"
+    },
+    {
+      "headline": "Grail Stock Hit a 12-Month High After Its FDA Panel Win. But Here's the Risk Investors Shouldn't Ignore.",
+      "source": "Motley Fool",
+      "url": "https://www.fool.com/investing/2026/10/11/grail-stock-hit-12-month-high-fda-panel-win-risk/",
+      "published": 1791707460.0,
+      "ticker": "NVDA"
+    },
+    {
+      "headline": "Siri AI at Day 28: Apple Ships the HomePad Screen Oct 13 — but the Enterprise Half Doesn’t Exist",
+      "source": "Yahoo Finance",
+      "url": "https://finance.yahoo.com/technology/ai/articles/siri-ai-day-28-apple-082748320.html?.tsrc=rss",
+      "published": 1791707268.0,
+      "ticker": "AAPL"
+    },
+    {
+      "headline": "President Donald Trump Has Floated the Idea of a Federal Gas Tax Holiday, but It Would Likely Backfire",
+      "source": "Motley Fool",
+      "url": "https://www.fool.com/investing/2026/10/11/donald-trump-float-idea-federal-gas-tax-holiday-would-likely-backfire/",
+      "published": 1791707161.0,
+      "ticker": "NVDA"
+    },
+    {
+      "headline": "Four Years In, $40 Trillion Up: Why This AI-Fueled Bull Market Has Room to Run",
+      "source": "via Yahoo Finance",
+      "url": "https://finance.yahoo.com/m/4a6ddf57-8100-34f1-89a7-923bd93d7e6d/four-years-in%2C-%2440-trillion.html?.tsrc=rss",
+      "published": 1791705600.0,
+      "ticker": "AAPL"
+    },
+    {
+      "headline": "Most Investors Are Wrong About Who Owns the Most Bitcoin. That Misunderstanding Creates a Buying Opportunity.",
+      "source": "Motley Fool",
+      "url": "https://www.fool.com/investing/2026/10/11/most-investors-are-wrong-about-who-owns-the-most-b/",
+      "published": 1791701820.0,
+      "ticker": "BTC-USD"
+    },
+    {
+      "headline": "Why Infosys Can Shrug Off the US Green-Card Suspension, For Now",
+      "source": "tikr.com",
+      "url": "https://www.tikr.com/blog/why-infosys-can-shrug-off-the-us-green-card-suspension-for-now?ref=yahoofinance&.tsrc=rss",
+      "published": 1791701777.0,
+      "ticker": "MSFT"
+    },
+    {
+      "headline": "Bitcoin struggles above $83,000 a year after $19 billion crypto crash",
+      "source": "Yahoo Finance",
+      "url": "https://finance.yahoo.com/markets/crypto/articles/bitcoin-struggles-above-83-000-055426754.html?.tsrc=rss",
+      "published": 1791698066.0,
+      "ticker": "BTC-USD"
+    },
+    {
+      "headline": "Tesla Renames Full Self-Driving Package to Assisted Driving Across Europe",
+      "source": "tikr.com",
+      "url": "https://www.tikr.com/blog/tesla-renames-fsd-assisted-driving-europe?ref=yahoofinance&.tsrc=rss",
+      "published": 1791695503.0,
+      "ticker": "TSLA"
+    },
+    {
+      "headline": "Is Walmart (WMT) Taking Too Long To Make Supply Chain Automation Pay Off?",
+      "source": "Yahoo Finance",
+      "url": "https://finance.yahoo.com/markets/stocks/articles/walmart-wmt-taking-too-long-041848805.html?.tsrc=rss",
+      "published": 1791692328.0,
+      "ticker": "WMT"
+    },
+    {
+      "headline": "International Business Machines (IBM) Unveils Real Time App Security Collaboration",
+      "source": "Yahoo Finance",
+      "url": "https://finance.yahoo.com/technology/articles/international-business-machines-ibm-unveils-031626945.html?.tsrc=rss",
+      "published": 1791688586.0,
+      "ticker": "IBM"
+    },
+    {
+      "headline": "Meta (META) Blocks Rival Ads Across Multiple Countries",
+      "source": "Yahoo Finance",
+      "url": "https://finance.yahoo.com/technology/ai/articles/meta-meta-blocks-rival-ads-031618784.html?.tsrc=rss",
+      "published": 1791688578.0,
+      "ticker": "META"
+    },
+    {
+      "headline": "How Much Would You Need to Invest in These 5 Pharma Stocks to Earn $1,000 a Month in Dividends?",
+      "source": "Motley Fool",
+      "url": "https://www.fool.com/investing/2026/10/10/how-much-would-you-need-to-invest-in-these-5-pharm/",
+      "published": 1791686100.0,
+      "ticker": "AMGN"
+    },
+    {
+      "headline": "Can CoreWeave Unseat Amazon Web Services as the Top Cloud Provider?",
+      "source": "Motley Fool",
+      "url": "https://www.fool.com/investing/2026/10/10/can-coreweave-unseat-amazon-web-services-as-the-to/",
+      "published": 1791675000.0,
+      "ticker": "AMZN"
+    },
+    {
+      "headline": "Sam's Club is letting its 200,000 members decide what it sells",
+      "source": "TheStreet",
+      "url": "https://www.thestreet.com/retail/sams-club-200000-members-decide-what-it-sells",
+      "published": 1791673620.0,
+      "ticker": "WMT"
+    },
+    {
+      "headline": "A COVID Vaccine Stock on the S&P 500 Is Up 600% This Year",
+      "source": "beincrypto.com",
+      "url": "https://beincrypto.com/moderna-stock-best-sp-500-2026/",
+      "published": 1791671034.0,
+      "ticker": "MRK"
+    },
+    {
+      "headline": "Walt Disney’s CEO explains why box office bombs may no longer matter",
+      "source": "TheStreet",
+      "url": "https://www.thestreet.com/entertainment/walt-disney-plans-to-give-fans-more-of-what-they-love",
+      "published": 1791670797.0,
+      "ticker": "DIS"
+    },
+    {
+      "headline": "Is AT&T (T) Ready for a Starlink World After Its Latest Fiber and iPhone Duo Moves?",
+      "source": "Yahoo Finance",
+      "url": "https://finance.yahoo.com/markets/stocks/articles/t-t-ready-starlink-world-221137273.html?.tsrc=rss",
+      "published": 1791670297.0,
+      "ticker": "AAPL"
+    },
+    {
+      "headline": "Amazon (AMZN) Wants Investors to Finance $8 Billion of Nvidia Chips. Is AI Spending Getting Too Heavy?",
+      "source": "Yahoo Finance",
+      "url": "https://finance.yahoo.com/technology/ai/articles/amazon-amzn-wants-investors-finance-221126922.html?.tsrc=rss",
+      "published": 1791670286.0,
+      "ticker": "AMZN"
+    },
+    {
+      "headline": "Merck Presents One-Year Results from the Pivotal Phase 2b/3 BRUNELLO Study Evaluating Remigromig, a Tri-specific Agonist of the Wingless-related Integration Site (Wnt) Pathway, in Adults with Diabetic Macular Edema at AAO 2026",
+      "source": "Yahoo Finance",
+      "url": "https://finance.yahoo.com/healthcare/articles/merck-presents-one-results-pivotal-221000461.html?.tsrc=rss",
+      "published": 1791670200.0,
+      "ticker": "MRK"
+    },
+    {
+      "headline": "Solana Confirms a Transaction in 200 Milliseconds and Bitcoin Takes 10 Minutes. Does Speed Make a Coin Worth More?",
+      "source": "24/7 Wall St",
+      "url": "https://247wallst.com/investing/cryptocurrency/2026/10/10/solana-confirms-a-transaction-in-200-milliseconds-and-bitcoin-takes-10-minutes-does-speed-make-a-coin-worth-more/",
+      "published": 1791670030.0,
+      "ticker": "BTC-USD"
+    },
+    {
+      "headline": "Veeva Systems’ (VEEV) Comeback Gets Jim Cramer Talking",
+      "source": "Yahoo Finance",
+      "url": "https://finance.yahoo.com/technology/ai/articles/veeva-systems-veev-comeback-gets-215549111.html?.tsrc=rss",
+      "published": 1791669349.0,
+      "ticker": "AMGN"
+    },
+    {
+      "headline": "Walmart CEO pledges to avoid shady pricing practice",
+      "source": "TheStreet",
+      "url": "https://www.thestreet.com/retail/walmart-ceo-pledges-to-avoid-shady-pricing-practice",
+      "published": 1791667980.0,
+      "ticker": "WMT"
+    },
+    {
+      "headline": "Whales Bought 15,000 Bitcoin in Three Days While MARA Sold $81 Million. Who Has It Right?",
+      "source": "24/7 Wall St",
+      "url": "https://247wallst.com/investing/cryptocurrency/2026/10/10/whales-bought-15000-bitcoin-in-three-days-while-mara-sold-81-million-who-has-it-right/",
+      "published": 1791667838.0,
+      "ticker": "BTC-USD"
+    },
+    {
+      "headline": "How to Earn $500 a Month From Goldman Sachs Stock Ahead of Q3 Earnings",
+      "source": "Yahoo Finance",
+      "url": "https://finance.yahoo.com/markets/stocks/articles/earn-500-month-goldman-sachs-213021867.html?.tsrc=rss",
+      "published": 1791667821.0,
+      "ticker": "GS"
+    },
+    {
+      "headline": "VOO Doesn't Hold SpaceX, Taiwan Semiconductor, Samsung Electronics, SK Hynix, or ASML. Meet the Vanguard ETF That Does.",
+      "source": "Motley Fool",
+      "url": "https://www.fool.com/investing/2026/10/10/voo-doesnt-own-spacex-taiwan-semiconductor-samsung/",
+      "published": 1791665493.0,
+      "ticker": "BRK-B"
+    },
+    {
+      "headline": "Infosys sees no material impact from U.S. PERM suspension",
+      "source": "Yahoo Finance",
+      "url": "https://finance.yahoo.com/technology/articles/infosys-sees-no-material-impact-204406039.html?.tsrc=rss",
+      "published": 1791665046.0,
+      "ticker": "MSFT"
+    },
+    {
+      "headline": "Eight Altcoins Have Surged Three Times More Than Bitcoin in 30 Days. Is Altcoin Season Here, or Is This Just a Momentary Uptick?",
+      "source": "24/7 Wall St",
+      "url": "https://247wallst.com/investing/cryptocurrency/2026/10/10/eight-altcoins-have-surged-three-times-more-than-bitcoin-in-30-days-is-altcoin-season-here-or-is-this-just-a-momentary-uptick/",
+      "published": 1791663319.0,
+      "ticker": "BTC-USD"
+    },
+    {
+      "headline": "Trump awards science medals to Musk, Nadella and 4 other tech titans — 5 immigrants — hours after Vance targets them",
+      "source": "Yahoo Finance",
+      "url": "https://finance.yahoo.com/technology/articles/trump-awards-science-medals-musk-201500010.html?.tsrc=rss",
+      "published": 1791663300.0,
+      "ticker": "MSFT"
+    }
+  ]
+}
