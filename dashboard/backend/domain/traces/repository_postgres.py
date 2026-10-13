@@ -321,6 +321,13 @@ class PostgresTraceStore:
                 )
         return len(fresh)
 
+    def event_high_watermark(self, trace_id: str) -> int:
+        """Freeze the export boundary before walking append-only event pages."""
+        with self._get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT COALESCE(MAX(sequence_no), 0) AS sequence_no FROM agent_trace_events WHERE trace_id = %s", (trace_id,))
+                return int(cur.fetchone()["sequence_no"])
+
     def list_events(
         self, trace_id: str, *, after_sequence: int = 0, limit: int = 100
     ) -> Dict[str, Any]:
