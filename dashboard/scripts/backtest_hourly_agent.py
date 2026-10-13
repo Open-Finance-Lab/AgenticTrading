@@ -689,6 +689,22 @@ def _exit_on_sigterm(signum, _frame):
     raise SystemExit(128 + signum)
 
 
+def _run_failed_report(exc: LLMExecutionError) -> str:
+    """The line the parent reads to name a model failure, not a traceback.
+
+    One machine-readable line (``api/routers/backtests._child_llm_failure``);
+    the ``ERROR: llm.`` prefix also has the parent relay it to the service log
+    live, and the category is a fixed enum value, never upstream text. A
+    ``finalize_run`` that raises while the run's own error is unwinding
+    replaces it; the run's error is the cause the user can act on ("add
+    Credits"), so the first execution error in the chain is reported.
+    """
+    cause = exc
+    while isinstance(cause.__context__, LLMExecutionError):
+        cause = cause.__context__
+    return run_failed_line(cause)
+
+
 if __name__ == "__main__":
     signal.signal(signal.SIGTERM, _exit_on_sigterm)
     # Reached through the module alias bound at the top rather than a second
@@ -699,15 +715,11 @@ if __name__ == "__main__":
         try:
             main()
         except LLMExecutionError as exc:
-            # One machine-readable line for the parent, which otherwise only
-            # has this process's traceback tail to show the user. Caught here,
-            # at the CLI boundary, rather than around the agent loop alone, so
-            # a handoff that fails during setup and a ``finalize_run`` that
-            # raises BILLING_FAILED in the loop's ``finally`` both name their
-            # category too. The ``ERROR: llm.`` prefix has the parent relay it
-            # to the service log live; the category is a fixed enum value,
-            # never upstream text.
-            print(run_failed_line(exc), flush=True)
+            # Caught at the CLI boundary rather than around the agent loop
+            # alone, so a handoff that fails during setup and a
+            # ``finalize_run`` that raises BILLING_FAILED in the loop's
+            # ``finally`` name their category too.
+            print(_run_failed_report(exc), flush=True)
             raise
         except _alpaca_bars.MarketDataUnavailableError as exc:
             # Library code raises (so server threads can catch it); the CLI

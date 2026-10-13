@@ -411,6 +411,10 @@ def calculate_user_state(
         # Split out of credits_unavailable; an empty balance still blocks the
         # platform lane, so it keeps the operational state it always had.
         "credits_insufficient",
+        # A restricted account (llm_overage, refund review) can run nothing on
+        # the platform lane -- strictly worse than an empty balance, so it
+        # must not read healthier than one.
+        "account_restricted",
         "model_not_allowed",
     }
     resolvers = {

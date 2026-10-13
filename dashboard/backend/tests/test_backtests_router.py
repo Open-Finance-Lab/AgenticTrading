@@ -3528,41 +3528,173 @@ def test_byok_runs_never_read_the_credits_balance(monkeypatch):
     assert credits.balance_reads == []
 
 
+def _gpt55_djia(**overrides):
+    kwargs = dict(
+        model_id="openai/gpt-5.5",
+        provider_id="commonstack",
+        sessions=7,
+        data_source="alpaca",
+        universe_size=30,
+        pipeline=[{"label": "Step 1", "prompt": "trade"}],
+    )
+    kwargs.update(overrides)
+    return bt._estimated_platform_credits(**kwargs)
+
+
 def test_platform_credits_estimate_matches_the_observed_reservation_shape():
-    pipeline = [{"label": "Step 1", "prompt": "trade"}]
-    calls = bt._estimated_pipeline_llm_calls(
-        "2026-09-21", "2026-09-29", pipeline, "alpaca"
+    # The ceiling term is the reservation's own rule: prod reserved
+    # 0.178-0.187 Credits per GPT-5.5 DJIA 30 call.
+    ceiling = bt.reservation_ceiling_micro_for(
+        prompt_bytes=bt._PREFLIGHT_PROMPT_FIXED_BYTES
+        + bt._PREFLIGHT_PROMPT_BYTES_PER_SYMBOL * 30
+        + len("trade"),
+        max_output_tokens=bt.RECOVERY_MAX_OUTPUT_TOKENS,
+        pricing_snapshot=bt.PricingSnapshot.from_model("openai/gpt-5.5", "commonstack"),
     )
-    assert calls == 49
-    one_call = bt._estimated_platform_credits_micro(
-        model_id="openai/gpt-5.5",
-        provider_id="commonstack",
+    assert 170_000 <= ceiling <= 200_000
+    assert _gpt55_djia(sessions=1).calls == 7
+    full = _gpt55_djia()
+    assert full.calls == 49
+    # The 2026-10-07 dead run spent 1.32 Credits over 39 calls -- a mean of
+    # 0.0338 per call, i.e. ~1.81 Credits for 49 calls with the last call's
+    # ceiling held. A typical estimate must land near that (within 10%), not
+    # at "every call at its ceiling" (~9 Credits), which refuses runs that
+    # finish -- and it still refuses the 1.5-Credit account that died.
+    assert 1_630_000 < full.needed_micro < 2_000_000
+    assert full.needed_micro > 1_500_000
+    assert _gpt55_djia(sessions=0) is None
+
+
+def test_platform_credits_estimate_uses_the_models_own_output_median():
+    sonnet = _gpt55_djia(model_id="anthropic/claude-sonnet-4-6")
+    assert bt._preflight_expected_output_tokens("openai/gpt-5.5") == 574
+    assert bt._preflight_expected_output_tokens("anthropic/claude-sonnet-4-6") == 420
+    # An unmeasured model takes the middle of the measured ones.
+    unmeasured = bt._preflight_expected_output_tokens("anthropic/claude-haiku-4-5")
+    assert 420 < unmeasured < 1335
+    assert sonnet.calls == 49
+
+
+def test_platform_credits_estimate_counts_the_callers_own_prompt_text():
+    short = _gpt55_djia()
+    long_instruction = _gpt55_djia(
+        pipeline=[{"label": "Step 1", "prompt": "x" * 8000}]
+    )
+    assert long_instruction.needed_micro > short.needed_micro
+    two_steps = _gpt55_djia(
+        pipeline=[
+            {"label": "Research", "prompt": "trade"},
+            {"label": "Execute", "prompt": "trade"},
+        ]
+    )
+    # Twice the calls, and step 2 carries step 1's output.
+    assert two_steps.calls == 98
+    single_prompt = _gpt55_djia(pipeline=None, strategy_prompt=None)
+    with_strategy = _gpt55_djia(pipeline=None, strategy_prompt="y" * 8000)
+    assert with_strategy.needed_micro > single_prompt.needed_micro
+
+
+def test_trading_sessions_skip_nyse_holidays_and_cn_counts_weekdays():
+    # Thanksgiving 2025 (Thu 11-27): four sessions, not five weekdays.
+    assert bt._estimated_trading_sessions("2025-11-24", "2025-11-28", market="US") == 4
+    assert bt._estimated_decision_days("2025-11-24", "2025-11-28") == 5
+    assert bt._estimated_trading_sessions("2025-11-24", "2025-11-28", market="CN") == 5
+    assert bt._estimated_trading_sessions("2026-09-21", "2026-09-29", market="US") == 7
+
+
+def test_trading_sessions_stop_at_the_settled_end(monkeypatch):
+    # A window reaching a session still in progress does not trade it.
+    monkeypatch.setattr(
+        bt, "settled_exclusive_end", lambda end_date, market=None: "2026-09-25"
+    )
+    assert bt._estimated_trading_sessions("2026-09-21", "2026-09-29", market="US") == 4
+
+
+def test_credits_figures_never_print_equal_on_both_sides():
+    assert bt._format_credits(1_804_900, round_up=True) == "1.81"
+    assert bt._format_credits(1_800_100) == "1.80"
+    assert bt._format_credits(1_800_000, round_up=True) == "1.80"
+
+
+def _admit_running_platform_slot(run_id, *, user_id, estimate):
+    claim = bt._CreditsClaim(
+        needed_micro=estimate,
+        available_micro=10**12,
         calls=1,
-        universe_size=30,
-        pipeline=pipeline,
-    )
-    # A single call needs a whole reservation free: prod reserved 0.178-0.187
-    # Credits per GPT-5.5 DJIA 30 call.
-    assert 170_000 <= one_call <= 200_000
-    full = bt._estimated_platform_credits_micro(
         model_id="openai/gpt-5.5",
-        provider_id="commonstack",
-        calls=calls,
-        universe_size=30,
-        pipeline=pipeline,
+        spent_by_run={},
     )
-    # Prod's dead run implied ~1.81 Credits for 49 calls. The estimate must
-    # sit above that (or the 1.5-Credit account is let through to fail again)
-    # and well below "every call at its ceiling" (~9 Credits), which would
-    # refuse runs that finish.
-    assert 1_810_000 < full < 3_500_000
-    assert bt._estimated_platform_credits_micro(
+    assert (
+        bt._try_acquire_backtest_slot(
+            live_run_id=run_id,
+            session_id=str(uuid.uuid4()),
+            user_id=user_id,
+            credits_claim=claim,
+        )
+        is None
+    )
+
+
+def test_a_launch_counts_what_the_owners_running_runs_still_need(monkeypatch):
+    # 8 Credits, and a sibling GPT-5.5 run admitted at 7.5 that has settled 1.
+    # Alone this launch (~1.8) fits; beside the sibling's remaining ~6.5 it does
+    # not (8 - 6.5 = 1.5), and must be refused before it starves both.
+    _admit_running_platform_slot("agent_sibling", user_id=7, estimate=7_500_000)
+
+    class _Credits(_FakeBalanceCredits):
+        def sum_run_llm_spend(self, user_id, run_id):
+            return (1_000_000, 10) if run_id == "agent_sibling" else (0, 0)
+
+    credits = _Credits(8_000_000)
+    response, spy, handoffs = _post_platform_run(monkeypatch, credits)
+
+    assert response.status_code == 402, response.text
+    detail = response.json()["detail"]
+    assert "your balance is 8.00 Credits" in detail
+    assert "about 6.50 of which your 1 running backtest is expected to use" in detail
+    assert handoffs == [] and spy.calls == 0
+
+
+def test_a_sibling_run_of_another_account_is_not_counted(monkeypatch):
+    _admit_running_platform_slot("agent_stranger", user_id=99, estimate=7_000_000)
+
+    class _Credits(_FakeBalanceCredits):
+        def sum_run_llm_spend(self, user_id, run_id):
+            raise AssertionError("a stranger's spend must not be read")
+
+    response, spy, _ = _post_platform_run(monkeypatch, _Credits(8_000_000))
+
+    assert response.status_code == 200, response.text
+    assert spy.calls == 1
+
+
+def test_the_slot_ledger_rechecks_a_credits_claim_under_its_lock():
+    # Two launches that both read the balance before either took a slot: the
+    # second one to reach the ledger sees the first and is refused.
+    claim = bt._CreditsClaim(
+        needed_micro=5_000_000,
+        available_micro=8_000_000,
+        calls=49,
         model_id="openai/gpt-5.5",
-        provider_id="commonstack",
-        calls=0,
-        universe_size=30,
-        pipeline=pipeline,
-    ) is None
+        spent_by_run={},
+    )
+    first = bt._try_acquire_backtest_slot(
+        live_run_id="agent_race_a",
+        session_id=str(uuid.uuid4()),
+        user_id=31,
+        credits_claim=claim,
+    )
+    second = bt._try_acquire_backtest_slot(
+        live_run_id="agent_race_b",
+        session_id=str(uuid.uuid4()),
+        user_id=31,
+        credits_claim=claim,
+    )
+    assert first is None
+    assert isinstance(second, bt._CreditsRefusal)
+    assert "running backtest" in second
+    assert bt._active_slots["agent_race_a"]["credits_estimate_micro"] == 5_000_000
+    assert "agent_race_b" not in bt._active_slots
 
 
 def test_snapshot_width_follows_the_portfolio_manager_rule():
@@ -3707,3 +3839,112 @@ def test_a_failure_without_a_category_line_keeps_the_generic_category(monkeypatc
     )
     bt._finalize_slot(run_id, error="Backtest failed with return code 1. boom", runs_count=0)
     assert emitted[-1]["error_category"] == "internal_error"
+
+
+def test_child_llm_failure_reads_the_other_stream_past_an_unknown_line():
+    failure = bt._child_llm_failure(
+        "ERROR: llm.run_failed category=made_up\n",
+        "ERROR: llm.run_failed category=billing_failed\n",
+    )
+    assert failure is not None
+    assert failure.category.value == "billing_failed"
+
+
+def test_an_llm_failure_names_account_facts_to_the_runs_owner_only():
+    run_id = "agent_redacted_failure"
+    agent_session = str(uuid.uuid4())
+    owner_session = str(uuid.uuid4())
+    assert (
+        bt._try_acquire_backtest_slot(
+            live_run_id=run_id,
+            session_id=agent_session,
+            owner_session=owner_session,
+            user_id=4242,
+        )
+        is None
+    )
+    private = (
+        "Backtest stopped: Your Credits account is paused for payment refund "
+        "review. Contact an administrator to restore access."
+    )
+    bt._finalize_slot(
+        run_id,
+        error=private,
+        runs_count=0,
+        error_category="account_restricted",
+        public_error=bt._LLM_FAILURE_PUBLIC_ERROR,
+    )
+    slot = bt._recent_slots[run_id]
+
+    # Anyone holding the built-in agent's published session id.
+    stranger = bt._status_snapshot_for(slot, session_id=agent_session, user_id=None)
+    assert stranger["error"] == bt._LLM_FAILURE_PUBLIC_ERROR
+    assert "refund" not in str(stranger)
+    owner = bt._status_snapshot_for(slot, session_id=owner_session, user_id=4242)
+    assert owner["error"] == private
+    # The legacy mirror answers whoever polls with the slot's session id.
+    assert "refund" not in str(bt.backtest_status.get("error"))
+
+
+def test_a_failure_with_nothing_personal_is_not_redacted():
+    run_id = "agent_plain_failure"
+    session = str(uuid.uuid4())
+    assert (
+        bt._try_acquire_backtest_slot(live_run_id=run_id, session_id=session, user_id=None)
+        is None
+    )
+    bt._finalize_slot(run_id, error="Backtest failed with return code 1. boom", runs_count=0)
+    snapshot = bt._status_snapshot_for(
+        bt._recent_slots[run_id], session_id=str(uuid.uuid4()), user_id=None
+    )
+    assert snapshot["error"] == "Backtest failed with return code 1. boom"
+
+
+def test_the_child_reports_the_runs_own_error_past_a_failed_finalize():
+    from dashboard.backend.infrastructure.llm.execution.errors import (
+        ExecutionErrorCategory,
+        LLMExecutionError,
+    )
+    from dashboard.scripts import backtest_hourly_agent as child
+
+    try:
+        try:
+            raise LLMExecutionError(ExecutionErrorCategory.INSUFFICIENT_CREDITS)
+        finally:
+            # finalize_run raising in the run loop's ``finally``.
+            raise LLMExecutionError(ExecutionErrorCategory.BILLING_FAILED)
+    except LLMExecutionError as exc:
+        line = child._run_failed_report(exc)
+    assert line == "ERROR: llm.run_failed category=insufficient_credits"
+
+    alone = LLMExecutionError(ExecutionErrorCategory.BILLING_FAILED)
+    assert (
+        child._run_failed_report(alone)
+        == "ERROR: llm.run_failed category=billing_failed"
+    )
+
+
+def test_the_child_reports_llm_failures_at_its_cli_boundary():
+    # Setup (the handoff) and finalize_run both raise outside the agent loop,
+    # so the report belongs to the __main__ block, not to the loop.
+    import ast
+    from pathlib import Path
+
+    source = (
+        Path(__file__).resolve().parents[2] / "scripts" / "backtest_hourly_agent.py"
+    ).read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    main_block = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.If) and "__main__" in ast.unparse(node.test)
+    )
+    handlers = [
+        handler
+        for node in ast.walk(main_block)
+        if isinstance(node, ast.Try)
+        for handler in node.handlers
+        if handler.type is not None and ast.unparse(handler.type) == "LLMExecutionError"
+    ]
+    assert handlers, "__main__ must catch LLMExecutionError"
+    assert "_run_failed_report" in ast.unparse(handlers[0])

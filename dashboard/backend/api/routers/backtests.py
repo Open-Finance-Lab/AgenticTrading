@@ -17,6 +17,7 @@ import math
 import os
 import re
 import signal
+import statistics
 import subprocess
 import time
 import uuid
@@ -44,7 +45,7 @@ from threading import Thread as _DeadlineThread
 from typing import Any, Dict, List, Literal, NamedTuple, Optional, Tuple
 
 import pytz
-from datetime import datetime
+from datetime import datetime, timedelta
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import Response
 from pydantic import BaseModel
@@ -67,7 +68,11 @@ from dashboard.backend.infrastructure.market_data.provider import (
     MarketDataSourceDisabled,
     UnsupportedMarketDataSource,
     ensure_market_data_source_available,
+    settled_exclusive_end,
     validate_market_data_source,
+)
+from dashboard.backend.infrastructure.market_data.us_market_calendar import (
+    is_trading_day as is_nyse_trading_day,
 )
 from dashboard.backend.infrastructure.market_data.sessions import time_in_session
 from dashboard.backend.infrastructure.market_data.profiles import (
@@ -86,6 +91,7 @@ from dashboard.backend.infrastructure.llm.execution.errors import (
 from dashboard.backend.infrastructure.llm.execution.service import (
     LLMExecutionService,
     analytics_error_category,
+    reservation_ceiling_micro_for,
 )
 from dashboard.backend.infrastructure.llm.execution.handoff import (
     create_execution_handoff,
@@ -855,7 +861,9 @@ def _mirror_slot_to_legacy(slot: Dict[str, Any]) -> None:
     """Keep ``backtest_status`` / ``backtest_session_id`` in sync with one slot."""
     global backtest_session_id
     backtest_status["running"] = bool(slot.get("running"))
-    backtest_status["error"] = slot.get("error")
+    # The mirror answers whoever polls with the slot's ``session_id`` -- for a
+    # built-in agent a published id -- so it carries the redacted form.
+    backtest_status["error"] = slot.get("public_error") or slot.get("error")
     backtest_status["runs_count"] = int(slot.get("runs_count") or 0)
     backtest_status["started_at"] = slot.get("started_at")
     backtest_status["progress_file"] = slot.get("progress_file")
@@ -877,8 +885,16 @@ def _try_acquire_backtest_slot(
     session_id: str,
     owner_session: Optional[str] = None,
     user_id: Optional[int],
+    credits_claim: Optional["_CreditsClaim"] = None,
 ) -> Optional[str]:
     """Register a running slot or return a human-readable refusal reason.
+
+    ``credits_claim`` is an ATL Credits launch's admitted estimate. It is
+    re-checked here, under the same lock that registers the slot, against the
+    owner's other running platform-credits runs -- so two launches that both
+    passed ``_enforce_platform_credits_balance`` on one balance cannot both
+    start -- and recorded on the slot for the next launch to count. A refusal
+    on that ground is a ``_CreditsRefusal``, which the route answers with 402.
 
     ``session_id`` files the *results* (for a built-in agent that is the
     agent's own session, so its runs land on its public card).
@@ -913,6 +929,12 @@ def _try_acquire_backtest_slot(
                 f"You already have {max_for_owner} backtests running. "
                 "Please wait for one to finish."
             )
+        if credits_claim is not None and user_id is not None:
+            shortfall = _credits_shortfall(
+                credits_claim, _owner_platform_credit_slots(int(user_id))
+            )
+            if shortfall is not None:
+                return _CreditsRefusal(shortfall)
         slot = {
             "live_run_id": live_run_id,
             "session_id": session_id,
@@ -945,6 +967,12 @@ def _try_acquire_backtest_slot(
             # did not time out.
             "timed_out": False,
             "timeout_detail": None,
+            # What this run was admitted as needing, for the credits check of
+            # the owner's next launch. None for every run that is not ATL
+            # Credits, which that check therefore never counts.
+            "credits_estimate_micro": (
+                int(credits_claim.needed_micro) if credits_claim is not None else None
+            ),
         }
         _active_slots[live_run_id] = slot
         _mirror_slot_to_legacy(slot)
@@ -1019,6 +1047,7 @@ def _finalize_slot(
     timed_out: bool = False,
     timeout_detail: Optional[Dict[str, Any]] = None,
     error_category: Optional[str] = None,
+    public_error: Optional[str] = None,
 ) -> None:
     """Move a slot to its terminal state.
 
@@ -1055,6 +1084,7 @@ def _finalize_slot(
             timed_out=timed_out,
             timeout_detail=timeout_detail,
             error_category=error_category,
+            public_error=public_error,
         )
     _emit_slot_run_event(event)
 
@@ -1068,6 +1098,7 @@ def _finalize_slot_locked(
     timed_out: bool = False,
     timeout_detail: Optional[Dict[str, Any]] = None,
     error_category: Optional[str] = None,
+    public_error: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
     """The terminal transition itself. THE CALLER MUST HOLD THE LEDGER LOCK.
 
@@ -1114,11 +1145,14 @@ def _finalize_slot_locked(
         backtest_status["live_run_id"] = None
         backtest_status["progress_file"] = None
         if error is not None:
-            backtest_status["error"] = error
+            backtest_status["error"] = public_error or error
         backtest_status["runs_count"] = runs_count
         return None
     slot["running"] = False
     slot["error"] = error
+    # What a caller who did not start the run reads in place of ``error``
+    # (``_status_snapshot_for``); None when ``error`` holds nothing personal.
+    slot["public_error"] = public_error
     slot["runs_count"] = runs_count
     # Captured before ``started_at`` is cleared, because it is the only record
     # of how long the run went that survives into the terminal state. The
@@ -1538,8 +1572,14 @@ def _status_snapshot_for(
     applied to one of them is not a redaction.
     """
     snapshot = _slot_snapshot(slot)
+    owned = _slot_owned_by(slot, session_id=session_id, user_id=user_id)
+    if not owned and slot.get("public_error"):
+        # A model-execution failure names the owner's Credits balance, their
+        # restriction, their billing lane -- the same class of account fact
+        # ``timeout_detail`` withholds below. Others learn only that it stopped.
+        snapshot["error"] = slot["public_error"]
     detail = snapshot.get("timeout_detail")
-    if detail and not _slot_owned_by(slot, session_id=session_id, user_id=user_id):
+    if detail and not owned:
         snapshot["timeout_detail"] = {
             key: value
             for key, value in detail.items()
@@ -2050,6 +2090,7 @@ def run_backtest_background(
             raise _BacktestCancelled()
 
         slot_error = None
+        slot_public_error = None
         slot_error_category = None
         slot_runs_count = 0
         if result.returncode != 0:
@@ -2067,6 +2108,7 @@ def run_backtest_background(
                 # The safe message is the whole story for the user; the
                 # traceback stays in the service log via the dump above.
                 slot_error = f"Backtest stopped: {llm_failure.safe_message}"
+                slot_public_error = _LLM_FAILURE_PUBLIC_ERROR
                 slot_error_category = analytics_error_category(
                     llm_failure.category
                 )
@@ -2092,6 +2134,7 @@ def run_backtest_background(
                 error=slot_error,
                 runs_count=slot_runs_count,
                 error_category=slot_error_category,
+                public_error=slot_public_error,
             )
             resolved_live_run_id = None  # finally must not double-finalize
     except _BacktestCancelled:
@@ -2688,23 +2731,46 @@ def _max_pipeline_llm_calls() -> int:
 # spent 1.32 Credits on 39 GPT-5.5 DJIA 30 calls, then failed the run). This
 # refuses that run up front instead.
 #
-# The estimate is ``(calls - 1) x expected + one reservation ceiling``: the
-# last call must still find a whole ceiling free. It is a refusal, so
-# over-estimating is the unsafe direction -- it turns away a run that would have
-# finished. The constants are therefore typical, not worst case, calibrated on
-# prod platform-credits usage (30 days to 2026-10-07): median output tokens per
-# call were 420 (Sonnet 4.6), 574 (GPT-5.5), 1058 (DeepSeek V4 Pro), 1335
-# (Qwen3.7 Plus). The reservation itself stays the hard gate.
+# The estimate is ``sum(expected per call) - expected(largest) + ceiling
+# (largest)``: the last call must still find a whole reservation free. It is a
+# refusal, so over-estimating is the unsafe direction -- it turns away a run
+# that would have finished. Every input is therefore typical, not worst case,
+# and the reservation itself stays the hard gate:
 #
-# Prompt size follows the step-0 market snapshot: about 3000 bytes of fixed
-# framing plus about 254 bytes per symbol shown, and about 57 more per symbol
-# for a half-invested book's holdings and trades. Measured by rebuilding the
-# snapshot; on GPT-5.5 / DJIA 30 the ceiling it gives (0.186 Credits) matches
-# the 0.178-0.187 prod reservations.
+# - calls: NYSE sessions (US) up to the settled end -- the engine never trades
+#   a session still in progress (``settled_exclusive_end``) -- not the weekday
+#   upper bound the subprocess timeout over-provisions from.
+# - output tokens: the model's own median from prod platform-credits usage
+#   (30 days to 2026-10-07).
+# - prompt: the step-0 market snapshot is about 3000 bytes of fixed framing plus
+#   about 254 bytes per symbol shown, and about 57 more per symbol for a
+#   half-invested book's holdings and trades (measured by rebuilding the
+#   snapshot; on GPT-5.5 / DJIA 30 the ceiling it gives, 0.186 Credits, matches
+#   the 0.178-0.187 prod reservations). On top of that, the caller's own text:
+#   each step's instruction and output format (or the single-prompt path's
+#   strategy prompt), and for step k > 0 the k upstream outputs it carries.
+#   The calibration ran a short starter instruction, so counting the whole
+#   instruction again over-states by those few hundred bytes -- noise beside
+#   the output tokens, which dominate the price.
 _PREFLIGHT_PROMPT_FIXED_BYTES = 3000
 _PREFLIGHT_PROMPT_BYTES_PER_SYMBOL = 311
-_PREFLIGHT_PROMPT_FRAMING_TOKENS = 256  # service._PROMPT_FRAMING_TOKEN_ALLOWANCE
-_PREFLIGHT_EXPECTED_OUTPUT_TOKENS = 1000
+_PREFLIGHT_EXPECTED_OUTPUT_TOKENS_BY_MODEL = {
+    "anthropic/claude-sonnet-4-6": 420,
+    "openai/gpt-5.5": 574,
+    "deepseek/deepseek-v4-pro": 1058,
+    "qwen/qwen3.7-plus": 1335,
+}
+# A model with no prod sample yet (Haiku 4.5, Gemini 3.1 Pro): the middle of
+# the measured ones, rather than any single model's figure.
+_PREFLIGHT_UNMEASURED_OUTPUT_TOKENS = int(
+    statistics.median(_PREFLIGHT_EXPECTED_OUTPUT_TOKENS_BY_MODEL.values())
+)
+
+
+def _preflight_expected_output_tokens(model_id: str) -> int:
+    return _PREFLIGHT_EXPECTED_OUTPUT_TOKENS_BY_MODEL.get(
+        model_id, _PREFLIGHT_UNMEASURED_OUTPUT_TOKENS
+    )
 
 
 def _snapshot_symbols_shown(
@@ -2717,25 +2783,70 @@ def _snapshot_symbols_shown(
     return min(universe_size, SNAPSHOT_SHORTLIST_SIZE)
 
 
-def _estimated_platform_credits_micro(
+def _estimated_trading_sessions(
+    start_date: str, end_date: str, *, market: object = None
+) -> int:
+    """Sessions an inclusive window will actually trade, for pricing it.
+
+    Unlike ``_estimated_decision_days`` (a weekday upper bound, right for a
+    timeout) this is a typical count, right for a refusal: it stops at the
+    settled end the engine fetches to and, on the US market, skips NYSE
+    holidays. A-share has no exchange calendar in the codebase, so CN stays a
+    weekday count.
+    """
+    try:
+        start = datetime.strptime(str(start_date)[:10], "%Y-%m-%d").date()
+        end = datetime.strptime(str(end_date)[:10], "%Y-%m-%d").date()
+        settled_last = datetime.strptime(
+            settled_exclusive_end(str(end_date)[:10], market=market), "%Y-%m-%d"
+        ).date() - timedelta(days=1)
+    except (TypeError, ValueError):
+        return 0
+    end = min(end, settled_last)
+    if end < start:
+        return 0
+    is_session = (
+        is_nyse_trading_day
+        if str(market or "US").upper() == "US"
+        else (lambda day: day.weekday() < 5)
+    )
+    return sum(
+        1
+        for offset in range((end - start).days + 1)
+        if is_session(start + timedelta(days=offset))
+    )
+
+
+def _utf8_len(text: Any) -> int:
+    return len(str(text or "").encode("utf-8"))
+
+
+class _PlatformCreditsEstimate(NamedTuple):
+    calls: int
+    needed_micro: int
+
+
+def _estimated_platform_credits(
     *,
     model_id: str,
     provider_id: str,
-    calls: int,
+    sessions: int,
+    data_source: Optional[str],
     universe_size: int,
     pipeline: Optional[List[Dict[str, Any]]],
-) -> Optional[int]:
-    """Credits (micro) a platform-credits run needs to finish, or None.
+    strategy_prompt: Optional[str] = None,
+) -> Optional[_PlatformCreditsEstimate]:
+    """What a platform-credits run needs to finish, or None.
 
     None means "cannot price it" (no calls, or no cost from the snapshot), and
     the caller lets the run through: the per-call reservation is still there.
     """
-    if calls <= 0:
+    if sessions <= 0:
         return None
+    bars = sessions * _pipeline_decision_bars_per_trading_day(data_source)
     shown = _snapshot_symbols_shown(universe_size, pipeline)
-    prompt_bytes = (
-        _PREFLIGHT_PROMPT_FIXED_BYTES + _PREFLIGHT_PROMPT_BYTES_PER_SYMBOL * shown
-    )
+    snapshot_bytes = _PREFLIGHT_PROMPT_FIXED_BYTES + _PREFLIGHT_PROMPT_BYTES_PER_SYMBOL * shown
+    expected_output = _preflight_expected_output_tokens(model_id)
     # Mirrors pipeline_runner._first_attempt_ceiling: a wide snapshot asks for
     # the recovery ceiling on its first attempt.
     ceiling_output = (
@@ -2743,31 +2854,146 @@ def _estimated_platform_credits_micro(
         if shown > DEFAULT_CEILING_SNAPSHOT_SYMBOLS
         else DEFAULT_MAX_OUTPUT_TOKENS
     )
-    snapshot = PricingSnapshot.from_model(model_id, provider_id)
-    ceiling_usd = estimate_cost_from_snapshot(
-        snapshot,
-        LLMUsage(
-            # Bytes as tokens, exactly as the reservation counts them.
-            input_tokens=prompt_bytes + _PREFLIGHT_PROMPT_FRAMING_TOKENS,
-            output_tokens=ceiling_output,
-        ),
-    )
-    expected_usd = estimate_cost_from_snapshot(
-        snapshot,
-        LLMUsage(
-            input_tokens=math.ceil(prompt_bytes / CHARS_PER_TOKEN),
-            output_tokens=min(_PREFLIGHT_EXPECTED_OUTPUT_TOKENS, ceiling_output),
-        ),
-    )
-    if ceiling_usd is None or expected_usd is None:
+    prior_output_bytes = min(expected_output, ceiling_output) * CHARS_PER_TOKEN
+
+    # (prompt bytes, how many calls of that shape) per call shape in the run.
+    shapes: List[Tuple[int, int]] = []
+    decision_steps, post_trade_steps = split_pipeline(pipeline)
+    if decision_steps:
+        for index, step in enumerate(decision_steps):
+            step_bytes = (
+                (snapshot_bytes if index == 0 else _PREFLIGHT_PROMPT_FIXED_BYTES)
+                + _utf8_len(step.get("prompt"))
+                + _utf8_len(step.get("outputFormat"))
+                + index * prior_output_bytes
+            )
+            shapes.append((step_bytes, bars))
+    else:
+        shapes.append((snapshot_bytes + _utf8_len(strategy_prompt), bars))
+    for step in post_trade_steps:
+        shapes.append(
+            (
+                _PREFLIGHT_PROMPT_FIXED_BYTES
+                + _utf8_len(step.get("prompt"))
+                + _utf8_len(step.get("outputFormat")),
+                sessions,
+            )
+        )
+
+    pricing = PricingSnapshot.from_model(model_id, provider_id)
+    calls = 0
+    expected_total = 0
+    largest_expected = 0
+    largest_ceiling = 0
+    for prompt_bytes, count in shapes:
+        ceiling = reservation_ceiling_micro_for(
+            prompt_bytes=prompt_bytes,
+            max_output_tokens=ceiling_output,
+            pricing_snapshot=pricing,
+        )
+        expected_usd = estimate_cost_from_snapshot(
+            pricing,
+            LLMUsage(
+                input_tokens=math.ceil(prompt_bytes / CHARS_PER_TOKEN),
+                output_tokens=min(expected_output, ceiling_output),
+            ),
+        )
+        if ceiling is None or expected_usd is None:
+            return None
+        expected = credits_micro_for_usd(expected_usd)
+        calls += count
+        expected_total += count * expected
+        if ceiling > largest_ceiling:
+            largest_ceiling, largest_expected = ceiling, expected
+    if calls <= 0:
         return None
-    return (calls - 1) * credits_micro_for_usd(expected_usd) + credits_micro_for_usd(
-        ceiling_usd
+    return _PlatformCreditsEstimate(
+        calls=calls,
+        needed_micro=expected_total - largest_expected + largest_ceiling,
     )
 
 
-def _format_credits(micro: int) -> str:
-    return f"{max(0, int(micro)) / 1_000_000:.2f}"
+def _format_credits(micro: int, *, round_up: bool = False) -> str:
+    """Two decimals, rounded in the direction that keeps a refusal legible.
+
+    A need is rounded up and a balance down, so a 402 can never print the same
+    figure on both sides of "needs about X ... your balance is X".
+    """
+    cents = max(0, int(micro)) / 10_000
+    cents = math.ceil(cents) if round_up else math.floor(cents)
+    return f"{cents / 100:.2f}"
+
+
+class _CreditsRefusal(str):
+    """A slot refusal that the route answers with 402, not a soft error body."""
+
+
+class _CreditsClaim(NamedTuple):
+    """An admitted platform-credits launch, re-checked under the ledger lock."""
+
+    needed_micro: int
+    available_micro: int
+    calls: int
+    model_id: str
+    # Settled spend of the owner's in-flight platform-credits runs, read
+    # outside the lock (it is a store call). A run missing here started after
+    # the read and is counted as having spent nothing yet.
+    spent_by_run: Dict[str, int]
+
+
+def _owner_platform_credit_slots(user_id: int) -> List[Tuple[str, int]]:
+    """(run id, admitted estimate) of the owner's running platform-credits runs.
+
+    THE CALLER MUST HOLD THE LEDGER LOCK, or accept a snapshot.
+    """
+    return [
+        (str(slot.get("live_run_id")), int(slot["credits_estimate_micro"]))
+        for slot in _active_slots.values()
+        if slot.get("running")
+        and slot.get("credits_estimate_micro") is not None
+        and slot.get("user_id") is not None
+        and int(slot["user_id"]) == int(user_id)
+    ]
+
+
+def _credits_committed_micro(
+    in_flight: List[Tuple[str, int]], spent_by_run: Dict[str, int]
+) -> int:
+    """What the owner's running runs are still expected to spend.
+
+    Each one's admitted estimate less what it has already settled -- the
+    settled part is already out of ``total_available_micro``. A run that holds
+    a reservation right now is counted once in the balance and once here, so
+    this over-states by at most one call's ceiling per running run.
+    """
+    return sum(
+        max(0, estimate - int(spent_by_run.get(run_id, 0)))
+        for run_id, estimate in in_flight
+    )
+
+
+def _credits_shortfall(
+    claim: _CreditsClaim, in_flight: List[Tuple[str, int]]
+) -> Optional[str]:
+    committed = _credits_committed_micro(in_flight, claim.spent_by_run)
+    if claim.available_micro - committed >= claim.needed_micro:
+        return None
+    message = (
+        f"This run needs about {_format_credits(claim.needed_micro, round_up=True)} "
+        f"ATL Credits ({claim.calls} model calls on {claim.model_id}), and your "
+        f"balance is {_format_credits(claim.available_micro)} Credits"
+    )
+    if committed > 0:
+        running = len(in_flight)
+        message += (
+            f", about {_format_credits(committed, round_up=True)} of which your "
+            f"{running} running backtest{'s' if running != 1 else ''} "
+            f"{'are' if running != 1 else 'is'} expected to use"
+        )
+    return message + (
+        ". Add Credits on the Credits page, shorten the date range, choose a "
+        "lower-cost model, or use your own API key."
+    )
 
 
 def _enforce_platform_credits_balance(
@@ -2780,33 +3006,50 @@ def _enforce_platform_credits_balance(
     pipeline: Optional[List[Dict[str, Any]]],
     data_source: Optional[str],
     universe_size: int,
-) -> None:
+    market: object = None,
+    strategy_prompt: Optional[str] = None,
+) -> Optional[_CreditsClaim]:
     """Refuse an ATL Credits run the account cannot pay to finish.
 
-    402 for a short balance, 403 for a restricted account (no reservation can
-    succeed there at all). A failed balance read lets the run through with a
-    log line: this check is a courtesy in front of the reservation, which
-    still refuses every call the balance cannot cover.
+    402 for a short balance -- counting what the owner's other running
+    platform-credits runs are still expected to spend, since they draw on the
+    same balance one reservation at a time and would otherwise each pass this
+    check alone and then starve together. 403 for a restricted account (no
+    reservation can succeed there at all).
+
+    Returns the claim the route hands to ``_try_acquire_backtest_slot``, which
+    repeats the comparison under the ledger lock so two launches racing past
+    this read cannot both be admitted against one balance. None when the run
+    cannot be priced or the balance cannot be read: this check is a courtesy in
+    front of the reservation, which still refuses every call the balance cannot
+    cover, and a broken courtesy must not take the whole lane down.
     """
-    calls = _estimated_pipeline_llm_calls(start_date, end_date, pipeline, data_source)
-    needed = _estimated_platform_credits_micro(
+    estimate = _estimated_platform_credits(
         model_id=model_id,
         provider_id=provider_id,
-        calls=calls,
+        sessions=_estimated_trading_sessions(start_date, end_date, market=market),
+        data_source=data_source,
         universe_size=universe_size,
         pipeline=pipeline,
+        strategy_prompt=strategy_prompt,
     )
-    if needed is None:
-        return
+    if estimate is None:
+        return None
+    with _backtest_slots_lock:
+        in_flight = _owner_platform_credit_slots(user_id)
     try:
         balance = credits_service.get_balance(int(user_id))
+        spent_by_run = {
+            run_id: int(credits_service.sum_run_llm_spend(int(user_id), run_id)[0])
+            for run_id, _estimate in in_flight
+        }
     except Exception as exc:  # noqa: BLE001 - the reservation remains the gate
         print(
             "WARNING: credits.preflight_balance_unavailable "
             f"category={type(exc).__name__}",
             flush=True,
         )
-        return
+        return None
     if balance.account_status == "restricted":
         raise HTTPException(
             status_code=403,
@@ -2815,19 +3058,17 @@ def _enforce_platform_credits_balance(
                 int(balance.outstanding_credits_micro or 0),
             ).safe_message,
         )
-    available = int(balance.total_available_micro)
-    if available >= needed:
-        return
-    raise HTTPException(
-        status_code=402,
-        detail=(
-            f"This run needs about {_format_credits(needed)} ATL Credits "
-            f"({calls} model calls on {model_id}), and your balance is "
-            f"{_format_credits(available)} Credits. Add Credits on the Credits "
-            "page, shorten the date range, choose a lower-cost model, or use "
-            "your own API key."
-        ),
+    claim = _CreditsClaim(
+        needed_micro=estimate.needed_micro,
+        available_micro=int(balance.total_available_micro),
+        calls=estimate.calls,
+        model_id=model_id,
+        spent_by_run=spent_by_run,
     )
+    shortfall = _credits_shortfall(claim, in_flight)
+    if shortfall is not None:
+        raise HTTPException(status_code=402, detail=shortfall)
+    return claim
 
 
 def _enforce_pipeline_llm_window(
@@ -2977,6 +3218,9 @@ class _BoundedStreamCapture:
 
 
 _RELAYED_CHILD_LINE_PREFIX = "ERROR: llm."
+# What a non-owner reads for a run a model-execution failure stopped: its
+# safe message names account facts (an empty balance, a refund review).
+_LLM_FAILURE_PUBLIC_ERROR = "Backtest stopped: the model run could not continue."
 _RUN_FAILED_LINE = re.compile(
     r"^ERROR: llm\.run_failed category=([a-z_]+)(?: reason=([a-z_]+))?\s*$", re.M
 )
@@ -2992,17 +3236,17 @@ def _child_llm_failure(*streams: Optional[str]) -> Optional[LLMExecutionError]:
     ``internal_error``. An unknown value is ignored rather than trusted: the
     category picks the user-facing sentence, so only the enum may choose it.
     """
+    reported = None
     for text in streams:
-        if not text:
-            continue
-        matches = _RUN_FAILED_LINE.findall(text)
-        if not matches:
-            continue
-        category_value, reason = matches[-1]
-        try:
-            category = ExecutionErrorCategory(category_value)
-        except ValueError:
-            return None
+        for category_value, reason in _RUN_FAILED_LINE.findall(text or ""):
+            try:
+                reported = (ExecutionErrorCategory(category_value), reason)
+            except ValueError:
+                # Skipped, not fatal: a stray line must not hide a valid one
+                # later in this stream or in the other.
+                continue
+    if reported is not None:
+        category, reason = reported
         if category is ExecutionErrorCategory.ACCOUNT_RESTRICTED:
             # The reason picks the remedy ("add Credits" vs "contact an
             # administrator"); account_restricted() ignores an unknown one.
@@ -3951,6 +4195,7 @@ def run_backtest_endpoint(
     live_run_id = f"agent_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}"
 
     execution_handoff_payload: Optional[str] = None
+    credits_claim: Optional[_CreditsClaim] = None
     if (
         resolved_decision_source == LLM_DECISION_SOURCE
         and runtime_type == PIPELINE_RUNTIME_TYPE
@@ -4034,7 +4279,7 @@ def run_backtest_endpoint(
             # After the route resolves (so the price is the model the run will
             # bill) and before a slot or handoff exists, so a refusal holds
             # nothing.
-            _enforce_platform_credits_balance(
+            credits_claim = _enforce_platform_credits_balance(
                 user_id=int(user_id),
                 model_id=route.catalog_id,
                 provider_id=provider_id,
@@ -4043,6 +4288,8 @@ def run_backtest_endpoint(
                 pipeline=pipeline,
                 data_source=data_source,
                 universe_size=len(selected_assets or ()) or len(profile.symbols),
+                market=profile.market,
+                strategy_prompt=strategy_prompt,
             )
 
         execution_handoff_payload = create_execution_handoff(
@@ -4071,7 +4318,10 @@ def run_backtest_endpoint(
         # file under a built-in agent's session — see _backtest_owner_key.
         owner_session=request.state.session_id,
         user_id=user_id,
+        credits_claim=credits_claim,
     )
+    if isinstance(refusal, _CreditsRefusal):
+        raise HTTPException(status_code=402, detail=str(refusal))
     if refusal:
         print(f"⚠️ Backtest refused: {refusal}", flush=True)
         return {

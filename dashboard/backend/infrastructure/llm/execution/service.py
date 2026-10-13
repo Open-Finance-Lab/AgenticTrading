@@ -150,6 +150,11 @@ def _pricing_snapshot_for(model_id: str, provider_id: str) -> PricingSnapshot:
     return PricingSnapshot.from_model(model_id, provider_id)
 
 
+def prompt_token_ceiling_for_bytes(prompt_bytes: int) -> int:
+    """The input-token ceiling a reservation charges for ``prompt_bytes``."""
+    return max(0, int(prompt_bytes)) + _PROMPT_FRAMING_TOKEN_ALLOWANCE
+
+
 def _prompt_token_ceiling(request: LLMExecutionRequest) -> int:
     payload = {
         "system_message": request.system_message,
@@ -160,7 +165,38 @@ def _prompt_token_ceiling(request: LLMExecutionRequest) -> int:
         ensure_ascii=False,
         separators=(",", ":"),
     ).encode("utf-8")
-    return len(encoded) + _PROMPT_FRAMING_TOKEN_ALLOWANCE
+    return prompt_token_ceiling_for_bytes(len(encoded))
+
+
+def _ceiling_micro(
+    input_tokens: int, output_tokens: int, pricing_snapshot: PricingSnapshot
+) -> int | None:
+    ceiling_cost = estimate_cost_from_snapshot(
+        pricing_snapshot,
+        LLMUsage(input_tokens=int(input_tokens), output_tokens=int(output_tokens)),
+    )
+    if ceiling_cost is None:
+        return None
+    return credits_micro_for_usd(ceiling_cost)
+
+
+def reservation_ceiling_micro_for(
+    *,
+    prompt_bytes: int,
+    max_output_tokens: int,
+    pricing_snapshot: PricingSnapshot,
+) -> int | None:
+    """The reservation one request of this shape holds, or None if unpriceable.
+
+    Shared with the backtest launch preflight so the two cannot drift: its
+    "the last call must find a whole ceiling free" is only true while it prices
+    exactly what ``_reservation_ceiling_micro`` does.
+    """
+    return _ceiling_micro(
+        prompt_token_ceiling_for_bytes(prompt_bytes),
+        max_output_tokens,
+        pricing_snapshot,
+    )
 
 
 def _reservation_ceiling_micro(
@@ -169,14 +205,14 @@ def _reservation_ceiling_micro(
 ) -> int:
     """Return the maximum billable cost for this one provider request."""
 
-    ceiling_usage = LLMUsage(
-        input_tokens=_prompt_token_ceiling(request),
-        output_tokens=request.usage_policy.max_output_tokens,
+    ceiling = _ceiling_micro(
+        _prompt_token_ceiling(request),
+        request.usage_policy.max_output_tokens,
+        pricing_snapshot,
     )
-    ceiling_cost = estimate_cost_from_snapshot(pricing_snapshot, ceiling_usage)
-    if ceiling_cost is None:
+    if ceiling is None:
         raise LLMExecutionError(ExecutionErrorCategory.BILLING_FAILED)
-    return credits_micro_for_usd(ceiling_cost)
+    return ceiling
 
 
 def analytics_error_category(category: ExecutionErrorCategory) -> str:
