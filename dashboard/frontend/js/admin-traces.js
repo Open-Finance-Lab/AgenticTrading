@@ -3,6 +3,8 @@
   'use strict';
 
   const SURFACE = 'traces';
+  const TERMINAL_EVENTS = ['run_completed', 'run_failed'];
+  const TRADING_LOG_LIMIT = 50;
   const state = {
     traceId: null, trace: null, events: [], nextSequence: 0,
     pollTimer: null, stale: false, context: {}, listItems: [], listHasMore: false, listNextCursor: 0,
@@ -138,60 +140,147 @@
       metrics.appendChild(metric);
     });
     section.appendChild(metrics);
+    const items = Array.isArray(events) ? events : [];
     const columns = node('div', 'trace-three-column');
-    const leftRail = node('aside', 'trace-context-rail');
     const centerColumn = node('div', 'trace-analysis-column');
-    const rightRail = node('aside', 'trace-trading-log');
-    const config = trace?.initial_input || events.find(e => e.event_type === 'run_started')?.payload?.config_summary || {};
-    const overview = node('details', 'trace-run-overview');
-    overview.setAttribute('data-trace-expand', 'run-configuration');
-    overview.open = Boolean(state.openState?.['run-configuration']);
-    overview.appendChild(node('summary', '', 'Run configuration'));
-    const fields = [['Agent', trace?.agent_id], ['Run', trace?.run_id], ['Model', config.model || config.model_name], ['Market / data source', config.market || config.data_source], ['Start date', config.start_date], ['End date', config.end_date], ['Initial capital', config.initial_capital ?? config.initial_equity]];
+    if (window.AdminTracePerformance) centerColumn.appendChild(window.AdminTracePerformance.render(trace, items, performance));
+    const title = node('h2', 'trace-section-title', 'Timeline');
+    centerColumn.appendChild(title);
+    centerColumn.appendChild(renderEventTimeline(items));
+    columns.append(renderContextRail(trace, items), centerColumn, renderTradingLog(items));
+    section.appendChild(columns);
+    return section;
+  }
+
+  // A <details> whose open state survives the poll's re-render: capture()
+  // records every [data-trace-expand] before the old tree is cleared.
+  function disclosure(className, key, label) {
+    const details = node('details', className);
+    details.setAttribute('data-trace-expand', key);
+    details.open = Boolean(state.openState?.[key]);
+    details.appendChild(node('summary', '', label));
+    return details;
+  }
+
+  function renderContextRail(trace, events) {
+    const rail = node('aside', 'trace-context-rail');
+    const config = trace?.initial_input || events.find((event) => event.event_type === 'run_started')?.payload?.config_summary || {};
+    const overview = disclosure('trace-run-overview', 'run-configuration', 'Run configuration');
+    const fields = [
+      ['Agent', trace?.agent_id], ['Run', trace?.run_id], ['Model', config.model || config.model_name],
+      ['Market / data source', config.market || config.data_source], ['Start date', config.start_date],
+      ['End date', config.end_date], ['Initial capital', config.initial_capital ?? config.initial_equity],
+    ];
     fields.forEach(([label, v]) => overview.appendChild(node('p', '', `${label}: ${v == null ? 'Not recorded' : String(v)}`)));
-    const configRaw = node('details'); configRaw.appendChild(node('summary', '', 'Recorded configuration (JSON)'));
-    configRaw.appendChild(node('pre', 'trace-event-payload', payloadText(config))); overview.appendChild(configRaw);
-    leftRail.appendChild(overview);
-    const report = node('details', 'trace-backtest-report');
-    report.setAttribute('data-trace-expand', 'backtest-report');
-    report.appendChild(node('summary', '', 'View this backtest · admin read-only'));
-    const reportBody = node('div'); report.appendChild(reportBody);
-    let reportLoaded = false;
-    report.addEventListener('toggle', async () => {
-      if (!report.open || reportLoaded) return;
-      reportLoaded = true; reportBody.textContent = 'Loading backtest…';
-      try {
-        const data = await shell().request(`/api/admin/traces/${encodeURIComponent(trace.trace_id)}/backtest`);
-        shell().clear(reportBody);
-        if (!data.available) { reportBody.textContent = 'No stored backtest result for this exact run. Trace events remain available.'; return; }
-        Object.entries(data.run).forEach(([key, v]) => reportBody.appendChild(node('p', '', `${shell().humanize(key)}: ${v == null ? 'Not recorded' : String(v)}`)));
-        const raw = node('details'); raw.appendChild(node('summary', '', 'Recorded backtest configuration'));
-        raw.appendChild(node('pre', 'trace-event-payload', payloadText(data.configuration))); reportBody.appendChild(raw);
-      } catch (error) {
-        if (await shell().handleAccessLost(error)) return;
-        reportLoaded = false; reportBody.textContent = 'Backtest details unavailable. Close and reopen to retry.';
-      }
-    });
-    report.open = Boolean(state.openState?.['backtest-report']);
-    leftRail.appendChild(report);
+    const configRaw = disclosure('', 'run-configuration-json', 'Recorded configuration (JSON)');
+    configRaw.appendChild(node('pre', 'trace-event-payload', payloadText(config)));
+    overview.appendChild(configRaw);
+    rail.appendChild(overview);
+    if (!trace?.trace_id) return rail;
+    rail.appendChild(renderBacktestReport(trace));
     const downloads = node('div', 'trace-downloads');
     [['json', 'Export JSON'], ['markdown', 'Export Markdown']].forEach(([format, label]) => {
       const link = node('a', 'auth-btn auth-btn-secondary', label);
       link.setAttribute('href', `/api/admin/traces/${encodeURIComponent(trace.trace_id)}/export?format=${format}`);
-      link.setAttribute('download', ''); downloads.appendChild(link);
+      link.setAttribute('download', '');
+      downloads.appendChild(link);
     });
     downloads.appendChild(node('span', 'muted', 'All recorded events · running traces export a fixed snapshot'));
-    leftRail.appendChild(downloads);
-    if (window.AdminTracePerformance) centerColumn.appendChild(window.AdminTracePerformance.render(trace, events, performance));
-    const title = node('h2', 'trace-section-title', 'Timeline');
-    centerColumn.appendChild(title);
-    centerColumn.appendChild(renderEventTimeline(events));
-    const fills = events.flatMap(e => (e.event_type === 'execution_result' ? (e.payload?.fills || []) : [])).slice(0, 50);
-    const logHead = node('div', 'trace-log-head'); logHead.append(node('h2', '', 'Trading log'), node('span', 'eyebrow', `${fills.length} fills`)); rightRail.appendChild(logHead);
-    if (!fills.length) rightRail.appendChild(node('p', 'panel-empty', 'No execution fills recorded.'));
-    fills.forEach(fill => { const item = node('article', 'trace-log-item'); const side = String(fill.side || fill.action || 'ORDER').toUpperCase(); item.append(node('div', 'trace-log-order', `${side} ${value(fill.symbol || 'Unknown symbol')}`), node('p', 'muted', `${fill.quantity ?? fill.shares ?? '—'} shares · ${fill.price == null ? 'Price not recorded' : fill.price}`)); const decision = events.find(e => e.event_type === 'decision_recorded' && e.decision_id === fill.decision_id); if (decision?.payload?.reasoning_summary) item.append(node('p', 'trace-reason', decision.payload.reasoning_summary)); rightRail.appendChild(item); });
-    columns.append(leftRail, centerColumn, rightRail); section.appendChild(columns);
-    return section;
+    rail.appendChild(downloads);
+    return rail;
+  }
+
+  // One request per trace and status, shared by every re-render: the poll
+  // rebuilds this panel, and restoring `open` fires `toggle` on the new
+  // element. A status change re-fetches once, because the stored result is
+  // written when the run finishes.
+  function loadBacktestReport(trace) {
+    const key = `${trace.trace_id}:${trace.status}`;
+    if (state.report?.key !== key) {
+      const promise = shell().request(`/api/admin/traces/${encodeURIComponent(trace.trace_id)}/backtest`);
+      state.report = { key, promise };
+      promise.catch(() => {
+        if (state.report?.promise === promise) state.report = null;
+      });
+    }
+    return state.report.promise;
+  }
+
+  function renderBacktestReport(trace) {
+    const report = disclosure('trace-backtest-report', 'backtest-report', 'View this backtest · admin read-only');
+    const body = node('div');
+    report.appendChild(body);
+    let shown = false;
+    report.addEventListener('toggle', async () => {
+      if (!report.open || shown) return;
+      shown = true;
+      body.textContent = 'Loading backtest…';
+      try {
+        const data = await loadBacktestReport(trace);
+        shell().clear(body);
+        if (!data?.available) {
+          body.textContent = 'No stored backtest result for this exact run. Trace events remain available.';
+          return;
+        }
+        Object.entries(data.run || {}).forEach(([key, v]) => body.appendChild(node('p', '', `${shell().humanize(key)}: ${v == null ? 'Not recorded' : String(v)}`)));
+        const raw = disclosure('', 'backtest-configuration-json', 'Recorded backtest configuration');
+        raw.appendChild(node('pre', 'trace-event-payload', payloadText(data.configuration)));
+        body.appendChild(raw);
+      } catch (error) {
+        if (await shell().handleAccessLost(error)) return;
+        shown = false;
+        body.textContent = 'Backtest details unavailable. Close and reopen to retry.';
+      }
+    });
+    return report;
+  }
+
+  // Fills carry no decision_id; their execution_result event does, and the
+  // decision's reasoning is per action, so a fill takes the reason of the
+  // action on its symbol (and side, when both name one).
+  function fillReason(decision, fill) {
+    const payload = decision?.payload || {};
+    const actions = Array.isArray(payload.actions) ? payload.actions : [];
+    const reasons = Array.isArray(payload.reasoning_summaries) ? payload.reasoning_summaries : [];
+    const side = String(fill.side || '').toUpperCase();
+    const onSymbol = (action) => action && action.symbol === fill.symbol;
+    let index = actions.findIndex((action) => onSymbol(action) && String(action.action || action.side || '').toUpperCase() === side);
+    if (index < 0) index = actions.findIndex(onSymbol);
+    const matched = index < 0 ? null : (reasons[index] || actions[index].reason || actions[index].reasoning);
+    if (typeof matched === 'string' && matched) return matched;
+    const distinct = [...new Set(reasons.filter((reason) => typeof reason === 'string' && reason))];
+    return distinct.length === 1 ? distinct[0] : null;
+  }
+
+  function renderTradingLog(events) {
+    const rail = node('aside', 'trace-trading-log');
+    const decisions = new Map(events
+      .filter((event) => event.event_type === 'decision_recorded' && event.decision_id)
+      .map((event) => [event.decision_id, event]));
+    const fills = events.flatMap((event) => (
+      event.event_type === 'execution_result' && Array.isArray(event.payload?.fills)
+        ? event.payload.fills.map((fill) => ({ fill, decision: decisions.get(event.decision_id) }))
+        : []
+    ));
+    // Newest first, so a running trace shows its latest fills without scrolling.
+    const shown = fills.slice(-TRADING_LOG_LIMIT).reverse();
+    const count = `${fills.length} fill${fills.length === 1 ? '' : 's'}`;
+    const head = node('div', 'trace-log-head');
+    head.append(node('h2', '', 'Trading log'), node('span', 'eyebrow', shown.length < fills.length ? `Latest ${shown.length} of ${count}` : count));
+    rail.appendChild(head);
+    if (!fills.length) rail.appendChild(node('p', 'panel-empty', 'No execution fills recorded.'));
+    shown.forEach(({ fill, decision }) => {
+      const item = node('article', 'trace-log-item');
+      const side = String(fill.side || fill.action || 'ORDER').toUpperCase();
+      item.append(
+        node('div', 'trace-log-order', `${side} ${value(fill.symbol || 'Unknown symbol')}`),
+        node('p', 'muted', `${fill.quantity ?? fill.shares ?? '—'} shares · ${fill.price == null ? 'Price not recorded' : fill.price}`),
+      );
+      const reason = fillReason(decision, fill);
+      if (reason) item.appendChild(node('p', 'trace-reason', reason));
+      rail.appendChild(item);
+    });
+    return rail;
   }
 
   function renderStaleNotice(host, message) {
@@ -261,13 +350,16 @@
     stopPolling();
     const seq = shell().nextSeq(SURFACE);
     try {
-      let trace = await shell().request(`/api/admin/traces/${encodeURIComponent(traceId)}`);
-      const events = await loadAllEvents(traceId);
-      const performance = await loadPerformance(traceId);
-      const terminal = [...events].reverse().find((event) => ['run_completed', 'run_failed'].includes(event.event_type));
-      if (terminal) trace = await refreshTraceEnvelope(traceId);
+      // Envelope first: the store appends a terminal event before it marks the
+      // trace terminal, so events read after a terminal envelope are complete.
+      let trace = await refreshTraceEnvelope(traceId);
+      const [events, performance] = await Promise.all([loadAllEvents(traceId), loadPerformance(traceId)]);
+      if (trace.status === 'running' && hasTerminalEvent(events)) trace = await refreshTraceEnvelope(traceId);
       if (!shell().isCurrent(SURFACE, seq)) return;
-      if (state.traceId !== traceId) state.openState = {};
+      if (state.traceId !== traceId) {
+        state.openState = {};
+        state.report = null;
+      }
       state.traceId = traceId;
       state.context = { ...context };
       state.trace = trace;
@@ -299,27 +391,50 @@
     catch (_error) { return { ...(previous || {}), unavailable: true }; }
   }
 
+  function hasTerminalEvent(events) {
+    return events.some((event) => TERMINAL_EVENTS.includes(event.event_type));
+  }
+
+  function performanceSignature(performance) {
+    return JSON.stringify([
+      performance?.point_count, performance?.unavailable, performance?.partial,
+      performance?.metrics, performance?.points?.[performance.points.length - 1],
+    ]);
+  }
+
   async function pollEvents() {
     if (!state.traceId || !state.trace || state.trace.status !== 'running') return;
     const traceId = state.traceId;
     const seq = shell().nextSeq(SURFACE);
     try {
-      const fresh = await loadAllEvents(traceId, state.nextSequence);
-      const performance = await loadPerformance(traceId, state.performance);
+      // Envelope before events (see loadDetail): a trace that turns terminal
+      // between the two reads is caught by the next poll, never by stopping
+      // with its last flush and terminal event unread.
       const envelope = await refreshTraceEnvelope(traceId);
+      const [fresh, performance] = await Promise.all([
+        loadAllEvents(traceId, state.nextSequence),
+        loadPerformance(traceId, state.performance),
+      ]);
       if (!shell().isCurrent(SURFACE, seq) || state.traceId !== traceId) return;
+      const added = fresh.filter((event) => event.sequence_no > state.nextSequence);
+      const changed = added.length > 0
+        || state.stale
+        || envelope.status !== state.trace.status
+        || envelope.ended_at !== state.trace.ended_at
+        || performanceSignature(performance) !== performanceSignature(state.performance);
       state.trace = envelope;
       state.performance = performance;
-      {
-        state.events = state.events.concat(fresh.filter((event) => event.sequence_no > state.nextSequence));
-        state.nextSequence = state.events.length ? state.events[state.events.length - 1].sequence_no : state.nextSequence;
-
-        const host = element('tracesView');
-        if (host && state.trace) {
-          state.openState = window.AdminTraceTimeline.capture(host);
-          shell().clear(host);
-          host.appendChild(renderTraceDetail(state.trace, state.events, state.context, state.performance));
-        }
+      state.events = state.events.concat(added);
+      state.nextSequence = state.events.length ? state.events[state.events.length - 1].sequence_no : state.nextSequence;
+      const host = element('tracesView');
+      // Re-render only on a change: a rebuild drops focus, selection and any
+      // disclosure capture() cannot see, every three seconds otherwise.
+      if (changed && host) {
+        state.openState = window.AdminTraceTimeline.capture(host);
+        const focusedId = document.activeElement?.id;
+        shell().clear(host);
+        host.appendChild(renderTraceDetail(state.trace, state.events, state.context, state.performance));
+        if (focusedId) document.getElementById(focusedId)?.focus?.({ preventScroll: true });
       }
       state.stale = false;
       if (state.trace.status === 'running') state.pollTimer = setTimeout(pollEvents, 3000);

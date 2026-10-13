@@ -3,7 +3,7 @@
   'use strict';
   const svgNS = 'http://www.w3.org/2000/svg';
   function series(events, performance) {
-    const snapshots = (events || []).filter(e => e.event_type === 'decision_recorded')
+    const snapshots = (Array.isArray(events) ? events : []).filter(e => e.event_type === 'decision_recorded')
       .map(e => ({ timestamp: e.payload?.decision_at, equity: e.payload?.state?.equity, event: e }));
     const raw = performance?.points?.length ? performance.points : snapshots;
     const points = raw.filter(p => typeof p.equity === 'number' && Number.isFinite(p.equity) && Number.isFinite(Date.parse(p.timestamp)))
@@ -18,8 +18,8 @@
     panel.appendChild(el('p', 'muted', snapshots
       ? 'Decision equity snapshots · market time (UTC). Sampled observations, not the complete backtest result.'
       : 'Run equity · market time (UTC). One observed outcome, not expected return.'));
-    if (trace.status !== 'completed') panel.appendChild(el('p', 'trace-performance-notice',
-      trace.status === 'failed' ? 'Run failed. Recorded performance is incomplete; inspect the failure in the timeline.' : 'Run in progress. Recorded performance is incomplete.'));
+    if (trace?.status !== 'completed') panel.appendChild(el('p', 'trace-performance-notice',
+      trace?.status === 'failed' ? 'Run failed. Recorded performance is incomplete; inspect the failure in the timeline.' : 'Run in progress. Recorded performance is incomplete.'));
     if (performance?.unavailable) panel.appendChild(el('p', 'muted', 'Performance refresh unavailable. Showing recorded snapshots or previously loaded data.'));
     if (points.length < 2) {
       panel.appendChild(el('p', 'panel-empty', points.length ? 'Only one equity observation is available; a curve requires two.' : 'No equity observations recorded for this run.'));
@@ -51,9 +51,10 @@
     const plotted = points.length > 1000 ? Array.from({length: 1000}, (_, i) => points[Math.round(i * (points.length - 1) / 999)]) : points;
     shape('polyline', { points: plotted.map(p => `${x(p.time)},${y(p.equity)}`).join(' '), fill: 'none', stroke: '#38bdf8', 'stroke-width': 2 });
     [points[0], points.at(-1)].forEach((p, i) => shape('text', { x: i ? 875 : 75, y: 245, 'text-anchor': i ? 'end' : 'start', fill: 'currentColor', 'font-size': 12 }, new Date(p.time).toISOString().slice(0, 16).replace('T', ' ')));
-    const decisions = new Map((events || []).filter(e => e.decision_id && e.event_type === 'decision_recorded').map(e => [e.decision_id, e]));
+    const items = Array.isArray(events) ? events : [];
+    const decisions = new Map(items.filter(e => e.decision_id && e.event_type === 'decision_recorded').map(e => [e.decision_id, e]));
     const links = el('div', 'trace-performance-links');
-    (events || []).filter(e => e.event_type === 'execution_result' && e.payload?.fills?.length).forEach(e => {
+    items.filter(e => e.event_type === 'execution_result' && e.payload?.fills?.length).forEach(e => {
       const decision = decisions.get(e.decision_id);
       if (!decision) return;
       const time = Date.parse(decision.payload?.decision_at);

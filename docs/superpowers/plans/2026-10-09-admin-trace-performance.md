@@ -13,3 +13,10 @@ Approved: collapsed event summaries, decision/step grouping, raw JSON behind a s
 Admin backtest details use an admin-gated exact-run projection across owners, rather than redirecting to the session-filtered trading interface. Display only stored fields and explicit missing-result states.
 
 Exports: admin-only JSON and Markdown, schema version and snapshot timestamp, fixed highest event sequence, all pages through that sequence, sensitive-field redaction, artifact references only. Build the output in a spooled temporary file before returning headers. Test >100 events, concurrent append, permission rejection, readable/escaped Markdown, and cross-owner exact-run lookup.
+
+## Review fixes (2026-10-13)
+
+- Polling reads the trace envelope before events. The store appends a terminal event before it marks the trace terminal, so events read after a terminal envelope are complete; the reverse order could stop polling with the last flush unread. The detail view re-renders only when events, status or performance changed.
+- Performance reports the run's stored `total_return` and `max_drawdown`, the figures the backtest panel shows, rather than a recomputation against the first equity mark.
+- The trading log links fills to reasoning through the execution event's `decision_id` (fills carry none) and the per-action `reasoning_summaries`, and shows the latest 50 fills newest first with the true count.
+- Exports take their status from the events inside the boundary, report failed runs as failed, match sensitive keys by word (token counts and `open_session_excluded` stay visible), escape agent text in Markdown so it cannot plant links or images, and use linear-time patterns on agent text.

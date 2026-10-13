@@ -9,7 +9,7 @@ def test_exact_run_and_bounded_points(monkeypatch):
     calls = []
     def run(run_id):
         calls.append(run_id)
-        return {'initial_equity': 100}
+        return {'initial_equity': 100, 'total_return': 20.0}
     monkeypatch.setattr(db, 'get_run', run)
     monkeypatch.setattr(db, 'get_equity_curve', lambda _: [{'timestamp': str(i), 'equity': 100 + i} for i in range(2001)])
     result = api.get_trace_performance('trace')
@@ -51,3 +51,28 @@ def test_performance_route_keeps_admin_dependency():
     from dashboard.backend.api.auth import require_admin
     route = next(r for r in api.router.routes if r.path.endswith('/performance'))
     assert require_admin in [dependency.call for dependency in route.dependant.dependencies]
+
+
+def test_metrics_are_the_runs_stored_figures(monkeypatch):
+    """One run, one return: the chart reports what the backtest panel and the
+    results page report, not a recomputation against the first equity mark
+    (which already carries first-bar fees)."""
+    monkeypatch.setattr(api.trace_store, 'get_trace', lambda _: {'run_id': 'r', 'status': 'completed'})
+    monkeypatch.setattr(db, 'get_run', lambda _: {
+        'run_id': 'r', 'initial_equity': 99950, 'total_return': 0.01, 'max_drawdown': -0.025,
+    })
+    monkeypatch.setattr(db, 'get_equity_curve', lambda _: [
+        {'timestamp': '1', 'equity': 99950}, {'timestamp': '2', 'equity': 101000},
+    ])
+    metrics = api.get_trace_performance('t')['metrics']
+    assert metrics['return_pct'] == 1.0
+    assert metrics['max_drawdown_pct'] == 2.5
+
+
+def test_return_is_not_invented_when_the_run_stored_none(monkeypatch):
+    monkeypatch.setattr(api.trace_store, 'get_trace', lambda _: {'run_id': 'r', 'status': 'completed'})
+    monkeypatch.setattr(db, 'get_run', lambda _: {'run_id': 'r', 'initial_equity': 100})
+    monkeypatch.setattr(db, 'get_equity_curve', lambda _: [
+        {'timestamp': '1', 'equity': 100}, {'timestamp': '2', 'equity': 120},
+    ])
+    assert api.get_trace_performance('t')['metrics']['return_pct'] is None

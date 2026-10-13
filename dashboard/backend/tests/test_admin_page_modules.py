@@ -196,10 +196,12 @@ def test_exact_endpoints_and_query_names():
     ):
         assert query_name in ALL, query_name
     assert "section, limit:" in MODULES["admin-users.js"]
+    # The trace detail reads a recorded backtest config (`config.start_date`):
+    # a property of stored data, not a query name. Only that read is exempt --
+    # every read module, the trace modules included, is still scanned.
+    query_sources = ALL.replace("config.start_date", "")
     for rejected in ("'status'", "start_date", "provider_id'", "model_id'", "'cohort'", "analyticsUser", "adminTab=analytics"):
-        # These are rejected analytics query names, not backtest config fields.
-        analytics_sources = "\n".join(MODULES[name] for name in ("admin-shell.js", "admin-live.js", "admin-overview.js", "admin-users.js"))
-        assert rejected not in analytics_sources, rejected
+        assert rejected not in query_sources, rejected
 
 
 def test_no_live_route_and_no_chartjs():

@@ -26,8 +26,9 @@
   function render(events, openState = {}) {
     const el = window.AdminShell.el;
     const list = el('ol', 'trace-timeline');
-    if (!events?.length) { list.appendChild(el('li', 'panel-empty', 'No events recorded yet.')); return list; }
-    groupEvents(events).forEach(group => {
+    const items = Array.isArray(events) ? events : [];
+    if (!items.length) { list.appendChild(el('li', 'panel-empty', 'No events recorded yet.')); return list; }
+    groupEvents(items).forEach(group => {
       const li = el('li', 'trace-event-group');
       const details = el('details', 'trace-group');
       details.setAttribute('data-trace-expand', group.key);

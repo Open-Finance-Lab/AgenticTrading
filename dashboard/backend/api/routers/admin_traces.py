@@ -84,6 +84,7 @@ def get_trace_performance(trace_id: str):
     """Resolve equity by the exact run ID, never by agent or nearest date."""
     import math
     from dashboard.backend.database import db
+    from dashboard.backend.domain.backtesting.metrics import calculate_max_drawdown
 
     trace = trace_store.get_trace(trace_id)
     if trace is None:
@@ -96,19 +97,26 @@ def get_trace_performance(trace_id: str):
             equity = row.get("equity")
             if isinstance(equity, (int, float)) and not isinstance(equity, bool) and math.isfinite(equity):
                 points.append({"timestamp": row["timestamp"], "equity": equity})
-    # Metrics use the full series; drawing uses a bounded sample including endpoints.
-    peak = None
-    drawdown = 0.0
-    for point in points:
-        peak = point["equity"] if peak is None else max(peak, point["equity"])
-        if peak > 0:
-            drawdown = max(drawdown, (peak - point["equity"]) / peak)
+    # Report the run's own stored figures, so this chart and the backtest panel
+    # beside it (and the results page) show one return for one run. The stored
+    # total_return is measured against initial capital; agent_runs.initial_equity
+    # is the first equity mark, which already carries first-bar fees.
+    def finite(value):
+        return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+
+    stored_return = (run or {}).get("total_return")
+    stored_drawdown = (run or {}).get("max_drawdown")
+    if finite(stored_drawdown):
+        drawdown = abs(stored_drawdown)
+    elif points:
+        # Metrics use the full series; drawing uses a bounded sample including endpoints.
+        drawdown = abs(calculate_max_drawdown(points))
+    else:
+        drawdown = None
     count = len(points)
-    initial = (run or {}).get("initial_equity")
-    baseline = initial if isinstance(initial, (int, float)) and math.isfinite(initial) and initial >= 0 else (points[0]["equity"] if points else 0)
     metrics = {
-        "return_pct": ((points[-1]["equity"] / baseline - 1) * 100) if points and baseline > 0 else None,
-        "max_drawdown_pct": drawdown * 100 if points else None,
+        "return_pct": stored_return * 100 if points and finite(stored_return) else None,
+        "max_drawdown_pct": drawdown * 100 if points and drawdown is not None else None,
     }
     if count > 1000:
         points = [points[round(i * (count - 1) / 999)] for i in range(1000)]
@@ -152,7 +160,7 @@ def get_trace_backtest(trace_id: str):
     run = db.get_run(trace.get('run_id')) if trace.get('run_id') else None
     if run is None:
         return {'available': False, 'run_id': trace.get('run_id')}
-    fields = ('run_id', 'agent_name', 'model_name', 'mode', 'start_date', 'end_date',
+    fields = ('run_id', 'agent_name', 'llm_model', 'mode', 'start_date', 'end_date',
               'initial_equity', 'final_equity', 'total_return', 'max_drawdown', 'sharpe_ratio',
               'num_trades', 'llm_calls', 'llm_decisions', 'input_tokens', 'output_tokens', 'est_cost_usd')
     return {'available': True, 'run_id': trace['run_id'],
