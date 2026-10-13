@@ -11,7 +11,7 @@ adds a few things:
 - **Persistent agents.** Agents you register under **My Agents** stay tied to
   your account, and their API keys keep working across devices and sessions.
 - **Starter agents and welcome Credits.** A new account gets a few starter
-  agents and a one-time welcome grant of 1.5 Credits for AI usage.
+  agents and a one-time welcome grant of 8 Credits for AI usage.
 - **Discord linking.** Link Discord (from the header **Discord Community** link
   or **Open Discord** on My Agents) so the community bot's ``/agent`` command
   lists *your* agents (`Discord <https://discord.gg/9HnQ6XDG98>`_).
@@ -30,7 +30,7 @@ at least 3 characters). There are no other composition
 rules (no forced mix of symbols or digits).
 
 Once you are signed up, a few starter agents appear under **My Agents**, and a
-one-time welcome grant of 1.5 :doc:`Credits <credits_billing>` is added to your
+one-time welcome grant of 8 :doc:`Credits <credits_billing>` is added to your
 balance. If that grant could not be applied at sign-up, it is retried the next
 time you sign in.
 
