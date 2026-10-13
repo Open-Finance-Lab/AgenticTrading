@@ -95,6 +95,14 @@ So a run costs the sum of its calls: a longer window or a larger pipeline makes
 more calls, and more assets make each call larger, so both cost more, and a short run costs very little. If a
 run ends early for any reason, holds that were never settled are released too.
 
+Before a run starts, ATL estimates what it will cost from the window's trading
+days, the model, the number of assets and your pipeline, and checks that your
+balance covers it. The estimate is a typical cost, not a guarantee; what you are
+charged is still each call's actual usage. Backtests you already have running
+on ATL Credits count against the same balance, so their expected remaining cost
+is set aside first. If the balance falls short, the run is not started and
+nothing is charged (see :ref:`credits-run-out`).
+
 Welcome Credits are spent before purchased Credits.
 
 .. _research-credits:
@@ -113,10 +121,13 @@ is in progress its hold is not available to spend on backtests.
 Welcome Credits
 ---------------
 
-Every account gets a one-time welcome grant of **1.5 Credits** to try LLM
+Every account gets a one-time welcome grant of **8 Credits** to try LLM
 backtests. It is added when you sign up, and the Activity tab lists it as
 **Welcome Credits**. If it could not be applied at sign-up, it is retried the
 next time you sign in. It is granted once per account.
+
+Accounts that already received the earlier welcome grant of 1.5 Credits keep
+it as their welcome grant and do not receive the 8 Credits on top.
 
 
 Buy Credits (Stripe Test Mode)
@@ -173,20 +184,32 @@ BYOK runs never appear here, because they cost no Credits. Their cost is on your
 provider's own dashboard.
 
 
+.. _credits-run-out:
+
 When Credits run out, or a provider fails
 -----------------------------------------
 
-- **Not enough balance.** Each call needs enough available balance to cover its
-  hold. If you are short, the model call cannot be billed and the run stops with
-  *Model usage billing could not be completed*. Buy more Credits and run again,
-  or switch the run to **Use my API key**.
+- **Not enough balance to start.** If your balance does not cover the run's
+  estimated cost, the run is not started. The message names the estimate, the
+  number of model calls and your balance, for example *This run needs about
+  1.80 ATL Credits (49 model calls on openai/gpt-5.5), and your balance is 1.50
+  Credits*. If other backtests of yours are running on ATL Credits, it also
+  says how much of the balance they are expected to use. Buy more Credits,
+  shorten the date range, choose a lower-cost model, or switch the run to
+  **Use my API key**.
+- **Running out mid-run.** The estimate is typical, so a run can still use more
+  than expected. Each call needs enough available balance to cover its hold; if
+  you are short, the run stops with *Not enough ATL Credits to continue this
+  run*. Calls already made are charged; nothing more is.
 - **Account paused.** In rare cases a call costs more than its hold and more
   than your remaining balance. The difference is recorded as an unpaid amount
   and the account is paused until it is covered. The Credits tab then says how
   much to add (*Add at least … Credits to restore access*); buying Credits at
   least that large restores access. Purchases stay available while paused for
   this reason. An account can also be paused while an administrator reviews a
-  payment refund; that needs an administrator to restore.
+  payment refund; that needs an administrator to restore. A paused account
+  cannot start an ATL Credits run; the run is refused with the reason it is
+  paused.
 - **A provider fails.** With ATL Credits, if one provider times out, is
   unavailable or has run out of balance on ATL's side, ATL tries the next
   available provider automatically. A failed attempt is not charged. If every
