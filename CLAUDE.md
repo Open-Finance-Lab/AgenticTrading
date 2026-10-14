@@ -212,6 +212,19 @@ an exhaustive sweep. Don't reintroduce a roster-wide total or a
 
 ### Two leaderboards, and what `live` does *not* mean
 
+> ⚠ **Partly stale — read `docs/superpowers/specs/2026-10-14-atl-direction.md` first.**
+>
+> **What changed since this section was written:**
+> - Since 09-26, `domain/leaderboard/live.py` (#534) has advanced a calendar-month board nightly on the legacy engine.
+> - Since 2026-09-29, `LIVE_LEADERBOARD_DEPLOY_MODELS=true`, so it bills DeepSeek through `COMMONSTACK_API_KEY` every weekday.
+>
+> **Decisions made on 2026-10-14:**
+> - Seasons are calendar months, not two weeks.
+> - Season 1 waits for the new engine.
+> - The tab becomes "Live Leaderboard".
+>
+> The "Season 0 preview / nothing advances" description below predates all of this.
+
 Since PR #352 the dashboard serves **two** boards: the **Competition Leaderboard** (one fixed
 historical window, the acquisition hook) and the **Live Trading Leaderboard**, which is meant to
 advance one session at a time in **two-week seasons**. The old Daily Leaderboard tab is retired.
