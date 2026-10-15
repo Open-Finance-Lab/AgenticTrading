@@ -79,12 +79,12 @@ bare literal, which is how the two could drift apart unnoticed.
 _MAX_HISTORY_SCAN_DAYS = max(
     MAX_VALUE_RANGE_DAYS, *(days for days, _granularity in _MOVEMENT_WINDOWS.values())
 )
-"""Widest span of per-user daily rows one lifecycle request may scan.
+"""Widest span of daily fact and rollup rows one lifecycle request may read.
 
 `MAX_VALUE_RANGE_DAYS` bounds the *filter* range, but the movement chart reads a
 window of its own, so the scan is the wider of the two -- 365 days today, double
 the filter cap. Derived rather than written down so that adding a longer
-movement range cannot silently widen every user's scan.
+movement range cannot silently widen the scan.
 """
 
 _PRIORITY_RANK = {
@@ -493,6 +493,32 @@ def _safe_cost_micro_usd(event: object) -> int:
     return atl_cost_micro(getattr(event, "billing_mode", None), properties)
 
 
+def _transition_models(
+    counts: Counter[tuple[str, str]],
+    partial: set[tuple[str, str]],
+    *,
+    start: date,
+    end: date,
+) -> list[LifecycleTransition]:
+    """Window-level transition totals, largest first, stamped with the window."""
+    return [
+        LifecycleTransition(
+            from_segment=from_segment,
+            to_segment=to_segment,
+            users=count,
+            period_start=start,
+            period_end=end,
+            data_quality=(
+                "partial" if (from_segment, to_segment) in partial else "complete"
+            ),
+        )
+        for (from_segment, to_segment), count in sorted(
+            counts.items(),
+            key=lambda item: (-item[1], item[0]),
+        )
+    ]
+
+
 class ValueAnalyticsQueryService:
     def __init__(
         self,
@@ -615,10 +641,10 @@ class ValueAnalyticsQueryService:
 
     def _history(
         self,
-        user_ids: Sequence[int],
         *,
         start: date,
         end: date,
+        yesterday: date,
         use_anonymous_rollups: bool,
         movement_start: date | None = None,
         movement_range: str = "5d",
@@ -628,6 +654,13 @@ class ValueAnalyticsQueryService:
         list[LifecycleTransition],
         SectionAvailability,
     ]:
+        """Population history from ``user_daily_facts`` and ``lifecycle_transitions``.
+
+        Both are grouped in SQL, so the read does not grow with the user table.
+        Days the facts table no longer holds fall back to the anonymous
+        lifecycle rollups. Facts exist only through ``yesterday``, so coverage
+        is judged against that day rather than against ``end``.
+        """
         if movement_range not in _MOVEMENT_WINDOWS:
             raise ValueError("unsupported lifecycle movement range")
         window_days, granularity = _MOVEMENT_WINDOWS[movement_range]
@@ -638,14 +671,19 @@ class ValueAnalyticsQueryService:
             min(start, selected_movement_start),
             end - timedelta(days=_MAX_HISTORY_SCAN_DAYS),
         )
-        rows = self._daily(
-            user_ids,
-            start=history_start - timedelta(days=1),
-            end=end,
-        )
-        by_date: dict[date, list[UserLifecycleDailySnapshot]] = defaultdict(list)
-        for row in rows:
-            by_date[row.snapshot_date].append(row)
+        daily_counts: dict[date, dict[LifecycleSegment, int]] = {}
+        daily_quality: dict[date, str] = {}
+        for row in self.value_store.count_segments_by_date(start=history_start, end=end):
+            counts = daily_counts.setdefault(
+                row.snapshot_date, {segment: 0 for segment in _LIFECYCLE_SEGMENTS}
+            )
+            counts[row.lifecycle_segment] = row.users
+            if row.partial_rows:
+                daily_quality[row.snapshot_date] = "partial"
+            else:
+                daily_quality.setdefault(row.snapshot_date, "complete")
+        direct_dates = set(daily_counts)
+
         rollups = (
             self.query_store.rollups.list_rollups(start=history_start, end=end)
             if use_anonymous_rollups
@@ -661,20 +699,6 @@ class ValueAnalyticsQueryService:
                 rollup_quality[row.rollup_date] = "partial"
             else:
                 rollup_quality.setdefault(row.rollup_date, "complete")
-
-        daily_counts: dict[date, dict[LifecycleSegment, int]] = {}
-        daily_quality: dict[date, str] = {}
-        direct_dates = {day for day in by_date if history_start <= day < end}
-        for day in direct_dates:
-            counts = Counter(row.lifecycle_segment for row in by_date[day])
-            daily_counts[day] = {
-                segment: int(counts.get(segment, 0)) for segment in _LIFECYCLE_SEGMENTS
-            }
-            daily_quality[day] = (
-                "partial"
-                if any(row.data_quality == "partial" for row in by_date[day])
-                else "complete"
-            )
         for day, counts in rollup_counts.items():
             if day not in direct_dates:
                 daily_counts[day] = {
@@ -686,9 +710,8 @@ class ValueAnalyticsQueryService:
         weekly: list[WeeklyLifecycleCount] = []
         by_week: dict[date, list[date]] = defaultdict(list)
         for day in daily_counts:
-            if not start <= day < end:
-                continue
-            by_week[_week_start(day)].append(day)
+            if start <= day < end:
+                by_week[_week_start(day)].append(day)
         for week, dates in sorted(by_week.items()):
             latest = max(dates)
             weekly.append(
@@ -716,18 +739,10 @@ class ValueAnalyticsQueryService:
 
         transition_counts: Counter[tuple[str, str]] = Counter()
         transition_partial: set[tuple[str, str]] = set()
-        by_user_date = {(row.user_id, row.snapshot_date): row for row in rows}
-        for row in rows:
-            if not start <= row.snapshot_date < end:
-                continue
-            previous = by_user_date.get(
-                (row.user_id, row.snapshot_date - timedelta(days=1))
-            )
-            if previous is None or previous.lifecycle_segment == row.lifecycle_segment:
-                continue
-            key = (previous.lifecycle_segment, row.lifecycle_segment)
-            transition_counts[key] += 1
-            if previous.data_quality == "partial" or row.data_quality == "partial":
+        for row in self.value_store.count_transitions(start=start, end=end):
+            key = (row.from_segment, row.to_segment)
+            transition_counts[key] += row.users
+            if row.partial_rows:
                 transition_partial.add(key)
         for row in rollups:
             if (
@@ -740,24 +755,9 @@ class ValueAnalyticsQueryService:
             transition_counts[key] += row.value_count
             if row.outcome == "partial":
                 transition_partial.add(key)
-        transitions = [
-            LifecycleTransition(
-                from_segment=from_segment,
-                to_segment=to_segment,
-                users=count,
-                period_start=start,
-                period_end=end,
-                data_quality=(
-                    "partial"
-                    if (from_segment, to_segment) in transition_partial
-                    else "complete"
-                ),
-            )
-            for (from_segment, to_segment), count in sorted(
-                transition_counts.items(),
-                key=lambda item: (-item[1], item[0]),
-            )
-        ]
+        transitions = _transition_models(
+            transition_counts, transition_partial, start=start, end=end
+        )
         coverage = sorted(day for day in daily_counts if start <= day < end)
         if not coverage:
             availability = SectionAvailability(
@@ -768,7 +768,7 @@ class ValueAnalyticsQueryService:
             partial = (
                 any(daily_quality[day] == "partial" for day in coverage)
                 or coverage[0] > start
-                or coverage[-1] < end - timedelta(days=1)
+                or coverage[-1] < min(end - timedelta(days=1), yesterday)
             )
             availability = SectionAvailability(
                 available=True,
@@ -787,25 +787,46 @@ class ValueAnalyticsQueryService:
         movement_range: str = "5d",
         now: datetime | None = None,
     ) -> LifecycleAnalyticsResponse:
+        """Segment counts are as of yesterday's fact rows (design §6.3, §6.10).
+
+        Fact rows hold no internal or excluded accounts, so ``include_internal``
+        widens only the activation and paid headlines, which read
+        ``user_activity`` and the ledger.
+        """
         start, end = _validate_dates(start, end)
         if movement_range not in _MOVEMENT_WINDOWS:
             raise ValueError("unsupported lifecycle movement range")
         window_days, _granularity = _MOVEMENT_WINDOWS[movement_range]
         movement_start = end - timedelta(days=window_days)
         current_time = _utc(now or datetime.now(UTC), "now")
-        users = self._eligible_users(include_internal=include_internal)
-        current = self._current(users)
-        counts = Counter(snapshot.lifecycle_segment for snapshot in current.values())
+        yesterday = current_time.date() - timedelta(days=1)
+        cells = self.value_store.count_states_for_date(yesterday)
         segment_counts = {
-            segment: int(counts.get(segment, 0)) for segment in _LIFECYCLE_SEGMENTS
+            segment: sum(
+                cell.users for cell in cells if cell.lifecycle_segment == segment
+            )
+            for segment in _LIFECYCLE_SEGMENTS
         }
         availability: dict[str, SectionAvailability] = {
             "current": SectionAvailability(
-                available=bool(current) or not users,
-                status="ready" if len(current) == len(users) else "building",
+                available=True,
+                status="ready" if cells else "building",
+                coverage_start=yesterday if cells else None,
+                coverage_end=yesterday if cells else None,
             )
         }
         try:
+            activated_users = self.value_store.count_activated_users(
+                include_internal=include_internal
+            )
+        except Exception:
+            activated_users = 0
+            availability["current"] = SectionAvailability(
+                available=bool(cells),
+                status="partial",
+            )
+        try:
+            users = self._eligible_users(include_internal=include_internal)
             commercial = self._commercial(users, start=start, end=end)
             paid = sum(
                 fact.lifetime_net_purchased_micro > 0 for fact in commercial.values()
@@ -822,9 +843,9 @@ class ValueAnalyticsQueryService:
             )
         try:
             weekly, movement, transitions, history_availability = self._history(
-                self._ids(users),
                 start=start,
                 end=end,
+                yesterday=yesterday,
                 use_anonymous_rollups=not include_internal,
                 movement_start=movement_start,
                 movement_range=movement_range,
@@ -839,9 +860,7 @@ class ValueAnalyticsQueryService:
         return LifecycleAnalyticsResponse(
             as_of=current_time,
             headline=LifecycleHeadline(
-                activated_users=sum(
-                    snapshot.activated_at is not None for snapshot in current.values()
-                ),
+                activated_users=activated_users,
                 core_users=segment_counts["core"],
                 at_risk_users=segment_counts["at_risk"],
                 paid_users=paid,
@@ -1451,11 +1470,19 @@ class ValueAnalyticsQueryService:
             start=_day_start(start),
             end=_day_start(end),
         )
-        _weekly, _movement, transitions, _availability = self._history(
-            [subject_id],
-            start=start,
-            end=end,
-            use_anonymous_rollups=False,
+        # This user's moves from the transition log, totalled over the window.
+        # Never the anonymous rollups: they are population-wide.
+        transition_counts: Counter[tuple[str, str]] = Counter()
+        transition_partial: set[tuple[str, str]] = set()
+        for row in self.value_store.list_user_transitions(
+            subject_id, start=start, end=end
+        ):
+            key = (row.from_segment, row.to_segment)
+            transition_counts[key] += 1
+            if row.data_quality == "partial":
+                transition_partial.add(key)
+        transitions = _transition_models(
+            transition_counts, transition_partial, start=start, end=end
         )
         return ValueUserProfile(
             **legacy.model_dump(),

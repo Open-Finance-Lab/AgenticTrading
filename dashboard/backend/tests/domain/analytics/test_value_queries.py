@@ -12,14 +12,21 @@ from dashboard.backend.domain.analytics.query_service import (
     AnalyticsStateSummary,
     AnalyticsUserProfile,
 )
+from dashboard.backend.domain.analytics.rollups import DailyRollup
 from dashboard.backend.domain.analytics.value_queries import (
-    _MAX_HISTORY_SCAN_DAYS,
-    _MOVEMENT_WINDOWS,
     UserValueFilters,
     ValueAnalyticsQueryService,
 )
 from dashboard.backend.domain.analytics.value_repository import (
     CommercialValueFact,
+    FactStateCount,
+    GroupFactTotals,
+    LifecycleTransitionRow,
+    RecentFactTotals,
+    SegmentDayCount,
+    TransitionCount,
+    UserActivity,
+    UserDailyFact,
     UserLifecycleDailySnapshot,
     UserValueSnapshot,
 )
@@ -108,6 +115,45 @@ def _daily(
     )
 
 
+def _fact(user_id: int, day: date, **overrides) -> UserDailyFact:
+    values = dict(
+        snapshot_date=day,
+        user_id=user_id,
+        lifecycle_segment="core",
+        lifecycle_reason_code="core_repeated_value",
+        operational_state="healthy",
+        operational_reason_code="no_supported_issue",
+        tier="unpaid",
+        user_group="unknown",
+        active=True,
+        runs_requested=1,
+        runs_completed=1,
+        runs_failed=0,
+        runs_cancelled=0,
+        operator_cost_micro=0,
+        own_spend_micro=0,
+        data_quality="complete",
+        calculated_at=NOW,
+    )
+    values.update(overrides)
+    return UserDailyFact(**values)
+
+
+def _activity(
+    user_id: int, *, activated_days_ago: int | None = 60, active_days_ago: int = 2
+) -> UserActivity:
+    return UserActivity(
+        user_id=user_id,
+        activated_at=(
+            None
+            if activated_days_ago is None
+            else NOW - timedelta(days=activated_days_ago)
+        ),
+        last_meaningful_activity_at=NOW - timedelta(days=active_days_ago),
+        updated_at=NOW,
+    )
+
+
 class FakeUserStore:
     def __init__(self, users):
         self.users = list(users)
@@ -126,17 +172,213 @@ class FakeBaseStore:
 
 
 class FakeValueStore:
-    def __init__(self, *, snapshots, commercial, daily=(), credit_activity=None, ledger_days=()):
-        self.snapshots = dict(snapshots)
-        self.commercial = dict(commercial)
-        self.daily = list(daily)
+    """Fact-backed fake: answers every fact/activity read from in-memory rows.
+
+    ``snapshots``/``daily`` back the snapshot reads the routes not yet moved
+    onto facts still make; each goes with the task that moves its route.
+    """
+
+    def __init__(
+        self,
+        *,
+        facts=(),
+        transitions=(),
+        activity=None,
+        commercial=None,
+        page_rows=(),
+        operational_facts=None,
+        internal_ids=(),
+        credit_activity=None,
+        ledger_days=(),
+        snapshots=None,
+        daily=(),
+    ):
+        self.facts = list(facts)
+        self.transitions = list(transitions)
+        self.activity = dict(activity or {})
+        self.commercial = dict(commercial or {})
+        self.page_rows = list(page_rows)
+        self.operational_facts = dict(operational_facts or {})
+        # UserActivity is frozen and carries no role, so "internal" is a set of ids.
+        self.internal_ids = set(internal_ids)
         self.credit_activity = dict(credit_activity or {})
         # user_id -> [LedgerDayTotal]; None stands for an unconfigured reader.
         self.ledger_days = None if ledger_days is None else dict(ledger_days)
+        self.snapshots = dict(snapshots or {})
+        self.daily = list(daily)
         self.commercial_windows = []
         self.daily_windows = []
         self.ledger_calls = []
+        self.page_calls = []
+        self.recent_windows = []
 
+    # -- fact-table reads --
+    def count_states_for_date(self, day):
+        cells = {}
+        for row in self.facts:
+            if row.snapshot_date != day:
+                continue
+            key = (row.operational_state, row.operational_reason_code, row.lifecycle_segment)
+            users, partial = cells.get(key, (0, 0))
+            cells[key] = (users + 1, partial + (row.data_quality == "partial"))
+        return [
+            FactStateCount(
+                operational_state=key[0],
+                operational_reason_code=key[1],
+                lifecycle_segment=key[2],
+                users=users,
+                partial_rows=partial,
+            )
+            for key, (users, partial) in sorted(
+                cells.items(), key=lambda item: tuple(str(v) for v in item[0])
+            )
+        ]
+
+    def count_segments_by_date(self, *, start, end):
+        cells = {}
+        for row in self.facts:
+            if not start <= row.snapshot_date < end:
+                continue
+            key = (row.snapshot_date, row.lifecycle_segment)
+            users, partial = cells.get(key, (0, 0))
+            cells[key] = (users + 1, partial + (row.data_quality == "partial"))
+        return [
+            SegmentDayCount(
+                snapshot_date=key[0],
+                lifecycle_segment=key[1],
+                users=users,
+                partial_rows=partial,
+            )
+            for key, (users, partial) in sorted(cells.items())
+        ]
+
+    def count_transitions(self, *, start, end):
+        cells = {}
+        for row in self.transitions:
+            if not start <= row.snapshot_date < end:
+                continue
+            key = (row.from_segment, row.to_segment)
+            users, partial = cells.get(key, (0, 0))
+            cells[key] = (users + 1, partial + (row.data_quality == "partial"))
+        return [
+            TransitionCount(
+                from_segment=key[0], to_segment=key[1], users=users, partial_rows=partial
+            )
+            for key, (users, partial) in sorted(cells.items())
+        ]
+
+    def list_attention_candidates(self, *, day, window_start, limit):
+        return []
+
+    def sum_facts_by_user_group(self, *, start, end):
+        totals = {}
+        completion_days = {}
+        for row in self.facts:
+            if not start <= row.snapshot_date < end:
+                continue
+            group = totals.setdefault(
+                row.user_group,
+                {"total_runs": 0, "operator_cost_micro": 0, "successful": set()},
+            )
+            group["total_runs"] += row.runs_requested
+            group["operator_cost_micro"] += row.operator_cost_micro
+            if row.runs_completed > 0:
+                group["successful"].add(row.user_id)
+                completion_days.setdefault((row.user_group, row.user_id), set()).add(
+                    row.snapshot_date
+                )
+        return {
+            name: GroupFactTotals(
+                total_runs=values["total_runs"],
+                operator_cost_micro=values["operator_cost_micro"],
+                successful_run_users=len(values["successful"]),
+                repeat_users=sum(
+                    1
+                    for (group, _user), days in completion_days.items()
+                    if group == name and len(days) >= 2
+                ),
+            )
+            for name, values in totals.items()
+        }
+
+    def list_active_dates(self, user_ids, *, start, end):
+        result = {user_id: [] for user_id in user_ids}
+        for row in sorted(self.facts, key=lambda r: (r.user_id, r.snapshot_date)):
+            if row.user_id in result and row.active and start <= row.snapshot_date < end:
+                result[row.user_id].append(row.snapshot_date)
+        return result
+
+    def list_activations(self, *, start, end, include_internal):
+        return {
+            user_id: activity.activated_at
+            for user_id, activity in self.activity.items()
+            if activity.activated_at is not None
+            and start <= activity.activated_at < end
+            and (include_internal or user_id not in self.internal_ids)
+        }
+
+    def count_activated_users(self, *, include_internal):
+        return sum(
+            1
+            for user_id, activity in self.activity.items()
+            if activity.activated_at is not None
+            and (include_internal or user_id not in self.internal_ids)
+        )
+
+    def list_user_transitions(self, user_id, *, start, end):
+        return [
+            row
+            for row in self.transitions
+            if row.user_id == user_id and start <= row.snapshot_date < end
+        ]
+
+    def list_transitions_for_date(self, day):
+        return [row for row in self.transitions if row.snapshot_date == day]
+
+    def list_users_page(self, *, query, day, limit, offset):
+        self.page_calls.append((query, day, limit, offset))
+        rows = list(self.page_rows)
+        return rows[offset : offset + limit], len(rows)
+
+    # -- activity clock and trailing windows --
+    def get_activity(self, user_id):
+        return self.activity.get(user_id)
+
+    def list_activity(self, user_ids):
+        return {
+            user_id: self.activity[user_id]
+            for user_id in user_ids
+            if user_id in self.activity
+        }
+
+    def sum_recent_facts(self, user_ids, *, start, end):
+        self.recent_windows.append((start, end))
+        result = {}
+        for user_id in user_ids:
+            rows = [
+                r for r in self.facts if r.user_id == user_id and start <= r.snapshot_date <= end
+            ]
+            if not rows:
+                continue
+            active_dates = [r.snapshot_date for r in rows if r.active]
+            result[user_id] = RecentFactTotals(
+                active_days=len(active_dates),
+                successful_backtests=sum(r.runs_completed for r in rows),
+                runs_requested=sum(r.runs_requested for r in rows),
+                runs_completed=sum(r.runs_completed for r in rows),
+                runs_failed=sum(r.runs_failed for r in rows),
+                runs_cancelled=sum(r.runs_cancelled for r in rows),
+                operator_cost_micro=sum(r.operator_cost_micro for r in rows),
+                own_spend_micro=sum(r.own_spend_micro for r in rows),
+                days_present=len(rows),
+                last_active_date=max(active_dates) if active_dates else None,
+            )
+        return result
+
+    def get_operational_facts(self, user_id, *, now):
+        return self.operational_facts[user_id]
+
+    # -- snapshot reads (routes not yet on facts) --
     def list_current_snapshots(self, user_ids):
         return {
             user_id: self.snapshots[user_id]
@@ -147,14 +389,6 @@ class FakeValueStore:
     def get_current_snapshot(self, user_id):
         return self.snapshots.get(user_id)
 
-    def list_commercial_values(self, user_ids, *, start, end):
-        self.commercial_windows.append((start, end))
-        return {
-            user_id: self.commercial[user_id]
-            for user_id in user_ids
-            if user_id in self.commercial
-        }
-
     def list_daily_snapshots(self, *, start, end, user_ids=None):
         self.daily_windows.append((start, end))
         selected = None if user_ids is None else set(user_ids)
@@ -164,6 +398,15 @@ class FakeValueStore:
             if start <= row.snapshot_date < end
             and (selected is None or row.user_id in selected)
         ]
+
+    # -- commercial and ledger --
+    def list_commercial_values(self, user_ids, *, start, end):
+        self.commercial_windows.append((start, end))
+        return {
+            user_id: self.commercial[user_id]
+            for user_id in user_ids
+            if user_id in self.commercial
+        }
 
     def list_ledger_days(self, user_ids, *, start, end):
         self.ledger_calls.append((list(user_ids), start, end))
@@ -188,11 +431,15 @@ class FakeValueStore:
 
 
 class FakeRollups:
-    def __init__(self, events=(), rollups=()):
-        self.events = list(events)
+    def __init__(self, events=None, rollups=()):
+        # None: no raw read is expected, and one fails the test. A list serves
+        # the routes that still scan raw events until their own task.
+        self.events = None if events is None else list(events)
         self.rollups = list(rollups)
 
     def list_events(self, *, start, end, include_internal, user_id=None):
+        if self.events is None:
+            raise AssertionError("this read must not scan raw events")
         assert include_internal is True
         return [
             event
@@ -206,7 +453,7 @@ class FakeRollups:
 
 
 class FakeQueryStore:
-    def __init__(self, *, events=(), rollups=(), legacy_status=None):
+    def __init__(self, *, events=None, rollups=(), legacy_status=None):
         self.rollups = FakeRollups(events, rollups)
         self.legacy_status = dict(legacy_status or {})
 
@@ -269,30 +516,51 @@ class FakeLegacyService:
 
 def _service(
     *,
-    snapshots,
+    facts=(),
+    transitions=(),
+    activity=None,
     commercial=None,
-    daily=(),
-    events=(),
-    user_groups=None,
+    page_rows=(),
+    operational_facts=None,
+    internal_ids=(),
+    users=(),
     rollups=(),
     excluded=(),
     legacy_availability=None,
     ledger_days=(),
+    # Snapshot-model fixtures for the routes not yet on facts: ``users``
+    # defaults to the snapshot ids grouped by ``user_groups``, and raw events
+    # stay readable. Without ``snapshots`` a raw-event read fails the test.
+    snapshots=None,
+    daily=(),
+    events=None,
+    user_groups=None,
 ):
-    facts = commercial or {user_id: _commercial(user_id) for user_id in snapshots}
-    group_values = dict(user_groups or {})
+    if snapshots is not None:
+        if not users:
+            groups = dict(user_groups or {})
+            users = tuple(
+                (user_id, groups.get(user_id, "unknown")) for user_id in snapshots
+            )
+        if events is None:
+            events = ()
+    user_ids = [user_id for user_id, _group in users]
     value_store = FakeValueStore(
-        snapshots=snapshots,
-        commercial=facts,
-        daily=daily,
+        facts=facts,
+        transitions=transitions,
+        activity=activity,
+        commercial=commercial or {user_id: _commercial(user_id) for user_id in user_ids},
+        page_rows=page_rows,
+        operational_facts=operational_facts,
+        internal_ids=internal_ids,
         ledger_days=ledger_days,
+        snapshots=snapshots,
+        daily=daily,
     )
     legacy_service = FakeLegacyService(legacy_availability)
     service = ValueAnalyticsQueryService(
         store=FakeBaseStore(excluded),
-        user_store=FakeUserStore(
-            [_user(user_id, group_values.get(user_id, "unknown")) for user_id in snapshots]
-        ),
+        user_store=FakeUserStore([_user(user_id, group) for user_id, group in users]),
         value_store=value_store,
         query_store=FakeQueryStore(events=events, rollups=rollups),
         legacy_service=legacy_service,
@@ -322,81 +590,6 @@ def _metric_event(
     )
 
 
-def _activity(user_id: int, occurred_at: datetime):
-    return SimpleNamespace(
-        user_id=user_id,
-        event_name="agent_updated",
-        occurred_at=occurred_at,
-    )
-
-
-def test_date_filter_changes_history_not_current_lifecycle_identity():
-    snapshots = {
-        1: _snapshot(1),
-        2: _snapshot(2, lifecycle="at_risk", inactive_days=12),
-    }
-    daily = [
-        _daily(1, date(2026, 8, 25), "growing"),
-        _daily(2, date(2026, 8, 25), "onboarding"),
-        _daily(1, date(2026, 9, 2), "core"),
-        _daily(2, date(2026, 9, 2), "at_risk"),
-    ]
-    service, _value_store, _legacy = _service(snapshots=snapshots, daily=daily)
-
-    short = service.get_lifecycle(
-        start=date(2026, 9, 1),
-        end=date(2026, 9, 4),
-        now=NOW,
-    )
-    long = service.get_lifecycle(
-        start=date(2026, 8, 24),
-        end=date(2026, 9, 4),
-        now=NOW,
-    )
-
-    assert short.headline == long.headline
-    assert short.segment_counts == long.segment_counts
-    assert short.weekly_segments != long.weekly_segments
-
-
-@pytest.mark.parametrize(
-    ("movement_range", "granularity"),
-    [("5d", "day"), ("1w", "day"), ("1m", "week"), ("1y", "month")],
-)
-def test_lifecycle_movement_returns_selected_range_and_granularity(
-    movement_range, granularity
-):
-    snapshots = {1: _snapshot(1)}
-    daily = [
-        _daily(1, date(2025, 10, 1) + timedelta(days=offset), "core")
-        for offset in range(365)
-    ]
-    service, _value_store, _legacy = _service(snapshots=snapshots, daily=daily)
-
-    response = service.get_lifecycle(
-        start=date(2026, 4, 5),
-        end=date(2026, 10, 1),
-        movement_range=movement_range,
-        now=datetime(2026, 10, 1, 12, tzinfo=UTC),
-    )
-
-    assert response.movement_range == movement_range
-    assert response.movement_granularity == granularity
-    starts = [point.period_start for point in response.movement_segments]
-    assert starts
-    assert starts == sorted(set(starts))
-    # Derived from the window rather than written down: a calendar bucket count
-    # depends on where the window falls in the calendar, so a hard-coded ceiling
-    # holds only for the dates this case happens to pick.
-    window_days = _MOVEMENT_WINDOWS[movement_range][0]
-    period_days = {"day": 1, "week": 7, "month": 28}[granularity]
-    assert len(starts) <= window_days // period_days + 2
-    assert all(
-        date(2026, 10, 1) - timedelta(days=window_days) <= day < date(2026, 10, 1)
-        for day in starts
-    )
-
-
 def test_retention_uses_nulls_for_immature_cells_and_weighted_mature_summary():
     first_week = date(2026, 7, 6)
     second_week = date(2026, 7, 13)
@@ -417,8 +610,8 @@ def test_retention_uses_nulls_for_immature_cells_and_weighted_mature_summary():
                 for day in range(7)
             )
     events = [
-        _activity(1, datetime(2026, 7, 14, 10, tzinfo=UTC)),
-        _activity(3, datetime(2026, 7, 21, 10, tzinfo=UTC)),
+        _metric_event(1, "agent_updated", datetime(2026, 7, 14, 10, tzinfo=UTC)),
+        _metric_event(3, "agent_updated", datetime(2026, 7, 21, 10, tzinfo=UTC)),
     ]
     service, _value_store, _legacy = _service(
         snapshots=snapshots,
@@ -640,7 +833,7 @@ def test_commercial_response_keeps_revenue_usage_grants_cost_and_balances_separa
         ),
     }
     service, _value_store, _legacy = _service(
-        snapshots={1: _snapshot(1), 2: _snapshot(2)},
+        users=((1, "unknown"), (2, "unknown")),
         commercial=facts,
     )
 
@@ -674,7 +867,7 @@ def test_commercial_platform_cost_is_unknown_not_zero_when_its_read_failed():
     behind the figure failed, the field is None so the page draws a dash, and
     the section is partial."""
     service, _value_store, _legacy = _service(
-        snapshots={1: _snapshot(1)},
+        users=((1, "unknown"),),
         legacy_availability={"growth": False, "friction": True},
     )
 
@@ -688,7 +881,7 @@ def test_commercial_reads_the_platform_cost_alone_not_a_whole_overview():
     """The figure is one headline of the overview; building the whole overview
     for it scanned the range's raw events, rollups, snapshots and users a
     second time on every page load."""
-    service, _value_store, legacy = _service(snapshots={1: _snapshot(1)})
+    service, _value_store, legacy = _service(users=((1, "unknown"),))
 
     service.get_commercial(
         start=date(2026, 8, 1), end=date(2026, 9, 1), include_internal=True, now=NOW
@@ -710,7 +903,7 @@ def test_commercial_series_sum_across_users_and_match_their_headlines():
     from dashboard.backend.domain.credits.repository_common import LedgerDayTotal
 
     service, value_store, _legacy = _service(
-        snapshots={1: _snapshot(1), 2: _snapshot(2)},
+        users=((1, "unknown"), (2, "unknown")),
         ledger_days={
             1: [
                 LedgerDayTotal(day=date(2026, 8, 3), purchased_micro=5_000_000, refunded_micro=2_000_000, consumed_micro=100_000),
@@ -738,7 +931,7 @@ def test_commercial_series_sum_across_users_and_match_their_headlines():
 def test_commercial_series_chunk_user_ids_like_the_headline():
     user_ids = range(1, 1202)
     service, value_store, _legacy = _service(
-        snapshots={user_id: _snapshot(user_id) for user_id in user_ids},
+        users=tuple((user_id, "unknown") for user_id in user_ids),
     )
 
     service.get_commercial(start=date(2026, 8, 1), end=date(2026, 9, 1), now=NOW)
@@ -748,7 +941,7 @@ def test_commercial_series_chunk_user_ids_like_the_headline():
 
 def test_commercial_series_failure_is_partial_and_logged_not_an_empty_ready(capsys):
     service, _value_store, _legacy = _service(
-        snapshots={1: _snapshot(1)},
+        users=((1, "unknown"),),
         ledger_days=None,
     )
 
@@ -807,12 +1000,26 @@ def test_missing_operational_subsection_is_reported_as_partial():
 def test_profile_includes_selected_period_and_lifecycle_transition():
     start = date(2026, 8, 1)
     end = date(2026, 9, 1)
-    snapshots = {1: _snapshot(1)}
-    daily = [
-        _daily(1, start - timedelta(days=1), "growing"),
-        _daily(1, start, "core"),
+    snapshots = {1: _snapshot(1), 2: _snapshot(2)}
+    transitions = [
+        LifecycleTransitionRow(
+            user_id=1, snapshot_date=start, from_segment="growing",
+            to_segment="core", created_at=NOW,
+        ),
+        # Another user's move on the same day stays off this profile.
+        LifecycleTransitionRow(
+            user_id=2, snapshot_date=start, from_segment="growing",
+            to_segment="at_risk", created_at=NOW,
+        ),
+        # Outside the selected period.
+        LifecycleTransitionRow(
+            user_id=1, snapshot_date=end, from_segment="core",
+            to_segment="at_risk", created_at=NOW,
+        ),
     ]
-    service, _value_store, legacy = _service(snapshots=snapshots, daily=daily)
+    service, _value_store, legacy = _service(
+        snapshots=snapshots, transitions=transitions
+    )
 
     profile = service.get_user_profile(
         user_id=1,
@@ -826,9 +1033,9 @@ def test_profile_includes_selected_period_and_lifecycle_transition():
     assert profile.lifecycle.segment == "core"
     assert profile.operational.state == "healthy"
     assert [
-        (row.from_segment, row.to_segment)
+        (row.from_segment, row.to_segment, row.users, row.period_start, row.period_end)
         for row in profile.recent_lifecycle_transitions
-    ] == [("growing", "core")]
+    ] == [("growing", "core", 1, start, end)]
     assert legacy.profile_windows == [
         (datetime(2026, 8, 1, tzinfo=UTC), datetime(2026, 9, 1, tzinfo=UTC))
     ]
@@ -883,120 +1090,214 @@ def test_internal_accounts_are_excluded_unless_explicitly_included():
     assert [item.user_id for item in all_users.items] == [1, 2]
 
 
-def _transition_rollup(day: date, count: int, outcome: str = "complete"):
-    return SimpleNamespace(
-        rollup_date=day,
-        metric_name="lifecycle_transition",
-        event_name="growing",
-        user_state="core",
-        value_count=count,
-        outcome=outcome,
-    )
+YESTERDAY = NOW.date() - timedelta(days=1)
 
 
-def test_lifecycle_transitions_ignore_rollups_outside_the_requested_window():
-    """A long movement range widens the scan; it must not widen the totals.
-
-    `transitions` is stamped with the requested period, so a rollup from before
-    `start` that is summed in reports itself as having happened inside a window
-    it predates.
-    """
-    start = date(2026, 9, 1)
-    end = date(2026, 10, 1)
-    daily = [
-        _daily(1, start + timedelta(days=offset))
-        for offset in range(30)
-        if start + timedelta(days=offset) != date(2026, 9, 10)
+def _lifecycle_service(**overrides):
+    facts = [
+        _fact(1, YESTERDAY, lifecycle_segment="core"),
+        _fact(2, YESTERDAY, lifecycle_segment="at_risk", active=False),
+        _fact(3, YESTERDAY, lifecycle_segment="onboarding", runs_completed=0),
+        _fact(1, YESTERDAY - timedelta(days=1), lifecycle_segment="growing"),
+        _fact(
+            2,
+            YESTERDAY - timedelta(days=1),
+            lifecycle_segment="growing",
+            data_quality="partial",
+        ),
+        _fact(
+            3, YESTERDAY - timedelta(days=1), lifecycle_segment="new", runs_completed=0
+        ),
     ]
-    service, _value_store, _legacy = _service(
-        snapshots={1: _snapshot(1)},
-        daily=daily,
-        rollups=[
-            _transition_rollup(date(2026, 9, 10), 2),
-            _transition_rollup(date(2026, 1, 15), 97),
-        ],
+    transitions = [
+        LifecycleTransitionRow(
+            user_id=1, snapshot_date=YESTERDAY, from_segment="growing",
+            to_segment="core", inactive_days=0, data_quality="complete",
+            created_at=NOW,
+        ),
+        LifecycleTransitionRow(
+            user_id=2, snapshot_date=YESTERDAY, from_segment="growing",
+            to_segment="at_risk", inactive_days=8, data_quality="partial",
+            created_at=NOW,
+        ),
+    ]
+    activity = {
+        1: _activity(1),
+        2: _activity(2, active_days_ago=8),
+        3: _activity(3, activated_days_ago=None),
+        9: _activity(9),
+    }
+    values = dict(
+        facts=facts,
+        transitions=transitions,
+        activity=activity,
+        internal_ids={9},
+        users=((1, "organic"), (2, "partner"), (3, "unknown"), (9, "internal")),
+        commercial={
+            1: _commercial(1, 6_000_000),
+            2: _commercial(2),
+            3: _commercial(3),
+            9: _commercial(9),
+        },
+    )
+    values.update(overrides)
+    return _service(**values)[0]
+
+
+def test_lifecycle_counts_are_yesterdays_facts_and_headline_reads_activity():
+    service = _lifecycle_service()
+
+    response = service.get_lifecycle(
+        start=YESTERDAY - timedelta(days=6), end=YESTERDAY + timedelta(days=1), now=NOW
+    )
+
+    assert response.segment_counts == {
+        "new": 0, "onboarding": 1, "growing": 0, "core": 1, "at_risk": 1, "dormant": 0
+    }
+    assert response.headline.core_users == 1
+    assert response.headline.at_risk_users == 1
+    assert response.headline.activated_users == 2  # user 9 is internal
+    assert response.headline.paid_users == 1
+    current = response.availability["current"]
+    assert (current.status, current.coverage_start, current.coverage_end) == (
+        "ready", YESTERDAY, YESTERDAY
+    )
+
+
+def test_lifecycle_current_is_building_before_yesterdays_facts_land():
+    service = _lifecycle_service(
+        facts=[_fact(1, YESTERDAY - timedelta(days=1))]
     )
 
     response = service.get_lifecycle(
-        start=start,
-        end=end,
-        movement_range="1y",
-        now=datetime(2026, 10, 1, 12, tzinfo=UTC),
+        start=YESTERDAY - timedelta(days=6), end=YESTERDAY + timedelta(days=1), now=NOW
     )
 
-    assert [
-        (row.from_segment, row.to_segment, row.users) for row in response.transitions
-    ] == [("growing", "core", 2)]
+    assert set(response.segment_counts.values()) == {0}
+    assert response.availability["current"].status == "building"
 
 
-def test_lifecycle_coverage_reports_the_requested_window_not_the_movement_history():
-    """Coverage describes the window the admin asked for.
-
-    The movement chart needs a wider scan than the filter range, but
-    `availability.history` is what the Lifecycle distribution card renders, so
-    it must keep describing `start..end`.
-    """
-    start = date(2026, 9, 1)
-    end = date(2026, 10, 1)
-    daily = [_daily(1, start + timedelta(days=offset)) for offset in range(30)]
-    daily.append(_daily(1, date(2025, 12, 1), quality="partial"))
-    service, _value_store, _legacy = _service(snapshots={1: _snapshot(1)}, daily=daily)
+def test_lifecycle_include_internal_counts_internal_activations():
+    service = _lifecycle_service()
 
     response = service.get_lifecycle(
-        start=start,
-        end=end,
-        movement_range="1y",
-        now=datetime(2026, 10, 1, 12, tzinfo=UTC),
+        start=YESTERDAY - timedelta(days=6),
+        end=YESTERDAY + timedelta(days=1),
+        include_internal=True,
+        now=NOW,
+    )
+
+    assert response.headline.activated_users == 3
+
+
+def test_lifecycle_movement_and_transitions_come_from_facts_and_the_transition_log():
+    service = _lifecycle_service()
+
+    response = service.get_lifecycle(
+        start=YESTERDAY - timedelta(days=6),
+        end=YESTERDAY + timedelta(days=1),
+        movement_range="5d",
+        now=NOW,
+    )
+
+    assert response.movement_granularity == "day"
+    assert [point.period_start for point in response.movement_segments] == [
+        YESTERDAY - timedelta(days=1),
+        YESTERDAY,
+    ]
+    assert response.movement_segments[0].segment_counts["growing"] == 2
+    assert response.movement_segments[0].data_quality == "partial"
+    assert response.movement_segments[1].segment_counts["core"] == 1
+    assert {
+        (t.from_segment, t.to_segment, t.users, t.data_quality)
+        for t in response.transitions
+    } == {
+        ("growing", "core", 1, "complete"),
+        ("growing", "at_risk", 1, "partial"),
+    }
+    assert response.availability["history"].status == "partial"
+    assert response.availability["history"].coverage_start == YESTERDAY - timedelta(
+        days=1
+    )
+
+
+def test_lifecycle_history_is_ready_through_yesterday_for_the_default_window():
+    """The router's default ``end`` is today + 1, and facts exist only through
+    yesterday: a fully covered window must not read as incomplete for lacking
+    a row that cannot exist yet."""
+    start = YESTERDAY - timedelta(days=6)
+    service = _lifecycle_service(
+        facts=[_fact(1, start + timedelta(days=offset)) for offset in range(7)],
+        transitions=[],
+    )
+
+    response = service.get_lifecycle(
+        start=start, end=NOW.date() + timedelta(days=1), now=NOW
     )
 
     history = response.availability["history"]
-    assert history.coverage_start == start
-    assert history.coverage_end == end - timedelta(days=1)
-    assert history.status == "ready"
+    assert (history.status, history.coverage_start, history.coverage_end) == (
+        "ready", start, YESTERDAY
+    )
 
 
-def test_lifecycle_movement_buckets_never_start_before_the_selected_window():
-    """Calendar bucketing must not label a point outside the chart's own range."""
-    start = date(2026, 9, 15)
-    end = date(2026, 10, 15)
-    window_start = end - timedelta(days=365)
-    daily = [_daily(1, window_start + timedelta(days=offset)) for offset in range(366)]
-    service, _value_store, _legacy = _service(snapshots={1: _snapshot(1)}, daily=daily)
+def test_lifecycle_history_falls_back_to_rollups_for_days_without_facts():
+    old_day = YESTERDAY - timedelta(days=3)
+    rollups = [
+        DailyRollup(
+            rollup_date=old_day, metric_name="lifecycle_segment_count",
+            user_state="core", outcome="complete", value_count=7, updated_at=NOW,
+        ),
+        DailyRollup(
+            rollup_date=old_day, metric_name="lifecycle_transition",
+            event_name="onboarding", user_state="growing", outcome="complete",
+            value_count=2, updated_at=NOW,
+        ),
+    ]
+    service = _lifecycle_service(rollups=rollups)
 
     response = service.get_lifecycle(
-        start=start,
-        end=end,
-        movement_range="1y",
-        now=datetime(2026, 10, 15, 12, tzinfo=UTC),
+        start=YESTERDAY - timedelta(days=6), end=YESTERDAY + timedelta(days=1), now=NOW
     )
 
-    assert response.movement_segments
-    assert min(point.period_start for point in response.movement_segments) >= window_start
-
-
-@pytest.mark.parametrize("movement_range", sorted(_MOVEMENT_WINDOWS))
-def test_lifecycle_daily_scan_stays_within_the_derived_history_bound(movement_range):
-    """Pins the widest span of per-user rows one request may read.
-
-    Not a regression test -- `_validate_dates` already bounds the filter range,
-    so the scan is bounded today. It is a drift guard: the movement window is
-    read from a table, and a longer entry added to that table would widen this
-    scan for every eligible user with nothing else noticing.
-    """
-    start = date(2026, 9, 1)
-    end = date(2026, 10, 1)
-    service, value_store, _legacy = _service(
-        snapshots={1: _snapshot(1)},
-        daily=[_daily(1, start + timedelta(days=offset)) for offset in range(30)],
+    assert any(
+        point.period_start == old_day and point.segment_counts["core"] == 7
+        for point in response.movement_segments
+    )
+    assert any(
+        t.from_segment == "onboarding" and t.to_segment == "growing" and t.users == 2
+        for t in response.transitions
     )
 
+    internal = service.get_lifecycle(
+        start=YESTERDAY - timedelta(days=6),
+        end=YESTERDAY + timedelta(days=1),
+        include_internal=True,
+        now=NOW,
+    )
+    assert not any(point.period_start == old_day for point in internal.movement_segments)
+
+
+def test_lifecycle_reads_no_raw_events():
+    service = _lifecycle_service()
+    # FakeRollups.list_events raises; a passing call proves no raw read happened.
     service.get_lifecycle(
-        start=start,
-        end=end,
-        movement_range=movement_range,
-        now=datetime(2026, 10, 1, 12, tzinfo=UTC),
+        start=YESTERDAY - timedelta(days=6), end=YESTERDAY + timedelta(days=1), now=NOW
     )
 
-    scan_start, scan_end = value_store.daily_windows[-1]
-    assert scan_end == end
-    assert scan_start >= end - timedelta(days=_MAX_HISTORY_SCAN_DAYS + 1)
+
+def test_lifecycle_failed_activation_read_is_partial_not_a_ready_zero():
+    service = _lifecycle_service()
+
+    def fail(*, include_internal):
+        raise RuntimeError("user_activity unavailable")
+
+    service.value_store.count_activated_users = fail
+
+    response = service.get_lifecycle(
+        start=YESTERDAY - timedelta(days=6), end=YESTERDAY + timedelta(days=1), now=NOW
+    )
+
+    assert response.headline.activated_users == 0
+    assert response.availability["current"].status == "partial"
+    assert response.segment_counts["core"] == 1  # the rest is still served
