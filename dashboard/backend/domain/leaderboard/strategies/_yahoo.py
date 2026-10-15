@@ -17,6 +17,9 @@ from dashboard.backend.infrastructure.market_data.sessions import (
     session_close_time,
     session_windows,
 )
+from dashboard.backend.infrastructure.market_data.us_market_calendar import (
+    is_early_close,
+)
 
 _CHART_URL = "https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
 _HEADERS = {"User-Agent": "Mozilla/5.0"}
@@ -156,8 +159,10 @@ def _restamp_close_levels(
     the lesser gap: the only pre-auction level on offer is the 11:30 bar's,
     30 minutes stale.
 
-    Only for a US exchange: the close comes from the NYSE calendar
-    (``sessions.session_close_time``).
+    Only on an NYSE early close, for a US exchange. On a full session the one
+    point stamped at the close is the latest close Yahoo appends to every
+    response, inside the window whenever a fetch reaches today; moving it would
+    mark today on the official close and a replay of the same day pre-auction.
     """
     if exchange_zone != _US_EXCHANGE_ZONE:
         return points
@@ -167,7 +172,9 @@ def _restamp_close_levels(
     by_stamp: Dict[dt.datetime, float] = {}
     for stamp, level in points:
         local = stamp.astimezone(zone)
-        if local.time() == session_close_time(local.date(), "US"):
+        if is_early_close(local.date()) and local.time() == session_close_time(
+            local.date(), "US"
+        ):
             opened = dt.datetime.combine(local.date(), session_open, tzinfo=zone)
             last_slot = (local - opened) % hour or hour
             stamp = (local - last_slot).astimezone(dt.timezone.utc)

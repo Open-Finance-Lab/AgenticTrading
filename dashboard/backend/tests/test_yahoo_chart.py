@@ -165,9 +165,10 @@ def test_yahoo_chart_error_is_a_request_exception():
 # NYSE early closes: Yahoo stamps the closing level at the close itself
 # --------------------------------------------------------------------------
 #
-# Both fixtures are real ^DJI responses to the request fetch_index_hourly
-# sends (period1 = the day's 00:00Z, period2 = +1 day, interval=1h), recorded
-# 2026-10-15 with only ``meta`` trimmed to the fields that matter here. The
+# The fixtures are real ^DJI and ^GSPC responses to the request
+# fetch_index_hourly sends (period1 = the day's 00:00Z, period2 = +1 day,
+# interval=1h), recorded 2026-10-15 and trimmed to ``meta``'s relevant fields
+# and the closes (Yahoo serves 1h data for the last 730 days only). The
 # trailing 2026-10-14T20:00Z point is Yahoo appending the latest close to every
 # hourly response, which the window filter drops. On 2025-11-28 (13:00 close)
 # the 12:30 half bar comes back null and the closing level, 47,716.42, arrives
@@ -199,6 +200,29 @@ def test_an_early_close_level_lands_in_the_last_half_bar(monkeypatch):
     ]
 
 
+@pytest.mark.parametrize(
+    ("fixture", "symbol", "day", "official_close"),
+    [
+        ("yahoo-chart-dji-1h-2025-11-28.json", "^DJI", "2025-11-28", 47716.421875),
+        ("yahoo-chart-gspc-1h-2025-11-28.json", "^GSPC", "2025-11-28", 6849.08984375),
+        ("yahoo-chart-dji-1h-2025-12-24.json", "^DJI", "2025-12-24", 48731.16015625),
+        ("yahoo-chart-gspc-1h-2025-12-24.json", "^GSPC", "2025-12-24", 6932.0498046875),
+    ],
+)
+def test_each_recorded_early_close_ends_on_the_official_close(
+    monkeypatch, fixture, symbol, day, official_close
+):
+    """Each level is that day's published close, equal to Yahoo's own daily
+    bar: 47,716.42 and 6,849.09 on 2025-11-28, 48,731.16 and 6,932.05 on
+    2025-12-24."""
+    _stub_response(monkeypatch, _recorded(fixture))
+    points = fetch_index_hourly(symbol, day, day)
+    assert [clock for clock, _value in _clock(points)] == [
+        "09:30", "10:30", "11:30", "12:30",
+    ]
+    assert points[-1][1] == official_close
+
+
 def test_the_early_close_level_is_the_live_boards_13_00_node(monkeypatch):
     """Read as an open-stamped bar, a point stamped 13:00 opens after the close
     and has no node, so the index curve's day would end on its 12:30 level."""
@@ -222,6 +246,22 @@ def test_a_full_session_is_left_as_yahoo_sent_it(monkeypatch):
         "09:30", "10:30", "11:30", "12:30", "13:30", "14:30", "15:30",
     ]
     assert points[-1][1] == 47419.671875
+
+
+def test_yahoos_appended_close_is_not_restamped_on_a_full_session(monkeypatch):
+    """Yahoo appends the latest close to every response, stamped at the close
+    itself: 16:00 ET on a full session. The nightly refresh fetches through
+    today, so the point is inside its window. Restamped, it would overwrite
+    today's 15:30 half bar with the official close, and a later replay of the
+    same day (the point gone by then) would mark it pre-auction again. Only an
+    NYSE early close restamps; here the point stays at 16:00, where the board's
+    node mapping drops it."""
+    _stub_response(monkeypatch, _recorded("yahoo-chart-dji-1h-2025-11-26.json"))
+    points = fetch_index_hourly("^DJI", "2025-11-26", "2026-10-14")
+    assert points[-2][1] == 47419.671875  # 2025-11-26's 15:30 half bar
+    assert points[-1] == (
+        dt.datetime(2026, 10, 14, 20, tzinfo=dt.timezone.utc), 51621.48046875,
+    )
 
 
 def test_the_close_stamped_level_wins_over_a_half_bar_yahoo_also_filled(monkeypatch):
