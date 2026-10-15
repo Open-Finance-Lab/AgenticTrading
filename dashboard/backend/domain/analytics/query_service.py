@@ -6,13 +6,14 @@ import json
 from collections import Counter, defaultdict
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Any, Literal
+from typing import Any, Literal, Sequence
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from .lifecycle import operational_result_from_code
 from .metrics import (
+    ACTIVATION_EVENTS,
     AnalyticsMetricFilters,
-    calculate_overview_metrics,
     is_meaningful_event,
 )
 from .models import AnalyticsEventRecord
@@ -32,6 +33,7 @@ from .states import (
     UserAnalyticsSnapshot,
     calculate_user_state,
 )
+from .value_repository import build_value_analytics_store
 
 ActivitySection = Literal["timeline", "runs", "usage", "sessions"]
 _USER_STATES = {"blocked", "needs_attention", "dormant", "onboarding", "active"}
@@ -46,12 +48,7 @@ _LANE_FIELDS = (
     "byok_estimated_micro",
     "byok_unpriced",
 )
-_ACTIVATION_EVENTS = (
-    "account_signed_up",
-    "credential_verified",
-    "agent_created",
-    "backtest_completed",
-)
+_ACTIVATION_EVENTS = ACTIVATION_EVENTS
 _USAGE_EVENTS = {
     "model_usage_recorded",
     "credits_reserved",
@@ -610,6 +607,75 @@ def _availability(available: bool = True) -> PanelAvailability:
     return PanelAvailability(available=available)
 
 
+def _legacy_state(operational_state: str, lifecycle_segment: str) -> str:
+    """The five-state label derived from the two fact axes, the mapping
+    ``value_repository._legacy_seed`` applies. An approximation of what
+    states.py wrote, kept only while ``user_state_counts`` and the profile's
+    state summary exist; both go in the D20 task."""
+
+    if operational_state in {"blocked", "needs_attention"}:
+        return operational_state
+    if lifecycle_segment == "dormant":
+        return "dormant"
+    if lifecycle_segment in {"new", "onboarding"}:
+        return "onboarding"
+    return "active"
+
+
+def _is_total_row(row: DailyRollup) -> bool:
+    """A rollup's undimensioned day total, not one of its per-dimension rows."""
+
+    return not (
+        row.event_name
+        or row.billing_mode
+        or row.provider_id
+        or row.model_id
+        or row.outcome
+        or row.error_category
+        or row.user_state
+    )
+
+
+def _latest_rollup_value(rows: Sequence[DailyRollup], metric_name: str) -> int | None:
+    """The metric's total on the latest rolled-up day: "as of yesterday"."""
+
+    latest: DailyRollup | None = None
+    for row in rows:
+        if row.metric_name == metric_name and _is_total_row(row):
+            if latest is None or row.rollup_date > latest.rollup_date:
+                latest = row
+    return None if latest is None else latest.value_count
+
+
+def _sum_rollup(rows: Sequence[DailyRollup], metric_name: str) -> int:
+    return sum(
+        row.value_count
+        for row in rows
+        if row.metric_name == metric_name and _is_total_row(row)
+    )
+
+
+def _rollup_token_total(
+    rows: Sequence[DailyRollup],
+    metric_name: str,
+    filters: AnalyticsMetricFilters,
+    *,
+    dimensional: bool,
+) -> int:
+    """A token metric over completed days: the day totals, or -- when a
+    billing/provider/model filter is set -- the per-usage-dimension rows."""
+
+    if not dimensional:
+        return _sum_rollup(rows, metric_name)
+    return sum(
+        row.value_count
+        for row in rows
+        if row.metric_name == metric_name
+        and (row.billing_mode or row.provider_id or row.model_id)
+        and _matches_rollup_dimensions(row, filters)
+    )
+
+
 def _matches_rollup_dimensions(
     row: DailyRollup,
     filters: AnalyticsMetricFilters,
@@ -673,6 +739,7 @@ class AnalyticsQueryService:
         *,
         store: Any = analytics_store,
         user_store: Any | None = None,
+        value_store: Any | None = None,
     ):
         if user_store is None:
             from dashboard.backend.users import user_store as default_user_store
@@ -681,6 +748,24 @@ class AnalyticsQueryService:
         self.store = store
         self.user_store = user_store
         self.query_store = AnalyticsQueryStore(store)
+        self._value_store = value_store
+
+    @property
+    def value_store(self) -> Any:
+        """The fact-table store, built on first use.
+
+        Not in ``__init__``: the module-level ``analytics_query_service`` is
+        constructed at import, and building the default twin resolves the
+        credits / provider / agent / run singletons -- on the web boot path
+        and in every backtest child that imports this module.
+        """
+        if self._value_store is None:
+            self._value_store = build_value_analytics_store(analytics_base=self.store)
+        return self._value_store
+
+    @value_store.setter
+    def value_store(self, value: Any) -> None:
+        self._value_store = value
 
     def get_overview(
         self,
@@ -713,58 +798,119 @@ class AnalyticsQueryService:
         lane_days: dict[str, dict[str, int]] = {}
         funnel: dict[str, int] = {}
         failures: list[FailureCategoryCount] = []
-        raw_events: list[_MetricEvent] = []
-        # An empty window has nothing to read, which is not a failed read.
-        raw_events_read = effective_end <= filters.start
-
-        if effective_end > filters.start:
+        dimensional = any(
+            value is not None
+            for value in (
+                filters.billing_mode,
+                filters.provider_id,
+                filters.model_id,
+            )
+        )
+        # The one raw-event read: the current UTC day, only the part of it the
+        # window covers (design §6.15 item 2). Completed days come from the
+        # rollups, which already hold the trailing context the old
+        # window-wide scan existed to supply.
+        today_start = datetime.combine(
+            current.date(), datetime.min.time(), tzinfo=timezone.utc
+        )
+        scan_start = max(filters.start, today_start)
+        today_events: list[_MetricEvent] = []
+        # An empty slice has nothing to read, which is not a failed read.
+        raw_events_read = effective_end <= scan_start
+        if not raw_events_read:
             try:
-                raw_events = self.query_store.list_metric_events(
-                    start=filters.start,
+                today_events = self.query_store.list_metric_events(
+                    start=scan_start,
                     end=effective_end,
                     include_internal=filters.include_internal,
                 )
                 raw_events_read = True
-                raw_metrics = calculate_overview_metrics(
-                    raw_events,
-                    start=filters.start,
-                    end=effective_end,
-                    billing_mode=filters.billing_mode,
-                    provider_id=filters.provider_id,
-                    model_id=filters.model_id,
-                )
-                active_users = raw_metrics.active_users_7d
-                conversion = raw_metrics.first_success_conversion
-                repeat_rate = raw_metrics.repeat_run_rate
-                funnel = {
-                    event_name: len(
-                        {
-                            event.user_id
-                            for event in raw_events
-                            if event.event_name == event_name
-                            and _event_matches_filters(event, filters)
-                        }
-                    )
-                    for event_name in _ACTIVATION_EVENTS
-                }
-                failure_users: dict[str, set[int]] = defaultdict(set)
-                for event in raw_events:
-                    if event.error_category and _event_matches_filters(event, filters):
-                        failure_users[event.error_category].add(event.user_id)
-                failures = [
-                    FailureCategoryCount(
-                        error_category=category,
-                        affected_users=len(users),
-                    )
-                    for category, users in sorted(
-                        failure_users.items(),
-                        key=lambda item: (-len(item[1]), item[0]),
-                    )[:10]
-                ]
             except Exception:
-                availability["snapshot"] = _availability(False)
-                availability["funnel"] = _availability(False)
-                availability["friction"] = _availability(False)
+                today_events = []
+        current_events = [
+            event for event in today_events if _event_matches_filters(event, filters)
+        ]
+        rollups: list[DailyRollup] = []
+        rollups_read = False
+        try:
+            historical_end = min(effective_end.date(), current.date())
+            rollups = self.query_store.rollups.list_rollups(
+                start=filters.start.date(),
+                end=historical_end,
+            )
+            rollups_read = True
+        except Exception:
+            rollups = []
+
+        # Trailing context, as of the latest completed day in the window. The
+        # rollups hold these as day totals only, so a billing/provider/model
+        # filter does not narrow them.
+        if rollups_read:
+            active_users = _latest_rollup_value(rollups, "rolling_active_users_7d")
+            mature = _sum_rollup(rollups, "mature_signup_cohort_users")
+            converted = _sum_rollup(rollups, "first_success_within_7d_users")
+            conversion = None if mature == 0 else converted / mature
+            first_success = _latest_rollup_value(rollups, "users_with_first_success")
+            repeat = _latest_rollup_value(rollups, "users_with_repeat_success_24h_30d")
+            if first_success:
+                repeat_rate = (repeat or 0) / first_success
+        else:
+            availability["snapshot"] = _availability(False)
+
+        if rollups_read and raw_events_read:
+            # Completed days sum their distinct users per day, so a user who
+            # repeats a step on two days counts twice (the daily tier's trade,
+            # design §6.3). activation_users rows carry no billing/provider/
+            # model, so today's half is unfiltered too.
+            funnel = {
+                event_name: sum(
+                    row.value_count
+                    for row in rollups
+                    if row.metric_name == "activation_users"
+                    and row.event_name == event_name
+                )
+                + len(
+                    {
+                        event.user_id
+                        for event in today_events
+                        if event.event_name == event_name
+                    }
+                )
+                for event_name in _ACTIVATION_EVENTS
+            }
+            # Design D13. affected_users rows are keyed by error_category
+            # alone; with a dimension filter the matching event_count rows
+            # stand in, which count events, so today counts events as well.
+            failure_counts: dict[str, int] = defaultdict(int)
+            for row in rollups:
+                if not row.error_category:
+                    continue
+                if dimensional:
+                    if row.metric_name == "event_count" and _matches_rollup_dimensions(
+                        row, filters
+                    ):
+                        failure_counts[row.error_category] += row.value_count
+                elif row.metric_name == "affected_users":
+                    failure_counts[row.error_category] += row.value_count
+            today_failure_users: dict[str, set[int]] = defaultdict(set)
+            for event in current_events:
+                if not event.error_category:
+                    continue
+                if dimensional:
+                    failure_counts[event.error_category] += 1
+                else:
+                    today_failure_users[event.error_category].add(event.user_id)
+            for category, users in today_failure_users.items():
+                failure_counts[category] += len(users)
+            failures = [
+                FailureCategoryCount(error_category=category, affected_users=count)
+                for category, count in sorted(
+                    failure_counts.items(),
+                    key=lambda item: (-item[1], item[0]),
+                )[:10]
+            ]
+        else:
+            availability["funnel"] = _availability(False)
 
         try:
             if not raw_events_read:
@@ -773,19 +919,8 @@ class AnalyticsQueryService:
                 # publish a rollup-only figure as the whole range -- the quiet
                 # answer a failed read must never be mistaken for.
                 raise AnalyticsStoreError("raw analytics events are unavailable")
-            historical_end = min(effective_end.date(), current.date())
-            rollups = self.query_store.rollups.list_rollups(
-                start=filters.start.date(),
-                end=historical_end,
-            )
-            dimensional = any(
-                value is not None
-                for value in (
-                    filters.billing_mode,
-                    filters.provider_id,
-                    filters.model_id,
-                )
-            )
+            if not rollups_read:
+                raise AnalyticsStoreError("analytics rollups are unavailable")
             if dimensional:
                 historical_completed = sum(
                     row.value_count
@@ -818,17 +953,6 @@ class AnalyticsQueryService:
                     and not row.provider_id
                     and not row.model_id
                 )
-            today_start = datetime.combine(
-                current.date(), datetime.min.time(), tzinfo=timezone.utc
-            )
-            current_events = [
-                event
-                for event in raw_events
-                if max(filters.start, today_start)
-                <= event.occurred_at
-                < effective_end
-                and _event_matches_filters(event, filters)
-            ]
             current_completed = sum(
                 event.event_name == "backtest_completed" for event in current_events
             )
@@ -843,17 +967,16 @@ class AnalyticsQueryService:
             platform_cost = (
                 _platform_cost_micro(rollups, current_events, filters) / 1_000_000
             )
-            input_tokens = sum(
-                int(event.properties.get("input_tokens", 0))
-                for event in raw_events
-                if event.event_name == "model_usage_recorded"
-                and _event_matches_filters(event, filters)
-            )
-            output_tokens = sum(
-                int(event.properties.get("output_tokens", 0))
-                for event in raw_events
-                if event.event_name == "model_usage_recorded"
-                and _event_matches_filters(event, filters)
+            input_tokens, output_tokens = (
+                _rollup_token_total(
+                    rollups, metric_name, filters, dimensional=dimensional
+                )
+                + sum(
+                    int(event.properties.get(metric_name, 0))
+                    for event in current_events
+                    if event.event_name == "model_usage_recorded"
+                )
+                for metric_name in ("input_tokens", "output_tokens")
             )
             for row in rollups:
                 key = row.rollup_date.isoformat()
@@ -957,77 +1080,57 @@ class AnalyticsQueryService:
         except Exception:
             availability["growth"] = _availability(False)
 
+        # Who is in which state, and who needs attention, as of yesterday's
+        # fact rows (design D20). The daily job writes facts for non-internal
+        # accounts only, so include_internal widens neither.
+        yesterday = current.date() - timedelta(days=1)
         state_counts: dict[str, int] = {}
         attention: list[AnalyticsUserListItem] = []
-        snapshots: dict[int, UserAnalyticsSnapshot] = {}
-        excluded: set[int] = set()
-        snapshots_available = False
         try:
-            snapshots = self.query_store.list_snapshots()
-            excluded = (
-                set()
-                if filters.include_internal
-                else self.store.list_excluded_user_ids(include_admin_accounts=True)
-            )
-            state_counts = dict(
-                Counter(
-                    snapshot.status
-                    for user_id, snapshot in snapshots.items()
-                    if user_id not in excluded
-                )
-            )
-            snapshots_available = True
+            for cell in self.value_store.count_states_for_date(yesterday):
+                # Bridge to the old five labels until user_state_counts goes.
+                label = _legacy_state(cell.operational_state, cell.lifecycle_segment)
+                state_counts[label] = state_counts.get(label, 0) + cell.users
         except Exception:
+            state_counts = {}
             availability["friction"] = _availability(False)
         try:
-            if not snapshots_available:
-                raise RuntimeError("Analytics snapshots are unavailable")
-            attention_ids = {
-                user_id
-                for user_id, snapshot in snapshots.items()
-                if user_id not in excluded
-                and snapshot.status in _ATTENTION_STATES
-            }
-            summaries = self.query_store.summarize_users(
-                user_ids=attention_ids,
-                start=current - timedelta(days=30),
-                end=current + timedelta(microseconds=1),
+            candidates = self.value_store.list_attention_candidates(
+                day=yesterday,
+                window_start=yesterday - timedelta(days=29),
+                limit=10,
             )
-            identities = {
-                int(user["id"]): user
-                for user in _all_users(self.user_store)
-                if int(user["id"]) in attention_ids
-            }
-            candidates = []
-            for user_id in attention_ids:
-                user = identities.get(user_id)
-                if user is None:
-                    continue
-                snapshot = snapshots[user_id]
-                summary = summaries.get(user_id, {})
-                candidates.append(
+            activity = (
+                self.value_store.list_activity(
+                    [candidate.user_id for candidate in candidates]
+                )
+                if candidates
+                else {}
+            )
+            for candidate in candidates:
+                reason = operational_result_from_code(
+                    candidate.operational_reason_code, as_of=current
+                )
+                clock = activity.get(candidate.user_id)
+                attention.append(
                     AnalyticsUserListItem(
-                        user_id=user_id,
-                        display_name=str(user.get("display_name") or ""),
-                        email=str(user.get("email") or ""),
-                        joined_at=_parse_timestamp(user["created_at"]),
-                        status=snapshot.status,
-                        reason_code=snapshot.reason_code,
-                        human_readable_reason=snapshot.human_readable_reason,
-                        last_meaningful_activity=summary.get(
-                            "last_meaningful_activity"
+                        user_id=candidate.user_id,
+                        display_name=candidate.display_name,
+                        email=candidate.email,
+                        joined_at=candidate.created_at,
+                        status=candidate.operational_state,
+                        reason_code=reason.reason_code,
+                        human_readable_reason=reason.reason,
+                        last_meaningful_activity=(
+                            clock.last_meaningful_activity_at if clock else None
                         ),
-                        recent_runs=int(summary.get("recent_runs", 0)),
-                        recent_failures=int(summary.get("recent_failures", 0)),
-                        profile_path=f"/admin/analytics/users/{user_id}",
+                        recent_runs=candidate.recent_runs,
+                        recent_failures=candidate.recent_failures,
+                        profile_path=f"/admin/analytics/users/{candidate.user_id}",
                     )
                 )
-            candidates.sort(
-                key=lambda item: (item.recent_failures, item.user_id),
-                reverse=True,
-            )
-            attention = candidates[:10]
         except Exception:
+            attention = []
             availability["attention"] = _availability(False)
 
         return AnalyticsOverview(

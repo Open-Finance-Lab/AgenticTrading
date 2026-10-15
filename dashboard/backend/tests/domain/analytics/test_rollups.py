@@ -9,6 +9,7 @@ from dashboard.backend.domain.analytics.repository import AnalyticsStore
 from dashboard.backend.domain.analytics.rollups import (
     AnalyticsRollupStore,
     DailyRollup,
+    rollup_current_day,
     rollup_lifecycle_day,
     rollup_day,
 )
@@ -298,3 +299,52 @@ def test_lifecycle_rollup_is_bounded_and_preserves_other_metrics(tmp_path):
     rebuilt = rollups.list_rollups(start=day, end=day + timedelta(days=1))
     assert any(row.metric_name == "lifecycle_transition" for row in rebuilt)
     assert any(row.metric_name == "lifecycle_segment_count" for row in rebuilt)
+
+
+def test_rollup_day_writes_distinct_activation_users_per_event(tmp_path):
+    analytics, rollups = _store(tmp_path)
+    service = AnalyticsService(analytics)
+    day = date(2026, 8, 25)
+    for index, (user_id, name, record_type) in enumerate(
+        (
+            (1, "account_signed_up", "user"),
+            (2, "account_signed_up", "user"),
+            (1, "agent_created", "agent"),
+            (1, "agent_created", "agent"),
+            (1, "backtest_completed", "run"),
+        )
+    ):
+        service.record_server_event(
+            event_name=name,
+            user_id=user_id,
+            source_event_id=f"{record_type}:{name}:{index}",
+            source_record_type=record_type,
+            source_record_id=str(index),
+            occurred_at=datetime(2026, 8, 25, 10 + index, 0, tzinfo=timezone.utc),
+        )
+
+    rollup_day(day, store=rollups)
+    stored = rollups.list_rollups(start=day, end=day + timedelta(days=1))
+
+    assert {
+        (row.event_name, row.value_count)
+        for row in stored
+        if row.metric_name == "activation_users"
+    } == {("account_signed_up", 2), ("agent_created", 1), ("backtest_completed", 1)}
+
+
+def test_rollup_current_day_reads_only_the_current_day(tmp_path):
+    analytics, rollups = _store(tmp_path)
+    windows = []
+    original = rollups.list_events
+
+    def recording(**kwargs):
+        windows.append((kwargs["start"], kwargs["end"]))
+        return original(**kwargs)
+
+    rollups.list_events = recording
+    now = datetime(2026, 8, 25, 15, 30, tzinfo=timezone.utc)
+
+    rollup_current_day(store=rollups, now=now)
+
+    assert windows == [(datetime(2026, 8, 25, tzinfo=timezone.utc), now)]

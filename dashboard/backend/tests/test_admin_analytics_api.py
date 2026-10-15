@@ -47,6 +47,7 @@ from dashboard.backend.domain.analytics.value_queries import (
     UserGroupSummary,
     ValueUserProfile,
 )
+from dashboard.backend.domain.analytics.value_repository import UserDailyFact
 from dashboard.backend.domain.user_groups import (
     DEFAULT_USER_GROUP,
     USER_GROUP_LABELS,
@@ -796,7 +797,9 @@ def test_activity_sections_page_independently_and_hide_session_ids(tmp_path):
     assert "session_id" not in str(sessions.model_dump(mode="json"))
 
 
-def test_overview_marks_only_failed_rollup_panel_unavailable(tmp_path, monkeypatch):
+def test_overview_marks_rollup_backed_panels_unavailable_when_rollups_fail(
+    tmp_path, monkeypatch
+):
     analytics, events, _rollups, _states, users = _fixture(tmp_path)
     _event(
         events,
@@ -814,17 +817,355 @@ def test_overview_marks_only_failed_rollup_panel_unavailable(tmp_path, monkeypat
 
     overview = service.get_overview(
         now=NOW,
+        filters=AnalyticsMetricFilters(start=NOW - timedelta(days=1), end=NOW),
+    )
+
+    assert overview.active_users_7d is None
+    assert overview.completed_runs is None
+    assert overview.availability["snapshot"].available is False
+    assert overview.availability["growth"].available is False
+    assert overview.availability["funnel"].available is False
+    assert overview.availability["growth"].error_code == "temporarily_unavailable"
+    # Panels that never touch rollups stay up.
+    assert overview.availability["friction"].available is True
+    assert overview.availability["attention"].available is True
+
+
+class _WindowRecordingQueryStore:
+    """Wraps AnalyticsQueryStore and records every raw-event read window."""
+
+    def __init__(self, inner):
+        self.inner = inner
+        self.windows = []
+
+    def list_metric_events(self, *, start, end, include_internal):
+        self.windows.append((start, end))
+        return self.inner.list_metric_events(
+            start=start, end=end, include_internal=include_internal
+        )
+
+    def __getattr__(self, name):
+        return getattr(self.inner, name)
+
+
+def test_overview_reads_raw_events_for_the_current_utc_day_only(tmp_path):
+    """Design §6.15 item 2: one bounded one-day scan, never the filter window."""
+
+    analytics, _events, _rollups, _states, users = _fixture(tmp_path)
+    service = AnalyticsQueryService(store=analytics, user_store=users)
+    recorder = _WindowRecordingQueryStore(service.query_store)
+    service.query_store = recorder
+
+    service.get_overview(
+        now=NOW,
+        filters=AnalyticsMetricFilters(start=NOW - timedelta(days=30), end=NOW),
+    )
+
+    assert len(recorder.windows) == 1
+    start, end = recorder.windows[0]
+    assert start == datetime.combine(NOW.date(), datetime.min.time(), tzinfo=timezone.utc)
+    assert end == NOW
+
+
+def test_overview_skips_the_raw_scan_for_a_window_that_ends_before_today(tmp_path):
+    analytics, _events, _rollups, _states, users = _fixture(tmp_path)
+    service = AnalyticsQueryService(store=analytics, user_store=users)
+    recorder = _WindowRecordingQueryStore(service.query_store)
+    service.query_store = recorder
+
+    overview = service.get_overview(
+        now=NOW,
         filters=AnalyticsMetricFilters(
-            start=NOW - timedelta(days=1),
+            start=NOW - timedelta(days=10),
+            end=datetime.combine(NOW.date(), datetime.min.time(), tzinfo=timezone.utc),
+        ),
+    )
+
+    assert recorder.windows == []
+    # Nothing to read is not a failed read.
+    assert overview.availability["growth"].available is True
+    assert overview.availability["funnel"].available is True
+
+
+def test_overview_trailing_metrics_and_funnel_come_from_rollups(tmp_path):
+    analytics, events, rollups, _states, users = _fixture(tmp_path)
+    yesterday = NOW.date() - timedelta(days=1)
+    stamp = datetime.combine(NOW.date(), datetime.min.time(), tzinfo=timezone.utc)
+
+    def rollup(metric_name, value_count, **dimensions):
+        return DailyRollup(
+            rollup_date=yesterday,
+            metric_name=metric_name,
+            value_count=value_count,
+            updated_at=stamp,
+            **dimensions,
+        )
+
+    rollups.replace_day(
+        yesterday,
+        [
+            rollup("rolling_active_users_7d", 9),
+            rollup("mature_signup_cohort_users", 4),
+            rollup("first_success_within_7d_users", 1),
+            rollup("users_with_first_success", 8),
+            rollup("users_with_repeat_success_24h_30d", 2),
+            rollup("activation_users", 5, event_name="account_signed_up"),
+            rollup("activation_users", 2, event_name="backtest_completed"),
+            rollup("affected_users", 3, error_category="provider_timeout"),
+            rollup("input_tokens", 1000),
+            rollup("output_tokens", 250),
+        ],
+    )
+    _event(
+        events,
+        "backtest_completed",
+        NOW - timedelta(minutes=2),
+        "run:backtest_completed:today",
+        outcome="succeeded",
+    )
+    _event(
+        events,
+        "backtest_failed",
+        NOW - timedelta(minutes=1),
+        "run:backtest_failed:today-fail",
+        source_record_id="today-fail",
+        outcome="failed",
+        error_category="provider_timeout",
+    )
+    service = AnalyticsQueryService(store=analytics, user_store=users)
+
+    overview = service.get_overview(
+        now=NOW,
+        filters=AnalyticsMetricFilters(
+            start=datetime.combine(yesterday, datetime.min.time(), tzinfo=timezone.utc),
             end=NOW,
         ),
     )
 
-    assert overview.active_users_7d == 1
-    assert overview.completed_runs is None
+    assert overview.active_users_7d == 9
+    assert overview.first_success_conversion == 0.25
+    assert overview.repeat_run_rate == 0.25
+    assert overview.activation_funnel == {
+        "account_signed_up": 5,
+        "credential_verified": 0,
+        "agent_created": 0,
+        "backtest_completed": 3,
+    }
+    assert [
+        (c.error_category, c.affected_users) for c in overview.top_failure_categories
+    ] == [("provider_timeout", 4)]
+    assert overview.input_tokens == 1000
+    assert overview.output_tokens == 250
     assert overview.availability["snapshot"].available is True
-    assert overview.availability["growth"].available is False
-    assert overview.availability["growth"].error_code == "temporarily_unavailable"
+    assert overview.availability["funnel"].available is True
+
+
+def test_overview_failure_categories_count_events_under_a_dimension_filter(tmp_path):
+    """``affected_users`` rows carry no provider/model, so a filtered view
+    counts the matching ``event_count`` rows instead -- events, today too."""
+
+    analytics, events, rollups, _states, users = _fixture(tmp_path)
+    yesterday = NOW.date() - timedelta(days=1)
+    stamp = datetime.combine(NOW.date(), datetime.min.time(), tzinfo=timezone.utc)
+
+    def failed_rollup(model_id, count):
+        return DailyRollup(
+            rollup_date=yesterday,
+            metric_name="event_count",
+            event_name="backtest_failed",
+            provider_id="openrouter",
+            model_id=model_id,
+            outcome="failed",
+            error_category="provider_timeout",
+            value_count=count,
+            updated_at=stamp,
+        )
+
+    rollups.replace_day(
+        yesterday,
+        [
+            failed_rollup("a", 3),
+            failed_rollup("b", 7),
+            DailyRollup(
+                rollup_date=yesterday,
+                metric_name="affected_users",
+                error_category="provider_timeout",
+                value_count=2,
+                updated_at=stamp,
+            ),
+        ],
+    )
+    for index in range(2):
+        _event(
+            events,
+            "backtest_failed",
+            NOW - timedelta(minutes=index + 1),
+            f"run:backtest_failed:today-{index}",
+            source_record_id=f"today-{index}",
+            provider_id="openrouter",
+            model_id="a",
+            outcome="failed",
+            error_category="provider_timeout",
+        )
+    service = AnalyticsQueryService(store=analytics, user_store=users)
+    start = datetime.combine(yesterday, datetime.min.time(), tzinfo=timezone.utc)
+
+    def categories(**filters):
+        overview = service.get_overview(
+            now=NOW,
+            filters=AnalyticsMetricFilters(start=start, end=NOW, **filters),
+        )
+        return [
+            (c.error_category, c.affected_users)
+            for c in overview.top_failure_categories
+        ]
+
+    # Unfiltered: distinct users -- 2 yesterday, user 1 today.
+    assert categories() == [("provider_timeout", 3)]
+    # Filtered: events -- 3 yesterday on model a, 2 today.
+    assert categories(model_id="a") == [("provider_timeout", 5)]
+
+
+def _fact(user_id, day, **overrides):
+    values = {
+        "snapshot_date": day,
+        "user_id": user_id,
+        "lifecycle_segment": "growing",
+        "lifecycle_reason_code": "growing_activated_below_core_threshold",
+        "operational_state": "healthy",
+        "operational_reason_code": "no_supported_issue",
+        "tier": "unpaid",
+        "user_group": "unknown",
+        "active": True,
+        "data_quality": "complete",
+        "calculated_at": NOW,
+    }
+    values.update(overrides)
+    return UserDailyFact(**values)
+
+
+def test_overview_state_counts_and_attention_come_from_yesterdays_facts(tmp_path):
+    """Design D20 bridge: user_state_counts maps yesterday's two axes onto the
+    old five labels; attention lists yesterday's blocked / needs-attention
+    users with their 30-day run totals and their current activity clock."""
+
+    analytics, _events, _rollups, _states, users = _fixture(tmp_path)
+    service = AnalyticsQueryService(store=analytics, user_store=users)
+    yesterday = NOW.date() - timedelta(days=1)
+    with analytics._get_connection() as conn:
+        conn.executemany(
+            "INSERT INTO users VALUES (?, ?, ?, 'x', 'user', ?)",
+            [
+                (user_id, f"u{user_id}@example.test", f"U{user_id}", NOW.isoformat())
+                for user_id in (3, 4, 5)
+            ],
+        )
+    last_seen = NOW - timedelta(days=3)
+    service.value_store.record_activity(
+        1, occurred_at=last_seen, activating=False, now=last_seen
+    )
+    service.value_store.upsert_daily_facts(
+        [
+            _fact(
+                1,
+                yesterday,
+                operational_state="needs_attention",
+                operational_reason_code="invalid_default_credential",
+                runs_requested=2,
+                runs_failed=1,
+            ),
+            # Ten days earlier, inside the 30-day window: adds to the totals.
+            _fact(1, yesterday - timedelta(days=10), runs_requested=3, runs_failed=2),
+            _fact(
+                3,
+                yesterday,
+                operational_state="blocked",
+                operational_reason_code="account_restricted",
+            ),
+            _fact(4, yesterday, lifecycle_segment="dormant",
+                  lifecycle_reason_code="dormant_previously_activated"),
+            _fact(5, yesterday, lifecycle_segment="onboarding",
+                  lifecycle_reason_code="onboarding_signed_up_not_activated"),
+            # Today's row (if one existed) is not yesterday's population.
+            _fact(5, NOW.date(), operational_state="blocked",
+                  operational_reason_code="account_restricted"),
+        ]
+    )
+
+    overview = service.get_overview(
+        now=NOW,
+        filters=AnalyticsMetricFilters(start=NOW - timedelta(days=1), end=NOW),
+    )
+
+    assert overview.user_state_counts == {
+        "needs_attention": 1,
+        "blocked": 1,
+        "dormant": 1,
+        "onboarding": 1,
+    }
+    assert [
+        (item.user_id, item.status, item.reason_code, item.recent_runs, item.recent_failures)
+        for item in overview.users_needing_attention
+    ] == [
+        (1, "needs_attention", "invalid_default_credential", 5, 3),
+        (3, "blocked", "account_restricted", 0, 0),
+    ]
+    first = overview.users_needing_attention[0]
+    assert first.human_readable_reason == "The default model credential is invalid."
+    assert first.last_meaningful_activity == last_seen
+    assert first.display_name == "One"
+    assert overview.users_needing_attention[1].last_meaningful_activity is None
+    assert overview.availability["friction"].available is True
+    assert overview.availability["attention"].available is True
+
+
+def test_overview_marks_fact_panels_unavailable_when_fact_reads_fail(tmp_path):
+    analytics, _events, _rollups, _states, users = _fixture(tmp_path)
+
+    class BrokenFacts:
+        def count_states_for_date(self, _day):
+            raise RuntimeError("private detail")
+
+        def list_attention_candidates(self, **_kwargs):
+            raise RuntimeError("private detail")
+
+    service = AnalyticsQueryService(
+        store=analytics, user_store=users, value_store=BrokenFacts()
+    )
+
+    overview = service.get_overview(
+        now=NOW,
+        filters=AnalyticsMetricFilters(start=NOW - timedelta(days=1), end=NOW),
+    )
+
+    assert overview.user_state_counts == {}
+    assert overview.users_needing_attention == []
+    assert overview.availability["friction"].available is False
+    assert overview.availability["attention"].available is False
+    assert overview.availability["growth"].available is True
+
+
+def test_query_service_builds_its_value_store_only_on_first_use(tmp_path, monkeypatch):
+    """The module-level service is built at import; an eager default would pull
+    the credits / provider / agent / run singletons onto the boot path."""
+
+    from dashboard.backend.domain.analytics import query_service as module
+
+    analytics, _events, _rollups, _states, users = _fixture(tmp_path)
+    built = []
+    real = module.build_value_analytics_store
+
+    def recording(**kwargs):
+        built.append(kwargs)
+        return real(**kwargs)
+
+    monkeypatch.setattr(module, "build_value_analytics_store", recording)
+    service = AnalyticsQueryService(store=analytics, user_store=users)
+    assert built == []
+
+    first = service.value_store
+    assert service.value_store is first
+    assert built == [{"analytics_base": analytics}]
 
 
 @pytest.fixture

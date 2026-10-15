@@ -12,7 +12,7 @@ from typing import Any, Iterable, Mapping, Sequence
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from .metrics import calculate_overview_metrics
+from .metrics import ACTIVATION_EVENTS, calculate_overview_metrics
 from .models import AnalyticsEventRecord
 from .repository import _row_to_event, analytics_store
 from .repository_common import utc_iso
@@ -457,6 +457,23 @@ def rollup_day(
                 updated_at=current,
             )
         )
+    # Distinct users per activation step per day: the overview's funnel sums
+    # these across completed days instead of rescanning the window.
+    activation_users: dict[str, set[int]] = defaultdict(set)
+    for event in day_events:
+        if event.event_name in ACTIVATION_EVENTS:
+            activation_users[event.event_name].add(event.user_id)
+    for event_name in ACTIVATION_EVENTS:
+        if activation_users[event_name]:
+            rows.append(
+                _row(
+                    day,
+                    "activation_users",
+                    count=len(activation_users[event_name]),
+                    event_name=event_name,
+                    updated_at=current,
+                )
+            )
     for status, count in sorted((state_counts or {}).items()):
         rows.append(
             _row(
@@ -490,11 +507,18 @@ def rollup_current_day(
     now: datetime | None = None,
     include_internal: bool = False,
 ):
+    """Metrics for the current UTC day from one bounded one-day scan.
+
+    Trailing-context fields (``active_users_7d``, ``first_success_conversion``,
+    ``repeat_run_rate``) are therefore computed over today's events only. The
+    overview takes that context from the rollups instead (design §6.15 item
+    2); this function no longer widens the read to supply it.
+    """
     current = now or datetime.now(timezone.utc)
     start = _day_start(current.astimezone(timezone.utc).date())
     aggregate_store = store or AnalyticsRollupStore()
     events = aggregate_store.list_events(
-        start=start - timedelta(days=30),
+        start=start,
         end=current,
         include_internal=include_internal,
     )

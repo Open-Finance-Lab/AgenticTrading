@@ -28,8 +28,11 @@ from dashboard.backend.domain.analytics.repository_common import (
 from dashboard.backend.domain.analytics.service import AnalyticsService
 from dashboard.backend.domain.analytics.states import (
     AnalyticsStateStore,
-    UserAnalyticsSnapshot,
     recalculate_user_snapshot,
+)
+from dashboard.backend.domain.analytics.value_repository import (
+    UserDailyFact,
+    build_value_analytics_store,
 )
 from dashboard.backend.users import UserStore
 
@@ -301,15 +304,35 @@ def assert_pr2_query_contract(store, user_id):
         limit=10,
         cursor=None,
     )
-    state_store.upsert_snapshot(
-        UserAnalyticsSnapshot(
-            user_id=user_id,
-            status="needs_attention",
-            reason_code="invalid_default_credential",
-            human_readable_reason="The default model credential is invalid.",
-            evidence_event_ids=[completed.event_id],
-            calculated_at=NOW,
-        )
+    value_store = build_value_analytics_store(
+        analytics_base=store,
+        credits_base=object(),
+        provider_base=object(),
+        agent_base=object(),
+        run_base=object(),
+    )
+    value_store.upsert_daily_facts(
+        [
+            UserDailyFact(
+                snapshot_date=NOW.date() - timedelta(days=1),
+                user_id=user_id,
+                lifecycle_segment="growing",
+                lifecycle_reason_code="growing_activated_below_core_threshold",
+                operational_state="needs_attention",
+                operational_reason_code="invalid_default_credential",
+                tier="unpaid",
+                user_group="unknown",
+                active=True,
+                runs_requested=2,
+                runs_completed=1,
+                runs_failed=1,
+                runs_cancelled=0,
+                operator_cost_micro=0,
+                own_spend_micro=0,
+                data_quality="complete",
+                calculated_at=NOW,
+            )
+        ]
     )
     attention_overview = service.get_overview(
         filters=AnalyticsMetricFilters(
