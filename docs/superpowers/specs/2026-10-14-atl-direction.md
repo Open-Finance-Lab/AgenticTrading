@@ -92,7 +92,7 @@ All three reports are estimates (±50%). They are not commitments.
   - No open-source engine is adopted, because adoption never pays back on this scope. This closes engine phase 1.
 - **Order of work:**
   1. Option-neutral work first:
-     - the calendar (D19);
+     - the calendar (D19; mostly shipped in #638 on 2026-10-15, leaving only the close-stamped `time_in_session`);
      - fee tables;
      - P19 Sharpe and D20;
      - corporate actions;

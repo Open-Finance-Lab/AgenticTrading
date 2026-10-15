@@ -316,7 +316,7 @@ Where the two diverge:
 
    | Item | Likely days |
    |---|---|
-   | D19 calendar | 1.6 |
+   | D19 calendar (mostly shipped in #638, 2026-10-15) | 1.6 |
    | Dated US fee tables | 1.0 |
    | P19 Sharpe, risk-free rate, and server-side Sharpe for D20 | ≈5.5 |
    | Corporate-action sourcing and back-adjusted indicators | 4.0 |
