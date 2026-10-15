@@ -168,14 +168,16 @@ def test_yahoo_chart_error_is_a_request_exception():
 # The fixtures are real ^DJI and ^GSPC responses to the request
 # fetch_index_hourly sends (period1 = the day's 00:00Z, period2 = +1 day,
 # interval=1h), recorded 2026-10-15 and trimmed to ``meta``'s relevant fields
-# and the closes (Yahoo serves 1h data for the last 730 days only). The
-# trailing 2026-10-14T20:00Z point is Yahoo appending the latest close to every
-# hourly response, which the window filter drops. On 2025-11-28 (13:00 close)
-# the 12:30 half bar comes back null and the closing level, 47,716.42, arrives
-# stamped 13:00 (18:00Z); the full session of 2025-11-26 has no such point. The
-# same shape was recorded for ^DJI and ^GSPC on every NYSE early close from
-# 2024-11-29 to 2025-12-24, and Yahoo's own ``tradingPeriods`` gives
-# 2025-11-28 a 14:30Z-18:00Z regular session.
+# and the closes (Yahoo serves 1h data for the last 730 days only, so the
+# 2024 ones could not be recorded after late 2026). The trailing
+# 2026-10-14T20:00Z point is Yahoo appending the latest close to every hourly
+# response; the window filter drops it unless the window reaches the latest
+# session. On 2025-11-28 (13:00 close) the 12:30 half bar comes back null and
+# the closing level, 47,716.42, arrives stamped 13:00 (18:00Z); the full
+# session of 2025-11-26 has no such point. Every NYSE early close from
+# 2024-11-29 to 2025-12-24 has that shape on both indices (all five are
+# pinned below), and Yahoo's own ``tradingPeriods`` gives 2025-11-28 a
+# 14:30Z-18:00Z regular session.
 
 _FIXTURES = Path(__file__).parent / "fixtures"
 _NEW_YORK = ZoneInfo("America/New_York")
@@ -200,21 +202,25 @@ def test_an_early_close_level_lands_in_the_last_half_bar(monkeypatch):
     ]
 
 
-@pytest.mark.parametrize(
-    ("fixture", "symbol", "day", "official_close"),
-    [
-        ("yahoo-chart-dji-1h-2025-11-28.json", "^DJI", "2025-11-28", 47716.421875),
-        ("yahoo-chart-gspc-1h-2025-11-28.json", "^GSPC", "2025-11-28", 6849.08984375),
-        ("yahoo-chart-dji-1h-2025-12-24.json", "^DJI", "2025-12-24", 48731.16015625),
-        ("yahoo-chart-gspc-1h-2025-12-24.json", "^GSPC", "2025-12-24", 6932.0498046875),
-    ],
-)
-def test_each_recorded_early_close_ends_on_the_official_close(
-    monkeypatch, fixture, symbol, day, official_close
-):
-    """Each level is that day's published close, equal to Yahoo's own daily
-    bar: 47,716.42 and 6,849.09 on 2025-11-28, 48,731.16 and 6,932.05 on
-    2025-12-24."""
+#: Each early close's published close, equal to Yahoo's own daily bar.
+_OFFICIAL_CLOSES = {
+    ("^DJI", "2024-11-29"): 44910.6484375,
+    ("^GSPC", "2024-11-29"): 6032.3798828125,
+    ("^DJI", "2024-12-24"): 43297.03125,
+    ("^GSPC", "2024-12-24"): 6040.0400390625,
+    ("^DJI", "2025-07-03"): 44828.53125,
+    ("^GSPC", "2025-07-03"): 6279.35009765625,
+    ("^DJI", "2025-11-28"): 47716.421875,
+    ("^GSPC", "2025-11-28"): 6849.08984375,
+    ("^DJI", "2025-12-24"): 48731.16015625,
+    ("^GSPC", "2025-12-24"): 6932.0498046875,
+}
+
+
+@pytest.mark.parametrize(("symbol", "day"), sorted(_OFFICIAL_CLOSES))
+def test_each_recorded_early_close_ends_on_the_official_close(monkeypatch, symbol, day):
+    fixture = f"yahoo-chart-{symbol[1:].lower()}-1h-{day}.json"
+    official_close = _OFFICIAL_CLOSES[(symbol, day)]
     _stub_response(monkeypatch, _recorded(fixture))
     points = fetch_index_hourly(symbol, day, day)
     assert [clock for clock, _value in _clock(points)] == [

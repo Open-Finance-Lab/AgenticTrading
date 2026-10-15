@@ -1,0 +1,37 @@
+{
+  "chart": {
+    "result": [
+      {
+        "meta": {
+          "symbol": "^DJI",
+          "exchangeTimezoneName": "America/New_York",
+          "instrumentType": "INDEX",
+          "dataGranularity": "1h"
+        },
+        "timestamp": [
+          1751549400,
+          1751553000,
+          1751556600,
+          1751560200,
+          1751562000,
+          1792008000
+        ],
+        "indicators": {
+          "quote": [
+            {
+              "close": [
+                44789.75,
+                44807.26953125,
+                44823.48828125,
+                null,
+                44828.53125,
+                51621.48046875
+              ]
+            }
+          ]
+        }
+      }
+    ],
+    "error": null
+  }
+}

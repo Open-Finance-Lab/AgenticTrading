@@ -17,6 +17,11 @@ library zipline's descendants use; it is not a dependency. For 2004-2025 it is
 sessions that already happened; for 2026-2035 it is a second, independent
 implementation of the same rules, so it catches a slip in ours rather than a
 change in NYSE's policy. That only NYSE's next release can show.
+
+A third calendar agrees too: QuantConnect LEAN's market-hours database
+(``Equity-usa``) matches every early close and holiday here for 2004-2028
+(diffed 2026-10-15). It is not the pin because it carries a Sunday early
+close, 2017-12-24.
 """
 
 from datetime import date, time, timedelta
