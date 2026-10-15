@@ -12,9 +12,10 @@ The board is where a weekday-only calendar first broke: a holiday became a
 freeze day whose one-day increment had no bars and failed every model, and it
 padded "Day N of M" and the chart axis with a session that never trades.
 
-Covers the ten NYSE holidays in force since 2022 (Juneteenth added that year)
-and the recurring 13:00 ET early closes (``nyse_early_closes``). An early close
-is still a trading day. The hour it ends at is a session bound, so it lives
+Covers the ten NYSE holidays in force since 2022 (Juneteenth added that year),
+the dated unscheduled closures since 2004 (``UNSCHEDULED_CLOSURES``) and the
+recurring 13:00 ET early closes (``nyse_early_closes``). An early close is
+still a trading day. The hour it ends at is a session bound, so it lives
 with the other bounds in ``sessions.py`` (``session_close_time``).
 """
 
@@ -61,8 +62,27 @@ def _observed(day: date) -> date:
     return day
 
 
+#: Full-day closures NYSE called at short notice, which no rule reproduces:
+#: national days of mourning and Hurricane Sandy. Dated data beside the rules,
+#: the split exchange_calendars makes (``adhoc_holidays`` in its XNYS
+#: calendar, where these come from). The next one is a one-line addition; until
+#: it lands, the Live board's session-gap check (``live._session_gap``) fails
+#: that night's refresh loudly rather than trading a closed day.
+UNSCHEDULED_CLOSURES: FrozenSet[date] = frozenset({
+    date(2004, 6, 11),   # President Reagan
+    date(2007, 1, 2),    # President Ford
+    date(2012, 10, 29),  # Hurricane Sandy
+    date(2012, 10, 30),  # Hurricane Sandy
+    date(2018, 12, 5),   # President G. H. W. Bush
+    date(2025, 1, 9),    # President Carter
+})
+
+
 @lru_cache(maxsize=16)
 def nyse_holidays(year: int) -> FrozenSet[date]:
+    """NYSE's full-day closures in ``year``: the rule-based holidays plus any
+    :data:`UNSCHEDULED_CLOSURES`. Matches every year 2004-2035 of
+    exchange_calendars' XNYS sessions (the test module pins the count)."""
     days = {
         _nth_weekday(year, 1, 0, 3),   # Martin Luther King Jr. Day
         _nth_weekday(year, 2, 0, 3),   # Washington's Birthday
@@ -80,6 +100,7 @@ def nyse_holidays(year: int) -> FrozenSet[date]:
         days.add(_observed(new_year))
     if year >= 2022:
         days.add(_observed(date(year, 6, 19)))  # Juneteenth
+    days.update(day for day in UNSCHEDULED_CLOSURES if day.year == year)
     return frozenset(days)
 
 
@@ -103,9 +124,10 @@ def nyse_early_closes(year: int) -> FrozenSet[date]:
     calendars and every year 2004-2035 of exchange_calendars' XNYS calendar
     (the test module pins both). Earlier years followed other rules: a Thursday
     July 4 put the half day on Friday July 5 (1996, 2002), and 1997-12-26,
-    1999-12-31 and 2003-12-26 were one-off half days. An unscheduled closure is
-    not predictable by rule, and the Live board's session-gap check stays the
-    backstop for one.
+    1999-12-31 and 2003-12-26 were one-off half days. NYSE has called no
+    unscheduled early close since 2004; if it does, the date needs adding by
+    hand, and nothing catches its absence: Alpaca still serves bars after an
+    early close, so the session-gap check sees a normal day.
     """
     candidates = {_nth_weekday(year, 11, 3, 4) + timedelta(days=1)}
     christmas_eve = date(year, 12, 24)

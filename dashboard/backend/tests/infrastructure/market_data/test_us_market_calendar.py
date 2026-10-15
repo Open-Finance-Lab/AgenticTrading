@@ -16,12 +16,13 @@ implementation of the same rules, so it catches a slip in ours rather than a
 change in NYSE's policy. That only NYSE's next release can show.
 """
 
-from datetime import date, time
+from datetime import date, time, timedelta
 
 import pytest
 
 from dashboard.backend.infrastructure.market_data import sessions
 from dashboard.backend.infrastructure.market_data.us_market_calendar import (
+    UNSCHEDULED_CLOSURES,
     is_early_close,
     is_trading_day,
     nyse_early_closes,
@@ -84,6 +85,40 @@ def test_early_closes_match_exchange_calendars_xnys(year):
     assert sorted(d.strftime("%m-%d") for d in nyse_early_closes(year)) == (
         XNYS_EARLY_CLOSES[year]
     )
+
+
+#: Sessions per year in exchange_calendars 4.13.2's XNYS calendar, generated
+#: the same way as ``XNYS_EARLY_CLOSES``. A count catches a missing or extra
+#: closure anywhere in the year without pinning ~8,000 dates.
+XNYS_SESSIONS_PER_YEAR = {
+    2004: 252, 2005: 252, 2006: 251, 2007: 251, 2008: 253, 2009: 252,
+    2010: 252, 2011: 252, 2012: 250, 2013: 252, 2014: 252, 2015: 252,
+    2016: 252, 2017: 251, 2018: 251, 2019: 252, 2020: 253, 2021: 252,
+    2022: 251, 2023: 250, 2024: 252, 2025: 250, 2026: 251, 2027: 251,
+    2028: 251, 2029: 251, 2030: 251, 2031: 251, 2032: 252, 2033: 251,
+    2034: 250, 2035: 251,
+}
+
+
+@pytest.mark.parametrize("year", sorted(XNYS_SESSIONS_PER_YEAR))
+def test_sessions_per_year_match_exchange_calendars_xnys(year):
+    day, sessions_in_year = date(year, 1, 1), 0
+    while day.year == year:
+        sessions_in_year += is_trading_day(day)
+        day += timedelta(days=1)
+    assert sessions_in_year == XNYS_SESSIONS_PER_YEAR[year]
+
+
+def test_unscheduled_closures_are_not_trading_days():
+    """No rule reproduces these. 2025-01-09 (President Carter's national day of
+    mourning) is the one a current backtest window can reach."""
+    assert date(2025, 1, 9) in UNSCHEDULED_CLOSURES
+    for day in UNSCHEDULED_CLOSURES:
+        assert day.weekday() < 5, day
+        assert day in nyse_holidays(day.year)
+        assert not is_trading_day(day)
+    assert is_trading_day(date(2025, 1, 8))
+    assert is_trading_day(date(2025, 1, 10))
 
 
 def test_a_holiday_or_weekend_is_never_an_early_close():
