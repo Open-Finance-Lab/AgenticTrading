@@ -14,7 +14,7 @@ from .lifecycle import (
     LifecycleSegment,
     OperationalResult,
     OperationalState,
-    is_lifecycle_activity,
+    activation_cohort_week,
 )
 from .metrics import AnalyticsMetricFilters
 from .query_service import (
@@ -28,7 +28,6 @@ from .repository_common import positive_limit, positive_user_id
 from .usage_cost import atl_cost_micro
 from .value_repository import (
     CommercialValueFact,
-    UserLifecycleDailySnapshot,
     UserValueSnapshot,
     build_value_analytics_store,
 )
@@ -621,24 +620,6 @@ class ValueAnalyticsQueryService:
             ],
         )
 
-    def _daily(
-        self,
-        user_ids: Sequence[int],
-        *,
-        start: date,
-        end: date,
-    ) -> list[UserLifecycleDailySnapshot]:
-        rows: list[UserLifecycleDailySnapshot] = []
-        for offset in range(0, len(user_ids), 500):
-            rows.extend(
-                self.value_store.list_daily_snapshots(
-                    start=start,
-                    end=end,
-                    user_ids=user_ids[offset : offset + 500],
-                )
-            )
-        return rows
-
     def _history(
         self,
         *,
@@ -874,27 +855,6 @@ class ValueAnalyticsQueryService:
             availability=availability,
         )
 
-    def _retention_quality(
-        self,
-        rows: Sequence[UserLifecycleDailySnapshot],
-        *,
-        user_ids: Sequence[int],
-        start: date,
-        end: date,
-    ) -> Literal["complete", "partial"]:
-        selected = [row for row in rows if start <= row.snapshot_date < end]
-        expected = {
-            (user_id, start + timedelta(days=offset))
-            for user_id in user_ids
-            for offset in range((end - start).days)
-        }
-        observed = {(row.user_id, row.snapshot_date) for row in selected}
-        if expected - observed or any(
-            row.data_quality == "partial" for row in selected
-        ):
-            return "partial"
-        return "complete"
-
     @staticmethod
     def _summary_cell(
         week: Literal[1, 2, 4],
@@ -926,52 +886,53 @@ class ValueAnalyticsQueryService:
     ) -> RetentionAnalyticsResponse:
         start, end = _validate_dates(start, end)
         current_time = _utc(now or datetime.now(UTC), "now")
-        users = self._eligible_users(include_internal=include_internal)
-        current = self._current(users)
         cohort_start = _week_start(start)
+        # Every Monday below ``end`` is a cohort week, so the last one is the
+        # Monday of the window's final day; its members activated before the
+        # next Monday.
+        activations = self.value_store.list_activations(
+            start=_day_start(cohort_start),
+            end=_day_start(_week_start(end - timedelta(days=1)) + timedelta(days=7)),
+            include_internal=include_internal,
+        )
         cohort_users: dict[date, list[int]] = defaultdict(list)
-        for user_id, snapshot in current.items():
-            if snapshot.activated_at is None:
-                continue
-            week = _week_start(snapshot.activated_at.date())
+        for user_id, activated_at in activations.items():
+            week = activation_cohort_week(activated_at)
             if cohort_start <= week < end:
                 cohort_users[week].append(user_id)
         ids = sorted(
-            {user_id for values in cohort_users.values() for user_id in values}
+            {user_id for members in cohort_users.values() for user_id in members}
         )
-        activity_by_user: dict[int, list[datetime]] = defaultdict(list)
-        if ids:
-            activity_end = min(_day_start(end + timedelta(days=35)), current_time)
-            events = self.query_store.rollups.list_events(
-                start=_day_start(cohort_start),
-                end=activity_end + timedelta(microseconds=1),
-                include_internal=True,
-            )
-            id_set = set(ids)
-            for event in events:
-                if event.user_id in id_set and is_lifecycle_activity(event):
-                    activity_by_user[event.user_id].append(event.occurred_at)
-            for offset in range(0, len(ids), 500):
-                chunk = ids[offset : offset + 500]
-                credit_activity = self.value_store.list_credit_activity(
-                    chunk,
-                    start=_day_start(cohort_start),
-                    end=activity_end + timedelta(microseconds=1),
-                )
-                for user_id, timestamps in credit_activity.items():
-                    activity_by_user[user_id].extend(timestamps)
-        daily_end = min(
+        grid_end = min(
             end + timedelta(days=35), current_time.date() + timedelta(days=1)
         )
-        daily = (
-            self._daily(
-                ids,
-                start=cohort_start,
-                end=daily_end,
-            )
-            if ids
-            else []
-        )
+        active_dates: dict[int, list[date]] = {}
+        day_quality: dict[date, str] = {}
+        if ids:
+            for offset in range(0, len(ids), 500):
+                active_dates.update(
+                    self.value_store.list_active_dates(
+                        ids[offset : offset + 500], start=cohort_start, end=grid_end
+                    )
+                )
+            # A day is trustworthy only when it has fact rows and none is partial.
+            for row in self.value_store.count_segments_by_date(
+                start=cohort_start, end=grid_end
+            ):
+                if row.partial_rows:
+                    day_quality[row.snapshot_date] = "partial"
+                else:
+                    day_quality.setdefault(row.snapshot_date, "complete")
+
+        def week_quality(
+            target_start: date, target_end: date
+        ) -> Literal["complete", "partial"]:
+            day = target_start
+            while day < target_end:
+                if day_quality.get(day) != "complete":
+                    return "partial"
+                day += timedelta(days=1)
+            return "complete"
 
         cohorts: list[RetentionCohort] = []
         all_cells: dict[int, list[RetentionCell]] = {1: [], 2: [], 4: []}
@@ -981,12 +942,6 @@ class ValueAnalyticsQueryService:
                 target_start = cohort_week + timedelta(days=week * 7)
                 target_end = target_start + timedelta(days=7)
                 mature = current_time >= _day_start(target_end)
-                quality = self._retention_quality(
-                    daily,
-                    user_ids=members,
-                    start=target_start,
-                    end=target_end,
-                )
                 retained = None
                 eligible = None
                 rate = None
@@ -994,10 +949,8 @@ class ValueAnalyticsQueryService:
                     eligible = len(members)
                     retained = sum(
                         any(
-                            _day_start(target_start)
-                            <= timestamp
-                            < _day_start(target_end)
-                            for timestamp in activity_by_user.get(user_id, ())
+                            target_start <= day < target_end
+                            for day in active_dates.get(user_id, ())
                         )
                         for user_id in members
                     )
@@ -1008,7 +961,7 @@ class ValueAnalyticsQueryService:
                     retained_users=retained,
                     eligible_users=eligible,
                     rate=rate,
-                    data_quality=quality,
+                    data_quality=week_quality(target_start, target_end),
                 )
                 cells[week] = cell
                 all_cells[week].append(cell)
@@ -1034,12 +987,8 @@ class ValueAnalyticsQueryService:
             summary_week_2=self._summary_cell(2, all_cells[2]),
             summary_week_4=self._summary_cell(4, all_cells[4]),
             availability=SectionAvailability(
-                available=bool(current) or not users,
-                status=(
-                    "partial"
-                    if partial
-                    else "ready" if len(current) == len(users) else "building"
-                ),
+                available=True,
+                status="partial" if partial else "ready",
                 coverage_start=cohort_start if cohorts else None,
                 coverage_end=end - timedelta(days=1) if cohorts else None,
             ),

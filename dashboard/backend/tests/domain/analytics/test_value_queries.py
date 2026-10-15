@@ -27,7 +27,6 @@ from dashboard.backend.domain.analytics.value_repository import (
     TransitionCount,
     UserActivity,
     UserDailyFact,
-    UserLifecycleDailySnapshot,
     UserValueSnapshot,
 )
 
@@ -99,22 +98,6 @@ def _commercial(
     )
 
 
-def _daily(
-    user_id: int,
-    day: date,
-    lifecycle: str = "core",
-    quality: str = "complete",
-) -> UserLifecycleDailySnapshot:
-    return UserLifecycleDailySnapshot(
-        snapshot_date=day,
-        user_id=user_id,
-        lifecycle_segment=lifecycle,
-        lifecycle_reason_code=f"{lifecycle}_synthetic_reason",
-        data_quality=quality,
-        calculated_at=NOW,
-    )
-
-
 def _fact(user_id: int, day: date, **overrides) -> UserDailyFact:
     values = dict(
         snapshot_date=day,
@@ -174,7 +157,7 @@ class FakeBaseStore:
 class FakeValueStore:
     """Fact-backed fake: answers every fact/activity read from in-memory rows.
 
-    ``snapshots``/``daily`` back the snapshot reads the routes not yet moved
+    ``snapshots`` backs the snapshot reads the routes not yet moved
     onto facts still make; each goes with the task that moves its route.
     """
 
@@ -188,10 +171,8 @@ class FakeValueStore:
         page_rows=(),
         operational_facts=None,
         internal_ids=(),
-        credit_activity=None,
         ledger_days=(),
         snapshots=None,
-        daily=(),
     ):
         self.facts = list(facts)
         self.transitions = list(transitions)
@@ -201,13 +182,10 @@ class FakeValueStore:
         self.operational_facts = dict(operational_facts or {})
         # UserActivity is frozen and carries no role, so "internal" is a set of ids.
         self.internal_ids = set(internal_ids)
-        self.credit_activity = dict(credit_activity or {})
         # user_id -> [LedgerDayTotal]; None stands for an unconfigured reader.
         self.ledger_days = None if ledger_days is None else dict(ledger_days)
         self.snapshots = dict(snapshots or {})
-        self.daily = list(daily)
         self.commercial_windows = []
-        self.daily_windows = []
         self.ledger_calls = []
         self.page_calls = []
         self.recent_windows = []
@@ -389,16 +367,6 @@ class FakeValueStore:
     def get_current_snapshot(self, user_id):
         return self.snapshots.get(user_id)
 
-    def list_daily_snapshots(self, *, start, end, user_ids=None):
-        self.daily_windows.append((start, end))
-        selected = None if user_ids is None else set(user_ids)
-        return [
-            row
-            for row in self.daily
-            if start <= row.snapshot_date < end
-            and (selected is None or row.user_id in selected)
-        ]
-
     # -- commercial and ledger --
     def list_commercial_values(self, user_ids, *, start, end):
         self.commercial_windows.append((start, end))
@@ -418,16 +386,6 @@ class FakeValueStore:
             for row in self.ledger_days.get(user_id, ())
             if start.date() <= row.day < end.date()
         ]
-
-    def list_credit_activity(self, user_ids, *, start, end):
-        return {
-            user_id: tuple(
-                value
-                for value in self.credit_activity.get(user_id, ())
-                if start <= value < end
-            )
-            for user_id in user_ids
-        }
 
 
 class FakeRollups:
@@ -532,7 +490,6 @@ def _service(
     # defaults to the snapshot ids grouped by ``user_groups``, and raw events
     # stay readable. Without ``snapshots`` a raw-event read fails the test.
     snapshots=None,
-    daily=(),
     events=None,
     user_groups=None,
 ):
@@ -555,7 +512,6 @@ def _service(
         internal_ids=internal_ids,
         ledger_days=ledger_days,
         snapshots=snapshots,
-        daily=daily,
     )
     legacy_service = FakeLegacyService(legacy_availability)
     service = ValueAnalyticsQueryService(
@@ -590,77 +546,118 @@ def _metric_event(
     )
 
 
-def test_retention_uses_nulls_for_immature_cells_and_weighted_mature_summary():
-    first_week = date(2026, 7, 6)
-    second_week = date(2026, 7, 13)
-    immature_week = date(2026, 8, 24)
-    snapshots = {
-        1: _snapshot(1, activated_at=datetime(2026, 7, 6, 10, tzinfo=UTC)),
-        2: _snapshot(2, activated_at=datetime(2026, 7, 7, 10, tzinfo=UTC)),
-        3: _snapshot(3, activated_at=datetime(2026, 7, 13, 10, tzinfo=UTC)),
-        4: _snapshot(4, activated_at=datetime(2026, 8, 24, 10, tzinfo=UTC)),
+def _retention_service():
+    # Cohort week Monday 2026-08-03: users 1 and 2 activated that week; user 3 in the next.
+    activity = {
+        1: _activity(1, activated_days_ago=(NOW.date() - date(2026, 8, 4)).days),
+        2: _activity(2, activated_days_ago=(NOW.date() - date(2026, 8, 7)).days),
+        3: _activity(3, activated_days_ago=(NOW.date() - date(2026, 8, 12)).days),
+        9: _activity(9, activated_days_ago=(NOW.date() - date(2026, 8, 5)).days),
     }
-    daily = []
-    for cohort, members in ((first_week, (1, 2)), (second_week, (3,))):
-        for target_week in (1, 2, 4):
-            target_start = cohort + timedelta(days=target_week * 7)
-            daily.extend(
-                _daily(user_id, target_start + timedelta(days=day))
-                for user_id in members
-                for day in range(7)
-            )
-    events = [
-        _metric_event(1, "agent_updated", datetime(2026, 7, 14, 10, tzinfo=UTC)),
-        _metric_event(3, "agent_updated", datetime(2026, 7, 21, 10, tzinfo=UTC)),
+    facts = []
+    # Every day from the cohort start through the latest ``now`` the tests use
+    # has at least one row, so no week is partial for lack of data.
+    day = date(2026, 8, 3)
+    while day <= RETENTION_LAST_FACT_DAY:
+        facts.append(_fact(3, day, active=False, runs_completed=0))
+        day += timedelta(days=1)
+    # Week 1 (2026-08-10..16): user 1 active, user 2 not. Week 2 (08-17..23): both.
+    # Week 4 (08-31..09-06): user 2 only.
+    facts += [
+        _fact(1, date(2026, 8, 11)),
+        _fact(1, date(2026, 8, 18)),
+        _fact(2, date(2026, 8, 20)),
+        _fact(2, date(2026, 9, 1)),
     ]
-    service, _value_store, _legacy = _service(
-        snapshots=snapshots,
-        daily=daily,
-        events=events,
+    return _service(
+        facts=facts,
+        activity=activity,
+        internal_ids={9},
+        users=((1, "organic"), (2, "organic"), (3, "organic"), (9, "internal")),
+    )[0]
+
+
+# Week 4 of the 2026-08-03 cohort ends 2026-09-07, so it is mature from 09-07 on.
+RETENTION_NOW = datetime(2026, 9, 10, 12, 0, tzinfo=UTC)
+RETENTION_LAST_FACT_DAY = RETENTION_NOW.date() - timedelta(days=1)
+
+
+def test_retention_cells_come_from_activation_weeks_and_active_fact_days():
+    service = _retention_service()
+
+    response = service.get_retention(
+        start=date(2026, 8, 1), end=date(2026, 8, 20), now=RETENTION_NOW
+    )
+
+    first = next(c for c in response.cohorts if c.cohort_week == date(2026, 8, 3))
+    assert first.activated_users == 2  # user 9 is internal
+    assert (first.week_1.retained_users, first.week_1.eligible_users, first.week_1.rate) == (1, 2, 0.5)
+    assert (first.week_2.retained_users, first.week_2.eligible_users) == (2, 2)
+    assert (first.week_4.retained_users, first.week_4.eligible_users, first.week_4.rate) == (1, 2, 0.5)
+    second = next(c for c in response.cohorts if c.cohort_week == date(2026, 8, 10))
+    assert second.activated_users == 1
+    assert second.week_1.retained_users == 0
+    assert response.summary_week_1.rate == 1 / 3
+    assert response.availability.status == "ready"
+
+
+def test_retention_cohort_membership_covers_the_window_end_week():
+    # end falls mid-week: the 08-17 cohort starts before it and must still be read.
+    service = _retention_service()
+    service.value_store.activity[4] = _activity(
+        4, activated_days_ago=(NOW.date() - date(2026, 8, 23)).days
     )
 
     response = service.get_retention(
-        start=date(2026, 7, 1),
-        end=date(2026, 9, 1),
-        now=NOW,
+        start=date(2026, 8, 1), end=date(2026, 8, 19), now=RETENTION_NOW
     )
 
-    assert response.summary_week_1.mature is True
-    assert response.summary_week_1.retained_users == 2
-    assert response.summary_week_1.eligible_users == 3
-    assert response.summary_week_1.rate == pytest.approx(2 / 3)
-    immature = next(
-        cohort for cohort in response.cohorts if cohort.cohort_week == immature_week
-    )
-    assert immature.week_1.mature is False
-    assert immature.week_1.retained_users is None
-    assert immature.week_1.eligible_users is None
-    assert immature.week_1.rate is None
+    assert [c.cohort_week for c in response.cohorts] == [
+        date(2026, 8, 3),
+        date(2026, 8, 10),
+        date(2026, 8, 17),
+    ]
+    assert response.cohorts[-1].activated_users == 1
 
 
-def test_missing_or_partial_retention_history_propagates_partial_quality():
-    cohort = date(2026, 7, 6)
-    snapshots = {
-        1: _snapshot(1, activated_at=datetime(2026, 7, 6, 10, tzinfo=UTC)),
-        2: _snapshot(2, activated_at=datetime(2026, 7, 7, 10, tzinfo=UTC)),
-    }
-    target_start = cohort + timedelta(days=7)
-    daily = [_daily(1, target_start + timedelta(days=day)) for day in range(7)]
-    daily.extend(
-        _daily(2, target_start + timedelta(days=day), quality="partial")
-        for day in range(6)
+def test_retention_marks_immature_weeks_unavailable_not_zero():
+    service = _retention_service()
+    now = datetime(2026, 8, 25, 12, 0, tzinfo=UTC)
+
+    response = service.get_retention(start=date(2026, 8, 1), end=date(2026, 8, 20), now=now)
+
+    first = next(c for c in response.cohorts if c.cohort_week == date(2026, 8, 3))
+    assert first.week_2.mature is True
+    assert first.week_4.mature is False
+    assert first.week_4.retained_users is None and first.week_4.rate is None
+    assert response.summary_week_4.mature is False
+
+
+def test_retention_week_with_a_missing_or_partial_fact_day_is_partial():
+    service = _retention_service()
+    service.value_store.facts = [
+        row for row in service.value_store.facts if row.snapshot_date != date(2026, 8, 12)
+    ]
+    service.value_store.facts.append(
+        _fact(3, date(2026, 8, 19), active=False, data_quality="partial")
     )
-    service, _value_store, _legacy = _service(snapshots=snapshots, daily=daily)
 
     response = service.get_retention(
-        start=date(2026, 7, 1),
-        end=date(2026, 7, 20),
-        now=NOW,
+        start=date(2026, 8, 1), end=date(2026, 8, 20), now=RETENTION_NOW
     )
 
-    assert response.cohorts[0].week_1.data_quality == "partial"
-    assert response.summary_week_1.data_quality == "partial"
+    first = next(c for c in response.cohorts if c.cohort_week == date(2026, 8, 3))
+    assert first.week_1.data_quality == "partial"  # 08-12 has no rows
+    assert first.week_2.data_quality == "partial"  # 08-19 carries a partial row
+    assert first.week_4.data_quality == "complete"
     assert response.availability.status == "partial"
+
+
+def test_retention_reads_no_raw_events():
+    # FakeRollups.list_events raises; a passing call proves no raw read happened.
+    _retention_service().get_retention(
+        start=date(2026, 8, 1), end=date(2026, 8, 20), now=RETENTION_NOW
+    )
 
 
 def test_priority_order_is_group_value_inactivity_then_user_id():
