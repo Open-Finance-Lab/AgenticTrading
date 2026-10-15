@@ -16,6 +16,7 @@ from dashboard.backend.domain.analytics.value_repository import (
     MAX_USER_BATCH,
     LifecycleTransitionRow,
     UserDailyFact,
+    UserPageQuery,
     ValueAnalyticsStore,
 )
 from dashboard.backend.users import UserStore
@@ -227,6 +228,108 @@ def assert_fact_read_contract(store, ids: dict[str, int]) -> None:
     assert store.list_transitions_for_date(two_days_ago) == []
 
 
+def _page_query(**overrides) -> UserPageQuery:
+    values = dict(
+        q=None,
+        lifecycle_segment=None,
+        operational_state=None,
+        commercial_tier=None,
+        user_group=None,
+        activated=None,
+        last_meaningful_activity_from=None,
+        last_meaningful_activity_to=None,
+        priority=False,
+        legacy_status=None,
+        include_internal=False,
+    )
+    values.update(overrides)
+    return UserPageQuery(**values)
+
+
+def assert_users_page_contract(store, ids: dict[str, int]) -> None:
+    rows, total = store.list_users_page(
+        query=_page_query(), day=YESTERDAY, limit=100, offset=0
+    )
+    assert total == 5
+    assert [row.user_id for row in rows] == sorted(
+        ids[key] for key in ("blocked", "attention", "core", "dormant", "fresh")
+    )
+    fresh = next(row for row in rows if row.user_id == ids["fresh"])
+    assert fresh.lifecycle_segment is None
+    assert fresh.operational_state == "healthy"
+    assert fresh.tier == "unpaid"
+    assert fresh.activated_at is None
+
+    rows, total = store.list_users_page(
+        query=_page_query(include_internal=True), day=YESTERDAY, limit=100, offset=0
+    )
+    assert total == 6
+    assert ids["admin"] in {row.user_id for row in rows}
+
+    rows, total = store.list_users_page(
+        query=_page_query(), day=YESTERDAY, limit=2, offset=2
+    )
+    assert total == 5
+    assert len(rows) == 2
+
+    rows, _total = store.list_users_page(
+        query=_page_query(priority=True), day=YESTERDAY, limit=100, offset=0
+    )
+    assert [row.user_id for row in rows] == [ids["blocked"], ids["attention"]]
+
+    rows, total = store.list_users_page(
+        query=_page_query(user_group="partner", commercial_tier="starter"),
+        day=YESTERDAY, limit=100, offset=0,
+    )
+    assert total == 1 and rows[0].user_id == ids["attention"]
+
+    rows, total = store.list_users_page(
+        query=_page_query(operational_state="blocked"), day=YESTERDAY, limit=100, offset=0
+    )
+    assert [row.user_id for row in rows] == [ids["blocked"]]
+    assert rows[0].operational_reason_code == "billing_lane_unavailable"
+
+    rows, total = store.list_users_page(
+        query=_page_query(lifecycle_segment="core"), day=YESTERDAY, limit=100, offset=0
+    )
+    assert [row.user_id for row in rows] == [ids["core"]]
+
+    rows, total = store.list_users_page(
+        query=_page_query(activated=False), day=YESTERDAY, limit=100, offset=0
+    )
+    assert {row.user_id for row in rows} == {ids["dormant"], ids["fresh"]}
+
+    rows, total = store.list_users_page(
+        query=_page_query(
+            last_meaningful_activity_from=NOW - timedelta(days=2),
+            last_meaningful_activity_to=NOW,
+        ),
+        day=YESTERDAY, limit=100, offset=0,
+    )
+    assert {row.user_id for row in rows} == {ids["core"], ids["attention"]}
+
+    rows, total = store.list_users_page(
+        query=_page_query(q="ATTEN"), day=YESTERDAY, limit=100, offset=0
+    )
+    assert [row.user_id for row in rows] == [ids["attention"]]
+    rows, total = store.list_users_page(
+        query=_page_query(q="%"), day=YESTERDAY, limit=100, offset=0
+    )
+    assert total == 0  # escaped: no literal percent sign in any email or name
+
+    for legacy, expected in (
+        ("blocked", {ids["blocked"]}),
+        ("needs_attention", {ids["attention"]}),
+        ("dormant", {ids["dormant"]}),
+        ("active", {ids["core"]}),
+        ("onboarding", set()),
+    ):
+        rows, _total = store.list_users_page(
+            query=_page_query(legacy_status=legacy), day=YESTERDAY, limit=100, offset=0
+        )
+        assert {row.user_id for row in rows} == expected, legacy
+
+
 def _sqlite_fixture(tmp_path):
     db_path = tmp_path / "fact-reads.db"
     users = UserStore(db_path=db_path)
@@ -328,3 +431,9 @@ def test_fact_reads_reject_malformed_windows(tmp_path):
         store.list_user_transitions(0, start=YESTERDAY, end=YESTERDAY + timedelta(days=1))
     with pytest.raises(ValueError):
         store.list_transitions_for_date("2026-09-14")
+
+
+def test_sqlite_users_page_follows_the_contract(tmp_path):
+    store, users, admin_id = _sqlite_fixture(tmp_path)
+    ids = seed_population(store, _sqlite_user_factory(users), admin_id=admin_id)
+    assert_users_page_contract(store, ids)

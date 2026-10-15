@@ -19,6 +19,7 @@ branch was never about which twin this class is -- a caller can pair either
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Literal, Mapping, Sequence
 
@@ -660,6 +661,42 @@ class GroupFactTotals(BaseModel):
     repeat_users: int = Field(default=0, ge=0)
 
 
+@dataclass(frozen=True)
+class UserPageQuery:
+    """The users-list filters, dialect-free, so the SQL builder can live here
+    without importing value_queries (which imports this module)."""
+
+    q: str | None = None
+    lifecycle_segment: str | None = None
+    operational_state: str | None = None
+    commercial_tier: str | None = None
+    user_group: str | None = None
+    activated: bool | None = None
+    last_meaningful_activity_from: datetime | None = None
+    last_meaningful_activity_to: datetime | None = None
+    priority: bool = False
+    legacy_status: str | None = None
+    include_internal: bool = False
+
+
+class UserPageRow(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    user_id: int = Field(gt=0)
+    email: str
+    display_name: str
+    role: str
+    user_group: str
+    created_at: datetime
+    activated_at: datetime | None = None
+    last_meaningful_activity_at: datetime | None = None
+    lifecycle_segment: LifecycleSegment | None = None
+    operational_state: OperationalState = "healthy"
+    operational_reason_code: str = "no_supported_issue"
+    tier: CommercialTier = "unpaid"
+    data_quality: Literal["complete", "partial"] | None = None
+
+
 class ProjectionJob(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -912,6 +949,156 @@ _TRANSITIONS_FOR_DATE_SQL = """
     WHERE snapshot_date = {p}
     ORDER BY user_id
 """
+
+
+_LEGACY_STATUS_PREDICATES = {
+    # An approximation of the status states.py wrote, as fact-row predicates;
+    # not a byte-for-byte reproduction. Removed with the status filter in the
+    # D20 task (Task 16).
+    "blocked": "COALESCE(f.operational_state, 'healthy') = 'blocked'",
+    "needs_attention": "COALESCE(f.operational_state, 'healthy') = 'needs_attention'",
+    "dormant": (
+        "COALESCE(f.operational_state, 'healthy') = 'healthy'"
+        " AND f.lifecycle_segment = 'dormant'"
+    ),
+    "onboarding": (
+        "COALESCE(f.operational_state, 'healthy') = 'healthy'"
+        " AND f.lifecycle_segment IN ('new', 'onboarding')"
+    ),
+    "active": (
+        "COALESCE(f.operational_state, 'healthy') = 'healthy'"
+        " AND f.lifecycle_segment IN ('growing', 'core', 'at_risk')"
+    ),
+}
+
+_USERS_PAGE_SELECT = """
+    SELECT u.id AS user_id, u.email, u.display_name, u.role, u.user_group,
+           u.created_at, a.activated_at, a.last_meaningful_activity_at,
+           f.lifecycle_segment, f.operational_state, f.operational_reason_code,
+           f.tier, f.data_quality
+"""
+_USERS_PAGE_FROM = """
+    FROM users AS u
+    LEFT JOIN user_activity AS a ON a.user_id = u.id
+    LEFT JOIN user_daily_facts AS f
+      ON f.user_id = u.id AND f.snapshot_date = {p}
+"""
+_USERS_PAGE_PRIORITY_ORDER = """
+    ORDER BY CASE COALESCE(f.operational_state, 'healthy')
+                 WHEN 'blocked' THEN 0
+                 WHEN 'needs_attention' THEN 1
+                 ELSE CASE f.lifecycle_segment
+                          WHEN 'at_risk' THEN 2
+                          WHEN 'onboarding' THEN 3
+                          ELSE 4
+                      END
+             END ASC,
+             CASE COALESCE(f.tier, 'unpaid')
+                 WHEN 'high_value' THEN 0
+                 WHEN 'invested' THEN 1
+                 WHEN 'starter' THEN 2
+                 ELSE 3
+             END ASC,
+             CASE WHEN a.last_meaningful_activity_at IS NULL THEN 0 ELSE 1 END ASC,
+             a.last_meaningful_activity_at ASC,
+             u.id ASC
+"""
+
+
+def _users_page_sql(
+    query: UserPageQuery, *, day: date, limit: int, offset: int, p: str
+) -> tuple[str, str, list[Any], list[Any]]:
+    """Render (page_sql, count_sql, page_params, count_params) for one dialect.
+
+    Every predicate is parameterised; the only interpolated text is the fixed
+    predicate for a legacy status, chosen from a closed dict. The LIKE pattern
+    comes from users.admin_user_search_pattern so '%' and '_' in a search are
+    literal, exactly as the account console's own search treats them.
+    """
+    from dashboard.backend.users import admin_user_search_pattern
+
+    where: list[str] = []
+    params: list[Any] = [_validate_day(day)]
+    if not query.include_internal:
+        where.append(
+            "u.role <> 'admin' AND u.id NOT IN "
+            "(SELECT user_id FROM analytics_subject_settings WHERE excluded)"
+        )
+    pattern = admin_user_search_pattern(query.q)
+    if pattern is not None:
+        where.append(
+            f"(lower(u.email) LIKE lower({p}) ESCAPE '\\'"
+            f" OR lower(u.display_name) LIKE lower({p}) ESCAPE '\\')"
+        )
+        params.extend([pattern, pattern])
+    if query.user_group is not None:
+        where.append(f"u.user_group = {p}")
+        params.append(query.user_group)
+    if query.commercial_tier is not None:
+        where.append(f"COALESCE(f.tier, 'unpaid') = {p}")
+        params.append(query.commercial_tier)
+    if query.operational_state is not None:
+        where.append(f"COALESCE(f.operational_state, 'healthy') = {p}")
+        params.append(query.operational_state)
+    if query.lifecycle_segment is not None:
+        where.append(f"f.lifecycle_segment = {p}")
+        params.append(query.lifecycle_segment)
+    if query.activated is True:
+        where.append("a.activated_at IS NOT NULL")
+    elif query.activated is False:
+        where.append("a.activated_at IS NULL")
+    if query.last_meaningful_activity_from is not None:
+        where.append(f"a.last_meaningful_activity_at >= {p}")
+        params.append(utc_iso(_utc(query.last_meaningful_activity_from)))
+    if query.last_meaningful_activity_to is not None:
+        where.append(f"a.last_meaningful_activity_at <= {p}")
+        params.append(utc_iso(_utc(query.last_meaningful_activity_to)))
+    if query.priority:
+        where.append(
+            "(COALESCE(f.operational_state, 'healthy') IN ('blocked', 'needs_attention')"
+            " OR f.lifecycle_segment IN ('at_risk', 'onboarding'))"
+        )
+    if query.legacy_status is not None:
+        if query.legacy_status not in _LEGACY_STATUS_PREDICATES:
+            raise ValueError("legacy_status is unsupported")
+        where.append(f"({_LEGACY_STATUS_PREDICATES[query.legacy_status]})")
+    where_sql = (" WHERE " + " AND ".join(where)) if where else ""
+    from_sql = _USERS_PAGE_FROM.format(p=p)
+    order_sql = _USERS_PAGE_PRIORITY_ORDER if query.priority else " ORDER BY u.id ASC"
+    page_sql = (
+        f"{_USERS_PAGE_SELECT}{from_sql}{where_sql}{order_sql} LIMIT {p} OFFSET {p}"
+    )
+    count_sql = f"SELECT COUNT(*) AS total{from_sql}{where_sql}"
+    return page_sql, count_sql, [*params, limit, offset], list(params)
+
+
+def _validate_page_window(limit: int, offset: int) -> tuple[int, int]:
+    if isinstance(offset, bool) or not isinstance(offset, int) or offset < 0:
+        raise ValueError("offset must be a non-negative integer")
+    return positive_limit(limit), offset
+
+
+def _user_page_row(row: Any) -> UserPageRow:
+    """Shared by both twins."""
+    return UserPageRow(
+        user_id=int(_row_value(row, "user_id")),
+        email=str(_row_value(row, "email") or ""),
+        display_name=str(_row_value(row, "display_name") or ""),
+        role=str(_row_value(row, "role") or "user"),
+        user_group=str(_row_value(row, "user_group") or "unknown"),
+        created_at=_timestamp(_row_value(row, "created_at")),
+        activated_at=_optional_timestamp(_row_value(row, "activated_at")),
+        last_meaningful_activity_at=_optional_timestamp(
+            _row_value(row, "last_meaningful_activity_at")
+        ),
+        lifecycle_segment=_row_value(row, "lifecycle_segment"),
+        operational_state=_row_value(row, "operational_state") or "healthy",
+        operational_reason_code=(
+            _row_value(row, "operational_reason_code") or "no_supported_issue"
+        ),
+        tier=_row_value(row, "tier") or "unpaid",
+        data_quality=_row_value(row, "data_quality"),
+    )
 
 
 def _transition_row(row: Any) -> LifecycleTransitionRow:
@@ -1621,6 +1808,31 @@ class ValueAnalyticsStore:
             rows = conn.execute(_ATTENTION_SQL.format(p="?"), params).fetchall()
         return [_attention_candidate(row) for row in rows]
 
+    def list_users_page(
+        self,
+        *,
+        query: UserPageQuery,
+        day: date,
+        limit: int,
+        offset: int,
+    ) -> tuple[list[UserPageRow], int]:
+        """One filtered, sorted, paginated page of users plus the total.
+
+        Two statements, both in SQL, neither parameterised by a user id: the
+        Python loop this replaces loaded every eligible user and every
+        snapshot on every page load.
+        """
+        page_size, start = _validate_page_window(limit, offset)
+        page_sql, count_sql, page_params, count_params = _users_page_sql(
+            query, day=day, limit=page_size, offset=start, p="?"
+        )
+        with self._analytics_connection() as conn:
+            rows = conn.execute(page_sql, page_params).fetchall()
+            total_row = conn.execute(count_sql, count_params).fetchone()
+        return [_user_page_row(row) for row in rows], int(
+            _row_value(total_row, "total", 0) or 0
+        )
+
     def sum_facts_by_user_group(
         self, *, start: date, end: date
     ) -> dict[str, GroupFactTotals]:
@@ -2304,6 +2516,8 @@ __all__ = [
     "RecentFactTotals",
     "SegmentDayCount",
     "TransitionCount",
+    "UserPageQuery",
+    "UserPageRow",
     "LifecycleTransitionRow",
     "UserActivity",
     "UserDailyFact",

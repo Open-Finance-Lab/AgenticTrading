@@ -289,6 +289,7 @@ def test_postgres_user_value_projection_round_trip(
 def test_postgres_fact_reads_follow_the_contract(postgres_contract_store):
     from dashboard.backend.tests.domain.analytics.test_fact_reads import (
         assert_fact_read_contract,
+        assert_users_page_contract,
         seed_population,
     )
 
@@ -301,24 +302,33 @@ def test_postgres_fact_reads_follow_the_contract(postgres_contract_store):
         run_base=object(),
     )
     next_id = iter(range(100, 200))
+    with store._get_connection() as conn:
+        with conn.cursor() as cur:
+            # The fixture's users table is a stub with no default id and no
+            # user_group column; the users page filters and returns it. The
+            # pre-seeded plain user is not part of the seeded population the
+            # contract counts, so drop it rather than loosen every total.
+            cur.execute(
+                "ALTER TABLE users ADD COLUMN IF NOT EXISTS user_group TEXT "
+                "NOT NULL DEFAULT 'unknown'"
+            )
+            cur.execute("DELETE FROM users WHERE id = 2")
 
     def create_user(key: str, email: str, group: str) -> int:
-        # The fixture's users table is a stub with no default id and no
-        # user_group column, so insert explicit ids. The fact reads take the
-        # group from the fact row, never from users.
         user_id = next(next_id)
         with store._get_connection() as conn:
             with conn.cursor() as cur:
                 cur.execute(
                     "INSERT INTO users (id, email, display_name, password_hash, "
-                    "role, created_at) VALUES (%s, %s, %s, 'x', 'user', "
-                    "'2026-08-01T00:00:00+00:00')",
-                    (user_id, email, key.title()),
+                    "role, created_at, user_group) VALUES (%s, %s, %s, 'x', "
+                    "'user', '2026-08-01T00:00:00+00:00', %s)",
+                    (user_id, email, key.title(), group),
                 )
         return user_id
 
     ids = seed_population(value_store, create_user, admin_id=admin_id)
     assert_fact_read_contract(value_store, ids)
+    assert_users_page_contract(value_store, ids)
 
 
 @pg_only

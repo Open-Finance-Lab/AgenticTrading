@@ -51,7 +51,10 @@ from .value_repository import (
     _segment_day_count,
     _transition_count,
     _transition_row,
+    _user_page_row,
+    _users_page_sql,
     _validate_date_window,
+    _validate_page_window,
     _validate_day,
     _recompute_days,
     _transition_values,
@@ -77,6 +80,8 @@ from .value_repository import (
     UserActivity,
     UserDailyFact,
     UserLifecycleDailySnapshot,
+    UserPageQuery,
+    UserPageRow,
     UserValueSnapshot,
     _current_snapshot_from_row,
     _ids,
@@ -679,6 +684,29 @@ class PostgresValueAnalyticsStore:
                 cur.execute(_ATTENTION_SQL.format(p="%s"), params)
                 rows = cur.fetchall()
         return [_attention_candidate(row) for row in rows]
+
+    def list_users_page(
+        self,
+        *,
+        query: UserPageQuery,
+        day: date,
+        limit: int,
+        offset: int,
+    ) -> tuple[list[UserPageRow], int]:
+        """See the SQLite twin."""
+        page_size, start = _validate_page_window(limit, offset)
+        page_sql, count_sql, page_params, count_params = _users_page_sql(
+            query, day=day, limit=page_size, offset=start, p="%s"
+        )
+        with self._analytics_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(page_sql, page_params)
+                rows = cur.fetchall()
+                cur.execute(count_sql, count_params)
+                total_row = cur.fetchone()
+        return [_user_page_row(row) for row in rows], int(
+            _row_value(total_row, "total", 0) or 0
+        )
 
     def sum_facts_by_user_group(
         self, *, start: date, end: date
