@@ -15,6 +15,7 @@ from dashboard.backend.domain.analytics.query_service import (
 from dashboard.backend.domain.analytics.rollups import DailyRollup
 from dashboard.backend.domain.analytics.value_queries import (
     OperationalAnalyticsResponse,
+    UserGroupSummary,
     UserValueFilters,
     ValueAnalyticsQueryService,
 )
@@ -30,6 +31,7 @@ from dashboard.backend.domain.analytics.value_repository import (
     UserDailyFact,
     UserValueSnapshot,
 )
+from dashboard.backend.domain.user_groups import USER_GROUPS
 
 
 UTC = timezone.utc
@@ -391,30 +393,19 @@ class FakeValueStore:
 
 
 class FakeRollups:
-    def __init__(self, events=None, rollups=()):
-        # None: no raw read is expected, and one fails the test. A list serves
-        # the routes that still scan raw events until their own task.
-        self.events = None if events is None else list(events)
+    def __init__(self, rollups=()):
         self.rollups = list(rollups)
 
     def list_events(self, *, start, end, include_internal, user_id=None):
-        if self.events is None:
-            raise AssertionError("this read must not scan raw events")
-        assert include_internal is True
-        return [
-            event
-            for event in self.events
-            if start <= event.occurred_at < end
-            and (user_id is None or event.user_id == user_id)
-        ]
+        raise AssertionError("this read must not scan raw events")
 
     def list_rollups(self, *, start, end):
         return [row for row in self.rollups if start <= row.rollup_date < end]
 
 
 class FakeQueryStore:
-    def __init__(self, *, events=None, rollups=(), legacy_status=None):
-        self.rollups = FakeRollups(events, rollups)
+    def __init__(self, *, rollups=(), legacy_status=None):
+        self.rollups = FakeRollups(rollups)
         self.legacy_status = dict(legacy_status or {})
 
     def list_snapshots(self):
@@ -489,10 +480,8 @@ def _service(
     legacy_availability=None,
     ledger_days=(),
     # Snapshot-model fixtures for the routes not yet on facts: ``users``
-    # defaults to the snapshot ids grouped by ``user_groups``, and raw events
-    # stay readable. Without ``snapshots`` a raw-event read fails the test.
+    # defaults to the snapshot ids grouped by ``user_groups``.
     snapshots=None,
-    events=None,
     user_groups=None,
 ):
     if snapshots is not None:
@@ -501,8 +490,6 @@ def _service(
             users = tuple(
                 (user_id, groups.get(user_id, "unknown")) for user_id in snapshots
             )
-        if events is None:
-            events = ()
     user_ids = [user_id for user_id, _group in users]
     value_store = FakeValueStore(
         facts=facts,
@@ -520,32 +507,10 @@ def _service(
         store=FakeBaseStore(excluded),
         user_store=FakeUserStore([_user(user_id, group) for user_id, group in users]),
         value_store=value_store,
-        query_store=FakeQueryStore(events=events, rollups=rollups),
+        query_store=FakeQueryStore(rollups=rollups),
         legacy_service=legacy_service,
     )
     return service, value_store, legacy_service
-
-
-def _metric_event(
-    user_id: int,
-    event_name: str,
-    occurred_at: str | datetime,
-    *,
-    billing_mode: str | None = None,
-    properties: dict[str, object] | None = None,
-):
-    at = (
-        datetime.fromisoformat(occurred_at)
-        if isinstance(occurred_at, str)
-        else occurred_at
-    )
-    return SimpleNamespace(
-        user_id=user_id,
-        event_name=event_name,
-        occurred_at=at,
-        billing_mode=billing_mode,
-        properties=properties or {},
-    )
 
 
 def _retention_service():
@@ -716,86 +681,104 @@ def test_user_list_uses_injected_utc_day_for_commercial_window():
     ]
 
 
-def test_group_summary_has_six_rows_zeroes_and_fixed_order():
-    service, _value_store, _legacy = _service(
-        snapshots={1: _snapshot(1)},
-        user_groups={1: "organic"},
-        events=[
-            _metric_event(
-                1,
-                "backtest_requested",
-                "2026-09-01T01:00:00+00:00",
-            ),
-            _metric_event(
-                1,
-                "backtest_completed",
-                "2026-09-01T02:00:00+00:00",
-            ),
-            _metric_event(
-                1,
-                "backtest_completed",
-                "2026-09-03T02:00:00+00:00",
-            ),
-        ],
-    )
-
-    result = service.get_groups(
-        date(2026, 9, 1), date(2026, 9, 4), now=NOW
-    )
-
-    assert [row.group for row in result.groups] == [
-        "internal",
-        "invited",
-        "organic",
-        "competition",
-        "partner",
-        "unknown",
+def _groups_service(**overrides):
+    facts = [
+        _fact(1, YESTERDAY, user_group="organic", runs_requested=3, runs_completed=2, operator_cost_micro=200_000),
+        _fact(1, YESTERDAY - timedelta(days=1), user_group="organic", runs_requested=1, runs_completed=1, operator_cost_micro=50_000),
+        _fact(2, YESTERDAY, user_group="organic", runs_requested=2, runs_completed=0, runs_failed=2),
+        _fact(3, YESTERDAY, user_group="partner", runs_requested=1, runs_completed=1),
+        _fact(4, YESTERDAY - timedelta(days=20), user_group="partner", runs_requested=9, runs_completed=9),
     ]
-    organic = result.groups[2]
-    assert organic.users == 1
-    assert organic.successful_run_users == 1
-    assert organic.repeat_users == 1
-    assert organic.total_runs == 1
-    assert result.groups[0].users == 0
-    assert result.availability.status == "ready"
+    values = dict(
+        facts=facts,
+        users=((1, "organic"), (2, "organic"), (3, "partner"), (4, "partner"), (5, "unknown")),
+        commercial={1: _commercial(1, 6_000_000), 2: _commercial(2), 3: _commercial(3, 1), 4: _commercial(4), 5: _commercial(5)},
+    )
+    values.update(overrides)
+    return _service(**values)[0:2]
 
 
-def test_group_summary_cost_excludes_byok_and_paid_uses_lifetime_credits():
-    service, _value_store, _legacy = _service(
-        snapshots={1: _snapshot(1), 2: _snapshot(2)},
-        user_groups={1: "partner", 2: "organic"},
-        commercial={
-            1: _commercial(1, 5_000_000),
-            2: _commercial(2, 0),
-        },
-        events=[
-            _metric_event(
-                1,
-                "model_usage_recorded",
-                "2026-09-01T01:00:00+00:00",
-                billing_mode="platform_credits",
-                properties={"cost_micro_usd": 1234},
-            ),
-            _metric_event(
-                1,
-                "model_usage_recorded",
-                "2026-09-01T02:00:00+00:00",
-                billing_mode="byok",
-                properties={"cost_micro_usd": 9999},
-            ),
-        ],
+def test_group_summary_has_six_rows_in_fixed_order_with_facts_totals():
+    service, _store = _groups_service()
+
+    response = service.get_groups(
+        start=YESTERDAY - timedelta(days=6), end=YESTERDAY + timedelta(days=1), now=NOW
     )
 
-    result = service.get_groups(
-        date(2026, 9, 1), date(2026, 9, 2), now=NOW
+    assert [row.group for row in response.groups] == list(USER_GROUPS)
+    by_group = {row.group: row for row in response.groups}
+    assert (by_group["organic"].users, by_group["organic"].total_runs) == (2, 6)
+    assert by_group["organic"].atl_cost_micro_usd == 250_000
+    assert by_group["organic"].successful_run_users == 1
+    assert by_group["organic"].repeat_users == 1
+    assert by_group["organic"].paid_users == 1
+    assert (by_group["partner"].users, by_group["partner"].total_runs) == (2, 1)  # user 4's row is outside the window
+    assert by_group["partner"].paid_users == 1
+    assert by_group["unknown"].users == 1
+    assert by_group["internal"] == UserGroupSummary(
+        group="internal", label="Internal", users=0, successful_run_users=0,
+        repeat_users=0, total_runs=0, atl_cost_micro_usd=0, paid_users=0,
+    )
+    assert response.availability.status == "ready"
+    assert response.availability.coverage_end == YESTERDAY
+
+
+def test_group_filter_zeroes_every_other_group():
+    service, _store = _groups_service()
+
+    response = service.get_groups(
+        start=YESTERDAY - timedelta(days=6), end=YESTERDAY + timedelta(days=1),
+        user_group="partner", now=NOW,
     )
 
-    partner = next(row for row in result.groups if row.group == "partner")
-    organic = next(row for row in result.groups if row.group == "organic")
-    assert partner.atl_cost_micro_usd == 1234
-    assert partner.paid_users == 1
-    assert organic.atl_cost_micro_usd == 0
-    assert organic.paid_users == 0
+    by_group = {row.group: row for row in response.groups}
+    assert response.selected_user_group == "partner"
+    assert by_group["partner"].total_runs == 1
+    assert by_group["organic"].total_runs == 0
+    assert by_group["organic"].users == 0
+    assert by_group["organic"].paid_users == 0
+
+
+def test_group_summary_is_partial_when_the_fact_read_fails():
+    service, store = _groups_service()
+
+    def explode(**_kwargs):
+        raise RuntimeError("private detail")
+
+    store.sum_facts_by_user_group = explode
+
+    response = service.get_groups(
+        start=YESTERDAY - timedelta(days=6), end=YESTERDAY + timedelta(days=1), now=NOW
+    )
+
+    assert response.availability.available is True
+    assert response.availability.status == "partial"
+    assert all(row.total_runs == 0 for row in response.groups)
+
+
+def test_group_summary_clamps_coverage_to_yesterday_for_a_window_ending_today():
+    service, _store = _groups_service()
+
+    response = service.get_groups(
+        start=YESTERDAY - timedelta(days=6), end=NOW.date() + timedelta(days=1), now=NOW
+    )
+
+    assert response.availability.status == "ready"
+    assert response.availability.coverage_end == YESTERDAY
+
+
+def test_group_summary_does_not_read_an_unlanded_window_as_zero_runs():
+    service, store = _groups_service()
+    store.sum_facts_by_user_group = lambda **_kwargs: pytest.fail("no day has landed")
+
+    response = service.get_groups(
+        start=NOW.date(), end=NOW.date() + timedelta(days=1), now=NOW
+    )
+
+    assert response.availability.available is True
+    assert response.availability.status == "partial"
+    assert response.availability.coverage_end is None
+    assert {row.group: row.users for row in response.groups}["organic"] == 2
 
 
 def test_user_group_filter_applies_to_priority_users():

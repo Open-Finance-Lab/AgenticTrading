@@ -26,9 +26,9 @@ from .query_service import (
 )
 from .repository import analytics_store
 from .repository_common import positive_limit, positive_user_id
-from .usage_cost import atl_cost_micro
 from .value_repository import (
     CommercialValueFact,
+    GroupFactTotals,
     UserValueSnapshot,
     build_value_analytics_store,
 )
@@ -476,35 +476,6 @@ def _all_users(user_store: Any) -> list[dict[str, Any]]:
         if len(page) < 500:
             return rows
         offset += len(page)
-
-
-def _event_utc(value: object) -> datetime:
-    """Normalize an event timestamp without trusting a naive stored value."""
-
-    if isinstance(value, datetime):
-        if value.tzinfo is None or value.utcoffset() is None:
-            return value.replace(tzinfo=UTC)
-        return value.astimezone(UTC)
-    return _parse_timestamp(value)
-
-
-def _safe_cost_micro_usd(event: object) -> int:
-    """Read only the bounded platform-cost field used by the summary.
-
-    Server analytics events are validated on write, but this endpoint also
-    reads legacy rows. A malformed or negative value must not make an admin
-    summary fail or turn into a negative cost.
-    """
-
-    if getattr(event, "event_name", None) != "model_usage_recorded":
-        return 0
-    properties = getattr(event, "properties", {})
-    if not isinstance(properties, dict):
-        return 0
-    value = properties.get("cost_micro_usd")
-    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
-        return 0
-    return atl_cost_micro(getattr(event, "billing_mode", None), properties)
 
 
 def _transition_models(
@@ -1187,10 +1158,12 @@ class ValueAnalyticsQueryService:
     ) -> GroupAnalyticsResponse:
         """Build the fixed-order source summary for one UTC date window.
 
-        The account row is the source of truth for group membership. Event and
-        Credits reads are deliberately batched and independently guarded so a
-        missing projection leaves six honest rows with partial availability,
-        rather than dropping the whole summary.
+        The account row is the source of truth for group membership. Run counts
+        and operator cost come from one grouped read of ``user_daily_facts``,
+        which carries the group each day was written under. That read and the
+        Credits read are independently guarded so a missing projection leaves
+        six honest rows with partial availability, rather than dropping the
+        whole summary.
         """
 
         start, end = _validate_dates(start, end)
@@ -1232,60 +1205,20 @@ class ValueAnalyticsQueryService:
         users_by_group: Counter[UserGroup] = Counter(
             group_by_user[user_id] for user_id in user_ids
         )
-        requested_by_group: Counter[UserGroup] = Counter()
-        successful_users_by_group: dict[UserGroup, set[int]] = defaultdict(set)
-        completion_days_by_group: dict[
-            UserGroup, dict[int, set[date]]
-        ] = defaultdict(lambda: defaultdict(set))
-        cost_by_group: Counter[UserGroup] = Counter()
-        events_available = True
-        events: Sequence[Any] = ()
-        period_start = _day_start(start)
-        period_end = _day_start(end)
-        try:
-            list_metric_events = getattr(self.query_store, "list_metric_events", None)
-            if callable(list_metric_events):
-                events = list_metric_events(
-                    start=period_start,
-                    end=period_end,
-                    include_internal=include_internal,
-                )
-            else:
-                # Small synthetic stores used by older callers expose only
-                # the rollup reader. It is still display-safe; account
-                # eligibility above remains the authoritative filter.
-                events = self.query_store.rollups.list_events(
-                    start=period_start,
-                    end=period_end,
-                    include_internal=True,
-                )
-        except Exception:
-            events_available = False
-
-        for event in events:
+        # Facts exist only through yesterday: a window that starts today has
+        # nothing landed, and reading it as zero runs would be a false answer.
+        landed = start < current_time.date()
+        facts_available = True
+        totals: dict[str, GroupFactTotals] = {}
+        if landed:
             try:
-                event_user_id = positive_user_id(getattr(event, "user_id"))
-                if event_user_id not in user_ids:
-                    continue
-                occurred_at = _event_utc(getattr(event, "occurred_at"))
-                if not (period_start <= occurred_at < period_end):
-                    continue
-                group = group_by_user[event_user_id]
-                event_name = getattr(event, "event_name", None)
-            except (AttributeError, TypeError, ValueError, KeyError):
-                # Ignore malformed legacy event rows while preserving a valid
-                # summary for the rest of the period.
-                events_available = False
-                continue
-            if event_name == "backtest_requested":
-                requested_by_group[group] += 1
-            elif event_name == "backtest_completed":
-                successful_users_by_group[group].add(event_user_id)
-                completion_days_by_group[group][event_user_id].add(
-                    occurred_at.date()
-                )
-            elif event_name == "model_usage_recorded":
-                cost_by_group[group] += _safe_cost_micro_usd(event)
+                totals = self.value_store.sum_facts_by_user_group(start=start, end=end)
+            except Exception:
+                facts_available = False
+        if selected_group is not None:
+            totals = {
+                group: value for group, value in totals.items() if group == selected_group
+            }
 
         commercial_available = True
         commercial: dict[int, CommercialValueFact] = {}
@@ -1305,20 +1238,16 @@ class ValueAnalyticsQueryService:
 
         rows: list[UserGroupSummary] = []
         for group in USER_GROUPS:
-            successful_users = successful_users_by_group[group]
-            repeat_users = sum(
-                len(days) >= 2
-                for days in completion_days_by_group[group].values()
-            )
+            group_totals = totals.get(group, GroupFactTotals())
             rows.append(
                 UserGroupSummary(
                     group=group,
                     label=USER_GROUP_LABELS[group],
                     users=int(users_by_group[group]),
-                    successful_run_users=len(successful_users),
-                    repeat_users=repeat_users,
-                    total_runs=int(requested_by_group[group]),
-                    atl_cost_micro_usd=int(cost_by_group[group]),
+                    successful_run_users=group_totals.successful_run_users,
+                    repeat_users=group_totals.repeat_users,
+                    total_runs=group_totals.total_runs,
+                    atl_cost_micro_usd=group_totals.operator_cost_micro,
                     paid_users=int(paid_by_group[group]),
                 )
             )
@@ -1326,12 +1255,15 @@ class ValueAnalyticsQueryService:
         if not users_available:
             availability = SectionAvailability(available=False, status="unavailable")
         else:
-            complete = events_available and commercial_available
+            complete = landed and facts_available and commercial_available
+            # Facts stop at yesterday; claiming today as covered would read an
+            # unlanded day as zero runs.
+            coverage_end = min(end - timedelta(days=1), current_time.date() - timedelta(days=1))
             availability = SectionAvailability(
                 available=True,
                 status="ready" if complete else "partial",
-                coverage_start=start,
-                coverage_end=end - timedelta(days=1),
+                coverage_start=start if landed else None,
+                coverage_end=coverage_end if landed else None,
             )
         return GroupAnalyticsResponse(
             as_of=current_time,

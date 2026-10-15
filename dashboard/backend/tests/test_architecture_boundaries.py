@@ -573,10 +573,6 @@ _EVENT_READ_ALLOWLIST = {
         "the paginated timeline (rule 3) and the overview's current-day read "
         "(rule 5); PR B narrows the overview read and gives sessions a 30-day window"
     ),
-    "dashboard/backend/domain/analytics/value_queries.py": (
-        "the retention grid's per-activation-week scan and the one-user profile "
-        "scan; PR B moves both onto user_daily_facts / user_activity"
-    ),
     "dashboard/backend/domain/analytics/states.py": (
         "legacy five-state calculator: full-history per-user reads. DELETED IN "
         "PR B (design SS13 row B); allowlisted, not fixed, because PR A creates "
