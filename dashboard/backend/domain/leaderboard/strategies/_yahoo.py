@@ -8,12 +8,19 @@ index. ETFs drift off the index (dividends, NAV premium), so for a true
 from __future__ import annotations
 
 import datetime as dt
-from typing import List, Tuple
+from typing import Dict, List, Optional, Tuple
+from zoneinfo import ZoneInfo
 
 import requests
 
+from dashboard.backend.infrastructure.market_data.sessions import (
+    session_close_time,
+    session_windows,
+)
+
 _CHART_URL = "https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
 _HEADERS = {"User-Agent": "Mozilla/5.0"}
+_US_EXCHANGE_ZONE = "America/New_York"
 
 
 class YahooChartError(requests.RequestException):
@@ -121,4 +128,39 @@ def fetch_index_hourly(
         if close is None or not (start_e <= ts < end_e):
             continue
         points.append((dt.datetime.fromtimestamp(ts, dt.timezone.utc), float(close)))
-    return points
+    return _restamp_close_levels(points, (res.get("meta") or {}).get("exchangeTimezoneName"))
+
+
+def _restamp_close_levels(
+    points: List[Tuple[dt.datetime, float]], exchange_zone: Optional[str]
+) -> List[Tuple[dt.datetime, float]]:
+    """Move a US index level stamped *at* the session close into the half bar it closes.
+
+    Every other point here is open-stamped on Yahoo's hourly grid, which starts
+    at the 09:30 open, so a session's last slot is a half bar (15:30-16:00). On
+    an NYSE early close Yahoo returns that half bar (12:30-13:00) with a null
+    close and sends the closing level as a separate point stamped 13:00. That
+    was recorded for ^DJI and ^GSPC on every early close from 2024-11-29 to
+    2025-12-24; full sessions carry no such point. Any reader that treats the
+    series as open-stamped (the Live board's ``_axis_node_key``) drops a 13:00
+    stamp as after-hours, so the day would end on its 12:30 level. Restamped to
+    the half bar's open, the closing level lands where that half bar's close
+    would. If Yahoo also filled the half bar, the closing level replaces it.
+
+    Only for a US exchange: the close comes from the NYSE calendar
+    (``sessions.session_close_time``).
+    """
+    if exchange_zone != _US_EXCHANGE_ZONE:
+        return points
+    zone = ZoneInfo(_US_EXCHANGE_ZONE)
+    session_open = session_windows("US")[0][0]
+    hour = dt.timedelta(hours=1)
+    by_stamp: Dict[dt.datetime, float] = {}
+    for stamp, level in points:
+        local = stamp.astimezone(zone)
+        if local.time() == session_close_time(local.date(), "US"):
+            opened = dt.datetime.combine(local.date(), session_open, tzinfo=zone)
+            last_slot = (local - opened) % hour or hour
+            stamp = (local - last_slot).astimezone(dt.timezone.utc)
+        by_stamp[stamp] = level
+    return sorted(by_stamp.items())

@@ -12,7 +12,10 @@ invisible:
 """
 
 import datetime as dt
+import json
+from pathlib import Path
 from types import SimpleNamespace
+from zoneinfo import ZoneInfo
 
 import pytest
 import requests
@@ -156,3 +159,83 @@ def test_yahoo_chart_error_is_a_request_exception():
     # Load-bearing: equity_plot catches requests.RequestException, so this is
     # what routes a 200-delivered failure into the degrade-and-flag path.
     assert issubclass(YahooChartError, requests.RequestException)
+
+
+# --------------------------------------------------------------------------
+# NYSE early closes: Yahoo stamps the closing level at the close itself
+# --------------------------------------------------------------------------
+#
+# Both fixtures are real ^DJI responses to the request fetch_index_hourly
+# sends (period1 = the day's 00:00Z, period2 = +1 day, interval=1h), recorded
+# 2026-10-15 with only ``meta`` trimmed to the fields that matter here. The
+# trailing 2026-10-14T20:00Z point is Yahoo appending the latest close to every
+# hourly response, which the window filter drops. On 2025-11-28 (13:00 close)
+# the 12:30 half bar comes back null and the closing level, 47,716.42, arrives
+# stamped 13:00 (18:00Z); the full session of 2025-11-26 has no such point. The
+# same shape was recorded for ^DJI and ^GSPC on every NYSE early close from
+# 2024-11-29 to 2025-12-24, and Yahoo's own ``tradingPeriods`` gives
+# 2025-11-28 a 14:30Z-18:00Z regular session.
+
+_FIXTURES = Path(__file__).parent / "fixtures"
+_NEW_YORK = ZoneInfo("America/New_York")
+
+
+def _recorded(name):
+    return json.loads((_FIXTURES / name).read_text())
+
+
+def _clock(points):
+    return [(stamp.astimezone(_NEW_YORK).strftime("%H:%M"), value) for stamp, value in points]
+
+
+def test_an_early_close_level_lands_in_the_last_half_bar(monkeypatch):
+    _stub_response(monkeypatch, _recorded("yahoo-chart-dji-1h-2025-11-28.json"))
+    points = fetch_index_hourly("^DJI", "2025-11-28", "2025-11-28")
+    assert _clock(points) == [
+        ("09:30", 47677.671875),
+        ("10:30", 47699.78125),
+        ("11:30", 47660.55859375),
+        ("12:30", 47716.421875),
+    ]
+
+
+def test_the_early_close_level_is_the_live_boards_13_00_node(monkeypatch):
+    """Read as an open-stamped bar, a point stamped 13:00 opens after the close
+    and has no node, so the index curve's day would end on its 12:30 level."""
+    from dashboard.backend.domain.leaderboard import live
+
+    _stub_response(monkeypatch, _recorded("yahoo-chart-dji-1h-2025-11-28.json"))
+    points = fetch_index_hourly("^DJI", "2025-11-28", "2025-11-28")
+    nodes = {live._axis_node_key(stamp.astimezone(_NEW_YORK)): value for stamp, value in points}
+    assert nodes == {
+        "2025-11-28T10:00": 47677.671875,
+        "2025-11-28T11:00": 47699.78125,
+        "2025-11-28T12:00": 47660.55859375,
+        "2025-11-28T13:00": 47716.421875,
+    }
+
+
+def test_a_full_session_is_left_as_yahoo_sent_it(monkeypatch):
+    _stub_response(monkeypatch, _recorded("yahoo-chart-dji-1h-2025-11-26.json"))
+    points = fetch_index_hourly("^DJI", "2025-11-26", "2025-11-26")
+    assert [clock for clock, _value in _clock(points)] == [
+        "09:30", "10:30", "11:30", "12:30", "13:30", "14:30", "15:30",
+    ]
+    assert points[-1][1] == 47419.671875
+
+
+def test_the_close_stamped_level_wins_over_a_half_bar_yahoo_also_filled(monkeypatch):
+    payload = _recorded("yahoo-chart-dji-1h-2025-11-28.json")
+    payload["chart"]["result"][0]["indicators"]["quote"][0]["close"][3] = 47700.0
+    _stub_response(monkeypatch, payload)
+    points = fetch_index_hourly("^DJI", "2025-11-28", "2025-11-28")
+    assert _clock(points)[-1] == ("12:30", 47716.421875)
+    assert len(points) == 4
+
+
+def test_a_non_us_index_is_not_restamped_on_an_nyse_early_close(monkeypatch):
+    payload = _recorded("yahoo-chart-dji-1h-2025-11-28.json")
+    payload["chart"]["result"][0]["meta"]["exchangeTimezoneName"] = "Asia/Shanghai"
+    _stub_response(monkeypatch, payload)
+    points = fetch_index_hourly("^DJI", "2025-11-28", "2025-11-28")
+    assert _clock(points)[-1] == ("13:00", 47716.421875)
