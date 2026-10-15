@@ -101,6 +101,11 @@ These are the plan author's decisions from the 2026-10-14 mapping. Each per-PR f
    The close-stamped path stays untouched; D19 belongs to the engine rewrite. The conformance suite must show no XPASS.
 
    *Deviation, recorded in P1:* the close **times** (`EARLY_CLOSE_TIME`, `REGULAR_CLOSE_TIME`, `session_close_time`) live in `sessions.py`, and only the **dates** live in the calendar. The reason is that `test_no_module_restates_the_session_bounds` forbids `time(13, 0)` / `time(16, 0)` anywhere else.
+
+   *Amended 2026-10-15 after a prior-art scan (P1's last section).* Three changes:
+   - The pins now cover NYSE's releases for 2022–2028 and exchange_calendars XNYS for 2004–2035. That library is used once, offline, and is not a dependency.
+   - Dated unscheduled closures are added (2025-01-09 and five earlier dates).
+   - The Yahoo index baselines get their early-close level restamped. Without it they would have ended 2026-11-27 at 12:00.
 2. **Cadence (P1).** No code change. A test pins it at 6 decisions per full session and 3 on an early close.
 3. **Trade memory (P2).** The new read-only `PortfolioManager.restored_trades` carries the 24h tail of trades, anchored on the newest trade and capped at 200, through `snapshot_state`. Restored trades never enter `self.trades`. The reason: `_record_progress` folds `manager.trades` into the nightly trade stats, so they would be counted twice. A `trade_memory` marker in the stored checkpoint records the session the memory started from, because the month P2 merges in mixes nights with and without memory.
 4. **Roster-loop robustness (P2).**

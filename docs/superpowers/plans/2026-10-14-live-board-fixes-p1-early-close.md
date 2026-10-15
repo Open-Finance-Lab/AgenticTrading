@@ -10,13 +10,15 @@
 
 **Spec:** `docs/superpowers/specs/2026-10-14-atl-direction.md` §6 (Live Leaderboard: the Cadence row and "Fixes to the board while it runs on the legacy engine", the 2026-11-27 half day) and §7 (Budget and keys: 126 calls/month). Decisions, Global Constraints, merge order and Review Focus live in the index plan `docs/superpowers/plans/2026-10-14-live-board-fixes.md`; every task here inherits its Global Constraints.
 
+> **Executed 2026-10-15, then amended from research.** Tasks 1.1–1.4 ran as written on `fix/live-early-close`. A prior-art scan and a final review then added nine commits (index-baseline restamp, unscheduled closures, exchange_calendars pins, a differential filter test, docstring corrections, a missing-level alarm). They are listed with their reasons under [Prior art, references and amendments](#prior-art-references-and-amendments-2026-10-15) at the end. Task 1.5 below is updated for them.
+
 **Merge order:** P1 → P2 → P3 → P4 → P5 → P6 → P7 PR A → P7 PR B (owner-gated). Deadlines: P3 before 2026-11-01; P4 by 2026-10-31 (else bump both live_from values); P1 merged and deployed by 2026-11-20. One executor per contiguous range; phases are not safe to run in parallel (several append to the same test files and bump the same cache-busters).
 
 ## Phase 1: NYSE early closes on the live board
 
 **Why.** Spec §6 ("Fixes to the board while it runs on the legacy engine") makes the **2026-11-27** half-day session a hard deadline; Decisions 1 and 2 in the index plan scope it. On main the session close is a fixed 16:00 in four places, so on 2026-11-27 (13:00 ET close) the board would:
 - draw seven axis nodes, three of them phantoms (`live.py` `_RTH_HOURS`);
-- keep Alpaca's 13:00/14:00/15:00 late-session bars as decision bars, so the model makes three extra billed decisions filled off thin post-close prints (`sessions.is_in_session`, open-stamped branch);
+- keep Alpaca's 13:00/14:00/15:00 bars as decision bars, so the model makes three extra billed decisions filled off post-close prints (`sessions.is_in_session`, open-stamped branch). These bars are not thin. The 13:00 bar opens with the closing auction, and NYSE's other venues and the TRF trade to 17:00 on an early close;
 - report "Cash session open" until 16:00 and settle at 16:30 (`live_clock`, `freeze_settle_time`).
 
 No fee, slippage or prompt change, so the 10-08 "no retrofit" rule does not apply (spec §6). The cadence (spec §6, budget §7) is already right and only gets pinned (Decision 2 in the index plan).
@@ -1395,16 +1397,20 @@ pytest dashboard/backend/tests -q -p no:cacheprovider 2>&1 | tee "$(git rev-pars
 grep '^FAILED' "$(git rev-parse --git-dir)/p1-full.log" | grep -v 'tests/test_report_pdf.py::'   # must print nothing
 ```
 
-Expected: the second command prints nothing. Judge by file, not by count: every failure must be in `test_report_pdf.py`, 7 of whose 9 tests need `reportlab`, which is not installed locally (environmental; CI installs it, and there they pass). Any other `FAILED` line is a regression. The log sits in the git directory, so it survives a separate shell and never shows in `git status`. Measured on main@17c552c5 + Tasks 1.1–1.4 without `reportlab`: `7 failed, 6736 passed, 176 skipped, 25 xfailed`, all 7 in `test_report_pdf.py`.
+Expected: the second command prints nothing. Judge by file, not by count: every failure must be in `test_report_pdf.py`, 7 of whose 9 tests need `reportlab`, which is not installed locally (environmental; CI installs it, and there they pass). Any other `FAILED` line is a regression. The log sits in the git directory, so it survives a separate shell and never shows in `git status`. Measured on main@17c552c5 + Tasks 1.1–1.4 without `reportlab`: `7 failed, 6736 passed, 176 skipped, 25 xfailed`, all 7 in `test_report_pdf.py`. On the amended branch (`9919eecc`, 2026-10-15) it was `7 failed, 6826 passed, 176 skipped, 25 xfailed` in 462 s, again all 7 in `test_report_pdf.py`.
 
 - [ ] **Step 2: Confirm the branch and push.**
 
 ```bash
 git branch --show-current                                  # fix/live-early-close
 gh pr list --head fix/live-early-close --state all         # expect no rows
-git log --oneline origin/main..HEAD                        # the four commits of Tasks 1.1-1.4
+git log --oneline origin/main..HEAD                        # Tasks 1.1-1.4 plus the research amendments (see the end of this plan)
 git push -u origin fix/live-early-close
 ```
+
+- [ ] **Step 2b: Owner checks with the Render-held Alpaca key (before 2026-11-20; not merge-blocking).** The key in `dashboard/.env` answers 401 on every endpoint, so nobody has seen Alpaca's own data for an early close yet. Both calls are read-only.
+  - `GET https://paper-api.alpaca.markets/v2/calendar?start=2026-11-01&end=2026-12-31`. Read only `date`, `open` and `close`, because `session_open`/`session_close` are undocumented. Expect `close` 13:00 on 2026-11-27 and 2026-12-24 and 16:00 on every other session. Paste the two rows into the PR.
+  - `GET https://data.alpaca.markets/v2/stocks/bars?symbols=AAPL,MSFT,SPY&timeframe=1Hour&feed=sip&start=2025-11-28T09:00:00Z&end=2025-11-29T01:00:00Z`. Commit the raw JSON under `dashboard/backend/tests/fixtures/` in a follow-up PR, with a test that bars stamped 13:00 ET and later are in the raw response and absent after `is_in_session`. Record in its docstring the 12:00 bar's close, the 13:00 bar's volume (the closing-cross spike) and the daily close. That turns two inferences into evidence: that Alpaca serves the late session, and that the auction print sits in the 13:00 bar. The filter is correct either way.
 
 - [ ] **Step 3: Open the PR.**
 
@@ -1416,10 +1422,17 @@ Merge and deploy by 2026-11-20: 2026-11-27 (13:00 ET close) is the first NYSE ea
 
 Do not merge between 22:15 and 23:30 UTC on a weekday. The merge auto-deploys prod, and the Render restart kills the 22:30 UTC live refresh thread mid-run, so that night's session is billed again on the next night.
 
-- Calendar: `nyse_early_closes` / `is_early_close` in `us_market_calendar.py`, by rule (day after Thanksgiving; Dec 24 Mon–Thu; Jul 3 when Jul 4 is Tue–Fri), pinned to NYSE's published 2025–2028 lists. The close times (`EARLY_CLOSE_TIME`, `REGULAR_CLOSE_TIME`, `session_close_time`) live in `sessions.py`, the only module `test_no_module_restates_the_session_bounds` lets spell a session bound.
-- `sessions.is_in_session`, open-stamped branch only: a US early-close day ends at 13:00, so Alpaca's 13:00–15:00 late-session bars are not decision bars (on main they would be 3 extra billed model calls filled off post-close prints). This also applies to My Agents and protocol runs on early-close days. The close-stamped path is untouched (D19 stays with the engine rewrite): conformance unchanged, 25 strict xfails, no XPASS.
+- Calendar: `nyse_early_closes` / `is_early_close` in `us_market_calendar.py`, by rule (day after Thanksgiving; Dec 24 Mon–Thu; Jul 3 when Jul 4 is Tue–Fri). Pinned to NYSE's 2022–2028 releases and to exchange_calendars XNYS for 2004–2035; the XNYS pin is a literal generated offline, not a dependency. Dated `UNSCHEDULED_CLOSURES` (2025-01-09 and five more since 2004) and an empty `UNSCHEDULED_EARLY_CLOSES`. Sessions per year now match XNYS for 2004–2035. The close times live in `sessions.py`, the only module `test_no_module_restates_the_session_bounds` lets spell a session bound.
+- `sessions.is_in_session`, open-stamped branch only: a US early-close day ends at 13:00, so bars stamped 13:00 and later are not decision bars. They hold real prints: the closing auction, then late sessions to 17:00. On main they would be 3 extra billed model calls filled off those prints. This also applies to My Agents and protocol runs. The close-stamped path is untouched (D19 stays with the engine rewrite): conformance is unchanged, 25 strict xfails, no XPASS.
+- Index baselines: on an early close Yahoo sends the 12:30 half bar null and the closing level as a separate point stamped 13:00. `_yahoo` restamps that point to 12:30, on early closes only, so ^DJI and ^GSPC end the day on the 13:00 node instead of 12:00. Pinned with recorded responses.
 - Live board: 4 axis nodes on an early close (10:00–13:00), settles at 13:30, and the clock, node mapping and reindex read the per-day close. The window description and chart hint say so. The Competition board is unaffected: its window has no early close.
 - Cadence pinned by tests: 6 decisions per full session, 3 per early close (Aug 2026 126, Nov 117, Dec 129 calls before retries).
+- Basis: excluding post-bell bars follows Barclay & Hendershott (2003, RFS), who find after-hours prices less efficient. Marking every symbol at one session cut avoids the nonsynchronous-trading bias in Lo & MacKinlay (1990, J. Econometrics).
+- Known gaps, stated in the docstrings:
+  - Agent marks are pre-auction on every day, because the auction print opens the dropped bar.
+  - The index baselines end a half day on the official close, about 0.02% off their full-day basis.
+  - Indicators still read extended-hours bars on every day. This is pre-existing; a follow-up (regular-hours indicator inputs) is proposed, not filed.
+- No stored curve changes, because no seed row or live checkpoint spans an early close. If this deploys after the 2026-11-27 13:30 ET settle, force-refresh November through the refresh route's `force=true` (`live.py` `force_refresh`). That replays the month from the 1st and bills it again.
 - No fee, slippage or prompt change.
 
 Tests: `pytest dashboard/backend/tests -q -p no:cacheprovider` (`test_report_pdf.py` needs `reportlab` locally).
@@ -1450,6 +1463,8 @@ Owner check after the nightly refresh (22:30 UTC cron, i.e. after 17:30 ET) on *
       stale: .live_status.snapshot_stale,
       axis: [.chart_axis[] | select(startswith("2026-11-27")) | .[11:16]],
       models: [.entries[] | select(.is_model) | {entry_id, status, snapshot_end, portfolio_value,
+        nodes: [.equity_curve[] | select(.timestamp | startswith("2026-11-27")) | [.timestamp[11:16], .equity]]}],
+      indexes: [.entries[] | select(.entry_id == "djia_index" or .entry_id == "spy_index") | {entry_id,
         nodes: [.equity_curve[] | select(.timestamp | startswith("2026-11-27")) | [.timestamp[11:16], .equity]]}]
     }'
 
@@ -1457,7 +1472,11 @@ Pass when:
 - `frozen_through` is the date and `stale` is false;
 - `axis` is `["10:00","11:00","12:00","13:00"]`;
 - every model with `snapshot_end` equal to the date has 4 nodes ending at `13:00`, and its `portfolio_value` equals that 13:00 node's equity. The last stored mark should be the 12:00 bar's; a mark on a post-close bar would usually make the two differ;
+- both `indexes` (`djia_index` is ^DJI, `spy_index` is ^GSPC) have 4 nodes ending at `13:00`, and the 13:00 equity differs from the 12:00 equity. Their nodes are equity scaled from the index level, so this checks that the official closing level arrived, not its value. If the two are equal, or the Render log has `ERROR: yahoo.early_close_level_missing`, Yahoo's half-day shape (a null 12:30 bar plus a 13:00 point, recorded for 2024–2025) has changed;
+- an agent's 13:00 node is a pre-auction mark (the 12:00 bar's last trade), so a small gap against official-close figures is expected, not a defect;
 - the Render log for that refresh shows `live increment <entry>: trade 2026-11-27 → 2026-11-27` followed by `🤖 LLM agent baseline: … steps=3 llm=on`. A catch-up spanning more days shows `steps` = 6 per full session + 3. Either way, nothing was traded after 13:00.
+
+Also, when NYSE publishes its 2029 calendar (usually in December): add 2029 to `PUBLISHED_EARLY_CLOSES` in `test_us_market_calendar.py`. The rule and XNYS predict 2029-07-03, 2029-11-23 and 2029-12-24.
 
 Source: PR #<n> (fix/live-early-close).
 EOF
@@ -1470,6 +1489,106 @@ Replace `<n>` with the PR number `gh pr create` printed in Step 3. Then link the
 1. **My Agents minute-mode backtest across an early close** (5m source bars that include the late session). Covered: `test_minute_mode_stops_filling_at_an_early_close` was added to Task 1.2. It pins that only the 10:30, 11:30 and 12:30 decisions fill, and that valuation stops at 12:55.
 2. **A manual refresh between 13:00 and 13:30 ET on 2026-11-27** (`workflow_dispatch` in the settle window). Covered by the `13:05 → settling, frozen 2026-11-25` case in `test_the_clock_closes_at_13_00_on_an_early_close`. It must not freeze a truncated 12:00 bar.
 3. **A catch-up or forced replay whose segment spans Thanksgiving and the half day.** Covered: `test_a_replay_across_thanksgiving_and_the_early_close_is_not_a_gap` runs the real `LLMAgentStrategy` decision loop over 11-25 → 11-27. It checks 6 then 3 decisions, one checkpoint per session, no `LiveSessionGapError`, and 4 painted nodes. A full-month replay takes the same per-day path.
-4. **Yahoo index baselines (`^DJI`, `^GSPC`) on the half day.** They are not session-filtered at all. Covered at the mapping layer: `test_axis_node_key_caps_at_the_early_close` maps Yahoo's 12:30 half bar to the 13:00 node and drops anything that opens at or after 13:00. It is not tested against a live Yahoo response, because the suite never calls the network.
-5. **An unscheduled early close** (a closure NYSE announces at short notice). Not testable: no rule can know it. A full-day closure is still caught loudly by `_session_gap`. An unscheduled *early* close would need its date added to `nyse_early_closes` by hand.
+4. **Yahoo index baselines (`^DJI`, `^GSPC`) on the half day.** They are not session-filtered at all. As planned, this item assumed Yahoo sends a populated 12:30 half bar. Recorded responses show it does not: the half bar comes back null and the closing level arrives as a separate point stamped 13:00, which `_axis_node_key` drops as after-hours. Fixed on the branch by `_yahoo._restamp_close_levels` (d52232b8, narrowed to early closes in 2306d7b5). Covered by four recorded responses in `test_yahoo_chart.py` (^DJI and ^GSPC, 2025-11-28 and 2025-12-24), each ending on the published close, plus a full-session control.
+5. **An unscheduled closure or early close** (one NYSE announces at short notice). Both are now one-line data changes: `UNSCHEDULED_CLOSURES` (six dates since 2004) and `UNSCHEDULED_EARLY_CLOSES` (empty). The safety nets do not cover them equally:
+   - A missing full-day closure is caught loudly by `_session_gap` (`ERROR: live.session_gap`, nothing stored past the gap, repeated nightly until the date is added and merged).
+   - A missing early close is not caught, because bars still arrive after the bell.
+   - Bars arriving on a day the calendar calls closed are not caught either.
 6. **Cost on the shared filter's hot path.** `is_in_session`'s open-stamped branch now also calls `session_close_time` (a second `session_windows` plus an `lru_cache`d frozenset lookup) on every stamp. All four call sites (`baseline_generator._market_hours_only`, `engine._market_hours_only`, `market_data_store._build_trading_timestamps`, `_common.filter_market_hours` via `market_timestamps`) filter one list of timestamps, already unioned across symbols where there are several, not symbol × timestamp, so a 14-day 5m run is a few thousand calls. The full suite ran in 454 s on main@17c552c5 + this phase, inside the 5–8 minutes the same suite took on main with the other phases applied. Not measured on a prod-size run; worth a glance, not a blocker.
+
+## Prior art, references and amendments (2026-10-15)
+
+Before and during execution, a prior-art scan asked what already exists for each P1 decision. It had two parts.
+
+**The research run.** Five topics, about 280 agents, three-vote verification of load-bearing claims, two critic gap rounds, three lens reviews (calendar, microstructure, engineering) and a synthesis.
+
+**First-hand checks**, all run offline on ext4 scratch:
+- exchange_calendars 4.13.2 and pandas_market_calendars 5.5.0 diffed against the rule.
+- QuantConnect LEAN's market-hours database diffed against the rule.
+- Yahoo chart responses recorded for every early close from 2024-11-29 to 2025-12-24, and the closing levels checked against Yahoo's daily bars.
+- NYSE's 2021-12-27 release read at source.
+
+Alpaca could not be checked, because the key in `dashboard/.env` answers 401 everywhere (Task 1.5 Step 2b).
+
+### What already exists, and what P1 does with it
+
+| Prior art | Verdict for P1 |
+|---|---|
+| exchange_calendars XNYS ([calendar](https://github.com/gerrymanoim/exchange_calendars/blob/master/exchange_calendars/exchange_calendar_xnys.py), [holidays](https://github.com/gerrymanoim/exchange_calendars/blob/master/exchange_calendars/us_holidays.py)) | **Reference, not a dependency.** A test-only dependency would be skipped in CI, it adds three packages, and stale installs have been reported ([#464](https://github.com/gerrymanoim/exchange_calendars/issues/464)). It generated, once and offline, the 2004–2035 early-close pin and the sessions-per-year pin. P1 copies its split between rules for recurring days and dated lists for ad hoc ones (`UNSCHEDULED_CLOSURES`). Its `TestTradingIndex` is the model for the naive-oracle test. The open-stamped rule is its `closed="left", force_close=False` index minus the straddling last bar. |
+| pandas_market_calendars ([nyse.py](https://github.com/rsheftel/pandas_market_calendars/blob/master/pandas_market_calendars/calendars/nyse.py)) | **Second cross-check.** It agrees with the rule 2004–2035, except for a 2005-06-01 15:56 technical close it lists. In it, one early-close set drives both the close and the post-market. P1 likewise has one date set driving the filter, axis, clock, settle and node mapping. [#138](https://github.com/rsheftel/pandas_market_calendars/issues/138), where a short session silently vanished, is the failure the oracle test's hourly-shape pin targets. |
+| QuantConnect LEAN market-hours database | **Third cross-check, not a source.** It matches every early close and holiday 2004–2028 (diffed), but carries a Sunday early close on 2017-12-24. Its per-day exchange hours are the precedent for a per-day close. |
+| Alpaca `/v2/calendar` | **Not a source.** It ends at 2029, a forum thread disputes its 2023-07-03 entry, and the `session_*` fields are undocumented. Use it only as a cross-check: by the owner (Task 1.5 Step 2b), and possibly in a nightly guard (follow-up). |
+| NYSE releases (2021-12-27, 2024-11-08, 2025-12-23) and the [hours page](https://www.nyse.com/trade/hours-calendars) | **The primary pins**, 2022–2028, hand-copied. [NYSE Rule 7.2](https://www.sec.gov/files/rules/sro/nyse/2021/34-93183-ex5.pdf) lists holidays only, so the early-close rule is a restatement of announced practice. |
+| Any library axis | **None can replace the per-day axis.** `trading_index` and `date_range` anchor at 09:30, and the board's nodes are bar closes from 10:00. |
+
+### Market-structure facts the code now states
+
+- **The bell and the late sessions.** The bell is at 13:00. NYSE Arca, American, National and Texas run late sessions to 17:00. So does FINRA TRF post-market reporting ([FINRA notice](https://www.finra.org/filing-reporting/technical-notices/thanksgiving-trf-2025)), and so does Alpaca's half-day extended session. Bars stamped 13:00 and later therefore hold real prints. The filter drops them by stamp.
+- **How Alpaca stamps bars.** Bars are left-stamped and half-open. Alpaca emits no bar for an interval without a valid trade. Condition 6 (the closing print) updates minute-bar OHLC. Sources: [Alpaca market-data FAQ](https://docs.alpaca.markets/us/docs/market-data-faq), forum threads [11966](https://forum.alpaca.markets/t/historical-data/11966) and [15032](https://forum.alpaca.markets/t/historical-bar-data-missing-data/15032).
+- **The auction print opens the dropped bar.** Every US day is therefore marked pre-auction, on the 12:00 bar or the 15:00 bar. The 13:00 bar is not used, because post-close prints can set its close. Sources: [NYSE XDP imbalances spec §1.1](https://www.nyse.com/publicdocs/nyse/data/XDP_Imbalances_Feed_Client_Specification_v2.2c.pdf), [SEC 34-92466](https://www.sec.gov/files/rules/sro/nasdaq/2021/34-92466.pdf), forum thread 11966.
+- **Yahoo's half-day shape.** On an early close Yahoo sends a null 12:30 row plus a 13:00 point equal to the official close. Its index curve therefore ends a half day on the official close, about 0.02% off its full-day pre-auction basis (^DJI 47,419.67 against 47,427.12 on 2025-11-26).
+- **Bars are complete at the settle, not immutable.** Alpaca updates bars after 30 s, applies SIP corrections after 20:00 and regenerates bars for days after (forum threads [14122](https://forum.alpaca.markets/t/how-accurate-is-get-stock-latest-bar/14122), [15456](https://forum.alpaca.markets/t/alpaca-alters-past-bars-trades-value/15456), [10236](https://forum.alpaca.markets/t/incorrect-spikes-peaks-in-historical-data/10236)). The 13:30 settle is the close plus the 15-minute SIP delay plus a 15-minute margin.
+
+### Literature (cited in the PR body; for the methodology page)
+
+- [Barclay & Hendershott (2003)](https://ideas.repec.org/a/oup/rfinst/v16y2003i4p1041-1073.html), *RFS* 16(4): after-hours prices are less efficient per hour, and post-close changes are the noisiest. Individual after-hours trades are more informative, though, so the exclusion is a tradability and noise policy, not a claim that the bars are empty.
+- [Lo & MacKinlay (1990)](https://web.mit.edu/Alo/www/Papers/lo-mackinlay-90a.html): marking at nonsynchronous times biases returns. P1 uses one session cut for every symbol and baseline.
+- [Ariel (1990)](https://ideas.repec.org/a/bla/jfinan/v45y1990i5p1611-26.html), *JF*; [Kim & Park (1994)](https://ideas.repec.org/a/cup/jfinqa/v29y1994i01p145-157_00.html), *JFQA*: pre-holiday returns are high. 2026-12-24 is a pre-holiday session. It is counted as one ordinary trading day and not re-weighted.
+- [Bogousslavsky & Muravyev (2023)](https://ideas.repec.org/a/eee/finmar/v66y2023ics1386418123000502.html), *JFM*: background on why the official close is the industry mark. It does not justify P1, whose mark is pre-auction.
+- **Evidence gap, stated rather than closed:** no peer-reviewed study measures NYSE half-day liquidity or the 13:00 cross.
+
+### Amendments on `fix/live-early-close` beyond Tasks 1.1–1.4
+
+| Commit | Change | Why |
+|---|---|---|
+| `d52232b8` | `_yahoo._restamp_close_levels`, with recorded ^DJI fixtures for 2025-11-26 and 2025-11-28. | As planned, the index baselines would have ended 2026-11-27 at 12:00. Yahoo never sends a populated 12:30 half bar on an early close. |
+| `d3bbf68b` | The XNYS early-close pin for 2004–2035, plus the docstring's validity range and the pre-2004 history. | The rule agrees with XNYS for 2004–2035. Earlier years followed other rules (Jul 5 in 1996 and 2002, and one-off half days). No year guard was added, because no entry path bounds dates. |
+| `a09bdfb6` | A naive-oracle differential test of the open-stamped rule: every trading day 2025–2028 at 1, 5 and 60 minutes. | Modelled on exchange_calendars `TestTradingIndex` and pandas_market_calendars #138. |
+| `c403732f` | `UNSCHEDULED_CLOSURES`: six dates from 2004 to 2025, including 2025-01-09. Sessions per year are pinned to XNYS for 2004–2035. | Before this, `is_trading_day(2025-01-09)` was True. |
+| `d0f695cc` | Docstrings: what the post-bell bars hold, the pre-auction mark, the settle's meaning, and labels on the synthetic grids. | The wording had claimed "thin" bars and a "final" settle. |
+| `2306d7b5` | The restamp runs on early closes only. Adds recorded ^GSPC 2025-11-28 and ^DJI/^GSPC 2025-12-24. | Yahoo appends the latest close at 16:00. A fetch that reached today was restamping it onto 15:30, so the same day marked differently live and on replay. |
+| `0a2c1c90` | An empty `UNSCHEDULED_EARLY_CLOSES`, applied ahead of the trading-day filter. `PUBLISHED_EARLY_CLOSES` gains 2022–2024 from the 2021-12-27 release. | The runbook "add the date" needs a place to add it. A holiday must still beat an early close (the class of LEAN [#9869](https://github.com/QuantConnect/Lean/pull/9869)). |
+| `f1119f24` | Recorded ^DJI/^GSPC fixtures for 2024-11-29, 2024-12-24 and 2025-07-03, plus a note that LEAN is a third cross-check. | All five early closes since 2024-11-29 are now pinned. The 2024 dates leave Yahoo's 730-day window in late 2026. |
+| `9919eecc` | Final-review follow-ups: a flushed `ERROR: yahoo.early_close_level_missing` for a settled early close that has no closing level; docstrings hedged where nothing has been observed yet; the market-local-time test made to bite. | Fail-visible: if Yahoo's half-day shape changes, the index curve would otherwise repeat its 11:30 level silently. The whole-branch review (most capable model, read-only) returned SHIP with no blockers. |
+
+### Confirmed, unchanged
+
+- The rule and the single 13:00 close time.
+- No runtime calendar dependency.
+- No year floor and no `ValueError`.
+- Drop the bars stamped 13:00 and later, and mark on the 12:00 bar.
+- The 13:30 settle.
+- An early close counts as one trading day. 252×6.5 annualisation is unchanged: two half days remove about 0.4% of session hours.
+- No bar-cache schema bump, because the filter runs after the fetch.
+- No stored curve changes, if P1 deploys before the 2026-11-27 13:30 ET settle.
+- D19 stays with the engine rewrite.
+
+### Open
+
+- **What Alpaca actually serves on an early close:** whether the late-session bars exist, and whether the 13:00 bar carries the closing cross. Task 1.5 Step 2b covers this.
+- **Yahoo's 2026 half-day shape.** It is checked by the dated issue. If it changes, every fetch that covers the day afterwards logs `ERROR: yahoo.early_close_level_missing`.
+- **Prod `agent_runs` rows spanning past early closes were not enumerated.** A user comparing a pre-P1 run with a post-P1 run of such a window mixes two rules.
+- **Unconfirmed hours and venues:** Nasdaq's post-market hours on early closes, and the NYSE late-session venue list (Texas or Chicago).
+- **Years from 2029 are extrapolated.** A reported 23/5 extended session, around December 2026, is unverified and worth watching.
+
+### Pointers for later plans
+
+- **Methodology page (spec §9):**
+  - Cite the literature above.
+  - State the mark convention: agents and Alpaca baselines are pre-auction, while the index baselines take the official close on a half day.
+  - State that an early close is one trading day, and that the pre-holiday anomaly is not re-weighted.
+  - State the evidence gap.
+  - Cite LEAN's note that ignoring varying close times "introduces look-ahead bias" (quantconnect.com/announcements/17380).
+- **Engine rewrite:**
+  - Read D19 from the same `session_close_time`, as zipline does with per-session masking.
+  - Compute indicators on regular-hours bars. Today every path computes them on all-hours frames before filtering. LEAN defaults to regular hours, IBKR has `useRTH`, and TradingView pins sessions.
+  - Stamp `early_close_sessions` into `agent_runs.metadata` beside `feed_provenance`.
+- **Live board:**
+  - A nightly Alpaca calendar cross-check that only reports (`ERROR: live.calendar_mismatch`) and never overrides the rule.
+  - A bar fingerprint in the checkpoint metadata, so a month replay can tell revised bars from model drift.
+- **Copy (owner-coordinated; P6 or a follow-up):**
+  - `app.html:1593` ("after the 16:00 ET cash close").
+  - `js/leaderboard.js:776` ("after the 16:00 ET cash session"). This needs a cache-buster bump.
+  - The client-side session clocks (`js/admin-ticker.js:231`, `app.js:6793`, `home-page.js:1030`) hard-code 09:30–16:00 with no holidays.
+  - A comment noting that `PIPELINE_DECISION_BARS_PER_TRADING_DAY = 7` is an upper bound.
+- **Context lake:** CLAUDE.md's "`_find_cached_run` reuses a row on `(mode, start_date, end_date, llm_model)` alone" and the matching comment at `service.py:2103` are stale. `_cache_match_rank` also ranks on recorded capital and strategy prompt.
