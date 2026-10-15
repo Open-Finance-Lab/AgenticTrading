@@ -61,8 +61,9 @@ _US_CASH_OPEN = session_windows("US")[0][0]
 # nodes on a full session, four (10:00 … 13:00) on an early close.
 _FIRST_NODE_HOUR = _US_CASH_OPEN.hour + 1
 _BAR_MINUTES = 60
-# A session joins the freeze only once its closing bar is final on the tape the
-# board is priced off. A Basic plan clamps a SIP request to now − delay, so a
+# A session joins the freeze only once its closing bar is complete on the tape
+# the board is priced off (complete, not immutable: see ``freeze_settle_time``).
+# A Basic plan clamps a SIP request to now − delay, so a
 # refresh at 16:02 would fetch a truncated 15:00 bar and cache that curve as
 # the day's close. The margin covers late prints and the cron's own jitter.
 _FREEZE_SETTLE_MARGIN_MINUTES = 15

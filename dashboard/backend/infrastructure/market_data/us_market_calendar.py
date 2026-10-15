@@ -77,6 +77,10 @@ UNSCHEDULED_CLOSURES: FrozenSet[date] = frozenset({
     date(2025, 1, 9),    # President Carter
 })
 
+#: 13:00 closes NYSE called at short notice. None since 2004; the set exists
+#: so the next one is a one-line addition, not a change to the rules.
+UNSCHEDULED_EARLY_CLOSES: FrozenSet[date] = frozenset()
+
 
 @lru_cache(maxsize=16)
 def nyse_holidays(year: int) -> FrozenSet[date]:
@@ -110,7 +114,8 @@ def is_trading_day(day: date) -> bool:
 
 @lru_cache(maxsize=16)
 def nyse_early_closes(year: int) -> FrozenSet[date]:
-    """NYSE's 13:00 ET early closes in ``year``, by rule.
+    """NYSE's 13:00 ET early closes in ``year``: by rule, plus any
+    :data:`UNSCHEDULED_EARLY_CLOSES`.
 
     - the day after Thanksgiving;
     - December 24 when it falls Monday to Thursday (a Friday one is the
@@ -119,15 +124,18 @@ def nyse_early_closes(year: int) -> FrozenSet[date]:
       makes July 3 the observed holiday; a Sunday or Monday one puts July 3 on
       a weekend).
 
+    NYSE Rule 7.2 lists holidays only; early closes are announced year by
+    year, so these rules restate the announced pattern. They reproduce NYSE's
+    published 2022-2028 calendars and every year 2004-2035 of
+    exchange_calendars' XNYS calendar (the test module pins both); a year past
+    NYSE's latest release is extrapolated. Earlier years followed other rules:
+    a Thursday July 4 put the half day on Friday July 5 (1996, 2002), and
+    1997-12-26, 1999-12-31 and 2003-12-26 were one-off half days.
+
     A candidate that is not a trading day is dropped, so this set can never
-    contradict ``nyse_holidays``. The rules reproduce NYSE's published 2025-2028
-    calendars and every year 2004-2035 of exchange_calendars' XNYS calendar
-    (the test module pins both). Earlier years followed other rules: a Thursday
-    July 4 put the half day on Friday July 5 (1996, 2002), and 1997-12-26,
-    1999-12-31 and 2003-12-26 were one-off half days. NYSE has called no
-    unscheduled early close since 2004; if it does, the date needs adding by
-    hand, and nothing catches its absence: Alpaca still serves bars after an
-    early close, so the session-gap check sees a normal day.
+    contradict ``nyse_holidays``. An unscheduled early close missing from
+    :data:`UNSCHEDULED_EARLY_CLOSES` goes unnoticed: bars still arrive after
+    the bell, so the Live board's session-gap check sees a normal day.
     """
     candidates = {_nth_weekday(year, 11, 3, 4) + timedelta(days=1)}
     christmas_eve = date(year, 12, 24)
@@ -135,6 +143,7 @@ def nyse_early_closes(year: int) -> FrozenSet[date]:
         candidates.add(christmas_eve)
     if 1 <= date(year, 7, 4).weekday() <= 4:
         candidates.add(date(year, 7, 3))
+    candidates.update(day for day in UNSCHEDULED_EARLY_CLOSES if day.year == year)
     return frozenset(day for day in candidates if is_trading_day(day))
 
 

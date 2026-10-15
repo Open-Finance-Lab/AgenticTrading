@@ -2,10 +2,13 @@
 
 The Live board's 2026-11-27 session is why this exists: the calendar knew the
 holidays but not the 13:00 early closes, so that day would have had seven
-chart nodes and three model decisions on late-session bars. Sources: the NYSE
-Group releases "2025, 2026 and 2027 Holiday and Early Closings Calendar"
-(2024-11-08) and "2026, 2027 and 2028 ..." (2025-12-23), and nyse.com
-"Holidays & Trading Hours" (https://www.nyse.com/trade/hours-calendars).
+chart nodes and three model decisions on late-session bars.
+``PUBLISHED_EARLY_CLOSES`` is hand-copied from NYSE, never generated from the
+code under test: the NYSE Group releases "2022, 2023 and 2024 Holiday and
+Early Closings Calendar" (2021-12-27), "2025, 2026 and 2027 ..." (2024-11-08)
+and "2026, 2027 and 2028 ..." (2025-12-23), and nyse.com "Holidays & Trading
+Hours" (https://www.nyse.com/trade/hours-calendars), retrieved 2026-10-15.
+Re-pin when NYSE publishes the next year, usually in December.
 
 ``XNYS_EARLY_CLOSES`` widens the pin to 2004-2035. It was generated once,
 offline, from exchange_calendars 4.13.2 (``get_calendar("XNYS").closes``: every
@@ -30,6 +33,9 @@ from dashboard.backend.infrastructure.market_data.us_market_calendar import (
 )
 
 PUBLISHED_EARLY_CLOSES = {
+    2022: ["2022-11-25"],
+    2023: ["2023-07-03", "2023-11-24"],
+    2024: ["2024-07-03", "2024-11-29", "2024-12-24"],
     2025: ["2025-07-03", "2025-11-28", "2025-12-24"],
     2026: ["2026-11-27", "2026-12-24"],
     2027: ["2027-11-26"],
@@ -119,6 +125,28 @@ def test_unscheduled_closures_are_not_trading_days():
         assert not is_trading_day(day)
     assert is_trading_day(date(2025, 1, 8))
     assert is_trading_day(date(2025, 1, 10))
+
+
+def test_an_unscheduled_early_close_never_opens_a_closed_day(monkeypatch):
+    """The dated set is empty today; adding to it must shorten a session, never
+    create one on a holiday or a weekend."""
+    from dashboard.backend.infrastructure.market_data import us_market_calendar
+
+    assert us_market_calendar.UNSCHEDULED_EARLY_CLOSES == frozenset()
+    monkeypatch.setattr(us_market_calendar, "UNSCHEDULED_EARLY_CLOSES", frozenset({
+        date(2026, 3, 12),  # a Thursday
+        date(2026, 4, 3),   # Good Friday
+        date(2026, 3, 14),  # a Saturday
+    }))
+    nyse_early_closes.cache_clear()
+    try:
+        assert nyse_early_closes(2026) == {
+            date(2026, 3, 12), date(2026, 11, 27), date(2026, 12, 24),
+        }
+        assert sessions.session_close_time(date(2026, 3, 12)) == time(13, 0)
+        assert not is_trading_day(date(2026, 4, 3))
+    finally:
+        nyse_early_closes.cache_clear()
 
 
 def test_a_holiday_or_weekend_is_never_an_early_close():
