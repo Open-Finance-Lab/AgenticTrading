@@ -323,6 +323,46 @@ def test_postgres_reseed_then_drop_legacy_snapshot_tables(
 
 
 @pg_only
+def test_postgres_failed_seed_keeps_both_legacy_tables(postgres_contract_store):
+    from dashboard.backend.domain.analytics.facts_migration import (
+        run_startup_migrations,
+    )
+    from dashboard.backend.tests.domain.analytics.test_facts_migration import (
+        LEGACY_TABLES,
+    )
+
+    analytics, _admin_id, _user_id = postgres_contract_store
+    value_store = PostgresValueAnalyticsStore(
+        analytics,
+        credits_base=object(),
+        provider_base=object(),
+        agent_base=object(),
+        run_base=object(),
+    )
+    with analytics._get_connection() as conn:
+        with conn.cursor() as cur:
+            # Lacks activated_at: UndefinedColumn, not the tolerated UndefinedTable.
+            cur.execute("CREATE TABLE user_analytics_snapshots (user_id INTEGER PRIMARY KEY)")
+            cur.execute(
+                "CREATE TABLE user_lifecycle_daily_snapshots ("
+                "snapshot_date TEXT NOT NULL, user_id INTEGER NOT NULL)"
+            )
+
+    with pytest.raises(psycopg.errors.UndefinedColumn):
+        run_startup_migrations(value_store=value_store, now=NOW)
+
+    with analytics._get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT table_name FROM information_schema.tables "
+                "WHERE table_schema = current_schema() AND table_name = ANY(%s)",
+                (list(LEGACY_TABLES),),
+            )
+            present = {row["table_name"] for row in cur.fetchall()}
+    assert present == set(LEGACY_TABLES)
+
+
+@pg_only
 def test_postgres_fact_expiry_and_long_term_rollups_round_trip(postgres_contract_store, tmp_path):
     from dashboard.backend.tests.domain.analytics.test_fact_reads import fact, transition
 

@@ -151,6 +151,25 @@ def test_seed_still_raises_on_errors_other_than_a_missing_table(tmp_path):
         value_store.seed_activity_from_snapshots(now=NOW)
 
 
+def test_a_failed_seed_keeps_both_legacy_tables(tmp_path):
+    """The drop is irreversible, so it must never run after a seed that did not
+    finish -- not from a ``finally``, not behind a swallowed exception."""
+    _user_id, analytics, value_store = _fixture(tmp_path)
+    with analytics._get_connection() as conn:
+        # Present but lacking the columns the seed reads: a real failure, not
+        # the tolerated missing table.
+        conn.execute("CREATE TABLE user_analytics_snapshots (user_id INTEGER PRIMARY KEY)")
+        conn.execute(
+            "CREATE TABLE user_lifecycle_daily_snapshots ("
+            "snapshot_date TEXT NOT NULL, user_id INTEGER NOT NULL)"
+        )
+
+    with pytest.raises(sqlite3.OperationalError, match="no such column"):
+        run_startup_migrations(value_store=value_store, now=NOW)
+
+    assert set(LEGACY_TABLES) <= _table_names(analytics)
+
+
 def test_fresh_schema_declares_no_snapshot_tables():
     for ddl in (repository.ANALYTICS_SQLITE_DDL, repository_postgres.ANALYTICS_POSTGRES_DDL):
         for table in LEGACY_TABLES:

@@ -251,9 +251,11 @@ class PostgresAnalyticsStore:
                 )
 
     def drop_legacy_snapshot_tables(self) -> None:
-        """See the SQLite twin."""
+        """See the SQLite twin. Both DROPs commit in one transaction."""
         with self._get_connection() as conn:
             with conn.cursor() as cur:
+                # Old instance holds a lock? Fail loudly, retry next boot; never stall startup.
+                cur.execute("SET LOCAL lock_timeout = '5s'")
                 for table in LEGACY_SNAPSHOT_TABLES:
                     cur.execute(f"DROP TABLE IF EXISTS {table}")
 
