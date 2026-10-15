@@ -45,7 +45,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="Validate and count without writing events, snapshots, or rollups.",
+        help="Validate and count without writing events or rollups.",
     )
     return parser
 

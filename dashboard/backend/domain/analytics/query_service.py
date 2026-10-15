@@ -38,14 +38,9 @@ from .repository_common import (
 )
 from .rollups import AnalyticsRollupStore, DailyRollup
 from .usage_cost import atl_cost_micro, byok_estimate_micro, byok_rollup_lane
-from .states import (
-    AnalyticsStateStore,
-    UserAnalyticsSnapshot,
-)
 from .value_repository import build_value_analytics_store
 
 ActivitySection = Literal["timeline", "runs", "usage", "sessions"]
-_USER_STATES = {"blocked", "needs_attention", "dormant", "onboarding", "active"}
 _ATTENTION_STATES = {"blocked", "needs_attention"}
 # The two BillingLaneDay call-count fields; also models.ALLOWED_BILLING_MODES.
 _BILLING_LANES = ("platform_credits", "byok")
@@ -309,51 +304,13 @@ class UserMetricsAdmin(UserMetricsShared):
     access_log: Sequence[str]
 
 
-def _all_users(user_store: Any) -> list[dict[str, Any]]:
-    users: list[dict[str, Any]] = []
-    offset = 0
-    while True:
-        page = user_store.list_users_admin(limit=500, offset=offset)
-        users.extend(page)
-        if len(page) < 500:
-            return users
-        offset += len(page)
-
-
 class AnalyticsQueryStore:
     """PR 2 read companions over the PR 1 Analytics tables."""
 
     def __init__(self, base_store: Any = analytics_store):
         self.base_store = base_store
         self.rollups = AnalyticsRollupStore(base_store)
-        self.states = AnalyticsStateStore(base_store)
         self.is_postgres = hasattr(base_store, "database_url")
-
-    def list_snapshots(self) -> dict[int, UserAnalyticsSnapshot]:
-        if self.is_postgres:
-            with self.base_store._get_connection() as conn:
-                with conn.cursor() as cur:
-                    cur.execute("SELECT * FROM user_analytics_snapshots ORDER BY user_id")
-                    rows = cur.fetchall()
-        else:
-            with self.base_store._get_connection() as conn:
-                rows = conn.execute(
-                    "SELECT * FROM user_analytics_snapshots ORDER BY user_id"
-                ).fetchall()
-        result = {}
-        for row in rows:
-            snapshot = UserAnalyticsSnapshot(
-                user_id=int(row["user_id"]),
-                status=str(row["status"]),
-                reason_code=str(row["reason_code"]),
-                human_readable_reason=str(row["human_readable_reason"]),
-                evidence_event_ids=list(
-                    json.loads(str(row["evidence_event_ids_json"]))
-                ),
-                calculated_at=_parse_timestamp(row["calculated_at"]),
-            )
-            result[snapshot.user_id] = snapshot
-        return result
 
     def list_metric_events(
         self,
@@ -450,61 +407,6 @@ class AnalyticsQueryStore:
                 )
             )
         return events
-
-    def summarize_users(
-        self,
-        *,
-        user_ids: set[int],
-        start: datetime,
-        end: datetime,
-    ) -> dict[int, dict[str, Any]]:
-        """Return bounded 30-day summaries without hydrating event models."""
-
-        if not user_ids:
-            return {}
-        result: dict[int, dict[str, Any]] = {}
-        ordered_ids = sorted(positive_user_id(user_id) for user_id in user_ids)
-        for offset in range(0, len(ordered_ids), 500):
-            chunk = ordered_ids[offset : offset + 500]
-            placeholder = "%s" if self.is_postgres else "?"
-            id_placeholders = ", ".join(placeholder for _ in chunk)
-            params: list[Any] = [utc_iso(start), utc_iso(end), *chunk]
-            sql = f"""
-                SELECT user_id,
-                       MAX(CASE
-                           WHEN event_group <> 'experience'
-                                OR event_name = 'page_viewed'
-                           THEN occurred_at
-                       END) AS last_meaningful_activity,
-                       SUM(CASE WHEN event_group = 'run' THEN 1 ELSE 0 END)
-                           AS recent_runs,
-                       SUM(CASE WHEN event_name = 'backtest_failed' THEN 1 ELSE 0 END)
-                           AS recent_failures
-                FROM analytics_events
-                WHERE occurred_at >= {placeholder}
-                  AND occurred_at < {placeholder}
-                  AND user_id IN ({id_placeholders})
-                GROUP BY user_id
-            """
-            if self.is_postgres:
-                with self.base_store._get_connection() as conn:
-                    with conn.cursor() as cur:
-                        cur.execute(sql, params)
-                        rows = cur.fetchall()
-            else:
-                with self.base_store._get_connection() as conn:
-                    rows = conn.execute(sql, params).fetchall()
-            for row in rows:
-                result[int(row["user_id"])] = {
-                    "last_meaningful_activity": (
-                        _parse_timestamp(row["last_meaningful_activity"])
-                        if row["last_meaningful_activity"] is not None
-                        else None
-                    ),
-                    "recent_runs": int(row["recent_runs"] or 0),
-                    "recent_failures": int(row["recent_failures"] or 0),
-                }
-        return result
 
     def list_activity_rows(
         self,
@@ -650,16 +552,6 @@ class AnalyticsQueryStore:
                 last["sequence"],
             )
         return page_rows, next_cursor
-
-
-def _snapshot_summary(snapshot: UserAnalyticsSnapshot) -> AnalyticsStateSummary:
-    return AnalyticsStateSummary(
-        status=snapshot.status,
-        reason_code=snapshot.reason_code,
-        human_readable_reason=snapshot.human_readable_reason,
-        evidence_event_ids=snapshot.evidence_event_ids,
-        calculated_at=snapshot.calculated_at,
-    )
 
 
 def _availability(available: bool = True) -> PanelAvailability:

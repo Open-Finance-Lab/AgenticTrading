@@ -356,20 +356,6 @@ async def startup_event():
         print(f"⚠️ Research sweeper start error: {e}")
 
     try:
-        from dashboard.backend.domain.analytics.maintenance import (
-            run_analytics_maintenance,
-        )
-        from dashboard.backend.domain.runs.service import register_reaper_sweep
-
-        register_reaper_sweep(run_analytics_maintenance)
-        print("🧹 Analytics maintenance sweep registered with the reaper")
-    except Exception as e:
-        print(
-            "WARNING: analytics.maintenance_registration_failed "
-            f"category={type(e).__name__}"
-        )
-
-    try:
         # Admin layer redesign PR A (design D23, SS6.9): the daily-facts job
         # runs on its own thread, not as a reaper sweep -- a whole-population
         # batch across three databases on the heartbeat thread would let a

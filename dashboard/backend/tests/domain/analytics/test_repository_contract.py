@@ -26,10 +26,6 @@ from dashboard.backend.domain.analytics.repository_common import (
     decode_event_cursor,
 )
 from dashboard.backend.domain.analytics.service import AnalyticsService
-from dashboard.backend.domain.analytics.states import (
-    AnalyticsStateStore,
-    recalculate_user_snapshot,
-)
 from dashboard.backend.domain.analytics.value_repository import (
     UserDailyFact,
     build_value_analytics_store,
@@ -305,8 +301,6 @@ def assert_pr2_query_contract(store, user_id):
         occurred_at=NOW - timedelta(minutes=59),
         **{key: value for key, value in common.items() if key != "source_record_type"},
     )
-    state_store = AnalyticsStateStore(store)
-    recalculate_user_snapshot(user_id, now=NOW, store=state_store)
     operational_base = _HealthyOperationalBase()
     value_store = build_value_analytics_store(
         analytics_base=store,

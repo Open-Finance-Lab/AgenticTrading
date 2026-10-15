@@ -24,11 +24,6 @@ from dashboard.backend.domain.analytics.service import (
     AnalyticsService,
     get_analytics_service,
 )
-from dashboard.backend.domain.analytics.states import (
-    AnalyticsStateStore,
-    recalculate_user_snapshot,
-    recalculate_user_snapshots,
-)
 from dashboard.backend.domain.analytics.value_repository import (
     UserDailyFact,
     ValueAnalyticsStore,
@@ -213,7 +208,6 @@ def test_synthetic_acceptance_scenario_has_no_real_credentials(monkeypatch):
         )
         store = AnalyticsStore(path)
         event_service = AnalyticsService(store)
-        state_store = AnalyticsStateStore(store)
         value_store = ValueAnalyticsStore(
             analytics_base=store,
             credits_base=CreditsStore(path),
@@ -236,16 +230,6 @@ def test_synthetic_acceptance_scenario_has_no_real_credentials(monkeypatch):
             instrumentation,
             "get_analytics_service",
             lambda: event_service,
-        )
-        monkeypatch.setattr(
-            instrumentation,
-            "_snapshot_recalculator",
-            lambda user_id: recalculate_user_snapshots(
-                user_id,
-                now=now,
-                state_store=state_store,
-                value_store=value_store,
-            ),
         )
         app.dependency_overrides[get_analytics_query_service] = lambda: query_service
         app.dependency_overrides[get_value_analytics_query_service] = (

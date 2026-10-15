@@ -6,10 +6,6 @@ import sqlite3
 from datetime import date, datetime, timedelta, timezone
 
 from dashboard.backend.domain.analytics.repository import AnalyticsStore
-from dashboard.backend.domain.analytics.states import (
-    AnalyticsStateStore,
-    UserAnalyticsSnapshot,
-)
 from dashboard.backend.domain.analytics.value_repository import (
     ProjectionJob,
     UserLifecycleDailySnapshot,
@@ -260,29 +256,40 @@ def _value_store(analytics, credits):
     )
 
 
+_LEGACY_COLUMNS = (
+    "status, reason_code, human_readable_reason, evidence_event_ids_json, calculated_at"
+)
+
+
 def test_current_projection_round_trips_without_overwriting_legacy_state(tmp_path):
     user_id, analytics, credits = _stores(tmp_path)
-    legacy = UserAnalyticsSnapshot(
-        user_id=user_id,
-        status="needs_attention",
-        reason_code="invalid_default_credential",
-        human_readable_reason="The default model credential is invalid.",
-        evidence_event_ids=["synthetic-event"],
-        calculated_at=NOW - timedelta(minutes=1),
+    # The five-state writer is gone (PR B); the row it left behind is
+    # inserted directly so the upsert can be checked against it.
+    legacy = (
+        "needs_attention",
+        "invalid_default_credential",
+        "The default model credential is invalid.",
+        '["synthetic-event"]',
+        (NOW - timedelta(minutes=1)).isoformat(),
     )
-    AnalyticsStateStore(analytics).upsert_snapshot(legacy)
+    with analytics._get_connection() as conn:
+        conn.execute(
+            f"INSERT INTO user_analytics_snapshots (user_id, {_LEGACY_COLUMNS}) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (user_id, *legacy),
+        )
     store = _value_store(analytics, credits)
 
     expected = _value_snapshot(user_id)
     store.upsert_current_snapshot(expected)
 
     assert store.get_current_snapshot(user_id) == expected
-    persisted_legacy = AnalyticsStateStore(analytics).get_snapshot(user_id)
-    assert persisted_legacy is not None
-    assert persisted_legacy.status == legacy.status
-    assert persisted_legacy.reason_code == legacy.reason_code
-    assert persisted_legacy.human_readable_reason == legacy.human_readable_reason
-    assert persisted_legacy.evidence_event_ids == legacy.evidence_event_ids
+    with analytics._get_connection() as conn:
+        persisted_legacy = conn.execute(
+            f"SELECT {_LEGACY_COLUMNS} FROM user_analytics_snapshots WHERE user_id = ?",
+            (user_id,),
+        ).fetchone()
+    assert tuple(persisted_legacy)[:4] == legacy[:4]
 
 
 def test_current_projections_are_loaded_in_one_batched_query(tmp_path):

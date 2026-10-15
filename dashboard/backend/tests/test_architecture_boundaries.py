@@ -366,6 +366,38 @@ def test_deleted_shims_absent_from_production_and_scripts():
     assert offenders == [], f"deleted shim paths still imported: {offenders}"
 
 
+_DELETED_ANALYTICS_MODULES = (
+    "dashboard.backend.domain.analytics.states",
+    "dashboard.backend.domain.analytics.lifecycle_backfill",
+    "dashboard.backend.domain.analytics.maintenance",
+)
+
+
+@pytest.mark.parametrize("module_name", _DELETED_ANALYTICS_MODULES)
+def test_deleted_five_state_module_is_not_importable(module_name):
+    """Design §13 row B: the five-state model leaves in PR B. A stale
+    __pycache__ resolves a deleted package dir as a namespace package, which
+    is why _DELETED_SHIMS exists; these are plain modules, so a stale .pyc is
+    the only way this can pass by accident -- see the CLAUDE.md gotcha."""
+    with pytest.raises(ModuleNotFoundError):
+        importlib.import_module(module_name)
+
+
+def test_app_no_longer_registers_analytics_maintenance_with_the_reaper():
+    source = (Path(__file__).resolve().parents[1] / "app.py").read_text(encoding="utf-8")
+    assert "run_analytics_maintenance" not in source
+    assert "analytics.maintenance_registration_failed" not in source
+
+
+def test_rollup_day_writes_no_five_state_rows():
+    import inspect
+
+    from dashboard.backend.domain.analytics import rollups
+
+    assert "user_state_count" not in inspect.getsource(rollups.rollup_day)
+    assert "state_counts" not in inspect.signature(rollups.rollup_day).parameters
+
+
 # ---------------------------------------------------------------------------
 # Chat / Discord import safety: no secrets, no network at import time
 # ---------------------------------------------------------------------------
@@ -561,8 +593,8 @@ _EVENT_READ_NAMES = {"list_events", "list_user_events", "list_metric_events"}
 # Files that may call a raw-event reader, each with the reason. Rules 3-5: the
 # paginated timeline and the overview's one-day scan are the only permitted raw
 # reads; everything else reads rollups or user_daily_facts. Every entry must
-# still contain a hit (the stale check below), so PR B removes the last two as
-# it deletes the files and narrows the others as it moves the reads.
+# still contain a hit (the stale check below); PR B removed the five-state
+# calculator's and the lifecycle backfill's entries with their files.
 _EVENT_READ_ALLOWLIST = {
     "dashboard/backend/domain/analytics/rollups.py": (
         "defines AnalyticsRollupStore.list_events; rollup_day / rollup_current_day "
@@ -572,15 +604,6 @@ _EVENT_READ_ALLOWLIST = {
     "dashboard/backend/domain/analytics/query_service.py": (
         "the paginated timeline (rule 3) and the overview's current-day read "
         "(rule 5); PR B narrows the overview read and gives sessions a 30-day window"
-    ),
-    "dashboard/backend/domain/analytics/states.py": (
-        "legacy five-state calculator: full-history per-user reads. DELETED IN "
-        "PR B (design SS13 row B); allowlisted, not fixed, because PR A creates "
-        "and PR B drops"
-    ),
-    "dashboard/backend/domain/analytics/lifecycle_backfill.py": (
-        "historical eight-week reconstruction, per-user history reads. DELETED "
-        "IN PR B; the copy in facts_migration.py carries the history now"
     ),
 }
 _OWN_CONNECTION_RECEIVERS = {"self", "self.analytics_base", "self.base_store"}

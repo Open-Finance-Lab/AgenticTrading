@@ -32,10 +32,6 @@ from dashboard.backend.domain.analytics.models import (
     FrontendAnalyticsEvent,
     RequestAnalyticsContext,
 )
-from dashboard.backend.domain.analytics.states import (
-    AnalyticsStateStore,
-    recalculate_user_snapshot,
-)
 from dashboard.backend.domain.analytics.value_queries import (
     CommercialAnalyticsResponse,
     GroupAnalyticsResponse,
@@ -215,7 +211,7 @@ def _fixture(tmp_path):
         analytics,
         AnalyticsService(analytics),
         AnalyticsRollupStore(analytics),
-        AnalyticsStateStore(analytics),
+        None,
         QueryUsers(users),
     )
 
@@ -1233,8 +1229,6 @@ def admin_analytics_api(monkeypatch):
                 outcome="succeeded",
                 occurred_at=at - timedelta(minutes=index + 1),
             )
-        state_store = AnalyticsStateStore(analytics)
-        recalculate_user_snapshot(subject["id"], now=at, store=state_store)
         query_service = AnalyticsQueryService(store=analytics, user_store=users)
         value_query_service = FixtureValueQueryService(int(subject["id"]))
         monkeypatch.setattr(users_module, "user_store", users)

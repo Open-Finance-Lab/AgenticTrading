@@ -109,8 +109,8 @@ def test_startup_starts_the_worker_and_leaves_the_reaper_to_heartbeats():
     assert source.count("start_daily_facts_worker()") == 1
     assert "register_reaper_sweep(analytics_retention_coordinator.run_if_due)" not in source
     assert "register_reaper_sweep(run_daily_facts" not in source
-    # The throttled snapshot repairs stay on the reaper until PR B deletes them.
-    assert "register_reaper_sweep(run_analytics_maintenance)" in source
+    # PR B deleted the throttled snapshot repairs along with maintenance.py.
+    assert "run_analytics_maintenance" not in source
 
 
 def test_the_job_owns_the_retention_coordinator_now():

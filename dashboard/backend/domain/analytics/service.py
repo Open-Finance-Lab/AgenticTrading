@@ -39,48 +39,16 @@ class AnalyticsService:
         self,
         store,
         *,
-        state_store=None,
         value_store=None,
-        project_snapshots: bool = False,
         maintain_activity: bool = False,
     ):
-        if not isinstance(project_snapshots, bool):
-            raise TypeError("project_snapshots must be a boolean")
         if not isinstance(maintain_activity, bool):
             raise TypeError("maintain_activity must be a boolean")
-        if project_snapshots and (state_store is None or value_store is None):
-            raise ValueError("snapshot stores are required when projection is enabled")
         if maintain_activity and value_store is None:
             raise ValueError("a value store is required to maintain user activity")
         self.store = store
-        self.state_store = state_store
         self.value_store = value_store
-        self.project_snapshots = project_snapshots
         self.maintain_activity = maintain_activity
-
-    def _try_recalculate_snapshots(
-        self,
-        *,
-        user_id: int,
-        event_name: str,
-        now: datetime,
-    ) -> None:
-        if not self.project_snapshots:
-            return
-        try:
-            from .states import recalculate_user_snapshots
-
-            recalculate_user_snapshots(
-                user_id,
-                now=now,
-                state_store=self.state_store,
-                value_store=self.value_store,
-            )
-        except Exception as exc:
-            print(
-                "WARNING: analytics.value_projection_failed "
-                f"event={event_name} category={type(exc).__name__[:80]}"
-            )
 
     def _try_record_activity(
         self,
@@ -204,19 +172,8 @@ class AnalyticsService:
         result = self.store.append_event(event)
         from .lifecycle import is_lifecycle_activity
 
-        lifecycle_activity = is_lifecycle_activity(event)
-        if result.created and lifecycle_activity:
+        if result.created and is_lifecycle_activity(event):
             self._try_record_activity(user_id=subject_id, event=event, now=received)
-        projection_relevant = lifecycle_activity or event_name in {
-            "account_signed_up",
-            "safe_error_recorded",
-        }
-        if result.created and projection_relevant:
-            self._try_recalculate_snapshots(
-                user_id=subject_id,
-                event_name=event_name,
-                now=received,
-            )
         return result
 
     def try_record_server_event(self, **kwargs) -> AppendEventResult | None:
@@ -271,22 +228,13 @@ class AnalyticsService:
 
 
 def _build_analytics_service() -> AnalyticsService:
-    from .states import AnalyticsStateStore
     from .value_repository import build_value_analytics_store
 
-    state_store = AnalyticsStateStore(analytics_store)
     return AnalyticsService(
         store=analytics_store,
-        state_store=state_store,
         value_store=build_value_analytics_store(analytics_store),
-        # PR 0 (burner kill): the live singleton no longer recomputes a
-        # snapshot synchronously inside record_server_event. Task 3 of the
-        # same plan disarms instrumentation.py's own fallback recalculator,
-        # which otherwise steps in for exactly this state (see that task --
-        # flipping this flag alone is not sufficient).
-        project_snapshots=False,
-        # PR A replaces the per-event snapshot recompute with the activity
-        # upsert. PR B deletes the projection flag entirely.
+        # The activity upsert is the only per-event projection (design SS6.5);
+        # PR B deleted the per-event snapshot recompute it replaced.
         maintain_activity=True,
     )
 

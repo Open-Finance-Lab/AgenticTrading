@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from collections import Counter, defaultdict
 from datetime import date, datetime, time, timedelta, timezone
-from typing import Any, Iterable, Mapping, Sequence
+from typing import Any, Iterable, Sequence
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -231,7 +231,6 @@ def rollup_day(
     day: date,
     *,
     store: AnalyticsRollupStore | None = None,
-    state_counts: Mapping[str, int] | None = None,
     include_internal: bool = False,
     now: datetime | None = None,
 ) -> list[DailyRollup]:
@@ -472,17 +471,6 @@ def rollup_day(
                     updated_at=current,
                 )
             )
-    for status, count in sorted((state_counts or {}).items()):
-        rows.append(
-            _row(
-                day,
-                "user_state_count",
-                count=int(count),
-                user_state=status,
-                updated_at=current,
-            )
-        )
-
     rows.sort(
         key=lambda row: (
             row.metric_name,
