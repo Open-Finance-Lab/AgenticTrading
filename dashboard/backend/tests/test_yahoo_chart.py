@@ -218,7 +218,9 @@ _OFFICIAL_CLOSES = {
 
 
 @pytest.mark.parametrize(("symbol", "day"), sorted(_OFFICIAL_CLOSES))
-def test_each_recorded_early_close_ends_on_the_official_close(monkeypatch, symbol, day):
+def test_each_recorded_early_close_ends_on_the_official_close(
+    monkeypatch, capsys, symbol, day
+):
     fixture = f"yahoo-chart-{symbol[1:].lower()}-1h-{day}.json"
     official_close = _OFFICIAL_CLOSES[(symbol, day)]
     _stub_response(monkeypatch, _recorded(fixture))
@@ -227,6 +229,52 @@ def test_each_recorded_early_close_ends_on_the_official_close(monkeypatch, symbo
         "09:30", "10:30", "11:30", "12:30",
     ]
     assert points[-1][1] == official_close
+    assert "ERROR" not in capsys.readouterr().out
+
+
+def _without_the_close_point(payload):
+    """The 2025-11-28 response as it would look if Yahoo dropped its 13:00 point."""
+    result = payload["chart"]["result"][0]
+    at = result["timestamp"].index(1764352800)  # 2025-11-28T18:00Z, 13:00 ET
+    del result["timestamp"][at]
+    del result["indicators"]["quote"][0]["close"][at]
+    return payload
+
+
+def test_a_missing_early_close_level_is_reported(monkeypatch, capsys):
+    """Fail-visible: without the 13:00 point the day ends on its 11:30 bar and
+    the board's 13:00 node repeats it, a plausible and wrong curve."""
+    _stub_response(
+        monkeypatch, _without_the_close_point(_recorded("yahoo-chart-dji-1h-2025-11-28.json"))
+    )
+    points = fetch_index_hourly("^DJI", "2025-11-28", "2025-11-28")
+    assert [clock for clock, _value in _clock(points)] == ["09:30", "10:30", "11:30"]
+    assert (
+        "ERROR: yahoo.early_close_level_missing symbol=^DJI date=2025-11-28"
+        in capsys.readouterr().out
+    )
+
+
+def test_an_early_close_within_its_settle_hour_is_not_reported(capsys):
+    from dashboard.backend.domain.leaderboard.strategies._yahoo import (
+        _report_missing_close_levels,
+    )
+
+    morning = [
+        (dt.datetime(2025, 11, 28, 14 + i, 30, tzinfo=dt.timezone.utc), 1.0)
+        for i in range(3)
+    ]
+    for hour, minute in ((13, 30), (13, 59)):
+        _report_missing_close_levels(
+            "^DJI", morning, "America/New_York",
+            now=dt.datetime(2025, 11, 28, hour, minute, tzinfo=_NEW_YORK),
+        )
+    assert capsys.readouterr().out == ""
+    _report_missing_close_levels(
+        "^DJI", morning, "America/New_York",
+        now=dt.datetime(2025, 11, 28, 14, 0, tzinfo=_NEW_YORK),
+    )
+    assert "date=2025-11-28" in capsys.readouterr().out
 
 
 def test_the_early_close_level_is_the_live_boards_13_00_node(monkeypatch):

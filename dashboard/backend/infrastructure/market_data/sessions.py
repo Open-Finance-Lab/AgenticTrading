@@ -172,20 +172,21 @@ def is_in_session(
     first fill off a pre-market print.
 
     The day's last session ends at :func:`session_close_time`: 13:00 ET on an
-    NYSE early close. Trading goes on after that bell (the NYSE Arca,
-    American, National and Texas late sessions, FINRA TRF post-market
-    reporting and Alpaca's half-day extended session all run to 17:00), so
-    bars stamped 13:00 and later can carry real prints: the rule drops them by
-    their stamp, never by their absence. Only this open-stamped rule reads the
-    day's close; the close-stamped rule (:func:`time_in_session`) still ends
-    every US day at 16:00 (D19, owned by the engine rewrite).
+    NYSE early close. Trading goes on after that bell (NYSE's late sessions,
+    FINRA TRF post-market reporting and Alpaca's half-day extended session
+    all run to 17:00), so bars stamped 13:00 and later can carry real prints:
+    the rule drops them by their stamp, never by their absence. Only this
+    open-stamped rule reads the day's close; the close-stamped rule
+    (:func:`time_in_session`) still ends every US day at 16:00 (D19, owned by
+    the engine rewrite).
 
     The close mark this leaves is pre-auction on every US day. The last kept
     bar (the 12:00 bar on an early close, 15:00 otherwise) closes on the last
-    last-sale-eligible trade before the bell, not the official close: the
-    closing-auction print, stamped at or just after 13:00:00 (16:00:00), opens
-    the next bar, which is dropped. Marking on that bar instead was rejected,
-    because post-close prints in the same hour can set its close.
+    trade before the bell, not the official close: the closing-auction print,
+    stamped at or just after 16:00:00, opens the next bar, which is dropped
+    (measured on SIP), and the 13:00 auction is expected to do the same on an
+    early close. Marking on that bar instead was rejected, because post-close
+    prints in the same hour can set its close.
     """
     local = market_local(timestamp, timezone)
     if open_stamped_minutes is None:

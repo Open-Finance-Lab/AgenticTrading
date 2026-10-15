@@ -193,12 +193,13 @@ def _open_stamped_kept(stamps, minutes=60):
 
 
 def test_open_stamped_hourly_early_close_is_three_bars():
-    """2026-11-27 closes at 13:00 ET. Alpaca serves the late session as bars
+    """2026-11-27 closes at 13:00 ET. Alpaca can serve the late session as bars
     stamped 13:00, 14:00 and 15:00, and a fixed 16:00 close kept them: three
-    decisions taken after the session had ended. On SIP the 13:00 bar opens
-    with the closing auction, as the 16:00 bar does on a full day; the 14:00
-    and 15:00 bars are late-session prints (NYSE Arca and others trade to
-    17:00 on an early close)."""
+    decisions taken after the session had ended. On SIP the 13:00 bar is
+    expected to open with the closing auction, as the 16:00 bar does on a full
+    day (measured there), and the 14:00 and 15:00 bars to hold late-session
+    prints (NYSE's late sessions run to 17:00 on an early close). Neither is
+    observed yet on an early close; the rule drops the bars either way."""
     day = pd.date_range("2026-11-27 04:00", "2026-11-27 19:00", freq="h",
                         tz="US/Eastern")
     assert _open_stamped_kept(day) == ["10:00", "11:00", "12:00"]
@@ -277,9 +278,11 @@ def test_the_open_stamped_rule_matches_a_naive_oracle_every_day(minutes, sweeps)
     assert early_closes == 8
 
 
-def test_the_early_close_is_read_on_the_market_local_date():
-    """18:00Z on 2026-11-27 is 13:00 ET, after that day's close; a naive stamp
-    is market-local, as everywhere else in this module."""
+def test_the_early_close_is_read_in_market_local_time():
+    """17:00Z on 2026-11-27 is the 12:00 ET bar and 18:00Z the 13:00 one, after
+    that day's close. A naive stamp is market-local, as everywhere else in this
+    module: naive 12:00 is the last bar (read as UTC it would be 07:00 ET, before
+    the open), naive 13:00 is past the close."""
     def kept(ts):
         return sessions.is_in_session(
             ts, market="US", timezone="US/Eastern", open_stamped_minutes=60
@@ -287,6 +290,7 @@ def test_the_early_close_is_read_on_the_market_local_date():
 
     assert kept(pd.Timestamp("2026-11-27 17:00", tz="UTC"))
     assert not kept(pd.Timestamp("2026-11-27 18:00", tz="UTC"))
+    assert kept(pd.Timestamp("2026-11-27 12:00"))
     assert not kept(pd.Timestamp("2026-11-27 13:00"))
 
 

@@ -131,7 +131,19 @@ def fetch_index_hourly(
         if close is None or not (start_e <= ts < end_e):
             continue
         points.append((dt.datetime.fromtimestamp(ts, dt.timezone.utc), float(close)))
-    return _restamp_close_levels(points, (res.get("meta") or {}).get("exchangeTimezoneName"))
+    exchange_zone = (res.get("meta") or {}).get("exchangeTimezoneName")
+    points = _restamp_close_levels(points, exchange_zone)
+    _report_missing_close_levels(symbol, points, exchange_zone)
+    return points
+
+
+def _last_slot_open(local: dt.datetime) -> dt.datetime:
+    """The open of the last grid slot ending at or before ``local``, on Yahoo's
+    hourly grid from the 09:30 open (12:30 for a 13:00 close, 15:30 for 16:00)."""
+    session_open = session_windows("US")[0][0]
+    opened = dt.datetime.combine(local.date(), session_open, tzinfo=local.tzinfo)
+    hour = dt.timedelta(hours=1)
+    return local - ((local - opened) % hour or hour)
 
 
 def _restamp_close_levels(
@@ -167,16 +179,42 @@ def _restamp_close_levels(
     if exchange_zone != _US_EXCHANGE_ZONE:
         return points
     zone = ZoneInfo(_US_EXCHANGE_ZONE)
-    session_open = session_windows("US")[0][0]
-    hour = dt.timedelta(hours=1)
     by_stamp: Dict[dt.datetime, float] = {}
     for stamp, level in points:
         local = stamp.astimezone(zone)
         if is_early_close(local.date()) and local.time() == session_close_time(
             local.date(), "US"
         ):
-            opened = dt.datetime.combine(local.date(), session_open, tzinfo=zone)
-            last_slot = (local - opened) % hour or hour
-            stamp = (local - last_slot).astimezone(dt.timezone.utc)
+            stamp = _last_slot_open(local).astimezone(dt.timezone.utc)
         by_stamp[stamp] = level
     return sorted(by_stamp.items())
+
+
+def _report_missing_close_levels(
+    symbol: str,
+    points: List[Tuple[dt.datetime, float]],
+    exchange_zone: Optional[str],
+    now: Optional[dt.datetime] = None,
+) -> None:
+    """One flushed ERROR per settled NYSE early close that has no closing level.
+
+    The restamp depends on Yahoo's half-day shape. If Yahoo stops sending the
+    13:00 point, or stamps it a second off, the day ends on its 11:30 bar and
+    the board's 13:00 node repeats that level: a plausible curve, wrong, with
+    nothing else to notice it. A day still within an hour of its close is
+    skipped, since Yahoo may not have sent the level yet.
+    """
+    if exchange_zone != _US_EXCHANGE_ZONE:
+        return
+    zone = ZoneInfo(_US_EXCHANGE_ZONE)
+    now = now or dt.datetime.now(dt.timezone.utc)
+    stamps = {stamp.astimezone(zone) for stamp, _level in points}
+    for day in sorted({stamp.date() for stamp in stamps if is_early_close(stamp.date())}):
+        close = dt.datetime.combine(day, session_close_time(day, "US"), tzinfo=zone)
+        if now < close + dt.timedelta(hours=1) or _last_slot_open(close) in stamps:
+            continue
+        print(
+            f"ERROR: yahoo.early_close_level_missing symbol={symbol} date={day} "
+            "(no level at the last half bar; the index curve ends on its 11:30 bar)",
+            flush=True,
+        )
