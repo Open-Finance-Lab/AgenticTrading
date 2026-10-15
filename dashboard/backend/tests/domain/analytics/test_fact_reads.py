@@ -140,6 +140,12 @@ def seed_population(store, create_user, *, admin_id: int) -> dict[str, int]:
 def assert_fact_read_contract(store, ids: dict[str, int]) -> None:
     two_days_ago = YESTERDAY - timedelta(days=1)
 
+    # I5: the latest landed day at or before a bound, one MAX() read.
+    assert store.latest_fact_date(on_or_before=YESTERDAY + timedelta(days=5)) == YESTERDAY
+    assert store.latest_fact_date(on_or_before=YESTERDAY) == YESTERDAY
+    assert store.latest_fact_date(on_or_before=two_days_ago) == two_days_ago
+    assert store.latest_fact_date(on_or_before=two_days_ago - timedelta(days=1)) is None
+
     states = store.count_states_for_date(YESTERDAY)
     by_state = {}
     by_reason = {}

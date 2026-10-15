@@ -966,6 +966,19 @@ _GROUP_TOTALS_SQL = """
     GROUP BY user_group
 """
 
+_LATEST_FACT_DATE_SQL = """
+    SELECT MAX(snapshot_date) AS latest
+    FROM user_daily_facts
+    WHERE snapshot_date <= {p}
+"""
+
+
+def _latest_fact_date(row: Any) -> date | None:
+    """Shared by both twins."""
+    latest = _row_value(row, "latest") if row is not None else None
+    return date.fromisoformat(str(latest)) if latest else None
+
+
 _GROUP_REPEAT_SQL = """
     SELECT user_group, COUNT(*) AS repeat_users
     FROM (
@@ -1699,6 +1712,18 @@ class ValueAnalyticsStore:
         return [_user_page_row(row) for row in rows], int(
             _row_value(total_row, "total", 0) or 0
         )
+
+    def latest_fact_date(self, *, on_or_before: date) -> date | None:
+        """The newest ``snapshot_date`` at or before the bound; one MAX() read.
+
+        ``/users`` joins yesterday's facts; before the night's job lands (or
+        while it fails) this names the day it can join instead.
+        """
+        with self._analytics_connection() as conn:
+            row = conn.execute(
+                _LATEST_FACT_DATE_SQL.format(p="?"), (_validate_day(on_or_before),)
+            ).fetchone()
+        return _latest_fact_date(row)
 
     def sum_facts_by_user_group(
         self, *, start: date, end: date

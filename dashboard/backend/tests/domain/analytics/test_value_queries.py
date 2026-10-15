@@ -287,6 +287,10 @@ class FakeValueStore:
     def list_transitions_for_date(self, day):
         return [row for row in self.transitions if row.snapshot_date == day]
 
+    def latest_fact_date(self, *, on_or_before):
+        days = [row.snapshot_date for row in self.facts if row.snapshot_date <= on_or_before]
+        return max(days) if days else None
+
     def list_users_page(self, *, query, day, limit, offset):
         self.page_calls.append((query, day, limit, offset))
         rows = list(self.page_rows)
@@ -697,6 +701,60 @@ def test_users_list_row_without_a_fact_row_reads_as_healthy_unpaid():
     assert item.lifetime_net_purchased_micro == 0
     assert item.lifecycle.segment == "dormant"  # created 90 days ago, no activity row
     assert item.priority_group == "none"
+
+
+def test_users_list_falls_back_to_the_latest_landed_fact_day_and_warns(capsys):
+    """I5: before the night's facts land, or while the job fails, the page joins
+    the latest landed day and says so, instead of reading everyone as healthy."""
+    stale_day = YESTERDAY - timedelta(days=1)
+    service, value_store, _legacy = _service(
+        facts=[_fact(1, stale_day)], activity={1: _activity(1)}, commercial={},
+    )
+    blocked = _page_row(
+        1, operational_state="blocked", operational_reason_code="account_restricted"
+    )
+
+    def page(*, query, day, limit, offset):
+        value_store.page_calls.append((query, day, limit, offset))
+        # Only the stale day carries the fact join; yesterday has no rows.
+        return ([blocked], 1) if day == stale_day else ([_page_row(1)], 1)
+
+    value_store.list_users_page = page
+
+    response = service.list_users(filters=UserValueFilters(), limit=25, offset=0, now=NOW)
+
+    assert value_store.page_calls[0][1] == stale_day
+    item = response.items[0]
+    assert item.operational.state == "blocked"
+    assert item.operational.calculated_at == _utc_midnight(YESTERDAY)
+    assert (
+        "WARNING: analytics.read.users_facts_stale "
+        f"latest={stale_day.isoformat()} expected={YESTERDAY.isoformat()}"
+    ) in capsys.readouterr().out
+
+
+def test_users_list_with_no_facts_at_all_keeps_yesterday_and_warns(capsys):
+    service, value_store, _legacy = _service(page_rows=[_page_row(1)], activity={}, commercial={})
+
+    response = service.list_users(filters=UserValueFilters(), limit=25, offset=0, now=NOW)
+
+    assert value_store.page_calls[0][1] == YESTERDAY
+    assert response.items[0].operational.calculated_at == _utc_midnight(NOW.date())
+    assert (
+        "WARNING: analytics.read.users_facts_stale "
+        f"latest=none expected={YESTERDAY.isoformat()}"
+    ) in capsys.readouterr().out
+
+
+def test_users_list_with_yesterdays_facts_landed_is_silent(capsys):
+    service, value_store, _legacy = _service(
+        page_rows=[_page_row(1)], facts=[_fact(1, YESTERDAY)], activity={}, commercial={},
+    )
+
+    service.list_users(filters=UserValueFilters(), limit=25, offset=0, now=NOW)
+
+    assert value_store.page_calls[0][1] == YESTERDAY
+    assert "users_facts_stale" not in capsys.readouterr().out
 
 
 def test_users_list_priority_groups_are_a_pure_function_of_state_and_segment():

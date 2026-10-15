@@ -1259,8 +1259,23 @@ class ValueAnalyticsQueryService:
             priority=filters.priority,
             include_internal=filters.include_internal,
         )
+        # The page joins yesterday's facts. Before the night's job lands, or
+        # while it is failing, that join is empty and every row would read
+        # healthy / unpaid with no signal: join the latest landed day instead,
+        # stamp the operational as_of from it, and say so in the log.
+        facts_day = yesterday
+        latest = self.value_store.latest_fact_date(on_or_before=yesterday)
+        if latest != yesterday:
+            print(
+                "WARNING: analytics.read.users_facts_stale "
+                f"latest={latest.isoformat() if latest else 'none'} "
+                f"expected={yesterday.isoformat()}",
+                flush=True,
+            )
+            if latest is not None:
+                facts_day = latest
         rows, total = self.value_store.list_users_page(
-            query=query, day=yesterday, limit=page_size, offset=offset
+            query=query, day=facts_day, limit=page_size, offset=offset
         )
         ids = [row.user_id for row in rows]
         totals = (
@@ -1279,7 +1294,7 @@ class ValueAnalyticsQueryService:
             if ids
             else {}
         )
-        as_of = _day_start(yesterday + timedelta(days=1))
+        as_of = _day_start(facts_day + timedelta(days=1))
         items: list[ValueUserListItem] = []
         for row in rows:
             activity = (

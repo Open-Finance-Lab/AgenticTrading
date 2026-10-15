@@ -30,6 +30,7 @@ from .value_repository import (
     _GROUP_REPEAT_SQL,
     _GROUP_TOTALS_SQL,
     _INTERNAL_EXCLUSION_SQL,
+    _LATEST_FACT_DATE_SQL,
     _LEGACY_SNAPSHOTS_SQL,
     _LEGACY_UNROLLED_DATES_SQL,
     _RECOMPUTE_EVENTS_SQL,
@@ -49,6 +50,7 @@ from .value_repository import (
     _fact_values,
     _group_totals,
     _id_chunks,
+    _latest_fact_date,
     _legacy_read_dates,
     _legacy_snapshot,
     _segment_day_count,
@@ -508,6 +510,16 @@ class PostgresValueAnalyticsStore:
         return [_user_page_row(row) for row in rows], int(
             _row_value(total_row, "total", 0) or 0
         )
+
+    def latest_fact_date(self, *, on_or_before: date) -> date | None:
+        """See the SQLite twin."""
+        with self._analytics_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    _LATEST_FACT_DATE_SQL.format(p="%s"), (_validate_day(on_or_before),)
+                )
+                row = cur.fetchone()
+        return _latest_fact_date(row)
 
     def sum_facts_by_user_group(
         self, *, start: date, end: date
