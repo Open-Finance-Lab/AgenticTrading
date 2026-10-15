@@ -14,10 +14,7 @@ from dashboard.backend.domain.analytics.rollups import (
     rollup_day,
 )
 from dashboard.backend.domain.analytics.service import AnalyticsService
-from dashboard.backend.domain.analytics.value_repository import (
-    UserLifecycleDailySnapshot,
-    ValueAnalyticsStore,
-)
+from dashboard.backend.domain.analytics.value_repository import ValueAnalyticsStore
 
 
 def _store(tmp_path):
@@ -236,69 +233,105 @@ def test_rollup_survives_a_stored_property_this_build_does_not_know(tmp_path):
     )
 
 
-def test_lifecycle_rollup_is_bounded_and_preserves_other_metrics(tmp_path):
+def test_lifecycle_rollup_reads_facts_and_transitions_and_writes_tier_and_group_families(tmp_path):
+    from dashboard.backend.tests.domain.analytics.test_fact_reads import fact, transition
+
     analytics, rollups = _store(tmp_path)
     values = ValueAnalyticsStore(
-        analytics,
-        credits_base=object(),
-        provider_base=object(),
-        agent_base=object(),
-        run_base=object(),
+        analytics, credits_base=object(), provider_base=object(), agent_base=object(), run_base=object()
     )
     day = date(2026, 8, 25)
     updated_at = datetime(2026, 8, 26, tzinfo=timezone.utc)
     rollups.replace_day(
-        day,
-        [
-            DailyRollup(
-                rollup_date=day,
-                metric_name="completed_runs",
-                value_count=7,
-                updated_at=updated_at,
-            )
-        ],
+        day, [DailyRollup(rollup_date=day, metric_name="completed_runs", value_count=7, updated_at=updated_at)]
     )
-    for snapshot_date, user_id, segment in (
-        (day - timedelta(days=1), 1, "new"),
-        (day - timedelta(days=1), 2, "onboarding"),
-        (day, 1, "growing"),
-        (day, 2, "onboarding"),
-    ):
-        values.upsert_daily_snapshot(
-            UserLifecycleDailySnapshot(
-                snapshot_date=snapshot_date,
-                user_id=user_id,
-                lifecycle_segment=segment,
-                lifecycle_reason_code=f"{segment}_reason",
-                data_quality="complete",
-                calculated_at=updated_at,
-            )
-        )
+    values.upsert_daily_facts(
+        [
+            fact(1, day, lifecycle_segment="growing", tier="starter", user_group="organic",
+                 runs_completed=2, operator_cost_micro=100_000, own_spend_micro=5_000),
+            fact(2, day, lifecycle_segment="onboarding", tier="unpaid", user_group="organic",
+                 runs_completed=0, operator_cost_micro=0, own_spend_micro=0, data_quality="partial"),
+        ]
+    )
+    values.append_lifecycle_transitions([transition(1, day, "new", "growing")])
 
     first = rollup_lifecycle_day(day, store=values)
     second = rollup_lifecycle_day(day, store=values)
     stored = rollups.list_rollups(start=day, end=day + timedelta(days=1))
 
     assert first == second
-    assert any(
-        row.metric_name == "completed_runs" and row.value_count == 7 for row in stored
-    )
-    assert {
-        (row.user_state, row.value_count)
-        for row in stored
-        if row.metric_name == "lifecycle_segment_count"
-    } == {("growing", 1), ("onboarding", 1)}
-    assert {
-        (row.event_name, row.user_state, row.value_count)
-        for row in stored
-        if row.metric_name == "lifecycle_transition"
-    } == {("new", "growing", 1)}
+    assert any(row.metric_name == "completed_runs" and row.value_count == 7 for row in stored)
+    assert {(r.user_state, r.value_count, r.outcome) for r in stored if r.metric_name == "lifecycle_segment_count"} == {
+        ("growing", 1, "complete"), ("onboarding", 1, "partial")
+    }
+    assert {(r.event_name, r.user_state, r.value_count) for r in stored if r.metric_name == "lifecycle_transition"} == {
+        ("new", "growing", 1)
+    }
+    assert {(r.user_state, r.value_count) for r in stored if r.metric_name == "runs_by_tier"} == {("starter", 2), ("unpaid", 0)}
+    assert {(r.user_state, r.value_count) for r in stored if r.metric_name == "runs_by_user_group"} == {("organic", 2)}
+    assert {(r.user_state, r.value_count, r.value_sum_micro) for r in stored if r.metric_name == "operator_cost_by_tier"} == {
+        ("starter", 1, 100_000), ("unpaid", 1, 0)
+    }
+    assert {(r.user_state, r.value_sum_micro) for r in stored if r.metric_name == "own_spend_by_user_group"} == {("organic", 5_000)}
     assert all("user_id" not in row.model_dump() for row in first)
 
     rollup_day(day, store=rollups)
     rebuilt = rollups.list_rollups(start=day, end=day + timedelta(days=1))
-    assert any(row.metric_name == "lifecycle_transition" for row in rebuilt)
-    assert any(row.metric_name == "lifecycle_segment_count" for row in rebuilt)
+    for name in ("lifecycle_transition", "lifecycle_segment_count", "runs_by_tier", "own_spend_by_user_group"):
+        assert any(row.metric_name == name for row in rebuilt), name
+
+
+def test_lifecycle_rollup_of_a_day_with_no_facts_keeps_what_was_already_written(tmp_path):
+    """A retention re-run after a day's facts expired must not blank its history."""
+    from dashboard.backend.tests.domain.analytics.test_fact_reads import fact
+
+    analytics, rollups = _store(tmp_path)
+    values = ValueAnalyticsStore(
+        analytics, credits_base=object(), provider_base=object(), agent_base=object(), run_base=object()
+    )
+    day = date(2026, 8, 25)
+    values.upsert_daily_facts([fact(1, day, tier="starter", user_group="organic", runs_completed=2)])
+    written = rollup_lifecycle_day(day, store=values)
+    assert written
+
+    assert values.expire_facts_for_date(day) == 1
+    assert rollup_lifecycle_day(day, store=values) == ()
+
+    stored = rollups.list_rollups(start=day, end=day + timedelta(days=1))
+    assert {(r.metric_name, r.user_state, r.value_count) for r in stored} == {
+        (r.metric_name, r.user_state, r.value_count) for r in written
+    }
+
+
+def test_replace_lifecycle_rollups_rejects_malformed_dimension_rows(tmp_path):
+    import pytest
+
+    analytics, _rollups = _store(tmp_path)
+    values = ValueAnalyticsStore(
+        analytics, credits_base=object(), provider_base=object(), agent_base=object(), run_base=object()
+    )
+    day = date(2026, 8, 25)
+    at = datetime(2026, 8, 26, tzinfo=timezone.utc)
+
+    def row(**overrides):
+        fields = dict(
+            rollup_date=day, metric_name="own_spend_by_tier", user_state="starter",
+            outcome="complete", value_count=1, value_sum_micro=5, updated_at=at,
+        )
+        fields.update(overrides)
+        return DailyRollup(**fields)
+
+    values.replace_lifecycle_rollups(day, [row()])  # the well-formed shape is accepted
+    for bad in (
+        row(user_state=""),                                  # a family needs its dimension value
+        row(event_name="growing"),                           # event_name is not part of this shape
+        row(value_sum_micro=-1),                             # cost sums are non-negative
+        row(metric_name="runs_by_tier", value_sum_micro=5),  # runs families carry a count only
+        row(outcome="unknown"),
+        row(metric_name="completed_runs"),                   # not a lifecycle-owned metric
+    ):
+        with pytest.raises(ValueError):
+            values.replace_lifecycle_rollups(day, [bad])
 
 
 def test_rollup_day_writes_distinct_activation_users_per_event(tmp_path):

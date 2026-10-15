@@ -19,10 +19,7 @@ from dashboard.backend.domain.analytics.retention import (
     AnalyticsRetentionService,
 )
 from dashboard.backend.domain.analytics.repository_common import utc_iso
-from dashboard.backend.domain.analytics.value_repository import (
-    UserLifecycleDailySnapshot,
-    ValueAnalyticsStore,
-)
+from dashboard.backend.domain.analytics.value_repository import ValueAnalyticsStore
 from dashboard.backend.users import UserStore
 
 
@@ -273,88 +270,67 @@ def test_sqlite_retention_is_bounded_and_preserves_aggregates(tmp_path):
         ).fetchone()[0] == "active"
 
 
-def test_lifecycle_history_is_aggregated_before_user_rows_are_deleted(tmp_path):
+def test_facts_and_transitions_are_aggregated_before_user_rows_are_deleted(tmp_path):
+    from dashboard.backend.tests.domain.analytics.test_fact_reads import fact, transition
+
     db_path = tmp_path / "lifecycle-retention.db"
     users = UserStore(db_path=db_path)
-    subject = users.create_user(
-        "lifecycle-retention@example.test",
-        "Lifecycle Retention",
-        "SecurePass1!",
-    )
+    subject = users.create_user("lifecycle-retention@example.test", "Lifecycle Retention", "SecurePass1!")
+    user_id = int(subject["id"])
     analytics = AnalyticsStore(db_path=db_path)
     values = ValueAnalyticsStore(
-        analytics,
-        credits_base=object(),
-        provider_base=object(),
-        agent_base=object(),
-        run_base=object(),
+        analytics, credits_base=object(), provider_base=object(), agent_base=object(), run_base=object()
     )
     cutoff = NOW.date() - timedelta(days=RAW_EVENT_RETENTION_DAYS)
-    calculated_at = NOW - timedelta(days=RAW_EVENT_RETENTION_DAYS)
-    for snapshot_date, segment in (
-        (cutoff - timedelta(days=2), "onboarding"),
-        (cutoff - timedelta(days=1), "growing"),
-        (cutoff, "growing"),
-    ):
-        values.upsert_daily_snapshot(
-            UserLifecycleDailySnapshot(
-                snapshot_date=snapshot_date,
-                user_id=int(subject["id"]),
-                lifecycle_segment=segment,
-                lifecycle_reason_code=f"{segment}_reason",
-                data_quality="complete",
-                calculated_at=calculated_at,
-            )
-        )
+    values.upsert_daily_facts(
+        [
+            fact(user_id, cutoff - timedelta(days=2), lifecycle_segment="onboarding", tier="starter", user_group="partner", runs_completed=0),
+            fact(user_id, cutoff - timedelta(days=1), lifecycle_segment="growing", tier="starter", user_group="partner", runs_completed=3, operator_cost_micro=90_000),
+            fact(user_id, cutoff, lifecycle_segment="growing", tier="starter", user_group="partner"),
+        ]
+    )
+    values.append_lifecycle_transitions(
+        [
+            transition(user_id, cutoff - timedelta(days=1), "onboarding", "growing"),
+            transition(user_id, cutoff + timedelta(days=3), "growing", "at_risk", inactive_days=8),
+        ]
+    )
     with analytics._get_connection() as conn:
         conn.execute(
-            """
-            INSERT INTO analytics_daily_rollups (
-                rollup_date, metric_name, value_count, updated_at
-            ) VALUES (?, 'completed_runs', 3, ?)
-            """,
-            ((cutoff - timedelta(days=1)).isoformat(), utc_iso(calculated_at)),
+            "INSERT INTO analytics_daily_rollups (rollup_date, metric_name, value_count, updated_at) VALUES (?, 'completed_runs', 3, ?)",
+            ((cutoff - timedelta(days=1)).isoformat(), utc_iso(NOW)),
         )
 
-    result = AnalyticsRetentionService(
-        store=analytics,
-        value_store=values,
-        batch_size=10,
-        max_batches=10,
-    ).run_once(NOW)
+    service = AnalyticsRetentionService(store=analytics, value_store=values, batch_size=10, max_batches=10)
+    result = service.run_once(NOW)
 
-    assert result.lifecycle_rows_deleted == 2
+    assert result.lifecycle_rows_deleted == 3  # two fact rows + one transition
     assert result.has_more_lifecycle_rows is False
-    assert values.list_daily_snapshots(
-        start=cutoff - timedelta(days=3),
-        end=cutoff + timedelta(days=1),
-    ) == [
-        UserLifecycleDailySnapshot(
-            snapshot_date=cutoff,
-            user_id=int(subject["id"]),
-            lifecycle_segment="growing",
-            lifecycle_reason_code="growing_reason",
-            data_quality="complete",
-            calculated_at=calculated_at,
-        )
-    ]
-    with analytics._get_connection() as conn:
-        rows = conn.execute(
-            """
-            SELECT metric_name, event_name, user_state, value_count
-            FROM analytics_daily_rollups
-            WHERE rollup_date = ?
-            ORDER BY metric_name
-            """,
-            ((cutoff - timedelta(days=1)).isoformat(),),
-        ).fetchall()
-    assert ("completed_runs", "", "", 3) in [tuple(row) for row in rows]
-    assert (
-        "lifecycle_transition",
-        "onboarding",
-        "growing",
-        1,
-    ) in [tuple(row) for row in rows]
+    assert [row.snapshot_date for row in values.list_facts_for_date(cutoff)] == [cutoff]
+    assert values.list_facts_for_date(cutoff - timedelta(days=1)) == []
+    assert values.list_transitions_for_date(cutoff - timedelta(days=1)) == []
+    assert len(values.list_transitions_for_date(cutoff + timedelta(days=3))) == 1  # inside the window, untouched
+
+    def day_rows():
+        with analytics._get_connection() as conn:
+            return {
+                tuple(row)
+                for row in conn.execute(
+                    "SELECT metric_name, event_name, user_state, value_count, value_sum_micro FROM analytics_daily_rollups WHERE rollup_date = ?",
+                    ((cutoff - timedelta(days=1)).isoformat(),),
+                ).fetchall()
+            }
+
+    rows = day_rows()
+    assert ("completed_runs", "", "", 3, 0) in rows
+    assert ("lifecycle_transition", "onboarding", "growing", 1, 0) in rows
+    assert ("runs_by_tier", "", "starter", 3, 0) in rows
+    assert ("operator_cost_by_user_group", "", "partner", 1, 90_000) in rows
+
+    # A re-run finds nothing left to expire and must leave that history alone.
+    again = service.run_once(NOW)
+    assert again.lifecycle_rows_deleted == 0
+    assert day_rows() == rows
 
 
 def test_the_retention_sweep_never_touches_user_activity(tmp_path):

@@ -61,7 +61,9 @@ from .value_repository import (
     _activity_from_row,
     _population_operational_signals,
     _recent_totals_from_row,
-    LIFECYCLE_ROLLUP_METRICS,
+    _ROLLUP_COLUMNS,
+    _lifecycle_rollup_payloads,
+    _replaced_lifecycle_metrics,
     LIFECYCLE_SEGMENTS,
     MAX_USER_BATCH,
     RUN_SAFE_DEADLINE,
@@ -349,72 +351,11 @@ class PostgresValueAnalyticsStore:
     ) -> None:
         """Replace only lifecycle aggregates, preserving other daily metrics."""
 
-        values = list(rows)
-        columns = (
-            "rollup_date",
-            "metric_name",
-            "event_name",
-            "billing_mode",
-            "provider_id",
-            "model_id",
-            "outcome",
-            "error_category",
-            "user_state",
-            "value_count",
-            "value_sum_micro",
-            "updated_at",
+        payloads = _lifecycle_rollup_payloads(
+            day, list(rows), replace_transitions=replace_transitions
         )
-        payloads = []
-        for row in values:
-            if (
-                row.rollup_date != day
-                or row.metric_name not in LIFECYCLE_ROLLUP_METRICS
-            ):
-                raise ValueError("invalid lifecycle rollup row")
-            if row.metric_name == "lifecycle_segment_count":
-                valid_dimensions = (
-                    not row.event_name and row.user_state in LIFECYCLE_SEGMENTS
-                )
-            else:
-                valid_dimensions = (
-                    replace_transitions
-                    and row.event_name in LIFECYCLE_SEGMENTS
-                    and row.user_state in LIFECYCLE_SEGMENTS
-                    and row.event_name != row.user_state
-                )
-            unused_dimensions = (
-                row.billing_mode,
-                row.provider_id,
-                row.model_id,
-                row.error_category,
-            )
-            if (
-                not valid_dimensions
-                or any(unused_dimensions)
-                or row.outcome not in {"complete", "partial"}
-                or row.value_sum_micro != 0
-            ):
-                raise ValueError("invalid lifecycle rollup dimensions")
-            payloads.append(
-                (
-                    row.rollup_date.isoformat(),
-                    row.metric_name,
-                    row.event_name,
-                    row.billing_mode,
-                    row.provider_id,
-                    row.model_id,
-                    row.outcome,
-                    row.error_category,
-                    row.user_state,
-                    row.value_count,
-                    row.value_sum_micro,
-                    utc_iso(row.updated_at),
-                )
-            )
-        placeholders = ", ".join(["%s"] * len(columns))
-        metrics = ["lifecycle_segment_count"]
-        if replace_transitions:
-            metrics.append("lifecycle_transition")
+        placeholders = ", ".join(["%s"] * len(_ROLLUP_COLUMNS))
+        metrics = _replaced_lifecycle_metrics(replace_transitions=replace_transitions)
         metric_placeholders = ", ".join(["%s"] * len(metrics))
         with self._analytics_connection() as conn:
             with conn.cursor() as cur:
@@ -429,11 +370,66 @@ class PostgresValueAnalyticsStore:
                 if payloads:
                     cur.executemany(
                         f"""
-                        INSERT INTO analytics_daily_rollups ({', '.join(columns)})
+                        INSERT INTO analytics_daily_rollups ({', '.join(_ROLLUP_COLUMNS)})
                         VALUES ({placeholders})
                         """,
                         payloads,
                     )
+
+    def list_expiring_fact_dates(self, *, before: date, limit: int) -> list[date]:
+        """See the SQLite twin."""
+        if not isinstance(before, date) or isinstance(before, datetime):
+            raise ValueError("before must be a date")
+        page_size = positive_limit(limit, maximum=1000)
+        sql = """
+            SELECT snapshot_date FROM (
+                SELECT DISTINCT snapshot_date FROM user_daily_facts
+                WHERE snapshot_date < %s
+                UNION
+                SELECT DISTINCT snapshot_date FROM lifecycle_transitions
+                WHERE snapshot_date < %s
+            ) AS expiring
+            ORDER BY snapshot_date
+            LIMIT %s
+        """
+        with self._analytics_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql, (before.isoformat(), before.isoformat(), page_size))
+                rows = cur.fetchall()
+        return [
+            date.fromisoformat(str(_row_value(row, "snapshot_date"))) for row in rows
+        ]
+
+    def expire_facts_for_date(self, day: date) -> int:
+        """See the SQLite twin. One connection, so one transaction."""
+        if not isinstance(day, date) or isinstance(day, datetime):
+            raise ValueError("day must be a date")
+        with self._analytics_connection() as conn:
+            with conn.cursor() as cur:
+                deleted = 0
+                for table in ("user_daily_facts", "lifecycle_transitions"):
+                    cur.execute(
+                        f"DELETE FROM {table} WHERE snapshot_date = %s RETURNING user_id",
+                        (day.isoformat(),),
+                    )
+                    deleted += len(cur.fetchall())
+                return deleted
+
+    def has_facts_before(self, before: date) -> bool:
+        """See the SQLite twin."""
+        if not isinstance(before, date) or isinstance(before, datetime):
+            raise ValueError("before must be a date")
+        sql = """
+            SELECT 1 FROM user_daily_facts WHERE snapshot_date < %s
+            UNION ALL
+            SELECT 1 FROM lifecycle_transitions WHERE snapshot_date < %s
+            LIMIT 1
+        """
+        with self._analytics_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql, (before.isoformat(), before.isoformat()))
+                row = cur.fetchone()
+        return row is not None
 
     def list_expiring_daily_dates(
         self,

@@ -18,7 +18,11 @@ from dashboard.backend.domain.analytics import repository_postgres as pg_module
 from dashboard.backend.domain.analytics.repository_postgres import (
     PostgresAnalyticsStore,
 )
-from dashboard.backend.domain.analytics.rollups import AnalyticsRollupStore, DailyRollup
+from dashboard.backend.domain.analytics.rollups import (
+    AnalyticsRollupStore,
+    DailyRollup,
+    rollup_lifecycle_day,
+)
 from dashboard.backend.domain.analytics.value_repository import (
     ActivityUpdate,
     LifecycleTransitionRow,
@@ -283,6 +287,53 @@ def test_postgres_user_value_projection_round_trip(
     ) == [NOW.date()]
     assert value_store.delete_daily_snapshots_for_date(NOW.date()) == 1
     assert value_store.has_daily_before(NOW.date() + timedelta(days=1)) is False
+
+
+@pg_only
+def test_postgres_fact_expiry_and_long_term_rollups_round_trip(postgres_contract_store, tmp_path):
+    from dashboard.backend.tests.domain.analytics.test_fact_reads import fact, transition
+
+    analytics, _admin_id, user_id = postgres_contract_store
+    value_store = PostgresValueAnalyticsStore(
+        analytics,
+        SyntheticCreditsStore(tmp_path / "postgres-expiry-credits.db"),
+        provider_base=SyntheticProviderStore({}, []),
+        agent_base=SyntheticAgentStore(),
+        run_base=SyntheticRunStore({}),
+    )
+    old, recent = NOW.date() - timedelta(days=200), NOW.date() - timedelta(days=1)
+    value_store.upsert_daily_facts(
+        [
+            fact(user_id, old, tier="starter", user_group="partner", runs_completed=3, operator_cost_micro=90_000),
+            fact(user_id, recent),
+        ]
+    )
+    value_store.append_lifecycle_transitions([transition(user_id, old, "onboarding", "growing")])
+    before = NOW.date() - timedelta(days=180)
+
+    # Rollup first (the long-term families), then expire the day.
+    rollups = rollup_lifecycle_day(old, store=value_store)
+    stored = AnalyticsRollupStore(analytics).list_rollups(start=old, end=old + timedelta(days=1))
+    assert {(r.metric_name, r.user_state, r.value_count, r.value_sum_micro) for r in stored} >= {
+        ("runs_by_tier", "starter", 3, 0),
+        ("operator_cost_by_user_group", "partner", 1, 90_000),
+        ("own_spend_by_tier", "starter", 1, 0),
+    }
+    assert {r.metric_name for r in rollups} == {r.metric_name for r in stored}
+
+    assert value_store.list_expiring_fact_dates(before=before, limit=10) == [old]
+    assert value_store.has_facts_before(before) is True
+    assert value_store.expire_facts_for_date(old) == 2  # one fact row + one transition
+    assert value_store.list_facts_for_date(old) == []
+    assert value_store.list_transitions_for_date(old) == []
+    assert value_store.list_facts_for_date(recent) != []  # inside the window, untouched
+    assert value_store.list_expiring_fact_dates(before=before, limit=10) == []
+    assert value_store.has_facts_before(before) is False
+
+    # A re-run finds no facts and leaves the day's rollups alone.
+    assert rollup_lifecycle_day(old, store=value_store) == ()
+    again = AnalyticsRollupStore(analytics).list_rollups(start=old, end=old + timedelta(days=1))
+    assert again == stored
 
 
 @pg_only

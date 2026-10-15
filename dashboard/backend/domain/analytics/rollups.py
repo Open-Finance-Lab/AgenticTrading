@@ -17,10 +17,7 @@ from .models import AnalyticsEventRecord
 from .repository import _row_to_event, analytics_store
 from .repository_common import utc_iso
 from .usage_cost import atl_cost_micro, byok_estimate_micro
-from .value_repository import (
-    LIFECYCLE_ROLLUP_METRICS,
-    UserLifecycleDailySnapshot,
-)
+from .value_repository import LIFECYCLE_ROLLUP_METRICS
 
 
 class DailyRollup(BaseModel):
@@ -127,17 +124,18 @@ class AnalyticsRollupStore:
             )
             for row in values
         ]
+        preserved = sorted(LIFECYCLE_ROLLUP_METRICS)
         if self.is_postgres:
             placeholders = ", ".join("%s" for _ in columns)
             with self.base_store._get_connection() as conn:
                 with conn.cursor() as cur:
                     cur.execute(
-                        """
+                        f"""
                         DELETE FROM analytics_daily_rollups
                         WHERE rollup_date = %s
-                          AND metric_name NOT IN (%s, %s)
+                          AND metric_name NOT IN ({", ".join("%s" for _ in preserved)})
                         """,
-                        (day.isoformat(), *sorted(LIFECYCLE_ROLLUP_METRICS)),
+                        (day.isoformat(), *preserved),
                     )
                     if payloads:
                         cur.executemany(
@@ -149,12 +147,12 @@ class AnalyticsRollupStore:
             placeholders = ", ".join("?" for _ in columns)
             with self.base_store._get_connection() as conn:
                 conn.execute(
-                    """
+                    f"""
                     DELETE FROM analytics_daily_rollups
                     WHERE rollup_date = ?
-                      AND metric_name NOT IN (?, ?)
+                      AND metric_name NOT IN ({", ".join("?" for _ in preserved)})
                     """,
-                    (day.isoformat(), *sorted(LIFECYCLE_ROLLUP_METRICS)),
+                    (day.isoformat(), *preserved),
                 )
                 if payloads:
                     conn.executemany(
@@ -525,10 +523,8 @@ def rollup_current_day(
     return calculate_overview_metrics(events, start=start, end=current)
 
 
-def _snapshot_quality(rows: Sequence[UserLifecycleDailySnapshot]) -> str:
-    return (
-        "partial" if any(row.data_quality == "partial" for row in rows) else "complete"
-    )
+def _quality(rows: Sequence[Any]) -> str:
+    return "partial" if any(row.data_quality == "partial" for row in rows) else "complete"
 
 
 def rollup_lifecycle_day(
@@ -536,67 +532,99 @@ def rollup_lifecycle_day(
     *,
     store,
 ) -> tuple[DailyRollup, ...]:
-    """Persist anonymous lifecycle counts and changed-segment transitions."""
+    """Persist anonymous lifecycle counts, transitions and the long-term
+    tier / user_group families for one day (design SS6.7, SS11).
 
-    current = store.list_daily_snapshots(
-        start=day,
-        end=day + timedelta(days=1),
-    )
-    previous = store.list_daily_snapshots(
-        start=day - timedelta(days=1),
-        end=day,
-    )
+    Reads the day's fact rows and transition log; writes nothing keyed by a
+    user. The retention sweep calls it for every expiring day before that
+    day's user-keyed rows are deleted. A day with no facts writes nothing:
+    its facts may already have expired, and replacing its lifecycle rollups
+    with an empty set would erase the history this function exists to keep.
+    """
+
+    facts = store.list_facts_for_date(day)
+    if not facts:
+        return ()
+    transitions = store.list_transitions_for_date(day)
     updated_at = _day_start(day + timedelta(days=1))
     rows: list[DailyRollup] = []
-    by_segment: dict[str, list[UserLifecycleDailySnapshot]] = defaultdict(list)
-    for snapshot in current:
-        by_segment[snapshot.lifecycle_segment].append(snapshot)
-    for segment, snapshots in sorted(by_segment.items()):
+
+    by_segment: dict[str, list[Any]] = defaultdict(list)
+    for fact in facts:
+        by_segment[fact.lifecycle_segment].append(fact)
+    for segment, group in sorted(by_segment.items()):
         rows.append(
             _row(
                 day,
                 "lifecycle_segment_count",
-                count=len(snapshots),
+                count=len(group),
                 user_state=segment,
-                outcome=_snapshot_quality(snapshots),
+                outcome=_quality(group),
                 updated_at=updated_at,
             )
         )
 
-    previous_by_user = {snapshot.user_id: snapshot for snapshot in previous}
-    transition_snapshots: dict[tuple[str, str], list[UserLifecycleDailySnapshot]] = (
-        defaultdict(list)
-    )
-    transition_quality: dict[tuple[str, str], list[UserLifecycleDailySnapshot]] = (
-        defaultdict(list)
-    )
-    for snapshot in current:
-        prior = previous_by_user.get(snapshot.user_id)
-        if prior is None or prior.lifecycle_segment == snapshot.lifecycle_segment:
-            continue
-        key = (prior.lifecycle_segment, snapshot.lifecycle_segment)
-        transition_snapshots[key].append(snapshot)
-        transition_quality[key].extend((prior, snapshot))
-    for (from_segment, to_segment), snapshots in sorted(transition_snapshots.items()):
+    by_transition: dict[tuple[str, str], list[Any]] = defaultdict(list)
+    for transition in transitions:
+        by_transition[(transition.from_segment, transition.to_segment)].append(
+            transition
+        )
+    for (from_segment, to_segment), group in sorted(by_transition.items()):
         rows.append(
             _row(
                 day,
                 "lifecycle_transition",
-                count=len(snapshots),
+                count=len(group),
                 event_name=from_segment,
                 user_state=to_segment,
-                outcome=_snapshot_quality(
-                    transition_quality[(from_segment, to_segment)]
-                ),
+                outcome=_quality(group),
                 updated_at=updated_at,
             )
         )
+
+    for dimension in ("tier", "user_group"):
+        by_value: dict[str, list[Any]] = defaultdict(list)
+        for fact in facts:
+            by_value[getattr(fact, dimension)].append(fact)
+        for value, group in sorted(by_value.items()):
+            quality = _quality(group)
+            rows.append(
+                _row(
+                    day,
+                    f"runs_by_{dimension}",
+                    count=sum(fact.runs_completed for fact in group),
+                    user_state=value,
+                    outcome=quality,
+                    updated_at=updated_at,
+                )
+            )
+            rows.append(
+                _row(
+                    day,
+                    f"operator_cost_by_{dimension}",
+                    count=len(group),
+                    sum_micro=sum(fact.operator_cost_micro for fact in group),
+                    user_state=value,
+                    outcome=quality,
+                    updated_at=updated_at,
+                )
+            )
+            rows.append(
+                _row(
+                    day,
+                    f"own_spend_by_{dimension}",
+                    count=len(group),
+                    sum_micro=sum(fact.own_spend_micro for fact in group),
+                    user_state=value,
+                    outcome=quality,
+                    updated_at=updated_at,
+                )
+            )
+
     rows.sort(key=lambda row: (row.metric_name, row.event_name, row.user_state))
-    store.replace_lifecycle_rollups(
-        day,
-        rows,
-        replace_transitions=bool(previous),
-    )
+    # Transitions come from their own table for ``day``, so there is no
+    # "previous day missing" case left to protect against.
+    store.replace_lifecycle_rollups(day, rows, replace_transitions=True)
     return tuple(rows)
 
 
