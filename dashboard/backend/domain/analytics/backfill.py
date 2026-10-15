@@ -514,6 +514,14 @@ def backfill_analytics(
 
     Rollup repairs run once per affected day after all inserts complete.
     Dry runs enumerate and validate sources but perform no writes at all.
+
+    Inserted events reach the raw log and the day rollups only. They do not
+    update ``user_activity`` (activation date, last meaningful activity) or
+    ``user_daily_facts``: events go in through ``store.append_event``, not the
+    ingestion path that maintains ``user_activity``, and the daily job's
+    late-arrival sweep recomputes facts only for the last
+    ``RECOMPUTE_LOOKBACK_DAYS`` days. A historical backfill therefore moves no
+    one's activation date or lifecycle segment.
     """
 
     if isinstance(days, bool) or not isinstance(days, int) or not 1 <= days <= 180:
