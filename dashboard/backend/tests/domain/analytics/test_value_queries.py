@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from types import SimpleNamespace
 
 import pytest
@@ -29,6 +29,8 @@ from dashboard.backend.domain.analytics.value_repository import (
     TransitionCount,
     UserActivity,
     UserDailyFact,
+    UserPageQuery,
+    UserPageRow,
     UserValueSnapshot,
 )
 from dashboard.backend.domain.user_groups import USER_GROUPS
@@ -361,13 +363,6 @@ class FakeValueStore:
         return self.operational_facts[user_id]
 
     # -- snapshot reads (routes not yet on facts) --
-    def list_current_snapshots(self, user_ids):
-        return {
-            user_id: self.snapshots[user_id]
-            for user_id in user_ids
-            if user_id in self.snapshots
-        }
-
     def get_current_snapshot(self, user_id):
         return self.snapshots.get(user_id)
 
@@ -479,17 +474,13 @@ def _service(
     excluded=(),
     legacy_availability=None,
     ledger_days=(),
-    # Snapshot-model fixtures for the routes not yet on facts: ``users``
-    # defaults to the snapshot ids grouped by ``user_groups``.
+    # Snapshot-model fixture for the profile route, not yet on facts: ``users``
+    # defaults to the snapshot ids.
     snapshots=None,
-    user_groups=None,
 ):
     if snapshots is not None:
         if not users:
-            groups = dict(user_groups or {})
-            users = tuple(
-                (user_id, groups.get(user_id, "unknown")) for user_id in snapshots
-            )
+            users = tuple((user_id, "unknown") for user_id in snapshots)
     user_ids = [user_id for user_id, _group in users]
     value_store = FakeValueStore(
         facts=facts,
@@ -627,57 +618,111 @@ def test_retention_reads_no_raw_events():
     )
 
 
-def test_priority_order_is_group_value_inactivity_then_user_id():
-    snapshots = {
-        10: _snapshot(10, operational="blocked", inactive_days=3),
-        11: _snapshot(11, operational="blocked", inactive_days=20),
-        12: _snapshot(12, operational="blocked", inactive_days=8),
-        13: _snapshot(13, operational="blocked", inactive_days=8),
-        20: _snapshot(20, operational="needs_attention"),
-        30: _snapshot(30, lifecycle="at_risk", inactive_days=15),
-        40: _snapshot(40, lifecycle="onboarding", inactive_days=4),
-        50: _snapshot(50, lifecycle="core"),
-    }
-    commercial = {
-        10: _commercial(10, 6_000_000),
-        11: _commercial(11, 4_000_000),
-        12: _commercial(12, 3_000_000),
-        13: _commercial(13, 3_000_000),
-        20: _commercial(20, 30_000_000),
-        30: _commercial(30, 30_000_000),
-        40: _commercial(40, 30_000_000),
-        50: _commercial(50, 30_000_000),
-    }
-    service, _value_store, _legacy = _service(
-        snapshots=snapshots,
-        commercial=commercial,
+def _page_row(user_id: int, **overrides) -> UserPageRow:
+    values = dict(
+        user_id=user_id, email=f"value-{user_id}@example.test", display_name=f"Value User {user_id}",
+        role="user", user_group="unknown", created_at=NOW - timedelta(days=90),
+        activated_at=NOW - timedelta(days=60), last_meaningful_activity_at=NOW - timedelta(days=2),
+        lifecycle_segment="core", operational_state="healthy",
+        operational_reason_code="no_supported_issue", tier="unpaid", data_quality="complete",
+    )
+    values.update(overrides)
+    return UserPageRow(**values)
+
+
+def _utc_midnight(day: date) -> datetime:
+    return datetime.combine(day, time.min, tzinfo=UTC)
+
+
+def test_users_list_reads_one_sql_page_and_computes_live_segments():
+    rows = [
+        _page_row(1, operational_state="blocked", operational_reason_code="account_restricted", tier="invested"),
+        _page_row(2, lifecycle_segment="growing", last_meaningful_activity_at=NOW - timedelta(days=9)),
+    ]
+    facts = [_fact(1, YESTERDAY - timedelta(days=offset)) for offset in range(3)]
+    activity = {1: _activity(1), 2: _activity(2, active_days_ago=9)}
+    service, value_store, _legacy = _service(
+        page_rows=rows, facts=facts, activity=activity,
+        commercial={1: _commercial(1, 6_000_000), 2: _commercial(2)},
     )
 
-    page = service.list_users(
-        filters=UserValueFilters(priority=True),
-        limit=25,
-        offset=0,
-        now=NOW,
-    )
+    response = service.list_users(filters=UserValueFilters(priority=True), limit=25, offset=0, now=NOW)
 
-    assert [item.user_id for item in page.items] == [10, 11, 12, 13, 20, 30, 40]
-
-
-def test_user_list_uses_injected_utc_day_for_commercial_window():
-    service, value_store, _legacy = _service(snapshots={1: _snapshot(1)})
-
-    service.list_users(
-        filters=UserValueFilters(),
-        limit=25,
-        offset=0,
-        now=NOW,
-    )
-
+    assert response.total == 2
+    first, second = response.items
+    assert first.user_id == 1
+    assert first.lifecycle.segment == "core"           # live: 3 active days, 3 successes
+    assert first.operational.state == "blocked"        # yesterday's fact row
+    assert first.operational.reason == "The Credits account is restricted from model spending."
+    assert first.commercial_tier == "invested"
+    assert first.lifetime_net_purchased_micro == 6_000_000
+    assert first.priority_group == "blocked"
+    assert second.lifecycle.segment == "at_risk"       # live: 9 idle days, no fact rows
+    assert second.priority_group == "none"             # yesterday's segment was growing
+    query, day, limit, offset = value_store.page_calls[0]
+    assert (day, limit, offset) == (YESTERDAY, 25, 0)
+    assert query.priority is True
+    assert value_store.recent_windows == [(YESTERDAY - timedelta(days=29), YESTERDAY)]
     assert value_store.commercial_windows == [
-        (
-            datetime(2026, 8, 4, tzinfo=UTC),
-            datetime(2026, 9, 4, tzinfo=UTC),
-        )
+        (_utc_midnight(YESTERDAY), _utc_midnight(YESTERDAY + timedelta(days=1)))
+    ]
+
+
+def test_users_list_passes_every_filter_to_sql_unchanged():
+    service, value_store, _legacy = _service(page_rows=[], activity={})
+    filters = UserValueFilters(
+        q="Ada", lifecycle_segment="core", operational_state="healthy", commercial_tier="starter",
+        user_group="partner", activated=True, last_meaningful_activity_from=NOW - timedelta(days=3),
+        last_meaningful_activity_to=NOW, priority=False, legacy_status="active", include_internal=True,
+    )
+
+    response = service.list_users(filters=filters, limit=10, offset=20, now=NOW)
+
+    assert response.total == 0 and response.items == []
+    query, _day, limit, offset = value_store.page_calls[0]
+    assert (limit, offset) == (10, 20)
+    assert query == UserPageQuery(
+        q="Ada", lifecycle_segment="core", operational_state="healthy", commercial_tier="starter",
+        user_group="partner", activated=True, last_meaningful_activity_from=NOW - timedelta(days=3),
+        last_meaningful_activity_to=NOW, priority=False, legacy_status="active", include_internal=True,
+    )
+
+
+def test_users_list_row_without_a_fact_row_reads_as_healthy_unpaid():
+    service, _value_store, _legacy = _service(
+        page_rows=[_page_row(
+            7, lifecycle_segment=None, data_quality=None, activated_at=None,
+            last_meaningful_activity_at=None,
+        )],
+        activity={}, commercial={},
+    )
+
+    response = service.list_users(filters=UserValueFilters(), limit=25, offset=0, now=NOW)
+
+    item = response.items[0]
+    assert item.operational.state == "healthy"
+    assert item.commercial_tier == "unpaid"
+    assert item.lifetime_net_purchased_micro == 0
+    assert item.lifecycle.segment == "dormant"  # created 90 days ago, no activity row
+    assert item.priority_group == "none"
+
+
+def test_users_list_priority_groups_are_a_pure_function_of_state_and_segment():
+    # The store maps a NULL code to no_supported_issue before the service sees it.
+    rows = [
+        _page_row(1),
+        _page_row(2, operational_state="needs_attention", operational_reason_code="three_consecutive_failed_runs", lifecycle_segment="at_risk"),
+        _page_row(3, lifecycle_segment="at_risk"),
+        _page_row(4, lifecycle_segment="onboarding"),
+    ]
+    service, _value_store, _legacy = _service(page_rows=rows, activity={}, commercial={})
+
+    items = service.list_users(filters=UserValueFilters(), limit=25, offset=0, now=NOW).items
+
+    assert items[0].operational.state == "healthy"
+    assert items[0].operational.reason_code == "no_supported_issue"
+    assert [item.priority_group for item in items] == [
+        "none", "needs_attention", "healthy_at_risk", "healthy_onboarding"
     ]
 
 
@@ -779,19 +824,6 @@ def test_group_summary_does_not_read_an_unlanded_window_as_zero_runs():
     assert response.availability.status == "partial"
     assert response.availability.coverage_end is None
     assert {row.group: row.users for row in response.groups}["organic"] == 2
-
-
-def test_user_group_filter_applies_to_priority_users():
-    service, _value_store, _legacy = _service(
-        snapshots={1: _snapshot(1, operational="blocked"), 2: _snapshot(2)},
-        user_groups={1: "partner", 2: "organic"},
-    )
-
-    filters = UserValueFilters(user_group="partner", priority=True)
-    page = service.list_users(filters=filters, limit=25, offset=0, now=NOW)
-
-    assert filters.user_group == "partner"
-    assert [item.user_id for item in page.items] == [1]
 
 
 def test_commercial_response_keeps_revenue_usage_grants_cost_and_balances_separate():
@@ -1125,28 +1157,13 @@ def test_profile_never_uses_anonymous_transition_rollups():
 
 
 def test_internal_accounts_are_excluded_unless_explicitly_included():
-    snapshots = {1: _snapshot(1), 2: _snapshot(2)}
-    service, _value_store, _legacy = _service(
-        snapshots=snapshots,
-        excluded={2},
-    )
+    service, value_store, _legacy = _service(page_rows=[_page_row(1)], activity={}, commercial={})
 
-    external = service.list_users(
-        filters=UserValueFilters(),
-        limit=25,
-        offset=0,
-        now=NOW,
-    )
-    all_users = service.list_users(
-        filters=UserValueFilters(include_internal=True),
-        limit=25,
-        offset=0,
-        now=NOW,
-    )
+    service.list_users(filters=UserValueFilters(), limit=25, offset=0, now=NOW)
+    service.list_users(filters=UserValueFilters(include_internal=True), limit=25, offset=0, now=NOW)
 
-    assert [item.user_id for item in external.items] == [1]
-    assert [item.user_id for item in all_users.items] == [1, 2]
-
+    # The exclusion is a predicate of the SQL page; the service only forwards the flag.
+    assert [call[0].include_internal for call in value_store.page_calls] == [False, True]
 
 
 def _lifecycle_service(**overrides):

@@ -15,8 +15,11 @@ from .lifecycle import (
     OperationalResult,
     OperationalState,
     activation_cohort_week,
+    calculate_lifecycle,
     operational_reason,
+    operational_result_from_code,
 )
+from .lifecycle_reads import build_lifecycle_inputs
 from .metrics import AnalyticsMetricFilters
 from .query_service import (
     AnalyticsQueryService,
@@ -29,6 +32,8 @@ from .repository_common import positive_limit, positive_user_id
 from .value_repository import (
     CommercialValueFact,
     GroupFactTotals,
+    UserActivity,
+    UserPageQuery,
     UserValueSnapshot,
     build_value_analytics_store,
 )
@@ -61,7 +66,6 @@ _COMMERCIAL_TIERS: tuple[CommercialTier, ...] = (
     "invested",
     "high_value",
 )
-_TIER_RANK = {tier: rank for rank, tier in enumerate(_COMMERCIAL_TIERS)}
 _MOVEMENT_WINDOWS: dict[str, tuple[int, Literal["day", "week", "month"]]] = {
     "5d": (5, "day"),
     "1w": (7, "day"),
@@ -87,15 +91,6 @@ the filter cap. Derived rather than written down so that adding a longer
 movement range cannot silently widen the scan.
 """
 
-_PRIORITY_RANK = {
-    "blocked": 0,
-    "needs_attention": 1,
-    "healthy_at_risk": 2,
-    "healthy_onboarding": 3,
-    "none": 4,
-}
-
-
 def _utc(value: datetime, field_name: str) -> datetime:
     if value.tzinfo is None or value.utcoffset() is None:
         raise ValueError(f"{field_name} must include a timezone")
@@ -116,13 +111,6 @@ def _period_start(value: date, granularity: Literal["day", "week", "month"]) -> 
     if granularity == "week":
         return _week_start(value)
     return value.replace(day=1)
-
-
-def _parse_timestamp(value: object) -> datetime:
-    parsed = datetime.fromisoformat(str(value))
-    if parsed.tzinfo is None or parsed.utcoffset() is None:
-        parsed = parsed.replace(tzinfo=UTC)
-    return parsed.astimezone(UTC)
 
 
 def _validate_dates(start: date, end: date) -> tuple[date, date]:
@@ -455,14 +443,18 @@ def _operational(snapshot: UserValueSnapshot) -> OperationalResult:
     )
 
 
-def _priority_group(snapshot: UserValueSnapshot) -> PriorityGroup:
-    if snapshot.operational_state == "blocked":
+def _priority_group(
+    operational_state: str, lifecycle_segment: str | None
+) -> PriorityGroup:
+    """Yesterday's fact values -> group; the same rule as ``_users_page_sql``'s
+    priority predicate and sort, so a row agrees with where SQL placed it."""
+    if operational_state == "blocked":
         return "blocked"
-    if snapshot.operational_state == "needs_attention":
+    if operational_state == "needs_attention":
         return "needs_attention"
-    if snapshot.lifecycle_segment == "at_risk":
+    if lifecycle_segment == "at_risk":
         return "healthy_at_risk"
-    if snapshot.lifecycle_segment == "onboarding":
+    if lifecycle_segment == "onboarding":
         return "healthy_onboarding"
     return "none"
 
@@ -537,18 +529,6 @@ class ValueAnalyticsQueryService:
     @staticmethod
     def _ids(users: Sequence[dict[str, Any]]) -> list[int]:
         return [positive_user_id(user["id"]) for user in users]
-
-    def _current(
-        self,
-        users: Sequence[dict[str, Any]],
-    ) -> dict[int, UserValueSnapshot]:
-        result: dict[int, UserValueSnapshot] = {}
-        ids = self._ids(users)
-        for offset in range(0, len(ids), 500):
-            result.update(
-                self.value_store.list_current_snapshots(ids[offset : offset + 500])
-            )
-        return result
 
     def _commercial(
         self,
@@ -1286,88 +1266,87 @@ class ValueAnalyticsQueryService:
         if isinstance(offset, bool) or not isinstance(offset, int) or offset < 0:
             raise ValueError("offset must be a non-negative integer")
         current_time = _utc(now or datetime.now(UTC), "now")
-        users = self._eligible_users(include_internal=filters.include_internal)
-        current = self._current(users)
-        commercial = self._commercial(
-            users,
-            start=current_time.date() - timedelta(days=30),
-            end=current_time.date() + timedelta(days=1),
+        yesterday = current_time.date() - timedelta(days=1)
+        query = UserPageQuery(
+            q=filters.q,
+            lifecycle_segment=filters.lifecycle_segment,
+            operational_state=filters.operational_state,
+            commercial_tier=filters.commercial_tier,
+            user_group=filters.user_group,
+            activated=filters.activated,
+            last_meaningful_activity_from=filters.last_meaningful_activity_from,
+            last_meaningful_activity_to=filters.last_meaningful_activity_to,
+            priority=filters.priority,
+            legacy_status=filters.legacy_status,
+            include_internal=filters.include_internal,
         )
-        legacy = self.query_store.list_snapshots() if filters.legacy_status else {}
-        selected: list[ValueUserListItem] = []
-        needle = filters.q.casefold() if filters.q else None
-        for user in users:
-            user_id = int(user["id"])
-            snapshot = current.get(user_id)
-            fact = commercial.get(user_id)
-            if snapshot is None or fact is None:
-                continue
-            user_group = coerce_user_group(user.get("user_group"))
-            if filters.user_group is not None and user_group != filters.user_group:
-                continue
-            group = _priority_group(snapshot)
-            if filters.priority and group == "none":
-                continue
-            if filters.lifecycle_segment not in {None, snapshot.lifecycle_segment}:
-                continue
-            if filters.operational_state not in {None, snapshot.operational_state}:
-                continue
-            if filters.commercial_tier not in {None, fact.commercial_tier}:
-                continue
-            if filters.activated is not None:
-                if (snapshot.activated_at is not None) != filters.activated:
-                    continue
-            if filters.last_meaningful_activity_from is not None and (
-                snapshot.last_meaningful_activity_at is None
-                or snapshot.last_meaningful_activity_at
-                < filters.last_meaningful_activity_from
-            ):
-                continue
-            if filters.last_meaningful_activity_to is not None and (
-                snapshot.last_meaningful_activity_at is None
-                or snapshot.last_meaningful_activity_at
-                > filters.last_meaningful_activity_to
-            ):
-                continue
-            if filters.legacy_status is not None and (
-                user_id not in legacy or legacy[user_id].status != filters.legacy_status
-            ):
-                continue
-            if needle is not None and needle not in (
-                f"{user.get('display_name', '')} {user.get('email', '')}".casefold()
-            ):
-                continue
-            selected.append(
+        rows, total = self.value_store.list_users_page(
+            query=query, day=yesterday, limit=page_size, offset=offset
+        )
+        ids = [row.user_id for row in rows]
+        totals = (
+            self.value_store.sum_recent_facts(
+                ids, start=yesterday - timedelta(days=29), end=yesterday
+            )
+            if ids
+            else {}
+        )
+        commercial = (
+            self.value_store.list_commercial_values(
+                ids,
+                start=_day_start(yesterday),
+                end=_day_start(yesterday + timedelta(days=1)),
+            )
+            if ids
+            else {}
+        )
+        as_of = _day_start(yesterday + timedelta(days=1))
+        items: list[ValueUserListItem] = []
+        for row in rows:
+            activity = (
+                UserActivity(
+                    user_id=row.user_id,
+                    activated_at=row.activated_at,
+                    last_meaningful_activity_at=row.last_meaningful_activity_at,
+                    updated_at=current_time,
+                )
+                if row.activated_at is not None
+                or row.last_meaningful_activity_at is not None
+                else None
+            )
+            lifecycle = calculate_lifecycle(
+                build_lifecycle_inputs(
+                    row.user_id,
+                    created_at=row.created_at,
+                    activity=activity,
+                    totals=totals.get(row.user_id),
+                    as_of=current_time,
+                ),
+                current_time,
+            )
+            fact = commercial.get(row.user_id)
+            items.append(
                 ValueUserListItem(
-                    user_id=user_id,
-                    display_name=str(user.get("display_name") or ""),
-                    email=str(user.get("email") or ""),
-                    joined_at=_parse_timestamp(user["created_at"]),
-                    lifecycle=_lifecycle(snapshot),
-                    operational=_operational(snapshot),
-                    commercial_tier=fact.commercial_tier,
-                    lifetime_net_purchased_micro=fact.lifetime_net_purchased_micro,
-                    priority_group=group,
-                    profile_path=f"/admin/analytics/users/{user_id}",
+                    user_id=row.user_id,
+                    display_name=row.display_name,
+                    email=row.email,
+                    joined_at=row.created_at,
+                    lifecycle=lifecycle,
+                    operational=operational_result_from_code(
+                        row.operational_reason_code, as_of=as_of
+                    ),
+                    commercial_tier=row.tier,
+                    lifetime_net_purchased_micro=(
+                        fact.lifetime_net_purchased_micro if fact is not None else 0
+                    ),
+                    priority_group=_priority_group(
+                        row.operational_state, row.lifecycle_segment
+                    ),
+                    profile_path=f"/admin/analytics/users/{row.user_id}",
                 )
             )
-        if filters.priority:
-            selected.sort(
-                key=lambda item: (
-                    _PRIORITY_RANK[item.priority_group],
-                    -_TIER_RANK[item.commercial_tier],
-                    -item.lifetime_net_purchased_micro,
-                    -item.lifecycle.inactive_days,
-                    item.user_id,
-                )
-            )
-        else:
-            selected.sort(key=lambda item: item.user_id)
         return PaginatedValueUsers(
-            items=selected[offset : offset + page_size],
-            total=len(selected),
-            limit=page_size,
-            offset=offset,
+            items=items, total=total, limit=page_size, offset=offset
         )
 
     def get_user_profile(

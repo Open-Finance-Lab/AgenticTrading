@@ -259,6 +259,9 @@ def assert_users_page_contract(store, ids: dict[str, int]) -> None:
     assert fresh.operational_state == "healthy"
     assert fresh.tier == "unpaid"
     assert fresh.activated_at is None
+    # A NULL stored reason code (history-copy row) reaches the service as healthy.
+    dormant = next(row for row in rows if row.user_id == ids["dormant"])
+    assert dormant.operational_reason_code == "no_supported_issue"
 
     rows, total = store.list_users_page(
         query=_page_query(include_internal=True), day=YESTERDAY, limit=100, offset=0
@@ -270,7 +273,10 @@ def assert_users_page_contract(store, ids: dict[str, int]) -> None:
         query=_page_query(), day=YESTERDAY, limit=2, offset=2
     )
     assert total == 5
-    assert len(rows) == 2
+    every_id = sorted(
+        ids[key] for key in ("blocked", "attention", "core", "dormant", "fresh")
+    )
+    assert [row.user_id for row in rows] == every_id[2:4]
 
     rows, _total = store.list_users_page(
         query=_page_query(priority=True), day=YESTERDAY, limit=100, offset=0
@@ -328,6 +334,66 @@ def assert_users_page_contract(store, ids: dict[str, int]) -> None:
             query=_page_query(legacy_status=legacy), day=YESTERDAY, limit=100, offset=0
         )
         assert {row.user_id for row in rows} == expected, legacy
+
+
+def assert_priority_sort_contract(store, create_user) -> None:
+    """The priority order, pinned key by key: group, tier, inactivity, id.
+
+    Users are created in an order that differs from the expected one, and the
+    lower groups carry the better tier, so no key passes by accident. Only
+    these users' relative order is asserted, which keeps the check valid on a
+    store that already holds the contract population.
+    """
+
+    #   key, fact overrides, days since last meaningful activity (None = no row)
+    specs = [
+        ("pr_onboard_high", dict(lifecycle_segment="onboarding", tier="high_value"), 1),
+        ("pr_at_risk", dict(lifecycle_segment="at_risk"), 1),
+        ("pr_attention", dict(operational_state="needs_attention", lifecycle_segment="at_risk",
+                              operational_reason_code="three_consecutive_failed_runs"), 1),
+        ("pr_blocked_recent", dict(operational_state="blocked",
+                                   operational_reason_code="billing_lane_unavailable"), 1),
+        ("pr_blocked_tie_a", dict(operational_state="blocked",
+                                  operational_reason_code="billing_lane_unavailable"), 5),
+        ("pr_blocked_tie_b", dict(operational_state="blocked",
+                                  operational_reason_code="billing_lane_unavailable"), 5),
+        ("pr_blocked_old", dict(operational_state="blocked",
+                                operational_reason_code="billing_lane_unavailable"), 20),
+        ("pr_blocked_never", dict(operational_state="blocked",
+                                  operational_reason_code="billing_lane_unavailable"), None),
+        ("pr_blocked_starter", dict(operational_state="blocked", tier="starter",
+                                    operational_reason_code="billing_lane_unavailable"), 1),
+        ("pr_blocked_high", dict(operational_state="blocked", tier="high_value",
+                                 operational_reason_code="billing_lane_unavailable"), 1),
+    ]
+    ids = {}
+    for key, overrides, idle_days in specs:
+        user_id = create_user(key, f"{key}@example.test", "unknown")
+        ids[key] = user_id
+        store.upsert_daily_facts([fact(user_id, YESTERDAY, **overrides)])
+        if idle_days is not None:
+            store.record_activity(
+                user_id, occurred_at=NOW - timedelta(days=idle_days), activating=False, now=NOW
+            )
+    assert ids["pr_blocked_tie_a"] < ids["pr_blocked_tie_b"]
+
+    rows, _total = store.list_users_page(
+        query=_page_query(priority=True), day=YESTERDAY, limit=100, offset=0
+    )
+
+    mine = {user_id: key for key, user_id in ids.items()}
+    assert [mine[row.user_id] for row in rows if row.user_id in mine] == [
+        "pr_blocked_high",      # group blocked, tier high_value
+        "pr_blocked_starter",   # tier starter
+        "pr_blocked_never",     # unpaid; no activity row sorts first
+        "pr_blocked_old",       # then the longest idle
+        "pr_blocked_tie_a",     # equal idle time falls to the lower id
+        "pr_blocked_tie_b",
+        "pr_blocked_recent",
+        "pr_attention",         # group needs_attention, though its segment is at_risk
+        "pr_at_risk",
+        "pr_onboard_high",      # last group, despite the best tier
+    ]
 
 
 def _sqlite_fixture(tmp_path):
@@ -437,3 +503,8 @@ def test_sqlite_users_page_follows_the_contract(tmp_path):
     store, users, admin_id = _sqlite_fixture(tmp_path)
     ids = seed_population(store, _sqlite_user_factory(users), admin_id=admin_id)
     assert_users_page_contract(store, ids)
+
+
+def test_sqlite_users_page_priority_sort_follows_the_contract(tmp_path):
+    store, users, _admin_id = _sqlite_fixture(tmp_path)
+    assert_priority_sort_contract(store, _sqlite_user_factory(users))

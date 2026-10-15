@@ -289,6 +289,7 @@ def test_postgres_user_value_projection_round_trip(
 def test_postgres_fact_reads_follow_the_contract(postgres_contract_store):
     from dashboard.backend.tests.domain.analytics.test_fact_reads import (
         assert_fact_read_contract,
+        assert_priority_sort_contract,
         assert_users_page_contract,
         seed_population,
     )
@@ -329,6 +330,7 @@ def test_postgres_fact_reads_follow_the_contract(postgres_contract_store):
     ids = seed_population(value_store, create_user, admin_id=admin_id)
     assert_fact_read_contract(value_store, ids)
     assert_users_page_contract(value_store, ids)
+    assert_priority_sort_contract(value_store, create_user)
 
 
 @pg_only
