@@ -574,20 +574,23 @@ class AnalyticsQueryStore:
         user_id: int,
         limit: int,
         cursor: str | None,
+        start: datetime,
     ) -> tuple[list[dict[str, Any]], str | None]:
         subject_id = positive_user_id(user_id)
         page_size = positive_limit(limit)
+        window_start = utc_iso(_utc(start, "start"))
         if self.is_postgres:
             with self.base_store._get_connection() as conn:
                 with conn.cursor() as cur:
                     cur.execute(
                         """
                         SELECT * FROM analytics_events
-                        WHERE user_id = %s AND event_group = 'experience'
+                        WHERE user_id = %s AND occurred_at >= %s
+                          AND event_group = 'experience'
                           AND session_id IS NOT NULL
                         ORDER BY occurred_at DESC, sequence DESC
                         """,
-                        (subject_id,),
+                        (subject_id, window_start),
                     )
                     rows = cur.fetchall()
         else:
@@ -595,11 +598,12 @@ class AnalyticsQueryStore:
                 rows = conn.execute(
                     """
                     SELECT * FROM analytics_events
-                    WHERE user_id = ? AND event_group = 'experience'
+                    WHERE user_id = ? AND occurred_at >= ?
+                      AND event_group = 'experience'
                       AND session_id IS NOT NULL
                     ORDER BY occurred_at DESC, sequence DESC
                     """,
-                    (subject_id,),
+                    (subject_id, window_start),
                 ).fetchall()
         grouped: dict[str, dict[str, Any]] = {}
         for row in rows:
@@ -1539,15 +1543,18 @@ class AnalyticsQueryService:
         section: ActivitySection,
         limit: int,
         cursor: str | None,
+        now: datetime | None = None,
     ) -> AnalyticsActivityPage:
         if section not in {"timeline", "runs", "usage", "sessions"}:
             raise ValueError("section must be a supported Analytics activity section")
         page_size = positive_limit(limit)
         if section == "sessions":
+            current = _utc(now or datetime.now(timezone.utc), "now")
             rows, next_cursor = self.query_store.list_session_rows(
                 user_id=user_id,
                 limit=page_size,
                 cursor=cursor,
+                start=current - timedelta(days=30),
             )
             return AnalyticsActivityPage(
                 items=[

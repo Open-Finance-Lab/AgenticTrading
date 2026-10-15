@@ -777,6 +777,7 @@ def test_activity_sections_page_independently_and_hide_session_ids(tmp_path):
         section="sessions",
         limit=2,
         cursor=None,
+        now=NOW,
     )
 
     assert len(first_runs.items) == 2
@@ -785,6 +786,43 @@ def test_activity_sections_page_independently_and_hide_session_ids(tmp_path):
     assert sessions.items[0].session_event_count == 2
     assert sessions.items[0].visible_ms == 500
     assert "session_id" not in str(sessions.model_dump(mode="json"))
+
+
+def test_sessions_section_is_bounded_to_thirty_days(tmp_path):
+    analytics, events, _rollups, _states, users = _fixture(tmp_path)
+    context = RequestAnalyticsContext(
+        country_code="US", device_category="desktop", browser_family="Chrome"
+    )
+    for days_ago in (2, 45):
+        occurred_at = NOW - timedelta(days=days_ago)
+        events.accept_frontend_event(
+            user={"id": 1},
+            payload=FrontendAnalyticsEvent(
+                event_id=str(uuid4()),
+                schema_version=1,
+                event_name="page_viewed",
+                session_id=str(uuid4()),
+                occurred_at=occurred_at,
+                page_view="agents",
+                properties={},
+            ),
+            context=context,
+            # Ingest rejects occurred_at older than received_at - 24h.
+            received_at=occurred_at,
+        )
+    service = AnalyticsQueryService(store=analytics, user_store=users)
+
+    sessions = service.get_user_activity(
+        user_id=1, section="sessions", limit=10, cursor=None, now=NOW
+    )
+
+    assert len(sessions.items) == 1
+    assert sessions.items[0].occurred_at == NOW - timedelta(days=2)
+    import inspect
+
+    from dashboard.backend.domain.analytics.query_service import AnalyticsQueryStore
+
+    assert "occurred_at >=" in inspect.getsource(AnalyticsQueryStore.list_session_rows)
 
 
 def test_overview_marks_rollup_backed_panels_unavailable_when_rollups_fail(
