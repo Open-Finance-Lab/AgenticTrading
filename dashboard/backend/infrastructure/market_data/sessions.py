@@ -78,9 +78,10 @@ def day_session_windows(day: date, market: object) -> tuple[tuple[time, time], .
     from the 12:30-12:59 minutes, nothing filled it, and an early-close day lost
     its closing decision. The close-stamped rule (:func:`time_in_session`) does
     not read it and still admits a bar stamped up to 16:00 (D19 in the US
-    conformance design, owned by the engine rewrite). No US source this repo
-    loads is close-stamped, and aggregation no longer produces a decision bar
-    after 13:00 on an early close, so nothing reaches that gap today.
+    conformance design, owned by the engine rewrite). Alpaca bars are
+    open-stamped and aggregation no longer makes a decision bar after 13:00
+    on an early close, so only a frame loaded close-stamped (the
+    ``vnpy_simulation`` source, test doubles) still reaches that gap.
     """
     if _trades_us_sessions(market) and is_early_close(day):
         return ((_US_SESSIONS[0][0], EARLY_CLOSE_TIME),)

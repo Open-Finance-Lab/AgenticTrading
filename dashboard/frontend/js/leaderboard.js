@@ -773,7 +773,7 @@ function formatLiveBoardSubtitle(payload) {
   // write, so that is the one read here. (`daily_status.trading_date` was the
   // retired Daily board's shape; the server never sends it for this board.)
   const advanced = season?.last_advanced_date;
-  const cadence = 'Advances nightly after the 16:00 ET cash session';
+  const cadence = 'Advances nightly after the US cash session (16:00 ET; 13:00 on early closes)';
   return advanced
     ? `${dates}${cadence} · last completed ${advanced}`
     : `${dates}${cadence}`;

@@ -183,6 +183,16 @@ _FIXTURES = Path(__file__).parent / "fixtures"
 _NEW_YORK = ZoneInfo("America/New_York")
 
 
+@pytest.fixture(autouse=True)
+def _fresh_error_reports():
+    """The module reports each condition once per process; each test starts clean."""
+    from dashboard.backend.domain.leaderboard.strategies import _yahoo
+
+    _yahoo._reported.clear()
+    yield
+    _yahoo._reported.clear()
+
+
 def _recorded(name):
     return json.loads((_FIXTURES / name).read_text())
 
@@ -253,6 +263,39 @@ def test_a_missing_early_close_level_is_reported(monkeypatch, capsys):
         "ERROR: yahoo.early_close_level_missing symbol=^DJI date=2025-11-28"
         in capsys.readouterr().out
     )
+
+
+def test_a_missing_early_close_level_is_reported_once_per_process(monkeypatch, capsys):
+    """Every plot render and refresh fetches again; one standing condition must
+    not print one ERROR per call."""
+    payload = _without_the_close_point(_recorded("yahoo-chart-dji-1h-2025-11-28.json"))
+    _stub_response(monkeypatch, payload)
+    fetch_index_hourly("^DJI", "2025-11-28", "2025-11-28")
+    fetch_index_hourly("^DJI", "2025-11-28", "2025-11-28")
+    assert capsys.readouterr().out.count("yahoo.early_close_level_missing") == 1
+
+
+@pytest.mark.parametrize("meta", [{}, None, {"exchangeTimezoneName": ""}])
+def test_a_missing_exchange_zone_is_reported_not_skipped_silently(monkeypatch, capsys, meta):
+    """Absent is not "another exchange". Without the field the restamp and the
+    missing-level check would both skip and every early close would end on its
+    11:30 bar with nothing logged, so absence is an ERROR (once per symbol)."""
+    payload = _recorded("yahoo-chart-dji-1h-2025-11-28.json")
+    payload["chart"]["result"][0]["meta"] = meta
+    _stub_response(monkeypatch, payload)
+    points = fetch_index_hourly("^DJI", "2025-11-28", "2025-11-28")
+    fetch_index_hourly("^DJI", "2025-11-28", "2025-11-28")
+    assert _clock(points)[-1] == ("13:00", 47716.421875)
+    out = capsys.readouterr().out
+    assert out.count("ERROR: yahoo.exchange_zone_missing symbol=^DJI") == 1
+
+
+def test_the_profiles_spelling_of_new_york_also_restamps(monkeypatch):
+    payload = _recorded("yahoo-chart-dji-1h-2025-11-28.json")
+    payload["chart"]["result"][0]["meta"]["exchangeTimezoneName"] = "US/Eastern"
+    _stub_response(monkeypatch, payload)
+    points = fetch_index_hourly("^DJI", "2025-11-28", "2025-11-28")
+    assert _clock(points)[-1] == ("12:30", 47716.421875)
 
 
 def test_an_early_close_within_its_settle_hour_is_not_reported(capsys):
@@ -327,9 +370,10 @@ def test_the_close_stamped_level_wins_over_a_half_bar_yahoo_also_filled(monkeypa
     assert len(points) == 4
 
 
-def test_a_non_us_index_is_not_restamped_on_an_nyse_early_close(monkeypatch):
+def test_a_non_us_index_is_not_restamped_on_an_nyse_early_close(monkeypatch, capsys):
     payload = _recorded("yahoo-chart-dji-1h-2025-11-28.json")
     payload["chart"]["result"][0]["meta"]["exchangeTimezoneName"] = "Asia/Shanghai"
     _stub_response(monkeypatch, payload)
     points = fetch_index_hourly("^DJI", "2025-11-28", "2025-11-28")
     assert _clock(points)[-1] == ("13:00", 47716.421875)
+    assert "ERROR" not in capsys.readouterr().out

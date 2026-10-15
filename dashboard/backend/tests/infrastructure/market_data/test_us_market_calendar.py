@@ -210,12 +210,14 @@ def test_day_session_windows(day, market, windows):
 def test_is_session_close_reads_the_days_close():
     from datetime import datetime
 
-    def close(hour, day):
-        stamp = datetime(2026, 11, day, hour, 0)
-        return sessions.is_session_close(stamp, market="US", timezone="US/Eastern")
-
-    assert close(13, 27) and not close(16, 27)
-    assert close(16, 25) and not close(13, 25)
+    closes = {
+        (day, hour): sessions.is_session_close(
+            datetime(2026, 11, day, hour, 0), market="US", timezone="US/Eastern"
+        )
+        for day in (25, 27)
+        for hour in (13, 16)
+    }
+    assert closes == {(25, 13): False, (25, 16): True, (27, 13): True, (27, 16): False}
 
 
 @pytest.mark.parametrize(

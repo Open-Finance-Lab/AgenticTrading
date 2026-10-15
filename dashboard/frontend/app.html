@@ -1590,7 +1590,7 @@
                 <div class="section-card">
                     <h3 class="section-title">Live Trading Leaderboard</h3>
                     <p class="about-text">This board runs <strong>forward</strong>, one calendar month at a time, on NYSE trading days. &ldquo;Live&rdquo; describes the direction, not the money: this is <strong>simulated trading on real market data</strong> &mdash; no broker account, no real capital, and no order ever leaves this system.</p>
-                    <p class="about-text">Each night after the 16:00 ET cash close, each entry is advanced one trading day: the model sees that day's real bars for the first time and its portfolio carries forward from where the previous day left it. Nobody &mdash; including us &mdash; knows what the next bar does when an entry locks, which is what separates this board from the fixed-window Competition one.</p>
+                    <p class="about-text">Each night after the US cash close (16:00 ET, or 13:00 on an NYSE early close), each entry is advanced one trading day: the model sees that day's real bars for the first time and its portfolio carries forward from where the previous day left it. Nobody &mdash; including us &mdash; knows what the next bar does when an entry locks, which is what separates this board from the fixed-window Competition one.</p>
                     <p class="about-text">Each entry is one continuous book that starts the month flat at $100,000 and ranks only the days inside it; the board resets on the 1st. Entries are a curated roster of AI models and baselines &mdash; there are no user submissions.</p>
                     <p class="about-text about-text-muted">We are in <strong>Season 0</strong>, the shakedown season, so read the standings as a preview rather than an official result. An entry more than one trading session behind is shown but not ranked.</p>
                 </div>
@@ -2519,7 +2519,7 @@
     <script src="js/credits.js?v=8" defer></script>
     <script src="js/admin-credits.js?v=9" defer></script>
     <script src="js/admin-tabs.js?v=12" defer></script>
-    <script src="js/leaderboard.js?v=37" defer></script>
+    <script src="js/leaderboard.js?v=38" defer></script>
     <script src="js/live-leaderboard.js?v=5" defer></script>
     <script src="home-page.js?v=55" defer></script>
     <!-- Load order: must come after app.js (API/API_BASE/escapeHtml) and
