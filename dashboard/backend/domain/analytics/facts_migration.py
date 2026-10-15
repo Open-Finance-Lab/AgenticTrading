@@ -1,28 +1,28 @@
-"""Startup migrations for the fact tables PR A creates.
+"""Startup migration from the five-state snapshot tables to the fact tables.
 
-Both are idempotent and both run again on every boot; the worker thread in
-``daily_job.py`` calls ``run_startup_migrations`` once before its first tick.
-PR B re-runs the same seed immediately before dropping the legacy tables,
-because the legacy snapshot row keeps being maintained between the two PRs
-(design SS6.9 "Migration of existing history", SS11).
+Runs on every boot, twice: synchronously from ``app.py``'s startup hook and
+again as the daily-facts worker's ``prepare`` step (``daily_job.py``). Both
+steps are idempotent, so the repeat costs nothing.
+
+PR A seeded ``user_activity`` from ``user_analytics_snapshots`` on creation.
+The legacy row kept being maintained by the throttled repair between PR A and
+PR B, so PR B re-runs the same seed immediately before dropping both legacy
+tables (design SS6.9 "Migration of existing history", SS11). After the first
+boot that drops them, the seed reads nothing and the drop is ``IF EXISTS``.
 """
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
-
-
-HISTORY_COPY_DAYS = 56
 
 
 class StartupMigrationReport(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     activity_seeded: int = Field(default=0, ge=0)
-    history_copied: int = Field(default=0, ge=0)
 
 
 def _utc_now(value: datetime | None) -> datetime:
@@ -32,20 +32,16 @@ def _utc_now(value: datetime | None) -> datetime:
     return current.astimezone(timezone.utc)
 
 
-def migrate_lifecycle_history(*, value_store: Any, now: datetime) -> int:
-    """Copy the last eight weeks of legacy daily snapshots; returns rows inserted."""
-    current = _utc_now(now)
-    return value_store.copy_daily_snapshot_history(
-        since=current.date() - timedelta(days=HISTORY_COPY_DAYS), now=current
-    )
-
-
 def run_startup_migrations(
     *,
     value_store: Any = None,
     now: datetime | None = None,
 ) -> StartupMigrationReport:
-    """Seed ``user_activity`` from the legacy row, then copy the history."""
+    """Re-seed ``user_activity`` from the legacy row, then drop the legacy tables.
+
+    The order is the point: the drop must never run before the seed has read
+    the final legacy row, or every pre-existing activation date is lost.
+    """
     current = _utc_now(now)
     if value_store is None:
         from .repository import analytics_store
@@ -53,13 +49,11 @@ def run_startup_migrations(
 
         value_store = build_value_analytics_store(analytics_store)
     seeded = value_store.seed_activity_from_snapshots(now=current)
-    copied = migrate_lifecycle_history(value_store=value_store, now=current)
-    return StartupMigrationReport(activity_seeded=seeded, history_copied=copied)
+    value_store.analytics_base.drop_legacy_snapshot_tables()
+    return StartupMigrationReport(activity_seeded=seeded)
 
 
 __all__ = [
-    "HISTORY_COPY_DAYS",
     "StartupMigrationReport",
-    "migrate_lifecycle_history",
     "run_startup_migrations",
 ]

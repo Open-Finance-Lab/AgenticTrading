@@ -113,6 +113,31 @@ def test_startup_starts_the_worker_and_leaves_the_reaper_to_heartbeats():
     assert "run_analytics_maintenance" not in source
 
 
+def test_a_startup_migration_failure_never_skips_starting_the_worker():
+    """PR B's migration drops tables; if it raises, the worker must still start
+    (it re-runs the same migration before its first tick). So the call that
+    starts the worker may not share a ``try`` with the migration."""
+    import ast
+    import textwrap
+
+    tree = ast.parse(textwrap.dedent(inspect.getsource(app_module.startup_event)))
+
+    def calls(node) -> set[str]:
+        return {
+            inner.func.id
+            for inner in ast.walk(node)
+            if isinstance(inner, ast.Call) and isinstance(inner.func, ast.Name)
+        }
+
+    migration_tries = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Try) and "run_startup_migrations" in calls(node)
+    ]
+    assert len(migration_tries) == 1
+    assert "start_daily_facts_worker" not in calls(migration_tries[0])
+
+
 def test_the_job_owns_the_retention_coordinator_now():
     source = inspect.getsource(daily_facts_module)
     assert source.count("analytics_retention_coordinator") == 1

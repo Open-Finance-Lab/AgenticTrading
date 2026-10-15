@@ -8,8 +8,9 @@ inside the single web process (design SS2.3): no external scheduler, no second
 service.
 
 Every tick is ``daily_facts.run_daily_facts``; the first thing the thread does,
-once, is ``facts_migration.run_startup_migrations`` (seed ``user_activity``,
-copy the legacy history). Both are idempotent, so a restart costs nothing.
+once, is ``facts_migration.run_startup_migrations`` (re-seed ``user_activity``,
+then drop the legacy snapshot tables). Both are idempotent, so a restart costs
+nothing.
 """
 
 from __future__ import annotations

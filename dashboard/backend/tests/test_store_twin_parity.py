@@ -493,8 +493,8 @@ _IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 _NO_OWN_DDL_TWINS: dict[str, str] = {
     "PostgresValueAnalyticsStore": (
         "ValueAnalyticsStore/PostgresValueAnalyticsStore own no CREATE TABLE "
-        "or CREATE INDEX: both read and write user_analytics_snapshots, "
-        "user_lifecycle_daily_snapshots and analytics_projection_jobs "
+        "or CREATE INDEX: both read and write user_daily_facts, "
+        "user_activity, lifecycle_transitions and analytics_projection_jobs "
         "through an injected analytics_base connection, and that base is "
         "AnalyticsStore/PostgresAnalyticsStore -- already a registered pair "
         "above, whose own schema-column test covers those tables."

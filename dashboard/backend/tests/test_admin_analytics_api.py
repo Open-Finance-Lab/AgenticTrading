@@ -211,7 +211,6 @@ def _fixture(tmp_path):
         analytics,
         AnalyticsService(analytics),
         AnalyticsRollupStore(analytics),
-        None,
         QueryUsers(users),
     )
 
@@ -229,7 +228,7 @@ def _event(service, name, at, source_id, **kwargs):
 
 
 def test_query_service_merges_completed_rollups_with_current_raw_day(tmp_path):
-    analytics, events, rollups, _states, users = _fixture(tmp_path)
+    analytics, events, rollups, users = _fixture(tmp_path)
     yesterday = NOW.date() - timedelta(days=1)
     rollups.replace_day(
         yesterday,
@@ -279,7 +278,7 @@ def test_query_service_merges_completed_rollups_with_current_raw_day(tmp_path):
 
 
 def test_billing_lane_mix_counts_model_calls_from_rollups_and_today_honouring_filters(tmp_path):
-    analytics, events, rollups, _states, users = _fixture(tmp_path)
+    analytics, events, rollups, users = _fixture(tmp_path)
     yesterday = NOW.date() - timedelta(days=1)
     stamp = datetime.combine(NOW.date(), datetime.min.time(), tzinfo=timezone.utc)
 
@@ -363,7 +362,7 @@ def test_billing_lane_mix_carries_each_lane_in_credits_honouring_filters(tmp_pat
     platform_model_cost_usd / byok_estimated_cost_usd rollups, today from raw
     events. The platform lane sums to the headline under every filter, and
     the BYOK estimate never enters it."""
-    analytics, events, rollups, _states, users = _fixture(tmp_path)
+    analytics, events, rollups, users = _fixture(tmp_path)
     yesterday = NOW.date() - timedelta(days=1)
     stamp = datetime.combine(NOW.date(), datetime.min.time(), tzinfo=timezone.utc)
 
@@ -466,7 +465,7 @@ def test_failed_raw_event_read_marks_growth_unavailable_not_a_rollup_only_range(
     raw events. When that read failed, growth stayed available and published
     the rollups alone as the whole range -- yesterday's cost as the range's,
     today's calls missing from every lane -- with status "ready"."""
-    analytics, events, rollups, _states, users = _fixture(tmp_path)
+    analytics, events, rollups, users = _fixture(tmp_path)
     yesterday = NOW.date() - timedelta(days=1)
     stamp = datetime.combine(NOW.date(), datetime.min.time(), tzinfo=timezone.utc)
     rollups.replace_day(
@@ -508,7 +507,7 @@ def test_billing_lane_mix_counts_unpriced_byok_calls_honouring_filters(tmp_path)
     and are all unpriced; with one, #572 priced an unlisted model at the $1/$5
     fallback, so the estimate stands only for a listed model. Deciding that per
     day instead made the unfiltered total and a per-model filter disagree."""
-    analytics, events, rollups, _states, users = _fixture(tmp_path)
+    analytics, events, rollups, users = _fixture(tmp_path)
     stamp = datetime.combine(NOW.date(), datetime.min.time(), tzinfo=timezone.utc)
     counted, legacy, legacy_priced = (NOW.date() - timedelta(days=n) for n in (1, 2, 3))
     listed = "openai/gpt-5.5"
@@ -609,7 +608,7 @@ def test_activity_reports_atl_cost_only_for_byok_usage(tmp_path):
     """The activity API's cost_micro_usd is ATL cost. A BYOK call costs ATL
     nothing -- including one from the PR #572 era, whose event carried the
     list-price estimate in that very field."""
-    analytics, events, _rollups, _states, users = _fixture(tmp_path)
+    analytics, events, _rollups, users = _fixture(tmp_path)
     for index, (billing_mode, properties) in enumerate(
         (
             ("platform_credits", {"cost_micro_usd": 1_250}),
@@ -642,7 +641,7 @@ def test_billing_lane_mix_skips_a_day_with_no_calls_and_no_cost(tmp_path):
     """Every rolled-up day carries a platform cost total, zero or not. A zero
     day is not activity: listing it would replace the panel's empty state with
     flat lines."""
-    analytics, _events, rollups, _states, users = _fixture(tmp_path)
+    analytics, _events, rollups, users = _fixture(tmp_path)
     yesterday = NOW.date() - timedelta(days=1)
     stamp = datetime.combine(NOW.date(), datetime.min.time(), tzinfo=timezone.utc)
     rollups.replace_day(
@@ -672,7 +671,7 @@ def test_billing_lane_mix_skips_a_day_with_no_calls_and_no_cost(tmp_path):
 
 
 def test_profile_is_display_safe_and_reads_facts_not_the_event_window(tmp_path):
-    analytics, events, _rollups, _states, users = _fixture(tmp_path)
+    analytics, events, _rollups, users = _fixture(tmp_path)
     from dashboard.backend.domain.analytics.value_repository import ValueAnalyticsStore
     from dashboard.backend.tests.domain.analytics.test_fact_reads import fact
     from dashboard.backend.tests.domain.analytics.test_value_repository import (
@@ -723,7 +722,7 @@ def test_profile_is_display_safe_and_reads_facts_not_the_event_window(tmp_path):
 
 
 def test_activity_sections_page_independently_and_hide_session_ids(tmp_path):
-    analytics, events, _rollups, _states, users = _fixture(tmp_path)
+    analytics, events, _rollups, users = _fixture(tmp_path)
     for index in range(3):
         _event(
             events,
@@ -785,7 +784,7 @@ def test_activity_sections_page_independently_and_hide_session_ids(tmp_path):
 
 
 def test_sessions_section_is_bounded_to_thirty_days(tmp_path):
-    analytics, events, _rollups, _states, users = _fixture(tmp_path)
+    analytics, events, _rollups, users = _fixture(tmp_path)
     context = RequestAnalyticsContext(
         country_code="US", device_category="desktop", browser_family="Chrome"
     )
@@ -824,7 +823,7 @@ def test_sessions_section_is_bounded_to_thirty_days(tmp_path):
 def test_overview_marks_rollup_backed_panels_unavailable_when_rollups_fail(
     tmp_path, monkeypatch
 ):
-    analytics, events, _rollups, _states, users = _fixture(tmp_path)
+    analytics, events, _rollups, users = _fixture(tmp_path)
     _event(
         events,
         "backtest_completed",
@@ -875,7 +874,7 @@ class _WindowRecordingQueryStore:
 def test_overview_reads_raw_events_for_the_current_utc_day_only(tmp_path):
     """Design §6.15 item 2: one bounded one-day scan, never the filter window."""
 
-    analytics, _events, _rollups, _states, users = _fixture(tmp_path)
+    analytics, _events, _rollups, users = _fixture(tmp_path)
     service = AnalyticsQueryService(store=analytics, user_store=users)
     recorder = _WindowRecordingQueryStore(service.query_store)
     service.query_store = recorder
@@ -892,7 +891,7 @@ def test_overview_reads_raw_events_for_the_current_utc_day_only(tmp_path):
 
 
 def test_overview_skips_the_raw_scan_for_a_window_that_ends_before_today(tmp_path):
-    analytics, _events, _rollups, _states, users = _fixture(tmp_path)
+    analytics, _events, _rollups, users = _fixture(tmp_path)
     service = AnalyticsQueryService(store=analytics, user_store=users)
     recorder = _WindowRecordingQueryStore(service.query_store)
     service.query_store = recorder
@@ -912,7 +911,7 @@ def test_overview_skips_the_raw_scan_for_a_window_that_ends_before_today(tmp_pat
 
 
 def test_overview_trailing_metrics_and_funnel_come_from_rollups(tmp_path):
-    analytics, events, rollups, _states, users = _fixture(tmp_path)
+    analytics, events, rollups, users = _fixture(tmp_path)
     yesterday = NOW.date() - timedelta(days=1)
     stamp = datetime.combine(NOW.date(), datetime.min.time(), tzinfo=timezone.utc)
 
@@ -988,7 +987,7 @@ def test_overview_failure_categories_count_events_under_a_dimension_filter(tmp_p
     """``affected_users`` rows carry no provider/model, so a filtered view
     counts the matching ``event_count`` rows instead -- events, today too."""
 
-    analytics, events, rollups, _states, users = _fixture(tmp_path)
+    analytics, events, rollups, users = _fixture(tmp_path)
     yesterday = NOW.date() - timedelta(days=1)
     stamp = datetime.combine(NOW.date(), datetime.min.time(), tzinfo=timezone.utc)
 
@@ -1073,7 +1072,7 @@ def test_overview_state_counts_and_attention_come_from_yesterdays_facts(tmp_path
     old five labels; attention lists yesterday's blocked / needs-attention
     users with their 30-day run totals and their current activity clock."""
 
-    analytics, _events, _rollups, _states, users = _fixture(tmp_path)
+    analytics, _events, _rollups, users = _fixture(tmp_path)
     service = AnalyticsQueryService(store=analytics, user_store=users)
     yesterday = NOW.date() - timedelta(days=1)
     with analytics._get_connection() as conn:
@@ -1144,7 +1143,7 @@ def test_overview_state_counts_and_attention_come_from_yesterdays_facts(tmp_path
 
 
 def test_overview_marks_fact_panels_unavailable_when_fact_reads_fail(tmp_path):
-    analytics, _events, _rollups, _states, users = _fixture(tmp_path)
+    analytics, _events, _rollups, users = _fixture(tmp_path)
 
     class BrokenFacts:
         def count_states_for_date(self, _day):
@@ -1175,7 +1174,7 @@ def test_query_service_builds_its_value_store_only_on_first_use(tmp_path, monkey
 
     from dashboard.backend.domain.analytics import query_service as module
 
-    analytics, _events, _rollups, _states, users = _fixture(tmp_path)
+    analytics, _events, _rollups, users = _fixture(tmp_path)
     built = []
     real = module.build_value_analytics_store
 

@@ -356,19 +356,34 @@ async def startup_event():
         print(f"⚠️ Research sweeper start error: {e}")
 
     try:
+        # Admin layer redesign PR B (design SS11): re-seed user_activity from
+        # the legacy snapshot row, then drop the two snapshot tables. Both
+        # steps are idempotent, so every boot after the first is a no-op. Its
+        # own try: a migration failure must never skip starting the worker
+        # below, which runs the same migrations again before its first tick.
+        from dashboard.backend.domain.analytics.facts_migration import (
+            run_startup_migrations,
+        )
+        report = run_startup_migrations()
+        print(
+            "🧹 Analytics legacy snapshot tables dropped (if present); "
+            f"user_activity seeded={report.activity_seeded}"
+        )
+    except Exception as exc:
+        print(
+            "WARNING: analytics.facts_migration_failed "
+            f"category={type(exc).__name__[:80]}"
+        )
+
+    try:
         # Admin layer redesign PR A (design D23, SS6.9): the daily-facts job
         # runs on its own thread, not as a reaper sweep -- a whole-population
         # batch across three databases on the heartbeat thread would let a
         # slow analytics night mark live runs as orphaned. The worker also
-        # owns rollup_day and the retention coordinator now, and runs the
-        # idempotent user_activity seed + history copy once before ticking.
+        # owns rollup_day and the retention coordinator now.
         from dashboard.backend.domain.analytics.daily_job import (
             start_daily_facts_worker,
         )
-        from dashboard.backend.domain.analytics.facts_migration import (
-            run_startup_migrations,
-        )
-        run_startup_migrations()
         start_daily_facts_worker()
         print("📊 Analytics daily-facts worker started")
     except Exception as e:

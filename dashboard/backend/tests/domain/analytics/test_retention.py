@@ -221,15 +221,6 @@ def test_sqlite_retention_is_bounded_and_preserves_aggregates(tmp_path):
             """,
             (utc_iso(NOW),),
         )
-        conn.execute(
-            """
-            INSERT INTO user_analytics_snapshots (
-                user_id, status, reason_code, human_readable_reason,
-                evidence_event_ids_json, calculated_at
-            ) VALUES (?, 'active', 'recent_activity', 'Recent activity.', '[]', ?)
-            """,
-            (int(subject["id"]), utc_iso(NOW)),
-        )
 
     class RecordingDeleteStore:
         def __init__(self, wrapped):
@@ -265,9 +256,6 @@ def test_sqlite_retention_is_bounded_and_preserves_aggregates(tmp_path):
         assert conn.execute(
             "SELECT value_count FROM analytics_daily_rollups"
         ).fetchone()[0] == 7
-        assert conn.execute(
-            "SELECT status FROM user_analytics_snapshots"
-        ).fetchone()[0] == "active"
 
 
 def test_facts_and_transitions_are_aggregated_before_user_rows_are_deleted(tmp_path):

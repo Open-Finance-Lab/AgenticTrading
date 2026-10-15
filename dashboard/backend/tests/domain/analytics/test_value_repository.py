@@ -8,8 +8,6 @@ from datetime import date, datetime, timedelta, timezone
 from dashboard.backend.domain.analytics.repository import AnalyticsStore
 from dashboard.backend.domain.analytics.value_repository import (
     ProjectionJob,
-    UserLifecycleDailySnapshot,
-    UserValueSnapshot,
     ValueAnalyticsStore,
 )
 from dashboard.backend.users import UserStore
@@ -214,26 +212,6 @@ class SyntheticRunStore:
         return list(self.runs.get(agent_id, ()))
 
 
-def _value_snapshot(user_id: int) -> UserValueSnapshot:
-    return UserValueSnapshot(
-        user_id=user_id,
-        lifecycle_segment="core",
-        lifecycle_reason_code="core_repeated_value",
-        lifecycle_reason="The user repeatedly completed valuable work.",
-        lifecycle_evidence=("3 active days in the trailing 30 days",),
-        operational_state="healthy",
-        operational_reason_code="no_supported_issue",
-        operational_reason="No supported current operational issue was detected.",
-        operational_evidence=("All supported operational checks passed.",),
-        activated_at=NOW - timedelta(days=20),
-        last_meaningful_activity_at=NOW - timedelta(days=2),
-        inactive_days=2,
-        active_days_30d=3,
-        successful_backtests_30d=4,
-        calculated_at=NOW,
-    )
-
-
 def _stores(tmp_path):
     analytics_path = tmp_path / "analytics.db"
     user = UserStore(db_path=analytics_path).create_user(
@@ -256,114 +234,25 @@ def _value_store(analytics, credits):
     )
 
 
-_LEGACY_COLUMNS = (
-    "status, reason_code, human_readable_reason, evidence_event_ids_json, calculated_at"
-)
-
-
-def test_current_projection_round_trips_without_overwriting_legacy_state(tmp_path):
-    user_id, analytics, credits = _stores(tmp_path)
-    # The five-state writer is gone (PR B); the row it left behind is
-    # inserted directly so the upsert can be checked against it.
-    legacy = (
-        "needs_attention",
-        "invalid_default_credential",
-        "The default model credential is invalid.",
-        '["synthetic-event"]',
-        (NOW - timedelta(minutes=1)).isoformat(),
-    )
-    with analytics._get_connection() as conn:
-        conn.execute(
-            f"INSERT INTO user_analytics_snapshots (user_id, {_LEGACY_COLUMNS}) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
-            (user_id, *legacy),
-        )
+def test_projection_job_upsert_is_idempotent(tmp_path):
+    _user_id, analytics, credits = _stores(tmp_path)
     store = _value_store(analytics, credits)
-
-    expected = _value_snapshot(user_id)
-    store.upsert_current_snapshot(expected)
-
-    assert store.get_current_snapshot(user_id) == expected
-    with analytics._get_connection() as conn:
-        persisted_legacy = conn.execute(
-            f"SELECT {_LEGACY_COLUMNS} FROM user_analytics_snapshots WHERE user_id = ?",
-            (user_id,),
-        ).fetchone()
-    assert tuple(persisted_legacy)[:4] == legacy[:4]
-
-
-def test_current_projections_are_loaded_in_one_batched_query(tmp_path):
-    user_id, analytics, credits = _stores(tmp_path)
-    second = UserStore(db_path=analytics.db_path).create_user(
-        "second-value-user@example.test",
-        "Second Value User",
-        "SecurePass1!",
-    )
-    second_id = int(second["id"])
-    store = _value_store(analytics, credits)
-    first_snapshot = _value_snapshot(user_id)
-    second_snapshot = _value_snapshot(second_id).model_copy(
-        update={"lifecycle_segment": "growing"}
-    )
-    store.upsert_current_snapshot(first_snapshot)
-    store.upsert_current_snapshot(second_snapshot)
-
-    snapshots = store.list_current_snapshots([second_id, user_id, second_id])
-
-    assert snapshots == {
-        user_id: first_snapshot,
-        second_id: second_snapshot,
-    }
-
-
-def test_daily_snapshot_and_projection_job_upserts_are_idempotent(tmp_path):
-    user_id, analytics, credits = _stores(tmp_path)
-    store = _value_store(analytics, credits)
-    first = UserLifecycleDailySnapshot(
-        snapshot_date=NOW.date(),
-        user_id=user_id,
-        lifecycle_segment="growing",
-        lifecycle_reason_code="growing_activated_below_core_threshold",
-        data_quality="partial",
-        calculated_at=NOW - timedelta(minutes=1),
-    )
-    replacement = first.model_copy(
-        update={
-            "lifecycle_segment": "core",
-            "lifecycle_reason_code": "core_repeated_value",
-            "data_quality": "complete",
-            "calculated_at": NOW,
-        }
-    )
-
-    store.upsert_daily_snapshot(first)
-    store.upsert_daily_snapshot(replacement)
-    rows = store.list_daily_snapshots(
-        start=NOW.date(),
-        end=NOW.date() + timedelta(days=1),
-        user_ids=[user_id],
-    )
-
-    assert rows == [replacement]
-    assert (
-        store.list_daily_snapshots(
-            start=NOW.date(),
-            end=NOW.date() + timedelta(days=1),
-            user_ids=[],
-        )
-        == []
-    )
-
     job = ProjectionJob(
         job_name="lifecycle-backfill",
         window_start=date(2026, 7, 6),
         window_end=date(2026, 8, 30),
         cursor="user:40",
         status="running",
-        updated_at=NOW,
+        updated_at=NOW - timedelta(minutes=1),
     )
+    replacement = job.model_copy(
+        update={"cursor": None, "status": "complete", "updated_at": NOW}
+    )
+
     store.save_projection_job(job)
-    assert store.get_projection_job(job.job_name) == job
+    store.save_projection_job(replacement)
+
+    assert store.get_projection_job(job.job_name) == replacement
 
 
 def test_commercial_value_keeps_revenue_grants_usage_and_balance_separate(tmp_path):
