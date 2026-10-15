@@ -228,8 +228,9 @@ class FakeValueStore:
                 continue
             group = totals.setdefault(
                 row.user_group,
-                {"total_runs": 0, "operator_cost_micro": 0, "successful": set()},
+                {"total_runs": 0, "operator_cost_micro": 0, "successful": set(), "partial": 0},
             )
+            group["partial"] += row.data_quality == "partial"
             group["total_runs"] += row.runs_requested
             group["operator_cost_micro"] += row.operator_cost_micro
             if row.runs_completed > 0:
@@ -247,6 +248,7 @@ class FakeValueStore:
                     for (group, _user), days in completion_days.items()
                     if group == name and len(days) >= 2
                 ),
+                partial_rows=values["partial"],
             )
             for name, values in totals.items()
         }
@@ -772,6 +774,30 @@ def test_group_summary_is_partial_when_the_fact_read_fails():
     assert response.availability.available is True
     assert response.availability.status == "partial"
     assert all(row.total_runs == 0 for row in response.groups)
+
+
+def test_group_summary_is_partial_when_any_fact_row_in_the_window_is_partial():
+    """I2: the PR A history copy wrote zero runs as partial rows; a window
+    reaching them must not label those zeros ready."""
+    facts = _groups_service()[1].facts + [
+        _fact(5, YESTERDAY - timedelta(days=2), user_group="unknown",
+              runs_requested=0, runs_completed=0, data_quality="partial"),
+    ]
+    service, _store = _groups_service(facts=facts)
+
+    response = service.get_groups(
+        start=YESTERDAY - timedelta(days=6), end=YESTERDAY + timedelta(days=1), now=NOW
+    )
+
+    assert response.availability.available is True
+    assert response.availability.status == "partial"
+    assert response.availability.coverage_end == YESTERDAY
+    # Outside the selected group the partial row does not downgrade the answer.
+    filtered = service.get_groups(
+        start=YESTERDAY - timedelta(days=6), end=YESTERDAY + timedelta(days=1),
+        user_group="organic", now=NOW,
+    )
+    assert filtered.availability.status == "ready"
 
 
 def test_group_summary_clamps_coverage_to_yesterday_for_a_window_ending_today():

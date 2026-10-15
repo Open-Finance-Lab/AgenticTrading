@@ -1202,7 +1202,12 @@ class ValueAnalyticsQueryService:
         if not users_available:
             availability = SectionAvailability(available=False, status="unavailable")
         else:
-            complete = landed and facts_available and commercial_available
+            # A partial fact row in the window (a failed source step, or the
+            # PR A history copy's zero-filled days) makes its zeros unknowns.
+            facts_partial = any(value.partial_rows for value in totals.values())
+            complete = (
+                landed and facts_available and commercial_available and not facts_partial
+            )
             # Facts stop at yesterday; claiming today as covered would read an
             # unlanded day as zero runs.
             coverage_end = min(end - timedelta(days=1), current_time.date() - timedelta(days=1))

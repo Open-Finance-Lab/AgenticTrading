@@ -192,6 +192,10 @@ def assert_fact_read_contract(store, ids: dict[str, int]) -> None:
     assert groups["partner"].successful_run_users == 0
     assert groups["partner"].repeat_users == 0
     assert "internal" not in groups
+    # The dormant user's partial row is the window's only one (I2).
+    assert groups["unknown"].partial_rows == 1
+    assert groups["organic"].partial_rows == 0
+    assert groups["partner"].partial_rows == 0
 
     active = store.list_active_dates(
         [ids["core"], ids["dormant"], ids["blocked"]],

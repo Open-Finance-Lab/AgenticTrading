@@ -745,6 +745,9 @@ class GroupFactTotals(BaseModel):
     operator_cost_micro: int = Field(default=0, ge=0)
     successful_run_users: int = Field(default=0, ge=0)
     repeat_users: int = Field(default=0, ge=0)
+    # Rows the daily job (or the PR A history copy) marked partial: their
+    # zeros are not known zeros, so /groups must not call the window ready.
+    partial_rows: int = Field(default=0, ge=0)
 
 
 @dataclass(frozen=True)
@@ -955,7 +958,9 @@ _GROUP_TOTALS_SQL = """
            COALESCE(SUM(runs_requested), 0) AS total_runs,
            COALESCE(SUM(operator_cost_micro), 0) AS operator_cost_micro,
            COUNT(DISTINCT CASE WHEN runs_completed > 0 THEN user_id END)
-               AS successful_run_users
+               AS successful_run_users,
+           COALESCE(SUM(CASE WHEN data_quality = 'partial' THEN 1 ELSE 0 END), 0)
+               AS partial_rows
     FROM user_daily_facts
     WHERE snapshot_date >= {p} AND snapshot_date < {p}
     GROUP BY user_group
@@ -1181,6 +1186,7 @@ def _group_totals(
             operator_cost_micro=max(int(_row_value(row, "operator_cost_micro", 0) or 0), 0),
             successful_run_users=int(_row_value(row, "successful_run_users", 0) or 0),
             repeat_users=repeat_by_group.get(str(_row_value(row, "user_group")), 0),
+            partial_rows=int(_row_value(row, "partial_rows", 0) or 0),
         )
         for row in totals
     }
