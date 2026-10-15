@@ -294,10 +294,12 @@ def test_the_early_close_is_read_in_market_local_time():
     assert not kept(pd.Timestamp("2026-11-27 13:00"))
 
 
-def test_an_early_close_leaves_the_close_stamped_path_alone():
-    """Bar aggregation and the engine's close-stamped filter still end every US
-    day at 16:00. That is D19, measured by conformance T05 and owned by the
-    engine rewrite; only the open-stamped rule reads the day's close."""
+def test_an_early_close_leaves_only_the_close_stamped_rule_at_16_00():
+    """The close-stamped filter still admits a bar stamped up to 16:00 on an
+    early close. That is D19, measured by conformance T05 and owned by the
+    engine rewrite. The rules that place a bar against the day's close (the
+    open-stamped filter, the session-close fill and the aggregation's buckets)
+    all read 13:00, so they agree on where the day's last decision is."""
     assert sessions.session_windows("US") == ((clock_time(9, 30), clock_time(16, 0)),)
     assert sessions.is_in_session(
         pd.Timestamp("2026-11-27 15:00", tz="US/Eastern"),
@@ -305,6 +307,11 @@ def test_an_early_close_leaves_the_close_stamped_path_alone():
         timezone="US/Eastern",
     )
     assert sessions.is_session_close(
+        pd.Timestamp("2026-11-27 13:00", tz="US/Eastern"),
+        market="US",
+        timezone="US/Eastern",
+    )
+    assert not sessions.is_session_close(
         pd.Timestamp("2026-11-27 16:00", tz="US/Eastern"),
         market="US",
         timezone="US/Eastern",

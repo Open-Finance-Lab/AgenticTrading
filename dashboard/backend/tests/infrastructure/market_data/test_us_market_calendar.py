@@ -180,8 +180,42 @@ def test_is_early_close():
 
 def test_the_close_times_have_one_owner():
     assert sessions.EARLY_CLOSE_TIME == time(13, 0)
-    assert sessions.REGULAR_CLOSE_TIME == time(16, 0)
-    assert sessions.REGULAR_CLOSE_TIME == sessions.session_windows("US")[-1][1]
+    # A full day's close is the session table's, not a second constant.
+    assert not hasattr(sessions, "REGULAR_CLOSE_TIME")
+    assert (
+        sessions.session_close_time(date(2026, 11, 25), "US")
+        == sessions.session_windows("US")[-1][1]
+        == time(16, 0)
+    )
+
+
+@pytest.mark.parametrize(
+    ("day", "market", "windows"),
+    [
+        (date(2026, 11, 27), "US", ((time(9, 30), time(13, 0)),)),
+        (date(2026, 11, 25), "US", ((time(9, 30), time(16, 0)),)),
+        # An unknown market trades US sessions, early closes included.
+        (date(2026, 11, 27), "XX", ((time(9, 30), time(13, 0)),)),
+        (
+            date(2026, 11, 27),
+            "cn",
+            ((time(9, 30), time(11, 30)), (time(13, 0), time(15, 0))),
+        ),
+    ],
+)
+def test_day_session_windows(day, market, windows):
+    assert sessions.day_session_windows(day, market) == windows
+
+
+def test_is_session_close_reads_the_days_close():
+    from datetime import datetime
+
+    def close(hour, day):
+        stamp = datetime(2026, 11, day, hour, 0)
+        return sessions.is_session_close(stamp, market="US", timezone="US/Eastern")
+
+    assert close(13, 27) and not close(16, 27)
+    assert close(16, 25) and not close(13, 25)
 
 
 @pytest.mark.parametrize(

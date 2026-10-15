@@ -1112,8 +1112,9 @@ PREDICTIONS_D: Dict[str, Prediction] = {
               "a decision with no fill bar is not a step, so o1 leaves no record (engine.py:1949)"),
     "T04": _p(FAIL, ("orders", "invariants"), ("D8",),
               "a fill with no source bar hits a bare continue, no order event (execution.py:526-527)"),
-    "T05": _p(FAIL, ("fills", "orders", "cash", "positions", "equity", "invariants"), ("D19", "D8"),
-              "the session is hard-coded to 16:00, so the 13:00 bucket never fills (sessions.py:40-44)"),
+    "T05": _p(FAIL, ("fills", "cash", "equity"), ("D2", "D16"),
+              "the 13:00 bucket fills at the 12:55 bar's close, as T02's 16:00 bucket does "
+              "(bar_aggregation.plan_execution_fills); D19's lost decision is gone since #638"),
     "C01": _p(FAIL, ("fills", "orders", "cash", "positions"), ("D5",),
               "actions run in listed order; the buy is rejected before the sell funds it (execution.py:442)"),
     "C02": _p(FAIL, ("fills", "orders", "cash", "positions"), ("D6", "D8"),

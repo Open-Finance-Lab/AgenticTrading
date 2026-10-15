@@ -692,7 +692,7 @@ This ports `tests/scenarios/factory.py` and `tests/oracle/engine.py` (MIT), long
 | T02, T02d | FAIL | FAIL | D2, D16 |
 | T03 | FAIL (orders) | FAIL (orders) | D8 |
 | T04 | FAIL (orders) | FAIL (orders) | D8 |
-| T05 | FAIL | FAIL | D19, D8 |
+| T05 | FAIL | FAIL | D19, D8 (since #638: D2, D16) |
 | C01 | FAIL | FAIL | D5, D18 |
 | C02 | FAIL | FAIL | D6, D8 |
 | C03 | FAIL | FAIL | D6 |
@@ -735,7 +735,7 @@ F01–F05 and CA01–CA03 count as FAIL rather than N/E under the §1 rule: cost
 | D16 | No daily decision timeframe | `profiles.py:198-218`; `external_run_service.py:297-299` | D, S |
 | D17 | S caps capital at ≤ 3,000 and order size at ≤ 10,000; v1 resolves weights at the decision close with floor division and applies a 25% cap | `constants.py:96-115`; `validator.py:69`; `domain/runs/protocol.py:112-114`; `domain/runs/service.py:916-985` | S |
 | D18 | The LLM translator's SELL always liquidates the full position, whatever its size; batches are truncated to one action per universe symbol | `portfolio_manager.py:802-812, 918-931` | DL |
-| D19 | The US session is hard-coded to 09:30–16:00 with no early-close calendar, so a half day's final bucket is mis-stamped and its decision never fills | `infrastructure/market_data/sessions.py:40-44`; `domain/leaderboard/us_market_calendar.py:9` | D, S |
+| D19 | The US session is hard-coded to 09:30–16:00 with no early-close calendar, so a half day's final bucket is mis-stamped and its decision never fills | `infrastructure/market_data/sessions.py:40-44`; `domain/leaderboard/us_market_calendar.py:9` | D, S. **Fixed by #638 (2026-10-15)**: `sessions.day_session_windows` ends an early close at 13:00 for aggregation, the open-stamped filter and the session-close fill, so the 13:00 bucket now fills at the 12:55 bar's close, which is D2's shape. Only the close-stamped `time_in_session` still admits stamps to 16:00. |
 
 ---
 
