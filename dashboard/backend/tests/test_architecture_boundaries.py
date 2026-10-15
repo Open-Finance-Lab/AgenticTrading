@@ -375,10 +375,11 @@ _DELETED_ANALYTICS_MODULES = (
 
 @pytest.mark.parametrize("module_name", _DELETED_ANALYTICS_MODULES)
 def test_deleted_five_state_module_is_not_importable(module_name):
-    """Design §13 row B: the five-state model leaves in PR B. A stale
-    __pycache__ resolves a deleted package dir as a namespace package, which
-    is why _DELETED_SHIMS exists; these are plain modules, so a stale .pyc is
-    the only way this can pass by accident -- see the CLAUDE.md gotcha."""
+    """Design §13 row B: the five-state model left in PR B. These are plain
+    modules, not package directories, so a leftover __pycache__ cannot make
+    the import succeed -- unlike the deleted shim *packages* in _DELETED_SHIMS,
+    whose stale .pyc dirs resolve as PEP-420 namespace packages. Python never
+    imports a sourceless .pyc from __pycache__."""
     with pytest.raises(ModuleNotFoundError):
         importlib.import_module(module_name)
 
@@ -599,11 +600,11 @@ _EVENT_READ_ALLOWLIST = {
     "dashboard/backend/domain/analytics/rollups.py": (
         "defines AnalyticsRollupStore.list_events; rollup_day / rollup_current_day "
         "are the day rollups and the overview's current-day scan (rule 5), "
-        "narrowed to one UTC day in PR B"
+        "which is bounded to one UTC day"
     ),
     "dashboard/backend/domain/analytics/query_service.py": (
         "the paginated timeline (rule 3) and the overview's current-day read "
-        "(rule 5); PR B narrows the overview read and gives sessions a 30-day window"
+        "(rule 5), bounded to one UTC day; the sessions read has a 30-day window"
     ),
 }
 _OWN_CONNECTION_RECEIVERS = {"self", "self.analytics_base", "self.base_store"}

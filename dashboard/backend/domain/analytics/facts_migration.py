@@ -4,10 +4,10 @@ Runs on every boot, twice: synchronously from ``app.py``'s startup hook and
 again as the daily-facts worker's ``prepare`` step (``daily_job.py``). Both
 steps are idempotent, so the repeat costs nothing.
 
-PR A seeded ``user_activity`` from ``user_analytics_snapshots`` on creation.
-The legacy row kept being maintained by the throttled repair between PR A and
-PR B, so PR B re-runs the same seed immediately before dropping both legacy
-tables (design SS6.9 "Migration of existing history", SS11). After the first
+``user_activity`` was first seeded from ``user_analytics_snapshots`` when it
+was created; the legacy row kept being maintained until the snapshot sweep was
+deleted, so the same seed runs again immediately before both legacy tables are
+dropped (design SS6.9 "Migration of existing history", SS11). After the first
 boot that drops them, the seed reads nothing and the drop is ``IF EXISTS``.
 """
 

@@ -975,7 +975,7 @@ def _users_page_sql(
     """Render (page_sql, count_sql, page_params, count_params) for one dialect.
 
     Every predicate is parameterised; the only interpolated text is the fixed
-    predicate for a legacy status, chosen from a closed dict. The LIKE pattern
+    every filter is a parameter, never interpolated text. The LIKE pattern
     comes from users.admin_user_search_pattern so '%' and '_' in a search are
     literal, exactly as the account console's own search treats them.
     """
@@ -1433,16 +1433,17 @@ class ValueAnalyticsStore:
     def seed_activity_from_snapshots(self, *, now: datetime) -> int:
         """Copy ``activated_at`` / ``last_meaningful_activity_at`` from the legacy row.
 
-        Design SS11: ``user_analytics_snapshots`` is the only table that knows
-        when an existing user first activated, and it is dropped in PR B.
-        Ingestion only maintains ``user_activity`` for events arriving after
-        this deploy, so without this copy every pre-existing activation date
-        would vanish on the night of the drop.
+        Design SS11: ``user_analytics_snapshots`` was the only table that
+        knew when an existing user first activated, and
+        ``run_startup_migrations`` drops it. Ingestion only maintains
+        ``user_activity`` for events arriving after the deploy that created
+        it, so without this copy every pre-existing activation date would
+        vanish with the drop.
 
         Idempotent by construction -- the same MIN/MAX upsert
-        ``record_activity`` uses -- so PR B re-runs it immediately before
-        the drop (the legacy row kept being maintained by the throttled
-        repair between the two PRs). Returns the number of rows touched.
+        ``record_activity`` uses -- so it runs immediately before the drop on
+        every boot, including one where the legacy row moved since the last.
+        Returns the number of rows touched.
 
         Returns 0 once the table is gone: ``run_startup_migrations`` drops it
         right after this read and runs on every boot, and a fresh install's

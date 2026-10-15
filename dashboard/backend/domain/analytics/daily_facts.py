@@ -2,7 +2,7 @@
 
 Every query here is parameterised by a date, never by a user id. That is the
 property the read-budget test enforces, and it is the difference between this
-module and the snapshot sweep it replaces: cost grows with days, not with
+module and the per-user snapshot sweep it replaced: cost grows with days, not with
 users times minutes (design SS6.9, SS6.12).
 
 Scheduling lives in ``daily_job.py`` (its own worker thread, D23). This module
@@ -158,7 +158,7 @@ def _compute_day(
         return _DayOutcome(failed_steps=tuple(failed))
     eligible_ids = [int(subject["id"]) for subject in subjects]
 
-    # 1. Anonymous rollups for D (moved here from run_analytics_maintenance).
+    # 1. Anonymous rollups for D.
     step(
         "rollup",
         lambda: rollup(day, store=AnalyticsRollupStore(analytics), now=_midnight(now.date())),
