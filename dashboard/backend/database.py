@@ -1018,6 +1018,12 @@ class BacktestDatabase:
         ``est_cost_usd`` is a float; converted with ``round(value * 1_000_000)``
         and clamped at zero so a negative stored value cannot violate
         ``user_daily_facts.operator_cost_micro``'s CHECK.
+
+        BYOK runs are excluded: ``engine.py`` stamps ``est_cost_usd`` on them
+        too, from the user's own provider bill, which is not operator spend
+        (design SS6.7 "for operator-funded runs"). The lane is read from
+        ``metadata.llm_execution.billing_mode``; a run that records none (rule
+        based, pre-handoff) or whose metadata is not valid JSON keeps counting.
         """
         start = f"{day.isoformat()} 00:00:00"
         end = f"{(day + timedelta(days=1)).isoformat()} 00:00:00"
@@ -1029,6 +1035,12 @@ class BacktestDatabase:
             FROM agent_runs
             WHERE owner_user_id IS NOT NULL
               AND updated_at >= ? AND updated_at < ?
+              AND COALESCE(
+                    CASE WHEN json_valid(metadata)
+                         THEN json_extract(metadata, '$.llm_execution.billing_mode')
+                    END,
+                    ''
+                  ) <> 'byok'
             GROUP BY owner_user_id
             """,
             (start, end),
