@@ -705,7 +705,8 @@ class ValueAnalyticsQueryService:
 
         Fact rows hold no internal or excluded accounts, so ``include_internal``
         widens only the activation and paid headlines, which read
-        ``user_activity`` and the ledger.
+        ``user_activity`` and the ledger. History always falls back to the
+        anonymous rollups for days without facts, whatever the toggle.
         """
         start, end = _validate_dates(start, end)
         if movement_range not in _MOVEMENT_WINDOWS:
@@ -760,7 +761,10 @@ class ValueAnalyticsQueryService:
                 start=start,
                 end=end,
                 yesterday=yesterday,
-                use_anonymous_rollups=not include_internal,
+                # Facts hold no internal accounts, exactly like the anonymous
+                # rollups, so the internal toggle has nothing to keep out of
+                # the fallback; gating it only dropped rollup-backed days.
+                use_anonymous_rollups=True,
                 movement_start=movement_start,
                 movement_range=movement_range,
             )
@@ -823,10 +827,14 @@ class ValueAnalyticsQueryService:
         # Every Monday below ``end`` is a cohort week, so the last one is the
         # Monday of the window's final day; its members activated before the
         # next Monday.
+        # Cohorts are always the facts-eligible population: user_daily_facts
+        # holds no internal or excluded account, so admitting one under
+        # ``include_internal`` would count it eligible and never retained,
+        # deflating every rate it touched. The flag is accepted and ignored.
         activations = self.value_store.list_activations(
             start=_day_start(cohort_start),
             end=_day_start(_week_start(end - timedelta(days=1)) + timedelta(days=7)),
-            include_internal=include_internal,
+            include_internal=False,
         )
         cohort_users: dict[date, list[int]] = defaultdict(list)
         for user_id, activated_at in activations.items():

@@ -586,6 +586,23 @@ def test_retention_week_with_a_missing_or_partial_fact_day_is_partial():
     assert response.availability.status == "partial"
 
 
+def test_retention_include_internal_does_not_deflate_rates():
+    """I4: facts hold no internal users, so an internal activation admitted to a
+    cohort would count as eligible and never retained."""
+    service = _retention_service()
+    window = dict(start=date(2026, 8, 1), end=date(2026, 8, 20), now=RETENTION_NOW)
+
+    default = service.get_retention(**window)
+    internal = service.get_retention(include_internal=True, **window)
+
+    assert internal.cohorts == default.cohorts
+    assert internal.summary_week_1 == default.summary_week_1
+    assert internal.summary_week_4 == default.summary_week_4
+    assert next(
+        c for c in internal.cohorts if c.cohort_week == date(2026, 8, 3)
+    ).activated_users == 2  # user 9 is internal
+
+
 def test_retention_reads_no_raw_events():
     # FakeRollups.list_events raises; a passing call proves no raw read happened.
     _retention_service().get_retention(
@@ -1330,21 +1347,27 @@ def test_lifecycle_history_falls_back_to_rollups_for_days_without_facts():
         for t in response.transitions
     )
 
+    # I4: facts are internal-free just as the rollups are, so the internal
+    # toggle has nothing to protect here and must not drop rollup-backed days.
     internal = service.get_lifecycle(
         start=YESTERDAY - timedelta(days=6),
         end=YESTERDAY + timedelta(days=1),
         include_internal=True,
         now=NOW,
     )
-    assert not any(point.period_start == old_day for point in internal.movement_segments)
+    assert internal.movement_segments == response.movement_segments
+    assert internal.transitions == response.transitions
+    assert internal.weekly_segments == response.weekly_segments
 
 
 def test_lifecycle_reads_no_raw_events():
     service = _lifecycle_service()
-    # FakeRollups.list_events raises; a passing call proves no raw read happened.
-    service.get_lifecycle(
+    # FakeRollups.list_events raises. get_lifecycle swallows a failed read into
+    # an unavailable section, so the proof is that every section is available.
+    response = service.get_lifecycle(
         start=YESTERDAY - timedelta(days=6), end=YESTERDAY + timedelta(days=1), now=NOW
     )
+    assert all(section.available for section in response.availability.values())
 
 
 def test_lifecycle_failed_activation_read_is_partial_not_a_ready_zero():
