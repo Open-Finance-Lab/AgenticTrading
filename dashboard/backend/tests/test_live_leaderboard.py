@@ -330,7 +330,9 @@ def test_axis_node_key_caps_at_the_early_close():
         return live._axis_node_key(datetime(2026, 11, day, hour, minute, tzinfo=_ET))
 
     assert key(12) == "2026-11-27T13:00"  # Alpaca's last cash-session bar
-    assert key(12, 30) == "2026-11-27T13:00"  # Yahoo's 12:30-13:00 half bar
+    # Yahoo's closing level, restamped to 12:30 by _yahoo from its 13:00 stub
+    # (test_yahoo_chart pins that against recorded responses).
+    assert key(12, 30) == "2026-11-27T13:00"
     assert key(13) is None  # the late session has no node
     assert key(15) is None
     assert key(15, day=25) == "2026-11-25T16:00"
@@ -366,8 +368,10 @@ def test_the_live_board_keeps_no_fixed_session_close():
 
 
 def _alpaca_hourly_bars(*days):
-    """AAPL bars shaped like Alpaca's: open-stamped hourly, 04:00-19:00 ET, so
-    the late session after an early close is in the response."""
+    """Open-stamped hourly AAPL bars, every hour 04:00-19:00 ET: a deliberate
+    superset of what Alpaca sends. It emits no bar for an hour without a valid
+    trade, and its half-day extended session ends at 17:00. Dense, so the late
+    session after an early close is certainly in the response."""
     import pandas as pd
 
     from dashboard.backend.infrastructure.market_data.sessions import (

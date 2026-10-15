@@ -195,7 +195,15 @@ def live_increment_bounds(
 
 
 def freeze_settle_time(day: date) -> datetime:
-    """When ``day``'s closing bar is final on the board's tape."""
+    """When ``day`` can be frozen: its cash close (13:00 on an NYSE early
+    close) plus the SIP delay and a margin, so the delay clamp no longer
+    truncates the last kept bar and Alpaca's late-trade update has landed.
+
+    Settled is not immutable. Alpaca applies SIP corrections after the 20:00
+    extended session and rebuilds recent bars for a few days afterwards, so a
+    later refetch (a config-change replay of the month) can differ slightly
+    from the frozen checkpoint.
+    """
     delay = 0 if allow_recent_sip() else sip_delay_minutes()
     close = _cash_close(day)
     return close + timedelta(minutes=delay + _FREEZE_SETTLE_MARGIN_MINUTES)
@@ -1235,8 +1243,9 @@ def _axis_node_key(bar_open: datetime) -> Optional[str]:
     Alpaca's 09:00 bar (09:30 open → 10:00) lands on 10:00 and its 15:00 bar on
     the 16:00 close; Yahoo's 09:30 bar closes 10:30 and lands on 10:00, and its
     15:30 half-bar is capped at the 16:00 close. On an NYSE early close the cap
-    is 13:00, where Alpaca's 12:00 bar and Yahoo's 12:30 half-bar both land. A
-    bar opening at or after the day's close is after-hours and has no node.
+    is 13:00. Alpaca's 12:00 bar lands there, and so does Yahoo's closing level,
+    which ``_yahoo`` restamps from its 13:00 stub to the 12:30 half-bar. A bar
+    opening at or after the day's close is after-hours and has no node.
     """
     session_close = _cash_close(bar_open.date())
     if bar_open >= session_close:

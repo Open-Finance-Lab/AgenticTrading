@@ -27,8 +27,10 @@ EARLY_CLOSE = ["10:00", "11:00", "12:00"]
 
 
 def _alpaca_hourly(days):
-    """Open-stamped hourly bars, 04:00-19:00 ET on each day: Alpaca serves
-    extended hours, so the late session after an early close is present."""
+    """Open-stamped hourly bars, every hour 04:00-19:00 ET on each day: a
+    deliberate superset of what Alpaca sends (no bar for an hour without a
+    valid trade; the half-day extended session ends at 17:00), so the late
+    session after an early close is certainly present."""
     index = pd.DatetimeIndex([
         ts
         for day in days

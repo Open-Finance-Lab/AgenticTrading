@@ -147,6 +147,15 @@ def _restamp_close_levels(
     the half bar's open, the closing level lands where that half bar's close
     would. If Yahoo also filled the half bar, the closing level replaces it.
 
+    That level is the official close, auction included: ^DJI 47,716.42 on
+    2025-11-28, Yahoo's daily close to the cent. On a full session the 15:30
+    half bar's close is pre-auction instead (47,419.67 against an official
+    47,427.12 on 2025-11-26), as every agent and Alpaca-baseline mark is on
+    both kinds of day (``sessions.is_in_session``). The index curve therefore
+    ends a half day about 0.02% off the basis it ends a full day on. That is
+    the lesser gap: the only pre-auction level on offer is the 11:30 bar's,
+    30 minutes stale.
+
     Only for a US exchange: the close comes from the NYSE calendar
     (``sessions.session_close_time``).
     """
