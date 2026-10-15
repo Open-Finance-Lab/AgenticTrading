@@ -834,7 +834,7 @@ def test_group_filter_zeroes_every_other_group():
     assert by_group["organic"].paid_users == 0
 
 
-def test_group_summary_is_partial_when_the_fact_read_fails():
+def test_group_summary_is_partial_when_the_fact_read_fails(capsys):
     service, store = _groups_service()
 
     def explode(**_kwargs):
@@ -849,6 +849,9 @@ def test_group_summary_is_partial_when_the_fact_read_fails():
     assert response.availability.available is True
     assert response.availability.status == "partial"
     assert all(row.total_runs == 0 for row in response.groups)
+    out = capsys.readouterr().out
+    assert "WARNING: analytics.read.groups_facts_failed category=RuntimeError" in out
+    assert "private detail" not in out
 
 
 def test_group_summary_is_partial_when_any_fact_row_in_the_window_is_partial():
@@ -1428,7 +1431,7 @@ def test_lifecycle_reads_no_raw_events():
     assert all(section.available for section in response.availability.values())
 
 
-def test_lifecycle_failed_activation_read_is_partial_not_a_ready_zero():
+def test_lifecycle_failed_activation_read_is_partial_not_a_ready_zero(capsys):
     service = _lifecycle_service()
 
     def fail(*, include_internal):
@@ -1443,3 +1446,24 @@ def test_lifecycle_failed_activation_read_is_partial_not_a_ready_zero():
     assert response.headline.activated_users == 0
     assert response.availability["current"].status == "partial"
     assert response.segment_counts["core"] == 1  # the rest is still served
+    out = capsys.readouterr().out
+    assert "WARNING: analytics.read.lifecycle_activation_failed category=RuntimeError" in out
+    assert "user_activity unavailable" not in out
+
+
+def test_lifecycle_failed_history_read_is_logged(capsys):
+    service = _lifecycle_service()
+
+    def fail(**_kwargs):
+        raise RuntimeError("private detail")
+
+    service.value_store.count_segments_by_date = fail
+
+    response = service.get_lifecycle(
+        start=YESTERDAY - timedelta(days=6), end=YESTERDAY + timedelta(days=1), now=NOW
+    )
+
+    assert response.availability["history"].status == "unavailable"
+    out = capsys.readouterr().out
+    assert "WARNING: analytics.read.lifecycle_history_failed category=RuntimeError" in out
+    assert "private detail" not in out

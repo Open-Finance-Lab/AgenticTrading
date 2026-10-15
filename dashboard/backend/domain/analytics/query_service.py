@@ -557,6 +557,20 @@ def _availability(available: bool = True) -> PanelAvailability:
     return PanelAvailability(available=available)
 
 
+def _warn_read_failed(section: str, exc: BaseException) -> None:
+    """One log line for a read the page degrades to unavailable/partial.
+
+    The page already says "incomplete"; this is what lets an operator tell a
+    Postgres-only SQL bug from an outage in the Render log. Class name only:
+    an exception message can carry row data.
+    """
+    print(
+        f"WARNING: analytics.read.{section}_failed "
+        f"category={type(exc).__name__[:80]}",
+        flush=True,
+    )
+
+
 def _legacy_state(operational_state: str, lifecycle_segment: str) -> str:
     """Map the live operational state and lifecycle segment onto the legacy
     five-state label (blocked, needs_attention, dormant, onboarding, active)
@@ -786,7 +800,8 @@ class AnalyticsQueryService:
                     include_internal=filters.include_internal,
                 )
                 raw_events_read = True
-            except Exception:
+            except Exception as exc:
+                _warn_read_failed("overview_events", exc)
                 today_events = []
         current_events = [
             event for event in today_events if _event_matches_filters(event, filters)
@@ -800,7 +815,8 @@ class AnalyticsQueryService:
                 end=historical_end,
             )
             rollups_read = True
-        except Exception:
+        except Exception as exc:
+            _warn_read_failed("overview_rollups", exc)
             rollups = []
 
         # Trailing context, as of the latest completed day in the window. The
@@ -1038,20 +1054,19 @@ class AnalyticsQueryService:
             lane_days = {
                 day: lane for day, lane in lanes.items() if any(lane.values())
             }
-        except Exception:
+        except Exception as exc:
+            _warn_read_failed("overview_growth", exc)
             availability["growth"] = _availability(False)
 
-        # Who is in which state, and who needs attention, as of yesterday's
-        # fact rows (design D20). The daily job writes facts for non-internal
-        # accounts only, so include_internal widens neither.
+        # The friction panel (top_failure_categories) is computed from the
+        # funnel's reads, so it is exactly as available as they are.
+        availability["friction"] = _availability(availability["funnel"].available)
+
+        # Who needs attention, as of yesterday's fact rows (design D20). The
+        # daily job writes facts for non-internal accounts only, so
+        # include_internal does not widen it.
         yesterday = current.date() - timedelta(days=1)
         attention: list[AnalyticsUserListItem] = []
-        try:
-            # The friction panel's availability reports the fact read the
-            # operational board is served from; the five-state counts are gone.
-            self.value_store.count_states_for_date(yesterday)
-        except Exception:
-            availability["friction"] = _availability(False)
         try:
             candidates = self.value_store.list_attention_candidates(
                 day=yesterday,
@@ -1087,7 +1102,8 @@ class AnalyticsQueryService:
                         profile_path=f"/admin/analytics/users/{candidate.user_id}",
                     )
                 )
-        except Exception:
+        except Exception as exc:
+            _warn_read_failed("overview_attention", exc)
             attention = []
             availability["attention"] = _availability(False)
 

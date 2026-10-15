@@ -823,7 +823,7 @@ def test_sessions_section_is_bounded_to_thirty_days(tmp_path):
 
 
 def test_overview_marks_rollup_backed_panels_unavailable_when_rollups_fail(
-    tmp_path, monkeypatch
+    tmp_path, monkeypatch, capsys
 ):
     analytics, events, _rollups, users = _fixture(tmp_path)
     _event(
@@ -851,9 +851,14 @@ def test_overview_marks_rollup_backed_panels_unavailable_when_rollups_fail(
     assert overview.availability["growth"].available is False
     assert overview.availability["funnel"].available is False
     assert overview.availability["growth"].error_code == "temporarily_unavailable"
-    # Panels that never touch rollups stay up.
-    assert overview.availability["friction"].available is True
+    # M1: friction (top_failure_categories) is computed from the funnel's
+    # reads, so it goes down with them; attention reads facts and stays up.
+    assert overview.availability["friction"].available is False
     assert overview.availability["attention"].available is True
+    # M2: the swallowed failure reaches the log, by class name only.
+    out = capsys.readouterr().out
+    assert "WARNING: analytics.read.overview_rollups_failed category=RuntimeError" in out
+    assert "private detail" not in out
 
 
 class _WindowRecordingQueryStore:
@@ -1138,12 +1143,12 @@ def test_overview_attention_comes_from_yesterdays_facts(tmp_path):
     assert overview.availability["attention"].available is True
 
 
-def test_overview_marks_fact_panels_unavailable_when_fact_reads_fail(tmp_path):
+def test_overview_marks_fact_panels_unavailable_when_fact_reads_fail(tmp_path, capsys):
     analytics, _events, _rollups, users = _fixture(tmp_path)
 
     class BrokenFacts:
         def count_states_for_date(self, _day):
-            raise RuntimeError("private detail")
+            raise AssertionError("friction availability no longer probes the facts")
 
         def list_attention_candidates(self, **_kwargs):
             raise RuntimeError("private detail")
@@ -1158,9 +1163,14 @@ def test_overview_marks_fact_panels_unavailable_when_fact_reads_fail(tmp_path):
     )
 
     assert overview.users_needing_attention == []
-    assert overview.availability["friction"].available is False
+    # M1: friction is served from the funnel's reads, so it follows them.
+    assert overview.availability["friction"].available is True
     assert overview.availability["attention"].available is False
     assert overview.availability["growth"].available is True
+    # M2: the swallowed failure reaches the log, by class name only.
+    out = capsys.readouterr().out
+    assert "WARNING: analytics.read.overview_attention_failed category=RuntimeError" in out
+    assert "private detail" not in out
 
 
 def test_query_service_builds_its_value_store_only_on_first_use(tmp_path, monkeypatch):

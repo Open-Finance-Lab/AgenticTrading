@@ -26,6 +26,7 @@ from .query_service import (
     AnalyticsQueryStore,
     AnalyticsUserProfile,
     FailureCategoryCount,
+    _warn_read_failed,
 )
 from .repository import analytics_store
 from .repository_common import positive_limit, positive_user_id
@@ -734,7 +735,8 @@ class ValueAnalyticsQueryService:
             activated_users = self.value_store.count_activated_users(
                 include_internal=include_internal
             )
-        except Exception:
+        except Exception as exc:
+            _warn_read_failed("lifecycle_activation", exc)
             activated_users = 0
             availability["current"] = SectionAvailability(
                 available=bool(cells),
@@ -750,7 +752,8 @@ class ValueAnalyticsQueryService:
                 available=True,
                 status="ready",
             )
-        except Exception:
+        except Exception as exc:
+            _warn_read_failed("lifecycle_commercial", exc)
             paid = 0
             availability["commercial"] = SectionAvailability(
                 available=False,
@@ -768,7 +771,8 @@ class ValueAnalyticsQueryService:
                 movement_start=movement_start,
                 movement_range=movement_range,
             )
-        except Exception:
+        except Exception as exc:
+            _warn_read_failed("lifecycle_history", exc)
             weekly, movement, transitions = [], [], []
             history_availability = SectionAvailability(
                 available=False,
@@ -1133,7 +1137,8 @@ class ValueAnalyticsQueryService:
         users_available = True
         try:
             all_users = self._eligible_users(include_internal=include_internal)
-        except Exception:
+        except Exception as exc:
+            _warn_read_failed("groups_users", exc)
             all_users = []
             users_available = False
 
@@ -1168,7 +1173,8 @@ class ValueAnalyticsQueryService:
         if landed:
             try:
                 totals = self.value_store.sum_facts_by_user_group(start=start, end=end)
-            except Exception:
+            except Exception as exc:
+                _warn_read_failed("groups_facts", exc)
                 facts_available = False
         if selected_group is not None:
             totals = {
@@ -1181,7 +1187,8 @@ class ValueAnalyticsQueryService:
             commercial = self._commercial(user_rows, start=start, end=end)
             if user_ids and not user_ids.issubset(commercial):
                 commercial_available = False
-        except Exception:
+        except Exception as exc:
+            _warn_read_failed("groups_commercial", exc)
             commercial_available = False
 
         paid_by_group: Counter[UserGroup] = Counter()
