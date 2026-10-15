@@ -1,4 +1,5 @@
-"""NYSE full-day holidays, computed by rule (no data file, no dependency).
+"""NYSE full-day holidays and early closes, computed by rule (no data file,
+no dependency).
 
 Shared US market-data infrastructure: the Live Trading Leaderboard walks it
 forward day by day, and the Run Backtest modal's default period
@@ -11,8 +12,10 @@ The board is where a weekday-only calendar first broke: a holiday became a
 freeze day whose one-day increment had no bars and failed every model, and it
 padded "Day N of M" and the chart axis with a session that never trades.
 
-Covers the ten NYSE holidays in force since 2022 (Juneteenth added that year).
-Early closes (13:00 ET) are not modelled; they are still trading days.
+Covers the ten NYSE holidays in force since 2022 (Juneteenth added that year)
+and the recurring 13:00 ET early closes (``nyse_early_closes``). An early close
+is still a trading day. The hour it ends at is a session bound, so it lives
+with the other bounds in ``sessions.py`` (``session_close_time``).
 """
 
 from __future__ import annotations
@@ -82,6 +85,36 @@ def nyse_holidays(year: int) -> FrozenSet[date]:
 
 def is_trading_day(day: date) -> bool:
     return day.weekday() < 5 and day not in nyse_holidays(day.year)
+
+
+@lru_cache(maxsize=16)
+def nyse_early_closes(year: int) -> FrozenSet[date]:
+    """NYSE's 13:00 ET early closes in ``year``, by rule.
+
+    - the day after Thanksgiving;
+    - December 24 when it falls Monday to Thursday (a Friday one is the
+      observed Christmas holiday, a weekend one is no session);
+    - July 3 when Independence Day falls Tuesday to Friday (a Saturday July 4
+      makes July 3 the observed holiday; a Sunday or Monday one puts July 3 on
+      a weekend).
+
+    A candidate that is not a trading day is dropped, so this set can never
+    contradict ``nyse_holidays``. The rules reproduce NYSE's published 2025-2028
+    calendars; an unscheduled closure is not predictable by rule, and the Live
+    board's session-gap check stays the backstop for one.
+    """
+    candidates = {_nth_weekday(year, 11, 3, 4) + timedelta(days=1)}
+    christmas_eve = date(year, 12, 24)
+    if christmas_eve.weekday() < 4:
+        candidates.add(christmas_eve)
+    if 1 <= date(year, 7, 4).weekday() <= 4:
+        candidates.add(date(year, 7, 3))
+    return frozenset(day for day in candidates if is_trading_day(day))
+
+
+def is_early_close(day: date) -> bool:
+    """Whether ``day`` is an NYSE session that ends at 13:00 ET."""
+    return day in nyse_early_closes(day.year)
 
 
 def trading_weeks_back(day: date) -> Iterator[Tuple[date, date]]:

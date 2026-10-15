@@ -15,13 +15,16 @@ can import it: domain, the backend-root baseline generator and ``api/`` alike.
 
 from __future__ import annotations
 
-from datetime import datetime, time, timedelta
+from datetime import date, datetime, time, timedelta
 from typing import Any, Mapping
 
 import pytz
 
 from dashboard.backend.infrastructure.market_data.profiles import (
     registered_market_timezones,
+)
+from dashboard.backend.infrastructure.market_data.us_market_calendar import (
+    is_early_close,
 )
 
 DEFAULT_MARKET = "US"
@@ -42,6 +45,34 @@ def session_windows(market: object) -> tuple[tuple[time, time], ...]:
     if canonical_market(market) == "CN":
         return ((time(9, 30), time(11, 30)), (time(13, 0), time(15, 0)))
     return ((time(9, 30), time(16, 0)),)
+
+
+#: The US cash close on a full session. Read off ``session_windows`` rather
+#: than restated, so the bound keeps one owner.
+REGULAR_CLOSE_TIME: time = session_windows(DEFAULT_MARKET)[-1][1]
+#: The US cash close on an NYSE early-close day
+#: (``us_market_calendar.nyse_early_closes``).
+EARLY_CLOSE_TIME: time = time(13, 0)
+
+
+def session_close_time(day: date, market: object = DEFAULT_MARKET) -> time:
+    """When ``market``'s last session ends on ``day``, in its own local time.
+
+    A market on US sessions closes at :data:`EARLY_CLOSE_TIME` on the NYSE
+    early-close days the calendar lists and at :data:`REGULAR_CLOSE_TIME`
+    otherwise; any other market closes at its last window's end. Whether
+    ``day`` trades at all is the calendar's question
+    (``us_market_calendar.is_trading_day``), not this one's.
+
+    The close-stamped helpers (:func:`time_in_session`, :func:`session_windows`,
+    :func:`is_session_close`) do not consult it: bar aggregation and the
+    engine still end every US day at 16:00. That gap is D19 in the US
+    conformance design, and the engine rewrite owns it.
+    """
+    windows = session_windows(market)
+    if windows == session_windows(DEFAULT_MARKET) and is_early_close(day):
+        return EARLY_CLOSE_TIME
+    return windows[-1][1]
 
 
 def timezone_for_market(market: object) -> str:
