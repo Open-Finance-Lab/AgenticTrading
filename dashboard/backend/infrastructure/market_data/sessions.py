@@ -170,6 +170,12 @@ def is_in_session(
     open, and that 09:00 bar is out too: its open, high, low and volume include
     half an hour of pre-market trading, so admitting it would price the day's
     first fill off a pre-market print.
+
+    The day's last session ends at :func:`session_close_time`: 13:00 ET on an
+    NYSE early close, where Alpaca still serves the late session as bars
+    stamped 13:00, 14:00 and 15:00. Only this open-stamped rule reads the
+    day's close; the close-stamped rule (:func:`time_in_session`) still ends
+    every US day at 16:00 (D19, owned by the engine rewrite).
     """
     local = market_local(timestamp, timezone)
     if open_stamped_minutes is None:
@@ -179,9 +185,13 @@ def is_in_session(
         return False
     open_minute = local.time().replace(second=0, microsecond=0)
     close_minute = close.time().replace(second=0, microsecond=0)
+    windows = session_windows(market)
+    windows = windows[:-1] + (
+        (windows[-1][0], session_close_time(local.date(), market)),
+    )
     return any(
         start <= open_minute and close_minute <= end
-        for start, end in session_windows(market)
+        for start, end in windows
     )
 
 

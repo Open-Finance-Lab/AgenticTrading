@@ -177,6 +177,138 @@ def test_open_stamped_hourly_day_is_six_bars():
     assert kept == ["10:00", "11:00", "12:00", "13:00", "14:00", "15:00"]
 
 
+def _open_stamped_kept(stamps, minutes=60):
+    return [
+        ts.strftime("%H:%M") for ts in stamps
+        if sessions.is_in_session(
+            ts, market="US", timezone="US/Eastern", open_stamped_minutes=minutes
+        )
+    ]
+
+
+def test_open_stamped_hourly_early_close_is_three_bars():
+    """2026-11-27 closes at 13:00 ET. Alpaca serves the late session as bars
+    stamped 13:00, 14:00 and 15:00, and a fixed 16:00 close kept them: three
+    decisions priced off thin after-hours prints."""
+    day = pd.date_range("2026-11-27 04:00", "2026-11-27 19:00", freq="h",
+                        tz="US/Eastern")
+    assert _open_stamped_kept(day) == ["10:00", "11:00", "12:00"]
+
+
+def test_the_day_before_thanksgiving_is_a_full_session():
+    day = pd.date_range("2026-11-25 04:00", "2026-11-25 19:00", freq="h",
+                        tz="US/Eastern")
+    assert _open_stamped_kept(day) == [
+        "10:00", "11:00", "12:00", "13:00", "14:00", "15:00",
+    ]
+
+
+def test_open_stamped_five_minute_bars_stop_at_the_early_close():
+    bars = pd.date_range("2026-12-24 12:45", "2026-12-24 13:15", freq="5min",
+                         tz="US/Eastern")
+    assert _open_stamped_kept(bars, minutes=5) == ["12:45", "12:50", "12:55"]
+
+
+def test_the_early_close_is_read_on_the_market_local_date():
+    """18:00Z on 2026-11-27 is 13:00 ET, after that day's close; a naive stamp
+    is market-local, as everywhere else in this module."""
+    def kept(ts):
+        return sessions.is_in_session(
+            ts, market="US", timezone="US/Eastern", open_stamped_minutes=60
+        )
+
+    assert kept(pd.Timestamp("2026-11-27 17:00", tz="UTC"))
+    assert not kept(pd.Timestamp("2026-11-27 18:00", tz="UTC"))
+    assert not kept(pd.Timestamp("2026-11-27 13:00"))
+
+
+def test_an_early_close_leaves_the_close_stamped_path_alone():
+    """Bar aggregation and the engine's close-stamped filter still end every US
+    day at 16:00. That is D19, measured by conformance T05 and owned by the
+    engine rewrite; only the open-stamped rule reads the day's close."""
+    assert sessions.session_windows("US") == ((clock_time(9, 30), clock_time(16, 0)),)
+    assert sessions.is_in_session(
+        pd.Timestamp("2026-11-27 15:00", tz="US/Eastern"),
+        market="US",
+        timezone="US/Eastern",
+    )
+    assert sessions.is_session_close(
+        pd.Timestamp("2026-11-27 16:00", tz="US/Eastern"),
+        market="US",
+        timezone="US/Eastern",
+    )
+
+
+def test_cn_open_stamped_sessions_ignore_the_nyse_calendar():
+    day = pd.date_range("2026-11-27 09:00", "2026-11-27 15:00", freq="h",
+                        tz="Asia/Shanghai")
+    kept = [
+        ts.strftime("%H:%M") for ts in day
+        if sessions.is_in_session(
+            ts, market="CN", timezone="Asia/Shanghai", open_stamped_minutes=60
+        )
+    ]
+    assert kept == ["10:00", "13:00", "14:00"]
+
+
+def test_every_us_filter_drops_the_late_session_on_an_early_close():
+    """The board's model, its Alpaca baselines, a My Agents backtest and a
+    protocol run all filter through ``is_in_session``. One rule for all of them
+    is what keeps an agent and its baseline on the same bars on a half day."""
+    from dashboard.backend import baseline_generator
+    from dashboard.backend.domain.backtesting import market_data_store as mds
+    from dashboard.backend.domain.backtesting.engine import HourlyBacktester
+    from dashboard.backend.domain.leaderboard.strategies import _common
+
+    stamps = list(
+        pd.date_range("2026-11-27 04:00", "2026-11-27 19:00", freq="h",
+                      tz="US/Eastern").tz_convert("UTC")
+    )
+    frame = pd.DataFrame({"close": 1.0}, index=pd.DatetimeIndex(stamps))
+    frame.attrs[sessions.FRAME_ATTR_OPEN_STAMPED_MINUTES] = 60
+    expected = [
+        ts for ts in stamps if ts.tz_convert("US/Eastern").hour in (10, 11, 12)
+    ]
+    engine = HourlyBacktester.__new__(HourlyBacktester)
+    engine.profile = profiles.get_market_profile(profiles.ALPACA)
+
+    assert baseline_generator._market_hours_only(
+        stamps, "US/Eastern", {"X": frame}
+    ) == expected
+    assert mds._build_trading_timestamps(
+        {"X": frame}, market="US", timezone="US/Eastern"
+    ) == expected
+    assert _common.market_timestamps({"X": frame}) == expected
+    assert engine._market_hours_only(stamps, {"X": frame}) == expected
+
+
+def test_minute_mode_stops_filling_at_an_early_close():
+    """My Agents' minute mode values and fills on open-stamped 5m source bars,
+    which now stop at 12:55 on 2026-11-27. The close-stamped aggregation still
+    forms 13:30-16:00 buckets from late-session prints (D19), but none of them
+    fills, so none is a step: nothing trades off a post-close print."""
+    from dashboard.backend.domain.backtesting.engine import HourlyBacktester
+
+    source = pd.date_range("2026-11-27 09:30", "2026-11-27 15:55", freq="5min",
+                           tz="US/Eastern").tz_convert("UTC")
+    frame = pd.DataFrame({"close": 1.0}, index=source)
+    frame.attrs[sessions.FRAME_ATTR_OPEN_STAMPED_MINUTES] = 5
+    engine = HourlyBacktester.__new__(HourlyBacktester)
+    engine.profile = profiles.get_market_profile(profiles.ALPACA)
+    engine.intraday_mode = True
+    engine.source_timeframe = "5m"
+    engine.source_data = {"X": frame}
+    decisions = [
+        pd.Timestamp(f"2026-11-27 {clock}", tz="US/Eastern").tz_convert("UTC")
+        for clock in ("10:30", "11:30", "12:30", "13:30", "14:30", "15:30", "16:00")
+    ]
+    steps, valuation, _fills = engine._plan_executions(decisions)
+    assert [ts.tz_convert("US/Eastern").strftime("%H:%M") for ts in steps] == [
+        "10:30", "11:30", "12:30",
+    ]
+    assert max(valuation).tz_convert("US/Eastern").strftime("%H:%M") == "12:55"
+
+
 def test_session_close_is_each_window_end():
     assert sessions.is_session_close(_et("16:00"), market="US", timezone="US/Eastern")
     assert not sessions.is_session_close(
