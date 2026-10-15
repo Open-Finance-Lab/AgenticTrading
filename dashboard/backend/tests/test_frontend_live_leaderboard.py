@@ -68,6 +68,13 @@ def test_live_chart_does_not_span_empty_future_with_fake_values():
     assert "2026-04-15" not in source
 
 
+def test_live_chart_hint_names_the_early_close():
+    """The axis ends at 13:00 on an NYSE early close; the caption under the
+    chart must not promise a 16:00 node that day."""
+    view = _APP_HTML.split('id="liveLeaderboardView"')[1].split('id="leaderboardView"')[0]
+    assert "10:00–13:00 on early closes" in view
+
+
 def _y_bounds_source() -> str:
     start = _LIVE_JS.index("const LIVE_Y_PAD_RATIO")
     end = _LIVE_JS.index("function renderLiveChart")
