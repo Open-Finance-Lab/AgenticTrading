@@ -13,6 +13,13 @@ The 10-07 engine mandate is narrowed to the decisions below.
 
 All three reports are estimates (±50%). They are not commitments.
 
+**Errata (2026-10-14).** These were found while planning the live-board fixes (`docs/superpowers/plans/2026-10-14-live-board-fixes.md`) and are corrected in place below:
+- §4, Sharpe interval: with 5 daily returns the 95% interval is about **±14** annualised. The ±7 written here was one standard error.
+- §6, Cadence: 6 decisions per **full** session. A 13:00 early close has 3, on the bars stamped 10:00–12:00. The early closes on the calendar are 2026-11-27 and 2026-12-24.
+- §6, Until Season 1: no model id can fix Nemotron. CommonStack serves no Nemotron or NVIDIA model (`GET /v1/models`, 2026-10-14).
+- §6, Reasoning and trade-log view: nothing on the live path records a decision tape or reasoning trace yet. #628 was an admin icon fix.
+- §6, Fixes: since #582 a model checkpoints each session that clears H6. Only a model with no checkpoint this month replays from the 1st.
+
 ## 1. Goals
 
 1. **Backtests are trustworthy** (§3).
@@ -74,7 +81,7 @@ All three reports are estimates (±50%). They are not commitments.
   - dated SEC/TAF fees;
   - results published net, with gross alongside;
   - the CAT fee rate still needs to be verified.
-- **Sharpe:** daily, computed once by the engine (P19), and never recomputed in the frontend (D20). It is shown from **5 trading days**, **always with its 95% interval**. With 5 daily returns the interval is about ±7 annualised, and showing it is the point.
+- **Sharpe:** daily, computed once by the engine (P19), and never recomputed in the frontend (D20). It is shown from **5 trading days**, **always with its 95% interval**. With 5 daily returns the 95% interval is about ±14 annualised (±7 is one standard error; corrected 2026-10-14), and showing it is the point.
 - **Stop-loss / take-profit:** the new core executes them for real. This item is not cuttable.
 
 ## 5. Engine
@@ -104,12 +111,12 @@ All three reports are estimates (±50%). They are not commitments.
 | Format | One shared prompt, identical data and decision times, public trades. |
 | Instruments | Long-only DJIA-30 cash equities. |
 | Seasons | Calendar month, with a hard stop and a capital reset. This formally replaces the 08-15 two-week decision. |
-| Cadence | 6 decisions per session, on bars stamped 10:00–15:00, computed nightly on closed bars. Shown as "Updated nightly after the close". This is equivalent to real time because the model has no tools and the prompt carries nothing newer than the decision time; it was checked and there is no news in the prompt. |
+| Cadence | 6 decisions per full session, on bars stamped 10:00–15:00; 3 on a 13:00 early close (bars 10:00–12:00; 2026-11-27 and 2026-12-24), corrected 2026-10-14. Computed nightly on closed bars. Shown as "Updated nightly after the close". This is equivalent to real time because the model has no tools and the prompt carries nothing newer than the decision time; it was checked and there is no news in the prompt. |
 | Season 1 gate | The board runs on the new engine **and** the methodology page is live. |
 | Season 1 timing | One full Season 0 month on the new engine first, then Season 1 the month after. That is roughly Mar–Apr 2027. |
 | Season 1 roster | 6 models without GPT-5.5 (Haiku 4.5, Sonnet 4.6, Gemini 3.1 Pro, Qwen3.7 Plus, DeepSeek V4 Pro, Nemotron 3 Nano), × 3 repeat runs each, ≈ $46/month. |
-| Until Season 1 | Fix Nemotron's model id, which returns a CommonStack 404 every night. Add Qwen and Haiku at 1 run each, ≈ $3/month. Months stay labelled "Season 0 · preview". |
-| Reasoning and trade-log view | Its own plan and PR, inside the 8 weeks after the engine work. The data has been stored since #628. |
+| Until Season 1 | Nemotron returns a CommonStack 404 every night, and no model id can fix that: CommonStack serves no Nemotron or NVIDIA model (corrected 2026-10-14). The live-board fixes take it off the live roster; its Season 1 source is an owner decision. Add Qwen and Haiku at 1 run each, ≈ $3/month. Months stay labelled "Season 0 · preview". |
+| Reasoning and trade-log view | Its own plan and PR, inside the 8 weeks after the engine work. Nothing on the live path records a decision tape or reasoning trace yet (#628 was an admin icon fix; corrected 2026-10-14), so that plan adds the recording first. |
 | Competition board | Labelled "legacy engine · historical window · may overlap model training data" now. Retired once Season 1 has data, not re-run. |
 
 **Fixes to the board while it runs on the legacy engine.** None of these is a fee or slippage change, so none falls under the 10-08 "no retrofit" rule.
@@ -117,7 +124,7 @@ All three reports are estimates (±50%). They are not commitments.
 - Trade memory across nights. `snapshot_state` omits `self.trades`.
 - The stop-loss/take-profit disclaimer (D12 on the legacy engine).
 - The Sharpe rule from §4.
-- **A failed model replays from the 1st every night.** A model that fails partway never checkpoints, so each night it replays the whole month from the 1st. That is free only while the failure happens before anything is generated.
+- **A failed model replays from the 1st every night.** Since #582 a model checkpoints each session that clears H6, so only a model with no checkpoint this month replays the whole month from the 1st each night (corrected 2026-10-14; this said it "never checkpoints"). That replay is free only while the failure happens before anything is generated.
 
 ## 7. Budget and keys
 
