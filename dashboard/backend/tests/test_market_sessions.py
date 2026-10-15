@@ -189,7 +189,10 @@ def _open_stamped_kept(stamps, minutes=60):
 def test_open_stamped_hourly_early_close_is_three_bars():
     """2026-11-27 closes at 13:00 ET. Alpaca serves the late session as bars
     stamped 13:00, 14:00 and 15:00, and a fixed 16:00 close kept them: three
-    decisions priced off thin after-hours prints."""
+    decisions taken after the session had ended. On SIP the 13:00 bar opens
+    with the closing auction, as the 16:00 bar does on a full day; the 14:00
+    and 15:00 bars are late-session prints (NYSE Arca and others trade to
+    17:00 on an early close)."""
     day = pd.date_range("2026-11-27 04:00", "2026-11-27 19:00", freq="h",
                         tz="US/Eastern")
     assert _open_stamped_kept(day) == ["10:00", "11:00", "12:00"]

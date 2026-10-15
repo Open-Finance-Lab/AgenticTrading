@@ -5,7 +5,15 @@ holidays but not the 13:00 early closes, so that day would have had seven
 chart nodes and three model decisions on late-session bars. Sources: the NYSE
 Group releases "2025, 2026 and 2027 Holiday and Early Closings Calendar"
 (2024-11-08) and "2026, 2027 and 2028 ..." (2025-12-23), and nyse.com
-"Holidays & Trading Hours".
+"Holidays & Trading Hours" (https://www.nyse.com/trade/hours-calendars).
+
+``XNYS_EARLY_CLOSES`` widens the pin to 2004-2035. It was generated once,
+offline, from exchange_calendars 4.13.2 (``get_calendar("XNYS").closes``: every
+session closing before 16:00, all of them at 13:00), the maintained calendar
+library zipline's descendants use; it is not a dependency. For 2004-2025 it is
+sessions that already happened; for 2026-2035 it is a second, independent
+implementation of the same rules, so it catches a slip in ours rather than a
+change in NYSE's policy. That only NYSE's next release can show.
 """
 
 from datetime import date, time
@@ -32,6 +40,49 @@ PUBLISHED_EARLY_CLOSES = {
 def test_early_closes_match_the_nyse_published_calendar(year):
     assert sorted(d.isoformat() for d in nyse_early_closes(year)) == (
         PUBLISHED_EARLY_CLOSES[year]
+    )
+
+
+XNYS_EARLY_CLOSES = {
+    2004: ["11-26"],
+    2005: ["11-25"],
+    2006: ["07-03", "11-24"],
+    2007: ["07-03", "11-23", "12-24"],
+    2008: ["07-03", "11-28", "12-24"],
+    2009: ["11-27", "12-24"],
+    2010: ["11-26"],
+    2011: ["11-25"],
+    2012: ["07-03", "11-23", "12-24"],
+    2013: ["07-03", "11-29", "12-24"],
+    2014: ["07-03", "11-28", "12-24"],
+    2015: ["11-27", "12-24"],
+    2016: ["11-25"],
+    2017: ["07-03", "11-24"],
+    2018: ["07-03", "11-23", "12-24"],
+    2019: ["07-03", "11-29", "12-24"],
+    2020: ["11-27", "12-24"],
+    2021: ["11-26"],
+    2022: ["11-25"],
+    2023: ["07-03", "11-24"],
+    2024: ["07-03", "11-29", "12-24"],
+    2025: ["07-03", "11-28", "12-24"],
+    2026: ["11-27", "12-24"],
+    2027: ["11-26"],
+    2028: ["07-03", "11-24"],
+    2029: ["07-03", "11-23", "12-24"],
+    2030: ["07-03", "11-29", "12-24"],
+    2031: ["07-03", "11-28", "12-24"],
+    2032: ["11-26"],
+    2033: ["11-25"],
+    2034: ["07-03", "11-24"],
+    2035: ["07-03", "11-23", "12-24"],
+}
+
+
+@pytest.mark.parametrize("year", sorted(XNYS_EARLY_CLOSES))
+def test_early_closes_match_exchange_calendars_xnys(year):
+    assert sorted(d.strftime("%m-%d") for d in nyse_early_closes(year)) == (
+        XNYS_EARLY_CLOSES[year]
     )
 
 

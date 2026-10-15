@@ -100,8 +100,12 @@ def nyse_early_closes(year: int) -> FrozenSet[date]:
 
     A candidate that is not a trading day is dropped, so this set can never
     contradict ``nyse_holidays``. The rules reproduce NYSE's published 2025-2028
-    calendars; an unscheduled closure is not predictable by rule, and the Live
-    board's session-gap check stays the backstop for one.
+    calendars and every year 2004-2035 of exchange_calendars' XNYS calendar
+    (the test module pins both). Earlier years followed other rules: a Thursday
+    July 4 put the half day on Friday July 5 (1996, 2002), and 1997-12-26,
+    1999-12-31 and 2003-12-26 were one-off half days. An unscheduled closure is
+    not predictable by rule, and the Live board's session-gap check stays the
+    backstop for one.
     """
     candidates = {_nth_weekday(year, 11, 3, 4) + timedelta(days=1)}
     christmas_eve = date(year, 12, 24)
