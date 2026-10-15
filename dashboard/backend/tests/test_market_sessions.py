@@ -8,13 +8,19 @@ copy of the bounds appears beside it.
 
 import ast
 import functools
+from datetime import date, datetime, timedelta
 from datetime import time as clock_time
 from pathlib import Path
 
 import pandas as pd
 import pytest
+import pytz
 
-from dashboard.backend.infrastructure.market_data import profiles, sessions
+from dashboard.backend.infrastructure.market_data import (
+    profiles,
+    sessions,
+    us_market_calendar,
+)
 
 BACKEND = Path(__file__).resolve().parents[1]
 
@@ -210,6 +216,65 @@ def test_open_stamped_five_minute_bars_stop_at_the_early_close():
     bars = pd.date_range("2026-12-24 12:45", "2026-12-24 13:15", freq="5min",
                          tz="US/Eastern")
     assert _open_stamped_kept(bars, minutes=5) == ["12:45", "12:50", "12:55"]
+
+
+def _trading_days(first_year, last_year):
+    day = date(first_year, 1, 1)
+    while day.year <= last_year:
+        if us_market_calendar.is_trading_day(day):
+            yield day
+        day += timedelta(days=1)
+
+
+@pytest.mark.parametrize(
+    ("minutes", "sweeps"),
+    [
+        (60, [(clock_time(4, 0), clock_time(20, 0))]),
+        (5, [(clock_time(9, 0), clock_time(10, 0)),
+             (clock_time(12, 30), clock_time(16, 30))]),
+        (1, [(clock_time(9, 25), clock_time(9, 35)),
+             (clock_time(12, 50), clock_time(13, 10)),
+             (clock_time(15, 50), clock_time(16, 10))]),
+    ],
+)
+def test_the_open_stamped_rule_matches_a_naive_oracle_every_day(minutes, sweeps):
+    """exchange_calendars tests ``trading_index`` against a deliberately naive
+    loop (``TestTradingIndex``); this does the same for the open-stamped rule,
+    on every trading day 2025-2028 and every span the Alpaca loader stamps.
+
+    A bar is in session iff it opens at or after 09:30 and closes at or before
+    that day's close: a left-closed, whole-bar index that never emits a
+    partial last bar (``closed="left"``, ``force_close=False`` there). The
+    hourly shapes are pinned too, because pandas_market_calendars #138 was a
+    short session silently losing its bars, not a long one keeping extra."""
+    zone = pytz.timezone("US/Eastern")
+    span = timedelta(minutes=minutes)
+    early_closes = 0
+    for day in _trading_days(2025, 2028):
+        close = sessions.session_close_time(day, "US")
+        early_closes += close == sessions.EARLY_CLOSE_TIME
+        kept = []
+        for start, end in sweeps:
+            stamp = datetime.combine(day, start)
+            while stamp.time() < end:
+                bar_close = stamp + span
+                expected = (
+                    stamp.time() >= clock_time(9, 30)
+                    and bar_close.date() == day
+                    and bar_close.time() <= close
+                )
+                actual = sessions.is_in_session(
+                    zone.localize(stamp), market="US", timezone="US/Eastern",
+                    open_stamped_minutes=minutes,
+                )
+                assert actual == expected, (stamp, minutes)
+                if actual:
+                    kept.append(stamp.hour)
+                stamp = bar_close
+        if minutes == 60:
+            last = 12 if close == sessions.EARLY_CLOSE_TIME else 15
+            assert kept == list(range(10, last + 1)), day
+    assert early_closes == 8
 
 
 def test_the_early_close_is_read_on_the_market_local_date():
