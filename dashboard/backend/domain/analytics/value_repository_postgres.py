@@ -107,12 +107,12 @@ from .lifecycle import (
 )
 
 
-
 def _postgres_table_exists(cur: Any, table: str) -> bool:
     """Locale-proof: ``to_regclass`` answers NULL for a missing relation, so no
     error message (whose text follows ``lc_messages``) is ever parsed."""
     cur.execute("SELECT to_regclass(%s) IS NOT NULL AS present", (table,))
     return bool(_row_value(cur.fetchone(), "present"))
+
 
 class PostgresValueAnalyticsStore:
     """PostgreSQL value projection storage.
