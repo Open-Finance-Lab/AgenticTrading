@@ -16,22 +16,43 @@ from typing import Any, Literal, Mapping, Sequence
 
 from .repository_common import positive_limit, positive_user_id, utc_iso
 from .value_repository import (
+    _ACTIVATIONS_SQL,
+    _ACTIVE_DATES_SQL,
     _ACTIVE_RUN_STATUSES,
     _ACTIVITY_EVENT_NAMES,
+    _ATTENTION_SQL,
+    _COUNT_ACTIVATED_SQL,
+    _COUNT_SEGMENTS_SQL,
+    _COUNT_STATES_SQL,
+    _COUNT_TRANSITIONS_SQL,
     _DAILY_FACT_COLUMNS,
     _DAILY_FACT_UPDATES,
     _EVENTS_FOR_DAY_SQL,
+    _GROUP_REPEAT_SQL,
+    _GROUP_TOTALS_SQL,
+    _INTERNAL_EXCLUSION_SQL,
     _RECOMPUTE_EVENTS_SQL,
     _RECOMPUTE_FACTS_SQL,
     _TERMINAL_RUN_STATUSES,
     _TRANSITION_COLUMNS,
     _TRANSITION_UPDATES,
+    _TRANSITIONS_FOR_DATE_SQL,
+    _USER_TRANSITIONS_SQL,
     _RECENT_FACTS_SQL,
     _activity_update_values,
+    _attention_candidate,
     _day_bounds_iso,
     _events_totals_from_row,
     _fact_from_row,
+    _fact_state_count,
     _fact_values,
+    _group_totals,
+    _id_chunks,
+    _segment_day_count,
+    _transition_count,
+    _transition_row,
+    _validate_date_window,
+    _validate_day,
     _recompute_days,
     _transition_values,
     _activity_from_row,
@@ -44,10 +65,15 @@ from .value_repository import (
     CommercialValueFact,
     CurrentOperationalFacts,
     ActivityUpdate,
+    AttentionCandidate,
     DayEventTotals,
+    FactStateCount,
+    GroupFactTotals,
     LifecycleTransitionRow,
     ProjectionJob,
     RecentFactTotals,
+    SegmentDayCount,
+    TransitionCount,
     UserActivity,
     UserDailyFact,
     UserLifecycleDailySnapshot,
@@ -606,6 +632,139 @@ class PostgresValueAnalyticsStore:
             int(_row_value(row, "user_id")): _recent_totals_from_row(row)
             for row in rows
         }
+
+    # -- Fact-table reads (design §6.10). One statement each, never per user. --
+
+    def count_states_for_date(self, day: date) -> list[FactStateCount]:
+        """See the SQLite twin."""
+        params = (_validate_day(day),)
+        with self._analytics_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(_COUNT_STATES_SQL.format(p="%s"), params)
+                rows = cur.fetchall()
+        return [_fact_state_count(row) for row in rows]
+
+    def count_segments_by_date(
+        self, *, start: date, end: date
+    ) -> list[SegmentDayCount]:
+        """See the SQLite twin."""
+        params = _validate_date_window(start, end)
+        with self._analytics_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(_COUNT_SEGMENTS_SQL.format(p="%s"), params)
+                rows = cur.fetchall()
+        return [_segment_day_count(row) for row in rows]
+
+    def count_transitions(self, *, start: date, end: date) -> list[TransitionCount]:
+        """See the SQLite twin."""
+        params = _validate_date_window(start, end)
+        with self._analytics_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(_COUNT_TRANSITIONS_SQL.format(p="%s"), params)
+                rows = cur.fetchall()
+        return [_transition_count(row) for row in rows]
+
+    def list_attention_candidates(
+        self, *, day: date, window_start: date, limit: int
+    ) -> list[AttentionCandidate]:
+        """See the SQLite twin."""
+        day_iso = _validate_day(day)
+        if not isinstance(window_start, date) or isinstance(window_start, datetime):
+            raise ValueError("window_start must be a date")
+        if window_start > day:
+            raise ValueError("window_start must not be after day")
+        params = (window_start.isoformat(), day_iso, day_iso, positive_limit(limit))
+        with self._analytics_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(_ATTENTION_SQL.format(p="%s"), params)
+                rows = cur.fetchall()
+        return [_attention_candidate(row) for row in rows]
+
+    def sum_facts_by_user_group(
+        self, *, start: date, end: date
+    ) -> dict[str, GroupFactTotals]:
+        """See the SQLite twin."""
+        params = _validate_date_window(start, end)
+        with self._analytics_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(_GROUP_TOTALS_SQL.format(p="%s"), params)
+                totals = cur.fetchall()
+                cur.execute(_GROUP_REPEAT_SQL.format(p="%s"), params)
+                repeats = cur.fetchall()
+        return _group_totals(totals, repeats)
+
+    def list_active_dates(
+        self, user_ids: Sequence[int], *, start: date, end: date
+    ) -> dict[int, list[date]]:
+        """See the SQLite twin."""
+        chunks = _id_chunks(user_ids)
+        window = _validate_date_window(start, end)
+        result: dict[int, list[date]] = {
+            user_id: [] for chunk in chunks for user_id in chunk
+        }
+        with self._analytics_connection() as conn:
+            with conn.cursor() as cur:
+                for chunk in chunks:
+                    cur.execute(
+                        _ACTIVE_DATES_SQL.format(
+                            p="%s", user_clause=" AND user_id = ANY(%s)"
+                        ),
+                        [*window, chunk],
+                    )
+                    for row in cur.fetchall():
+                        result[int(_row_value(row, "user_id"))].append(
+                            date.fromisoformat(str(_row_value(row, "snapshot_date")))
+                        )
+        return result
+
+    def list_activations(
+        self, *, start: datetime, end: datetime, include_internal: bool
+    ) -> dict[int, datetime]:
+        """See the SQLite twin."""
+        window_start, window_end = _validate_window(start, end)
+        sql = _ACTIVATIONS_SQL.format(
+            p="%s", internal="" if include_internal else _INTERNAL_EXCLUSION_SQL
+        )
+        with self._analytics_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql, (utc_iso(window_start), utc_iso(window_end)))
+                rows = cur.fetchall()
+        return {
+            int(_row_value(row, "user_id")): _timestamp(_row_value(row, "activated_at"))
+            for row in rows
+        }
+
+    def count_activated_users(self, *, include_internal: bool) -> int:
+        """See the SQLite twin."""
+        sql = _COUNT_ACTIVATED_SQL.format(
+            internal="" if include_internal else _INTERNAL_EXCLUSION_SQL
+        )
+        with self._analytics_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql)
+                row = cur.fetchone()
+        return int(_row_value(row, "activated", 0) or 0)
+
+    def list_user_transitions(
+        self, user_id: int, *, start: date, end: date
+    ) -> list[LifecycleTransitionRow]:
+        """See the SQLite twin."""
+        subject = positive_user_id(user_id)
+        window = _validate_date_window(start, end)
+        with self._analytics_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(_USER_TRANSITIONS_SQL.format(p="%s"), (subject, *window))
+                rows = cur.fetchall()
+        return [_transition_row(row) for row in rows]
+
+    def list_transitions_for_date(self, day: date) -> list[LifecycleTransitionRow]:
+        """See the SQLite twin."""
+        params = (_validate_day(day),)
+        with self._analytics_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(_TRANSITIONS_FOR_DATE_SQL.format(p="%s"), params)
+                rows = cur.fetchall()
+        return [_transition_row(row) for row in rows]
 
     def aggregate_events_for_day(self, day: date) -> dict[int, DayEventTotals]:
         """See the SQLite twin."""

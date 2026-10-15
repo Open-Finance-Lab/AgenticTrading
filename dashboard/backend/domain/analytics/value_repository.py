@@ -605,6 +605,61 @@ class CurrentOperationalFacts(BaseModel):
     run_beyond_safe_deadline: bool = False
 
 
+class FactStateCount(BaseModel):
+    """One (operational state, reason, segment) cell of one day's population."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    operational_state: OperationalState
+    # Nullable like the column: history-copy rows carry 'healthy' with no code.
+    operational_reason_code: str | None = None
+    lifecycle_segment: LifecycleSegment
+    users: int = Field(ge=0)
+    partial_rows: int = Field(default=0, ge=0)
+
+
+class SegmentDayCount(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    snapshot_date: date
+    lifecycle_segment: LifecycleSegment
+    users: int = Field(ge=0)
+    partial_rows: int = Field(default=0, ge=0)
+
+
+class TransitionCount(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    from_segment: LifecycleSegment
+    to_segment: LifecycleSegment
+    users: int = Field(ge=0)
+    partial_rows: int = Field(default=0, ge=0)
+
+
+class AttentionCandidate(BaseModel):
+    """A blocked or needs-attention user with their trailing-window run counts."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    user_id: int = Field(gt=0)
+    display_name: str
+    email: str
+    created_at: datetime
+    operational_state: OperationalState
+    operational_reason_code: str | None = None
+    recent_runs: int = Field(default=0, ge=0)
+    recent_failures: int = Field(default=0, ge=0)
+
+
+class GroupFactTotals(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    total_runs: int = Field(default=0, ge=0)
+    operator_cost_micro: int = Field(default=0, ge=0)
+    successful_run_users: int = Field(default=0, ge=0)
+    repeat_users: int = Field(default=0, ge=0)
+
+
 class ProjectionJob(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -731,6 +786,241 @@ def _projection_job_name(value: object) -> str:
     ):
         raise ValueError("job_name must be a trimmed non-empty string")
     return value
+
+
+# -- Set-based fact-table reads (design §6.10). ``{p}`` is the placeholder,
+# ``{internal}`` the optional internal-account exclusion, ``{user_clause}`` the
+# per-twin id clause. Both twins render these; only the placeholder and the id
+# clause differ. ``active`` and ``excluded`` are INTEGER on SQLite and BOOLEAN on
+# Postgres, so the SQL says ``WHERE active`` / ``WHERE excluded`` and never
+# ``= 1``.
+
+_INTERNAL_EXCLUSION_SQL = """
+      AND u.role <> 'admin'
+      AND u.id NOT IN (
+          SELECT user_id FROM analytics_subject_settings WHERE excluded
+      )
+"""
+
+_COUNT_STATES_SQL = """
+    SELECT operational_state, operational_reason_code, lifecycle_segment,
+           COUNT(*) AS users,
+           SUM(CASE WHEN data_quality = 'partial' THEN 1 ELSE 0 END) AS partial_rows
+    FROM user_daily_facts
+    WHERE snapshot_date = {p}
+    GROUP BY operational_state, operational_reason_code, lifecycle_segment
+    ORDER BY operational_state, operational_reason_code, lifecycle_segment
+"""
+
+_COUNT_SEGMENTS_SQL = """
+    SELECT snapshot_date, lifecycle_segment,
+           COUNT(*) AS users,
+           SUM(CASE WHEN data_quality = 'partial' THEN 1 ELSE 0 END) AS partial_rows
+    FROM user_daily_facts
+    WHERE snapshot_date >= {p} AND snapshot_date < {p}
+    GROUP BY snapshot_date, lifecycle_segment
+    ORDER BY snapshot_date, lifecycle_segment
+"""
+
+_COUNT_TRANSITIONS_SQL = """
+    SELECT from_segment, to_segment,
+           COUNT(*) AS users,
+           SUM(CASE WHEN data_quality = 'partial' THEN 1 ELSE 0 END) AS partial_rows
+    FROM lifecycle_transitions
+    WHERE snapshot_date >= {p} AND snapshot_date < {p}
+    GROUP BY from_segment, to_segment
+    ORDER BY from_segment, to_segment
+"""
+
+_ATTENTION_SQL = """
+    SELECT f.user_id, f.operational_state, f.operational_reason_code,
+           u.display_name, u.email, u.created_at,
+           COALESCE(SUM(w.runs_requested), 0) AS recent_runs,
+           COALESCE(SUM(w.runs_failed), 0) AS recent_failures
+    FROM user_daily_facts AS f
+    JOIN users AS u ON u.id = f.user_id
+    LEFT JOIN user_daily_facts AS w
+      ON w.user_id = f.user_id
+     AND w.snapshot_date >= {p} AND w.snapshot_date <= {p}
+    WHERE f.snapshot_date = {p}
+      AND f.operational_state IN ('blocked', 'needs_attention')
+    GROUP BY f.user_id, f.operational_state, f.operational_reason_code,
+             u.display_name, u.email, u.created_at
+    ORDER BY recent_failures DESC, f.user_id DESC
+    LIMIT {p}
+"""
+
+_GROUP_TOTALS_SQL = """
+    SELECT user_group,
+           COALESCE(SUM(runs_requested), 0) AS total_runs,
+           COALESCE(SUM(operator_cost_micro), 0) AS operator_cost_micro,
+           COUNT(DISTINCT CASE WHEN runs_completed > 0 THEN user_id END)
+               AS successful_run_users
+    FROM user_daily_facts
+    WHERE snapshot_date >= {p} AND snapshot_date < {p}
+    GROUP BY user_group
+"""
+
+_GROUP_REPEAT_SQL = """
+    SELECT user_group, COUNT(*) AS repeat_users
+    FROM (
+        SELECT user_group, user_id
+        FROM user_daily_facts
+        WHERE snapshot_date >= {p} AND snapshot_date < {p}
+          AND runs_completed > 0
+        GROUP BY user_group, user_id
+        HAVING COUNT(*) >= 2
+    ) AS repeaters
+    GROUP BY user_group
+"""
+
+_ACTIVE_DATES_SQL = """
+    SELECT user_id, snapshot_date
+    FROM user_daily_facts
+    WHERE snapshot_date >= {p} AND snapshot_date < {p}
+      AND active{user_clause}
+    ORDER BY user_id, snapshot_date
+"""
+
+_ACTIVATIONS_SQL = """
+    SELECT a.user_id, a.activated_at
+    FROM user_activity AS a
+    JOIN users AS u ON u.id = a.user_id
+    WHERE a.activated_at IS NOT NULL
+      AND a.activated_at >= {p} AND a.activated_at < {p}
+      {internal}
+    ORDER BY a.user_id
+"""
+
+_COUNT_ACTIVATED_SQL = """
+    SELECT COUNT(*) AS activated
+    FROM user_activity AS a
+    JOIN users AS u ON u.id = a.user_id
+    WHERE a.activated_at IS NOT NULL
+      {internal}
+"""
+
+_USER_TRANSITIONS_SQL = """
+    SELECT * FROM lifecycle_transitions
+    WHERE user_id = {p}
+      AND snapshot_date >= {p} AND snapshot_date < {p}
+    ORDER BY snapshot_date, transition_id
+"""
+
+_TRANSITIONS_FOR_DATE_SQL = """
+    SELECT * FROM lifecycle_transitions
+    WHERE snapshot_date = {p}
+    ORDER BY user_id
+"""
+
+
+def _transition_row(row: Any) -> LifecycleTransitionRow:
+    """Shared by both twins."""
+    return LifecycleTransitionRow(
+        user_id=int(_row_value(row, "user_id")),
+        snapshot_date=date.fromisoformat(str(_row_value(row, "snapshot_date"))),
+        from_segment=_row_value(row, "from_segment"),
+        to_segment=_row_value(row, "to_segment"),
+        inactive_days=int(_row_value(row, "inactive_days", 0)),
+        data_quality=_row_value(row, "data_quality"),
+        created_at=_timestamp(_row_value(row, "created_at")),
+    )
+
+
+def _attention_candidate(row: Any) -> AttentionCandidate:
+    """Shared by both twins."""
+    return AttentionCandidate(
+        user_id=int(_row_value(row, "user_id")),
+        display_name=str(_row_value(row, "display_name") or ""),
+        email=str(_row_value(row, "email") or ""),
+        created_at=_timestamp(_row_value(row, "created_at")),
+        operational_state=_row_value(row, "operational_state"),
+        operational_reason_code=_row_value(row, "operational_reason_code"),
+        recent_runs=int(_row_value(row, "recent_runs", 0) or 0),
+        recent_failures=int(_row_value(row, "recent_failures", 0) or 0),
+    )
+
+
+def _group_totals(
+    totals: Sequence[Any], repeats: Sequence[Any]
+) -> dict[str, GroupFactTotals]:
+    """Shared by both twins."""
+    repeat_by_group = {
+        str(_row_value(row, "user_group")): int(_row_value(row, "repeat_users", 0) or 0)
+        for row in repeats
+    }
+    return {
+        str(_row_value(row, "user_group")): GroupFactTotals(
+            total_runs=int(_row_value(row, "total_runs", 0) or 0),
+            operator_cost_micro=max(int(_row_value(row, "operator_cost_micro", 0) or 0), 0),
+            successful_run_users=int(_row_value(row, "successful_run_users", 0) or 0),
+            repeat_users=repeat_by_group.get(str(_row_value(row, "user_group")), 0),
+        )
+        for row in totals
+    }
+
+
+def _fact_state_count(row: Any) -> FactStateCount:
+    """Shared by both twins."""
+    return FactStateCount(
+        operational_state=_row_value(row, "operational_state"),
+        operational_reason_code=_row_value(row, "operational_reason_code"),
+        lifecycle_segment=_row_value(row, "lifecycle_segment"),
+        users=int(_row_value(row, "users", 0)),
+        partial_rows=int(_row_value(row, "partial_rows", 0) or 0),
+    )
+
+
+def _segment_day_count(row: Any) -> SegmentDayCount:
+    """Shared by both twins."""
+    return SegmentDayCount(
+        snapshot_date=date.fromisoformat(str(_row_value(row, "snapshot_date"))),
+        lifecycle_segment=_row_value(row, "lifecycle_segment"),
+        users=int(_row_value(row, "users", 0)),
+        partial_rows=int(_row_value(row, "partial_rows", 0) or 0),
+    )
+
+
+def _transition_count(row: Any) -> TransitionCount:
+    """Shared by both twins."""
+    return TransitionCount(
+        from_segment=_row_value(row, "from_segment"),
+        to_segment=_row_value(row, "to_segment"),
+        users=int(_row_value(row, "users", 0)),
+        partial_rows=int(_row_value(row, "partial_rows", 0) or 0),
+    )
+
+
+def _validate_day(day: date) -> str:
+    if not isinstance(day, date) or isinstance(day, datetime):
+        raise ValueError("day must be a date")
+    return day.isoformat()
+
+
+def _validate_date_window(start: date, end: date) -> tuple[str, str]:
+    """Half-open ``[start, end)`` over dates, as ISO strings."""
+    if not isinstance(start, date) or isinstance(start, datetime):
+        raise ValueError("start must be a date")
+    if not isinstance(end, date) or isinstance(end, datetime):
+        raise ValueError("end must be a date")
+    if end <= start:
+        raise ValueError("end must be later than start")
+    return start.isoformat(), end.isoformat()
+
+
+def _id_chunks(user_ids: Sequence[int]) -> list[list[int]]:
+    """Dedupe ``user_ids`` and split into ``MAX_USER_BATCH``-sized chunks.
+
+    ``_ids`` refuses more than one batch; a whole-population caller (the
+    retention cohorts) needs a read that spans several.
+    """
+    if not isinstance(user_ids, (list, tuple)):
+        raise ValueError("user_ids must be a list or tuple")
+    values = list(dict.fromkeys(positive_user_id(item) for item in user_ids))
+    return [
+        values[index : index + MAX_USER_BATCH]
+        for index in range(0, len(values), MAX_USER_BATCH)
+    ]
 
 
 class ValueAnalyticsStore:
@@ -1293,6 +1583,116 @@ class ValueAnalyticsStore:
             int(_row_value(row, "user_id")): _recent_totals_from_row(row)
             for row in rows
         }
+
+    # -- Fact-table reads (design §6.10). One statement each, never per user. --
+
+    def count_states_for_date(self, day: date) -> list[FactStateCount]:
+        params = (_validate_day(day),)
+        with self._analytics_connection() as conn:
+            rows = conn.execute(_COUNT_STATES_SQL.format(p="?"), params).fetchall()
+        return [_fact_state_count(row) for row in rows]
+
+    def count_segments_by_date(
+        self, *, start: date, end: date
+    ) -> list[SegmentDayCount]:
+        params = _validate_date_window(start, end)
+        with self._analytics_connection() as conn:
+            rows = conn.execute(_COUNT_SEGMENTS_SQL.format(p="?"), params).fetchall()
+        return [_segment_day_count(row) for row in rows]
+
+    def count_transitions(self, *, start: date, end: date) -> list[TransitionCount]:
+        params = _validate_date_window(start, end)
+        with self._analytics_connection() as conn:
+            rows = conn.execute(
+                _COUNT_TRANSITIONS_SQL.format(p="?"), params
+            ).fetchall()
+        return [_transition_count(row) for row in rows]
+
+    def list_attention_candidates(
+        self, *, day: date, window_start: date, limit: int
+    ) -> list[AttentionCandidate]:
+        day_iso = _validate_day(day)
+        if not isinstance(window_start, date) or isinstance(window_start, datetime):
+            raise ValueError("window_start must be a date")
+        if window_start > day:
+            raise ValueError("window_start must not be after day")
+        params = (window_start.isoformat(), day_iso, day_iso, positive_limit(limit))
+        with self._analytics_connection() as conn:
+            rows = conn.execute(_ATTENTION_SQL.format(p="?"), params).fetchall()
+        return [_attention_candidate(row) for row in rows]
+
+    def sum_facts_by_user_group(
+        self, *, start: date, end: date
+    ) -> dict[str, GroupFactTotals]:
+        params = _validate_date_window(start, end)
+        with self._analytics_connection() as conn:
+            totals = conn.execute(_GROUP_TOTALS_SQL.format(p="?"), params).fetchall()
+            repeats = conn.execute(_GROUP_REPEAT_SQL.format(p="?"), params).fetchall()
+        return _group_totals(totals, repeats)
+
+    def list_active_dates(
+        self, user_ids: Sequence[int], *, start: date, end: date
+    ) -> dict[int, list[date]]:
+        chunks = _id_chunks(user_ids)
+        window = _validate_date_window(start, end)
+        result: dict[int, list[date]] = {
+            user_id: [] for chunk in chunks for user_id in chunk
+        }
+        with self._analytics_connection() as conn:
+            for chunk in chunks:
+                user_clause = f" AND user_id IN ({', '.join('?' for _ in chunk)})"
+                rows = conn.execute(
+                    _ACTIVE_DATES_SQL.format(p="?", user_clause=user_clause),
+                    [*window, *chunk],
+                ).fetchall()
+                for row in rows:
+                    result[int(_row_value(row, "user_id"))].append(
+                        date.fromisoformat(str(_row_value(row, "snapshot_date")))
+                    )
+        return result
+
+    def list_activations(
+        self, *, start: datetime, end: datetime, include_internal: bool
+    ) -> dict[int, datetime]:
+        window_start, window_end = _validate_window(start, end)
+        sql = _ACTIVATIONS_SQL.format(
+            p="?", internal="" if include_internal else _INTERNAL_EXCLUSION_SQL
+        )
+        with self._analytics_connection() as conn:
+            rows = conn.execute(
+                sql, (utc_iso(window_start), utc_iso(window_end))
+            ).fetchall()
+        return {
+            int(_row_value(row, "user_id")): _timestamp(_row_value(row, "activated_at"))
+            for row in rows
+        }
+
+    def count_activated_users(self, *, include_internal: bool) -> int:
+        sql = _COUNT_ACTIVATED_SQL.format(
+            internal="" if include_internal else _INTERNAL_EXCLUSION_SQL
+        )
+        with self._analytics_connection() as conn:
+            row = conn.execute(sql).fetchone()
+        return int(_row_value(row, "activated", 0) or 0)
+
+    def list_user_transitions(
+        self, user_id: int, *, start: date, end: date
+    ) -> list[LifecycleTransitionRow]:
+        subject = positive_user_id(user_id)
+        window = _validate_date_window(start, end)
+        with self._analytics_connection() as conn:
+            rows = conn.execute(
+                _USER_TRANSITIONS_SQL.format(p="?"), (subject, *window)
+            ).fetchall()
+        return [_transition_row(row) for row in rows]
+
+    def list_transitions_for_date(self, day: date) -> list[LifecycleTransitionRow]:
+        params = (_validate_day(day),)
+        with self._analytics_connection() as conn:
+            rows = conn.execute(
+                _TRANSITIONS_FOR_DATE_SQL.format(p="?"), params
+            ).fetchall()
+        return [_transition_row(row) for row in rows]
 
     def list_commercial_values(
         self,
@@ -1893,12 +2293,17 @@ def build_value_analytics_store(
 
 
 __all__ = [
+    "AttentionCandidate",
     "CommercialValueFact",
     "CurrentOperationalFacts",
     "ProjectionJob",
     "ActivityUpdate",
     "DayEventTotals",
+    "FactStateCount",
+    "GroupFactTotals",
     "RecentFactTotals",
+    "SegmentDayCount",
+    "TransitionCount",
     "LifecycleTransitionRow",
     "UserActivity",
     "UserDailyFact",

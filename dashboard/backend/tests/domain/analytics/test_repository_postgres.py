@@ -286,6 +286,42 @@ def test_postgres_user_value_projection_round_trip(
 
 
 @pg_only
+def test_postgres_fact_reads_follow_the_contract(postgres_contract_store):
+    from dashboard.backend.tests.domain.analytics.test_fact_reads import (
+        assert_fact_read_contract,
+        seed_population,
+    )
+
+    store, admin_id, _user_id = postgres_contract_store
+    value_store = PostgresValueAnalyticsStore(
+        analytics_base=store,
+        credits_base=object(),
+        provider_base=object(),
+        agent_base=object(),
+        run_base=object(),
+    )
+    next_id = iter(range(100, 200))
+
+    def create_user(key: str, email: str, group: str) -> int:
+        # The fixture's users table is a stub with no default id and no
+        # user_group column, so insert explicit ids. The fact reads take the
+        # group from the fact row, never from users.
+        user_id = next(next_id)
+        with store._get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "INSERT INTO users (id, email, display_name, password_hash, "
+                    "role, created_at) VALUES (%s, %s, %s, 'x', 'user', "
+                    "'2026-08-01T00:00:00+00:00')",
+                    (user_id, email, key.title()),
+                )
+        return user_id
+
+    ids = seed_population(value_store, create_user, admin_id=admin_id)
+    assert_fact_read_contract(value_store, ids)
+
+
+@pg_only
 def test_postgres_daily_facts_methods_round_trip(postgres_contract_store, tmp_path):
     # Every method the daily-facts job calls on the Postgres twin. These
     # raised NameError in prod from 2026-09-23 (helpers used but never
