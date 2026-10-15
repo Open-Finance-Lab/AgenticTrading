@@ -220,6 +220,29 @@ class ContractUsers:
         return self.user if user_id == self.user["id"] else None
 
 
+class _HealthyOperationalBase:
+    """Credits + provider stand-in: a positive balance and one enabled
+    platform lane, so the profile's live operational axis reads healthy
+    without the process-wide credits/provider singletons."""
+
+    def get_balance_projections(self, user_ids):
+        return {user_id: {"total_available_micro": 1_000_000} for user_id in user_ids}
+
+    def get_account_billing_state(self, user_id):
+        return {"account_status": "active", "restriction_reason": None}
+
+    def list_user_credentials(self, user_id):
+        return []
+
+    def list_all_providers(self):
+        return [{"provider_id": "openrouter", "status": "enabled", "platform_enabled": True}]
+
+
+class _NoAgents:
+    def list_agents(self, *, owner_user_id):
+        return []
+
+
 def assert_pr2_query_contract(store, user_id):
     events = AnalyticsService(store)
     common = {
@@ -284,9 +307,18 @@ def assert_pr2_query_contract(store, user_id):
     )
     state_store = AnalyticsStateStore(store)
     recalculate_user_snapshot(user_id, now=NOW, store=state_store)
+    operational_base = _HealthyOperationalBase()
+    value_store = build_value_analytics_store(
+        analytics_base=store,
+        credits_base=operational_base,
+        provider_base=operational_base,
+        agent_base=_NoAgents(),
+        run_base=object(),
+    )
     service = AnalyticsQueryService(
         store=store,
         user_store=ContractUsers(user_id),
+        value_store=value_store,
     )
 
     overview = service.get_overview(
@@ -297,19 +329,11 @@ def assert_pr2_query_contract(store, user_id):
         now=NOW,
     )
 
-    profile = service.get_user_profile(user_id=user_id, now=NOW)
     activity = service.get_user_activity(
         user_id=user_id,
         section="runs",
         limit=10,
         cursor=None,
-    )
-    value_store = build_value_analytics_store(
-        analytics_base=store,
-        credits_base=object(),
-        provider_base=object(),
-        agent_base=object(),
-        run_base=object(),
     )
     value_store.upsert_daily_facts(
         [
@@ -328,12 +352,15 @@ def assert_pr2_query_contract(store, user_id):
                 runs_failed=1,
                 runs_cancelled=0,
                 operator_cost_micro=0,
-                own_spend_micro=0,
+                own_spend_micro=100,
                 data_quality="complete",
                 calculated_at=NOW,
             )
         ]
     )
+    # Run and spend figures come from the facts as of yesterday; tokens and
+    # the footprint from the one timeline page.
+    profile = service.get_user_profile(user_id=user_id, now=NOW)
     attention_overview = service.get_overview(
         filters=AnalyticsMetricFilters(
             start=NOW - timedelta(days=30),
@@ -346,7 +373,9 @@ def assert_pr2_query_contract(store, user_id):
     assert overview.failed_runs == 1
     assert overview.platform_model_cost_usd == 0.25
     assert profile.state.status == "active"
-    assert completed.event_id in profile.state.evidence_event_ids
+    assert profile.state.evidence_event_ids == []
+    assert completed.event_id in [item.event_id for item in profile.recent_footprint]
+    assert profile.run_summary == {"requested": 2, "completed": 1, "failed": 1, "cancelled": 0}
     assert profile.input_tokens == 120
     assert profile.output_tokens == 30
     assert profile.credits_debited_micro == 100

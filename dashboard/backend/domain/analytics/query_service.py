@@ -5,12 +5,22 @@ from __future__ import annotations
 import json
 from collections import Counter, defaultdict
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any, Literal, Sequence
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from .lifecycle import operational_result_from_code
+from .lifecycle import (
+    CommercialTier,
+    LifecycleResult,
+    OperationalResult,
+    OperationalSignals,
+    calculate_lifecycle,
+    calculate_operational_state,
+    operational_result_from_code,
+    resolve_group_badge,
+)
+from .lifecycle_reads import build_lifecycle_inputs
 from .metrics import (
     ACTIVATION_EVENTS,
     AnalyticsMetricFilters,
@@ -31,7 +41,6 @@ from .usage_cost import atl_cost_micro, byok_estimate_micro, byok_rollup_lane
 from .states import (
     AnalyticsStateStore,
     UserAnalyticsSnapshot,
-    calculate_user_state,
 )
 from .value_repository import build_value_analytics_store
 
@@ -252,6 +261,52 @@ class AnalyticsOverview(BaseModel):
     last_updated: datetime
     filters: AnalyticsMetricFilters
     availability: dict[str, PanelAvailability]
+
+
+class RunOutcomeCounts(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    requested: int = Field(default=0, ge=0)
+    completed: int = Field(default=0, ge=0)
+    failed: int = Field(default=0, ge=0)
+    cancelled: int = Field(default=0, ge=0)
+
+
+class UserMetricsShared(BaseModel):
+    """One user's numbers as the user may see them (design §6.13).
+
+    ``get_user_metrics`` builds this for ``audience="user"`` and
+    ``UserMetricsAdmin`` for ``audience="admin"``. Two models rather than one
+    with nullable admin fields: the admin-only fields are *absent* from the
+    user projection, not nulled -- a null still tells the subject the field
+    exists -- and absence must hold on every serialisation path, including
+    ``model_dump_json`` and FastAPI's, which a ``model_dump`` override would
+    not reach. A future ``GET /api/me/usage`` is this call with
+    ``audience="user"``.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    user_id: int = Field(gt=0)
+    facts_as_of: date
+    runs_7d: RunOutcomeCounts
+    runs_30d: RunOutcomeCounts
+    own_spend_micro: int = Field(default=0, ge=0)
+    operator_cost_micro: int = Field(default=0, ge=0)
+    tier: CommercialTier = "unpaid"
+    credit_balance_micro: int = Field(default=0, ge=0)
+    data_quality: Literal["complete", "partial"] = "complete"
+
+
+class UserMetricsAdmin(UserMetricsShared):
+    """The admin projection: the shared numbers plus the admin-only axes."""
+
+    active_days_30d: int = Field(ge=0, le=30)
+    lifecycle: LifecycleResult
+    operational: OperationalResult
+    user_group: str
+    group_badge: str
+    access_log: Sequence[str]
 
 
 def _all_users(user_store: Any) -> list[dict[str, Any]]:
@@ -730,6 +785,17 @@ def _platform_cost_micro(
         atl_cost_micro(event.billing_mode, event.properties)
         for event in current_events
         if event.event_name == "model_usage_recorded"
+    )
+
+
+def _run_outcome_counts(totals: Any) -> RunOutcomeCounts:
+    if totals is None:
+        return RunOutcomeCounts()
+    return RunOutcomeCounts(
+        requested=totals.runs_requested,
+        completed=totals.runs_completed,
+        failed=totals.runs_failed,
+        cancelled=totals.runs_cancelled,
     )
 
 
@@ -1214,6 +1280,41 @@ class AnalyticsQueryService:
             )
             return None
 
+    def get_user_axes(
+        self, user_id: int, *, now: datetime
+    ) -> tuple[LifecycleResult, OperationalResult]:
+        """Live segment and live operational state for exactly one user.
+
+        The segment's inputs are ``user_activity`` plus the trailing 30 fact
+        days through yesterday, evaluated ``as_of=now``; today's runs reach
+        the segment tomorrow (the accepted one-day lag, design §6.3).
+        """
+        subject_id = positive_user_id(user_id)
+        current = _utc(now, "now")
+        user = self.user_store.get_user_admin(subject_id)
+        if user is None:
+            raise LookupError("Analytics user was not found")
+        yesterday = current.date() - timedelta(days=1)
+        activity = self.value_store.get_activity(subject_id)
+        totals = self.value_store.sum_recent_facts(
+            [subject_id], start=yesterday - timedelta(days=29), end=yesterday
+        ).get(subject_id)
+        lifecycle = calculate_lifecycle(
+            build_lifecycle_inputs(
+                subject_id,
+                created_at=_parse_timestamp(user["created_at"]),
+                activity=activity,
+                totals=totals,
+                as_of=current,
+            ),
+            current,
+        )
+        facts = self.value_store.get_operational_facts(subject_id, now=current)
+        operational = calculate_operational_state(
+            OperationalSignals(**facts.model_dump()), current
+        )
+        return lifecycle, operational
+
     def get_user_profile(
         self,
         *,
@@ -1221,7 +1322,17 @@ class AnalyticsQueryService:
         now: datetime | None = None,
         start: datetime | None = None,
         end: datetime | None = None,
+        axes: tuple[LifecycleResult, OperationalResult] | None = None,
     ) -> AnalyticsUserProfile:
+        """One user's profile: live axes, fact-window sums, one timeline page.
+
+        The run, cost and spend figures sum ``user_daily_facts`` over the
+        selected window clipped to yesterday ("as of yesterday", design
+        §6.3). The one raw-event read is the first timeline page (design
+        §6.12), and every field computed from events -- lane mix, provider,
+        client, top page, tokens, the two event milestones -- is bounded by
+        that page, not by the window.
+        """
         subject_id = positive_user_id(user_id)
         current = _utc(now or datetime.now(timezone.utc), "now")
         range_start = (
@@ -1235,33 +1346,37 @@ class AnalyticsQueryService:
         user = self.user_store.get_user_admin(subject_id)
         if user is None:
             raise LookupError("Analytics user was not found")
-        snapshot = self.query_store.states.get_snapshot(subject_id)
-        if snapshot is None:
-            snapshot = calculate_user_state(
-                subject_id,
-                now=current,
-                store=self.query_store.states,
-            )
-        events = self.query_store.rollups.list_events(
-            start=range_start,
-            end=range_end,
-            include_internal=True,
-            user_id=subject_id,
+        lifecycle, operational = axes or self.get_user_axes(subject_id, now=current)
+        yesterday = current.date() - timedelta(days=1)
+        window_start = range_start.date()
+        window_end = min((range_end - timedelta(microseconds=1)).date(), yesterday)
+        totals = (
+            self.value_store.sum_recent_facts(
+                [subject_id], start=window_start, end=window_end
+            ).get(subject_id)
+            if window_end >= window_start
+            else None
         )
-        ordered = sorted(events, key=lambda event: event.occurred_at, reverse=True)
-        meaningful = [event for event in ordered if is_meaningful_event(event)]
-        milestones: dict[str, datetime] = {}
-        for event_name in _ACTIVATION_EVENTS:
+        activity = self.value_store.get_activity(subject_id)
+
+        # The profile's one raw-event read: the first timeline page (design §6.12).
+        rows, _next_cursor = self.query_store.list_activity_rows(
+            user_id=subject_id, section="timeline", limit=100, cursor=None
+        )
+        events = [event for _sequence, event in rows]  # newest first
+        meaningful = [event for event in events if is_meaningful_event(event)]
+        joined_at = _parse_timestamp(user["created_at"])
+        milestones: dict[str, datetime] = {"account_signed_up": joined_at}
+        if activity is not None and activity.activated_at is not None:
+            milestones["backtest_completed"] = activity.activated_at
+        for event_name in ("credential_verified", "agent_created"):
             matches = [
                 event.occurred_at for event in events if event.event_name == event_name
             ]
             if matches:
                 milestones[event_name] = min(matches)
-        lane_counts = Counter(
-            event.billing_mode
-            for event in events
-            if event.event_name == "model_usage_recorded" and event.billing_mode
-        )
+        usage = [event for event in events if event.event_name == "model_usage_recorded"]
+        lane_counts = Counter(event.billing_mode for event in usage if event.billing_mode)
         page_counts = Counter(
             event.page_view
             for event in events
@@ -1270,7 +1385,7 @@ class AnalyticsQueryService:
         provider_event = next(
             (
                 event
-                for event in ordered
+                for event in events
                 if event.provider_id
                 and event.event_name
                 in {"credential_defaulted", "credential_verified", "model_usage_recorded"}
@@ -1280,68 +1395,141 @@ class AnalyticsQueryService:
         client_event = next(
             (
                 event
-                for event in ordered
+                for event in events
                 if event.country_code or event.device_category or event.browser_family
             ),
             None,
         )
-        recent = [
-            AnalyticsFootprintItem(
-                event_id=event.event_id,
-                event_name=event.event_name,
-                occurred_at=event.occurred_at,
-                page_view=event.page_view,
-                provider_id=event.provider_id,
-                model_id=event.model_id,
-                billing_mode=event.billing_mode,
-                outcome=event.outcome,
-                error_category=event.error_category,
-            )
-            for event in meaningful[:20]
-        ]
+        state_status = _legacy_state(operational.state, lifecycle.segment)
+        state_reason = (
+            operational if state_status in _ATTENTION_STATES else lifecycle
+        )
         return AnalyticsUserProfile(
             user_id=subject_id,
             display_name=str(user.get("display_name") or ""),
             email=str(user.get("email") or ""),
-            joined_at=_parse_timestamp(user["created_at"]),
-            last_meaningful_activity=(meaningful[0].occurred_at if meaningful else None),
-            state=_snapshot_summary(snapshot),
+            joined_at=joined_at,
+            last_meaningful_activity=(
+                activity.last_meaningful_activity_at if activity is not None else None
+            ),
+            state=AnalyticsStateSummary(
+                status=state_status,
+                reason_code=state_reason.reason_code,
+                human_readable_reason=state_reason.reason,
+                # The five-state evidence list had one source,
+                # calculate_user_state, and the profile no longer calls it.
+                evidence_event_ids=[],
+                calculated_at=current,
+            ),
             primary_billing_lane=(lane_counts.most_common(1)[0][0] if lane_counts else None),
             default_provider=(provider_event.provider_id if provider_event else None),
             country_code=(client_event.country_code if client_event else None),
             device_category=(client_event.device_category if client_event else None),
             browser_family=(client_event.browser_family if client_event else None),
             activation_milestones=milestones,
-            recent_footprint=recent,
+            recent_footprint=[
+                AnalyticsFootprintItem(
+                    event_id=event.event_id,
+                    event_name=event.event_name,
+                    occurred_at=event.occurred_at,
+                    page_view=event.page_view,
+                    provider_id=event.provider_id,
+                    model_id=event.model_id,
+                    billing_mode=event.billing_mode,
+                    outcome=event.outcome,
+                    error_category=event.error_category,
+                )
+                for event in meaningful[:20]
+            ],
             run_summary={
-                "requested": sum(event.event_name == "backtest_requested" for event in events),
-                "completed": sum(event.event_name == "backtest_completed" for event in events),
-                "failed": sum(event.event_name == "backtest_failed" for event in events),
-                "cancelled": sum(event.event_name == "backtest_cancelled" for event in events),
+                "requested": totals.runs_requested if totals else 0,
+                "completed": totals.runs_completed if totals else 0,
+                "failed": totals.runs_failed if totals else 0,
+                "cancelled": totals.runs_cancelled if totals else 0,
             },
             billing_lane_mix=dict(lane_counts),
             input_tokens=sum(
-                int(event.properties.get("input_tokens", 0))
-                for event in events
-                if event.event_name == "model_usage_recorded"
+                int(event.properties.get("input_tokens", 0)) for event in usage
             ),
             output_tokens=sum(
-                int(event.properties.get("output_tokens", 0))
-                for event in events
-                if event.event_name == "model_usage_recorded"
+                int(event.properties.get("output_tokens", 0)) for event in usage
             ),
-            platform_model_cost_usd=sum(
-                atl_cost_micro(event.billing_mode, event.properties)
-                for event in events
-                if event.event_name == "model_usage_recorded"
-            )
+            platform_model_cost_usd=(totals.operator_cost_micro if totals else 0)
             / 1_000_000,
-            credits_debited_micro=sum(
-                int(event.properties.get("amount_micro", 0))
-                for event in events
-                if event.event_name == "credits_settled"
-            ),
+            credits_debited_micro=totals.own_spend_micro if totals else 0,
             top_product_page=(page_counts.most_common(1)[0][0] if page_counts else None),
+        )
+
+    def get_user_metrics(
+        self,
+        user_id: int,
+        *,
+        audience: Literal["admin", "user"],
+        now: datetime | None = None,
+    ) -> UserMetricsShared:
+        """Build one user's metric struct for one audience (design §6.13).
+
+        ``audience="user"`` returns ``UserMetricsShared`` and never reads the
+        admin-only sources (the axes, the access log); ``audience="admin"``
+        returns ``UserMetricsAdmin``. The shared numbers come from the same
+        reads either way, so the two projections cannot disagree on them.
+        Nothing calls this yet and it is on no response model.
+        """
+        if audience not in {"admin", "user"}:
+            raise ValueError("audience must be admin or user")
+        subject_id = positive_user_id(user_id)
+        current = _utc(now or datetime.now(timezone.utc), "now")
+        user = self.user_store.get_user_admin(subject_id)
+        if user is None:
+            raise LookupError("Analytics user was not found")
+        yesterday = current.date() - timedelta(days=1)
+        week = self.value_store.sum_recent_facts(
+            [subject_id], start=yesterday - timedelta(days=6), end=yesterday
+        ).get(subject_id)
+        month = self.value_store.sum_recent_facts(
+            [subject_id], start=yesterday - timedelta(days=29), end=yesterday
+        ).get(subject_id)
+        yesterday_start = datetime.combine(yesterday, datetime.min.time(), tzinfo=timezone.utc)
+        commercial = self.value_store.list_commercial_values(
+            [subject_id],
+            start=yesterday_start,
+            end=yesterday_start + timedelta(days=1),
+        ).get(subject_id)
+        tier: CommercialTier = (
+            commercial.commercial_tier if commercial is not None else "unpaid"
+        )
+        shared = dict(
+            user_id=subject_id,
+            facts_as_of=yesterday,
+            runs_7d=_run_outcome_counts(week),
+            runs_30d=_run_outcome_counts(month),
+            own_spend_micro=month.own_spend_micro if month else 0,
+            operator_cost_micro=month.operator_cost_micro if month else 0,
+            tier=tier,
+            credit_balance_micro=(
+                commercial.total_available_micro if commercial is not None else 0
+            ),
+            data_quality=(
+                "complete" if month is not None and month.days_present >= 30 else "partial"
+            ),
+        )
+        if audience == "user":
+            return UserMetricsShared(**shared)
+        lifecycle, operational = self.get_user_axes(subject_id, now=current)
+        user_group = str(user.get("user_group") or "unknown")
+        return UserMetricsAdmin(
+            **shared,
+            active_days_30d=min(30, month.active_days) if month else 0,
+            lifecycle=lifecycle,
+            operational=operational,
+            user_group=user_group,
+            group_badge=resolve_group_badge(
+                role=str(user.get("role") or "user"), user_group=user_group, tier=tier
+            ),
+            access_log=[
+                str(row["section"])
+                for row in self.store.list_admin_access(subject_id, limit=10)
+            ],
         )
 
     def get_user_activity(
@@ -1479,6 +1667,9 @@ __all__ = [
     "AnalyticsUserProfile",
     "FailureCategoryCount",
     "PanelAvailability",
+    "RunOutcomeCounts",
+    "UserMetricsAdmin",
+    "UserMetricsShared",
     "get_analytics_query_service",
     "get_value_analytics_query_service",
 ]

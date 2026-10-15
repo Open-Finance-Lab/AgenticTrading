@@ -34,7 +34,6 @@ from .value_repository import (
     GroupFactTotals,
     UserActivity,
     UserPageQuery,
-    UserValueSnapshot,
     build_value_analytics_store,
 )
 from dashboard.backend.domain.user_groups import (
@@ -418,31 +417,6 @@ class ValueUserProfile(AnalyticsUserProfile):
     recent_lifecycle_transitions: Sequence[LifecycleTransition]
 
 
-def _lifecycle(snapshot: UserValueSnapshot) -> LifecycleResult:
-    return LifecycleResult(
-        segment=snapshot.lifecycle_segment,
-        reason_code=snapshot.lifecycle_reason_code,
-        reason=snapshot.lifecycle_reason,
-        evidence=tuple(snapshot.lifecycle_evidence),
-        activated_at=snapshot.activated_at,
-        last_meaningful_activity_at=snapshot.last_meaningful_activity_at,
-        inactive_days=snapshot.inactive_days,
-        active_days_30d=snapshot.active_days_30d,
-        successful_backtests_30d=snapshot.successful_backtests_30d,
-        calculated_at=snapshot.calculated_at,
-    )
-
-
-def _operational(snapshot: UserValueSnapshot) -> OperationalResult:
-    return OperationalResult(
-        state=snapshot.operational_state,
-        reason_code=snapshot.operational_reason_code,
-        reason=snapshot.operational_reason,
-        evidence=tuple(snapshot.operational_evidence),
-        calculated_at=snapshot.calculated_at,
-    )
-
-
 def _priority_group(
     operational_state: str, lifecycle_segment: str | None
 ) -> PriorityGroup:
@@ -514,9 +488,12 @@ class ValueAnalyticsQueryService:
         self.user_store = user_store
         self.value_store = value_store or build_value_analytics_store(store)
         self.query_store = query_store or AnalyticsQueryStore(store)
+        # A defaulted legacy service shares this service's value store, so the
+        # profile's axes and fact sums read the stores this service was given.
         self.legacy_service = legacy_service or AnalyticsQueryService(
             store=store,
             user_store=user_store,
+            value_store=self.value_store,
         )
 
     def _eligible_users(self, *, include_internal: bool) -> list[dict[str, Any]]:
@@ -1360,38 +1337,39 @@ class ValueAnalyticsQueryService:
         start, end = _validate_dates(start, end)
         subject_id = positive_user_id(user_id)
         current_time = _utc(now or datetime.now(UTC), "now")
-        snapshot = self.value_store.get_current_snapshot(subject_id)
-        if snapshot is None:
-            raise LookupError("Analytics value snapshot was not found")
-        commercial = self.value_store.list_commercial_values(
-            [subject_id],
-            start=_day_start(start),
-            end=_day_start(end),
-        )[subject_id]
+        axes = self.legacy_service.get_user_axes(subject_id, now=current_time)
         legacy = self.legacy_service.get_user_profile(
             user_id=subject_id,
             now=current_time,
             start=_day_start(start),
             end=_day_start(end),
+            axes=axes,
         )
-        # This user's moves from the transition log, totalled over the window.
-        # Never the anonymous rollups: they are population-wide.
-        transition_counts: Counter[tuple[str, str]] = Counter()
-        transition_partial: set[tuple[str, str]] = set()
-        for row in self.value_store.list_user_transitions(
-            subject_id, start=start, end=end
-        ):
-            key = (row.from_segment, row.to_segment)
-            transition_counts[key] += 1
-            if row.data_quality == "partial":
-                transition_partial.add(key)
-        transitions = _transition_models(
-            transition_counts, transition_partial, start=start, end=end
-        )
+        commercial = self.value_store.list_commercial_values(
+            [subject_id],
+            start=_day_start(start),
+            end=_day_start(end),
+        )[subject_id]
+        # This user's own moves from the transition log, each stamped with its
+        # own day. Never the anonymous rollups: they are population-wide.
+        transitions = [
+            LifecycleTransition(
+                from_segment=row.from_segment,
+                to_segment=row.to_segment,
+                users=1,
+                period_start=row.snapshot_date,
+                period_end=row.snapshot_date + timedelta(days=1),
+                data_quality=row.data_quality,
+            )
+            for row in self.value_store.list_user_transitions(
+                subject_id, start=start, end=end
+            )
+        ]
+        lifecycle, operational = axes
         return ValueUserProfile(
             **legacy.model_dump(),
-            lifecycle=_lifecycle(snapshot),
-            operational=_operational(snapshot),
+            lifecycle=lifecycle,
+            operational=operational,
             commercial=commercial,
             selected_period_start=start,
             selected_period_end=end,

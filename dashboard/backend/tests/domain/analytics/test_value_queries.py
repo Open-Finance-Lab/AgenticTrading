@@ -21,6 +21,7 @@ from dashboard.backend.domain.analytics.value_queries import (
 )
 from dashboard.backend.domain.analytics.value_repository import (
     CommercialValueFact,
+    CurrentOperationalFacts,
     FactStateCount,
     GroupFactTotals,
     LifecycleTransitionRow,
@@ -31,7 +32,6 @@ from dashboard.backend.domain.analytics.value_repository import (
     UserDailyFact,
     UserPageQuery,
     UserPageRow,
-    UserValueSnapshot,
 )
 from dashboard.backend.domain.user_groups import USER_GROUPS
 
@@ -49,34 +49,6 @@ def _user(user_id: int, user_group: str = "unknown") -> dict[str, object]:
         "created_at": (NOW - timedelta(days=90)).isoformat(),
         "user_group": user_group,
     }
-
-
-def _snapshot(
-    user_id: int,
-    *,
-    lifecycle: str = "core",
-    operational: str = "healthy",
-    activated_at: datetime | None = None,
-    inactive_days: int = 2,
-) -> UserValueSnapshot:
-    activated = activated_at if activated_at is not None else NOW - timedelta(days=60)
-    return UserValueSnapshot(
-        user_id=user_id,
-        lifecycle_segment=lifecycle,
-        lifecycle_reason_code=f"{lifecycle}_synthetic_reason",
-        lifecycle_reason=f"Synthetic {lifecycle} lifecycle reason.",
-        lifecycle_evidence=("Synthetic lifecycle evidence.",),
-        operational_state=operational,
-        operational_reason_code=f"{operational}_synthetic_reason",
-        operational_reason=f"Synthetic {operational} operational reason.",
-        operational_evidence=("Synthetic operational evidence.",),
-        activated_at=(None if lifecycle == "onboarding" else activated),
-        last_meaningful_activity_at=NOW - timedelta(days=inactive_days),
-        inactive_days=inactive_days,
-        active_days_30d=3 if lifecycle == "core" else 1,
-        successful_backtests_30d=3 if lifecycle == "core" else 0,
-        calculated_at=NOW,
-    )
 
 
 def _commercial(
@@ -161,11 +133,7 @@ class FakeBaseStore:
 
 
 class FakeValueStore:
-    """Fact-backed fake: answers every fact/activity read from in-memory rows.
-
-    ``snapshots`` backs the snapshot reads the routes not yet moved
-    onto facts still make; each goes with the task that moves its route.
-    """
+    """Fact-backed fake: answers every fact/activity read from in-memory rows."""
 
     def __init__(
         self,
@@ -178,7 +146,6 @@ class FakeValueStore:
         operational_facts=None,
         internal_ids=(),
         ledger_days=(),
-        snapshots=None,
     ):
         self.facts = list(facts)
         self.transitions = list(transitions)
@@ -190,7 +157,6 @@ class FakeValueStore:
         self.internal_ids = set(internal_ids)
         # user_id -> [LedgerDayTotal]; None stands for an unconfigured reader.
         self.ledger_days = None if ledger_days is None else dict(ledger_days)
-        self.snapshots = dict(snapshots or {})
         self.commercial_windows = []
         self.ledger_calls = []
         self.page_calls = []
@@ -362,10 +328,6 @@ class FakeValueStore:
     def get_operational_facts(self, user_id, *, now):
         return self.operational_facts[user_id]
 
-    # -- snapshot reads (routes not yet on facts) --
-    def get_current_snapshot(self, user_id):
-        return self.snapshots.get(user_id)
-
     # -- commercial and ledger --
     def list_commercial_values(self, user_ids, *, start, end):
         self.commercial_windows.append((start, end))
@@ -399,20 +361,15 @@ class FakeRollups:
 
 
 class FakeQueryStore:
-    def __init__(self, *, rollups=(), legacy_status=None):
+    def __init__(self, *, rollups=()):
         self.rollups = FakeRollups(rollups)
-        self.legacy_status = dict(legacy_status or {})
-
-    def list_snapshots(self):
-        return {
-            user_id: SimpleNamespace(status=status)
-            for user_id, status in self.legacy_status.items()
-        }
 
 
 class FakeLegacyService:
-    def __init__(self, availability=None):
+    def __init__(self, availability=None, *, operational_facts=None):
         self.profile_windows = []
+        self.operational_facts = dict(operational_facts or {})
+        self.raise_lookup = False
         self.overview_calls = 0
         self.platform_cost_filters = []
         self.availability = availability or {"growth": True, "friction": True}
@@ -439,7 +396,28 @@ class FakeLegacyService:
             top_failure_categories=[],
         )
 
-    def get_user_profile(self, *, user_id, now, start=None, end=None):
+    def get_user_axes(self, user_id, *, now):
+        from dashboard.backend.domain.analytics.lifecycle import (
+            LifecycleInputs, OperationalSignals, calculate_lifecycle, calculate_operational_state,
+        )
+        if self.raise_lookup:
+            raise LookupError("Analytics user was not found")
+        facts = self.operational_facts.get(user_id)
+        operational = calculate_operational_state(
+            OperationalSignals(**facts.model_dump()) if facts else OperationalSignals(user_id=user_id), now
+        )
+        lifecycle = calculate_lifecycle(
+            LifecycleInputs(user_id=user_id, created_at=now - timedelta(days=90),
+                            first_successful_backtest_at=now - timedelta(days=60),
+                            last_meaningful_activity_at=now - timedelta(days=2),
+                            active_days_30d=3, successful_backtests_30d=3),
+            now,
+        )
+        return lifecycle, operational
+
+    def get_user_profile(self, *, user_id, now, start=None, end=None, axes=None):
+        if self.raise_lookup:
+            raise LookupError("Analytics user was not found")
         self.profile_windows.append((start, end))
         return AnalyticsUserProfile(
             user_id=user_id,
@@ -474,13 +452,7 @@ def _service(
     excluded=(),
     legacy_availability=None,
     ledger_days=(),
-    # Snapshot-model fixture for the profile route, not yet on facts: ``users``
-    # defaults to the snapshot ids.
-    snapshots=None,
 ):
-    if snapshots is not None:
-        if not users:
-            users = tuple((user_id, "unknown") for user_id in snapshots)
     user_ids = [user_id for user_id, _group in users]
     value_store = FakeValueStore(
         facts=facts,
@@ -491,9 +463,10 @@ def _service(
         operational_facts=operational_facts,
         internal_ids=internal_ids,
         ledger_days=ledger_days,
-        snapshots=snapshots,
     )
-    legacy_service = FakeLegacyService(legacy_availability)
+    legacy_service = FakeLegacyService(
+        legacy_availability, operational_facts=operational_facts
+    )
     service = ValueAnalyticsQueryService(
         store=FakeBaseStore(excluded),
         user_store=FakeUserStore([_user(user_id, group) for user_id, group in users]),
@@ -1087,73 +1060,62 @@ def test_top_operational_reasons_rank_blocking_reasons_by_users():
     assert "top_operational_reasons" not in OperationalAnalyticsResponse.model_fields
 
 
-def test_profile_includes_selected_period_and_lifecycle_transition():
-    start = date(2026, 8, 1)
-    end = date(2026, 9, 1)
-    snapshots = {1: _snapshot(1), 2: _snapshot(2)}
+def _day_start(day: date) -> datetime:
+    return datetime.combine(day, time.min, tzinfo=UTC)
+
+
+def test_value_profile_combines_live_axes_facts_and_user_transitions():
     transitions = [
-        LifecycleTransitionRow(
-            user_id=1, snapshot_date=start, from_segment="growing",
-            to_segment="core", created_at=NOW,
-        ),
+        LifecycleTransitionRow(user_id=1, snapshot_date=YESTERDAY, from_segment="growing", to_segment="core",
+                               inactive_days=0, data_quality="complete", created_at=NOW),
         # Another user's move on the same day stays off this profile.
-        LifecycleTransitionRow(
-            user_id=2, snapshot_date=start, from_segment="growing",
-            to_segment="at_risk", created_at=NOW,
-        ),
-        # Outside the selected period.
-        LifecycleTransitionRow(
-            user_id=1, snapshot_date=end, from_segment="core",
-            to_segment="at_risk", created_at=NOW,
-        ),
+        LifecycleTransitionRow(user_id=2, snapshot_date=YESTERDAY, from_segment="growing", to_segment="at_risk",
+                               inactive_days=8, data_quality="complete", created_at=NOW),
     ]
     service, _value_store, legacy = _service(
-        snapshots=snapshots, transitions=transitions
+        facts=[_fact(1, YESTERDAY - timedelta(days=offset)) for offset in range(3)],
+        transitions=transitions, activity={1: _activity(1)}, commercial={1: _commercial(1, 6_000_000)},
+        operational_facts={1: CurrentOperationalFacts(user_id=1, account_restricted=True)},
     )
 
-    profile = service.get_user_profile(
-        user_id=1,
-        start=start,
-        end=end,
-        now=NOW,
-    )
+    profile = service.get_user_profile(user_id=1, start=YESTERDAY - timedelta(days=6), end=YESTERDAY + timedelta(days=1), now=NOW)
 
-    assert profile.selected_period_start == start
-    assert profile.selected_period_end == end
     assert profile.lifecycle.segment == "core"
-    assert profile.operational.state == "healthy"
+    assert profile.operational.state == "blocked"
+    assert profile.operational.reason_code == "account_restricted"
+    assert profile.commercial.commercial_tier == "invested"
+    assert (profile.selected_period_start, profile.selected_period_end) == (YESTERDAY - timedelta(days=6), YESTERDAY + timedelta(days=1))
     assert [
-        (row.from_segment, row.to_segment, row.users, row.period_start, row.period_end)
-        for row in profile.recent_lifecycle_transitions
-    ] == [("growing", "core", 1, start, end)]
-    assert legacy.profile_windows == [
-        (datetime(2026, 8, 1, tzinfo=UTC), datetime(2026, 9, 1, tzinfo=UTC))
-    ]
+        (t.from_segment, t.to_segment, t.users, t.period_start, t.period_end)
+        for t in profile.recent_lifecycle_transitions
+    ] == [("growing", "core", 1, YESTERDAY, YESTERDAY + timedelta(days=1))]
+    assert legacy.profile_windows == [(_day_start(YESTERDAY - timedelta(days=6)), _day_start(YESTERDAY + timedelta(days=1)))]
 
 
-def test_profile_never_uses_anonymous_transition_rollups():
-    start = date(2026, 8, 1)
+def test_value_profile_never_uses_anonymous_transition_rollups():
     aggregate = SimpleNamespace(
-        rollup_date=start,
+        rollup_date=YESTERDAY,
         metric_name="lifecycle_transition",
         event_name="growing",
         user_state="core",
         value_count=99,
         outcome="complete",
     )
-    service, _value_store, _legacy = _service(
-        snapshots={1: _snapshot(1)},
-        rollups=[aggregate],
-    )
+    service, _value_store, _legacy = _service(users=((1, "unknown"),), rollups=[aggregate])
 
     profile = service.get_user_profile(
-        user_id=1,
-        start=start,
-        end=date(2026, 9, 1),
-        now=NOW,
+        user_id=1, start=YESTERDAY - timedelta(days=6), end=YESTERDAY + timedelta(days=1), now=NOW
     )
 
     assert profile.recent_lifecycle_transitions == []
+
+
+def test_value_profile_raises_lookup_error_for_an_unknown_user():
+    service, _value_store, legacy = _service(activity={}, commercial={})
+    legacy.raise_lookup = True
+
+    with pytest.raises(LookupError):
+        service.get_user_profile(user_id=404, start=YESTERDAY - timedelta(days=6), end=YESTERDAY + timedelta(days=1), now=NOW)
 
 
 def test_internal_accounts_are_excluded_unless_explicitly_included():

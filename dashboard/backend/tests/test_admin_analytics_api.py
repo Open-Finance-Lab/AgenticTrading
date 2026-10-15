@@ -675,63 +675,53 @@ def test_billing_lane_mix_skips_a_day_with_no_calls_and_no_cost(tmp_path):
     assert overview.billing_lane_mix == []
 
 
-def test_user_list_and_profile_are_display_safe(tmp_path):
-    analytics, events, _rollups, states, users = _fixture(tmp_path)
-    _event(
-        events,
-        "account_signed_up",
-        NOW - timedelta(days=20),
-        "account:account_signed_up:1",
-        source_record_type="user",
-        source_record_id="1",
+def test_profile_is_display_safe_and_reads_facts_not_the_event_window(tmp_path):
+    analytics, events, _rollups, _states, users = _fixture(tmp_path)
+    from dashboard.backend.domain.analytics.value_repository import ValueAnalyticsStore
+    from dashboard.backend.tests.domain.analytics.test_fact_reads import fact
+    from dashboard.backend.tests.domain.analytics.test_value_repository import (
+        SyntheticAgentStore, SyntheticCreditsStore, SyntheticProviderStore, SyntheticRunStore,
     )
-    success = _event(
-        events,
-        "backtest_completed",
-        NOW - timedelta(hours=1),
-        "run:backtest_completed:run-1",
-        correlation_id="run-1",
-        outcome="succeeded",
-    )
-    _event(
-        events,
-        "model_usage_recorded",
-        NOW - timedelta(minutes=50),
-        "resource:model_usage_recorded:run-1:0",
-        correlation_id="run-1",
-        provider_id="openrouter",
-        model_id="openai/gpt-5.5",
-        billing_mode="platform_credits",
-        outcome="succeeded",
-        properties={
-            "input_tokens": 120,
-            "output_tokens": 30,
-            "cost_micro_usd": 250_000,
-        },
-    )
-    _event(
-        events,
-        "credits_settled",
-        NOW - timedelta(minutes=49),
-        "resource:credits_settled:reservation-1:grant",
-        source_record_type="credit_reservation",
-        source_record_id="reservation-1",
-        correlation_id="run-1",
-        billing_mode="platform_credits",
-        properties={"amount_micro": 100, "bucket": "grant"},
-    )
-    recalculate_user_snapshot(1, now=NOW, store=states)
-    service = AnalyticsQueryService(store=analytics, user_store=users)
 
+    value_store = ValueAnalyticsStore(
+        analytics, SyntheticCreditsStore(tmp_path / "credits.db"),
+        # One enabled platform lane and a positive balance: operationally healthy.
+        provider_base=SyntheticProviderStore(
+            {}, [{"provider_id": "openrouter", "status": "enabled", "platform_enabled": True}]
+        ),
+        agent_base=SyntheticAgentStore(), run_base=SyntheticRunStore({}),
+    )
+    yesterday = NOW.date() - timedelta(days=1)
+    value_store.record_activity(1, occurred_at=NOW - timedelta(hours=1), activating=True, now=NOW)
+    value_store.upsert_daily_facts(
+        [fact(1, yesterday, runs_requested=3, runs_completed=2, runs_failed=1, operator_cost_micro=250_000, own_spend_micro=100)]
+    )
+    _event(events, "model_usage_recorded", NOW - timedelta(minutes=50), "resource:model_usage_recorded:run-1:0",
+           correlation_id="run-1", provider_id="openrouter", model_id="openai/gpt-5.5",
+           billing_mode="platform_credits", outcome="succeeded",
+           properties={"input_tokens": 120, "output_tokens": 30, "cost_micro_usd": 250_000})
+    service = AnalyticsQueryService(store=analytics, user_store=users, value_store=value_store)
 
-    profile = service.get_user_profile(user_id=1, now=NOW)
+    def refuse_window_scan(**_kwargs):
+        raise AssertionError("the profile must not scan the event window")
+
+    service.query_store.rollups.list_events = refuse_window_scan
+    recorder = _WindowRecordingQueryStore(service.query_store)
+    service.query_store = recorder
+
+    profile = service.get_user_profile(user_id=1, now=NOW, start=NOW - timedelta(days=30), end=NOW)
     serialized = profile.model_dump(mode="json")
 
     assert profile.state.status == "active"
-    assert success.event_id in profile.state.evidence_event_ids
-    assert profile.input_tokens == 120
+    assert profile.state.evidence_event_ids == []
+    assert profile.run_summary == {"requested": 3, "completed": 2, "failed": 1, "cancelled": 0}
     assert profile.platform_model_cost_usd == 0.25
     assert profile.credits_debited_micro == 100
+    assert profile.input_tokens == 120
+    assert profile.default_provider == "openrouter"
+    assert profile.activation_milestones["backtest_completed"] == NOW - timedelta(hours=1)
+    assert profile.last_meaningful_activity == NOW - timedelta(hours=1)
+    assert recorder.windows == []  # no list_metric_events call: the only raw read is one timeline page
     assert "properties" not in str(serialized)
     assert "session_id" not in str(serialized)
 
