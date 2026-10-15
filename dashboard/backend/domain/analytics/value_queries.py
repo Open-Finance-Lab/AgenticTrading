@@ -15,6 +15,7 @@ from .lifecycle import (
     OperationalResult,
     OperationalState,
     activation_cohort_week,
+    operational_reason,
 )
 from .metrics import AnalyticsMetricFilters
 from .query_service import (
@@ -294,6 +295,20 @@ class OperationalAnalyticsResponse(BaseModel):
     platform_model_cost_micro_usd: int | None = Field(ge=0)
     top_failure_categories: Sequence[FailureCategoryCount]
     availability: SectionAvailability
+
+
+class OperationalReasonCount(BaseModel):
+    """One blocking or attention reason and how many users carried it.
+
+    Service-level only in PR B (design §9: PR D puts `top_operational_reasons`
+    on OperationalAnalyticsResponse in the contract re-cut).
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    reason_code: str
+    reason: str
+    users: int = Field(ge=0)
 
 
 class UserGroupSummary(BaseModel):
@@ -1083,9 +1098,14 @@ class ValueAnalyticsQueryService:
     ) -> OperationalAnalyticsResponse:
         start, end = _validate_dates(start, end)
         current_time = _utc(now or datetime.now(UTC), "now")
-        users = self._eligible_users(include_internal=include_internal)
-        current = self._current(users)
-        counts = Counter(snapshot.operational_state for snapshot in current.values())
+        yesterday = current_time.date() - timedelta(days=1)
+        # Fact rows hold no internal or excluded accounts, so ``include_internal``
+        # widens only the overview figures below.
+        cells = self.value_store.count_states_for_date(yesterday)
+        counts = {
+            state: sum(cell.users for cell in cells if cell.operational_state == state)
+            for state in _OPERATIONAL_STATES
+        }
         overview = self.legacy_service.get_overview(
             filters=AnalyticsMetricFilters(
                 start=_day_start(start),
@@ -1099,9 +1119,9 @@ class ValueAnalyticsQueryService:
         )
         growth_available = overview.availability["growth"].available
         friction_available = overview.availability["friction"].available
-        current_complete = len(current) == len(users)
-        available = bool(current) or not users or growth_available or friction_available
-        if not current_complete:
+        available = bool(cells) or growth_available or friction_available
+        if not cells:
+            # Yesterday's facts have not landed: empty counts are not "none blocked".
             status = "building"
         elif growth_available and friction_available:
             status = "ready"
@@ -1109,9 +1129,7 @@ class ValueAnalyticsQueryService:
             status = "partial" if available else "unavailable"
         return OperationalAnalyticsResponse(
             as_of=current_time,
-            operational_state_counts={
-                state: int(counts.get(state, 0)) for state in _OPERATIONAL_STATES
-            },
+            operational_state_counts=counts,
             # Unknown whenever the growth read failed, even part-way: the
             # overview can compute a figure and then fail the block.
             backtest_success_rate=(
@@ -1132,6 +1150,27 @@ class ValueAnalyticsQueryService:
                 status=status,
             ),
         )
+
+    def top_operational_reasons(
+        self, *, day: date, limit: int = 10
+    ) -> list[OperationalReasonCount]:
+        """Why users were blocked or needed attention on ``day`` (design §9).
+
+        One grouped read over the fact rows; the reason text is the rule
+        table's copy, never the stored code alone.
+        """
+        page_size = positive_limit(limit)
+        totals: Counter[str] = Counter()
+        for cell in self.value_store.count_states_for_date(day):
+            if cell.operational_state in {"blocked", "needs_attention"}:
+                totals[cell.operational_reason_code] += cell.users
+        ranked = sorted(totals.items(), key=lambda item: (-item[1], item[0]))
+        return [
+            OperationalReasonCount(
+                reason_code=code, reason=operational_reason(code), users=users
+            )
+            for code, users in ranked[:page_size]
+        ]
 
     def get_groups(
         self,
@@ -1454,6 +1493,7 @@ __all__ = [
     "LifecycleMovementPoint",
     "LifecycleTransition",
     "OperationalAnalyticsResponse",
+    "OperationalReasonCount",
     "PaginatedValueUsers",
     "RetentionAnalyticsResponse",
     "RetentionCell",

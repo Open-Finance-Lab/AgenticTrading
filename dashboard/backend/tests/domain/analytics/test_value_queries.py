@@ -14,6 +14,7 @@ from dashboard.backend.domain.analytics.query_service import (
 )
 from dashboard.backend.domain.analytics.rollups import DailyRollup
 from dashboard.backend.domain.analytics.value_queries import (
+    OperationalAnalyticsResponse,
     UserValueFilters,
     ValueAnalyticsQueryService,
 )
@@ -33,6 +34,7 @@ from dashboard.backend.domain.analytics.value_repository import (
 
 UTC = timezone.utc
 NOW = datetime(2026, 9, 3, 12, 0, tzinfo=UTC)
+YESTERDAY = NOW.date() - timedelta(days=1)
 
 
 def _user(user_id: int, user_group: str = "unknown") -> dict[str, object]:
@@ -957,7 +959,8 @@ def test_operational_growth_figures_are_unknown_not_zero_when_their_read_failed(
     read. When it failed they are None, not 0 -- which is the real answer "no
     runs" -- even though the overview may have computed some before failing."""
     service, _value_store, _legacy = _service(
-        snapshots={1: _snapshot(1)},
+        facts=[_fact(1, YESTERDAY)],
+        users=((1, "unknown"),),
         legacy_availability={"growth": False, "friction": True},
     )
 
@@ -973,25 +976,81 @@ def test_operational_growth_figures_are_unknown_not_zero_when_their_read_failed(
     ) == (None, None, None, None, None, None)
     assert response.availability.status == "partial"
 
-    service, _value_store, _legacy = _service(snapshots={1: _snapshot(1)})
+    service, _value_store, _legacy = _service(facts=[_fact(1, YESTERDAY)], users=((1, "unknown"),))
     response = service.get_operational(start=date(2026, 8, 1), end=date(2026, 9, 1), now=NOW)
     assert (response.completed_runs, response.platform_model_cost_micro_usd) == (9, 250_000)
 
 
-def test_missing_operational_subsection_is_reported_as_partial():
-    service, _value_store, _legacy = _service(
-        snapshots={1: _snapshot(1)},
-        legacy_availability={"growth": True, "friction": False},
-    )
+def _operational_service(**overrides):
+    facts = [
+        _fact(1, YESTERDAY, operational_state="blocked", operational_reason_code="billing_lane_unavailable"),
+        _fact(2, YESTERDAY, operational_state="blocked", operational_reason_code="billing_lane_unavailable"),
+        _fact(3, YESTERDAY, operational_state="needs_attention", operational_reason_code="invalid_default_credential"),
+        _fact(4, YESTERDAY),
+        _fact(5, YESTERDAY - timedelta(days=1), operational_state="blocked", operational_reason_code="account_restricted"),
+    ]
+    values = dict(facts=facts, users=((1, "unknown"), (2, "unknown"), (3, "unknown"), (4, "unknown")))
+    values.update(overrides)
+    return _service(**values)[0]
+
+
+def test_operational_state_counts_are_yesterdays_facts():
+    service = _operational_service()
 
     response = service.get_operational(
-        start=date(2026, 8, 1),
-        end=date(2026, 9, 1),
-        now=NOW,
+        start=YESTERDAY - timedelta(days=6), end=YESTERDAY + timedelta(days=1), now=NOW
+    )
+
+    assert response.operational_state_counts == {"blocked": 2, "needs_attention": 1, "healthy": 1}
+    assert response.completed_runs == 9  # FakeLegacyService
+    assert response.availability.status == "ready"
+
+
+def test_operational_is_partial_when_the_overview_growth_panel_is_down():
+    service = _operational_service(legacy_availability={"growth": False, "friction": True})
+
+    response = service.get_operational(
+        start=YESTERDAY - timedelta(days=6), end=YESTERDAY + timedelta(days=1), now=NOW
     )
 
     assert response.availability.available is True
     assert response.availability.status == "partial"
+
+
+def test_missing_operational_subsection_is_reported_as_partial():
+    service = _operational_service(legacy_availability={"growth": True, "friction": False})
+
+    response = service.get_operational(
+        start=YESTERDAY - timedelta(days=6), end=YESTERDAY + timedelta(days=1), now=NOW
+    )
+
+    assert response.availability.available is True
+    assert response.availability.status == "partial"
+
+
+def test_operational_is_building_before_the_first_fact_day():
+    service = _operational_service(facts=[])
+
+    response = service.get_operational(
+        start=YESTERDAY - timedelta(days=6), end=YESTERDAY + timedelta(days=1), now=NOW
+    )
+
+    assert response.operational_state_counts == {"blocked": 0, "needs_attention": 0, "healthy": 0}
+    assert response.availability.status == "building"
+
+
+def test_top_operational_reasons_rank_blocking_reasons_by_users():
+    service = _operational_service()
+
+    reasons = service.top_operational_reasons(day=YESTERDAY)
+
+    assert [(r.reason_code, r.users) for r in reasons] == [
+        ("billing_lane_unavailable", 2),
+        ("invalid_default_credential", 1),
+    ]
+    assert reasons[0].reason == "No usable model billing lane is available."
+    assert service.top_operational_reasons(day=YESTERDAY, limit=1)[0].reason_code == "billing_lane_unavailable"
+    assert "top_operational_reasons" not in OperationalAnalyticsResponse.model_fields
 
 
 def test_profile_includes_selected_period_and_lifecycle_transition():
@@ -1086,8 +1145,6 @@ def test_internal_accounts_are_excluded_unless_explicitly_included():
     assert [item.user_id for item in external.items] == [1]
     assert [item.user_id for item in all_users.items] == [1, 2]
 
-
-YESTERDAY = NOW.date() - timedelta(days=1)
 
 
 def _lifecycle_service(**overrides):
