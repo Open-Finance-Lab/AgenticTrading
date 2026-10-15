@@ -1039,6 +1039,25 @@ def test_operational_is_building_before_the_first_fact_day():
     assert response.availability.status == "building"
 
 
+def test_null_operational_reason_codes_count_by_state_but_are_not_reasons():
+    facts = [
+        _fact(1, YESTERDAY, operational_state="healthy", operational_reason_code=None),
+        _fact(2, YESTERDAY, operational_state="blocked", operational_reason_code=None),
+        _fact(3, YESTERDAY, operational_state="blocked", operational_reason_code="billing_lane_unavailable"),
+    ]
+    service = _operational_service(
+        facts=facts, users=((1, "unknown"), (2, "unknown"), (3, "unknown"))
+    )
+
+    response = service.get_operational(
+        start=YESTERDAY - timedelta(days=6), end=YESTERDAY + timedelta(days=1), now=NOW
+    )
+    reasons = service.top_operational_reasons(day=YESTERDAY)
+
+    assert response.operational_state_counts == {"blocked": 2, "needs_attention": 0, "healthy": 1}
+    assert [(r.reason_code, r.users) for r in reasons] == [("billing_lane_unavailable", 1)]
+
+
 def test_top_operational_reasons_rank_blocking_reasons_by_users():
     service = _operational_service()
 

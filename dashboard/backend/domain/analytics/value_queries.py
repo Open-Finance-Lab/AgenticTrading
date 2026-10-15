@@ -1162,7 +1162,12 @@ class ValueAnalyticsQueryService:
         page_size = positive_limit(limit)
         totals: Counter[str] = Counter()
         for cell in self.value_store.count_states_for_date(day):
-            if cell.operational_state in {"blocked", "needs_attention"}:
+            # A NULL code is not a supported reason (it reads as
+            # no_supported_issue); the row still counts under its state.
+            if (
+                cell.operational_state in {"blocked", "needs_attention"}
+                and cell.operational_reason_code is not None
+            ):
                 totals[cell.operational_reason_code] += cell.users
         ranked = sorted(totals.items(), key=lambda item: (-item[1], item[0]))
         return [
