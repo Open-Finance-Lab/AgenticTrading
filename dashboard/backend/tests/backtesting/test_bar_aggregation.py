@@ -251,3 +251,75 @@ def test_aggregated_bars_are_stamped_at_their_close():
 
     assert FRAME_ATTR_OPEN_STAMPED_MINUTES not in result.attrs
     assert result.attrs["alpaca_feed"] == "sip"
+
+
+def test_an_early_close_buckets_and_fills_on_its_13_00_close():
+    """2026-11-27 closes at 13:00 ET. Alpaca serves prints after the bell (NYSE
+    late sessions and post-market reporting run to 17:00), so the source frame
+    reaches 16:55. The last decision bar is the 12:30-13:00 half bucket, filled
+    at the close of the 12:55 bar. Bucketing on the full-day session built a
+    13:30 bucket from 12:30-12:59 instead, which no source bar could fill once
+    the open-stamped filter dropped everything from 13:00: the day lost its
+    closing decision."""
+    from dashboard.backend.domain.backtesting.bar_aggregation import (
+        plan_execution_fills,
+    )
+    from dashboard.backend.infrastructure.market_data.sessions import is_in_session
+
+    eastern = pytz.timezone("US/Eastern")
+    timestamps = pd.date_range(
+        eastern.localize(datetime(2026, 11, 27, 9, 30)),
+        eastern.localize(datetime(2026, 11, 27, 16, 55)),
+        freq="5min",
+    )
+    result = aggregate_bars(
+        _bars(timestamps),
+        source_timeframe="5m",
+        decision_timeframe="60m",
+        market="US",
+        timezone="US/Eastern",
+    )
+    local = [stamp.tz_convert(eastern).strftime("%H:%M") for stamp in result.index]
+    assert local == ["10:30", "11:30", "12:30", "13:00"]
+    assert result.iloc[-1]["expected_source_bars"] == 6
+    assert bool(result.iloc[-1]["is_complete"]) is True
+
+    source = [
+        stamp
+        for stamp in timestamps
+        if is_in_session(
+            stamp, market="US", timezone="US/Eastern", open_stamped_minutes=5
+        )
+    ]
+    assert source[-1] == eastern.localize(datetime(2026, 11, 27, 12, 55))
+    fills = plan_execution_fills(
+        result.index,
+        source,
+        source_minutes=5,
+        market="US",
+        timezone="US/Eastern",
+    )
+    closing = fills[result.index[-1]]
+    assert closing.bar == source[-1]
+    assert closing.price_field == "close"
+    assert closing.filled_at == result.index[-1]
+    # The three hourly decisions fill at the open of the bar starting then.
+    assert all(fills[stamp].price_field == "open" for stamp in result.index[:-1])
+
+
+def test_a_full_session_still_ends_its_buckets_at_16_00():
+    eastern = pytz.timezone("US/Eastern")
+    timestamps = pd.date_range(
+        eastern.localize(datetime(2026, 11, 25, 9, 30)),
+        eastern.localize(datetime(2026, 11, 25, 16, 55)),
+        freq="5min",
+    )
+    result = aggregate_bars(
+        _bars(timestamps),
+        source_timeframe="5m",
+        decision_timeframe="60m",
+        market="US",
+        timezone="US/Eastern",
+    )
+    assert result.index[-1].tz_convert(eastern).strftime("%H:%M") == "16:00"
+    assert len(result) == 7

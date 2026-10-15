@@ -3,8 +3,9 @@
 This board is not Daily stretched to 30 days and not the fixed contest window.
 One continuous paper-trading month per entry: the chart axis is the current
 America/New_York calendar month, hourly nodes are the closes of the US cash
-session's hourly bars (10:00–16:00 ET, NYSE trading days), and points after
-the freeze close stay empty so the line cannot interpolate into the future.
+session's hourly bars (10:00–16:00 ET on NYSE trading days, 10:00–13:00 on
+NYSE early closes), and points after the freeze close stay empty so the line
+cannot interpolate into the future.
 
 Every curve is written by ``refresh_live_leaderboard`` (the cron hook or the
 refresh script), never on a public GET: GET only reads the latest stored
@@ -39,24 +40,30 @@ from dashboard.backend.infrastructure.market_data.alpaca_bars import (
     allow_recent_sip,
     sip_delay_minutes,
 )
-from dashboard.backend.infrastructure.market_data.sessions import session_windows
+from dashboard.backend.infrastructure.market_data.sessions import (
+    session_close_time,
+    session_windows,
+)
 from dashboard.backend.infrastructure.market_data.us_market_calendar import is_trading_day
 from dashboard.backend.paths import DATA_DIR
 import dashboard.backend.domain.leaderboard.service as lb_service
 
 _US_EASTERN = ZoneInfo("America/New_York")
 # The US cash session has one owner (market_data/sessions.py); restating it here
-# is how the board's copies drifted apart before #529.
-_US_CASH_OPEN, _US_CASH_CLOSE = session_windows("US")[0]
+# is how the board's copies drifted apart before #529. The open is fixed; the
+# close is per day (``_cash_close``), because an NYSE early close ends at 13:00.
+_US_CASH_OPEN = session_windows("US")[0][0]
 # Axis nodes are hourly bar *closes*. Since #529 the board's Alpaca bars are
 # open-stamped (09:00 … 15:00, each closing an hour later) and Yahoo's index
 # bars are open-stamped on the half hour (09:30 … 15:30), so a stored point is
-# placed at the hour its bar closed in (see ``_axis_node_key``): seven nodes a
-# day, the last one holding the 16:00 close.
-_RTH_HOURS = (10, 11, 12, 13, 14, 15, 16)
+# placed at the hour its bar closed in (see ``_axis_node_key``). The first node
+# is the 09:00 bar's 10:00 close and the last is the day's cash close: seven
+# nodes on a full session, four (10:00 … 13:00) on an early close.
+_FIRST_NODE_HOUR = _US_CASH_OPEN.hour + 1
 _BAR_MINUTES = 60
-# A session joins the freeze only once its closing bar is final on the tape the
-# board is priced off. A Basic plan clamps a SIP request to now − delay, so a
+# A session joins the freeze only once its closing bar is complete on the tape
+# the board is priced off (complete, not immutable: see ``freeze_settle_time``).
+# A Basic plan clamps a SIP request to now − delay, so a
 # refresh at 16:02 would fetch a truncated 15:00 bar and cache that curve as
 # the day's close. The margin covers late prints and the cron's own jitter.
 _FREEZE_SETTLE_MARGIN_MINUTES = 15
@@ -86,18 +93,28 @@ _live_refresh_lock = threading.Lock()
 _live_refresh_running = False
 
 
+def _cash_close(day: date) -> datetime:
+    """``day``'s US cash close in New York: 16:00, or 13:00 on an NYSE early close."""
+    return datetime.combine(day, session_close_time(day, "US"), tzinfo=_US_EASTERN)
+
+
+def _axis_hours(day: date) -> Tuple[int, ...]:
+    """Hours of ``day``'s axis nodes: 10 … 16, or 10 … 13 on an early close.
+
+    NYSE closes on the hour, so the last node is the close itself.
+    """
+    return tuple(range(_FIRST_NODE_HOUR, _cash_close(day).hour + 1))
+
+
 def _coerce_as_of_eastern(as_of: Optional[Union[date, datetime]] = None) -> datetime:
+    """``as_of`` in New York; a bare date means that day's cash close."""
     if as_of is None:
         return datetime.now(_US_EASTERN)
     if isinstance(as_of, datetime):
         if as_of.tzinfo is None:
             return as_of.replace(tzinfo=_US_EASTERN)
         return as_of.astimezone(_US_EASTERN)
-    return datetime(
-        as_of.year, as_of.month, as_of.day,
-        _US_CASH_CLOSE.hour, _US_CASH_CLOSE.minute,
-        tzinfo=_US_EASTERN,
-    )
+    return _cash_close(as_of)
 
 
 def live_month_dates(as_of: Optional[Union[date, datetime]] = None) -> Tuple[str, str]:
@@ -121,12 +138,15 @@ def _trading_days_inclusive(start: date, end: date) -> List[date]:
 
 
 def live_month_hourly_axis(start_date: str, end_date: str) -> List[str]:
-    """Hourly bar-close ISO timestamps covering the month's NYSE trading days."""
+    """Hourly bar-close ISO timestamps covering the month's NYSE trading days.
+
+    Seven per full session (10:00 … 16:00), four per early close (10:00 … 13:00).
+    """
     start = date.fromisoformat(start_date)
     end = date.fromisoformat(end_date)
     out: List[str] = []
     for day in _trading_days_inclusive(start, end):
-        for hour in _RTH_HOURS:
+        for hour in _axis_hours(day):
             ts = datetime(day.year, day.month, day.day, hour, 0, tzinfo=_US_EASTERN)
             out.append(ts.isoformat())
     return out
@@ -176,9 +196,17 @@ def live_increment_bounds(
 
 
 def freeze_settle_time(day: date) -> datetime:
-    """When ``day``'s closing bar is final on the board's tape."""
+    """When ``day`` can be frozen: its cash close (13:00 on an NYSE early
+    close) plus the SIP delay and a margin, so the delay clamp no longer
+    truncates the last kept bar and Alpaca's late-trade update has landed.
+
+    Settled is not immutable. Alpaca applies SIP corrections after the 20:00
+    extended session and rebuilds recent bars for a few days afterwards, so a
+    later refetch (a config-change replay of the month) can differ slightly
+    from the frozen checkpoint.
+    """
     delay = 0 if allow_recent_sip() else sip_delay_minutes()
-    close = datetime.combine(day, _US_CASH_CLOSE, tzinfo=_US_EASTERN)
+    close = _cash_close(day)
     return close + timedelta(minutes=delay + _FREEZE_SETTLE_MARGIN_MINUTES)
 
 
@@ -204,7 +232,7 @@ def live_clock(as_of: Optional[Union[date, datetime]] = None) -> Dict[str, Any]:
         session_state = "preopen"
         frozen_through = _previous_trading_day(today)
         live_day = None
-    elif now.time() < _US_CASH_CLOSE:
+    elif now.time() < session_close_time(today, "US"):
         session_state = "rth"
         frozen_through = _previous_trading_day(today)
         live_day = today
@@ -1215,13 +1243,15 @@ def _axis_node_key(bar_open: datetime) -> Optional[str]:
 
     Alpaca's 09:00 bar (09:30 open → 10:00) lands on 10:00 and its 15:00 bar on
     the 16:00 close; Yahoo's 09:30 bar closes 10:30 and lands on 10:00, and its
-    15:30 half-bar is capped at the 16:00 close. A bar opening at or after the
-    close is after-hours and has no node.
+    15:30 half-bar is capped at the 16:00 close. On an NYSE early close the cap
+    is 13:00. Alpaca's 12:00 bar lands there, and so does Yahoo's closing level,
+    which ``_yahoo`` restamps from its 13:00 stub to the 12:30 half-bar. A bar
+    opening at or after the day's close is after-hours and has no node.
     """
-    if bar_open.time() >= _US_CASH_CLOSE:
+    session_close = _cash_close(bar_open.date())
+    if bar_open >= session_close:
         return None
     close = bar_open + timedelta(minutes=_BAR_MINUTES)
-    session_close = datetime.combine(close.date(), _US_CASH_CLOSE, tzinfo=_US_EASTERN)
     if close > session_close:
         close = session_close
     return f"{close.date().isoformat()}T{close.hour:02d}:00"
@@ -1251,9 +1281,7 @@ def reindex_frozen_curve(
         if key is not None:
             by_hour[key] = float(equity) * scale
 
-    freeze_dt = datetime.combine(
-        date.fromisoformat(freeze_end), _US_CASH_CLOSE, tzinfo=_US_EASTERN
-    )
+    freeze_dt = _cash_close(date.fromisoformat(freeze_end))
     last: Optional[float] = None
     out: List[Dict[str, Any]] = []
     for ts in axis:
@@ -1523,7 +1551,8 @@ def get_live_leaderboard(
             "description": (
                 f"Live month {month_label}. Axis is the calendar month's NYSE "
                 "trading days; each node is the close of an hourly US cash-session "
-                "bar (10:00–16:00 America/New_York). "
+                "bar (10:00–16:00 America/New_York; 10:00–13:00 on NYSE early-close "
+                "days). "
                 f"Frozen history is the hourly backtest through {clock['frozen_through']}; "
                 "a session is appended once, after it closes and settles. "
                 "Each freeze is stored as a monthly snapshot in agent_runs "

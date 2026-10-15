@@ -246,6 +246,244 @@ def test_nyse_holiday_rules():
     assert date(2022, 1, 1) not in nyse_holidays(2022)
 
 
+# ── NYSE early closes (13:00 ET) ────────────────────────────────────────────
+
+
+@pytest.fixture
+def sip_delay_15(monkeypatch):
+    monkeypatch.delenv("ALPACA_ALLOW_RECENT_SIP", raising=False)
+    monkeypatch.setenv("ALPACA_SIP_DELAY_MINUTES", "15")
+
+
+def _node_clocks(axis, day):
+    return [ts[11:16] for ts in axis if ts.startswith(day)]
+
+
+def test_hourly_axis_ends_at_13_00_on_an_early_close():
+    """2026-11-27 closes at 13:00: four nodes (10:00 carries the prior close,
+    11:00-13:00 hold the 10:00-12:00 bars), not seven with three phantoms."""
+    from dashboard.backend.infrastructure.market_data.us_market_calendar import (
+        is_early_close,
+    )
+
+    axis = live.live_month_hourly_axis("2026-11-01", "2026-11-30")
+    days = live._trading_days_inclusive(date(2026, 11, 1), date(2026, 11, 30))
+    assert len(days) == 20
+    assert [day for day in days if is_early_close(day)] == [date(2026, 11, 27)]
+    assert len(axis) == 19 * 7 + 4
+    assert _node_clocks(axis, "2026-11-27") == ["10:00", "11:00", "12:00", "13:00"]
+    assert _node_clocks(axis, "2026-11-25") == [
+        "10:00", "11:00", "12:00", "13:00", "14:00", "15:00", "16:00",
+    ]
+    assert _node_clocks(axis, "2026-11-26") == []
+
+
+def test_december_axis_has_one_early_close():
+    axis = live.live_month_hourly_axis("2026-12-01", "2026-12-31")
+    days = live._trading_days_inclusive(date(2026, 12, 1), date(2026, 12, 31))
+    assert len(days) == 22
+    assert len(axis) == 21 * 7 + 4
+    assert _node_clocks(axis, "2026-12-24") == ["10:00", "11:00", "12:00", "13:00"]
+    assert axis[-1].startswith("2026-12-31T16:00")
+
+
+def test_an_early_close_settles_30_minutes_after_13_00(sip_delay_15):
+    assert live.freeze_settle_time(date(2026, 11, 27)) == datetime(
+        2026, 11, 27, 13, 30, tzinfo=_ET
+    )
+    assert live.freeze_settle_time(date(2026, 11, 25)) == datetime(
+        2026, 11, 25, 16, 30, tzinfo=_ET
+    )
+
+
+@pytest.mark.parametrize(
+    ("clock", "state", "frozen_through", "live_day"),
+    [
+        ((12, 59), "rth", "2026-11-25", "2026-11-27"),
+        ((13, 5), "settling", "2026-11-25", "2026-11-27"),
+        ((13, 30), "closed", "2026-11-27", None),
+        ((15, 0), "closed", "2026-11-27", None),
+    ],
+)
+def test_the_clock_closes_at_13_00_on_an_early_close(
+    sip_delay_15, clock, state, frozen_through, live_day
+):
+    """Thanksgiving (11-26) is skipped: before the half day settles, the
+    freeze is still Wednesday's."""
+    status = live.live_clock(datetime(2026, 11, 27, *clock, tzinfo=_ET))
+    assert (
+        status["session_state"], status["frozen_through"], status["live_day"]
+    ) == (state, frozen_through, live_day)
+
+
+def test_a_bare_date_means_that_days_cash_close():
+    assert live._coerce_as_of_eastern(date(2026, 11, 27)) == datetime(
+        2026, 11, 27, 13, 0, tzinfo=_ET
+    )
+    assert live._coerce_as_of_eastern(date(2026, 11, 25)) == datetime(
+        2026, 11, 25, 16, 0, tzinfo=_ET
+    )
+
+
+def test_axis_node_key_caps_at_the_early_close():
+    def key(hour, minute=0, day=27):
+        return live._axis_node_key(datetime(2026, 11, day, hour, minute, tzinfo=_ET))
+
+    assert key(12) == "2026-11-27T13:00"  # Alpaca's last cash-session bar
+    # Yahoo's closing level, restamped to 12:30 by _yahoo from its 13:00 stub
+    # (test_yahoo_chart pins that against recorded responses).
+    assert key(12, 30) == "2026-11-27T13:00"
+    assert key(13) is None  # the late session has no node
+    assert key(15) is None
+    assert key(15, day=25) == "2026-11-25T16:00"
+
+
+def test_frozen_curve_through_an_early_close_stops_at_13_00():
+    """Open-stamped bars 10:00-15:00 ET (15:00Z-20:00Z in EST): the three
+    late-session prints must not paint 14:00-16:00 nodes."""
+    axis = live.live_month_hourly_axis("2026-11-01", "2026-11-30")
+    points = [
+        _pt(f"2026-11-27T{15 + i}:00:00+00:00", SEED + 100 * i) for i in range(6)
+    ]
+    curve = live.reindex_frozen_curve(points, axis, "2026-11-27", SEED)
+    assert len(curve) == 18 * 7 + 4
+    assert [
+        (p["timestamp"][11:16], p["equity"])
+        for p in curve if p["timestamp"].startswith("2026-11-27")
+    ] == [
+        ("10:00", SEED), ("11:00", SEED), ("12:00", SEED + 100), ("13:00", SEED + 200),
+    ]
+
+
+def test_the_window_description_names_the_early_close(no_alpaca):
+    payload = live.get_live_leaderboard(as_of=datetime(2026, 11, 27, 17, 39, tzinfo=_ET))
+    assert "10:00–13:00 on NYSE early-close days" in payload["window"]["description"]
+
+
+def test_the_live_board_keeps_no_fixed_session_close():
+    """A module-level 16:00 close and a fixed seven-hour axis are how the early
+    close slipped through: every reader asks for the day's close instead."""
+    assert not hasattr(live, "_US_CASH_CLOSE")
+    assert not hasattr(live, "_RTH_HOURS")
+
+
+def _alpaca_hourly_bars(*days):
+    """Open-stamped hourly AAPL bars, every hour 04:00-19:00 ET: a deliberate
+    superset of what Alpaca sends. It emits no bar for an hour without a valid
+    trade, and its half-day extended session ends at 17:00. Dense, so the late
+    session after an early close is certainly in the response."""
+    import pandas as pd
+
+    from dashboard.backend.infrastructure.market_data.sessions import (
+        FRAME_ATTR_OPEN_STAMPED_MINUTES,
+    )
+
+    index = pd.DatetimeIndex([
+        ts
+        for day in days
+        for ts in pd.date_range(f"{day} 04:00", f"{day} 19:00", freq="h",
+                                tz="US/Eastern")
+    ]).tz_convert("UTC")
+    frame = pd.DataFrame(
+        {"open": 100.0, "high": 101.0, "low": 99.0, "close": 100.0, "volume": 1000},
+        index=index,
+    )
+    frame.attrs[FRAME_ATTR_OPEN_STAMPED_MINUTES] = 60
+    return {"AAPL": frame}
+
+
+def test_a_replay_across_thanksgiving_and_the_early_close_is_not_a_gap(monkeypatch):
+    """The real decision loop over 11-25 (full), 11-26 (holiday) and 11-27
+    (13:00 close): six decisions then three, a checkpoint per session, no
+    LiveSessionGapError, and four nodes on the half day."""
+    from dashboard.backend.domain.leaderboard.strategies import llm_agent
+
+    decided = []
+
+    class Manager:
+        def __init__(self, **kwargs):
+            self.equity_history = []
+            self.trades = []
+            self.llm_calls = self.llm_decisions = 0
+            self.input_tokens = self.output_tokens = 0
+
+        def restore_state(self, snapshot):
+            pass
+
+        def snapshot_state(self):
+            return {"cash": SEED, "positions": {}}
+
+        def get_portfolio_state(self, *args):
+            return {}
+
+        def make_trading_decision_with_llm(self, state, client, **kwargs):
+            decided.append(state["timestamp"])
+            self.llm_calls += 1
+            self.llm_decisions += 1
+            return {"actions": []}
+
+        def execute_actions(self, *args):
+            pass
+
+        def update_equity(self, market_data, price_cache, ts):
+            equity = SEED + 1000 * (len(self.equity_history) + 1)
+            self.equity_history.append(
+                {"timestamp": ts, "equity": equity, "cash": equity, "positions_value": 0}
+            )
+
+        def get_equity_curve(self):
+            return self.equity_history
+
+    monkeypatch.setattr(llm_agent, "PortfolioManager", Manager)
+    monkeypatch.setattr(llm_agent.LLMAgentStrategy, "_make_client", lambda self: object())
+    monkeypatch.setattr(
+        lb_service,
+        "fetch_hourly_bars",
+        lambda symbols, start, end: _alpaca_hourly_bars("2026-11-25", "2026-11-27"),
+    )
+    _insert_live_run(
+        "lb_deepseek_v4_pro_20261101_20261124", "deepseek_v4_pro", "2026-11-24",
+        [_pt("2026-11-24T20:00:00+00:00", SEED)],
+        start_date="2026-11-01",
+        metadata={live.LIVE_SNAPSHOT_KEY: {"cash": SEED, "positions": {}}},
+    )
+    as_of = datetime(2026, 11, 27, 17, 39, tzinfo=_ET)
+    freeze_cfg = live.live_freeze_config(as_of)
+    assert freeze_cfg["end_date"] == "2026-11-27"
+
+    row = live.deploy_live_model_increment(_deepseek(freeze_cfg), freeze_cfg)
+
+    assert row["segment"] == {"start_date": "2026-11-25", "end_date": "2026-11-27"}
+    by_day = {}
+    for ts in decided:
+        et = ts.tz_convert("US/Eastern")
+        by_day.setdefault(et.date().isoformat(), []).append(et.strftime("%H:%M"))
+    assert by_day == {
+        "2026-11-25": ["10:00", "11:00", "12:00", "13:00", "14:00", "15:00"],
+        "2026-11-27": ["10:00", "11:00", "12:00"],
+    }
+    stored = db.get_run(row["run_id"])
+    assert stored["end_date"] == "2026-11-27"
+    assert stored["llm_calls"] == 9
+    assert [r["end_date"] for r in _month_rows("deepseek_v4_pro")] == ["2026-11-27"]
+
+    payload = live.get_live_leaderboard(as_of=as_of)
+    assert _node_clocks(payload["chart_axis"], "2026-11-27") == [
+        "10:00", "11:00", "12:00", "13:00",
+    ]
+    deepseek = next(e for e in payload["entries"] if e["entry_id"] == "deepseek_v4_pro")
+    assert [
+        (p["timestamp"][11:16], p["equity"])
+        for p in deepseek["equity_curve"] if p["timestamp"].startswith("2026-11-27")
+    ] == [
+        ("10:00", SEED + 6000),
+        ("11:00", SEED + 7000),
+        ("12:00", SEED + 8000),
+        ("13:00", SEED + 9000),
+    ]
+    assert deepseek["portfolio_value"] == SEED + 9000
+
+
 def test_payload_without_runs_keeps_empty_curves(no_alpaca):
     payload = live.get_live_leaderboard(
         as_of=datetime(2026, 8, 27, 14, 0, tzinfo=_ET)

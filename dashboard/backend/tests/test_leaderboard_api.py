@@ -258,6 +258,24 @@ def test_daily_window_dates_skips_weekend():
     assert start == end == "2026-07-14"
 
 
+def test_daily_window_dates_reads_an_early_close():
+    """2026-11-27 closes at 13:00 ET: the session is complete from then, not
+    from 16:00, and a bare date resolves to that close. The close has one
+    owner (``sessions.session_close_time``), shared with the Live board."""
+    from datetime import date, datetime
+    from zoneinfo import ZoneInfo
+
+    et = ZoneInfo("America/New_York")
+    start, _ = lb_service.daily_window_dates(as_of=datetime(2026, 11, 27, 12, 59, tzinfo=et))
+    assert start == "2026-11-26"
+    start, _ = lb_service.daily_window_dates(as_of=datetime(2026, 11, 27, 13, 0, tzinfo=et))
+    assert start == "2026-11-27"
+    assert lb_service._coerce_as_of_eastern(date(2026, 11, 27)) == datetime(
+        2026, 11, 27, 13, 0, tzinfo=et
+    )
+    assert not hasattr(lb_service, "_US_CASH_CLOSE")
+
+
 def test_daily_window_dates_cron_moment_is_todays_session():
     """22:30 UTC after a weekday close must select that US session, not Friday."""
     from datetime import datetime, timezone

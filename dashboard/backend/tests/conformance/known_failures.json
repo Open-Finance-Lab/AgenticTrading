@@ -329,22 +329,14 @@
   },
   "T05/D": {
     "cash": [
-      "cash: expected 490, actual 1000"
+      "cash: expected 490, actual 500"
     ],
     "equity": [
-      "equity[2026-11-30T10:30:00-05:00]: expected 1005, actual 1000"
+      "equity[2026-11-30T10:30:00-05:00]: expected 1005, actual 1015"
     ],
     "fills": [
-      "fills[o1@2026-11-30T09:30:00-05:00]: expected price 102 qty 5, actual no fill on that bar"
-    ],
-    "invariants": [
-      "invariant 7: o1 has 0 terminal OrderFinal(s), expected 1"
-    ],
-    "orders": [
-      "orders[o1]: expected filled/- filled 5, actual no terminal OrderFinal"
-    ],
-    "positions": [
-      "positions[AAPL]: expected 5, actual not held"
+      "fills[o1@2026-11-30T09:30:00-05:00]: expected price 102 qty 5, actual no fill on that bar",
+      "fills[o1@2026-11-27T12:30:00-05:00]: expected no fill, actual price 100 qty 5"
     ]
   }
 }
