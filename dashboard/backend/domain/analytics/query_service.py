@@ -250,7 +250,6 @@ class AnalyticsOverview(BaseModel):
     daily_completed_runs: dict[str, int]
     billing_lane_mix: list[BillingLaneDay]
     activation_funnel: dict[str, int]
-    user_state_counts: dict[str, int]
     top_failure_categories: list[FailureCategoryCount]
     users_needing_attention: list[AnalyticsUserListItem]
     last_updated: datetime
@@ -559,10 +558,10 @@ def _availability(available: bool = True) -> PanelAvailability:
 
 
 def _legacy_state(operational_state: str, lifecycle_segment: str) -> str:
-    """The five-state label derived from the two fact axes, the mapping
-    ``value_repository._legacy_seed`` applies. An approximation of what
-    states.py wrote, kept only while ``user_state_counts`` and the profile's
-    state summary exist; both go in the D20 task."""
+    """Map the live operational state and lifecycle segment onto the legacy
+    five-state label (blocked, needs_attention, dormant, onboarding, active)
+    that the user profile's ``state`` summary still reports. Operational
+    problems win; otherwise the lifecycle segment decides."""
 
     if operational_state in {"blocked", "needs_attention"}:
         return operational_state
@@ -1046,15 +1045,12 @@ class AnalyticsQueryService:
         # fact rows (design D20). The daily job writes facts for non-internal
         # accounts only, so include_internal widens neither.
         yesterday = current.date() - timedelta(days=1)
-        state_counts: dict[str, int] = {}
         attention: list[AnalyticsUserListItem] = []
         try:
-            for cell in self.value_store.count_states_for_date(yesterday):
-                # Bridge to the old five labels until user_state_counts goes.
-                label = _legacy_state(cell.operational_state, cell.lifecycle_segment)
-                state_counts[label] = state_counts.get(label, 0) + cell.users
+            # The friction panel's availability reports the fact read the
+            # operational board is served from; the five-state counts are gone.
+            self.value_store.count_states_for_date(yesterday)
         except Exception:
-            state_counts = {}
             availability["friction"] = _availability(False)
         try:
             candidates = self.value_store.list_attention_candidates(
@@ -1119,7 +1115,6 @@ class AnalyticsQueryService:
                 for day, counts in sorted(lane_days.items())
             ],
             activation_funnel=funnel,
-            user_state_counts=state_counts,
             top_failure_categories=failures,
             users_needing_attention=attention,
             last_updated=current,

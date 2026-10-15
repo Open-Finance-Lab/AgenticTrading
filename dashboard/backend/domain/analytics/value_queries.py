@@ -336,7 +336,6 @@ class UserValueFilters(BaseModel):
     last_meaningful_activity_from: datetime | None = None
     last_meaningful_activity_to: datetime | None = None
     priority: bool = False
-    legacy_status: str | None = None
     include_internal: bool = False
 
     @field_validator("q")
@@ -363,15 +362,6 @@ class UserValueFilters(BaseModel):
             and self.last_meaningful_activity_to < self.last_meaningful_activity_from
         ):
             raise ValueError("last meaningful activity range is reversed")
-        legacy = self.legacy_status
-        if legacy is not None and legacy not in {
-            "blocked",
-            "needs_attention",
-            "dormant",
-            "onboarding",
-            "active",
-        }:
-            raise ValueError("legacy_status is unsupported")
         return self
 
 
@@ -1254,7 +1244,6 @@ class ValueAnalyticsQueryService:
             last_meaningful_activity_from=filters.last_meaningful_activity_from,
             last_meaningful_activity_to=filters.last_meaningful_activity_to,
             priority=filters.priority,
-            legacy_status=filters.legacy_status,
             include_internal=filters.include_internal,
         )
         rows, total = self.value_store.list_users_page(

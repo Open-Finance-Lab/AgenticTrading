@@ -239,7 +239,6 @@ def _page_query(**overrides) -> UserPageQuery:
         last_meaningful_activity_from=None,
         last_meaningful_activity_to=None,
         priority=False,
-        legacy_status=None,
         include_internal=False,
     )
     values.update(overrides)
@@ -322,18 +321,6 @@ def assert_users_page_contract(store, ids: dict[str, int]) -> None:
         query=_page_query(q="%"), day=YESTERDAY, limit=100, offset=0
     )
     assert total == 0  # escaped: no literal percent sign in any email or name
-
-    for legacy, expected in (
-        ("blocked", {ids["blocked"]}),
-        ("needs_attention", {ids["attention"]}),
-        ("dormant", {ids["dormant"]}),
-        ("active", {ids["core"]}),
-        ("onboarding", set()),
-    ):
-        rows, _total = store.list_users_page(
-            query=_page_query(legacy_status=legacy), day=YESTERDAY, limit=100, offset=0
-        )
-        assert {row.user_id for row in rows} == expected, legacy
 
 
 def assert_priority_sort_contract(store, create_user) -> None:

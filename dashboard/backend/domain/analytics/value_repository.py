@@ -737,7 +737,6 @@ class UserPageQuery:
     last_meaningful_activity_from: datetime | None = None
     last_meaningful_activity_to: datetime | None = None
     priority: bool = False
-    legacy_status: str | None = None
     include_internal: bool = False
 
 
@@ -936,26 +935,6 @@ _TRANSITIONS_FOR_DATE_SQL = """
 """
 
 
-_LEGACY_STATUS_PREDICATES = {
-    # An approximation of the status states.py wrote, as fact-row predicates;
-    # not a byte-for-byte reproduction. Removed with the status filter in the
-    # D20 task (Task 16).
-    "blocked": "COALESCE(f.operational_state, 'healthy') = 'blocked'",
-    "needs_attention": "COALESCE(f.operational_state, 'healthy') = 'needs_attention'",
-    "dormant": (
-        "COALESCE(f.operational_state, 'healthy') = 'healthy'"
-        " AND f.lifecycle_segment = 'dormant'"
-    ),
-    "onboarding": (
-        "COALESCE(f.operational_state, 'healthy') = 'healthy'"
-        " AND f.lifecycle_segment IN ('new', 'onboarding')"
-    ),
-    "active": (
-        "COALESCE(f.operational_state, 'healthy') = 'healthy'"
-        " AND f.lifecycle_segment IN ('growing', 'core', 'at_risk')"
-    ),
-}
-
 _USERS_PAGE_SELECT = """
     SELECT u.id AS user_id, u.email, u.display_name, u.role, u.user_group,
            u.created_at, a.activated_at, a.last_meaningful_activity_at,
@@ -1043,10 +1022,6 @@ def _users_page_sql(
             "(COALESCE(f.operational_state, 'healthy') IN ('blocked', 'needs_attention')"
             " OR f.lifecycle_segment IN ('at_risk', 'onboarding'))"
         )
-    if query.legacy_status is not None:
-        if query.legacy_status not in _LEGACY_STATUS_PREDICATES:
-            raise ValueError("legacy_status is unsupported")
-        where.append(f"({_LEGACY_STATUS_PREDICATES[query.legacy_status]})")
     where_sql = (" WHERE " + " AND ".join(where)) if where else ""
     from_sql = _USERS_PAGE_FROM.format(p=p)
     order_sql = _USERS_PAGE_PRIORITY_ORDER if query.priority else " ORDER BY u.id ASC"

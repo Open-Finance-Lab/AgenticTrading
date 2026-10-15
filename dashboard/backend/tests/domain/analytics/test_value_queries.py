@@ -646,7 +646,7 @@ def test_users_list_passes_every_filter_to_sql_unchanged():
     filters = UserValueFilters(
         q="Ada", lifecycle_segment="core", operational_state="healthy", commercial_tier="starter",
         user_group="partner", activated=True, last_meaningful_activity_from=NOW - timedelta(days=3),
-        last_meaningful_activity_to=NOW, priority=False, legacy_status="active", include_internal=True,
+        last_meaningful_activity_to=NOW, priority=False, include_internal=True,
     )
 
     response = service.list_users(filters=filters, limit=10, offset=20, now=NOW)
@@ -657,7 +657,7 @@ def test_users_list_passes_every_filter_to_sql_unchanged():
     assert query == UserPageQuery(
         q="Ada", lifecycle_segment="core", operational_state="healthy", commercial_tier="starter",
         user_group="partner", activated=True, last_meaningful_activity_from=NOW - timedelta(days=3),
-        last_meaningful_activity_to=NOW, priority=False, legacy_status="active", include_internal=True,
+        last_meaningful_activity_to=NOW, priority=False, include_internal=True,
     )
 
 

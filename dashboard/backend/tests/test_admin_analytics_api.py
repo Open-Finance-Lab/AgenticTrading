@@ -16,6 +16,7 @@ from dashboard.backend import users as users_module
 from dashboard.backend.app import app
 from dashboard.backend.domain.analytics.metrics import AnalyticsMetricFilters
 from dashboard.backend.domain.analytics.query_service import (
+    AnalyticsOverview,
     AnalyticsQueryService,
     get_analytics_query_service,
     get_value_analytics_query_service,
@@ -41,6 +42,7 @@ from dashboard.backend.domain.analytics.value_queries import (
     RetentionAnalyticsResponse,
     SectionAvailability,
     UserGroupSummary,
+    UserValueFilters,
     ValueUserProfile,
 )
 from dashboard.backend.domain.analytics.value_repository import UserDailyFact
@@ -1067,10 +1069,10 @@ def _fact(user_id, day, **overrides):
     return UserDailyFact(**values)
 
 
-def test_overview_state_counts_and_attention_come_from_yesterdays_facts(tmp_path):
-    """Design D20 bridge: user_state_counts maps yesterday's two axes onto the
-    old five labels; attention lists yesterday's blocked / needs-attention
-    users with their 30-day run totals and their current activity clock."""
+def test_overview_attention_comes_from_yesterdays_facts(tmp_path):
+    """Design D20: the overview carries no five-state counts; attention lists
+    yesterday's blocked / needs-attention users with their 30-day run totals
+    and their current activity clock."""
 
     analytics, _events, _rollups, users = _fixture(tmp_path)
     service = AnalyticsQueryService(store=analytics, user_store=users)
@@ -1120,12 +1122,6 @@ def test_overview_state_counts_and_attention_come_from_yesterdays_facts(tmp_path
         filters=AnalyticsMetricFilters(start=NOW - timedelta(days=1), end=NOW),
     )
 
-    assert overview.user_state_counts == {
-        "needs_attention": 1,
-        "blocked": 1,
-        "dormant": 1,
-        "onboarding": 1,
-    }
     assert [
         (item.user_id, item.status, item.reason_code, item.recent_runs, item.recent_failures)
         for item in overview.users_needing_attention
@@ -1161,7 +1157,6 @@ def test_overview_marks_fact_panels_unavailable_when_fact_reads_fail(tmp_path):
         filters=AnalyticsMetricFilters(start=NOW - timedelta(days=1), end=NOW),
     )
 
-    assert overview.user_state_counts == {}
     assert overview.users_needing_attention == []
     assert overview.availability["friction"].available is False
     assert overview.availability["attention"].available is False
@@ -1459,7 +1454,6 @@ def test_admin_user_list_accepts_documented_filters(admin_analytics_api):
         "/api/admin/analytics/users",
         params={
             "q": "Subject",
-            "status": "active",
             "lifecycle_segment": "core",
             "operational_state": "healthy",
             "commercial_tier": "invested",
@@ -1487,7 +1481,6 @@ def test_admin_user_list_accepts_documented_filters(admin_analytics_api):
     assert filters.commercial_tier == "invested"
     assert filters.user_group == "partner"
     assert filters.activated is True
-    assert filters.legacy_status == "active"
 
 
 def test_admin_analytics_maps_not_found_and_cursor_errors_safely(
@@ -1594,3 +1587,21 @@ def test_value_routes_reject_unknown_duplicate_and_unsafe_queries(
     assert response.status_code == 422
     assert response.json() == {"detail": "Invalid Analytics query."}
     assert "synthetic secret" not in response.text
+
+
+def test_overview_has_no_five_state_field_and_users_rejects_status(admin_analytics_api):
+    """Design D20: the one permitted contract break before PR D."""
+    api = admin_analytics_api
+
+    overview = api["client"].get("/api/admin/analytics/overview", headers=api["admin_headers"])
+    users = api["client"].get(
+        "/api/admin/analytics/users", params={"status": "active"}, headers=api["admin_headers"]
+    )
+
+    assert overview.status_code == 200, overview.text
+    assert "user_state_counts" not in overview.json()
+    assert set(overview.json()["availability"]) == {"snapshot", "growth", "funnel", "friction", "attention"}
+    assert users.status_code == 422
+    assert users.json() == {"detail": "Invalid Analytics query."}
+    assert "user_state_counts" not in AnalyticsOverview.model_fields
+    assert "legacy_status" not in UserValueFilters.model_fields
