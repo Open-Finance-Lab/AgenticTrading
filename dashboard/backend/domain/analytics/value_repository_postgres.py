@@ -13,8 +13,6 @@ from __future__ import annotations
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Literal, Mapping, Sequence
 
-import psycopg
-
 from .repository_common import positive_limit, positive_user_id, utc_iso
 from .value_repository import (
     _ACTIVATIONS_SQL,
@@ -32,6 +30,8 @@ from .value_repository import (
     _GROUP_REPEAT_SQL,
     _GROUP_TOTALS_SQL,
     _INTERNAL_EXCLUSION_SQL,
+    _LEGACY_SNAPSHOTS_SQL,
+    _LEGACY_UNROLLED_DATES_SQL,
     _RECOMPUTE_EVENTS_SQL,
     _RECOMPUTE_FACTS_SQL,
     _TERMINAL_RUN_STATUSES,
@@ -49,6 +49,8 @@ from .value_repository import (
     _fact_values,
     _group_totals,
     _id_chunks,
+    _legacy_read_dates,
+    _legacy_snapshot,
     _segment_day_count,
     _transition_count,
     _transition_row,
@@ -65,6 +67,7 @@ from .value_repository import (
     _ROLLUP_COLUMNS,
     _lifecycle_rollup_payloads,
     _replaced_lifecycle_metrics,
+    LIFECYCLE_ROLLUP_METRICS,
     LIFECYCLE_SEGMENTS,
     MAX_USER_BATCH,
     RUN_SAFE_DEADLINE,
@@ -75,6 +78,7 @@ from .value_repository import (
     DayEventTotals,
     FactStateCount,
     GroupFactTotals,
+    LegacyLifecycleHistory,
     LifecycleTransitionRow,
     ProjectionJob,
     RecentFactTotals,
@@ -100,6 +104,13 @@ from .lifecycle import (
     consecutive_failed_terminal_runs,
 )
 
+
+
+def _postgres_table_exists(cur: Any, table: str) -> bool:
+    """Locale-proof: ``to_regclass`` answers NULL for a missing relation, so no
+    error message (whose text follows ``lc_messages``) is ever parsed."""
+    cur.execute("SELECT to_regclass(%s) IS NOT NULL AS present", (table,))
+    return bool(_row_value(cur.fetchone(), "present"))
 
 class PostgresValueAnalyticsStore:
     """PostgreSQL value projection storage.
@@ -337,11 +348,8 @@ class PostgresValueAnalyticsStore:
         return result
 
     def seed_activity_from_snapshots(self, *, now: datetime) -> int:
-        """See the SQLite twin; the missing table is ``UndefinedTable`` here.
-
-        Caught outside the connection block, so the pool's context manager
-        rolls the aborted transaction back before the connection is reused.
-        """
+        """See the SQLite twin. Absence is ``to_regclass`` IS NULL, which
+        resolves through ``search_path`` and reads no localized message text."""
         stamp = utc_iso(_utc(now, "now"))
         sql = """
             INSERT INTO user_activity (
@@ -368,15 +376,40 @@ class PostgresValueAnalyticsStore:
                 ),
                 updated_at = EXCLUDED.updated_at
         """
-        try:
-            with self._analytics_connection() as conn:
-                with conn.cursor() as cur:
-                    cur.execute(sql, (stamp,))
-                    return max(0, int(cur.rowcount))
-        except psycopg.errors.UndefinedTable as exc:
-            if '"user_analytics_snapshots"' in str(exc):
-                return 0
-            raise
+        with self._analytics_connection() as conn:
+            with conn.cursor() as cur:
+                if not _postgres_table_exists(cur, "user_analytics_snapshots"):
+                    return 0
+                cur.execute(sql, (stamp,))
+                return max(0, int(cur.rowcount))
+
+    def list_legacy_lifecycle_history(self) -> LegacyLifecycleHistory:
+        """See the SQLite twin."""
+        metrics = sorted(LIFECYCLE_ROLLUP_METRICS)
+        with self._analytics_connection() as conn:
+            with conn.cursor() as cur:
+                if not _postgres_table_exists(cur, "user_lifecycle_daily_snapshots"):
+                    return LegacyLifecycleHistory()
+                cur.execute(
+                    _LEGACY_UNROLLED_DATES_SQL.format(
+                        metrics=", ".join("%s" for _ in metrics)
+                    ),
+                    metrics,
+                )
+                days = tuple(
+                    date.fromisoformat(str(_row_value(row, "snapshot_date")))
+                    for row in cur.fetchall()
+                )
+                if not days:
+                    return LegacyLifecycleHistory()
+                cur.execute(
+                    _LEGACY_SNAPSHOTS_SQL.format(date_clause="snapshot_date = ANY(%s)"),
+                    (_legacy_read_dates(days),),
+                )
+                rows = cur.fetchall()
+        return LegacyLifecycleHistory(
+            days=days, snapshots=tuple(_legacy_snapshot(row) for row in rows)
+        )
 
     def sum_recent_facts(
         self,

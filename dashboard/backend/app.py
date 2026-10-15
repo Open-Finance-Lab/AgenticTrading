@@ -357,8 +357,9 @@ async def startup_event():
 
     try:
         # Admin layer redesign PR B (design SS11): re-seed user_activity from
-        # the legacy snapshot row, then drop the two snapshot tables. Both
-        # steps are idempotent, so every boot after the first is a no-op. Its
+        # the legacy snapshot row, roll up the legacy lifecycle days no fact
+        # row covers, then drop the two snapshot tables. Every step is
+        # idempotent, so every boot after the first is a no-op. Its
         # own try: a migration failure must never skip starting the worker
         # below, which runs the same migrations again before its first tick.
         from dashboard.backend.domain.analytics.facts_migration import (
@@ -367,7 +368,8 @@ async def startup_event():
         report = run_startup_migrations()
         print(
             "🧹 Analytics legacy snapshot tables dropped (if present); "
-            f"user_activity seeded={report.activity_seeded}"
+            f"user_activity seeded={report.activity_seeded} "
+            f"legacy_lifecycle_days_rolled_up={report.legacy_days_rolled_up}"
         )
     except Exception as exc:
         print(

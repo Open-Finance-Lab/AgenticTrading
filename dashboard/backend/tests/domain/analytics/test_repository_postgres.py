@@ -323,6 +323,69 @@ def test_postgres_reseed_then_drop_legacy_snapshot_tables(
 
 
 @pg_only
+def test_postgres_rolls_up_uncovered_legacy_days_before_the_drop(
+    postgres_contract_store,
+):
+    """I1 on the prod dialect: uncovered legacy days become anonymous lifecycle
+    rollups, a covered day is left alone, the drop follows, and the second boot
+    (to_regclass IS NULL) is a no-op."""
+    from dashboard.backend.domain.analytics.facts_migration import (
+        StartupMigrationReport,
+        run_startup_migrations,
+    )
+    from dashboard.backend.tests.domain.analytics.test_facts_migration import (
+        COVERED_DAY,
+        LEGACY_DAILY_DDL,
+        LEGACY_DAILY_ROWS,
+        UNCOVERED_DAYS,
+        _rollup_shape,
+        covering_fact,
+        legacy_lifecycle_rollups,
+    )
+
+    analytics, _admin_id, user_id = postgres_contract_store
+    value_store = PostgresValueAnalyticsStore(
+        analytics,
+        credits_base=object(),
+        provider_base=object(),
+        agent_base=object(),
+        run_base=object(),
+    )
+    with analytics._get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "CREATE TABLE user_analytics_snapshots (user_id INTEGER PRIMARY KEY, "
+                "activated_at TEXT, last_meaningful_activity_at TEXT)"
+            )
+            cur.execute(LEGACY_DAILY_DDL)
+            for snapshot_date, legacy_user, segment, quality in LEGACY_DAILY_ROWS:
+                cur.execute(
+                    "INSERT INTO user_lifecycle_daily_snapshots "
+                    "VALUES (%s, %s, %s, 'x', %s, %s)",
+                    (snapshot_date, legacy_user, segment, quality, NOW.isoformat()),
+                )
+    value_store.upsert_daily_facts([covering_fact(user_id)])
+
+    def lifecycle_rollups(day):
+        return _rollup_shape(
+            AnalyticsRollupStore(analytics).list_rollups(
+                start=day, end=day + timedelta(days=1)
+            )
+        )
+
+    report = run_startup_migrations(value_store=value_store, now=NOW)
+
+    assert report == StartupMigrationReport(legacy_days_rolled_up=2)
+    for day in UNCOVERED_DAYS:
+        assert lifecycle_rollups(day) == legacy_lifecycle_rollups(day)
+    assert lifecycle_rollups(COVERED_DAY) == []
+    assert value_store.list_legacy_lifecycle_history().days == ()
+    assert run_startup_migrations(value_store=value_store, now=NOW) == (
+        StartupMigrationReport()
+    )
+
+
+@pg_only
 def test_postgres_failed_seed_keeps_both_legacy_tables(postgres_contract_store):
     from dashboard.backend.domain.analytics.facts_migration import (
         run_startup_migrations,

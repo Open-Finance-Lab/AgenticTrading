@@ -381,3 +381,25 @@ def test_rollup_current_day_reads_only_the_current_day(tmp_path):
     rollup_current_day(store=rollups, now=now)
 
     assert windows == [(datetime(2026, 8, 25, tzinfo=timezone.utc), now)]
+
+
+def test_lifecycle_rollup_warns_when_a_day_has_transitions_but_no_facts(tmp_path, capsys):
+    """Unreachable while both expire together; if it happens, the lost movement
+    must reach the service log rather than vanish."""
+    from dashboard.backend.tests.domain.analytics.test_fact_reads import transition
+
+    analytics, rollups = _store(tmp_path)
+    values = ValueAnalyticsStore(
+        analytics, credits_base=object(), provider_base=object(), agent_base=object(), run_base=object()
+    )
+    day = date(2026, 8, 25)
+    values.append_lifecycle_transitions([transition(1, day, "new", "growing")])
+
+    assert rollup_lifecycle_day(day, store=values) == ()
+
+    out = capsys.readouterr().out
+    assert (
+        "WARNING: analytics.rollup.lifecycle_day_without_facts "
+        "day=2026-08-25 transitions=1"
+    ) in out
+    assert rollups.list_rollups(start=day, end=day + timedelta(days=1)) == []

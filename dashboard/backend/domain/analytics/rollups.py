@@ -525,15 +525,26 @@ def rollup_lifecycle_day(
 
     Reads the day's fact rows and transition log; writes nothing keyed by a
     user. The retention sweep calls it for every expiring day before that
-    day's user-keyed rows are deleted. A day with no facts writes nothing:
+    day's user-keyed rows are deleted. ``runs_by_tier`` /
+    ``runs_by_user_group`` count ``runs_completed``, not the
+    ``runs_requested`` that ``/groups`` reports as ``total_runs``. A day with
+    no facts writes nothing:
     its facts may already have expired, and replacing its lifecycle rollups
     with an empty set would erase the history this function exists to keep.
     """
 
     facts = store.list_facts_for_date(day)
-    if not facts:
-        return ()
     transitions = store.list_transitions_for_date(day)
+    if not facts:
+        if transitions:
+            # Unreachable while facts and transitions expire together; if it
+            # ever happens the day's movement is lost, so say so.
+            print(
+                "WARNING: analytics.rollup.lifecycle_day_without_facts "
+                f"day={day.isoformat()} transitions={len(transitions)}",
+                flush=True,
+            )
+        return ()
     updated_at = _day_start(day + timedelta(days=1))
     rows: list[DailyRollup] = []
 
@@ -570,6 +581,9 @@ def rollup_lifecycle_day(
             )
         )
 
+    # ``runs_by_*`` count runs_completed -- finished runs -- unlike /groups'
+    # ``total_runs``, which counts runs_requested. These rows are permanent
+    # once the day's facts expire, so the semantics are fixed here.
     for dimension in ("tier", "user_group"):
         by_value: dict[str, list[Any]] = defaultdict(list)
         for fact in facts:
@@ -616,10 +630,86 @@ def rollup_lifecycle_day(
     return tuple(rows)
 
 
+def _legacy_lifecycle_rows(
+    day: date, current: Sequence[Any], previous: Sequence[Any]
+) -> list[DailyRollup]:
+    """Main's ``rollup_lifecycle_day`` over legacy snapshot rows, unchanged in shape:
+    a count per segment, and a transition per (previous, current) segment pair
+    for users present on both days whose segment moved."""
+    updated_at = _day_start(day + timedelta(days=1))
+    rows: list[DailyRollup] = []
+    by_segment: dict[str, list[Any]] = defaultdict(list)
+    for snapshot in current:
+        by_segment[snapshot.lifecycle_segment].append(snapshot)
+    for segment, group in sorted(by_segment.items()):
+        rows.append(
+            _row(
+                day,
+                "lifecycle_segment_count",
+                count=len(group),
+                user_state=segment,
+                outcome=_quality(group),
+                updated_at=updated_at,
+            )
+        )
+    previous_by_user = {snapshot.user_id: snapshot for snapshot in previous}
+    moved: dict[tuple[str, str], list[Any]] = defaultdict(list)
+    moved_quality: dict[tuple[str, str], list[Any]] = defaultdict(list)
+    for snapshot in current:
+        prior = previous_by_user.get(snapshot.user_id)
+        if prior is None or prior.lifecycle_segment == snapshot.lifecycle_segment:
+            continue
+        key = (prior.lifecycle_segment, snapshot.lifecycle_segment)
+        moved[key].append(snapshot)
+        moved_quality[key].extend((prior, snapshot))
+    for (from_segment, to_segment), group in sorted(moved.items()):
+        rows.append(
+            _row(
+                day,
+                "lifecycle_transition",
+                count=len(group),
+                event_name=from_segment,
+                user_state=to_segment,
+                outcome=_quality(moved_quality[(from_segment, to_segment)]),
+                updated_at=updated_at,
+            )
+        )
+    rows.sort(key=lambda row: (row.metric_name, row.event_name, row.user_state))
+    return rows
+
+
+def rollup_legacy_lifecycle_days(*, store) -> tuple[date, ...]:
+    """Roll the legacy days no fact row covers into anonymous lifecycle rollups.
+
+    The startup migration's step between the ``user_activity`` seed and the
+    drop of ``user_lifecycle_daily_snapshots`` (design SS6.9, SS11): the PR A
+    history copy reached back only 56 days, so older legacy days live in that
+    table alone, and ``_history`` already falls back to these two families for
+    any day without facts. Days that already hold a lifecycle-owned rollup are
+    excluded by the store's read, so nothing is overwritten and a re-run (a
+    boot whose drop failed) writes nothing new. Transitions are written only
+    when the previous legacy day exists, exactly as main's writer did.
+    Returns the days rolled up.
+    """
+    history = store.list_legacy_lifecycle_history()
+    by_day: dict[date, list[Any]] = defaultdict(list)
+    for snapshot in history.snapshots:
+        by_day[snapshot.snapshot_date].append(snapshot)
+    for day in history.days:
+        previous = by_day.get(day - timedelta(days=1), [])
+        store.replace_lifecycle_rollups(
+            day,
+            _legacy_lifecycle_rows(day, by_day.get(day, []), previous),
+            replace_transitions=bool(previous),
+        )
+    return history.days
+
+
 __all__ = [
     "AnalyticsRollupStore",
     "DailyRollup",
     "rollup_current_day",
     "rollup_day",
+    "rollup_legacy_lifecycle_days",
     "rollup_lifecycle_day",
 ]

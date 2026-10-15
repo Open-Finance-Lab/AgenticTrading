@@ -357,6 +357,30 @@ class LifecycleTransitionRow(BaseModel):
         return _utc(value)
 
 
+class LegacyLifecycleSnapshot(BaseModel):
+    """One row of the retired ``user_lifecycle_daily_snapshots`` table.
+
+    Read once, by the startup migration, to roll up the legacy days no fact
+    row covers before the table is dropped (``rollups.rollup_legacy_lifecycle_days``).
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    snapshot_date: date
+    user_id: int = Field(gt=0)
+    lifecycle_segment: LifecycleSegment
+    data_quality: Literal["complete", "partial"]
+
+
+class LegacyLifecycleHistory(BaseModel):
+    """The legacy days still to roll up, plus their rows and the previous day's."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    days: tuple[date, ...] = ()
+    snapshots: tuple[LegacyLifecycleSnapshot, ...] = ()
+
+
 _DAILY_FACT_COLUMNS = (
     "snapshot_date", "user_id", "lifecycle_segment", "lifecycle_reason_code",
     "operational_state", "operational_reason_code", "tier", "user_group", "active",
@@ -870,6 +894,61 @@ _ATTENTION_SQL = """
     ORDER BY recent_failures DESC, f.user_id DESC
     LIMIT {p}
 """
+
+# The legacy days the drop would otherwise destroy: no fact row covers them
+# and no lifecycle rollup was ever written for them (design SS6.9 "Movement
+# charts keep their history"). {metrics} is the lifecycle-owned families, so a
+# day already rolled up -- by an earlier boot whose drop failed, or by the
+# retention sweep -- is never overwritten.
+_LEGACY_UNROLLED_DATES_SQL = """
+    SELECT DISTINCT s.snapshot_date
+    FROM user_lifecycle_daily_snapshots AS s
+    WHERE NOT EXISTS (
+        SELECT 1 FROM user_daily_facts AS f
+        WHERE f.snapshot_date = s.snapshot_date
+    )
+      AND NOT EXISTS (
+        SELECT 1 FROM analytics_daily_rollups AS r
+        WHERE r.rollup_date = s.snapshot_date
+          AND r.metric_name IN ({metrics})
+    )
+    ORDER BY s.snapshot_date
+"""
+
+_LEGACY_SNAPSHOTS_SQL = """
+    SELECT snapshot_date, user_id, lifecycle_segment, data_quality
+    FROM user_lifecycle_daily_snapshots
+    WHERE {date_clause}
+    ORDER BY snapshot_date, user_id
+"""
+
+
+def _legacy_snapshot(row: Any) -> LegacyLifecycleSnapshot:
+    """Shared by both twins."""
+    return LegacyLifecycleSnapshot(
+        snapshot_date=date.fromisoformat(str(_row_value(row, "snapshot_date"))),
+        user_id=int(_row_value(row, "user_id")),
+        lifecycle_segment=_row_value(row, "lifecycle_segment"),
+        data_quality=_row_value(row, "data_quality"),
+    )
+
+
+def _legacy_read_dates(days: Sequence[date]) -> list[str]:
+    """Each unrolled day plus the day before it, for its transitions. Shared."""
+    wanted = set(days) | {day - timedelta(days=1) for day in days}
+    return sorted(day.isoformat() for day in wanted)
+
+
+def _sqlite_table_exists(conn: sqlite3.Connection, table: str) -> bool:
+    """Locale-proof: asks the catalogue rather than parsing an error message."""
+    return (
+        conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+            (table,),
+        ).fetchone()
+        is not None
+    )
+
 
 _GROUP_TOTALS_SQL = """
     SELECT user_group,
@@ -1447,8 +1526,9 @@ class ValueAnalyticsStore:
 
         Returns 0 once the table is gone: ``run_startup_migrations`` drops it
         right after this read and runs on every boot, and a fresh install's
-        DDL never creates it. Only the missing table is tolerated; any other
-        failure (a legacy row missing the columns read here) still raises.
+        DDL never creates it. Absence is read from the catalogue, never from
+        an error message; any failure (a legacy row missing the columns read
+        here) still raises.
         """
         stamp = utc_iso(_utc(now, "now"))
         sql = """
@@ -1476,14 +1556,48 @@ class ValueAnalyticsStore:
                 ),
                 updated_at = excluded.updated_at
         """
-        try:
-            with self._analytics_connection() as conn:
-                cursor = conn.execute(sql, (stamp,))
-                return max(0, int(cursor.rowcount))
-        except sqlite3.OperationalError as exc:
-            if "no such table: user_analytics_snapshots" in str(exc):
+        with self._analytics_connection() as conn:
+            if not _sqlite_table_exists(conn, "user_analytics_snapshots"):
                 return 0
-            raise
+            cursor = conn.execute(sql, (stamp,))
+            return max(0, int(cursor.rowcount))
+
+    def list_legacy_lifecycle_history(self) -> LegacyLifecycleHistory:
+        """The legacy lifecycle days no fact row and no lifecycle rollup covers.
+
+        Read by the startup migration immediately before the drop, so those
+        days survive it as anonymous rollups. Empty once the table is gone
+        (every boot after the drop, and a fresh install); any other failure
+        raises, which skips the drop.
+        """
+        metrics = sorted(LIFECYCLE_ROLLUP_METRICS)
+        with self._analytics_connection() as conn:
+            if not _sqlite_table_exists(conn, "user_lifecycle_daily_snapshots"):
+                return LegacyLifecycleHistory()
+            day_rows = conn.execute(
+                _LEGACY_UNROLLED_DATES_SQL.format(
+                    metrics=", ".join("?" for _ in metrics)
+                ),
+                metrics,
+            ).fetchall()
+            days = tuple(
+                date.fromisoformat(str(_row_value(row, "snapshot_date")))
+                for row in day_rows
+            )
+            if not days:
+                return LegacyLifecycleHistory()
+            read_dates = _legacy_read_dates(days)
+            rows = conn.execute(
+                _LEGACY_SNAPSHOTS_SQL.format(
+                    date_clause=(
+                        f"snapshot_date IN ({', '.join('?' for _ in read_dates)})"
+                    )
+                ),
+                read_dates,
+            ).fetchall()
+        return LegacyLifecycleHistory(
+            days=days, snapshots=tuple(_legacy_snapshot(row) for row in rows)
+        )
 
     def sum_recent_facts(
         self,
