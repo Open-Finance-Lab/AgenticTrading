@@ -11,6 +11,7 @@ TRACES = source("admin-traces.js")
 def _eval(expression: str) -> object:
     return run_node(
         SHELL,
+        source("backtest-comparison.js"),
         source("admin-trace-performance.js"),
         source("admin-trace-timeline.js"),
         TRACES,
@@ -44,9 +45,9 @@ def test_timeline_keeps_order_and_serializes_payload_as_text():
         "  return {events: node.children.map((item) => item.textContent), pre: byTag(node, 'pre').map((item) => item.textContent)};"
         "})()"
     )
-    assert "#1 Run Started" in result["events"][0]
+    assert "#1Run Started" in result["events"][0]
     assert "<safe>" in result["pre"][0]
-    assert "#2 Decision Recorded" in result["events"][1]
+    assert "#2Decision Recorded" in result["events"][1]
 
 
 def test_empty_trace_states_are_explicit():
@@ -61,12 +62,31 @@ def test_performance_filters_invalid_snapshots_and_uses_market_time():
     assert result['points'][0]['timestamp'] == '2026-05-04T10:00:00Z'
 
 
-def test_failed_performance_renders_partial_and_links_by_decision_id():
-    result = _eval("(() => { const n = window.AdminTracePerformance.render({status:'failed'}, [{sequence_no:1,event_type:'decision_recorded',decision_id:'d',payload:{decision_at:'2026-05-04T10:00:00Z',state:{equity:100}}},{sequence_no:2,event_type:'decision_recorded',payload:{decision_at:'2026-05-04T11:00:00Z',state:{equity:90}}},{sequence_no:3,event_type:'execution_result',decision_id:'d',payload:{fills:[{side:'BUY',symbol:'AAPL'}]}}],null); return {text:n.textContent, circles:byTag(n,'circle').length, buttons:byTag(n,'button').map(b=>b.textContent)}; })()")
+def test_failed_performance_renders_partial_and_marks_trades_by_decision_id():
+    """Without the run's chart payload the curve falls back to decision
+    snapshots: one agent column, its metrics from those points, and a marker
+    only on the decision whose execution produced an order."""
+    result = _eval("(() => { const n = window.AdminTracePerformance.render({status:'failed'}, [{sequence_no:1,event_type:'decision_recorded',decision_id:'d',payload:{decision_at:'2026-05-04T10:00:00Z',state:{equity:100}}},{sequence_no:2,event_type:'decision_recorded',payload:{decision_at:'2026-05-04T11:00:00Z',state:{equity:90}}},{sequence_no:3,event_type:'execution_result',decision_id:'d',payload:{fills:[{side:'BUY',symbol:'AAPL'}]}}],null); return {text:n.textContent, circles:byTag(n,'circle').length, legend:byClass(n,'trace-legend-btn').map(b=>b.textContent), cells:byTag(n,'td').map(c=>c.textContent)}; })()")
     assert 'Run failed' in result['text']
-    assert 'Snapshot change: -10.00%' in result['text']
     assert result['circles'] == 1
-    assert result['buttons'][1] == 'Execution'
+    assert result['legend'] == ['Your Agent']
+    assert result['cells'] == ['$90', '-10.00%', '-10.00%']
+
+
+def test_chart_and_comparison_use_the_backtest_model_when_the_run_has_benchmarks():
+    result = _eval("(() => {"
+        "  const chart = {available: true, agent_run_id: 'r', timestamps: ['2026-05-04T14:30:00', '2026-05-04T15:30:00', '2026-05-05T14:30:00'],"
+        "    series: [{run_id: 'r', label: 'Agent', values: [1000, 1010, 1020], color: '#4FC3F7', dashed: false},"
+        "             {run_id: 'index:^DJI', label: 'DJIA index', values: [1000, 1005, 1030], color: '#F5C04A', dashed: true}], run: {}};"
+        "  const n = window.AdminTracePerformance.render({status:'completed'}, [], {points: []}, chart);"
+        "  return {legend: byClass(n,'trace-legend-btn').map(b=>b.textContent), lines: byTag(n,'polyline').length,"
+        "    best: byClass(n,'trace-best').length, deltas: byClass(n,'trace-delta').map(d=>d.textContent), head: byTag(n,'th').map(t=>t.textContent)};"
+        "})()")
+    assert result['legend'] == ['Your Agent', 'DJIA']
+    assert result['lines'] == 2
+    assert result['deltas'] == ['DJIA -1.00pp']
+    # Sharpe is the engine's to compute (2026-10-14 direction), never this table's.
+    assert 'Sharpe Ratio' not in result['head']
 
 
 def test_groups_only_by_explicit_links_and_keeps_event_order():
@@ -113,7 +133,7 @@ def test_poll_reads_the_envelope_before_events_so_a_finished_run_keeps_its_tail(
     assert result["calls"][0] == "/api/admin/traces/t"
     assert result["calls"][1].startswith("/api/admin/traces/t/events?after_sequence=1")
     assert result["calls"][2] == "/api/admin/traces/t/performance"
-    assert "#3 Run Completed" in result["text"]
+    assert "#3Run Completed" in result["text"]
 
 
 def test_poll_without_changes_keeps_the_rendered_tree():
@@ -157,38 +177,95 @@ def test_an_open_backtest_report_is_fetched_once_per_trace_status():
     assert "Llm Model: deepseek-v4-pro" in result["text"]
 
 
-def test_trading_log_takes_each_fills_reason_from_its_decision():
-    """Tape fills carry no decision_id and decisions record reasoning_summaries
-    (a list, one per action), so the log links through the execution event."""
-    result = _eval(
-        "(() => {"
-        "  const events = ["
-        "    {sequence_no: 1, event_type: 'decision_recorded', decision_id: 'd1', payload: {"
-        "      actions: [{symbol: 'AAPL', action: 'BUY', shares: 10, reason: 'momentum'}, {symbol: 'MSFT', action: 'SELL', shares: 5, reason: 'trim'}],"
-        "      reasoning_summaries: ['momentum', 'trim']}},"
-        "    {sequence_no: 2, event_type: 'execution_result', decision_id: 'd1', payload: {fills: ["
-        "      {timestamp: '2026-05-04T14:00:00Z', symbol: 'MSFT', side: 'SELL', shares: 5, price: 300},"
-        "      {timestamp: '2026-05-04T14:00:00Z', symbol: 'AAPL', side: 'BUY', shares: 10, price: 150}]}},"
-        "  ];"
-        "  const log = byClass(window.AdminTraces.renderTraceDetail({trace_id: 't', status: 'completed'}, events), 'trace-trading-log')[0];"
-        "  return byClass(log, 'trace-log-item').map((item) => ["
-        "    byClass(item, 'trace-log-order')[0].textContent, (byClass(item, 'trace-reason')[0] || {}).textContent]);"
-        "})()"
-    )
-    # Newest first.
-    assert result == [["BUY AAPL", "momentum"], ["SELL MSFT", "trim"]]
+_TWO_ORDERS = (
+    "  const events = ["
+    "    {sequence_no: 1, event_type: 'decision_recorded', decision_id: 'd1', payload: {decision_at: '2026-05-04T14:00:00Z',"
+    "      actions: [{symbol: 'AAPL', action: 'BUY', shares: 10, reason: 'momentum'}, {symbol: 'MSFT', action: 'SELL', shares: 5, reason: 'trim'}],"
+    "      reasoning_summaries: ['momentum', 'trim']}},"
+    "    {sequence_no: 2, event_type: 'execution_result', decision_id: 'd1', payload: {fills: ["
+    "      {timestamp: '2026-05-04T14:00:00Z', symbol: 'MSFT', side: 'SELL', shares: 5, price: 300}],"
+    "      rejected: [{symbol: 'AAPL', side: 'BUY', requested_shares: 10, reason: 'insufficient_cash'}]}},"
+    "    {sequence_no: 3, event_type: 'decision_recorded', decision_id: 'd2', payload: {decision_at: '2026-05-04T15:00:00Z',"
+    "      actions: [{symbol: 'NVDA', action: 'BUY'}, {symbol: 'AMZN', action: 'BUY'}], reasoning_summaries: ['equal weight', 'equal weight']}},"
+    "    {sequence_no: 4, event_type: 'execution_result', decision_id: 'd2', payload: {fills: ["
+    "      {symbol: 'NVDA', side: 'BUY', shares: 1, price: 237.05}, {symbol: 'AMZN', side: 'BUY', shares: 1, price: 251.58}]}},"
+    "  ];"
+)
 
 
-def test_trading_log_shows_the_latest_fills_and_the_true_count():
+def test_trading_log_groups_orders_by_decision_with_each_reason_once():
+    """An order takes the reason of the action on its symbol and side; a reason
+    every order in the group shares prints once, above them."""
     result = _eval(
-        "(() => {"
-        "  const fills = Array.from({length: 60}, (_, i) => ({symbol: `S${i}`, side: 'BUY', shares: 1, price: 1}));"
-        "  const log = byClass(window.AdminTraces.renderTraceDetail({trace_id: 't', status: 'running'}, [{sequence_no: 1, event_type: 'execution_result', payload: {fills}}]), 'trace-trading-log')[0];"
-        "  const items = byClass(log, 'trace-log-item');"
-        "  return {head: byClass(log, 'eyebrow')[0].textContent, count: items.length, first: byClass(items[0], 'trace-log-order')[0].textContent};"
+        "(() => {" + _TWO_ORDERS +
+        "  const log = window.AdminTraces.renderTradingLog(events);"
+        "  return {summary: byClass(log, 'trace-log-summary')[0].textContent,"
+        "    groups: byClass(log, 'trace-log-group').map((g) => ({id: g.getAttribute('id'),"
+        "      lines: byClass(g, 'trace-log-line').map((l) => l.textContent),"
+        "      reasons: byClass(g, 'trace-log-reason').map((r) => r.textContent),"
+        "      rejects: byClass(g, 'trace-log-reject').map((r) => r.textContent)}))};"
         "})()"
     )
-    assert result == {"head": "Latest 50 of 60 fills", "count": 50, "first": "BUY S59"}
+    assert result["summary"] == "4 orders · 3 filled · 1 rejected"
+    newest, oldest = result["groups"]
+    assert newest["id"] == "trace-orders-d2"
+    assert newest["lines"] == ["BUYNVDA1 × $237.05Filled", "BUYAMZN1 × $251.58Filled"]
+    assert newest["reasons"] == ["equal weight"]
+    assert oldest["lines"] == ["SELLMSFT5 × $300.00Filled", "BUYAAPL10 shRejected"]
+    assert oldest["reasons"] == ["trim", "momentum"]
+    assert oldest["rejects"] == ["Rejected: Insufficient Cash"]
+
+
+def test_timeline_rows_describe_the_process_and_never_the_orders():
+    """The Trading log owns symbols and reasoning; a trade row says how the step
+    ran, and its body links to the orders instead of repeating them."""
+    result = _eval(
+        "(() => {" + _TWO_ORDERS +
+        "  let shown = null;"
+        "  const list = window.AdminTraceTimeline.render(events, {}, {onShowOrders: (id) => { shown = id; }});"
+        "  const rows = byClass(list, 'trace-row');"
+        "  byClass(rows[0], 'trace-row-orders')[0].listeners.click[0]();"
+        "  const visible = rows.map((row) => byClass(row, 'trace-row-summary')[0].textContent).join(' | ');"
+        "  return {visible, shown, kinds: byClass(list, 'trace-kind').map((k) => k.textContent),"
+        "    eventLines: byClass(list, 'trace-event-line').map((l) => l.textContent).join(' | ')};"
+        "})()"
+    )
+    assert result["kinds"] == ["Trade", "Trade"]
+    assert "2 orders (1 filled, 1 rejected)" in result["visible"]
+    for leaked in ("AAPL", "MSFT", "NVDA", "momentum", "equal weight"):
+        assert leaked not in result["visible"], leaked
+        assert leaked not in result["eventLines"], leaked
+    assert result["shown"] == "d1"
+
+
+def test_quiet_steps_fold_and_the_errors_filter_keeps_a_failed_trade():
+    result = _eval(
+        "(() => {"
+        "  const hold = (n) => [{sequence_no: n, event_type: 'decision_recorded', decision_id: `h${n}`, payload: {decision_at: '2026-05-04T14:00:00Z'}},"
+        "                       {sequence_no: n + 1, event_type: 'execution_result', decision_id: `h${n}`, payload: {fills: []}}];"
+        "  const events = [...hold(1), ...hold(3), ...hold(5),"
+        "    {sequence_no: 7, event_type: 'tool_result', step_id: 's', decision_id: 't', payload: {tool_name: 'news_digest', outcome: 'error', error_code: 'provider_timeout'}},"
+        "    {sequence_no: 8, event_type: 'decision_recorded', step_id: 's', decision_id: 't', payload: {decision_at: '2026-05-04T17:00:00Z'}},"
+        "    {sequence_no: 9, event_type: 'execution_result', decision_id: 't', payload: {fills: [{side: 'SELL', symbol: 'X', shares: 1, price: 1}]}}];"
+        "  const kinds = (list) => byClass(list, 'trace-kind').map((k) => k.textContent);"
+        "  return {all: kinds(window.AdminTraceTimeline.render(events)), errors: kinds(window.AdminTraceTimeline.render(events, {}, {filter: 'errors'})),"
+        "    flag: byClass(window.AdminTraceTimeline.render(events), 'trace-row-flag').map((f) => f.textContent)};"
+        "})()"
+    )
+    assert result["all"] == ["Hold", "Trade"]
+    assert result["errors"] == ["Trade"]
+    assert result["flag"] == ["news_digest failed"]
+
+
+def test_back_follows_the_entry_point_and_escape_uses_it():
+    result = _eval(
+        "(() => {"
+        "  const href = (ctx) => byClass(window.AdminTraces.renderTraceDetail({trace_id: 't', status: 'completed'}, [], ctx), 'trace-back')[0];"
+        "  const fromUser = href({user_id: 42});"
+        "  return {list: href({}).getAttribute('href'), user: fromUser.getAttribute('href'), label: fromUser.textContent};"
+        "})()"
+    )
+    assert result == {"list": "#traces", "user": "#users/42", "label": "← User analytics"}
 
 
 def test_trace_detail_tolerates_missing_trace_or_events():
@@ -201,3 +278,61 @@ def test_trace_detail_tolerates_missing_trace_or_events():
     )
     for texts in result:
         assert "No events recorded yet." in texts
+
+
+def test_chart_ranges_count_trading_days_not_bars():
+    """A 5-minute run has 78 bars a session: 1D must still be one session and
+    1W five, rather than the last 7 or 35 bars of an hourly assumption."""
+    result = _eval(
+        "(() => {"
+        "  const days = ['2026-05-04', '2026-05-05', '2026-05-06', '2026-05-07', '2026-05-08', '2026-05-11'];"
+        "  const ts = days.flatMap((d) => Array.from({length: 78}, (_, i) => `${d}T${String(13 + Math.floor((30 + i * 5) / 60)).padStart(2, '0')}:${String((30 + i * 5) % 60).padStart(2, '0')}:00+00:00`));"
+        "  const start = (range) => window.AdminTracePerformance.rangeStart(ts, range);"
+        "  const day = (i) => ts[i].slice(0, 10);"
+        "  return {total: ts.length, d1: [start('1D'), day(start('1D'))], w1: [start('1W'), day(start('1W'))], all: start('ALL')};"
+        "})()"
+    )
+    assert result["total"] == 468
+    assert result["d1"] == [390, "2026-05-11"]
+    assert result["w1"] == [78, "2026-05-05"]
+    assert result["all"] == 0
+
+
+def test_a_stale_poll_does_not_write_its_chart_into_the_next_trace():
+    """Trace t finishes while the admin opens trace u. t's poll awaits its own
+    chart read; when that resolves after u loaded, u must keep its chart."""
+    result = _eval(
+        "(async () => {"
+        "  const settle = () => new Promise((resolve) => setTimeout(resolve, 0));"
+        "  const host = register('tracesView', document.createElement('div'));"
+        "  let release; const gate = new Promise((resolve) => { release = resolve; });"
+        "  let tStatus = 'running';"
+        "  const ok = (body) => ({ok: true, status: 200, json: async () => body});"
+        "  globalThis.fetch = async (url) => {"
+        "    fetchCalls.push([url]);"
+        "    if (url === '/api/admin/traces/t') return ok({trace_id: 't', run_id: 'r-t', status: tStatus});"
+        "    if (url === '/api/admin/traces/u') return ok({trace_id: 'u', run_id: 'r-u', status: 'completed'});"
+        "    if (url.includes('/events?')) return ok({items: [], has_more: false});"
+        "    if (url.endsWith('/performance')) return ok({points: [], point_count: 0, metrics: {}});"
+        "    if (url === '/api/admin/traces/u/chart-data') return ok({available: true, agent_run_id: 'r-u', timestamps: [], series: []});"
+        "    if (url === '/api/admin/traces/t/chart-data') {"
+        "      if (tStatus === 'running') return ok({available: false, run_id: 'r-t'});"
+        "      await gate; return ok({available: true, agent_run_id: 'r-t', timestamps: [], series: []});"
+        "    }"
+        "    return ok({});"
+        "  };"
+        "  document.dispatchEvent(new CustomEvent('admin:route', {detail: {route: 'traces', id: 't'}}));"
+        "  for (let i = 0; i < 10; i += 1) await settle();"
+        "  window.AdminTraces.stopPolling();"
+        "  tStatus = 'completed';"
+        "  const polling = window.AdminTraces.pollEvents();"
+        "  for (let i = 0; i < 10; i += 1) await settle();"
+        "  document.dispatchEvent(new CustomEvent('admin:route', {detail: {route: 'traces', id: 'u'}}));"
+        "  for (let i = 0; i < 10; i += 1) await settle();"
+        "  release();"
+        "  await polling;"
+        "  window.AdminTraces.stopPolling();"
+        "  return {chart: window.AdminTraces.currentChart()?.agent_run_id, askedT: fetchCalls.some(([u]) => u === '/api/admin/traces/t/chart-data')};"
+        "})()"
+    )
+    assert result == {"chart": "r-u", "askedT": True}

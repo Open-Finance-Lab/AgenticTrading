@@ -1,13 +1,14 @@
-/** /admin Agent execution traces: a read-only list and ordered run timeline. */
+/** /admin Agent execution traces: a read-only list and a Backtest-shaped run detail. */
 (function () {
   'use strict';
 
   const SURFACE = 'traces';
   const TERMINAL_EVENTS = ['run_completed', 'run_failed'];
-  const TRADING_LOG_LIMIT = 50;
+  const LOG_FILTERS = [['all', 'All orders'], ['buy', 'Buys only'], ['sell', 'Sells only'], ['rejected', 'Rejected']];
   const state = {
     traceId: null, trace: null, events: [], nextSequence: 0,
     pollTimer: null, stale: false, context: {}, listItems: [], listHasMore: false, listNextCursor: 0,
+    timelineFilter: 'all', logFilter: 'all', chartView: { range: 'ALL', hidden: new Set() }, chartData: null,
   };
 
   function shell() {
@@ -83,7 +84,9 @@
   }
 
   function renderEventTimeline(events) {
-    return window.AdminTraceTimeline.render(events, state.openState || {});
+    return window.AdminTraceTimeline.render(events, state.openState || {}, {
+      filter: state.timelineFilter, onShowOrders: revealOrders,
+    });
   }
 
   function renderTraceList(payload) {
@@ -114,14 +117,36 @@
     return section;
   }
 
-  function renderTraceDetail(trace, events, context = {}, performance = null) {
-    const section = node('section', 'trace-detail-panel');
+  // Where Back goes: the user's analytics page when the trace was opened from
+  // it, otherwise the trace list.
+  function backTarget(context) {
+    return context?.user_id
+      ? { href: `#users/${encodeURIComponent(String(context.user_id))}`, label: 'User analytics' }
+      : { href: '#traces', label: 'Agent traces' };
+  }
+
+  function renderTopbar(trace, context) {
+    const target = backTarget(context);
+    const bar = node('div', 'trace-topbar');
+    const back = node('a', 'trace-back', `← ${target.label}`);
+    back.setAttribute('href', target.href);
+    back.setAttribute('data-trace-back', '');
     const breadcrumb = node('nav', 'breadcrumb');
     breadcrumb.setAttribute('aria-label', 'Breadcrumb');
-    const back = node('a', '', context.user_id ? 'Back to user analytics' : 'Agent traces');
-    back.setAttribute('href', context.user_id ? `#users/${encodeURIComponent(String(context.user_id))}` : '#traces');
-    breadcrumb.append(back, node('span', '', '/'), node('span', '', value(trace?.trace_id)));
-    section.appendChild(breadcrumb);
+    const parent = node('a', '', target.label);
+    parent.setAttribute('href', target.href);
+    const current = node('span', '', value(trace?.trace_id));
+    current.setAttribute('aria-current', 'page');
+    breadcrumb.append(parent, node('span', '', '/'), current);
+    const hint = node('span', 'trace-back-hint', 'Esc to go back');
+    hint.setAttribute('aria-hidden', 'true');
+    bar.append(back, breadcrumb, hint);
+    return bar;
+  }
+
+  function renderTraceDetail(trace, events, context = {}, performance = null, chartData = null) {
+    const section = node('section', 'trace-detail-panel');
+    section.appendChild(renderTopbar(trace, context));
     const head = node('div', 'page-head');
     const copy = node('div');
     copy.appendChild(node('h1', '', value(trace?.trace_id)));
@@ -141,15 +166,80 @@
     });
     section.appendChild(metrics);
     const items = Array.isArray(events) ? events : [];
+    // Backtest's three columns: run config | chart, comparison, timeline | trading log.
     const columns = node('div', 'trace-three-column');
     const centerColumn = node('div', 'trace-analysis-column');
-    if (window.AdminTracePerformance) centerColumn.appendChild(window.AdminTracePerformance.render(trace, items, performance));
-    const title = node('h2', 'trace-section-title', 'Timeline');
-    centerColumn.appendChild(title);
-    centerColumn.appendChild(renderEventTimeline(items));
+    if (window.AdminTracePerformance) {
+      centerColumn.appendChild(window.AdminTracePerformance.render(trace, items, performance, chartData, {
+        view: state.chartView, onDecision: (decision) => revealDecision(decision.sequence_no),
+      }));
+    }
+    centerColumn.appendChild(renderTimelinePanel(items));
     columns.append(renderContextRail(trace, items), centerColumn, renderTradingLog(items));
     section.appendChild(columns);
     return section;
+  }
+
+  function renderTimelinePanel(items) {
+    const panel = node('section', 'trace-timeline-panel');
+    panel.setAttribute('aria-labelledby', 'traceTimelineTitle');
+    const head = node('div', 'trace-timeline-head');
+    const titles = node('div');
+    const title = node('h2', 'trace-section-title', 'Timeline');
+    title.setAttribute('id', 'traceTimelineTitle');
+    titles.append(title, node('p', 'trace-timeline-sub', 'Every recorded step: setup, holds, trades and failures'));
+    const filter = node('div', 'trace-filter');
+    filter.setAttribute('role', 'group');
+    filter.setAttribute('aria-label', 'Filter timeline');
+    const list = node('div', 'trace-timeline-host');
+    const paint = () => {
+      shell().clear(list);
+      list.appendChild(renderEventTimeline(items));
+    };
+    [['all', 'All'], ['errors', 'Errors']].forEach(([key, label]) => {
+      const button = node('button', '', label);
+      button.setAttribute('type', 'button');
+      button.setAttribute('data-trace-filter', key);
+      button.setAttribute('aria-pressed', String(state.timelineFilter === key));
+      button.addEventListener('click', () => {
+        state.openState = { ...(state.openState || {}), ...window.AdminTraceTimeline.capture(list) };
+        state.timelineFilter = key;
+        Array.from(filter.children).forEach((other) => other.setAttribute('aria-pressed', String(other.getAttribute('data-trace-filter') === key)));
+        paint();
+      });
+      filter.appendChild(button);
+    });
+    const rows = window.AdminTraceTimeline.rows(items);
+    const failed = rows.filter((row) => row.failed).length;
+    head.append(titles, filter, node('span', 'eyebrow', `${items.length} events${failed ? ` · ${failed} failed` : ''}`));
+    panel.appendChild(head);
+    paint();
+    panel.appendChild(list);
+    return panel;
+  }
+
+  // Timeline → Trading log: the decision's order group, scrolled into the
+  // log's own scroller and marked. The filter resets first so it is there.
+  function revealOrders(decisionId) {
+    if (state.logFilter !== 'all') {
+      state.logFilter = 'all';
+      const log = document.querySelector('.trace-trading-log');
+      if (log?.parentNode) log.parentNode.replaceChild(renderTradingLog(state.events), log);
+    }
+    const group = document.getElementById(`trace-orders-${decisionId}`);
+    if (!group) return;
+    group.scrollIntoView?.({ block: 'nearest', behavior: 'smooth' });
+    group.querySelector?.('.trace-log-when')?.focus?.({ preventScroll: true });
+    window.AdminTraceTimeline.flash(group);
+  }
+
+  // Trading log / chart → Timeline: switch off the Errors filter when it
+  // hides the row, then open and mark it.
+  function revealDecision(sequence) {
+    if (window.AdminTraceTimeline.reveal(sequence)) return;
+    if (state.timelineFilter === 'all') return;
+    document.querySelector('[data-trace-filter="all"]')?.click();
+    window.AdminTraceTimeline.reveal(sequence);
   }
 
   // A <details> whose open state survives the poll's re-render: capture()
@@ -162,22 +252,47 @@
     return details;
   }
 
+  function configRow(label, text, secondary) {
+    const row = node('div', 'trace-config-row');
+    const dd = node('dd', '', text == null || text === '' ? 'Not recorded' : String(text));
+    if (secondary) dd.appendChild(node('span', 'trace-config-secondary', String(secondary)));
+    row.append(node('dt', '', label), dd);
+    return row;
+  }
+
+  function capitalText(v) {
+    const numeric = Number(v);
+    if (v == null || v === '' || !Number.isFinite(numeric)) return v;
+    return new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: 0 }).format(numeric);
+  }
+
+  // Backtest's Run config list: the recorded fields shown, not folded away.
   function renderContextRail(trace, events) {
     const rail = node('aside', 'trace-context-rail');
     const config = trace?.initial_input || events.find((event) => event.event_type === 'run_started')?.payload?.config_summary || {};
-    const overview = disclosure('trace-run-overview', 'run-configuration', 'Run configuration');
-    const fields = [
-      ['Agent', trace?.agent_id], ['Run', trace?.run_id], ['Model', config.model || config.model_name],
-      ['Market / data source', config.market || config.data_source], ['Start date', config.start_date],
-      ['End date', config.end_date], ['Initial capital', config.initial_capital ?? config.initial_equity],
-    ];
-    fields.forEach(([label, v]) => overview.appendChild(node('p', '', `${label}: ${v == null ? 'Not recorded' : String(v)}`)));
-    const configRaw = disclosure('', 'run-configuration-json', 'Recorded configuration (JSON)');
+    rail.appendChild(node('h3', 'trace-rail-title', 'Run config'));
+    const list = node('dl', 'trace-config-list');
+    const range = config.start_date || config.end_date ? `${config.start_date || '?'} → ${config.end_date || '?'}` : null;
+    list.append(
+      configRow('Agent', trace?.agent_id),
+      configRow('Model', config.model || config.model_name),
+      configRow('Market', config.market || config.data_source, config.universe),
+      configRow('Date range', range),
+      configRow('Initial capital', capitalText(config.initial_capital ?? config.initial_equity)),
+    );
+    rail.appendChild(list);
+    const configRaw = disclosure('trace-config-details', 'run-configuration-json', 'Recorded configuration (JSON)');
     configRaw.appendChild(node('pre', 'trace-event-payload', payloadText(config)));
-    overview.appendChild(configRaw);
-    rail.appendChild(overview);
+    rail.appendChild(configRaw);
     if (!trace?.trace_id) return rail;
     rail.appendChild(renderBacktestReport(trace));
+    const meta = node('div', 'trace-config-meta');
+    const started = node('span', '', 'Started');
+    started.appendChild(node('strong', '', shell().formatTimestamp(trace.started_at)));
+    const run = node('span', '', 'Run');
+    run.appendChild(node('strong', '', value(trace.run_id)));
+    meta.append(started, run);
+    rail.appendChild(meta);
     const downloads = node('div', 'trace-downloads');
     [['json', 'Export JSON'], ['markdown', 'Export Markdown']].forEach(([format, label]) => {
       const link = node('a', 'auth-btn auth-btn-secondary', label);
@@ -235,15 +350,15 @@
     return report;
   }
 
-  // Fills carry no decision_id; their execution_result event does, and the
-  // decision's reasoning is per action, so a fill takes the reason of the
-  // action on its symbol (and side, when both name one).
-  function fillReason(decision, fill) {
+  // Orders carry no reasoning of their own: the decision records one summary
+  // per action, so an order takes the reason of the action on its symbol (and
+  // side, when both name one).
+  function orderReason(decision, order) {
     const payload = decision?.payload || {};
     const actions = Array.isArray(payload.actions) ? payload.actions : [];
     const reasons = Array.isArray(payload.reasoning_summaries) ? payload.reasoning_summaries : [];
-    const side = String(fill.side || '').toUpperCase();
-    const onSymbol = (action) => action && action.symbol === fill.symbol;
+    const side = String(order.side || order.action || '').toUpperCase();
+    const onSymbol = (action) => action && action.symbol === order.symbol;
     let index = actions.findIndex((action) => onSymbol(action) && String(action.action || action.side || '').toUpperCase() === side);
     if (index < 0) index = actions.findIndex(onSymbol);
     const matched = index < 0 ? null : (reasons[index] || actions[index].reason || actions[index].reasoning);
@@ -252,35 +367,122 @@
     return distinct.length === 1 ? distinct[0] : null;
   }
 
-  function renderTradingLog(events) {
-    const rail = node('aside', 'trace-trading-log');
+  // One group per decision that produced orders, newest first. Fills carry no
+  // decision_id; their execution_result event does.
+  function orderGroups(events) {
     const decisions = new Map(events
       .filter((event) => event.event_type === 'decision_recorded' && event.decision_id)
       .map((event) => [event.decision_id, event]));
-    const fills = events.flatMap((event) => (
-      event.event_type === 'execution_result' && Array.isArray(event.payload?.fills)
-        ? event.payload.fills.map((fill) => ({ fill, decision: decisions.get(event.decision_id) }))
-        : []
-    ));
-    // Newest first, so a running trace shows its latest fills without scrolling.
-    const shown = fills.slice(-TRADING_LOG_LIMIT).reverse();
-    const count = `${fills.length} fill${fills.length === 1 ? '' : 's'}`;
+    return events
+      .filter((event) => event.event_type === 'execution_result')
+      .map((event) => ({
+        decisionId: event.decision_id,
+        decision: decisions.get(event.decision_id),
+        orders: [
+          ...(Array.isArray(event.payload?.fills) ? event.payload.fills : []).map((order) => ({ ...order, status: 'filled' })),
+          ...(Array.isArray(event.payload?.rejected) ? event.payload.rejected : []).map((order) => ({ ...order, status: 'rejected' })),
+        ],
+      }))
+      .filter((group) => group.orders.length)
+      .reverse();
+  }
+
+  function keepOrder(order) {
+    if (state.logFilter === 'all') return true;
+    if (state.logFilter === 'rejected') return order.status === 'rejected';
+    return order.status === 'filled' && String(order.side || order.action || '').toLowerCase() === state.logFilter;
+  }
+
+  function orderLine(order) {
+    const side = String(order.side || order.action || 'ORDER').toUpperCase();
+    const line = node('div', `trace-log-line trace-log-line--${order.status}`);
+    const shares = order.quantity ?? order.shares ?? order.requested_shares;
+    const amount = order.status === 'filled'
+      ? `${shares ?? shell().DASH} × ${order.price == null ? 'price not recorded' : `$${Number(order.price).toFixed(2)}`}`
+      : `${shares ?? shell().DASH} sh`;
+    line.append(
+      node('span', `trace-side-badge trace-side-badge--${side.toLowerCase()}`, side),
+      node('span', 'trace-sym', value(order.symbol || 'Unknown symbol')),
+      node('span', 'trace-log-amount', amount),
+      node('span', `trace-status trace-status--${order.status}`, order.status === 'filled' ? 'Filled' : 'Rejected'),
+    );
+    return line;
+  }
+
+  function renderTradingLog(events) {
+    const rail = node('aside', 'trace-trading-log');
+    const groups = orderGroups(events);
+    const all = groups.flatMap((group) => group.orders);
+    const filled = all.filter((order) => order.status === 'filled').length;
     const head = node('div', 'trace-log-head');
-    head.append(node('h2', '', 'Trading log'), node('span', 'eyebrow', shown.length < fills.length ? `Latest ${shown.length} of ${count}` : count));
-    rail.appendChild(head);
-    if (!fills.length) rail.appendChild(node('p', 'panel-empty', 'No execution fills recorded.'));
-    shown.forEach(({ fill, decision }) => {
-      const item = node('article', 'trace-log-item');
-      const side = String(fill.side || fill.action || 'ORDER').toUpperCase();
-      item.append(
-        node('div', 'trace-log-order', `${side} ${value(fill.symbol || 'Unknown symbol')}`),
-        node('p', 'muted', `${fill.quantity ?? fill.shares ?? '—'} shares · ${fill.price == null ? 'Price not recorded' : fill.price}`),
-      );
-      const reason = fillReason(decision, fill);
-      if (reason) item.appendChild(node('p', 'trace-reason', reason));
-      rail.appendChild(item);
+    const titles = node('div');
+    titles.append(node('h2', '', 'Trading log'), node('p', 'trace-log-summary', `${all.length} order${all.length === 1 ? '' : 's'} · ${filled} filled · ${all.length - filled} rejected`));
+    const label = node('label', 'sr-only', 'Filter Trading log orders');
+    label.setAttribute('for', 'traceLogFilter');
+    const select = node('select', 'trace-log-filter');
+    select.setAttribute('id', 'traceLogFilter');
+    LOG_FILTERS.forEach(([key, text]) => {
+      const option = node('option', '', text);
+      option.setAttribute('value', key);
+      if (key === state.logFilter) option.setAttribute('selected', '');
+      select.appendChild(option);
     });
+    select.value = state.logFilter;
+    select.addEventListener('change', () => {
+      state.logFilter = select.value;
+      const fresh = renderTradingLog(state.events);
+      rail.parentNode?.replaceChild(fresh, rail);
+      document.getElementById('traceLogFilter')?.focus?.();
+    });
+    head.append(titles, label, select);
+    rail.appendChild(head);
+    const scroll = node('div', 'trace-log-scroll');
+    scroll.setAttribute('tabindex', '0');
+    scroll.setAttribute('role', 'list');
+    scroll.setAttribute('aria-label', 'Trading log orders');
+    let shownGroups = 0;
+    groups.forEach(({ decisionId, decision, orders }) => {
+      const shown = orders.filter(keepOrder);
+      if (!shown.length) return;
+      shownGroups += 1;
+      const group = node('section', 'trace-log-group');
+      group.setAttribute('role', 'listitem');
+      if (decisionId) group.setAttribute('id', `trace-orders-${decisionId}`);
+      const at = decision?.payload?.decision_at;
+      const when = node('button', 'trace-log-when', at ? shell().formatTimestamp(at) : 'Decision time not recorded');
+      when.setAttribute('type', 'button');
+      when.setAttribute('aria-label', `Open the decision${at ? ` at ${shell().formatTimestamp(at)}` : ''} in the timeline`);
+      if (decision) when.addEventListener('click', () => revealDecision(decision.sequence_no));
+      else when.disabled = true;
+      group.appendChild(when);
+      // A reason shared by every order prints once, above them; otherwise
+      // each order carries its own.
+      const reasons = shown.map((order) => orderReason(decision, order));
+      const shared = new Set(reasons).size === 1 ? reasons[0] : null;
+      if (shared) group.appendChild(node('p', 'trace-log-reason', shared));
+      shown.forEach((order, index) => {
+        group.appendChild(orderLine(order));
+        if (order.status === 'rejected' && order.reason) group.appendChild(node('p', 'trace-log-reject', `Rejected: ${shell().humanize(order.reason)}`));
+        if (!shared && reasons[index]) group.appendChild(node('p', 'trace-log-reason trace-log-reason--order', reasons[index]));
+      });
+      scroll.appendChild(group);
+    });
+    if (!all.length) scroll.appendChild(node('p', 'panel-empty', 'No orders recorded.'));
+    else if (!shownGroups) scroll.appendChild(node('p', 'panel-empty', 'No orders match this filter.'));
+    rail.appendChild(scroll);
     return rail;
+  }
+
+  // Esc returns to the parent page, except from a form field or an open
+  // dialog, where Esc already means something.
+  function onKeydown(event) {
+    if (event.key !== 'Escape' || event.defaultPrevented || !state.traceId) return;
+    const target = event.target;
+    if (target && typeof target.closest === 'function' && target.closest('input, textarea, select, [contenteditable], dialog[open]')) return;
+    const back = document.querySelector('[data-trace-back]');
+    if (!back) return;
+    event.preventDefault();
+    window.location.hash = back.getAttribute('href');
   }
 
   function renderStaleNotice(host, message) {
@@ -353,13 +555,18 @@
       // Envelope first: the store appends a terminal event before it marks the
       // trace terminal, so events read after a terminal envelope are complete.
       let trace = await refreshTraceEnvelope(traceId);
-      const [events, performance] = await Promise.all([loadAllEvents(traceId), loadPerformance(traceId)]);
+      const [events, performance, chartData] = await Promise.all([loadAllEvents(traceId), loadPerformance(traceId), loadChartData(traceId)]);
       if (trace.status === 'running' && hasTerminalEvent(events)) trace = await refreshTraceEnvelope(traceId);
       if (!shell().isCurrent(SURFACE, seq)) return;
       if (state.traceId !== traceId) {
         state.openState = {};
         state.report = null;
+        state.timelineFilter = 'all';
+        state.logFilter = 'all';
+        state.chartView = { range: 'ALL', hidden: new Set() };
       }
+      state.chartData = chartData;
+      state.chartStatus = trace.status;
       state.traceId = traceId;
       state.context = { ...context };
       state.trace = trace;
@@ -370,7 +577,7 @@
       const host = element('tracesView');
       if (!host) return;
       shell().clear(host);
-      host.appendChild(renderTraceDetail(trace, state.events, context, state.performance));
+      host.appendChild(renderTraceDetail(trace, state.events, context, state.performance, state.chartData));
       if (trace.status === 'running') startPolling();
     } catch (error) {
       if (await shell().handleAccessLost(error)) return;
@@ -384,6 +591,14 @@
       clearTimeout(state.pollTimer);
       state.pollTimer = null;
     }
+  }
+
+  // The benchmark series are stored with the run, so they are read once per
+  // trace and again when it finishes, not on every poll. A failed read keeps
+  // the chart on the trace's own equity.
+  async function loadChartData(traceId) {
+    try { return await shell().request(`/api/admin/traces/${encodeURIComponent(traceId)}/chart-data`); }
+    catch (_error) { return null; }
   }
 
   async function loadPerformance(traceId, previous = null) {
@@ -415,7 +630,14 @@
         loadAllEvents(traceId, state.nextSequence),
         loadPerformance(traceId, state.performance),
       ]);
+      // Held locally until the current-request check: a poll for a trace the
+      // admin has since left must not write its chart into the new trace.
+      const chartData = envelope.status !== state.chartStatus ? await loadChartData(traceId) : undefined;
       if (!shell().isCurrent(SURFACE, seq) || state.traceId !== traceId) return;
+      if (chartData !== undefined) {
+        state.chartData = chartData;
+        state.chartStatus = envelope.status;
+      }
       const added = fresh.filter((event) => event.sequence_no > state.nextSequence);
       const changed = added.length > 0
         || state.stale
@@ -433,7 +655,7 @@
         state.openState = window.AdminTraceTimeline.capture(host);
         const focusedId = document.activeElement?.id;
         shell().clear(host);
-        host.appendChild(renderTraceDetail(state.trace, state.events, state.context, state.performance));
+        host.appendChild(renderTraceDetail(state.trace, state.events, state.context, state.performance, state.chartData));
         if (focusedId) document.getElementById(focusedId)?.focus?.({ preventScroll: true });
       }
       state.stale = false;
@@ -465,8 +687,11 @@
   }
 
   document.addEventListener('admin:route', onRoute);
+  document.addEventListener('keydown', onKeydown);
   window.AdminTraces = {
     renderTraceRows, renderEventTimeline, renderTraceList, renderTraceDetail,
-    loadAllEvents, pollEvents, stopPolling,
+    renderTradingLog, loadAllEvents, pollEvents, stopPolling, onKeydown,
+    // Read-only, for the poll-race test: which run's chart this page holds.
+    currentChart: () => state.chartData,
   };
 })();

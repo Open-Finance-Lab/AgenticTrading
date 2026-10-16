@@ -68,7 +68,7 @@ def test_each_module_is_an_iife_exposing_exactly_one_global():
 
 def test_every_module_admin_html_loads_exists_and_nothing_else_is_loaded():
     srcs = re.findall(r'<script src="js/([^?"]+)\?v=\d+" defer></script>', ADMIN_HTML)
-    assert set(srcs) == set(NAMES) | {"credit-format.js"} | {"admin-ticker.js"}
+    assert set(srcs) == set(NAMES) | {"credit-format.js"} | {"admin-ticker.js"} | {"backtest-comparison.js"}
     for name in srcs:
         assert (FRONTEND / "js" / name).exists(), name
 

@@ -127,6 +127,57 @@ def get_trace_performance(trace_id: str):
     }
 
 
+@router.get("/{trace_id}/chart-data")
+def get_trace_chart_data(trace_id: str):
+    """The Backtest panel's chart payload for this trace's exact run.
+
+    Same builder, market-hour filter and benchmarks as the owner-scoped
+    ``/api/backtest/{run_id}/chart-data``; only the lookup differs, by run ID
+    across owners, because an administrator reads every user's runs. A trace
+    whose run has no stored equity answers ``available: False`` rather than
+    404, so the panel can still show its decision snapshots.
+    """
+    from dashboard.backend.api.routers import backtests as bt
+    from dashboard.backend.database import db
+    from dashboard.backend.equity_plot import build_backtest_chart_data
+
+    trace = trace_store.get_trace(trace_id)
+    if trace is None:
+        raise HTTPException(status_code=404, detail="Trace not found")
+    run_id = trace.get("run_id")
+    run = db.get_run(run_id) if run_id else None
+    if run is None:
+        return {"available": False, "run_id": run_id}
+    agent_curve = bt._filter_equity_for_run(run, db.get_equity_curve(run_id))
+    if not agent_curve:
+        return {"available": False, "run_id": run_id}
+    profile = bt._market_profile_for_run(run)
+    try:
+        payload = build_backtest_chart_data(
+            run_id=run_id,
+            agent_name=run.get("agent_name") or "Agent",
+            llm_model=run.get("llm_model"),
+            start_date=run.get("start_date") or "",
+            end_date=run.get("end_date") or "",
+            initial_capital=bt._run_initial_capital(run, agent_curve[0].get("equity")),
+            agent_curve=agent_curve,
+            stored_baselines=bt._stored_buyhold_baseline(run),
+            include_market_indexes=profile.index_baseline_enabled,
+            market_timezone=profile.timezone,
+        )
+    except ValueError:
+        return {"available": False, "run_id": run_id}
+    # The comparison model reads these to pick its columns (A-share runs have
+    # no US index benchmarks) and to match the stored buy-and-hold series.
+    metadata = run.get("metadata") if isinstance(run.get("metadata"), dict) else {}
+    payload["run"] = {
+        "data_source": metadata.get("data_source"),
+        "baseline_buyhold_run_id": run.get("baseline_buyhold_run_id"),
+        "reporting_currency": metadata.get("reporting_currency"),
+    }
+    return {"available": True, **payload}
+
+
 @router.get("/{trace_id}/export")
 def export_trace(trace_id: str, format: str = Query(default="json", pattern="^(json|markdown)$")):
     from fastapi.responses import StreamingResponse
