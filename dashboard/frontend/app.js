@@ -13381,16 +13381,14 @@ async function renderResearchShelf() {
   const section = grid.closest('.agents-category');
   if (section) section.style.display = '';
   let agents = [];
-  let guest = false;
   try {
     try {
       agents = await fetchResearchAgents();
     } catch (error) {
       if (renderVersion !== researchShelfRenderVersion) return;
       if (error?.status !== 401) throw error;
-      guest = true;
-      const catalog = await API.get(`${API_BASE}/api/v1/agents/marketplace`);
-      agents = (catalog.templates || []).filter(agent => templateMarketplaceShelf(agent) === 'research');
+      // Guests share the unadded shelf state; discovery lives in Community.
+      agents = [];
     }
   } catch (error) {
     if (renderVersion !== researchShelfRenderVersion) return;
@@ -13403,7 +13401,7 @@ async function renderResearchShelf() {
     return;
   }
   if (renderVersion !== researchShelfRenderVersion) return;
-  const added = guest ? agents : agents.filter((agent) => agent.added);
+  const added = agents.filter((agent) => agent.added);
   if (countEl) {
     countEl.textContent = String(added.length);
     countEl.hidden = added.length === 0;
@@ -13412,7 +13410,7 @@ async function renderResearchShelf() {
     grid.innerHTML = '';
     if (emptyEl) {
       emptyEl.hidden = false;
-      emptyEl.innerHTML = 'No research agents yet. Add one from '
+      emptyEl.innerHTML = 'No research agents yet. Add a research agent from '
         + communityShelfButtonHtml('all') + '.';
     }
     return;
@@ -13432,14 +13430,13 @@ async function renderResearchShelf() {
           <svg class="ui-icon research-fact-icon" aria-hidden="true"><use href="#icon-file-text"></use></svg> ${escapeHtml(((agent.research || {}).output_formats || []).join(' / '))}
         </p>
         <div class="research-agent-card-actions">
-          <button type="button" class="auth-btn auth-btn-primary research-open-btn">${guest ? 'Sign in to use' : 'Open workbench'}</button>
-          ${guest ? '' : `<button type="button" class="research-remove-btn" data-remove-template-id="${escapeHtml(agent.template_id)}" data-agent-name="${escapeHtml(agent.name)}">Remove</button>`}
+          <button type="button" class="auth-btn auth-btn-primary research-open-btn">Open workbench</button>
+          <button type="button" class="research-remove-btn" data-remove-template-id="${escapeHtml(agent.template_id)}" data-agent-name="${escapeHtml(agent.name)}">Remove</button>
         </div>
       </article>`;
   }).join('');
   grid.querySelectorAll('.research-agent-card').forEach((card) => {
     card.querySelector('.research-open-btn')?.addEventListener('click', () => {
-      if (guest) { openAuthModal('login'); return; }
       openResearchWorkbench(card.dataset.templateId);
     });
     card.querySelector('.research-remove-btn')?.addEventListener('click', async (event) => {
