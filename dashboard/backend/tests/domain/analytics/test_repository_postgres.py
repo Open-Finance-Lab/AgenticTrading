@@ -5,7 +5,7 @@ from __future__ import annotations
 import inspect
 import os
 import uuid
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import psycopg
@@ -21,6 +21,7 @@ from dashboard.backend.domain.analytics.repository_postgres import (
 from dashboard.backend.domain.analytics.rollups import (
     AnalyticsRollupStore,
     DailyRollup,
+    rollup_day,
     rollup_lifecycle_day,
 )
 from dashboard.backend.domain.analytics.value_repository import (
@@ -386,6 +387,109 @@ def test_postgres_rolls_up_uncovered_legacy_days_before_the_drop(
 
 
 @pg_only
+def test_postgres_copied_fact_days_get_their_transition_log(postgres_contract_store):
+    """Review #1 on the prod dialect: the day arithmetic and the legacy-source
+    join are the twin's own SQL, so the SQLite run says nothing about them."""
+    from dashboard.backend.domain.analytics.facts_migration import (
+        run_startup_migrations,
+    )
+    from dashboard.backend.tests.domain.analytics.test_facts_migration import (
+        LEGACY_DAILY_DDL,
+        assert_transition_history_backfilled,
+        seed_transition_history,
+    )
+
+    analytics, _admin_id, first = postgres_contract_store
+    value_store = PostgresValueAnalyticsStore(
+        analytics,
+        credits_base=object(),
+        provider_base=object(),
+        agent_base=object(),
+        run_base=object(),
+    )
+    second = 900
+    with analytics._get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO users (id, email, display_name, password_hash, role, "
+                "created_at) VALUES (%s, 'second@example.test', 'S', 'x', 'user', "
+                "'2026-07-01T00:00:00+00:00')",
+                (second,),
+            )
+            cur.execute(
+                "CREATE TABLE user_analytics_snapshots (user_id INTEGER PRIMARY KEY, "
+                "activated_at TEXT, last_meaningful_activity_at TEXT)"
+            )
+            cur.execute(LEGACY_DAILY_DDL)
+
+    def insert_legacy(rows):
+        with analytics._get_connection() as conn:
+            with conn.cursor() as cur:
+                for snapshot_date, user_id, segment, quality in rows:
+                    cur.execute(
+                        "INSERT INTO user_lifecycle_daily_snapshots "
+                        "VALUES (%s, %s, %s, 'x', %s, %s)",
+                        (snapshot_date, user_id, segment, quality, NOW.isoformat()),
+                    )
+
+    seed_transition_history(value_store, first, second, insert_legacy)
+
+    report = run_startup_migrations(value_store=value_store, now=NOW)
+
+    assert report.transitions_backfilled == 2
+    assert_transition_history_backfilled(value_store, first, second)
+    assert run_startup_migrations(value_store=value_store, now=NOW).transitions_backfilled == 0
+
+
+@pg_only
+def test_postgres_activation_backfill_fills_rolled_up_days(postgres_contract_store):
+    """Review #5 on the prod dialect: substr() over the TEXT occurred_at and
+    the BOOLEAN excluded column are where the twins could diverge."""
+    analytics, _admin_id, user_id = postgres_contract_store
+    rollups = AnalyticsRollupStore(analytics)
+    day = NOW.date() - timedelta(days=3)
+    at = datetime.combine(day, datetime.min.time(), tzinfo=timezone.utc) + timedelta(hours=9)
+    analytics.append_event(
+        event_record(
+            user_id,
+            event_name="agent_created",
+            event_group="agent",
+            event_source="server",
+            source_event_id="agent:agent_created:activation-backfill-pg",
+            source_record_type="agent",
+            source_record_id="activation-backfill-pg",
+            page_view=None,
+            session_id=None,
+            device_category=None,
+            browser_family=None,
+            outcome=None,
+            occurred_at=at,
+            received_at=at + timedelta(seconds=1),
+        )
+    )
+    rollup_day(day, store=rollups)
+    with analytics._get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "DELETE FROM analytics_daily_rollups WHERE metric_name = 'activation_users'"
+            )
+
+    assert rollups.backfill_activation_users(since=day, until=day + timedelta(days=1)) == (day,)
+    counts = {
+        row.event_name: row.value_count
+        for row in rollups.list_rollups(start=day, end=day + timedelta(days=1))
+        if row.metric_name == "activation_users"
+    }
+    assert counts == {
+        "account_signed_up": 0,
+        "credential_verified": 0,
+        "agent_created": 1,
+        "backtest_completed": 0,
+    }
+    assert rollups.backfill_activation_users(since=day, until=day + timedelta(days=1)) == ()
+
+
+@pg_only
 def test_postgres_failed_seed_keeps_both_legacy_tables(postgres_contract_store):
     from dashboard.backend.domain.analytics.facts_migration import (
         run_startup_migrations,
@@ -477,6 +581,8 @@ def test_postgres_fact_reads_follow_the_contract(postgres_contract_store):
     from dashboard.backend.tests.domain.analytics.test_fact_reads import (
         assert_fact_read_contract,
         assert_priority_sort_contract,
+        assert_read_time_exclusion_contract,
+        assert_transition_replace_contract,
         assert_users_page_contract,
         seed_population,
     )
@@ -518,6 +624,22 @@ def test_postgres_fact_reads_follow_the_contract(postgres_contract_store):
     assert_fact_read_contract(value_store, ids)
     assert_users_page_contract(value_store, ids)
     assert_priority_sort_contract(value_store, create_user)
+
+    def promote(user_id: int) -> None:
+        with store._get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("UPDATE users SET role = 'admin' WHERE id = %s", (user_id,))
+
+    # Last: it mutates the population the contracts above count.
+    assert_read_time_exclusion_contract(
+        value_store,
+        ids,
+        exclude=lambda user_id, excluded=True: store.set_subject_exclusion(
+            user_id, excluded=excluded, actor_user_id=admin_id, reason="test account"
+        ),
+        promote=promote,
+    )
+    assert_transition_replace_contract(value_store, ids)
 
 
 @pg_only

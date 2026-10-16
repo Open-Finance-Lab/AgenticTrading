@@ -92,38 +92,8 @@ class AnalyticsRollupStore:
         return [event for event in events if event.user_id not in excluded]
 
     def replace_day(self, day: date, rows: Iterable[DailyRollup]) -> None:
-        values = list(rows)
-        columns = (
-            "rollup_date",
-            "metric_name",
-            "event_name",
-            "billing_mode",
-            "provider_id",
-            "model_id",
-            "outcome",
-            "error_category",
-            "user_state",
-            "value_count",
-            "value_sum_micro",
-            "updated_at",
-        )
-        payloads = [
-            (
-                row.rollup_date.isoformat(),
-                row.metric_name,
-                row.event_name,
-                row.billing_mode,
-                row.provider_id,
-                row.model_id,
-                row.outcome,
-                row.error_category,
-                row.user_state,
-                row.value_count,
-                row.value_sum_micro,
-                utc_iso(row.updated_at),
-            )
-            for row in values
-        ]
+        columns = _ROLLUP_TABLE_COLUMNS
+        payloads = [_rollup_payload(row) for row in rows]
         preserved = sorted(LIFECYCLE_ROLLUP_METRICS)
         if self.is_postgres:
             placeholders = ", ".join("%s" for _ in columns)
@@ -160,6 +130,106 @@ class AnalyticsRollupStore:
                         f"VALUES ({placeholders})",
                         payloads,
                     )
+
+    def backfill_activation_users(self, *, since: date, until: date) -> tuple[date, ...]:
+        """Write ``activation_users`` for rolled-up days that predate the metric.
+
+        ``rollup_day`` gained the metric in PR B, so every day rolled up
+        before it holds none, and the overview's funnel summed those days as
+        zero. One grouped read over the raw events of the missing days --
+        distinct users per step per day, counted in SQL -- fills them, where
+        a ``rollup_day`` rebuild per day would re-read 31 days of events for
+        each one. Only days in ``[since, until)`` that were rolled up (they
+        hold ``daily_active_users``) are written, so a day whose raw events
+        have expired is never filled with zeros; admin and excluded accounts
+        are left out, as ``list_events`` leaves them out. A filled day no
+        longer matches, so a re-run writes nothing. Returns the days filled.
+        """
+        p = "%s" if self.is_postgres else "?"
+        missing_sql = f"""
+            SELECT DISTINCT r.rollup_date FROM analytics_daily_rollups AS r
+            WHERE r.metric_name = 'daily_active_users'
+              AND r.rollup_date >= {p} AND r.rollup_date < {p}
+              AND NOT EXISTS (
+                  SELECT 1 FROM analytics_daily_rollups AS a
+                  WHERE a.rollup_date = r.rollup_date
+                    AND a.metric_name = 'activation_users'
+              )
+            ORDER BY r.rollup_date
+        """
+        events = sorted(ACTIVATION_EVENTS)
+        counts_sql = f"""
+            SELECT substr(occurred_at, 1, 10) AS day, event_name,
+                   COUNT(DISTINCT user_id) AS users
+            FROM analytics_events
+            WHERE occurred_at >= {p} AND occurred_at < {p}
+              AND event_name IN ({", ".join(p for _ in events)})
+              AND user_id NOT IN (SELECT id FROM users WHERE role = 'admin')
+              AND user_id NOT IN (
+                  SELECT user_id FROM analytics_subject_settings WHERE excluded
+              )
+            GROUP BY substr(occurred_at, 1, 10), event_name
+        """
+        insert_sql = (
+            f"INSERT INTO analytics_daily_rollups ({', '.join(_ROLLUP_TABLE_COLUMNS)}) "
+            f"VALUES ({', '.join(p for _ in _ROLLUP_TABLE_COLUMNS)})"
+        )
+
+        def fill(run: Any) -> tuple[date, ...]:
+            days = tuple(
+                date.fromisoformat(str(row["rollup_date"]))
+                for row in run(missing_sql, (since.isoformat(), until.isoformat()))
+            )
+            if not days:
+                return ()
+            counts = {
+                (str(row["day"]), str(row["event_name"])): int(row["users"])
+                for row in run(
+                    counts_sql,
+                    (
+                        utc_iso(_day_start(days[0])),
+                        utc_iso(_day_start(days[-1] + timedelta(days=1))),
+                        *events,
+                    ),
+                )
+            }
+            payloads = [
+                _rollup_payload(
+                    _row(
+                        day,
+                        "activation_users",
+                        count=counts.get((day.isoformat(), event_name), 0),
+                        event_name=event_name,
+                        updated_at=_day_start(day + timedelta(days=1)),
+                    )
+                )
+                for day in days
+                for event_name in ACTIVATION_EVENTS
+            ]
+            run(insert_sql, payloads, many=True)
+            return days
+
+        if self.is_postgres:
+            with self.base_store._get_connection() as conn:
+                with conn.cursor() as cur:
+
+                    def run_postgres(sql: str, params: Any, many: bool = False) -> Any:
+                        if many:
+                            cur.executemany(sql, params)
+                            return []
+                        cur.execute(sql, params)
+                        return cur.fetchall()
+
+                    return fill(run_postgres)
+        with self.base_store._get_connection() as conn:
+
+            def run_sqlite(sql: str, params: Any, many: bool = False) -> Any:
+                if many:
+                    conn.executemany(sql, params)
+                    return []
+                return conn.execute(sql, params).fetchall()
+
+            return fill(run_sqlite)
 
     def list_rollups(self, *, start: date, end: date) -> list[DailyRollup]:
         params = (start.isoformat(), end.isoformat())
@@ -206,6 +276,39 @@ class AnalyticsRollupStore:
             )
             for row in rows
         ]
+
+
+_ROLLUP_TABLE_COLUMNS = (
+    "rollup_date",
+    "metric_name",
+    "event_name",
+    "billing_mode",
+    "provider_id",
+    "model_id",
+    "outcome",
+    "error_category",
+    "user_state",
+    "value_count",
+    "value_sum_micro",
+    "updated_at",
+)
+
+
+def _rollup_payload(row: DailyRollup) -> tuple[Any, ...]:
+    return (
+        row.rollup_date.isoformat(),
+        row.metric_name,
+        row.event_name,
+        row.billing_mode,
+        row.provider_id,
+        row.model_id,
+        row.outcome,
+        row.error_category,
+        row.user_state,
+        row.value_count,
+        row.value_sum_micro,
+        utc_iso(row.updated_at),
+    )
 
 
 def _row(
@@ -455,22 +558,24 @@ def rollup_day(
             )
         )
     # Distinct users per activation step per day: the overview's funnel sums
-    # these across completed days instead of rescanning the window.
+    # these across completed days instead of rescanning the window. Written
+    # zero or not, like byok_unpriced_calls: presence is how the funnel tells
+    # a day with no activations from a day rolled up before this metric
+    # existed, which it must not read as zero.
     activation_users: dict[str, set[int]] = defaultdict(set)
     for event in day_events:
         if event.event_name in ACTIVATION_EVENTS:
             activation_users[event.event_name].add(event.user_id)
     for event_name in ACTIVATION_EVENTS:
-        if activation_users[event_name]:
-            rows.append(
-                _row(
-                    day,
-                    "activation_users",
-                    count=len(activation_users[event_name]),
-                    event_name=event_name,
-                    updated_at=current,
-                )
+        rows.append(
+            _row(
+                day,
+                "activation_users",
+                count=len(activation_users[event_name]),
+                event_name=event_name,
+                updated_at=current,
             )
+        )
     rows.sort(
         key=lambda row: (
             row.metric_name,
@@ -485,30 +590,6 @@ def rollup_day(
     )
     aggregate_store.replace_day(day, rows)
     return rows
-
-
-def rollup_current_day(
-    *,
-    store: AnalyticsRollupStore | None = None,
-    now: datetime | None = None,
-    include_internal: bool = False,
-):
-    """Metrics for the current UTC day from one bounded one-day scan.
-
-    Trailing-context fields (``active_users_7d``, ``first_success_conversion``,
-    ``repeat_run_rate``) are therefore computed over today's events only. The
-    overview takes that context from the rollups instead (design §6.15 item
-    2); this function no longer widens the read to supply it.
-    """
-    current = now or datetime.now(timezone.utc)
-    start = _day_start(current.astimezone(timezone.utc).date())
-    aggregate_store = store or AnalyticsRollupStore()
-    events = aggregate_store.list_events(
-        start=start,
-        end=current,
-        include_internal=include_internal,
-    )
-    return calculate_overview_metrics(events, start=start, end=current)
 
 
 def _quality(rows: Sequence[Any]) -> str:
@@ -708,7 +789,6 @@ def rollup_legacy_lifecycle_days(*, store) -> tuple[date, ...]:
 __all__ = [
     "AnalyticsRollupStore",
     "DailyRollup",
-    "rollup_current_day",
     "rollup_day",
     "rollup_legacy_lifecycle_days",
     "rollup_lifecycle_day",

@@ -110,6 +110,44 @@ def _count(totals: Any, field: str) -> int:
     return int(getattr(totals, field)) if totals is not None else 0
 
 
+def _rederive_next_day_transitions(
+    day: date, facts: list[UserDailyFact], *, store: Any, now: datetime
+) -> int:
+    """Rebuild ``day + 1``'s transition log against ``day``'s rewritten facts.
+
+    A transition's ``from_segment`` is the previous day's segment, so
+    recomputing a past day can invalidate the next day's log without
+    touching its facts. Only the late-arrival sweep calls this (the target
+    day's successor is today, which has no facts). ``inactive_days`` belongs
+    to the later day's own evaluation, so an existing row keeps its value; a
+    move that only appears now has none to keep and takes the column's 0.
+    """
+    next_day = day + timedelta(days=1)
+    later = store.list_facts_for_date(next_day)
+    if not later:
+        return 0
+    existing = {row.user_id: row for row in store.list_transitions_for_date(next_day)}
+    segment_on_day = {row.user_id: row.lifecycle_segment for row in facts}
+    rows: list[LifecycleTransitionRow] = []
+    for fact in later:
+        before = segment_on_day.get(fact.user_id)
+        if before is None or before == fact.lifecycle_segment:
+            continue
+        kept = existing.get(fact.user_id)
+        rows.append(
+            LifecycleTransitionRow(
+                user_id=fact.user_id,
+                snapshot_date=next_day,
+                from_segment=before,
+                to_segment=fact.lifecycle_segment,
+                inactive_days=kept.inactive_days if kept is not None else 0,
+                data_quality=fact.data_quality,
+                created_at=now,
+            )
+        )
+    return store.replace_lifecycle_transitions(next_day, rows)
+
+
 def _compute_day(
     day: date,
     *,
@@ -117,12 +155,17 @@ def _compute_day(
     store: Any,
     run_history_store: Any,
     rollup: Callable[..., Any],
+    rederive_next: bool = False,
 ) -> _DayOutcome:
     """Steps 1-6 of design SS6.9 for one day, each wrapped individually.
 
     Step order differs from the design's numbering in one place: the eligible
     population is read first, because the operational step (5) answers for
     exactly those ids. Query count is unchanged.
+
+    ``rederive_next`` is set for a late-arrival recompute, whose successor
+    day already has facts and therefore a transition log keyed to this
+    day's segments.
     """
     from .rollups import AnalyticsRollupStore
 
@@ -320,7 +363,14 @@ def _compute_day(
                     created_at=now,
                 )
             )
-        return store.append_lifecycle_transitions(changed)
+        # Whole-day replace: a recompute that puts a user back on yesterday's
+        # segment must also remove the move the first run recorded.
+        written = store.replace_lifecycle_transitions(day, changed)
+        if rederive_next:
+            written += _rederive_next_day_transitions(
+                day, [row for row, _days in rows_with_days], store=store, now=now
+            )
+        return written
 
     transitions = step("transitions", transitions_step, 0)
     return _DayOutcome(
@@ -385,14 +435,22 @@ def run_daily_facts(
                 "WARNING: analytics.daily_facts.recompute_scan_failed "
                 f"category={type(exc).__name__[:80]}"
             )
-        # One store call after the loop, never inside it: the lease belongs to
+        # Store calls after the loop, never inside it: the lease belongs to
         # the job row, not the day, and the discipline guard forbids store
-        # calls inside loops (design SS6.11 rule 7). A failed stale day stays
-        # in list_days_needing_recompute, so the next tick retries it.
+        # calls inside loops (design SS6.11 rule 7). A failed stale day is
+        # re-queued explicitly: a step that failed after the facts upsert had
+        # already refreshed calculated_at, which is what takes a day off
+        # list_days_needing_recompute -- so without it, the day's partial rows
+        # (or a stale next-day transition log) would stand for good.
         failed_recomputes: list[date] = []
         for stale_day in stale_days[:MAX_RECOMPUTES_PER_TICK]:
             stale_outcome = _compute_day(
-                stale_day, now=current, store=store, run_history_store=runs, rollup=rollup_fn
+                stale_day,
+                now=current,
+                store=store,
+                run_history_store=runs,
+                rollup=rollup_fn,
+                rederive_next=True,
             )
             if stale_outcome.failed_steps:
                 failed_recomputes.append(stale_day)
@@ -403,6 +461,7 @@ def run_daily_facts(
                 continue
             recomputed.append(stale_day)
         if failed_recomputes:
+            store.requeue_days_for_recompute(failed_recomputes)
             store.release_projection_day(DAILY_FACTS_JOB, now=current)
 
         report = DailyFactsReport(

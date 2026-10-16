@@ -13,6 +13,7 @@ from dashboard.backend.domain.analytics.facts_migration import (
     StartupMigrationReport,
     run_startup_migrations,
 )
+from dashboard.backend.domain.analytics.metrics import ACTIVATION_EVENTS
 from dashboard.backend.domain.analytics.repository import AnalyticsStore
 from dashboard.backend.domain.analytics.rollups import AnalyticsRollupStore, DailyRollup
 from dashboard.backend.domain.analytics.value_repository import (
@@ -305,9 +306,16 @@ def test_legacy_rollup_never_overwrites_a_day_that_has_lifecycle_rollups(tmp_pat
     ]
     day_two = _lifecycle_rollups(analytics, UNCOVERED_DAYS[1])
     assert ("daily_active_users", "", "", 4, "") in day_two
-    assert [row for row in day_two if row[0] != "daily_active_users"] == (
-        legacy_lifecycle_rollups(UNCOVERED_DAYS[1])
+    # The day was rolled up (it holds daily_active_users) before the funnel's
+    # activation_users metric existed, so the activation backfill fills it --
+    # with zeros, since this fixture recorded no raw events that day.
+    assert sorted(row for row in day_two if row[0] == "activation_users") == sorted(
+        ("activation_users", event_name, "", 0, "")
+        for event_name in ACTIVATION_EVENTS
     )
+    assert [
+        row for row in day_two if row[0] not in {"daily_active_users", "activation_users"}
+    ] == legacy_lifecycle_rollups(UNCOVERED_DAYS[1])
 
 
 def test_a_failed_legacy_rollup_keeps_both_legacy_tables(tmp_path):
@@ -336,9 +344,167 @@ def test_missing_legacy_table_is_detected_from_the_catalogue_not_message_text():
         value_repository.ValueAnalyticsStore,
         value_repository_postgres.PostgresValueAnalyticsStore,
     ):
-        for method in (store.seed_activity_from_snapshots, store.list_legacy_lifecycle_history):
+        for method in (
+            store.seed_activity_from_snapshots,
+            store.list_legacy_lifecycle_history,
+            store.backfill_transitions_from_history,
+        ):
             source = inspect.getsource(method)
             assert "str(exc)" not in source and "except" not in source, method
             assert "_table_exists(" in source, method
     assert "to_regclass" in inspect.getsource(value_repository_postgres._postgres_table_exists)
     assert "sqlite_master" in inspect.getsource(value_repository._sqlite_table_exists)
+
+
+# Review #1: the PR A history copy filled user_daily_facts for 07-29..09-22
+# and wrote no transition log, and the legacy rollup skips any day a fact row
+# covers, so those days lost their movement once _history stopped deriving it
+# from the legacy rows.
+HISTORY_COPIED_DAYS = (date(2026, 7, 29), date(2026, 7, 30))
+HISTORY_JOB_DAYS = (date(2026, 7, 31), date(2026, 8, 1))
+
+
+def history_fact(user_id: int, day: date, segment: str, quality: str = "complete"):
+    return UserDailyFact(
+        snapshot_date=day,
+        user_id=user_id,
+        lifecycle_segment=segment,
+        lifecycle_reason_code="x",
+        operational_state="healthy",
+        tier="unpaid",
+        user_group="organic",
+        data_quality=quality,
+        calculated_at=NOW,
+    )
+
+
+def seed_transition_history(value_store, first: int, second: int, insert_legacy) -> None:
+    """A legacy day, two copied fact days without a log, two job days with one.
+
+    ``insert_legacy(rows)`` writes ``(snapshot_date, user_id, segment,
+    quality)`` rows into ``user_lifecycle_daily_snapshots`` on the dialect
+    under test.
+    """
+    from dashboard.backend.domain.analytics.value_repository import LifecycleTransitionRow
+
+    insert_legacy(
+        [
+            ("2026-07-28", first, "core", "complete"),
+            # Same segment on the first copied day: no move to derive.
+            ("2026-07-28", second, "new", "complete"),
+        ]
+    )
+    copied, job = HISTORY_COPIED_DAYS, HISTORY_JOB_DAYS
+    value_store.upsert_daily_facts(
+        [
+            history_fact(first, copied[0], "at_risk"),
+            history_fact(second, copied[0], "new"),
+            history_fact(first, copied[1], "at_risk"),
+            history_fact(second, copied[1], "growing", "partial"),
+            history_fact(first, job[0], "at_risk"),
+            history_fact(second, job[0], "growing"),
+            history_fact(first, job[1], "dormant"),
+            history_fact(second, job[1], "growing"),
+        ]
+    )
+    # The job's own log for its second day, with the inactive_days only the
+    # job can compute; the first job day had no movement and has no log.
+    value_store.append_lifecycle_transitions(
+        [
+            LifecycleTransitionRow(
+                user_id=first,
+                snapshot_date=job[1],
+                from_segment="at_risk",
+                to_segment="dormant",
+                inactive_days=20,
+                created_at=NOW,
+            )
+        ]
+    )
+
+
+def assert_transition_history_backfilled(value_store, first: int, second: int) -> None:
+    def log(day):
+        return {
+            (row.user_id, row.from_segment, row.to_segment, row.inactive_days, row.data_quality)
+            for row in value_store.list_transitions_for_date(day)
+        }
+
+    copied, job = HISTORY_COPIED_DAYS, HISTORY_JOB_DAYS
+    # The first copied day's predecessor exists only in the legacy table.
+    assert log(copied[0]) == {(first, "core", "at_risk", 0, "complete")}
+    assert log(copied[1]) == {(second, "new", "growing", 0, "partial")}
+    # A job day with no movement derives none; a job day's log is untouched.
+    assert log(job[0]) == set()
+    assert log(job[1]) == {(first, "at_risk", "dormant", 20, "complete")}
+
+
+def test_copied_fact_days_get_their_transition_log_before_the_drop(tmp_path):
+    first, analytics, value_store = _fixture(tmp_path)
+    second = int(
+        UserStore(db_path=tmp_path / "migration.db").create_user(
+            "second@example.test", "S", "SecurePass1!"
+        )["id"]
+    )
+    create_legacy_snapshot_tables(analytics)
+
+    def insert_legacy(rows):
+        with analytics._get_connection() as conn:
+            for snapshot_date, user_id, segment, quality in rows:
+                conn.execute(
+                    "INSERT INTO user_lifecycle_daily_snapshots VALUES (?, ?, ?, 'x', ?, ?)",
+                    (snapshot_date, user_id, segment, quality, NOW.isoformat()),
+                )
+
+    seed_transition_history(value_store, first, second, insert_legacy)
+
+    report = run_startup_migrations(value_store=value_store, now=NOW)
+
+    assert report.transitions_backfilled == 2
+    assert_transition_history_backfilled(value_store, first, second)
+    assert not set(LEGACY_TABLES) & _table_names(analytics)
+    # The step goes with the table: a later boot re-derives nothing.
+    assert run_startup_migrations(value_store=value_store, now=NOW).transitions_backfilled == 0
+    assert_transition_history_backfilled(value_store, first, second)
+
+
+def test_a_failed_transition_backfill_skips_the_drop(tmp_path, monkeypatch):
+    _user_id, analytics, value_store = _fixture(tmp_path)
+    create_legacy_snapshot_tables(analytics)
+
+    def explode(*, now):
+        raise RuntimeError("backfill failed")
+
+    monkeypatch.setattr(value_store, "backfill_transitions_from_history", explode)
+
+    with pytest.raises(RuntimeError):
+        run_startup_migrations(value_store=value_store, now=NOW)
+    assert set(LEGACY_TABLES) <= _table_names(analytics)
+
+
+def test_a_failing_drop_does_not_block_the_activation_backfill(tmp_path, monkeypatch):
+    """The backfill shares nothing with the drop's chain: a drop that keeps
+    losing its lock must not also keep the funnel unavailable. The drop's
+    error is still raised afterwards, so the worker retries."""
+    _user_id, analytics, value_store = _fixture(tmp_path)
+    create_legacy_snapshot_tables(analytics)
+    day = NOW.date() - timedelta(days=3)
+    AnalyticsRollupStore(analytics).replace_day(
+        day,
+        [DailyRollup(rollup_date=day, metric_name="daily_active_users", value_count=1, updated_at=NOW)],
+    )
+
+    def lock_timeout():
+        raise RuntimeError("lock timeout")
+
+    monkeypatch.setattr(analytics, "drop_legacy_snapshot_tables", lock_timeout)
+
+    with pytest.raises(RuntimeError, match="lock timeout"):
+        run_startup_migrations(value_store=value_store, now=NOW)
+
+    filled = {
+        row.event_name
+        for row in AnalyticsRollupStore(analytics).list_rollups(start=day, end=day + timedelta(days=1))
+        if row.metric_name == "activation_users"
+    }
+    assert filled == set(ACTIVATION_EVENTS)

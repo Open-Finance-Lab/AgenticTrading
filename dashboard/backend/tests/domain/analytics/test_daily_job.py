@@ -113,29 +113,47 @@ def test_startup_starts_the_worker_and_leaves_the_reaper_to_heartbeats():
     assert "run_analytics_maintenance" not in source
 
 
-def test_a_startup_migration_failure_never_skips_starting_the_worker():
-    """PR B's migration drops tables; if it raises, the worker must still start
-    (it re-runs the same migration before its first tick). So the call that
-    starts the worker may not share a ``try`` with the migration."""
+def test_the_worker_is_the_only_caller_of_the_startup_migration():
+    """Review #11: app.py ran the migration synchronously inside the async
+    startup hook -- blocking the event loop for the seed, the legacy rollup and
+    up to a 5 s lock wait on the drop -- and the worker then ran it again. The
+    worker's prepare step is now the one caller."""
     import ast
     import textwrap
 
     tree = ast.parse(textwrap.dedent(inspect.getsource(app_module.startup_event)))
+    called = {
+        inner.func.id
+        for inner in ast.walk(tree)
+        if isinstance(inner, ast.Call) and isinstance(inner.func, ast.Name)
+    }
+    assert "run_startup_migrations" not in called
+    assert "start_daily_facts_worker" in called
+    assert "run_startup_migrations" in inspect.getsource(daily_job._default_prepare)
 
-    def calls(node) -> set[str]:
-        return {
-            inner.func.id
-            for inner in ast.walk(node)
-            if isinstance(inner, ast.Call) and isinstance(inner.func, ast.Name)
-        }
 
-    migration_tries = [
-        node
-        for node in ast.walk(tree)
-        if isinstance(node, ast.Try) and "run_startup_migrations" in calls(node)
-    ]
-    assert len(migration_tries) == 1
-    assert "start_daily_facts_worker" not in calls(migration_tries[0])
+def test_a_failing_prepare_is_retried_before_each_tick_until_it_succeeds(capsys):
+    """The drop can lose its lock to the outgoing instance on a deploy; one
+    failure must not leave the legacy tables in place until the next boot."""
+    stop = threading.Event()
+    calls: list[str] = []
+
+    def prepare():
+        calls.append("prepare")
+        if calls.count("prepare") < 3:
+            raise RuntimeError("lock timeout")
+
+    def tick():
+        calls.append("tick")
+        if calls.count("tick") >= 4:
+            stop.set()
+
+    daily_job.start_daily_facts_worker(0.01, stop, tick=tick, prepare=prepare).join(5)
+
+    # prepare (fails), prepare (fails) + tick, prepare (succeeds) + tick, tick, tick.
+    assert calls[:5] == ["prepare", "prepare", "tick", "prepare", "tick"]
+    assert calls.count("prepare") == 3
+    assert capsys.readouterr().out.count("analytics.facts_migration_failed") == 2
 
 
 def test_the_job_owns_the_retention_coordinator_now():

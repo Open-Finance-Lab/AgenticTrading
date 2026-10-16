@@ -428,6 +428,12 @@ _RECOMPUTE_FACTS_SQL = """
     WHERE snapshot_date >= {p} AND snapshot_date <= {p}
     GROUP BY snapshot_date
 """
+# Older than every received_at, so a requeued day compares as stale.
+_RECOMPUTE_EPOCH = "1970-01-01T00:00:00+00:00"
+_REQUEUE_RECOMPUTE_SQL = """
+    UPDATE user_daily_facts SET calculated_at = {p}
+    WHERE snapshot_date IN ({days})
+"""
 
 
 def _day_bounds_iso(day: date) -> tuple[str, str]:
@@ -850,37 +856,72 @@ _INTERNAL_EXCLUSION_SQL = """
       )
 """
 
-_COUNT_STATES_SQL = """
+
+def _subject_filter(column: str) -> str:
+    """Read-time exclusion over user-keyed fact rows. Shared by both twins.
+
+    The daily job writes no row for an admin or an excluded account (design
+    SS6), but a row written before the account was excluded or promoted stays
+    in the table for up to 180 days. ``main`` filtered every read through
+    ``_eligible_users``, so an exclusion took effect on the next request;
+    this fragment keeps that, instead of letting it wait for tomorrow's facts
+    (and, for history, for the rows to expire).
+    """
+    return f"""
+      AND {column} NOT IN (SELECT id FROM users WHERE role = 'admin')
+      AND {column} NOT IN (
+          SELECT user_id FROM analytics_subject_settings WHERE excluded
+      )
+"""
+
+
+_COUNT_STATES_SQL = (
+    """
     SELECT operational_state, operational_reason_code, lifecycle_segment,
            COUNT(*) AS users,
            SUM(CASE WHEN data_quality = 'partial' THEN 1 ELSE 0 END) AS partial_rows
     FROM user_daily_facts
     WHERE snapshot_date = {p}
+    """
+    + _subject_filter("user_id")
+    + """
     GROUP BY operational_state, operational_reason_code, lifecycle_segment
     ORDER BY operational_state, operational_reason_code, lifecycle_segment
 """
+)
 
-_COUNT_SEGMENTS_SQL = """
+_COUNT_SEGMENTS_SQL = (
+    """
     SELECT snapshot_date, lifecycle_segment,
            COUNT(*) AS users,
            SUM(CASE WHEN data_quality = 'partial' THEN 1 ELSE 0 END) AS partial_rows
     FROM user_daily_facts
     WHERE snapshot_date >= {p} AND snapshot_date < {p}
+    """
+    + _subject_filter("user_id")
+    + """
     GROUP BY snapshot_date, lifecycle_segment
     ORDER BY snapshot_date, lifecycle_segment
 """
+)
 
-_COUNT_TRANSITIONS_SQL = """
+_COUNT_TRANSITIONS_SQL = (
+    """
     SELECT from_segment, to_segment,
            COUNT(*) AS users,
            SUM(CASE WHEN data_quality = 'partial' THEN 1 ELSE 0 END) AS partial_rows
     FROM lifecycle_transitions
     WHERE snapshot_date >= {p} AND snapshot_date < {p}
+    """
+    + _subject_filter("user_id")
+    + """
     GROUP BY from_segment, to_segment
     ORDER BY from_segment, to_segment
 """
+)
 
-_ATTENTION_SQL = """
+_ATTENTION_SQL = (
+    """
     SELECT f.user_id, f.operational_state, f.operational_reason_code,
            u.display_name, u.email, u.created_at,
            COALESCE(SUM(w.runs_requested), 0) AS recent_runs,
@@ -892,11 +933,116 @@ _ATTENTION_SQL = """
      AND w.snapshot_date >= {p} AND w.snapshot_date <= {p}
     WHERE f.snapshot_date = {p}
       AND f.operational_state IN ('blocked', 'needs_attention')
+    """
+    + _subject_filter("f.user_id")
+    + """
     GROUP BY f.user_id, f.operational_state, f.operational_reason_code,
              u.display_name, u.email, u.created_at
     ORDER BY recent_failures DESC, f.user_id DESC
     LIMIT {p}
 """
+)
+
+_REPLACE_TRANSITIONS_DELETE_SQL = (
+    """
+    DELETE FROM lifecycle_transitions
+    WHERE snapshot_date = {p}
+    """
+    + _subject_filter("user_id")
+)
+
+_UPSERT_TRANSITIONS_SQL = f"""
+    INSERT INTO lifecycle_transitions ({", ".join(_TRANSITION_COLUMNS)})
+    VALUES ({", ".join("{p}" for _ in _TRANSITION_COLUMNS)})
+    ON CONFLICT(user_id, snapshot_date) DO UPDATE SET {_TRANSITION_UPDATES}
+"""
+
+_FACTS_FOR_DATE_SQL = (
+    """
+    SELECT * FROM user_daily_facts
+    WHERE snapshot_date = {p}
+    """
+    + _subject_filter("user_id")
+    + """
+    ORDER BY user_id
+"""
+)
+
+# The PR A history copy (``copy_daily_snapshot_history``) filled
+# ``user_daily_facts`` from the legacy table and wrote no transition log, and
+# the legacy rollup skips any day a fact row covers, so 07-29..09-22 had no
+# movement source once ``_history`` stopped deriving it from the legacy rows.
+# The startup migration derives it from consecutive fact days, and for a first
+# fact day whose predecessor exists only in the legacy table, from that table
+# while it still exists. ``{prev}`` is the dialect's "the day before
+# cur.snapshot_date" as YYYY-MM-DD text; ``{days}`` / ``{segments}`` are
+# placeholder lists. ``inactive_days`` is not on a fact row; 0 is the column
+# default and nothing reads it off a transition.
+_DAYS_WITHOUT_TRANSITIONS_SQL = """
+    SELECT DISTINCT f.snapshot_date
+    FROM user_daily_facts AS f
+    WHERE NOT EXISTS (
+        SELECT 1 FROM lifecycle_transitions AS t
+        WHERE t.snapshot_date = f.snapshot_date
+    )
+    ORDER BY f.snapshot_date
+"""
+
+_BACKFILL_TRANSITIONS_SQL = """
+    INSERT INTO lifecycle_transitions (
+        user_id, snapshot_date, from_segment, to_segment, inactive_days,
+        data_quality, created_at
+    )
+    SELECT cur.user_id, cur.snapshot_date, prev.lifecycle_segment,
+           cur.lifecycle_segment, 0,
+           CASE WHEN cur.data_quality = 'partial' OR prev.data_quality = 'partial'
+                THEN 'partial' ELSE 'complete' END,
+           {p}
+    FROM user_daily_facts AS cur
+    JOIN {source} AS prev
+      ON prev.user_id = cur.user_id AND prev.snapshot_date = {prev}
+    WHERE cur.snapshot_date IN ({days})
+      AND prev.lifecycle_segment <> cur.lifecycle_segment
+      AND prev.lifecycle_segment IN ({segments})
+      {guard}
+    ON CONFLICT (user_id, snapshot_date) DO NOTHING
+"""
+
+# Only for the legacy source: a day whose predecessor has facts takes its
+# previous segment from them, never from the table being retired.
+_NO_PRIOR_FACT_DAY_SQL = """
+      AND NOT EXISTS (
+          SELECT 1 FROM user_daily_facts AS pf WHERE pf.snapshot_date = {prev}
+      )
+"""
+
+
+def _backfill_transition_statements(
+    *, p: str, prev: str, days: Sequence[str]
+) -> list[tuple[str, list[str]]]:
+    """(sql, params) per source, facts first. Shared by both twins."""
+    segments = sorted(LIFECYCLE_SEGMENTS)
+    day_marks = ", ".join(p for _ in days)
+    segment_marks = ", ".join(p for _ in segments)
+    statements = []
+    for source, guard in (
+        ("user_daily_facts", ""),
+        ("user_lifecycle_daily_snapshots", _NO_PRIOR_FACT_DAY_SQL.format(prev=prev)),
+    ):
+        statements.append(
+            (
+                _BACKFILL_TRANSITIONS_SQL.format(
+                    p=p,
+                    source=source,
+                    prev=prev,
+                    days=day_marks,
+                    segments=segment_marks,
+                    guard=guard,
+                ),
+                [*days, *segments],
+            )
+        )
+    return statements
 
 # The legacy days the drop would otherwise destroy: no fact row covers them
 # and no lifecycle rollup was ever written for them (design SS6.9 "Movement
@@ -953,7 +1099,8 @@ def _sqlite_table_exists(conn: sqlite3.Connection, table: str) -> bool:
     )
 
 
-_GROUP_TOTALS_SQL = """
+_GROUP_TOTALS_SQL = (
+    """
     SELECT user_group,
            COALESCE(SUM(runs_requested), 0) AS total_runs,
            COALESCE(SUM(operator_cost_micro), 0) AS operator_cost_micro,
@@ -963,8 +1110,12 @@ _GROUP_TOTALS_SQL = """
                AS partial_rows
     FROM user_daily_facts
     WHERE snapshot_date >= {p} AND snapshot_date < {p}
+    """
+    + _subject_filter("user_id")
+    + """
     GROUP BY user_group
 """
+)
 
 _LATEST_FACT_DATE_SQL = """
     SELECT MAX(snapshot_date) AS latest
@@ -979,18 +1130,23 @@ def _latest_fact_date(row: Any) -> date | None:
     return date.fromisoformat(str(latest)) if latest else None
 
 
-_GROUP_REPEAT_SQL = """
+_GROUP_REPEAT_SQL = (
+    """
     SELECT user_group, COUNT(*) AS repeat_users
     FROM (
         SELECT user_group, user_id
         FROM user_daily_facts
         WHERE snapshot_date >= {p} AND snapshot_date < {p}
           AND runs_completed > 0
+        """
+    + _subject_filter("user_id")
+    + """
         GROUP BY user_group, user_id
         HAVING COUNT(*) >= 2
     ) AS repeaters
     GROUP BY user_group
 """
+)
 
 _ACTIVE_DATES_SQL = """
     SELECT user_id, snapshot_date
@@ -1025,11 +1181,16 @@ _USER_TRANSITIONS_SQL = """
     ORDER BY snapshot_date, transition_id
 """
 
-_TRANSITIONS_FOR_DATE_SQL = """
+_TRANSITIONS_FOR_DATE_SQL = (
+    """
     SELECT * FROM lifecycle_transitions
     WHERE snapshot_date = {p}
+    """
+    + _subject_filter("user_id")
+    + """
     ORDER BY user_id
 """
+)
 
 
 _USERS_PAGE_SELECT = """
@@ -2290,12 +2451,83 @@ class ValueAnalyticsStore:
             conn.executemany(sql, [_transition_values(row) for row in rows])
         return len(rows)
 
+    def replace_lifecycle_transitions(
+        self, day: date, rows: Sequence[LifecycleTransitionRow]
+    ) -> int:
+        """Make ``day``'s transition log exactly ``rows``, in one transaction.
+
+        The daily job's writer. ``append_lifecycle_transitions`` upserts the
+        users whose segment moved and touches nobody else, so a recompute
+        that finds a user back on the previous day's segment kept the first
+        run's row forever -- and ``rollup_lifecycle_day`` bakes that row into
+        the permanent rollups at expiry. The day is recomputed whole, so its
+        log is replaced whole -- for the accounts the job evaluates. Rows of
+        an admin or excluded account are left in place: the read filter only
+        hides them, so an exclusion stays reversible.
+        """
+        day_iso = _validate_day(day)
+        if any(row.snapshot_date != day for row in rows):
+            raise ValueError("every transition must belong to day")
+        with self._analytics_connection() as conn:
+            conn.execute(_REPLACE_TRANSITIONS_DELETE_SQL.format(p="?"), (day_iso,))
+            if rows:
+                conn.executemany(
+                    _UPSERT_TRANSITIONS_SQL.format(p="?"),
+                    [_transition_values(row) for row in rows],
+                )
+        return len(rows)
+
+    def requeue_days_for_recompute(self, days: Sequence[date]) -> int:
+        """Put ``days`` back on ``list_days_needing_recompute``. One statement.
+
+        A day leaves that list once its facts' ``calculated_at`` is newer than
+        its newest event's ``received_at``, and the facts upsert sets it
+        before the transitions step runs. A late-arrival recompute that then
+        fails would never be retried. Resetting the stamp to the epoch (it is
+        read by nothing but the recompute scan) makes the day due again.
+        """
+        values = sorted({_validate_day(day) for day in days})
+        if not values:
+            return 0
+        sql = _REQUEUE_RECOMPUTE_SQL.format(p="?", days=", ".join("?" for _ in values))
+        with self._analytics_connection() as conn:
+            cursor = conn.execute(sql, [_RECOMPUTE_EPOCH, *values])
+            return max(0, int(cursor.rowcount))
+
+    def backfill_transitions_from_history(self, *, now: datetime) -> int:
+        """Derive the transition log for every fact day that has none.
+
+        A startup-migration step, run between the legacy rollup and the drop
+        (``facts_migration.run_startup_migrations``), and only while
+        ``user_lifecycle_daily_snapshots`` still exists: it is a one-off for
+        the PR A history copy's days, not a second writer beside the job.
+        A day the job already wrote a log for is left alone; a day it wrote
+        none for (no one moved) derives none again, from the same facts.
+        Returns the rows inserted.
+        """
+        stamp = utc_iso(_utc(now, "now"))
+        with self._analytics_connection() as conn:
+            if not _sqlite_table_exists(conn, "user_lifecycle_daily_snapshots"):
+                return 0
+            days = [
+                str(_row_value(row, "snapshot_date"))
+                for row in conn.execute(_DAYS_WITHOUT_TRANSITIONS_SQL).fetchall()
+            ]
+            if not days:
+                return 0
+            inserted = 0
+            for sql, params in _backfill_transition_statements(
+                p="?", prev="date(cur.snapshot_date, '-1 day')", days=days
+            ):
+                cursor = conn.execute(sql, [stamp, *params])
+                inserted += max(0, int(cursor.rowcount))
+        return inserted
+
     def list_facts_for_date(self, day: date) -> list[UserDailyFact]:
         """Every fact row for one date. Used for the previous day's segments."""
         with self._analytics_connection() as conn:
             rows = conn.execute(
-                "SELECT * FROM user_daily_facts WHERE snapshot_date = ? ORDER BY user_id",
-                (day.isoformat(),),
+                _FACTS_FOR_DATE_SQL.format(p="?"), (_validate_day(day),)
             ).fetchall()
         return [_fact_from_row(row) for row in rows]
 

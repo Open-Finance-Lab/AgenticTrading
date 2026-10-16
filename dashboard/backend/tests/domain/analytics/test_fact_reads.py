@@ -238,6 +238,72 @@ def assert_fact_read_contract(store, ids: dict[str, int]) -> None:
     assert store.list_transitions_for_date(two_days_ago) == []
 
 
+def assert_read_time_exclusion_contract(store, ids: dict[str, int], *, exclude, promote) -> None:
+    """Review #7: excluding an account, or promoting it to admin, takes effect
+    on the next read of rows already written -- as it did when every read went
+    through ``_eligible_users`` -- not only on facts written from tomorrow.
+
+    Asserted as deltas, so whatever else a tier's fixture seeded on the same
+    days contributes nothing. Mutates the population: run it last.
+    """
+    two_days_ago = YESTERDAY - timedelta(days=1)
+    window = dict(start=two_days_ago, end=YESTERDAY + timedelta(days=1))
+
+    def state_total() -> int:
+        return sum(row.users for row in store.count_states_for_date(YESTERDAY))
+
+    def segment_total() -> int:
+        return sum(row.users for row in store.count_segments_by_date(**window))
+
+    def transition_total() -> int:
+        return sum(row.users for row in store.count_transitions(**window))
+
+    def group_runs() -> dict[str, int]:
+        return {
+            group: totals.total_runs
+            for group, totals in store.sum_facts_by_user_group(**window).items()
+        }
+
+    states, segments, transitions, runs = (
+        state_total(), segment_total(), transition_total(), group_runs()
+    )
+    exclude(ids["blocked"])
+    promote(ids["core"])
+
+    # blocked: rows on both days, one transition, 3 partner runs.
+    # core: rows on both days, one transition, 5 organic runs.
+    assert state_total() == states - 2
+    assert segment_total() == segments - 4
+    assert transition_total() == transitions - 2
+    after = group_runs()
+    assert after.get("partner", 0) == runs["partner"] - 3
+    assert after.get("organic", 0) == runs["organic"] - 5
+    candidates = {
+        candidate.user_id
+        for candidate in store.list_attention_candidates(
+            day=YESTERDAY, window_start=YESTERDAY - timedelta(days=29), limit=10
+        )
+    }
+    assert ids["blocked"] not in candidates
+    assert ids["attention"] in candidates
+    # The expiry rollup reads these two, so the permanent record drops them too.
+    day_facts = {row.user_id for row in store.list_facts_for_date(YESTERDAY)}
+    assert ids["attention"] in day_facts
+    assert day_facts.isdisjoint({ids["blocked"], ids["core"]})
+    assert {row.user_id for row in store.list_transitions_for_date(YESTERDAY)}.isdisjoint(
+        {ids["blocked"], ids["core"]}
+    )
+
+    # The job's whole-day replace removes only what the job evaluates: the
+    # hidden row of an excluded account survives it, so an exclusion made by
+    # mistake can be undone without losing that account's movement.
+    store.replace_lifecycle_transitions(YESTERDAY, [])
+    exclude(ids["blocked"], excluded=False)
+    assert {row.user_id for row in store.list_transitions_for_date(YESTERDAY)} == {
+        ids["blocked"]
+    }
+
+
 def _page_query(**overrides) -> UserPageQuery:
     values = dict(
         q=None,
@@ -505,3 +571,56 @@ def test_sqlite_users_page_follows_the_contract(tmp_path):
 def test_sqlite_users_page_priority_sort_follows_the_contract(tmp_path):
     store, users, _admin_id = _sqlite_fixture(tmp_path)
     assert_priority_sort_contract(store, _sqlite_user_factory(users))
+
+
+def test_sqlite_fact_reads_apply_exclusions_at_read_time(tmp_path):
+    store, users, admin_id = _sqlite_fixture(tmp_path)
+    ids = seed_population(store, _sqlite_user_factory(users), admin_id=admin_id)
+
+    assert_read_time_exclusion_contract(
+        store,
+        ids,
+        exclude=lambda user_id, excluded=True: store.analytics_base.set_subject_exclusion(
+            user_id, excluded=excluded, actor_user_id=admin_id, reason="test account"
+        ),
+        promote=lambda user_id: users.apply_admin_patch(user_id, role="admin"),
+    )
+
+
+def test_sqlite_transition_log_is_replaced_per_day(tmp_path):
+    """Review #2: a recompute that puts a user back on the previous day's
+    segment must remove the first run's transition, not keep it."""
+    store, users, admin_id = _sqlite_fixture(tmp_path)
+    ids = seed_population(store, _sqlite_user_factory(users), admin_id=admin_id)
+
+    assert_transition_replace_contract(store, ids)
+
+
+def assert_transition_replace_contract(store, ids: dict[str, int]) -> None:
+    """Uses its own day and users, so it composes with any other contract."""
+    day = YESTERDAY - timedelta(days=5)
+    store.append_lifecycle_transitions(
+        [
+            transition(ids["attention"], day, "new", "onboarding"),
+            transition(ids["dormant"], day, "growing", "at_risk"),
+        ]
+    )
+    assert {row.user_id for row in store.list_transitions_for_date(day)} == {
+        ids["attention"], ids["dormant"]
+    }
+
+    written = store.replace_lifecycle_transitions(
+        day, [transition(ids["dormant"], day, "growing", "dormant", inactive_days=12)]
+    )
+
+    assert written == 1
+    [kept] = store.list_transitions_for_date(day)
+    assert (kept.user_id, kept.to_segment, kept.inactive_days) == (
+        ids["dormant"], "dormant", 12
+    )
+    assert store.replace_lifecycle_transitions(day, []) == 0
+    assert store.list_transitions_for_date(day) == []
+    with pytest.raises(ValueError):
+        store.replace_lifecycle_transitions(
+            day, [transition(ids["dormant"], day - timedelta(days=1), "new", "core")]
+        )

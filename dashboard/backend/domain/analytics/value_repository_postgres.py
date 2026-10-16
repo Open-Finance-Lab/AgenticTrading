@@ -26,22 +26,29 @@ from .value_repository import (
     _COUNT_TRANSITIONS_SQL,
     _DAILY_FACT_COLUMNS,
     _DAILY_FACT_UPDATES,
+    _DAYS_WITHOUT_TRANSITIONS_SQL,
     _EVENTS_FOR_DAY_SQL,
+    _FACTS_FOR_DATE_SQL,
     _GROUP_REPEAT_SQL,
     _GROUP_TOTALS_SQL,
     _INTERNAL_EXCLUSION_SQL,
     _LATEST_FACT_DATE_SQL,
     _LEGACY_SNAPSHOTS_SQL,
     _LEGACY_UNROLLED_DATES_SQL,
+    _RECOMPUTE_EPOCH,
     _RECOMPUTE_EVENTS_SQL,
     _RECOMPUTE_FACTS_SQL,
+    _REPLACE_TRANSITIONS_DELETE_SQL,
+    _REQUEUE_RECOMPUTE_SQL,
     _TERMINAL_RUN_STATUSES,
     _TRANSITION_COLUMNS,
     _TRANSITION_UPDATES,
     _TRANSITIONS_FOR_DATE_SQL,
+    _UPSERT_TRANSITIONS_SQL,
     _USER_TRANSITIONS_SQL,
     _RECENT_FACTS_SQL,
     _activity_update_values,
+    _backfill_transition_statements,
     _attention_candidate,
     _day_bounds_iso,
     _events_totals_from_row,
@@ -694,14 +701,62 @@ class PostgresValueAnalyticsStore:
                 cur.executemany(sql, [_transition_values(row) for row in rows])
         return len(rows)
 
+    def replace_lifecycle_transitions(
+        self, day: date, rows: Sequence[LifecycleTransitionRow]
+    ) -> int:
+        """See the SQLite twin."""
+        day_iso = _validate_day(day)
+        if any(row.snapshot_date != day for row in rows):
+            raise ValueError("every transition must belong to day")
+        with self._analytics_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(_REPLACE_TRANSITIONS_DELETE_SQL.format(p="%s"), (day_iso,))
+                if rows:
+                    cur.executemany(
+                        _UPSERT_TRANSITIONS_SQL.format(p="%s"),
+                        [_transition_values(row) for row in rows],
+                    )
+        return len(rows)
+
+    def requeue_days_for_recompute(self, days: Sequence[date]) -> int:
+        """See the SQLite twin."""
+        values = sorted({_validate_day(day) for day in days})
+        if not values:
+            return 0
+        sql = _REQUEUE_RECOMPUTE_SQL.format(p="%s", days=", ".join("%s" for _ in values))
+        with self._analytics_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql, [_RECOMPUTE_EPOCH, *values])
+                return max(0, int(cur.rowcount))
+
+    def backfill_transitions_from_history(self, *, now: datetime) -> int:
+        """See the SQLite twin."""
+        stamp = utc_iso(_utc(now, "now"))
+        with self._analytics_connection() as conn:
+            with conn.cursor() as cur:
+                if not _postgres_table_exists(cur, "user_lifecycle_daily_snapshots"):
+                    return 0
+                cur.execute(_DAYS_WITHOUT_TRANSITIONS_SQL)
+                days = [
+                    str(_row_value(row, "snapshot_date")) for row in cur.fetchall()
+                ]
+                if not days:
+                    return 0
+                inserted = 0
+                for sql, params in _backfill_transition_statements(
+                    p="%s",
+                    prev="to_char(cur.snapshot_date::date - 1, 'YYYY-MM-DD')",
+                    days=days,
+                ):
+                    cur.execute(sql, [stamp, *params])
+                    inserted += max(0, int(cur.rowcount))
+        return inserted
+
     def list_facts_for_date(self, day: date) -> list[UserDailyFact]:
         """See the SQLite twin."""
         with self._analytics_connection() as conn:
             with conn.cursor() as cur:
-                cur.execute(
-                    "SELECT * FROM user_daily_facts WHERE snapshot_date = %s ORDER BY user_id",
-                    (day.isoformat(),),
-                )
+                cur.execute(_FACTS_FOR_DATE_SQL.format(p="%s"), (_validate_day(day),))
                 rows = cur.fetchall()
         return [_fact_from_row(row) for row in rows]
 

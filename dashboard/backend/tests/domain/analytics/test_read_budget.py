@@ -42,7 +42,7 @@ NOW = datetime(2026, 9, 12, 0, 5, tzinfo=timezone.utc)
 #   value store   12  claim, aggregate_events, record_activity_batch x2,
 #                     list_operational_signals, list_activity, sum_recent_facts,
 #                     upsert_daily_facts, list_facts_for_date,
-#                     append_lifecycle_transitions, list_days_needing_recompute,
+#                     replace_lifecycle_transitions, list_days_needing_recompute,
 #                     complete_projection_day
 #   analytics      2  list_excluded_user_ids (inside rollup_day), list_daily_subjects
 #   credits        3  aggregate_ledger_for_day, get_balance_projections,

@@ -9,7 +9,6 @@ from dashboard.backend.domain.analytics.repository import AnalyticsStore
 from dashboard.backend.domain.analytics.rollups import (
     AnalyticsRollupStore,
     DailyRollup,
-    rollup_current_day,
     rollup_lifecycle_day,
     rollup_day,
 )
@@ -359,28 +358,130 @@ def test_rollup_day_writes_distinct_activation_users_per_event(tmp_path):
     rollup_day(day, store=rollups)
     stored = rollups.list_rollups(start=day, end=day + timedelta(days=1))
 
+    # Written zero or not: the zero row is how the funnel tells "nobody
+    # verified a credential that day" from "rolled up before the metric".
     assert {
         (row.event_name, row.value_count)
         for row in stored
         if row.metric_name == "activation_users"
-    } == {("account_signed_up", 2), ("agent_created", 1), ("backtest_completed", 1)}
+    } == {
+        ("account_signed_up", 2),
+        ("credential_verified", 0),
+        ("agent_created", 1),
+        ("backtest_completed", 1),
+    }
 
 
-def test_rollup_current_day_reads_only_the_current_day(tmp_path):
+def _record(service, user_id, name, record_type, occurred_at, index):
+    service.record_server_event(
+        event_name=name,
+        user_id=user_id,
+        source_event_id=f"{record_type}:{name}:{index}",
+        source_record_type=record_type,
+        source_record_id=str(index),
+        occurred_at=occurred_at,
+    )
+
+
+def _drop_activation_rows(analytics):
+    """What a day rolled up before PR B added the metric looks like."""
+    with analytics._get_connection() as conn:
+        conn.execute(
+            "DELETE FROM analytics_daily_rollups WHERE metric_name = 'activation_users'"
+        )
+
+
+def test_activation_backfill_fills_rolled_up_days_that_predate_the_metric(tmp_path):
     analytics, rollups = _store(tmp_path)
-    windows = []
-    original = rollups.list_events
+    service = AnalyticsService(analytics)
+    first, second = date(2026, 8, 24), date(2026, 8, 25)
+    for index, (user_id, name, record_type, day) in enumerate(
+        (
+            (1, "account_signed_up", "user", first),
+            (2, "account_signed_up", "user", first),
+            (1, "agent_created", "agent", second),
+            (1, "agent_created", "agent", second),
+        )
+    ):
+        _record(
+            service,
+            user_id,
+            name,
+            record_type,
+            datetime.combine(day, datetime.min.time(), tzinfo=timezone.utc)
+            + timedelta(hours=10 + index),
+            index,
+        )
+    rollup_day(first, store=rollups)
+    rollup_day(second, store=rollups)
+    expected = {
+        (row.rollup_date, row.event_name, row.value_count)
+        for row in rollups.list_rollups(start=first, end=second + timedelta(days=1))
+        if row.metric_name == "activation_users"
+    }
+    _drop_activation_rows(analytics)
 
-    def recording(**kwargs):
-        windows.append((kwargs["start"], kwargs["end"]))
-        return original(**kwargs)
+    filled = rollups.backfill_activation_users(since=first, until=second + timedelta(days=1))
 
-    rollups.list_events = recording
-    now = datetime(2026, 8, 25, 15, 30, tzinfo=timezone.utc)
+    assert filled == (first, second)
+    after = rollups.list_rollups(start=first, end=second + timedelta(days=1))
+    # Byte-for-byte what rollup_day itself writes, zero rows included.
+    assert {
+        (row.rollup_date, row.event_name, row.value_count)
+        for row in after
+        if row.metric_name == "activation_users"
+    } == expected
+    assert (second, "agent_created", 1) in expected
+    # Idempotent: a filled day no longer matches.
+    assert rollups.backfill_activation_users(
+        since=first, until=second + timedelta(days=1)
+    ) == ()
 
-    rollup_current_day(store=rollups, now=now)
 
-    assert windows == [(datetime(2026, 8, 25, tzinfo=timezone.utc), now)]
+def test_activation_backfill_never_writes_a_day_that_was_not_rolled_up(tmp_path):
+    """A day with no rollup row is unknown, not zero: its raw events may have
+    expired, so the backfill must not mint a zero funnel for it."""
+    analytics, rollups = _store(tmp_path)
+    service = AnalyticsService(analytics)
+    day = date(2026, 8, 25)
+    _record(
+        service,
+        1,
+        "account_signed_up",
+        "user",
+        datetime(2026, 8, 25, 10, tzinfo=timezone.utc),
+        0,
+    )
+
+    assert rollups.backfill_activation_users(since=day, until=day + timedelta(days=1)) == ()
+    assert rollups.list_rollups(start=day, end=day + timedelta(days=1)) == []
+
+
+def test_activation_backfill_leaves_out_excluded_and_admin_accounts(tmp_path):
+    analytics, rollups = _store(tmp_path)
+    service = AnalyticsService(analytics)
+    day = date(2026, 8, 25)
+    for index, user_id in enumerate((1, 2)):
+        _record(
+            service,
+            user_id,
+            "account_signed_up",
+            "user",
+            datetime(2026, 8, 25, 10 + index, tzinfo=timezone.utc),
+            index,
+        )
+    rollup_day(day, store=rollups)
+    _drop_activation_rows(analytics)
+    analytics.set_subject_exclusion(2, excluded=True, actor_user_id=1, reason="test account")
+
+    rollups.backfill_activation_users(since=day, until=day + timedelta(days=1))
+
+    counts = {
+        row.event_name: row.value_count
+        for row in rollups.list_rollups(start=day, end=day + timedelta(days=1))
+        if row.metric_name == "activation_users"
+    }
+    assert counts["account_signed_up"] == 1
 
 
 def test_lifecycle_rollup_warns_when_a_day_has_transitions_but_no_facts(tmp_path, capsys):
