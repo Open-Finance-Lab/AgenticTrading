@@ -590,7 +590,12 @@ def test_portfolio_manager_construction_always_declares_settlement():
 # ---------------------------------------------------------------------------
 
 _ANALYTICS = _BACKEND / "domain" / "analytics"
-_EVENT_READ_NAMES = {"list_events", "list_user_events", "list_metric_events"}
+_EVENT_READ_NAMES = {
+    "list_events",
+    "list_user_events",
+    "list_metric_events",
+    "first_event_times",
+}
 # Files that may call a raw-event reader, each with the reason. Rules 3-5: the
 # paginated timeline and the overview's one-day scan are the only permitted raw
 # reads; everything else reads rollups or user_daily_facts. Every entry must
@@ -598,13 +603,17 @@ _EVENT_READ_NAMES = {"list_events", "list_user_events", "list_metric_events"}
 # calculator's and the lifecycle backfill's entries with their files.
 _EVENT_READ_ALLOWLIST = {
     "dashboard/backend/domain/analytics/rollups.py": (
-        "defines AnalyticsRollupStore.list_events; rollup_day / rollup_current_day "
-        "are the day rollups and the overview's current-day scan (rule 5), "
-        "which is bounded to one UTC day"
+        "defines AnalyticsRollupStore.list_events; rollup_day is the day "
+        "rollup (rule 5), its read bounded to the day plus its 30-day trailing "
+        "context. (The startup migration's activation_users backfill is one "
+        "grouped SQL read here too, outside this name-based check.)"
     ),
     "dashboard/backend/domain/analytics/query_service.py": (
         "the paginated timeline (rule 3) and the overview's current-day read "
-        "(rule 5), bounded to one UTC day; the sessions read has a 30-day window"
+        "(rule 5), bounded to one UTC day; the sessions read has a 30-day "
+        "window; first_event_times is the profile's grouped MIN() for its two "
+        "activation milestones, at most two rows (design SS6.12, amended "
+        "2026-10-16)"
     ),
 }
 _OWN_CONNECTION_RECEIVERS = {"self", "self.analytics_base", "self.base_store"}

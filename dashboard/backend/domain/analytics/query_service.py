@@ -469,6 +469,54 @@ class AnalyticsQueryStore:
             (int(row["sequence"]), _row_to_event(row)) for row in page_rows
         ], next_cursor
 
+    def first_event_times(
+        self,
+        *,
+        user_id: int,
+        event_names: Sequence[str],
+        start: datetime,
+        end: datetime,
+    ) -> dict[str, datetime]:
+        """Each named event's first ``occurred_at`` for one user in ``[start, end)``.
+
+        One grouped, indexed read returning at most ``len(event_names)``
+        rows: the profile's activation milestones are first occurrences,
+        which the newest-100 timeline page cannot answer for a user whose
+        first verification is older than their last hundred events.
+        """
+        subject_id = positive_user_id(user_id)
+        names = sorted(set(event_names))
+        if not names:
+            return {}
+        placeholder = "%s" if self.is_postgres else "?"
+        sql = f"""
+            SELECT event_name, MIN(occurred_at) AS first_at
+            FROM analytics_events
+            WHERE user_id = {placeholder}
+              AND event_name IN ({", ".join(placeholder for _ in names)})
+              AND occurred_at >= {placeholder} AND occurred_at < {placeholder}
+            GROUP BY event_name
+        """
+        params = [
+            subject_id,
+            *names,
+            utc_iso(_utc(start, "start")),
+            utc_iso(_utc(end, "end")),
+        ]
+        if self.is_postgres:
+            with self.base_store._get_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(sql, params)
+                    rows = cur.fetchall()
+        else:
+            with self.base_store._get_connection() as conn:
+                rows = conn.execute(sql, params).fetchall()
+        return {
+            str(row["event_name"]): _parse_timestamp(row["first_at"])
+            for row in rows
+            if row["first_at"] is not None
+        }
+
     def list_session_rows(
         self,
         *,
@@ -477,35 +525,39 @@ class AnalyticsQueryStore:
         cursor: str | None,
         start: datetime,
     ) -> tuple[list[dict[str, Any]], str | None]:
+        """Sessions with any experience event at or after ``start``, whole.
+
+        The window selects *sessions*, not events: a session that began
+        before ``start`` and continued after it is read with all of its
+        events, so its count and visible time are not cut at the boundary.
+        Sessions wholly before ``start`` are out of scope (design: the
+        activity route's 30-day sessions window).
+        """
         subject_id = positive_user_id(user_id)
         page_size = positive_limit(limit)
         window_start = utc_iso(_utc(start, "start"))
+        placeholder = "%s" if self.is_postgres else "?"
+        sql = f"""
+            SELECT * FROM analytics_events
+            WHERE user_id = {placeholder}
+              AND event_group = 'experience'
+              AND session_id IN (
+                  SELECT session_id FROM analytics_events
+                  WHERE user_id = {placeholder} AND occurred_at >= {placeholder}
+                    AND event_group = 'experience'
+                    AND session_id IS NOT NULL
+              )
+            ORDER BY occurred_at DESC, sequence DESC
+        """
+        params = (subject_id, subject_id, window_start)
         if self.is_postgres:
             with self.base_store._get_connection() as conn:
                 with conn.cursor() as cur:
-                    cur.execute(
-                        """
-                        SELECT * FROM analytics_events
-                        WHERE user_id = %s AND occurred_at >= %s
-                          AND event_group = 'experience'
-                          AND session_id IS NOT NULL
-                        ORDER BY occurred_at DESC, sequence DESC
-                        """,
-                        (subject_id, window_start),
-                    )
+                    cur.execute(sql, params)
                     rows = cur.fetchall()
         else:
             with self.base_store._get_connection() as conn:
-                rows = conn.execute(
-                    """
-                    SELECT * FROM analytics_events
-                    WHERE user_id = ? AND occurred_at >= ?
-                      AND event_group = 'experience'
-                      AND session_id IS NOT NULL
-                    ORDER BY occurred_at DESC, sequence DESC
-                    """,
-                    (subject_id, window_start),
-                ).fetchall()
+                rows = conn.execute(sql, params).fetchall()
         grouped: dict[str, dict[str, Any]] = {}
         for row in rows:
             event = _row_to_event(row)
@@ -708,6 +760,37 @@ def _run_outcome_counts(totals: Any) -> RunOutcomeCounts:
     )
 
 
+def landed_fact_day(
+    value_store: Any,
+    *,
+    yesterday: date,
+    warned: set[tuple[date, date | None]],
+) -> date | None:
+    """The fact day a read "as of yesterday" should use, or None if none landed.
+
+    Facts land once a night. Until they do -- or all day, when the job's
+    facts step fails -- yesterday has no rows, and a read of it returns empty
+    counts indistinguishable from "nobody is blocked". Every such read
+    joins the newest landed day instead and labels it (``stale`` plus the
+    coverage dates; ``/users`` stamps ``as_of``), or, where its response has
+    no field to label it with, refuses a day older than the normal gap.
+
+    The WARNING is printed once per (expected, latest) pair for the calling
+    service, not once per request: a failed job would otherwise write it on
+    every page load, filter change and pagination click all day.
+    """
+    latest = value_store.latest_fact_date(on_or_before=yesterday)
+    if latest != yesterday and (yesterday, latest) not in warned:
+        warned.add((yesterday, latest))
+        print(
+            "WARNING: analytics.read.facts_stale "
+            f"latest={latest.isoformat() if latest else 'none'} "
+            f"expected={yesterday.isoformat()}",
+            flush=True,
+        )
+    return latest
+
+
 class AnalyticsQueryService:
     def __init__(
         self,
@@ -724,6 +807,7 @@ class AnalyticsQueryService:
         self.user_store = user_store
         self.query_store = AnalyticsQueryStore(store)
         self._value_store = value_store
+        self._stale_fact_warnings: set[tuple[date, date | None]] = set()
 
     @property
     def value_store(self) -> Any:
@@ -785,6 +869,12 @@ class AnalyticsQueryService:
         # window covers (design §6.15 item 2). Completed days come from the
         # rollups, which already hold the trailing context the old
         # window-wide scan existed to supply.
+        #
+        # Always without internal accounts: ``rollup_day`` writes the
+        # completed days internal-free, so admitting them into today's slice
+        # under ``include_internal`` summed two populations into one figure
+        # that matched neither setting. The flag is accepted and echoed, and
+        # widens nothing here (as on /retention, /groups and /lifecycle).
         today_start = datetime.combine(
             current.date(), datetime.min.time(), tzinfo=timezone.utc
         )
@@ -797,7 +887,7 @@ class AnalyticsQueryService:
                 today_events = self.query_store.list_metric_events(
                     start=scan_start,
                     end=effective_end,
-                    include_internal=filters.include_internal,
+                    include_internal=False,
                 )
                 raw_events_read = True
             except Exception as exc:
@@ -886,8 +976,24 @@ class AnalyticsQueryService:
                     key=lambda item: (-item[1], item[0]),
                 )[:10]
             ]
+            # A completed day rolled up before activation_users existed has
+            # every other rollup row and none of these, and summed as zero.
+            # rollup_day now writes them zero or not and the startup
+            # migration fills the old days inside raw retention; a day still
+            # without them makes the funnel an undercount, which it must not
+            # publish as a figure.
+            rolled_up_days = {
+                row.rollup_date for row in rollups if row.metric_name == "daily_active_users"
+            }
+            activation_days = {
+                row.rollup_date for row in rollups if row.metric_name == "activation_users"
+            }
+            if not rolled_up_days <= activation_days:
+                funnel = {}
+                availability["funnel"] = _availability(False)
         else:
             availability["funnel"] = _availability(False)
+            availability["friction"] = _availability(False)
 
         try:
             if not raw_events_read:
@@ -1059,18 +1165,30 @@ class AnalyticsQueryService:
             availability["growth"] = _availability(False)
 
         # The friction panel (top_failure_categories) is computed from the
-        # funnel's reads, so it is exactly as available as they are.
-        availability["friction"] = _availability(availability["funnel"].available)
+        # funnel's reads, so it is unavailable exactly when they failed (set
+        # above) -- not when only the funnel's activation rows are missing.
 
-        # Who needs attention, as of yesterday's fact rows (design D20). The
-        # daily job writes facts for non-internal accounts only, so
+        # Who needs attention, as of the latest landed fact day (design D20):
+        # yesterday once the night's job lands, the day before until then.
+        # The daily job writes facts for non-internal accounts only, so
         # include_internal does not widen it.
         yesterday = current.date() - timedelta(days=1)
         attention: list[AnalyticsUserListItem] = []
         try:
+            facts_day = landed_fact_day(
+                self.value_store,
+                yesterday=yesterday,
+                warned=self._stale_fact_warnings,
+            )
+            if facts_day is None or facts_day < yesterday - timedelta(days=1):
+                # No fact day has landed, or only one older than the normal
+                # "tonight's job has not run yet" gap. An empty list would read
+                # as "nobody needs attention", and this panel has no as-of
+                # field to label an old list with, so it says unavailable.
+                raise AnalyticsStoreError("no recent analytics fact day has landed")
             candidates = self.value_store.list_attention_candidates(
-                day=yesterday,
-                window_start=yesterday - timedelta(days=29),
+                day=facts_day,
+                window_start=facts_day - timedelta(days=29),
                 limit=10,
             )
             activity = (
@@ -1169,10 +1287,12 @@ class AnalyticsQueryService:
             current_events = (
                 [
                     event
+                    # Internal-free, like the rollups it is added to -- the
+                    # overview's own figure reads the same way (see there).
                     for event in self.query_store.list_metric_events(
                         start=current_start,
                         end=effective_end,
-                        include_internal=filters.include_internal,
+                        include_internal=False,
                     )
                     if _event_matches_filters(event, filters)
                 ]
@@ -1235,10 +1355,11 @@ class AnalyticsQueryService:
 
         The run, cost and spend figures sum ``user_daily_facts`` over the
         selected window clipped to yesterday ("as of yesterday", design
-        §6.3). The one raw-event read is the first timeline page (design
-        §6.12), and every field computed from events -- lane mix, provider,
-        client, top page, tokens, the two event milestones -- is bounded by
-        that page, not by the window.
+        §6.3). The raw-event scan is the first timeline page (design §6.12),
+        and every field computed from it -- lane mix, provider, client, top
+        page, tokens -- is bounded by that page, not by the window. The two
+        event milestones are first occurrences, so they come from one grouped
+        MIN() read over the selected range instead.
         """
         subject_id = positive_user_id(user_id)
         current = _utc(now or datetime.now(timezone.utc), "now")
@@ -1276,12 +1397,17 @@ class AnalyticsQueryService:
         milestones: dict[str, datetime] = {"account_signed_up": joined_at}
         if activity is not None and activity.activated_at is not None:
             milestones["backtest_completed"] = activity.activated_at
-        for event_name in ("credential_verified", "agent_created"):
-            matches = [
-                event.occurred_at for event in events if event.event_name == event_name
-            ]
-            if matches:
-                milestones[event_name] = min(matches)
+        # First occurrences in the selected range, as main computed them --
+        # never min() over the timeline page, which holds only the newest
+        # 100 events and so loses (or misdates) an older first verification.
+        milestones.update(
+            self.query_store.first_event_times(
+                user_id=subject_id,
+                event_names=("credential_verified", "agent_created"),
+                start=range_start,
+                end=range_end,
+            )
+        )
         usage = [event for event in events if event.event_name == "model_usage_recorded"]
         lane_counts = Counter(event.billing_mode for event in usage if event.billing_mode)
         page_counts = Counter(

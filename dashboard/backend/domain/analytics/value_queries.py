@@ -27,10 +27,12 @@ from .query_service import (
     AnalyticsUserProfile,
     FailureCategoryCount,
     _warn_read_failed,
+    landed_fact_day,
 )
 from .repository import analytics_store
 from .repository_common import positive_limit, positive_user_id
 from .value_repository import (
+    MAX_USER_BATCH,
     CommercialValueFact,
     GroupFactTotals,
     UserActivity,
@@ -486,6 +488,12 @@ class ValueAnalyticsQueryService:
             user_store=user_store,
             value_store=self.value_store,
         )
+        self._stale_fact_warnings: set[tuple[date, date | None]] = set()
+
+    def _landed_fact_day(self, yesterday: date) -> date | None:
+        return landed_fact_day(
+            self.value_store, yesterday=yesterday, warned=self._stale_fact_warnings
+        )
 
     def _eligible_users(self, *, include_internal: bool) -> list[dict[str, Any]]:
         users = _all_users(self.user_store)
@@ -560,7 +568,6 @@ class ValueAnalyticsQueryService:
         start: date,
         end: date,
         yesterday: date,
-        use_anonymous_rollups: bool,
         movement_start: date | None = None,
         movement_range: str = "5d",
     ) -> tuple[
@@ -573,8 +580,10 @@ class ValueAnalyticsQueryService:
 
         Both are grouped in SQL, so the read does not grow with the user table.
         Days the facts table no longer holds fall back to the anonymous
-        lifecycle rollups. Facts exist only through ``yesterday``, so coverage
-        is judged against that day rather than against ``end``.
+        lifecycle rollups -- always: facts hold no internal accounts, exactly
+        like the rollups, so the internal toggle has nothing to keep out of
+        the fallback. Facts exist only through ``yesterday``, so coverage is
+        judged against that day rather than against ``end``.
         """
         if movement_range not in _MOVEMENT_WINDOWS:
             raise ValueError("unsupported lifecycle movement range")
@@ -599,11 +608,7 @@ class ValueAnalyticsQueryService:
                 daily_quality.setdefault(row.snapshot_date, "complete")
         direct_dates = set(daily_counts)
 
-        rollups = (
-            self.query_store.rollups.list_rollups(start=history_start, end=end)
-            if use_anonymous_rollups
-            else []
-        )
+        rollups = self.query_store.rollups.list_rollups(start=history_start, end=end)
         rollup_counts: dict[date, dict[LifecycleSegment, int]] = defaultdict(dict)
         rollup_quality: dict[date, str] = {}
         for row in rollups:
@@ -702,12 +707,14 @@ class ValueAnalyticsQueryService:
         movement_range: str = "5d",
         now: datetime | None = None,
     ) -> LifecycleAnalyticsResponse:
-        """Segment counts are as of yesterday's fact rows (design §6.3, §6.10).
+        """Segment counts are as of the latest landed fact day (design §6.3, §6.10).
 
-        Fact rows hold no internal or excluded accounts, so ``include_internal``
-        widens only the activation and paid headlines, which read
-        ``user_activity`` and the ledger. History always falls back to the
-        anonymous rollups for days without facts, whatever the toggle.
+        That is yesterday once the night's job lands; until then, or while it
+        fails, the day before, labelled ``stale`` and ``partial`` rather than
+        read as an empty population. Fact rows hold no internal or excluded
+        accounts, so ``include_internal`` widens only the activation and paid
+        headlines, which read ``user_activity`` and the ledger. History always
+        falls back to the anonymous rollups for days without facts.
         """
         start, end = _validate_dates(start, end)
         if movement_range not in _MOVEMENT_WINDOWS:
@@ -716,7 +723,9 @@ class ValueAnalyticsQueryService:
         movement_start = end - timedelta(days=window_days)
         current_time = _utc(now or datetime.now(UTC), "now")
         yesterday = current_time.date() - timedelta(days=1)
-        cells = self.value_store.count_states_for_date(yesterday)
+        facts_day = self._landed_fact_day(yesterday)
+        cells = self.value_store.count_states_for_date(facts_day) if facts_day else []
+        stale = bool(cells) and facts_day != yesterday
         segment_counts = {
             segment: sum(
                 cell.users for cell in cells if cell.lifecycle_segment == segment
@@ -726,9 +735,12 @@ class ValueAnalyticsQueryService:
         availability: dict[str, SectionAvailability] = {
             "current": SectionAvailability(
                 available=True,
-                status="ready" if cells else "building",
-                coverage_start=yesterday if cells else None,
-                coverage_end=yesterday if cells else None,
+                stale=stale,
+                status=(
+                    "building" if not cells else "partial" if stale else "ready"
+                ),
+                coverage_start=facts_day if cells else None,
+                coverage_end=facts_day if cells else None,
             )
         }
         try:
@@ -740,6 +752,7 @@ class ValueAnalyticsQueryService:
             activated_users = 0
             availability["current"] = SectionAvailability(
                 available=bool(cells),
+                stale=stale,
                 status="partial",
             )
         try:
@@ -764,10 +777,6 @@ class ValueAnalyticsQueryService:
                 start=start,
                 end=end,
                 yesterday=yesterday,
-                # Facts hold no internal accounts, exactly like the anonymous
-                # rollups, so the internal toggle has nothing to keep out of
-                # the fallback; gating it only dropped rollup-backed days.
-                use_anonymous_rollups=True,
                 movement_start=movement_start,
                 movement_range=movement_range,
             )
@@ -851,15 +860,27 @@ class ValueAnalyticsQueryService:
         grid_end = min(
             end + timedelta(days=35), current_time.date() + timedelta(days=1)
         )
-        active_dates: dict[int, list[date]] = {}
+        active_dates: dict[int, set[date]] = defaultdict(set)
         day_quality: dict[date, str] = {}
         if ids:
-            for offset in range(0, len(ids), 500):
-                active_dates.update(
-                    self.value_store.list_active_dates(
-                        ids[offset : offset + 500], start=cohort_start, end=grid_end
-                    )
-                )
+            # list_active_dates chunks by MAX_USER_BATCH itself.
+            for user_id, days in self.value_store.list_active_dates(
+                ids, start=cohort_start, end=grid_end
+            ).items():
+                active_dates[user_id].update(days)
+            # A ledger movement (a purchase, a grant, a debit) retains a user
+            # as it did on main, which unioned list_credit_activity into the
+            # event activity. The fact ``active`` flag is set from events
+            # alone, so without this a cohort member whose only week-2
+            # activity was a Credits purchase read as churned.
+            # list_credit_activity takes one batch at most.
+            for offset in range(0, len(ids), MAX_USER_BATCH):
+                for user_id, stamps in self.value_store.list_credit_activity(
+                    ids[offset : offset + MAX_USER_BATCH],
+                    start=_day_start(cohort_start),
+                    end=_day_start(grid_end),
+                ).items():
+                    active_dates[user_id].update(stamp.date() for stamp in stamps)
             # A day is trustworthy only when it has fact rows and none is partial.
             for row in self.value_store.count_segments_by_date(
                 start=cohort_start, end=grid_end
@@ -1030,8 +1051,12 @@ class ValueAnalyticsQueryService:
         current_time = _utc(now or datetime.now(UTC), "now")
         yesterday = current_time.date() - timedelta(days=1)
         # Fact rows hold no internal or excluded accounts, so ``include_internal``
-        # widens only the overview figures below.
-        cells = self.value_store.count_states_for_date(yesterday)
+        # widens only the overview figures below. State counts are as of the
+        # latest landed fact day -- the same day /users falls back to, so the
+        # two pages agree while the night's job has not landed.
+        facts_day = self._landed_fact_day(yesterday)
+        cells = self.value_store.count_states_for_date(facts_day) if facts_day else []
+        stale = bool(cells) and facts_day != yesterday
         counts = {
             state: sum(cell.users for cell in cells if cell.operational_state == state)
             for state in _OPERATIONAL_STATES
@@ -1051,9 +1076,9 @@ class ValueAnalyticsQueryService:
         friction_available = overview.availability["friction"].available
         available = bool(cells) or growth_available or friction_available
         if not cells:
-            # Yesterday's facts have not landed: empty counts are not "none blocked".
+            # No fact day has landed: empty counts are not "none blocked".
             status = "building"
-        elif growth_available and friction_available:
+        elif growth_available and friction_available and not stale:
             status = "ready"
         else:
             status = "partial" if available else "unavailable"
@@ -1077,7 +1102,12 @@ class ValueAnalyticsQueryService:
             top_failure_categories=overview.top_failure_categories,
             availability=SectionAvailability(
                 available=available,
+                stale=stale,
                 status=status,
+                # The day the state counts describe, so a stale fallback says
+                # how stale it is.
+                coverage_start=facts_day if cells else None,
+                coverage_end=facts_day if cells else None,
             ),
         )
 
@@ -1165,17 +1195,30 @@ class ValueAnalyticsQueryService:
         users_by_group: Counter[UserGroup] = Counter(
             group_by_user[user_id] for user_id in user_ids
         )
-        # Facts exist only through yesterday: a window that starts today has
-        # nothing landed, and reading it as zero runs would be a false answer.
-        landed = start < current_time.date()
+        # Facts exist only through yesterday, and a past day has them only
+        # once the night's job lands. Coverage is read, not assumed from the
+        # calendar: a window holding a day the job has not landed (or failed
+        # to write) would otherwise read that day as zero runs, "ready".
+        facts_end = min(end, current_time.date())
+        expected_days = {
+            start + timedelta(days=offset) for offset in range((facts_end - start).days)
+        }
+        landed_days: set[date] = set()
         facts_available = True
         totals: dict[str, GroupFactTotals] = {}
-        if landed:
+        if expected_days:
             try:
                 totals = self.value_store.sum_facts_by_user_group(start=start, end=end)
+                landed_days = {
+                    row.snapshot_date
+                    for row in self.value_store.count_segments_by_date(
+                        start=start, end=facts_end
+                    )
+                }
             except Exception as exc:
                 _warn_read_failed("groups_facts", exc)
                 facts_available = False
+        landed = bool(landed_days)
         if selected_group is not None:
             totals = {
                 group: value for group, value in totals.items() if group == selected_group
@@ -1218,19 +1261,21 @@ class ValueAnalyticsQueryService:
             availability = SectionAvailability(available=False, status="unavailable")
         else:
             # A partial fact row in the window (a failed source step, or the
-            # PR A history copy's zero-filled days) makes its zeros unknowns.
+            # PR A history copy's zero-filled days) makes its zeros unknowns,
+            # and so does a past day with no fact rows at all.
             facts_partial = any(value.partial_rows for value in totals.values())
             complete = (
-                landed and facts_available and commercial_available and not facts_partial
+                landed
+                and landed_days == expected_days
+                and facts_available
+                and commercial_available
+                and not facts_partial
             )
-            # Facts stop at yesterday; claiming today as covered would read an
-            # unlanded day as zero runs.
-            coverage_end = min(end - timedelta(days=1), current_time.date() - timedelta(days=1))
             availability = SectionAvailability(
                 available=True,
                 status="ready" if complete else "partial",
-                coverage_start=start if landed else None,
-                coverage_end=coverage_end if landed else None,
+                coverage_start=min(landed_days) if landed else None,
+                coverage_end=max(landed_days) if landed else None,
             )
         return GroupAnalyticsResponse(
             as_of=current_time,
@@ -1269,18 +1314,9 @@ class ValueAnalyticsQueryService:
         # The page joins yesterday's facts. Before the night's job lands, or
         # while it is failing, that join is empty and every row would read
         # healthy / unpaid with no signal: join the latest landed day instead,
-        # stamp the operational as_of from it, and say so in the log.
-        facts_day = yesterday
-        latest = self.value_store.latest_fact_date(on_or_before=yesterday)
-        if latest != yesterday:
-            print(
-                "WARNING: analytics.read.users_facts_stale "
-                f"latest={latest.isoformat() if latest else 'none'} "
-                f"expected={yesterday.isoformat()}",
-                flush=True,
-            )
-            if latest is not None:
-                facts_day = latest
+        # stamp the operational as_of from it, and say so in the log (once
+        # per stale day, not once per page load).
+        facts_day = self._landed_fact_day(yesterday) or yesterday
         rows, total = self.value_store.list_users_page(
             query=query, day=facts_day, limit=page_size, offset=offset
         )

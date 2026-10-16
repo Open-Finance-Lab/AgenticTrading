@@ -146,8 +146,12 @@ class FakeValueStore:
         operational_facts=None,
         internal_ids=(),
         ledger_days=(),
+        credit_activity=None,
     ):
         self.facts = list(facts)
+        # user_id -> [datetime]: ledger movements, which retention counts as
+        # activity alongside the fact ``active`` flag.
+        self.credit_activity = dict(credit_activity or {})
         self.transitions = list(transitions)
         self.activity = dict(activity or {})
         self.commercial = dict(commercial or {})
@@ -259,6 +263,16 @@ class FakeValueStore:
             if row.user_id in result and row.active and start <= row.snapshot_date < end:
                 result[row.user_id].append(row.snapshot_date)
         return result
+
+    def list_credit_activity(self, user_ids, *, start, end):
+        return {
+            user_id: tuple(
+                stamp
+                for stamp in self.credit_activity.get(user_id, ())
+                if start <= stamp < end
+            )
+            for user_id in user_ids
+        }
 
     def list_activations(self, *, start, end, include_internal):
         return {
@@ -538,6 +552,22 @@ def test_retention_cells_come_from_activation_weeks_and_active_fact_days():
     assert response.availability.status == "ready"
 
 
+def test_retention_counts_a_ledger_movement_as_activity():
+    """Review #9: main unioned list_credit_activity into retention; the fact
+    ``active`` flag is set from analytics events alone, so a cohort member
+    whose only week-1 activity was a Credits purchase read as churned."""
+    service = _retention_service()
+    # User 2 had no active fact day in week 1 (2026-08-10..16).
+    service.value_store.credit_activity[2] = [datetime(2026, 8, 12, 15, 0, tzinfo=UTC)]
+
+    response = service.get_retention(
+        start=date(2026, 8, 1), end=date(2026, 8, 20), now=RETENTION_NOW
+    )
+
+    first = next(c for c in response.cohorts if c.cohort_week == date(2026, 8, 3))
+    assert (first.week_1.retained_users, first.week_1.eligible_users) == (2, 2)
+
+
 def test_retention_cohort_membership_covers_the_window_end_week():
     # end falls mid-week: the 08-17 cohort starts before it and must still be read.
     service = _retention_service()
@@ -728,9 +758,14 @@ def test_users_list_falls_back_to_the_latest_landed_fact_day_and_warns(capsys):
     assert item.operational.state == "blocked"
     assert item.operational.calculated_at == _utc_midnight(YESTERDAY)
     assert (
-        "WARNING: analytics.read.users_facts_stale "
+        "WARNING: analytics.read.facts_stale "
         f"latest={stale_day.isoformat()} expected={YESTERDAY.isoformat()}"
     ) in capsys.readouterr().out
+
+    # Once per stale day, not once per request: a failed job would otherwise
+    # write the line on every page load and filter click all day.
+    service.list_users(filters=UserValueFilters(q="a"), limit=25, offset=25, now=NOW)
+    assert "facts_stale" not in capsys.readouterr().out
 
 
 def test_users_list_with_no_facts_at_all_keeps_yesterday_and_warns(capsys):
@@ -741,7 +776,7 @@ def test_users_list_with_no_facts_at_all_keeps_yesterday_and_warns(capsys):
     assert value_store.page_calls[0][1] == YESTERDAY
     assert response.items[0].operational.calculated_at == _utc_midnight(NOW.date())
     assert (
-        "WARNING: analytics.read.users_facts_stale "
+        "WARNING: analytics.read.facts_stale "
         f"latest=none expected={YESTERDAY.isoformat()}"
     ) in capsys.readouterr().out
 
@@ -754,7 +789,7 @@ def test_users_list_with_yesterdays_facts_landed_is_silent(capsys):
     service.list_users(filters=UserValueFilters(), limit=25, offset=0, now=NOW)
 
     assert value_store.page_calls[0][1] == YESTERDAY
-    assert "users_facts_stale" not in capsys.readouterr().out
+    assert "facts_stale" not in capsys.readouterr().out
 
 
 def test_users_list_priority_groups_are_a_pure_function_of_state_and_segment():
@@ -783,6 +818,9 @@ def _groups_service(**overrides):
         _fact(2, YESTERDAY, user_group="organic", runs_requested=2, runs_completed=0, runs_failed=2),
         _fact(3, YESTERDAY, user_group="partner", runs_requested=1, runs_completed=1),
         _fact(4, YESTERDAY - timedelta(days=20), user_group="partner", runs_requested=9, runs_completed=9),
+        # The job writes a row per eligible user per day, active or not, so
+        # every landed day has rows; user 5's idle days stand for that here.
+        *(_fact(5, YESTERDAY - timedelta(days=offset), user_group="unknown") for offset in range(7)),
     ]
     values = dict(
         facts=facts,
@@ -857,8 +895,13 @@ def test_group_summary_is_partial_when_the_fact_read_fails(capsys):
 def test_group_summary_is_partial_when_any_fact_row_in_the_window_is_partial():
     """I2: the PR A history copy wrote zero runs as partial rows; a window
     reaching them must not label those zeros ready."""
-    facts = _groups_service()[1].facts + [
-        _fact(5, YESTERDAY - timedelta(days=2), user_group="unknown",
+    partial_day = YESTERDAY - timedelta(days=2)
+    facts = [
+        row
+        for row in _groups_service()[1].facts
+        if (row.user_id, row.snapshot_date) != (5, partial_day)
+    ] + [
+        _fact(5, partial_day, user_group="unknown",
               runs_requested=0, runs_completed=0, data_quality="partial"),
     ]
     service, _store = _groups_service(facts=facts)
@@ -901,6 +944,29 @@ def test_group_summary_does_not_read_an_unlanded_window_as_zero_runs():
     assert response.availability.status == "partial"
     assert response.availability.coverage_end is None
     assert {row.group: row.users for row in response.groups}["organic"] == 2
+
+
+def test_group_summary_reads_a_past_day_without_facts_as_unknown_not_zero():
+    """Review #4: start < today is not "landed". Before the night's job lands
+    (or when it fails outright) yesterday has no fact rows, and summing it as
+    zero runs under "ready" is the answer the landed check exists to prevent."""
+    facts = [row for row in _groups_service()[1].facts if row.snapshot_date != YESTERDAY]
+    service, _store = _groups_service(facts=facts)
+
+    response = service.get_groups(
+        start=YESTERDAY - timedelta(days=6), end=YESTERDAY + timedelta(days=1), now=NOW
+    )
+
+    assert response.availability.status == "partial"
+    assert response.availability.coverage_start == YESTERDAY - timedelta(days=6)
+    assert response.availability.coverage_end == YESTERDAY - timedelta(days=1)
+
+    only_yesterday = service.get_groups(
+        start=YESTERDAY, end=YESTERDAY + timedelta(days=1), now=NOW
+    )
+    assert only_yesterday.availability.status == "partial"
+    assert only_yesterday.availability.coverage_end is None
+    assert all(row.total_runs == 0 for row in only_yesterday.groups)
 
 
 def test_commercial_response_keeps_revenue_usage_grants_cost_and_balances_separate():
@@ -1096,6 +1162,40 @@ def test_operational_state_counts_are_yesterdays_facts():
     assert response.operational_state_counts == {"blocked": 2, "needs_attention": 1, "healthy": 1}
     assert response.completed_runs == 9  # FakeLegacyService
     assert response.availability.status == "ready"
+
+
+def test_operational_state_counts_fall_back_to_the_latest_landed_day():
+    """Review #10: /users falls back to the latest landed day before the
+    night's job lands; /operational read 0 blocked / 0 needing attention
+    until then. Both now read the same day, and this one says it is stale."""
+    stale_day = YESTERDAY - timedelta(days=1)
+    service = _operational_service(
+        facts=[
+            _fact(1, stale_day, operational_state="blocked", operational_reason_code="billing_lane_unavailable"),
+            _fact(2, stale_day),
+        ]
+    )
+
+    response = service.get_operational(
+        start=YESTERDAY - timedelta(days=6), end=YESTERDAY + timedelta(days=1), now=NOW
+    )
+
+    assert response.operational_state_counts == {"blocked": 1, "needs_attention": 0, "healthy": 1}
+    assert (response.availability.status, response.availability.stale) == ("partial", True)
+    assert (response.availability.coverage_start, response.availability.coverage_end) == (
+        stale_day, stale_day
+    )
+
+
+def test_operational_is_building_when_no_fact_day_has_landed():
+    service = _operational_service(facts=[])
+
+    response = service.get_operational(
+        start=YESTERDAY - timedelta(days=6), end=YESTERDAY + timedelta(days=1), now=NOW
+    )
+
+    assert set(response.operational_state_counts.values()) == {0}
+    assert response.availability.status == "building"
 
 
 def test_operational_is_partial_when_the_overview_growth_panel_is_down():
@@ -1303,10 +1403,24 @@ def test_lifecycle_counts_are_yesterdays_facts_and_headline_reads_activity():
     )
 
 
-def test_lifecycle_current_is_building_before_yesterdays_facts_land():
-    service = _lifecycle_service(
-        facts=[_fact(1, YESTERDAY - timedelta(days=1))]
+def test_lifecycle_current_falls_back_to_the_latest_landed_day_before_yesterdays_facts_land():
+    """Review #10: until the night's job lands, the headline reads the day
+    /users falls back to, labelled stale, instead of 0 core / 0 at risk."""
+    stale_day = YESTERDAY - timedelta(days=1)
+    service = _lifecycle_service(facts=[_fact(1, stale_day, lifecycle_segment="core")])
+
+    response = service.get_lifecycle(
+        start=YESTERDAY - timedelta(days=6), end=YESTERDAY + timedelta(days=1), now=NOW
     )
+
+    assert response.headline.core_users == 1
+    current = response.availability["current"]
+    assert (current.status, current.stale) == ("partial", True)
+    assert (current.coverage_start, current.coverage_end) == (stale_day, stale_day)
+
+
+def test_lifecycle_current_is_building_when_no_fact_day_has_landed():
+    service = _lifecycle_service(facts=[])
 
     response = service.get_lifecycle(
         start=YESTERDAY - timedelta(days=6), end=YESTERDAY + timedelta(days=1), now=NOW
@@ -1314,6 +1428,7 @@ def test_lifecycle_current_is_building_before_yesterdays_facts_land():
 
     assert set(response.segment_counts.values()) == {0}
     assert response.availability["current"].status == "building"
+    assert response.availability["current"].stale is False
 
 
 def test_lifecycle_include_internal_counts_internal_activations():

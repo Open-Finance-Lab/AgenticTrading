@@ -474,7 +474,7 @@ Pinned by a test that wraps **every store the job touches** — analytics, credi
 | daily job, per UTC day | a constant number of queries, independent of user count, none parameterised by a single user id |
 | daily job, per UTC day (**Amended**, new) | wall-clock under a fixed bound at 200 users, and the 400-user run no more than 2.5× the 200-user run, so a constant-count step that scans an unindexed table or hides a quadratic fold is caught |
 | admin overview page load | at most 1 raw-event query, windowed to the current UTC day |
-| admin user profile load | at most 1 raw-event query (timeline page) |
+| admin user profile load | at most 1 raw-event query (timeline page), plus (**Amended 2026-10-16**) one grouped `MIN(occurred_at)` returning at most 2 rows for the `credential_verified` / `agent_created` milestones — first occurrences the newest-100 page cannot answer (PR B review #8). Moving them onto `user_activity` would drop it; not done in PR B because it touches the ingestion hot path |
 
 The PR A plan fixes the daily-job constant from the final step list and the test pins that exact number. The test fails on the first user-id-parameterised query inside the daily job regardless of count, and it fails if doubling the synthetic user count changes the query count at all.
 
