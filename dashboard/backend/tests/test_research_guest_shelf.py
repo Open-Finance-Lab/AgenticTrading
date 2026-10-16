@@ -10,7 +10,7 @@ APP = (Path(__file__).parents[2] / 'frontend' / 'app.js').read_text()
 RENDER = APP[APP.index('let researchShelfRenderVersion = 0;'):APP.index('/** The Community research card', APP.index('async function renderResearchShelf()'))]
 
 
-@pytest.mark.parametrize('mode', ['guest', 'owner', 'failure'])
+@pytest.mark.parametrize('mode', ['guest', 'empty_owner', 'owner', 'failure'])
 def test_research_shelf_access_states(mode):
     if not shutil.which('node'):
         pytest.skip('Node required')
@@ -23,7 +23,7 @@ const grid = {innerHTML:'',closest:()=>section,querySelectorAll:()=>[card]};
 const empty = {}, count = {};
 const document = {getElementById:id=>({agentsGridResearch:grid,agentsEmptyResearch:empty,agentsCountResearch:count}[id])};
 const agent = {template_id:'research',name:'Research demo',research:{},added:true};
-const fetchResearchAgents = async()=> {if(mode==='owner') return [agent,{...agent,name:'Unadded',added:false}]; throw {status:mode==='guest'?401:503};};
+const fetchResearchAgents = async()=> {if(mode==='empty_owner')return []; if(mode==='owner') return [agent,{...agent,name:'Unadded',added:false}]; throw {status:mode==='guest'?401:503};};
 let catalogCalls=0;
 const API = {get:async()=>{catalogCalls++;return {templates:[agent,{name:'Trading',template_id:'trading'}]};}};
 const API_BASE='';
@@ -31,19 +31,19 @@ const templateMarketplaceShelf = a=>a.research?'research':'open';
 const escapeHtml=s=>String(s??'');
 const openAuthModal=()=>login=true;
 const openResearchWorkbench=()=>workbench=true;
-const communityShelfButtonHtml=()=>'';
+const communityShelfButtonHtml=()=>'<button>Community</button>';
 RENDER
-(async()=>{await renderResearchShelf();if(handler)handler();console.log(JSON.stringify({html:grid.innerHTML,display:section.style.display,login,workbench,catalogCalls,error:empty.textContent}));})().catch(e=>{console.error(e);process.exit(1)});
+(async()=>{await renderResearchShelf();if(handler)handler();console.log(JSON.stringify({html:grid.innerHTML,display:section.style.display,login,workbench,catalogCalls,error:empty.textContent,emptyHtml:empty.innerHTML,countHidden:count.hidden}));})().catch(e=>{console.error(e);process.exit(1)});
 '''.replace('MODE', json.dumps(mode)).replace('RENDER', RENDER)
     result = json.loads(subprocess.check_output(['node', '-e', script], text=True))
     assert result['display'] == ''
-    if mode == 'guest':
-        assert 'Research demo' in result['html']
-        assert 'Sign in to use' in result['html']
-        assert 'research-remove-btn' not in result['html']
-        assert 'Trading' not in result['html']
-        assert result['login'] and not result['workbench']
-        assert result['catalogCalls'] == 1
+    if mode in ('guest', 'empty_owner'):
+        assert result['html'] == ''
+        assert 'No research agents yet.' in result['emptyHtml']
+        assert '<button>Community</button>' in result['emptyHtml']
+        assert result['countHidden']
+        assert not result['login'] and not result['workbench']
+        assert result['catalogCalls'] == 0
     elif mode == 'owner':
         assert 'Open workbench' in result['html']
         assert 'Unadded' not in result['html']
@@ -67,7 +67,7 @@ let signedIn = false, resolveCatalog, rejectCatalog, started;
 const catalogStarted = new Promise(resolve=>started=resolve);
 const catalog = new Promise((resolve,reject)=>{resolveCatalog=resolve;rejectCatalog=reject;});
 const agent = {template_id:'research',name:'Owned research',research:{},added:true};
-const fetchResearchAgents = async()=>{if(signedIn)return [agent];throw {status:401};};
+const fetchResearchAgents = async()=>{if(signedIn)return [agent];started();return catalog;};
 const API = {get:()=>{started();return catalog;}};
 const API_BASE='';
 const templateMarketplaceShelf=()=> 'research';
@@ -80,8 +80,8 @@ RENDER
   signedIn=true;
   await renderResearchShelf();
   const expected=grid.innerHTML;
-  if(REJECT)rejectCatalog(new Error('Late failure'));
-  else resolveCatalog({templates:[{...agent,name:'Guest research'}]});
+  if(REJECT)rejectCatalog({status:401});
+  else resolveCatalog([]);
   await oldRender;
   console.log(JSON.stringify({unchanged:expected===grid.innerHTML,html:grid.innerHTML,error:empty.textContent}));
 })().catch(e=>{console.error(e);process.exit(1)});
