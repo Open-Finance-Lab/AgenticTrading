@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 APP = (Path(__file__).parents[2] / 'frontend' / 'app.js').read_text()
-RENDER = APP[APP.index('async function renderResearchShelf()'):APP.index('/** The Community research card', APP.index('async function renderResearchShelf()'))]
+RENDER = APP[APP.index('let researchShelfRenderVersion = 0;'):APP.index('/** The Community research card', APP.index('async function renderResearchShelf()'))]
 
 
 @pytest.mark.parametrize('mode', ['guest', 'owner', 'failure'])
@@ -52,3 +52,44 @@ RENDER
     else:
         assert 'temporarily unavailable' in result['error']
         assert result['catalogCalls'] == 0
+
+
+@pytest.mark.parametrize('reject_old', [False, True])
+def test_pending_guest_response_cannot_overwrite_signed_in_shelf(reject_old):
+    if not shutil.which('node'):
+        pytest.skip('Node required')
+    script = r"""
+const section = {style:{}};
+const grid = {innerHTML:'',closest:()=>section,querySelectorAll:()=>[]};
+const empty = {}, count = {};
+const document = {getElementById:id=>({agentsGridResearch:grid,agentsEmptyResearch:empty,agentsCountResearch:count}[id])};
+let signedIn = false, resolveCatalog, rejectCatalog, started;
+const catalogStarted = new Promise(resolve=>started=resolve);
+const catalog = new Promise((resolve,reject)=>{resolveCatalog=resolve;rejectCatalog=reject;});
+const agent = {template_id:'research',name:'Owned research',research:{},added:true};
+const fetchResearchAgents = async()=>{if(signedIn)return [agent];throw {status:401};};
+const API = {get:()=>{started();return catalog;}};
+const API_BASE='';
+const templateMarketplaceShelf=()=> 'research';
+const escapeHtml=s=>String(s??'');
+const communityShelfButtonHtml=()=>'';
+RENDER
+(async()=>{
+  const oldRender=renderResearchShelf();
+  await catalogStarted;
+  signedIn=true;
+  await renderResearchShelf();
+  const expected=grid.innerHTML;
+  if(REJECT)rejectCatalog(new Error('Late failure'));
+  else resolveCatalog({templates:[{...agent,name:'Guest research'}]});
+  await oldRender;
+  console.log(JSON.stringify({unchanged:expected===grid.innerHTML,html:grid.innerHTML,error:empty.textContent}));
+})().catch(e=>{console.error(e);process.exit(1)});
+""".replace('RENDER', RENDER).replace('REJECT', json.dumps(reject_old))
+    result = json.loads(subprocess.check_output(['node', '-e', script], text=True))
+    assert result['unchanged']
+    assert 'Owned research' in result['html']
+    assert 'Open workbench' in result['html']
+    assert 'research-remove-btn' in result['html']
+    assert 'Guest research' not in result['html']
+    assert not result.get('error')

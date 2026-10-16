@@ -13370,7 +13370,10 @@ function researchStatusLabel(status) {
 }
 
 /** The My Agents "Research Agents" shelf: cards for cloned research agents. */
+let researchShelfRenderVersion = 0;
+
 async function renderResearchShelf() {
+  const renderVersion = ++researchShelfRenderVersion;
   const grid = document.getElementById('agentsGridResearch');
   const emptyEl = document.getElementById('agentsEmptyResearch');
   const countEl = document.getElementById('agentsCountResearch');
@@ -13383,12 +13386,14 @@ async function renderResearchShelf() {
     try {
       agents = await fetchResearchAgents();
     } catch (error) {
+      if (renderVersion !== researchShelfRenderVersion) return;
       if (error?.status !== 401) throw error;
       guest = true;
       const catalog = await API.get(`${API_BASE}/api/v1/agents/marketplace`);
       agents = (catalog.templates || []).filter(agent => templateMarketplaceShelf(agent) === 'research');
     }
   } catch (error) {
+    if (renderVersion !== researchShelfRenderVersion) return;
     grid.innerHTML = '';
     if (countEl) countEl.hidden = true;
     if (emptyEl) {
@@ -13397,6 +13402,7 @@ async function renderResearchShelf() {
     }
     return;
   }
+  if (renderVersion !== researchShelfRenderVersion) return;
   const added = guest ? agents : agents.filter((agent) => agent.added);
   if (countEl) {
     countEl.textContent = String(added.length);
