@@ -13375,19 +13375,29 @@ async function renderResearchShelf() {
   const emptyEl = document.getElementById('agentsEmptyResearch');
   const countEl = document.getElementById('agentsCountResearch');
   if (!grid) return;
+  const section = grid.closest('.agents-category');
+  if (section) section.style.display = '';
   let agents = [];
+  let guest = false;
   try {
-    agents = await fetchResearchAgents();
+    try {
+      agents = await fetchResearchAgents();
+    } catch (error) {
+      if (error?.status !== 401) throw error;
+      guest = true;
+      const catalog = await API.get(`${API_BASE}/api/v1/agents/marketplace`);
+      agents = (catalog.templates || []).filter(agent => templateMarketplaceShelf(agent) === 'research');
+    }
   } catch (error) {
-    // A 401 here just means the visitor is not signed in — the shelf hides
-    // rather than advertising an error for a surface guests cannot use.
     grid.innerHTML = '';
-    if (emptyEl) emptyEl.hidden = true;
-    const section = grid.closest('.agents-category');
-    if (section) section.style.display = error?.status === 401 ? 'none' : '';
+    if (countEl) countEl.hidden = true;
+    if (emptyEl) {
+      emptyEl.hidden = false;
+      emptyEl.textContent = 'Research agents are temporarily unavailable. Reopen this page to retry.';
+    }
     return;
   }
-  const added = agents.filter((agent) => agent.added);
+  const added = guest ? agents : agents.filter((agent) => agent.added);
   if (countEl) {
     countEl.textContent = String(added.length);
     countEl.hidden = added.length === 0;
@@ -13416,13 +13426,14 @@ async function renderResearchShelf() {
           <svg class="ui-icon research-fact-icon" aria-hidden="true"><use href="#icon-file-text"></use></svg> ${escapeHtml(((agent.research || {}).output_formats || []).join(' / '))}
         </p>
         <div class="research-agent-card-actions">
-          <button type="button" class="auth-btn auth-btn-primary research-open-btn">Open workbench</button>
-          <button type="button" class="research-remove-btn" data-remove-template-id="${escapeHtml(agent.template_id)}" data-agent-name="${escapeHtml(agent.name)}">Remove</button>
+          <button type="button" class="auth-btn auth-btn-primary research-open-btn">${guest ? 'Sign in to use' : 'Open workbench'}</button>
+          ${guest ? '' : `<button type="button" class="research-remove-btn" data-remove-template-id="${escapeHtml(agent.template_id)}" data-agent-name="${escapeHtml(agent.name)}">Remove</button>`}
         </div>
       </article>`;
   }).join('');
   grid.querySelectorAll('.research-agent-card').forEach((card) => {
     card.querySelector('.research-open-btn')?.addEventListener('click', () => {
+      if (guest) { openAuthModal('login'); return; }
       openResearchWorkbench(card.dataset.templateId);
     });
     card.querySelector('.research-remove-btn')?.addEventListener('click', async (event) => {
