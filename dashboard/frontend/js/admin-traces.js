@@ -630,11 +630,14 @@
         loadAllEvents(traceId, state.nextSequence),
         loadPerformance(traceId, state.performance),
       ]);
-      if (envelope.status !== state.chartStatus) {
-        state.chartData = await loadChartData(traceId);
+      // Held locally until the current-request check: a poll for a trace the
+      // admin has since left must not write its chart into the new trace.
+      const chartData = envelope.status !== state.chartStatus ? await loadChartData(traceId) : undefined;
+      if (!shell().isCurrent(SURFACE, seq) || state.traceId !== traceId) return;
+      if (chartData !== undefined) {
+        state.chartData = chartData;
         state.chartStatus = envelope.status;
       }
-      if (!shell().isCurrent(SURFACE, seq) || state.traceId !== traceId) return;
       const added = fresh.filter((event) => event.sequence_no > state.nextSequence);
       const changed = added.length > 0
         || state.stale
@@ -688,5 +691,7 @@
   window.AdminTraces = {
     renderTraceRows, renderEventTimeline, renderTraceList, renderTraceDetail,
     renderTradingLog, loadAllEvents, pollEvents, stopPolling, onKeydown,
+    // Read-only, for the poll-race test: which run's chart this page holds.
+    currentChart: () => state.chartData,
   };
 })();

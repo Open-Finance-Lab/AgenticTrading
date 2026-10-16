@@ -30,8 +30,8 @@ EXPECTED_SCRIPTS = [
     # The trace chart reuses the Backtest panel's comparison model.
     "js/backtest-comparison.js?v=1",
     "js/admin-trace-timeline.js?v=2",
-    "js/admin-trace-performance.js?v=3",
-    "js/admin-traces.js?v=4",
+    "js/admin-trace-performance.js?v=4",
+    "js/admin-traces.js?v=5",
 ]
 
 # This guard's whole job is "no inline script anywhere in this page", so a

@@ -2,9 +2,29 @@
 (function () {
   'use strict';
   const svgNS = 'http://www.w3.org/2000/svg';
-  // Bars per US session at hourly cadence; the range buttons count bars, not
-  // calendar time, because the x axis skips closed hours like Backtest's.
-  const RANGE_BARS = { '1D': 7, '1W': 35, ALL: Infinity };
+  // Ranges count trading days present in the series, not bars or calendar
+  // time: a 5-minute run and an hourly one both show one session for 1D, and
+  // a market with a different session length needs no constant of its own.
+  const RANGE_DAYS = { '1D': 1, '1W': 5, ALL: Infinity };
+  function tradingDay(ts) {
+    return String(ts).slice(0, 10);
+  }
+  // Index of the first bar inside the last `days` trading days.
+  function rangeStart(timestamps, range) {
+    const days = RANGE_DAYS[range] ?? Infinity;
+    if (!Number.isFinite(days)) return 0;
+    let seen = 0;
+    let current = null;
+    for (let i = timestamps.length - 1; i >= 0; i -= 1) {
+      const day = tradingDay(timestamps[i]);
+      if (day !== current) {
+        seen += 1;
+        if (seen > days) return i + 1;
+        current = day;
+      }
+    }
+    return 0;
+  }
   // Decision snapshots are the fallback curve when a run stored no equity, so
   // a failed or still-running trace keeps a chart.
   function series(events, performance) {
@@ -37,7 +57,7 @@
     while (chart.firstChild) chart.removeChild(chart.firstChild);
     const visible = data.cols.filter(c => !view.hidden.has(c.key));
     const total = data.timestamps.length;
-    const from = Math.max(0, total - (RANGE_BARS[view.range] || Infinity));
+    const from = rangeStart(data.timestamps, view.range);
     const values = visible.flatMap(c => c.values.slice(from).filter(Number.isFinite));
     if (!values.length || total - from < 2) return;
     const min = values.reduce((v, x) => Math.min(v, x), Infinity), max = values.reduce((v, x) => Math.max(v, x), -Infinity);
@@ -60,7 +80,7 @@
     // One label per trading day, at its first bar.
     let lastDay = '';
     data.timestamps.slice(from).forEach((ts, i) => {
-      const day = String(ts).slice(0, 10);
+      const day = tradingDay(ts);
       if (day !== lastDay) { lastDay = day; shape('text', { x: x(i), y: 285, 'text-anchor': i ? 'middle' : 'start', fill: 'currentColor', 'font-size': 11 }, day); }
     });
     // Benchmarks first, so the agent line draws on top of them.
@@ -189,7 +209,7 @@
     chart.setAttribute('aria-label', 'Portfolio value over historical market time, agent and benchmarks');
     panel.appendChild(chart);
     const paint = () => renderChart(chart, data, view, items, onDecision);
-    Object.keys(RANGE_BARS).forEach(key => {
+    Object.keys(RANGE_DAYS).forEach(key => {
       const button = el('button', `time-btn${view.range === key ? ' active' : ''}`, key);
       button.setAttribute('type', 'button');
       button.setAttribute('aria-pressed', String(view.range === key));
@@ -220,5 +240,5 @@
     panel.appendChild(renderComparison(data));
     return panel;
   }
-  window.AdminTracePerformance = { series, columns, render };
+  window.AdminTracePerformance = { series, columns, render, rangeStart };
 })();

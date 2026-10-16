@@ -278,3 +278,61 @@ def test_trace_detail_tolerates_missing_trace_or_events():
     )
     for texts in result:
         assert "No events recorded yet." in texts
+
+
+def test_chart_ranges_count_trading_days_not_bars():
+    """A 5-minute run has 78 bars a session: 1D must still be one session and
+    1W five, rather than the last 7 or 35 bars of an hourly assumption."""
+    result = _eval(
+        "(() => {"
+        "  const days = ['2026-05-04', '2026-05-05', '2026-05-06', '2026-05-07', '2026-05-08', '2026-05-11'];"
+        "  const ts = days.flatMap((d) => Array.from({length: 78}, (_, i) => `${d}T${String(13 + Math.floor((30 + i * 5) / 60)).padStart(2, '0')}:${String((30 + i * 5) % 60).padStart(2, '0')}:00+00:00`));"
+        "  const start = (range) => window.AdminTracePerformance.rangeStart(ts, range);"
+        "  const day = (i) => ts[i].slice(0, 10);"
+        "  return {total: ts.length, d1: [start('1D'), day(start('1D'))], w1: [start('1W'), day(start('1W'))], all: start('ALL')};"
+        "})()"
+    )
+    assert result["total"] == 468
+    assert result["d1"] == [390, "2026-05-11"]
+    assert result["w1"] == [78, "2026-05-05"]
+    assert result["all"] == 0
+
+
+def test_a_stale_poll_does_not_write_its_chart_into_the_next_trace():
+    """Trace t finishes while the admin opens trace u. t's poll awaits its own
+    chart read; when that resolves after u loaded, u must keep its chart."""
+    result = _eval(
+        "(async () => {"
+        "  const settle = () => new Promise((resolve) => setTimeout(resolve, 0));"
+        "  const host = register('tracesView', document.createElement('div'));"
+        "  let release; const gate = new Promise((resolve) => { release = resolve; });"
+        "  let tStatus = 'running';"
+        "  const ok = (body) => ({ok: true, status: 200, json: async () => body});"
+        "  globalThis.fetch = async (url) => {"
+        "    fetchCalls.push([url]);"
+        "    if (url === '/api/admin/traces/t') return ok({trace_id: 't', run_id: 'r-t', status: tStatus});"
+        "    if (url === '/api/admin/traces/u') return ok({trace_id: 'u', run_id: 'r-u', status: 'completed'});"
+        "    if (url.includes('/events?')) return ok({items: [], has_more: false});"
+        "    if (url.endsWith('/performance')) return ok({points: [], point_count: 0, metrics: {}});"
+        "    if (url === '/api/admin/traces/u/chart-data') return ok({available: true, agent_run_id: 'r-u', timestamps: [], series: []});"
+        "    if (url === '/api/admin/traces/t/chart-data') {"
+        "      if (tStatus === 'running') return ok({available: false, run_id: 'r-t'});"
+        "      await gate; return ok({available: true, agent_run_id: 'r-t', timestamps: [], series: []});"
+        "    }"
+        "    return ok({});"
+        "  };"
+        "  document.dispatchEvent(new CustomEvent('admin:route', {detail: {route: 'traces', id: 't'}}));"
+        "  for (let i = 0; i < 10; i += 1) await settle();"
+        "  window.AdminTraces.stopPolling();"
+        "  tStatus = 'completed';"
+        "  const polling = window.AdminTraces.pollEvents();"
+        "  for (let i = 0; i < 10; i += 1) await settle();"
+        "  document.dispatchEvent(new CustomEvent('admin:route', {detail: {route: 'traces', id: 'u'}}));"
+        "  for (let i = 0; i < 10; i += 1) await settle();"
+        "  release();"
+        "  await polling;"
+        "  window.AdminTraces.stopPolling();"
+        "  return {chart: window.AdminTraces.currentChart()?.agent_run_id, askedT: fetchCalls.some(([u]) => u === '/api/admin/traces/t/chart-data')};"
+        "})()"
+    )
+    assert result == {"chart": "r-u", "askedT": True}
