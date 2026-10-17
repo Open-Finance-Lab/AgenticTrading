@@ -1931,6 +1931,23 @@ class CreditsStore:
         with self._get_connection() as conn:
             self._begin(conn)
             now = _utcnow_iso()
+            # Return only the rows this call releases. The service emits a
+            # ``credits_refunded`` event per returned row, and a hold that was
+            # already settled or released emitted its own at call time (#525).
+            # BEGIN IMMEDIATE holds the write lock, so no row can leave 'open'
+            # between this read and the UPDATE below.
+            released_ids = [
+                row["reservation_id"]
+                for row in conn.execute(
+                    """
+                    SELECT reservation_id FROM credit_llm_reservations
+                    WHERE run_id = ? AND status = 'open'
+                    """,
+                    (run_id,),
+                ).fetchall()
+            ]
+            if not released_ids:
+                return []
             conn.execute(
                 """
                 UPDATE credit_llm_reservations
@@ -1939,12 +1956,14 @@ class CreditsStore:
                 """,
                 (reason, now, run_id),
             )
+            placeholders = ", ".join("?" for _ in released_ids)
             rows = conn.execute(
-                """
+                f"""
                 SELECT * FROM credit_llm_reservations
-                WHERE run_id = ? ORDER BY call_index, attempt_index, reservation_id
+                WHERE reservation_id IN ({placeholders})
+                ORDER BY call_index, attempt_index, reservation_id
                 """,
-                (run_id,),
+                released_ids,
             ).fetchall()
             return [
                 self._llm_reservation_result_in_transaction(conn, row)
