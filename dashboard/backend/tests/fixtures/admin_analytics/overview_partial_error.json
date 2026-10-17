@@ -19,7 +19,7 @@
   "top_failure_categories": [
     {
       "error_category": "credential_invalid",
-      "affected_users": 4
+      "event_count": 4
     }
   ],
   "users_needing_attention": [],

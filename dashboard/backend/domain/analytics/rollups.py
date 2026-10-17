@@ -411,7 +411,6 @@ def rollup_day(
         ),
         _row(day, "input_tokens", count=overview.input_tokens, updated_at=current),
         _row(day, "output_tokens", count=overview.output_tokens, updated_at=current),
-        _row(day, "affected_users", count=overview.affected_users, updated_at=current),
     ]
 
     event_dimensions = Counter(
@@ -543,20 +542,6 @@ def rollup_day(
                     ),
                 ]
             )
-    failure_users: dict[str, set[int]] = defaultdict(set)
-    for event in day_events:
-        if event.error_category:
-            failure_users[event.error_category].add(event.user_id)
-    for category, users in sorted(failure_users.items()):
-        rows.append(
-            _row(
-                day,
-                "affected_users",
-                count=len(users),
-                error_category=category,
-                updated_at=current,
-            )
-        )
     # Distinct users per activation step per day: the overview's funnel sums
     # these across completed days instead of rescanning the window. Written
     # zero or not, like byok_unpriced_calls: presence is how the funnel tells

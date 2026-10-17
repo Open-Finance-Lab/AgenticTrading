@@ -372,6 +372,36 @@ def test_rollup_day_writes_distinct_activation_users_per_event(tmp_path):
     }
 
 
+def test_rollup_day_counts_failure_categories_as_events_only(tmp_path):
+    """The overview sums ``event_count`` per category (#647); the per-user
+    ``affected_users`` family it replaced is no longer written."""
+
+    analytics, rollups = _store(tmp_path)
+    service = AnalyticsService(analytics)
+    day = date(2026, 8, 25)
+    for index, user_id in enumerate((1, 1, 2)):
+        service.record_server_event(
+            event_name="backtest_failed",
+            user_id=user_id,
+            source_event_id=f"run:backtest_failed:{index}",
+            source_record_type="run",
+            source_record_id=str(index),
+            outcome="failed",
+            error_category="provider_timeout",
+            occurred_at=datetime(2026, 8, 25, 10 + index, 0, tzinfo=timezone.utc),
+        )
+
+    rollup_day(day, store=rollups)
+    stored = rollups.list_rollups(start=day, end=day + timedelta(days=1))
+
+    assert sum(
+        row.value_count
+        for row in stored
+        if row.metric_name == "event_count" and row.error_category == "provider_timeout"
+    ) == 3
+    assert not any(row.metric_name == "affected_users" for row in stored)
+
+
 def _record(service, user_id, name, record_type, occurred_at, index):
     service.record_server_event(
         event_name=name,

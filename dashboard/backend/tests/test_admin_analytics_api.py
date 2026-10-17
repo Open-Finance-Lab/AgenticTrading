@@ -943,7 +943,13 @@ def test_overview_trailing_metrics_and_funnel_come_from_rollups(tmp_path):
             rollup("users_with_repeat_success_24h_30d", 2),
             rollup("activation_users", 5, event_name="account_signed_up"),
             rollup("activation_users", 2, event_name="backtest_completed"),
-            rollup("affected_users", 3, error_category="provider_timeout"),
+            rollup(
+                "event_count",
+                3,
+                event_name="backtest_failed",
+                outcome="failed",
+                error_category="provider_timeout",
+            ),
             rollup("input_tokens", 1000),
             rollup("output_tokens", 250),
         ],
@@ -984,7 +990,7 @@ def test_overview_trailing_metrics_and_funnel_come_from_rollups(tmp_path):
         "backtest_completed": 3,
     }
     assert [
-        (c.error_category, c.affected_users) for c in overview.top_failure_categories
+        (c.error_category, c.event_count) for c in overview.top_failure_categories
     ] == [("provider_timeout", 4)]
     assert overview.input_tokens == 1000
     assert overview.output_tokens == 250
@@ -992,9 +998,10 @@ def test_overview_trailing_metrics_and_funnel_come_from_rollups(tmp_path):
     assert overview.availability["funnel"].available is True
 
 
-def test_overview_failure_categories_count_events_under_a_dimension_filter(tmp_path):
-    """``affected_users`` rows carry no provider/model, so a filtered view
-    counts the matching ``event_count`` rows instead -- events, today too."""
+def test_overview_failure_categories_count_events_filtered_or_not(tmp_path):
+    """Failure categories sum ``event_count`` rows plus today's events, with
+    or without a dimension filter (#647). The per-category ``affected_users``
+    rows older rollups still hold are not read."""
 
     analytics, events, rollups, users = _fixture(tmp_path)
     yesterday = NOW.date() - timedelta(days=1)
@@ -1048,13 +1055,13 @@ def test_overview_failure_categories_count_events_under_a_dimension_filter(tmp_p
             filters=AnalyticsMetricFilters(start=start, end=NOW, **filters),
         )
         return [
-            (c.error_category, c.affected_users)
+            (c.error_category, c.event_count)
             for c in overview.top_failure_categories
         ]
 
-    # Unfiltered: distinct users -- 2 yesterday, user 1 today.
-    assert categories() == [("provider_timeout", 3)]
-    # Filtered: events -- 3 yesterday on model a, 2 today.
+    # Unfiltered: 3 + 7 yesterday, 2 today; the legacy row adds nothing.
+    assert categories() == [("provider_timeout", 12)]
+    # Filtered: 3 yesterday on model a, 2 today.
     assert categories(model_id="a") == [("provider_timeout", 5)]
 
 

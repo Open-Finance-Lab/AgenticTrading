@@ -224,7 +224,7 @@ The 09-12 document ranked cost control **first**. *Why it moved:* that ranking w
 
 ### Metrics
 
-**D13 — `top_failure_categories` is kept and served from `analytics_daily_rollups` on the `error_category` dimension.** *Why:* the 09-12 rewrite silently deleted it (zero mentions across its 4,930 lines of spec and plan), while both frontends render it. The rollups already key on `error_category`, so keeping it costs no schema change and no raw-event read.
+**D13 — `top_failure_categories` is kept and served from `analytics_daily_rollups` on the `error_category` dimension.** *Why:* the 09-12 rewrite silently deleted it (zero mentions across its 4,930 lines of spec and plan), while both frontends render it. The rollups already key on `error_category`, so keeping it costs no schema change and no raw-event read. (**Amended 2026-10-16**, #647.) Each category counts **events**, from `event_count` rows plus today's raw slice, with or without a billing/provider/model filter. The rollups are anonymous, so a distinct-user count over a range would need a raw read or a rollup keyed by user. Summing the per-day distinct-user rows counts user-days, and those rows had no dimensions, so a filtered view counted events anyway. The field is `event_count`, renamed from `affected_users`, and `rollup_day` no longer writes the `affected_users` family. PR B makes this one contract and frontend change, to `admin-overview.js` (one field and the column header), in the same commit as its only reader.
 
 **D14 — Billing-lane mix (BYOK vs platform credits) is kept, from the rollups' `billing_mode` dimension.** Same reasoning as D13.
 

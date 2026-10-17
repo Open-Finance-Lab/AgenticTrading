@@ -104,7 +104,7 @@ class FailureCategoryCount(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     error_category: str
-    affected_users: int = Field(ge=0)
+    event_count: int = Field(ge=0)
 
 
 class AnalyticsStateSummary(BaseModel):
@@ -945,32 +945,24 @@ class AnalyticsQueryService:
                 )
                 for event_name in _ACTIVATION_EVENTS
             }
-            # Design D13. affected_users rows are keyed by error_category
-            # alone; with a dimension filter the matching event_count rows
-            # stand in, which count events, so today counts events as well.
+            # Design D13: events per category, filtered or not. A distinct-user
+            # count over the range would need a raw read or a rollup keyed by
+            # user, and summing per-day distinct users counts user-days, so
+            # the one figure the rollups give exactly is the event count
+            # (#647).
             failure_counts: dict[str, int] = defaultdict(int)
             for row in rollups:
-                if not row.error_category:
-                    continue
-                if dimensional:
-                    if row.metric_name == "event_count" and _matches_rollup_dimensions(
-                        row, filters
-                    ):
-                        failure_counts[row.error_category] += row.value_count
-                elif row.metric_name == "affected_users":
+                if (
+                    row.error_category
+                    and row.metric_name == "event_count"
+                    and _matches_rollup_dimensions(row, filters)
+                ):
                     failure_counts[row.error_category] += row.value_count
-            today_failure_users: dict[str, set[int]] = defaultdict(set)
             for event in current_events:
-                if not event.error_category:
-                    continue
-                if dimensional:
+                if event.error_category:
                     failure_counts[event.error_category] += 1
-                else:
-                    today_failure_users[event.error_category].add(event.user_id)
-            for category, users in today_failure_users.items():
-                failure_counts[category] += len(users)
             failures = [
-                FailureCategoryCount(error_category=category, affected_users=count)
+                FailureCategoryCount(error_category=category, event_count=count)
                 for category, count in sorted(
                     failure_counts.items(),
                     key=lambda item: (-item[1], item[0]),
