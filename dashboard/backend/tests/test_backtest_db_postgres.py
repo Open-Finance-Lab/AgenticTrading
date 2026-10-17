@@ -882,3 +882,33 @@ def test_update_run_baselines_coalesce_preserves_unset_field_postgres(pg_backtes
     run = pg_backtest_db.get_run("run-base")
     assert run["baseline_djia_run_id"] == "djia-1"  # untouched by the second call
     assert run["baseline_buyhold_run_id"] == "bh-1"
+
+
+@pg_only
+def test_operator_cost_excludes_byok_runs_postgres(pg_backtest_db):
+    """I3 on the prod dialect: the twin of test_run_history_aggregates."""
+    from datetime import date
+
+    from dashboard.backend.tests.test_run_history_aggregates import BILLING_CASES
+
+    for run_id, owner, cost, metadata in BILLING_CASES:
+        pg_backtest_db.insert_run(
+            run_id=run_id, session_id="s1", agent_name="Agent", mode="backtest",
+            start_date="2026-09-01", end_date="2026-09-02", initial_equity=1000.0,
+            est_cost_usd=cost, owner_user_id=owner, metadata=metadata,
+        )
+    pg_backtest_db.insert_run(
+        run_id="bad", session_id="s1", agent_name="Agent", mode="backtest",
+        start_date="2026-09-01", end_date="2026-09-02", initial_equity=1000.0,
+        est_cost_usd=0.5, owner_user_id=8,
+    )
+    with pg_backtest_db._get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("UPDATE agent_runs SET metadata = '{not json' WHERE run_id = 'bad'")
+            cur.execute("UPDATE agent_runs SET updated_at = '2026-09-11 15:30:00'")
+
+    assert pg_backtest_db.aggregate_operator_cost_for_day(date(2026, 9, 11)) == {
+        4: 1_000_000,
+        5: 500_000,
+        8: 500_000,
+    }

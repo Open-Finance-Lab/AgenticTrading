@@ -15,6 +15,15 @@ from .usage_cost import atl_cost_micro
 _MEANINGFUL_EXPERIENCE_EVENTS = {"page_viewed"}
 _TERMINAL_SUCCESS = "backtest_completed"
 _TERMINAL_FAILURE = "backtest_failed"
+# The overview's activation funnel, in funnel order. Shared by the rollup that
+# writes one ``activation_users`` row per name per day and the query service
+# that reads them back.
+ACTIVATION_EVENTS: tuple[str, ...] = (
+    "account_signed_up",
+    "credential_verified",
+    "agent_created",
+    "backtest_completed",
+)
 
 
 def _utc(value: datetime, field_name: str) -> datetime:
@@ -255,6 +264,7 @@ def calculate_overview_metrics(
 
 
 __all__ = [
+    "ACTIVATION_EVENTS",
     "AnalyticsMetricFilters",
     "AnalyticsOverviewMetrics",
     "backtest_success_rate",
