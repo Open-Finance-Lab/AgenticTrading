@@ -101,6 +101,35 @@ def test_listed_price_does_not_borrow_a_sibling_needles_rate():
 
 
 @pytest.mark.parametrize(
+    "model",
+    ["acme/nonexistent", "vendor/model-localized-v1", "acme/demo-7b", "acme/baseline-xl"],
+)
+def test_a_real_id_containing_a_free_marker_is_not_free(model):
+    """#590: ``none``/``local``/``demo``/``baseline`` inside a real id used to
+    price it at $0/$0, so a platform call reserved nothing and settled at 0."""
+    assert pricing.price_for_model(model) != (0.0, 0.0)
+    assert pricing.is_free_model(model) is False
+
+
+def test_an_unlisted_id_containing_a_free_marker_gets_the_default_price():
+    assert pricing.price_for_model("acme/nonexistent") == (1.0, 5.0)
+
+
+def test_a_free_variant_is_still_a_real_model_to_is_free_model():
+    # The Discord bot forwards whatever is_free_model rejects; an OpenRouter
+    # ``:free`` id is a real model it must keep forwarding.
+    assert pricing.is_free_model("openrouter/some-model:free") is False
+
+
+@pytest.mark.parametrize(
+    "model", [*pricing._FREE_MODEL_MARKERS, "LOCAL-MODEL", " Local-Model "]
+)
+def test_the_exact_sentinels_are_still_free(model):
+    assert pricing.price_for_model(model) == (0.0, 0.0)
+    assert pricing.is_free_model(model) is True
+
+
+@pytest.mark.parametrize(
     ("model", "price"),
     [
         # The ATL catalog, by catalog id and by the native providers' own id.

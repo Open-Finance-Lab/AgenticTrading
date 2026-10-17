@@ -50,7 +50,9 @@ _PRICING_TABLE: list[Tuple[str, float, float]] = [
     ("gpt-3.5", 0.50, 1.50),
 ]
 
-# Model names that represent no paid LLM call (cost = 0).
+# Model names that represent no paid LLM call (cost = 0). Matched as whole
+# names, never as substrings: a real id that merely contains one of these words
+# (``acme/nonexistent``, ``*-localized-*``, ``*-demo-*``) is a paid model.
 _FREE_MODEL_MARKERS = ("rule-based", "local-model", "local", "demo", "baseline", "none")
 
 # Fallback pricing when a real-looking model name is not in the table.
@@ -71,11 +73,11 @@ def is_free_model(model: str | None) -> bool:
     name = (model or "").strip().lower()
     if not name:
         return True
-    return any(marker in name for marker in _FREE_MODEL_MARKERS)
+    return name in _FREE_MODEL_MARKERS
 
 
 def _table_price(name: str) -> Tuple[float, float] | None:
-    if any(marker in name for marker in _FREE_MODEL_MARKERS):
+    if name in _FREE_MODEL_MARKERS:
         return (0.0, 0.0)
     for needle, in_price, out_price in _PRICING_TABLE:
         if needle in name:
@@ -125,8 +127,9 @@ def listed_price_for_model(model: str | None) -> Tuple[float, float] | None:
     below it). So a model is listed here only when its name, less the
     provider prefix and a snapshot suffix, *is* a table entry's. OpenRouter's
     ``:free`` variants are listed at zero, not at their paid sibling's rate,
-    and so are the free-model sentinels -- by exact name, since the substring
-    markers would price any model with ``none`` or ``demo`` in it at zero.
+    and so are the free-model sentinels, by exact name as everywhere else.
+    ``:free`` stays out of ``price_for_model``: billing keeps the paid rate
+    there so a reservation never gets a zero ceiling.
     """
     name = (model or "").strip().lower()
     if not name:
