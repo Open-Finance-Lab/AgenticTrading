@@ -712,8 +712,13 @@ class ExternalBacktestSession:
                     "error": f"invalid_status:{self.status}",
                 }
 
-            if _utcnow() > self._deadline_at():
-                self._advance_step(executable=[], decision_source="timeout_hold")
+            # The legacy /api/v1/backtest and /api/v2 routes reach this straight
+            # from a late POST, with no instrumented poll ahead of it. Going
+            # through the shared ``_maybe_apply_timeout`` keeps one deadline
+            # check for all four hold sites, so this one prints too (#375).
+            held_index = self.step_index
+            if self._maybe_apply_timeout():
+                self._emit_deadline_hold_notice(held_index, 1)
                 return {
                     "accepted": False,
                     "error": "step_already_closed",

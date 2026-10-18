@@ -218,6 +218,39 @@ def test_get_status_no_expired_step_prints_nothing(session, capsys):
 
 
 # ---------------------------------------------------------------------------
+# submit_decisions: the fourth auto-hold site (#375). The legacy
+# /api/v1/backtest and /api/v2 routes call it straight after a GET, with no
+# instrumented poll in between, so a late POST is the only thing that holds.
+# ---------------------------------------------------------------------------
+
+
+def test_late_submit_single_hold_single_line(session, monkeypatch, capsys):
+    s = session
+    capsys.readouterr()
+    _expire_next_n_steps(monkeypatch, s, n=1)
+
+    result = s.submit_decisions({"actions": []})
+
+    out = capsys.readouterr().out
+    assert out.count("decision deadline") == 1
+    assert "auto-held 1 step(s) for bt_visible" in out
+    assert "steps=0..0" in out
+    assert "total_holds=1" in out
+    assert s.timeout_holds == 1
+    assert s.step_index == 1
+    assert result["outcome"] == "timeout_hold"
+
+
+def test_on_time_submit_prints_nothing(session, capsys):
+    s = session
+    capsys.readouterr()
+    s.submit_decisions({"actions": []})
+    out = capsys.readouterr().out
+    assert "decision deadline" not in out
+    assert s.timeout_holds == 0
+
+
+# ---------------------------------------------------------------------------
 # Through the router: run_service.get_step calls session.get_status() FIRST,
 # which applies the hold and advances step_index, so its own
 # `session.step_index == seq` guard then fails and get_current_step() is
