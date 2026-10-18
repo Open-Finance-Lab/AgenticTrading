@@ -58,6 +58,8 @@ from dashboard.backend.infrastructure.llm.backtest_harness import (
     request_trading_decision as _request_trading_decision,
 )
 from dashboard.backend.infrastructure.llm.execution.errors import (
+    ExecutionErrorCategory,
+    LLMExecutionError,
     is_transient_provider_failure,
 )
 from dashboard.backend.infrastructure.llm.pipeline_runner import (
@@ -700,22 +702,40 @@ class PortfolioManager:
                             f"and max_tokens={RECOVERY_MAX_OUTPUT_TOKENS}"
                         )
                         recovery_spent = True
-                        response = _request_trading_decision(
-                            llm_client,
-                            prompt=prompt,
-                            model=model,
-                            max_tokens=RECOVERY_MAX_OUTPUT_TOKENS,
-                            temperature=temperature,
-                            market_context=market_context,
-                        )
-                    else:
-                        response = _request_trading_decision(
-                            llm_client,
-                            prompt=prompt,
-                            model=model,
-                            temperature=temperature,
-                            market_context=market_context,
-                        )
+                    try:
+                        if attempt == no_text_retries:
+                            response = _request_trading_decision(
+                                llm_client,
+                                prompt=prompt,
+                                model=model,
+                                max_tokens=RECOVERY_MAX_OUTPUT_TOKENS,
+                                temperature=temperature,
+                                market_context=market_context,
+                            )
+                        else:
+                            response = _request_trading_decision(
+                                llm_client,
+                                prompt=prompt,
+                                model=model,
+                                temperature=temperature,
+                                market_context=market_context,
+                            )
+                    except LLMExecutionError as exec_err:
+                        # The execution layer rejects an empty reply before any
+                        # message reaches us, as RESPONSE_INVALID rather than
+                        # the "No text content" AttributeError below. It is the
+                        # same outcome and gets the same retries and rescue
+                        # call, as in pipeline_runner (#600). Every other
+                        # category (billing, credentials, quota) stays fatal.
+                        if exec_err.category is not ExecutionErrorCategory.RESPONSE_INVALID:
+                            raise
+                        if attempt < no_text_retries:
+                            print(
+                                "   ⚠️  Empty model response; "
+                                f"retry {attempt + 1}/{no_text_retries}"
+                            )
+                            continue
+                        raise
                     output_delta = self._record_llm_usage(response)
                     try:
                         llm_response = _extract_response_text(response)
@@ -750,16 +770,28 @@ class PortfolioManager:
                             "reasoning preserved and "
                             f"max_tokens={RECOVERY_MAX_OUTPUT_TOKENS}"
                         )
-                        retry_response = _request_trading_decision(
-                            llm_client,
-                            prompt=prompt,
-                            model=model,
-                            max_tokens=RECOVERY_MAX_OUTPUT_TOKENS,
-                            temperature=temperature,
-                            market_context=market_context,
+                        try:
+                            retry_response = _request_trading_decision(
+                                llm_client,
+                                prompt=prompt,
+                                model=model,
+                                max_tokens=RECOVERY_MAX_OUTPUT_TOKENS,
+                                temperature=temperature,
+                                market_context=market_context,
+                            )
+                        except LLMExecutionError as retry_err:
+                            # An empty second reply is the same outcome as the
+                            # truncated first one: keep the first attempt.
+                            if retry_err.category is not ExecutionErrorCategory.RESPONSE_INVALID:
+                                raise
+                            retry_response = None
+                        if retry_response is not None:
+                            self._record_llm_usage(retry_response)
+                        retry_text = (
+                            None
+                            if retry_response is None
+                            else response_text_or_none(retry_response)
                         )
-                        self._record_llm_usage(retry_response)
-                        retry_text = response_text_or_none(retry_response)
                         if retry_text is None:
                             print(
                                 "   ⚠️  Retry returned no text block; "

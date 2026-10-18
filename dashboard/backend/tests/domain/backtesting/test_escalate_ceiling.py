@@ -21,9 +21,31 @@ import pytest
 from dashboard.backend.domain.backtesting import portfolio_manager as pm
 from dashboard.backend.domain.backtesting.portfolio_manager import PortfolioManager
 from dashboard.backend.infrastructure.llm import pipeline_runner
+from dashboard.backend.infrastructure.llm.execution.adapters.base import (
+    AdapterResponse,
+)
+from dashboard.backend.infrastructure.llm.execution.client import (
+    AnthropicCompatibleExecutionClient,
+)
+from dashboard.backend.infrastructure.llm.execution.errors import (
+    ExecutionErrorCategory,
+    LLMExecutionError,
+)
+from dashboard.backend.infrastructure.llm.execution.handoff import ExecutionHandoff
+from dashboard.backend.infrastructure.llm.execution.models import (
+    BillingMode,
+    LLMUsage,
+    PricingSnapshot,
+)
 from dashboard.backend.infrastructure.llm.pipeline_runner import (
     RECOVERY_MAX_OUTPUT_TOKENS,
     escalate_ceiling_on_retry,
+)
+from dashboard.backend.tests.infrastructure.llm.test_platform_credits_env_fallback import (
+    MODEL_ID,
+    USER_ID,
+    ScriptedExecutionAdapter,
+    _execution_service,
 )
 
 DECISION_JSON = '{"actions": []}'
@@ -74,7 +96,12 @@ def spy(monkeypatch):
         calls.append(None if max_tokens is _SENTINEL else max_tokens)
         i = len(calls) - 1
         texts = plan["texts"]
-        return _Resp(texts[i] if i < len(texts) else DECISION_JSON)
+        entry = texts[i] if i < len(texts) else DECISION_JSON
+        # An exception in the plan is raised from the request itself, as the
+        # execution layer does for an empty reply (#600).
+        if isinstance(entry, Exception):
+            raise entry
+        return _Resp(entry)
 
     def fake_extract(response):
         if response._text is None:
@@ -272,3 +299,106 @@ def test_billing_counts_every_attempt_either_way(spy, monkeypatch):
     plan["texts"] = [None, None, DECISION_JSON]
     _run(off, monkeypatch, on=False)
     assert off.llm_calls == len(calls) == 3
+
+
+# ------------------------------ execution-layer empty reply (#600) ----------
+# The stand-in above raises the "No text content" AttributeError, which only
+# the legacy client produces. The execution layer rejects an empty reply
+# itself, before any message exists, as LLMExecutionError(RESPONSE_INVALID).
+# These pin that the same retries and rescue call cover it.
+
+
+def _rejected():
+    return LLMExecutionError(ExecutionErrorCategory.RESPONSE_INVALID)
+
+
+def test_an_execution_layer_empty_reply_is_retried(spy, monkeypatch, capsys):
+    calls, plan = spy
+    plan["texts"] = [_rejected(), DECISION_JSON]
+    _run(_manager(), monkeypatch, on=False)
+    assert calls == [None, None]
+    assert "LLM decision error" not in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    ("on", "expected"),
+    [
+        (False, [None, None, None, None, RECOVERY_MAX_OUTPUT_TOKENS]),
+        (True, [None, RECOVERY_MAX_OUTPUT_TOKENS]),
+    ],
+)
+def test_execution_layer_empty_replies_reach_the_rescue_call(
+        spy, monkeypatch, on, expected):
+    calls, plan = spy
+    plan["texts"] = [_rejected()] * (len(expected) - 1) + [DECISION_JSON]
+    _run(_manager(), monkeypatch, on=on)
+    assert calls == expected
+
+
+def test_other_execution_errors_are_not_retried(spy, monkeypatch, capsys):
+    calls, plan = spy
+    plan["texts"] = [LLMExecutionError(ExecutionErrorCategory.BILLING_FAILED)]
+    _run(_manager(), monkeypatch, on=False)
+    assert calls == [None], "billing, credential and quota failures stay fatal"
+    assert "LLM decision error" in capsys.readouterr().out
+
+
+def test_an_empty_truncation_retry_keeps_the_first_reply(
+        spy, monkeypatch, capsys):
+    calls, plan = spy
+    plan["texts"] = ["not json at all", _rejected()]
+    _run(_manager(), monkeypatch, on=False)
+    out = capsys.readouterr().out
+    assert calls == [None, RECOVERY_MAX_OUTPUT_TOKENS]
+    assert "keeping the first attempt" in out
+    assert "LLM decision error" not in out
+
+
+def test_a_real_execution_client_empty_reply_is_retried(tmp_path, monkeypatch):
+    """#600 end to end, as prod runs it: the real execution service rejects
+    an empty adapter reply, the real client raises it before any message
+    exists, and a strict, fail-closed run must still retry instead of ending."""
+    monkeypatch.delenv("LLM_ESCALATE_CEILING_ON_RETRY", raising=False)
+    adapter = ScriptedExecutionAdapter([
+        AdapterResponse(
+            text="",
+            model_id=MODEL_ID,
+            usage=LLMUsage(input_tokens=40, output_tokens=2000),
+        ),
+        AdapterResponse(
+            text=DECISION_JSON,
+            model_id=MODEL_ID,
+            usage=LLMUsage(input_tokens=40, output_tokens=20),
+            finish_reason="stop",
+        ),
+    ])
+    service, _ = _execution_service(tmp_path, monkeypatch, adapter)
+    # The harness prices at $1000/Mtok for its ledger arithmetic; a real
+    # trading prompt's reservation would exceed its seeded balance at that rate.
+    service.pricing_snapshot_factory = lambda model_id, provider_id: PricingSnapshot(
+        provider_id=provider_id,
+        model_id=model_id,
+        input_usd_per_million_tokens=1.0,
+        output_usd_per_million_tokens=1.0,
+        source_version="test-pricing",
+    )
+    client = AnthropicCompatibleExecutionClient(
+        execution_service=service,
+        handoff=ExecutionHandoff(
+            user_id=USER_ID,
+            run_id="run-600",
+            billing_mode=BillingMode.PLATFORM_CREDITS,
+            provider_id="openrouter",
+            model_id=MODEL_ID,
+            prompt_digest="a" * 64,
+            nonce="n" * 16,
+            issued_at=1,
+            expires_at=2,
+        ),
+    )
+
+    decision = _manager().make_trading_decision_with_llm(
+        _state(), llm_client=client, model=MODEL_ID, strict_llm=True)
+
+    assert len(adapter.calls) == 2
+    assert decision == {"actions": []}
