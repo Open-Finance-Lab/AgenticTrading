@@ -8,6 +8,7 @@ lives in ``pricing.py``, a leaf that both sides import.
 """
 
 import ast
+import hashlib
 from pathlib import Path
 
 import pytest
@@ -122,7 +123,7 @@ def test_a_free_variant_is_still_a_real_model_to_is_free_model():
 
 
 @pytest.mark.parametrize(
-    "model", [*pricing._FREE_MODEL_MARKERS, "LOCAL-MODEL", " Local-Model "]
+    "model", [*sorted(pricing.FREE_MODEL_NAMES), "LOCAL-MODEL", " Local-Model "]
 )
 def test_the_exact_sentinels_are_still_free(model):
     assert pricing.price_for_model(model) == (0.0, 0.0)
@@ -152,3 +153,78 @@ def test_the_exact_sentinels_are_still_free(model):
 )
 def test_listed_price_covers_the_catalog_and_its_snapshots(model, price):
     assert pricing.listed_price_for_model(model) == price
+
+
+def test_the_shipped_example_clients_default_name_is_free():
+    """``rule-based-demo`` is the example client's default ``--model-name``
+    (``dashboard/examples/external_agent_client.py``), so stored agents carry
+    it. It was free only by accident of the substring rule; listed by name now,
+    or the Discord bot forwards it as a model and its runs show a $1/$5 cost."""
+    assert pricing.is_free_model("rule-based-demo") is True
+    assert pricing.price_for_model("rule-based-demo") == (0.0, 0.0)
+    assert pricing.listed_price_for_model("rule-based-demo") == (0.0, 0.0)
+
+
+def test_every_rule_based_label_is_a_free_name():
+    """Provenance's rule-based labels come from the same constant and are a
+    subset of the free names: a run nothing drove made no paid call. Not equal
+    sets -- a ``local-model`` run is free, but a self-hosted model drove it."""
+    from dashboard.backend.domain.backtesting import provenance
+
+    assert pricing.RULE_BASED_MODEL_LABELS <= pricing.FREE_MODEL_NAMES
+    assert provenance._RULE_BASED_MODEL_LABELS == {"", *pricing.RULE_BASED_MODEL_LABELS}
+    for label in ("rule_based", "null"):
+        assert pricing.price_for_model(label) == (0.0, 0.0)
+
+
+@pytest.mark.parametrize("model", [None, "", "   "])
+def test_no_model_at_all_is_free_wherever_it_is_priced(model):
+    """``is_free_model`` and ``price_for_model`` agree that no model costs $0.
+    It cannot reach a reservation (``PricingSnapshot.model_id`` has
+    ``min_length=1``), so only estimates see it. ``listed_price_for_model``
+    still answers None: a published BYOK estimate for an unnamed model reads
+    as unpriced, not as a claimed $0."""
+    assert pricing.is_free_model(model) is True
+    assert pricing.price_for_model(model) == (0.0, 0.0)
+    assert pricing.listed_price_for_model(model) is None
+
+
+@pytest.mark.parametrize(
+    "model",
+    [
+        *sorted(pricing.FREE_MODEL_NAMES),
+        "RULE-BASED-DEMO",
+        "acme/nonexistent",
+        "acme/demo-7b",
+        "openrouter/some-model:free",
+        "anthropic/claude-haiku-4-5",
+        "acme/unlisted",
+    ],
+)
+def test_the_three_functions_agree_on_which_names_are_sentinels(model):
+    free = pricing.is_free_model(model)
+    assert (pricing.price_for_model(model) == (0.0, 0.0)) is free
+    if not model.endswith(":free"):  # listed at $0 but a real model; see above
+        assert (pricing.listed_price_for_model(model) == (0.0, 0.0)) is free
+
+
+# Everything that decides a price, fingerprinted and pinned beside the version
+# that stamps it. Change the table, the sentinels or the default and this
+# fails until the version and the pin move together.
+_PRICED_BY = {
+    "pricing-table-2026-10-22": "49fb4f3bccad267f",
+}
+
+
+def _pricing_fingerprint() -> str:
+    material = repr(
+        (pricing._PRICING_TABLE, sorted(pricing.FREE_MODEL_NAMES), pricing._DEFAULT_PRICING)
+    )
+    return hashlib.sha256(material.encode()).hexdigest()[:16]
+
+
+def test_source_version_moves_with_the_rates():
+    """A stored ``PricingSnapshot`` names the rule that priced it only if the
+    version moves whenever a price does (#648 moved ``acme/demo-7b`` from $0
+    to $1/$5). On failure: bump ``PRICING_SOURCE_VERSION``, then re-pin."""
+    assert _PRICED_BY.get(pricing.PRICING_SOURCE_VERSION) == _pricing_fingerprint()
