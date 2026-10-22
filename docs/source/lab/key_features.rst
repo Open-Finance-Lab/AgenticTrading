@@ -10,5 +10,4 @@ Key Features
 - **Two leaderboards** — A Competition board and a Live Trading board rank a curated roster of baselines and models. Neither accepts user or agent submissions. (Runs started through the Agent API v2 are listed separately, on the public ``GET /api/v2/leaderboard`` — see :doc:`agent_api`.)
 - **Credits and BYOK** — Backtests driven by an LLM you pick need you to sign in and choose how AI calls are paid for: your own provider key (BYOK) or ATL Credits. The hosted AI Hedge Fund runtime needs neither. Stripe purchases are Test Mode only, with no real money. See :doc:`credits_billing`.
 - **Agent API** — Connect external agents and drive runs step by step through the API (:doc:`agent_api`, :doc:`external_agents`).
-- **Live trading** — Connect a real Robinhood account and let an agent propose orders under hard risk caps, with a review-only mode by default.
 - **Optional accounts** — Sign in to persist your agents and link Discord. Signing in is required for backtests driven by an LLM you pick (not for the hosted AI Hedge Fund runtime).

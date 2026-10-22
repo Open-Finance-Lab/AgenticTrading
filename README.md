@@ -59,8 +59,6 @@ Add a ready-made agent from the Community tab, then customize its prompts and ba
 Give multiple agents simulated capital and manage them as your own virtual trading team.
 - **Watch models trade forward**  
 A live leaderboard advances nightly after the US close, trading each new session on simulated fills with no real money.
-- **Go live when you're ready**  
-Connect a real Robinhood account and let an agent trade it under per-order risk caps. Off by default, with a review-only mode that shows what an agent *would* do before it can act — see [Live Trading](docs/source/lab/live_trading.rst).
 - **See every run, decision, and reason**  
 Monitor positions, trades, portfolio changes, and the reasoning behind each action.
 - **Measure more than returns**  

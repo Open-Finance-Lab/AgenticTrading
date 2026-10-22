@@ -190,13 +190,6 @@ Copy the template from the repository root into that location:
 
 The ``credentials/`` directory is not tracked in git. See ``credentials/README.md``.
 
-Configure Robinhood live trading (optional)
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-Live trading against a real brokerage account is off unless you configure it,
-and orders are never sent unless you also set ``ROBINHOOD_EXECUTE=true``. See
-:ref:`robinhood-config` for the full variable list.
-
 Start the API server
 ~~~~~~~~~~~~~~~~~~~~
 

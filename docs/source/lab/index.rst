@@ -3,7 +3,7 @@
 Agentic Trading Lab
 ===================
 
-**Agentic Trading Lab** is an interactive platform for exploring LLM-powered trading agents: backtesting on historical US (Alpaca) and A-share (iFinD) market data, comparison against buy-and-hold and index baselines, and optional live trading through a connected Robinhood account.
+**Agentic Trading Lab** is an interactive platform for exploring LLM-powered trading agents: backtesting on historical US (Alpaca) and A-share (iFinD) market data, and comparison against buy-and-hold and index baselines.
 
 - **Live app:** `agentic-trading-lab.vercel.app <https://agentic-trading-lab.vercel.app/>`_
 - **Community:** `Discord <https://discord.gg/9HnQ6XDG98>`_
