@@ -1940,7 +1940,12 @@ def run_backtest_background(
         
         # Determine the Python executable to use (from venv if available)
         if venv_dir.exists():
-            python_exe = str(venv_dir / "bin" / "python3")
+            # A Windows venv keeps its interpreter under Scripts\, not bin/;
+            # bin/python3 there made every backtest die with WinError 2.
+            if os.name == "nt":
+                python_exe = str(venv_dir / "Scripts" / "python.exe")
+            else:
+                python_exe = str(venv_dir / "bin" / "python3")
             print(f"🐍 Using venv Python: {python_exe}", flush=True)
         else:
             python_exe = sys.executable
