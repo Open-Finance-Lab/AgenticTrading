@@ -46,7 +46,8 @@ class FakeBackend(ExecutionBackend):
             "decision_format": {"actions": []},
         }
 
-    def apply_decisions(self, actions: List[Dict[str, Any]]) -> Dict[str, Any]:
+    def apply_decisions(self, actions: List[Dict[str, Any]],
+                        expected_step: Optional[int] = None) -> Dict[str, Any]:
         executed = [{"action": a.get("action"), "symbol": a.get("symbol"),
                      "shares": a.get("position_size", 0), "price": 100.0}
                     for a in actions if a.get("action") in ("buy", "sell")]

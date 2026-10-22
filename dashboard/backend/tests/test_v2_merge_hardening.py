@@ -60,7 +60,7 @@ class _RejectingSession:
     def __init__(self, result):
         self._result = result
 
-    def submit_decisions(self, payload):
+    def submit_decisions(self, payload, expected_step=None):
         return self._result
 
 
@@ -262,7 +262,7 @@ class _ClosingBackend:
     def current_step_index(self):
         return self._step
 
-    def apply_decisions(self, actions):
+    def apply_decisions(self, actions, expected_step=None):
         self.calls += 1
         self._step = 4
         raise ApiError(
@@ -307,7 +307,7 @@ def test_non_consuming_rejection_is_not_cached():
         def current_step_index(self):
             return 0
 
-        def apply_decisions(self, actions):
+        def apply_decisions(self, actions, expected_step=None):
             self.calls += 1
             if self.calls == 1:
                 raise ApiError("invalid_status", "Run is not awaiting a decision (status: loading)",

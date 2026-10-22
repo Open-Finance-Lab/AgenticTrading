@@ -144,7 +144,7 @@ def test_apply_decisions_executes_pre_validated_actions():
         step_index = 1
         status = "waiting_decision"
 
-        def submit_decisions(self, payload):
+        def submit_decisions(self, payload, expected_step=None):
             executed = [{"action": a["action"], "symbol": a["symbol"],
                          "shares": a["position_size"]} for a in payload["actions"]]
             return {"accepted": True, "executed": executed,

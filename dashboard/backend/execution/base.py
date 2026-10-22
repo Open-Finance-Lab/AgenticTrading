@@ -22,8 +22,12 @@ class ExecutionBackend(ABC):
         """Return a ContextEnvelope-shaped dict for the current step."""
 
     @abstractmethod
-    def apply_decisions(self, actions: List[Dict[str, Any]]) -> Dict[str, Any]:
-        """Validate + execute actions; return a SubmitAck-shaped dict."""
+    def apply_decisions(self, actions: List[Dict[str, Any]],
+                        expected_step: Optional[int] = None) -> Dict[str, Any]:
+        """Validate + execute actions; return a SubmitAck-shaped dict.
+
+        ``expected_step`` is the step the caller read as current; a backend
+        refuses the decision (step_already_closed) if the run has moved on."""
 
     @abstractmethod
     def status(self) -> Dict[str, Any]:
