@@ -3735,6 +3735,28 @@ def test_every_category_round_trips_through_the_child_line():
     assert rebuilt.safe_message == restricted.safe_message
 
 
+def test_an_empty_reply_keeps_its_label_across_the_child_line():
+    # The marker is not a category, so only the line's reason carries it; lost
+    # there, a run that died on empty replies reads `internal_error`.
+    from dashboard.backend.infrastructure.llm.execution.errors import (
+        ExecutionErrorCategory,
+        LLMExecutionError as _Err,
+        is_empty_reply,
+        run_failed_line,
+    )
+
+    line = run_failed_line(_Err.for_empty_reply())
+    assert line == "ERROR: llm.run_failed category=response_invalid reason=empty_reply"
+    rebuilt = bt._child_llm_failure(line)
+    assert is_empty_reply(rebuilt)
+    assert bt.analytics_error_category_for(rebuilt) == "empty_response"
+    refused = bt._child_llm_failure(
+        run_failed_line(_Err(ExecutionErrorCategory.RESPONSE_INVALID))
+    )
+    assert not is_empty_reply(refused)
+    assert bt.analytics_error_category_for(refused) == "internal_error"
+
+
 @pytest.mark.parametrize(
     ("reason", "expected"),
     [
