@@ -15,7 +15,7 @@ from typing import Tuple
 
 # Approximate USD pricing per 1,000,000 tokens (input, output).
 # Matched by substring against the run's model name (longest/most specific first).
-# "Local" / rule-based models incur no API cost.
+# Sentinel names (``FREE_MODEL_NAMES``) cost nothing and are checked before it.
 _PRICING_TABLE: list[Tuple[str, float, float]] = [
     # CommonStack-verified slugs (provider/model), rates from GET /v1/models on
     # 2026-06-24. Listed first so the specific slug wins over generic needles.
@@ -50,15 +50,42 @@ _PRICING_TABLE: list[Tuple[str, float, float]] = [
     ("gpt-3.5", 0.50, 1.50),
 ]
 
-# Model names that represent no paid LLM call (cost = 0).
-_FREE_MODEL_MARKERS = ("rule-based", "local-model", "local", "demo", "baseline", "none")
+# Model labels a run carries when no model drove it. ``provenance`` reads the
+# same set (plus the empty string) to call a run rule-based, so the two cannot
+# drift apart: every one of these is also free below.
+RULE_BASED_MODEL_LABELS = frozenset({"rule-based", "rule_based", "none", "null"})
+
+# Model names that represent no paid LLM call (cost = 0). Matched as whole
+# names, never as substrings: a real id that merely contains one of these words
+# (``acme/nonexistent``, ``*-localized-*``, ``*-demo-*``) is a paid model. A
+# superset of the rule-based labels: ``local-model`` costs nothing, but a
+# self-hosted model still drove the run. ``rule-based-demo`` is the example
+# client's default ``--model-name``, so stored agents carry it.
+FREE_MODEL_NAMES = RULE_BASED_MODEL_LABELS | {
+    "local-model",
+    "local",
+    "demo",
+    "baseline",
+    "rule-based-demo",
+}
 
 # Fallback pricing when a real-looking model name is not in the table.
 _DEFAULT_PRICING: Tuple[float, float] = (1.0, 5.0)
 
 # Stamped on every ``PricingSnapshot`` so a stored cost can be traced to the
-# table that priced it. Bump it whenever the rates above change.
-PRICING_SOURCE_VERSION = "pricing-table-2026-08-24"
+# table that priced it. Bump it whenever a price changes -- the table, the
+# free names or the default; ``test_pricing`` pins it to a fingerprint of all
+# three.
+PRICING_SOURCE_VERSION = "pricing-table-2026-10-22"
+
+
+def _normalized(model: str | None) -> str:
+    return (model or "").strip().lower()
+
+
+def _is_sentinel(name: str) -> bool:
+    """The one free-name check; ``name`` is already ``_normalized``."""
+    return name in FREE_MODEL_NAMES
 
 
 def is_free_model(model: str | None) -> bool:
@@ -68,15 +95,11 @@ def is_free_model(model: str | None) -> bool:
     Callers use this to treat such values as "no explicit model" rather than a
     real model id — e.g. the Discord bot must not forward the default
     ``'local-model'`` sentinel to the hosted-model API as if it were a model."""
-    name = (model or "").strip().lower()
-    if not name:
-        return True
-    return any(marker in name for marker in _FREE_MODEL_MARKERS)
+    name = _normalized(model)
+    return not name or _is_sentinel(name)
 
 
 def _table_price(name: str) -> Tuple[float, float] | None:
-    if any(marker in name for marker in _FREE_MODEL_MARKERS):
-        return (0.0, 0.0)
     for needle, in_price, out_price in _PRICING_TABLE:
         if needle in name:
             return (in_price, out_price)
@@ -84,9 +107,14 @@ def _table_price(name: str) -> Tuple[float, float] | None:
 
 
 def price_for_model(model: str | None) -> Tuple[float, float]:
-    """Return (input_usd_per_mtok, output_usd_per_mtok) for a model name."""
-    name = (model or "").strip().lower()
-    return (_table_price(name) if name else None) or _DEFAULT_PRICING
+    """Return (input_usd_per_mtok, output_usd_per_mtok) for a model name.
+
+    $0 wherever ``is_free_model`` says so, including no model at all. That
+    cannot zero a reservation ceiling: ``PricingSnapshot.model_id`` has
+    ``min_length=1``, so only estimates ever price an empty name."""
+    if is_free_model(model):
+        return (0.0, 0.0)
+    return _table_price(_normalized(model)) or _DEFAULT_PRICING
 
 
 # A dated or preview snapshot of a model is that model: Anthropic's
@@ -125,12 +153,15 @@ def listed_price_for_model(model: str | None) -> Tuple[float, float] | None:
     below it). So a model is listed here only when its name, less the
     provider prefix and a snapshot suffix, *is* a table entry's. OpenRouter's
     ``:free`` variants are listed at zero, not at their paid sibling's rate,
-    and so are the free-model sentinels -- by exact name, since the substring
-    markers would price any model with ``none`` or ``demo`` in it at zero.
+    and so are the free-model sentinels, by exact name as everywhere else.
+    ``:free`` stays out of ``price_for_model``: billing keeps the paid rate
+    there so a reservation never gets a zero ceiling. No model at all is the
+    one name ``is_free_model`` calls free that is not listed: a published
+    estimate for a call whose model is unknown reads as unpriced, not $0.
     """
-    name = (model or "").strip().lower()
+    name = _normalized(model)
     if not name:
         return None
-    if name.endswith(":free") or name in _FREE_MODEL_MARKERS:
+    if name.endswith(":free") or _is_sentinel(name):
         return (0.0, 0.0)
     return _LISTED_PRICES.get(_listed_name(name))

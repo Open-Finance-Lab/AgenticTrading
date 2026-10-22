@@ -54,8 +54,9 @@ def test_price_for_model_table_and_markers():
     assert price_for_model("local-model") == (0.0, 0.0)
     # Unknown but real-looking -> default pricing.
     assert price_for_model("some-unknown-model") == (1.0, 5.0)
-    assert price_for_model("") == (1.0, 5.0)
-    assert price_for_model(None) == (1.0, 5.0)
+    # No model at all is free, as ``is_free_model`` already said it was.
+    assert price_for_model("") == (0.0, 0.0)
+    assert price_for_model(None) == (0.0, 0.0)
 
 
 def test_gpt_5_5_pricing_snapshot_uses_canonical_catalog_id():
