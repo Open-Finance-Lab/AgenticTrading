@@ -1338,7 +1338,7 @@
     if (instructionEl) instructionEl.value = simpleStep ? simpleStep.prompt : '';
     updateSimpleReplaceNote();
     refreshRunHistory(currentAgent);
-    refreshRobinhoodStatus();
+    // refreshRobinhoodStatus();  // Robinhood real-money path: commented out 2026-10-22
     if (isAiHedgeFundAgent(agent)) {
       refreshFinancialDatasetsStatus(agent);
     }
@@ -1543,10 +1543,11 @@
   function bindEvents() {
     document.getElementById('agentEditorBackBtn')?.addEventListener('click', () => close(false));
     document.getElementById('agentEditorSaveBtn')?.addEventListener('click', () => save());
-    document.getElementById('agentEditorConnectRobinhoodBtn')?.addEventListener('click', connectRobinhood);
-    document.getElementById('agentEditorDisconnectRobinhoodBtn')?.addEventListener('click', disconnectRobinhood);
+    // Robinhood real-money path: commented out 2026-10-22, with its panel in app.html.
+    // document.getElementById('agentEditorConnectRobinhoodBtn')?.addEventListener('click', connectRobinhood);
+    // document.getElementById('agentEditorDisconnectRobinhoodBtn')?.addEventListener('click', disconnectRobinhood);
     document.getElementById('agentEditorFinancialDatasetsRemove')?.addEventListener('click', removeFinancialDatasetsCredential);
-    document.getElementById('agentEditorRunLiveBtn')?.addEventListener('click', runLive);
+    // document.getElementById('agentEditorRunLiveBtn')?.addEventListener('click', runLive);
     document.getElementById('agentEditorRunBacktestBtn')?.addEventListener('click', () => {
       if (!currentAgent) return;
       // The modal reads the last-saved agent, so an unsaved edit would run the

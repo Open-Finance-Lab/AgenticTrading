@@ -1531,11 +1531,15 @@ def delete_avatar(current_user: dict = Depends(get_current_user)):
     return {"user": _store_avatar(current_user["id"], None)}
 
 
+# Robinhood real-money path: commented out 2026-10-22 (real capital is out of
+# scope). The three route decorators below are commented out, so none of these
+# handlers is mounted. Restore by uncommenting them; see CLAUDE.md, `execution/`.
 class RobinhoodStartBody(BaseModel):
     agent_id: Optional[str] = Field(default=None, max_length=64)
 
 
-@router.post("/robinhood/start")
+# Unmounted with the rest of the Robinhood real-money path; see the note above.
+# @router.post("/robinhood/start")
 async def robinhood_oauth_start(
     body: RobinhoodStartBody | None = None,
     current_user: dict = Depends(get_current_user),
@@ -1593,7 +1597,8 @@ class RobinhoodCompleteBody(BaseModel):
     link_code: str = Field(min_length=8, max_length=128)
 
 
-@router.get("/robinhood/callback")
+# Unmounted with the rest of the Robinhood real-money path; see the note above.
+# @router.get("/robinhood/callback")
 async def robinhood_oauth_callback(code: Optional[str] = None, state: Optional[str] = None):
     """OAuth redirect: exchange the code, park the tokens, return to /app.
 
@@ -1652,7 +1657,8 @@ async def robinhood_oauth_callback(code: Optional[str] = None, state: Optional[s
     return _app_redirect(query)
 
 
-@router.post("/robinhood/complete")
+# Unmounted with the rest of the Robinhood real-money path; see the note above.
+# @router.post("/robinhood/complete")
 async def robinhood_oauth_complete(
     body: RobinhoodCompleteBody,
     current_user: dict = Depends(get_current_user),

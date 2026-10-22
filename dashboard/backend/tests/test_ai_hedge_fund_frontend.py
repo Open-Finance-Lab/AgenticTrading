@@ -167,7 +167,6 @@ def test_robinhood_editor_behavior_is_shared_by_both_runtimes():
         "function configureEditorMode(agent)",
         "function populateModelSelect(agent)",
     )
-    open_editor = _slice(_EDITOR_JS, "function open(agent)", "function close(force)")
     editor_state = _slice(
         _EDITOR_JS,
         "function getEditorState()",
@@ -175,7 +174,8 @@ def test_robinhood_editor_behavior_is_shared_by_both_runtimes():
     )
 
     assert "agentEditorBrokerPanel" not in configure
-    assert "refreshRobinhoodStatus();" in open_editor
+    # open()'s refreshRobinhoodStatus() call is commented out with the rest of the
+    # Robinhood path; test_robinhood_live_disabled.py pins that.
     assert "live_trading_enabled: Boolean(liveToggle?.checked)" in editor_state
 
 

@@ -1,6 +1,13 @@
 Live Trading with Robinhood
 ===========================
 
+.. important::
+
+   **Switched off.** Real-money trading is out of scope for the Lab, so the
+   agent editor no longer shows the Robinhood panel and the server does not
+   mount the Robinhood routes. This page describes the feature as it was
+   built, for a deployment that restores it.
+
 Agents can be connected to a **real Robinhood brokerage account** and asked to
 propose and place orders against it. This is separate from :doc:`backtesting
 <getting_started>`, which runs on historical data: here the account, the

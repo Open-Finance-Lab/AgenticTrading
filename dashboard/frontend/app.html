@@ -1151,6 +1151,8 @@
                     <select id="agentEditorCategorySelect" class="agent-editor-model-select" aria-label="Which market this agent trades"></select>
                 </label>
                 <textarea id="agentEditorDescription" class="agent-editor-description" rows="2" maxlength="280" placeholder="Optional description for this agent…" aria-label="Agent description"></textarea>
+                <!-- Robinhood real-money path: commented out 2026-10-22 (real capital is out of scope).
+                     The routes this panel calls are unmounted. Restore with them; see CLAUDE.md, execution/.
                 <div id="agentEditorBrokerPanel" class="agent-editor-broker section-card compact">
                     <div class="agent-editor-broker-head">
                         <h3 class="agent-editor-intro-title">Robinhood live trading</h3>
@@ -1169,6 +1171,7 @@
                     </div>
                     <p id="agentEditorLiveRunResult" class="agent-editor-live-result" hidden></p>
                 </div>
+                -->
             </div>
             <div class="agent-editor-header-actions">
                 <span id="agentEditorDirtyBadge" class="agent-editor-dirty-badge" hidden>Unsaved changes</span>
@@ -1205,7 +1208,7 @@
                                 <span class="agent-capital-note">Simulated only. Never spends real cash.</span>
                             </label>
                         </div>
-                        <p id="agentCapitalRealMoneyNote" class="control-helper">Every test here uses simulated money. Real money is involved only if you explicitly connect a brokerage account and turn on live trading.</p>
+                        <p id="agentCapitalRealMoneyNote" class="control-helper">Every test here uses simulated money.</p>
                     </div>
                     <div id="agentEditorSimplePanel" class="agent-editor-simple section-card compact">
                         <h3 class="agent-editor-intro-title">Trading instruction</h3>
@@ -1957,7 +1960,7 @@
                     <input id="marketplaceSearchInput" type="search" placeholder="Search templates..." aria-label="Search marketplace templates">
                 </div>
             </div>
-            <p class="control-helper">Performance is based on simulated tests and may vary between runs. Live trading requires an explicitly connected brokerage account.</p>
+            <p class="control-helper">Performance is based on simulated tests and may vary between runs.</p>
             <div id="marketplaceCategoryChips" class="marketplace-category-chips" role="group" aria-label="Filter templates by market"></div>
             <div id="marketplaceGrid" class="marketplace-shelves"></div>
             <p id="marketplaceEmptyState" class="control-helper" hidden></p>
@@ -2512,9 +2515,9 @@
     <script src="market-events/MarketEventFeed.js" defer></script>
     <script src="js/portfolio.js?v=18" defer></script>
     <script src="js/backtest-comparison.js?v=1" defer></script>
-    <script src="app.js?v=161" defer></script>
+    <script src="app.js?v=162" defer></script>
     <script src="js/analytics.js?v=1" defer></script>
-    <script src="js/agent-editor.js?v=32" defer></script>
+    <script src="js/agent-editor.js?v=33" defer></script>
     <script src="js/credit-format.js?v=1" defer></script>
     <script src="js/credits.js?v=8" defer></script>
     <script src="js/admin-credits.js?v=9" defer></script>

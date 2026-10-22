@@ -6052,7 +6052,7 @@ function initAuthUI(options = {}) {
   updateAuthUI();
   openAuthFromUrl();
   handleDiscordOAuthReturn();
-  handleRobinhoodOAuthReturn();
+  // handleRobinhoodOAuthReturn();  // Robinhood real-money path: commented out 2026-10-22
   wireDiscordAccountButtons();
   initChangePasswordForm();
   initDisplayNameForm();

@@ -24,7 +24,9 @@ from dashboard.backend.api.routers.portfolio import router as portfolio_router
 from dashboard.backend.api.routers.research import router as research_router
 from dashboard.backend.api.routers.runs import router as runs_router
 from dashboard.backend.api.routers.strategies import router as strategies_router
-from dashboard.backend.api.routers.robinhood_live import router as robinhood_router
+# Robinhood real-money path: commented out 2026-10-22 (real capital is out of
+# scope). Restore by uncommenting; see CLAUDE.md, `execution/`.
+# from dashboard.backend.api.routers.robinhood_live import router as robinhood_router
 from dashboard.backend.api.v2.router import v2_router
 
 api_router = APIRouter(prefix="/api")
@@ -50,5 +52,5 @@ api_router.include_router(leaderboard_router)
 api_router.include_router(strategies_router)
 api_router.include_router(portfolio_router)
 api_router.include_router(news_router)
-api_router.include_router(robinhood_router)
+# api_router.include_router(robinhood_router)  # Robinhood real-money path, see above
 api_router.include_router(v2_router)
