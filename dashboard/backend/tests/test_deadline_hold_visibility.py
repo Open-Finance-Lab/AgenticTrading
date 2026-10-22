@@ -3,8 +3,10 @@
 ``_maybe_apply_timeout`` reattributes a step to ``decision_source ==
 "timeout_hold"`` with no output whatsoever. A published equity curve
 containing auto-held steps is not the agent's curve. This file pins the
-visibility contract at all three sites that can trigger a hold
-(``get_current_step``, ``drain_expired``, ``get_status``) plus the live
+visibility contract at all four sites that can trigger a hold
+(``get_current_step``, ``drain_expired``, ``get_status``,
+``submit_decisions``), which all go through ``_apply_expired_holds``, plus
+the routes that reach them. That includes the live
 protocol path (``run_service.get_step``), which calls ``get_status()``
 first — applying the hold and advancing ``step_index`` before
 ``get_current_step``'s own ``step_index == seq`` guard is ever reached, so an
@@ -218,9 +220,10 @@ def test_get_status_no_expired_step_prints_nothing(session, capsys):
 
 
 # ---------------------------------------------------------------------------
-# submit_decisions: the fourth auto-hold site (#375). The legacy
-# /api/v1/backtest and /api/v2 routes call it straight after a GET, with no
-# instrumented poll in between, so a late POST is the only thing that holds.
+# submit_decisions: the fourth auto-hold site (#375). When nothing polls
+# between the agent's GET and its late POST, the POST is what holds the step.
+# When something else holds it first (the v2 reaper, a legacy /status poll),
+# the late POST must be refused, not applied to the next step.
 # ---------------------------------------------------------------------------
 
 
@@ -238,16 +241,259 @@ def test_late_submit_single_hold_single_line(session, monkeypatch, capsys):
     assert "total_holds=1" in out
     assert s.timeout_holds == 1
     assert s.step_index == 1
+    # The fields both routes map to 409.
+    assert result["accepted"] is False
+    assert result["error"] == "step_already_closed"
     assert result["outcome"] == "timeout_hold"
+    assert result["step_index"] == 0
+    assert result["next_step"] == 1
+    assert result["run_id"] is None
 
 
 def test_on_time_submit_prints_nothing(session, capsys):
     s = session
     capsys.readouterr()
-    s.submit_decisions({"actions": []})
+    result = s.submit_decisions({"actions": []})
     out = capsys.readouterr().out
     assert "decision deadline" not in out
     assert s.timeout_holds == 0
+    # Without these the test also passes when submit returns early.
+    assert result["accepted"] is True
+    assert result["step_index"] == 0
+    assert s.step_index == 1
+    # _open_current_step() used to reset this before the ack read it.
+    assert result["decision_source"] == "external_agent"
+
+
+def _submit_through_to_last_step(s):
+    while s.step_index < s.total_steps - 1:
+        result = s.submit_decisions({"actions": []})
+        assert result["accepted"] is True
+
+
+def test_late_submit_on_final_step_returns_the_finished_run(session, monkeypatch, capsys):
+    s = session
+    _submit_through_to_last_step(s)
+    capsys.readouterr()
+    _expire_next_n_steps(monkeypatch, s, n=1)
+
+    result = s.submit_decisions({"actions": []})
+
+    assert capsys.readouterr().out.count("decision deadline") == 1
+    assert s.status == "completed"
+    assert result["error"] == "step_already_closed"
+    assert result["status"] == "completed"
+    # A 409 for a finished run must still say where the result is.
+    assert result["run_id"] == s.run_id and s.run_id
+    assert result["metrics"] is not None
+    assert "compare_url" in result
+
+
+@pytest.mark.parametrize("holder", ["drain_expired", "get_status"])
+def test_submit_after_another_path_held_the_served_step_is_refused(
+    session, monkeypatch, capsys, holder
+):
+    s = session
+    s.get_current_step()  # the agent is served step 0
+    capsys.readouterr()
+    _expire_next_n_steps(monkeypatch, s, n=1)
+    getattr(s, holder)()  # the v2 reaper / a legacy status poll wins the race
+    assert capsys.readouterr().out.count("decision deadline") == 1
+    assert s.step_index == 1
+
+    result = s.submit_decisions({"actions": [
+        {"action": "buy", "symbol": "AAPL", "confidence": 0.9,
+         "reasoning": "built from step 0", "position_size": 1},
+    ]})
+
+    assert result["accepted"] is False
+    assert result["error"] == "step_already_closed"
+    assert result["outcome"] == "timeout_hold"
+    assert result["step_index"] == 0
+    assert result["next_step"] == 1
+    # Step 1 is untouched: not executed, not held, not printed twice.
+    assert s.step_index == 1
+    assert s.timeout_holds == 1
+    assert "decision deadline" not in capsys.readouterr().out
+    assert [e["decision_source"] for e in s.decision_log] == ["timeout_hold"]
+
+    # Fetching step 1 first is how the agent recovers.
+    s.get_current_step()
+    recovered = s.submit_decisions({"actions": []})
+    assert recovered["accepted"] is True
+
+
+def test_submit_without_fetching_context_still_works(session):
+    """The stale check fires only when the served step was HELD. A client
+    that POSTs without a GET after deciding a step itself is not refused."""
+    s = session
+    s.get_current_step()
+    first = s.submit_decisions({"actions": []})
+    assert first["accepted"] is True
+    result = s.submit_decisions({"actions": []})
+    assert result["accepted"] is True
+    assert result["step_index"] == 1
+
+
+def test_expected_step_that_moved_on_is_refused(session):
+    s = session
+    first = s.submit_decisions({"actions": []}, expected_step=0)
+    assert first["accepted"] is True
+
+    result = s.submit_decisions({"actions": []}, expected_step=0)
+
+    assert result["error"] == "step_already_closed"
+    assert result["outcome"] == "external_agent"
+    assert result["step_index"] == 0
+    assert s.step_index == 1
+    assert s.timeout_holds == 0
+
+
+# ---------------------------------------------------------------------------
+# Through the routes that reach submit_decisions with no poll in between:
+# the legacy /api/v1/backtest decisions route and v2's _submit_for.
+# ---------------------------------------------------------------------------
+
+
+def test_legacy_route_late_submit_prints_and_409s(session, monkeypatch, capsys):
+    from fastapi.testclient import TestClient
+
+    from dashboard.backend.app import app
+
+    s = session
+    monkeypatch.setitem(ebs._sessions, s.backtest_id, s)
+    client = TestClient(app)
+    headers = {"X-Session-Id": s.session_id}
+    url = f"/api/v1/backtest/{s.backtest_id}/steps/current"
+    served = client.get(url, headers=headers).json()
+    assert served["step_index"] == 0
+    capsys.readouterr()
+    _expire_next_n_steps(monkeypatch, s, n=1)
+
+    resp = client.post(f"{url}/decisions", json={"actions": []}, headers=headers)
+
+    assert resp.status_code == 409, resp.text
+    assert resp.json()["detail"]["outcome"] == "timeout_hold"
+    out = capsys.readouterr().out
+    assert out.count("decision deadline") == 1
+    assert "steps=0..0" in out
+
+
+@pytest.fixture
+def v2_run(monkeypatch, tmp_path):
+    import dashboard.backend.api.v2.runs as runs_mod
+    import dashboard.backend.domain.runs.repository as run_store_module
+    from dashboard.backend.execution import backtest_backend as bb_mod
+
+    path = tmp_path / "hold_visibility_v2.db"
+    test_db = db_module.BacktestDatabase(db_path=path)
+    test_runs = run_store_module.RunStore(db_path=path)
+    monkeypatch.setattr(db_module, "db", test_db)
+    monkeypatch.setattr(ebs, "db", test_db)
+    monkeypatch.setattr(runs_mod, "db", test_db)
+    monkeypatch.setattr(run_store_module, "run_store", test_runs)
+    monkeypatch.setattr(ebs, "AlpacaDataLoader", _Loader)
+    monkeypatch.setattr(bb_mod, "load_news_sentiment", lambda *_: ({}, None))
+    monkeypatch.setattr(bw.HourlyBacktester, "run_buyhold_baseline",
+                        lambda self: (None, None))
+    monkeypatch.setattr(bw.HourlyBacktester, "run_djia_baseline",
+                        lambda self: (None, None))
+
+    run_id = "run_hold_v2"
+    test_runs.create_run(
+        run_id=run_id, agent_id=None, agent_version_id=None,
+        session_id="sess_v2", environment_id=None, environment_type="backtest",
+        config={}, backtest_id=run_id, status="running",
+    )
+    backend = bb_mod.BacktestBackend(
+        run_id=run_id, session_id="sess_v2", agent_name="agent-v2",
+        model_name="m", start_date="2026-04-15", end_date="2026-04-17",
+    )
+    backend.load_blocking()
+    monkeypatch.setitem(runs_mod._runs, run_id,
+                        {"backend": backend, "session_id": "sess_v2", "agent_id": None})
+    return runs_mod, backend, test_db, test_runs
+
+
+def _audit_steps(test_db, run_id):
+    conn = test_db._get_connection()
+    try:
+        rows = conn.execute(
+            "SELECT step_index FROM idempotency_keys WHERE run_id = ?", (run_id,)
+        ).fetchall()
+    finally:
+        conn.close()
+    return [r[0] for r in rows]
+
+
+def test_v2_late_submit_prints_and_409s(v2_run, monkeypatch, capsys):
+    from dashboard.backend.api.v2.errors import ApiError
+
+    runs_mod, backend, test_db, _ = v2_run
+    backend.build_context()
+    capsys.readouterr()
+    _expire_next_n_steps(monkeypatch, backend.session, n=1)
+
+    with pytest.raises(ApiError) as ei:
+        runs_mod._submit_for(backend.run_id, "sess_v2", "k-late", [])
+
+    assert ei.value.code == "step_already_closed" and ei.value.status == 409
+    assert ei.value.details["step_index"] == 0
+    assert capsys.readouterr().out.count("decision deadline") == 1
+    assert _audit_steps(test_db, backend.run_id) == [0]
+
+
+def test_v2_reaper_hold_between_read_and_apply_refuses_the_decision(
+    v2_run, monkeypatch, capsys
+):
+    """_submit_for reads the step without the session lock. If the reaper
+    holds it before apply_decisions runs, the decision must be refused and
+    audited under the step it was meant for, not executed on the next one."""
+    runs_mod, backend, test_db, _ = v2_run
+    from dashboard.backend.api.v2.errors import ApiError
+
+    real_read = backend.current_step_index
+
+    def read_then_reaper_wins():
+        step = real_read()
+        _expire_next_n_steps(monkeypatch, backend.session, n=1)
+        backend.advance()  # v2 reaper -> drain_expired()
+        return step
+
+    monkeypatch.setattr(backend, "current_step_index", read_then_reaper_wins)
+    capsys.readouterr()
+
+    with pytest.raises(ApiError) as ei:
+        runs_mod._submit_for(backend.run_id, "sess_v2", "k-race", [
+            {"action": "buy", "symbol": "AAPL", "confidence": 0.9,
+             "reasoning": "built from step 0", "position_size": 1},
+        ])
+
+    assert ei.value.code == "step_already_closed"
+    assert ei.value.details["outcome"] == "timeout_hold"
+    assert ei.value.details["step_index"] == 0
+    assert backend.session.step_index == 1  # step 1 not consumed
+    assert [e["decision_source"] for e in backend.session.decision_log] == ["timeout_hold"]
+    assert _audit_steps(test_db, backend.run_id) == [0]
+    # One hold, one line: printed by the reaper, not again by the refusal.
+    assert capsys.readouterr().out.count("decision deadline") == 1
+
+
+def test_v2_late_submit_on_final_step_marks_the_run_completed(v2_run, monkeypatch):
+    from dashboard.backend.api.v2.errors import ApiError
+
+    runs_mod, backend, _, test_runs = v2_run
+    _submit_through_to_last_step(backend.session)
+    assert test_runs.get_run(backend.run_id)["status"] == "running"
+    _expire_next_n_steps(monkeypatch, backend.session, n=1)
+
+    with pytest.raises(ApiError) as ei:
+        runs_mod._submit_for(backend.run_id, "sess_v2", "k-final", [])
+
+    assert ei.value.code == "step_already_closed"
+    assert ei.value.details["status"] == "completed"
+    # Not left 'running' (and counted against the caps) until the reaper.
+    assert test_runs.get_run(backend.run_id)["status"] == "completed"
 
 
 # ---------------------------------------------------------------------------
@@ -326,6 +572,41 @@ def test_router_get_step_prints_on_deadline(router_run, monkeypatch, capsys):
     # get_status() applied the hold and advanced step_index past seq, so
     # get_step falls back to the historical view for the now-superseded step.
     assert result["status"] == "timed_out"
+
+
+def test_router_submit_refused_when_reaper_holds_after_the_step_check(
+    router_run, monkeypatch, capsys
+):
+    """submit_decision checks seq under run.lock, but the reaper's
+    drain_expired() takes only the session lock. A hold landing between the
+    check and the engine call must refuse the decision, not apply it to
+    seq + 1."""
+    from dashboard.backend.domain.runs.protocol import DecisionIn, ProtocolError
+
+    run_service, run_id, step_id = router_run
+    session = run_service._get_run(run_id).session()
+    # A v1 step_id names its step explicitly; isolate that pin from the
+    # served-step inference the legacy route relies on.
+    session.served_step_index = None
+    real_trade_count = session.trade_count
+
+    def reaper_wins():  # called just before session.submit_decisions
+        _expire_next_n_steps(monkeypatch, session, n=1)
+        session.drain_expired()
+        return real_trade_count()
+
+    monkeypatch.setattr(session, "trade_count", reaper_wins)
+    capsys.readouterr()
+
+    with pytest.raises(ProtocolError) as ei:
+        run_service.submit_decision(
+            run_id, step_id, DecisionIn(idempotency_key="k-v1-race")
+        )
+
+    assert ei.value.code == "decision_deadline_exceeded"
+    assert session.step_index == 1
+    assert [e["decision_source"] for e in session.decision_log] == ["timeout_hold"]
+    assert capsys.readouterr().out.count("decision deadline") == 1
 
 
 def test_router_get_step_no_deadline_prints_nothing(router_run, capsys):
