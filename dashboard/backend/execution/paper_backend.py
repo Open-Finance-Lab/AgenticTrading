@@ -22,7 +22,8 @@ class PaperBackend(ExecutionBackend):
     def build_context(self) -> Dict[str, Any]:
         raise NotImplementedError(_NOT_BUILT)
 
-    def apply_decisions(self, actions: List[Dict[str, Any]]) -> Dict[str, Any]:
+    def apply_decisions(self, actions: List[Dict[str, Any]],
+                        expected_step: Optional[int] = None) -> Dict[str, Any]:
         raise NotImplementedError(_NOT_BUILT)
 
     def status(self) -> Dict[str, Any]:

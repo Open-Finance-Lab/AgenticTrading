@@ -316,3 +316,44 @@ def test_every_execution_failure_category_maps_into_the_allow_list():
 
     for category in ExecutionErrorCategory:
         assert analytics_error_category(category) in ALLOWED_ERROR_CATEGORIES, category
+
+
+def test_an_empty_reply_has_its_own_admitted_category():
+    # RESPONSE_INVALID maps to `internal_error`, which put our-bug counts on
+    # every run that recovered an empty reply with one rescue call.
+    from dashboard.backend.infrastructure.llm.execution.service import (
+        analytics_error_category_for,
+    )
+
+    empty = LLMExecutionError.for_empty_reply()
+    refused = LLMExecutionError(ExecutionErrorCategory.RESPONSE_INVALID)
+    assert analytics_error_category_for(empty) == "empty_response"
+    assert "empty_response" in ALLOWED_ERROR_CATEGORIES
+    assert analytics_error_category_for(refused) == "internal_error"
+
+
+def test_every_error_category_check_admits_exactly_the_allow_list():
+    """The Postgres CHECKs are literals, in two places, with no derived guard.
+
+    SQLite rebuilds its CHECK whenever it stops admitting the set
+    (``test_repository_contract``), but the Postgres DDL and the ALTER that
+    re-adds the constraint at every boot are hand-written. A category in the
+    set and missing from either passes every SQLite test, then is rejected on
+    prod, where ``emit_safe_error_event`` drops the event with a WARNING.
+    """
+    import re
+    from pathlib import Path
+
+    from dashboard.backend.domain.analytics import repository
+
+    package = Path(repository.__file__).parent
+    checks = []
+    for name in ("repository.py", "repository_postgres.py"):
+        source = (package / name).read_text(encoding="utf-8")
+        for listed in re.findall(r"error_category IN \(([^)]*)\)", source):
+            checks.append((name, set(re.findall(r"'([a-z_]+)'", listed))))
+    # SQLite DDL, Postgres DDL, Postgres ALTER; a new list fails here until
+    # it is counted, so it cannot slip in unchecked.
+    assert len(checks) == 3, [name for name, _ in checks]
+    for name, admitted in checks:
+        assert admitted == ALLOWED_ERROR_CATEGORIES, name

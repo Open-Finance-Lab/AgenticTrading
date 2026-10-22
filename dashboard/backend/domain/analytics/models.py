@@ -78,6 +78,10 @@ ALLOWED_ERROR_CATEGORIES = {
     # guard and the event was dropped with only a WARNING line.
     "account_restricted",
     "credits_insufficient",
+    # The provider answered with no text (``LLMExecutionError.empty_reply``).
+    # Filed as `internal_error` it put our-bug counts on runs that recovered
+    # with one rescue call.
+    "empty_response",
 }
 
 EVENT_GROUP_BY_NAME = {
