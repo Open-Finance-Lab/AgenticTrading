@@ -4,7 +4,7 @@ Live Trading with Robinhood
 Agents can be connected to a **real Robinhood brokerage account** and asked to
 propose and place orders against it. This is separate from :doc:`backtesting
 <getting_started>`, which runs on historical data: here the account, the
-positions, and the orders are real. Paper trading is coming in the future.
+positions, and the orders are real. The Lab has no paper-trading mode.
 
 .. warning::
 

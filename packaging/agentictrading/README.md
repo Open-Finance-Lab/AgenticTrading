@@ -154,7 +154,7 @@ agentictrading ticker AAPL,NVDA --api https://... # latest quotes
 | `equity(run_id)` | `GET /runs/{id}/equity` (needs the session that created the run) |
 | `compare(run_ids)` | `GET /compare` |
 | `leaderboard()` | `GET /api/v1/leaderboard` |
-| `paper_account()` / `paper_positions()` / `paper_trades()` | `GET /paper/...` (the API routes exist; paper trading in the dashboard is coming in the future) |
+| `paper_account()` / `paper_positions()` / `paper_trades()` | `GET /paper/...` (read-only data from the deployment's own Alpaca paper account; the dashboard has no paper-trading mode) |
 | `resolve()` | `GET /api/v1/agents/resolve` |
 | `backtest_schema()` | `GET /api/v1/backtest/schema` |
 | `start_backtest(...)` | `POST /api/v1/backtest/start` |

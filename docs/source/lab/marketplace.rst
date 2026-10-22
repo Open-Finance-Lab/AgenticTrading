@@ -166,7 +166,7 @@ Add one to My Agents
 
 Backtests start from **$1,000** unless you enter a different **Backtesting** amount
 (up to $3,000) under **Allocated Capital** on the added agent's **Configure** screen —
-see :ref:`allocated-capital`. Paper trading is coming in the future, so a new
+see :ref:`allocated-capital`. Paper trading is not available, so a new
 agent reserves nothing from your account portfolio.
 
 A **Research Agent** is added differently: it needs you to be signed in, and it
