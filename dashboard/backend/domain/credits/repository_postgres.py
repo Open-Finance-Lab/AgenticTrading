@@ -1649,6 +1649,11 @@ class PostgresCreditsStore:
                 return self._llm_reservation_result(cur, reservation)
 
     def release_run_llm_reservations(self, run_id: str, *, reason: str) -> list[dict[str, Any]]:
+        """Release the run's open holds; return **only** the rows this call released.
+
+        Not the run's reservation state: a settled or already-released hold is
+        never returned, so a repeat call returns ``[]`` (#525).
+        """
         run_id = _required_text(run_id, "run_id", max_length=128)
         reason = _required_text(reason, "reason", max_length=120)
         with self._get_connection() as conn:

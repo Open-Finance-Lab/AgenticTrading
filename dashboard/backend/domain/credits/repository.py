@@ -1926,49 +1926,55 @@ class CreditsStore:
         *,
         reason: str,
     ) -> list[dict[str, Any]]:
+        """Release the run's open holds; return **only** the rows this call released.
+
+        Not the run's reservation state: a settled or already-released hold is
+        never returned, so a repeat call returns ``[]``. The service emits one
+        ``credits_refunded`` per returned row, and a hold that closed earlier
+        emitted its own when it closed (#525).
+        """
         run_id = _required_text(run_id, "run_id", max_length=128)
         reason = _required_text(reason, "reason", max_length=120)
         with self._get_connection() as conn:
             self._begin(conn)
             now = _utcnow_iso()
-            # Return only the rows this call releases. The service emits a
-            # ``credits_refunded`` event per returned row, and a hold that was
-            # already settled or released emitted its own at call time (#525).
-            # BEGIN IMMEDIATE holds the write lock, so no row can leave 'open'
-            # between this read and the UPDATE below.
-            released_ids = [
+            open_ids = [
                 row["reservation_id"]
                 for row in conn.execute(
                     """
                     SELECT reservation_id FROM credit_llm_reservations
                     WHERE run_id = ? AND status = 'open'
+                    ORDER BY call_index, attempt_index, reservation_id
                     """,
                     (run_id,),
                 ).fetchall()
             ]
-            if not released_ids:
-                return []
-            conn.execute(
-                """
-                UPDATE credit_llm_reservations
-                SET status = 'released', failure_reason = ?, updated_at = ?
-                WHERE run_id = ? AND status = 'open'
-                """,
-                (reason, now, run_id),
-            )
-            placeholders = ", ".join("?" for _ in released_ids)
-            rows = conn.execute(
-                f"""
-                SELECT * FROM credit_llm_reservations
-                WHERE reservation_id IN ({placeholders})
-                ORDER BY call_index, attempt_index, reservation_id
-                """,
-                released_ids,
-            ).fetchall()
-            return [
-                self._llm_reservation_result_in_transaction(conn, row)
-                for row in rows
-            ]
+            released = []
+            # Keyed per hold, and a row is reported only when its own UPDATE
+            # changed it, so "released" and "returned" agree by construction
+            # rather than by the IMMEDIATE lock alone. One statement per hold
+            # also avoids an unbounded IN-list (999 variables before SQLite
+            # 3.32); RETURNING would need 3.35, which no SQLite store here
+            # requires. Finalize typically releases zero or one hold.
+            for reservation_id in open_ids:
+                changed = conn.execute(
+                    """
+                    UPDATE credit_llm_reservations
+                    SET status = 'released', failure_reason = ?, updated_at = ?
+                    WHERE reservation_id = ? AND status = 'open'
+                    """,
+                    (reason, now, reservation_id),
+                ).rowcount
+                if not changed:
+                    continue
+                row = conn.execute(
+                    "SELECT * FROM credit_llm_reservations WHERE reservation_id = ?",
+                    (reservation_id,),
+                ).fetchone()
+                released.append(
+                    self._llm_reservation_result_in_transaction(conn, row)
+                )
+            return released
 
     def sum_run_llm_spend(self, user_id: int, run_id: str) -> tuple[int, int]:
         """Settled LLM spend for one run: ``(micro_credits, distinct_calls)``.

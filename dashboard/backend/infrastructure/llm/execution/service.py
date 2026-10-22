@@ -343,6 +343,9 @@ class LLMExecutionService:
         A BYOK finalizer is intentionally a no-op so that lane never mutates
         the ATL Credits ledger. Worker callers should pass their known lane;
         retaining the in-process set keeps the one-argument form safe too.
+
+        Returns only the holds this call released (``[]`` on a repeat), not
+        the run's reservations; see ``CreditsService.release_run_llm_reservations``.
         """
 
         if billing_mode is BillingMode.BYOK:
