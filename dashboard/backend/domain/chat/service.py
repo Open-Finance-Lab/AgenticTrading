@@ -196,6 +196,22 @@ conversation_history: dict[
     list[dict[str, Any]],
 ] = defaultdict(list)
 
+# The latest six user-assistant exchanges for the MVP.
+_MAX_HISTORY_MESSAGES = 12
+
+
+def _trim_history(history: list[dict[str, Any]]) -> None:
+    """Keep the latest messages, starting on a user turn.
+
+    A bare tail cut drops the oldest question and leaves its answer first, so
+    the model reads a reply with no question (it says it lacks context). The
+    Messages API also documents that the first message must be ``user``.
+    """
+    if len(history) > _MAX_HISTORY_MESSAGES:
+        del history[:-_MAX_HISTORY_MESSAGES]
+    while history and history[0]["role"] != "user":
+        del history[0]
+
 
 SYSTEM_PROMPT = """
 You are the conversational assistant for Agentic Trading Lab.
@@ -271,9 +287,7 @@ async def chat_with_agent(
         }
     )
 
-    # Keep only the latest six user-assistant exchanges for the MVP.
-    if len(history) > 12:
-        del history[:-12]
+    _trim_history(history)
 
     prompt_chars = len(SYSTEM_PROMPT) + sum(
         len(str(m.get("content") or "")) for m in history
@@ -343,8 +357,7 @@ async def chat_with_agent(
         }
     )
 
-    if len(history) > 12:
-        del history[:-12]
+    _trim_history(history)
 
     # The note is for the reader, not the model: history keeps the bare reply.
     # Only an error moves a reply off the requested model silently; a stub

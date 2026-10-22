@@ -515,16 +515,67 @@ def test_synthesize_strategy_stub_error_generic_without_commonstack(monkeypatch)
     assert "CommonStack" not in str(exc_info.value)
 
 
+def _six_exchanges():
+    """A realistic full history: six alternating user/assistant exchanges."""
+    history = []
+    for i in range(1, 7):
+        history.append({"role": "user", "content": f"q{i}"})
+        history.append({"role": "assistant", "content": f"a{i}"})
+    return history
+
+
 def test_chat_history_trimmed_to_12(monkeypatch):
     monkeypatch.setenv("ANTHROPIC_MODEL", "claude-test-model")
     _install_client(monkeypatch, response=_text_response("ok"))
     key = ("u1", "a1")
-    conversation_history[key] = [
-        {"role": "assistant", "content": f"m{i}"} for i in range(12)
-    ]
+    conversation_history[key] = _six_exchanges()
     asyncio.run(chat_with_agent(user_id="u1", agent_id="a1", message="hello"))
     assert len(conversation_history[key]) == 12
     assert conversation_history[key][-1] == {"role": "assistant", "content": "ok"}
+
+
+def test_trim_drops_whole_exchanges_so_history_starts_with_user(monkeypatch):
+    """The 7th message used to drop only q1, sending a1 -- an answer whose
+    question was gone -- as the first message the model reads."""
+    monkeypatch.setenv("ANTHROPIC_MODEL", "claude-test-model")
+    fake = _install_client(monkeypatch, response=_text_response("a7"))
+    # ``calls`` keeps a reference to the live history list, which the service
+    # mutates after the call; snapshot what was actually sent.
+    sent = []
+    original_create = fake.create
+
+    async def snapshot_create(**kwargs):
+        sent.append([dict(m) for m in kwargs["messages"]])
+        return await original_create(**kwargs)
+
+    monkeypatch.setattr(fake, "create", snapshot_create)
+    key = ("u1", "a1")
+    conversation_history[key] = _six_exchanges()
+
+    asyncio.run(chat_with_agent(user_id="u1", agent_id="a1", message="q7"))
+
+    assert sent[-1][0] == {"role": "user", "content": "q2"}
+    assert {"role": "assistant", "content": "a1"} not in sent[-1]
+    history = conversation_history[key]
+    assert history[0]["role"] == "user"
+    assert history[-2:] == [
+        {"role": "user", "content": "q7"},
+        {"role": "assistant", "content": "a7"},
+    ]
+
+
+def test_failed_message_leaves_history_starting_with_user(monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_MODEL", "claude-test-model")
+    _install_client(monkeypatch, error=_provider_error())
+    key = ("u1", "a1")
+    conversation_history[key] = _six_exchanges()
+
+    with pytest.raises(Exception):
+        asyncio.run(chat_with_agent(user_id="u1", agent_id="a1", message="q7"))
+
+    history = conversation_history[key]
+    assert history[0]["role"] == "user"
+    assert history[-1] == {"role": "assistant", "content": "a6"}
 
 
 def test_sessions_are_keyed_by_user_and_agent(monkeypatch):
