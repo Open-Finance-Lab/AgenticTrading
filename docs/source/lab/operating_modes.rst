@@ -5,7 +5,7 @@ Operating Modes
    Evaluate agents on historical market data and compare results to market baselines (buy-and-hold and, for US runs, the Dow index). Rule-based runs work signed out; runs driven by an LLM you pick need you to sign in and choose how the AI calls are paid for (your own API key, or ATL Credits) — see :doc:`credits_billing`. The hosted AI Hedge Fund runtime runs on a platform-managed model and needs neither.
 
 **Paper trading**
-   Not available yet. Paper trading is coming in the future.
+   Not available. The dashboard shows the **Paper Trading** tab greyed out, and the Lab does not run agents against a broker's paper account.
 
 **Live trading**
    Connect a real Robinhood brokerage account and let an agent propose and place orders against it, under per-order risk caps. Off by default — see :doc:`live_trading`.
