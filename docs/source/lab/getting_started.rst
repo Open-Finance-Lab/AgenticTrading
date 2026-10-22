@@ -115,7 +115,7 @@ The **Allocated Capital** card on an agent's **Configure** screen has two fields
    different — "not configured" — and falls back as described above.
 
 **Paper Trading**
-   Greyed out and labelled *coming soon*. Paper trading is not available,
+   Greyed out and labelled *not available*: the Lab has no paper trading,
    so this field cannot be edited and new agents reserve nothing in it. Backtesting is the way to run an agent today.
 
 Start from a template
