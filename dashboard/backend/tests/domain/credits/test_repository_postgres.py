@@ -796,6 +796,45 @@ def test_postgres_provider_attempts_share_logical_call_after_release(pg_credits_
 
 
 @pg_only
+def test_postgres_release_run_returns_only_the_reservations_it_released(
+    pg_credits_store,
+):
+    """#525, the twin of the SQLite test: a hold already settled or released
+    must not come back, or the service re-emits its credits_refunded."""
+    store = pg_credits_store
+    _pending_order(store, cents=100)
+    _pay_order(store, cents=100)
+
+    def reserve(call_index):
+        return store.reserve_llm_credits(
+            reservation_id=f"pg-run525-{call_index}",
+            user_id=1,
+            run_id="pg-run-525",
+            call_index=call_index,
+            attempt_index=0,
+            provider_id="commonstack",
+            reserved_micro=10_000,
+            operation_key=f"pg-run525-op-{call_index}",
+            request_digest=str(call_index) * 64,
+        )
+
+    store.settle_llm_credits(
+        reserve(0)["reservation_id"],
+        actual_micro=4_000,
+        evidence={"billing_source": "platform_credits"},
+    )
+    store.release_llm_credits(reserve(1)["reservation_id"], reason="response_invalid")
+    reserve(3)
+    reserve(2)
+
+    released = store.release_run_llm_reservations("pg-run-525", reason="worker_failed")
+
+    assert [row["reservation_id"] for row in released] == ["pg-run525-2", "pg-run525-3"]
+    assert {row["status"] for row in released} == {"released"}
+    assert store.release_run_llm_reservations("pg-run-525", reason="worker_failed") == []
+
+
+@pg_only
 def test_postgres_runs_shared_four_operation_contract(pg_credits_store):
     assert_four_operations_are_signed_and_paired(pg_credits_store)
 

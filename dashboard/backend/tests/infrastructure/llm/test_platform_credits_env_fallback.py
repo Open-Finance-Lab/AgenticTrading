@@ -293,6 +293,51 @@ def test_platform_execution_emits_bucketed_resource_evidence(
     assert "sk-or-execution-test-abcd" not in repr(events)
 
 
+def test_finalize_emits_refunds_only_for_the_holds_it_releases(
+    tmp_path, monkeypatch
+):
+    """#525: a hold the run already settled or released emitted its own
+    credits_refunded when it closed; finalize re-emitting it cost one rejected
+    append and one warning per hold (94 on prod run agent_20260922_202119_fc7bd724)."""
+    adapter = FakeExecutionAdapter(LLMUsage(input_tokens=100, output_tokens=100))
+    service, credits_store = _execution_service(tmp_path, monkeypatch, adapter)
+    service.execute(_request("finalize-run"))
+    credits_store.reserve_llm_credits(
+        reservation_id="finalize-open",
+        user_id=USER_ID,
+        run_id="finalize-run",
+        call_index=1,
+        attempt_index=0,
+        provider_id="openrouter",
+        reserved_micro=50_000,
+        operation_key="finalize-open-op",
+        request_digest="f" * 64,
+    )
+    events = []
+    monkeypatch.setattr(
+        execution_service_module.analytics_instrumentation,
+        "emit_resource_event",
+        lambda **kwargs: events.append(kwargs),
+    )
+
+    released = service.finalize_run(
+        "finalize-run", billing_mode=BillingMode.PLATFORM_CREDITS
+    )
+
+    assert [result.reservation_id for result in released] == ["finalize-open"]
+    assert {(e["event_name"], e["source_record_id"]) for e in events} == {
+        ("credits_refunded", "finalize-open")
+    }
+    assert sum(e["properties"]["amount_micro"] for e in events) == 50_000
+
+    events.clear()
+    assert (
+        service.finalize_run("finalize-run", billing_mode=BillingMode.PLATFORM_CREDITS)
+        == []
+    )
+    assert events == []
+
+
 def test_platform_quota_error_retries_once_through_commonstack(
     tmp_path, monkeypatch
 ):

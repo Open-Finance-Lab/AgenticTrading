@@ -1649,12 +1649,19 @@ class PostgresCreditsStore:
                 return self._llm_reservation_result(cur, reservation)
 
     def release_run_llm_reservations(self, run_id: str, *, reason: str) -> list[dict[str, Any]]:
+        """Release the run's open holds; return **only** the rows this call released.
+
+        Not the run's reservation state: a settled or already-released hold is
+        never returned, so a repeat call returns ``[]`` (#525).
+        """
         run_id = _required_text(run_id, "run_id", max_length=128)
         reason = _required_text(reason, "reason", max_length=120)
         with self._get_connection() as conn:
             with conn.cursor() as cur:
-                cur.execute("UPDATE credit_llm_reservations SET status = 'released', failure_reason = %s, updated_at = %s WHERE run_id = %s AND status = 'open'", (reason, _utcnow_iso(), run_id))
-                cur.execute("SELECT * FROM credit_llm_reservations WHERE run_id = %s ORDER BY call_index, attempt_index, reservation_id", (run_id,))
+                # Only the rows this call releases: the service emits a
+                # credits_refunded per returned row, and an already-settled or
+                # already-released hold emitted its own at call time (#525).
+                cur.execute("WITH released AS (UPDATE credit_llm_reservations SET status = 'released', failure_reason = %s, updated_at = %s WHERE run_id = %s AND status = 'open' RETURNING *) SELECT * FROM released ORDER BY call_index, attempt_index, reservation_id", (reason, _utcnow_iso(), run_id))
                 return [self._llm_reservation_result(cur, row) for row in cur.fetchall()]
 
     def sum_run_llm_spend(self, user_id: int, run_id: str) -> tuple[int, int]:
