@@ -14,15 +14,28 @@ first time issues exactly the request it does today. That is what keeps this a
 cost change rather than a behaviour change.
 """
 
+import json
+import sqlite3
 from datetime import datetime
 
+import httpx
 import pytest
+from openai import _base_client as openai_base_client
 
 from dashboard.backend.domain.backtesting import portfolio_manager as pm
 from dashboard.backend.domain.backtesting.portfolio_manager import PortfolioManager
 from dashboard.backend.infrastructure.llm import pipeline_runner
-from dashboard.backend.infrastructure.llm.execution.adapters.base import (
-    AdapterResponse,
+from dashboard.backend.infrastructure.llm.backtest_harness import (
+    DEFAULT_MAX_OUTPUT_TOKENS as HARNESS_DEFAULT_MAX_OUTPUT_TOKENS,
+)
+from dashboard.backend.infrastructure.llm.execution import (
+    service as execution_service_module,
+)
+from dashboard.backend.infrastructure.llm.execution.adapters import (
+    base as adapters_base,
+)
+from dashboard.backend.infrastructure.llm.execution.adapters.openai import (
+    OpenAICompatibleAdapter,
 )
 from dashboard.backend.infrastructure.llm.execution.client import (
     AnthropicCompatibleExecutionClient,
@@ -30,22 +43,17 @@ from dashboard.backend.infrastructure.llm.execution.client import (
 from dashboard.backend.infrastructure.llm.execution.errors import (
     ExecutionErrorCategory,
     LLMExecutionError,
+    is_empty_reply,
 )
 from dashboard.backend.infrastructure.llm.execution.handoff import ExecutionHandoff
-from dashboard.backend.infrastructure.llm.execution.models import (
-    BillingMode,
-    LLMUsage,
-    PricingSnapshot,
-)
+from dashboard.backend.infrastructure.llm.execution.models import BillingMode
 from dashboard.backend.infrastructure.llm.pipeline_runner import (
     RECOVERY_MAX_OUTPUT_TOKENS,
     escalate_ceiling_on_retry,
 )
-from dashboard.backend.tests.infrastructure.llm.test_platform_credits_env_fallback import (
-    MODEL_ID,
+from dashboard.backend.tests._execution_fixtures import (
     USER_ID,
-    ScriptedExecutionAdapter,
-    _execution_service,
+    build_execution_service,
 )
 
 DECISION_JSON = '{"actions": []}'
@@ -116,11 +124,15 @@ def spy(monkeypatch):
     return calls, plan
 
 
-def _run(manager, monkeypatch, on):
+def _set_flag(monkeypatch, on):
     if on:
         monkeypatch.setenv("LLM_ESCALATE_CEILING_ON_RETRY", "1")
     else:
         monkeypatch.delenv("LLM_ESCALATE_CEILING_ON_RETRY", raising=False)
+
+
+def _run(manager, monkeypatch, on):
+    _set_flag(monkeypatch, on)
     return manager.make_trading_decision_with_llm(
         _state(), llm_client=object(), model="m")
 
@@ -304,35 +316,66 @@ def test_billing_counts_every_attempt_either_way(spy, monkeypatch):
 # ------------------------------ execution-layer empty reply (#600) ----------
 # The stand-in above raises the "No text content" AttributeError, which only
 # the legacy client produces. The execution layer rejects an empty reply
-# itself, before any message exists, as LLMExecutionError(RESPONSE_INVALID).
-# These pin that the same retries and rescue call cover it.
+# itself, before any message exists, as RESPONSE_INVALID marked
+# ``empty_reply``, and releases its reservation at zero (#556) -- so a
+# same-ceiling retry would be a generation the platform pays for and never
+# bills. It goes straight to the rescue call, as pipeline_runner's steps do,
+# whatever the flag says; the rest of RESPONSE_INVALID is never retried.
 
 
-def _rejected():
+def _empty_reply():
+    return LLMExecutionError.for_empty_reply()
+
+
+def _refused_request():
+    """RESPONSE_INVALID with no marker: a contract break, not an empty reply."""
     return LLMExecutionError(ExecutionErrorCategory.RESPONSE_INVALID)
 
 
-def test_an_execution_layer_empty_reply_is_retried(spy, monkeypatch, capsys):
-    calls, plan = spy
-    plan["texts"] = [_rejected(), DECISION_JSON]
-    _run(_manager(), monkeypatch, on=False)
-    assert calls == [None, None]
-    assert "LLM decision error" not in capsys.readouterr().out
+class _HostedClient:
+    """The one attribute of the execution client this loop reads."""
+
+    fail_closed = True
 
 
-@pytest.mark.parametrize(
-    ("on", "expected"),
-    [
-        (False, [None, None, None, None, RECOVERY_MAX_OUTPUT_TOKENS]),
-        (True, [None, RECOVERY_MAX_OUTPUT_TOKENS]),
-    ],
-)
-def test_execution_layer_empty_replies_reach_the_rescue_call(
-        spy, monkeypatch, on, expected):
+@pytest.mark.parametrize("on", [False, True])
+def test_an_execution_layer_empty_reply_goes_straight_to_the_rescue(
+        spy, monkeypatch, capsys, on):
     calls, plan = spy
-    plan["texts"] = [_rejected()] * (len(expected) - 1) + [DECISION_JSON]
+    plan["texts"] = [_empty_reply(), DECISION_JSON]
     _run(_manager(), monkeypatch, on=on)
-    assert calls == expected
+    out = capsys.readouterr().out
+    assert calls == [None, RECOVERY_MAX_OUTPUT_TOKENS]
+    assert "going straight to the rescue call" in out
+    assert "LLM decision error" not in out
+
+
+@pytest.mark.parametrize("on", [False, True])
+def test_an_empty_rescue_ends_a_hosted_run(spy, monkeypatch, on):
+    """The terminal branch: the rescue came back empty too. A hosted run
+    raises the marked error rather than continuing with no reply, and stops
+    after the one rescue -- a third request would be the same request."""
+    calls, plan = spy
+    plan["texts"] = [_empty_reply()] * 5
+    _set_flag(monkeypatch, on)
+    with pytest.raises(LLMExecutionError) as raised:
+        _manager().make_trading_decision_with_llm(
+            _state(), llm_client=_HostedClient(), model="m", strict_llm=True)
+    assert is_empty_reply(raised.value)
+    assert calls == [None, RECOVERY_MAX_OUTPUT_TOKENS]
+
+
+def test_a_contract_break_is_not_retried(spy, monkeypatch, capsys):
+    """A request the client refuses before sending, or a settled result that
+    fails validation, fails the same way every time -- and the second has
+    already been billed. Neither is retried, nor logged as an empty reply."""
+    calls, plan = spy
+    plan["texts"] = [_refused_request()]
+    _run(_manager(), monkeypatch, on=False)
+    out = capsys.readouterr().out
+    assert calls == [None]
+    assert "Empty model response" not in out
+    assert "LLM decision error" in out
 
 
 def test_other_execution_errors_are_not_retried(spy, monkeypatch, capsys):
@@ -346,7 +389,7 @@ def test_other_execution_errors_are_not_retried(spy, monkeypatch, capsys):
 def test_an_empty_truncation_retry_keeps_the_first_reply(
         spy, monkeypatch, capsys):
     calls, plan = spy
-    plan["texts"] = ["not json at all", _rejected()]
+    plan["texts"] = ["not json at all", _empty_reply()]
     _run(_manager(), monkeypatch, on=False)
     out = capsys.readouterr().out
     assert calls == [None, RECOVERY_MAX_OUTPUT_TOKENS]
@@ -354,33 +397,85 @@ def test_an_empty_truncation_retry_keeps_the_first_reply(
     assert "LLM decision error" not in out
 
 
-def test_a_real_execution_client_empty_reply_is_retried(tmp_path, monkeypatch):
-    """#600 end to end, as prod runs it: the real execution service rejects
-    an empty adapter reply, the real client raises it before any message
-    exists, and a strict, fail-closed run must still retry instead of ending."""
+def test_a_refused_truncation_retry_is_raised(spy, monkeypatch, capsys):
+    calls, plan = spy
+    plan["texts"] = ["not json at all", _refused_request()]
+    _run(_manager(), monkeypatch, on=False)
+    out = capsys.readouterr().out
+    assert calls == [None, RECOVERY_MAX_OUTPUT_TOKENS]
+    assert "keeping the first attempt" not in out
+    assert "LLM decision error" in out
+
+
+DEEPSEEK = "deepseek/deepseek-v4-pro"
+
+
+def _deepseek_completion(content, *, completion_tokens, finish="stop"):
+    """A chat completion as CommonStack answers it, ``reasoning_content`` and all."""
+    return {
+        "id": "chatcmpl-600",
+        "object": "chat.completion",
+        "created": 0,
+        "model": DEEPSEEK,
+        "choices": [
+            {
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": content,
+                    "reasoning_content": "RSI is neutral; weighing MACD against",
+                },
+                "finish_reason": finish,
+            }
+        ],
+        "usage": {
+            "prompt_tokens": 40,
+            "completion_tokens": completion_tokens,
+            "total_tokens": 40 + completion_tokens,
+        },
+    }
+
+
+def test_a_real_empty_reply_is_rescued_and_only_the_rescue_is_billed(
+        tmp_path, monkeypatch):
+    """#600 end to end, on the lane prod failed on: DeepSeek V4 Pro through
+    CommonStack on ATL Credits, in a strict, fail-closed run. Everything is
+    real but the socket -- the OpenAI SDK, the CommonStack adapter that
+    rejects the empty answer, the service that releases its reservation, the
+    client and this loop. The rescue call is the one settled, and the model,
+    not a hold, drove the step."""
     monkeypatch.delenv("LLM_ESCALATE_CEILING_ON_RETRY", raising=False)
-    adapter = ScriptedExecutionAdapter([
-        AdapterResponse(
-            text="",
-            model_id=MODEL_ID,
-            usage=LLMUsage(input_tokens=40, output_tokens=2000),
-        ),
-        AdapterResponse(
-            text=DECISION_JSON,
-            model_id=MODEL_ID,
-            usage=LLMUsage(input_tokens=40, output_tokens=20),
-            finish_reason="stop",
-        ),
-    ])
-    service, _ = _execution_service(tmp_path, monkeypatch, adapter)
-    # The harness prices at $1000/Mtok for its ledger arithmetic; a real
-    # trading prompt's reservation would exceed its seeded balance at that rate.
-    service.pricing_snapshot_factory = lambda model_id, provider_id: PricingSnapshot(
-        provider_id=provider_id,
-        model_id=model_id,
-        input_usd_per_million_tokens=1.0,
-        output_usd_per_million_tokens=1.0,
-        source_version="test-pricing",
+    monkeypatch.delenv("BROKER_CREDENTIAL_VERIFICATION_PROXY", raising=False)
+    monkeypatch.setenv("COMMONSTACK_API_KEY", "cs-fake-empty-reply-abcd")
+    answers = [
+        _deepseek_completion(None, completion_tokens=2000, finish="length"),
+        _deepseek_completion(DECISION_JSON, completion_tokens=20),
+    ]
+    sent = []
+
+    def commonstack(request: httpx.Request) -> httpx.Response:
+        sent.append(json.loads(request.content))
+        return httpx.Response(200, json=answers.pop(0), request=request)
+
+    monkeypatch.setattr(
+        adapters_base, "build_pinned_transport",
+        lambda *_args, **_kwargs: httpx.MockTransport(commonstack),
+    )
+    monkeypatch.setattr(openai_base_client.time, "sleep", lambda _seconds: None)
+    errors = []
+    monkeypatch.setattr(
+        execution_service_module.analytics_instrumentation,
+        "emit_safe_error_event",
+        lambda **kwargs: errors.append(kwargs),
+    )
+    service, credits_store = build_execution_service(
+        tmp_path,
+        monkeypatch,
+        None,
+        adapters={"commonstack": OpenAICompatibleAdapter()},
+        # A real trading prompt's reservation at the harness's default
+        # $1000/Mtok would exceed the seeded balance.
+        usd_per_million_tokens=1.0,
     )
     client = AnthropicCompatibleExecutionClient(
         execution_service=service,
@@ -388,17 +483,39 @@ def test_a_real_execution_client_empty_reply_is_retried(tmp_path, monkeypatch):
             user_id=USER_ID,
             run_id="run-600",
             billing_mode=BillingMode.PLATFORM_CREDITS,
-            provider_id="openrouter",
-            model_id=MODEL_ID,
+            provider_id="commonstack",
+            provider_ids=("commonstack",),
+            model_id=DEEPSEEK,
             prompt_digest="a" * 64,
             nonce="n" * 16,
             issued_at=1,
             expires_at=2,
         ),
     )
+    manager = _manager()
 
-    decision = _manager().make_trading_decision_with_llm(
-        _state(), llm_client=client, model=MODEL_ID, strict_llm=True)
+    decision = manager.make_trading_decision_with_llm(
+        _state(), llm_client=client, model=DEEPSEEK, strict_llm=True)
 
-    assert len(adapter.calls) == 2
     assert decision == {"actions": []}
+    assert manager.llm_decisions == 1, "a hold would return the same dict"
+    assert manager.llm_calls == 1, "only the reply that came back is a call"
+    assert [body["max_tokens"] for body in sent] == [
+        HARNESS_DEFAULT_MAX_OUTPUT_TOKENS,
+        RECOVERY_MAX_OUTPUT_TOKENS,
+    ]
+    # The catalog's pin for this lane, as prod sends it: thinking off.
+    assert [body.get("thinking") for body in sent] == [{"type": "disabled"}] * 2
+    with sqlite3.connect(credits_store.db_path) as conn:
+        rows = conn.execute(
+            "SELECT call_index, status, settled_micro "
+            "FROM credit_llm_reservations WHERE run_id = ? ORDER BY call_index",
+            ("run-600",),
+        ).fetchall()
+    assert [(index, status) for index, status, _ in rows] == [
+        (0, "released"),
+        (1, "settled"),
+    ]
+    assert rows[0][2] == 0, "the empty reply is never debited"
+    assert rows[1][2] > 0
+    assert [error["error_category"] for error in errors] == ["empty_response"]

@@ -70,7 +70,7 @@ CREATE TABLE IF NOT EXISTS analytics_events (
             'provider_unavailable', 'provider_quota_exhausted',
             'credits_unavailable',
             'model_not_allowed', 'internal_error', 'run_timeout',
-            'account_restricted', 'credits_insufficient'
+            'account_restricted', 'credits_insufficient', 'empty_response'
         )
     ),
     country_code TEXT CHECK (country_code IS NULL OR length(country_code) = 2),

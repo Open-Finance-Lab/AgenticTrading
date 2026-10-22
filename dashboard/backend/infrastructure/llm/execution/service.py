@@ -33,6 +33,7 @@ from dashboard.backend.infrastructure.llm.execution.errors import (
     ExecutionErrorCategory,
     LLMExecutionError,
     RetryHint,
+    is_empty_reply,
 )
 from dashboard.backend.infrastructure.llm.execution.log_safe import log_safe_token
 from dashboard.backend.infrastructure.llm.execution.models import (
@@ -233,6 +234,18 @@ def analytics_error_category(category: ExecutionErrorCategory) -> str:
     }.get(category, "internal_error")
 
 
+def analytics_error_category_for(error: LLMExecutionError) -> str:
+    """``analytics_error_category`` for one error, telling an empty reply apart.
+
+    An empty reply is the provider's, and the caller usually recovers it with
+    one rescue call; filed under RESPONSE_INVALID's ``internal_error`` it put
+    our-bug counts on healthy runs and hid the real ones.
+    """
+    if is_empty_reply(error):
+        return "empty_response"
+    return analytics_error_category(error.category)
+
+
 class LLMExecutionService:
     """Resolve one credential lane, run one model call, and settle its cost."""
 
@@ -279,7 +292,7 @@ class LLMExecutionService:
                 user_id=request.user_id,
                 source_record_type="run",
                 source_record_id=request.run_id,
-                error_category=self._analytics_error_category(exc.category),
+                error_category=analytics_error_category_for(exc),
                 correlation_id=request.run_id,
                 version=f"{request.call_index}:{exc.category.value}",
             )
@@ -294,12 +307,6 @@ class LLMExecutionService:
                 version=f"{request.call_index}:internal_error",
             )
             raise
-
-    @staticmethod
-    def _analytics_error_category(
-        category: ExecutionErrorCategory,
-    ) -> str:
-        return analytics_error_category(category)
 
     @staticmethod
     def _emit_model_usage(
@@ -667,8 +674,14 @@ class LLMExecutionService:
             error = LLMExecutionError(ExecutionErrorCategory.PROVIDER_UNAVAILABLE)
             error.provider_elapsed_seconds = float(self._clock() - started)
             raise error from exc
-        if not isinstance(response, AdapterResponse) or not response.text.strip():
+        if not isinstance(response, AdapterResponse):
             raise LLMExecutionError(ExecutionErrorCategory.RESPONSE_INVALID)
+        if not response.text.strip():
+            # The adapters reject an empty reply themselves, marked the same
+            # way; this is the backstop for one that hands it back instead.
+            # Either way it is before settlement, so the reservation is
+            # released and a caller may ask again.
+            raise LLMExecutionError.for_empty_reply()
         if not isinstance(response.model_id, str) or not response.model_id.strip():
             raise LLMExecutionError(ExecutionErrorCategory.RESPONSE_INVALID)
         return response

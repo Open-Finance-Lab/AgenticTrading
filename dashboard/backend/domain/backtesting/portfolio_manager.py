@@ -58,8 +58,8 @@ from dashboard.backend.infrastructure.llm.backtest_harness import (
     request_trading_decision as _request_trading_decision,
 )
 from dashboard.backend.infrastructure.llm.execution.errors import (
-    ExecutionErrorCategory,
     LLMExecutionError,
+    is_empty_reply,
     is_transient_provider_failure,
 )
 from dashboard.backend.infrastructure.llm.pipeline_runner import (
@@ -130,6 +130,15 @@ def _insert_before(
             out[key] = value
         out[existing] = existing_value
     return out
+
+
+def _is_legacy_empty_reply(error: BaseException) -> bool:
+    """The legacy client's empty reply: a response with no text block.
+
+    Unlike the execution layer's (``is_empty_reply``), it arrives as a response
+    whose usage was already recorded, so its retries are billed calls.
+    """
+    return isinstance(error, AttributeError) and "No text content" in str(error)
 
 
 class PortfolioManager:
@@ -685,6 +694,8 @@ class PortfolioManager:
                 # not the kind of failure a same-ceiling retry fixes. The first
                 # request and the rescue call are byte-identical either way;
                 # only the count of same-ceiling retries between them moves.
+                # The count governs the legacy client's empty reply only; the
+                # execution layer's skips it (see the retry branch below).
                 no_text_retries = 1 if escalate_ceiling_on_retry() else 4
                 # One recovery budget (``RECOVERY_MAX_OUTPUT_TOKENS``) per
                 # step, spent by whichever unusable reply claims it first: the
@@ -693,8 +704,26 @@ class PortfolioManager:
                 # different left to ask for.
                 recovery_spent = False
                 output_delta = 0
-                for attempt in range(no_text_retries + 1):
-                    if attempt == no_text_retries:
+
+                def request_decision(*, recovery: bool):
+                    # Only a recovery attempt passes a ceiling, so every other
+                    # request keeps the call shape it had before retries.
+                    ceiling = (
+                        {"max_tokens": RECOVERY_MAX_OUTPUT_TOKENS} if recovery else {}
+                    )
+                    return _request_trading_decision(
+                        llm_client,
+                        prompt=prompt,
+                        model=model,
+                        temperature=temperature,
+                        market_context=market_context,
+                        **ceiling,
+                    )
+
+                attempt = 0
+                while True:
+                    rescue = attempt >= no_text_retries
+                    if rescue:
                         # Final rescue: preserve the provider's reasoning mode,
                         # but give the model more room for reasoning plus JSON.
                         print(
@@ -703,53 +732,34 @@ class PortfolioManager:
                         )
                         recovery_spent = True
                     try:
-                        if attempt == no_text_retries:
-                            response = _request_trading_decision(
-                                llm_client,
-                                prompt=prompt,
-                                model=model,
-                                max_tokens=RECOVERY_MAX_OUTPUT_TOKENS,
-                                temperature=temperature,
-                                market_context=market_context,
-                            )
-                        else:
-                            response = _request_trading_decision(
-                                llm_client,
-                                prompt=prompt,
-                                model=model,
-                                temperature=temperature,
-                                market_context=market_context,
-                            )
-                    except LLMExecutionError as exec_err:
-                        # The execution layer rejects an empty reply before any
-                        # message reaches us, as RESPONSE_INVALID rather than
-                        # the "No text content" AttributeError below. It is the
-                        # same outcome and gets the same retries and rescue
-                        # call, as in pipeline_runner (#600). Every other
-                        # category (billing, credentials, quota) stays fatal.
-                        if exec_err.category is not ExecutionErrorCategory.RESPONSE_INVALID:
-                            raise
-                        if attempt < no_text_retries:
-                            print(
-                                "   ⚠️  Empty model response; "
-                                f"retry {attempt + 1}/{no_text_retries}"
-                            )
-                            continue
-                        raise
-                    output_delta = self._record_llm_usage(response)
-                    try:
+                        response = request_decision(recovery=rescue)
+                        output_delta = self._record_llm_usage(response)
                         llm_response = _extract_response_text(response)
                         break
-                    except AttributeError as extract_err:
-                        if "No text content" not in str(extract_err):
+                    except (LLMExecutionError, AttributeError) as unusable:
+                        legacy_empty = _is_legacy_empty_reply(unusable)
+                        if rescue or not (legacy_empty or is_empty_reply(unusable)):
                             raise
-                        if attempt < no_text_retries:
+                        if legacy_empty:
                             print(
-                                f"   ⚠️  {extract_err}; "
+                                f"   ⚠️  {unusable}; "
                                 f"retry {attempt + 1}/{no_text_retries}"
                             )
-                            continue
-                        raise
+                            attempt += 1
+                        else:
+                            # The execution layer rejects an empty reply itself
+                            # (#600) and releases its reservation at zero
+                            # (#556), so a same-ceiling retry is a generation
+                            # the platform pays for and never bills. It goes
+                            # straight to the rescue, as pipeline_runner's
+                            # steps do. Any other execution error -- a request
+                            # or result contract break, billing, credentials,
+                            # quota -- was raised above, unretried.
+                            print(
+                                "   ⚠️  Empty model response; going straight "
+                                "to the rescue call"
+                            )
+                            attempt = no_text_retries
 
                 # ================================================================
                 # STEP 3: Parse and validate LLM response
@@ -771,18 +781,11 @@ class PortfolioManager:
                             f"max_tokens={RECOVERY_MAX_OUTPUT_TOKENS}"
                         )
                         try:
-                            retry_response = _request_trading_decision(
-                                llm_client,
-                                prompt=prompt,
-                                model=model,
-                                max_tokens=RECOVERY_MAX_OUTPUT_TOKENS,
-                                temperature=temperature,
-                                market_context=market_context,
-                            )
+                            retry_response = request_decision(recovery=True)
                         except LLMExecutionError as retry_err:
                             # An empty second reply is the same outcome as the
                             # truncated first one: keep the first attempt.
-                            if retry_err.category is not ExecutionErrorCategory.RESPONSE_INVALID:
+                            if not is_empty_reply(retry_err):
                                 raise
                             retry_response = None
                         if retry_response is not None:
