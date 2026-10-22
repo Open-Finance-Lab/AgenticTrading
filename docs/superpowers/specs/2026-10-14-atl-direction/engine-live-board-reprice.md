@@ -79,9 +79,9 @@ The Hyperliquid increment itself is unreconciled: +23.5 days red-team (ATL write
 
 ### Stage 0: start now, about 24 likely days, needed under every option
 
-- **The probe's 15.35 days:** D19 calendar 1.6, fee tables 1.0, P19 Sharpe ≈5.5, corporate actions 4.0, fractional and fee persistence 2.25, INT-2 stamp 1.0.
+- **The probe's 15.35 days:** D19 calendar 1.6 (mostly shipped in #638, 2026-10-15), fee tables 1.0, P19 Sharpe ≈5.5, corporate actions 4.0, fractional and fee persistence 2.25, INT-2 stamp 1.0.
 - **Leaderboard decision tape, 2.5. Do this first.** Tapes cannot be backfilled, and today no leaderboard bar is recorded. Audit, nof1-style per-model trade logs ("ModelChat") and differentials all depend on it.
-- **Early closes on the live axis, about 1 (judgement). Deadline 2026-11-27.** `live.py:56` hardcodes seven hourly nodes. Write the half-day test first. Whether the effect is mis-stamped bars or empty nodes is unverified.
+- **Early closes on the live axis, about 1 (judgement). Deadline 2026-11-27.** *Shipped in #638 (2026-10-15).* `live.py:56` hardcodes seven hourly nodes. Write the half-day test first. Whether the effect is mis-stamped bars or empty nodes is unverified.
 - **Carry trade memory in the snapshot, about 1 (judgement).** This is a live defect today. `restore_state` never restores `self.trades`, and `recent_trades` is built from it (`portfolio_manager.py:445`). So every nightly increment starts with an empty 24-hour memory.
 - **D12 disclaimer, 0.4.** The prompt advertises stop and take-profit orders that are ignored, on a public board.
 - **Leaderboard Sharpe on the P19 method, 1.5.**

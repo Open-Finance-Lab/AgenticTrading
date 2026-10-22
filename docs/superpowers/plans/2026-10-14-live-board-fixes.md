@@ -100,6 +100,8 @@ These are the plan author's decisions from the 2026-10-14 mapping. Each per-PR f
 
    The close-stamped path stays untouched; D19 belongs to the engine rewrite. The conformance suite must show no XPASS.
 
+   *As shipped (#638, 2026-10-15):* review widened this. `sessions.day_session_windows` ends an early close at 13:00 for aggregation, the open-stamped filter and `is_session_close` alike, so most of D19 shipped with P1 and conformance T05 now fails as D2/D16 instead of D19/D8. Only the close-stamped `time_in_session` still admits stamps to 16:00; it reaches close-stamped frames only (`vnpy_simulation`, test doubles). `REGULAR_CLOSE_TIME` was dropped as unused.
+
    *Deviation, recorded in P1:* the close **times** (`EARLY_CLOSE_TIME`, `REGULAR_CLOSE_TIME`, `session_close_time`) live in `sessions.py`, and only the **dates** live in the calendar. The reason is that `test_no_module_restates_the_session_bounds` forbids `time(13, 0)` / `time(16, 0)` anywhere else.
 
    *Amended 2026-10-15 after a prior-art scan (P1's last section).* Three changes:
@@ -169,7 +171,7 @@ These are the five inputs the spec implies, no task originally exercised, and th
 - **The methodology page, and the subtitle link to it** (spec §4) belong to their own plan. The subtitle stays plain text here.
 - **Nemotron's Season 1 source.** This is an owner decision (below).
 - **#587** (a replay rewrites the month-to-date curve at every checkpoint) is perf only. P4's `live_from` makes the newcomers start on the 1st, so no replay happens.
-- **The engine rewrite and everything it owns:** D19 close-stamped sessions, stop-loss/take-profit execution, fees and costs, Season 1.
+- **The engine rewrite and everything it owns:** the close-stamped `time_in_session` remainder of D19 (#638 shipped the rest), stop-loss/take-profit execution, fees and costs, Season 1.
 - **User-facing docs outside P7 PR B:** see the follow-up list in the PR that adds this plan.
 - **A night lost to a total market-data failure reads "an internal error"** on the board. It reaches the attempt classifier as `RuntimeError('No market data returned…')`, and naming it properly needs a typed error raised in `live.py`. That is a follow-up issue, not part of P3.
 
