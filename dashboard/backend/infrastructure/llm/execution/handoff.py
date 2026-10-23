@@ -193,7 +193,15 @@ def consume_execution_handoff(
 ) -> ExecutionHandoff:
     """Verify and claim exactly one short-lived worker handoff."""
 
-    if not isinstance(payload, str) or not payload or len(payload) > _MAX_HANDOFF_BYTES:
+    # A real token is base64 and ASCII. Refusing anything else here keeps a
+    # stray non-ASCII character a handoff error rather than a UnicodeEncodeError
+    # from the HMAC below (#659), and makes the length check a byte count.
+    if (
+        not isinstance(payload, str)
+        or not payload
+        or not payload.isascii()
+        or len(payload) > _MAX_HANDOFF_BYTES
+    ):
         raise ExecutionHandoffError()
     try:
         encoded_payload, encoded_signature = payload.split(".", 1)

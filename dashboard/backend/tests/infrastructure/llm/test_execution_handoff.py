@@ -1,9 +1,18 @@
 import pytest
 
 from dashboard.backend.infrastructure.llm.execution.handoff import (
+    ExecutionHandoffError,
     consume_execution_handoff,
     create_execution_handoff,
 )
+
+
+@pytest.mark.parametrize("token", ["é.abc", "abc.é"], ids=["payload", "signature"])
+def test_a_non_ascii_token_is_a_handoff_error(token):
+    # The worker catches only ExecutionHandoffError; a raw UnicodeEncodeError
+    # from the payload half reached it as a traceback (#659).
+    with pytest.raises(ExecutionHandoffError):
+        consume_execution_handoff(token, now=1_001)
 
 
 def test_handoff_round_trips_ordered_provider_candidates():
