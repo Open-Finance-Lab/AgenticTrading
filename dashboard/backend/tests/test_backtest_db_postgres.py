@@ -202,6 +202,7 @@ def pg_backtest_db():
             cur.execute("DELETE FROM trades")
             cur.execute("DELETE FROM backtest_decisions")
             cur.execute("DELETE FROM run_manifest")
+            cur.execute("DELETE FROM run_live_progress")
             cur.execute("DELETE FROM agent_runs")
     yield store
 
@@ -882,3 +883,136 @@ def test_update_run_baselines_coalesce_preserves_unset_field_postgres(pg_backtes
     run = pg_backtest_db.get_run("run-base")
     assert run["baseline_djia_run_id"] == "djia-1"  # untouched by the second call
     assert run["baseline_buyhold_run_id"] == "bh-1"
+
+
+# ---------------------------------------------- live progress (#601) --------
+# The pool hands out dict rows (db_pool.py: row_factory=dict_row), so reading
+# a row by position (``r[0]``) raised KeyError(0) and the startup reclaimer
+# never recovered an interrupted run on Postgres. CI and local runs are SQLite,
+# so nothing caught it.
+
+
+def _live_snapshot(run_id="run_live", step=14, total=49, equity=10500.0):
+    """Same shape as test_backtest_partial_results.py's ``_snapshot``."""
+    return {
+        "run_id": run_id,
+        "session_id": "sess-1",
+        "agent_name": "TestAgent",
+        "payload": {
+            "run_id": run_id,
+            "step": step,
+            "total_steps": total,
+            "equity_curve": [
+                {"timestamp": "2026-08-01T14:00:00", "equity": equity - 500,
+                 "cash": 9000.0, "positions_value": 1000.0},
+                {"timestamp": "2026-08-01T15:00:00", "equity": equity,
+                 "cash": 9200.0, "positions_value": 1300.0},
+            ],
+            "trades": [
+                {"symbol": "AAPL", "side": "buy", "qty": 10, "price": 100.0,
+                 "timestamp": "2026-08-01T15:00:00"},
+            ],
+            "run_metadata": {
+                "start_date": "2026-08-01", "end_date": "2026-08-31",
+                "mode": "llm", "llm_model": "gpt-test",
+            },
+        },
+    }
+
+
+class _DictRowCursor:
+    """Answers every query with dict rows, as prod's dict_row pool does."""
+
+    def __init__(self, rows):
+        self._rows = rows
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def execute(self, *args, **kwargs):
+        pass
+
+    def fetchall(self):
+        return list(self._rows)
+
+    def fetchone(self):
+        return self._rows[0] if self._rows else None
+
+
+class _DictRowConnection:
+    def __init__(self, rows):
+        self._rows = rows
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def cursor(self):
+        return _DictRowCursor(self._rows)
+
+
+def test_live_progress_readers_accept_dict_rows():
+    """Runs without Postgres: reproduces prod's row shape directly."""
+    import json
+
+    import dashboard.backend.database_postgres as database_pg_module
+
+    snap = _live_snapshot()
+    row = {
+        "run_id": snap["run_id"],
+        "session_id": snap["session_id"],
+        "agent_name": snap["agent_name"],
+        "payload": json.dumps(snap["payload"]),
+    }
+    store = object.__new__(database_pg_module.PostgresBacktestDatabase)
+    store._get_connection = lambda: _DictRowConnection([row])
+
+    assert store.list_live_progress() == [snap]
+    assert store.get_live_progress(snap["run_id"]) == snap["payload"]
+
+
+@pg_only
+def test_live_progress_round_trips_postgres(pg_backtest_db):
+    snap = _live_snapshot()
+    pg_backtest_db.upsert_live_progress(
+        snap["run_id"], snap["session_id"], snap["agent_name"], snap["payload"]
+    )
+
+    assert pg_backtest_db.list_live_progress() == [snap]
+    assert pg_backtest_db.get_live_progress(snap["run_id"]) == snap["payload"]
+
+
+@pg_only
+def test_reclaim_turns_snapshot_into_interrupted_run_postgres(
+    pg_backtest_db, monkeypatch
+):
+    """The startup reclaimer end to end on the Postgres twin (#601)."""
+    import json
+
+    from dashboard.backend.domain.backtesting.partial_results import (
+        reclaim_interrupted_backtests,
+    )
+
+    snap = _live_snapshot()
+    pg_backtest_db.upsert_live_progress(
+        snap["run_id"], snap["session_id"], snap["agent_name"], snap["payload"]
+    )
+    monkeypatch.setattr("dashboard.backend.database.db", pg_backtest_db, raising=False)
+
+    counts = reclaim_interrupted_backtests()
+
+    assert counts["reclaimed"] == 1
+    run = pg_backtest_db.get_run(snap["run_id"])
+    assert run is not None
+    meta = run["metadata"]
+    meta = json.loads(meta) if isinstance(meta, str) else meta
+    assert meta["interrupted"] is True
+    assert meta["interrupted_step"] == 14
+    assert meta["interrupted_total_steps"] == 49
+    assert len(pg_backtest_db.get_equity_curve(snap["run_id"])) == 2
+    assert pg_backtest_db.get_live_progress(snap["run_id"]) is None

@@ -520,7 +520,9 @@ class PostgresBacktestDatabase:
         if not row:
             return None
         try:
-            return json.loads(row[0])
+            # By name, not position: the pool's dict_row factory makes
+            # ``row[0]`` a KeyError (#601).
+            return json.loads(row["payload"])
         except (TypeError, ValueError):
             return None
 
@@ -539,10 +541,10 @@ class PostgresBacktestDatabase:
         for r in rows:
             try:
                 out.append({
-                    "run_id": r[0],
-                    "session_id": r[1],
-                    "agent_name": r[2],
-                    "payload": json.loads(r[3]),
+                    "run_id": r["run_id"],
+                    "session_id": r["session_id"],
+                    "agent_name": r["agent_name"],
+                    "payload": json.loads(r["payload"]),
                 })
             except (TypeError, ValueError):
                 continue
