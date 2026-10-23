@@ -5547,7 +5547,7 @@ async function finishRobinhoodLinkSuccess(agentId) {
   alert('Robinhood connected. Enable live trading, save, then Run Live.');
 }
 
-/** Handle /app?robinhood=linked|pending|error after OAuth callback. */
+/** Handle /app?robinhood=linked|pending|error|disabled after OAuth callback. */
 async function handleRobinhoodOAuthReturn() {
   const params = new URLSearchParams(window.location.search);
   const robinhood = (params.get('robinhood') || '').toLowerCase();
@@ -5573,6 +5573,16 @@ async function handleRobinhoodOAuthReturn() {
   const clean = params.toString();
   const next = `${window.location.pathname}${clean ? `?${clean}` : ''}${window.location.hash}`;
   window.history.replaceState(getNavigationState(), '', next);
+
+  // The callback sends this while the real-money path is switched off
+  // (robinhood_live_enabled(), domain/backtesting/constants.py): a browser that
+  // left for Robinhood before the switch went off lands here, its code never
+  // exchanged. A `pending` return from before then reaches /complete, which
+  // answers 404 with the same sentence, shown by the branch below.
+  if (robinhood === 'disabled') {
+    alert('Robinhood live trading is switched off, so no account was connected.');
+    return;
+  }
 
   if (robinhood === 'linked') {
     await finishRobinhoodLinkSuccess(agentId);
@@ -6052,7 +6062,7 @@ function initAuthUI(options = {}) {
   updateAuthUI();
   openAuthFromUrl();
   handleDiscordOAuthReturn();
-  // handleRobinhoodOAuthReturn();  // Robinhood real-money path: commented out 2026-10-22
+  handleRobinhoodOAuthReturn();
   wireDiscordAccountButtons();
   initChangePasswordForm();
   initDisplayNameForm();

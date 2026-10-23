@@ -179,8 +179,8 @@ Only do this once the no-key setup works.
 - LLM keys (`ANTHROPIC_API_KEY`, …) are **billable**. LLM backtests on the
   dashboard require sign-in and a billing mode (BYOK or credits).
 - **Do not set `ROBINHOOD_EXECUTE`.** It is the server-wide switch for
-  real-money orders on the Robinhood path. That path is commented out today;
-  keep the switch off if it is ever restored.
+  real-money orders on the Robinhood path. That path is switched off in code
+  today (`robinhood_live_enabled()`); keep this switch off if it is turned back on.
 - `run_local_safe.sh` blanks all of these keys on purpose. To use real keys,
   start uvicorn yourself with the same `DATABASE_PATH` / `ATL_BAR_CACHE_DIR`
   exports and leave `ROBINHOOD_EXECUTE=false`.
@@ -214,6 +214,6 @@ billed, and no persistent data outside `~/.cache/atl-local` is written.
 - **Outbound calls without keys.** The home-page ticker (`/ticker`) still
   fetches public quotes (Yahoo Finance), and the news panel may call the
   FinSearch endpoint.
-- **Live trading.** The Robinhood real-money path is commented out, so no
-  route reaches it. If it is ever restored: it has per-order caps but no
-  per-run or per-day limit.
+- **Live trading.** The Robinhood real-money path is switched off in code, so
+  no route starts a link or places a live run. If it is ever turned back on: it
+  has per-order caps but no per-run or per-day limit.

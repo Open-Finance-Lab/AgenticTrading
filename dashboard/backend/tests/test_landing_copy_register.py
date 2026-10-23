@@ -298,7 +298,7 @@ _CLAIM_DISCLAIMERS = (
     # the brokered path's condition -- accurate for what the landing sells, which
     # is simulated end to end (`execution/paper_backend.py` is still a stub). The
     # opt-in brokered path still exists in code (api/routers/robinhood_live.py),
-    # but its mount in api/router.py has been commented out since 2026-10-22, and
+    # but it has been switched off since 2026-10-22 (robinhood_live_enabled()), and
     # the /app surface now says only "Every test here uses simulated money." -- see
     # test_frontend_shelves, which pins it there. Banning the phrase this line
     # needs would delete the disclaimer in order to satisfy the guard against the
@@ -325,9 +325,9 @@ def test_no_landing_component_claims_brokered_or_real_capital_trading():
     """Nothing on the narrative path puts real capital at risk — say nothing else.
 
     Not because brokered execution does not exist: the code does
-    (`api/routers/robinhood_live.py`, behind `ROBINHOOD_EXECUTE`), though its
-    routes have been commented out since 2026-10-22. It is a separate, opt-in,
-    per-user path. What the landing sells — Talk
+    (`api/routers/robinhood_live.py`, behind `ROBINHOOD_EXECUTE`), though it has
+    been switched off since 2026-10-22 (`robinhood_live_enabled()`). It is a
+    separate, opt-in, per-user path. What the landing sells — Talk
     → Test → Race, the boards, the playground — is simulated throughout, and
     `execution/paper_backend.py` is still a stub, so copy implying that running an
     agent here trades real money describes something these flows do not do.

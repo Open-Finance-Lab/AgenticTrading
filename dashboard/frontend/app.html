@@ -13,7 +13,7 @@
          because every API call is a CORS request. -->
     <link rel="preconnect" href="https://agentictrading.onrender.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="styles.css?v=159">
+    <link rel="stylesheet" href="styles.css?v=160">
     <!-- defer: ~200KB that was render-blocking. Deferred scripts execute in
          document order (this one first, the body-end ones after), all before
          DOMContentLoaded, so Chart is defined before any chart renders. -->
@@ -1151,16 +1151,18 @@
                     <select id="agentEditorCategorySelect" class="agent-editor-model-select" aria-label="Which market this agent trades"></select>
                 </label>
                 <textarea id="agentEditorDescription" class="agent-editor-description" rows="2" maxlength="280" placeholder="Optional description for this agent…" aria-label="Agent description"></textarea>
-                <!-- Robinhood real-money path: commented out 2026-10-22 (real capital is out of scope).
-                     The routes this panel calls are unmounted. Restore with them; see CLAUDE.md, execution/.
-                <div id="agentEditorBrokerPanel" class="agent-editor-broker section-card compact">
+                <!-- Robinhood real-money path: hidden until GET /api/v1/robinhood/status answers.
+                     The server owns the switch (robinhood_live_enabled(), domain/backtesting/constants.py)
+                     and it is off, so agent-editor.js shows this panel only to an account that is
+                     still linked, with only its Disconnect button. See CLAUDE.md, execution/. -->
+                <div id="agentEditorBrokerPanel" class="agent-editor-broker section-card compact" hidden>
                     <div class="agent-editor-broker-head">
                         <h3 class="agent-editor-intro-title">Robinhood live trading</h3>
                         <span id="agentEditorRobinhoodStatus" class="agent-editor-broker-status">Checking…</span>
                     </div>
-                    <p class="agent-editor-intro-text">Connect your Robinhood Agentic account to run this agent with real money. Orders only execute when live trading is enabled and the server execute switch is on.</p>
+                    <p id="agentEditorRobinhoodIntro" class="agent-editor-intro-text">Connect your Robinhood Agentic account to run this agent with real money. Orders only execute when live trading is enabled and the server execute switch is on.</p>
                     <div id="agentEditorRobinhoodMeta" class="agent-editor-broker-meta" hidden></div>
-                    <label class="agent-editor-live-toggle">
+                    <label id="agentEditorLiveTradingToggle" class="agent-editor-live-toggle">
                         <input id="agentEditorLiveTradingEnabled" type="checkbox">
                         <span>Enable live trading for this agent</span>
                     </label>
@@ -1171,7 +1173,6 @@
                     </div>
                     <p id="agentEditorLiveRunResult" class="agent-editor-live-result" hidden></p>
                 </div>
-                -->
             </div>
             <div class="agent-editor-header-actions">
                 <span id="agentEditorDirtyBadge" class="agent-editor-dirty-badge" hidden>Unsaved changes</span>
