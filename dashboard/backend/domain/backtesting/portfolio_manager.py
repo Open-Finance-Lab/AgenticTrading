@@ -748,9 +748,9 @@ class PortfolioManager:
                             attempt += 1
                         else:
                             # The execution layer rejects an empty reply itself
-                            # (#600) and releases its reservation at zero
-                            # (#556), so a same-ceiling retry is a generation
-                            # the platform pays for and never bills. It goes
+                            # (#600) and settles what it was billed (#556), so
+                            # a same-ceiling retry is another billed generation
+                            # likely to spend the same ceiling again. It goes
                             # straight to the rescue, as pipeline_runner's
                             # steps do. Any other execution error -- a request
                             # or result contract break, billing, credentials,
