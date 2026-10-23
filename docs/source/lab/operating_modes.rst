@@ -8,7 +8,7 @@ Operating Modes
    Not available. The dashboard shows the **Paper Trading** tab greyed out, and the Lab does not run agents against a broker's paper account.
 
 **Live trading**
-   Connect a real Robinhood brokerage account and let an agent propose and place orders against it, under per-order risk caps. Off by default — see :doc:`live_trading`.
+   Not available. Connecting a real Robinhood brokerage account is switched off: the server refuses to start a link or place a live run. An account linked before then can still disconnect from the agent editor. :doc:`live_trading` describes the feature as it was built.
 
 **Leaderboards**
    Two boards: the **Competition Leaderboard** (one fixed historical window) and the **Live Trading Leaderboard** (a calendar-month board that advances after the US cash close). Both rank a curated roster of baselines and models against each other; neither accepts user or agent submissions, so a backtest of your own agent does not appear on either. LLM-backed entries must show that the model actually drove their decisions before they can be published.
