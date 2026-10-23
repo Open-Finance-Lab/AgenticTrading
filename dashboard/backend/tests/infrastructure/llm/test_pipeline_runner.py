@@ -101,6 +101,22 @@ def test_pipeline_output_to_decision_orders():
     assert decision["actions"][0]["position_size"] == 10
 
 
+def test_pipeline_output_to_decision_strips_the_side():
+    # "buy " used to miss the buy/sell/hold set and become "hold" (#658).
+    decision = pipeline_output_to_decision(
+        {
+            "orders": [{"symbol": "AAPL", "side": "buy ", "qty": 10}],
+            "risk_actions": [],
+        }
+    )
+    assert decision["actions"][0]["action"] == "buy"
+
+    decision = pipeline_output_to_decision(
+        {"risk_actions": [{"symbol": "AAPL", "action": " stop_loss\n", "size_pct": 1.0}]}
+    )
+    assert decision["actions"][0]["action"] == "sell"
+
+
 def test_pipeline_output_to_decision_actions_passthrough():
     parsed = {
         "actions": [

@@ -867,7 +867,9 @@ class PortfolioManager:
 
             for llm_action in llm_actions:
                 symbol = str(llm_action.get("symbol") or "").strip().upper()
-                action_type = llm_action.get("action", "hold").lower()
+                # Stripped like the strict check above, or "buy " passes it and
+                # then matches no branch below (#658).
+                action_type = llm_action.get("action", "hold").strip().lower()
                 confidence = llm_action.get("confidence", 0.5)
                 reasoning = llm_action.get("reasoning", "")
                 
