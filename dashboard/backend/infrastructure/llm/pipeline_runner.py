@@ -233,7 +233,7 @@ def pipeline_output_to_decision(parsed: Dict[str, Any]) -> Optional[Dict[str, An
             for order in orders:
                 if not isinstance(order, dict):
                     continue
-                side = str(order.get("side") or order.get("action") or "hold").lower()
+                side = str(order.get("side") or order.get("action") or "hold").strip().lower()
                 if side not in ("buy", "sell", "hold"):
                     side = "hold"
                 qty = order.get(
@@ -269,7 +269,7 @@ def pipeline_output_to_decision(parsed: Dict[str, Any]) -> Optional[Dict[str, An
             for risk in risk_actions:
                 if not isinstance(risk, dict):
                     continue
-                action_type = str(risk.get("action") or "hold").lower()
+                action_type = str(risk.get("action") or "hold").strip().lower()
                 if action_type in ("stop_loss", "take_profit", "trail"):
                     side = "sell"
                 elif action_type == "hold":
