@@ -35,6 +35,7 @@ from dashboard.backend.infrastructure.llm.execution.errors import (
 from dashboard.backend.infrastructure.llm.execution.models import (
     LLMExecutionRequest,
     LLMMessage,
+    LLMUsage,
     UsagePolicy,
 )
 
@@ -419,6 +420,13 @@ _EMPTY_REPLIES = {
                 "finish_reason": "length",
             }
         ],
+        # A reasoning model's ceiling spent on reasoning, as GPT-5.5 reports it.
+        "usage": {
+            "prompt_tokens": 12,
+            "completion_tokens": 2000,
+            "total_tokens": 2012,
+            "completion_tokens_details": {"reasoning_tokens": 2000},
+        },
     },
     "anthropic": {
         **_ANTHROPIC_MESSAGE,
@@ -471,6 +479,66 @@ def test_every_adapter_marks_an_empty_reply(wire, route):
     assert exc_info.value.category is ExecutionErrorCategory.RESPONSE_INVALID
     assert is_empty_reply(exc_info.value)
     assert len(wire.sent) == 1
+    # The reasoning that spent the ceiling is billed, so the error carries it
+    # for the service to settle (#556). Gemini reports it only as thoughts.
+    assert exc_info.value.billed_usage == LLMUsage(input_tokens=12, output_tokens=2000)
+
+
+@pytest.mark.parametrize(
+    ("metadata", "expected"),
+    [
+        # #657's example: thinking is billed output beside the answer.
+        (
+            {"promptTokenCount": 100, "candidatesTokenCount": 50, "thoughtsTokenCount": 900},
+            (100, 950),
+        ),
+        ({"promptTokenCount": 100, "candidatesTokenCount": 50}, (100, 50)),
+        # thoughtsTokenCount omitted with thinking on: the total still has it.
+        (
+            {"promptTokenCount": 100, "candidatesTokenCount": 50, "totalTokenCount": 1050},
+            (100, 950),
+        ),
+        # Reported thoughts win; the total is only a fallback for a missing one.
+        (
+            {
+                "promptTokenCount": 100,
+                "candidatesTokenCount": 50,
+                "thoughtsTokenCount": 900,
+                "totalTokenCount": 5000,
+            },
+            (100, 950),
+        ),
+        # A tool-use prompt sits in the total but is not output.
+        (
+            {
+                "promptTokenCount": 100,
+                "candidatesTokenCount": 50,
+                "toolUsePromptTokenCount": 300,
+                "totalTokenCount": 1350,
+            },
+            (100, 950),
+        ),
+        # A malformed optional field never drops a valid count.
+        (
+            {"promptTokenCount": 100, "candidatesTokenCount": 50, "thoughtsTokenCount": "x"},
+            (100, 50),
+        ),
+        (
+            {"promptTokenCount": 100, "candidatesTokenCount": 50, "totalTokenCount": -1},
+            (100, 50),
+        ),
+        (None, None),
+        ({"promptTokenCount": 100}, None),
+        ({"promptTokenCount": 100, "candidatesTokenCount": "junk"}, None),
+    ],
+)
+def test_gemini_usage_counts_thinking_as_output(metadata, expected):
+    usage = gemini_module._gemini_usage(metadata)
+
+    if expected is None:
+        assert usage is None
+    else:
+        assert usage == LLMUsage(input_tokens=expected[0], output_tokens=expected[1])
 
 
 def test_gemini_gets_provider_timeout_and_keeps_status_branch(wire):

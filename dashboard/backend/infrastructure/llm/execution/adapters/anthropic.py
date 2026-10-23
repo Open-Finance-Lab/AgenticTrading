@@ -97,20 +97,23 @@ class AnthropicExecutionAdapter:
                 wire.append(f"temperature={request.temperature}")
             response = client.messages.create(**kwargs)
             text = _content_text(response)
-            if not text:
-                raise ProviderExecutionError.for_empty_reply()
             usage = value_at(response, "usage")
             normalized_usage = usage_from_fields(
                 value_at(usage, "input_tokens"),
                 value_at(usage, "output_tokens"),
             ) if usage is not None else None
+            provider_cost_usd = optional_nonnegative_float(
+                value_at(response, "cost", value_at(usage, "cost"))
+            )
+            if not text:
+                raise ProviderExecutionError.for_empty_reply(
+                    usage=normalized_usage, provider_cost_usd=provider_cost_usd
+                )
             return AdapterResponse(
                 text=text,
                 model_id=request.model_id,
                 usage=normalized_usage,
-                provider_cost_usd=optional_nonnegative_float(
-                    value_at(response, "cost", value_at(usage, "cost"))
-                ),
+                provider_cost_usd=provider_cost_usd,
                 finish_reason=normalize_finish_reason(
                     value_at(response, "stop_reason")
                 ),

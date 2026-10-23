@@ -3,9 +3,13 @@
 from __future__ import annotations
 
 from enum import StrEnum
+from typing import TYPE_CHECKING
 
 # ``RetryHint`` lives in the leaf ``http_policy``; re-exported here.
 from dashboard.backend.infrastructure.llm.http_policy import RetryHint
+
+if TYPE_CHECKING:
+    from dashboard.backend.infrastructure.llm.execution.models import LLMUsage
 
 
 class ExecutionErrorCategory(StrEnum):
@@ -89,6 +93,11 @@ class LLMExecutionError(RuntimeError):
         # Set by ``for_empty_reply``. A second axis, like ``retry_hint``:
         # the category stays RESPONSE_INVALID for every consumer that maps it.
         self.empty_reply = False
+        # Also set by ``for_empty_reply``: what the provider billed for the
+        # textless reply, so the service can settle it rather than release
+        # the hold at zero (#556). ``None`` when no usage came back.
+        self.billed_usage: LLMUsage | None = None
+        self.billed_cost_usd: float | None = None
         super().__init__(self.safe_message)
 
     @classmethod
@@ -96,7 +105,12 @@ class LLMExecutionError(RuntimeError):
         return cls(category)
 
     @classmethod
-    def for_empty_reply(cls) -> "LLMExecutionError":
+    def for_empty_reply(
+        cls,
+        *,
+        usage: LLMUsage | None = None,
+        provider_cost_usd: float | None = None,
+    ) -> "LLMExecutionError":
         """The provider answered with no text, typically because reasoning spent the ceiling.
 
         RESPONSE_INVALID also covers contract breaks that fail identically
@@ -106,9 +120,15 @@ class LLMExecutionError(RuntimeError):
         asking again, so callers retry on ``is_empty_reply``, never on the
         bare category: retrying those others billed the same failure again or
         logged a request bug as an empty model reply (#600).
+
+        The reply is still billed upstream -- the reasoning that spent the
+        ceiling is output -- so an adapter passes the usage it read, and the
+        service settles it before raising this again (#556).
         """
         error = cls(ExecutionErrorCategory.RESPONSE_INVALID)
         error.empty_reply = True
+        error.billed_usage = usage
+        error.billed_cost_usd = provider_cost_usd
         return error
 
     @classmethod

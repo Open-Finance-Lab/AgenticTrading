@@ -664,8 +664,9 @@ def _retry_with_recovery_budget(client, *, model: str, prompt: str):
 class _StepUsage:
     """Calls and token deltas for the responses a pipeline actually received.
 
-    Only responses that came back are recorded — an attempt that raised was
-    released by the execution service and never billed.
+    Only responses that came back are recorded. An attempt that raised is not
+    counted here, though an empty reply that raised may still have been
+    settled by the execution service (#556).
     """
 
     __slots__ = ("calls", "input_tokens", "output_tokens")

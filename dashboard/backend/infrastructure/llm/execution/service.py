@@ -411,35 +411,26 @@ class LLMExecutionService:
                 if reservation.status != "open":
                     raise LLMExecutionError(ExecutionErrorCategory.BILLING_FAILED)
 
-            response = self._complete(adapter, request, credential, provider)
+            try:
+                response = self._complete(adapter, request, credential, provider)
+            except LLMExecutionError as exc:
+                if self._settle_empty_reply(
+                    exc,
+                    request=request,
+                    reservation_id=reservation_id,
+                    pricing_snapshot=pricing_snapshot,
+                ):
+                    # Settled: there is no hold left to release.
+                    reservation_id = None
+                raise
             usage = self._result_usage(response)
-            if not usage.usage_available:
-                raise LLMExecutionError(ExecutionErrorCategory.USAGE_UNAVAILABLE)
-            billing = self._build_evidence(
+            billing = self._bill(
                 request=request,
+                reservation_id=reservation_id,
                 usage=usage,
                 provider_cost_usd=response.provider_cost_usd,
                 pricing_snapshot=pricing_snapshot,
             )
-            if billing.usage_authority == "unavailable":
-                raise LLMExecutionError(ExecutionErrorCategory.USAGE_UNAVAILABLE)
-
-            if reservation_id is not None:
-                actual_micro = billing.provider_cost_credits_micro
-                settlement = self._settle(
-                    reservation_id, billing, actual_micro=actual_micro
-                )
-                billing = billing.model_copy(
-                    update={
-                        "debited_credits_micro": settlement.settled_micro,
-                        "outstanding_credits_micro": settlement.outstanding_micro,
-                    }
-                )
-            elif billing.provider_cost_credits_micro > 0:
-                # A zero-priced snapshot must not become a paid call after the
-                # fact; there is no held balance from which to settle it.
-                raise LLMExecutionError(ExecutionErrorCategory.BILLING_FAILED)
-
             return self._result(
                 request=request,
                 credential=credential,
@@ -682,12 +673,91 @@ class LLMExecutionService:
         if not response.text.strip():
             # The adapters reject an empty reply themselves, marked the same
             # way; this is the backstop for one that hands it back instead.
-            # Either way it is before settlement, so the reservation is
-            # released and a caller may ask again.
-            raise LLMExecutionError.for_empty_reply()
+            raise LLMExecutionError.for_empty_reply(
+                usage=response.usage if isinstance(response.usage, LLMUsage) else None,
+                provider_cost_usd=response.provider_cost_usd,
+            )
         if not isinstance(response.model_id, str) or not response.model_id.strip():
             raise LLMExecutionError(ExecutionErrorCategory.RESPONSE_INVALID)
         return response
+
+    def _bill(
+        self,
+        *,
+        request: LLMExecutionRequest,
+        reservation_id: str | None,
+        usage: LLMUsage,
+        provider_cost_usd: float | None,
+        pricing_snapshot: PricingSnapshot,
+    ) -> BillingEvidence:
+        """Price ``usage`` and settle it against the hold, if there is one."""
+        if not usage.usage_available:
+            raise LLMExecutionError(ExecutionErrorCategory.USAGE_UNAVAILABLE)
+        billing = self._build_evidence(
+            request=request,
+            usage=usage,
+            provider_cost_usd=provider_cost_usd,
+            pricing_snapshot=pricing_snapshot,
+        )
+        if billing.usage_authority == "unavailable":
+            raise LLMExecutionError(ExecutionErrorCategory.USAGE_UNAVAILABLE)
+
+        if reservation_id is not None:
+            actual_micro = billing.provider_cost_credits_micro
+            settlement = self._settle(
+                reservation_id, billing, actual_micro=actual_micro
+            )
+            return billing.model_copy(
+                update={
+                    "debited_credits_micro": settlement.settled_micro,
+                    "outstanding_credits_micro": settlement.outstanding_micro,
+                }
+            )
+        if billing.provider_cost_credits_micro > 0:
+            # A zero-priced snapshot must not become a paid call after the
+            # fact; there is no held balance from which to settle it.
+            raise LLMExecutionError(ExecutionErrorCategory.BILLING_FAILED)
+        return billing
+
+    def _settle_empty_reply(
+        self,
+        error: LLMExecutionError,
+        *,
+        request: LLMExecutionRequest,
+        reservation_id: str | None,
+        pricing_snapshot: PricingSnapshot,
+    ) -> bool:
+        """Settle what the provider billed for an empty reply; True once settled.
+
+        Reasoning that spent the output ceiling is billed output, so it is
+        settled like any reply before the empty-reply error goes on to the
+        caller, who may ask again (#556). Only a charge the reply shows is
+        settled: output tokens, or a cost the provider reported (OpenRouter
+        reports $0 for what its zero-completion insurance waives). Anything
+        else -- no usage, nothing to price it with -- is released at zero as
+        before, and stays retryable.
+        """
+        usage = error.billed_usage
+        if (
+            not is_empty_reply(error)
+            or not isinstance(usage, LLMUsage)
+            or not usage.usage_available
+            or (usage.output_tokens <= 0 and error.billed_cost_usd is None)
+        ):
+            return False
+        try:
+            self._bill(
+                request=request,
+                reservation_id=reservation_id,
+                usage=usage,
+                provider_cost_usd=error.billed_cost_usd,
+                pricing_snapshot=pricing_snapshot,
+            )
+        except LLMExecutionError as billing_error:
+            if billing_error.category is ExecutionErrorCategory.USAGE_UNAVAILABLE:
+                return False
+            raise
+        return True
 
     @staticmethod
     def _result_usage(response: AdapterResponse) -> LLMUsage:
