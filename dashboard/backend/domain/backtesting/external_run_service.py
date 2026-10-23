@@ -323,7 +323,13 @@ class ExternalBacktestSession:
         # session in a terminal status; None until then. Explicit default so
         # the attribute is discoverable rather than a bare getattr() away.
         self.terminal_seen_at: Optional[datetime] = None
+        # Source of the most recently CLOSED step. Not reset when the next step
+        # opens: the submit ack reads it after _advance_step has already opened
+        # that step, and a reset there reported every accepted decision as None.
         self.last_decision_source: Optional[str] = None
+        # The newest step whose context get_current_step() served, i.e. the
+        # step an agent's next decision was built from. See _decision_target.
+        self.served_step_index: Optional[int] = None
         self.decision_log: List[Dict[str, Any]] = []
         self.last_executed: List[Dict[str, Any]] = []
 
@@ -469,7 +475,6 @@ class ExternalBacktestSession:
 
     def _open_current_step(self) -> None:
         self.step_opened_at = _utcnow()
-        self.last_decision_source = None
 
     def _deadline_at(self) -> datetime:
         opened = self.step_opened_at or _utcnow()
@@ -608,17 +613,34 @@ class ExternalBacktestSession:
         self._advance_step(executable=[], decision_source="timeout_hold")
         return True
 
-    def _emit_deadline_hold_notice(self, first_index: int, count: int) -> None:
-        """Print once per poll when this call just auto-held one or more steps.
+    def _apply_expired_holds(self, *, drain: bool) -> int:
+        """Auto-hold expired steps and print the notice; return how many were held.
 
-        Every caller drives ``_maybe_apply_timeout`` (looped or single-call)
-        under ``self._step_lock`` and must capture ``first_index``
-        (``self.step_index``) *before* doing so — ``_advance_step`` increments
-        ``step_index`` inside the loop, so a value read afterward would name a
-        step that was never held. Never take ``self._step_lock`` here: every
-        caller already holds it, and ``threading.Lock`` is non-reentrant, so
-        re-acquiring it deadlocks. A published equity curve containing these
-        steps is not the agent's curve; this is the one place that says so.
+        The only caller of ``_maybe_apply_timeout``. Every hold site goes
+        through here so none can be silent: #375 was a fourth site that
+        decided "late" on its own and printed nothing. ``drain=True`` keeps
+        holding while steps stay expired; ``drain=False`` holds at most the
+        current one. Caller holds ``self._step_lock``.
+        """
+        # Captured before holding: _advance_step increments step_index, so a
+        # value read afterward would name a step that was never held.
+        first_index = self.step_index
+        holds_before = self.timeout_holds
+        while self._maybe_apply_timeout() and drain:
+            pass
+        held = self.timeout_holds - holds_before
+        if held:
+            self._emit_deadline_hold_notice(first_index, held)
+        return held
+
+    def _emit_deadline_hold_notice(self, first_index: int, count: int) -> None:
+        """Print one line for the steps a single call just auto-held.
+
+        Called only from ``_apply_expired_holds``, under ``self._step_lock``.
+        Never take ``self._step_lock`` here: ``threading.Lock`` is
+        non-reentrant, so re-acquiring it deadlocks. A published equity curve
+        containing these steps is not the agent's curve; this is the one place
+        that says so.
         """
         last_index = first_index + count - 1
         # agent_name is caller-supplied on the legacy surface (StartBacktestRequest,
@@ -635,15 +657,7 @@ class ExternalBacktestSession:
 
     def get_current_step(self) -> Dict[str, Any]:
         with self._step_lock:
-            start_index = self.step_index
-            holds_before = self.timeout_holds
-            while self._maybe_apply_timeout():
-                if self.status == "completed":
-                    break
-            if self.timeout_holds > holds_before:
-                self._emit_deadline_hold_notice(
-                    start_index, self.timeout_holds - holds_before
-                )
+            self._apply_expired_holds(drain=True)
 
             if self.status == "loading":
                 return {"status": "loading", "message": "Loading market data..."}
@@ -681,6 +695,7 @@ class ExternalBacktestSession:
                 market_data, self.price_cache, timestamp
             )
             state["timestamp"] = timestamp
+            self.served_step_index = self.step_index
 
             return {
                 "status": "waiting_decision",
@@ -697,7 +712,15 @@ class ExternalBacktestSession:
                 "decision_format": get_decision_format(),
             }
 
-    def submit_decisions(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+    def submit_decisions(
+        self, payload: Dict[str, Any], *, expected_step: Optional[int] = None
+    ) -> Dict[str, Any]:
+        """Execute a decision against the current step.
+
+        ``expected_step`` is the step the caller saw as current when it began
+        handling this submission; if the run has moved on since, the decision
+        is refused rather than applied to a step it was not built for.
+        """
         with self._step_lock:
             if self.status == "completed":
                 return {
@@ -712,15 +735,21 @@ class ExternalBacktestSession:
                     "error": f"invalid_status:{self.status}",
                 }
 
-            if _utcnow() > self._deadline_at():
-                self._advance_step(executable=[], decision_source="timeout_hold")
-                return {
-                    "accepted": False,
-                    "error": "step_already_closed",
-                    "outcome": "timeout_hold",
-                    "next_step": self.step_index,
-                    "status": self.status,
-                }
+            # A decision built for a step that has since closed (held by the
+            # v2 reaper or a status poll, or decided by an earlier submit) would
+            # otherwise execute here: stale context, this step's prices, logged
+            # as the agent's own decision. Refuse it without touching the open
+            # step. Whoever held the old step already printed that hold.
+            target = self._decision_target(expected_step)
+            if target != self.step_index:
+                return self._closed_step_result(
+                    target, outcome=self._step_decision_source(target)
+                )
+
+            # A late POST holds the step it arrived for, and prints like every
+            # other hold site (#375).
+            if self._apply_expired_holds(drain=False):
+                return self._closed_step_result(target, outcome="timeout_hold")
 
             decisions, err = parse_actions_payload(payload)
             if err:
@@ -729,6 +758,7 @@ class ExternalBacktestSession:
                     "accepted": False,
                     "error": err,
                     "outcome": "validation_hold",
+                    "step_index": target,
                     "next_step": self.step_index,
                     "status": self.status,
                 }
@@ -763,12 +793,58 @@ class ExternalBacktestSession:
                 "executed_count": len(self.last_executed),
                 "executed": self.last_executed,
                 "decision_source": self.last_decision_source,
+                "step_index": target,
                 "next_step": self.step_index,
                 "status": self.status,
-                "run_id": self.run_id if self.status == "completed" else None,
-                "compare_url": self._compare_url() if self.status == "completed" else None,
-                "metrics": self._final_metrics() if self.status == "completed" else None,
+                **self._completion_fields(),
             }
+
+    def _decision_target(self, expected_step: Optional[int]) -> int:
+        """The step a submitted decision was built for. Caller holds the lock.
+
+        ``expected_step`` (a step the caller read itself) catches a hold
+        between that read and this call. No caller can see a hold that landed
+        before its request arrived, so infer that case: if the step this agent
+        was last served got auto-held and the open step was never served, the
+        decision was built from the held step's context. Only a held step
+        triggers this, so a client that POSTs without fetching context first
+        keeps working after a step it decided itself.
+        """
+        if expected_step is not None and expected_step != self.step_index:
+            return expected_step
+        served = self.served_step_index
+        if (served is not None and served < self.step_index
+                and self._step_decision_source(served) == "timeout_hold"):
+            return served
+        return self.step_index
+
+    def _step_decision_source(self, step_index: int) -> Optional[str]:
+        for entry in reversed(self.decision_log):
+            if entry.get("step_index") == step_index:
+                return entry.get("decision_source")
+        return None
+
+    def _completion_fields(self) -> Dict[str, Any]:
+        done = self.status == "completed"
+        return {
+            "run_id": self.run_id if done else None,
+            "compare_url": self._compare_url() if done else None,
+            "metrics": self._final_metrics() if done else None,
+        }
+
+    def _closed_step_result(self, step_index: int, *, outcome: Optional[str]) -> Dict[str, Any]:
+        # A hold of the final step finalizes the run, so this carries the same
+        # completion fields as an accepted ack: without them a client is told
+        # 409 for a finished run and given no run_id to fetch it by.
+        return {
+            "accepted": False,
+            "error": "step_already_closed",
+            "outcome": outcome,
+            "step_index": step_index,
+            "next_step": self.step_index,
+            "status": self.status,
+            **self._completion_fields(),
+        }
 
     def _advance_step(
         self,
@@ -977,13 +1053,7 @@ class ExternalBacktestSession:
 
     def get_status(self) -> Dict[str, Any]:
         with self._step_lock:
-            start_index = self.step_index
-            holds_before = self.timeout_holds
-            self._maybe_apply_timeout()
-            if self.timeout_holds > holds_before:
-                self._emit_deadline_hold_notice(
-                    start_index, self.timeout_holds - holds_before
-                )
+            self._apply_expired_holds(drain=False)
             base = {
                 "backtest_id": self.backtest_id,
                 "status": self.status,
@@ -1010,15 +1080,7 @@ class ExternalBacktestSession:
         driving an abandoned run forward. No-op unless the current step is past
         its deadline. Returns the resulting status."""
         with self._step_lock:
-            start_index = self.step_index
-            holds_before = self.timeout_holds
-            while self._maybe_apply_timeout():
-                if self.status == "completed":
-                    break
-            if self.timeout_holds > holds_before:
-                self._emit_deadline_hold_notice(
-                    start_index, self.timeout_holds - holds_before
-                )
+            self._apply_expired_holds(drain=True)
             return self.status
 
     def get_decisions(self) -> List[Dict[str, Any]]:

@@ -953,7 +953,7 @@
         <div class="subtab-bar playground-subtabs">
             <button class="subtab-btn active" data-playground-tab="agents">My Agents</button>
             <button class="subtab-btn" data-playground-tab="backtest">Backtest</button>
-            <button class="subtab-btn subtab-btn--disabled" data-playground-tab="paper" disabled aria-disabled="true" title="Paper trading is coming soon">Paper Trading</button>
+            <button class="subtab-btn subtab-btn--disabled" data-playground-tab="paper" disabled aria-disabled="true" title="Paper trading is not available">Paper Trading</button>
         </div>
         <div id="playgroundAgentsPanel" class="playground-panel">
             <!-- My Portfolio: Overview + Capital Allocation (live ledger when signed in, sample data for guests).
@@ -1188,11 +1188,11 @@
                             <!-- Greyed while paper trading is switched off (PAPER_TRADING_ENABLED
                                  in app.js). agent-editor.js reads `disabled` as "leave the saved
                                  sleeve alone" and omits cash_allocation from the PATCH. -->
-                            <label class="agent-capital-field agent-capital-field--disabled" for="agentEditorCashAllocation" title="Paper trading is coming soon">
-                                <span class="agent-capital-label">Paper Trading <span class="agent-capital-max">coming soon</span></span>
+                            <label class="agent-capital-field agent-capital-field--disabled" for="agentEditorCashAllocation" title="Paper trading is not available">
+                                <span class="agent-capital-label">Paper Trading <span class="agent-capital-max">not available</span></span>
                                 <input id="agentEditorCashAllocation" class="agent-capital-input" type="number" min="0" max="3000" step="any" data-cash-step="100" placeholder="1000" aria-label="Paper Trading Allocated Capital" disabled aria-disabled="true">
                                 <span class="capital-input-error" data-cash-error-slot role="alert" hidden></span>
-                                <span class="agent-capital-note">Paper trading is not available yet. Backtests use the simulated amount beside it.</span>
+                                <span class="agent-capital-note">Paper trading is not available. Backtests use the simulated amount beside it.</span>
                             </label>
                             <label class="agent-capital-field" for="agentEditorBacktestAllocation">
                                 <span class="agent-capital-label">Backtesting <span class="agent-capital-max">max $3,000</span></span>

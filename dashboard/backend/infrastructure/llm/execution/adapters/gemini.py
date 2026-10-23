@@ -94,7 +94,7 @@ class GeminiExecutionAdapter:
                 if isinstance(value_at(part, "text"), str)
             ).strip()
             if not text:
-                raise ProviderExecutionError("response_invalid")
+                raise ProviderExecutionError.for_empty_reply()
             usage_data = data.get("usageMetadata") if isinstance(data, dict) else None
             usage = usage_from_fields(
                 value_at(usage_data, "promptTokenCount"),

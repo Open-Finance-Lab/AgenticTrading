@@ -55,8 +55,6 @@ Start with a market question or trading idea, then turn it into an agent you can
 Choose a model, data source, and trading prompt, or connect your own agent through our API.
 - **Start from a template**  
 Add a ready-made agent from the Community tab, then customize its prompts and backtest it.
-- **Build an agent-powered portfolio**  
-Give multiple agents simulated capital and manage them as your own virtual trading team.
 - **Watch models trade forward**  
 A live leaderboard advances nightly after the US close, trading each new session on simulated fills with no real money.
 - **See every run, decision, and reason**  

@@ -30,6 +30,7 @@ from dashboard.backend.infrastructure.llm.execution import service as service_mo
 from dashboard.backend.infrastructure.llm.execution.errors import (
     ExecutionErrorCategory,
     RetryHint,
+    is_empty_reply,
 )
 from dashboard.backend.infrastructure.llm.execution.models import (
     LLMExecutionRequest,
@@ -389,6 +390,87 @@ def test_sdk_adapter_sources_pass_max_retries_and_timeout():
             assert (
                 isinstance(retries, ast.Name) and retries.id == "SDK_MAX_RETRIES"
             ) or (isinstance(retries, ast.Constant) and retries.value == 0), name
+
+
+# Each provider's own spelling of "reasoning spent the ceiling, no answer".
+_EMPTY_REPLIES = {
+    # DeepSeek's thinking field beside a null answer, as CommonStack relays it.
+    "commonstack": {
+        **_CHAT_COMPLETION,
+        "choices": [
+            {
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": None,
+                    "reasoning_content": "Weighing RSI against MACD",
+                },
+                "finish_reason": "length",
+            }
+        ],
+        "usage": {"prompt_tokens": 12, "completion_tokens": 2000, "total_tokens": 2012},
+    },
+    "openai": {
+        **_CHAT_COMPLETION,
+        "choices": [
+            {
+                "index": 0,
+                "message": {"role": "assistant", "content": ""},
+                "finish_reason": "length",
+            }
+        ],
+    },
+    "anthropic": {
+        **_ANTHROPIC_MESSAGE,
+        "content": [
+            {"type": "thinking", "thinking": "Weighing RSI", "signature": "sig"}
+        ],
+        "stop_reason": "max_tokens",
+        "usage": {"input_tokens": 12, "output_tokens": 2000},
+    },
+    "gemini": {
+        "candidates": [
+            {"content": {"role": "model"}, "finishReason": "MAX_TOKENS", "index": 0}
+        ],
+        "usageMetadata": {
+            "promptTokenCount": 12,
+            "thoughtsTokenCount": 2000,
+            "totalTokenCount": 2012,
+        },
+    },
+}
+
+
+def _complete(route: str):
+    if route in _OPENAI_ROUTES:
+        adapter_class, provider, model_id = _OPENAI_ROUTES[route]
+        return adapter_class().complete(
+            _request(route, model_id), _credential(route), provider
+        )
+    if route == "anthropic":
+        return anthropic_module.AnthropicExecutionAdapter().complete(
+            _request(route, _ANTHROPIC_MODEL), _credential(route), _ANTHROPIC_PROVIDER
+        )
+    return gemini_module.GeminiExecutionAdapter().complete(
+        _request(route, _GEMINI_MODEL), _credential(route), _GEMINI_PROVIDER
+    )
+
+
+@pytest.mark.parametrize("route", sorted(_EMPTY_REPLIES))
+def test_every_adapter_marks_an_empty_reply(wire, route):
+    """Prod's empty replies are rejected here, in the adapter, not by the
+    service's backstop (#600: DeepSeek through CommonStack). Unmarked, the
+    rejection reads as a contract break and nothing retries it."""
+    wire.respond = lambda request: httpx.Response(
+        200, json=_EMPTY_REPLIES[route], request=request
+    )
+
+    with pytest.raises(base_module.ProviderExecutionError) as exc_info:
+        _complete(route)
+
+    assert exc_info.value.category is ExecutionErrorCategory.RESPONSE_INVALID
+    assert is_empty_reply(exc_info.value)
+    assert len(wire.sent) == 1
 
 
 def test_gemini_gets_provider_timeout_and_keeps_status_branch(wire):

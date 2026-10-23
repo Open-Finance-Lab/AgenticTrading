@@ -307,6 +307,42 @@ def test_provider_attempts_have_independent_reservations_for_one_logical_call(
     assert fallback["provider_id"] == "commonstack"
 
 
+def test_release_run_returns_only_the_reservations_it_released(tmp_path):
+    """#525: the service emits credits_refunded per returned row, so a hold
+    that was already settled or released must not come back a second time."""
+    store = _store(tmp_path)
+    _pending_order(store, amount_usd_cents=100, credits_micro=1_000_000)
+    _pay_order(store, amount_usd_cents=100)
+
+    def reserve(call_index):
+        return store.reserve_llm_credits(
+            reservation_id=f"run525-{call_index}",
+            user_id=1,
+            run_id="run-525",
+            call_index=call_index,
+            attempt_index=0,
+            provider_id="commonstack",
+            reserved_micro=10_000,
+            operation_key=f"run525-op-{call_index}",
+            request_digest=str(call_index) * 64,
+        )
+
+    store.settle_llm_credits(
+        reserve(0)["reservation_id"],
+        actual_micro=4_000,
+        evidence={"billing_source": "platform_credits"},
+    )
+    store.release_llm_credits(reserve(1)["reservation_id"], reason="response_invalid")
+    reserve(3)
+    reserve(2)
+
+    released = store.release_run_llm_reservations("run-525", reason="worker_failed")
+
+    assert [row["reservation_id"] for row in released] == ["run525-2", "run525-3"]
+    assert {row["status"] for row in released} == {"released"}
+    assert store.release_run_llm_reservations("run-525", reason="worker_failed") == []
+
+
 def test_reservation_attempt_identity_is_validated_and_idempotent(tmp_path):
     store = _store(tmp_path)
     _pending_order(store, amount_usd_cents=100, credits_micro=1_000_000)

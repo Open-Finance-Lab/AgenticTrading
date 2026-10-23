@@ -73,6 +73,13 @@ algo_status: dict[str, Any] = {
     "result": None,
 }
 
+# Serializes ``execute_algo``'s check of ``algo_status["running"]`` with its
+# claim of it. ``/api/algo/execute`` is a sync route, so concurrent requests
+# run on separate threadpool threads, and the check and the claim are ~35
+# lines apart: without the lock two requests could both pass the check and
+# each start a subprocess on the platform key.
+_launch_lock = threading.Lock()
+
 
 def _ensure_data_dir() -> None:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -387,52 +394,54 @@ def execute_algo(
 
     # Server-wide single flight: ``algo_status`` is one global record, and a
     # per-session check let any caller rotating X-Session-Id start unlimited
-    # concurrent LLM subprocesses on the platform key.
-    if algo_status["running"]:
-        raise RuntimeError("A trading-algo backtest is already running. Please wait.")
+    # concurrent LLM subprocesses on the platform key. The check holds only
+    # under ``_launch_lock``, which spans it through the claim below.
+    with _launch_lock:
+        if algo_status["running"]:
+            raise RuntimeError("A trading-algo backtest is already running. Please wait.")
 
-    if _blocks_match_defaults(blocks):
-        raise RuntimeError(
-            "Edit the four strategy blocks (or use chat) before Execute. "
-            "The built-in example and Leaderboard mock teams do not trigger a real backtest."
+        if _blocks_match_defaults(blocks):
+            raise RuntimeError(
+                "Edit the four strategy blocks (or use chat) before Execute. "
+                "The built-in example and Leaderboard mock teams do not trigger a real backtest."
+            )
+
+        if not os.getenv("ANTHROPIC_API_KEY"):
+            raise RuntimeError("ANTHROPIC_API_KEY is required for real LLM backtests")
+
+        if not _has_alpaca_credentials():
+            raise RuntimeError(
+                "Alpaca credentials are required for market data. "
+                "Set ALPACA_API_KEY / ALPACA_SECRET_KEY or create credentials/alpaca.json"
+            )
+
+        # Resolved once, not once per bound: the resolver now prints on a bad
+        # settings file, and calling it twice reported the same fault twice.
+        default_start, default_end = _default_backtest_dates()
+        start, end = start_date or default_start, end_date or default_end
+        name = (team_name or _default_team_name(blocks)).strip() or "My Trading Algo"
+        submission_id = f"{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}"
+
+        _ensure_data_dir()
+        config_path = CONFIG_DIR / f"{submission_id}.json"
+        config_path.write_text(
+            json.dumps(
+                {"blocks": deepcopy(blocks), "start_date": start, "end_date": end, "team_name": name},
+                ensure_ascii=False,
+                indent=2,
+            ),
+            encoding="utf-8",
         )
 
-    if not os.getenv("ANTHROPIC_API_KEY"):
-        raise RuntimeError("ANTHROPIC_API_KEY is required for real LLM backtests")
-
-    if not _has_alpaca_credentials():
-        raise RuntimeError(
-            "Alpaca credentials are required for market data. "
-            "Set ALPACA_API_KEY / ALPACA_SECRET_KEY or create credentials/alpaca.json"
-        )
-
-    # Resolved once, not once per bound: the resolver now prints on a bad
-    # settings file, and calling it twice reported the same fault twice.
-    default_start, default_end = _default_backtest_dates()
-    start, end = start_date or default_start, end_date or default_end
-    name = (team_name or _default_team_name(blocks)).strip() or "My Trading Algo"
-    submission_id = f"{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}"
-
-    _ensure_data_dir()
-    config_path = CONFIG_DIR / f"{submission_id}.json"
-    config_path.write_text(
-        json.dumps(
-            {"blocks": deepcopy(blocks), "start_date": start, "end_date": end, "team_name": name},
-            ensure_ascii=False,
-            indent=2,
-        ),
-        encoding="utf-8",
-    )
-
-    algo_status = {
-        "running": True,
-        "submission_id": submission_id,
-        "session_id": session_id,
-        "team_name": name,
-        "progress": "Submitted; starting real backtest (Alpaca + LLM)…",
-        "error": None,
-        "result": None,
-    }
+        algo_status = {
+            "running": True,
+            "submission_id": submission_id,
+            "session_id": session_id,
+            "team_name": name,
+            "progress": "Submitted; starting real backtest (Alpaca + LLM)…",
+            "error": None,
+            "result": None,
+        }
 
     thread = threading.Thread(
         target=_run_backtest_background,
