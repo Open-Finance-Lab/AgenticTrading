@@ -40,9 +40,7 @@ import dashboard.backend.api.routers.robinhood_live as robinhood_router
 import dashboard.backend.database as db_module
 import dashboard.backend.domain.agents.repository as agent_store_module
 import dashboard.backend.domain.backtesting.constants as constants
-from dashboard.backend.api.auth import get_current_user
 from dashboard.backend.app import app
-from dashboard.backend.domain.agents.repository import AgentStore
 from dashboard.backend.tests._frontend_source import (
     APP_HTML,
     APP_JS,
@@ -64,9 +62,9 @@ def client():
 
 @pytest.fixture
 def signed_in():
-    app.dependency_overrides[get_current_user] = lambda: dict(_USER)
+    app.dependency_overrides[auth_module.get_current_user] = lambda: dict(_USER)
     yield
-    app.dependency_overrides.pop(get_current_user, None)
+    app.dependency_overrides.pop(auth_module.get_current_user, None)
 
 
 @pytest.fixture
@@ -236,7 +234,7 @@ def agents_client(tmp_path, monkeypatch):
     import dashboard.backend.api.routers.agents as agents_api
 
     db_path = tmp_path / "test.db"
-    test_agents = AgentStore(db_path=db_path)
+    test_agents = agent_store_module.AgentStore(db_path=db_path)
     test_db = db_module.BacktestDatabase(db_path=db_path)
     monkeypatch.setattr(agent_store_module, "agent_store", test_agents)
     monkeypatch.setattr(agents_api.agent_service, "agents", test_agents)
