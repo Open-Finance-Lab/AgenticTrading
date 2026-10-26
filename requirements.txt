@@ -38,7 +38,7 @@ pycparser==3.0
 pydantic==2.11.7
 pydantic-settings==2.10.1
 pydantic_core==2.33.2
-PyJWT==2.13.0
+PyJWT==2.15.1
 python-dateutil==2.9.0.post0
 python-dotenv==1.2.2
 python-multipart==0.0.31
