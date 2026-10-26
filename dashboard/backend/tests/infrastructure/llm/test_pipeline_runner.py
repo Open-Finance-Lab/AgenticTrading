@@ -138,7 +138,9 @@ def test_pipeline_output_to_decision_risk_actions():
             "symbol": "AAPL",
             "confidence": 0.8,
             "reasoning": "risk limit",
-            "position_size": 50,
+            # A share of the position, not a share count: the gate sizes it.
+            "position_size": 0,
+            "size_fraction": 0.5,
         }
     ]
 

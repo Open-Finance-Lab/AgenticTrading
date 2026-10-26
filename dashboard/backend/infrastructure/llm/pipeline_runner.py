@@ -281,21 +281,20 @@ def pipeline_output_to_decision(parsed: Dict[str, Any]) -> Optional[Dict[str, An
                         else "hold"
                     )
                 size_pct = float(risk.get("size_pct", 1.0) or 1.0)
-                normalized.append(
-                    {
-                        "action": side,
-                        "symbol": risk.get("symbol"),
-                        "confidence": 0.8,
-                        "reasoning": risk.get("reason")
-                        or risk.get("rationale")
-                        or action_type,
-                        "position_size": (
-                            max(1, int(round(size_pct * 100)))
-                            if side == "sell"
-                            else 0
-                        ),
-                    }
-                )
+                order = {
+                    "action": side,
+                    "symbol": risk.get("symbol"),
+                    "confidence": 0.8,
+                    "reasoning": risk.get("reason")
+                    or risk.get("rationale")
+                    or action_type,
+                    "position_size": 0,
+                }
+                if side == "sell":
+                    # A share of the position, not a share count: the sell
+                    # gate turns it into shares against what is held (#661).
+                    order["size_fraction"] = size_pct
+                normalized.append(order)
             if normalized:
                 return {"actions": normalized}
             saw_unusable_nonempty_envelope = True

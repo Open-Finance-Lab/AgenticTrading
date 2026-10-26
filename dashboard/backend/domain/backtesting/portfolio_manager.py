@@ -305,6 +305,38 @@ class PortfolioManager:
             return held
         return min(self.available_positions.get(symbol, 0), held)
 
+    def _coerce_position_size(self, raw: Any) -> Optional[float]:
+        """A model's ``position_size`` as a number, or None when unparseable.
+
+        json.loads happily yields strings, floats, Infinity and NaN here; a
+        missing or null size reads as 0. Whole shares unless the market trades
+        in lots, where the executor validates the quantity itself.
+        """
+        try:
+            size = float(raw or 0) if self.lot_size > 1 else int(raw or 0)
+        except (TypeError, ValueError, OverflowError):
+            return None
+        if isinstance(size, float) and not math.isfinite(size):
+            return None
+        return size
+
+    def _fraction_of_position(self, raw: Any, held: float) -> float:
+        """Shares a pipeline risk action's ``size_fraction`` asks to sell.
+
+        A usable fraction is a finite number above 0; 1 or more means the whole
+        position. Anything else is ignored and the whole position is sold, as
+        before sells honoured a size. A partial trim rounds down to whole lots.
+        """
+        if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+            return held
+        if not math.isfinite(raw) or raw <= 0:
+            return held
+        if raw >= 1:
+            return held
+        if self.lot_size > 1:
+            return math.floor(raw * held / self.lot_size) * self.lot_size
+        return math.floor(raw * held)
+
     def record_t1_deferral(
         self,
         symbol: str,
@@ -892,16 +924,8 @@ class PortfolioManager:
                     # NaN here, and an unparseable value must skip THIS action,
                     # not throw the whole decision into the rule-based fallback.
                     raw_size = llm_action.get("position_size", 0)
-                    try:
-                        shares = (
-                            float(raw_size or 0)
-                            if self.lot_size > 1
-                            else int(raw_size or 0)
-                        )
-                    except (TypeError, ValueError, OverflowError):
-                        print(f"      ⚠️  BUY {symbol}: Skip (unparseable position_size {raw_size!r})")
-                        continue
-                    if isinstance(shares, float) and not math.isfinite(shares):
+                    shares = self._coerce_position_size(raw_size)
+                    if shares is None:
                         print(f"      ⚠️  BUY {symbol}: Skip (unparseable position_size {raw_size!r})")
                         continue
 
@@ -951,27 +975,54 @@ class PortfolioManager:
                         print(f"      ⚠️  BUY {symbol}: Skip (insufficient cash: need ${shares*price:,.0f}, have ${self.cash:,.0f})")
                 
                 elif action_type == "sell":
+                    # Sell what was asked for (#661): position_size shares, else
+                    # a pipeline risk action's size_fraction of the position,
+                    # else the whole position. Same coercion as BUY: an
+                    # unparseable or negative size skips THIS action only.
+                    raw_size = llm_action.get("position_size", 0)
+                    asked = self._coerce_position_size(raw_size)
+                    if asked is None:
+                        print(f"      ⚠️  SELL {symbol}: Skip (unparseable position_size {raw_size!r})")
+                        continue
+                    if asked < 0:
+                        print(f"      ⚠️  SELL {symbol}: Skip (negative position_size {raw_size!r})")
+                        continue
+                    if asked == 0 and isinstance(raw_size, (int, float)) and raw_size > 0:
+                        # int() truncated a fraction of a share to 0, and 0
+                        # means "the whole position": never read it that way.
+                        print(f"      ⚠️  SELL {symbol}: Skip (position_size {raw_size!r} rounds to 0 shares)")
+                        continue
+                    held = self.positions.get(symbol, 0)
+                    requested = (
+                        asked
+                        if asked > 0
+                        else self._fraction_of_position(llm_action.get("size_fraction"), held)
+                    )
+                    if held > 0 and requested <= 0:
+                        print(f"      ⚠️  SELL {symbol}: Skip (size_fraction trims less than one lot of {held} shares)")
+                        continue
                     # Size at the sellable quantity, not the held one: under T+1
                     # they differ, and the difference is unfillable.
-                    held = self.positions.get(symbol, 0)
                     sellable = self.sellable_shares(symbol)
-                    if sellable < held:
-                        self.record_t1_deferral(symbol, held, sellable)
-                    if sellable > 0:
+                    wanted = min(requested, held)
+                    if sellable < wanted:
+                        self.record_t1_deferral(symbol, wanted, sellable)
+                    shares = min(wanted, sellable)
+                    if shares > 0:
                         action = {
                             "symbol": symbol,
                             "action": "sell",
-                            "shares": sellable,
+                            "shares": shares,
                             "reason": f"[LLM] {reasoning} (confidence: {confidence:.0%})",
                             "confidence": confidence
                         }
-                        if sellable < held:
+                        if shares < requested:
                             # The reason string still carries the model's own
                             # words ("exit the full position"); without this the
-                            # log would read as though it asked for `sellable`.
-                            action["requested_shares"] = held
+                            # log would read as though it asked for `shares`.
+                            action["requested_shares"] = requested
                         actions.append(action)
-                        print(f"      ✅ SELL {symbol}: {sellable} shares @ ${price:.2f} (conf: {confidence:.0%})")
+                        print(f"      ✅ SELL {symbol}: {shares} shares @ ${price:.2f} (conf: {confidence:.0%})")
                     elif symbol in self.positions and self.positions[symbol] > 0:
                         print(f"      ⚠️  SELL {symbol}: Skip (T+1 frozen, {self.positions[symbol]} shares settle next trading day)")
                     else:

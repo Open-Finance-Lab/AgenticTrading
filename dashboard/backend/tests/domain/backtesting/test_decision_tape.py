@@ -41,7 +41,7 @@ def test_intent_reads_final_step_orders_and_risk_actions():
     risk = [{"step": 1, "output": {"risk_actions": [{"symbol": "MSFT", "action": "stop_loss", "size_pct": 0.5}]}}]
     intent = tape.intent_from_outputs(risk, outputs_before=[], decision_step_count=1)
     assert intent["orders"][0] == {
-        "symbol": "MSFT", "action": "sell", "position_size": 50,
+        "symbol": "MSFT", "action": "sell", "position_size": 0, "size_fraction": 0.5,
         "confidence": 0.8, "reasoning": "stop_loss",
     }
 
@@ -270,15 +270,23 @@ def test_gate_rewrote_tolerates_non_numeric_model_sizes():
 def test_gate_rewrote_compares_symbol_side_size_triples():
     buy5 = {"orders": [{"symbol": "AAPL", "action": "buy", "position_size": 5}]}
     assert tape.gate_rewrote(buy5, [{"symbol": "AAPL", "action": "buy", "shares": 5}]) is False
-    # resized, dropped, added, and a SELL widened to the whole position
+    # resized, dropped, added
     assert tape.gate_rewrote(buy5, [{"symbol": "AAPL", "action": "buy", "shares": 3}]) is True
     assert tape.gate_rewrote(buy5, []) is True
     assert tape.gate_rewrote({"orders": []}, [{"symbol": "AAPL", "action": "buy", "shares": 1}]) is True
-    # The gate always sizes a SELL to the sellable position, and sizes a BUY
-    # left at 0 from confidence: both are what was asked, not a rewrite.
+    # A sized SELL is honoured (#661): sold as asked is not a rewrite, and one
+    # resized (capped at the holding or by T+1) is, like a resized BUY.
     trim = {"orders": [{"symbol": "AAPL", "action": "sell", "position_size": 2}]}
-    assert tape.gate_rewrote(trim, [{"symbol": "AAPL", "action": "sell", "shares": 10}]) is False
+    assert tape.gate_rewrote(trim, [{"symbol": "AAPL", "action": "sell", "shares": 2}]) is False
+    assert tape.gate_rewrote(trim, [{"symbol": "AAPL", "action": "sell", "shares": 10}]) is True
     assert tape.gate_rewrote(trim, []) is True  # a dropped sell still is
+    # The gate sizes a SELL with no size (the whole position) or a
+    # size_fraction (a share of it), and a BUY left at 0 from confidence: each
+    # is what was asked, not a rewrite.
+    exit_all = {"orders": [{"symbol": "AAPL", "action": "sell", "position_size": 0}]}
+    assert tape.gate_rewrote(exit_all, [{"symbol": "AAPL", "action": "sell", "shares": 10}]) is False
+    half = {"orders": [{"symbol": "AAPL", "action": "sell", "position_size": 0, "size_fraction": 0.5}]}
+    assert tape.gate_rewrote(half, [{"symbol": "AAPL", "action": "sell", "shares": 5}]) is False
     size_it = {"orders": [{"symbol": "AAPL", "action": "buy", "position_size": 0}]}
     assert tape.gate_rewrote(size_it, [{"symbol": "AAPL", "action": "buy", "shares": 7}]) is False
     # Normalised as the gate reads them: " aapl " / "BUY " is AAPL buy.

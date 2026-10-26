@@ -52,7 +52,7 @@ DRIVER_RULE_BASED = "rule_based"
 # store rejects a payload whose keys look sensitive (``token``, ``secret``...),
 # so only named fields are ever copied.
 _INTENT_FIELDS = (
-    "symbol", "action", "position_size", "confidence", "reasoning",
+    "symbol", "action", "position_size", "size_fraction", "confidence", "reasoning",
     "stop_loss_price", "take_profit_price",
 )
 _ACTION_FIELDS = ("symbol", "action", "shares", "requested_shares", "confidence", "reason")
@@ -367,11 +367,12 @@ def _order_triples(orders: Iterable[Mapping[str, Any]], size_field: str):
     """``(symbol, side, size)`` per buy/sell order, normalised the way the gate
     reads them (``symbol.strip().upper()``, ``action.strip().lower()``).
 
-    ``size`` is compared only where the gate honours it. A SELL is always sized
-    by the gate to the whole sellable position, whatever the model sent, so a
-    sell's size is ``None`` on both sides. A BUY with ``position_size`` 0 (or
-    none) asks the gate to size it from confidence, so that intent size is
-    ``None`` as well: the gate doing what was asked is not a rewrite."""
+    ``size`` is compared only where the gate honours it. An order with
+    ``position_size`` 0 (or none) asks the gate to size it -- a BUY from
+    confidence, a SELL to the whole position or to its ``size_fraction`` share
+    of it -- so that intent size is ``None``: the gate doing what was asked is
+    not a rewrite. A sized SELL is sold as asked (#661), so one capped at the
+    holding or by T+1 is a rewrite, like a resized BUY."""
     triples = []
     for order in orders or ():
         if not isinstance(order, Mapping):
@@ -379,11 +380,9 @@ def _order_triples(orders: Iterable[Mapping[str, Any]], size_field: str):
         side = str(order.get("action") or order.get("side") or "").strip().lower()
         if side not in _ORDER_SIDES:
             continue  # hold / unknown: not an order the gate can rewrite
-        size = None
-        if side == "buy":
-            size = _size(order.get(size_field))
-            if size == 0:
-                size = None
+        size = _size(order.get(size_field))
+        if size == 0:
+            size = None
         triples.append((str(order.get("symbol") or "").strip().upper(), side, size))
     return sorted(triples, key=lambda t: (t[0], t[1], -1.0 if t[2] is None else t[2]))
 
@@ -393,10 +392,10 @@ def gate_rewrote(intent: Optional[Mapping[str, Any]], actions: Iterable[Mapping[
 
     Compares the sorted ``(symbol, side, size)`` triples of ``intent.orders``
     (size = ``position_size``) with those of the post-gate ``actions`` (size =
-    ``shares``). A dropped, added or resized BUY is a rewrite; a SELL widened
-    to the sellable position, or a BUY sized by the gate because the model left
-    the size at 0, is the gate's documented behaviour and is not (see
-    ``_order_triples``). ``False`` with no intent or an unparsed one: a
+    ``shares``). A dropped, added or resized order is a rewrite; an order the
+    gate sized because the model left the size at 0 (a BUY from confidence, a
+    SELL to the whole position or its ``size_fraction``) is the gate's
+    documented behaviour and is not (see ``_order_triples``). ``False`` with no intent or an unparsed one: a
     rule-based or fallback bar had no model order to rewrite.
 
     ``build_decision_payload`` applies this only on ``driver == "llm"`` bars:
