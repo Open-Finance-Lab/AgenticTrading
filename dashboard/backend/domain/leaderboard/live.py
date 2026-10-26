@@ -1042,7 +1042,9 @@ def refresh_live_leaderboard(
     Always refreshes cheap baselines/indices for month-open → last completed
     session. When ``deploy_models`` is True, each LLM entry continues from the
     latest snapshot and only trades sessions not yet stored (typically one
-    cash day). Public GET never calls this.
+    cash day). An entry that raises is logged and listed in
+    ``model_failures``; the rest of the roster still trades, and the prune and
+    the state save still run. Public GET never calls this.
     """
     freeze_cfg = live_freeze_config(as_of)
     if freeze_cfg is None:
@@ -1103,7 +1105,13 @@ def refresh_live_leaderboard(
                     bars_memo=bars_memo,
                 )
                 successes.append(row)
-            except (lb_service.LeaderboardFallbackError, ValueError, RuntimeError) as exc:
+            except Exception as exc:
+                # Any Exception, not a list of expected types: one model's
+                # dropped database connection or SDK socket error must not leave
+                # the rest of the roster untraded and skip the prune and state
+                # save below. BaseException (a shutdown) still propagates. The
+                # type name in the line is what tells an operator a programming
+                # error from a provider outage, since both now land here.
                 # The background refresh keeps this list only in a state file on
                 # an ephemeral disk; the log line is the part an operator sees.
                 print(

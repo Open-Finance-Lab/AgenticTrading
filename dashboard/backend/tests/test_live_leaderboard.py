@@ -1454,6 +1454,84 @@ def test_a_segment_that_can_no_longer_clear_h6_stops_billing(monkeypatch):
     assert _month_rows("deepseek_v4_pro") == []
 
 
+# What a failed night leaves behind, pinned as it is (2026-10-14). The rule
+# these encode: a session is checkpointed only once the segment traded so far
+# clears H6, so billed sessions H6 has not yet accepted are lost when the run
+# dies, and the next night re-bills them. Storing that prefix anyway would
+# publish a curve the model did not drive; do not "fix" these by doing so.
+
+
+class _DeadModelAgent(_ScriptedAgent):
+    """Every call fails before generating anything (a gateway 404): each step
+    falls back to rule-based, so sessions are offered and traded while
+    ``llm_calls`` and ``llm_decisions`` never move."""
+
+    def run(self, bars, start, end, capital, starting_snapshot=None, on_session_close=None):
+        self.runs.append((start, end, (starting_snapshot or {}).get("day")))
+        days = live._trading_days_inclusive(date.fromisoformat(start), date.fromisoformat(end))
+        self.planned_decision_steps = self.steps * len(days)
+        curve = []
+        for day in days:
+            iso = day.isoformat()
+            self.traded.append(iso)
+            self.decision_steps += self.steps
+            curve.append(_pt(f"{iso}T19:00:00+00:00", SEED))
+            self.last_portfolio_snapshot = {"cash": SEED, "positions": {}, "day": iso[5:]}
+            on_session_close(day, list(curve))
+        return curve
+
+
+def test_a_dead_model_stores_nothing_and_restarts_at_the_1st_every_night(monkeypatch):
+    freeze_cfg = _live_aug27()
+    for _night in range(2):
+        runs = []
+        agent = _use_agent(monkeypatch, _DeadModelAgent(runs=runs))
+        with pytest.raises(lb_service.LeaderboardFallbackError, match="llm_calls=0"):
+            live.deploy_live_model_increment(_deepseek(freeze_cfg), freeze_cfg)
+        # Aug 1 is a Saturday: the first session is the 3rd, and it is the
+        # only one traded before the guard stops the run.
+        assert runs == [("2026-08-01", "2026-08-27", None)]
+        assert agent.traded == ["2026-08-03"]
+        assert agent.llm_calls == 0
+        assert _month_rows("deepseek_v4_pro") == []
+
+
+def test_an_early_miss_then_a_crash_loses_the_unchecked_prefix(monkeypatch):
+    freeze_cfg = _live_aug27()
+    agent = _use_agent(
+        monkeypatch,
+        _ScriptedAgent(misses={"2026-08-03": 1}, crash_on={"2026-08-05"}),
+    )
+    with pytest.raises(RuntimeError, match="worker killed"):
+        live.deploy_live_model_increment(_deepseek(freeze_cfg), freeze_cfg)
+    # 6/7 and 13/14 are under 95%, so neither close was stored, yet both
+    # sessions were billed.
+    assert agent.traded == ["2026-08-03", "2026-08-04"]
+    assert agent.llm_calls == 14
+    assert _month_rows("deepseek_v4_pro") == []
+
+    runs = []
+    _use_agent(monkeypatch, _ScriptedAgent(runs=runs))
+    live.deploy_live_model_increment(_deepseek(freeze_cfg), freeze_cfg)
+    assert runs == [("2026-08-01", "2026-08-27", None)]
+
+
+def test_a_single_miss_on_a_nightly_increment_keeps_the_prior_checkpoint(monkeypatch):
+    freeze_cfg = _live_aug27()
+    _insert_checkpoint("2026-08-26", "08-26")
+    agent = _use_agent(monkeypatch, _ScriptedAgent(misses={"2026-08-27": 1}))
+    with pytest.raises(lb_service.LeaderboardFallbackError, match="6/7"):
+        live.deploy_live_model_increment(_deepseek(freeze_cfg), freeze_cfg)
+    assert agent.llm_calls == 7
+    assert [r["end_date"] for r in _month_rows("deepseek_v4_pro")] == ["2026-08-26"]
+
+    # The retry resumes from that checkpoint, not from the 1st.
+    runs = []
+    _use_agent(monkeypatch, _ScriptedAgent(runs=runs))
+    live.deploy_live_model_increment(_deepseek(freeze_cfg), freeze_cfg)
+    assert runs == [("2026-08-27", "2026-08-27", "08-26")]
+
+
 def test_a_session_with_no_bars_stops_the_run_loudly(monkeypatch, capsys):
     """A trading day with no bars is broken data. Skipping it carried the book
     across a session it never traded, and the window was marked deployed."""
@@ -1498,6 +1576,72 @@ def test_a_missing_last_session_fails_the_refresh_instead_of_marking_it_done(
         "2026-08-26"
     }
     assert live.refresh_live_leaderboard(deploy_models=True, as_of=as_of)["skipped"] is False
+
+
+def test_an_unexpected_error_from_one_model_does_not_stop_the_roster(
+    monkeypatch, capsys,
+):
+    """The per-entry catch named three types. Anything else (a dropped database
+    connection, a socket error from a provider SDK) escaped it: every later
+    entry went untraded, and the prune and the state save never ran."""
+    as_of = datetime(2026, 8, 27, 17, 39, tzinfo=_ET)
+    freeze_cfg = live.live_freeze_config(as_of)
+    deepseek = _deepseek(freeze_cfg)
+    second = {**deepseek, "id": "second_model", "name": "Second Model"}
+    monkeypatch.setattr(live, "live_llm_entries", lambda *args, **kwargs: [deepseek, second])
+    monkeypatch.setattr(lb_service, "ensure_leaderboard_runs", lambda **kwargs: {})
+    monkeypatch.setattr(lb_service, "fetch_hourly_bars", lambda *args: _one_bar_frame())
+    healthy = _ScriptedAgent()
+
+    def get_strategy(entry):
+        if entry["id"] == "deepseek_v4_pro":
+            raise ConnectionError("server closed the connection unexpectedly")
+        return healthy
+
+    monkeypatch.setattr(lb_service, "get_strategy", get_strategy)
+    # A superseded row the end-of-refresh prune must still remove.
+    for end in ("2026-08-25", "2026-08-26"):
+        _insert_live_run(
+            f"lb_spy_index_20260801_{end.replace('-', '')}", "spy_index", end,
+            [_pt(f"{end}T19:00:00+00:00", SEED)],
+        )
+
+    result = live.refresh_live_leaderboard(deploy_models=True, as_of=as_of)
+
+    assert result["models_deployed"] is False
+    assert result["model_failures"] == [
+        {
+            "entry_id": "deepseek_v4_pro",
+            "error": "server closed the connection unexpectedly",
+        }
+    ]
+    assert [row["entry_id"] for row in result["model_results"]] == ["second_model"]
+    assert healthy.traded[-1] == "2026-08-27"
+    assert (
+        "ERROR: live.model_deploy_failed entry=deepseek_v4_pro "
+        "error=ConnectionError: server closed the connection unexpectedly"
+    ) in capsys.readouterr().out
+    assert result["pruned_runs"] == 1
+    assert db.get_run("lb_spy_index_20260801_20260825") is None
+    saved = live._live_refresh_state()
+    assert saved["window_key"] == result["window_key"]
+    assert saved["model_failures"] == result["model_failures"]
+
+
+def test_a_base_exception_still_stops_the_refresh(monkeypatch):
+    """Exception, not BaseException: a shutdown must not be logged as one
+    model's failure while the loop carries on billing the rest."""
+    as_of = datetime(2026, 8, 27, 17, 39, tzinfo=_ET)
+    monkeypatch.setattr(lb_service, "ensure_leaderboard_runs", lambda **kwargs: {})
+    monkeypatch.setattr(lb_service, "fetch_hourly_bars", lambda *args: _one_bar_frame())
+
+    def get_strategy(entry):
+        raise SystemExit("worker shutting down")
+
+    monkeypatch.setattr(lb_service, "get_strategy", get_strategy)
+    with pytest.raises(SystemExit):
+        live.refresh_live_leaderboard(deploy_models=True, as_of=as_of)
+    assert live._live_refresh_state() == {}
 
 
 @pytest.mark.parametrize(
