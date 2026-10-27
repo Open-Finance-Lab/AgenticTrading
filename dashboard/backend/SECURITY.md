@@ -118,7 +118,7 @@ It applies these constraints inline instead:
 | JSON-only, no tools | No request sends `tools`; text blocks only (`extract_response_text`, which skips `tool_use` and thinking blocks); prompt scaffold pins the output contract; response is parsed as JSON only (`parse_llm_response`), never executed |
 | Symbol allowlist | Symbols outside the run's universe (`_allowed_set`: `DJIA_30` unless the run names a universe) skipped; a strict run rejects the whole batch |
 | Action count | Capped at one action per universe symbol (`len(allowed_symbols)`); excess entries ignored, or the whole batch rejected on a strict run |
-| Per-order size | `position_size > MAX_ORDER_SHARES` (10k, same constant as the validator) skipped; unparseable/non-finite sizes skipped |
+| Per-order size | `position_size > MAX_ORDER_SHARES` (10k, same constant as the validator) skipped; unparseable/non-finite/boolean sizes skipped; a buy size that rounds to 0 shares or is not positive skipped, never sized from confidence (only a missing/null/0 size is) |
 | Cash bound | Buys must fit in available cash; sells limited to held shares |
 | Confidence floor | Actions with confidence < 0.3 skipped |
 

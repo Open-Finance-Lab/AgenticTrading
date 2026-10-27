@@ -280,6 +280,52 @@ def test_llm_requested_size_is_still_passed_through_unrounded():
     assert [action["shares"] for action in out["actions"]] == [150]
 
 
+_NO_SIZE = object()
+
+
+def _llm_buy_shares(size):
+    pm = CanonicalPortfolioManager(100000)
+    action = {"symbol": "AAPL", "action": "buy", "confidence": 0.9, "reasoning": "x"}
+    if size is not _NO_SIZE:
+        action["position_size"] = size
+    client = _FakeClient(_FakeResp(json.dumps({"actions": [action]}), _FakeUsage(1, 1)))
+    return [a["shares"] for a in pm.make_trading_decision_with_llm(_llm_state(), client)["actions"]]
+
+
+@pytest.mark.parametrize("size", [0.6, 0.99])
+def test_llm_buy_size_under_one_share_is_skipped_not_auto_sized(size, capsys):
+    """int() truncated a size under one share to 0, and 0 means "size it from
+    confidence": the model asked for 0.6 of a share and got an engine-chosen
+    buy. It asked for an amount, so nothing is bought in its name instead."""
+    assert _llm_buy_shares(size) == []
+    assert "rounds to 0 shares" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("size", [-0.5, -3])
+def test_llm_buy_size_not_positive_is_skipped_not_auto_sized(size, capsys):
+    """-0.5 truncated to 0 and was auto-sized like a missing size; -3 was
+    skipped but logged as "insufficient cash: need $-300"."""
+    assert _llm_buy_shares(size) == []
+    assert "not positive" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("size", [True, False])
+def test_llm_buy_boolean_size_is_skipped(size, capsys):
+    """int(True) is 1 and int(False) is 0: neither is a share count."""
+    assert _llm_buy_shares(size) == []
+    assert "unparseable position_size" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("size", [_NO_SIZE, 0, None, ""])
+def test_llm_buy_without_size_is_still_confidence_sized(size):
+    shares = _llm_buy_shares(size)
+    assert len(shares) == 1 and shares[0] > 0
+
+
+def test_llm_buy_fractional_size_above_one_truncates():
+    assert _llm_buy_shares(10.7) == [10]
+
+
 def test_strict_llm_rejects_missing_client_without_rule_fallback(monkeypatch):
     pm = CanonicalPortfolioManager(100000)
     fallback_calls = []
