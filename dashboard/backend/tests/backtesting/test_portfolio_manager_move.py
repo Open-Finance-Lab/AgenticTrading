@@ -377,6 +377,28 @@ def test_strict_pipeline_accepts_empty_orders_as_model_hold():
     assert pm.llm_decisions == 1
 
 
+def test_pipeline_order_with_zero_confidence_does_not_trade():
+    """A pipeline order the model gave confidence 0 stays under the 0.3 floor."""
+    pm = CanonicalPortfolioManager(100000)
+    reply = {"orders": [{"symbol": "AAPL", "side": "buy", "qty": 10, "confidence": 0}]}
+    client = _FakeClient(_FakeResp(json.dumps(reply), _FakeUsage(3, 2)))
+
+    result = pm.make_trading_decision_with_llm(
+        _llm_state(),
+        client,
+        pipeline=[
+            {
+                "label": "Trading instruction",
+                "prompt": "Return the orders for this bar.",
+                "outputFormat": '{"orders": []}',
+            }
+        ],
+        strict_llm=True,
+    )
+
+    assert result == {"actions": []}
+
+
 @pytest.mark.parametrize(
     "action",
     [

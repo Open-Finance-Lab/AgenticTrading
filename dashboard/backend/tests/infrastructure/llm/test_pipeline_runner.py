@@ -101,6 +101,20 @@ def test_pipeline_output_to_decision_orders():
     assert decision["actions"][0]["position_size"] == 10
 
 
+def test_pipeline_order_with_zero_confidence_keeps_it():
+    """``confidence: 0`` is the model saying it is not confident at all; only
+    a missing confidence takes the 0.75 default."""
+    decision = pipeline_output_to_decision(
+        {"orders": [{"symbol": "AAPL", "side": "buy", "qty": 10, "confidence": 0}]}
+    )
+    assert decision["actions"][0]["confidence"] == 0.0
+
+    decision = pipeline_output_to_decision(
+        {"orders": [{"symbol": "AAPL", "side": "buy", "qty": 10}]}
+    )
+    assert decision["actions"][0]["confidence"] == 0.75
+
+
 def test_pipeline_output_to_decision_actions_passthrough():
     parsed = {
         "actions": [

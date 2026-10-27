@@ -247,7 +247,13 @@ def pipeline_output_to_decision(parsed: Dict[str, Any]) -> Optional[Dict[str, An
                     {
                         "action": side,
                         "symbol": order.get("symbol"),
-                        "confidence": float(order.get("confidence", 0.75) or 0.75),
+                        # Default only a missing confidence: 0 is the model
+                        # saying it is not confident, not an absent value.
+                        "confidence": float(
+                            0.75
+                            if order.get("confidence") in (None, "")
+                            else order["confidence"]
+                        ),
                         "reasoning": order.get("reason")
                         or order.get("rationale")
                         or "",
