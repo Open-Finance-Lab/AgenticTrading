@@ -280,6 +280,34 @@ def test_llm_requested_size_is_still_passed_through_unrounded():
     assert [action["shares"] for action in out["actions"]] == [150]
 
 
+def _llm_buy(confidence, **fields):
+    pm = CanonicalPortfolioManager(100000)
+    action = {"symbol": "AAPL", "action": "buy", "confidence": confidence, "reasoning": "x"}
+    action.update(fields)
+    client = _FakeClient(_FakeResp(json.dumps({"actions": [action]}), _FakeUsage(1, 1)))
+    return pm.make_trading_decision_with_llm(_llm_state(), client)["actions"]
+
+
+@pytest.mark.parametrize("confidence", [25, 80, 1.5])
+def test_llm_confidence_above_one_is_skipped_not_scaled(confidence, capsys):
+    """Confidence is 0-1. A model answering on a 0-100 scale (25 meaning 25%)
+    used to pass the 0.3 floor and multiply the auto-sized buy by 100. It is
+    neither clamped nor divided by 100: the value is wrong, so the order is."""
+    assert _llm_buy(confidence) == []
+    assert "outside 0-1" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("confidence", [-0.5, float("nan"), float("inf")])
+def test_llm_confidence_negative_or_not_finite_is_skipped(confidence, capsys):
+    assert _llm_buy(confidence, position_size=5) == []
+    assert "outside 0-1" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("confidence", [0.3, 1.0, 1])
+def test_llm_confidence_at_the_bounds_still_trades(confidence):
+    assert [a["shares"] for a in _llm_buy(confidence, position_size=5)] == [5]
+
+
 def test_strict_llm_rejects_missing_client_without_rule_fallback(monkeypatch):
     pm = CanonicalPortfolioManager(100000)
     fallback_calls = []

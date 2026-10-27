@@ -873,7 +873,20 @@ class PortfolioManager:
                 
                 print(f"\n   Processing: {symbol} ({action_type.upper()}, conf={confidence:.0%})")
                 print(f"      Reasoning: {reasoning[:60]}...")
-                
+
+                # Confidence is 0-1, the same range validate_confidence enforces
+                # for external agents. A model answering on a 0-100 scale (25
+                # meaning 25%) otherwise clears the 0.3 floor and multiplies the
+                # confidence-sized buy by 100. Skip the action rather than clamp
+                # or divide by 100: guessing the model's scale is not ours to do.
+                if (
+                    isinstance(confidence, (int, float))
+                    and not isinstance(confidence, bool)
+                    and not (math.isfinite(confidence) and 0 <= confidence <= 1)
+                ):
+                    print(f"      ⚠️  {symbol}: Skip (confidence {confidence!r} outside 0-1)")
+                    continue
+
                 # Skip low-confidence decisions
                 if confidence < 0.3:
                     print(f"      ⏸️  Skipping (confidence {confidence:.0%} too low)")
