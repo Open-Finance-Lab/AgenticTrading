@@ -54,7 +54,32 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-          pip install pytest pytest-timeout matplotlib
+
+      - name: Check requirements.txt pins every installed package
+        # Runs before the test tools are installed, so the environment holds
+        # requirements.txt's tree alone. An unpinned transitive floats to its
+        # newest release on every build and deploy, and Dependabot cannot track
+        # it; a bump that pulls in a new package fails here until it is pinned.
+        run: |
+          python - <<'EOF'
+          import re, sys
+          from importlib.metadata import distributions
+          norm = lambda n: re.sub(r"[-_.]+", "-", n).lower()
+          lines = [l.split("#")[0].strip() for l in open("requirements.txt")]
+          lines = [l for l in lines if l]
+          loose = [l for l in lines if "==" not in l]
+          pinned = {norm(re.split(r"[\[=<>!~ ]", l)[0]) for l in lines}
+          installed = {norm(d.metadata["Name"]) for d in distributions()}
+          missing = sorted(installed - pinned - {"pip", "setuptools", "wheel"})
+          for l in loose:
+              print(f"::error file=requirements.txt::not pinned with ==: {l}")
+          for n in missing:
+              print(f"::error file=requirements.txt::installed but not pinned: {n}")
+          sys.exit(1 if loose or missing else 0)
+          EOF
+
+      - name: Install test tools
+        run: pip install pytest pytest-timeout matplotlib
 
       - name: Run backend tests
         # DATABASE_PATH is a belt-and-suspenders backstop: tests/conftest.py

@@ -350,7 +350,7 @@ The FinSearch news adapter (`dashboard/backend/integrations/news_sentiment.py`) 
 
 ## Gotchas
 
-- Root `pyproject.toml` (`finagent-orchestration`) is for the **orchestration** subsystem, not the dashboard — edit `requirements.txt` for dashboard deps.
+- Root `pyproject.toml` (`finagent-orchestration`) is for the **orchestration** subsystem, not the dashboard — edit `requirements.txt` for dashboard deps. That file pins the **whole** installed tree, transitives included, and CI fails on any installed package it does not pin with `==` (the *Check requirements.txt pins every installed package* step in `ci.yml`, run before the test tools are installed). After a bump, pin whatever new package `pip freeze` shows.
 - `README.md`'s "File Structure" diagram is idealized; the real layout nests everything under `dashboard/`.
 - The committed `dashboard/storage/data/backtest.db` holds seed runs referenced by `dashboard/config/defaults.json`. Importing a store module runs `CREATE TABLE IF NOT EXISTS` against `DATABASE_PATH`, so running the app locally can add empty tables to that file — don't commit those mutations. If you regenerate the DB, update `defaults.json`.
 - Pytest is not in `requirements.txt`; install it separately.
