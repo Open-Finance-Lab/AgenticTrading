@@ -13,7 +13,7 @@
          because every API call is a CORS request. -->
     <link rel="preconnect" href="https://agentictrading.onrender.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="styles.css?v=160">
+    <link rel="stylesheet" href="styles.css?v=161">
     <!-- defer: ~200KB that was render-blocking. Deferred scripts execute in
          document order (this one first, the body-end ones after), all before
          DOMContentLoaded, so Chart is defined before any chart renders. -->
@@ -369,6 +369,7 @@
                         </div>
                         <div id="ifindAshareSymbolGrid" class="ifind-symbol-grid" aria-label="Registered A-share universe"></div>
                     </div>
+                    <p id="backtestSingleSymbolHint" class="control-helper" role="status" hidden></p>
                     <div class="universe-tabs" id="universeTabs">
                         <button class="universe-tab active" data-tab="builtin" type="button">Built-in</button>
                         <button class="universe-tab" data-tab="custom" type="button">Custom</button>
@@ -1143,7 +1144,7 @@
                 </label>
                 <div id="agentEditorManagedModelField" class="agent-editor-managed-model-field" aria-label="Hosted AI model" hidden>
                     <span class="agent-editor-model-label">Hosted AI model</span>
-                    <strong id="agentEditorManagedModelValue" class="agent-editor-managed-model-value">OpenRouter · nvidia/nemotron-3-nano-30b-a3b</strong>
+                    <strong id="agentEditorManagedModelValue" class="agent-editor-managed-model-value">Hosted model — loading…</strong>
                     <span class="agent-editor-managed-model-note">Managed for you by Agentic Trading Lab</span>
                 </div>
                 <label id="agentEditorCategoryField" class="agent-editor-model-field" for="agentEditorCategorySelect">
@@ -1223,16 +1224,22 @@
                         <p id="agentEditorSimpleReplaceNote" class="agent-editor-simple-note" hidden>This agent currently uses a custom multi-step strategy. Saving this instruction replaces it.</p>
                     </div>
                     <div id="agentEditorAiHedgeFundPanel" class="agent-editor-simple section-card compact" hidden>
-                        <h3 class="agent-editor-intro-title">AI Hedge Fund analyst panel</h3>
+                        <h3 id="agentEditorHostedPanelTitle" class="agent-editor-intro-title">AI Hedge Fund analyst panel</h3>
                         <p class="agent-editor-intro-text">Choose the analysts that shape this agent's strategy. The AI model and its settings are hosted and managed by Agentic Trading Lab.</p>
                         <div id="agentEditorAiHedgeFundAnalysts" class="agent-editor-analyst-grid" role="group" aria-label="AI Hedge Fund analysts"></div>
-                        <label class="auth-field agent-editor-credential-field" for="agentEditorFinancialDatasetsKey">
-                            <span>Financial Datasets access key (from financialdatasets.ai)</span>
-                            <input id="agentEditorFinancialDatasetsKey" type="password" autocomplete="new-password" placeholder="Leave blank to keep the stored key" aria-describedby="agentEditorFinancialDatasetsStatus">
-                        </label>
-                        <p id="agentEditorFinancialDatasetsStatus" class="agent-editor-simple-note">Checking credential…</p>
-                        <button id="agentEditorFinancialDatasetsRemove" class="agent-editor-credential-remove" type="button" hidden>Remove stored key</button>
-                        <p class="agent-editor-simple-note">Encrypted and stored securely. For your protection, it is never shown again after you save.</p>
+                        <p id="agentEditorHostedWithdrawnNote" class="agent-editor-simple-note agent-editor-withdrawn-note" role="status" hidden></p>
+                        <!-- Agent-scoped market-data key. AI Hedge Fund only: TradingAgents
+                             reads keyless yfinance data, and this is neither the platform
+                             OpenRouter key nor the ATL_API_KEY Connect Agent issues. -->
+                        <div id="agentEditorFinancialDatasetsField">
+                            <label class="auth-field agent-editor-credential-field" for="agentEditorFinancialDatasetsKey">
+                                <span>Financial Datasets access key (from financialdatasets.ai)</span>
+                                <input id="agentEditorFinancialDatasetsKey" type="password" autocomplete="new-password" placeholder="Leave blank to keep the stored key" aria-describedby="agentEditorFinancialDatasetsStatus">
+                            </label>
+                            <p id="agentEditorFinancialDatasetsStatus" class="agent-editor-simple-note">Checking credential…</p>
+                            <button id="agentEditorFinancialDatasetsRemove" class="agent-editor-credential-remove" type="button" hidden>Remove stored key</button>
+                            <p class="agent-editor-simple-note">Encrypted and stored securely. For your protection, it is never shown again after you save.</p>
+                        </div>
                     </div>
                     <p id="agentEditorSaveStatus" class="agent-editor-save-status" hidden></p>
                     <p class="agent-editor-hint">Tip: press <kbd>Ctrl</kbd>+<kbd>S</kbd> to save.</p>
@@ -2516,9 +2523,9 @@
     <script src="market-events/MarketEventFeed.js" defer></script>
     <script src="js/portfolio.js?v=18" defer></script>
     <script src="js/backtest-comparison.js?v=1" defer></script>
-    <script src="app.js?v=162" defer></script>
+    <script src="app.js?v=166" defer></script>
     <script src="js/analytics.js?v=1" defer></script>
-    <script src="js/agent-editor.js?v=33" defer></script>
+    <script src="js/agent-editor.js?v=38" defer></script>
     <script src="js/credit-format.js?v=1" defer></script>
     <script src="js/credits.js?v=8" defer></script>
     <script src="js/admin-credits.js?v=9" defer></script>

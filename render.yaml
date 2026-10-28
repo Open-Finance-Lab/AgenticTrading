@@ -15,7 +15,7 @@ services:
     # Prod deploys via Dockerfile (ATL on 3.13, AI Hedge Fund venv on 3.12 via
     # uv). This native buildCommand is documentation — upstream numpy^1.24 has
     # no cp313 wheels, so the isolated venv must use 3.12.
-    buildCommand: pip install -r requirements.txt && pip install uv && uv python install 3.12 && uv venv --python 3.12 .ai-hedge-fund-venv && uv pip install --python .ai-hedge-fund-venv -r requirements-ai-hedge-fund.txt
+    buildCommand: pip install -r requirements.txt && pip install uv && uv python install 3.12 && uv venv --python 3.12 .ai-hedge-fund-venv && uv pip install --python .ai-hedge-fund-venv -r requirements-ai-hedge-fund.txt && uv venv --python 3.12 .tradingagents-venv && uv pip install --python .tradingagents-venv -r requirements-tradingagents.txt
     
     # Start command (canonical ASGI package target; runs via Render's shell,
     # which expands $PORT). No import-path workarounds needed.
@@ -38,6 +38,11 @@ services:
         value: "*"
       - key: AI_HEDGE_FUND_PYTHON
         value: .ai-hedge-fund-venv/bin/python
+      # Second isolated interpreter, same convention. TRADINGAGENTS_ROOT is
+      # deliberately unset: the bridge reads the SDK from packaging/ in the
+      # deployed tree, which is where a checkout and the image both put it.
+      - key: TRADINGAGENTS_PYTHON
+        value: .tradingagents-venv/bin/python
       - key: OPENROUTER_API_KEY
         sync: false
       # Encrypts both broker OAuth tokens and per-agent hosted-runtime

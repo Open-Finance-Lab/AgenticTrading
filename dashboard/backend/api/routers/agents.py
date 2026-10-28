@@ -43,6 +43,7 @@ from dashboard.backend.domain.agents.service import (
 from dashboard.backend.domain.agents import marketplace as marketplace_catalog
 from dashboard.backend.domain.agents.runtime import (
     AI_HEDGE_FUND_RUNTIME_TYPE,
+    TRADINGAGENTS_RUNTIME_TYPE,
     normalize_runtime_config,
 )
 from dashboard.backend.api.dependencies import (
@@ -74,7 +75,7 @@ class CreateAgentBody(BaseModel):
     model_name: str = Field(default="local-model", max_length=100)
     agent_type: str = Field(default="external", max_length=20)
     description: Optional[str] = Field(default=None, max_length=280)
-    runtime_type: Literal["pipeline", "ai_hedge_fund"] = "pipeline"
+    runtime_type: Literal["pipeline", "ai_hedge_fund", "tradingagents"] = "pipeline"
     runtime_config: Dict[str, Any] = Field(default_factory=dict)
     # None = "not chosen": the route resolves it via new_agent_cash_allocation()
     # at call time ($0 while paper trading is switched off).
@@ -108,7 +109,7 @@ class UpdateAgentBody(BaseModel):
     model_name: Optional[str] = Field(default=None, min_length=1, max_length=100)
     description: Optional[str] = Field(default=None, max_length=280)
     pipeline: Optional[List[PipelineStep]] = Field(default=None, max_length=50)
-    runtime_type: Optional[Literal["pipeline", "ai_hedge_fund"]] = None
+    runtime_type: Optional[Literal["pipeline", "ai_hedge_fund", "tradingagents"]] = None
     runtime_config: Optional[Dict[str, Any]] = None
     cash_allocation: Optional[float] = Field(
         default=None,
@@ -306,6 +307,102 @@ def clone_marketplace_agent(
             ctx["user_id"], AgentScope.from_owner_context(ctx)
         )
     return {"agent": agent}
+
+
+#: Display labels for the platform gateways a hosted runtime can be funded by.
+#: Keyed on the gateway id the adapter resolves, so a gateway with no entry
+#: reports its own id rather than another's name.
+_GATEWAY_LABELS = {
+    "openrouter": "OpenRouter",
+    "commonstack": "CommonStack",
+}
+
+
+def _require_signed_in_user(
+    request: Request, authorization: Optional[str]
+) -> Dict[str, Any]:
+    """The caller's account, or 401. Reuses the router's own notion of a user."""
+    from dashboard.backend.api.dependencies import _optional_user
+
+    user = _optional_user(request, authorization)
+    if not user or user.get("id") is None:
+        raise HTTPException(status_code=401, detail="Sign in to continue.")
+    return user
+
+
+@router.get("/hosted-runtimes")
+def describe_hosted_runtimes(
+    request: Request,
+    authorization: Optional[str] = Header(default=None),
+):
+    """The provider and model each hosted runtime actually runs on.
+
+    Exists because the agent editor used to *hard-code* that line. `app.html`
+    shipped the literal "OpenRouter - nvidia/nemotron-3-nano-30b-a3b" inside
+    `#agentEditorManagedModelValue` and no code ever wrote it, so every hosted
+    agent's Configure panel claimed that provider and model regardless of
+    which gateway the deployment is funded by. Production resolves CommonStack
+    first (`_GATEWAY_AUTODETECT_ORDER`), so the panel named the wrong provider
+    *and* the wrong model for every TradingAgents agent -- and for AI Hedge
+    Fund it was right only by coincidence.
+
+    Sign-in required, and the first version of this was not -- its docstring
+    claimed the answer "reveals nothing about credential state" because the
+    gateway resolver falls back to a default when no key is set. An
+    independent review showed that is false in the direction that matters:
+    `_GATEWAY_AUTODETECT_ORDER` returns `commonstack` **iff**
+    `COMMONSTACK_API_KEY` is present, so an anonymous caller learned whether
+    that key is configured. That is the same fact
+    `_validate_tradingagents_runtime`'s 503 is deliberately ordered *behind*
+    the sign-in gate to withhold, so publishing it here unauthenticated undid
+    that care on another route.
+
+    Requiring an account costs nothing: a signed-out visitor cannot run a
+    hosted backtest either (`_require_signed_in_for_tradingagents`), so there
+    is no state they need this to configure.
+
+    The response is additive and presentational. It does not change the agent
+    contract or any leaderboard label; a format change to those is a separate
+    decision.
+    """
+    _require_signed_in_user(request, authorization)
+    from dashboard.backend.infrastructure.ai_hedge_fund import adapter as ahf
+    from dashboard.backend.infrastructure.tradingagents.adapter import (
+        TradingAgentsConfigurationError,
+        select_managed_gateway,
+    )
+    from dashboard.backend.infrastructure.tradingagents.bridge import (
+        DEFAULT_MANAGED_GATEWAY,
+        MANAGED_GATEWAYS,
+    )
+
+    try:
+        gateway = select_managed_gateway()
+    except TradingAgentsConfigurationError:
+        # A bad TRADINGAGENTS_GATEWAY override. The run itself is refused
+        # elsewhere with that message; this endpoint is presentational, so it
+        # reports the default rather than failing the whole panel.
+        gateway = DEFAULT_MANAGED_GATEWAY
+    managed = MANAGED_GATEWAYS[gateway]
+
+    return {
+        "runtimes": {
+            AI_HEDGE_FUND_RUNTIME_TYPE: {
+                # AI Hedge Fund's bridge reads OPENROUTER_API_KEY and its own
+                # default model; it has no gateway selection of its own.
+                "provider": "openrouter",
+                "provider_label": _GATEWAY_LABELS["openrouter"],
+                "model": ahf.DEFAULT_MODEL_NAME,
+            },
+            TRADINGAGENTS_RUNTIME_TYPE: {
+                "provider": gateway,
+                "provider_label": _GATEWAY_LABELS.get(gateway, gateway),
+                # The deep-think model: the one that produces the decision the
+                # order is mapped from.
+                "model": managed["deep_think_llm"],
+            },
+        }
+    }
 
 
 @router.get("/builtin")

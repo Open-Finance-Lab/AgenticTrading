@@ -180,6 +180,28 @@
    }
   },
   {
+   "template_id": "tradingagents",
+   "shelf": "open",
+   "card_subtitle": "Open-source multi-agent research desk",
+   "name": "TradingAgents",
+   "model_name": "nvidia/nemotron-3-nano-30b-a3b",
+   "description": "A research desk that studies one ticker before each trading day — market analysis, a bull/bear debate, a trader plan and a risk review — then hands one rating to the backtest engine.",
+   "category": "us_stocks",
+   "tags": [
+    "analyst debate",
+    "single ticker",
+    "official template"
+   ],
+   "author": "Tauric Research / Agentic Trading Lab",
+   "repo_url": "https://github.com/TauricResearch/TradingAgents",
+   "runtime_type": "tradingagents",
+   "runtime_config": {
+    "analysts": [
+     "market"
+    ]
+   }
+  },
+  {
    "template_id": "balanced-starter",
    "shelf": "open",
    "name": "Balanced Starter",

@@ -1,0 +1,73 @@
+# Build context exclusions.
+#
+# .gitignore has NO effect on a Docker build context: `COPY dashboard
+# ./dashboard` happily copies `dashboard/.env`, and app.py loads it at import,
+# so a local build bakes live credentials into the image and the process reads
+# them as if an operator had set them. (Render builds from the Git clone, where
+# .env was never committed, so prod images are unaffected -- but a local image
+# must never be pushed to a registry, and the no-credential path cannot be
+# tested while the key ships inside.)
+#
+# Secrets first.
+#
+# ⚠ Docker ignore patterns are NOT .gitignore patterns: one without a slash
+# matches only at the context ROOT, so a bare `.env` leaves `dashboard/.env`
+# -- the one app.py actually loads -- in the image. The `**/` forms are the
+# ones that do the work here; the bare forms are kept for the root copies.
+.env
+.env.*
+**/.env
+**/.env.*
+!.env.example
+!**/.env.example
+credentials/
+**/credentials/
+*.pem
+*.key
+**/*.pem
+**/*.key
+
+# Version control and tooling metadata.
+.git
+.gitignore
+.github
+.vscode
+.pytest_cache
+
+# Virtual environments -- the image builds its own isolated ones.
+.venv
+venv
+.ai-hedge-fund-venv
+.tradingagents-venv
+
+# Caches and build junk.
+__pycache__
+**/__pycache__
+*.py[cod]
+*.egg-info
+**/*.egg-info
+.ruff_cache
+.mypy_cache
+node_modules
+**/node_modules
+
+# Local databases and scratch data.
+#
+# ⚠ `*.db` is deliberately NOT here. `dashboard/storage/data/backtest.db` is
+# committed and holds the seed runs `dashboard/config/defaults.json`
+# references; on Render, which has no persistent disk, that file is what
+# DATABASE_PATH resets to on every deploy. Excluding the extension would ship
+# an image whose seed data is missing, and a developer's working copy cannot
+# be told from the seed by extension. `test_docker_build_context.py` asserts
+# the seed file stays in the context, because adding `*.db` here looks like a
+# tidy-up and is a regression.
+#
+# The recursive forms below are load-bearing, for the reason the header gives:
+# a slashless pattern anchors at the context ROOT, so `*.db-journal` alone
+# left `dashboard/storage/data/backtest.db-journal` in the image.
+*.db-journal
+**/*.db-journal
+*.sqlite
+**/*.sqlite
+*.log
+**/*.log

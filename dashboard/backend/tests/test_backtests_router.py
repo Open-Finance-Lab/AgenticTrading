@@ -3970,3 +3970,579 @@ def test_the_child_reports_llm_failures_at_its_cli_boundary():
     ]
     assert handlers, "__main__ must catch LLMExecutionError"
     assert "_run_failed_report" in ast.unparse(handlers[0])
+
+
+# ===========================================================================
+# TradingAgents hosted runtime
+# ===========================================================================
+
+
+def _stub_tradingagents_deployment(monkeypatch):
+    """Make the deployment look able to host the runtime. No sign-in."""
+    monkeypatch.setattr(bt, "tradingagents_runtime_unavailable_reason", lambda: None)
+
+
+def _stub_tradingagents_installed(monkeypatch):
+    """Make the deployment look able to host the runtime, and sign the caller in.
+
+    The sign-in belongs here because it is a precondition of *reaching* the
+    runtime at all: a TradingAgents run bills the platform's own gateway, so
+    the route refuses an unauthenticated one before it checks anything else
+    (see test_anonymous_session_cannot_launch_a_platform_paid_tradingagents_run).
+    A case that wants the anonymous path calls neither.
+    """
+    _stub_tradingagents_deployment(monkeypatch)
+    _sign_in(monkeypatch)
+
+
+def _create_tradingagents_agent(client, headers):
+    """Clone the marketplace template -- the only path that yields the built-in
+    agent /backtest/run accepts."""
+    response = client.post(
+        "/api/v1/agents/marketplace/tradingagents/clone",
+        json={},
+        headers=headers,
+    )
+    assert response.status_code == 200, response.text
+    return response.json()["agent"]
+
+
+def test_tradingagents_backtest_dispatches_the_hosted_runtime(client, monkeypatch):
+    """TradingAgents reads free yfinance data, so unlike AI Hedge Fund it must
+    start without any per-agent market-data credential configured."""
+    spy = _Spy()
+    monkeypatch.setattr(bt, "run_backtest_background", spy)
+    monkeypatch.setenv("OPENROUTER_API_KEY", "platform-openrouter-test-key")
+    _stub_tradingagents_installed(monkeypatch)
+    headers = {"X-Session-Id": str(uuid.uuid4())}
+    agent = _create_tradingagents_agent(client, headers)
+
+    response = client.post(
+        "/backtest/run",
+        json={
+            "start_date": "2026-05-01",
+            "end_date": "2026-05-02",
+            "decision_source": "llm",
+            "assets": ["AAPL"],
+            "model": "claude-haiku-4.5",
+            "agent_id": agent["agent_id"],
+        },
+        headers=headers,
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["runtime_type"] == "tradingagents"
+    assert spy.last_kwargs["runtime_type"] == "tradingagents"
+    # The shipped template's roster, which is also the only as-of-safe one:
+    # a run that reached the engine with social/news/fundamentals selected
+    # would read wall-clock-current data for a historical date.
+    assert spy.last_kwargs["runtime_config"]["analysts"] == ["market"]
+    assert spy.last_kwargs["financial_datasets_api_key"] is None
+    assert spy.last_kwargs["model"] is None
+
+
+def _sign_in(monkeypatch, user_id=7):
+    """Make _optional_user report a signed-in account, the way the other
+    authenticated cases in this file do."""
+    monkeypatch.setattr(
+        "dashboard.backend.api.dependencies._optional_user",
+        lambda *_args, **_kwargs: {"id": user_id},
+    )
+
+
+def test_anonymous_session_cannot_launch_a_platform_paid_tradingagents_run(
+    client, monkeypatch
+):
+    """A self-chosen X-Session-Id is not an authenticated identity.
+
+    The probe this pins: clone the marketplace template with a random
+    X-Session-Id -- which makes the caller the agent's owner, since
+    owner_browser_session is set from that header -- and POST /backtest/run.
+    Nothing else is needed: TradingAgents requires no per-agent credential,
+    and its model calls are billed to the platform's own gateway account. The
+    route's sign-in gate was scoped `and runtime_type == PIPELINE_RUNTIME_TYPE`,
+    so this lane skipped it entirely.
+    """
+    spy = _Spy()
+    monkeypatch.setattr(bt, "run_backtest_background", spy)
+    monkeypatch.setenv("OPENROUTER_API_KEY", "platform-openrouter-test-key")
+    # Deployment ready, caller deliberately NOT signed in.
+    _stub_tradingagents_deployment(monkeypatch)
+    headers = {"X-Session-Id": str(uuid.uuid4())}
+    agent = _create_tradingagents_agent(client, headers)
+
+    response = client.post(
+        "/backtest/run",
+        json={
+            "start_date": "2026-05-01",
+            "end_date": "2026-05-02",
+            "decision_source": "llm",
+            "assets": ["AAPL"],
+            "agent_id": agent["agent_id"],
+        },
+        headers=headers,
+    )
+
+    assert response.status_code == 401, response.text
+    assert "Sign in" in response.json()["detail"]
+    # The decisive assertion: no subprocess, so no platform spend.
+    assert spy.last_kwargs is None
+
+
+def test_a_signed_in_account_can_still_launch_a_tradingagents_run(
+    client, monkeypatch
+):
+    """The gate is authentication, not a feature switch."""
+    spy = _Spy()
+    monkeypatch.setattr(bt, "run_backtest_background", spy)
+    monkeypatch.setenv("OPENROUTER_API_KEY", "platform-openrouter-test-key")
+    _stub_tradingagents_installed(monkeypatch)
+    headers = {"X-Session-Id": str(uuid.uuid4())}
+    agent = _create_tradingagents_agent(client, headers)
+    _sign_in(monkeypatch)
+
+    response = client.post(
+        "/backtest/run",
+        json={
+            "start_date": "2026-05-01",
+            "end_date": "2026-05-02",
+            "decision_source": "llm",
+            "assets": ["AAPL"],
+            "agent_id": agent["agent_id"],
+        },
+        headers=headers,
+    )
+
+    assert response.status_code == 200, response.text
+    assert spy.last_kwargs["runtime_type"] == "tradingagents"
+
+
+def test_the_signin_gate_runs_before_the_deployment_readiness_checks(
+    client, monkeypatch
+):
+    """An anonymous caller must not be able to probe the deployment.
+
+    Ordering matters beyond spend: the readiness checks answer 503 and name
+    which platform gateway is configured, so running them first would let an
+    unauthenticated caller enumerate the deployment's credential state.
+    """
+    spy = _Spy()
+    monkeypatch.setattr(bt, "run_backtest_background", spy)
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.delenv("COMMONSTACK_API_KEY", raising=False)
+    headers = {"X-Session-Id": str(uuid.uuid4())}
+    agent = _create_tradingagents_agent(client, headers)
+
+    response = client.post(
+        "/backtest/run",
+        json={
+            "start_date": "2026-05-01",
+            "end_date": "2026-05-02",
+            "decision_source": "llm",
+            "assets": ["AAPL"],
+            "agent_id": agent["agent_id"],
+        },
+        headers=headers,
+    )
+
+    # 401, not the 503 that would describe the deployment.
+    assert response.status_code == 401, response.text
+    assert spy.last_kwargs is None
+
+
+@pytest.mark.parametrize("unsafe", ["social", "news", "fundamentals"])
+def test_tradingagents_backtest_refuses_a_lookahead_roster(
+    client, monkeypatch, unsafe
+):
+    """A roster whose data sources ignore the analysis date is refused at the
+    request, not discovered after the run has started billing."""
+    spy = _Spy()
+    monkeypatch.setattr(bt, "run_backtest_background", spy)
+    monkeypatch.setenv("OPENROUTER_API_KEY", "platform-openrouter-test-key")
+    _stub_tradingagents_installed(monkeypatch)
+    headers = {"X-Session-Id": str(uuid.uuid4())}
+    agent = _create_tradingagents_agent(client, headers)
+    patched = client.patch(
+        f"/api/v1/agents/{agent['agent_id']}",
+        json={"runtime_config": {"analysts": ["market", unsafe]}},
+        headers=headers,
+    )
+    assert patched.status_code == 200, patched.text
+
+    response = client.post(
+        "/backtest/run",
+        json={
+            "start_date": "2026-05-01",
+            "end_date": "2026-05-02",
+            "decision_source": "llm",
+            "assets": ["AAPL"],
+            "agent_id": agent["agent_id"],
+        },
+        headers=headers,
+    )
+
+    assert response.status_code == 422, response.text
+    detail = response.json()["detail"]
+    assert unsafe in detail
+    # The message has to tell the user what to do instead, or a 422 on a
+    # roster the UI offered is just a dead end.
+    assert "market" in detail
+    # Nothing was launched: the refusal happens before any subprocess or
+    # model call.
+    assert spy.last_kwargs is None
+
+
+def test_tradingagents_backtest_refuses_without_the_selected_gateways_key(
+    client, monkeypatch
+):
+    """Pin the gateway rather than relying on which platform credential happens
+    to be in the environment -- ``dashboard/.env`` is loaded at import, so a
+    developer machine with a CommonStack key would otherwise satisfy a check
+    meant to find none. Also pins the stronger property: another gateway's
+    credential must not fund the selected one."""
+    monkeypatch.setenv("TRADINGAGENTS_GATEWAY", "openrouter")
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.setenv("COMMONSTACK_API_KEY", "must-not-fund-another-gateway")
+    monkeypatch.setenv("OPENAI_API_KEY", "must-not-authorize-hosted-runtime")
+    _stub_tradingagents_installed(monkeypatch)
+    headers = {"X-Session-Id": str(uuid.uuid4())}
+    agent = _create_tradingagents_agent(client, headers)
+
+    response = client.post(
+        "/backtest/run",
+        json={
+            "start_date": "2026-05-01",
+            "end_date": "2026-05-02",
+            "assets": ["AAPL"],
+            "agent_id": agent["agent_id"],
+        },
+        headers=headers,
+    )
+
+    assert response.status_code == 503
+
+
+def test_an_unexpected_gateway_error_is_not_echoed_as_a_503(client, monkeypatch):
+    """Pins the narrowed ``except``. A broad ``except Exception`` would turn any
+    bug in gateway selection into a 503 and echo its message to the caller;
+    only a known configuration fault may do that."""
+    import dashboard.backend.api.routers.backtests as backtests_module
+
+    def boom(*_args, **_kwargs):
+        raise RuntimeError("internal detail that must not reach the client")
+
+    monkeypatch.setattr(
+        backtests_module, "tradingagents_select_managed_gateway", boom
+    )
+    monkeypatch.setenv("COMMONSTACK_API_KEY", "x")
+    _stub_tradingagents_installed(monkeypatch)
+    headers = {"X-Session-Id": str(uuid.uuid4())}
+    agent = _create_tradingagents_agent(client, headers)
+
+    try:
+        response = client.post(
+            "/backtest/run",
+            json={
+                "start_date": "2026-05-01",
+                "end_date": "2026-05-02",
+                "assets": ["AAPL"],
+                "agent_id": agent["agent_id"],
+            },
+            headers=headers,
+        )
+    except RuntimeError:
+        return  # Propagated to the server boundary, which is the point.
+
+    assert response.status_code != 503
+    assert "internal detail" not in response.text
+
+
+def test_tradingagents_backtest_rejects_an_unknown_gateway_override(
+    client, monkeypatch
+):
+    """A bad deployment override is a 503 naming the variable to fix, not a 500
+    and not an arbitrary internal message echoed to the caller."""
+    monkeypatch.setenv("TRADINGAGENTS_GATEWAY", "ollama")
+    monkeypatch.setenv("COMMONSTACK_API_KEY", "x")
+    _stub_tradingagents_installed(monkeypatch)
+    headers = {"X-Session-Id": str(uuid.uuid4())}
+    agent = _create_tradingagents_agent(client, headers)
+
+    response = client.post(
+        "/backtest/run",
+        json={
+            "start_date": "2026-05-01",
+            "end_date": "2026-05-02",
+            "assets": ["AAPL"],
+            "agent_id": agent["agent_id"],
+        },
+        headers=headers,
+    )
+
+    assert response.status_code == 503
+    assert "TRADINGAGENTS_GATEWAY" in response.json()["detail"]
+
+
+def test_tradingagents_backtest_refuses_without_the_commonstack_key(
+    client, monkeypatch
+):
+    """The gateway Felix directed prod to use gets the same gate: an OpenRouter
+    key must not stand in for a missing CommonStack one."""
+    monkeypatch.setenv("TRADINGAGENTS_GATEWAY", "commonstack")
+    monkeypatch.delenv("COMMONSTACK_API_KEY", raising=False)
+    monkeypatch.setenv("OPENROUTER_API_KEY", "must-not-fund-another-gateway")
+    _stub_tradingagents_installed(monkeypatch)
+    headers = {"X-Session-Id": str(uuid.uuid4())}
+    agent = _create_tradingagents_agent(client, headers)
+
+    response = client.post(
+        "/backtest/run",
+        json={
+            "start_date": "2026-05-01",
+            "end_date": "2026-05-02",
+            "assets": ["AAPL"],
+            "agent_id": agent["agent_id"],
+        },
+        headers=headers,
+    )
+
+    assert response.status_code == 503
+
+
+def test_tradingagents_backtest_rejects_a_run_when_the_runtime_is_not_installed(
+    client, monkeypatch
+):
+    """Reject at request time rather than failing inside a background
+    subprocess minutes later."""
+    monkeypatch.setenv("OPENROUTER_API_KEY", "platform-openrouter-test-key")
+    monkeypatch.setattr(
+        bt,
+        "tradingagents_runtime_unavailable_reason",
+        lambda: "TradingAgents runtime is not installed; configure TRADINGAGENTS_PYTHON",
+    )
+    # Signed in, because this case is about the *deployment* being unready:
+    # an anonymous caller is refused earlier and would never reach the 503.
+    _sign_in(monkeypatch)
+    headers = {"X-Session-Id": str(uuid.uuid4())}
+    agent = _create_tradingagents_agent(client, headers)
+
+    response = client.post(
+        "/backtest/run",
+        json={
+            "start_date": "2026-05-01",
+            "end_date": "2026-05-02",
+            "assets": ["AAPL"],
+            "agent_id": agent["agent_id"],
+        },
+        headers=headers,
+    )
+
+    assert response.status_code == 503
+    assert "TRADINGAGENTS_PYTHON" in response.text
+
+
+def test_tradingagents_backtest_rejects_a_multi_symbol_universe(client, monkeypatch):
+    """The runtime raises a configuration error on a multi-symbol context, which
+    aborts the run after the worker has already been dispatched."""
+    monkeypatch.setenv("OPENROUTER_API_KEY", "platform-openrouter-test-key")
+    _stub_tradingagents_installed(monkeypatch)
+    headers = {"X-Session-Id": str(uuid.uuid4())}
+    agent = _create_tradingagents_agent(client, headers)
+
+    response = client.post(
+        "/backtest/run",
+        json={
+            "start_date": "2026-05-01",
+            "end_date": "2026-05-02",
+            "assets": ["AAPL", "MSFT"],
+            "agent_id": agent["agent_id"],
+        },
+        headers=headers,
+    )
+
+    assert response.status_code == 422
+    assert "single" in response.text.lower()
+
+
+def test_tradingagents_parent_timeout_is_sized_from_its_own_step_budget():
+    """A TradingAgents day is a multi-agent debate; sizing its parent from AI
+    Hedge Fund's 300s step would kill the child mid-debate."""
+    days = bt._estimated_decision_days("2026-01-01", "2026-01-31")
+    tradingagents = bt._backtest_subprocess_timeout(
+        "tradingagents", "2026-01-01", "2026-01-31"
+    )
+
+    # Derived, not hardcoded: the step budget is an operator dial (1..900), so a
+    # literal here asserts against a deployment that only happens to be the
+    # default one. conftest strips the variable, but the invariant under test is
+    # "the parent covers its own runtime's steps" at whatever the step budget is.
+    assert tradingagents >= bt.resolve_tradingagents_step_timeout_seconds() * days
+    assert tradingagents > bt._backtest_subprocess_timeout(
+        "ai_hedge_fund", "2026-01-01", "2026-01-31"
+    )
+
+
+def test_tradingagents_backtest_refuses_a_window_longer_than_allowed(
+    client, monkeypatch
+):
+    """AI Hedge Fund has a trading-day bound; TradingAgents shipped without one,
+    so a long range was accepted and sized a parent budget of up to
+    MAX_SUBPROCESS_TIMEOUT_SECONDS -- while ``app.js`` stops polling at
+    BACKTEST_POLL_MAX_SECONDS (4200) and tells the user it lost contact with a
+    run that is in fact still healthy."""
+    monkeypatch.setenv("COMMONSTACK_API_KEY", "x")
+    _stub_tradingagents_installed(monkeypatch)
+    headers = {"X-Session-Id": str(uuid.uuid4())}
+    agent = _create_tradingagents_agent(client, headers)
+
+    response = client.post(
+        "/backtest/run",
+        json={
+            "start_date": "2026-05-01",
+            "end_date": "2026-06-30",
+            "assets": ["AAPL"],
+            "agent_id": agent["agent_id"],
+        },
+        headers=headers,
+    )
+
+    assert response.status_code == 422
+    detail = response.json()["detail"]
+    assert "trading days" in detail
+
+
+def test_the_watched_budget_mirrors_the_shipped_poller_bound():
+    """The backend's copy of app.js's poll ceiling must be the shipped one.
+
+    A mirrored frontend constant is exactly the trap CLAUDE.md warns about, so
+    the mirror is lifted from app.js rather than restated. It is safe to mirror
+    at all only because the frontend value is a fixed literal, not an operator
+    dial.
+    """
+    import dashboard.backend.api.routers.backtests as m
+    from dashboard.backend.tests._frontend_source import js_const
+
+    declaration = js_const("BACKTEST_POLL_MAX_SECONDS")
+    shipped = int(declaration.split("=")[1].split(";")[0].strip())
+    assert m.WATCHED_SUBPROCESS_TIMEOUT_SECONDS == shipped
+
+
+@pytest.mark.parametrize("step_seconds", [1, 60, 300, 600, 720, 900])
+def test_the_window_bound_keeps_the_poller_honest_at_every_step_budget(
+    step_seconds, monkeypatch
+):
+    """The invariant has to hold for every legal step budget, not just today's.
+
+    The previous version of this test read the *default* configuration only. At
+    600s x 5 days + 600 the arithmetic lands on exactly 3600, so it passed by
+    coincidence -- and because the ceiling was inverted against the 14400s
+    worker cap rather than the poller's 4200s, an operator raising
+    TRADINGAGENTS_TIMEOUT_SECONDS to 900 got a 5-day window with a 5100s
+    budget and no test went red.
+    """
+    import importlib
+
+    import dashboard.backend.api.routers.backtests as m
+
+    monkeypatch.setenv("TRADINGAGENTS_TIMEOUT_SECONDS", str(step_seconds))
+    monkeypatch.delenv("MAX_TRADINGAGENTS_TRADING_DAYS", raising=False)
+    reloaded = importlib.reload(m)
+    try:
+        days = reloaded.MAX_TRADINGAGENTS_TRADING_DAYS
+        budget = (
+            step_seconds * days + reloaded.SUBPROCESS_TIMEOUT_OVERHEAD_SECONDS
+        )
+        assert days >= 1
+        assert budget <= reloaded.WATCHED_SUBPROCESS_TIMEOUT_SECONDS, (
+            f"{days} days x {step_seconds}s outlives the page watching it"
+        )
+    finally:
+        # Restore the module other cases in this file hold references to.
+        monkeypatch.undo()
+        importlib.reload(m)
+
+
+def test_the_retry_safe_pairing_is_reachable(monkeypatch):
+    """One decision is two full upstream passes, so a step budget that cannot
+    cover both kills a healthy decision and pays for the discarded work.
+
+    Measured: one pass is 290-415s for a single-analyst roster, so two are
+    580-830s. 900s is the only legal step budget that covers that worst case
+    (MAX_TIMEOUT_SECONDS is 900), and at 900s the window bound comes out at
+    4 days -- 900 x 4 + 600 = 4200, exactly the poller bound, which the page
+    still shows because it gives up strictly above it. This asserts the
+    pairing exists; which pairing to ship is a decision for the team.
+    """
+    import importlib
+
+    import dashboard.backend.api.routers.backtests as m
+
+    monkeypatch.setenv("TRADINGAGENTS_TIMEOUT_SECONDS", "900")
+    monkeypatch.delenv("MAX_TRADINGAGENTS_TRADING_DAYS", raising=False)
+    reloaded = importlib.reload(m)
+    try:
+        assert reloaded.MAX_TRADINGAGENTS_TRADING_DAYS == 4
+        assert 900 * 4 + 600 == reloaded.WATCHED_SUBPROCESS_TIMEOUT_SECONDS
+    finally:
+        monkeypatch.undo()
+        importlib.reload(m)
+
+
+def test_no_pairing_covers_two_attempts_over_five_days():
+    """The honest statement of the conflict, as arithmetic.
+
+    Two attempts worst case is 830s per day. Over five days that is
+    830 x 5 + 600 = 4750s, past the 4200s the page watches -- so there is no
+    step budget that both covers the retry and keeps a five-day window
+    visible. Closing that needs a decision (raise the poller bound, shorten
+    the window, or accept a killed second attempt), which is why it is
+    recorded rather than silently resolved.
+    """
+    import dashboard.backend.api.routers.backtests as m
+
+    worst_case_two_attempts = 830
+    five_day_budget = (
+        worst_case_two_attempts * 5 + m.SUBPROCESS_TIMEOUT_OVERHEAD_SECONDS
+    )
+    assert five_day_budget > m.WATCHED_SUBPROCESS_TIMEOUT_SECONDS
+
+
+def test_tradingagents_trading_days_ceiling_is_derived_not_hardcoded():
+    """Same inputs as ``_backtest_subprocess_timeout``, inverted, so the bound
+    and the budget cannot disagree about how big a window is."""
+    import dashboard.backend.api.routers.backtests as m
+
+    usable = (
+        m.WATCHED_SUBPROCESS_TIMEOUT_SECONDS - m.SUBPROCESS_TIMEOUT_OVERHEAD_SECONDS
+    )
+    step = m.resolve_tradingagents_step_timeout_seconds()
+    assert m._tradingagents_trading_days_ceiling() == max(1, usable // step)
+
+
+def test_zero_max_tradingagents_trading_days_turns_the_runtime_off(
+    client, monkeypatch
+):
+    """Same meaning MAX_ACTIVE_DASHBOARD_BACKTESTS gives 0: an operator on
+    constrained hosting can switch it off without a deploy, and the refusal is a
+    503 about the deployment rather than a 422 about the caller's dates."""
+    import dashboard.backend.api.routers.backtests as m
+
+    monkeypatch.setenv("COMMONSTACK_API_KEY", "x")
+    monkeypatch.setattr(m, "MAX_TRADINGAGENTS_TRADING_DAYS", 0)
+    _stub_tradingagents_installed(monkeypatch)
+    headers = {"X-Session-Id": str(uuid.uuid4())}
+    agent = _create_tradingagents_agent(client, headers)
+
+    response = client.post(
+        "/backtest/run",
+        json={
+            "start_date": "2026-05-01",
+            "end_date": "2026-05-02",
+            "assets": ["AAPL"],
+            "agent_id": agent["agent_id"],
+        },
+        headers=headers,
+    )
+
+    assert response.status_code == 503
+    assert "MAX_TRADINGAGENTS_TRADING_DAYS" in response.json()["detail"]

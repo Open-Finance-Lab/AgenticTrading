@@ -949,3 +949,152 @@ def test_domain_runtime_module_does_not_import_any_adapter():
     with pytest.raises(Exception) as excinfo:
         RuntimeDispatcher(AI_HEDGE_FUND_RUNTIME_TYPE, {"analysts": ["ben_graham"]})
     assert "requires its runtime instance" in str(excinfo.value)
+
+
+# ---------------------------------------------------------------------------
+# TradingAgents hosted runtime registration
+# ---------------------------------------------------------------------------
+
+
+def test_tradingagents_is_a_selectable_hosted_runtime():
+    from dashboard.backend.domain.agents.runtime import (
+        TRADINGAGENTS_RUNTIME_TYPE,
+        normalize_runtime_type,
+    )
+
+    assert normalize_runtime_type("  TradingAgents ") == TRADINGAGENTS_RUNTIME_TYPE
+    assert normalize_runtime_type(TRADINGAGENTS_RUNTIME_TYPE) != AI_HEDGE_FUND_RUNTIME_TYPE
+
+
+def test_tradingagents_config_allows_only_the_four_upstream_analysts():
+    """Upstream's analyst registry has exactly four entries
+    (``tradingagents/graph/setup.py``); AI Hedge Fund's nineteen are a different
+    product's roster and would make ``setup_graph`` raise mid-run."""
+    from dashboard.backend.domain.agents.runtime import (
+        TRADINGAGENTS_ANALYSTS,
+        TRADINGAGENTS_RUNTIME_TYPE,
+    )
+
+    assert TRADINGAGENTS_ANALYSTS == ("market", "social", "news", "fundamentals")
+    assert normalize_runtime_config(
+        TRADINGAGENTS_RUNTIME_TYPE, {"analysts": ["market", "news"]}
+    ) == {"analysts": ["market", "news"]}
+
+    with pytest.raises(ValueError, match="unsupported analysts"):
+        normalize_runtime_config(
+            TRADINGAGENTS_RUNTIME_TYPE, {"analysts": ["warren_buffett"]}
+        )
+
+
+@pytest.mark.parametrize(
+    "protected",
+    [
+        "max_position_weight",
+        "model_name",
+        "deep_think_llm",
+        "llm_provider",
+        "timeout_seconds",
+        "symbol",
+    ],
+)
+def test_tradingagents_config_refuses_platform_owned_knobs(protected):
+    """Position sizing, model, provider and timeouts are deployment-owned. A
+    stored agent that could set them would pick its own spend and leverage."""
+    from dashboard.backend.domain.agents.runtime import TRADINGAGENTS_RUNTIME_TYPE
+
+    with pytest.raises(ValueError, match="Unsupported"):
+        normalize_runtime_config(
+            TRADINGAGENTS_RUNTIME_TYPE,
+            {"analysts": ["market"], protected: "user-value"},
+        )
+
+
+@pytest.mark.parametrize(
+    "analysts", [[], ["market", "market"], ["market", "unknown"], "market"]
+)
+def test_tradingagents_rejects_invalid_analyst_composition(analysts):
+    from dashboard.backend.domain.agents.runtime import TRADINGAGENTS_RUNTIME_TYPE
+
+    with pytest.raises(ValueError):
+        normalize_runtime_config(TRADINGAGENTS_RUNTIME_TYPE, {"analysts": analysts})
+
+
+def test_every_hosted_runtime_declares_a_roster():
+    """A runtime in SUPPORTED_RUNTIME_TYPES but not in the roster table used to
+    make every config normalization raise KeyError, which routers map to a 500
+    -- the deployment's own omission reported as a server fault."""
+    from dashboard.backend.domain.agents.runtime import (
+        PIPELINE_RUNTIME_TYPE,
+        SUPPORTED_RUNTIME_TYPES,
+        _HOSTED_RUNTIME_ANALYSTS,
+    )
+
+    hosted = set(SUPPORTED_RUNTIME_TYPES) - {PIPELINE_RUNTIME_TYPE}
+    assert hosted == set(_HOSTED_RUNTIME_ANALYSTS)
+
+
+def test_a_runtime_without_a_roster_is_a_clear_error_not_a_keyerror(monkeypatch):
+    from dashboard.backend.domain.agents import runtime as m
+
+    monkeypatch.setattr(
+        m, "SUPPORTED_RUNTIME_TYPES", frozenset(m.SUPPORTED_RUNTIME_TYPES | {"future"})
+    )
+    with pytest.raises(m.UnsupportedAgentRuntime, match="declares no analyst roster"):
+        m.normalize_runtime_config("future", {"analysts": ["x"]})
+
+
+def test_tradingagents_rejects_an_empty_roster_with_an_actionable_message():
+    """The frontend relies on this: its own empty-roster guard was
+    AI-Hedge-Fund-only, so a TradingAgents agent with nothing selected reached
+    the server and the failure was reported as "Saved locally"."""
+    from dashboard.backend.domain.agents.runtime import normalize_runtime_config
+
+    with pytest.raises(ValueError, match="at least one analyst"):
+        normalize_runtime_config("tradingagents", {"analysts": []})
+
+
+def test_the_decisions_fallback_is_a_known_gap():
+    """`RuntimeDispatcher.decisions` falls back to `calls`, and AI Hedge Fund
+    relies on that fallback -- so the honest-coverage property the engine
+    asserts does not yet apply to it.
+
+    Pinned rather than fixed: giving AiHedgeFundRuntime its own counter would
+    change `llm_decisions` for its failing runs, which is the figure the
+    leaderboard integrity guard reads. That is a product decision, recorded
+    for the team. This test exists so the gap is visible and so closing it
+    fails here deliberately rather than passing unnoticed.
+    """
+    from dashboard.backend.domain.agents.runtime import (
+        AI_HEDGE_FUND_RUNTIME_TYPE,
+        RuntimeDispatcher,
+    )
+    from dashboard.backend.infrastructure.ai_hedge_fund.adapter import (
+        AiHedgeFundRuntime,
+    )
+    from dashboard.backend.infrastructure.tradingagents.adapter import (
+        TradingAgentsRuntime,
+    )
+
+    # TradingAgents reports both numbers.
+    assert hasattr(
+        TradingAgentsRuntime(
+            {"analysts": ["market"]},
+            runner=object(),
+            environment={"COMMONSTACK_API_KEY": "k"},
+        ),
+        "decisions",
+    )
+
+    # AI Hedge Fund reports only the billing counter, so the dispatcher
+    # answers with it.
+    ahf = AiHedgeFundRuntime(
+        {"analysts": ["technical_analyst"]}, runner=object(), environment={}
+    )
+    assert not hasattr(ahf, "decisions")
+    dispatcher = RuntimeDispatcher(
+        AI_HEDGE_FUND_RUNTIME_TYPE,
+        {"analysts": ["technical_analyst"]},
+        runtime=ahf,
+    )
+    ahf.calls = 3
+    assert dispatcher.decisions == 3

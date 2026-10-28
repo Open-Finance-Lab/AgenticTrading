@@ -27,15 +27,25 @@ const DISCORD_SERVER_URL = 'https://discord.gg/9HnQ6XDG98';
 // SUBPROCESS_TIMEOUT_OVERHEAD_SECONDS. Pinned to both server constants by
 // test_ifind_ashare_frontend.py.
 // ⚠ The margin covers the PIPELINE runtime, the only one whose budget is a
-// fixed constant. A hosted (AI Hedge Fund) run is sized per trading day by
-// `_backtest_subprocess_timeout` and may be granted up to
-// MAX_SUBPROCESS_TIMEOUT_SECONDS (14400) -- four times this ceiling. At the
-// shipped MAX_AI_HEDGE_FUND_TRADING_DAYS (10) the derived budget lands back on
-// 3600 and the margin holds, but an operator who raises that bound makes this
-// poller report "lost contact" for a healthy run. Raising the ceiling is not
-// the fix (it would keep a tab polling for four hours); the fix is for the
-// RUNNING status payload to publish the run's own budget, which today appears
-// only once the run has already timed out. Tracked with issue #474 item 5.
+// fixed constant. A HOSTED run -- AI Hedge Fund or TradingAgents -- is sized
+// per trading day by `_backtest_subprocess_timeout` and may be granted up to
+// MAX_SUBPROCESS_TIMEOUT_SECONDS (14400), four times this ceiling.
+//
+// The two hosted runtimes protect this differently, and the difference is
+// worth knowing before touching either bound:
+//   * AI Hedge Fund's window bound is a plain default. At the shipped 10 days
+//     x 300s the derived budget lands back on 3600 and the margin holds, but
+//     an operator who raises MAX_AI_HEDGE_FUND_TRADING_DAYS makes this poller
+//     report "lost contact" for a healthy run.
+//   * TradingAgents derives its bound by inverting *this* constant
+//     (WATCHED_SUBPROCESS_TIMEOUT_SECONDS in backtests.py, pinned to the
+//     literal below by a test), so raising its step budget shortens the
+//     allowed window instead of outliving the page.
+//
+// Raising this ceiling is not the fix (it would keep a tab polling for four
+// hours); the fix is for the RUNNING status payload to publish the run's own
+// budget, which today appears only once the run has already timed out.
+// Tracked with issue #474 item 5.
 const BACKTEST_BUDGET_SECONDS = 3600;   // mirrors PIPELINE_SUBPROCESS_TIMEOUT_SECONDS
 const BACKTEST_POLL_MAX_SECONDS = 4200; // budget + SUBPROCESS_TIMEOUT_OVERHEAD_SECONDS
 // One sentence for one condition, reached two ways -- the per-run poll-failure
@@ -740,9 +750,9 @@ window.AGENT_SHELF_LABELS = MARKET_LABELS;
  * an agent on an unlisted model silently submitted the *previous* agent's
  * selection (see syncModelSelectFromAgent). Declaration order is display order.
  *
- * The AI Hedge Fund runtime's Nemotron is deliberately absent: it is a property
- * of a hosted runtime, not a user choice, and syncBacktestModelFieldMode
- * already renders that case as "AI Hedge Fund — hosted runtime". */
+ * A hosted runtime's model is deliberately absent: it is a property of the
+ * runtime, not a user choice, and syncBacktestModelFieldMode already renders
+ * that case as "<runtime> — hosted runtime" (hostedRuntimeLabel). */
 const SUPPORTED_MODELS = [
   { slug: 'anthropic/claude-haiku-4-5', label: 'Claude Haiku 4.5', vendor: 'anthropic' },
   { slug: 'anthropic/claude-sonnet-4-6', label: 'Claude Sonnet 4.6', vendor: 'anthropic' },
@@ -2504,9 +2514,7 @@ function populateBacktestAgentSelect() {
   select.disabled = false;
   select.innerHTML = agents
     .map((agent) => {
-      const type = agent.agent_type === 'builtin' ? 'Built-in' : 'External';
-      const model = agent.model_name || 'local-model';
-      const label = `${agentDisplayName(agent)} · ${model} · ${type}`;
+      const label = backtestAgentOptionLabel(agent);
       return `<option value="${escapeHtml(agent.agent_id)}">${escapeHtml(label)}</option>`;
     })
     .join('');
@@ -2578,7 +2586,15 @@ function syncBacktestModelFieldMode() {
   if (readonly) {
     readonly.hidden = modelIsEditable;
     readonly.textContent = isHostedRuntime
-      ? 'AI Hedge Fund — hosted runtime'
+      // `runBacktestModalAgent`, which is what `isHostedRuntime` above is
+      // derived from. An earlier edit wrote `agent` here -- a name that does
+      // not exist in this scope -- so this line threw a ReferenceError for
+      // every hosted agent, and `openRunBacktestModal` never reached
+      // `modal.hidden = false`: clicking Run Backtest did nothing at all, for
+      // AI Hedge Fund as well as TradingAgents. Nothing caught it because no
+      // test executed this function; the only reference to it was a substring
+      // check on its name.
+      ? `${hostedRuntimeLabel(runBacktestModalAgent)} — hosted runtime`
       : 'Rule-based — simulated practice data, no AI involved';
   }
   if (billingGroup) billingGroup.hidden = isHostedRuntime || isRuleBased;
@@ -7337,6 +7353,172 @@ const ASSET_UNIVERSES = {
     }
 };
 
+// Hosted runtimes whose adapter refuses a multi-symbol context. The server is
+// authoritative twice over -- the route refuses `len(selected_assets) != 1` and
+// `TradingAgentsRuntime._require_single_symbol` refuses it again -- so this set
+// exists to stop the modal *offering* a universe that cannot run, not to
+// enforce the rule.
+const SINGLE_SYMBOL_RUNTIMES = new Set(['tradingagents']);
+
+// Hosted runtimes whose runs are billed to the platform's own gateway account
+// and therefore require an account. Declared per runtime rather than inferred
+// from "is hosted": AI Hedge Fund has the same server-side property but is
+// shipped behaviour, and whether to require an account for it is a product
+// decision rather than this screen's to take. The server is authoritative
+// (401, _require_signed_in_for_tradingagents); this set exists so the refusal
+// arrives before the request instead of as a failed run.
+const SIGN_IN_REQUIRED_RUNTIMES = new Set(['tradingagents']);
+
+// One table rather than a branch per runtime. Every hosted-run label used to
+// read "AI Hedge Fund" because each site branched on a single
+// `isHostedRuntime` boolean, so a TradingAgents run reported another product's
+// name in the results panel's Model row and in its own progress message. A
+// runtime with no entry reports its own id, which is visibly wrong rather than
+// quietly wrong.
+const HOSTED_RUNTIME_LABELS = {
+    ai_hedge_fund: 'AI Hedge Fund',
+    tradingagents: 'TradingAgents',
+};
+
+function agentRuntimeType(agent) {
+    return agent?.runtime_type || 'pipeline';
+}
+
+function runtimeTakesSingleSymbol(agent) {
+    return SINGLE_SYMBOL_RUNTIMES.has(agentRuntimeType(agent));
+}
+
+function runtimeRequiresSignIn(agent) {
+    return SIGN_IN_REQUIRED_RUNTIMES.has(agentRuntimeType(agent));
+}
+
+/** Why this agent cannot be run right now, or '' when it can. */
+function hostedRuntimeAuthRefusal(agent) {
+    if (!runtimeRequiresSignIn(agent) || isSignedIn()) return '';
+    return `Sign in to run ${hostedRuntimeLabel(agent) || 'this agent'}. `
+        + 'Its model calls are paid for by the platform, so they are tied to an '
+        + 'account.';
+}
+
+/** The hosted product's display name, or '' for a pipeline agent. */
+function hostedRuntimeLabel(agent) {
+    const runtime = agentRuntimeType(agent);
+    if (runtime === 'pipeline') return '';
+    return HOSTED_RUNTIME_LABELS[runtime] || runtime;
+}
+
+/** The tickers the user has actually chosen on the Custom tab. */
+function customUniverseSymbols() {
+    return Array.from(document.querySelectorAll('#selectedChips .chip'))
+        .map((chip) => chip.dataset.ticker)
+        .filter(Boolean);
+}
+
+/** Reduce the Custom tab to its first chip, removing the rest. */
+function trimCustomUniverseToOne() {
+    const symbols = customUniverseSymbols();
+    for (const ticker of symbols.slice(1)) {
+        document.querySelector(`#selectedChips .chip[data-ticker="${ticker}"]`)?.remove();
+    }
+}
+
+/**
+ * One line for the backtest agent picker: name, model, built-in or external.
+ *
+ * A hosted runtime's model is resolved by the deployment at run time, not
+ * stored on the agent: a cloned row carries whatever its marketplace template
+ * said, and for TradingAgents that is a model it does not run on. So name the
+ * runtime rather than repeat a stale claim. (`agentDisplayName` already
+ * ignores `model_name` for hosted agents; this was the one place that did not.)
+ */
+function backtestAgentOptionLabel(agent) {
+    const type = agent?.agent_type === 'builtin' ? 'Built-in' : 'External';
+    const model = hostedRuntimeLabel(agent) || agent?.model_name || 'local-model';
+    return `${agentDisplayName(agent)} · ${model} · ${type}`;
+}
+
+/**
+ * Why this agent's universe cannot be submitted, or '' when it can.
+ *
+ * Shaped like the server's `describe_tradingagents_lookahead`: a message or
+ * nothing, so the caller branches on one value and the text has one owner.
+ */
+function singleSymbolUniverseRefusal(agent) {
+    if (!runtimeTakesSingleSymbol(agent)) return '';
+    const who = hostedRuntimeLabel(agent) || 'This runtime';
+    // Which pane is active decides what the request will carry, so the guard
+    // has to ask that first. Reading the chips unconditionally made it blind
+    // to the pane in use: `applyUniverseDefaultsForRuntime` opens on Custom,
+    // but `syncMarketDataSourceUI`'s iFinD restore path calls
+    // `handleUniverseTabSwitch(previousTab)` right after, and that function
+    // never consults the Built-in button's `disabled`. The guard then passed
+    // on one leftover chip while `getSelectedAssets()` sent all 30 DJIA
+    // names, and the refusal arrived as the server's 422 after the modal had
+    // closed -- the exact failure this guard was extracted to prevent.
+    if (!document.getElementById('builtinTab')?.classList.contains('active')) {
+        // The chips, not getSelectedAssets(): that falls back to ['AAPL'] for
+        // an empty custom universe, which would pass a count check and then
+        // run a ticker the user never chose.
+        const chosen = customUniverseSymbols();
+        if (chosen.length === 1) return '';
+        return `${who} analyses one ticker at a time. `
+            + (chosen.length === 0
+                ? 'Add one company to the custom universe.'
+                : `Remove ${chosen.length - 1} so exactly one is selected.`);
+    }
+    // Built-in pane: the request will carry that preset's whole universe, and
+    // neither preset is single-symbol.
+    const preset = ASSET_UNIVERSES[selectedUniverse];
+    const count = preset?.assets?.length ?? 0;
+    if (count === 1) return '';
+    return `${who} analyses one ticker at a time, and `
+        + `${preset?.name || 'this category'} holds ${count}. `
+        + 'Switch to the Custom tab and pick one company.';
+}
+
+/**
+ * Point the universe selector at something this runtime can actually run.
+ *
+ * Extracted from openRunBacktestModal so the choice is testable on its own:
+ * the modal used to select the DJIA 30 preset and the Built-in tab for every
+ * agent, which made the first Run Backtest click on a single-symbol runtime a
+ * guaranteed 422. Switching to the Custom tab is not enough by itself --
+ * app.html ships six chips inside #selectedChips -- so the selection is also
+ * trimmed to one.
+ */
+function applyUniverseDefaultsForRuntime(agent) {
+    const singleSymbol = runtimeTakesSingleSymbol(agent);
+    const tab = document.querySelector(
+        `#runBacktestModal .universe-tab[data-tab="${singleSymbol ? 'custom' : 'builtin'}"]`,
+    );
+    if (singleSymbol) {
+        trimCustomUniverseToOne();
+    } else {
+        selectPreset('djia');
+    }
+    if (tab) handleUniverseTabSwitch(tab);
+
+    // Neither built-in preset is single-symbol (DJIA 30, Magnificent 7), so the
+    // tab is closed off rather than left as a trap that reopens the 422.
+    const builtinTab = document.querySelector(
+        '#runBacktestModal .universe-tab[data-tab="builtin"]',
+    );
+    if (builtinTab) {
+        builtinTab.disabled = singleSymbol;
+        builtinTab.title = singleSymbol
+            ? 'This runtime analyses one ticker at a time, and every built-in preset holds more.'
+            : '';
+    }
+    const hint = document.getElementById('backtestSingleSymbolHint');
+    if (hint) {
+        hint.hidden = !singleSymbol;
+        hint.textContent = singleSymbol
+            ? `${hostedRuntimeLabel(agent) || 'This runtime'} analyses one ticker at a time. `
+              + 'Pick exactly one below.'
+            : '';
+    }
+}
+
 const IFIND_ASHARE_SOURCE = 'ifind_ashare';
 const IFIND_ASHARE_TIMEFRAME = '60m';
 const IFIND_ASHARE_START_DATE = '2026-04-01';
@@ -9844,9 +10026,15 @@ function syncRunBacktestSubmitAvailability() {
         )
     );
     if (isHostedRuntime || isRuleBased) {
-        submit.disabled = false;
+        // A hosted runtime needs no model or billing selection, but one that
+        // spends platform money needs an account. Disabled with the reason on
+        // the control rather than left enabled to fail with a 401.
+        const authRefusal = hostedRuntimeAuthRefusal(agent);
+        submit.disabled = Boolean(authRefusal);
+        submit.title = authRefusal;
         return;
     }
+    submit.title = '';
     const providerId = document.getElementById('runBacktestProviderSelect')?.value || '';
     const option = runBacktestExecutionOption(providerId);
     const platformModelAvailable = availableRunBacktestProviders('platform_credits')
@@ -10814,9 +11002,7 @@ async function openRunBacktestModal(agent) {
             String(isHostedRuntime),
         );
     }
-    selectPreset('djia');
-    const builtinTabBtn = document.querySelector('#runBacktestModal .universe-tab[data-tab="builtin"]');
-    if (builtinTabBtn) handleUniverseTabSwitch(builtinTabBtn);
+    applyUniverseDefaultsForRuntime(agent);
     syncMarketDataSourceUI({ resetIFindDecisionSource: true });
     // Not awaited: the modal opens at once and the dates fill in when the
     // defaults land (submit awaits them if they have not).
@@ -10944,6 +11130,21 @@ async function runBacktest() {
         return;
     }
 
+    // Before activateAgent, which is the first network call: a universe this
+    // runtime cannot accept is refused while the modal is still open and the
+    // selection is still on screen, rather than as a 422 after the modal has
+    // closed and a "Failed" result card has been drawn.
+    const authRefusal = hostedRuntimeAuthRefusal(activeAgent);
+    if (authRefusal) {
+        showModalError(authRefusal);
+        return;
+    }
+    const universeRefusal = singleSymbolUniverseRefusal(activeAgent);
+    if (universeRefusal) {
+        showModalError(universeRefusal);
+        return;
+    }
+
     await activateAgent(activeAgent);
     const isHostedRuntime = (activeAgent.runtime_type || 'pipeline') !== 'pipeline';
     const pipeline = isRuleBasedDecision
@@ -11024,7 +11225,7 @@ async function runBacktest() {
         agentId: activeAgent.agent_id,
         agentName: activeAgent.name,
         model: isHostedRuntime
-            ? 'AI Hedge Fund (hosted)'
+            ? `${hostedRuntimeLabel(activeAgent)} (hosted)`
             : (isRuleBasedDecision ? 'Rule-based' : (model || null)),
         prompt: promptSummary,
         initialCapital,
@@ -11088,7 +11289,7 @@ async function runBacktest() {
         updateBacktestRunProgress({
             elapsedSeconds: 0,
             message: isHostedRuntime
-                ? 'Running hosted AI Hedge Fund…'
+                ? `Running hosted ${hostedRuntimeLabel(activeAgent)}…`
                 : (pipeline?.length
                     ? `Running ${pipeline.length}-step agent pipeline…`
                     : 'Starting backtest…'),
