@@ -55,6 +55,12 @@ TOP_10_STOCKS = ["AAPL", "MSFT", "JPM", "V", "JNJ", "WMT", "PG", "AXP", "HD", "D
 _TICKER_RE = re.compile(r"^[A-Z][A-Z0-9.]{0,9}$")
 
 
+def normalize_symbol(symbol: str) -> str:
+    """Canonical ticker form shared by the v1 and v2 decision schemas, so a
+    symbol accepted on one surface is never refused on the other."""
+    return symbol.strip().upper()
+
+
 class TradingAction(str, Enum):
     """Allowed trading actions"""
     BUY = "buy"
@@ -92,7 +98,7 @@ class LLMTradingDecision(BaseModel):
         """Normalize ticker and enforce shape (universe checked later)."""
         if not isinstance(v, str):
             raise ValueError(f"Symbol must be a string, got {type(v)}")
-        symbol = v.strip().upper()
+        symbol = normalize_symbol(v)
         if not _TICKER_RE.fullmatch(symbol):
             raise ValueError(f"Invalid symbol format: {v}")
         return symbol

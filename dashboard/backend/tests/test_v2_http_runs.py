@@ -132,6 +132,23 @@ def test_mixed_payload_executes_valid_and_rejects_invalid():
     assert any(rj["reason"] == "universe_violation" for rj in body["rejected"])
 
 
+def test_lowercase_symbol_executes_as_its_canonical_ticker():
+    # v1 accepts "aapl"; v2 used to hold the step as a universe_violation.
+    key, sid, _ = _agent("case-agent")
+    _register_run("run_case_http", sid)
+    r = client.post("/api/v2/runs/run_case_http/decisions",
+                    headers={"X-API-Key": key}, json={
+        "idempotency_key": "case-1",
+        "actions": [{"action": "buy", "symbol": " aapl ", "confidence": 0.7,
+                     "reasoning": "valid momentum play", "position_size": 3}],
+    })
+    assert r.status_code == 200
+    body = r.json()
+    assert body["rejected"] == []
+    assert body["decision_source"] == "external_agent"
+    assert [e["symbol"] for e in body["executed"]] == ["AAPL"]
+
+
 def test_all_invalid_payload_auto_holds():
     key, sid, _ = _agent("allbad-agent")
     _register_run("run_allbad_http", sid)

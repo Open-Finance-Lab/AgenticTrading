@@ -6,7 +6,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
-from dashboard.backend.infrastructure.llm.validator import DJIA_30
+from dashboard.backend.infrastructure.llm.validator import DJIA_30, normalize_symbol
 
 SCHEMA_VERSION = "2.0"
 UNIVERSE_KEY = "djia_30"
@@ -80,7 +80,9 @@ class ActionItem(BaseModel):
     model_config = ConfigDict(use_enum_values=True)
 
     action: str = Field(pattern="^(buy|sell|hold)$")
-    symbol: str
+    symbol: str = Field(description=(
+        "DJIA-30 ticker. Surrounding whitespace is trimmed and the value is "
+        "uppercased before the universe check, so 'aapl' is accepted as AAPL."))
     confidence: float = Field(ge=0.0, le=1.0)
     reasoning: str = Field(min_length=5, max_length=500)
     position_size: int = Field(ge=0, le=10000)
@@ -90,9 +92,13 @@ class ActionItem(BaseModel):
     @field_validator("symbol")
     @classmethod
     def _symbol_in_universe(cls, v: str) -> str:
-        if v not in _UNIVERSE_SET:
+        # Normalize before the membership check, with the same helper v1's
+        # LLMTradingDecision uses: "aapl" or "AAPL " is AAPL, not a universe
+        # violation.
+        symbol = normalize_symbol(v)
+        if symbol not in _UNIVERSE_SET:
             raise ValueError(f"universe_violation: {v} not in DJIA-30")
-        return v
+        return symbol
 
 
 class DecisionRequest(BaseModel):

@@ -87,6 +87,57 @@ def test_news_sentiment_entry_accepts_rationale():
     assert entry.rationale == "Two outlets report upbeat guidance."
 
 
+@pytest.mark.parametrize("symbol", ["aapl", "AAPL ", " Aapl", "\taapl\n"])
+def test_validate_actions_normalizes_symbol_case_and_whitespace(symbol):
+    """v1 (LLMTradingDecision) strips and uppercases the ticker; v2 compared it
+    raw, so the same decision executed on v1 and was held on v2 as a
+    "universe_violation" for a DJIA-30 name."""
+    from dashboard.backend.api.v2.models import validate_actions
+    valid, rejected = validate_actions([
+        {"action": "buy", "symbol": symbol, "confidence": 0.8,
+         "reasoning": "trend is up", "position_size": 5},
+    ])
+    assert rejected == []
+    assert [a["symbol"] for a in valid] == ["AAPL"]
+
+
+@pytest.mark.parametrize("symbol", ["zzz", " ZZZ "])
+def test_validate_actions_still_rejects_off_universe_after_normalizing(symbol):
+    from dashboard.backend.api.v2.models import validate_actions
+    valid, rejected = validate_actions([
+        {"action": "buy", "symbol": symbol, "confidence": 0.8,
+         "reasoning": "trend is up", "position_size": 5},
+    ])
+    assert valid == []
+    assert [r["reason"] for r in rejected] == ["universe_violation"]
+
+
+@pytest.mark.parametrize("symbol", ["", "   "])
+def test_validate_actions_rejects_blank_symbol(symbol):
+    # Only that it is rejected: which reason a blank symbol earns is not part
+    # of this contract.
+    from dashboard.backend.api.v2.models import validate_actions
+    valid, rejected = validate_actions([
+        {"action": "buy", "symbol": symbol, "confidence": 0.8,
+         "reasoning": "trend is up", "position_size": 5},
+    ])
+    assert valid == []
+    assert len(rejected) == 1
+
+
+@pytest.mark.parametrize("symbol", ["aapl", "AAPL ", " Aapl", "\taapl\n"])
+def test_v1_and_v2_normalize_symbols_identically(symbol):
+    from dashboard.backend.infrastructure.llm.validator import LLMTradingDecision
+    fields = {"action": "buy", "symbol": symbol, "confidence": 0.8,
+              "reasoning": "trend is up", "position_size": 5}
+    assert LLMTradingDecision(**fields).symbol == ActionItem(**fields).symbol == "AAPL"
+
+
+def test_schema_documents_symbol_normalization():
+    description = ActionItem.model_json_schema()["properties"]["symbol"]["description"]
+    assert "trimmed" in description and "uppercased" in description
+
+
 def test_news_sentiment_entry_rationale_is_optional():
     entry = NewsSentimentEntry(
         sentiment="neutral", score=0.0, headline="h", source="s",
