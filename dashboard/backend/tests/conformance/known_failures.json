@@ -226,9 +226,6 @@
     ]
   },
   "M01/D": {
-    "avg_cost": [
-      "avg_cost[AAPL]: expected 110, actual 120"
-    ],
     "equity": [
       "equity[2026-03-02T10:30:00-05:00]: expected 1000, actual 990",
       "equity[2026-03-02T11:30:00-05:00]: expected 1040, actual 1000"
@@ -241,12 +238,6 @@
     ]
   },
   "M02/D": {
-    "avg_cost": [
-      "avg_cost[AAPL]: expected 105, actual 90",
-      "avg_cost after o2: expected 110, actual 120",
-      "avg_cost after o3: expected 110, actual 120",
-      "avg_cost after o4: expected 105, actual 90"
-    ],
     "realized_pnl": [
       "realized_pnl: expected 40, actual None (engine has no such output)"
     ]

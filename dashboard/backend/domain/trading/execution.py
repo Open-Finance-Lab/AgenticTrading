@@ -6,7 +6,9 @@ execution logic over explicit state (cash, positions, entry prices, trades). The
 legacy method now delegates here.
 
 With ``t_plus_one_enabled=False`` (the default), behavior remains identical to
-the original method. In particular:
+the original method, with one deliberate exception: a BUY keeps the position's
+average cost in ``entry_prices`` instead of overwriting it with the last fill
+(conformance defect D14, avg-cost half). In particular:
 
 * action fields are read with ``action.get("symbol")``, ``action.get("action")``,
   ``action.get("shares", 0)``, ``action.get("reason", "")``;
@@ -15,7 +17,8 @@ the original method. In particular:
   module deliberately does NOT reuse ``portfolio.resolve_price``;
 * execution price is always ``market_data[symbol]["close"]``;
 * BUY executes only when ``cost <= cash and shares > 0``, sets
-  ``entry_prices[symbol] = price``, and records a trade with a ``cost`` field;
+  ``entry_prices[symbol]`` to the share-weighted average cost of the position
+  (the fill price on a new position), and records a trade with a ``cost`` field;
 * SELL executes only when the symbol is held with a positive quantity, sells
   ``min(shares, positions[symbol])``, removes the position and its entry price
   when the holding reaches zero, and records a trade with a ``proceeds`` field
@@ -627,8 +630,15 @@ def execute_actions(
                 execution_price = calculated_costs["price"]
                 gross_value = calculated_costs["gross_value"]
                 cash += calculated_costs["net_cash_impact"]
-                positions[symbol] = positions.get(symbol, 0) + shares
-                entry_prices[symbol] = execution_price
+                # Share-weighted average cost, not the last fill: the entry
+                # price is what the model's pnl_pct is measured against, and
+                # overwriting it on an add hid the loss on the earlier shares.
+                prior_shares = positions.get(symbol, 0)
+                prior_entry = entry_prices.get(symbol, execution_price)
+                positions[symbol] = prior_shares + shares
+                entry_prices[symbol] = (
+                    prior_shares * prior_entry + shares * execution_price
+                ) / (prior_shares + shares)
                 if t_plus_one_enabled:
                     frozen_lots.setdefault(symbol, []).append({
                         "quantity": shares,
