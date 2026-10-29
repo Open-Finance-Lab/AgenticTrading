@@ -3,7 +3,7 @@ Agentic Trading Documentation
 
 Welcome to the **Agentic Trading** documentation.
 
-- **Agentic Trading Lab** — Web dashboard, backtesting, leaderboards, and REST API for LLM-driven trading experiments (paper trading is coming in the future).
+- **Agentic Trading Lab** — Web dashboard, backtesting, leaderboards, and REST API for LLM-driven trading experiments.
 - **Orchestration Framework** — FinAgent multi-agent system (DAG planner, agent pools, memory, MCP/A2A protocols) under ``orchestration/`` in the repository.
 
 .. toctree::

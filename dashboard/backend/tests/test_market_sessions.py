@@ -8,13 +8,19 @@ copy of the bounds appears beside it.
 
 import ast
 import functools
+from datetime import date, datetime, timedelta
 from datetime import time as clock_time
 from pathlib import Path
 
 import pandas as pd
 import pytest
+import pytz
 
-from dashboard.backend.infrastructure.market_data import profiles, sessions
+from dashboard.backend.infrastructure.market_data import (
+    profiles,
+    sessions,
+    us_market_calendar,
+)
 
 BACKEND = Path(__file__).resolve().parents[1]
 
@@ -175,6 +181,211 @@ def test_open_stamped_hourly_day_is_six_bars():
         )
     ]
     assert kept == ["10:00", "11:00", "12:00", "13:00", "14:00", "15:00"]
+
+
+def _open_stamped_kept(stamps, minutes=60):
+    return [
+        ts.strftime("%H:%M") for ts in stamps
+        if sessions.is_in_session(
+            ts, market="US", timezone="US/Eastern", open_stamped_minutes=minutes
+        )
+    ]
+
+
+def test_open_stamped_hourly_early_close_is_three_bars():
+    """2026-11-27 closes at 13:00 ET. Alpaca can serve the late session as bars
+    stamped 13:00, 14:00 and 15:00, and a fixed 16:00 close kept them: three
+    decisions taken after the session had ended. On SIP the 13:00 bar is
+    expected to open with the closing auction, as the 16:00 bar does on a full
+    day (measured there), and the 14:00 and 15:00 bars to hold late-session
+    prints (NYSE's late sessions run to 17:00 on an early close). Neither is
+    observed yet on an early close; the rule drops the bars either way."""
+    day = pd.date_range("2026-11-27 04:00", "2026-11-27 19:00", freq="h",
+                        tz="US/Eastern")
+    assert _open_stamped_kept(day) == ["10:00", "11:00", "12:00"]
+
+
+def test_the_day_before_thanksgiving_is_a_full_session():
+    day = pd.date_range("2026-11-25 04:00", "2026-11-25 19:00", freq="h",
+                        tz="US/Eastern")
+    assert _open_stamped_kept(day) == [
+        "10:00", "11:00", "12:00", "13:00", "14:00", "15:00",
+    ]
+
+
+def test_open_stamped_five_minute_bars_stop_at_the_early_close():
+    bars = pd.date_range("2026-12-24 12:45", "2026-12-24 13:15", freq="5min",
+                         tz="US/Eastern")
+    assert _open_stamped_kept(bars, minutes=5) == ["12:45", "12:50", "12:55"]
+
+
+def _trading_days(first_year, last_year):
+    day = date(first_year, 1, 1)
+    while day.year <= last_year:
+        if us_market_calendar.is_trading_day(day):
+            yield day
+        day += timedelta(days=1)
+
+
+@pytest.mark.parametrize(
+    ("minutes", "sweeps"),
+    [
+        (60, [(clock_time(4, 0), clock_time(20, 0))]),
+        (5, [(clock_time(9, 0), clock_time(10, 0)),
+             (clock_time(12, 30), clock_time(16, 30))]),
+        (1, [(clock_time(9, 25), clock_time(9, 35)),
+             (clock_time(12, 50), clock_time(13, 10)),
+             (clock_time(15, 50), clock_time(16, 10))]),
+    ],
+)
+def test_the_open_stamped_rule_matches_a_naive_oracle_every_day(minutes, sweeps):
+    """exchange_calendars tests ``trading_index`` against a deliberately naive
+    loop (``TestTradingIndex``); this does the same for the open-stamped rule,
+    on every trading day 2025-2028 and every span the Alpaca loader stamps.
+
+    A bar is in session iff it opens at or after 09:30 and closes at or before
+    that day's close: a left-closed, whole-bar index that never emits a
+    partial last bar (``closed="left"``, ``force_close=False`` there). The
+    hourly shapes are pinned too, because pandas_market_calendars #138 was a
+    short session silently losing its bars, not a long one keeping extra."""
+    zone = pytz.timezone("US/Eastern")
+    span = timedelta(minutes=minutes)
+    early_closes = 0
+    for day in _trading_days(2025, 2028):
+        close = sessions.session_close_time(day, "US")
+        early_closes += close == sessions.EARLY_CLOSE_TIME
+        kept = []
+        for start, end in sweeps:
+            stamp = datetime.combine(day, start)
+            while stamp.time() < end:
+                bar_close = stamp + span
+                expected = (
+                    stamp.time() >= clock_time(9, 30)
+                    and bar_close.date() == day
+                    and bar_close.time() <= close
+                )
+                actual = sessions.is_in_session(
+                    zone.localize(stamp), market="US", timezone="US/Eastern",
+                    open_stamped_minutes=minutes,
+                )
+                assert actual == expected, (stamp, minutes)
+                if actual:
+                    kept.append(stamp.hour)
+                stamp = bar_close
+        if minutes == 60:
+            last = 12 if close == sessions.EARLY_CLOSE_TIME else 15
+            assert kept == list(range(10, last + 1)), day
+    assert early_closes == 8
+
+
+def test_the_early_close_is_read_in_market_local_time():
+    """17:00Z on 2026-11-27 is the 12:00 ET bar and 18:00Z the 13:00 one, after
+    that day's close. A naive stamp is market-local, as everywhere else in this
+    module: naive 12:00 is the last bar (read as UTC it would be 07:00 ET, before
+    the open), naive 13:00 is past the close."""
+    def kept(ts):
+        return sessions.is_in_session(
+            ts, market="US", timezone="US/Eastern", open_stamped_minutes=60
+        )
+
+    assert kept(pd.Timestamp("2026-11-27 17:00", tz="UTC"))
+    assert not kept(pd.Timestamp("2026-11-27 18:00", tz="UTC"))
+    assert kept(pd.Timestamp("2026-11-27 12:00"))
+    assert not kept(pd.Timestamp("2026-11-27 13:00"))
+
+
+def test_an_early_close_leaves_only_the_close_stamped_rule_at_16_00():
+    """The close-stamped filter still admits a bar stamped up to 16:00 on an
+    early close. That is D19, measured by conformance T05 and owned by the
+    engine rewrite. The rules that place a bar against the day's close (the
+    open-stamped filter, the session-close fill and the aggregation's buckets)
+    all read 13:00, so they agree on where the day's last decision is."""
+    assert sessions.session_windows("US") == ((clock_time(9, 30), clock_time(16, 0)),)
+    assert sessions.is_in_session(
+        pd.Timestamp("2026-11-27 15:00", tz="US/Eastern"),
+        market="US",
+        timezone="US/Eastern",
+    )
+    assert sessions.is_session_close(
+        pd.Timestamp("2026-11-27 13:00", tz="US/Eastern"),
+        market="US",
+        timezone="US/Eastern",
+    )
+    assert not sessions.is_session_close(
+        pd.Timestamp("2026-11-27 16:00", tz="US/Eastern"),
+        market="US",
+        timezone="US/Eastern",
+    )
+
+
+def test_cn_open_stamped_sessions_ignore_the_nyse_calendar():
+    day = pd.date_range("2026-11-27 09:00", "2026-11-27 15:00", freq="h",
+                        tz="Asia/Shanghai")
+    kept = [
+        ts.strftime("%H:%M") for ts in day
+        if sessions.is_in_session(
+            ts, market="CN", timezone="Asia/Shanghai", open_stamped_minutes=60
+        )
+    ]
+    assert kept == ["10:00", "13:00", "14:00"]
+
+
+def test_every_us_filter_drops_the_late_session_on_an_early_close():
+    """The board's model, its Alpaca baselines, a My Agents backtest and a
+    protocol run all filter through ``is_in_session``. One rule for all of them
+    is what keeps an agent and its baseline on the same bars on a half day."""
+    from dashboard.backend import baseline_generator
+    from dashboard.backend.domain.backtesting import market_data_store as mds
+    from dashboard.backend.domain.backtesting.engine import HourlyBacktester
+    from dashboard.backend.domain.leaderboard.strategies import _common
+
+    stamps = list(
+        pd.date_range("2026-11-27 04:00", "2026-11-27 19:00", freq="h",
+                      tz="US/Eastern").tz_convert("UTC")
+    )
+    frame = pd.DataFrame({"close": 1.0}, index=pd.DatetimeIndex(stamps))
+    frame.attrs[sessions.FRAME_ATTR_OPEN_STAMPED_MINUTES] = 60
+    expected = [
+        ts for ts in stamps if ts.tz_convert("US/Eastern").hour in (10, 11, 12)
+    ]
+    engine = HourlyBacktester.__new__(HourlyBacktester)
+    engine.profile = profiles.get_market_profile(profiles.ALPACA)
+
+    assert baseline_generator._market_hours_only(
+        stamps, "US/Eastern", {"X": frame}
+    ) == expected
+    assert mds._build_trading_timestamps(
+        {"X": frame}, market="US", timezone="US/Eastern"
+    ) == expected
+    assert _common.market_timestamps({"X": frame}) == expected
+    assert engine._market_hours_only(stamps, {"X": frame}) == expected
+
+
+def test_minute_mode_stops_filling_at_an_early_close():
+    """My Agents' minute mode values and fills on open-stamped 5m source bars,
+    which now stop at 12:55 on 2026-11-27. The close-stamped aggregation still
+    forms 13:30-16:00 buckets from late-session prints (D19), but none of them
+    fills, so none is a step: nothing trades off a post-close print."""
+    from dashboard.backend.domain.backtesting.engine import HourlyBacktester
+
+    source = pd.date_range("2026-11-27 09:30", "2026-11-27 15:55", freq="5min",
+                           tz="US/Eastern").tz_convert("UTC")
+    frame = pd.DataFrame({"close": 1.0}, index=source)
+    frame.attrs[sessions.FRAME_ATTR_OPEN_STAMPED_MINUTES] = 5
+    engine = HourlyBacktester.__new__(HourlyBacktester)
+    engine.profile = profiles.get_market_profile(profiles.ALPACA)
+    engine.intraday_mode = True
+    engine.source_timeframe = "5m"
+    engine.source_data = {"X": frame}
+    decisions = [
+        pd.Timestamp(f"2026-11-27 {clock}", tz="US/Eastern").tz_convert("UTC")
+        for clock in ("10:30", "11:30", "12:30", "13:30", "14:30", "15:30", "16:00")
+    ]
+    steps, valuation, _fills = engine._plan_executions(decisions)
+    assert [ts.tz_convert("US/Eastern").strftime("%H:%M") for ts in steps] == [
+        "10:30", "11:30", "12:30",
+    ]
+    assert max(valuation).tz_convert("US/Eastern").strftime("%H:%M") == "12:55"
 
 
 def test_session_close_is_each_window_end():

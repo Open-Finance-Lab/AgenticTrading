@@ -134,9 +134,13 @@ them in this order and take the largest:
    misses the path where `get_status` applies the hold *before* the
    instrumented loop in `get_current_step` runs, so the loop sees no delta
    and logs nothing. Measured: a 25-agent Standard run logged **0** while the
-   client observed **1**. Issue #375 is a second, separate blind spot (the
-   fourth deadline branch in `submit_decisions`, silent on the legacy and v2
-   surfaces).
+   client observed **1**. The separate #375 blind spot is closed: the
+   late-POST branch in `submit_decisions` (legacy and v2 surfaces) now holds
+   through the same `_apply_expired_holds` helper as the other three sites,
+   which is the only code that writes a `timeout_hold`, so every hold prints
+   exactly once. A late POST refused because another path already held its
+   step answers 409 without printing again — that hold printed when it was
+   applied.
 3. **The `timeout_holds` counter** — weakest. Until 2026-08-18 an unreadable
    count printed as `0`, so this criterion could not fail; it now prints
    `unknown`. At load it is unknown for essentially every run (a 100-agent

@@ -5547,7 +5547,7 @@ async function finishRobinhoodLinkSuccess(agentId) {
   alert('Robinhood connected. Enable live trading, save, then Run Live.');
 }
 
-/** Handle /app?robinhood=linked|pending|error after OAuth callback. */
+/** Handle /app?robinhood=linked|pending|error|disabled after OAuth callback. */
 async function handleRobinhoodOAuthReturn() {
   const params = new URLSearchParams(window.location.search);
   const robinhood = (params.get('robinhood') || '').toLowerCase();
@@ -5573,6 +5573,16 @@ async function handleRobinhoodOAuthReturn() {
   const clean = params.toString();
   const next = `${window.location.pathname}${clean ? `?${clean}` : ''}${window.location.hash}`;
   window.history.replaceState(getNavigationState(), '', next);
+
+  // The callback sends this while the real-money path is switched off
+  // (robinhood_live_enabled(), domain/backtesting/constants.py): a browser that
+  // left for Robinhood before the switch went off lands here, its code never
+  // exchanged. A `pending` return from before then reaches /complete, which
+  // answers 404 with the same sentence, shown by the branch below.
+  if (robinhood === 'disabled') {
+    alert('Robinhood live trading is switched off, so no account was connected.');
+    return;
+  }
 
   if (robinhood === 'linked') {
     await finishRobinhoodLinkSuccess(agentId);
@@ -13370,23 +13380,37 @@ function researchStatusLabel(status) {
 }
 
 /** The My Agents "Research Agents" shelf: cards for cloned research agents. */
+let researchShelfRenderVersion = 0;
+
 async function renderResearchShelf() {
+  const renderVersion = ++researchShelfRenderVersion;
   const grid = document.getElementById('agentsGridResearch');
   const emptyEl = document.getElementById('agentsEmptyResearch');
   const countEl = document.getElementById('agentsCountResearch');
   if (!grid) return;
+  const section = grid.closest('.agents-category');
+  if (section) section.style.display = '';
   let agents = [];
   try {
-    agents = await fetchResearchAgents();
+    try {
+      agents = await fetchResearchAgents();
+    } catch (error) {
+      if (renderVersion !== researchShelfRenderVersion) return;
+      if (error?.status !== 401) throw error;
+      // Guests share the unadded shelf state; discovery lives in Community.
+      agents = [];
+    }
   } catch (error) {
-    // A 401 here just means the visitor is not signed in — the shelf hides
-    // rather than advertising an error for a surface guests cannot use.
+    if (renderVersion !== researchShelfRenderVersion) return;
     grid.innerHTML = '';
-    if (emptyEl) emptyEl.hidden = true;
-    const section = grid.closest('.agents-category');
-    if (section) section.style.display = error?.status === 401 ? 'none' : '';
+    if (countEl) countEl.hidden = true;
+    if (emptyEl) {
+      emptyEl.hidden = false;
+      emptyEl.textContent = 'Research agents are temporarily unavailable. Reopen this page to retry.';
+    }
     return;
   }
+  if (renderVersion !== researchShelfRenderVersion) return;
   const added = agents.filter((agent) => agent.added);
   if (countEl) {
     countEl.textContent = String(added.length);
@@ -13396,7 +13420,7 @@ async function renderResearchShelf() {
     grid.innerHTML = '';
     if (emptyEl) {
       emptyEl.hidden = false;
-      emptyEl.innerHTML = 'No research agents yet. Add one from '
+      emptyEl.innerHTML = 'No research agents yet. Add a research agent from '
         + communityShelfButtonHtml('all') + '.';
     }
     return;

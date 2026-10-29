@@ -1561,7 +1561,16 @@ Alpaca could not be checked, because the key in `dashboard/.env` answers 401 eve
 - An early close counts as one trading day. 252×6.5 annualisation is unchanged: two half days remove about 0.4% of session hours.
 - No bar-cache schema bump, because the filter runs after the fetch.
 - No stored curve changes, if P1 deploys before the 2026-11-27 13:30 ET settle.
-- D19 stays with the engine rewrite.
+- ~~D19 stays with the engine rewrite.~~ Superseded at review; see *Review commits* below.
+
+### Review commits (merged in #638, 2026-10-15)
+
+| Commit | Change | Why |
+|---|---|---|
+| `1acb75dc` | `sessions.day_session_windows`, the per-day owner read by `is_in_session`, `is_session_close` and `bar_aggregation.aggregate_bars`. US is decided by market name, not window shape. Drops `REGULAR_CLOSE_TIME` (the CodeQL note). | Only the open-stamped filter knew the 13:00 close. Aggregation still built a 13:30 bucket from 12:30–12:59 and nothing filled it, so a minute-source run lost its closing decision. Conformance T05 moves from D19/D8 to D2/D16. |
+| `87ba5117` | `leaderboard/service.py` as-of and daily-window cutoffs read `session_close_time`. `_yahoo` accepts both New York zone spellings, logs `ERROR: yahoo.exchange_zone_missing` instead of silently skipping the restamp, and dedupes its ERRORs per (symbol, day). Live board copy names the 13:00 close (`leaderboard.js` v=38). | The board's own cutoffs still assumed 16:00, and a missing zone field was the silent path. |
+
+What remains of D19 is the close-stamped `time_in_session`, which still admits stamps to 16:00. It reaches close-stamped frames only (`vnpy_simulation`, test doubles). The dated post-deploy checks are issue #639.
 
 ### Open
 
@@ -1580,15 +1589,14 @@ Alpaca could not be checked, because the key in `dashboard/.env` answers 401 eve
   - State the evidence gap.
   - Cite LEAN's note that ignoring varying close times "introduces look-ahead bias" (quantconnect.com/announcements/17380).
 - **Engine rewrite:**
-  - Read D19 from the same `session_close_time`, as zipline does with per-session masking.
+  - ~~Read D19 from the same `session_close_time`~~ Done in #638 (`day_session_windows`), except the close-stamped `time_in_session`.
   - Compute indicators on regular-hours bars. Today every path computes them on all-hours frames before filtering. LEAN defaults to regular hours, IBKR has `useRTH`, and TradingView pins sessions.
   - Stamp `early_close_sessions` into `agent_runs.metadata` beside `feed_provenance`.
 - **Live board:**
   - A nightly Alpaca calendar cross-check that only reports (`ERROR: live.calendar_mismatch`) and never overrides the rule.
   - A bar fingerprint in the checkpoint metadata, so a month replay can tell revised bars from model drift.
 - **Copy (owner-coordinated; P6 or a follow-up):**
-  - `app.html:1593` ("after the 16:00 ET cash close").
-  - `js/leaderboard.js:776` ("after the 16:00 ET cash session"). This needs a cache-buster bump.
+  - ~~`app.html:1593` and `js/leaderboard.js:776`~~ Done in #638 (`87ba5117`, v=38).
   - The client-side session clocks (`js/admin-ticker.js:231`, `app.js:6793`, `home-page.js:1030`) hard-code 09:30–16:00 with no holidays.
   - A comment noting that `PIPELINE_DECISION_BARS_PER_TRADING_DAY = 7` is an upper bound.
 - **Context lake:** CLAUDE.md's "`_find_cached_run` reuses a row on `(mode, start_date, end_date, llm_model)` alone" and the matching comment at `service.py:2103` are stale. `_cache_match_rank` also ranks on recorded capital and strategy prompt.

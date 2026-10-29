@@ -169,10 +169,9 @@ def test_synthesized_bars_aggregate_back_to_the_case(case):
     """§8.1, pinned: an adapter bug must never be scored as an engine defect.
 
     The engine's own aggregation of the synthesized 5m bars reproduces every
-    hourly case bar exactly, and spans every daily one with its O/H/L/C. The
-    one exception is T05's early-close bucket: the engine's session is fixed
-    at 16:00 (D19), so a 12:30-13:00 bucket is an incomplete 12:30-13:30 bar
-    there -- which is the defect T05 measures, not a synthesis error.
+    hourly case bar exactly, and spans every daily one with its O/H/L/C. That
+    includes T05's 12:30-13:00 half bucket: since #638 the aggregation ends an
+    NYSE early close at 13:00 (``sessions.day_session_windows``).
     """
     hourly = aggregate_bars_by_symbol(
         synthesize_source_bars(case), source_timeframe="5m", decision_timeframe="60m"
@@ -185,8 +184,6 @@ def test_synthesized_bars_aggregate_back_to_the_case(case):
             day = frame.loc[(frame.index > pd.Timestamp(bar.ts).tz_convert("UTC")) & (frame.index <= close)]
             assert len(day) == 7 and day["is_complete"].all(), bar
             got = [day["open"].iloc[0], day["high"].max(), day["low"].min(), day["close"].iloc[-1]]
-        elif bar.minutes == 30 and bar.close_ts.hour != 16:
-            continue
         else:
             row = frame.loc[close]
             assert bool(row["is_complete"]), bar

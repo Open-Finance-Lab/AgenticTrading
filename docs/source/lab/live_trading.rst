@@ -1,10 +1,19 @@
 Live Trading with Robinhood
 ===========================
 
+.. important::
+
+   **Switched off.** Real-money trading is out of scope for the Lab, so the
+   server refuses to start a Robinhood link or place a live run, and the agent
+   editor offers no way to connect. An account linked before the switch went
+   off sees only a **Disconnect** button there, which deletes the stored
+   access. This page describes the feature as it was built, for a deployment
+   that turns it back on.
+
 Agents can be connected to a **real Robinhood brokerage account** and asked to
 propose and place orders against it. This is separate from :doc:`backtesting
 <getting_started>`, which runs on historical data: here the account, the
-positions, and the orders are real. Paper trading is coming in the future.
+positions, and the orders are real. The Lab has no paper-trading mode.
 
 .. warning::
 

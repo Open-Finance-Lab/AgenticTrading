@@ -27,6 +27,7 @@ from dashboard.backend.infrastructure.market_data.frequency import (
 # Re-exported: the session bounds have one owner, and it is not this module.
 from dashboard.backend.infrastructure.market_data.sessions import (
     FRAME_ATTR_OPEN_STAMPED_MINUTES,
+    day_session_windows,
     is_session_close,
     market_local,
     session_windows,
@@ -129,7 +130,10 @@ def aggregate_bars(
         )
 
     local = _as_local_index(frame, timezone)
-    windows = session_windows(market)
+    # Each day's own sessions, so an NYSE early close buckets 12:30-13:00 as
+    # its final (half) bar, stamped 13:00, which ``plan_execution_fills`` then
+    # fills at the session close. Resolved once per date, not per source bar.
+    windows_by_day: dict[date, tuple[tuple[time, time], ...]] = {}
     # Walk the index, not the rows: iterrows builds a Series per source bar,
     # and the onboarding shape has ~16k of them (7 weekdays x 78 five-minute
     # bars x 30 symbols). That is the cheapest thing here to remove, not the
@@ -153,6 +157,10 @@ def aggregate_bars(
     # `.iloc[0]` of each group and discarded the rest.
     ends_by_start: dict[pd.Timestamp, pd.Timestamp] = {}
     for timestamp in local.index:
+        day = timestamp.date()
+        windows = windows_by_day.get(day)
+        if windows is None:
+            windows = windows_by_day[day] = day_session_windows(day, market)
         session = _session_for_timestamp(timestamp, windows)
         if session is None:
             keep.append(False)
@@ -373,7 +381,7 @@ def plan_execution_fills(
     kind :func:`aggregate_bars` accepts), sorted. A decision closes at its
     stamp, so it fills at the ``open`` of the source bar opening at that
     instant -- the first fill without look-ahead. A session's final bucket
-    (16:00 ET) has no such bar once after-hours bars are out of the source set,
+    (16:00 ET, 13:00 on an NYSE early close) has no such bar once after-hours bars are out of the source set,
     so it fills at the ``close`` of the source bar ending at that instant,
     priced at the last regular-hours trade and stamped at that bar's close
     rather than its open, so the trade never predates the decision.

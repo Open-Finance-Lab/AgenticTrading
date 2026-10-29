@@ -115,9 +115,8 @@ The **Allocated Capital** card on an agent's **Configure** screen has two fields
    different — "not configured" — and falls back as described above.
 
 **Paper Trading**
-   Greyed out and labelled *coming soon*. Paper trading is coming in the
-   future, so this field cannot be edited today and new agents reserve nothing
-   in it. Backtesting is the way to run an agent today.
+   Greyed out and labelled *not available*: the Lab has no paper trading,
+   so this field cannot be edited and new agents reserve nothing in it. Backtesting is the way to run an agent today.
 
 Start from a template
 ---------------------
@@ -190,13 +189,6 @@ Copy the template from the repository root into that location:
    cp credentials/alpaca.json.example credentials/alpaca.json
 
 The ``credentials/`` directory is not tracked in git. See ``credentials/README.md``.
-
-Configure Robinhood live trading (optional)
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-Live trading against a real brokerage account is off unless you configure it,
-and orders are never sent unless you also set ``ROBINHOOD_EXECUTE=true``. See
-:ref:`robinhood-config` for the full variable list.
 
 Start the API server
 ~~~~~~~~~~~~~~~~~~~~

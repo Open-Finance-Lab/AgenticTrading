@@ -1,0 +1,37 @@
+{
+  "chart": {
+    "result": [
+      {
+        "meta": {
+          "symbol": "^GSPC",
+          "exchangeTimezoneName": "America/New_York",
+          "instrumentType": "INDEX",
+          "dataGranularity": "1h"
+        },
+        "timestamp": [
+          1766586600,
+          1766590200,
+          1766593800,
+          1766597400,
+          1766599200,
+          1792008000
+        ],
+        "indicators": {
+          "quote": [
+            {
+              "close": [
+                6920.2099609375,
+                6928.93994140625,
+                6934.8798828125,
+                null,
+                6932.0498046875,
+                7718.93994140625
+              ]
+            }
+          ]
+        }
+      }
+    ],
+    "error": null
+  }
+}

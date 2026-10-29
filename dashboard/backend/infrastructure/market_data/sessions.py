@@ -15,13 +15,16 @@ can import it: domain, the backend-root baseline generator and ``api/`` alike.
 
 from __future__ import annotations
 
-from datetime import datetime, time, timedelta
+from datetime import date, datetime, time, timedelta
 from typing import Any, Mapping
 
 import pytz
 
 from dashboard.backend.infrastructure.market_data.profiles import (
     registered_market_timezones,
+)
+from dashboard.backend.infrastructure.market_data.us_market_calendar import (
+    is_early_close,
 )
 
 DEFAULT_MARKET = "US"
@@ -37,11 +40,59 @@ def canonical_market(market: object) -> str:
     return str(market or DEFAULT_MARKET).strip().upper() or DEFAULT_MARKET
 
 
+_US_SESSIONS: tuple[tuple[time, time], ...] = ((time(9, 30), time(16, 0)),)
+_CN_SESSIONS: tuple[tuple[time, time], ...] = (
+    (time(9, 30), time(11, 30)),
+    (time(13, 0), time(15, 0)),
+)
+
+#: The US cash close on an NYSE early-close day
+#: (``us_market_calendar.nyse_early_closes``).
+EARLY_CLOSE_TIME: time = time(13, 0)
+
+
+def _trades_us_sessions(market: object) -> bool:
+    """Whether ``market`` trades the US cash session. Unknown -> US."""
+    return canonical_market(market) != "CN"
+
+
 def session_windows(market: object) -> tuple[tuple[time, time], ...]:
-    """The market's trading sessions, in its own local time. Unknown -> US."""
-    if canonical_market(market) == "CN":
-        return ((time(9, 30), time(11, 30)), (time(13, 0), time(15, 0)))
-    return ((time(9, 30), time(16, 0)),)
+    """The market's trading sessions on a full day, in its own local time.
+    Unknown -> US. For a particular date, use :func:`day_session_windows`:
+    an NYSE early close ends the US session at 13:00."""
+    return _US_SESSIONS if _trades_us_sessions(market) else _CN_SESSIONS
+
+
+def day_session_windows(day: date, market: object) -> tuple[tuple[time, time], ...]:
+    """:func:`session_windows` for ``day``: a US day ends at
+    :data:`EARLY_CLOSE_TIME` on the NYSE early-close days the calendar lists.
+    Any other market's sessions do not vary by date here. Whether ``day``
+    trades at all is the calendar's question
+    (``us_market_calendar.is_trading_day``), not this one's.
+
+    Read by every rule that places a bar against the day's close: the
+    open-stamped filter (:func:`is_in_session`), the session-close fill
+    (:func:`is_session_close`) and the bucketing in
+    ``bar_aggregation.aggregate_bars``. They have to agree. When only the
+    filter knew about the 13:00 close, aggregation still built a 13:30 bucket
+    from the 12:30-12:59 minutes, nothing filled it, and an early-close day lost
+    its closing decision. The close-stamped rule (:func:`time_in_session`) does
+    not read it and still admits a bar stamped up to 16:00 (D19 in the US
+    conformance design, owned by the engine rewrite). Alpaca bars are
+    open-stamped and aggregation no longer makes a decision bar after 13:00
+    on an early close, so only a frame loaded close-stamped (the
+    ``vnpy_simulation`` source, test doubles) still reaches that gap.
+    """
+    if _trades_us_sessions(market) and is_early_close(day):
+        return ((_US_SESSIONS[0][0], EARLY_CLOSE_TIME),)
+    return session_windows(market)
+
+
+def session_close_time(day: date, market: object = DEFAULT_MARKET) -> time:
+    """When ``market``'s last session ends on ``day``, in its own local time:
+    16:00 ET, or :data:`EARLY_CLOSE_TIME` on an NYSE early close, for US
+    sessions; the last window's end for any other market."""
+    return day_session_windows(day, market)[-1][1]
 
 
 def timezone_for_market(market: object) -> str:
@@ -139,6 +190,22 @@ def is_in_session(
     open, and that 09:00 bar is out too: its open, high, low and volume include
     half an hour of pre-market trading, so admitting it would price the day's
     first fill off a pre-market print.
+
+    The day's sessions come from :func:`day_session_windows`, so the last one
+    ends at 13:00 ET on an NYSE early close. Trading goes on after that bell (NYSE's late sessions,
+    FINRA TRF post-market reporting and Alpaca's half-day extended session
+    all run to 17:00), so bars stamped 13:00 and later can carry real prints:
+    the rule drops them by their stamp, never by their absence. The
+    close-stamped rule (:func:`time_in_session`) still ends every US day at
+    16:00 (see :func:`day_session_windows`).
+
+    The close mark this leaves is pre-auction on every US day. The last kept
+    bar (the 12:00 bar on an early close, 15:00 otherwise) closes on the last
+    trade before the bell, not the official close: the closing-auction print,
+    stamped at or just after 16:00:00, opens the next bar, which is dropped
+    (measured on SIP), and the 13:00 auction is expected to do the same on an
+    early close. Marking on that bar instead was rejected, because post-close
+    prints in the same hour can set its close.
     """
     local = market_local(timestamp, timezone)
     if open_stamped_minutes is None:
@@ -150,15 +217,16 @@ def is_in_session(
     close_minute = close.time().replace(second=0, microsecond=0)
     return any(
         start <= open_minute and close_minute <= end
-        for start, end in session_windows(market)
+        for start, end in day_session_windows(local.date(), market)
     )
 
 
 def is_session_close(timestamp: datetime, *, market: object, timezone: str) -> bool:
-    """Whether ``timestamp`` falls in the minute a session ends (16:00 ET,
-    11:30 and 15:00 CST): the stamp of a final bucket, which no in-session
-    source bar opens at."""
-    minute = market_local(timestamp, timezone).time().replace(
-        second=0, microsecond=0
+    """Whether ``timestamp`` falls in the minute one of that day's sessions
+    ends (16:00 ET, 13:00 on an NYSE early close; 11:30 and 15:00 CST): the
+    stamp of a final bucket, which no in-session source bar opens at."""
+    local = market_local(timestamp, timezone)
+    minute = local.time().replace(second=0, microsecond=0)
+    return any(
+        minute == end for _start, end in day_session_windows(local.date(), market)
     )
-    return any(minute == end for _start, end in session_windows(market))

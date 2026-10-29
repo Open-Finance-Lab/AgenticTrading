@@ -88,7 +88,7 @@ ATL runs three surfaces on one legacy engine. My Agents backtests fail ATL's own
 | SEC 31 / TAF fees | Default in none checked [web, conf=med] | Owner chose dated SEC/TAF on, which would exceed the bar [gatherer-reported] |
 | Seeded determinism | Differentiator; Nautilus seeds the fill model only [web, conf=high] | Unproven |
 | Published "what we don't model" list | LEAN, Nautilus, Backtrader and Alpaca paper all have one [web, conf=high] | None. The cheapest gap to close |
-| Early-close calendar | Not retrieved for any peer | Lacks (D19) |
+| Early-close calendar | Not retrieved for any peer | Lacks (D19). Has it since #638 (2026-10-15) |
 
 Peers earn credibility by documenting assumptions that users can override, not by non-zero defaults [web, conf=high]. A defensible minimum for ATL is a methodology page plus fixes for D2, D10, D11 and D19 (inference).
 
@@ -235,7 +235,7 @@ ATL can beat nof1 on what critics attacked it for: replicas and bands, a minimum
 - For: one document can retire the stale claims in §E.
 - Against:
   - EP and LB live in a session scratchpad. Scratchpads are wiped within days [gatherer-reported], and HEAD `2dc8203a` is itself a "recover engine rewrite phase 1 records" commit [source-verified].
-  - `main` is unprotected, so #626 needs a draft or `blocked` gate now.
+  - `main` is unprotected, so #626 needs a draft or `blocked` gate now. *(Superseded 2026-10-29: `main` is now gated by ruleset 26155796; see CLAUDE.md "Merge & branch discipline". A draft or `blocked` gate is still how to hold a PR, because one approval or an admin bypass still merges it.)*
 - **Supported only if** the reports are copied into the repo this session.
 
 ## G. Decision tree for rounds 2+

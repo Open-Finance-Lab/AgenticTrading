@@ -88,6 +88,7 @@ from __future__ import annotations
 from typing import Any, Dict, Mapping, Optional
 
 from dashboard.backend.domain.leaderboard.service import MIN_LLM_DECISION_COVERAGE
+from dashboard.backend.infrastructure.llm.pricing import RULE_BASED_MODEL_LABELS
 from dashboard.backend.infrastructure.market_data.profiles import (
     LLM_DECISION_SOURCE,
     RULE_BASED_DECISION_SOURCE,
@@ -116,8 +117,9 @@ REQUESTED_DECISION_SOURCE_KEY = "requested_decision_source"
 
 # Labels the engine persists when no model drove the run. "rule-based" is the
 # one it actually writes (engine.py); the rest are defensive, since a caller
-# with no model configured can leave the column empty or null.
-_RULE_BASED_MODEL_LABELS = frozenset({"", "rule-based", "rule_based", "none", "null"})
+# with no model configured can leave the column empty or null. Shared with
+# ``pricing``, which prices every one of them at $0.
+_RULE_BASED_MODEL_LABELS = frozenset({"", *RULE_BASED_MODEL_LABELS})
 
 
 def _as_int(value: Any) -> int:

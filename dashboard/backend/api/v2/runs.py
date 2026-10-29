@@ -299,11 +299,12 @@ def _context_for(run_id: str, session_id: str) -> Dict[str, Any]:
     return backend.build_context()
 
 
-# Rejections that CONSUMED the step (the engine auto-held and advanced). These
-# must replay under their idempotency key: a same-key retry that missed the
-# cache would pass the step re-check and execute the stale actions against the
-# NEXT step's prices. Non-consuming errors (invalid_status) change nothing
-# server-side, so the same key stays retryable once the run is ready.
+# Rejections whose step is CLOSED (the engine auto-held and advanced, or the
+# step had already closed before the decision reached it). These must replay
+# under their idempotency key: a same-key retry that missed the cache would
+# execute the stale actions against the NEXT step's prices. Non-consuming
+# errors (invalid_status) change nothing server-side, so the same key stays
+# retryable once the run is ready.
 _STEP_CONSUMING_REJECTIONS = {"step_already_closed", "validation_failed"}
 
 
@@ -327,13 +328,28 @@ def _submit_for(run_id: str, session_id: str, idem_key: str,
     # execute the rest. If all are invalid, the step auto-holds (validation_hold).
     valid, rejected = validate_actions(raw_actions)
     try:
-        ack = backend.apply_decisions(valid)
+        # ``step`` was read without the session lock; passing it back makes
+        # the engine refuse the decision if the reaper held that step in the
+        # meantime, so the step recorded below is the one it executed on.
+        ack = backend.apply_decisions(valid, expected_step=step)
     except ApiError as exc:
         if exc.code in _STEP_CONSUMING_REJECTIONS:
-            db.put_idempotency(run_id, step, idem_key, {"__rejection__": {
+            details = exc.details or {}
+            closed_step = details.get("step_index")
+            if closed_step is None:
+                closed_step = step
+            db.put_idempotency(run_id, closed_step, idem_key, {"__rejection__": {
                 "code": exc.code, "message": exc.message, "status": exc.status,
                 "retryable": exc.retryable, "details": exc.details,
             }})
+            if details.get("status") == "completed":
+                # Holding the final step finalized the run; close its trace now
+                # rather than at the next reaper archive.
+                try:
+                    trace_service.complete_trace(run_id, {"step_index": closed_step + 1})
+                except Exception as trace_exc:
+                    print(f"⚠️ v2 trace event failed for {run_id}: "
+                          f"{type(trace_exc).__name__}")
         raise
     if rejected:
         ack["rejected"] = list(ack.get("rejected") or []) + rejected
