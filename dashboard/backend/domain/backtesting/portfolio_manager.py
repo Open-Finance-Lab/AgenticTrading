@@ -103,6 +103,14 @@ SNAPSHOT_FULL_UNIVERSE_MAX = 30
 SNAPSHOT_SHORTLIST_SIZE = 12
 
 
+def _is_zero(value: Any) -> bool:
+    """Whether a model-supplied size reads as exactly 0 ("0", 0, 0.0)."""
+    try:
+        return float(value) == 0
+    except (TypeError, ValueError, OverflowError):
+        return False
+
+
 def _universe_note(*, ranked: int, held: int, universe_size: int) -> str:
     """Describe a partial snapshot by what it actually holds this bar.
 
@@ -892,7 +900,18 @@ class PortfolioManager:
                     # NaN here, and an unparseable value must skip THIS action,
                     # not throw the whole decision into the rule-based fallback.
                     raw_size = llm_action.get("position_size", 0)
+                    # Whether the model asked for no size is read off the raw
+                    # value, not the coerced one: int() also turns 0.6 and -0.5
+                    # into 0, and those must not be sized from confidence below
+                    # as though the model had left the size out.
+                    size_given = not (
+                        raw_size is None
+                        or raw_size == ""
+                        or (not isinstance(raw_size, bool) and _is_zero(raw_size))
+                    )
                     try:
+                        if isinstance(raw_size, bool):
+                            raise TypeError("a boolean is not a share count")
                         shares = (
                             float(raw_size or 0)
                             if self.lot_size > 1
@@ -903,6 +922,12 @@ class PortfolioManager:
                         continue
                     if isinstance(shares, float) and not math.isfinite(shares):
                         print(f"      ⚠️  BUY {symbol}: Skip (unparseable position_size {raw_size!r})")
+                        continue
+                    if size_given and shares <= 0:
+                        if shares == 0 and float(raw_size) > 0:
+                            print(f"      ⚠️  BUY {symbol}: Skip (position_size {raw_size!r} rounds to 0 shares)")
+                        else:
+                            print(f"      ⚠️  BUY {symbol}: Skip (invalid position_size {raw_size!r}, not positive)")
                         continue
 
                     # If LLM didn't provide position_size, calculate from confidence
