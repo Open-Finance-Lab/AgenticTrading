@@ -121,6 +121,66 @@ class _Seq:
         return step
 
 
+def _stored(user_id: str = "u1", agent_id: str = "a1"):
+    """The (question, answer) exchanges stored for one conversation."""
+    return list(conversation_history[(user_id, agent_id)])
+
+
+def _user(content: str):
+    return {"role": "user", "content": content}
+
+
+def _messages(*numbers: int):
+    """Messages API turns for exchanges ``q<n>``/``a<n>``, oldest first."""
+    turns = []
+    for n in numbers:
+        turns += [_user(f"q{n}"), {"role": "assistant", "content": f"a{n}"}]
+    return turns
+
+
+async def _answer_by_number(question: str):
+    """``q3`` -> ``a3``: lets a test read which question an answer belongs to."""
+    return _text_response("a" + question[1:])
+
+
+class _Recording:
+    """Fake ``client.messages`` answering per question and recording each request.
+
+    ``sent`` snapshots the messages at call time, so it shows what the
+    provider received even if the list is mutated afterwards.
+    """
+
+    def __init__(self, reply):
+        self._reply = reply
+        self.sent = []
+
+    async def create(self, **kwargs):
+        messages = [dict(m) for m in kwargs["messages"]]
+        self.sent.append(messages)
+        return await self._reply(messages[-1]["content"])
+
+
+def _install_recording(monkeypatch, reply=_answer_by_number):
+    fake = _Recording(reply)
+    monkeypatch.setattr(
+        chat_service, "get_claude_client", lambda: SimpleNamespace(messages=fake)
+    )
+    return fake
+
+
+def _chat(message: str, **kwargs):
+    return chat_with_agent(user_id="u1", agent_id="a1", message=message, **kwargs)
+
+
+async def _until(predicate):
+    """Yield to the loop until ``predicate()`` holds (a task reached its await)."""
+    for _ in range(1000):
+        if predicate():
+            return
+        await asyncio.sleep(0)
+    raise AssertionError("condition never held")
+
+
 # ---------------------------------------------------------------------------
 # extract_text
 # ---------------------------------------------------------------------------
@@ -152,9 +212,8 @@ def test_chat_constructs_request_and_records_history(monkeypatch):
     assert call["model"] == "claude-test-model"
     assert call["max_tokens"] == 1200
     assert call["system"] == SYSTEM_PROMPT
-    history = conversation_history[("u1", "a1")]
-    assert history[0] == {"role": "user", "content": "hello"}
-    assert history[1] == {"role": "assistant", "content": "hi there"}
+    assert call["messages"] == [_user("hello")]
+    assert _stored() == [("hello", "hi there")]
 
 
 def test_chat_empty_message_raises_value_error(monkeypatch):
@@ -164,13 +223,45 @@ def test_chat_empty_message_raises_value_error(monkeypatch):
         asyncio.run(chat_with_agent(user_id="u1", agent_id="a1", message="   "))
 
 
-def test_chat_empty_answer_fallback(monkeypatch):
+def test_chat_empty_reply_is_shown_but_never_stored(monkeypatch):
+    # The placeholder is for the reader. Stored, it was sent back to the model
+    # as something it had said, on every later turn and to /strategy.
+    monkeypatch.delenv("COMMONSTACK_API_KEY", raising=False)
     monkeypatch.setenv("ANTHROPIC_MODEL", "claude-test-model")
-    _install_client(monkeypatch, response=_text_response("   "))
-    answer = asyncio.run(chat_with_agent(user_id="u1", agent_id="a1", message="hello"))
-    assert answer == "Claude returned an empty response."
-    history = conversation_history[("u1", "a1")]
-    assert history[-1] == {"role": "assistant", "content": "Claude returned an empty response."}
+
+    async def reply(question):
+        return _text_response("   " if question == "q1" else "a2")
+
+    fake = _install_recording(monkeypatch, reply)
+
+    assert asyncio.run(_chat("q1")) == "Claude returned an empty response."
+    asyncio.run(_chat("q2"))
+
+    assert fake.sent[-1] == [_user("q2")]
+    assert _stored() == [("q2", "a2")]
+
+
+def test_chat_falls_back_on_empty_reply(monkeypatch):
+    # Same as strategy synthesis: an empty reply moves on to the next model,
+    # and the reader is told the requested one did not answer.
+    monkeypatch.setenv("COMMONSTACK_API_KEY", "cs-test-key")
+    monkeypatch.delenv("CHAT_MODEL", raising=False)
+    fake_messages = _Seq(_text_response("  "), _text_response("ok"))
+    monkeypatch.setattr(
+        chat_service,
+        "get_claude_client",
+        lambda: SimpleNamespace(messages=fake_messages),
+    )
+
+    answer = asyncio.run(_chat("hello", model="deepseek/deepseek-v4-pro"))
+
+    assert [call["model"] for call in fake_messages.calls] == [
+        "deepseek/deepseek-v4-pro",
+        "openai/gpt-4o-mini",
+    ]
+    assert answer.startswith("ok")
+    assert "openai/gpt-4o-mini" in answer and "deepseek/deepseek-v4-pro" in answer
+    assert _stored() == [("hello", "ok")]
 
 
 def test_chat_provider_error_propagates_and_pops_user_message(monkeypatch):
@@ -180,7 +271,7 @@ def test_chat_provider_error_propagates_and_pops_user_message(monkeypatch):
     with pytest.raises(RuntimeError, match="provider down"):
         asyncio.run(chat_with_agent(user_id="u1", agent_id="a1", message="hello"))
 
-    assert conversation_history[("u1", "a1")] == []
+    assert _stored() == []
 
 
 def test_chat_model_falls_back_to_default_when_unset(monkeypatch):
@@ -195,8 +286,7 @@ def test_chat_model_falls_back_to_default_when_unset(monkeypatch):
 
     assert answer == "ok"
     assert fake.calls[0]["model"] == chat_service.LLM_MODEL_NAME
-    history = conversation_history[("u1", "a1")]
-    assert history[-1] == {"role": "assistant", "content": "ok"}
+    assert _stored() == [("hello", "ok")]
 
 
 def test_chat_uses_commonstack_slug_when_key_present(monkeypatch):
@@ -235,8 +325,7 @@ def test_chat_skips_commonstack_stub_greeting_and_retries(monkeypatch):
     assert answer == "Sure, here's what I see in your portfolio."
     assert fake_messages.calls[0]["model"] == "anthropic/claude-haiku-4-5"
     assert fake_messages.calls[1]["model"] == "openai/gpt-4o-mini"
-    history = conversation_history[("u1", "a1")]
-    assert history[-1] == {"role": "assistant", "content": answer}
+    assert _stored() == [("what do I own", answer)]
 
 
 def test_chat_retries_the_same_model_before_falling_back(monkeypatch, retry_sleeps):
@@ -294,7 +383,7 @@ def test_chat_falls_back_on_provider_request_error(monkeypatch, retry_sleeps):
     # The substitution is visible to the reader, but not fed back to the model.
     assert answer.startswith("ok")
     assert "openai/gpt-4o-mini" in answer and "deepseek/deepseek-v4-pro" in answer
-    assert conversation_history[("u1", "a1")][-1] == {"role": "assistant", "content": "ok"}
+    assert _stored() == [("hello", "ok")]
 
 
 def test_chat_timeout_never_fails_over_to_another_model(monkeypatch, retry_sleeps):
@@ -317,7 +406,7 @@ def test_chat_timeout_never_fails_over_to_another_model(monkeypatch, retry_sleep
 
     assert len(fake_messages.calls) == 1
     assert retry_sleeps == []
-    assert conversation_history[("u1", "a1")] == []
+    assert _stored() == []
 
 
 def test_chat_last_candidate_request_error_propagates_and_pops_message(monkeypatch):
@@ -333,7 +422,7 @@ def test_chat_last_candidate_request_error_propagates_and_pops_message(monkeypat
     # One candidate on native Anthropic: the same-model retries are its only
     # second chance, then the error surfaces.
     assert len(fake_messages.calls) == 3
-    assert conversation_history[("u1", "a1")] == []
+    assert _stored() == []
 
 
 def test_chat_stub_error_mentions_commonstack_when_key_set(monkeypatch):
@@ -353,7 +442,7 @@ def test_chat_stub_error_mentions_commonstack_when_key_set(monkeypatch):
         )
 
     # No answer was ever produced -> the pending user message must not stick.
-    assert conversation_history[("u1", "a1")] == []
+    assert _stored() == []
 
 
 def test_chat_stub_error_generic_without_commonstack(monkeypatch):
@@ -515,67 +604,186 @@ def test_synthesize_strategy_stub_error_generic_without_commonstack(monkeypatch)
     assert "CommonStack" not in str(exc_info.value)
 
 
-def _six_exchanges():
-    """A realistic full history: six alternating user/assistant exchanges."""
-    history = []
-    for i in range(1, 7):
-        history.append({"role": "user", "content": f"q{i}"})
-        history.append({"role": "assistant", "content": f"a{i}"})
-    return history
+# ---------------------------------------------------------------------------
+# chat_with_agent: what the history holds and what the model is sent
+# ---------------------------------------------------------------------------
 
+def test_history_sends_six_exchanges_starting_on_a_user_turn(monkeypatch):
+    """Every request opens on a question and carries the six latest exchanges.
 
-def test_chat_history_trimmed_to_12(monkeypatch):
+    A bare tail cut used to drop q1 and lead with a1, an answer whose question
+    was gone; trimming before the call also left only five exchanges sent.
+    """
     monkeypatch.setenv("ANTHROPIC_MODEL", "claude-test-model")
-    _install_client(monkeypatch, response=_text_response("ok"))
-    key = ("u1", "a1")
-    conversation_history[key] = _six_exchanges()
-    asyncio.run(chat_with_agent(user_id="u1", agent_id="a1", message="hello"))
-    assert len(conversation_history[key]) == 12
-    assert conversation_history[key][-1] == {"role": "assistant", "content": "ok"}
+    fake = _install_recording(monkeypatch)
+
+    for n in range(1, 9):
+        asyncio.run(_chat(f"q{n}"))
+
+    for request in fake.sent:
+        roles = [m["role"] for m in request]
+        assert roles == ["user", "assistant"] * (len(roles) // 2) + ["user"]
+    assert fake.sent[-1] == _messages(2, 3, 4, 5, 6, 7) + [_user("q8")]
+    assert _stored() == [(f"q{n}", f"a{n}") for n in range(3, 9)]
 
 
-def test_trim_drops_whole_exchanges_so_history_starts_with_user(monkeypatch):
-    """The 7th message used to drop only q1, sending a1 -- an answer whose
-    question was gone -- as the first message the model reads."""
+def test_failed_message_leaves_history_unchanged(monkeypatch):
     monkeypatch.setenv("ANTHROPIC_MODEL", "claude-test-model")
-    fake = _install_client(monkeypatch, response=_text_response("a7"))
-    # ``calls`` keeps a reference to the live history list, which the service
-    # mutates after the call; snapshot what was actually sent.
-    sent = []
-    original_create = fake.create
 
-    async def snapshot_create(**kwargs):
-        sent.append([dict(m) for m in kwargs["messages"]])
-        return await original_create(**kwargs)
+    async def reply(question):
+        if question == "q7":
+            raise _provider_error()
+        return await _answer_by_number(question)
 
-    monkeypatch.setattr(fake, "create", snapshot_create)
-    key = ("u1", "a1")
-    conversation_history[key] = _six_exchanges()
+    fake = _install_recording(monkeypatch, reply)
+    for n in range(1, 7):
+        asyncio.run(_chat(f"q{n}"))
 
-    asyncio.run(chat_with_agent(user_id="u1", agent_id="a1", message="q7"))
+    with pytest.raises(anthropic.APIConnectionError):
+        asyncio.run(_chat("q7"))
+    asyncio.run(_chat("q8"))
 
-    assert sent[-1][0] == {"role": "user", "content": "q2"}
-    assert {"role": "assistant", "content": "a1"} not in sent[-1]
-    history = conversation_history[key]
-    assert history[0]["role"] == "user"
-    assert history[-2:] == [
-        {"role": "user", "content": "q7"},
-        {"role": "assistant", "content": "a7"},
+    # Exchange 1 survives a message that stored nothing.
+    assert fake.sent[-1] == _messages(1, 2, 3, 4, 5, 6) + [_user("q8")]
+
+
+def test_zero_history_cap_keeps_nothing(monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_MODEL", "claude-test-model")
+    monkeypatch.setattr(chat_service, "_MAX_HISTORY_EXCHANGES", 0)
+    fake = _install_recording(monkeypatch)
+
+    asyncio.run(_chat("q1"))
+    asyncio.run(_chat("q2"))
+
+    assert fake.sent[-1] == [_user("q2")]
+    assert _stored() == []
+
+
+def test_concurrent_failure_keeps_the_other_messages_exchange(monkeypatch):
+    """Discord serialises nothing per user, so two messages can be in flight.
+
+    A fails while B waits. A must not remove B's question, and B must not
+    see A's unanswered one.
+    """
+    monkeypatch.setenv("ANTHROPIC_MODEL", "claude-test-model")
+
+    async def scenario():
+        release_a, release_b = asyncio.Event(), asyncio.Event()
+
+        async def reply(question):
+            if question == "qA":
+                await release_a.wait()
+                raise RuntimeError("provider down")
+            if question == "qB":
+                await release_b.wait()
+            return await _answer_by_number(question)
+
+        fake = _install_recording(monkeypatch, reply)
+        task_a = asyncio.create_task(_chat("qA"))
+        await _until(lambda: len(fake.sent) == 1)
+        task_b = asyncio.create_task(_chat("qB"))
+        await _until(lambda: len(fake.sent) == 2)
+
+        release_a.set()
+        with pytest.raises(RuntimeError, match="provider down"):
+            await task_a
+        release_b.set()
+        await task_b
+        await _chat("qC")
+        return fake
+
+    fake = asyncio.run(scenario())
+
+    assert fake.sent[1] == [_user("qB")]
+    assert fake.sent[-1] == [
+        _user("qB"),
+        {"role": "assistant", "content": "aB"},
+        _user("qC"),
     ]
 
 
-def test_failed_message_leaves_history_starting_with_user(monkeypatch):
+def test_retry_resends_the_request_it_first_sent(monkeypatch):
+    """A retry is the same request: B finishing during A's backoff changes nothing."""
     monkeypatch.setenv("ANTHROPIC_MODEL", "claude-test-model")
-    _install_client(monkeypatch, error=_provider_error())
-    key = ("u1", "a1")
-    conversation_history[key] = _six_exchanges()
 
-    with pytest.raises(Exception):
-        asyncio.run(chat_with_agent(user_id="u1", agent_id="a1", message="q7"))
+    async def scenario():
+        in_backoff, end_backoff = asyncio.Event(), asyncio.Event()
 
-    history = conversation_history[key]
-    assert history[0]["role"] == "user"
-    assert history[-1] == {"role": "assistant", "content": "a6"}
+        async def held_sleep(seconds):
+            in_backoff.set()
+            await end_backoff.wait()
+
+        monkeypatch.setattr(chat_service, "_retry_sleep", held_sleep)
+        failed_once = []
+
+        async def reply(question):
+            if question == "qA" and not failed_once:
+                failed_once.append(True)
+                raise _provider_error()
+            return await _answer_by_number(question)
+
+        fake = _install_recording(monkeypatch, reply)
+        task_a = asyncio.create_task(_chat("qA"))
+        await in_backoff.wait()
+        await _chat("qB")
+        end_backoff.set()
+        await task_a
+        return fake
+
+    fake = asyncio.run(scenario())
+
+    first_attempt, b_request, retry = fake.sent
+    assert first_attempt == retry == [_user("qA")]
+    assert b_request == [_user("qB")]
+    assert sorted(_stored()) == [("qA", "aA"), ("qB", "aB")]
+
+
+def test_reset_during_a_call_discards_that_exchange(monkeypatch):
+    # The answer belongs to the conversation the user reset, not the new one.
+    monkeypatch.setenv("ANTHROPIC_MODEL", "claude-test-model")
+
+    async def scenario():
+        release = asyncio.Event()
+
+        async def reply(question):
+            if question == "q1":
+                await release.wait()
+            return await _answer_by_number(question)
+
+        fake = _install_recording(monkeypatch, reply)
+        task = asyncio.create_task(_chat("q1"))
+        await _until(lambda: len(fake.sent) == 1)
+        reset_agent_conversation(user_id="u1", agent_id="a1")
+        release.set()
+        await task
+        await _chat("q2")
+        return fake
+
+    fake = asyncio.run(scenario())
+
+    assert fake.sent[-1] == [_user("q2")]
+
+
+def test_synthesize_strategy_sends_the_conversation_then_the_instruction(monkeypatch):
+    monkeypatch.delenv("COMMONSTACK_API_KEY", raising=False)
+    monkeypatch.setenv("ANTHROPIC_MODEL", "claude-test-model")
+
+    async def reply(question):
+        if question.startswith("Compile"):
+            return _text_response("Buy AAPL on SMA20 crosses.")
+        return await _answer_by_number(question)
+
+    fake = _install_recording(monkeypatch, reply)
+    asyncio.run(_chat("q1"))
+
+    prompt = asyncio.run(
+        chat_service.synthesize_strategy_prompt(user_id="u1", agent_id="a1")
+    )
+
+    assert prompt == "Buy AAPL on SMA20 crosses."
+    assert fake.sent[-1][:2] == _messages(1)
+    assert fake.sent[-1][2]["role"] == "user"
+    assert fake.sent[-1][2]["content"].startswith("Compile everything above")
 
 
 def test_sessions_are_keyed_by_user_and_agent(monkeypatch):
