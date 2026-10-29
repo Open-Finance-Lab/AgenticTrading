@@ -2,11 +2,16 @@ name: CodeQL
 
 # Static security + quality analysis (GitHub CodeQL, advanced setup).
 #
-# This is intentionally a SEPARATE workflow from ci.yml and is NON-GATING:
-#   * The repo has no branch protection, so nothing blocks a merge on it.
+# This is intentionally a SEPARATE workflow from ci.yml, and it is a MERGE GATE:
+#   * The `main protection` repository ruleset (since 2026-10-29) requires
+#     CodeQL results on every PR to main and blocks the merge on an alert at
+#     `error` severity or a security alert at `high` or above. Admins can
+#     bypass it by merging the PR with --admin.
+#   * GitHub blocks the merge while a PR's analysis is missing or in progress,
+#     so keep the `pull_request` trigger below unfiltered: a PR this workflow
+#     skips can never merge without a bypass.
 #   * The prod deploy in ci.yml gates only on `backend-tests`, not on this job.
-# Its purpose is to surface findings in the repo's Security > Code scanning tab
-# (the repo had no code scanning before this) — not to add a merge hurdle.
+# Findings also land in the repo's Security > Code scanning tab.
 #
 # Advanced setup (this file) is mutually exclusive with CodeQL "default setup"
 # in the Security tab UI: enabling default setup there would DISABLE this
