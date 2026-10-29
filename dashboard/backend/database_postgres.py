@@ -1107,7 +1107,9 @@ class PostgresBacktestDatabase:
         return [BacktestDatabase._parse_run_row(row) for row in rows]
 
     def aggregate_operator_cost_for_day(self, day: date) -> Dict[int, int]:
-        """See the SQLite twin."""
+        """See the SQLite twin. ``metadata`` is TEXT here as well; ``IS JSON
+        OBJECT`` (PostgreSQL 16+, prod and CI run 18) guards the cast so one
+        malformed row cannot fail the whole day's statement."""
         start = f"{day.isoformat()} 00:00:00"
         end = f"{(day + timedelta(days=1)).isoformat()} 00:00:00"
         with self._get_connection() as conn:
@@ -1118,6 +1120,12 @@ class PostgresBacktestDatabase:
                     FROM agent_runs
                     WHERE owner_user_id IS NOT NULL
                       AND updated_at >= %s AND updated_at < %s
+                      AND COALESCE(
+                            CASE WHEN metadata IS JSON OBJECT
+                                 THEN metadata::jsonb -> 'llm_execution' ->> 'billing_mode'
+                            END,
+                            ''
+                          ) <> 'byok'
                     GROUP BY owner_user_id
                     """,
                     (start, end),

@@ -10,7 +10,12 @@ import psycopg
 from dashboard.backend.db_url import init_schema_unless_worker, require_postgres_url
 
 from .models import AnalyticsEventRecord, AppendEventResult, RetentionResult
-from .repository import _EVENT_COLUMNS, _event_values, _row_to_event
+from .repository import (
+    LEGACY_SNAPSHOT_TABLES,
+    _EVENT_COLUMNS,
+    _event_values,
+    _row_to_event,
+)
 from .repository_common import (
     AnalyticsIdempotencyConflictError,
     AnalyticsStoreError,
@@ -61,7 +66,7 @@ CREATE TABLE IF NOT EXISTS analytics_events (
             'provider_unavailable', 'provider_quota_exhausted',
             'credits_unavailable',
             'model_not_allowed', 'internal_error', 'run_timeout',
-            'account_restricted', 'credits_insufficient'
+            'account_restricted', 'credits_insufficient', 'empty_response'
         )
     ),
     country_code TEXT CHECK (country_code IS NULL OR length(country_code) = 2),
@@ -112,46 +117,6 @@ CREATE TABLE IF NOT EXISTS analytics_daily_rollups (
         model_id, outcome, error_category, user_state
     )
 );
-
-CREATE TABLE IF NOT EXISTS user_analytics_snapshots (
-    user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
-    status TEXT NOT NULL CHECK (
-        status IN ('blocked', 'needs_attention', 'dormant', 'onboarding', 'active')
-    ),
-    reason_code TEXT NOT NULL CHECK (length(reason_code) BETWEEN 1 AND 100),
-    human_readable_reason TEXT NOT NULL
-        CHECK (length(human_readable_reason) BETWEEN 1 AND 500),
-    evidence_event_ids_json TEXT NOT NULL DEFAULT '[]'
-        CHECK (length(evidence_event_ids_json) <= 4096),
-    calculated_at TEXT NOT NULL,
-    lifecycle_segment TEXT,
-    lifecycle_reason_code TEXT,
-    lifecycle_reason TEXT,
-    lifecycle_evidence_json TEXT NOT NULL DEFAULT '[]',
-    operational_state TEXT,
-    operational_reason_code TEXT,
-    operational_reason TEXT,
-    operational_evidence_json TEXT NOT NULL DEFAULT '[]',
-    activated_at TEXT,
-    last_meaningful_activity_at TEXT,
-    inactive_days INTEGER NOT NULL DEFAULT 0,
-    active_days_30d INTEGER NOT NULL DEFAULT 0,
-    successful_backtests_30d INTEGER NOT NULL DEFAULT 0
-);
-
-CREATE TABLE IF NOT EXISTS user_lifecycle_daily_snapshots (
-    snapshot_date TEXT NOT NULL CHECK (length(snapshot_date) = 10),
-    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    lifecycle_segment TEXT NOT NULL,
-    lifecycle_reason_code TEXT NOT NULL,
-    data_quality TEXT NOT NULL CHECK (data_quality IN ('complete', 'partial')),
-    calculated_at TEXT NOT NULL,
-    PRIMARY KEY (snapshot_date, user_id)
-);
-CREATE INDEX IF NOT EXISTS idx_lifecycle_daily_segment
-    ON user_lifecycle_daily_snapshots(snapshot_date, lifecycle_segment);
-CREATE INDEX IF NOT EXISTS idx_lifecycle_daily_user
-    ON user_lifecycle_daily_snapshots(user_id, snapshot_date DESC);
 
 CREATE TABLE IF NOT EXISTS analytics_projection_jobs (
     job_name TEXT PRIMARY KEY,
@@ -268,25 +233,6 @@ class PostgresAnalyticsStore:
                     "ALTER TABLE analytics_events "
                     "DROP CONSTRAINT IF EXISTS analytics_events_error_category_check"
                 )
-                for column, definition in {
-                    "lifecycle_segment": "TEXT",
-                    "lifecycle_reason_code": "TEXT",
-                    "lifecycle_reason": "TEXT",
-                    "lifecycle_evidence_json": "TEXT NOT NULL DEFAULT '[]'",
-                    "operational_state": "TEXT",
-                    "operational_reason_code": "TEXT",
-                    "operational_reason": "TEXT",
-                    "operational_evidence_json": "TEXT NOT NULL DEFAULT '[]'",
-                    "activated_at": "TEXT",
-                    "last_meaningful_activity_at": "TEXT",
-                    "inactive_days": "INTEGER NOT NULL DEFAULT 0",
-                    "active_days_30d": "INTEGER NOT NULL DEFAULT 0",
-                    "successful_backtests_30d": "INTEGER NOT NULL DEFAULT 0",
-                }.items():
-                    cur.execute(
-                        "ALTER TABLE user_analytics_snapshots "
-                        f"ADD COLUMN IF NOT EXISTS {column} {definition}"
-                    )
                 cur.execute(
                     """
                     ALTER TABLE analytics_events
@@ -298,11 +244,20 @@ class PostgresAnalyticsStore:
                             'provider_quota_exhausted', 'credits_unavailable',
                             'model_not_allowed', 'internal_error',
                             'run_timeout', 'account_restricted',
-                            'credits_insufficient'
+                            'credits_insufficient', 'empty_response'
                         )
                     )
                     """
                 )
+
+    def drop_legacy_snapshot_tables(self) -> None:
+        """See the SQLite twin. Both DROPs commit in one transaction."""
+        with self._get_connection() as conn:
+            with conn.cursor() as cur:
+                # Old instance holds a lock? Fail loudly, retry next boot; never stall startup.
+                cur.execute("SET LOCAL lock_timeout = '5s'")
+                for table in LEGACY_SNAPSHOT_TABLES:
+                    cur.execute(f"DROP TABLE IF EXISTS {table}")
 
     @staticmethod
     def _select_event(cur, field: str, value: str | None):

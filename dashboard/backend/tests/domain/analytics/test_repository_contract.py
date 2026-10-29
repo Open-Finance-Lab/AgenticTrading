@@ -26,10 +26,9 @@ from dashboard.backend.domain.analytics.repository_common import (
     decode_event_cursor,
 )
 from dashboard.backend.domain.analytics.service import AnalyticsService
-from dashboard.backend.domain.analytics.states import (
-    AnalyticsStateStore,
-    UserAnalyticsSnapshot,
-    recalculate_user_snapshot,
+from dashboard.backend.domain.analytics.value_repository import (
+    UserDailyFact,
+    build_value_analytics_store,
 )
 from dashboard.backend.users import UserStore
 
@@ -217,6 +216,29 @@ class ContractUsers:
         return self.user if user_id == self.user["id"] else None
 
 
+class _HealthyOperationalBase:
+    """Credits + provider stand-in: a positive balance and one enabled
+    platform lane, so the profile's live operational axis reads healthy
+    without the process-wide credits/provider singletons."""
+
+    def get_balance_projections(self, user_ids):
+        return {user_id: {"total_available_micro": 1_000_000} for user_id in user_ids}
+
+    def get_account_billing_state(self, user_id):
+        return {"account_status": "active", "restriction_reason": None}
+
+    def list_user_credentials(self, user_id):
+        return []
+
+    def list_all_providers(self):
+        return [{"provider_id": "openrouter", "status": "enabled", "platform_enabled": True}]
+
+
+class _NoAgents:
+    def list_agents(self, *, owner_user_id):
+        return []
+
+
 def assert_pr2_query_contract(store, user_id):
     events = AnalyticsService(store)
     common = {
@@ -279,11 +301,18 @@ def assert_pr2_query_contract(store, user_id):
         occurred_at=NOW - timedelta(minutes=59),
         **{key: value for key, value in common.items() if key != "source_record_type"},
     )
-    state_store = AnalyticsStateStore(store)
-    recalculate_user_snapshot(user_id, now=NOW, store=state_store)
+    operational_base = _HealthyOperationalBase()
+    value_store = build_value_analytics_store(
+        analytics_base=store,
+        credits_base=operational_base,
+        provider_base=operational_base,
+        agent_base=_NoAgents(),
+        run_base=object(),
+    )
     service = AnalyticsQueryService(
         store=store,
         user_store=ContractUsers(user_id),
+        value_store=value_store,
     )
 
     overview = service.get_overview(
@@ -294,23 +323,38 @@ def assert_pr2_query_contract(store, user_id):
         now=NOW,
     )
 
-    profile = service.get_user_profile(user_id=user_id, now=NOW)
     activity = service.get_user_activity(
         user_id=user_id,
         section="runs",
         limit=10,
         cursor=None,
     )
-    state_store.upsert_snapshot(
-        UserAnalyticsSnapshot(
-            user_id=user_id,
-            status="needs_attention",
-            reason_code="invalid_default_credential",
-            human_readable_reason="The default model credential is invalid.",
-            evidence_event_ids=[completed.event_id],
-            calculated_at=NOW,
-        )
+    value_store.upsert_daily_facts(
+        [
+            UserDailyFact(
+                snapshot_date=NOW.date() - timedelta(days=1),
+                user_id=user_id,
+                lifecycle_segment="growing",
+                lifecycle_reason_code="growing_activated_below_core_threshold",
+                operational_state="needs_attention",
+                operational_reason_code="invalid_default_credential",
+                tier="unpaid",
+                user_group="unknown",
+                active=True,
+                runs_requested=2,
+                runs_completed=1,
+                runs_failed=1,
+                runs_cancelled=0,
+                operator_cost_micro=0,
+                own_spend_micro=100,
+                data_quality="complete",
+                calculated_at=NOW,
+            )
+        ]
     )
+    # Run and spend figures come from the facts as of yesterday; tokens and
+    # the footprint from the one timeline page.
+    profile = service.get_user_profile(user_id=user_id, now=NOW)
     attention_overview = service.get_overview(
         filters=AnalyticsMetricFilters(
             start=NOW - timedelta(days=30),
@@ -323,7 +367,9 @@ def assert_pr2_query_contract(store, user_id):
     assert overview.failed_runs == 1
     assert overview.platform_model_cost_usd == 0.25
     assert profile.state.status == "active"
-    assert completed.event_id in profile.state.evidence_event_ids
+    assert profile.state.evidence_event_ids == []
+    assert completed.event_id in [item.event_id for item in profile.recent_footprint]
+    assert profile.run_summary == {"requested": 2, "completed": 1, "failed": 1, "cancelled": 0}
     assert profile.input_tokens == 120
     assert profile.output_tokens == 30
     assert profile.credits_debited_micro == 100
@@ -348,97 +394,12 @@ def test_sqlite_schema_contains_all_foundation_tables(sqlite_contract):
     assert {
         "analytics_events",
         "analytics_daily_rollups",
-        "user_analytics_snapshots",
         "analytics_subject_settings",
         "admin_analytics_access_log",
     } <= names
-
-
-def test_sqlite_schema_adds_user_value_projection_storage(sqlite_contract):
-    store, _admin_id, _user_id = sqlite_contract
-    with store._get_connection() as conn:
-        names = {
-            row[0]
-            for row in conn.execute(
-                "SELECT name FROM sqlite_master WHERE type = 'table'"
-            ).fetchall()
-        }
-        snapshot_columns = {
-            row[1]
-            for row in conn.execute(
-                "PRAGMA table_info(user_analytics_snapshots)"
-            ).fetchall()
-        }
-
-    assert {
-        "user_lifecycle_daily_snapshots",
-        "analytics_projection_jobs",
-    } <= names
-    assert {
-        "status",
-        "lifecycle_segment",
-        "operational_state",
-        "activated_at",
-        "last_meaningful_activity_at",
-        "inactive_days",
-        "active_days_30d",
-        "successful_backtests_30d",
-    } <= snapshot_columns
-
-
-def test_sqlite_user_value_migration_is_idempotent(sqlite_contract):
-    store, _admin_id, _user_id = sqlite_contract
-
-    store._init_schema()
-    store._init_schema()
-
-    with store._get_connection() as conn:
-        names = [
-            row[1]
-            for row in conn.execute(
-                "PRAGMA table_info(user_analytics_snapshots)"
-            ).fetchall()
-        ]
-    assert len(names) == len(set(names))
-
-
-def test_sqlite_migrates_existing_legacy_snapshot_table(tmp_path):
-    db_path = tmp_path / "legacy-value-analytics.db"
-    UserStore(db_path=db_path).create_user(
-        "legacy-value-user@example.test",
-        "Legacy Value User",
-        "SecurePass1!",
-    )
-    with sqlite3.connect(db_path) as conn:
-        conn.execute(
-            """
-            CREATE TABLE user_analytics_snapshots (
-                user_id INTEGER PRIMARY KEY,
-                status TEXT NOT NULL,
-                reason_code TEXT NOT NULL,
-                human_readable_reason TEXT NOT NULL,
-                evidence_event_ids_json TEXT NOT NULL DEFAULT '[]',
-                calculated_at TEXT NOT NULL
-            )
-            """
-        )
-
-    store = AnalyticsStore(db_path=db_path)
-    store._init_schema()
-
-    with store._get_connection() as conn:
-        columns = {
-            row[1]
-            for row in conn.execute(
-                "PRAGMA table_info(user_analytics_snapshots)"
-            ).fetchall()
-        }
-    assert {
-        "lifecycle_segment",
-        "operational_state",
-        "inactive_days",
-        "successful_backtests_30d",
-    } <= columns
+    # The five-state snapshot tables are gone (PR B); a fresh schema never
+    # creates them and facts_migration drops them from an existing one.
+    assert not {"user_analytics_snapshots", "user_lifecycle_daily_snapshots"} & names
 
 
 def test_sqlite_accepts_provider_quota_exhausted_category(sqlite_contract):

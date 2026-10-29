@@ -229,7 +229,7 @@ def test_a_wide_snapshot_does_not_repeat_a_truncated_recovery_sized_reply():
 def test_a_wide_snapshot_still_retries_an_empty_reply():
     client = _PipelineClient(
         [
-            LLMExecutionError(ExecutionErrorCategory.RESPONSE_INVALID),
+            LLMExecutionError.for_empty_reply(),
             _PipelineResponse('{"orders": []}'),
         ]
     )
@@ -287,10 +287,10 @@ def test_apply_prompt_patches_by_id_and_skips_post_trade():
     assert decision[0]["prompt"] == "old gather"  # deepcopy, original untouched
 
 
-def test_run_pipeline_decision_retries_response_invalid_with_reasoning_preserved():
+def test_run_pipeline_decision_retries_an_empty_reply_with_reasoning_preserved():
     client = _PipelineClient(
         [
-            LLMExecutionError(ExecutionErrorCategory.RESPONSE_INVALID),
+            LLMExecutionError.for_empty_reply(),
             _PipelineResponse('{"orders": []}', input_tokens=11, output_tokens=4),
         ]
     )
@@ -319,8 +319,8 @@ def test_run_pipeline_decision_retries_response_invalid_with_reasoning_preserved
 def test_run_pipeline_decision_reraises_after_one_failed_retry():
     client = _PipelineClient(
         [
-            LLMExecutionError(ExecutionErrorCategory.RESPONSE_INVALID),
-            LLMExecutionError(ExecutionErrorCategory.RESPONSE_INVALID),
+            LLMExecutionError.for_empty_reply(),
+            LLMExecutionError.for_empty_reply(),
         ]
     )
 
@@ -438,7 +438,7 @@ def test_run_pipeline_decision_preserves_response_invalid_after_retry():
 
         def create(self, **kwargs):
             self.calls.append(kwargs)
-            raise LLMExecutionError(ExecutionErrorCategory.RESPONSE_INVALID)
+            raise LLMExecutionError.for_empty_reply()
 
     client = SimpleNamespace(messages=_LegacyMessages())
 
@@ -461,7 +461,7 @@ def test_run_pipeline_decision_propagates_unrelated_retry_type_error():
         def create(self, **kwargs):
             self.calls.append(kwargs)
             if kwargs["max_tokens"] != RECOVERY_MAX_OUTPUT_TOKENS:
-                raise LLMExecutionError(ExecutionErrorCategory.RESPONSE_INVALID)
+                raise LLMExecutionError.for_empty_reply()
             raise TypeError("client serialization failed")
 
     client = SimpleNamespace(messages=_BrokenMessages())
@@ -486,6 +486,10 @@ def test_run_pipeline_decision_propagates_unrelated_retry_type_error():
         ExecutionErrorCategory.BILLING_FAILED,
         ExecutionErrorCategory.USAGE_UNAVAILABLE,
         ExecutionErrorCategory.WORKER_FAILED,
+        # Unmarked, RESPONSE_INVALID is a request the client refused or a
+        # settled result that failed validation: the same again on a retry,
+        # and the second is already billed. Only ``for_empty_reply`` retries.
+        ExecutionErrorCategory.RESPONSE_INVALID,
     ],
 )
 def test_run_pipeline_decision_does_not_retry_other_execution_errors(category):
@@ -638,12 +642,12 @@ def test_looks_like_truncated_json_scope():
 
 
 def test_run_pipeline_decision_truncation_retry_degrades_when_retry_is_invalid():
-    # The first reply was real and billed; a second reply the provider rejects
-    # as invalid must not turn that into an exception that loses its usage.
+    # The first reply was real and billed; a second reply that comes back
+    # empty must not turn that into an exception that loses its usage.
     client = _PipelineClient(
         [
             _PipelineResponse(_truncated_json(), input_tokens=13, output_tokens=2000),
-            LLMExecutionError(ExecutionErrorCategory.RESPONSE_INVALID),
+            LLMExecutionError.for_empty_reply(),
         ]
     )
 
@@ -656,6 +660,27 @@ def test_run_pipeline_decision_truncation_retry_degrades_when_retry_is_invalid()
     assert decision is None
     assert usage == (13, 2000)
     assert calls == 1
+    assert len(client.messages.calls) == 2
+
+
+def test_run_pipeline_decision_truncation_retry_raises_a_refused_retry():
+    # Unlike an empty second reply, a contract break is not "the same class
+    # of outcome as the truncated first one", and swallowing it would hide it.
+    client = _PipelineClient(
+        [
+            _PipelineResponse(_truncated_json(), input_tokens=13, output_tokens=2000),
+            LLMExecutionError(ExecutionErrorCategory.RESPONSE_INVALID),
+        ]
+    )
+
+    with pytest.raises(LLMExecutionError) as error:
+        run_pipeline_decision(
+            client,
+            pipeline=_PIPELINE,
+            market_snapshot={"top_signals": {}},
+        )
+
+    assert not error.value.empty_reply
     assert len(client.messages.calls) == 2
 
 
@@ -726,11 +751,11 @@ def test_run_pipeline_decision_truncation_retry_propagates_client_faults():
 
 
 def test_run_pipeline_decision_retries_at_most_once_per_step():
-    # The response_invalid retry already ran with the recovery budget; a
+    # The empty-reply retry already ran with the recovery budget; a
     # truncated reply from it has nothing different left to send.
     client = _PipelineClient(
         [
-            LLMExecutionError(ExecutionErrorCategory.RESPONSE_INVALID),
+            LLMExecutionError.for_empty_reply(),
             _PipelineResponse(_truncated_json(), input_tokens=13, output_tokens=2000),
         ]
     )

@@ -157,6 +157,13 @@
   let isDirty = false;
   let savedSnapshot = '';
   let financialDatasetsConfigured = false;
+  // The server owns the Robinhood real-money switch (robinhood_live_enabled(),
+  // domain/backtesting/constants.py) and reports it as `enabled` on
+  // GET /api/v1/robinhood/status. This is the only copy, set from that answer:
+  // until it says true the broker panel offers no Connect or Run Live, and save()
+  // leaves live_trading_enabled out of the PATCH. Signed out, or a failed status
+  // check, reads as off.
+  let robinhoodLiveEnabled = false;
 
   function isAiHedgeFundAgent(agent = currentAgent) {
     return (agent?.runtime_type || 'pipeline') === AI_HEDGE_FUND_RUNTIME;
@@ -511,26 +518,57 @@
     runLiveBtn.title = connected ? '' : 'Connect Robinhood first';
   }
 
+  function setBrokerPanelVisible(visible) {
+    const panel = document.getElementById('agentEditorBrokerPanel');
+    if (panel) panel.hidden = !visible;
+  }
+
+  /** The parts of the panel that start or use a link. Disconnect is not one. */
+  function setLiveControlsVisible(visible) {
+    ['agentEditorRobinhoodIntro', 'agentEditorLiveTradingToggle', 'agentEditorRunLiveBtn'].forEach((id) => {
+      const el = document.getElementById(id);
+      if (el) el.hidden = !visible;
+    });
+  }
+
+  /**
+   * Switched off: an unlinked account sees no panel. A linked one sees it with
+   * Disconnect alone, because its stored tokens are real-money credentials and
+   * deleting them has to stay possible -- the reason DELETE
+   * /api/v1/robinhood/disconnect stays mounted while the path is off.
+   */
+  function renderRobinhoodSwitchedOff(connected) {
+    const statusEl = document.getElementById('agentEditorRobinhoodStatus');
+    const metaEl = document.getElementById('agentEditorRobinhoodMeta');
+    const connectBtn = document.getElementById('agentEditorConnectRobinhoodBtn');
+    const disconnectBtn = document.getElementById('agentEditorDisconnectRobinhoodBtn');
+    setBrokerPanelVisible(connected);
+    setLiveControlsVisible(false);
+    if (connectBtn) connectBtn.hidden = true;
+    if (disconnectBtn) disconnectBtn.hidden = !connected;
+    if (metaEl) metaEl.hidden = true;
+    if (statusEl) {
+      statusEl.textContent = 'Switched off';
+      statusEl.className = 'agent-editor-broker-status agent-editor-broker-status--warn';
+    }
+    setBrokerMessage(
+      connected
+        ? 'Robinhood live trading is switched off. Your Robinhood account is still linked to ATL; disconnect it to delete the stored access.'
+        : '',
+    );
+  }
+
   async function refreshRobinhoodStatus() {
     const statusEl = document.getElementById('agentEditorRobinhoodStatus');
     const metaEl = document.getElementById('agentEditorRobinhoodMeta');
     const connectBtn = document.getElementById('agentEditorConnectRobinhoodBtn');
     const disconnectBtn = document.getElementById('agentEditorDisconnectRobinhoodBtn');
     const liveToggle = document.getElementById('agentEditorLiveTradingEnabled');
+    robinhoodLiveEnabled = false;
     if (!isEditorSignedIn()) {
-      if (statusEl) {
-        statusEl.textContent = 'Sign in required';
-        statusEl.className = 'agent-editor-broker-status agent-editor-broker-status--warn';
-      }
-      if (connectBtn) {
-        connectBtn.hidden = false;
-        connectBtn.disabled = false;
-        connectBtn.textContent = 'Sign in to connect';
-      }
-      if (disconnectBtn) disconnectBtn.hidden = true;
-      if (metaEl) metaEl.hidden = true;
-      setRunLiveProminence(false);
-      setBrokerMessage('Log in to your ATL account, then click Connect Robinhood.', true);
+      // The switch is reported only to a signed-in caller, so a guest never
+      // learns it and sees no panel, whichever way it is set.
+      setBrokerPanelVisible(false);
       return;
     }
 
@@ -555,6 +593,15 @@
       if (!response.ok) throw new Error(data.detail || 'Status check failed');
 
       const connected = Boolean(data.connected);
+      // Strictly true: a server without the field predates the switch, and
+      // reading its silence as "on" would offer a Connect this build refuses.
+      robinhoodLiveEnabled = data.enabled === true;
+      if (!robinhoodLiveEnabled) {
+        renderRobinhoodSwitchedOff(connected);
+        return;
+      }
+      setBrokerPanelVisible(true);
+      setLiveControlsVisible(true);
       if (statusEl) {
         statusEl.textContent = connected ? 'Connected' : 'Not connected';
         statusEl.className = connected
@@ -586,24 +633,10 @@
         setBrokerMessage('');
       }
     } catch (error) {
-      const timedOut = error?.name === 'AbortError';
-      if (statusEl) {
-        statusEl.textContent = timedOut ? 'Not connected' : 'Unavailable';
-        statusEl.className = 'agent-editor-broker-status agent-editor-broker-status--warn';
-      }
-      if (connectBtn) {
-        connectBtn.hidden = false;
-        connectBtn.disabled = false;
-        connectBtn.textContent = 'Connect Robinhood';
-      }
-      if (disconnectBtn) disconnectBtn.hidden = true;
+      // Without an answer the switch is unknown, and unknown is off: hide the
+      // panel rather than offer a Connect that may answer 404.
+      setBrokerPanelVisible(false);
       setRunLiveProminence(false);
-      setBrokerMessage(
-        timedOut
-          ? 'Status check timed out. You can still click Connect Robinhood.'
-          : (error.message || 'Could not check Robinhood status.'),
-        true,
-      );
       console.warn('Robinhood status failed:', error);
     }
 
@@ -613,6 +646,10 @@
   }
 
   async function connectRobinhood() {
+    if (!robinhoodLiveEnabled) {
+      setBrokerMessage('Robinhood live trading is switched off.', true);
+      return;
+    }
     if (!isEditorSignedIn()) {
       setBrokerMessage('Please sign in first.', true);
       if (typeof window.openAuthModal === 'function') window.openAuthModal('login');
@@ -699,6 +736,10 @@
   }
 
   async function runLive() {
+    if (!robinhoodLiveEnabled) {
+      showSaveStatus('Robinhood live trading is switched off', true);
+      return;
+    }
     if (!currentAgent?.agent_id || isDemoAgent(currentAgent.agent_id)) {
       showSaveStatus('Save a real agent before running live', true);
       return;
@@ -1162,8 +1203,13 @@
       description: description || null,
       cash_allocation,
       backtest_allocation,
-      live_trading_enabled: Boolean(live_trading_enabled),
     };
+    // Omitted means "leave alone" (the route reads fields_set). save() passes
+    // undefined while the Robinhood path is switched off, so a save can neither
+    // arm an agent nor quietly disarm one whose toggle the user never saw.
+    if (live_trading_enabled !== undefined) {
+      payload.live_trading_enabled = Boolean(live_trading_enabled);
+    }
     // Presence of the key is the signal, so the falsy-but-meaningful "" (clear
     // the shelf) must still be sent; only null/undefined means "leave alone".
     if (category !== null && category !== undefined) payload.category = category;
@@ -1469,7 +1515,7 @@
         state.cash_allocation,
         state.backtest_allocation,
         state.model_name,
-        state.live_trading_enabled,
+        robinhoodLiveEnabled ? state.live_trading_enabled : undefined,
         state.runtime_config,
         state.category,
       );

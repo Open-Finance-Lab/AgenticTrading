@@ -15,10 +15,7 @@ from dashboard.backend.domain.model_providers.execution_catalog import (
 from dashboard.backend.infrastructure.llm.execution.client import (
     AnthropicCompatibleExecutionClient,
 )
-from dashboard.backend.infrastructure.llm.execution.errors import (
-    ExecutionErrorCategory,
-    LLMExecutionError,
-)
+from dashboard.backend.infrastructure.llm.execution.errors import LLMExecutionError
 from dashboard.backend.infrastructure.llm.execution.handoff import ExecutionHandoff
 from dashboard.backend.infrastructure.llm.execution.models import (
     BillingEvidence,
@@ -120,7 +117,7 @@ def test_the_recovery_retry_carries_the_same_policy():
     client, service = _client(
         model_id,
         [
-            LLMExecutionError(ExecutionErrorCategory.RESPONSE_INVALID),
+            LLMExecutionError.for_empty_reply(),
             _result(model_id),
         ],
     )

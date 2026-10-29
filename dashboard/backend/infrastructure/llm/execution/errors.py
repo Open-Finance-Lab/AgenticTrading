@@ -86,11 +86,30 @@ class LLMExecutionError(RuntimeError):
         # only fixed tokens (the backtest child's run_failed line) rebuild the
         # restriction-specific message rather than the generic one.
         self.restriction_reason: str | None = None
+        # Set by ``for_empty_reply``. A second axis, like ``retry_hint``:
+        # the category stays RESPONSE_INVALID for every consumer that maps it.
+        self.empty_reply = False
         super().__init__(self.safe_message)
 
     @classmethod
     def safe(cls, category: ExecutionErrorCategory | str) -> "LLMExecutionError":
         return cls(category)
+
+    @classmethod
+    def for_empty_reply(cls) -> "LLMExecutionError":
+        """The provider answered with no text, typically because reasoning spent the ceiling.
+
+        RESPONSE_INVALID also covers contract breaks that fail identically
+        every time -- a request the client refuses before sending (a model id
+        the handoff did not sign, a prompt over the size limit) and a result
+        that fails validation after it was settled. Only this one is worth
+        asking again, so callers retry on ``is_empty_reply``, never on the
+        bare category: retrying those others billed the same failure again or
+        logged a request bug as an empty model reply (#600).
+        """
+        error = cls(ExecutionErrorCategory.RESPONSE_INVALID)
+        error.empty_reply = True
+        return error
 
     @classmethod
     def account_restricted(
@@ -134,6 +153,17 @@ def is_transient_provider_failure(error: BaseException) -> bool:
     )
 
 
+def is_empty_reply(error: BaseException) -> bool:
+    """True for a provider reply that carried no text (see ``for_empty_reply``)."""
+    return isinstance(error, LLMExecutionError) and bool(
+        getattr(error, "empty_reply", False)
+    )
+
+
+# The ``reason`` token ``run_failed_line`` writes for an empty reply.
+EMPTY_REPLY_REASON = "empty_reply"
+
+
 def run_failed_line(error: LLMExecutionError) -> str:
     """The line a backtest child prints when a model call ends its run.
 
@@ -143,15 +173,19 @@ def run_failed_line(error: LLMExecutionError) -> str:
     """
     line = f"ERROR: llm.run_failed category={error.category.value}"
     reason = getattr(error, "restriction_reason", None)
+    if not reason and is_empty_reply(error):
+        reason = EMPTY_REPLY_REASON
     if reason:
         line += f" reason={reason}"
     return line
 
 
 __all__ = [
+    "EMPTY_REPLY_REASON",
     "ExecutionErrorCategory",
     "LLMExecutionError",
     "RetryHint",
+    "is_empty_reply",
     "is_transient_provider_failure",
     "run_failed_line",
 ]

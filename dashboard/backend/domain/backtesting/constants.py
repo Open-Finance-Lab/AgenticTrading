@@ -88,6 +88,27 @@ def new_agent_cash_allocation() -> float:
     return float(DEFAULT_AGENT_CASH_ALLOCATION) if PAPER_TRADING_ENABLED else 0.0
 
 
+# The Robinhood real-money path is switched off: real capital is out of scope
+# under docs/superpowers/specs/2026-10-14-atl-direction.md. Off, the routes that
+# start a link, finish one or place a live run answer 404, the OAuth callback
+# returns to /app without exchanging its code, and PATCH /api/v1/agents refuses
+# to arm an agent. Two routes stay up on purpose: GET /api/v1/robinhood/status
+# reports this switch as ``enabled`` (the agent editor reads it there, so there
+# is no frontend copy to flip), and DELETE /api/v1/robinhood/disconnect stays
+# the way an already-linked account deletes its stored tokens. A restore is
+# this one line; the rest of the checklist is in CLAUDE.md (`execution/`).
+ROBINHOOD_LIVE_ENABLED = False
+
+
+def robinhood_live_enabled() -> bool:
+    """Whether the Robinhood real-money path is on, read at call time.
+
+    A function for the same reason as ``new_agent_cash_allocation``: tests pin
+    the restored behaviour by patching ``ROBINHOOD_LIVE_ENABLED`` alone.
+    """
+    return bool(ROBINHOOD_LIVE_ENABLED)
+
+
 def resolve_initial_capital(requested: Optional[Any] = None) -> float:
     """Resolve simulation capital for a backtest / protocol run.
 

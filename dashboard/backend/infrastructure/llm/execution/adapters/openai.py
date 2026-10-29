@@ -167,7 +167,7 @@ class OpenAIExecutionAdapter:
             response = client.chat.completions.create(**kwargs)
             text = response_text(response)
             if not text:
-                raise ProviderExecutionError("response_invalid")
+                raise ProviderExecutionError.for_empty_reply()
             usage = _response_usage(response)
             provider_cost_usd = optional_nonnegative_float(
                 value_at(response, "cost", value_at(value_at(response, "usage"), "cost"))

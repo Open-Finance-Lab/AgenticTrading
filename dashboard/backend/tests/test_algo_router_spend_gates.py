@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import threading
+import time
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -84,3 +87,55 @@ def test_second_run_is_refused_whatever_the_session(monkeypatch):
                                                           session_id="someone-else"))
     with pytest.raises(RuntimeError, match="already running"):
         algo_service.execute_algo(BLOCKS, "a-fresh-session")
+
+
+def test_concurrent_executes_start_one_run(monkeypatch, tmp_path):
+    """The route is a sync def, so two POSTs run on two threadpool threads.
+
+    The ``running`` check and its claim sat ~35 lines apart with no lock, so
+    both requests could pass the check and each start a subprocess on the
+    platform key. ``_default_backtest_dates`` runs between the two; holding
+    the first caller there until the second arrives opens that window on
+    every run instead of by luck.
+    """
+    monkeypatch.setattr(algo_service, "algo_status", dict(algo_service.algo_status, running=False))
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    monkeypatch.setattr(algo_service, "_has_alpaca_credentials", lambda: True)
+    monkeypatch.setattr(algo_service, "_ensure_data_dir", lambda: None)
+    monkeypatch.setattr(algo_service, "CONFIG_DIR", tmp_path)
+    launched = []
+    monkeypatch.setattr(algo_service, "_run_backtest_background", lambda *args: launched.append(args))
+
+    arrivals = []
+    second_arrived = threading.Event()
+
+    def held_dates():
+        arrivals.append(None)
+        if len(arrivals) == 2:
+            second_arrived.set()
+        second_arrived.wait(timeout=0.5)
+        return "2025-03-03", "2025-03-07"
+
+    monkeypatch.setattr(algo_service, "_default_backtest_dates", held_dates)
+
+    outcomes = []
+
+    def post():
+        try:
+            algo_service.execute_algo(BLOCKS, "a-fresh-session")
+            outcomes.append("started")
+        except RuntimeError as exc:
+            outcomes.append(str(exc))
+
+    callers = [threading.Thread(target=post) for _ in range(2)]
+    for caller in callers:
+        caller.start()
+    for caller in callers:
+        caller.join(timeout=5)
+
+    deadline = time.monotonic() + 2
+    while len(launched) < outcomes.count("started") and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert outcomes.count("started") == 1, outcomes
+    assert len(launched) == 1
+    assert any("already running" in outcome for outcome in outcomes), outcomes

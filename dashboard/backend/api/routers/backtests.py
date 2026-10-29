@@ -85,12 +85,13 @@ from dashboard.backend.infrastructure.market_data.ifind_ashare import (
     ASHARE_SESSIONS_PER_TRADING_DAY,
 )
 from dashboard.backend.infrastructure.llm.execution.errors import (
+    EMPTY_REPLY_REASON,
     ExecutionErrorCategory,
     LLMExecutionError,
 )
 from dashboard.backend.infrastructure.llm.execution.service import (
     LLMExecutionService,
-    analytics_error_category,
+    analytics_error_category_for,
     reservation_ceiling_micro_for,
 )
 from dashboard.backend.infrastructure.llm.execution.handoff import (
@@ -1194,7 +1195,7 @@ def _finalize_slot_locked(
         # Still `backtest_failed`: the user asked for a backtest, got nothing,
         # and was billed. A separate event name would need nine registrations
         # and would drop timeouts out of `metrics.py`'s `_TERMINAL_FAILURE`,
-        # `states.py`'s consecutive-failure alert and `backfill.py`'s terminal
+        # `lifecycle.py`'s consecutive-failure alert and `backfill.py`'s terminal
         # map -- the three things that exist to notice runs failing. What was
         # missing is the reason, not the outcome.
         return {
@@ -2109,9 +2110,7 @@ def run_backtest_background(
                 # traceback stays in the service log via the dump above.
                 slot_error = f"Backtest stopped: {llm_failure.safe_message}"
                 slot_public_error = _LLM_FAILURE_PUBLIC_ERROR
-                slot_error_category = analytics_error_category(
-                    llm_failure.category
-                )
+                slot_error_category = analytics_error_category_for(llm_failure)
             print(f"❌ Backtest failed (returncode={result.returncode})", flush=True)
             # A negative return code is a signal death, and the parent's own
             # signals were claimed above (cancel) or raise TimeoutExpired
@@ -3253,6 +3252,11 @@ def _child_llm_failure(*streams: Optional[str]) -> Optional[LLMExecutionError]:
             # The outstanding amount does not cross the boundary, so an
             # overage reads "add Credits" without the figure.
             return LLMExecutionError.account_restricted(reason or None)
+        if (
+            category is ExecutionErrorCategory.RESPONSE_INVALID
+            and reason == EMPTY_REPLY_REASON
+        ):
+            return LLMExecutionError.for_empty_reply()
         return LLMExecutionError(category)
     return None
 

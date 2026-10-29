@@ -98,7 +98,7 @@ class AnthropicExecutionAdapter:
             response = client.messages.create(**kwargs)
             text = _content_text(response)
             if not text:
-                raise ProviderExecutionError("response_invalid")
+                raise ProviderExecutionError.for_empty_reply()
             usage = value_at(response, "usage")
             normalized_usage = usage_from_fields(
                 value_at(usage, "input_tokens"),

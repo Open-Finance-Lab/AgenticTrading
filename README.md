@@ -22,7 +22,7 @@
 
 
 **[Agentic Trading Lab](https://agentic-trading-lab.vercel.app/) is an open-source experimental platform for LLM-powered trading agents.**  
-Turn trading ideas into traceable experiments: prototype agents, run backtests and paper-trading simulations, inspect reasoning and decision logs, benchmark against market baselines, and study how agents behave under near-real financial constraints.
+Turn trading ideas into traceable experiments: prototype agents, run backtests, inspect reasoning and decision logs, benchmark against market baselines, and study how agents behave under near-real financial constraints.
 
 <div align="center">
   <a href="https://agentic-trading-lab.vercel.app/">
@@ -44,7 +44,7 @@ Turn trading ideas into traceable experiments: prototype agents, run backtests a
 
 ## Overview
 
-Agentic Trading Lab is an interactive research and educational platform for exploring trading systems powered by large language models. Developed alongside a systematic survey of agentic trading research, it helps students, researchers, and developers explore how agents reason, trade, and perform in realistic market environments. Move beyond backtest returns by customizing agents, inspecting their decisions, evaluating risk, progressing from historical simulation to live-market paper trading, and comparing performance on standardized leaderboards.
+Agentic Trading Lab is an interactive research and educational platform for exploring trading systems powered by large language models. Developed alongside a systematic survey of agentic trading research, it helps students, researchers, and developers explore how agents reason, trade, and perform in realistic market environments. Move beyond backtest returns by customizing agents, inspecting their decisions, evaluating risk, and comparing performance on standardized leaderboards, including one that advances forward on live market data.
 
 ## Key Features
 
@@ -55,18 +55,14 @@ Start with a market question or trading idea, then turn it into an agent you can
 Choose a model, data source, and trading prompt, or connect your own agent through our API.
 - **Start from a template**  
 Add a ready-made agent from the Community tab, then customize its prompts and backtest it.
-- **Build an agent-powered portfolio**  
-Give multiple agents simulated capital and manage them as your own virtual trading team.
-- **Test before using real capital**  
-Move from historical backtests to live-market paper trading in one workflow.
-- **Go live when you're ready**  
-Connect a real Robinhood account and let an agent trade it under per-order risk caps. Off by default, with a review-only mode that shows what an agent *would* do before it can act — see [Live Trading](docs/source/lab/live_trading.rst).
+- **Watch models trade forward**  
+A live leaderboard advances nightly after the US close, trading each new session on simulated fills with no real money.
 - **See every run, decision, and reason**  
 Monitor positions, trades, portfolio changes, and the reasoning behind each action.
 - **Measure more than returns**  
 Evaluate performance, risk, drawdown, and trading behavior using standardized metrics.
 - **Compare agents in the open**  
-Benchmark LLM models, baseline strategies, and market indices on an open leaderboard under the same market window.
+Benchmark LLM models, baseline strategies, and market indices on public leaderboards under the same market window. The roster is curated, so neither board takes submissions.
 
 ## Run Locally
 
@@ -94,7 +90,7 @@ AgenticTrading/
 │   ├── scripts/               # CLI backtests (backtest_hourly_agent.py, …)
 │   ├── config/                # defaults.json, leaderboard.json, marketplace.json
 │   └── storage/               # data/backtest.db + backups/
-├── packaging/agentictrading/  # PyPI SDK (AgentRunner + HTTP client)
+├── packaging/agentictrading/  # Python SDK (AgentRunner + HTTP client; install from source)
 ├── credentials/               # Local only — not in git (see alpaca.json.example)
 ├── docs/                      # Sphinx docs + architecture notes
 ├── orchestration/             # FinAgent multi-agent framework (separate)
@@ -118,13 +114,13 @@ Connect popular open-source trading projects, model providers, data providers, b
 - **Managed agent runtime**  
 Support scheduled and long-running agents with persistent state, monitoring, alerts, and failure recovery.
 - **Dynamic market evaluation**  
-Evaluate agents through live-market paper trading with execution records, costs, risks, and reasoning traces—not only final returns.
+Evaluate agents forward on live market data with simulated fills, execution records, costs, risks, and reasoning traces—not only final returns.
 - **Risk and stress testing**  
 Test agents under changing market conditions with configurable risk policies, approval rules, and kill switches.
 - **Open agent ecosystem**  
-Grow Agent Cards, reproducible submissions, competitions, and the open leaderboard toward hundreds and eventually thousands of reusable agent instances.
+Grow Agent Cards, reproducible submissions, competitions, and an open leaderboard toward hundreds and eventually thousands of reusable agent instances.
 
-Progress so far: news sentiment is live via Agentic FinSearch (Home panel + v2 agent context), with Reddit/social sentiment still planned. Under *Broader agent and tool connectivity*, the first external-framework adapter has shipped — [TradingAgents](https://github.com/TauricResearch/TradingAgents) runs locally on your own model and data credentials and replays its decisions through the Python SDK ([setup guide](docs/integrations/tradingagents.zh-CN.md), written in Simplified Chinese) — while MCP, broker, and data-provider adapters are still ahead.
+Progress so far: news sentiment comes from Agentic FinSearch (Home panel + v2 agent context), with Reddit/social sentiment still planned. The live feed is paused for now, so the Home panel shows a labelled demo snapshot. Under *Broader agent and tool connectivity*, the first external-framework adapter has shipped — [TradingAgents](https://github.com/TauricResearch/TradingAgents) runs locally on your own model and data credentials and replays its decisions through the Python SDK ([setup guide](docs/integrations/tradingagents.zh-CN.md), written in Simplified Chinese) — while MCP, broker, and data-provider adapters are still ahead.
 
 ## Citation
 
@@ -158,4 +154,4 @@ Pull requests and issues welcome!
 
 ---
 
-Built with Alpaca API, FastAPI, Chart.js, and SQLite
+Built with Alpaca API, FastAPI, Chart.js, SQLite, and Postgres
