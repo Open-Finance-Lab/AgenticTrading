@@ -35,6 +35,7 @@ from dashboard.backend.domain.leaderboard.live_trade_stats import (
     fold_trade_stats,
     summarize_trade_stats,
 )
+from dashboard.backend.domain.leaderboard.roster_failures import RosterFailures
 from dashboard.backend.domain.leaderboard.strategies._common import reference_start_date
 from dashboard.backend.infrastructure.market_data.alpaca_bars import (
     allow_recent_sip,
@@ -1044,7 +1045,9 @@ def refresh_live_leaderboard(
     latest snapshot and only trades sessions not yet stored (typically one
     cash day). An entry that raises is logged and listed in
     ``model_failures``; the rest of the roster still trades, and the prune and
-    the state save still run. Public GET never calls this.
+    the state save still run. When two entries in a row fail with the same
+    error, the fault is shared, so the rest are listed as not attempted rather
+    than billed for the same failure. Public GET never calls this.
     """
     freeze_cfg = live_freeze_config(as_of)
     if freeze_cfg is None:
@@ -1091,11 +1094,14 @@ def refresh_live_leaderboard(
     }
 
     if deploy_models:
-        failures: List[Dict[str, str]] = []
+        roster = RosterFailures("live")
         successes: List[Dict[str, Any]] = []
         bars_memo: Dict[Tuple[Any, ...], Any] = {}
         for entry in live_llm_entries(freeze_cfg):
             entry_id = entry["id"]
+            if roster.stopped:
+                roster.skip(entry_id)
+                continue
             try:
                 row = deploy_live_model_increment(
                     entry,
@@ -1104,25 +1110,26 @@ def refresh_live_leaderboard(
                     allow_fallback=allow_fallback,
                     bars_memo=bars_memo,
                 )
-                successes.append(row)
             except Exception as exc:
-                # Any Exception, not a list of expected types: one model's
-                # dropped database connection or SDK socket error must not leave
-                # the rest of the roster untraded and skip the prune and state
-                # save below. BaseException (a shutdown) still propagates. The
-                # type name in the line is what tells an operator a programming
-                # error from a provider outage, since both now land here.
-                # The background refresh keeps this list only in a state file on
-                # an ephemeral disk; the log line is the part an operator sees.
-                print(
-                    f"ERROR: live.model_deploy_failed entry={entry_id} "
-                    f"error={type(exc).__name__}: {exc}",
-                    flush=True,
-                )
-                failures.append({"entry_id": entry_id, "error": str(exc)})
-        result["models_deployed"] = not failures
+                # Any Exception, not the three types this once named: a
+                # database error or a bug after the model calls (the checkpoint
+                # write, the run metadata) escaped those, leaving the rest of the
+                # roster untraded and skipping the prune and state save below.
+                # An LLM provider error does not reach here: the live strategy
+                # runs non-strict, so a failed call becomes a rule-based step and
+                # arrives as an H6 refusal, which was always caught. Not
+                # BaseException, so Ctrl-C still stops a CLI refresh (a redeploy
+                # kills the daemon thread without raising at all). RosterFailures
+                # prints the line an operator sees, since the state file is on an
+                # ephemeral disk, and stops the roster when two entries in a row
+                # fail the same way.
+                roster.failed(entry_id, exc)
+                continue
+            roster.traded(row)
+            successes.append(row)
+        result["models_deployed"] = not roster.failures
         result["model_results"] = successes
-        result["model_failures"] = failures
+        result["model_failures"] = roster.failures
 
     result["pruned_runs"] = prune_superseded_live_runs(
         freeze_cfg["start_date"], freeze_cfg["end_date"]
