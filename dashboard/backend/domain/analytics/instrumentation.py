@@ -45,42 +45,6 @@ _RESOURCE_EVENTS = {
     "credits_settled",
     "credits_refunded",
 }
-SNAPSHOT_RELEVANT_EVENTS = (
-    _ACCOUNT_EVENTS
-    | _CREDENTIAL_EVENTS
-    | _AGENT_EVENTS
-    | _RUN_EVENTS
-    | _RESOURCE_EVENTS
-    | {"safe_error_recorded"}
-)
-# None means "no synchronous projection". That is the default in every process
-# and nothing in production registers a callback, so no process rebuilds
-# snapshots on the event path. Before #522, None fell back to
-# states.recalculate_user_snapshots: ~5s per event in the child, ~31s of every
-# model call. Snapshots now catch up only through the reaper's repair sweep,
-# throttled to a 24-hour staleness window, for worker-emitted events exactly
-# as for web-emitted ones. The daily job writes user_daily_facts, not snapshots.
-_snapshot_recalculator: Any = None
-
-
-def register_snapshot_recalculator(callback: Any) -> None:
-    global _snapshot_recalculator
-    if callback is not None and not callable(callback):
-        raise TypeError("snapshot recalculator must be callable")
-    _snapshot_recalculator = callback
-
-
-def _recalculate_snapshot(user_id: int, event_name: str) -> None:
-    if event_name not in SNAPSHOT_RELEVANT_EVENTS:
-        return
-    callback = _snapshot_recalculator
-    if callback is None:
-        # Inert by default (#522). A default that is expensive until something
-        # disables it is inherited by every entry point that skips app.py's
-        # startup: the backtest child, CLI scripts, a future worker service.
-        # Do not add a fallback here.
-        return
-    callback(user_id)
 
 
 def _safe_warning(exc: BaseException) -> None:
@@ -135,10 +99,7 @@ def _emit(*, allowed_names: set[str], group: str, **kwargs: Any) -> None:
             source_record_id=source_record_id,
             version=version,
         )
-        service = get_analytics_service()
-        result = service.try_record_server_event(**kwargs)
-        if result is not None and not getattr(service, "project_snapshots", False):
-            _recalculate_snapshot(int(kwargs["user_id"]), str(event_name))
+        get_analytics_service().try_record_server_event(**kwargs)
     except Exception as exc:
         _safe_warning(exc)
 

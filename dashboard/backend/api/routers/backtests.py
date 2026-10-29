@@ -1195,7 +1195,7 @@ def _finalize_slot_locked(
         # Still `backtest_failed`: the user asked for a backtest, got nothing,
         # and was billed. A separate event name would need nine registrations
         # and would drop timeouts out of `metrics.py`'s `_TERMINAL_FAILURE`,
-        # `states.py`'s consecutive-failure alert and `backfill.py`'s terminal
+        # `lifecycle.py`'s consecutive-failure alert and `backfill.py`'s terminal
         # map -- the three things that exist to notice runs failing. What was
         # missing is the reason, not the outcome.
         return {

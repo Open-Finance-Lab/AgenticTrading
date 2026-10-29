@@ -8,19 +8,16 @@ from __future__ import annotations
 
 from collections import Counter, defaultdict
 from datetime import date, datetime, time, timedelta, timezone
-from typing import Any, Iterable, Mapping, Sequence
+from typing import Any, Iterable, Sequence
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from .metrics import calculate_overview_metrics
+from .metrics import ACTIVATION_EVENTS, calculate_overview_metrics
 from .models import AnalyticsEventRecord
 from .repository import _row_to_event, analytics_store
 from .repository_common import utc_iso
 from .usage_cost import atl_cost_micro, byok_estimate_micro
-from .value_repository import (
-    LIFECYCLE_ROLLUP_METRICS,
-    UserLifecycleDailySnapshot,
-)
+from .value_repository import LIFECYCLE_ROLLUP_METRICS
 
 
 class DailyRollup(BaseModel):
@@ -95,49 +92,20 @@ class AnalyticsRollupStore:
         return [event for event in events if event.user_id not in excluded]
 
     def replace_day(self, day: date, rows: Iterable[DailyRollup]) -> None:
-        values = list(rows)
-        columns = (
-            "rollup_date",
-            "metric_name",
-            "event_name",
-            "billing_mode",
-            "provider_id",
-            "model_id",
-            "outcome",
-            "error_category",
-            "user_state",
-            "value_count",
-            "value_sum_micro",
-            "updated_at",
-        )
-        payloads = [
-            (
-                row.rollup_date.isoformat(),
-                row.metric_name,
-                row.event_name,
-                row.billing_mode,
-                row.provider_id,
-                row.model_id,
-                row.outcome,
-                row.error_category,
-                row.user_state,
-                row.value_count,
-                row.value_sum_micro,
-                utc_iso(row.updated_at),
-            )
-            for row in values
-        ]
+        columns = _ROLLUP_TABLE_COLUMNS
+        payloads = [_rollup_payload(row) for row in rows]
+        preserved = sorted(LIFECYCLE_ROLLUP_METRICS)
         if self.is_postgres:
             placeholders = ", ".join("%s" for _ in columns)
             with self.base_store._get_connection() as conn:
                 with conn.cursor() as cur:
                     cur.execute(
-                        """
+                        f"""
                         DELETE FROM analytics_daily_rollups
                         WHERE rollup_date = %s
-                          AND metric_name NOT IN (%s, %s)
+                          AND metric_name NOT IN ({", ".join("%s" for _ in preserved)})
                         """,
-                        (day.isoformat(), *sorted(LIFECYCLE_ROLLUP_METRICS)),
+                        (day.isoformat(), *preserved),
                     )
                     if payloads:
                         cur.executemany(
@@ -149,12 +117,12 @@ class AnalyticsRollupStore:
             placeholders = ", ".join("?" for _ in columns)
             with self.base_store._get_connection() as conn:
                 conn.execute(
-                    """
+                    f"""
                     DELETE FROM analytics_daily_rollups
                     WHERE rollup_date = ?
-                      AND metric_name NOT IN (?, ?)
+                      AND metric_name NOT IN ({", ".join("?" for _ in preserved)})
                     """,
-                    (day.isoformat(), *sorted(LIFECYCLE_ROLLUP_METRICS)),
+                    (day.isoformat(), *preserved),
                 )
                 if payloads:
                     conn.executemany(
@@ -162,6 +130,106 @@ class AnalyticsRollupStore:
                         f"VALUES ({placeholders})",
                         payloads,
                     )
+
+    def backfill_activation_users(self, *, since: date, until: date) -> tuple[date, ...]:
+        """Write ``activation_users`` for rolled-up days that predate the metric.
+
+        ``rollup_day`` gained the metric in PR B, so every day rolled up
+        before it holds none, and the overview's funnel summed those days as
+        zero. One grouped read over the raw events of the missing days --
+        distinct users per step per day, counted in SQL -- fills them, where
+        a ``rollup_day`` rebuild per day would re-read 31 days of events for
+        each one. Only days in ``[since, until)`` that were rolled up (they
+        hold ``daily_active_users``) are written, so a day whose raw events
+        have expired is never filled with zeros; admin and excluded accounts
+        are left out, as ``list_events`` leaves them out. A filled day no
+        longer matches, so a re-run writes nothing. Returns the days filled.
+        """
+        p = "%s" if self.is_postgres else "?"
+        missing_sql = f"""
+            SELECT DISTINCT r.rollup_date FROM analytics_daily_rollups AS r
+            WHERE r.metric_name = 'daily_active_users'
+              AND r.rollup_date >= {p} AND r.rollup_date < {p}
+              AND NOT EXISTS (
+                  SELECT 1 FROM analytics_daily_rollups AS a
+                  WHERE a.rollup_date = r.rollup_date
+                    AND a.metric_name = 'activation_users'
+              )
+            ORDER BY r.rollup_date
+        """
+        events = sorted(ACTIVATION_EVENTS)
+        counts_sql = f"""
+            SELECT substr(occurred_at, 1, 10) AS day, event_name,
+                   COUNT(DISTINCT user_id) AS users
+            FROM analytics_events
+            WHERE occurred_at >= {p} AND occurred_at < {p}
+              AND event_name IN ({", ".join(p for _ in events)})
+              AND user_id NOT IN (SELECT id FROM users WHERE role = 'admin')
+              AND user_id NOT IN (
+                  SELECT user_id FROM analytics_subject_settings WHERE excluded
+              )
+            GROUP BY substr(occurred_at, 1, 10), event_name
+        """
+        insert_sql = (
+            f"INSERT INTO analytics_daily_rollups ({', '.join(_ROLLUP_TABLE_COLUMNS)}) "
+            f"VALUES ({', '.join(p for _ in _ROLLUP_TABLE_COLUMNS)})"
+        )
+
+        def fill(run: Any) -> tuple[date, ...]:
+            days = tuple(
+                date.fromisoformat(str(row["rollup_date"]))
+                for row in run(missing_sql, (since.isoformat(), until.isoformat()))
+            )
+            if not days:
+                return ()
+            counts = {
+                (str(row["day"]), str(row["event_name"])): int(row["users"])
+                for row in run(
+                    counts_sql,
+                    (
+                        utc_iso(_day_start(days[0])),
+                        utc_iso(_day_start(days[-1] + timedelta(days=1))),
+                        *events,
+                    ),
+                )
+            }
+            payloads = [
+                _rollup_payload(
+                    _row(
+                        day,
+                        "activation_users",
+                        count=counts.get((day.isoformat(), event_name), 0),
+                        event_name=event_name,
+                        updated_at=_day_start(day + timedelta(days=1)),
+                    )
+                )
+                for day in days
+                for event_name in ACTIVATION_EVENTS
+            ]
+            run(insert_sql, payloads, many=True)
+            return days
+
+        if self.is_postgres:
+            with self.base_store._get_connection() as conn:
+                with conn.cursor() as cur:
+
+                    def run_postgres(sql: str, params: Any, many: bool = False) -> Any:
+                        if many:
+                            cur.executemany(sql, params)
+                            return []
+                        cur.execute(sql, params)
+                        return cur.fetchall()
+
+                    return fill(run_postgres)
+        with self.base_store._get_connection() as conn:
+
+            def run_sqlite(sql: str, params: Any, many: bool = False) -> Any:
+                if many:
+                    conn.executemany(sql, params)
+                    return []
+                return conn.execute(sql, params).fetchall()
+
+            return fill(run_sqlite)
 
     def list_rollups(self, *, start: date, end: date) -> list[DailyRollup]:
         params = (start.isoformat(), end.isoformat())
@@ -210,6 +278,39 @@ class AnalyticsRollupStore:
         ]
 
 
+_ROLLUP_TABLE_COLUMNS = (
+    "rollup_date",
+    "metric_name",
+    "event_name",
+    "billing_mode",
+    "provider_id",
+    "model_id",
+    "outcome",
+    "error_category",
+    "user_state",
+    "value_count",
+    "value_sum_micro",
+    "updated_at",
+)
+
+
+def _rollup_payload(row: DailyRollup) -> tuple[Any, ...]:
+    return (
+        row.rollup_date.isoformat(),
+        row.metric_name,
+        row.event_name,
+        row.billing_mode,
+        row.provider_id,
+        row.model_id,
+        row.outcome,
+        row.error_category,
+        row.user_state,
+        row.value_count,
+        row.value_sum_micro,
+        utc_iso(row.updated_at),
+    )
+
+
 def _row(
     day: date,
     metric_name: str,
@@ -233,7 +334,6 @@ def rollup_day(
     day: date,
     *,
     store: AnalyticsRollupStore | None = None,
-    state_counts: Mapping[str, int] | None = None,
     include_internal: bool = False,
     now: datetime | None = None,
 ) -> list[DailyRollup]:
@@ -311,7 +411,6 @@ def rollup_day(
         ),
         _row(day, "input_tokens", count=overview.input_tokens, updated_at=current),
         _row(day, "output_tokens", count=overview.output_tokens, updated_at=current),
-        _row(day, "affected_users", count=overview.affected_users, updated_at=current),
     ]
 
     event_dimensions = Counter(
@@ -443,31 +542,25 @@ def rollup_day(
                     ),
                 ]
             )
-    failure_users: dict[str, set[int]] = defaultdict(set)
+    # Distinct users per activation step per day: the overview's funnel sums
+    # these across completed days instead of rescanning the window. Written
+    # zero or not, like byok_unpriced_calls: presence is how the funnel tells
+    # a day with no activations from a day rolled up before this metric
+    # existed, which it must not read as zero.
+    activation_users: dict[str, set[int]] = defaultdict(set)
     for event in day_events:
-        if event.error_category:
-            failure_users[event.error_category].add(event.user_id)
-    for category, users in sorted(failure_users.items()):
+        if event.event_name in ACTIVATION_EVENTS:
+            activation_users[event.event_name].add(event.user_id)
+    for event_name in ACTIVATION_EVENTS:
         rows.append(
             _row(
                 day,
-                "affected_users",
-                count=len(users),
-                error_category=category,
+                "activation_users",
+                count=len(activation_users[event_name]),
+                event_name=event_name,
                 updated_at=current,
             )
         )
-    for status, count in sorted((state_counts or {}).items()):
-        rows.append(
-            _row(
-                day,
-                "user_state_count",
-                count=int(count),
-                user_state=status,
-                updated_at=current,
-            )
-        )
-
     rows.sort(
         key=lambda row: (
             row.metric_name,
@@ -484,27 +577,8 @@ def rollup_day(
     return rows
 
 
-def rollup_current_day(
-    *,
-    store: AnalyticsRollupStore | None = None,
-    now: datetime | None = None,
-    include_internal: bool = False,
-):
-    current = now or datetime.now(timezone.utc)
-    start = _day_start(current.astimezone(timezone.utc).date())
-    aggregate_store = store or AnalyticsRollupStore()
-    events = aggregate_store.list_events(
-        start=start - timedelta(days=30),
-        end=current,
-        include_internal=include_internal,
-    )
-    return calculate_overview_metrics(events, start=start, end=current)
-
-
-def _snapshot_quality(rows: Sequence[UserLifecycleDailySnapshot]) -> str:
-    return (
-        "partial" if any(row.data_quality == "partial" for row in rows) else "complete"
-    )
+def _quality(rows: Sequence[Any]) -> str:
+    return "partial" if any(row.data_quality == "partial" for row in rows) else "complete"
 
 
 def rollup_lifecycle_day(
@@ -512,74 +586,195 @@ def rollup_lifecycle_day(
     *,
     store,
 ) -> tuple[DailyRollup, ...]:
-    """Persist anonymous lifecycle counts and changed-segment transitions."""
+    """Persist anonymous lifecycle counts, transitions and the long-term
+    tier / user_group families for one day (design SS6.7, SS11).
 
-    current = store.list_daily_snapshots(
-        start=day,
-        end=day + timedelta(days=1),
-    )
-    previous = store.list_daily_snapshots(
-        start=day - timedelta(days=1),
-        end=day,
-    )
+    Reads the day's fact rows and transition log; writes nothing keyed by a
+    user. The retention sweep calls it for every expiring day before that
+    day's user-keyed rows are deleted. ``runs_by_tier`` /
+    ``runs_by_user_group`` count ``runs_completed``, not the
+    ``runs_requested`` that ``/groups`` reports as ``total_runs``. A day with
+    no facts writes nothing:
+    its facts may already have expired, and replacing its lifecycle rollups
+    with an empty set would erase the history this function exists to keep.
+    """
+
+    facts = store.list_facts_for_date(day)
+    transitions = store.list_transitions_for_date(day)
+    if not facts:
+        if transitions:
+            # Unreachable while facts and transitions expire together; if it
+            # ever happens the day's movement is lost, so say so.
+            print(
+                "WARNING: analytics.rollup.lifecycle_day_without_facts "
+                f"day={day.isoformat()} transitions={len(transitions)}",
+                flush=True,
+            )
+        return ()
     updated_at = _day_start(day + timedelta(days=1))
     rows: list[DailyRollup] = []
-    by_segment: dict[str, list[UserLifecycleDailySnapshot]] = defaultdict(list)
-    for snapshot in current:
-        by_segment[snapshot.lifecycle_segment].append(snapshot)
-    for segment, snapshots in sorted(by_segment.items()):
+
+    by_segment: dict[str, list[Any]] = defaultdict(list)
+    for fact in facts:
+        by_segment[fact.lifecycle_segment].append(fact)
+    for segment, group in sorted(by_segment.items()):
         rows.append(
             _row(
                 day,
                 "lifecycle_segment_count",
-                count=len(snapshots),
+                count=len(group),
                 user_state=segment,
-                outcome=_snapshot_quality(snapshots),
+                outcome=_quality(group),
                 updated_at=updated_at,
             )
         )
 
+    by_transition: dict[tuple[str, str], list[Any]] = defaultdict(list)
+    for transition in transitions:
+        by_transition[(transition.from_segment, transition.to_segment)].append(
+            transition
+        )
+    for (from_segment, to_segment), group in sorted(by_transition.items()):
+        rows.append(
+            _row(
+                day,
+                "lifecycle_transition",
+                count=len(group),
+                event_name=from_segment,
+                user_state=to_segment,
+                outcome=_quality(group),
+                updated_at=updated_at,
+            )
+        )
+
+    # ``runs_by_*`` count runs_completed -- finished runs -- unlike /groups'
+    # ``total_runs``, which counts runs_requested. These rows are permanent
+    # once the day's facts expire, so the semantics are fixed here.
+    for dimension in ("tier", "user_group"):
+        by_value: dict[str, list[Any]] = defaultdict(list)
+        for fact in facts:
+            by_value[getattr(fact, dimension)].append(fact)
+        for value, group in sorted(by_value.items()):
+            quality = _quality(group)
+            rows.append(
+                _row(
+                    day,
+                    f"runs_by_{dimension}",
+                    count=sum(fact.runs_completed for fact in group),
+                    user_state=value,
+                    outcome=quality,
+                    updated_at=updated_at,
+                )
+            )
+            rows.append(
+                _row(
+                    day,
+                    f"operator_cost_by_{dimension}",
+                    count=len(group),
+                    sum_micro=sum(fact.operator_cost_micro for fact in group),
+                    user_state=value,
+                    outcome=quality,
+                    updated_at=updated_at,
+                )
+            )
+            rows.append(
+                _row(
+                    day,
+                    f"own_spend_by_{dimension}",
+                    count=len(group),
+                    sum_micro=sum(fact.own_spend_micro for fact in group),
+                    user_state=value,
+                    outcome=quality,
+                    updated_at=updated_at,
+                )
+            )
+
+    rows.sort(key=lambda row: (row.metric_name, row.event_name, row.user_state))
+    # Transitions come from their own table for ``day``, so there is no
+    # "previous day missing" case left to protect against.
+    store.replace_lifecycle_rollups(day, rows, replace_transitions=True)
+    return tuple(rows)
+
+
+def _legacy_lifecycle_rows(
+    day: date, current: Sequence[Any], previous: Sequence[Any]
+) -> list[DailyRollup]:
+    """Main's ``rollup_lifecycle_day`` over legacy snapshot rows, unchanged in shape:
+    a count per segment, and a transition per (previous, current) segment pair
+    for users present on both days whose segment moved."""
+    updated_at = _day_start(day + timedelta(days=1))
+    rows: list[DailyRollup] = []
+    by_segment: dict[str, list[Any]] = defaultdict(list)
+    for snapshot in current:
+        by_segment[snapshot.lifecycle_segment].append(snapshot)
+    for segment, group in sorted(by_segment.items()):
+        rows.append(
+            _row(
+                day,
+                "lifecycle_segment_count",
+                count=len(group),
+                user_state=segment,
+                outcome=_quality(group),
+                updated_at=updated_at,
+            )
+        )
     previous_by_user = {snapshot.user_id: snapshot for snapshot in previous}
-    transition_snapshots: dict[tuple[str, str], list[UserLifecycleDailySnapshot]] = (
-        defaultdict(list)
-    )
-    transition_quality: dict[tuple[str, str], list[UserLifecycleDailySnapshot]] = (
-        defaultdict(list)
-    )
+    moved: dict[tuple[str, str], list[Any]] = defaultdict(list)
+    moved_quality: dict[tuple[str, str], list[Any]] = defaultdict(list)
     for snapshot in current:
         prior = previous_by_user.get(snapshot.user_id)
         if prior is None or prior.lifecycle_segment == snapshot.lifecycle_segment:
             continue
         key = (prior.lifecycle_segment, snapshot.lifecycle_segment)
-        transition_snapshots[key].append(snapshot)
-        transition_quality[key].extend((prior, snapshot))
-    for (from_segment, to_segment), snapshots in sorted(transition_snapshots.items()):
+        moved[key].append(snapshot)
+        moved_quality[key].extend((prior, snapshot))
+    for (from_segment, to_segment), group in sorted(moved.items()):
         rows.append(
             _row(
                 day,
                 "lifecycle_transition",
-                count=len(snapshots),
+                count=len(group),
                 event_name=from_segment,
                 user_state=to_segment,
-                outcome=_snapshot_quality(
-                    transition_quality[(from_segment, to_segment)]
-                ),
+                outcome=_quality(moved_quality[(from_segment, to_segment)]),
                 updated_at=updated_at,
             )
         )
     rows.sort(key=lambda row: (row.metric_name, row.event_name, row.user_state))
-    store.replace_lifecycle_rollups(
-        day,
-        rows,
-        replace_transitions=bool(previous),
-    )
-    return tuple(rows)
+    return rows
+
+
+def rollup_legacy_lifecycle_days(*, store) -> tuple[date, ...]:
+    """Roll the legacy days no fact row covers into anonymous lifecycle rollups.
+
+    The startup migration's step between the ``user_activity`` seed and the
+    drop of ``user_lifecycle_daily_snapshots`` (design SS6.9, SS11): the PR A
+    history copy reached back only 56 days, so older legacy days live in that
+    table alone, and ``_history`` already falls back to these two families for
+    any day without facts. Days that already hold a lifecycle-owned rollup are
+    excluded by the store's read, so nothing is overwritten and a re-run (a
+    boot whose drop failed) writes nothing new. Transitions are written only
+    when the previous legacy day exists, exactly as main's writer did.
+    Returns the days rolled up.
+    """
+    history = store.list_legacy_lifecycle_history()
+    by_day: dict[date, list[Any]] = defaultdict(list)
+    for snapshot in history.snapshots:
+        by_day[snapshot.snapshot_date].append(snapshot)
+    for day in history.days:
+        previous = by_day.get(day - timedelta(days=1), [])
+        store.replace_lifecycle_rollups(
+            day,
+            _legacy_lifecycle_rows(day, by_day.get(day, []), previous),
+            replace_transitions=bool(previous),
+        )
+    return history.days
 
 
 __all__ = [
     "AnalyticsRollupStore",
     "DailyRollup",
-    "rollup_current_day",
     "rollup_day",
+    "rollup_legacy_lifecycle_days",
     "rollup_lifecycle_day",
 ]

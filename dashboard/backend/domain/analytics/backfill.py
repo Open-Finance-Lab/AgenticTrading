@@ -108,7 +108,6 @@ class BackfillReport(BaseModel):
     write_failures: int = Field(default=0, ge=0)
     repair_failures: int = Field(default=0, ge=0)
     affected_users: int = Field(default=0, ge=0)
-    repaired_snapshots: int = Field(default=0, ge=0)
     rebuilt_rollup_days: int = Field(default=0, ge=0)
     source_event_ids: list[str] = Field(default_factory=list)
 
@@ -509,13 +508,20 @@ def backfill_analytics(
     dry_run: bool = False,
     source: BackfillSource | None = None,
     store: Any = analytics_store,
-    recalculate_snapshot: Any | None = None,
     rebuild_rollup: Any | None = None,
 ) -> BackfillReport:
     """Reconstruct safe events inside ``[now - days, before]``.
 
-    Bulk repairs run once per affected subject/day after all inserts complete.
+    Rollup repairs run once per affected day after all inserts complete.
     Dry runs enumerate and validate sources but perform no writes at all.
+
+    Inserted events reach the raw log and the day rollups only. They do not
+    update ``user_activity`` (activation date, last meaningful activity) or
+    ``user_daily_facts``: events go in through ``store.append_event``, not the
+    ingestion path that maintains ``user_activity``, and the daily job's
+    late-arrival sweep recomputes facts only for the last
+    ``RECOMPUTE_LOOKBACK_DAYS`` days. A historical backfill therefore moves no
+    one's activation date or lifecycle segment.
     """
 
     if isinstance(days, bool) or not isinstance(days, int) or not 1 <= days <= 180:
@@ -593,14 +599,6 @@ def backfill_analytics(
         if candidate.occurred_at.date() < current.date():
             affected_days.add(candidate.occurred_at.date())
 
-    if recalculate_snapshot is None:
-        from .states import AnalyticsStateStore, recalculate_user_snapshot
-
-        state_store = AnalyticsStateStore(store)
-
-        def recalculate_snapshot(user_id: int, **kwargs: Any) -> Any:
-            return recalculate_user_snapshot(user_id, store=state_store, **kwargs)
-
     if rebuild_rollup is None:
         from .rollups import AnalyticsRollupStore, rollup_day
 
@@ -610,14 +608,7 @@ def backfill_analytics(
             return rollup_day(day, store=rollup_store, **kwargs)
 
     repair_failures = 0
-    repaired_snapshots = 0
     rebuilt_rollup_days = 0
-    for user_id in sorted(affected_users):
-        try:
-            recalculate_snapshot(user_id, now=current)
-            repaired_snapshots += 1
-        except Exception:
-            repair_failures += 1
     for day in sorted(affected_days):
         try:
             rebuild_rollup(day, now=datetime.combine(
@@ -640,7 +631,6 @@ def backfill_analytics(
         write_failures=write_failures,
         repair_failures=repair_failures,
         affected_users=len(affected_users),
-        repaired_snapshots=repaired_snapshots,
         rebuilt_rollup_days=rebuilt_rollup_days,
         source_event_ids=inserted_ids,
     )

@@ -16,6 +16,7 @@ from dashboard.backend import users as users_module
 from dashboard.backend.app import app
 from dashboard.backend.domain.analytics.metrics import AnalyticsMetricFilters
 from dashboard.backend.domain.analytics.query_service import (
+    AnalyticsOverview,
     AnalyticsQueryService,
     get_analytics_query_service,
     get_value_analytics_query_service,
@@ -32,10 +33,6 @@ from dashboard.backend.domain.analytics.models import (
     FrontendAnalyticsEvent,
     RequestAnalyticsContext,
 )
-from dashboard.backend.domain.analytics.states import (
-    AnalyticsStateStore,
-    recalculate_user_snapshot,
-)
 from dashboard.backend.domain.analytics.value_queries import (
     CommercialAnalyticsResponse,
     GroupAnalyticsResponse,
@@ -45,8 +42,10 @@ from dashboard.backend.domain.analytics.value_queries import (
     RetentionAnalyticsResponse,
     SectionAvailability,
     UserGroupSummary,
+    UserValueFilters,
     ValueUserProfile,
 )
+from dashboard.backend.domain.analytics.value_repository import UserDailyFact
 from dashboard.backend.domain.user_groups import (
     DEFAULT_USER_GROUP,
     USER_GROUP_LABELS,
@@ -214,7 +213,6 @@ def _fixture(tmp_path):
         analytics,
         AnalyticsService(analytics),
         AnalyticsRollupStore(analytics),
-        AnalyticsStateStore(analytics),
         QueryUsers(users),
     )
 
@@ -232,7 +230,7 @@ def _event(service, name, at, source_id, **kwargs):
 
 
 def test_query_service_merges_completed_rollups_with_current_raw_day(tmp_path):
-    analytics, events, rollups, _states, users = _fixture(tmp_path)
+    analytics, events, rollups, users = _fixture(tmp_path)
     yesterday = NOW.date() - timedelta(days=1)
     rollups.replace_day(
         yesterday,
@@ -282,7 +280,7 @@ def test_query_service_merges_completed_rollups_with_current_raw_day(tmp_path):
 
 
 def test_billing_lane_mix_counts_model_calls_from_rollups_and_today_honouring_filters(tmp_path):
-    analytics, events, rollups, _states, users = _fixture(tmp_path)
+    analytics, events, rollups, users = _fixture(tmp_path)
     yesterday = NOW.date() - timedelta(days=1)
     stamp = datetime.combine(NOW.date(), datetime.min.time(), tzinfo=timezone.utc)
 
@@ -366,7 +364,7 @@ def test_billing_lane_mix_carries_each_lane_in_credits_honouring_filters(tmp_pat
     platform_model_cost_usd / byok_estimated_cost_usd rollups, today from raw
     events. The platform lane sums to the headline under every filter, and
     the BYOK estimate never enters it."""
-    analytics, events, rollups, _states, users = _fixture(tmp_path)
+    analytics, events, rollups, users = _fixture(tmp_path)
     yesterday = NOW.date() - timedelta(days=1)
     stamp = datetime.combine(NOW.date(), datetime.min.time(), tzinfo=timezone.utc)
 
@@ -469,7 +467,7 @@ def test_failed_raw_event_read_marks_growth_unavailable_not_a_rollup_only_range(
     raw events. When that read failed, growth stayed available and published
     the rollups alone as the whole range -- yesterday's cost as the range's,
     today's calls missing from every lane -- with status "ready"."""
-    analytics, events, rollups, _states, users = _fixture(tmp_path)
+    analytics, events, rollups, users = _fixture(tmp_path)
     yesterday = NOW.date() - timedelta(days=1)
     stamp = datetime.combine(NOW.date(), datetime.min.time(), tzinfo=timezone.utc)
     rollups.replace_day(
@@ -511,7 +509,7 @@ def test_billing_lane_mix_counts_unpriced_byok_calls_honouring_filters(tmp_path)
     and are all unpriced; with one, #572 priced an unlisted model at the $1/$5
     fallback, so the estimate stands only for a listed model. Deciding that per
     day instead made the unfiltered total and a per-model filter disagree."""
-    analytics, events, rollups, _states, users = _fixture(tmp_path)
+    analytics, events, rollups, users = _fixture(tmp_path)
     stamp = datetime.combine(NOW.date(), datetime.min.time(), tzinfo=timezone.utc)
     counted, legacy, legacy_priced = (NOW.date() - timedelta(days=n) for n in (1, 2, 3))
     listed = "openai/gpt-5.5"
@@ -612,7 +610,7 @@ def test_activity_reports_atl_cost_only_for_byok_usage(tmp_path):
     """The activity API's cost_micro_usd is ATL cost. A BYOK call costs ATL
     nothing -- including one from the PR #572 era, whose event carried the
     list-price estimate in that very field."""
-    analytics, events, _rollups, _states, users = _fixture(tmp_path)
+    analytics, events, _rollups, users = _fixture(tmp_path)
     for index, (billing_mode, properties) in enumerate(
         (
             ("platform_credits", {"cost_micro_usd": 1_250}),
@@ -645,7 +643,7 @@ def test_billing_lane_mix_skips_a_day_with_no_calls_and_no_cost(tmp_path):
     """Every rolled-up day carries a platform cost total, zero or not. A zero
     day is not activity: listing it would replace the panel's empty state with
     flat lines."""
-    analytics, _events, rollups, _states, users = _fixture(tmp_path)
+    analytics, _events, rollups, users = _fixture(tmp_path)
     yesterday = NOW.date() - timedelta(days=1)
     stamp = datetime.combine(NOW.date(), datetime.min.time(), tzinfo=timezone.utc)
     rollups.replace_day(
@@ -674,69 +672,59 @@ def test_billing_lane_mix_skips_a_day_with_no_calls_and_no_cost(tmp_path):
     assert overview.billing_lane_mix == []
 
 
-def test_user_list_and_profile_are_display_safe(tmp_path):
-    analytics, events, _rollups, states, users = _fixture(tmp_path)
-    _event(
-        events,
-        "account_signed_up",
-        NOW - timedelta(days=20),
-        "account:account_signed_up:1",
-        source_record_type="user",
-        source_record_id="1",
+def test_profile_is_display_safe_and_reads_facts_not_the_event_window(tmp_path):
+    analytics, events, _rollups, users = _fixture(tmp_path)
+    from dashboard.backend.domain.analytics.value_repository import ValueAnalyticsStore
+    from dashboard.backend.tests.domain.analytics.test_fact_reads import fact
+    from dashboard.backend.tests.domain.analytics.test_value_repository import (
+        SyntheticAgentStore, SyntheticCreditsStore, SyntheticProviderStore, SyntheticRunStore,
     )
-    success = _event(
-        events,
-        "backtest_completed",
-        NOW - timedelta(hours=1),
-        "run:backtest_completed:run-1",
-        correlation_id="run-1",
-        outcome="succeeded",
-    )
-    _event(
-        events,
-        "model_usage_recorded",
-        NOW - timedelta(minutes=50),
-        "resource:model_usage_recorded:run-1:0",
-        correlation_id="run-1",
-        provider_id="openrouter",
-        model_id="openai/gpt-5.5",
-        billing_mode="platform_credits",
-        outcome="succeeded",
-        properties={
-            "input_tokens": 120,
-            "output_tokens": 30,
-            "cost_micro_usd": 250_000,
-        },
-    )
-    _event(
-        events,
-        "credits_settled",
-        NOW - timedelta(minutes=49),
-        "resource:credits_settled:reservation-1:grant",
-        source_record_type="credit_reservation",
-        source_record_id="reservation-1",
-        correlation_id="run-1",
-        billing_mode="platform_credits",
-        properties={"amount_micro": 100, "bucket": "grant"},
-    )
-    recalculate_user_snapshot(1, now=NOW, store=states)
-    service = AnalyticsQueryService(store=analytics, user_store=users)
 
+    value_store = ValueAnalyticsStore(
+        analytics, SyntheticCreditsStore(tmp_path / "credits.db"),
+        # One enabled platform lane and a positive balance: operationally healthy.
+        provider_base=SyntheticProviderStore(
+            {}, [{"provider_id": "openrouter", "status": "enabled", "platform_enabled": True}]
+        ),
+        agent_base=SyntheticAgentStore(), run_base=SyntheticRunStore({}),
+    )
+    yesterday = NOW.date() - timedelta(days=1)
+    value_store.record_activity(1, occurred_at=NOW - timedelta(hours=1), activating=True, now=NOW)
+    value_store.upsert_daily_facts(
+        [fact(1, yesterday, runs_requested=3, runs_completed=2, runs_failed=1, operator_cost_micro=250_000, own_spend_micro=100)]
+    )
+    _event(events, "model_usage_recorded", NOW - timedelta(minutes=50), "resource:model_usage_recorded:run-1:0",
+           correlation_id="run-1", provider_id="openrouter", model_id="openai/gpt-5.5",
+           billing_mode="platform_credits", outcome="succeeded",
+           properties={"input_tokens": 120, "output_tokens": 30, "cost_micro_usd": 250_000})
+    service = AnalyticsQueryService(store=analytics, user_store=users, value_store=value_store)
 
-    profile = service.get_user_profile(user_id=1, now=NOW)
+    def refuse_window_scan(**_kwargs):
+        raise AssertionError("the profile must not scan the event window")
+
+    service.query_store.rollups.list_events = refuse_window_scan
+    recorder = _WindowRecordingQueryStore(service.query_store)
+    service.query_store = recorder
+
+    profile = service.get_user_profile(user_id=1, now=NOW, start=NOW - timedelta(days=30), end=NOW)
     serialized = profile.model_dump(mode="json")
 
     assert profile.state.status == "active"
-    assert success.event_id in profile.state.evidence_event_ids
-    assert profile.input_tokens == 120
+    assert profile.state.evidence_event_ids == []
+    assert profile.run_summary == {"requested": 3, "completed": 2, "failed": 1, "cancelled": 0}
     assert profile.platform_model_cost_usd == 0.25
     assert profile.credits_debited_micro == 100
+    assert profile.input_tokens == 120
+    assert profile.default_provider == "openrouter"
+    assert profile.activation_milestones["backtest_completed"] == NOW - timedelta(hours=1)
+    assert profile.last_meaningful_activity == NOW - timedelta(hours=1)
+    assert recorder.windows == []  # no list_metric_events call: the only raw read is one timeline page
     assert "properties" not in str(serialized)
     assert "session_id" not in str(serialized)
 
 
 def test_activity_sections_page_independently_and_hide_session_ids(tmp_path):
-    analytics, events, _rollups, _states, users = _fixture(tmp_path)
+    analytics, events, _rollups, users = _fixture(tmp_path)
     for index in range(3):
         _event(
             events,
@@ -786,6 +774,7 @@ def test_activity_sections_page_independently_and_hide_session_ids(tmp_path):
         section="sessions",
         limit=2,
         cursor=None,
+        now=NOW,
     )
 
     assert len(first_runs.items) == 2
@@ -796,8 +785,47 @@ def test_activity_sections_page_independently_and_hide_session_ids(tmp_path):
     assert "session_id" not in str(sessions.model_dump(mode="json"))
 
 
-def test_overview_marks_only_failed_rollup_panel_unavailable(tmp_path, monkeypatch):
-    analytics, events, _rollups, _states, users = _fixture(tmp_path)
+def test_sessions_section_is_bounded_to_thirty_days(tmp_path):
+    analytics, events, _rollups, users = _fixture(tmp_path)
+    context = RequestAnalyticsContext(
+        country_code="US", device_category="desktop", browser_family="Chrome"
+    )
+    for days_ago in (2, 45):
+        occurred_at = NOW - timedelta(days=days_ago)
+        events.accept_frontend_event(
+            user={"id": 1},
+            payload=FrontendAnalyticsEvent(
+                event_id=str(uuid4()),
+                schema_version=1,
+                event_name="page_viewed",
+                session_id=str(uuid4()),
+                occurred_at=occurred_at,
+                page_view="agents",
+                properties={},
+            ),
+            context=context,
+            # Ingest rejects occurred_at older than received_at - 24h.
+            received_at=occurred_at,
+        )
+    service = AnalyticsQueryService(store=analytics, user_store=users)
+
+    sessions = service.get_user_activity(
+        user_id=1, section="sessions", limit=10, cursor=None, now=NOW
+    )
+
+    assert len(sessions.items) == 1
+    assert sessions.items[0].occurred_at == NOW - timedelta(days=2)
+    import inspect
+
+    from dashboard.backend.domain.analytics.query_service import AnalyticsQueryStore
+
+    assert "occurred_at >=" in inspect.getsource(AnalyticsQueryStore.list_session_rows)
+
+
+def test_overview_marks_rollup_backed_panels_unavailable_when_rollups_fail(
+    tmp_path, monkeypatch, capsys
+):
+    analytics, events, _rollups, users = _fixture(tmp_path)
     _event(
         events,
         "backtest_completed",
@@ -806,6 +834,8 @@ def test_overview_marks_only_failed_rollup_panel_unavailable(tmp_path, monkeypat
         outcome="succeeded",
     )
     service = AnalyticsQueryService(store=analytics, user_store=users)
+    # Yesterday's facts have landed, so attention has a day to read.
+    service.value_store.upsert_daily_facts([_fact(1, NOW.date() - timedelta(days=1))])
     monkeypatch.setattr(
         service.query_store.rollups,
         "list_rollups",
@@ -814,17 +844,638 @@ def test_overview_marks_only_failed_rollup_panel_unavailable(tmp_path, monkeypat
 
     overview = service.get_overview(
         now=NOW,
+        filters=AnalyticsMetricFilters(start=NOW - timedelta(days=1), end=NOW),
+    )
+
+    assert overview.active_users_7d is None
+    assert overview.completed_runs is None
+    assert overview.availability["snapshot"].available is False
+    assert overview.availability["growth"].available is False
+    assert overview.availability["funnel"].available is False
+    assert overview.availability["growth"].error_code == "temporarily_unavailable"
+    # M1: friction (top_failure_categories) is computed from the funnel's
+    # reads, so it goes down with them; attention reads facts and stays up.
+    assert overview.availability["friction"].available is False
+    assert overview.availability["attention"].available is True
+    # M2: the swallowed failure reaches the log, by class name only.
+    out = capsys.readouterr().out
+    assert "WARNING: analytics.read.overview_rollups_failed category=RuntimeError" in out
+    assert "private detail" not in out
+
+
+class _WindowRecordingQueryStore:
+    """Wraps AnalyticsQueryStore and records every raw-event read window."""
+
+    def __init__(self, inner):
+        self.inner = inner
+        self.windows = []
+
+    def list_metric_events(self, *, start, end, include_internal):
+        self.windows.append((start, end))
+        return self.inner.list_metric_events(
+            start=start, end=end, include_internal=include_internal
+        )
+
+    def __getattr__(self, name):
+        return getattr(self.inner, name)
+
+
+def test_overview_reads_raw_events_for_the_current_utc_day_only(tmp_path):
+    """Design §6.15 item 2: one bounded one-day scan, never the filter window."""
+
+    analytics, _events, _rollups, users = _fixture(tmp_path)
+    service = AnalyticsQueryService(store=analytics, user_store=users)
+    recorder = _WindowRecordingQueryStore(service.query_store)
+    service.query_store = recorder
+
+    service.get_overview(
+        now=NOW,
+        filters=AnalyticsMetricFilters(start=NOW - timedelta(days=30), end=NOW),
+    )
+
+    assert len(recorder.windows) == 1
+    start, end = recorder.windows[0]
+    assert start == datetime.combine(NOW.date(), datetime.min.time(), tzinfo=timezone.utc)
+    assert end == NOW
+
+
+def test_overview_skips_the_raw_scan_for_a_window_that_ends_before_today(tmp_path):
+    analytics, _events, _rollups, users = _fixture(tmp_path)
+    service = AnalyticsQueryService(store=analytics, user_store=users)
+    recorder = _WindowRecordingQueryStore(service.query_store)
+    service.query_store = recorder
+
+    overview = service.get_overview(
+        now=NOW,
         filters=AnalyticsMetricFilters(
-            start=NOW - timedelta(days=1),
+            start=NOW - timedelta(days=10),
+            end=datetime.combine(NOW.date(), datetime.min.time(), tzinfo=timezone.utc),
+        ),
+    )
+
+    assert recorder.windows == []
+    # Nothing to read is not a failed read.
+    assert overview.availability["growth"].available is True
+    assert overview.availability["funnel"].available is True
+
+
+def test_overview_trailing_metrics_and_funnel_come_from_rollups(tmp_path):
+    analytics, events, rollups, users = _fixture(tmp_path)
+    yesterday = NOW.date() - timedelta(days=1)
+    stamp = datetime.combine(NOW.date(), datetime.min.time(), tzinfo=timezone.utc)
+
+    def rollup(metric_name, value_count, **dimensions):
+        return DailyRollup(
+            rollup_date=yesterday,
+            metric_name=metric_name,
+            value_count=value_count,
+            updated_at=stamp,
+            **dimensions,
+        )
+
+    rollups.replace_day(
+        yesterday,
+        [
+            rollup("rolling_active_users_7d", 9),
+            rollup("mature_signup_cohort_users", 4),
+            rollup("first_success_within_7d_users", 1),
+            rollup("users_with_first_success", 8),
+            rollup("users_with_repeat_success_24h_30d", 2),
+            rollup("activation_users", 5, event_name="account_signed_up"),
+            rollup("activation_users", 2, event_name="backtest_completed"),
+            rollup(
+                "event_count",
+                3,
+                event_name="backtest_failed",
+                outcome="failed",
+                error_category="provider_timeout",
+            ),
+            rollup("input_tokens", 1000),
+            rollup("output_tokens", 250),
+        ],
+    )
+    _event(
+        events,
+        "backtest_completed",
+        NOW - timedelta(minutes=2),
+        "run:backtest_completed:today",
+        outcome="succeeded",
+    )
+    _event(
+        events,
+        "backtest_failed",
+        NOW - timedelta(minutes=1),
+        "run:backtest_failed:today-fail",
+        source_record_id="today-fail",
+        outcome="failed",
+        error_category="provider_timeout",
+    )
+    service = AnalyticsQueryService(store=analytics, user_store=users)
+
+    overview = service.get_overview(
+        now=NOW,
+        filters=AnalyticsMetricFilters(
+            start=datetime.combine(yesterday, datetime.min.time(), tzinfo=timezone.utc),
             end=NOW,
         ),
     )
 
-    assert overview.active_users_7d == 1
-    assert overview.completed_runs is None
+    assert overview.active_users_7d == 9
+    assert overview.first_success_conversion == 0.25
+    assert overview.repeat_run_rate == 0.25
+    assert overview.activation_funnel == {
+        "account_signed_up": 5,
+        "credential_verified": 0,
+        "agent_created": 0,
+        "backtest_completed": 3,
+    }
+    assert [
+        (c.error_category, c.event_count) for c in overview.top_failure_categories
+    ] == [("provider_timeout", 4)]
+    assert overview.input_tokens == 1000
+    assert overview.output_tokens == 250
     assert overview.availability["snapshot"].available is True
-    assert overview.availability["growth"].available is False
-    assert overview.availability["growth"].error_code == "temporarily_unavailable"
+    assert overview.availability["funnel"].available is True
+
+
+def test_overview_failure_categories_count_events_filtered_or_not(tmp_path):
+    """Failure categories sum ``event_count`` rows plus today's events, with
+    or without a dimension filter (#647). The per-category ``affected_users``
+    rows older rollups still hold are not read."""
+
+    analytics, events, rollups, users = _fixture(tmp_path)
+    yesterday = NOW.date() - timedelta(days=1)
+    stamp = datetime.combine(NOW.date(), datetime.min.time(), tzinfo=timezone.utc)
+
+    def failed_rollup(model_id, count):
+        return DailyRollup(
+            rollup_date=yesterday,
+            metric_name="event_count",
+            event_name="backtest_failed",
+            provider_id="openrouter",
+            model_id=model_id,
+            outcome="failed",
+            error_category="provider_timeout",
+            value_count=count,
+            updated_at=stamp,
+        )
+
+    rollups.replace_day(
+        yesterday,
+        [
+            failed_rollup("a", 3),
+            failed_rollup("b", 7),
+            DailyRollup(
+                rollup_date=yesterday,
+                metric_name="affected_users",
+                error_category="provider_timeout",
+                value_count=2,
+                updated_at=stamp,
+            ),
+        ],
+    )
+    for index in range(2):
+        _event(
+            events,
+            "backtest_failed",
+            NOW - timedelta(minutes=index + 1),
+            f"run:backtest_failed:today-{index}",
+            source_record_id=f"today-{index}",
+            provider_id="openrouter",
+            model_id="a",
+            outcome="failed",
+            error_category="provider_timeout",
+        )
+    service = AnalyticsQueryService(store=analytics, user_store=users)
+    start = datetime.combine(yesterday, datetime.min.time(), tzinfo=timezone.utc)
+
+    def categories(**filters):
+        overview = service.get_overview(
+            now=NOW,
+            filters=AnalyticsMetricFilters(start=start, end=NOW, **filters),
+        )
+        return [
+            (c.error_category, c.event_count)
+            for c in overview.top_failure_categories
+        ]
+
+    # Unfiltered: 3 + 7 yesterday, 2 today; the legacy row adds nothing.
+    assert categories() == [("provider_timeout", 12)]
+    # Filtered: 3 yesterday on model a, 2 today.
+    assert categories(model_id="a") == [("provider_timeout", 5)]
+
+
+def _fact(user_id, day, **overrides):
+    values = {
+        "snapshot_date": day,
+        "user_id": user_id,
+        "lifecycle_segment": "growing",
+        "lifecycle_reason_code": "growing_activated_below_core_threshold",
+        "operational_state": "healthy",
+        "operational_reason_code": "no_supported_issue",
+        "tier": "unpaid",
+        "user_group": "unknown",
+        "active": True,
+        "data_quality": "complete",
+        "calculated_at": NOW,
+    }
+    values.update(overrides)
+    return UserDailyFact(**values)
+
+
+def test_overview_attention_comes_from_yesterdays_facts(tmp_path):
+    """Design D20: the overview carries no five-state counts; attention lists
+    yesterday's blocked / needs-attention users with their 30-day run totals
+    and their current activity clock."""
+
+    analytics, _events, _rollups, users = _fixture(tmp_path)
+    service = AnalyticsQueryService(store=analytics, user_store=users)
+    yesterday = NOW.date() - timedelta(days=1)
+    with analytics._get_connection() as conn:
+        conn.executemany(
+            "INSERT INTO users VALUES (?, ?, ?, 'x', 'user', ?)",
+            [
+                (user_id, f"u{user_id}@example.test", f"U{user_id}", NOW.isoformat())
+                for user_id in (3, 4, 5)
+            ],
+        )
+    last_seen = NOW - timedelta(days=3)
+    service.value_store.record_activity(
+        1, occurred_at=last_seen, activating=False, now=last_seen
+    )
+    service.value_store.upsert_daily_facts(
+        [
+            _fact(
+                1,
+                yesterday,
+                operational_state="needs_attention",
+                operational_reason_code="invalid_default_credential",
+                runs_requested=2,
+                runs_failed=1,
+            ),
+            # Ten days earlier, inside the 30-day window: adds to the totals.
+            _fact(1, yesterday - timedelta(days=10), runs_requested=3, runs_failed=2),
+            _fact(
+                3,
+                yesterday,
+                operational_state="blocked",
+                operational_reason_code="account_restricted",
+            ),
+            _fact(4, yesterday, lifecycle_segment="dormant",
+                  lifecycle_reason_code="dormant_previously_activated"),
+            _fact(5, yesterday, lifecycle_segment="onboarding",
+                  lifecycle_reason_code="onboarding_signed_up_not_activated"),
+            # Today's row (if one existed) is not yesterday's population.
+            _fact(5, NOW.date(), operational_state="blocked",
+                  operational_reason_code="account_restricted"),
+        ]
+    )
+
+    overview = service.get_overview(
+        now=NOW,
+        filters=AnalyticsMetricFilters(start=NOW - timedelta(days=1), end=NOW),
+    )
+
+    assert [
+        (item.user_id, item.status, item.reason_code, item.recent_runs, item.recent_failures)
+        for item in overview.users_needing_attention
+    ] == [
+        (1, "needs_attention", "invalid_default_credential", 5, 3),
+        (3, "blocked", "account_restricted", 0, 0),
+    ]
+    first = overview.users_needing_attention[0]
+    assert first.human_readable_reason == "The default model credential is invalid."
+    assert first.last_meaningful_activity == last_seen
+    assert first.display_name == "One"
+    assert overview.users_needing_attention[1].last_meaningful_activity is None
+    assert overview.availability["friction"].available is True
+    assert overview.availability["attention"].available is True
+
+
+def test_overview_attention_falls_back_to_the_latest_landed_fact_day(tmp_path, capsys):
+    """Review #3: before the night's job lands (or all day, when it fails)
+    yesterday has no rows, and [] marked available read as "nobody needs
+    attention". The list joins the latest landed day, as /users does."""
+    analytics, _events, _rollups, users = _fixture(tmp_path)
+    service = AnalyticsQueryService(store=analytics, user_store=users)
+    landed = NOW.date() - timedelta(days=2)
+    service.value_store.upsert_daily_facts(
+        [
+            _fact(
+                1,
+                landed,
+                operational_state="blocked",
+                operational_reason_code="account_restricted",
+            )
+        ]
+    )
+
+    overview = service.get_overview(
+        now=NOW, filters=AnalyticsMetricFilters(start=NOW - timedelta(days=1), end=NOW)
+    )
+
+    assert [item.user_id for item in overview.users_needing_attention] == [1]
+    assert overview.availability["attention"].available is True
+    assert "WARNING: analytics.read.facts_stale" in capsys.readouterr().out
+
+
+def test_overview_attention_is_unavailable_when_no_fact_day_has_landed(tmp_path):
+    analytics, _events, _rollups, users = _fixture(tmp_path)
+    service = AnalyticsQueryService(store=analytics, user_store=users)
+
+    overview = service.get_overview(
+        now=NOW, filters=AnalyticsMetricFilters(start=NOW - timedelta(days=1), end=NOW)
+    )
+
+    assert overview.users_needing_attention == []
+    assert overview.availability["attention"].available is False
+
+
+def test_overview_attention_refuses_a_fact_day_older_than_the_nightly_gap(tmp_path):
+    """The attention panel has no as-of field: after days of failed jobs, an
+    old blocked list must read unavailable, not current."""
+    analytics, _events, _rollups, users = _fixture(tmp_path)
+    service = AnalyticsQueryService(store=analytics, user_store=users)
+    service.value_store.upsert_daily_facts(
+        [
+            _fact(
+                1,
+                NOW.date() - timedelta(days=3),
+                operational_state="blocked",
+                operational_reason_code="account_restricted",
+            )
+        ]
+    )
+
+    overview = service.get_overview(
+        now=NOW, filters=AnalyticsMetricFilters(start=NOW - timedelta(days=1), end=NOW)
+    )
+
+    assert overview.users_needing_attention == []
+    assert overview.availability["attention"].available is False
+
+
+def _midnight(day):
+    return datetime.combine(day, datetime.min.time(), tzinfo=timezone.utc)
+
+
+def test_overview_funnel_is_unavailable_while_a_rolled_up_day_lacks_activation_rows(tmp_path):
+    """Review #5: a day rolled up before activation_users existed summed as
+    zero under an available funnel. Until the backfill fills it, the funnel
+    says unavailable; friction, from the same reads, stays up."""
+    analytics, _events, rollups, users = _fixture(tmp_path)
+    yesterday = NOW.date() - timedelta(days=1)
+    service = AnalyticsQueryService(store=analytics, user_store=users)
+    filters = AnalyticsMetricFilters(start=_midnight(yesterday), end=NOW)
+    pre_metric_day = [
+        DailyRollup(
+            rollup_date=yesterday,
+            metric_name="daily_active_users",
+            value_count=3,
+            updated_at=_midnight(NOW.date()),
+        )
+    ]
+    rollups.replace_day(yesterday, pre_metric_day)
+
+    stale = service.get_overview(now=NOW, filters=filters)
+
+    assert stale.availability["funnel"].available is False
+    assert stale.activation_funnel == {}
+    assert stale.availability["friction"].available is True
+
+    rollups.replace_day(
+        yesterday,
+        pre_metric_day
+        + [
+            DailyRollup(
+                rollup_date=yesterday,
+                metric_name="activation_users",
+                event_name=event_name,
+                value_count=2 if event_name == "account_signed_up" else 0,
+                updated_at=_midnight(NOW.date()),
+            )
+            for event_name in ("account_signed_up", "credential_verified", "agent_created", "backtest_completed")
+        ],
+    )
+
+    filled = service.get_overview(now=NOW, filters=filters)
+
+    assert filled.availability["funnel"].available is True
+    assert filled.activation_funnel["account_signed_up"] == 2
+
+
+def test_overview_include_internal_does_not_add_internal_accounts_to_today(tmp_path):
+    """Review #6: completed days come from rollups written without internal
+    accounts, so today's raw slice must leave them out too, whatever the
+    flag; mixing them produced figures that matched neither setting."""
+    analytics, events, _rollups, users = _fixture(tmp_path)
+    for index, user_id in enumerate((1, 2)):  # user 2 is the admin account
+        events.record_server_event(
+            event_name="backtest_completed",
+            user_id=user_id,
+            source_event_id=f"run:backtest_completed:today-{index}",
+            source_record_type="run",
+            source_record_id=f"today-{index}",
+            outcome="succeeded",
+            occurred_at=NOW - timedelta(minutes=5 + index),
+        )
+    service = AnalyticsQueryService(store=analytics, user_store=users)
+    start = _midnight(NOW.date())
+
+    internal_free = service.get_overview(
+        now=NOW, filters=AnalyticsMetricFilters(start=start, end=NOW)
+    )
+    widened = service.get_overview(
+        now=NOW, filters=AnalyticsMetricFilters(start=start, end=NOW, include_internal=True)
+    )
+
+    assert internal_free.completed_runs == 1
+    assert widened.completed_runs == internal_free.completed_runs
+    assert widened.daily_completed_runs == internal_free.daily_completed_runs
+    assert widened.filters.include_internal is True  # accepted and echoed
+
+
+def test_platform_cost_read_alone_also_leaves_internal_accounts_out_of_today(tmp_path):
+    """The figure /commercial publishes is the overview's, read alone; it
+    must not widen today's slice under include_internal either."""
+    analytics, events, _rollups, users = _fixture(tmp_path)
+    for index, user_id in enumerate((1, 2)):  # user 2 is the admin account
+        events.record_server_event(
+            event_name="model_usage_recorded",
+            user_id=user_id,
+            source_event_id=f"resource:model_usage_recorded:today-{index}:0",
+            source_record_type="resource",
+            source_record_id=f"today-{index}",
+            correlation_id=f"today-{index}",
+            provider_id="openrouter",
+            model_id="openai/gpt-5.5",
+            billing_mode="platform_credits",
+            outcome="succeeded",
+            properties={"input_tokens": 10, "output_tokens": 5, "cost_micro_usd": 300_000},
+            occurred_at=NOW - timedelta(minutes=5 + index),
+        )
+    service = AnalyticsQueryService(store=analytics, user_store=users)
+    start = _midnight(NOW.date())
+
+    def cost(include_internal):
+        return service.get_platform_model_cost_micro(
+            filters=AnalyticsMetricFilters(start=start, end=NOW, include_internal=include_internal),
+            now=NOW,
+        )
+
+    assert cost(False) == 300_000
+    assert cost(True) == cost(False)
+
+
+def test_profile_milestones_are_first_occurrences_not_the_newest_page(tmp_path):
+    """Review #8: min() over the newest-100 timeline page dropped a first
+    verification older than the user's last hundred events."""
+    analytics, events, _rollups, users = _fixture(tmp_path)
+    first_verified = NOW - timedelta(days=40)
+    events.record_server_event(
+        event_name="credential_verified",
+        user_id=1,
+        source_event_id="credential:c-1:verified:first",
+        source_record_type="credential",
+        source_record_id="c-1",
+        occurred_at=first_verified,
+    )
+    events.record_server_event(
+        event_name="credential_verified",
+        user_id=1,
+        source_event_id="credential:c-1:verified:again",
+        source_record_type="credential",
+        source_record_id="c-1",
+        occurred_at=NOW - timedelta(days=2),
+    )
+    for index in range(101):
+        _event(
+            events,
+            "backtest_requested",
+            NOW - timedelta(hours=1, minutes=index),
+            f"run:backtest_requested:page-{index}",
+            source_record_id=f"page-{index}",
+        )
+    from dashboard.backend.domain.analytics.value_repository import ValueAnalyticsStore
+    from dashboard.backend.tests.domain.analytics.test_value_repository import (
+        SyntheticAgentStore, SyntheticCreditsStore, SyntheticProviderStore, SyntheticRunStore,
+    )
+
+    value_store = ValueAnalyticsStore(
+        analytics, SyntheticCreditsStore(tmp_path / "credits.db"),
+        provider_base=SyntheticProviderStore(
+            {}, [{"provider_id": "openrouter", "status": "enabled", "platform_enabled": True}]
+        ),
+        agent_base=SyntheticAgentStore(), run_base=SyntheticRunStore({}),
+    )
+    service = AnalyticsQueryService(store=analytics, user_store=users, value_store=value_store)
+
+    profile = service.get_user_profile(
+        user_id=1, now=NOW, start=NOW - timedelta(days=90), end=NOW
+    )
+
+    assert profile.activation_milestones["credential_verified"] == first_verified
+    assert "agent_created" not in profile.activation_milestones
+    # The selected range bounds it, as on main.
+    narrow = service.get_user_profile(
+        user_id=1, now=NOW, start=NOW - timedelta(days=10), end=NOW
+    )
+    assert narrow.activation_milestones["credential_verified"] == NOW - timedelta(days=2)
+
+
+def test_a_session_crossing_the_30_day_cutoff_is_read_whole(tmp_path):
+    """Review #13: the window selects sessions, not events. A session that
+    began before the cutoff and continued after it keeps all its events; a
+    session wholly before the cutoff stays out (the design's 30-day window)."""
+    analytics, events, _rollups, users = _fixture(tmp_path)
+    cutoff = NOW - timedelta(days=30)
+    context = RequestAnalyticsContext(
+        country_code="US", device_category="desktop", browser_family="Chrome"
+    )
+    straddling, older = str(uuid4()), str(uuid4())
+    for session_id, name, at in (
+        (straddling, "page_viewed", cutoff - timedelta(minutes=5)),
+        (straddling, "session_heartbeat", cutoff + timedelta(minutes=5)),
+        (older, "page_viewed", cutoff - timedelta(days=1)),
+    ):
+        events.accept_frontend_event(
+            user={"id": 1},
+            payload=FrontendAnalyticsEvent(
+                event_id=str(uuid4()),
+                schema_version=1,
+                event_name=name,
+                session_id=session_id,
+                occurred_at=at,
+                page_view="agents",
+                properties=({} if name == "page_viewed" else {"visible_ms": 500}),
+            ),
+            context=context,
+            received_at=at + timedelta(minutes=1),
+        )
+    service = AnalyticsQueryService(store=analytics, user_store=users)
+
+    page = service.get_user_activity(
+        user_id=1, section="sessions", limit=10, cursor=None, now=NOW
+    )
+
+    assert [item.session_event_count for item in page.items] == [2]
+    assert page.items[0].visible_ms == 500
+
+
+def test_overview_marks_fact_panels_unavailable_when_fact_reads_fail(tmp_path, capsys):
+    analytics, _events, _rollups, users = _fixture(tmp_path)
+
+    class BrokenFacts:
+        def count_states_for_date(self, _day):
+            raise AssertionError("friction availability no longer probes the facts")
+
+        def latest_fact_date(self, *, on_or_before):
+            return on_or_before
+
+        def list_attention_candidates(self, **_kwargs):
+            raise RuntimeError("private detail")
+
+    service = AnalyticsQueryService(
+        store=analytics, user_store=users, value_store=BrokenFacts()
+    )
+
+    overview = service.get_overview(
+        now=NOW,
+        filters=AnalyticsMetricFilters(start=NOW - timedelta(days=1), end=NOW),
+    )
+
+    assert overview.users_needing_attention == []
+    # M1: friction is served from the funnel's reads, so it follows them.
+    assert overview.availability["friction"].available is True
+    assert overview.availability["attention"].available is False
+    assert overview.availability["growth"].available is True
+    # M2: the swallowed failure reaches the log, by class name only.
+    out = capsys.readouterr().out
+    assert "WARNING: analytics.read.overview_attention_failed category=RuntimeError" in out
+    assert "private detail" not in out
+
+
+def test_query_service_builds_its_value_store_only_on_first_use(tmp_path, monkeypatch):
+    """The module-level service is built at import; an eager default would pull
+    the credits / provider / agent / run singletons onto the boot path."""
+
+    from dashboard.backend.domain.analytics import query_service as module
+
+    analytics, _events, _rollups, users = _fixture(tmp_path)
+    built = []
+    real = module.build_value_analytics_store
+
+    def recording(**kwargs):
+        built.append(kwargs)
+        return real(**kwargs)
+
+    monkeypatch.setattr(module, "build_value_analytics_store", recording)
+    service = AnalyticsQueryService(store=analytics, user_store=users)
+    assert built == []
+
+    first = service.value_store
+    assert service.value_store is first
+    assert built == [{"analytics_base": analytics}]
 
 
 @pytest.fixture
@@ -864,8 +1515,6 @@ def admin_analytics_api(monkeypatch):
                 outcome="succeeded",
                 occurred_at=at - timedelta(minutes=index + 1),
             )
-        state_store = AnalyticsStateStore(analytics)
-        recalculate_user_snapshot(subject["id"], now=at, store=state_store)
         query_service = AnalyticsQueryService(store=analytics, user_store=users)
         value_query_service = FixtureValueQueryService(int(subject["id"]))
         monkeypatch.setattr(users_module, "user_store", users)
@@ -1097,7 +1746,6 @@ def test_admin_user_list_accepts_documented_filters(admin_analytics_api):
         "/api/admin/analytics/users",
         params={
             "q": "Subject",
-            "status": "active",
             "lifecycle_segment": "core",
             "operational_state": "healthy",
             "commercial_tier": "invested",
@@ -1125,7 +1773,6 @@ def test_admin_user_list_accepts_documented_filters(admin_analytics_api):
     assert filters.commercial_tier == "invested"
     assert filters.user_group == "partner"
     assert filters.activated is True
-    assert filters.legacy_status == "active"
 
 
 def test_admin_analytics_maps_not_found_and_cursor_errors_safely(
@@ -1232,3 +1879,21 @@ def test_value_routes_reject_unknown_duplicate_and_unsafe_queries(
     assert response.status_code == 422
     assert response.json() == {"detail": "Invalid Analytics query."}
     assert "synthetic secret" not in response.text
+
+
+def test_overview_has_no_five_state_field_and_users_rejects_status(admin_analytics_api):
+    """Design D20: the one permitted contract break before PR D."""
+    api = admin_analytics_api
+
+    overview = api["client"].get("/api/admin/analytics/overview", headers=api["admin_headers"])
+    users = api["client"].get(
+        "/api/admin/analytics/users", params={"status": "active"}, headers=api["admin_headers"]
+    )
+
+    assert overview.status_code == 200, overview.text
+    assert "user_state_counts" not in overview.json()
+    assert set(overview.json()["availability"]) == {"snapshot", "growth", "funnel", "friction", "attention"}
+    assert users.status_code == 422
+    assert users.json() == {"detail": "Invalid Analytics query."}
+    assert "user_state_counts" not in AnalyticsOverview.model_fields
+    assert "legacy_status" not in UserValueFilters.model_fields

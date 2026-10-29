@@ -7,9 +7,11 @@ orphaned, so the job is *not* a ``register_reaper_sweep`` step. It is still
 inside the single web process (design SS2.3): no external scheduler, no second
 service.
 
-Every tick is ``daily_facts.run_daily_facts``; the first thing the thread does,
-once, is ``facts_migration.run_startup_migrations`` (seed ``user_activity``,
-copy the legacy history). Both are idempotent, so a restart costs nothing.
+Every tick is ``daily_facts.run_daily_facts``; the first thing the thread does
+is ``facts_migration.run_startup_migrations`` (re-seed ``user_activity``, roll
+up and derive the legacy history, then drop the legacy snapshot tables), and
+until that succeeds it is retried before each tick. Both are idempotent, so a
+restart costs nothing.
 """
 
 from __future__ import annotations
@@ -98,15 +100,29 @@ def start_daily_facts_worker(
         tick_fn = tick if tick is not None else _default_tick
         prepare_fn = prepare if prepare is not None else _default_prepare
 
-        def _loop() -> None:
+        def _prepare() -> bool:
             try:
-                prepare_fn()
+                report = prepare_fn()
             except Exception as exc:
                 print(
                     "WARNING: analytics.facts_migration_failed "
                     f"category={type(exc).__name__[:80]}"
                 )
+                return False
+            if report is not None:
+                print(f"🧹 Analytics startup migration: {report!r}", flush=True)
+            return True
+
+        def _loop() -> None:
+            # The only caller of the startup migration (app.py used to run it
+            # synchronously as well, on the event loop). A failure is retried
+            # before each tick rather than only at the next boot: the drop it
+            # guards is the step most likely to lose a lock to the outgoing
+            # instance on a deploy.
+            prepared = _prepare()
             while not stop.wait(interval):
+                if not prepared:
+                    prepared = _prepare()
                 try:
                     tick_fn()
                 except Exception as exc:
