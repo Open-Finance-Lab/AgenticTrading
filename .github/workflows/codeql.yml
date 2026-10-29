@@ -3,13 +3,11 @@ name: CodeQL
 # Static security + quality analysis (GitHub CodeQL, advanced setup).
 #
 # This is intentionally a SEPARATE workflow from ci.yml, and it is a MERGE GATE:
-#   * The `main protection` repository ruleset (since 2026-10-29) requires
-#     CodeQL results on every PR to main and blocks the merge on an alert at
-#     `error` severity or a security alert at `high` or above. Admins can
-#     bypass it by merging the PR with --admin.
-#   * GitHub blocks the merge while a PR's analysis is missing or in progress,
-#     so keep the `pull_request` trigger below unfiltered: a PR this workflow
-#     skips can never merge without a bypass.
+#   * The `main protection` ruleset requires this workflow's results on every
+#     PR to main. Never add a `paths:` filter to the `pull_request` trigger
+#     below: a PR it skips cannot merge without an admin bypass. What the gate
+#     checks, and how to unstick a PR that got no run, is in CLAUDE.md
+#     ("Merge & branch discipline"); keep the details there, not here.
 #   * The prod deploy in ci.yml gates only on `backend-tests`, not on this job.
 # Findings also land in the repo's Security > Code scanning tab.
 #
