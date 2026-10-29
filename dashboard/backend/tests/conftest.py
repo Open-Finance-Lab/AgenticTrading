@@ -91,6 +91,18 @@ os.environ.pop("AGENT_AUTH_CACHE_TTL_SECONDS", None)
 os.environ.pop("MAX_LEGACY_ACTIVE_PER_SESSION", None)
 os.environ.pop("MAX_LEGACY_ACTIVE_GLOBAL", None)
 os.environ.pop("ANALYTICS_DAILY_JOB_INTERVAL_SECONDS", None)
+# Hosted-runtime dials, same rationale: app.py loads dashboard/.env at import
+# and the suite imports app, so a machine configured like prod would inherit
+# them. They change asserted shapes rather than just timings -- the parent
+# subprocess budget is a product of the step timeout and the day bound, so a
+# legal TRADINGAGENTS_TIMEOUT_SECONDS of 300 or 900 makes the window-bound
+# tests assert against a budget the shipped defaults never produce.
+os.environ.pop("TRADINGAGENTS_TIMEOUT_SECONDS", None)
+os.environ.pop("MAX_TRADINGAGENTS_TRADING_DAYS", None)
+os.environ.pop("TRADINGAGENTS_MAX_POSITION_WEIGHT", None)
+os.environ.pop("TRADINGAGENTS_GATEWAY", None)
+os.environ.pop("AI_HEDGE_FUND_TIMEOUT_SECONDS", None)
+os.environ.pop("MAX_AI_HEDGE_FUND_TRADING_DAYS", None)
 # A shell that exported the backtest-worker flag would make every Postgres
 # twin the suite constructs skip DDL and fail on its first query.
 os.environ.pop("ATL_BACKTEST_WORKER", None)

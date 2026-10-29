@@ -20,6 +20,7 @@
   const NAME_OVERRIDE_PREFIX = 'agent-name-override:';
   const CASH_OVERRIDE_PREFIX = 'agent-cash-allocation:';
   const AI_HEDGE_FUND_RUNTIME = 'ai_hedge_fund';
+  const TRADINGAGENTS_RUNTIME = 'tradingagents';
   const AI_HEDGE_FUND_ANALYSTS = [
     {
       id: 'aswath_damodaran',
@@ -117,6 +118,56 @@
       description: 'Estimates intrinsic value using DCF, owner earnings, EV/EBITDA, and residual-income models, then compares it with market value.',
     },
   ];
+
+  // Upstream's registry at the pinned 0.3.x revision
+  // (tradingagents/graph/setup.py). Descriptions follow the tools each analyst
+  // is actually bound to, not the marketing copy.
+  // `unavailable`, where present, is the reason this analyst cannot be used in
+  // a historical backtest: its data sources answer as of the wall clock rather
+  // than as of the date being analyzed. The server refuses such a roster with
+  // a 422 (describe_tradingagents_lookahead in domain/agents/runtime.py), so
+  // offering it here would be offering a run that always fails. Keep the two
+  // lists in agreement -- the server's is authoritative.
+  const TRADINGAGENTS_ANALYSTS = [
+    {
+      id: 'market',
+      label: 'Market Analyst',
+      description: 'Reads price action, volume and technical indicators from the verified market snapshot.',
+    },
+    {
+      id: 'social',
+      label: 'Social Analyst',
+      description: 'Gauges retail and social sentiment from recent coverage of the ticker.',
+      unavailable: 'StockTwits and Reddit have no historical cutoff, so a backtest would read today’s posts.',
+    },
+    {
+      id: 'news',
+      label: 'News Analyst',
+      description: 'Weighs company headlines, insider transactions, macro indicators and prediction markets.',
+      unavailable: 'Prediction-market probabilities are only available live, so a backtest would read today’s odds.',
+    },
+    {
+      id: 'fundamentals',
+      label: 'Fundamentals Analyst',
+      description: 'Works through the income statement, balance sheet and cash flow for financial health.',
+      unavailable: 'The fundamentals overview reports current valuation and 52-week ranges, which postdate the decision.',
+    },
+  ];
+
+  // One table rather than a branch per runtime: a hosted runtime added without
+  // an entry here renders no analysts at all, which is visible immediately,
+  // instead of silently falling through to the pipeline editor -- which is how
+  // a TradingAgents agent used to get a model picker it does not own and a
+  // prompt pipeline it never consumes.
+  const HOSTED_RUNTIME_ANALYSTS = {
+    [AI_HEDGE_FUND_RUNTIME]: AI_HEDGE_FUND_ANALYSTS,
+    [TRADINGAGENTS_RUNTIME]: TRADINGAGENTS_ANALYSTS,
+  };
+
+  const HOSTED_RUNTIME_LABELS = {
+    [AI_HEDGE_FUND_RUNTIME]: 'AI Hedge Fund',
+    [TRADINGAGENTS_RUNTIME]: 'TradingAgents',
+  };
   // Match app.js: same-origin locally, hosted backend everywhere else. In
   // Same-origin API base. Local uvicorn serves the backend; production Vercel
   // rewrites API paths to Render (see vercel.json). Empty string = root-relative.
@@ -165,8 +216,22 @@
   // check, reads as off.
   let robinhoodLiveEnabled = false;
 
+  function agentRuntime(agent = currentAgent) {
+    return agent?.runtime_type || 'pipeline';
+  }
+
+  function hostedAnalystRoster(agent = currentAgent) {
+    return HOSTED_RUNTIME_ANALYSTS[agentRuntime(agent)] || null;
+  }
+
+  function isHostedRuntimeAgent(agent = currentAgent) {
+    return hostedAnalystRoster(agent) !== null;
+  }
+
+  // Deliberately still runtime-specific: the Financial Datasets key is an AI
+  // Hedge Fund concept. TradingAgents needs no agent-scoped credential.
   function isAiHedgeFundAgent(agent = currentAgent) {
-    return (agent?.runtime_type || 'pipeline') === AI_HEDGE_FUND_RUNTIME;
+    return agentRuntime(agent) === AI_HEDGE_FUND_RUNTIME;
   }
 
   function escapeHtml(value) {
@@ -358,21 +423,128 @@
     });
   }
 
-  function renderAiHedgeFundAnalysts(agent) {
+  // Named element rather than a toast: the user needs to still see it when
+  // they reach for Save, and a transient message would be gone by then.
+  function renderWithdrawnAnalystNote(withdrawn) {
+    const note = document.getElementById('agentEditorHostedWithdrawnNote');
+    if (!note) return;
+    if (!withdrawn.length) {
+      note.hidden = true;
+      note.textContent = '';
+      return;
+    }
+    const names = withdrawn.map((a) => a.label).join(', ');
+    note.textContent =
+      `${names} ${withdrawn.length === 1 ? 'is' : 'are'} no longer available for `
+      + 'backtests and has been cleared from this agent’s selection. '
+      // Not "saving removes it": if the whole stored roster was withdrawn,
+      // emptyRosterRefusal blocks the save until something available is
+      // ticked, so promising a save that cannot happen was contradictory.
+      + 'Choose at least one available analyst, then save.';
+    note.hidden = false;
+  }
+
+  // What the server says each hosted runtime actually runs on. Null until the
+  // first answer arrives; the panel shows a neutral placeholder until then
+  // rather than a guess, because a guess is what this replaced.
+  let hostedRuntimeModels = null;
+  let hostedRuntimeModelsPromise = null;
+  // 'pending' until the first answer, then 'ready' or a failure kind. A
+  // pending fetch and a failed one used to render identically -- the panel
+  // said "unavailable" for up to 8s on every first open, which is the
+  // "fail-closed is not fail-visible" shape CLAUDE.md warns about, and it
+  // contradicted both this code's own comment and app.html's placeholder.
+  let hostedRuntimeModelsState = 'pending';
+
+  async function loadHostedRuntimeModels() {
+    if (hostedRuntimeModels) return hostedRuntimeModels;
+    if (!hostedRuntimeModelsPromise) {
+      hostedRuntimeModelsPromise = (async () => {
+        try {
+          const response = await fetchWithTimeout(
+            `${API_BASE}/api/v1/agents/hosted-runtimes`,
+            {},
+            8000,
+          );
+          if (response.status === 401) {
+            // The route needs an account, like running a hosted backtest
+            // does. Say so rather than reporting a failure.
+            hostedRuntimeModelsState = 'signed-out';
+            return null;
+          }
+          if (!response.ok) throw new Error(`HTTP ${response.status}`);
+          const body = await response.json();
+          hostedRuntimeModels = body?.runtimes || {};
+          hostedRuntimeModelsState = 'ready';
+        } catch (error) {
+          // Leave the models null: renderManagedModel then says the model is
+          // unavailable rather than naming one nobody verified.
+          hostedRuntimeModelsState = 'failed';
+          console.error('Could not read the hosted runtime models:', error);
+          hostedRuntimeModelsPromise = null;
+        }
+        return hostedRuntimeModels;
+      })();
+    }
+    return hostedRuntimeModelsPromise;
+  }
+
+  function managedModelText(agent, models, state = 'ready') {
+    const entry = models?.[agentRuntime(agent)];
+    const provider = entry?.provider_label || entry?.provider || '';
+    const model = entry?.model || '';
+    if (model) return provider ? `${provider} · ${model}` : model;
+    // No model for this runtime. Which sentence depends on *why*, because
+    // "still loading", "sign in" and "the server could not tell us" are three
+    // different things to a reader.
+    if (state === 'pending') return 'Hosted model — loading…';
+    if (state === 'signed-out') return 'Hosted model — sign in to see it';
+    return 'Hosted model — unavailable';
+  }
+
+  function renderManagedModel(agent) {
+    const value = document.getElementById('agentEditorManagedModelValue');
+    if (!value) return;
+    value.textContent = managedModelText(
+      agent,
+      hostedRuntimeModels,
+      hostedRuntimeModelsState,
+    );
+  }
+
+  function renderHostedAnalysts(agent) {
     const grid = document.getElementById('agentEditorAiHedgeFundAnalysts');
     if (!grid) return;
+    const roster = hostedAnalystRoster(agent);
+    if (!roster) {
+      grid.innerHTML = '';
+      return;
+    }
+    grid.setAttribute(
+      'aria-label',
+      `${HOSTED_RUNTIME_LABELS[agentRuntime(agent)] || 'Hosted'} analysts`
+    );
     hideAiHedgeFundTooltip(activeAiHedgeFundTooltipOption);
     const selected = new Set(agent?.runtime_config?.analysts || []);
-    grid.innerHTML = AI_HEDGE_FUND_ANALYSTS.map(({ id, label, description }) => {
+    // An agent saved before an analyst was withdrawn still carries it. Render
+    // it unchecked and disabled like the rest, but say so on the panel: the
+    // roster the user sees is about to differ from the one they stored, and
+    // dropping it without a word is the "silently ran something else" failure
+    // the guard exists to prevent.
+    const withdrawn = roster.filter((a) => a.unavailable && selected.has(a.id));
+    grid.innerHTML = roster.map(({ id, label, description, unavailable }) => {
       const labelId = `agentEditorAiHedgeFundAnalyst-${id}-label`;
       const tooltipId = `agentEditorAiHedgeFundAnalyst-${id}-tooltip`;
+      const blocked = Boolean(unavailable);
+      const tip = blocked ? `${description} Unavailable: ${unavailable}` : description;
       return `
-        <label class="agent-editor-analyst-option">
-          <input type="checkbox" name="agentEditorAiHedgeFundAnalyst" value="${escapeHtml(id)}" aria-labelledby="${escapeHtml(labelId)}" aria-describedby="${escapeHtml(tooltipId)}" ${selected.has(id) ? 'checked' : ''}>
-          <span id="${escapeHtml(labelId)}">${escapeHtml(label)}</span>
-          <span id="${escapeHtml(tooltipId)}" class="agent-editor-analyst-tooltip" role="tooltip">${escapeHtml(description)}</span>
+        <label class="agent-editor-analyst-option${blocked ? ' is-unavailable' : ''}">
+          <input type="checkbox" name="agentEditorAiHedgeFundAnalyst" value="${escapeHtml(id)}" aria-labelledby="${escapeHtml(labelId)}" aria-describedby="${escapeHtml(tooltipId)}" ${blocked ? 'disabled' : ''} ${!blocked && selected.has(id) ? 'checked' : ''}>
+          <span id="${escapeHtml(labelId)}">${escapeHtml(label)}${blocked ? ' <em class="agent-editor-analyst-unavailable">unavailable</em>' : ''}</span>
+          <span id="${escapeHtml(tooltipId)}" class="agent-editor-analyst-tooltip" role="tooltip">${escapeHtml(tip)}</span>
         </label>`;
     }).join('');
+    renderWithdrawnAnalystNote(withdrawn);
     grid.querySelectorAll('.agent-editor-analyst-option').forEach((option) => {
       option.addEventListener('mouseenter', () => showAiHedgeFundTooltip(option));
       option.addEventListener('mouseleave', () => {
@@ -392,7 +564,7 @@
     });
   }
 
-  function selectedAiHedgeFundAnalysts() {
+  function selectedHostedAnalysts() {
     return Array.from(
       document.querySelectorAll('input[name="agentEditorAiHedgeFundAnalyst"]:checked')
     ).map((input) => input.value);
@@ -851,7 +1023,7 @@
   }
 
   function getEditorState() {
-    const hostedAiHedgeFund = isAiHedgeFundAgent();
+    const hostedRuntime = isHostedRuntimeAgent();
     const categorySelect = document.getElementById('agentEditorCategorySelect');
     // null means "omit the key", which the PATCH route reads as "leave alone".
     // "" means "clear the shelf" and must still be sent.
@@ -912,12 +1084,12 @@
           : 1000;
     }
     const modelSelect = document.getElementById('agentEditorModelSelect');
-    const instruction = hostedAiHedgeFund ? '' : (
+    const instruction = hostedRuntime ? '' : (
       document.getElementById('agentEditorSimpleInstruction')?.value || ''
     ).trim();
     let subAgentsOut;
-    let sendPipeline = !hostedAiHedgeFund;
-    if (hostedAiHedgeFund) {
+    let sendPipeline = !hostedRuntime;
+    if (hostedRuntime) {
       // Hosted runtimes do not consume or mutate the legacy prompt pipeline.
       subAgentsOut = subAgents;
     } else if (instruction) {
@@ -955,14 +1127,14 @@
       category,
       cash_allocation,
       backtest_allocation,
-      model_name: hostedAiHedgeFund
+      model_name: hostedRuntime
         ? ''
         : (modelSelect ? modelSelect.value : ''),
       live_trading_enabled: Boolean(liveToggle?.checked),
-      runtime_config: hostedAiHedgeFund
-        ? { analysts: selectedAiHedgeFundAnalysts() }
+      runtime_config: hostedRuntime
+        ? { analysts: selectedHostedAnalysts() }
         : null,
-      financial_datasets_api_key: hostedAiHedgeFund
+      financial_datasets_api_key: isAiHedgeFundAgent()
         ? (credentialInput?.value || '').trim()
         : '',
       subAgents: subAgentsOut,
@@ -1084,17 +1256,38 @@
   }
 
   function configureEditorMode(agent) {
-    const hostedAiHedgeFund = isAiHedgeFundAgent(agent);
+    const hostedRuntime = isHostedRuntimeAgent(agent);
+    const aiHedgeFund = isAiHedgeFundAgent(agent);
     const modelField = document.getElementById('agentEditorModelField');
     const managedModelField = document.getElementById('agentEditorManagedModelField');
     const simplePanel = document.getElementById('agentEditorSimplePanel');
-    const hedgeFundPanel = document.getElementById('agentEditorAiHedgeFundPanel');
-    if (modelField) modelField.hidden = hostedAiHedgeFund;
-    if (managedModelField) managedModelField.hidden = !hostedAiHedgeFund;
-    if (simplePanel) simplePanel.hidden = hostedAiHedgeFund;
-    if (hedgeFundPanel) hedgeFundPanel.hidden = !hostedAiHedgeFund;
-    if (hostedAiHedgeFund) {
-      renderAiHedgeFundAnalysts(agent);
+    const hostedPanel = document.getElementById('agentEditorAiHedgeFundPanel');
+    const panelTitle = document.getElementById('agentEditorHostedPanelTitle');
+    const credentialField = document.getElementById('agentEditorFinancialDatasetsField');
+    if (modelField) modelField.hidden = hostedRuntime;
+    if (managedModelField) managedModelField.hidden = !hostedRuntime;
+    if (simplePanel) simplePanel.hidden = hostedRuntime;
+    if (hostedPanel) hostedPanel.hidden = !hostedRuntime;
+    // One panel serves both runtimes, so its heading follows the agent.
+    if (panelTitle && hostedRuntime) {
+      const label = HOSTED_RUNTIME_LABELS[agentRuntime(agent)] || 'Hosted';
+      panelTitle.textContent = `${label} analyst panel`;
+    }
+    if (credentialField) credentialField.hidden = !aiHedgeFund;
+    if (hostedRuntime) {
+      renderHostedAnalysts(agent);
+      // Paint whatever is already known, then refresh when the server answers.
+      // The element used to carry a hard-coded provider and model in app.html
+      // that no code ever wrote, so every hosted agent claimed the same pair
+      // regardless of which gateway funds the deployment.
+      renderManagedModel(agent);
+      loadHostedRuntimeModels().then(() => {
+        if (agentRuntime(currentAgent) === agentRuntime(agent)) {
+          renderManagedModel(agent);
+        }
+      });
+    }
+    if (aiHedgeFund) {
       const keyInput = document.getElementById('agentEditorFinancialDatasetsKey');
       if (keyInput) keyInput.value = '';
       setFinancialDatasetsStatus(false, 'Checking credential…');
@@ -1427,6 +1620,26 @@
     setDirty(false);
   }
 
+  /**
+   * Why this save cannot be sent, or '' when it can.
+   *
+   * Any hosted runtime, not just AI Hedge Fund. The server refuses an empty
+   * roster for all of them (normalize_runtime_config), and this check used to
+   * be keyed on isAiHedgeFundAgent -- so a TradingAgents agent with nothing
+   * selected sailed past it, failed the PATCH, and landed in save()'s catch,
+   * which reports "Saved locally; server update failed" and clears the dirty
+   * flag. Nothing had been saved anywhere, and the wording said otherwise.
+   *
+   * Shaped like singleSymbolUniverseRefusal in app.js and the server's
+   * describe_tradingagents_lookahead: a message or nothing.
+   */
+  function emptyRosterRefusal(agent, state) {
+    if (!isHostedRuntimeAgent(agent)) return '';
+    if (state?.runtime_config?.analysts?.length) return '';
+    const label = HOSTED_RUNTIME_LABELS[agentRuntime(agent)] || 'hosted';
+    return `Select at least one ${label} analyst`;
+  }
+
   async function save() {
     if (!currentAgent) return;
 
@@ -1443,8 +1656,9 @@
       document.getElementById('agentEditorNameInput')?.focus();
       return;
     }
-    if (isAiHedgeFundAgent() && !state.runtime_config.analysts.length) {
-      showSaveStatus('Select at least one AI Hedge Fund analyst', true);
+    const rosterRefusal = emptyRosterRefusal(currentAgent, state);
+    if (rosterRefusal) {
+      showSaveStatus(rosterRefusal, true);
       return;
     }
 

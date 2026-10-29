@@ -122,7 +122,16 @@ from dashboard.backend.domain.backtesting.constants import INITIAL_CAPITAL
 from dashboard.backend.domain.agents.runtime import (
     AI_HEDGE_FUND_RUNTIME_TYPE,
     PIPELINE_RUNTIME_TYPE,
+    TRADINGAGENTS_RUNTIME_TYPE,
 )
+
+# Display names for the hosted runtimes this worker can drive. Keyed rather
+# than branched so adding a runtime cannot leave the banner naming another
+# product for the whole run.
+HOSTED_RUNTIME_LABELS = {
+    AI_HEDGE_FUND_RUNTIME_TYPE: "AI Hedge Fund",
+    TRADINGAGENTS_RUNTIME_TYPE: "TradingAgents",
+}
 
 # DJIA_30 is imported from validator (the single source of truth, guarded by
 # tests/test_djia30_universe.py) rather than redefined here.
@@ -258,7 +267,11 @@ def main():
     parser.add_argument(
         "--runtime-type",
         default=PIPELINE_RUNTIME_TYPE,
-        choices=[PIPELINE_RUNTIME_TYPE, AI_HEDGE_FUND_RUNTIME_TYPE],
+        choices=[
+            PIPELINE_RUNTIME_TYPE,
+            AI_HEDGE_FUND_RUNTIME_TYPE,
+            TRADINGAGENTS_RUNTIME_TYPE,
+        ],
         help="Hosted agent runtime (default: pipeline)",
     )
     parser.add_argument(
@@ -488,8 +501,8 @@ def main():
     
     # Show mode
     mode_display = (
-        "AI Hedge Fund"
-        if args.runtime_type == AI_HEDGE_FUND_RUNTIME_TYPE
+        HOSTED_RUNTIME_LABELS.get(args.runtime_type, args.runtime_type)
+        if args.runtime_type != PIPELINE_RUNTIME_TYPE
         else (
             "Sub-agent Pipeline"
             if pipeline
@@ -579,8 +592,8 @@ def main():
         )
         tape_owner["backtester"] = backtester
     
-        if args.runtime_type == AI_HEDGE_FUND_RUNTIME_TYPE:
-            print("🧠 Using hosted AI Hedge Fund runtime for trading decisions\n")
+        if args.runtime_type != PIPELINE_RUNTIME_TYPE:
+            print(f"🧠 Using hosted {mode_display} runtime for trading decisions\n")
         elif backtester.use_llm:
             # The engine's resolved model, not the module default: printing
             # LLM_MODEL_NAME named Claude Haiku on every DeepSeek or Qwen run.

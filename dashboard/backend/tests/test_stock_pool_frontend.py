@@ -14,11 +14,25 @@ pytestmark = pytest.mark.skipif(shutil.which("node") is None, reason="node is no
 HTML = (Path(__file__).resolve().parents[2] / "frontend/app.html").read_text(encoding="utf-8")
 
 
+def _object_const(name):
+    """A multi-line object `const` from app.js. `js_const` stops at the first
+    `;`, which returns only the opening line for an object literal."""
+    import re
+
+    from dashboard.backend.tests._frontend_source import APP_JS, _match_brace
+
+    match = re.search(rf"^const {re.escape(name)} = \{{", APP_JS, re.MULTILINE)
+    assert match, f"{name} is no longer a top-level object const in app.js"
+    brace = APP_JS.index("{", match.start())
+    return APP_JS[match.start() : _match_brace(APP_JS, brace) + 1] + ";"
+
+
 def run_picker(script, setup=""):
     code = "\n".join([
         "const assert = require('node:assert/strict');",
         js_const("ASSET_UNIVERSES"),
         js_const("IFIND_ASHARE_SOURCE"),
+        _object_const("HOSTED_RUNTIME_LABELS"),
         "let selectedUniverse = 'djia'; let representativePoolsPromise = null;",
         "let source = 'alpaca'; let builtin = true; let renders = 0; let requests = 0;",
         "const error = {hidden:true}; const options = ['ordinary','fund','all'].map(value => ({value,disabled:true}));",
@@ -36,6 +50,19 @@ def run_picker(script, setup=""):
         fn_body("function getSelectedAssets("),
         fn_body("function runBacktestModalDecisionSource("),
         fn_body("function pipelineHasTradingInstruction("),
+        # runBacktest refuses a universe the agent's runtime cannot accept
+        # before its first network call, so the guard and its helpers are real
+        # dependencies of the function under test, not test scaffolding.
+        js_const("SINGLE_SYMBOL_RUNTIMES"),
+        js_const("SIGN_IN_REQUIRED_RUNTIMES"),
+        "function isSignedIn(){return true}",
+        fn_body("function agentRuntimeType("),
+        fn_body("function runtimeTakesSingleSymbol("),
+        fn_body("function runtimeRequiresSignIn("),
+        fn_body("function hostedRuntimeAuthRefusal("),
+        fn_body("function hostedRuntimeLabel("),
+        fn_body("function customUniverseSymbols("),
+        fn_body("function singleSymbolUniverseRefusal("),
         fn_body("async function runBacktest("),
         setup,
         "(async()=>{" + script + "})().catch(e=>{console.error(e);process.exit(1)});",

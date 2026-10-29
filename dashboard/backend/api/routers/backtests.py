@@ -152,6 +152,8 @@ from dashboard.backend.domain.agents.runtime import (
     AI_HEDGE_FUND_RUNTIME_TYPE,
     DEFAULT_RUNTIME_TYPE,
     PIPELINE_RUNTIME_TYPE,
+    TRADINGAGENTS_RUNTIME_TYPE,
+    describe_tradingagents_lookahead,
     normalize_runtime_config,
     normalize_runtime_type,
 )
@@ -160,6 +162,37 @@ from dashboard.backend.infrastructure.ai_hedge_fund.adapter import (
     resolve_step_timeout_seconds,
     runtime_unavailable_reason,
 )
+from dashboard.backend.infrastructure.tradingagents.adapter import (
+    TradingAgentsConfigurationError,
+    resolve_max_position_weight,
+)
+from dashboard.backend.infrastructure.tradingagents.adapter import (
+    resolve_step_timeout_seconds as resolve_tradingagents_step_timeout_seconds,
+)
+from dashboard.backend.infrastructure.tradingagents.adapter import (
+    managed_gateway_credential_env as tradingagents_gateway_credential_env,
+)
+from dashboard.backend.infrastructure.tradingagents.adapter import (
+    runtime_unavailable_reason as tradingagents_runtime_unavailable_reason,
+)
+from dashboard.backend.infrastructure.tradingagents.adapter import (
+    select_managed_gateway as tradingagents_select_managed_gateway,
+)
+
+# Each hosted runtime spends a different amount of wall clock per decision, and
+# the parent timeout has to be sized from the runtime that will actually run --
+# a parent sized from another runtime's step budget kills the child mid-decision
+# and discards every step already completed.
+_HOSTED_STEP_TIMEOUTS = {
+    AI_HEDGE_FUND_RUNTIME_TYPE: (
+        resolve_step_timeout_seconds,
+        "AI_HEDGE_FUND_TIMEOUT_SECONDS",
+    ),
+    TRADINGAGENTS_RUNTIME_TYPE: (
+        resolve_tradingagents_step_timeout_seconds,
+        "TRADINGAGENTS_TIMEOUT_SECONDS",
+    ),
+}
 from dashboard.backend.domain.backtesting.constants import (
     INITIAL_CAPITAL,
     MAX_BACKTEST_INITIAL_CAPITAL,
@@ -2347,6 +2380,27 @@ SUBPROCESS_TIMEOUT_OVERHEAD_SECONDS = 600
 # Ceiling, so a long date range cannot pin a worker thread indefinitely.
 MAX_SUBPROCESS_TIMEOUT_SECONDS = 14400
 
+# The longest a run can take and still be *watched*. ``app.js`` polls for
+# BACKTEST_POLL_MAX_SECONDS (4200) and has no way to read a run's real budget
+# (issue #474 item 5), so past this the page reports "lost contact" for a run
+# that is still healthy -- and the user has already paid for decisions they
+# can no longer see. A mirror of a frontend constant, which this repo is
+# otherwise wary of; it is safe here because the frontend value is a fixed
+# literal rather than an operator dial, and it is pinned to the shipped app.js
+# by test_tradingagents_window_bound_keeps_the_frontend_poller_honest.
+#
+# This, not MAX_SUBPROCESS_TIMEOUT_SECONDS, is the binding constraint on a
+# user-visible window. Inverting the wrong one is what let an operator raise
+# TRADINGAGENTS_TIMEOUT_SECONDS to 900 and silently get a 5-day window whose
+# derived parent budget (5100s) outlives the page watching it.
+WATCHED_SUBPROCESS_TIMEOUT_SECONDS = 4200
+
+# The smallest per-decision budget worth inverting into a window bound. One
+# upstream pass is 290-415s measured, so anything near this floor already
+# cannot finish a decision -- but the bound must not become *larger* as the
+# budget shrinks, which is what an unfloored division did.
+_MIN_INVERTIBLE_STEP_SECONDS = 60
+
 
 def _estimated_decision_days(start_date: str, end_date: str) -> int:
     """Upper-bound the trading days in an inclusive date range.
@@ -2377,7 +2431,8 @@ def _backtest_subprocess_timeout(
     """Return the parent subprocess timeout for this run's runtime."""
     if runtime_type == PIPELINE_RUNTIME_TYPE:
         return PIPELINE_SUBPROCESS_TIMEOUT_SECONDS
-    step_seconds = resolve_step_timeout_seconds()
+    step_resolver, step_variable = _HOSTED_STEP_TIMEOUTS[runtime_type]
+    step_seconds = step_resolver()
     required = (
         step_seconds * _estimated_decision_days(start_date, end_date)
         + SUBPROCESS_TIMEOUT_OVERHEAD_SECONDS
@@ -2389,7 +2444,7 @@ def _backtest_subprocess_timeout(
         print(
             f"⚠️  Hosted backtest needs ~{budget}s but is capped at "
             f"{MAX_SUBPROCESS_TIMEOUT_SECONDS}s; shorten the date range or "
-            f"lower AI_HEDGE_FUND_TIMEOUT_SECONDS (currently {step_seconds}s)",
+            f"lower {step_variable} (currently {step_seconds}s)",
             flush=True,
         )
         return MAX_SUBPROCESS_TIMEOUT_SECONDS
@@ -2506,6 +2561,131 @@ def _max_ai_hedge_fund_trading_days() -> int:
 
 
 MAX_AI_HEDGE_FUND_TRADING_DAYS = _max_ai_hedge_fund_trading_days()
+
+
+# TradingAgents spends twice AI Hedge Fund's wall clock per decision (600s vs
+# 300s), so it needs its own bound rather than borrowing that one.
+#
+# 5 rather than 10 for a reason that is not about this runtime at all: app.js
+# polls a run for at most BACKTEST_POLL_MAX_SECONDS (3600 + 600) and has no way
+# to read the run's real budget (issue #474 item 5). 600 * 5 + 600 = 3600 keeps
+# the derived parent budget inside that ceiling, the same property AI Hedge
+# Fund's 10 days * 300s has. A larger default would make the page report "lost
+# contact" for a run that is still healthy -- a worse failure than a clear 422,
+# because the user has already paid for the decisions they can no longer see.
+_DEFAULT_MAX_TRADINGAGENTS_TRADING_DAYS = 5
+# Only reached when TRADINGAGENTS_TIMEOUT_SECONDS is unreadable; mirrors the
+# adapter's own default so the two agree about an unconfigured deployment.
+_FALLBACK_TRADINGAGENTS_STEP_TIMEOUT_SECONDS = 600
+
+
+def _tradingagents_trading_days_ceiling() -> int:
+    """Largest window whose run the page can still be watching when it ends.
+
+    Same inputs as ``_backtest_subprocess_timeout``, inverted, so the bound and
+    the budget cannot disagree about how big a window is -- the property
+    ``_ai_hedge_fund_trading_days_ceiling`` documents at length.
+
+    Inverted against ``WATCHED_SUBPROCESS_TIMEOUT_SECONDS`` rather than
+    ``MAX_SUBPROCESS_TIMEOUT_SECONDS``. Both are real bounds, but they bind
+    different things: 14400 stops a window pinning a worker thread, while 4200
+    is where the browser stops watching. Inverting the larger one meant the
+    shipped default was poller-safe by arithmetic coincidence -- 600 x 5 + 600
+    is exactly 3600 -- and an operator raising TRADINGAGENTS_TIMEOUT_SECONDS to
+    900 silently got a 5-day window with a 5100s budget, so the page reported
+    failure for a run that was still going. The two dials each looked in range
+    on their own.
+
+    What it returns is ``floor(3600 / step)``: 6 at the shipped 600s step and
+    4 at 900s. The *default* window is ``min(5, ceiling)``, so the shipped
+    behaviour is 5 days either way -- this docstring previously claimed the
+    ceiling itself was 5 and 3, conflating the two, and the test that checked
+    it re-derived the same expression and so pinned nothing.
+    """
+    try:
+        step_seconds = max(1, int(resolve_tradingagents_step_timeout_seconds()))
+    except (TradingAgentsConfigurationError, TypeError, ValueError):
+        # Runs at import, and the resolver raises on a junk
+        # TRADINGAGENTS_TIMEOUT_SECONDS. CLAUDE.md records that a bare ``int()``
+        # at module scope in this module once killed app boot; the launch path
+        # reports the real configuration error to the operator who set it.
+        step_seconds = _FALLBACK_TRADINGAGENTS_STEP_TIMEOUT_SECONDS
+    usable = WATCHED_SUBPROCESS_TIMEOUT_SECONDS - SUBPROCESS_TIMEOUT_OVERHEAD_SECONDS
+    # Floored before the division. TRADINGAGENTS_TIMEOUT_SECONDS is legal from
+    # 1, and inverting a 1-second budget yielded a 3600-trading-day ceiling --
+    # a ~14-year window, accepted by a bound whose whole job is to refuse a
+    # window the deployment cannot survive, every decision of which would be
+    # killed after one second. The floor is the smallest budget that can plausibly
+    # hold one upstream pass; below it the window bound stops being meaningful
+    # rather than becoming generous.
+    return max(1, usable // max(step_seconds, _MIN_INVERTIBLE_STEP_SECONDS))
+
+
+def _max_tradingagents_trading_days() -> int:
+    """Trading days one TradingAgents backtest may cover on this deployment.
+
+    Parsed defensively for the same reason its AI Hedge Fund twin is: an
+    operator-set integer read with a bare ``int()`` at module scope once killed
+    app boot on a typo.
+    """
+    ceiling = _tradingagents_trading_days_ceiling()
+    default = min(_DEFAULT_MAX_TRADINGAGENTS_TRADING_DAYS, ceiling)
+    raw = os.getenv("MAX_TRADINGAGENTS_TRADING_DAYS")
+    if raw is None or not str(raw).strip():
+        return default
+    try:
+        value = int(str(raw).strip())
+    except (TypeError, ValueError):
+        print(
+            "MAX_TRADINGAGENTS_TRADING_DAYS is not an integer "
+            f"({raw!r}); using {default}",
+            flush=True,
+        )
+        return default
+    if value < 0 or value > ceiling:
+        print(
+            f"MAX_TRADINGAGENTS_TRADING_DAYS is out of range ({value}; allowed "
+            f"0-{ceiling}, derived from the {WATCHED_SUBPROCESS_TIMEOUT_SECONDS}s "
+            f"frontend poll budget and TRADINGAGENTS_TIMEOUT_SECONDS); "
+            f"using {default}",
+            flush=True,
+        )
+        return default
+    return value
+
+
+MAX_TRADINGAGENTS_TRADING_DAYS = _max_tradingagents_trading_days()
+
+
+def _enforce_tradingagents_window(start_date: str, end_date: str) -> None:
+    """Refuse a run whose window this deployment cannot survive.
+
+    503 when the runtime is switched off here (the deployment's own
+    configuration, nothing the caller can act on); 422 when the window is merely
+    too long, naming both the bound and the number requested so the refusal is
+    actionable. Measured in trading days because that is what the runtime spends
+    a subprocess on.
+    """
+    limit = MAX_TRADINGAGENTS_TRADING_DAYS
+    if limit <= 0:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "TradingAgents backtests are turned off on this deployment. "
+                "Ask the operator to raise MAX_TRADINGAGENTS_TRADING_DAYS, or "
+                "run a pipeline agent instead."
+            ),
+        )
+    requested = _estimated_decision_days(start_date, end_date)
+    if requested > limit:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"TradingAgents backtests are limited to {limit} trading days "
+                f"on this deployment; this range covers about {requested}. "
+                "Shorten the date range and run it again."
+            ),
+        )
 
 
 def _enforce_ai_hedge_fund_window(start_date: str, end_date: str) -> None:
@@ -3862,6 +4042,86 @@ def _resolve_ai_hedge_fund_credential(request: Request, agent_id: Optional[str])
     return credential
 
 
+def _require_signed_in_for_tradingagents(request: Request) -> None:
+    """Refuse an unauthenticated TradingAgents run.
+
+    Reuses the route's own notion of a signed-in caller -- the same
+    ``_optional_user`` the pipeline lane's LLM gate consults -- rather than
+    introducing a second identity mechanism. ``X-Session-Id`` is explicitly
+    not accepted: it is caller-chosen, so for a built-in agent it is an
+    ownership *stamp*, never a credential.
+    """
+    from dashboard.backend.api.dependencies import _optional_user
+
+    user = _optional_user(
+        request,
+        request.headers.get("authorization") or request.headers.get("Authorization"),
+    )
+    if not user or user.get("id") is None:
+        # Same status and wording as the pipeline lane's gate, so the frontend
+        # needs no second branch to recognise it.
+        raise HTTPException(
+            status_code=401,
+            detail="Sign in before running an LLM backtest.",
+        )
+
+
+def _validate_tradingagents_runtime(request: Request, agent_id: Optional[str]) -> None:
+    """Authorize the agent and assert this deployment can host the runtime.
+
+    Unlike AI Hedge Fund there is no per-agent credential to resolve:
+    TradingAgents reads free yfinance data and bills the platform's own
+    OpenRouter account, so ownership plus deployment readiness is the whole
+    precondition. Checked here rather than in the worker because every failure
+    below is identical on every step of the run.
+    """
+    if not agent_id:
+        raise HTTPException(
+            status_code=422,
+            detail="TradingAgents backtests must reference an owned agent",
+        )
+    ctx = _owner_context(request, request.headers.get("authorization"))
+    agent = _require_agent_access(agent_id, ctx)
+    if (agent.get("runtime_type") or DEFAULT_RUNTIME_TYPE) != TRADINGAGENTS_RUNTIME_TYPE:
+        raise HTTPException(
+            status_code=422, detail="Agent runtime is not TradingAgents"
+        )
+    # Which gateway pays is a deployment choice, so ask the adapter rather
+    # than hard-coding one provider's variable here: an OpenRouter-only check
+    # 503s a CommonStack deployment that is in fact fully configured.
+    try:
+        _ta_gateway = tradingagents_select_managed_gateway()
+    except TradingAgentsConfigurationError as exc:
+        # Only a known configuration fault becomes a 503 whose detail is shown
+        # to the caller. Anything else is a real bug and must surface as a 500
+        # rather than be echoed to the client as if it were a config message.
+        raise HTTPException(status_code=503, detail=str(exc)) from None
+    _ta_credential = tradingagents_gateway_credential_env(_ta_gateway)
+    if not (os.getenv(_ta_credential) or "").strip():
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                f"The platform-managed {_ta_gateway} provider for TradingAgents "
+                "is not configured"
+            ),
+        )
+    # The isolated venv is created by the deploy build, and render.yaml is
+    # documentation rather than the deploy mechanism for this service -- so a
+    # deployment without it is a live possibility. Reject the run here instead
+    # of accepting it and failing inside a background subprocess minutes later.
+    try:
+        unavailable = tradingagents_runtime_unavailable_reason()
+    except TradingAgentsConfigurationError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    if unavailable:
+        raise HTTPException(status_code=503, detail=unavailable)
+    try:
+        resolve_tradingagents_step_timeout_seconds()
+        resolve_max_position_weight()
+    except TradingAgentsConfigurationError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
 def _resolve_backtest_session(request: Request, agent_id: Optional[str]) -> str:
     """Return the session that should own this backtest run.
 
@@ -4026,6 +4286,71 @@ def run_backtest_endpoint(
         financial_datasets_api_key = _resolve_ai_hedge_fund_credential(
             request, agent_id
         )
+    elif runtime_type == TRADINGAGENTS_RUNTIME_TYPE:
+        if data_source != ALPACA:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    "TradingAgents currently supports the Alpaca US-equity "
+                    "profile only."
+                ),
+            )
+        if resolved_decision_source != LLM_DECISION_SOURCE:
+            raise HTTPException(
+                status_code=422,
+                detail="TradingAgents requires decision_source='llm'.",
+            )
+        # Authentication first, before anything that spends or describes the
+        # deployment. A TradingAgents run bills the platform's own gateway
+        # account for 11 sequential model calls per trading day and needs no
+        # per-agent credential, and cloning the marketplace template with a
+        # self-chosen X-Session-Id makes the caller that agent's owner -- so
+        # without this an unauthenticated request could spend platform money
+        # at will. The route's existing LLM gate below is scoped to the
+        # pipeline runtime and never reached this lane.
+        #
+        # Deliberately NOT extended to AI Hedge Fund here: that lane has the
+        # same hole, but it is shipped behaviour and whether to require an
+        # account for it is a product decision, not this change's to make.
+        # Recorded for Felix/Chris in the runbook.
+        _require_signed_in_for_tradingagents(request)
+        # Ownership next, before anything that *describes* the agent. The
+        # roster refusal below names the exact analysts a stored agent has
+        # selected, so running it first let a signed-in caller read a
+        # stranger's configuration out of a 422 by guessing an agent id --
+        # disclosure rather than spend, but the rest of this block is
+        # scrupulous about putting authentication first and this was the one
+        # exception. It also means every refusal past here is about an agent
+        # the caller actually owns.
+        _validate_tradingagents_runtime(request, agent_id)
+        # Then the roster: pure arithmetic on config already resolved above,
+        # and the one refusal that is about the *validity of the result*
+        # rather than about this deployment's capacity. A roster whose data
+        # sources ignore the analysis date cannot produce a historical
+        # backtest at all.
+        analysts = runtime_config.get("analysts")
+        if not analysts:
+            # `normalize_runtime_config` only refuses an empty roster when the
+            # `analysts` key is *present*, so `POST /api/v1/agents` with the
+            # default `runtime_config: {}` persists an agent with none. Without
+            # this the run passed every gate, took a concurrency slot, spawned
+            # the worker, loaded bars for minutes, and then failed in the
+            # bridge with an opaque error instead of answering here.
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    "This TradingAgents agent has no analysts selected. Open "
+                    "Configure and choose at least one."
+                ),
+            )
+        lookahead = describe_tradingagents_lookahead(analysts)
+        if lookahead:
+            raise HTTPException(status_code=422, detail=lookahead)
+        # Last, the window: a bound this deployment refuses is refused whether
+        # or not anything else is configured, and it is the cheapest of the
+        # three to compute.
+        _enforce_tradingagents_window(start_date, end_date)
+        financial_datasets_api_key = None
     else:
         financial_datasets_api_key = None
     selected_assets = (
@@ -4035,6 +4360,14 @@ def run_backtest_endpoint(
             else _normalize_backtest_assets(raw_assets)
         )
     )
+    if runtime_type == TRADINGAGENTS_RUNTIME_TYPE and len(selected_assets or []) != 1:
+        # The runtime refuses a multi-symbol context, but it only sees one after
+        # the worker is running and a run slot is held. Omitting assets means
+        # the DJIA 30 default, which is the same problem.
+        raise HTTPException(
+            status_code=422,
+            detail="TradingAgents currently supports a single symbol per run.",
+        )
 
     if initial_capital is not None:
         try:
