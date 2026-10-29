@@ -55,10 +55,31 @@ TOP_10_STOCKS = ["AAPL", "MSFT", "JPM", "V", "JNJ", "WMT", "PG", "AXP", "HD", "D
 _TICKER_RE = re.compile(r"^[A-Z][A-Z0-9.]{0,9}$")
 
 
+# The whitespace an agent's JSON plausibly wraps a ticker in. Deliberately not
+# str.strip()'s default set, which also eats Unicode spaces (NBSP, U+2028) and
+# the ASCII separators \x1c-\x1f.
+_SYMBOL_WHITESPACE = " \t\n\r\v\f"
+
+
 def normalize_symbol(symbol: str) -> str:
-    """Canonical ticker form shared by the v1 and v2 decision schemas, so a
-    symbol accepted on one surface is never refused on the other."""
-    return symbol.strip().upper()
+    """Canonical ticker form: ASCII whitespace trimmed, ASCII letters uppercased.
+
+    This is the one rule every decision path applies before comparing a
+    symbol with its allow-list (v1 ``LLMTradingDecision``, v2 ``ActionItem``,
+    the protocol Run API's ``OrderIn``, the backtest portfolio manager, the AI
+    Hedge Fund adapter, the Robinhood live path). It is normalization only:
+    which symbols are tradeable is still each caller's own universe, so a
+    symbol accepted on one surface can be refused on another.
+
+    A ticker is ASCII. A value that is not ASCII once trimmed is returned
+    trimmed but *not* case-folded, so it can never equal a ticker: Unicode
+    case mapping folds look-alikes into real symbols ('ıbm'.upper() == 'IBM',
+    'cſco'.upper() == 'CSCO').
+    """
+    trimmed = symbol.strip(_SYMBOL_WHITESPACE)
+    if not trimmed.isascii():
+        return trimmed
+    return trimmed.upper()
 
 
 class TradingAction(str, Enum):
@@ -96,8 +117,6 @@ class LLMTradingDecision(BaseModel):
     @classmethod
     def validate_symbol(cls, v):
         """Normalize ticker and enforce shape (universe checked later)."""
-        if not isinstance(v, str):
-            raise ValueError(f"Symbol must be a string, got {type(v)}")
         symbol = normalize_symbol(v)
         if not _TICKER_RE.fullmatch(symbol):
             raise ValueError(f"Invalid symbol format: {v}")
@@ -234,7 +253,7 @@ def validate_llm_response(
         return None
 
     allow = {
-        str(s).strip().upper()
+        normalize_symbol(str(s))
         for s in (allowed_symbols if allowed_symbols is not None else DJIA_30)
         if s
     }
@@ -727,7 +746,7 @@ Return ONLY valid JSON.
 
 def _format_valid_symbols(allowed_symbols: Optional[List[str]] = None) -> str:
     symbols = allowed_symbols if allowed_symbols is not None else DJIA_30
-    return ", ".join(str(s).strip().upper() for s in symbols if s)
+    return ", ".join(normalize_symbol(str(s)) for s in symbols if s)
 
 
 def create_safe_prompt(

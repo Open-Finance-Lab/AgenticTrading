@@ -116,7 +116,7 @@ It applies these constraints inline instead:
 | Constraint | Enforcement |
 |------------|-------------|
 | JSON-only, no tools | No request sends `tools`; text blocks only (`extract_response_text`, which skips `tool_use` and thinking blocks); prompt scaffold pins the output contract; response is parsed as JSON only (`parse_llm_response`), never executed |
-| Symbol allowlist | Symbols outside the run's universe (`_allowed_set`: `DJIA_30` unless the run names a universe) skipped; a strict run rejects the whole batch |
+| Symbol allowlist | Symbols are normalized with `normalize_symbol` (see below), then any outside the run's universe (`_allowed_set`: `DJIA_30` unless the run names a universe) is skipped; a strict run rejects the whole batch |
 | Action count | Capped at one action per universe symbol (`len(allowed_symbols)`); excess entries ignored, or the whole batch rejected on a strict run |
 | Per-order size | `position_size > MAX_ORDER_SHARES` (10k, same constant as the validator) skipped; unparseable/non-finite sizes skipped |
 | Cash bound | Buys must fit in available cash; sells limited to held shares |
@@ -128,6 +128,23 @@ appended by fixed scaffolding (`create_custom_prompt`) and cannot be overridden
 by the user text. If you need the stricter schema validation (tool-call
 rejection, audit logging), route through `validate_llm_response` as below —
 new endpoints must not copy this exemption.
+
+### Symbol normalization (every decision path)
+
+Every path that checks a decision's symbol against an allow-list first applies
+`normalize_symbol` (`infrastructure/llm/validator.py`). These paths are this
+engine loop, `validate_llm_response`, v1 `LLMTradingDecision`, v2 `ActionItem`
+(`validate_actions`), the protocol Run API's `OrderIn`, the AI Hedge Fund
+adapter, and the Robinhood live path (switched off). The Robinhood path
+validates the model's actions with the same `validate_actions` as v2.
+
+The rule trims ASCII whitespace and uppercases ASCII letters, so `" aapl "`
+trades as `AAPL`. It does nothing else. A value that is not ASCII after
+trimming is never case-folded, so it cannot match a ticker. That is the point:
+Unicode case mapping would turn look-alikes into real symbols (`"ıbm".upper()`
+is `"IBM"`, `"cſco".upper()` is `"CSCO"`), and on the Robinhood path a real
+symbol is a real order. Do not replace the helper with `str.strip().upper()`.
+That pair is Unicode-aware, and it reopens exactly that hole.
 
 ### Not covered: the Trading Algo backtest
 
