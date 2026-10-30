@@ -8,8 +8,9 @@ import logging
 import os
 from typing import Any, Dict, List, Optional
 
+import httpx
 from mcp import ClientSession
-from mcp.client.streamable_http import streamablehttp_client
+from mcp.client.streamable_http import streamable_http_client
 
 from dashboard.backend.infrastructure.brokers import robinhood_oauth
 
@@ -17,6 +18,9 @@ logger = logging.getLogger(__name__)
 
 MCP_URL = robinhood_oauth.MCP_URL
 MCP_TIMEOUT_SECONDS = float(os.getenv("ROBINHOOD_MCP_TIMEOUT_SECONDS", "12"))
+# The deprecated streamablehttp_client defaults (30s, 300s SSE read). The whole
+# call is still bounded by MCP_TIMEOUT_SECONDS.
+_HTTP_TIMEOUT = httpx.Timeout(30.0, read=300.0)
 
 
 def _tool_text(result: Any) -> Any:
@@ -49,16 +53,23 @@ class RobinhoodMCPClient:
         self.access_token = access_token
         self._headers = {"Authorization": f"Bearer {access_token}"}
 
+    def _http_client(self) -> httpx.AsyncClient:
+        # mcp>=1.30 follows a redirect only within the endpoint's origin and
+        # raises on any other, whatever follow_redirects says, so no tool call
+        # (an order included) is sent off MCP_URL's origin. 1.28 followed all.
+        return httpx.AsyncClient(headers=self._headers, timeout=_HTTP_TIMEOUT)
+
     async def _call_tool(self, name: str, arguments: Optional[Dict[str, Any]] = None) -> Any:
         arguments = arguments or {}
 
         async def _run() -> Any:
-            async with streamablehttp_client(MCP_URL, headers=self._headers) as streams:
-                read_stream, write_stream, _ = streams
-                async with ClientSession(read_stream, write_stream) as session:
-                    await session.initialize()
-                    result = await session.call_tool(name, arguments)
-                    return _tool_text(result)
+            async with self._http_client() as http_client:
+                async with streamable_http_client(MCP_URL, http_client=http_client) as streams:
+                    read_stream, write_stream, _ = streams
+                    async with ClientSession(read_stream, write_stream) as session:
+                        await session.initialize()
+                        result = await session.call_tool(name, arguments)
+                        return _tool_text(result)
 
         return await asyncio.wait_for(_run(), timeout=MCP_TIMEOUT_SECONDS)
 

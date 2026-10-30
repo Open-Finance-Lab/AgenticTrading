@@ -348,6 +348,52 @@ def test_reject_invalid_symbol(client):
     assert body["fills"] == []
 
 
+def test_lowercase_padded_symbol_fills_as_its_ticker(client):
+    """v2's ActionItem and this surface share normalize_symbol, so an order
+    that trades on /api/v2 is not an invalid_symbol on /api/v1/runs."""
+    agent_id, key, _ = _new_agent(client)
+    version_id = _new_version(client, agent_id, key)
+    run_id = _create_run(client, key, version_id)
+    step = _wait_for_step(client, run_id, key)
+
+    resp = client.post(
+        f"/api/v1/runs/{run_id}/steps/{step['step_id']}/decision",
+        json={
+            "idempotency_key": str(uuid.uuid4()),
+            "orders": [{"symbol": " aapl ", "side": "buy", "quantity": 2}],
+        },
+        headers={"X-API-Key": key},
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["validation"]["rejections"] == []
+    assert [(f["symbol"], f["filled_quantity"]) for f in body["fills"]] == [("AAPL", 2)]
+
+
+def test_unicode_look_alike_is_an_invalid_symbol_and_spares_the_rest(client):
+    """'mſft'.upper() == 'MSFT'. The look-alike is refused per order, so the
+    valid order in the same decision still fills."""
+    agent_id, key, _ = _new_agent(client)
+    version_id = _new_version(client, agent_id, key)
+    run_id = _create_run(client, key, version_id)
+    step = _wait_for_step(client, run_id, key)
+
+    resp = client.post(
+        f"/api/v1/runs/{run_id}/steps/{step['step_id']}/decision",
+        json={
+            "idempotency_key": str(uuid.uuid4()),
+            "orders": [{"symbol": "mſft", "side": "buy", "quantity": 1},
+                       {"symbol": "AAPL", "side": "buy", "quantity": 1}],
+        },
+        headers={"X-API-Key": key},
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert [(r["order"]["symbol"], r["reason"])
+            for r in body["validation"]["rejections"]] == [("mſft", "invalid_symbol")]
+    assert [f["symbol"] for f in body["fills"]] == ["AAPL"]
+
+
 def test_reject_oversized_order_position_cap(client):
     """A single BUY that would exceed max_position_weight (0.25 of equity) is
     rejected on its own and produces no fill.

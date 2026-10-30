@@ -5,8 +5,12 @@ WORKDIR /app
 # Copy requirements
 COPY requirements.txt requirements-ai-hedge-fund.txt ./
 
-# Install dependencies
-RUN pip install --no-cache-dir -r requirements.txt
+# Install dependencies. requirements.txt pins the whole tree (it is generated
+# from requirements.in), so --no-deps installs exactly that set and nothing
+# newer. If a pin is missing, pip check fails the build rather than letting pip
+# resolve the gap to whatever release is newest on deploy day.
+RUN pip install --no-cache-dir --no-deps -r requirements.txt \
+    && pip check
 
 # Keep virattt/ai-hedge-fund and its LangChain graph isolated from ATL's main
 # dependency set. The adapter invokes this interpreter over a JSON subprocess

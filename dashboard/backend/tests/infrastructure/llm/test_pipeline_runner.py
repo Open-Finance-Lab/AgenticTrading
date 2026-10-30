@@ -24,6 +24,10 @@ from dashboard.backend.infrastructure.llm.pipeline_runner import (
     trading_day_key,
     _build_step_prompt,
 )
+from dashboard.backend.infrastructure.llm.validator import (
+    LLM_ACTION_DEFAULT_CONFIDENCE,
+    read_confidence,
+)
 
 
 class _PipelineResponse:
@@ -101,6 +105,62 @@ def test_pipeline_output_to_decision_orders():
     assert decision["actions"][0]["position_size"] == 10
 
 
+@pytest.mark.parametrize(
+    "fields, expected",
+    [
+        ({"confidence": 0}, 0.0),
+        ({"confidence": 0.0}, 0.0),
+        ({"confidence": "0"}, 0.0),
+        ({"confidence": "0.4"}, 0.4),
+        ({}, 0.75),
+        ({"confidence": None}, 0.75),
+        ({"confidence": ""}, 0.75),
+    ],
+)
+def test_pipeline_order_confidence_defaults_only_when_missing(fields, expected):
+    """``confidence: 0`` is the model saying it is not confident at all; only
+    a missing one (absent, null or empty) takes the 0.75 default."""
+    order = {"symbol": "AAPL", "side": "buy", "qty": 10, **fields}
+    decision = pipeline_output_to_decision({"orders": [order]})
+    assert decision["actions"][0]["confidence"] == expected
+
+
+@pytest.mark.parametrize(
+    "confidence",
+    [[], {}, False, True, "high", float("nan"), float("inf"), 20, -0.1,
+     pytest.param(10**400, id="int-past-float")],
+)
+def test_pipeline_order_unusable_confidence_is_handed_on_as_written(confidence):
+    """The converter raised on ``[]``/``{}`` and ``"high"``, losing the step's
+    usage and aborting a paid run, and read ``false`` as 0.75. It now hands
+    the value on unchanged, for the gate to skip the order and log it."""
+    decision = pipeline_output_to_decision(
+        {"orders": [{"symbol": "AAPL", "side": "buy", "qty": 10, "confidence": confidence}]}
+    )
+    handed_on = decision["actions"][0]["confidence"]
+    assert handed_on is confidence
+    assert read_confidence(handed_on, LLM_ACTION_DEFAULT_CONFIDENCE) is None
+
+
+@pytest.mark.parametrize(
+    "qty",
+    ["10.5", float("nan"), float("inf"), pytest.param(10**400, id="int-past-float"), 0.6],
+)
+def test_pipeline_order_qty_is_handed_on_as_written(qty):
+    """``int(qty)`` turned "10.5", NaN and 0.6 into 0, which the gate reads as
+    "size it for me", and raised OverflowError on Infinity. The gate coerces
+    and checks the size itself."""
+    decision = pipeline_output_to_decision(
+        {"orders": [{"symbol": "AAPL", "side": "buy", "qty": qty}]}
+    )
+    assert decision["actions"][0]["position_size"] is qty
+
+
+def test_pipeline_order_without_qty_still_asks_the_gate_to_size_it():
+    decision = pipeline_output_to_decision({"orders": [{"symbol": "AAPL", "side": "buy"}]})
+    assert decision["actions"][0]["position_size"] == 0
+
+
 def test_pipeline_output_to_decision_actions_passthrough():
     parsed = {
         "actions": [
@@ -143,6 +203,44 @@ def test_pipeline_output_to_decision_risk_actions():
             "size_fraction": 0.5,
         }
     ]
+
+
+def test_pipeline_risk_action_keeps_the_models_confidence():
+    """``risk_actions`` hard-coded confidence 0.8, so a stop-loss the model
+    gave confidence 0 still cleared the 0.3 floor and sold."""
+    decision = pipeline_output_to_decision(
+        {
+            "risk_actions": [
+                {"symbol": "AAPL", "action": "stop_loss", "confidence": 0},
+                {"symbol": "MSFT", "action": "stop_loss"},
+                {"symbol": "JPM", "action": "stop_loss", "confidence": "high"},
+            ]
+        }
+    )
+    assert [a["confidence"] for a in decision["actions"]] == [0.0, 0.8, "high"]
+
+
+@pytest.mark.parametrize(
+    "size_pct", [0, 0.0, "0", -0.5, "50%", float("nan"), float("inf"), True, []]
+)
+def test_pipeline_risk_action_size_it_cannot_use_holds(size_pct):
+    """``float(size_pct or 1.0)`` read 0 as 1.0, the whole position, and
+    raised on "50%" and Infinity. A size the model gave must be positive."""
+    decision = pipeline_output_to_decision(
+        {"risk_actions": [{"symbol": "AAPL", "action": "trail", "size_pct": size_pct}]}
+    )
+    assert decision["actions"][0]["action"] == "hold"
+
+
+@pytest.mark.parametrize("fields", [{}, {"size_pct": None}, {"size_pct": ""}])
+def test_pipeline_risk_action_without_a_size_sells_the_position(fields):
+    decision = pipeline_output_to_decision(
+        {"risk_actions": [{"symbol": "AAPL", "action": "trail", **fields}]}
+    )
+    assert decision["actions"][0]["action"] == "sell"
+    # The whole position: the gate reads a fraction of 1 as all of it (#661).
+    assert decision["actions"][0]["position_size"] == 0
+    assert decision["actions"][0]["size_fraction"] == 1.0
 
 
 @pytest.mark.parametrize(
