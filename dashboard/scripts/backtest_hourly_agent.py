@@ -193,6 +193,7 @@ from dashboard.backend.domain.backtesting.partial_results import LiveProgressHea
 from dashboard.backend.infrastructure.llm.execution.handoff import (
     ExecutionHandoffError,
     consume_execution_handoff,
+    read_execution_handoff,
 )
 from dashboard.backend.infrastructure.llm.execution.client import (
     AnthropicCompatibleExecutionClient,
@@ -341,7 +342,9 @@ def main():
     execution_handoff = None
     if args.execution_handoff_stdin:
         try:
-            execution_handoff = consume_execution_handoff(sys.stdin.read())
+            execution_handoff = consume_execution_handoff(
+                read_execution_handoff(sys.stdin.buffer)
+            )
         except ExecutionHandoffError:
             parser.error("invalid execution handoff")
         if args.run_id != execution_handoff.run_id:

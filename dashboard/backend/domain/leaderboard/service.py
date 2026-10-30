@@ -24,6 +24,7 @@ from zoneinfo import ZoneInfo
 import dashboard.backend.infrastructure.llm.token_cost as token_cost
 from dashboard.backend.database import db
 import dashboard.backend.domain.leaderboard.baselines as _baselines
+from dashboard.backend.domain.leaderboard.roster_failures import RosterFailures
 from dashboard.backend.domain.leaderboard.strategies._common import reference_start_date
 from dashboard.backend.domain.leaderboard.strategies import get_strategy
 from dashboard.backend.infrastructure.llm import backtest_harness as llm_harness
@@ -408,7 +409,7 @@ def refresh_daily_leaderboard(
     }
 
     if deploy_models:
-        failures: List[Dict[str, str]] = []
+        roster = RosterFailures("daily")
         successes: List[Dict[str, Any]] = []
         # An entry the board publishes from repeat runs alone has no primary,
         # so `deploy_model_run` would miss its cache and bill a full run for a
@@ -421,6 +422,9 @@ def refresh_daily_leaderboard(
                     {"entry_id": entry_id, "cached": True, "published_from_samples": True}
                 )
                 continue
+            if roster.stopped:
+                roster.skip(entry_id)
+                continue
             try:
                 row = deploy_model_run(
                     entry_id,
@@ -428,14 +432,19 @@ def refresh_daily_leaderboard(
                     period="daily",
                     allow_fallback=allow_fallback,
                 )
-                successes.append(row)
-            except (LeaderboardFallbackError, ValueError, RuntimeError) as exc:
-                failures.append({"entry_id": entry_id, "error": str(exc)})
+            except Exception as exc:
+                # Same contract as the live loop: one entry's failure must not
+                # leave the rest undeployed or skip the state save below, and a
+                # fault every entry shares stops the roster (see roster_failures).
+                roster.failed(entry_id, exc)
+                continue
+            roster.traded(row)
+            successes.append(row)
         # Only mark complete when every model succeeded; a partial run must not
         # skip the remaining entries on the next cron (force=false).
-        result["models_deployed"] = not failures
+        result["models_deployed"] = not roster.failures
         result["model_results"] = successes
-        result["model_failures"] = failures
+        result["model_failures"] = roster.failures
 
     _save_daily_refresh_state(result)
     return result

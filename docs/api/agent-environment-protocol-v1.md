@@ -248,6 +248,11 @@ always empty — do not wait for them to populate.
 ```
 
 - `orders` may be empty — this is an explicit **HOLD**.
+- `symbol` is normalized before it is checked against
+  `constraints.allowed_symbols`: surrounding ASCII whitespace is trimmed and
+  ASCII letters are uppercased, so `" aapl "` fills as `AAPL`. A symbol
+  containing any non-ASCII character is never case-folded and is rejected as
+  `invalid_symbol`. Fills and rejections echo the normalized symbol.
 - `quantity_type`: `shares` (default), `notional` (cash amount), or `weight`
   (fraction of current equity). Non-share types are converted to whole shares
   using the step's prices and equity.

@@ -7,6 +7,7 @@ from .handoff import (
     HandoffReplayGuard,
     consume_execution_handoff,
     create_execution_handoff,
+    read_execution_handoff,
 )
 from .models import (
     BillingEvidence,
@@ -37,4 +38,5 @@ __all__ = [
     "UsagePolicy",
     "consume_execution_handoff",
     "create_execution_handoff",
+    "read_execution_handoff",
 ]

@@ -480,6 +480,23 @@ def test_review_that_raises_prevents_placement(monkeypatch):
     assert result["orders_reviewed"][0]["review"] is None
 
 
+@pytest.mark.parametrize("symbol", ["ıbm", "cſco", "aapl ", " aapl"])
+def test_unicode_look_alike_symbol_is_never_placed(monkeypatch, symbol):
+    """The model's actions pass through v2's validate_actions here. Unicode
+    case mapping turns 'ıbm' into 'IBM', so a Unicode-aware normalizer would
+    make a look-alike a real-money order."""
+    client = FakeMCPClient()
+    result = _run_live(monkeypatch, client, actions=[_action(symbol)])
+    assert client.review_calls == [] and client.place_calls == []
+    assert result["executions"] == []
+
+
+def test_lowercase_padded_symbol_is_placed_as_its_ticker(monkeypatch):
+    client = FakeMCPClient()
+    _run_live(monkeypatch, client, actions=[_action(" aapl ")])
+    assert [order["symbol"] for order in client.place_calls] == ["AAPL"]
+
+
 def test_approving_review_allows_placement(monkeypatch):
     client = FakeMCPClient(reviews=lambda order: {"approved": True})
     result = _run_live(monkeypatch, client, actions=[_action("AAPL")])
