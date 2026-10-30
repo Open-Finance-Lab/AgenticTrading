@@ -963,6 +963,21 @@ function homeFormatReturnPct(value) {
     return `${sign}${pct.toFixed(2)}%`;
 }
 
+/** A rank row's Sharpe cell, `{ text, title }`.
+ *
+ *  DELEGATES to leaderboard.js's `formatBoardSharpe`, so the rank row and the
+ *  Competition table word one number the same way -- the reason
+ *  `homeFormatReturnPct` delegates too. The server computes the number and its
+ *  interval (P19); nothing here does (D20). The 48px column holds the number
+ *  only, so the 95% interval -- or the reason there is no number -- is the
+ *  cell's tooltip. Without leaderboard.js, a dash: there is no wording to
+ *  borrow, and inventing one is the drift the delegation prevents. */
+function homeFormatSharpe(entry, basis) {
+    if (typeof window.formatBoardSharpe !== 'function') return { text: '—', title: '' };
+    const fmt = window.formatBoardSharpe(entry, basis);
+    return { text: fmt.main, title: [fmt.sub, fmt.title].filter(Boolean).join(' · ') };
+}
+
 function homeSparkPolyline(values, width = 52, height = 18) {
     const nums = (values || []).map(Number).filter(Number.isFinite);
     if (nums.length < 2) {
@@ -2064,7 +2079,7 @@ async function loadHomeLeaderboardModule() {
         el.textContent = label ? `${WINDOW_BASE} · ${label}` : WINDOW_BASE;
     }
 
-    function renderEntries(entries, { sample = null } = {}) {
+    function renderEntries(entries, { sample = null, sharpeBasis = null } = {}) {
         markSample(sample);
         // THE ONLY PLACE THAT CAN TAKE THE CHART DOWN WITH THE STANDINGS. All
         // three sample paths return before `renderHomeLeaderboardChart` is ever
@@ -2084,7 +2099,7 @@ async function loadHomeLeaderboardModule() {
             const label = entry.model || entry.team_name || '—';
             const ret = Number(entry.cumulative_return || 0);
             const retClass = ret >= 0 ? 'positive' : 'negative';
-            const sharpe = Number(entry.sharpe_ratio || 0);
+            const sharpe = homeFormatSharpe(entry, sharpeBasis);
             const value = homeFormatPortfolioValue(entry.portfolio_value);
             // Same source as the curve's own colour, so a row's swatch and its
             // line cannot disagree -- a swatch pointing at the wrong line is
@@ -2102,7 +2117,7 @@ async function loadHomeLeaderboardModule() {
                 </span>
                 <span class="hm-rank-value tabular-nums">${homeEscape(value)}</span>
                 <span class="hm-rank-ret ${retClass} tabular-nums">${homeEscape(homeFormatReturnPct(ret))}</span>
-                <span class="hm-rank-sharpe tabular-nums">${homeEscape(sharpe.toFixed(2))}</span>
+                <span class="hm-rank-sharpe tabular-nums"${sharpe.title ? ` title="${homeEscape(sharpe.title)}"` : ''}>${homeEscape(sharpe.text)}</span>
             </li>`;
         }).join('');
     }
@@ -2120,7 +2135,7 @@ async function loadHomeLeaderboardModule() {
             renderEntries(homeModelEntries(HOME_MOCK_LEADERBOARD), { sample: 'empty' });
             return;
         }
-        renderEntries(models);
+        renderEntries(models, { sharpeBasis: payload.sharpe_basis || null });
         const build = window.buildEquityCurvesFromEntries;
         if (typeof build !== 'function') {
             // Distinguishable in the console from the honest no-curves case,

@@ -295,7 +295,12 @@ def test_market_data_notice_names_no_ai_not_no_llm():
 
 
 def test_sharpe_tooltip_is_plain_language():
-    assert 'title="Risk-adjusted return, annualized from hourly results."' in _HTML
+    assert (
+        'title="Sharpe ratio. Return above what cash would have earned, divided by how '
+        'much the daily returns swung, scaled to a yearly figure. Hover a value for its '
+        '95% interval."'
+    ) in _HTML
+    assert "annualized from hourly results" not in _HTML
     assert "Annualized for hourly data (sqrt(252*6.5))" not in _HTML
 
 
