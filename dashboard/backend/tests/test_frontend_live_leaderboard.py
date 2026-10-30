@@ -344,3 +344,20 @@ def test_format_sharpe_never_prints_minus_zero_or_an_invented_day_count():
     assert no_days["main"] == "2.61"
     assert "trading days" not in no_days["title"]
     assert "cash rate 0%/yr" in no_days["title"]
+
+
+@_needs_node
+def test_an_unprinted_row_carries_no_sharpe_tooltip_or_rank():
+    """A row with no stored final value renders "—" everywhere; its Sharpe
+    tooltip must not describe a number the cell does not show."""
+    out = _render_live(
+        [
+            _sharpe_row("unprinted", portfolio_value=None, **_SHARPE_OK),
+            _sharpe_row("down", sharpe_status="ok", sharpe_ratio=-0.5, sharpe_ci_low=-14.2,
+                        sharpe_ci_high=13.2, sharpe_days=5),
+        ],
+        selected="unprinted",
+    )
+    assert out["table"].count("Based on 5 trading days") == 1  # "down" only
+    assert "Based on 5 trading days" not in out["detail"]
+    assert out["order"] == ["down", "unprinted"]

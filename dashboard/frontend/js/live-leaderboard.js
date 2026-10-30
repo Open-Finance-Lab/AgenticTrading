@@ -347,7 +347,7 @@ function liveSortValue(entry, key) {
     case 'return': return Number(entry.cumulative_return);
     // A cell showing "—" is "no figure", not 0.00 and not a hidden value (an
     // old payload's hourly number): NaN sorts below every number.
-    case 'sharpe': return liveFormatSharpe(entry, null).main === '—' ? NaN : Number(entry.sharpe_ratio);
+    case 'sharpe': return liveEntryIsPending(entry) || liveFormatSharpe(entry, null).main === '—' ? NaN : Number(entry.sharpe_ratio);
     case 'dd': return Math.abs(Number(entry.max_drawdown));
     case 'trades': return Number(entry.num_trades);
     case 'hold': return Number(entry.avg_hold_hours);
@@ -412,7 +412,7 @@ function populateLiveTable() {
           </div>
         </td>
         <td class="num-cell ${retClass(ret)}">${dash(liveFormatPct(ret, 2))}</td>
-        <td class="num-cell"${sharpe.title ? ` title="${escapeHtml(sharpe.title)}"` : ''}>${dash(`${escapeHtml(sharpe.main)}${sharpeSub}`)}</td>
+        <td class="num-cell"${printed && sharpe.title ? ` title="${escapeHtml(sharpe.title)}"` : ''}>${dash(`${escapeHtml(sharpe.main)}${sharpeSub}`)}</td>
         <td class="num-cell">${dash(liveFormatPct(entry.max_drawdown == null ? null : -Math.abs(Number(entry.max_drawdown)), 2))}</td>
         <td class="num-cell">${dash(entry.num_trades == null ? '—' : String(entry.num_trades))}</td>
         <td class="num-cell">${dash(liveFormatHold(entry.avg_hold_hours))}</td>
@@ -448,7 +448,7 @@ function renderLiveDetail(entry) {
     <div class="team-detail-row"><span class="team-detail-label">Type</span><span class="team-detail-value">${escapeHtml(liveFormatBadge(entry.team_badge))}</span></div>
     <div class="team-detail-row"><span class="team-detail-label">Value</span><span class="team-detail-value">${hasPrints ? `$${liveFormatMoney(entry.portfolio_value)}` : 'Awaiting freeze'}</span></div>
     <div class="team-detail-row"><span class="team-detail-label">Return</span><span class="team-detail-value" style="color:${retColor};">${hasPrints ? liveFormatPct(ret, 2) : '—'}</span></div>
-    <div class="team-detail-row"><span class="team-detail-label">Sharpe ratio</span><span class="team-detail-value"${sharpe.title ? ` title="${escapeHtml(sharpe.title)}"` : ''}>${escapeHtml(sharpeText)}</span></div>
+    <div class="team-detail-row"><span class="team-detail-label">Sharpe ratio</span><span class="team-detail-value"${hasPrints && sharpe.title ? ` title="${escapeHtml(sharpe.title)}"` : ''}>${escapeHtml(sharpeText)}</span></div>
     <div class="team-detail-row"><span class="team-detail-label">Trades</span><span class="team-detail-value">${hasPrints && entry.num_trades != null ? escapeHtml(String(entry.num_trades)) : '—'}</span></div>
     <div class="team-detail-row"><span class="team-detail-label">Avg hold</span><span class="team-detail-value">${hasPrints ? liveFormatHold(entry.avg_hold_hours) : '—'}</span></div>
     <div class="team-detail-row"><span class="team-detail-label">Through</span><span class="team-detail-value">${escapeHtml(entry.snapshot_end || '—')}</span></div>
