@@ -30,6 +30,10 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 from zoneinfo import ZoneInfo
 
 from dashboard.backend.database import db
+from dashboard.backend.domain.backtesting.metrics import (
+    daily_sharpe_basis,
+    daily_sharpe_interval,
+)
 from dashboard.backend.domain.leaderboard import live_budget
 from dashboard.backend.domain.leaderboard.baselines import INITIAL_CAPITAL, calc_metrics
 from dashboard.backend.domain.leaderboard.live_trade_stats import (
@@ -1637,11 +1641,18 @@ def _entry_from_strategy(
     scale: float = 1.0,
     catching_up: bool = False,
 ) -> Dict[str, Any]:
-    """One board row. Returns and risk come off the stored run untouched.
+    """One board row. Return and drawdown come off the stored run untouched.
 
     The stored run's metrics were computed against the capital it was seeded
     with, over exactly the curve this row plots, so only the dollar axis is
-    scaled (the contest board's rule). A row with no run is *pending*: it has
+    scaled (the contest board's rule). Sharpe is the exception: the stored
+    column is hourly marks with ddof 0 and 0 for "undefined", so the row
+    publishes P19's daily figure and its 95% interval instead, read off
+    ``curve`` (``daily_sharpe_interval``). ``curve`` is on the display axis and
+    opens at ``display_capital`` before the first print, so ``E_0`` is the seed
+    and day 1 keeps the first hour's P&L.
+
+    A row with no run is *pending*: it has
     no value, return or rank — publishing the seed and 0% would rank an entry
     that never traded against ones that did. A row *catching up* is several
     sessions behind the rest of the board (a replay checkpointing its way
@@ -1660,13 +1671,12 @@ def _entry_from_strategy(
         final = run.get("final_equity")
         portfolio_value = float(final) * scale if final is not None else None
         total_return = run.get("total_return")
-        sharpe = run.get("sharpe_ratio")
         max_dd = run.get("max_drawdown")
     else:
         portfolio_value = None
         total_return = None
-        sharpe = None
         max_dd = None
+    sharpe = daily_sharpe_interval(curve if printed else [], display_capital)
     trade_figures = summarize_trade_stats(
         _run_metadata_dict(run).get(TRADE_STATS_KEY) if printed else None
     )
@@ -1680,7 +1690,11 @@ def _entry_from_strategy(
         "initial_equity": display_capital,
         "portfolio_value": portfolio_value,
         "cumulative_return": total_return,
-        "sharpe_ratio": sharpe,
+        "sharpe_ratio": sharpe["sharpe"],
+        "sharpe_ci_low": sharpe["ci_low"],
+        "sharpe_ci_high": sharpe["ci_high"],
+        "sharpe_days": sharpe["days"],
+        "sharpe_status": sharpe["status"],
         "max_drawdown": max_dd,
         "status": status,
         "rank": None,
@@ -1813,6 +1827,8 @@ def get_live_leaderboard(
     month_label = now.strftime("%B %Y")
     live_status = {
         "phase": LIVE_PHASE,
+        # What every entry's sharpe_* fields mean; the table quotes these.
+        "sharpe": daily_sharpe_basis(),
         "month": f"{now.year:04d}-{now.month:02d}",
         "session_id": LIVE_SESSION_ID,
         "as_of": clock["as_of"],

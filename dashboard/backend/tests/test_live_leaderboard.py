@@ -1095,7 +1095,15 @@ def test_returns_come_off_the_stored_run_and_keep_the_first_hour(no_alpaca):
     payload = live.get_live_leaderboard(as_of=datetime(2026, 8, 27, 17, 39, tzinfo=_ET))
     qwen = next(e for e in payload["entries"] if e["entry_id"] == "qwen3_7_plus")
     assert qwen["cumulative_return"] == pytest.approx(0.02)
-    assert qwen["sharpe_ratio"] == pytest.approx(1.1)
+    # Sharpe is not the stored 1.1: it is the daily figure off the plotted
+    # curve. Aug 3-26 is 18 sessions; the as-of fill holds 0.995 x seed from
+    # Aug 3 to Aug 25, so r = [-0.005, 0 x 16, 1.02/0.995 - 1]. Measured from the
+    # first mark instead of the seed, r_1 would be 0 and this would read 3.74.
+    assert qwen["sharpe_ratio"] == pytest.approx(2.906881, abs=1e-6)
+    assert qwen["sharpe_ci_low"] == pytest.approx(-4.487853, abs=1e-6)
+    assert qwen["sharpe_ci_high"] == pytest.approx(10.301616, abs=1e-6)
+    assert qwen["sharpe_days"] == 18
+    assert qwen["sharpe_status"] == "ok"
     assert qwen["max_drawdown"] == pytest.approx(-0.03)
     assert qwen["portfolio_value"] == pytest.approx(SEED * 1.02)
     assert qwen["equity_curve"][0]["equity"] == pytest.approx(first_mark)
@@ -1966,3 +1974,165 @@ def test_restored_lot_with_an_unreadable_date_is_released_not_kept():
     })
     assert manager.available_positions["AAPL"] == 10.0
     assert "AAPL" not in manager.frozen_lots
+
+
+# --- Daily Sharpe with its 95% interval (P19; spec 2026-10-14 §4) -------------
+
+# Conformance case M03 as session closes: r = [0, 0.02, -0.05, 0.05, 0.01].
+_M03_FACTORS = (1.0, 1.02, 0.969, 1.01745, 1.0276245)
+
+
+def _insert_sharpe_run(entry_id, days, factors, *, seed=SEED, sharpe=9.99):
+    """One 15:00 ET bar per August session (19:00Z, open-stamped -> the 16:00
+    node). ``sharpe`` is the stored column, which the board must ignore."""
+    end = f"2026-08-{days[-1]:02d}"
+    _insert_live_run(
+        f"lb_{entry_id}_20260801_{end.replace('-', '')}", entry_id, end,
+        [_pt(f"2026-08-{d:02d}T19:00:00+00:00", seed * f) for d, f in zip(days, factors)],
+        total_return=factors[-1] - 1, sharpe=sharpe,
+        metadata={"initial_capital": seed},
+    )
+
+
+def _sharpe_entry(payload, entry_id):
+    return next(e for e in payload["entries"] if e["entry_id"] == entry_id)
+
+
+def test_live_sharpe_is_daily_with_its_interval(no_alpaca):
+    _insert_sharpe_run("deepseek_v4_pro", range(3, 8), _M03_FACTORS)
+    payload = live.get_live_leaderboard(as_of=datetime(2026, 8, 7, 17, 39, tzinfo=_ET))
+    deepseek = _sharpe_entry(payload, "deepseek_v4_pro")
+    assert deepseek["sharpe_ratio"] == pytest.approx(2.611715, abs=1e-6)
+    assert deepseek["sharpe_ci_low"] == pytest.approx(-11.396490, abs=1e-6)
+    assert deepseek["sharpe_ci_high"] == pytest.approx(16.619919, abs=1e-6)
+    assert deepseek["sharpe_days"] == 5
+    assert deepseek["sharpe_status"] == "ok"
+
+
+def test_live_sharpe_is_hidden_below_five_days(no_alpaca):
+    _insert_sharpe_run("deepseek_v4_pro", range(3, 7), _M03_FACTORS[:4])
+    payload = live.get_live_leaderboard(as_of=datetime(2026, 8, 6, 17, 39, tzinfo=_ET))
+    deepseek = _sharpe_entry(payload, "deepseek_v4_pro")
+    assert deepseek["status"] == "frozen"
+    assert deepseek["sharpe_ratio"] is None
+    assert deepseek["sharpe_ci_low"] is None and deepseek["sharpe_ci_high"] is None
+    assert deepseek["sharpe_days"] == 4
+    assert deepseek["sharpe_status"] == "insufficient_days"
+
+
+def test_live_sessions_before_the_first_print_count_as_idle_days(no_alpaca):
+    """P19 counts every session in the window. Printing first on Aug 5 leaves
+    Aug 3-4 at the seed: two zero returns, so five days, not three."""
+    _insert_sharpe_run("deepseek_v4_pro", (5, 6, 7), (1.01, 1.0, 1.02))
+    payload = live.get_live_leaderboard(as_of=datetime(2026, 8, 7, 17, 39, tzinfo=_ET))
+    deepseek = _sharpe_entry(payload, "deepseek_v4_pro")
+    assert deepseek["sharpe_days"] == 5
+    assert deepseek["sharpe_status"] == "ok"
+    assert deepseek["sharpe_ratio"] == pytest.approx(5.611652, abs=1e-6)
+
+
+def test_live_sharpe_is_the_same_at_any_seed(no_alpaca):
+    _insert_sharpe_run("deepseek_v4_pro", range(3, 8), _M03_FACTORS, seed=10_000.0)
+    payload = live.get_live_leaderboard(as_of=datetime(2026, 8, 7, 17, 39, tzinfo=_ET))
+    deepseek = _sharpe_entry(payload, "deepseek_v4_pro")
+    assert deepseek["sharpe_ratio"] == pytest.approx(2.611715, abs=1e-6)
+
+
+def test_a_pending_entry_has_no_sharpe(no_alpaca):
+    _insert_sharpe_run("spy_index", range(3, 8), _M03_FACTORS)
+    payload = live.get_live_leaderboard(as_of=datetime(2026, 8, 7, 17, 39, tzinfo=_ET))
+    deepseek = _sharpe_entry(payload, "deepseek_v4_pro")
+    assert deepseek["status"] == "pending"
+    assert deepseek["sharpe_ratio"] is None
+    assert deepseek["sharpe_ci_low"] is None and deepseek["sharpe_ci_high"] is None
+    assert deepseek["sharpe_days"] == 0
+    assert deepseek["sharpe_status"] == "pending"
+
+
+def test_live_payload_states_its_sharpe_basis(no_alpaca):
+    from dashboard.backend.domain.backtesting.metrics import daily_sharpe_basis
+
+    payload = live.get_live_leaderboard(as_of=datetime(2026, 8, 7, 17, 39, tzinfo=_ET))
+    assert payload["live_status"]["sharpe"] == {
+        "basis": "daily_returns",
+        "annualization_days": 252,
+        "confidence": 0.95,
+        "min_days": 5,
+        "rf_annual": 0.0,
+        "stderr": "iid",
+    }
+    assert payload["live_status"]["sharpe"] == daily_sharpe_basis()
+
+
+def test_live_payload_survives_strict_json(no_alpaca):
+    """A flat curve is no_variation, and nothing on the wire is NaN."""
+    import json
+
+    _insert_sharpe_run("deepseek_v4_pro", range(3, 8), (1.0,) * 5)
+    payload = live.get_live_leaderboard(as_of=datetime(2026, 8, 7, 17, 39, tzinfo=_ET))
+    deepseek = _sharpe_entry(payload, "deepseek_v4_pro")
+    assert deepseek["sharpe_status"] == "no_variation"
+    assert deepseek["sharpe_ratio"] is None
+    json.dumps(payload, allow_nan=False)
+
+
+# November 2026's NYSE sessions: Thanksgiving (the 26th) shut, the 27th an
+# early close at 13:00.
+_NOV_2026_SESSIONS = (2, 3, 4, 5, 6, 9, 10, 11, 12, 13, 16, 17, 18, 19, 20, 23, 24, 25, 27, 30)
+
+
+def test_live_sharpe_counts_an_early_close_once(no_alpaca):
+    """November 2026 through the 30th: 20 sessions, Thanksgiving (11-26) shut,
+    11-27 closing at 13:00. Each session returns the next of conformance case
+    M03's five returns, four times over, so the figure is hand-checkable:
+    mean 0.006, stdev 0.0334664 (ddof 1), SR = 0.006 / 0.0334664 x sqrt(252)
+    = 2.846050, and E_0 = the seed gives 20 returns, not 19.
+
+    One 15:00 ET bar per full session (20:00Z in EST, open-stamped -> the 16:00
+    node). On 11-27 the last bar is the 12:00 one (17:00Z), which closes at
+    13:00, so the 13:00 node is that day's close. An axis with a fixed 16:00
+    close draws 14:00-16:00 nodes after it carrying the same equity, so the
+    Sharpe figure alone cannot tell the two axes apart; the curve assertions can.
+    """
+    from dashboard.backend.domain.backtesting.metrics import daily_session_closes
+
+    closes, level = [], SEED
+    for r in (0.0, 0.02, -0.05, 0.05, 0.01) * 4:
+        level *= 1 + r
+        closes.append(level)
+    close_by_day = dict(zip(_NOV_2026_SESSIONS, closes))
+    points = []
+    for day, equity in close_by_day.items():
+        if day == 27:
+            # The 11:00 bar lands on the 12:00 node, the 12:00 bar on 13:00.
+            points.append(_pt("2026-11-27T16:00:00+00:00", equity * 0.99))
+            points.append(_pt("2026-11-27T17:00:00+00:00", equity))
+        else:
+            points.append(_pt(f"2026-11-{day:02d}T20:00:00+00:00", equity))
+    _insert_live_run(
+        "lb_deepseek_v4_pro_20261101_20261130", "deepseek_v4_pro", "2026-11-30", points,
+        total_return=closes[-1] / SEED - 1, sharpe=9.99,
+        metadata={"initial_capital": SEED}, start_date="2026-11-01",
+    )
+    payload = live.get_live_leaderboard(as_of=datetime(2026, 11, 30, 17, 39, tzinfo=_ET))
+    deepseek = _sharpe_entry(payload, "deepseek_v4_pro")
+
+    half_day = [
+        (p["timestamp"][11:16], p["equity"])
+        for p in deepseek["equity_curve"] if p["timestamp"].startswith("2026-11-27")
+    ]
+    assert half_day == [
+        ("10:00", close_by_day[25]),
+        ("11:00", close_by_day[25]),
+        ("12:00", close_by_day[27] * 0.99),
+        ("13:00", close_by_day[27]),
+    ]
+    daily = dict(daily_session_closes(deepseek["equity_curve"]))
+    assert [day.day for day in daily] == list(_NOV_2026_SESSIONS)
+    assert daily[date(2026, 11, 27)] == close_by_day[27]
+
+    assert deepseek["sharpe_ratio"] == pytest.approx(2.846050, abs=1e-6)
+    assert deepseek["sharpe_ci_low"] == pytest.approx(-4.166815, abs=1e-6)
+    assert deepseek["sharpe_ci_high"] == pytest.approx(9.858915, abs=1e-6)
+    assert deepseek["sharpe_days"] == 20
+    assert deepseek["sharpe_status"] == "ok"
