@@ -76,6 +76,9 @@ from dashboard.backend.domain.backtesting.metrics import (
     calculate_sharpe,
     calculate_max_drawdown,
 )
+from dashboard.backend.domain.backtesting.partial_results import (
+    LIVE_PROGRESS_HEARTBEAT_SECONDS,
+)
 from dashboard.backend.domain.backtesting.portfolio_manager import PortfolioManager
 from dashboard.backend.domain.backtesting.decision_tape import (
     DecisionTapeRecorder,
@@ -1102,8 +1105,14 @@ class HourlyBacktester:
         if tape is not None:
             tape.flush()
 
-    def _publish_live_progress(self, step: int, total_steps: int, manager) -> None:
-        """Write incremental equity curve snapshots for live dashboard charting."""
+    def _publish_live_progress(
+        self, step: int, total_steps: int, manager, *, llm_used: bool = False
+    ) -> None:
+        """Write incremental equity curve snapshots for live dashboard charting.
+
+        ``llm_used`` says whether the model has driven a step yet, which
+        decides the model the durable snapshot is labelled with.
+        """
         # Above the early return, not below it. The phase clock is state, not a
         # side effect of writing, and the progress file is only one of its
         # readers. Below the return an engine with no progress file -- every
@@ -1167,14 +1176,16 @@ class HourlyBacktester:
             **self._progress_phase_fields(),
         }
         self._write_progress_payload(payload)
-        self._flush_live_progress_durable(step, payload)
+        self._flush_live_progress_durable(step, payload, llm_used=llm_used)
 
     #: Flush cadence for the durable partial-result snapshot. Ten bars is
     #: under a second of wall time on the cheapest Neon tier yet bounds a
     #: server crash to losing at most nine bars of curve.
     LIVE_PROGRESS_FLUSH_EVERY_STEPS = 10
 
-    def _flush_live_progress_durable(self, step: int, payload: Dict) -> None:
+    def _flush_live_progress_durable(
+        self, step: int, payload: Dict, *, llm_used: bool = False
+    ) -> None:
         """Mirror the progress payload into the run database, throttled.
 
         The progress FILE lives on the instance's ephemeral disk and dies with
@@ -1183,10 +1194,12 @@ class HourlyBacktester:
         earned. Failures are swallowed: persistence here is a courtesy on top
         of a run whose real write comes at completion, and a flaky DB must not
         stall the bar loop. First step always flushes so a run that dies young
-        still leaves a tombstone; the terminal caller (``_save`` paths) relies
-        on the reclaimer treating snapshots WITHOUT a matching agent_runs row
-        as interrupted, which is why completion also clears via delete in the
-        reclaim path rather than here.
+        still leaves a tombstone. Nothing here deletes the row: the parent does
+        once it knows how the run ended, and a row it never got to is what the
+        reclaimer publishes (``partial_results.py``). Between flushes the
+        child's ``LiveProgressHeartbeat`` keeps the row stamped as alive, and
+        ``heartbeat_seconds`` tells the reclaimer so: a snapshot without it
+        was written before runs heartbeated, and its age proves nothing.
         """
         try:
             if step % self.LIVE_PROGRESS_FLUSH_EVERY_STEPS != 0 and step != 1:
@@ -1196,19 +1209,41 @@ class HourlyBacktester:
             db.upsert_live_progress(
                 str(self.live_run_id),
                 str(self.session_id),
-                str(getattr(self, "agent_name", "") or "agent"),
+                # The name run_agent_backtest's completed row carries.
+                "Agent",
                 {
                     **payload,
+                    # What the reclaimer needs to shape the row like the
+                    # completed one: its owner, and the capital total_return
+                    # is measured against.
                     "run_metadata": {
                         "start_date": getattr(self, "start_date", None),
                         "end_date": getattr(self, "end_date", None),
-                        "mode": getattr(self, "mode", None),
-                        "llm_model": getattr(self, "model", None),
+                        "llm_model": self._recorded_llm_model(llm_used),
+                        "owner_user_id": getattr(self, "owner_user_id", None),
+                        "initial_capital": getattr(self, "initial_capital", None),
+                        "heartbeat_seconds": LIVE_PROGRESS_HEARTBEAT_SECONDS,
                     },
                 },
             )
         except Exception as exc:  # noqa: BLE001 - see docstring
             print(f"   ⚠️  live-progress durable flush skipped: {exc}")
+
+    def _recorded_llm_model(self, llm_used: bool) -> str:
+        """The ``llm_model`` a run's row records: a model only once it drove
+        a step. A hosted runtime is attributed from its own calls; a pipeline
+        run from ``llm_used``. The completed row and the reclaimer's snapshot
+        both read it, so an interrupted run is labelled as it would have been.
+        """
+        if getattr(self, "runtime_type", PIPELINE_RUNTIME_TYPE) != PIPELINE_RUNTIME_TYPE:
+            dispatcher = self.runtime_dispatcher
+            return (
+                str(dispatcher.model_name or "unknown")
+                if dispatcher.calls
+                else "rule-based"
+            )
+        model = getattr(self, "model", None)
+        return str(model) if llm_used and model else "rule-based"
 
     def load_data(self):
         """Fetch source bars and build the strategy's decision-bar dataset."""
@@ -2069,8 +2104,6 @@ class HourlyBacktester:
         
         # Track LLM usage for results metadata
         llm_calls_count = 0
-        llm_model = "rule-based"  # Default; hosted runs are attributed below,
-        # after the loop, from the calls that actually succeeded.
 
         manager = PortfolioManager(
             initial_capital=self.native_initial_capital,
@@ -2236,8 +2269,6 @@ class HourlyBacktester:
                         strict_llm=self.strict_llm,
                     )
                     llm_calls_count += 1  # Track that LLM was used
-                    if llm_calls_count == 1:  # Set on first call
-                        llm_model = self.model
                     if manager.last_pipeline_step_outputs:
                         day_episode["latest_step_outputs"] = manager.last_pipeline_step_outputs
                 else:
@@ -2399,7 +2430,9 @@ class HourlyBacktester:
                         manager.equity_history[-1]
                     )
                 )
-            self._publish_live_progress(i + 1, total_steps, manager)
+            self._publish_live_progress(
+                i + 1, total_steps, manager, llm_used=llm_calls_count > 0
+            )
 
             if post_trade_steps and is_last_bar_of_trading_day(all_timestamps, i):
                 self._run_daily_post_trade(
@@ -2461,12 +2494,7 @@ class HourlyBacktester:
             if self.runtime_type != PIPELINE_RUNTIME_TYPE
             else 0
         )
-        if self.runtime_type != PIPELINE_RUNTIME_TYPE:
-            llm_model = (
-                str(self.runtime_dispatcher.model_name or "unknown")
-                if runtime_calls
-                else "rule-based"
-            )
+        llm_model = self._recorded_llm_model(llm_calls_count > 0)
         # Upstream does not report token usage back across the bridge, so a
         # hosted run's tokens and cost stay 0. The call count is what makes the
         # row self-consistent rather than silently understating the run.

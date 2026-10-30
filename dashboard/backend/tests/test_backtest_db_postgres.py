@@ -202,6 +202,7 @@ def pg_backtest_db():
             cur.execute("DELETE FROM trades")
             cur.execute("DELETE FROM backtest_decisions")
             cur.execute("DELETE FROM run_manifest")
+            cur.execute("DELETE FROM run_live_progress")
             cur.execute("DELETE FROM agent_runs")
     yield store
 
@@ -882,6 +883,258 @@ def test_update_run_baselines_coalesce_preserves_unset_field_postgres(pg_backtes
     run = pg_backtest_db.get_run("run-base")
     assert run["baseline_djia_run_id"] == "djia-1"  # untouched by the second call
     assert run["baseline_buyhold_run_id"] == "bh-1"
+
+
+# ---------------------------------------------- live progress (#601) --------
+# The pool hands out dict rows (db_pool.py: row_factory=dict_row), so reading
+# a row by position (``r[0]``) raised KeyError(0) and the startup reclaimer
+# never recovered an interrupted run on Postgres. The twin's live-progress
+# methods shipped (fbbacd56) with no @pg_only test, so the Postgres tier CI
+# runs never exercised them; these mirror test_backtest_partial_results.py.
+
+
+def _pg_backdate(store, run_id, seconds):
+    with store._get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE run_live_progress"
+                " SET updated_at = now() - make_interval(secs => %s)"
+                " WHERE run_id = %s",
+                (seconds, run_id),
+            )
+
+
+def _select_names(sql):
+    """The result keys a SELECT produces: each item's alias, else its name.
+
+    Scans at paren depth 0 so ``EXTRACT(EPOCH FROM ...)`` neither ends the
+    select list nor splits an item."""
+    upper = sql.upper()
+    start = upper.index("SELECT") + len("SELECT")
+    depth, items, current, i = 0, [], "", start
+    while i < len(sql):
+        ch = sql[i]
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+        if depth == 0 and upper.startswith("FROM", i) and sql[i - 1].isspace():
+            break
+        if depth == 0 and ch == ",":
+            items.append(current)
+            current = ""
+        else:
+            current += ch
+        i += 1
+    items.append(current)
+    names = []
+    for item in items:
+        words = item.split()
+        if len(words) >= 2 and words[-2].upper() == "AS":
+            names.append(words[-1])
+        else:
+            names.append(item.strip())
+    return names
+
+
+class _DictRowCursor:
+    """Answers with dict rows keyed by what the executed SELECT names, as
+    prod's dict_row pool does -- so a reader that drops or renames a column
+    in its SQL fails here too, rather than reading the fake's own keys."""
+
+    def __init__(self, table):
+        self._table = table
+        self._rows = []
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def execute(self, sql, params=None):
+        names = _select_names(sql)
+        rows = self._table
+        if "WHERE run_id" in sql:
+            rows = [r for r in rows if r["run_id"] == params[0]]
+        self._rows = [{name: r[name] for name in names} for r in rows]
+
+    def fetchall(self):
+        return list(self._rows)
+
+    def fetchone(self):
+        return self._rows[0] if self._rows else None
+
+
+class _DictRowConnection:
+    def __init__(self, table):
+        self._table = table
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def cursor(self):
+        return _DictRowCursor(self._table)
+
+
+def test_live_progress_readers_accept_dict_rows():
+    """Runs without Postgres: reproduces prod's row shape directly."""
+    import json
+
+    import dashboard.backend.database_postgres as database_pg_module
+
+    payload = {"run_id": "run_live", "step": 10, "equity_curve": []}
+    table = [{
+        "run_id": "run_live",
+        "session_id": "sess-1",
+        "agent_name": "Agent",
+        "payload": json.dumps(payload),
+        # What the listing's age expression yields, under its alias.
+        "age_seconds": 42.0,
+    }]
+    store = object.__new__(database_pg_module.PostgresBacktestDatabase)
+    store._get_connection = lambda: _DictRowConnection(table)
+
+    assert store.list_live_progress() == [{
+        "run_id": "run_live",
+        "session_id": "sess-1",
+        "agent_name": "Agent",
+        "age_seconds": 42.0,
+    }]
+    assert store.get_live_progress("run_live") == payload
+
+
+@pg_only
+def test_live_progress_store_contract_postgres(pg_backtest_db, tmp_path, monkeypatch):
+    from dashboard.backend.tests.test_backtest_partial_results import engine_snapshot
+
+    monkeypatch.setattr("dashboard.backend.database.db", pg_backtest_db, raising=False)
+    engine_snapshot(tmp_path, run_id="run_live")
+    _pg_backdate(pg_backtest_db, "run_live", 600)
+
+    [row] = pg_backtest_db.list_live_progress()
+    assert set(row) == {"run_id", "session_id", "agent_name", "age_seconds"}
+    assert row["agent_name"] == "Agent"
+    assert row["age_seconds"] == pytest.approx(600, abs=5)
+
+    pg_backtest_db.touch_live_progress("run_live")
+    pg_backtest_db.touch_live_progress("no_such_run")
+    rows = pg_backtest_db.list_live_progress()
+    assert [r["run_id"] for r in rows] == ["run_live"]
+    assert rows[0]["age_seconds"] < 5
+    assert pg_backtest_db.get_live_progress("run_live")["step"] == 10
+
+
+@pg_only
+def test_claim_is_won_exactly_once_under_concurrency_postgres(
+    pg_backtest_db, tmp_path, monkeypatch
+):
+    """Two instances' reclaimers claim the same row at once during a deploy.
+    The UPDATE's row lock makes the loser re-check staleness after the winner
+    re-stamped it."""
+    import threading
+
+    from dashboard.backend.domain.backtesting.partial_results import (
+        RECLAIM_STALE_AFTER_SECONDS,
+    )
+    from dashboard.backend.tests.test_backtest_partial_results import engine_snapshot
+
+    monkeypatch.setattr("dashboard.backend.database.db", pg_backtest_db, raising=False)
+    engine_snapshot(tmp_path, run_id="run_live")
+    engine_snapshot(tmp_path, run_id="run_fresh")
+    _pg_backdate(pg_backtest_db, "run_live", RECLAIM_STALE_AFTER_SECONDS + 60)
+    start = threading.Barrier(4)
+    won = []
+
+    def claim():
+        start.wait(10)
+        won.append(pg_backtest_db.claim_live_progress("run_live", RECLAIM_STALE_AFTER_SECONDS))
+
+    threads = [threading.Thread(target=claim) for _ in range(4)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(30)
+
+    assert sorted(won) == [False, False, False, True]
+    assert pg_backtest_db.claim_live_progress("run_fresh", RECLAIM_STALE_AFTER_SECONDS) is False
+    assert pg_backtest_db.claim_live_progress("no_such_run", RECLAIM_STALE_AFTER_SECONDS) is False
+
+
+@pg_only
+def test_delete_run_and_clear_all_delete_snapshots_postgres(
+    pg_backtest_db, tmp_path, monkeypatch
+):
+    from dashboard.backend.tests.test_backtest_partial_results import engine_snapshot
+
+    monkeypatch.setattr("dashboard.backend.database.db", pg_backtest_db, raising=False)
+    engine_snapshot(tmp_path, run_id="run_a")
+    engine_snapshot(tmp_path, run_id="run_b")
+    pg_backtest_db.insert_run(
+        run_id="run_a", session_id="sess-1", agent_name="Agent", mode="backtest",
+        start_date="2026-08-01", end_date="2026-08-31", initial_equity=10000.0,
+    )
+
+    pg_backtest_db.delete_run("run_a")
+    assert [r["run_id"] for r in pg_backtest_db.list_live_progress()] == ["run_b"]
+
+    pg_backtest_db.clear_all()
+    assert pg_backtest_db.list_live_progress() == []
+
+
+@pg_only
+def test_corrupt_payload_is_listed_but_reads_as_none_postgres(pg_backtest_db):
+    with pg_backtest_db._get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO run_live_progress (run_id, session_id, agent_name, payload)"
+                " VALUES ('run_bad', 's', 'Agent', '{not json')"
+            )
+
+    assert [r["run_id"] for r in pg_backtest_db.list_live_progress()] == ["run_bad"]
+    assert pg_backtest_db.get_live_progress("run_bad") is None
+
+
+@pg_only
+def test_reclaim_end_to_end_postgres(pg_backtest_db, tmp_path, monkeypatch):
+    """The reclaimer on the Postgres twin, against a snapshot the engine wrote."""
+    import json
+
+    from dashboard.backend.domain.backtesting.partial_results import (
+        RECLAIM_MAX_AGE_SECONDS,
+        RECLAIM_STALE_AFTER_SECONDS,
+        reclaim_interrupted_backtests,
+    )
+    from dashboard.backend.tests.test_backtest_partial_results import engine_snapshot
+
+    monkeypatch.setattr("dashboard.backend.database.db", pg_backtest_db, raising=False)
+    engine_snapshot(tmp_path, run_id="run_stale", owner_user_id=7)
+    engine_snapshot(tmp_path, run_id="run_fresh")
+    engine_snapshot(tmp_path, run_id="run_ancient")
+    _pg_backdate(pg_backtest_db, "run_stale", RECLAIM_STALE_AFTER_SECONDS + 60)
+    _pg_backdate(pg_backtest_db, "run_ancient", RECLAIM_MAX_AGE_SECONDS + 60)
+
+    counts = reclaim_interrupted_backtests()
+
+    assert counts["reclaimed"] == 1
+    assert counts["discarded"] == 1
+    assert counts["pending"] == ["run_fresh"]
+    run = pg_backtest_db.get_run("run_stale")
+    assert (run["agent_name"], run["mode"], run["owner_user_id"]) == ("Agent", "backtest", 7)
+    assert run["llm_model"] == "gpt-test"
+    assert run["total_return"] == pytest.approx(0.05)
+    meta = run["metadata"]
+    meta = json.loads(meta) if isinstance(meta, str) else meta
+    assert meta["interrupted"] is True
+    assert meta["interrupted_step"] == 10
+    assert len(pg_backtest_db.get_equity_curve("run_stale")) == 2
+    [trade] = pg_backtest_db.get_trades("run_stale")
+    assert (trade["quantity"], trade["side"]) == (10, "BUY")
+    assert pg_backtest_db.get_run("run_ancient") is None
+    assert [r["run_id"] for r in pg_backtest_db.list_live_progress()] == ["run_fresh"]
 
 
 @pg_only
