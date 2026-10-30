@@ -16,7 +16,7 @@ import json
 import os
 import sys
 from copy import deepcopy
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Dict, List
 
@@ -29,6 +29,7 @@ from _bootstrap import ensure_repo_root
 ensure_repo_root()
 
 from dashboard.backend.infrastructure.llm.prompts import create_custom_algo_prompt, parse_risk_rules
+from dashboard.backend.infrastructure.llm.validator import normalize_action, normalize_symbol
 from dashboard.backend.database import db
 
 from backtest_hourly_agent import (  # noqa: E402
@@ -97,7 +98,6 @@ class CustomAlgoPortfolioManager(PortfolioManager):
             return self.make_trading_decision(portfolio_state)
 
         import json as json_lib
-        from backtest_hourly_agent import timedelta
 
         timestamp = portfolio_state.get("timestamp", datetime.now())
         timestamp_str = timestamp.isoformat() if hasattr(timestamp, "isoformat") else str(timestamp)
@@ -184,8 +184,10 @@ class CustomAlgoPortfolioManager(PortfolioManager):
         signals = portfolio_state["market_signals"]
 
         for item in parsed.get("actions", [])[:8]:
-            symbol = item.get("symbol")
-            action_type = str(item.get("action", "hold")).lower()
+            # The gate's own readings: an unstripped "buy " or "AAPL " matched
+            # no branch and no DJIA name, so the trade was dropped (#658).
+            symbol = normalize_symbol(str(item.get("symbol") or ""))
+            action_type = normalize_action(item.get("action")) or "hold"
             confidence = float(item.get("confidence", 0.5))
             reasoning = str(item.get("reasoning", ""))[:200]
 

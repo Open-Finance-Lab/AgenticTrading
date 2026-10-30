@@ -654,19 +654,23 @@ def test_filtered_actions_still_count_as_a_decision():
     assert pm.llm_decisions == 1
 
 
-def test_post_parse_exception_is_billed_but_not_a_decision():
-    # Valid JSON with a non-empty actions list, but a field has the wrong type
-    # (action as a number, which has no .lower()), so the per-action processing
-    # loop raises. (This used confidence "0.9" until the gate learned to read
-    # numeric strings, which made that a usable confidence.)
+def test_post_parse_exception_is_billed_but_not_a_decision(monkeypatch):
+    # Valid JSON with a non-empty actions list, but the per-action processing
+    # loop raises. The fault is injected rather than provoked with a malformed
+    # field: this test reached the loop through confidence "0.9", then through
+    # action 7, and each stopped raising once the gate learned to read it.
     # The blanket except converts the whole step to a pure rule-based fallback —
     # the returned actions are the rule-based engine's, not the model's — so it
     # must NOT count toward model coverage even though parsing "succeeded".
     # (Otherwise a model that reliably emits subtly-malformed actions would show
     # 100% coverage while trading fully rule-based, defeating the H6 guard.)
+    def _raise(*_args, **_kwargs):
+        raise TypeError("malformed field")
+
+    monkeypatch.setattr(portfolio_manager_module, "read_confidence", _raise)
     pm = bha.PortfolioManager(100000)
     resp_text = json.dumps({"actions": [
-        {"symbol": "AAPL", "action": 7, "confidence": 0.9,
+        {"symbol": "AAPL", "action": "buy", "confidence": 0.9,
          "reasoning": "strong", "position_size": 10},
     ]})
     client = _FakeClient(_FakeResponse(resp_text, usage=_FakeUsage(10, 5)))
@@ -674,6 +678,22 @@ def test_post_parse_exception_is_billed_but_not_a_decision():
     assert out == pm.make_trading_decision(_portfolio_state())  # rule-based result
     assert pm.llm_calls == 1        # billed
     assert pm.llm_decisions == 0    # but not a usable model decision
+
+
+def test_unrecognised_action_is_billed_but_not_a_decision():
+    # action 7 used to raise in the loop above (#658 follow-up). It is now
+    # skipped, and a batch with no recognised action holds the step: billed,
+    # and not credited to the model either.
+    pm = bha.PortfolioManager(100000)
+    resp_text = json.dumps({"actions": [
+        {"symbol": "AAPL", "action": 7, "confidence": 0.9,
+         "reasoning": "strong", "position_size": 10},
+    ]})
+    client = _FakeClient(_FakeResponse(resp_text, usage=_FakeUsage(10, 5)))
+    out = pm.make_trading_decision_with_llm(_portfolio_state(), client)
+    assert out == {"actions": []}
+    assert pm.llm_calls == 1
+    assert pm.llm_decisions == 0
 
 
 def test_missing_client_is_neither_billed_nor_a_decision():

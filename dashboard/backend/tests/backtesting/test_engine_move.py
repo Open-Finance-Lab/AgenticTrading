@@ -6,6 +6,7 @@ behave exactly as before. No real Alpaca or Anthropic calls are made.
 """
 
 import ast
+import json
 import os
 import subprocess
 import sys
@@ -511,6 +512,49 @@ def test_custom_algo_subclasses_canonical_engine():
         )
     assert proc.returncode == 0, f"subprocess failed:\n{proc.stderr}"
     assert "OK" in proc.stdout
+
+
+def test_custom_algo_reads_a_padded_action_and_symbol_like_the_gate():
+    # "buy " matched neither branch and "AAPL " no DJIA name, so the Trading
+    # Algo loop dropped the trade without a word (#658). Also the only test
+    # that runs this method's LLM branch at all: from cd402c8a until this
+    # fix, its `from backtest_hourly_agent import timedelta` raised
+    # ImportError on the first decision of every LLM Trading Algo run.
+    code = (
+        "import json\n"
+        "from datetime import datetime\n"
+        "import backtest_custom_algo as bca\n"
+        "reply = json.dumps({'actions': [{'symbol': ' aapl\\n', 'action': 'BUY ',\n"
+        "                                 'position_size': 2, 'confidence': 0.9}]})\n"
+        "class _Block:\n"
+        "    text = reply\n"
+        "class _Messages:\n"
+        "    @staticmethod\n"
+        "    def create(**_kw):\n"
+        "        return type('R', (), {'content': [_Block()]})()\n"
+        "class _Client:\n"
+        "    messages = _Messages()\n"
+        "bca.HAS_ANTHROPIC = True\n"
+        "manager = bca.CustomAlgoPortfolioManager(10000.0, {})\n"
+        "state = {'timestamp': datetime(2026, 4, 1, 15, 30), 'positions': [],\n"
+        "         'cash': 10000.0, 'total_equity': 10000.0,\n"
+        "         'market_signals': {'AAPL': {'price': 100.0, 'rsi': 50.0}}}\n"
+        "decision = manager.make_trading_decision_with_custom_algo(state, _Client())\n"
+        "print(json.dumps([[a['symbol'], a['action'], a['shares']]\n"
+        "                  for a in decision['actions']]))\n"
+    )
+    scripts_dir = _REPO_ROOT / "dashboard" / "scripts"
+    with tempfile.TemporaryDirectory(prefix="atl_engine_") as tmp:
+        env = {**os.environ, "DATABASE_PATH": os.path.join(tmp, "t.db")}
+        proc = subprocess.run(
+            [sys.executable, "-c", code],
+            cwd=str(scripts_dir),
+            env=env,
+            capture_output=True,
+            text=True,
+        )
+    assert proc.returncode == 0, f"subprocess failed:\n{proc.stderr}"
+    assert json.loads(proc.stdout.strip().splitlines()[-1]) == [["AAPL", "buy", 2]]
 
 
 def _hosted_backtester(runner, *, symbols=("AAPL", "MSFT", "JPM")):
