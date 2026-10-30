@@ -54,7 +54,11 @@ from typing import Any, Dict, List, Optional, Tuple
 from dashboard.backend.database import db
 import dashboard.backend.infrastructure.llm.token_cost as token_cost
 from dashboard.backend.baseline_generator import generate_baselines
-from dashboard.backend.infrastructure.llm.validator import DJIA_30, TOP_10_STOCKS as TOP_10
+from dashboard.backend.infrastructure.llm.validator import (
+    DJIA_30,
+    LLM_SELL_SIZING,
+    TOP_10_STOCKS as TOP_10,
+)
 from dashboard.backend.infrastructure.market_data.strategy_universe import (
     resolve_strategy_universe, validate_selection,
 )
@@ -1812,6 +1816,9 @@ class HourlyBacktester:
         if self.use_llm:
             meta["llm_max_output_tokens"] = llm_harness.DEFAULT_MAX_OUTPUT_TOKENS
             meta["llm_sampling"] = self._llm_sampling_metadata()
+            # Which rule sized the model's sells: a row without it predates
+            # sells honouring their size (#661) and closed whole positions.
+            meta["llm_sell_sizing"] = LLM_SELL_SIZING
         llm_execution = getattr(self, "_llm_execution_evidence", None)
         execution_client = getattr(self, "execution_client", None)
         if llm_execution is None and execution_client is not None:

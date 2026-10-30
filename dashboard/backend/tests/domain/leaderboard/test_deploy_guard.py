@@ -242,6 +242,7 @@ def test_deploy_records_effective_llm_run_metadata(guard_env, monkeypatch):
         # indistinguishable from one written before the field existed.
         "strategy_prompt": None,
         "llm_max_output_tokens": 1234,
+        "llm_sell_sizing": "requested_shares",
         "initial_capital": 10000.0,
         "start_date": "2026-04-16",
         "end_date": "2026-04-30",
@@ -375,6 +376,7 @@ def test_ensure_leaderboard_runs_records_llm_metadata(tmp_path, monkeypatch):
         "reasoning_effort": "none",
         "strategy_prompt": None,
         "llm_max_output_tokens": 1234,
+        "llm_sell_sizing": "requested_shares",
         "initial_capital": 10000.0,
         "start_date": "2026-04-15",
         "end_date": "2026-05-15",

@@ -158,6 +158,7 @@ def test_engine_llm_run_metadata_snapshot(monkeypatch):
             "model": None,
             "wire": {},
         },
+        "llm_sell_sizing": "requested_shares",
     }
     backtester.use_llm = False
     assert backtester._agent_run_metadata() == {

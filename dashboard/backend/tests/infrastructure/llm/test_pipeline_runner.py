@@ -248,7 +248,9 @@ def test_pipeline_output_to_decision_risk_actions():
             "symbol": "AAPL",
             "confidence": 0.8,
             "reasoning": "risk limit",
-            "position_size": 50,
+            # A share of the position, not a share count: the gate sizes it.
+            "position_size": 0,
+            "size_fraction": 0.5,
         }
     ]
 
@@ -286,7 +288,34 @@ def test_pipeline_risk_action_without_a_size_sells_the_position(fields):
         {"risk_actions": [{"symbol": "AAPL", "action": "trail", **fields}]}
     )
     assert decision["actions"][0]["action"] == "sell"
-    assert decision["actions"][0]["position_size"] == 100
+    # The whole position: the gate reads a fraction of 1 as all of it (#661).
+    assert decision["actions"][0]["position_size"] == 0
+    assert decision["actions"][0]["size_fraction"] == 1.0
+
+
+def test_pipeline_risk_action_size_near_the_float_limit_does_not_raise():
+    """``int(round(size_pct * 100))`` raised OverflowError on 1e307, throwing
+    the whole bar away; a fraction above 1 is the whole position."""
+    decision = pipeline_output_to_decision(
+        {"risk_actions": [{"symbol": "AAPL", "action": "trail", "size_pct": 1e307}]}
+    )
+    assert decision["actions"][0]["size_fraction"] == 1e307
+
+
+def test_pipeline_execution_rules_state_how_a_sell_is_sized():
+    """Agents seeded before #661 carry an instruction saying a sell closes the
+    whole position, so the harness states the rule on every last step."""
+    from dashboard.backend.infrastructure.llm.pipeline_runner import _build_step_prompt
+
+    prompt = _build_step_prompt(
+        step_index=0,
+        step={"id": "s1", "label": "Trade", "prompt": "Trade.", "outputFormat": "JSON"},
+        market_snapshot={"portfolio": {}, "top_signals": {}},
+        prior_outputs=[],
+        is_last=True,
+    )
+    rules = prompt.split("=== EXECUTION RULES ===", 1)[1]
+    assert "a qty of 0 sells the whole position" in rules
 
 
 @pytest.mark.parametrize(

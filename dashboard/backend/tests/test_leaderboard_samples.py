@@ -519,6 +519,22 @@ def test_a_clamped_or_fallback_tape_is_a_different_experiment(board):
     assert entry["samples"]["max_return"] == pytest.approx(0.01)
 
 
+def test_repeats_sized_by_different_sell_rules_never_pool(board):
+    """A row without ``llm_sell_sizing`` closed whole positions whatever the
+    model's size (#661); a median across it and a row that sold the size asked
+    for describes neither. The larger group publishes, as for the tape, so a
+    board whose repeats all predate the rule is unchanged by the merge."""
+    _seed_primary(board)
+    _seed_sample(board, 1, -0.01)
+    _seed_sample(board, 2, 0.01)
+    _seed_sample(board, 3, 0.40, metadata=_config(llm_sell_sizing="requested_shares"))
+
+    entry = _entry(lb_service.get_leaderboard(), _ENTRY)
+
+    assert entry["samples"]["count"] == 2
+    assert entry["samples"]["max_return"] == pytest.approx(0.01)
+
+
 def test_newest_means_last_written_on_either_backend():
     """Postgres keeps the first-seen ``created_at`` on a re-insert, so a
     ``--force`` rerun is newer only by ``updated_at``, which both backends set."""

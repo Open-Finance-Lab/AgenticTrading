@@ -275,11 +275,10 @@ def test_llm_pipeline_bars_record_intent_and_fallback(monkeypatch, store):
     assert tape[1]["decision"]["gate_rewrote"] is False  # nothing parsed, nothing to rewrite
 
 
-def test_llm_sell_widened_by_the_gate_is_not_a_rewrite(monkeypatch, store):
-    """Every model SELL becomes 'sell all sellable' -- the gate's documented
-    sizing, not a rewrite, or ``gate_rewrites`` would count prompt habits. A
-    BUY the gate drops (confidence under 0.3) is a rewrite, per bar and per
-    run."""
+def test_llm_sell_trim_is_sold_as_asked_and_is_not_a_rewrite(monkeypatch, store):
+    """A model SELL of 1 share out of 4 sells 1 (#661): the gate honoured the
+    size, so it is not a rewrite. A BUY the gate drops (confidence under 0.3)
+    is a rewrite, per bar and per run."""
     stub = _PipelineStub([
         json.dumps({"actions": [{"symbol": "AAPL", "action": "buy", "position_size": 4, "confidence": 0.9, "reasoning": "open"}]}),
         json.dumps({"actions": [{"symbol": "AAPL", "action": "sell", "position_size": 1, "confidence": 0.9, "reasoning": "trim one"}]}),
@@ -289,7 +288,7 @@ def test_llm_sell_widened_by_the_gate_is_not_a_rewrite(monkeypatch, store):
     tape = trace_service.load_decision_tape("agent_tape_engine")
     assert tape[0]["decision"]["gate_rewrote"] is False
     assert tape[1]["decision"]["intent"]["orders"][0]["position_size"] == 1
-    assert tape[1]["decision"]["actions"][0]["shares"] == 4  # the whole position
+    assert tape[1]["decision"]["actions"][0]["shares"] == 1  # the trim, not the whole position
     assert tape[1]["decision"]["gate_rewrote"] is False
     assert tape[2]["decision"]["actions"] == []  # dropped for low confidence
     assert tape[2]["decision"]["gate_rewrote"] is True

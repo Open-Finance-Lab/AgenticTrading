@@ -37,6 +37,7 @@ from dashboard.backend.domain.leaderboard.live_trade_stats import (
 )
 from dashboard.backend.domain.leaderboard.roster_failures import RosterFailures
 from dashboard.backend.domain.leaderboard.strategies._common import reference_start_date
+from dashboard.backend.infrastructure.llm.validator import LEGACY_LLM_SELL_SIZING
 from dashboard.backend.infrastructure.market_data.alpaca_bars import (
     allow_recent_sip,
     sip_delay_minutes,
@@ -572,7 +573,14 @@ _RESUME_CONFIG_KEYS = (
     "temperature",
     "reasoning_effort",
     "strategy_prompt",
+    "llm_sell_sizing",
 )
+
+# Resume keys whose absence is itself a recorded value. A checkpoint written
+# before ``llm_sell_sizing`` existed sold whole positions whatever the model's
+# size (#661): reading that absence as "unknown" would splice a month half
+# sized one way and half the other, and its trade stats with it.
+_RESUME_KEY_DEFAULTS = {"llm_sell_sizing": LEGACY_LLM_SELL_SIZING}
 
 
 def _config_changes(
@@ -590,9 +598,10 @@ def _config_changes(
     the recorded side, so the two cannot drift apart by construction. A key
     the checkpoint never recorded is unknown, not a change. So is a
     ``model_id`` the entry leaves to the gateway default, which only ``run()``
-    resolves.
+    resolves. A key in ``_RESUME_KEY_DEFAULTS`` is never unknown: its absence
+    reads as its default.
     """
-    recorded = _run_metadata_dict(resume_from)
+    recorded = {**_RESUME_KEY_DEFAULTS, **_run_metadata_dict(resume_from)}
     current = lb_service._llm_run_metadata(
         entry["id"],
         entry,

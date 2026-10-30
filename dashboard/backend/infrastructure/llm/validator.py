@@ -145,6 +145,69 @@ def model_number(value: Any, default: Optional[float] = None) -> Optional[float]
     return None
 
 
+# How a model's SELL is sized (``requested_sell_shares``), recorded on every
+# LLM run's metadata as ``llm_sell_sizing``. Until #661 the backtest gate sold
+# the whole position whatever the size; a row without the key was written
+# under that rule (``LEGACY_LLM_SELL_SIZING``). The two rules trade one reply
+# differently, so curves made under them are different experiments: the
+# leaderboard pools repeats of one rule only, and a Live month checkpointed
+# under the other is replayed rather than resumed. Change the value with the
+# rule.
+LLM_SELL_SIZING = "requested_shares"
+LEGACY_LLM_SELL_SIZING = "whole_position"
+
+
+def requested_sell_shares(
+    position_size: Any,
+    size_fraction: Any,
+    held: float,
+    *,
+    lot_size: int = 1,
+) -> Tuple[Optional[float], Optional[str]]:
+    """Shares a model's SELL asks for, before the holding and T+1 cap it (#661).
+
+    ``(shares, None)``, or ``(None, why)`` when the SELL must be skipped. One
+    rule for both readers of a SELL: the backtest gate and
+    ``actions_to_executable``. Only a size the model left out, null or 0 means
+    the whole position (the convention both have always shared; blank text is
+    left out, as everywhere ``model_number`` reads a number); a size this
+    cannot use is refused, never read as "all of it":
+
+    - ``position_size`` above 0 is a share count. Where ``lot_size`` is 1 it
+      is cut to whole shares, and one under a share is refused rather than cut
+      to 0. In a lot market it is passed on as written, for the executor's own
+      lot check.
+    - With no ``position_size``, ``size_fraction`` (a pipeline risk action's
+      ``size_pct``) is a share of ``held``: a number above 0, 1 or more
+      meaning all of it, a part rounded down to whole lots. Without one, the
+      whole position.
+    - A bool, text that is not a number, a list, NaN, infinity or a negative
+      number in either field is refused, and so is a fraction that rounds to
+      no shares.
+    """
+    size = model_number(position_size, 0.0)
+    if size is None or not math.isfinite(size) or size < 0:
+        return None, f"position_size {position_size!r} is not a share count"
+    if size > 0:
+        if lot_size > 1:
+            return size, None
+        if size < 1:
+            return None, f"position_size {position_size!r} is less than one share"
+        return int(size), None
+    fraction = model_number(size_fraction, 1.0)  # absent: the whole position
+    if fraction is None or not math.isfinite(fraction) or fraction <= 0:
+        return None, f"size_fraction {size_fraction!r} is not a share of the position"
+    if fraction >= 1:
+        return held, None
+    # Rounded before the floor: 0.57 * 100 is 56.99999999999999 in binary
+    # floating point, and a bare floor sold 56 of the 57 shares asked for.
+    lots = math.floor(round(fraction * held / lot_size, 9))
+    if lots <= 0:
+        unit = "one share" if lot_size == 1 else f"one lot of {lot_size}"
+        return None, f"size_fraction {size_fraction!r} of {held:g} shares is less than {unit}"
+    return lots * lot_size, None
+
+
 def _confidence_in_range(confidence: float) -> bool:
     return math.isfinite(confidence) and 0.0 <= confidence <= 1.0
 
@@ -503,7 +566,14 @@ def actions_to_executable(
 
         elif action_type == TradingAction.SELL:
             if symbol in positions and positions[symbol] > 0:
-                sell_shares = min(decision.position_size or positions[symbol], positions[symbol])
+                # The gate's rule (requested_sell_shares), so one SELL is sized
+                # alike on both paths. LLMTradingDecision has already held
+                # position_size to a whole count from 0 to MAX_ORDER_SHARES and
+                # carries no size_fraction, so only "0 = all of it" applies.
+                requested, _refusal = requested_sell_shares(
+                    decision.position_size, None, positions[symbol]
+                )
+                sell_shares = min(requested or 0, positions[symbol])
                 if sell_shares > 0:
                     executable.append({
                         "symbol": symbol,
@@ -747,7 +817,7 @@ Position sizing:
 - position_size must be an integer share count.
 - If price or cash is missing, use position_size 1 for BUY.
 - For HOLD, position_size must be 0.
-- For SELL, position_size should be the shares to sell if available; otherwise use 1.
+- For SELL, position_size is the number of shares to sell, at most what you hold; use 0 to sell the whole position.
 
 Confidence:
 - BUY confidence should usually be 0.65 to 0.90.
@@ -774,7 +844,7 @@ Return exactly this JSON shape:
       "symbol": "<DJIA symbol>",
       "confidence": 0.75,
       "reasoning": "<short reason using trend, momentum, RSI, or risk>",
-      "position_size": 1,
+      "position_size": <integer shares; for SELL the shares to sell, 0 for the whole position; 0 for hold>,
       "stop_loss_price": null,
       "take_profit_price": null
     }}
@@ -805,6 +875,7 @@ Run the strategy above as a DJIA portfolio trading agent on historical hourly da
 - Trade ONLY symbols listed in VALID SYMBOLS.
 - Only SELL symbols that are currently owned (see current_holdings).
 - position_size must be an integer share count; use 0 for hold.
+- For SELL, position_size is the number of shares to sell, at most what you hold; use 0 to sell the whole position.
 - Output at most 10 actions.
 - Return ONLY valid JSON. No markdown, no code fences, no text outside the JSON.
 
@@ -823,7 +894,7 @@ Return exactly this JSON shape:
       "symbol": "<DJIA symbol>",
       "confidence": 0.75,
       "reasoning": "<short reason grounded in the strategy and the snapshot>",
-      "position_size": 1,
+      "position_size": <integer shares; for SELL the shares to sell, 0 for the whole position; 0 for hold>,
       "stop_loss_price": null,
       "take_profit_price": null
     }}

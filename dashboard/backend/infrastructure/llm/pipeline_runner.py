@@ -135,6 +135,17 @@ def is_last_bar_of_trading_day(
     return trading_day_key(timestamps[index]) != trading_day_key(timestamps[index + 1])
 
 
+# The last step's EXECUTION RULES state how a SELL is sized, and not only the
+# starter instruction: that text is copied into an agent when it is created, so
+# agents made before sells honoured their size (#661) still say "a sell always
+# closes the whole position" -- and a model trusting that sentence writes any
+# qty, which now trims.
+_SELL_SIZE_RULE = (
+    "- A SELL's qty is the number of shares to sell, at most what you hold; "
+    "a qty of 0 sells the whole position."
+)
+
+
 def _market_lot_size(market_snapshot: Any) -> int:
     """The board lot the snapshot's ``market`` block declares, else 1."""
     market = market_snapshot.get("market") if isinstance(market_snapshot, dict) else None
@@ -191,6 +202,7 @@ def _build_step_prompt(
                 "=== EXECUTION RULES ===",
                 "- Trade ONLY symbols listed in the market snapshot.",
                 "- Only SELL symbols that appear in current_holdings.",
+                _SELL_SIZE_RULE,
                 "- Respect available cash for buy orders.",
                 "- Use integer share quantities.",
             ]
@@ -319,23 +331,25 @@ def pipeline_output_to_decision(parsed: Dict[str, Any]) -> Optional[Dict[str, An
                 confidence = read_confidence(
                     raw_confidence, PIPELINE_RISK_DEFAULT_CONFIDENCE
                 )
-                normalized.append(
-                    {
-                        "action": side,
-                        "symbol": risk.get("symbol"),
-                        "confidence": (
-                            raw_confidence if confidence is None else confidence
-                        ),
-                        "reasoning": risk.get("reason")
-                        or risk.get("rationale")
-                        or action_type,
-                        "position_size": (
-                            max(1, int(round(size_pct * 100)))
-                            if side == "sell"
-                            else 0
-                        ),
-                    }
-                )
+                order = {
+                    "action": side,
+                    "symbol": risk.get("symbol"),
+                    "confidence": (
+                        raw_confidence if confidence is None else confidence
+                    ),
+                    "reasoning": risk.get("reason")
+                    or risk.get("rationale")
+                    or action_type,
+                    "position_size": 0,
+                }
+                if side == "sell":
+                    # A share of the position, not a share count: the sell
+                    # gate turns it into shares against what is held (#661),
+                    # which this function never sees. It used to send
+                    # round(size_pct * 100) as a share count, which also
+                    # raised OverflowError on a size_pct near the float limit.
+                    order["size_fraction"] = size_pct
+                normalized.append(order)
             if normalized:
                 return {"actions": normalized}
             saw_unusable_nonempty_envelope = True
