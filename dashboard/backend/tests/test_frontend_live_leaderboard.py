@@ -215,8 +215,8 @@ def _render_live(entries, *, selected=None):
         "liveSortKey = 'sharpe'; liveSortDir = 'desc';",
         "populateLiveTable();",
         f"renderLiveDetail(livePayload.entries.find((e) => e.entry_id === {json.dumps(selected)}) || null);",
-        "console.log(JSON.stringify({ table: tbody.innerHTML, detail: detail.innerHTML,"
-        " order: liveSortedEntries().map((e) => e.entry_id) }));",
+        "console.log(JSON.stringify({ table: tbody.innerHTML, detail: detail.innerHTML, "
+        + "order: liveSortedEntries().map((e) => e.entry_id) }));",
     ])
     return run_node(script)
 
