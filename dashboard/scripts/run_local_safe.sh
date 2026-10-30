@@ -14,9 +14,17 @@ SCRATCH="${ATL_LOCAL_DIR:-$HOME/.cache/atl-local}"
 mkdir -p "$SCRATCH/bar_cache"
 [ -f "$SCRATCH/backtest.db" ] || cp dashboard/storage/data/backtest.db "$SCRATCH/backtest.db"
 
-if ! .venv/bin/python -c "import uvicorn" 2>/dev/null; then
+# A venv keeps its interpreter in Scripts/ on Windows (Git Bash) and bin/
+# everywhere else. Picked by OS, not by which file exists: a checkout shared
+# with Windows can hold a Windows venv that Linux cannot run.
+case "${OSTYPE:-}" in
+  msys*|cygwin*) PY=.venv/Scripts/python.exe ;;
+  *)             PY=.venv/bin/python ;;
+esac
+
+if ! "$PY" -c "import uvicorn" 2>/dev/null; then
   echo "Dependencies missing. Install with:" >&2
-  echo "  UV_HTTP_TIMEOUT=180 uv pip install --python .venv/bin/python -r requirements.txt -r requirements-vnpy.txt pytest pytest-timeout" >&2
+  echo "  UV_HTTP_TIMEOUT=180 uv pip install --python $PY -r requirements.txt -r requirements-vnpy.txt pytest pytest-timeout" >&2
   exit 1
 fi
 
@@ -32,4 +40,4 @@ exec env \
   ALPACA_API_KEY= ALPACA_SECRET_KEY= \
   ANTHROPIC_API_KEY= OPENAI_API_KEY= DEEPSEEK_API_KEY= \
   COMMONSTACK_API_KEY= OPENROUTER_API_KEY= \
-  .venv/bin/python -m uvicorn dashboard.backend.app:app --host 127.0.0.1 --port "$PORT"
+  "$PY" -m uvicorn dashboard.backend.app:app --host 127.0.0.1 --port "$PORT"
