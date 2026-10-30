@@ -20,7 +20,6 @@ import json
 import os
 import re
 import subprocess
-import sys
 import threading
 import time
 import uuid
@@ -34,6 +33,7 @@ from dashboard.backend.infrastructure.llm.http_policy import (
     call_with_retries,
     provider_http_timeout,
 )
+from dashboard.backend.paths import child_python
 
 # Resolves to the ``dashboard/`` directory — identical to the previous
 # ``Path(__file__).resolve().parent.parent`` when this module lived at
@@ -143,19 +143,6 @@ def _default_backtest_dates() -> tuple[str, str]:
             # swallow an unrelated attribute bug.
             _report_unusable_defaults(f"could not be read as a settings object ({exc})")
     return "2026-05-04", "2026-05-12"
-
-
-def _resolve_python_exe() -> str:
-    project_dir = _PROJECT_DIR
-    venv_dir = project_dir / ".venv"
-    if venv_dir.exists():
-        win_py = venv_dir / "Scripts" / "python.exe"
-        if win_py.exists():
-            return str(win_py)
-        unix_py = venv_dir / "bin" / "python3"
-        if unix_py.exists():
-            return str(unix_py)
-    return sys.executable
 
 
 def _get_anthropic_client():
@@ -301,12 +288,14 @@ def _run_backtest_background(
     global algo_status
     project_dir = _PROJECT_DIR
     script = project_dir / "scripts" / "backtest_custom_algo.py"
-    python_exe = _resolve_python_exe()
     env = os.environ.copy()
 
     algo_status["progress"] = "Fetching hourly bars from Alpaca…"
 
     try:
+        # Inside the try: a raise before it would skip the finally and leave
+        # the single-flight algo_status claiming "running" until a restart.
+        python_exe = child_python()
         proc = subprocess.run(
             [
                 python_exe,
