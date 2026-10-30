@@ -32,7 +32,7 @@ from dashboard.backend.infrastructure.llm.validator import (
     parse_actions_payload,
 )
 from dashboard.backend.infrastructure.llm.providers import openrouter
-from dashboard.backend.paths import REPO_ROOT
+from dashboard.backend.paths import REPO_ROOT, venv_python
 
 DEFAULT_MODEL_NAME = openrouter.DEFAULT_MODEL
 DEFAULT_MODEL_PROVIDER = "OpenRouter"
@@ -184,12 +184,18 @@ class AiHedgeFundSubprocessRunner:
 
     def _python_executable(self) -> Path:
         configured = self.environment.get("AI_HEDGE_FUND_PYTHON", "").strip()
+        # venv_python, not a literal bin/python: a Windows runtime venv keeps
+        # its interpreter at Scripts\python.exe.
         candidate = (
             _resolve_path(configured)
             if configured
-            else _LOCAL_RUNTIME_DIR / "bin" / "python"
+            else venv_python(_LOCAL_RUNTIME_DIR)
         )
-        if not candidate.is_file() or not os.access(candidate, os.X_OK):
+        if (
+            candidate is None
+            or not candidate.is_file()
+            or not os.access(candidate, os.X_OK)
+        ):
             raise AiHedgeFundConfigurationError(
                 "AI Hedge Fund runtime is not installed; configure "
                 "AI_HEDGE_FUND_PYTHON with its isolated interpreter"

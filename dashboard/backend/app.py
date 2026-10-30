@@ -17,6 +17,7 @@ from fastapi.responses import FileResponse, RedirectResponse
 from pathlib import Path
 import asyncio
 import os
+import sys
 
 import dashboard.backend.database as _database
 from dashboard.backend.paths import FRONTEND_DIR
@@ -40,6 +41,30 @@ from dashboard.backend.domain.backtesting.baselines.paper import create_paper_ba
 # name as an "unused import" errors 9 tests. Bound explicitly so the
 # re-export reads as deliberate rather than as a stale import.
 db = _database.db
+
+
+def _never_fail_on_unencodable_output(streams=None) -> None:
+    """Let a print the stream cannot encode degrade instead of raising.
+
+    The backend prints emoji throughout (``run_backtest_background`` prints
+    several before it launches the child). Windows encodes a redirected
+    stdout -- a service, ``> server.log``, an IDE run pane -- in the ANSI code
+    page, where each of those raised UnicodeEncodeError and failed the request
+    or backtest that printed it. ``backslashreplace`` keeps the stream's
+    encoding and writes ``\\U0001f680`` instead. A UTF-8 stream, which is
+    every deployment, encodes everything and sees no change.
+    """
+    for stream in (sys.stdout, sys.stderr) if streams is None else streams:
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is None:  # None under pythonw, or a non-io replacement
+            continue
+        try:
+            reconfigure(errors="backslashreplace")
+        except (OSError, ValueError):  # a detached or closed stream
+            continue
+
+
+_never_fail_on_unencodable_output()
 
 # Load .env from project root (ANTHROPIC_API_KEY, ALPACA_*)
 _env_path = Path(__file__).resolve().parent.parent / ".env"

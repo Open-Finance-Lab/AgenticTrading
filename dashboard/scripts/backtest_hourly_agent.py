@@ -717,6 +717,11 @@ def _run_failed_report(exc: LLMExecutionError) -> str:
 
 if __name__ == "__main__":
     signal.signal(signal.SIGTERM, _exit_on_sigterm)
+    # Windows' cancel signal. The parent sends CTRL_BREAK_EVENT to this
+    # process's console group (``_break_console_group``) because
+    # ``terminate()`` there is TerminateProcess, which skips this unwind.
+    if hasattr(signal, "SIGBREAK"):
+        signal.signal(signal.SIGBREAK, _exit_on_sigterm)
     # Reached through the module alias bound at the top rather than a second
     # `from` import of the same module: importing one module both ways in one
     # file is its own CodeQL finding (py/import-and-import-from), and the alias
