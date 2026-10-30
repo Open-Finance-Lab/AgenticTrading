@@ -37,7 +37,10 @@ kiwisolver==1.5.1
 llvmlite==0.44.0
 matplotlib==3.11.0
 mcp==1.30.0
-msgpack==1.2.1
+# A security floor, not a direct import: alpaca-py's live-data websocket
+# decoder pulls it in. 1.2.3 fixes GHSA-j586-36cw-2gc2 and 1.2.4 fixes
+# GHSA-j8c6-9vc5-hj6x, both in the C extension. Never pin below 1.2.4.
+msgpack==1.2.4
 multitasking==0.0.13
 networkx==3.5
 numpy==2.2.6
