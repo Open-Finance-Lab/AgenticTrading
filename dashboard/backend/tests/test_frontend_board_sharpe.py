@@ -61,6 +61,12 @@ _CASES = [
     (None, _BASIS),
     ({**_OK, "sharpe_ratio": -0.004, "sharpe_ci_low": -0.004, "sharpe_ci_high": 0.003}, _BASIS),
     ({k: v for k, v in _OK.items() if k != "sharpe_days"}, _BASIS),
+    # The two files coerce through different helpers; hold them together on
+    # the off-type shapes a hand-edited or proxied payload could carry.
+    ({**_OK, "sharpe_ratio": "2.6", "sharpe_days": "5"}, _BASIS),
+    ({**_OK, "sharpe_ratio": "Infinity"}, _BASIS),
+    ({**_OK, "sharpe_ci_low": ""}, _BASIS),
+    ({"sharpe_status": "insufficient_days", "sharpe_days": 3}, {**_BASIS, "min_days": "7"}),
 ]
 
 
@@ -108,7 +114,7 @@ def test_both_boards_word_sharpe_identically():
     for board, live in pairs:
         assert board == live
     mains = [board["main"] for board, _live in pairs]
-    assert mains == ["2.61", "-0.50", "2.61", "2.61", "—", "—", "—", "—", "—", "—", "—", "0.00", "2.61"]
+    assert mains == ["2.61", "-0.50", "2.61", "2.61", "—", "—", "—", "—", "—", "—", "—", "0.00", "2.61", "2.60", "—", "—", "—"]
 
 
 @_needs_node
@@ -195,3 +201,21 @@ def test_sharpe_headers_say_what_the_number_is():
     live_title = re.search(r'<th[^>]*data-sort="sharpe"[^>]*title="([^"]*)"', live).group(1)
     assert live_title == _HEADER_TITLE, "one definition, worded once on both boards"
     assert "annualized from hourly results" not in APP_HTML
+
+
+def test_every_sharpe_sink_is_escaped():
+    """The formatters only emit numbers and fixed text today, so no fixture can
+    show a missing escape; pin the sinks by source instead."""
+    raw = re.compile(r"\$\{\s*sharpe(?:Text|\.(?:main|sub|text|title))\s*\}")
+    for name, source in (
+        ("leaderboard.js", _LEADERBOARD_JS),
+        ("live-leaderboard.js", _LIVE_JS),
+        ("home-page.js", _HOME_JS),
+    ):
+        code = strip_comments(source)
+        assert not raw.search(code), name
+    assert _LEADERBOARD_JS.count("escapeHtml(sharpe.main)") == 1
+    assert _LEADERBOARD_JS.count("escapeHtml(sharpe.sub)") == 1
+    assert _LEADERBOARD_JS.count("escapeHtml(sharpe.title)") == 2
+    assert _LIVE_JS.count("escapeHtml(sharpe.title)") == 2
+    assert "homeEscape(sharpe.text)" in _HOME_JS and "homeEscape(sharpe.title)" in _HOME_JS

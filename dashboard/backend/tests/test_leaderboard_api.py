@@ -951,3 +951,55 @@ def test_competition_sharpe_never_reads_the_stored_column():
     assert 'run.get("sharpe_ratio") or 0' not in source
     assert "daily_sharpe_interval(scaled_hourly, display_capital)" in source
     assert "daily_sharpe_interval(equity_curve" not in source
+
+
+@pytest.mark.parametrize("seed", [10_000.0, 250_000.0])
+def test_competition_sharpe_is_the_same_at_any_stored_seed(client, monkeypatch, seed):
+    """A board run off the published capital is rescaled onto it (#365/#194);
+    Sharpe must read the rescaled curve against the board's E_0, or day 1
+    carries the seed ratio as a return."""
+    factor = seed / 100000.0
+    runs = {
+        "djia_index": [
+            ("2026-04-15T14:00:00", 100000), ("2026-04-15T20:00:00", 100000),
+            ("2026-04-16T20:00:00", 102000), ("2026-04-17T20:00:00", 96900),
+            ("2026-04-20T20:00:00", 101745), ("2026-04-21T20:00:00", 102762.45),
+        ],
+        "spy_index": [("2026-04-15T14:00:00", 100000), ("2026-05-15T20:00:00", 103000)],
+    }
+    for entry_id, points in runs.items():
+        run_id = f"lb_{entry_id}_20260415_20260515"
+        lb_service.db.insert_run(
+            run_id=run_id,
+            session_id="leaderboard-contest",
+            agent_name="Agentic Trading Lab",
+            mode="leaderboard",
+            start_date="2026-04-15",
+            end_date="2026-05-15",
+            initial_equity=seed,
+            final_equity=points[-1][1] * factor,
+            total_return=points[-1][1] / 100000 - 1,
+            sharpe_ratio=1.2,
+            max_drawdown=-0.02,
+            num_trades=1,
+            llm_model=entry_id,
+        )
+        lb_service.db.insert_equity_points(run_id, [
+            {"timestamp": t, "equity": e * factor, "cash": 0, "positions_value": e * factor}
+            for t, e in points
+        ])
+    monkeypatch.setattr(
+        lb_service,
+        "ensure_leaderboard_runs",
+        lambda force_refresh=False, period="contest", config=None: {
+            "session_id": "leaderboard-contest",
+            "created": 0,
+            "refreshed_at": "2026-06-18T00:00:00+00:00",
+        },
+    )
+    body = client.get("/api/v1/leaderboard").json()
+    djia = next(e for e in body["entries"] if e["entry_id"] == "djia_index")
+    assert djia["portfolio_value"] == pytest.approx(102762.45)  # rescaled onto the board
+    assert djia["sharpe_status"] == "ok"
+    assert djia["sharpe_days"] == 5
+    assert djia["sharpe_ratio"] == pytest.approx(2.611715, abs=1e-6)
