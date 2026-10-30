@@ -1,0 +1,12 @@
+# Test tools for CI and local test runs; the Docker image never installs
+# them. requirements-test.txt is generated from this file the way
+# requirements.txt is generated from requirements.in (see that file), with
+#
+#     uv pip compile requirements-test.in -o requirements-test.txt --python-platform linux --python-version 3.13
+#
+# The constraint holds every package the two files share at
+# requirements.txt's pin, so installing the test tools cannot move a
+# package prod runs.
+-c requirements.txt
+pytest==9.2.0
+pytest-timeout==2.4.0
