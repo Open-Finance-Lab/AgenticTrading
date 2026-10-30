@@ -168,11 +168,13 @@ def test_restore_keeps_memory_out_of_the_trade_list():
     ]
 
 
-def test_an_old_snapshot_restores_no_memory():
+def test_an_old_snapshot_restores_no_memory(capsys):
     manager = PortfolioManager(initial_capital=10_000)
     manager.restore_state({"cash": 100.0, "positions": {"AAPL": 1}})
     assert manager.restored_trades == []
     assert manager.cash == 100.0
+    # Every Live checkpoint before this shipped looks like this: not an error.
+    assert "ERROR" not in capsys.readouterr().out
 
 
 def test_restore_skips_corrupt_memory_rows():
@@ -190,6 +192,13 @@ def test_restore_skips_corrupt_memory_rows():
             {**valid, "side": ""},
             {**valid, "price": "NaN"},
             {**valid, "shares": "ten"},
+            # pandas reads these as the wall clock, later than every bar.
+            {**valid, "timestamp": "now"},
+            {**valid, "timestamp": "today"},
+            # float() reads True as 1.0 and "100.0" as a price; the writer
+            # stores numbers, so neither is a quantity.
+            {**valid, "shares": True},
+            {**valid, "price": "100.0"},
             "garbage",
             None,
             valid,
@@ -346,26 +355,17 @@ def test_restore_carries_where_the_memory_started():
     [
         {},
         {"trade_memory_since": "2026-08-03T14:00:00+00:00"},
-        {
-            "trade_memory": TRADE_MEMORY_VERSION,
-            "trade_memory_since": "not-a-date",
-            "recent_trades": [],
-        },
-        {
-            "trade_memory": TRADE_MEMORY_VERSION,
-            "trade_memory_since": None,
-            "recent_trades": [],
-        },
+        {"trade_memory": TRADE_MEMORY_VERSION, "trade_memory_since": "not-a-date"},
+        {"trade_memory": TRADE_MEMORY_VERSION, "trade_memory_since": None},
     ],
     ids=["pre-marker", "stamp-without-marker", "unreadable-stamp", "no-stamp"],
 )
-def test_a_snapshot_without_a_readable_mark_restarts_it_here(marker, capsys):
+def test_a_snapshot_without_a_readable_mark_restarts_it_here(marker):
     manager = PortfolioManager(initial_capital=10_000)
     manager.restore_state({"cash": 100.0, "positions": {}, **marker})
     assert manager.trade_memory_since is None
     _decide_at(manager, "2026-08-27T14:00:00Z")
     assert manager.snapshot_state()["trade_memory_since"] == "2026-08-27T14:00:00+00:00"
-    assert "ERROR" not in capsys.readouterr().out
 
 
 def test_an_empty_marked_memory_is_a_quiet_night_and_keeps_the_mark(capsys):
@@ -381,28 +381,71 @@ def test_an_empty_marked_memory_is_a_quiet_night_and_keeps_the_mark(capsys):
     assert "ERROR" not in capsys.readouterr().out
 
 
+_KEPT = _memory("2026-08-26T18:00:00+00:00")
+
+
 @pytest.mark.parametrize(
-    "memory, found",
+    "damage, restored, line",
     [
-        ({}, "missing"),
-        ({"recent_trades": {"AAPL": 1}}, "dict"),
-        ({"recent_trades": [{"symbol": "AAPL"}, "garbage"]}, "2"),
+        ({"recent_trades": None}, [], "version=1 recent_trades=missing restored=0 since=ok"),
+        ({"recent_trades": {"AAPL": 1}}, [], "version=1 recent_trades=dict restored=0 since=ok"),
+        (
+            {"recent_trades": [{"symbol": "AAPL"}, "garbage"]},
+            [],
+            "version=1 recent_trades=2 restored=0 since=ok",
+        ),
+        (
+            {"recent_trades": [_KEPT, "garbage"]},
+            [_KEPT],
+            "version=1 recent_trades=2 restored=1 since=ok",
+        ),
+        (
+            {"trade_memory_since": "not-a-date"},
+            [_KEPT],
+            "version=1 recent_trades=1 restored=1 since=unreadable",
+        ),
+        ({"trade_memory": 2}, [_KEPT], "version=2 recent_trades=1 restored=1 since=ok"),
     ],
-    ids=["key-missing", "not-a-list", "every-row-unreadable"],
+    ids=[
+        "key-missing",
+        "not-a-list",
+        "every-row-unreadable",
+        "one-row-unreadable",
+        "unreadable-stamp",
+        "unknown-version",
+    ],
 )
-def test_marked_memory_that_reads_back_as_nothing_is_an_error(memory, found, capsys):
-    # Broken, not absent: the night opens with no memory, so the stamp must
-    # restart here too or the row would claim this night had it.
-    manager = PortfolioManager(initial_capital=10_000)
-    manager.restore_state({
+def test_a_marked_snapshot_that_does_not_read_back_whole_is_an_error(
+    damage, restored, line, capsys
+):
+    # The writer stores only rows _memory_trade accepts and, after a bar, a
+    # readable stamp, so anything less is broken, not absent. The night opens
+    # with less memory than it was given, so the stamp restarts here too, or
+    # the checkpoint would claim this night had it.
+    snapshot = {
         "cash": 100.0,
+        "recent_trades": [_KEPT],
         "trade_memory": TRADE_MEMORY_VERSION,
         "trade_memory_since": "2026-08-03T14:00:00+00:00",
-        **memory,
-    })
-    assert manager.restored_trades == []
+        **damage,
+    }
+    if snapshot["recent_trades"] is None:
+        del snapshot["recent_trades"]
+    manager = PortfolioManager(initial_capital=10_000)
+    manager.restore_state(snapshot)
+    assert manager.restored_trades == [
+        {**row, "timestamp": pd.Timestamp(row["timestamp"])} for row in restored
+    ]
     assert manager.trade_memory_since is None
-    assert (
-        f"ERROR: portfolio.trade_memory_unreadable recent_trades={found} restored=0"
-        in capsys.readouterr().out
-    )
+    assert f"ERROR: portfolio.trade_memory_unreadable {line}" in capsys.readouterr().out
+
+
+def test_a_whole_marked_snapshot_restores_quietly(capsys):
+    night1 = PortfolioManager(initial_capital=10_000)
+    night1.trades = [_trade("2026-08-26T18:00:00Z")]
+    _decide_at(night1, "2026-08-26T18:00:00Z")
+    night2 = PortfolioManager(initial_capital=10_000)
+    night2.restore_state(json.loads(json.dumps(night1.snapshot_state())))
+    assert len(night2.restored_trades) == 1
+    assert night2.trade_memory_since == pd.Timestamp("2026-08-26T18:00:00Z")
+    assert "ERROR" not in capsys.readouterr().out

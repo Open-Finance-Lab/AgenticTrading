@@ -29,6 +29,7 @@ import json
 import math
 from datetime import date, datetime, timedelta
 from itertools import chain
+from numbers import Real
 from types import MappingProxyType
 from typing import Any, Dict, List, Mapping, Optional
 
@@ -152,11 +153,15 @@ def _memory_timestamp(value: Any) -> Optional[pd.Timestamp]:
     A naive stamp is read as UTC, the zone the board's bars are stamped in, so
     a restored trade can always be compared with a tz-aware decision clock
     (comparing naive with aware raises, and the decision path would swallow
-    that into a rule-based fallback).
+    that into a rule-based fallback). Text must open with an ISO date:
+    pandas also reads "now" and "today", which would stamp a corrupt row at
+    the wall clock, later than every bar.
     """
     if not isinstance(value, (str, datetime)):
         return None
     try:
+        if isinstance(value, str):
+            date.fromisoformat(value[:10])
         ts = pd.Timestamp(value)
     except (TypeError, ValueError, OverflowError):
         return None
@@ -181,11 +186,12 @@ def _memory_trade(trade: Any) -> Optional[Dict[str, Any]]:
     ts = _memory_timestamp(trade.get("timestamp"))
     if ts is None:
         return None
-    try:
-        shares = float(trade.get("shares"))
-        price = float(trade.get("price"))
-    except (TypeError, ValueError, OverflowError):
+    # Numbers only: the writer stores floats, so text or a bool (which
+    # float() reads as 1.0) is a corrupt row, not a quantity.
+    numbers = (trade.get("shares"), trade.get("price"))
+    if not all(isinstance(n, Real) and not isinstance(n, bool) for n in numbers):
         return None
+    shares, price = (float(n) for n in numbers)
     if not (math.isfinite(shares) and math.isfinite(price)):
         return None
     return {
@@ -378,10 +384,9 @@ class PortfolioManager:
             return []
         rows.sort(key=lambda row: row["timestamp"])
         anchor = rows[-1]["timestamp"]
-        if self.equity_history:
-            last_bar = _memory_timestamp(self.equity_history[-1].get("timestamp"))
-            if last_bar is not None and last_bar > anchor:
-                anchor = last_bar
+        last_bar = self._bar_stamp(-1)
+        if last_bar is not None and last_bar > anchor:
+            anchor = last_bar
         cutoff = anchor - TRADE_MEMORY_WINDOW
         tail = [row for row in rows if row["timestamp"] > cutoff]
         return [
@@ -403,19 +408,24 @@ class PortfolioManager:
         could not say where.
         """
         since = self.trade_memory_since
-        if since is None and self.equity_history:
-            since = _memory_timestamp(self.equity_history[0].get("timestamp"))
+        if since is None:
+            since = self._bar_stamp(0)
         return since.isoformat() if since is not None else None
+
+    def _bar_stamp(self, index: int) -> Optional[pd.Timestamp]:
+        """The stamp of equity point ``index`` (0 is the first bar this manager
+        decided, -1 the last), or None before it has decided anything."""
+        if not self.equity_history:
+            return None
+        return _memory_timestamp(self.equity_history[index].get("timestamp"))
 
     def restore_state(self, snapshot: Optional[Dict[str, Any]]) -> None:
         """Load cash/positions/T+1 lots and the 24h trade memory from
         ``snapshot_state`` (no-op if empty).
 
         The memory goes to ``restored_trades``, never ``trades``. A snapshot
-        written before it existed restores none; a corrupt memory row is
-        skipped rather than allowed to fail the session, and memory that reads
-        back as nothing at all logs an ERROR. ``trade_memory_since`` is kept
-        only from a snapshot marked ``trade_memory`` whose memory read back.
+        written before it existed restores none, quietly; a marked one that
+        does not read back whole logs an ERROR (``_restore_trade_memory``).
         """
         if not snapshot:
             return
@@ -459,8 +469,18 @@ class PortfolioManager:
             if restored:
                 lots_out[str(symbol)] = restored
         self.frozen_lots = lots_out
+        self._restore_trade_memory(snapshot)
+
+    def _restore_trade_memory(self, snapshot: Dict[str, Any]) -> None:
+        """Load ``recent_trades`` into ``restored_trades`` and, from a snapshot
+        that carried it whole, ``trade_memory_since``.
+
+        Rows are re-read through ``_memory_trade``, put in time order and capped
+        to the newest ``SNAPSHOT_TRADE_MEMORY_LIMIT``; an unusable one is
+        skipped rather than allowed to fail the session.
+        """
         memory = snapshot.get("recent_trades")
-        restored_trades = sorted(
+        parsed = sorted(
             (
                 row
                 for row in map(_memory_trade, memory if isinstance(memory, list) else [])
@@ -468,34 +488,40 @@ class PortfolioManager:
             ),
             key=lambda row: row["timestamp"],
         )
-        self.restored_trades = restored_trades[-SNAPSHOT_TRADE_MEMORY_LIMIT:]
-        marked = snapshot.get("trade_memory") == TRADE_MEMORY_VERSION
-        # A marked snapshot always writes a list of rows ``_memory_trade``
-        # accepted, so one whose memory reads back as nothing at all is a broken
-        # contract (a renamed key, a changed row shape), not a quiet night:
-        # nothing else would tell the two apart, since this night's prompts
-        # would just open with no memory.
-        lost = marked and (
-            not isinstance(memory, list) or (bool(memory) and not restored_trades)
+        self.restored_trades = parsed[-SNAPSHOT_TRADE_MEMORY_LIMIT:]
+        version = snapshot.get("trade_memory")
+        if version is None:
+            # Written before the memory existed: nothing was carried, nothing
+            # is wrong, and the mark restarts at this manager's first bar.
+            self.trade_memory_since = None
+            return
+        since = _memory_timestamp(snapshot.get("trade_memory_since"))
+        # A marked snapshot holds only rows ``_memory_trade`` accepted and, being
+        # written after a bar, a readable stamp. Less than that is a broken
+        # contract (a renamed key, a changed row shape, a version this code does
+        # not know), not a quiet night: nothing else would tell the two apart,
+        # since the night just opens with less memory than it was given.
+        intact = (
+            version == TRADE_MEMORY_VERSION
+            and isinstance(memory, list)
+            and len(parsed) == len(memory)
+            and since is not None
         )
-        if lost:
+        if not intact:
             if isinstance(memory, list):
                 found = len(memory)
             else:
                 found = "missing" if memory is None else type(memory).__name__
             print(
-                f"ERROR: portfolio.trade_memory_unreadable recent_trades={found} "
-                "restored=0",
+                f"ERROR: portfolio.trade_memory_unreadable version={version} "
+                f"recent_trades={found} restored={len(parsed)} "
+                f"since={'ok' if since is not None else 'unreadable'}",
                 flush=True,
             )
-        # Unmarked (written before the memory existed), lost or unreadable: the
-        # mark restarts at this manager's first bar, which can only record the
-        # switch later than it happened, never earlier.
-        self.trade_memory_since = (
-            _memory_timestamp(snapshot.get("trade_memory_since"))
-            if marked and not lost
-            else None
-        )
+        # Lost or unreadable: the mark restarts at this manager's first bar,
+        # which can only record the switch later than it happened, never
+        # earlier.
+        self.trade_memory_since = since if intact else None
 
     @property
     def sellable_positions(self) -> Optional[Mapping]:
