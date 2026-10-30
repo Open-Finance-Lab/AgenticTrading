@@ -10,33 +10,72 @@ which twin this class is).
 
 from __future__ import annotations
 
-import json
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Literal, Mapping, Sequence
 
 from .repository_common import positive_limit, positive_user_id, utc_iso
 from .value_repository import (
+    _ACTIVATIONS_SQL,
+    _ACTIVE_DATES_SQL,
     _ACTIVE_RUN_STATUSES,
     _ACTIVITY_EVENT_NAMES,
+    _ATTENTION_SQL,
+    _COUNT_ACTIVATED_SQL,
+    _COUNT_SEGMENTS_SQL,
+    _COUNT_STATES_SQL,
+    _COUNT_TRANSITIONS_SQL,
     _DAILY_FACT_COLUMNS,
     _DAILY_FACT_UPDATES,
+    _DAYS_WITHOUT_TRANSITIONS_SQL,
     _EVENTS_FOR_DAY_SQL,
+    _FACTS_FOR_DATE_SQL,
+    _GROUP_REPEAT_SQL,
+    _GROUP_TOTALS_SQL,
+    _INTERNAL_EXCLUSION_SQL,
+    _LATEST_FACT_DATE_SQL,
+    _LEGACY_SNAPSHOTS_SQL,
+    _LEGACY_UNROLLED_DATES_SQL,
+    _RECOMPUTE_EPOCH,
     _RECOMPUTE_EVENTS_SQL,
     _RECOMPUTE_FACTS_SQL,
+    _REPLACE_TRANSITIONS_DELETE_SQL,
+    _REQUEUE_RECOMPUTE_SQL,
     _TERMINAL_RUN_STATUSES,
     _TRANSITION_COLUMNS,
     _TRANSITION_UPDATES,
+    _TRANSITIONS_FOR_DATE_SQL,
+    _UPSERT_TRANSITIONS_SQL,
+    _USER_TRANSITIONS_SQL,
     _RECENT_FACTS_SQL,
     _activity_update_values,
+    _backfill_transition_statements,
+    _attention_candidate,
     _day_bounds_iso,
     _events_totals_from_row,
     _fact_from_row,
+    _fact_state_count,
     _fact_values,
+    _group_totals,
+    _id_chunks,
+    _latest_fact_date,
+    _legacy_read_dates,
+    _legacy_snapshot,
+    _segment_day_count,
+    _transition_count,
+    _transition_row,
+    _user_page_row,
+    _users_page_sql,
+    _validate_date_window,
+    _validate_page_window,
+    _validate_day,
     _recompute_days,
     _transition_values,
     _activity_from_row,
     _population_operational_signals,
     _recent_totals_from_row,
+    _ROLLUP_COLUMNS,
+    _lifecycle_rollup_payloads,
+    _replaced_lifecycle_metrics,
     LIFECYCLE_ROLLUP_METRICS,
     LIFECYCLE_SEGMENTS,
     MAX_USER_BATCH,
@@ -44,17 +83,21 @@ from .value_repository import (
     CommercialValueFact,
     CurrentOperationalFacts,
     ActivityUpdate,
+    AttentionCandidate,
     DayEventTotals,
+    FactStateCount,
+    GroupFactTotals,
+    LegacyLifecycleHistory,
     LifecycleTransitionRow,
     ProjectionJob,
     RecentFactTotals,
+    SegmentDayCount,
+    TransitionCount,
     UserActivity,
     UserDailyFact,
-    UserLifecycleDailySnapshot,
-    UserValueSnapshot,
-    _current_snapshot_from_row,
+    UserPageQuery,
+    UserPageRow,
     _ids,
-    _legacy_seed,
     _object_value,
     _optional_timestamp,
     _projection_job_name,
@@ -69,6 +112,13 @@ from .lifecycle import (
     OperationalSignals,
     consecutive_failed_terminal_runs,
 )
+
+
+def _postgres_table_exists(cur: Any, table: str) -> bool:
+    """Locale-proof: ``to_regclass`` answers NULL for a missing relation, so no
+    error message (whose text follows ``lc_messages``) is ever parsed."""
+    cur.execute("SELECT to_regclass(%s) IS NOT NULL AS present", (table,))
+    return bool(_row_value(cur.fetchone(), "present"))
 
 
 class PostgresValueAnalyticsStore:
@@ -129,186 +179,6 @@ class PostgresValueAnalyticsStore:
     def _analytics_connection(self):
         return self.analytics_base._get_connection()
 
-    def upsert_current_snapshot(self, snapshot: UserValueSnapshot) -> UserValueSnapshot:
-        def evidence(value: Sequence[str]) -> str:
-            return json.dumps(
-                list(value),
-                separators=(",", ":"),
-                ensure_ascii=True,
-            )
-
-        legacy_status, legacy_reason_code, legacy_reason = _legacy_seed(snapshot)
-        values = (
-            snapshot.user_id,
-            legacy_status,
-            legacy_reason_code,
-            legacy_reason,
-            "[]",
-            snapshot.lifecycle_segment,
-            snapshot.lifecycle_reason_code,
-            snapshot.lifecycle_reason,
-            evidence(snapshot.lifecycle_evidence),
-            snapshot.operational_state,
-            snapshot.operational_reason_code,
-            snapshot.operational_reason,
-            evidence(snapshot.operational_evidence),
-            utc_iso(snapshot.activated_at) if snapshot.activated_at else None,
-            (
-                utc_iso(snapshot.last_meaningful_activity_at)
-                if snapshot.last_meaningful_activity_at
-                else None
-            ),
-            snapshot.inactive_days,
-            snapshot.active_days_30d,
-            snapshot.successful_backtests_30d,
-            utc_iso(snapshot.calculated_at),
-        )
-        columns = """
-            user_id, status, reason_code, human_readable_reason,
-            evidence_event_ids_json, lifecycle_segment, lifecycle_reason_code,
-            lifecycle_reason, lifecycle_evidence_json, operational_state,
-            operational_reason_code, operational_reason,
-            operational_evidence_json, activated_at,
-            last_meaningful_activity_at, inactive_days, active_days_30d,
-            successful_backtests_30d, calculated_at
-        """
-        updates = """
-            lifecycle_segment=excluded.lifecycle_segment,
-            lifecycle_reason_code=excluded.lifecycle_reason_code,
-            lifecycle_reason=excluded.lifecycle_reason,
-            lifecycle_evidence_json=excluded.lifecycle_evidence_json,
-            operational_state=excluded.operational_state,
-            operational_reason_code=excluded.operational_reason_code,
-            operational_reason=excluded.operational_reason,
-            operational_evidence_json=excluded.operational_evidence_json,
-            activated_at=excluded.activated_at,
-            last_meaningful_activity_at=excluded.last_meaningful_activity_at,
-            inactive_days=excluded.inactive_days,
-            active_days_30d=excluded.active_days_30d,
-            successful_backtests_30d=excluded.successful_backtests_30d,
-            calculated_at=excluded.calculated_at
-        """
-        with self._analytics_connection() as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    f"""
-                    INSERT INTO user_analytics_snapshots ({columns})
-                    VALUES ({", ".join(["%s"] * len(values))})
-                    ON CONFLICT(user_id) DO UPDATE SET {updates}
-                    """,
-                    values,
-                )
-        return snapshot
-
-    def get_current_snapshot(self, user_id: int) -> UserValueSnapshot | None:
-        subject = positive_user_id(user_id)
-        with self._analytics_connection() as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    "SELECT * FROM user_analytics_snapshots WHERE user_id=%s",
-                    (subject,),
-                )
-                row = cur.fetchone()
-        return _current_snapshot_from_row(row)
-
-    def list_current_snapshots(
-        self,
-        user_ids: Sequence[int],
-    ) -> dict[int, UserValueSnapshot]:
-        ids = _ids(user_ids)
-        if not ids:
-            return {}
-        result: dict[int, UserValueSnapshot] = {}
-        for offset in range(0, len(ids), MAX_USER_BATCH):
-            chunk = ids[offset : offset + MAX_USER_BATCH]
-            with self._analytics_connection() as conn:
-                with conn.cursor() as cur:
-                    cur.execute(
-                        """
-                        SELECT *
-                        FROM user_analytics_snapshots
-                        WHERE user_id = ANY(%s) AND lifecycle_segment IS NOT NULL
-                        ORDER BY user_id
-                        """,
-                        [chunk],
-                    )
-                    rows = cur.fetchall()
-            for row in rows:
-                user_id = int(_row_value(row, "user_id"))
-                snapshot = _current_snapshot_from_row(row)
-                if snapshot is not None:
-                    result[user_id] = snapshot
-        return result
-
-    def upsert_daily_snapshot(
-        self,
-        snapshot: UserLifecycleDailySnapshot,
-    ) -> UserLifecycleDailySnapshot:
-        values = (
-            snapshot.snapshot_date.isoformat(),
-            snapshot.user_id,
-            snapshot.lifecycle_segment,
-            snapshot.lifecycle_reason_code,
-            snapshot.data_quality,
-            utc_iso(snapshot.calculated_at),
-        )
-        sql = """
-            INSERT INTO user_lifecycle_daily_snapshots (
-                snapshot_date, user_id, lifecycle_segment,
-                lifecycle_reason_code, data_quality, calculated_at
-            ) VALUES (%s, %s, %s, %s, %s, %s)
-            ON CONFLICT(snapshot_date, user_id) DO UPDATE SET
-                lifecycle_segment=excluded.lifecycle_segment,
-                lifecycle_reason_code=excluded.lifecycle_reason_code,
-                data_quality=excluded.data_quality,
-                calculated_at=excluded.calculated_at
-        """
-        with self._analytics_connection() as conn:
-            with conn.cursor() as cur:
-                cur.execute(sql, values)
-        return snapshot
-
-    def list_daily_snapshots(
-        self,
-        *,
-        start: date,
-        end: date,
-        user_ids: Sequence[int] | None = None,
-    ) -> list[UserLifecycleDailySnapshot]:
-        if end <= start:
-            raise ValueError("end must be later than start")
-        ids = _ids(user_ids) if user_ids is not None else None
-        if ids == []:
-            return []
-        params: list[Any] = [start.isoformat(), end.isoformat()]
-        clause = ""
-        if ids:
-            clause = " AND user_id = ANY(%s)"
-            params.append(ids)
-        sql = f"""
-            SELECT *
-            FROM user_lifecycle_daily_snapshots
-            WHERE snapshot_date >= %s
-              AND snapshot_date < %s
-              {clause}
-            ORDER BY snapshot_date, user_id
-        """
-        with self._analytics_connection() as conn:
-            with conn.cursor() as cur:
-                cur.execute(sql, params)
-                rows = cur.fetchall()
-        return [
-            UserLifecycleDailySnapshot(
-                snapshot_date=date.fromisoformat(str(_row_value(row, "snapshot_date"))),
-                user_id=int(_row_value(row, "user_id")),
-                lifecycle_segment=_row_value(row, "lifecycle_segment"),
-                lifecycle_reason_code=_row_value(row, "lifecycle_reason_code"),
-                data_quality=_row_value(row, "data_quality"),
-                calculated_at=_timestamp(_row_value(row, "calculated_at")),
-            )
-            for row in rows
-        ]
-
     def replace_lifecycle_rollups(
         self,
         day: date,
@@ -318,72 +188,11 @@ class PostgresValueAnalyticsStore:
     ) -> None:
         """Replace only lifecycle aggregates, preserving other daily metrics."""
 
-        values = list(rows)
-        columns = (
-            "rollup_date",
-            "metric_name",
-            "event_name",
-            "billing_mode",
-            "provider_id",
-            "model_id",
-            "outcome",
-            "error_category",
-            "user_state",
-            "value_count",
-            "value_sum_micro",
-            "updated_at",
+        payloads = _lifecycle_rollup_payloads(
+            day, list(rows), replace_transitions=replace_transitions
         )
-        payloads = []
-        for row in values:
-            if (
-                row.rollup_date != day
-                or row.metric_name not in LIFECYCLE_ROLLUP_METRICS
-            ):
-                raise ValueError("invalid lifecycle rollup row")
-            if row.metric_name == "lifecycle_segment_count":
-                valid_dimensions = (
-                    not row.event_name and row.user_state in LIFECYCLE_SEGMENTS
-                )
-            else:
-                valid_dimensions = (
-                    replace_transitions
-                    and row.event_name in LIFECYCLE_SEGMENTS
-                    and row.user_state in LIFECYCLE_SEGMENTS
-                    and row.event_name != row.user_state
-                )
-            unused_dimensions = (
-                row.billing_mode,
-                row.provider_id,
-                row.model_id,
-                row.error_category,
-            )
-            if (
-                not valid_dimensions
-                or any(unused_dimensions)
-                or row.outcome not in {"complete", "partial"}
-                or row.value_sum_micro != 0
-            ):
-                raise ValueError("invalid lifecycle rollup dimensions")
-            payloads.append(
-                (
-                    row.rollup_date.isoformat(),
-                    row.metric_name,
-                    row.event_name,
-                    row.billing_mode,
-                    row.provider_id,
-                    row.model_id,
-                    row.outcome,
-                    row.error_category,
-                    row.user_state,
-                    row.value_count,
-                    row.value_sum_micro,
-                    utc_iso(row.updated_at),
-                )
-            )
-        placeholders = ", ".join(["%s"] * len(columns))
-        metrics = ["lifecycle_segment_count"]
-        if replace_transitions:
-            metrics.append("lifecycle_transition")
+        placeholders = ", ".join(["%s"] * len(_ROLLUP_COLUMNS))
+        metrics = _replaced_lifecycle_metrics(replace_transitions=replace_transitions)
         metric_placeholders = ", ".join(["%s"] * len(metrics))
         with self._analytics_connection() as conn:
             with conn.cursor() as cur:
@@ -398,63 +207,64 @@ class PostgresValueAnalyticsStore:
                 if payloads:
                     cur.executemany(
                         f"""
-                        INSERT INTO analytics_daily_rollups ({', '.join(columns)})
+                        INSERT INTO analytics_daily_rollups ({', '.join(_ROLLUP_COLUMNS)})
                         VALUES ({placeholders})
                         """,
                         payloads,
                     )
 
-    def list_expiring_daily_dates(
-        self,
-        *,
-        before: date,
-        limit: int,
-    ) -> list[date]:
+    def list_expiring_fact_dates(self, *, before: date, limit: int) -> list[date]:
+        """See the SQLite twin."""
         if not isinstance(before, date) or isinstance(before, datetime):
             raise ValueError("before must be a date")
         page_size = positive_limit(limit, maximum=1000)
         sql = """
-            SELECT DISTINCT snapshot_date
-            FROM user_lifecycle_daily_snapshots
-            WHERE snapshot_date < %s
+            SELECT snapshot_date FROM (
+                SELECT DISTINCT snapshot_date FROM user_daily_facts
+                WHERE snapshot_date < %s
+                UNION
+                SELECT DISTINCT snapshot_date FROM lifecycle_transitions
+                WHERE snapshot_date < %s
+            ) AS expiring
             ORDER BY snapshot_date
             LIMIT %s
         """
         with self._analytics_connection() as conn:
             with conn.cursor() as cur:
-                cur.execute(sql, (before.isoformat(), page_size))
+                cur.execute(sql, (before.isoformat(), before.isoformat(), page_size))
                 rows = cur.fetchall()
         return [
             date.fromisoformat(str(_row_value(row, "snapshot_date"))) for row in rows
         ]
 
-    def delete_daily_snapshots_for_date(self, day: date) -> int:
+    def expire_facts_for_date(self, day: date) -> int:
+        """See the SQLite twin. One connection, so one transaction."""
         if not isinstance(day, date) or isinstance(day, datetime):
             raise ValueError("day must be a date")
         with self._analytics_connection() as conn:
             with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    DELETE FROM user_lifecycle_daily_snapshots
-                    WHERE snapshot_date = %s
-                    RETURNING user_id
-                    """,
-                    (day.isoformat(),),
-                )
-                return len(cur.fetchall())
+                deleted = 0
+                for table in ("user_daily_facts", "lifecycle_transitions"):
+                    cur.execute(
+                        f"DELETE FROM {table} WHERE snapshot_date = %s RETURNING user_id",
+                        (day.isoformat(),),
+                    )
+                    deleted += len(cur.fetchall())
+                return deleted
 
-    def has_daily_before(self, before: date) -> bool:
+    def has_facts_before(self, before: date) -> bool:
+        """See the SQLite twin."""
         if not isinstance(before, date) or isinstance(before, datetime):
             raise ValueError("before must be a date")
         sql = """
-            SELECT 1
-            FROM user_lifecycle_daily_snapshots
-            WHERE snapshot_date < %s
+            SELECT 1 FROM user_daily_facts WHERE snapshot_date < %s
+            UNION ALL
+            SELECT 1 FROM lifecycle_transitions WHERE snapshot_date < %s
             LIMIT 1
         """
         with self._analytics_connection() as conn:
             with conn.cursor() as cur:
-                cur.execute(sql, (before.isoformat(),))
+                cur.execute(sql, (before.isoformat(), before.isoformat()))
                 row = cur.fetchone()
         return row is not None
 
@@ -547,7 +357,8 @@ class PostgresValueAnalyticsStore:
         return result
 
     def seed_activity_from_snapshots(self, *, now: datetime) -> int:
-        """See the SQLite twin."""
+        """See the SQLite twin. Absence is ``to_regclass`` IS NULL, which
+        resolves through ``search_path`` and reads no localized message text."""
         stamp = utc_iso(_utc(now, "now"))
         sql = """
             INSERT INTO user_activity (
@@ -576,8 +387,38 @@ class PostgresValueAnalyticsStore:
         """
         with self._analytics_connection() as conn:
             with conn.cursor() as cur:
+                if not _postgres_table_exists(cur, "user_analytics_snapshots"):
+                    return 0
                 cur.execute(sql, (stamp,))
                 return max(0, int(cur.rowcount))
+
+    def list_legacy_lifecycle_history(self) -> LegacyLifecycleHistory:
+        """See the SQLite twin."""
+        metrics = sorted(LIFECYCLE_ROLLUP_METRICS)
+        with self._analytics_connection() as conn:
+            with conn.cursor() as cur:
+                if not _postgres_table_exists(cur, "user_lifecycle_daily_snapshots"):
+                    return LegacyLifecycleHistory()
+                cur.execute(
+                    _LEGACY_UNROLLED_DATES_SQL.format(
+                        metrics=", ".join("%s" for _ in metrics)
+                    ),
+                    metrics,
+                )
+                days = tuple(
+                    date.fromisoformat(str(_row_value(row, "snapshot_date")))
+                    for row in cur.fetchall()
+                )
+                if not days:
+                    return LegacyLifecycleHistory()
+                cur.execute(
+                    _LEGACY_SNAPSHOTS_SQL.format(date_clause="snapshot_date = ANY(%s)"),
+                    (_legacy_read_dates(days),),
+                )
+                rows = cur.fetchall()
+        return LegacyLifecycleHistory(
+            days=days, snapshots=tuple(_legacy_snapshot(row) for row in rows)
+        )
 
     def sum_recent_facts(
         self,
@@ -606,6 +447,172 @@ class PostgresValueAnalyticsStore:
             int(_row_value(row, "user_id")): _recent_totals_from_row(row)
             for row in rows
         }
+
+    # -- Fact-table reads (design §6.10). One statement each, never per user. --
+
+    def count_states_for_date(self, day: date) -> list[FactStateCount]:
+        """See the SQLite twin."""
+        params = (_validate_day(day),)
+        with self._analytics_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(_COUNT_STATES_SQL.format(p="%s"), params)
+                rows = cur.fetchall()
+        return [_fact_state_count(row) for row in rows]
+
+    def count_segments_by_date(
+        self, *, start: date, end: date
+    ) -> list[SegmentDayCount]:
+        """See the SQLite twin."""
+        params = _validate_date_window(start, end)
+        with self._analytics_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(_COUNT_SEGMENTS_SQL.format(p="%s"), params)
+                rows = cur.fetchall()
+        return [_segment_day_count(row) for row in rows]
+
+    def count_transitions(self, *, start: date, end: date) -> list[TransitionCount]:
+        """See the SQLite twin."""
+        params = _validate_date_window(start, end)
+        with self._analytics_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(_COUNT_TRANSITIONS_SQL.format(p="%s"), params)
+                rows = cur.fetchall()
+        return [_transition_count(row) for row in rows]
+
+    def list_attention_candidates(
+        self, *, day: date, window_start: date, limit: int
+    ) -> list[AttentionCandidate]:
+        """See the SQLite twin."""
+        day_iso = _validate_day(day)
+        if not isinstance(window_start, date) or isinstance(window_start, datetime):
+            raise ValueError("window_start must be a date")
+        if window_start > day:
+            raise ValueError("window_start must not be after day")
+        params = (window_start.isoformat(), day_iso, day_iso, positive_limit(limit))
+        with self._analytics_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(_ATTENTION_SQL.format(p="%s"), params)
+                rows = cur.fetchall()
+        return [_attention_candidate(row) for row in rows]
+
+    def list_users_page(
+        self,
+        *,
+        query: UserPageQuery,
+        day: date,
+        limit: int,
+        offset: int,
+    ) -> tuple[list[UserPageRow], int]:
+        """See the SQLite twin."""
+        page_size, start = _validate_page_window(limit, offset)
+        page_sql, count_sql, page_params, count_params = _users_page_sql(
+            query, day=day, limit=page_size, offset=start, p="%s"
+        )
+        with self._analytics_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(page_sql, page_params)
+                rows = cur.fetchall()
+                cur.execute(count_sql, count_params)
+                total_row = cur.fetchone()
+        return [_user_page_row(row) for row in rows], int(
+            _row_value(total_row, "total", 0) or 0
+        )
+
+    def latest_fact_date(self, *, on_or_before: date) -> date | None:
+        """See the SQLite twin."""
+        with self._analytics_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    _LATEST_FACT_DATE_SQL.format(p="%s"), (_validate_day(on_or_before),)
+                )
+                row = cur.fetchone()
+        return _latest_fact_date(row)
+
+    def sum_facts_by_user_group(
+        self, *, start: date, end: date
+    ) -> dict[str, GroupFactTotals]:
+        """See the SQLite twin."""
+        params = _validate_date_window(start, end)
+        with self._analytics_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(_GROUP_TOTALS_SQL.format(p="%s"), params)
+                totals = cur.fetchall()
+                cur.execute(_GROUP_REPEAT_SQL.format(p="%s"), params)
+                repeats = cur.fetchall()
+        return _group_totals(totals, repeats)
+
+    def list_active_dates(
+        self, user_ids: Sequence[int], *, start: date, end: date
+    ) -> dict[int, list[date]]:
+        """See the SQLite twin."""
+        chunks = _id_chunks(user_ids)
+        window = _validate_date_window(start, end)
+        result: dict[int, list[date]] = {
+            user_id: [] for chunk in chunks for user_id in chunk
+        }
+        with self._analytics_connection() as conn:
+            with conn.cursor() as cur:
+                for chunk in chunks:
+                    cur.execute(
+                        _ACTIVE_DATES_SQL.format(
+                            p="%s", user_clause=" AND user_id = ANY(%s)"
+                        ),
+                        [*window, chunk],
+                    )
+                    for row in cur.fetchall():
+                        result[int(_row_value(row, "user_id"))].append(
+                            date.fromisoformat(str(_row_value(row, "snapshot_date")))
+                        )
+        return result
+
+    def list_activations(
+        self, *, start: datetime, end: datetime, include_internal: bool
+    ) -> dict[int, datetime]:
+        """See the SQLite twin."""
+        window_start, window_end = _validate_window(start, end)
+        sql = _ACTIVATIONS_SQL.format(
+            p="%s", internal="" if include_internal else _INTERNAL_EXCLUSION_SQL
+        )
+        with self._analytics_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql, (utc_iso(window_start), utc_iso(window_end)))
+                rows = cur.fetchall()
+        return {
+            int(_row_value(row, "user_id")): _timestamp(_row_value(row, "activated_at"))
+            for row in rows
+        }
+
+    def count_activated_users(self, *, include_internal: bool) -> int:
+        """See the SQLite twin."""
+        sql = _COUNT_ACTIVATED_SQL.format(
+            internal="" if include_internal else _INTERNAL_EXCLUSION_SQL
+        )
+        with self._analytics_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql)
+                row = cur.fetchone()
+        return int(_row_value(row, "activated", 0) or 0)
+
+    def list_user_transitions(
+        self, user_id: int, *, start: date, end: date
+    ) -> list[LifecycleTransitionRow]:
+        """See the SQLite twin."""
+        subject = positive_user_id(user_id)
+        window = _validate_date_window(start, end)
+        with self._analytics_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(_USER_TRANSITIONS_SQL.format(p="%s"), (subject, *window))
+                rows = cur.fetchall()
+        return [_transition_row(row) for row in rows]
+
+    def list_transitions_for_date(self, day: date) -> list[LifecycleTransitionRow]:
+        """See the SQLite twin."""
+        params = (_validate_day(day),)
+        with self._analytics_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(_TRANSITIONS_FOR_DATE_SQL.format(p="%s"), params)
+                rows = cur.fetchall()
+        return [_transition_row(row) for row in rows]
 
     def aggregate_events_for_day(self, day: date) -> dict[int, DayEventTotals]:
         """See the SQLite twin."""
@@ -694,14 +701,62 @@ class PostgresValueAnalyticsStore:
                 cur.executemany(sql, [_transition_values(row) for row in rows])
         return len(rows)
 
+    def replace_lifecycle_transitions(
+        self, day: date, rows: Sequence[LifecycleTransitionRow]
+    ) -> int:
+        """See the SQLite twin."""
+        day_iso = _validate_day(day)
+        if any(row.snapshot_date != day for row in rows):
+            raise ValueError("every transition must belong to day")
+        with self._analytics_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(_REPLACE_TRANSITIONS_DELETE_SQL.format(p="%s"), (day_iso,))
+                if rows:
+                    cur.executemany(
+                        _UPSERT_TRANSITIONS_SQL.format(p="%s"),
+                        [_transition_values(row) for row in rows],
+                    )
+        return len(rows)
+
+    def requeue_days_for_recompute(self, days: Sequence[date]) -> int:
+        """See the SQLite twin."""
+        values = sorted({_validate_day(day) for day in days})
+        if not values:
+            return 0
+        sql = _REQUEUE_RECOMPUTE_SQL.format(p="%s", days=", ".join("%s" for _ in values))
+        with self._analytics_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql, [_RECOMPUTE_EPOCH, *values])
+                return max(0, int(cur.rowcount))
+
+    def backfill_transitions_from_history(self, *, now: datetime) -> int:
+        """See the SQLite twin."""
+        stamp = utc_iso(_utc(now, "now"))
+        with self._analytics_connection() as conn:
+            with conn.cursor() as cur:
+                if not _postgres_table_exists(cur, "user_lifecycle_daily_snapshots"):
+                    return 0
+                cur.execute(_DAYS_WITHOUT_TRANSITIONS_SQL)
+                days = [
+                    str(_row_value(row, "snapshot_date")) for row in cur.fetchall()
+                ]
+                if not days:
+                    return 0
+                inserted = 0
+                for sql, params in _backfill_transition_statements(
+                    p="%s",
+                    prev="to_char(cur.snapshot_date::date - 1, 'YYYY-MM-DD')",
+                    days=days,
+                ):
+                    cur.execute(sql, [stamp, *params])
+                    inserted += max(0, int(cur.rowcount))
+        return inserted
+
     def list_facts_for_date(self, day: date) -> list[UserDailyFact]:
         """See the SQLite twin."""
         with self._analytics_connection() as conn:
             with conn.cursor() as cur:
-                cur.execute(
-                    "SELECT * FROM user_daily_facts WHERE snapshot_date = %s ORDER BY user_id",
-                    (day.isoformat(),),
-                )
+                cur.execute(_FACTS_FOR_DATE_SQL.format(p="%s"), (_validate_day(day),))
                 rows = cur.fetchall()
         return [_fact_from_row(row) for row in rows]
 
@@ -721,29 +776,6 @@ class PostgresValueAnalyticsStore:
                 )
                 fact_rows = cur.fetchall()
         return _recompute_days(event_rows, fact_rows)
-
-    def copy_daily_snapshot_history(self, *, since: date, now: datetime) -> int:
-        """See the SQLite twin. ``active`` is BOOLEAN here."""
-        stamp = utc_iso(_utc(now, "now"))
-        sql = """
-            INSERT INTO user_daily_facts (
-                snapshot_date, user_id, lifecycle_segment, lifecycle_reason_code,
-                operational_state, operational_reason_code, tier, user_group, active,
-                runs_requested, runs_completed, runs_failed, runs_cancelled,
-                operator_cost_micro, own_spend_micro, data_quality, calculated_at
-            )
-            SELECT s.snapshot_date, s.user_id, s.lifecycle_segment,
-                   s.lifecycle_reason_code, 'healthy', NULL, 'unpaid',
-                   users.user_group, FALSE, 0, 0, 0, 0, 0, 0, 'partial', %s
-            FROM user_lifecycle_daily_snapshots AS s
-            JOIN users ON users.id = s.user_id
-            WHERE s.snapshot_date >= %s
-            ON CONFLICT(snapshot_date, user_id) DO NOTHING
-        """
-        with self._analytics_connection() as conn:
-            with conn.cursor() as cur:
-                cur.execute(sql, (stamp, since.isoformat()))
-                return max(0, int(cur.rowcount))
 
     def list_operational_signals(
         self,

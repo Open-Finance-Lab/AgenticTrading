@@ -28,10 +28,11 @@ from dashboard.backend.domain.agents.runtime import (
 from dashboard.backend.infrastructure.llm.validator import (
     MAX_ORDER_SHARES,
     actions_to_executable,
+    normalize_symbol,
     parse_actions_payload,
 )
 from dashboard.backend.infrastructure.llm.providers import openrouter
-from dashboard.backend.paths import REPO_ROOT
+from dashboard.backend.paths import REPO_ROOT, venv_python
 
 DEFAULT_MODEL_NAME = openrouter.DEFAULT_MODEL
 DEFAULT_MODEL_PROVIDER = "OpenRouter"
@@ -183,12 +184,18 @@ class AiHedgeFundSubprocessRunner:
 
     def _python_executable(self) -> Path:
         configured = self.environment.get("AI_HEDGE_FUND_PYTHON", "").strip()
+        # venv_python, not a literal bin/python: a Windows runtime venv keeps
+        # its interpreter at Scripts\python.exe.
         candidate = (
             _resolve_path(configured)
             if configured
-            else _LOCAL_RUNTIME_DIR / "bin" / "python"
+            else venv_python(_LOCAL_RUNTIME_DIR)
         )
-        if not candidate.is_file() or not os.access(candidate, os.X_OK):
+        if (
+            candidate is None
+            or not candidate.is_file()
+            or not os.access(candidate, os.X_OK)
+        ):
             raise AiHedgeFundConfigurationError(
                 "AI Hedge Fund runtime is not installed; configure "
                 "AI_HEDGE_FUND_PYTHON with its isolated interpreter"
@@ -661,12 +668,12 @@ class AiHedgeFundRuntime:
         decision_date = context.timestamp.date().isoformat()
         cutoff = context.latest_market_date_before_decision
         data_cutoff_date = cutoff.isoformat() if cutoff is not None else ""
-        allowed = {str(symbol).strip().upper() for symbol in context.symbols}
+        allowed = {normalize_symbol(str(symbol)) for symbol in context.symbols}
         normalized = []
         trace_by_symbol: Dict[str, Dict[str, Any]] = {}
         seen = set()
         for raw_symbol, raw_decision in decisions.items():
-            symbol = str(raw_symbol or "").strip().upper()
+            symbol = normalize_symbol(str(raw_symbol or ""))
             if symbol not in allowed or symbol in seen:
                 raise AiHedgeFundOutputError(
                     f"AI Hedge Fund returned invalid symbol {raw_symbol!r}"

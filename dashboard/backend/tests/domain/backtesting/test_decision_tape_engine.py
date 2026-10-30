@@ -327,10 +327,11 @@ def test_intent_replay_through_the_gate_reproduces_an_llm_run(monkeypatch, store
 
 
 def test_intent_replay_keeps_null_and_non_finite_fields(monkeypatch, store):
-    """Finding 3: ``confidence: null`` makes the gate raise (the bar falls back
-    to rule-based) while an absent confidence reads as 0.5 and trades; an
-    ``Infinity`` position_size is skipped while ``null`` becomes a
-    confidence-sized buy. The tape must hand the replay the same values."""
+    """Finding 3: a ``null`` reasoning makes the gate raise (the bar falls back
+    to rule-based) while an absent one trades; an ``Infinity`` position_size
+    is skipped while ``null`` becomes a confidence-sized buy. ``confidence:
+    null`` reads as the 0.5 default, as an absent one does. The tape must hand
+    the replay the same values."""
     script = [
         json.dumps({"actions": [{"symbol": "AAPL", "action": "buy", "position_size": 3, "confidence": None, "reasoning": "null conf"}]}),
         json.dumps({"actions": [{"symbol": "MSFT", "action": "buy", "position_size": float("inf"), "confidence": 0.9, "reasoning": "inf size"}]}),
@@ -341,9 +342,10 @@ def test_intent_replay_keeps_null_and_non_finite_fields(monkeypatch, store):
     _bt, first, first_curve = _run(monkeypatch, run_id="agent_intent_edge", llm_client=_PipelineStub(script), pipeline=pipeline)
     tape = trace_service.load_decision_tape("agent_intent_edge")
 
-    assert tape[0]["decision"]["driver"] == "llm_fallback"
+    assert tape[0]["decision"]["driver"] == "llm"
     assert tape[0]["decision"]["intent"]["orders"][0]["confidence"] is None
-    assert tape[0]["decision"]["gate_rewrote"] is False  # a fallback is not a rewrite
+    assert tape[0]["decision"]["actions"][0]["confidence"] == 0.5
+    assert tape[0]["decision"]["gate_rewrote"] is False
     assert tape[1]["decision"]["intent"]["orders"][0]["position_size"] is None
     assert tape[1]["decision"]["intent"]["orders"][0]["raw"] == {"position_size": "Infinity"}
     assert tape[2]["decision"]["driver"] == "llm_fallback"  # reasoning[:60] on None

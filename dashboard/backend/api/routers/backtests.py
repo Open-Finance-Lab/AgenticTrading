@@ -21,6 +21,7 @@ import statistics
 import subprocess
 import time
 import uuid
+import weakref
 from collections import deque
 from functools import lru_cache
 from pathlib import Path
@@ -58,7 +59,7 @@ import matplotlib
 matplotlib.use("Agg")
 
 from dashboard.backend.database import db, DB_PATH
-from dashboard.backend.paths import DASHBOARD_DIR, REPO_ROOT, SCRIPTS_DIR
+from dashboard.backend.paths import DASHBOARD_DIR, SCRIPTS_DIR, child_python
 from dashboard.backend.middleware import get_session_id_from_request
 from dashboard.backend.infrastructure.market_data.provider import (
     ALPACA,
@@ -1195,7 +1196,7 @@ def _finalize_slot_locked(
         # Still `backtest_failed`: the user asked for a backtest, got nothing,
         # and was billed. A separate event name would need nine registrations
         # and would drop timeouts out of `metrics.py`'s `_TERMINAL_FAILURE`,
-        # `states.py`'s consecutive-failure alert and `backfill.py`'s terminal
+        # `lifecycle.py`'s consecutive-failure alert and `backfill.py`'s terminal
         # map -- the three things that exist to notice runs failing. What was
         # missing is the reason, not the outcome.
         return {
@@ -1384,6 +1385,73 @@ def _label_trace(run_id: Optional[str], error_code: str) -> None:
         )
 
 
+# Same bound, same reason, for the partial-result snapshot below.
+LIVE_PROGRESS_CLEAR_DEADLINE_SECONDS = 10
+
+
+def _clear_live_progress_snapshot(run_id: Optional[str]) -> None:
+    """Delete the child's partial-result snapshot now that the run is over.
+
+    The boot reclaimer publishes any snapshot it finds as a run interrupted by
+    a server restart, so the row must not outlive a parent that saw the run
+    end -- however it ended. Without this, every cancelled, failed and
+    timed-out run came back under that label after the next deploy. A row left
+    here is one whose parent died, which is exactly what the label claims.
+    Bounded, and run after the slot is free, like the trace label above.
+    """
+    if not run_id:
+        return
+    result = _run_with_deadline(
+        lambda: db.delete_live_progress(run_id),
+        LIVE_PROGRESS_CLEAR_DEADLINE_SECONDS,
+    )
+    if result.error is not None:
+        print(
+            f"ERROR: live_progress.clear_failed run={run_id} "
+            f"error={type(result.error).__name__}: {result.error}",
+            flush=True,
+        )
+    elif not result.finished:
+        print(
+            f"ERROR: live_progress.clear_timeout run={run_id} "
+            f"deadline_s={LIVE_PROGRESS_CLEAR_DEADLINE_SECONDS}; abandoned",
+            flush=True,
+        )
+
+
+# Children ``_run_backtest_subprocess`` launched with CREATE_NEW_PROCESS_GROUP
+# (Windows only). Nothing else may be sent CTRL_BREAK_EVENT: the event is
+# addressed to a console process group, and an id that leads no group is not
+# reliably refused -- conhost has been seen to broadcast it to every process on
+# the console, the web server included. Weak, so a finished run's handle is not
+# kept alive by membership.
+_CONSOLE_GROUP_LEADERS: "weakref.WeakSet[Any]" = weakref.WeakSet()
+
+
+def _break_console_group(process: Any) -> bool:
+    """Windows' SIGTERM-to-the-group: CTRL_BREAK_EVENT to the child's console group.
+
+    The child leads a console process group and everything it starts joins it
+    -- the interpreter behind a venv launcher, an AI Hedge Fund grandchild --
+    so one event reaches the tree, the child's SIGBREAK handler unwinds like
+    SIGTERM does on POSIX, and a grandchild with the default disposition exits.
+    False, so the caller falls back to ``terminate()``: off Windows, for a
+    process not launched that way, for one that has already exited (its id may
+    no longer lead a group), or when the parent has no console to send through,
+    which GenerateConsoleCtrlEvent requires.
+    """
+    ctrl_break = getattr(signal, "CTRL_BREAK_EVENT", None)
+    if ctrl_break is None or process not in _CONSOLE_GROUP_LEADERS:
+        return False
+    try:
+        if process.poll() is not None:
+            return False
+        os.kill(int(process.pid), ctrl_break)
+    except (OSError, AttributeError, TypeError, ValueError):
+        return False
+    return True
+
+
 def _signal_backtest_process(process: Any) -> bool:
     """SIGTERM the child and everything it started. True when a signal landed.
 
@@ -1395,10 +1463,18 @@ def _signal_backtest_process(process: Any) -> bool:
     Swallows every failure mode of the handle call because all of them mean the
     same thing here: the child is already gone, or was never started. Neither is
     a reason to fail the cancel the user just asked for.
+
+    Windows has no group to SIGTERM, and ``terminate()`` there is
+    TerminateProcess: a hard kill that skips the child's ``finally`` exactly as
+    SIGKILL would, and makes ``_CANCEL_GRACE_SECONDS`` buy nothing. So the
+    console-group break (``_break_console_group``) goes first and the handle
+    call is only its fallback.
     """
     if process is None:
         return False
     group_signalled = _killpg(_resolve_child_pgid(process), signal.SIGTERM)
+    if _break_console_group(process):
+        return True
     try:
         process.terminate()
     except Exception:  # noqa: BLE001 - see docstring
@@ -1439,7 +1515,32 @@ def _kill_backtest_process_after_grace(
             pass
     except Exception:  # noqa: BLE001 - same
         pass
-    _killpg(pgid, signal.SIGKILL)
+    # Looked up, not named: Windows has no ``signal.SIGKILL``, and the argument
+    # is evaluated before ``_killpg``'s own guard can see it -- the
+    # AttributeError escaped every caller, turning a timeout into a generic
+    # failure and a pre-launch cancel into an error over a closed slot. There
+    # is no group to sweep there (``_resolve_child_pgid`` is None); the
+    # ``kill()`` above is that platform's whole escalation.
+    sigkill = getattr(signal, "SIGKILL", None)
+    if sigkill is not None:
+        _killpg(pgid, sigkill)
+
+
+def _stopped_by_signal(returncode: int) -> bool:
+    """Whether the child's exit code says a signal stopped it, not a failure.
+
+    Negative is POSIX's signal death (SIGKILL, say). ``128 + N`` is the child's
+    own ``_exit_on_sigterm`` turning a stop signal into SystemExit: SIGTERM, or
+    SIGBREAK on Windows, where a sign check alone could never fire. Windows has
+    no code for a hard kill at all: TerminateProcess (Task Manager,
+    ``Popen.kill``) exits with whatever code the killer picks -- 1 for
+    ``kill()`` -- which is indistinguishable from a crash, so an external hard
+    kill there still reads as a failure.
+    """
+    if returncode < 0:
+        return True
+    stop_signals = (getattr(signal, name, None) for name in ("SIGTERM", "SIGBREAK"))
+    return returncode in {128 + int(sig) for sig in stop_signals if sig is not None}
 
 
 def _attach_backtest_process(live_run_id: str, process: Any) -> bool:
@@ -1870,7 +1971,8 @@ def run_backtest_background(
     resolved_live_run_id = live_run_id
     # Captured separately: the except arm below clears resolved_live_run_id
     # once the slot is finalized, but the finally still needs the id to close
-    # a trace the child could not (killed by the timeout or SIGKILL).
+    # a trace the child could not (killed by the timeout or SIGKILL) and to
+    # delete the child's partial-result snapshot.
     trace_run_id: Optional[str] = None
     # Which label a still-``running`` trace gets. Each arm only RECORDS it; the
     # write happens once, last in ``finally``, so a slow trace store can never
@@ -1883,7 +1985,6 @@ def run_backtest_background(
     # it mid-run" (Configure stays open, and sibling runs adapt too).
     baseline_pipeline = _writeback_start_pipeline(pipeline, writeback_baseline, agent_id)
     try:
-        import sys
         import tempfile
 
         profile = get_market_profile(data_source, universe)
@@ -1937,16 +2038,9 @@ def run_backtest_background(
         
         script_path = SCRIPTS_DIR / "backtest_hourly_agent.py"
         db_path = DB_PATH
-        venv_dir = REPO_ROOT / ".venv"
-        
-        # Determine the Python executable to use (from venv if available)
-        if venv_dir.exists():
-            python_exe = str(venv_dir / "bin" / "python3")
-            print(f"🐍 Using venv Python: {python_exe}", flush=True)
-        else:
-            python_exe = sys.executable
-            print(f"🐍 Using system Python: {python_exe}", flush=True)
-        
+        python_exe = child_python()
+        print(f"🐍 Using Python: {python_exe}", flush=True)
+
         # Check database directory
         print(f"📁 Database path: {db_path}", flush=True)
         print(f"📁 Database dir exists: {db_path.parent.exists()}", flush=True)
@@ -1958,6 +2052,13 @@ def run_backtest_background(
         # worker, and a value that leaked into os.environ would make the next
         # uvicorn reload skip DDL it actually needs.
         env[BACKTEST_WORKER_ENV] = "1"
+        # The other half of ``_run_backtest_subprocess``'s UTF-8 decode. Left
+        # alone, Windows encodes a child's piped stdout in the ANSI code page
+        # and the script's first emoji print raises UnicodeEncodeError: every
+        # backtest dead at launch on a default-locale machine. Forced rather
+        # than defaulted, since a different value here would break the
+        # parent's decode, not tune it.
+        env["PYTHONIOENCODING"] = "utf-8:backslashreplace"
         if runtime_type == AI_HEDGE_FUND_RUNTIME_TYPE:
             # A Financial Datasets key is agent-owner material, never a platform
             # fallback. Isolate it only for the hosted runtime; pipeline
@@ -2112,11 +2213,13 @@ def run_backtest_background(
                 slot_public_error = _LLM_FAILURE_PUBLIC_ERROR
                 slot_error_category = analytics_error_category_for(llm_failure)
             print(f"❌ Backtest failed (returncode={result.returncode})", flush=True)
-            # A negative return code is a signal death, and the parent's own
-            # signals were claimed above (cancel) or raise TimeoutExpired
-            # (timeout): this one came from elsewhere -- a cgroup OOM SIGKILL
-            # is the likely sender -- so the child was killed, not failed.
-            trace_label = "run_killed" if result.returncode < 0 else "run_failed"
+            # A signal stopped it, and the parent's own signals were claimed
+            # above (cancel) or raise TimeoutExpired (timeout): this one came
+            # from elsewhere -- a cgroup OOM SIGKILL is the likely sender -- so
+            # the child was killed, not failed.
+            trace_label = (
+                "run_killed" if _stopped_by_signal(result.returncode) else "run_failed"
+            )
         else:
             runs = db.get_runs_by_mode("backtest")
             slot_runs_count = len(runs)
@@ -2333,6 +2436,9 @@ def run_backtest_background(
             # that raises (``finalize_run`` with a non-LLMExecutionError,
             # ``_finalize_slot``) cannot leave the trace ``running`` forever.
             _label_trace(trace_run_id, trace_label or "run_killed")
+            # trace_run_id is the id the child flushed its snapshot under
+            # (--run-id), and unlike resolved_live_run_id no arm clears it.
+            _clear_live_progress_snapshot(trace_run_id)
             print("✋ Backtest background thread finished", flush=True)
 
 
@@ -3348,21 +3454,36 @@ def _run_backtest_subprocess(
     established timeout cleanup is untouched — except that the exception now
     carries the retained output, which the old path threw away.
     """
+    console_group_flag = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
     process = subprocess.Popen(
         cmd,
         cwd=cwd,
         env=env,
         text=True,
+        # Named, not the locale's: on Windows that is the ANSI code page, which
+        # cannot decode the child's UTF-8 (``⏱`` carries 0x8F, a byte cp1252
+        # leaves undefined). A decode error is a ValueError, which
+        # ``_drain_stream`` reads as a closed pipe: the reader stops, the child
+        # blocks on a full pipe, and the run hangs to its timeout. ``replace``
+        # so no byte can do that. The child is told to match
+        # (PYTHONIOENCODING, set in ``run_backtest_background``).
+        encoding="utf-8",
+        errors="replace",
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         # The child leads its own process group, so a cancel or a timeout can
         # signal the whole tree instead of one pid. Without it the AI Hedge Fund
         # grandchild outlived every stop path — see ``_resolve_child_pgid``.
-        # Ignored on non-POSIX platforms, where the helpers fall back to the
-        # handle.
+        # Ignored on non-POSIX platforms.
         start_new_session=True,
+        # Windows' counterpart: a console process group of its own, which is
+        # what ``_break_console_group`` signals. 0 everywhere else, where a
+        # non-zero value would be refused.
+        creationflags=console_group_flag,
     )
+    if console_group_flag:
+        _CONSOLE_GROUP_LEADERS.add(process)
     if live_run_id and not _attach_backtest_process(live_run_id, process):
         # A cancel landed between slot acquisition and launch. The slot is
         # already released, so nothing is watching this child — kill it here

@@ -16,7 +16,9 @@ import json
 from dashboard.backend.infrastructure.llm.validator import (
     validate_llm_response,
     TradingAction,
-    create_safe_prompt
+    create_safe_prompt,
+    model_number,
+    read_confidence,
 )
 
 
@@ -454,3 +456,34 @@ class TestE2EFlow:
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+class TestReadConfidence:
+    """read_confidence: one confidence rule for the backtest gate and every
+    pipeline envelope it reads."""
+
+    @pytest.mark.parametrize("value", [None, "", "   "])
+    def test_missing_confidence_takes_the_default(self, value):
+        assert read_confidence(value, 0.75) == 0.75
+
+    @pytest.mark.parametrize(
+        "value, expected",
+        [(0, 0.0), (0.0, 0.0), ("0", 0.0), (0.3, 0.3), (" 0.4 ", 0.4), (1, 1.0)],
+    )
+    def test_a_number_from_0_to_1_is_kept(self, value, expected):
+        assert read_confidence(value, 0.75) == expected
+
+    @pytest.mark.parametrize(
+        "value",
+        [False, True, "high", "50%", [], {}, [0.5], float("nan"), "NaN",
+         float("inf"), float("-inf"), 25, 1.5, -0.1,
+         pytest.param(10**400, id="int-past-float")],
+    )
+    def test_anything_else_skips_the_action(self, value):
+        assert read_confidence(value, 0.75) is None
+
+    def test_model_number_reads_an_oversized_int_as_infinite(self):
+        assert model_number(10**400) == float("inf")
+        assert model_number(-(10**400)) == float("-inf")
+        assert model_number(True) is None
+        assert model_number(None, 1.0) == 1.0
