@@ -164,3 +164,36 @@ def test_unusable_feed_env_does_not_500_a_cached_board(monkeypatch, capsys):
     monkeypatch.setenv("ALPACA_DATA_FEED", "IEXX")
     assert service._configured_feed_or_none() is None
     assert "WARNING" in capsys.readouterr().out
+
+
+def test_gate_drift_warns_once_and_ignores_unrecorded_rows(capsys):
+    """A row from another pre-trade gate is another experiment for the window.
+    Reported like a feed drift, and like one never auto-refreshed: the refresh
+    would be a billable model deploy started by a public GET."""
+    current = service.LLM_GATE_VERSION
+    runs = [
+        {"metadata": {"llm_gate_version": current - 1}},
+        {"metadata": {"llm_gate_version": current}},
+        {"metadata": {"llm_gate_version": True}},
+        {"metadata": {}},
+        {"metadata": None},
+    ]
+    service._warned_gate_drift.clear()
+    service._warn_on_gate_drift(runs)
+    out = capsys.readouterr().out
+    assert f"gate version {current - 1} " in out
+    assert "force-refresh" in out
+
+    service._warn_on_gate_drift(runs)
+    assert capsys.readouterr().out == ""
+
+    service._warned_gate_drift.clear()
+    service._warn_on_gate_drift(runs[1:])
+    assert capsys.readouterr().out == ""
+
+
+def test_samples_from_another_gate_are_not_pooled():
+    assert "llm_gate_version" in service._SAMPLE_CONFIG_KEYS
+    one = {"metadata": {"llm_gate_version": 1}}
+    two = {"metadata": {"llm_gate_version": 2}}
+    assert service._sample_config_key(one) != service._sample_config_key(two)

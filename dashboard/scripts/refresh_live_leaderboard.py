@@ -55,7 +55,10 @@ def main() -> int:
     parser.add_argument(
         "--models",
         action="store_true",
-        help="Append the Live LLM roster (DeepSeek / Nemotron) for new cash sessions (billable)",
+        help=(
+            "Append this month's Live LLM roster (LIVE_MODEL_IDS, each entry "
+            "from its live_from month) for new cash sessions (billable)"
+        ),
     )
     parser.add_argument(
         "--allow-fallback",

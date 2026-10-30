@@ -140,7 +140,10 @@ def test_llm_agent_without_reasoning_keeps_legacy_factory_behavior(monkeypatch):
 # its published curve is not silently re-specified. DeepSeek and Qwen joined
 # Nemotron on 2026-10-02: CommonStack's per-call thinking coin flip emptied
 # DeepSeek's replies past the H6 guard; thinking off is the catalog's
-# PINNED_NO_THINKING for both.
+# PINNED_NO_THINKING for both. Claude Haiku 4.5 pins temperature 0 on the Live
+# board only, under its "live_overrides" block, so it is not counted here: its
+# shared keys are what its Competition runs recorded (see
+# test_leaderboard_samples.py::test_the_live_haiku_pin_leaves_its_competition_median_alone).
 _PINNED_SAMPLING_ENTRIES = {"nemotron_3_nano_30b", "deepseek_v4_pro", "qwen3_7_plus"}
 
 

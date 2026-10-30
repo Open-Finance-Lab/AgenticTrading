@@ -516,10 +516,11 @@ def test_custom_algo_subclasses_canonical_engine():
 
 def test_custom_algo_reads_a_padded_action_and_symbol_like_the_gate():
     # "buy " matched neither branch and "AAPL " no DJIA name, so the Trading
-    # Algo loop dropped the trade without a word (#658). Also the only test
-    # that runs this method's LLM branch at all: from cd402c8a until this
-    # fix, its `from backtest_hourly_agent import timedelta` raised
-    # ImportError on the first decision of every LLM Trading Algo run.
+    # Algo loop dropped the trade without a word (#658). Also runs this
+    # method's LLM branch end to end (as does test_custom_algo_confidence.py):
+    # from cd402c8a until this fix, its `from backtest_hourly_agent import
+    # timedelta` raised ImportError on the first decision of every LLM
+    # Trading Algo run.
     code = (
         "import json\n"
         "from datetime import datetime\n"

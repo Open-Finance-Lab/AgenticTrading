@@ -28,6 +28,8 @@ from dashboard.backend.domain.agents.runtime import (
 from dashboard.backend.infrastructure.llm.validator import (
     MAX_ORDER_SHARES,
     actions_to_executable,
+    confidence_in_range,
+    model_number,
     normalize_action,
     normalize_symbol,
     parse_actions_payload,
@@ -420,8 +422,11 @@ class AiHedgeFundRuntime:
             raise AiHedgeFundOutputError(
                 f"Decision for {symbol} has invalid confidence"
             )
-        confidence_pct = float(confidence_raw)
-        if not 0 <= confidence_pct <= 100:
+        # Upstream answers on 0-100. Divided out, the range is the shared 0-1
+        # rule; model_number reads an int too large for float() as infinite
+        # (out of range) instead of raising OverflowError past this check.
+        confidence = model_number(confidence_raw) / 100.0
+        if not confidence_in_range(confidence):
             raise AiHedgeFundOutputError(
                 f"Decision for {symbol} has invalid confidence"
             )
@@ -433,7 +438,7 @@ class AiHedgeFundRuntime:
         reasoning = reasoning_raw.strip() or "AI Hedge Fund decision"
         if len(reasoning) < 5:
             reasoning = f"AI Hedge Fund: {reasoning}"
-        return action, quantity, confidence_pct / 100.0, reasoning[:500]
+        return action, quantity, confidence, reasoning[:500]
 
     @staticmethod
     def _trace(

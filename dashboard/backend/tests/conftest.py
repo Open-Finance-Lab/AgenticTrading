@@ -165,6 +165,10 @@ os.environ.pop("STRIPE_WEBHOOK_SECRET", None)
 # secret-gate tests see a known-unset baseline rather than the shell's value.
 os.environ.pop("LEADERBOARD_DAILY_AUTO_DEPLOY", None)
 os.environ.pop("LEADERBOARD_DAILY_REFRESH_SECRET", None)
+# The Live board's monthly model budget. A developer with a small or zero cap
+# exported would see every live deploy test halt on the budget instead of
+# trading; the budget tests set it per case via monkeypatch.
+os.environ.pop("LEADERBOARD_MONTHLY_BUDGET_USD", None)
 # Same known-unset baseline for the first-admin bootstrap secret: a developer
 # with it exported would otherwise make the unconfigured-refusal tests fail,
 # and could accidentally promote the suite's throwaway accounts.
