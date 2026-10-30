@@ -5,8 +5,11 @@ What changed is where the struct comes from: two indexed reads of
 ``user_activity`` and ``user_daily_facts`` rather than a 180-day scan of
 ``analytics_events`` per user (design SS6.6).
 
-Nothing in ``api/`` calls this module yet. PR B wires it into the one-user
-profile route; the daily job (``daily_facts.py``) is its only caller in PR A.
+Two kinds of caller: the daily job (``daily_facts.py``), which passes the end
+of the day it is computing as ``as_of``, and the live read paths
+(``query_service.py`` for one user's axes, ``value_queries.py`` for the profile
+and users list), which pass ``now``. The clamp below is what lets one function
+serve both.
 """
 
 from __future__ import annotations

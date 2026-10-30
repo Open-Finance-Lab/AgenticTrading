@@ -3,7 +3,7 @@
 This guide gets the dashboard, the API and a working backtest running on your
 own machine **with no API keys and no money at risk**, then shows how to run the
 test suites. Every command below was run end to end on Linux (Python 3.13,
-Node 22).
+Node 22). On Windows, see the note at the end of [Install](#2-install).
 
 All commands run from the **repository root**.
 
@@ -52,6 +52,12 @@ UV_HTTP_TIMEOUT=180 uv pip install --python .venv/bin/python \
 If `uv venv` asks *"A virtual environment already exists. Replace it?"*,
 answer **no** unless you mean to reinstall everything. Replacing it deletes
 every installed package.
+
+**On Windows**, the venv's interpreter is `.venv/Scripts/python.exe`, not
+`.venv/bin/python`. Use it in every command in this guide, and run the
+commands from Git Bash, since `run_local_safe.sh` and the `VAR=value command`
+prefixes are Bash. A venv is per OS: one built in WSL does not run on Windows,
+and the reverse. This guide has not yet been run end to end on Windows.
 
 ## 3. Start the app safely
 

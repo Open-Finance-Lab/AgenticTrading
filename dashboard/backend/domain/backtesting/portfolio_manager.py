@@ -36,8 +36,11 @@ import pandas as pd
 from dashboard.backend.domain.backtesting.constants import INITIAL_CAPITAL
 from dashboard.backend.infrastructure.llm.validator import (
     DJIA_30,
+    LLM_ACTION_DEFAULT_CONFIDENCE,
     MAX_ORDER_SHARES,
     create_prompt,
+    normalize_symbol,
+    read_confidence,
 )
 from dashboard.backend.domain.trading.portfolio import (
     append_equity_record as _append_equity_record,
@@ -199,7 +202,7 @@ class PortfolioManager:
         self.last_pipeline_step_outputs = []
         # Tradeable universe for this run (defaults to DJIA_30).
         symbols = allowed_symbols if allowed_symbols is not None else DJIA_30
-        self.allowed_symbols = [str(s).strip().upper() for s in symbols if s]
+        self.allowed_symbols = [normalize_symbol(str(s)) for s in symbols if s]
         self._allowed_set = set(self.allowed_symbols)
 
     def snapshot_state(self) -> Dict[str, Any]:
@@ -853,7 +856,7 @@ class PortfolioManager:
                         raise LLMDecisionError(
                             "LLM returned an invalid action batch"
                         )
-                    symbol = str(llm_action.get("symbol") or "").strip().upper()
+                    symbol = normalize_symbol(str(llm_action.get("symbol") or ""))
                     action_type = str(
                         llm_action.get("action") or ""
                     ).strip().lower()
@@ -866,26 +869,21 @@ class PortfolioManager:
                         )
 
             for llm_action in llm_actions:
-                symbol = str(llm_action.get("symbol") or "").strip().upper()
+                symbol = normalize_symbol(str(llm_action.get("symbol") or ""))
                 action_type = llm_action.get("action", "hold").lower()
-                confidence = llm_action.get("confidence", 0.5)
+                raw_confidence = llm_action.get("confidence")
+                confidence = read_confidence(
+                    raw_confidence, LLM_ACTION_DEFAULT_CONFIDENCE
+                )
                 reasoning = llm_action.get("reasoning", "")
-                
+
+                if confidence is None:
+                    print(f"\n   Processing: {symbol} ({action_type.upper()}, conf={raw_confidence!r})")
+                    print(f"      ⚠️  {symbol}: Skip (confidence {raw_confidence!r} is not a number from 0 to 1)")
+                    continue
+
                 print(f"\n   Processing: {symbol} ({action_type.upper()}, conf={confidence:.0%})")
                 print(f"      Reasoning: {reasoning[:60]}...")
-
-                # Confidence is 0-1, the same range validate_confidence enforces
-                # for external agents. A model answering on a 0-100 scale (25
-                # meaning 25%) otherwise clears the 0.3 floor and multiplies the
-                # confidence-sized buy by 100. Skip the action rather than clamp
-                # or divide by 100: guessing the model's scale is not ours to do.
-                if (
-                    isinstance(confidence, (int, float))
-                    and not isinstance(confidence, bool)
-                    and not (math.isfinite(confidence) and 0 <= confidence <= 1)
-                ):
-                    print(f"      ⚠️  {symbol}: Skip (confidence {confidence!r} outside 0-1)")
-                    continue
 
                 # Skip low-confidence decisions
                 if confidence < 0.3:

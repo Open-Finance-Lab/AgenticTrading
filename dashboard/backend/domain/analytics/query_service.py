@@ -5,14 +5,25 @@ from __future__ import annotations
 import json
 from collections import Counter, defaultdict
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
-from typing import Any, Literal
+from datetime import date, datetime, timedelta, timezone
+from typing import Any, Literal, Sequence
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from .lifecycle import (
+    CommercialTier,
+    LifecycleResult,
+    OperationalResult,
+    OperationalSignals,
+    calculate_lifecycle,
+    calculate_operational_state,
+    operational_result_from_code,
+    resolve_group_badge,
+)
+from .lifecycle_reads import build_lifecycle_inputs
 from .metrics import (
+    ACTIVATION_EVENTS,
     AnalyticsMetricFilters,
-    calculate_overview_metrics,
     is_meaningful_event,
 )
 from .models import AnalyticsEventRecord
@@ -27,14 +38,9 @@ from .repository_common import (
 )
 from .rollups import AnalyticsRollupStore, DailyRollup
 from .usage_cost import atl_cost_micro, byok_estimate_micro, byok_rollup_lane
-from .states import (
-    AnalyticsStateStore,
-    UserAnalyticsSnapshot,
-    calculate_user_state,
-)
+from .value_repository import build_value_analytics_store
 
 ActivitySection = Literal["timeline", "runs", "usage", "sessions"]
-_USER_STATES = {"blocked", "needs_attention", "dormant", "onboarding", "active"}
 _ATTENTION_STATES = {"blocked", "needs_attention"}
 # The two BillingLaneDay call-count fields; also models.ALLOWED_BILLING_MODES.
 _BILLING_LANES = ("platform_credits", "byok")
@@ -46,12 +52,7 @@ _LANE_FIELDS = (
     "byok_estimated_micro",
     "byok_unpriced",
 )
-_ACTIVATION_EVENTS = (
-    "account_signed_up",
-    "credential_verified",
-    "agent_created",
-    "backtest_completed",
-)
+_ACTIVATION_EVENTS = ACTIVATION_EVENTS
 _USAGE_EVENTS = {
     "model_usage_recorded",
     "credits_reserved",
@@ -103,7 +104,7 @@ class FailureCategoryCount(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     error_category: str
-    affected_users: int = Field(ge=0)
+    event_count: int = Field(ge=0)
 
 
 class AnalyticsStateSummary(BaseModel):
@@ -249,7 +250,6 @@ class AnalyticsOverview(BaseModel):
     daily_completed_runs: dict[str, int]
     billing_lane_mix: list[BillingLaneDay]
     activation_funnel: dict[str, int]
-    user_state_counts: dict[str, int]
     top_failure_categories: list[FailureCategoryCount]
     users_needing_attention: list[AnalyticsUserListItem]
     last_updated: datetime
@@ -257,15 +257,50 @@ class AnalyticsOverview(BaseModel):
     availability: dict[str, PanelAvailability]
 
 
-def _all_users(user_store: Any) -> list[dict[str, Any]]:
-    users: list[dict[str, Any]] = []
-    offset = 0
-    while True:
-        page = user_store.list_users_admin(limit=500, offset=offset)
-        users.extend(page)
-        if len(page) < 500:
-            return users
-        offset += len(page)
+class RunOutcomeCounts(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    requested: int = Field(default=0, ge=0)
+    completed: int = Field(default=0, ge=0)
+    failed: int = Field(default=0, ge=0)
+    cancelled: int = Field(default=0, ge=0)
+
+
+class UserMetricsShared(BaseModel):
+    """One user's numbers as the user may see them (design §6.13).
+
+    ``get_user_metrics`` builds this for ``audience="user"`` and
+    ``UserMetricsAdmin`` for ``audience="admin"``. Two models rather than one
+    with nullable admin fields: the admin-only fields are *absent* from the
+    user projection, not nulled -- a null still tells the subject the field
+    exists -- and absence must hold on every serialisation path, including
+    ``model_dump_json`` and FastAPI's, which a ``model_dump`` override would
+    not reach. A future ``GET /api/me/usage`` is this call with
+    ``audience="user"``.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    user_id: int = Field(gt=0)
+    facts_as_of: date
+    runs_7d: RunOutcomeCounts
+    runs_30d: RunOutcomeCounts
+    own_spend_micro: int = Field(default=0, ge=0)
+    operator_cost_micro: int = Field(default=0, ge=0)
+    tier: CommercialTier = "unpaid"
+    credit_balance_micro: int = Field(default=0, ge=0)
+    data_quality: Literal["complete", "partial"] = "complete"
+
+
+class UserMetricsAdmin(UserMetricsShared):
+    """The admin projection: the shared numbers plus the admin-only axes."""
+
+    active_days_30d: int = Field(ge=0, le=30)
+    lifecycle: LifecycleResult
+    operational: OperationalResult
+    user_group: str
+    group_badge: str
+    access_log: Sequence[str]
 
 
 class AnalyticsQueryStore:
@@ -274,34 +309,7 @@ class AnalyticsQueryStore:
     def __init__(self, base_store: Any = analytics_store):
         self.base_store = base_store
         self.rollups = AnalyticsRollupStore(base_store)
-        self.states = AnalyticsStateStore(base_store)
         self.is_postgres = hasattr(base_store, "database_url")
-
-    def list_snapshots(self) -> dict[int, UserAnalyticsSnapshot]:
-        if self.is_postgres:
-            with self.base_store._get_connection() as conn:
-                with conn.cursor() as cur:
-                    cur.execute("SELECT * FROM user_analytics_snapshots ORDER BY user_id")
-                    rows = cur.fetchall()
-        else:
-            with self.base_store._get_connection() as conn:
-                rows = conn.execute(
-                    "SELECT * FROM user_analytics_snapshots ORDER BY user_id"
-                ).fetchall()
-        result = {}
-        for row in rows:
-            snapshot = UserAnalyticsSnapshot(
-                user_id=int(row["user_id"]),
-                status=str(row["status"]),
-                reason_code=str(row["reason_code"]),
-                human_readable_reason=str(row["human_readable_reason"]),
-                evidence_event_ids=list(
-                    json.loads(str(row["evidence_event_ids_json"]))
-                ),
-                calculated_at=_parse_timestamp(row["calculated_at"]),
-            )
-            result[snapshot.user_id] = snapshot
-        return result
 
     def list_metric_events(
         self,
@@ -399,61 +407,6 @@ class AnalyticsQueryStore:
             )
         return events
 
-    def summarize_users(
-        self,
-        *,
-        user_ids: set[int],
-        start: datetime,
-        end: datetime,
-    ) -> dict[int, dict[str, Any]]:
-        """Return bounded 30-day summaries without hydrating event models."""
-
-        if not user_ids:
-            return {}
-        result: dict[int, dict[str, Any]] = {}
-        ordered_ids = sorted(positive_user_id(user_id) for user_id in user_ids)
-        for offset in range(0, len(ordered_ids), 500):
-            chunk = ordered_ids[offset : offset + 500]
-            placeholder = "%s" if self.is_postgres else "?"
-            id_placeholders = ", ".join(placeholder for _ in chunk)
-            params: list[Any] = [utc_iso(start), utc_iso(end), *chunk]
-            sql = f"""
-                SELECT user_id,
-                       MAX(CASE
-                           WHEN event_group <> 'experience'
-                                OR event_name = 'page_viewed'
-                           THEN occurred_at
-                       END) AS last_meaningful_activity,
-                       SUM(CASE WHEN event_group = 'run' THEN 1 ELSE 0 END)
-                           AS recent_runs,
-                       SUM(CASE WHEN event_name = 'backtest_failed' THEN 1 ELSE 0 END)
-                           AS recent_failures
-                FROM analytics_events
-                WHERE occurred_at >= {placeholder}
-                  AND occurred_at < {placeholder}
-                  AND user_id IN ({id_placeholders})
-                GROUP BY user_id
-            """
-            if self.is_postgres:
-                with self.base_store._get_connection() as conn:
-                    with conn.cursor() as cur:
-                        cur.execute(sql, params)
-                        rows = cur.fetchall()
-            else:
-                with self.base_store._get_connection() as conn:
-                    rows = conn.execute(sql, params).fetchall()
-            for row in rows:
-                result[int(row["user_id"])] = {
-                    "last_meaningful_activity": (
-                        _parse_timestamp(row["last_meaningful_activity"])
-                        if row["last_meaningful_activity"] is not None
-                        else None
-                    ),
-                    "recent_runs": int(row["recent_runs"] or 0),
-                    "recent_failures": int(row["recent_failures"] or 0),
-                }
-        return result
-
     def list_activity_rows(
         self,
         *,
@@ -516,39 +469,95 @@ class AnalyticsQueryStore:
             (int(row["sequence"]), _row_to_event(row)) for row in page_rows
         ], next_cursor
 
+    def first_event_times(
+        self,
+        *,
+        user_id: int,
+        event_names: Sequence[str],
+        start: datetime,
+        end: datetime,
+    ) -> dict[str, datetime]:
+        """Each named event's first ``occurred_at`` for one user in ``[start, end)``.
+
+        One grouped, indexed read returning at most ``len(event_names)``
+        rows: the profile's activation milestones are first occurrences,
+        which the newest-100 timeline page cannot answer for a user whose
+        first verification is older than their last hundred events.
+        """
+        subject_id = positive_user_id(user_id)
+        names = sorted(set(event_names))
+        if not names:
+            return {}
+        placeholder = "%s" if self.is_postgres else "?"
+        sql = f"""
+            SELECT event_name, MIN(occurred_at) AS first_at
+            FROM analytics_events
+            WHERE user_id = {placeholder}
+              AND event_name IN ({", ".join(placeholder for _ in names)})
+              AND occurred_at >= {placeholder} AND occurred_at < {placeholder}
+            GROUP BY event_name
+        """
+        params = [
+            subject_id,
+            *names,
+            utc_iso(_utc(start, "start")),
+            utc_iso(_utc(end, "end")),
+        ]
+        if self.is_postgres:
+            with self.base_store._get_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(sql, params)
+                    rows = cur.fetchall()
+        else:
+            with self.base_store._get_connection() as conn:
+                rows = conn.execute(sql, params).fetchall()
+        return {
+            str(row["event_name"]): _parse_timestamp(row["first_at"])
+            for row in rows
+            if row["first_at"] is not None
+        }
+
     def list_session_rows(
         self,
         *,
         user_id: int,
         limit: int,
         cursor: str | None,
+        start: datetime,
     ) -> tuple[list[dict[str, Any]], str | None]:
+        """Sessions with any experience event at or after ``start``, whole.
+
+        The window selects *sessions*, not events: a session that began
+        before ``start`` and continued after it is read with all of its
+        events, so its count and visible time are not cut at the boundary.
+        Sessions wholly before ``start`` are out of scope (design: the
+        activity route's 30-day sessions window).
+        """
         subject_id = positive_user_id(user_id)
         page_size = positive_limit(limit)
+        window_start = utc_iso(_utc(start, "start"))
+        placeholder = "%s" if self.is_postgres else "?"
+        sql = f"""
+            SELECT * FROM analytics_events
+            WHERE user_id = {placeholder}
+              AND event_group = 'experience'
+              AND session_id IN (
+                  SELECT session_id FROM analytics_events
+                  WHERE user_id = {placeholder} AND occurred_at >= {placeholder}
+                    AND event_group = 'experience'
+                    AND session_id IS NOT NULL
+              )
+            ORDER BY occurred_at DESC, sequence DESC
+        """
+        params = (subject_id, subject_id, window_start)
         if self.is_postgres:
             with self.base_store._get_connection() as conn:
                 with conn.cursor() as cur:
-                    cur.execute(
-                        """
-                        SELECT * FROM analytics_events
-                        WHERE user_id = %s AND event_group = 'experience'
-                          AND session_id IS NOT NULL
-                        ORDER BY occurred_at DESC, sequence DESC
-                        """,
-                        (subject_id,),
-                    )
+                    cur.execute(sql, params)
                     rows = cur.fetchall()
         else:
             with self.base_store._get_connection() as conn:
-                rows = conn.execute(
-                    """
-                    SELECT * FROM analytics_events
-                    WHERE user_id = ? AND event_group = 'experience'
-                      AND session_id IS NOT NULL
-                    ORDER BY occurred_at DESC, sequence DESC
-                    """,
-                    (subject_id,),
-                ).fetchall()
+                rows = conn.execute(sql, params).fetchall()
         grouped: dict[str, dict[str, Any]] = {}
         for row in rows:
             event = _row_to_event(row)
@@ -596,18 +605,91 @@ class AnalyticsQueryStore:
         return page_rows, next_cursor
 
 
-def _snapshot_summary(snapshot: UserAnalyticsSnapshot) -> AnalyticsStateSummary:
-    return AnalyticsStateSummary(
-        status=snapshot.status,
-        reason_code=snapshot.reason_code,
-        human_readable_reason=snapshot.human_readable_reason,
-        evidence_event_ids=snapshot.evidence_event_ids,
-        calculated_at=snapshot.calculated_at,
+def _availability(available: bool = True) -> PanelAvailability:
+    return PanelAvailability(available=available)
+
+
+def _warn_read_failed(section: str, exc: BaseException) -> None:
+    """One log line for a read the page degrades to unavailable/partial.
+
+    The page already says "incomplete"; this is what lets an operator tell a
+    Postgres-only SQL bug from an outage in the Render log. Class name only:
+    an exception message can carry row data.
+    """
+    print(
+        f"WARNING: analytics.read.{section}_failed "
+        f"category={type(exc).__name__[:80]}",
+        flush=True,
     )
 
 
-def _availability(available: bool = True) -> PanelAvailability:
-    return PanelAvailability(available=available)
+def _legacy_state(operational_state: str, lifecycle_segment: str) -> str:
+    """Map the live operational state and lifecycle segment onto the legacy
+    five-state label (blocked, needs_attention, dormant, onboarding, active)
+    that the user profile's ``state`` summary still reports. Operational
+    problems win; otherwise the lifecycle segment decides."""
+
+    if operational_state in {"blocked", "needs_attention"}:
+        return operational_state
+    if lifecycle_segment == "dormant":
+        return "dormant"
+    if lifecycle_segment in {"new", "onboarding"}:
+        return "onboarding"
+    return "active"
+
+
+def _is_total_row(row: DailyRollup) -> bool:
+    """A rollup's undimensioned day total, not one of its per-dimension rows."""
+
+    return not (
+        row.event_name
+        or row.billing_mode
+        or row.provider_id
+        or row.model_id
+        or row.outcome
+        or row.error_category
+        or row.user_state
+    )
+
+
+def _latest_rollup_value(rows: Sequence[DailyRollup], metric_name: str) -> int | None:
+    """The metric's total on the latest rolled-up day: "as of yesterday"."""
+
+    latest: DailyRollup | None = None
+    for row in rows:
+        if row.metric_name == metric_name and _is_total_row(row):
+            if latest is None or row.rollup_date > latest.rollup_date:
+                latest = row
+    return None if latest is None else latest.value_count
+
+
+def _sum_rollup(rows: Sequence[DailyRollup], metric_name: str) -> int:
+    return sum(
+        row.value_count
+        for row in rows
+        if row.metric_name == metric_name and _is_total_row(row)
+    )
+
+
+def _rollup_token_total(
+    rows: Sequence[DailyRollup],
+    metric_name: str,
+    filters: AnalyticsMetricFilters,
+    *,
+    dimensional: bool,
+) -> int:
+    """A token metric over completed days: the day totals, or -- when a
+    billing/provider/model filter is set -- the per-usage-dimension rows."""
+
+    if not dimensional:
+        return _sum_rollup(rows, metric_name)
+    return sum(
+        row.value_count
+        for row in rows
+        if row.metric_name == metric_name
+        and (row.billing_mode or row.provider_id or row.model_id)
+        and _matches_rollup_dimensions(row, filters)
+    )
 
 
 def _matches_rollup_dimensions(
@@ -667,12 +749,55 @@ def _platform_cost_micro(
     )
 
 
+def _run_outcome_counts(totals: Any) -> RunOutcomeCounts:
+    if totals is None:
+        return RunOutcomeCounts()
+    return RunOutcomeCounts(
+        requested=totals.runs_requested,
+        completed=totals.runs_completed,
+        failed=totals.runs_failed,
+        cancelled=totals.runs_cancelled,
+    )
+
+
+def landed_fact_day(
+    value_store: Any,
+    *,
+    yesterday: date,
+    warned: set[tuple[date, date | None]],
+) -> date | None:
+    """The fact day a read "as of yesterday" should use, or None if none landed.
+
+    Facts land once a night. Until they do -- or all day, when the job's
+    facts step fails -- yesterday has no rows, and a read of it returns empty
+    counts indistinguishable from "nobody is blocked". Every such read
+    joins the newest landed day instead and labels it (``stale`` plus the
+    coverage dates; ``/users`` stamps ``as_of``), or, where its response has
+    no field to label it with, refuses a day older than the normal gap.
+
+    The WARNING is printed once per (expected, latest) pair for the calling
+    service, not once per request: a failed job would otherwise write it on
+    every page load, filter change and pagination click all day.
+    """
+    latest = value_store.latest_fact_date(on_or_before=yesterday)
+    if latest != yesterday and (yesterday, latest) not in warned:
+        warned.add((yesterday, latest))
+        print(
+            "WARNING: analytics.read.facts_stale "
+            f"latest={latest.isoformat() if latest else 'none'} "
+            f"expected={yesterday.isoformat()}",
+            flush=True,
+        )
+    return latest
+
+
 class AnalyticsQueryService:
     def __init__(
         self,
         *,
         store: Any = analytics_store,
         user_store: Any | None = None,
+        value_store: Any | None = None,
     ):
         if user_store is None:
             from dashboard.backend.users import user_store as default_user_store
@@ -681,6 +806,25 @@ class AnalyticsQueryService:
         self.store = store
         self.user_store = user_store
         self.query_store = AnalyticsQueryStore(store)
+        self._value_store = value_store
+        self._stale_fact_warnings: set[tuple[date, date | None]] = set()
+
+    @property
+    def value_store(self) -> Any:
+        """The fact-table store, built on first use.
+
+        Not in ``__init__``: the module-level ``analytics_query_service`` is
+        constructed at import, and building the default twin resolves the
+        credits / provider / agent / run singletons -- on the web boot path
+        and in every backtest child that imports this module.
+        """
+        if self._value_store is None:
+            self._value_store = build_value_analytics_store(analytics_base=self.store)
+        return self._value_store
+
+    @value_store.setter
+    def value_store(self, value: Any) -> None:
+        self._value_store = value
 
     def get_overview(
         self,
@@ -713,58 +857,135 @@ class AnalyticsQueryService:
         lane_days: dict[str, dict[str, int]] = {}
         funnel: dict[str, int] = {}
         failures: list[FailureCategoryCount] = []
-        raw_events: list[_MetricEvent] = []
-        # An empty window has nothing to read, which is not a failed read.
-        raw_events_read = effective_end <= filters.start
-
-        if effective_end > filters.start:
+        dimensional = any(
+            value is not None
+            for value in (
+                filters.billing_mode,
+                filters.provider_id,
+                filters.model_id,
+            )
+        )
+        # The one raw-event read: the current UTC day, only the part of it the
+        # window covers (design §6.15 item 2). Completed days come from the
+        # rollups, which already hold the trailing context the old
+        # window-wide scan existed to supply.
+        #
+        # Always without internal accounts: ``rollup_day`` writes the
+        # completed days internal-free, so admitting them into today's slice
+        # under ``include_internal`` summed two populations into one figure
+        # that matched neither setting. The flag is accepted and echoed, and
+        # widens nothing here (as on /retention, /groups and /lifecycle).
+        today_start = datetime.combine(
+            current.date(), datetime.min.time(), tzinfo=timezone.utc
+        )
+        scan_start = max(filters.start, today_start)
+        today_events: list[_MetricEvent] = []
+        # An empty slice has nothing to read, which is not a failed read.
+        raw_events_read = effective_end <= scan_start
+        if not raw_events_read:
             try:
-                raw_events = self.query_store.list_metric_events(
-                    start=filters.start,
+                today_events = self.query_store.list_metric_events(
+                    start=scan_start,
                     end=effective_end,
-                    include_internal=filters.include_internal,
+                    include_internal=False,
                 )
                 raw_events_read = True
-                raw_metrics = calculate_overview_metrics(
-                    raw_events,
-                    start=filters.start,
-                    end=effective_end,
-                    billing_mode=filters.billing_mode,
-                    provider_id=filters.provider_id,
-                    model_id=filters.model_id,
+            except Exception as exc:
+                _warn_read_failed("overview_events", exc)
+                today_events = []
+        current_events = [
+            event for event in today_events if _event_matches_filters(event, filters)
+        ]
+        rollups: list[DailyRollup] = []
+        rollups_read = False
+        try:
+            historical_end = min(effective_end.date(), current.date())
+            rollups = self.query_store.rollups.list_rollups(
+                start=filters.start.date(),
+                end=historical_end,
+            )
+            rollups_read = True
+        except Exception as exc:
+            _warn_read_failed("overview_rollups", exc)
+            rollups = []
+
+        # Trailing context, as of the latest completed day in the window. The
+        # rollups hold these as day totals only, so a billing/provider/model
+        # filter does not narrow them.
+        if rollups_read:
+            active_users = _latest_rollup_value(rollups, "rolling_active_users_7d")
+            mature = _sum_rollup(rollups, "mature_signup_cohort_users")
+            converted = _sum_rollup(rollups, "first_success_within_7d_users")
+            conversion = None if mature == 0 else converted / mature
+            first_success = _latest_rollup_value(rollups, "users_with_first_success")
+            repeat = _latest_rollup_value(rollups, "users_with_repeat_success_24h_30d")
+            if first_success:
+                repeat_rate = (repeat or 0) / first_success
+        else:
+            availability["snapshot"] = _availability(False)
+
+        if rollups_read and raw_events_read:
+            # Completed days sum their distinct users per day, so a user who
+            # repeats a step on two days counts twice (the daily tier's trade,
+            # design §6.3). activation_users rows carry no billing/provider/
+            # model, so today's half is unfiltered too.
+            funnel = {
+                event_name: sum(
+                    row.value_count
+                    for row in rollups
+                    if row.metric_name == "activation_users"
+                    and row.event_name == event_name
                 )
-                active_users = raw_metrics.active_users_7d
-                conversion = raw_metrics.first_success_conversion
-                repeat_rate = raw_metrics.repeat_run_rate
-                funnel = {
-                    event_name: len(
-                        {
-                            event.user_id
-                            for event in raw_events
-                            if event.event_name == event_name
-                            and _event_matches_filters(event, filters)
-                        }
-                    )
-                    for event_name in _ACTIVATION_EVENTS
-                }
-                failure_users: dict[str, set[int]] = defaultdict(set)
-                for event in raw_events:
-                    if event.error_category and _event_matches_filters(event, filters):
-                        failure_users[event.error_category].add(event.user_id)
-                failures = [
-                    FailureCategoryCount(
-                        error_category=category,
-                        affected_users=len(users),
-                    )
-                    for category, users in sorted(
-                        failure_users.items(),
-                        key=lambda item: (-len(item[1]), item[0]),
-                    )[:10]
-                ]
-            except Exception:
-                availability["snapshot"] = _availability(False)
+                + len(
+                    {
+                        event.user_id
+                        for event in today_events
+                        if event.event_name == event_name
+                    }
+                )
+                for event_name in _ACTIVATION_EVENTS
+            }
+            # Design D13: events per category, filtered or not. A distinct-user
+            # count over the range would need a raw read or a rollup keyed by
+            # user, and summing per-day distinct users counts user-days, so
+            # the one figure the rollups give exactly is the event count
+            # (#647).
+            failure_counts: dict[str, int] = defaultdict(int)
+            for row in rollups:
+                if (
+                    row.error_category
+                    and row.metric_name == "event_count"
+                    and _matches_rollup_dimensions(row, filters)
+                ):
+                    failure_counts[row.error_category] += row.value_count
+            for event in current_events:
+                if event.error_category:
+                    failure_counts[event.error_category] += 1
+            failures = [
+                FailureCategoryCount(error_category=category, event_count=count)
+                for category, count in sorted(
+                    failure_counts.items(),
+                    key=lambda item: (-item[1], item[0]),
+                )[:10]
+            ]
+            # A completed day rolled up before activation_users existed has
+            # every other rollup row and none of these, and summed as zero.
+            # rollup_day now writes them zero or not and the startup
+            # migration fills the old days inside raw retention; a day still
+            # without them makes the funnel an undercount, which it must not
+            # publish as a figure.
+            rolled_up_days = {
+                row.rollup_date for row in rollups if row.metric_name == "daily_active_users"
+            }
+            activation_days = {
+                row.rollup_date for row in rollups if row.metric_name == "activation_users"
+            }
+            if not rolled_up_days <= activation_days:
+                funnel = {}
                 availability["funnel"] = _availability(False)
-                availability["friction"] = _availability(False)
+        else:
+            availability["funnel"] = _availability(False)
+            availability["friction"] = _availability(False)
 
         try:
             if not raw_events_read:
@@ -773,19 +994,8 @@ class AnalyticsQueryService:
                 # publish a rollup-only figure as the whole range -- the quiet
                 # answer a failed read must never be mistaken for.
                 raise AnalyticsStoreError("raw analytics events are unavailable")
-            historical_end = min(effective_end.date(), current.date())
-            rollups = self.query_store.rollups.list_rollups(
-                start=filters.start.date(),
-                end=historical_end,
-            )
-            dimensional = any(
-                value is not None
-                for value in (
-                    filters.billing_mode,
-                    filters.provider_id,
-                    filters.model_id,
-                )
-            )
+            if not rollups_read:
+                raise AnalyticsStoreError("analytics rollups are unavailable")
             if dimensional:
                 historical_completed = sum(
                     row.value_count
@@ -818,17 +1028,6 @@ class AnalyticsQueryService:
                     and not row.provider_id
                     and not row.model_id
                 )
-            today_start = datetime.combine(
-                current.date(), datetime.min.time(), tzinfo=timezone.utc
-            )
-            current_events = [
-                event
-                for event in raw_events
-                if max(filters.start, today_start)
-                <= event.occurred_at
-                < effective_end
-                and _event_matches_filters(event, filters)
-            ]
             current_completed = sum(
                 event.event_name == "backtest_completed" for event in current_events
             )
@@ -843,17 +1042,16 @@ class AnalyticsQueryService:
             platform_cost = (
                 _platform_cost_micro(rollups, current_events, filters) / 1_000_000
             )
-            input_tokens = sum(
-                int(event.properties.get("input_tokens", 0))
-                for event in raw_events
-                if event.event_name == "model_usage_recorded"
-                and _event_matches_filters(event, filters)
-            )
-            output_tokens = sum(
-                int(event.properties.get("output_tokens", 0))
-                for event in raw_events
-                if event.event_name == "model_usage_recorded"
-                and _event_matches_filters(event, filters)
+            input_tokens, output_tokens = (
+                _rollup_token_total(
+                    rollups, metric_name, filters, dimensional=dimensional
+                )
+                + sum(
+                    int(event.properties.get(metric_name, 0))
+                    for event in current_events
+                    if event.event_name == "model_usage_recorded"
+                )
+                for metric_name in ("input_tokens", "output_tokens")
             )
             for row in rollups:
                 key = row.rollup_date.isoformat()
@@ -954,80 +1152,69 @@ class AnalyticsQueryService:
             lane_days = {
                 day: lane for day, lane in lanes.items() if any(lane.values())
             }
-        except Exception:
+        except Exception as exc:
+            _warn_read_failed("overview_growth", exc)
             availability["growth"] = _availability(False)
 
-        state_counts: dict[str, int] = {}
+        # The friction panel (top_failure_categories) is computed from the
+        # funnel's reads, so it is unavailable exactly when they failed (set
+        # above) -- not when only the funnel's activation rows are missing.
+
+        # Who needs attention, as of the latest landed fact day (design D20):
+        # yesterday once the night's job lands, the day before until then.
+        # The daily job writes facts for non-internal accounts only, so
+        # include_internal does not widen it.
+        yesterday = current.date() - timedelta(days=1)
         attention: list[AnalyticsUserListItem] = []
-        snapshots: dict[int, UserAnalyticsSnapshot] = {}
-        excluded: set[int] = set()
-        snapshots_available = False
         try:
-            snapshots = self.query_store.list_snapshots()
-            excluded = (
-                set()
-                if filters.include_internal
-                else self.store.list_excluded_user_ids(include_admin_accounts=True)
+            facts_day = landed_fact_day(
+                self.value_store,
+                yesterday=yesterday,
+                warned=self._stale_fact_warnings,
             )
-            state_counts = dict(
-                Counter(
-                    snapshot.status
-                    for user_id, snapshot in snapshots.items()
-                    if user_id not in excluded
+            if facts_day is None or facts_day < yesterday - timedelta(days=1):
+                # No fact day has landed, or only one older than the normal
+                # "tonight's job has not run yet" gap. An empty list would read
+                # as "nobody needs attention", and this panel has no as-of
+                # field to label an old list with, so it says unavailable.
+                raise AnalyticsStoreError("no recent analytics fact day has landed")
+            candidates = self.value_store.list_attention_candidates(
+                day=facts_day,
+                window_start=facts_day - timedelta(days=29),
+                limit=10,
+            )
+            activity = (
+                self.value_store.list_activity(
+                    [candidate.user_id for candidate in candidates]
                 )
+                if candidates
+                else {}
             )
-            snapshots_available = True
-        except Exception:
-            availability["friction"] = _availability(False)
-        try:
-            if not snapshots_available:
-                raise RuntimeError("Analytics snapshots are unavailable")
-            attention_ids = {
-                user_id
-                for user_id, snapshot in snapshots.items()
-                if user_id not in excluded
-                and snapshot.status in _ATTENTION_STATES
-            }
-            summaries = self.query_store.summarize_users(
-                user_ids=attention_ids,
-                start=current - timedelta(days=30),
-                end=current + timedelta(microseconds=1),
-            )
-            identities = {
-                int(user["id"]): user
-                for user in _all_users(self.user_store)
-                if int(user["id"]) in attention_ids
-            }
-            candidates = []
-            for user_id in attention_ids:
-                user = identities.get(user_id)
-                if user is None:
-                    continue
-                snapshot = snapshots[user_id]
-                summary = summaries.get(user_id, {})
-                candidates.append(
+            for candidate in candidates:
+                reason = operational_result_from_code(
+                    candidate.operational_reason_code, as_of=current
+                )
+                clock = activity.get(candidate.user_id)
+                attention.append(
                     AnalyticsUserListItem(
-                        user_id=user_id,
-                        display_name=str(user.get("display_name") or ""),
-                        email=str(user.get("email") or ""),
-                        joined_at=_parse_timestamp(user["created_at"]),
-                        status=snapshot.status,
-                        reason_code=snapshot.reason_code,
-                        human_readable_reason=snapshot.human_readable_reason,
-                        last_meaningful_activity=summary.get(
-                            "last_meaningful_activity"
+                        user_id=candidate.user_id,
+                        display_name=candidate.display_name,
+                        email=candidate.email,
+                        joined_at=candidate.created_at,
+                        status=candidate.operational_state,
+                        reason_code=reason.reason_code,
+                        human_readable_reason=reason.reason,
+                        last_meaningful_activity=(
+                            clock.last_meaningful_activity_at if clock else None
                         ),
-                        recent_runs=int(summary.get("recent_runs", 0)),
-                        recent_failures=int(summary.get("recent_failures", 0)),
-                        profile_path=f"/admin/analytics/users/{user_id}",
+                        recent_runs=candidate.recent_runs,
+                        recent_failures=candidate.recent_failures,
+                        profile_path=f"/admin/analytics/users/{candidate.user_id}",
                     )
                 )
-            candidates.sort(
-                key=lambda item: (item.recent_failures, item.user_id),
-                reverse=True,
-            )
-            attention = candidates[:10]
-        except Exception:
+        except Exception as exc:
+            _warn_read_failed("overview_attention", exc)
+            attention = []
             availability["attention"] = _availability(False)
 
         return AnalyticsOverview(
@@ -1054,7 +1241,6 @@ class AnalyticsQueryService:
                 for day, counts in sorted(lane_days.items())
             ],
             activation_funnel=funnel,
-            user_state_counts=state_counts,
             top_failure_categories=failures,
             users_needing_attention=attention,
             last_updated=current,
@@ -1093,10 +1279,12 @@ class AnalyticsQueryService:
             current_events = (
                 [
                     event
+                    # Internal-free, like the rollups it is added to -- the
+                    # overview's own figure reads the same way (see there).
                     for event in self.query_store.list_metric_events(
                         start=current_start,
                         end=effective_end,
-                        include_internal=filters.include_internal,
+                        include_internal=False,
                     )
                     if _event_matches_filters(event, filters)
                 ]
@@ -1111,6 +1299,41 @@ class AnalyticsQueryService:
             )
             return None
 
+    def get_user_axes(
+        self, user_id: int, *, now: datetime
+    ) -> tuple[LifecycleResult, OperationalResult]:
+        """Live segment and live operational state for exactly one user.
+
+        The segment's inputs are ``user_activity`` plus the trailing 30 fact
+        days through yesterday, evaluated ``as_of=now``; today's runs reach
+        the segment tomorrow (the accepted one-day lag, design §6.3).
+        """
+        subject_id = positive_user_id(user_id)
+        current = _utc(now, "now")
+        user = self.user_store.get_user_admin(subject_id)
+        if user is None:
+            raise LookupError("Analytics user was not found")
+        yesterday = current.date() - timedelta(days=1)
+        activity = self.value_store.get_activity(subject_id)
+        totals = self.value_store.sum_recent_facts(
+            [subject_id], start=yesterday - timedelta(days=29), end=yesterday
+        ).get(subject_id)
+        lifecycle = calculate_lifecycle(
+            build_lifecycle_inputs(
+                subject_id,
+                created_at=_parse_timestamp(user["created_at"]),
+                activity=activity,
+                totals=totals,
+                as_of=current,
+            ),
+            current,
+        )
+        facts = self.value_store.get_operational_facts(subject_id, now=current)
+        operational = calculate_operational_state(
+            OperationalSignals(**facts.model_dump()), current
+        )
+        return lifecycle, operational
+
     def get_user_profile(
         self,
         *,
@@ -1118,7 +1341,18 @@ class AnalyticsQueryService:
         now: datetime | None = None,
         start: datetime | None = None,
         end: datetime | None = None,
+        axes: tuple[LifecycleResult, OperationalResult] | None = None,
     ) -> AnalyticsUserProfile:
+        """One user's profile: live axes, fact-window sums, one timeline page.
+
+        The run, cost and spend figures sum ``user_daily_facts`` over the
+        selected window clipped to yesterday ("as of yesterday", design
+        §6.3). The raw-event scan is the first timeline page (design §6.12),
+        and every field computed from it -- lane mix, provider, client, top
+        page, tokens -- is bounded by that page, not by the window. The two
+        event milestones are first occurrences, so they come from one grouped
+        MIN() read over the selected range instead.
+        """
         subject_id = positive_user_id(user_id)
         current = _utc(now or datetime.now(timezone.utc), "now")
         range_start = (
@@ -1132,33 +1366,42 @@ class AnalyticsQueryService:
         user = self.user_store.get_user_admin(subject_id)
         if user is None:
             raise LookupError("Analytics user was not found")
-        snapshot = self.query_store.states.get_snapshot(subject_id)
-        if snapshot is None:
-            snapshot = calculate_user_state(
-                subject_id,
-                now=current,
-                store=self.query_store.states,
+        lifecycle, operational = axes or self.get_user_axes(subject_id, now=current)
+        yesterday = current.date() - timedelta(days=1)
+        window_start = range_start.date()
+        window_end = min((range_end - timedelta(microseconds=1)).date(), yesterday)
+        totals = (
+            self.value_store.sum_recent_facts(
+                [subject_id], start=window_start, end=window_end
+            ).get(subject_id)
+            if window_end >= window_start
+            else None
+        )
+        activity = self.value_store.get_activity(subject_id)
+
+        # The profile's one raw-event read: the first timeline page (design §6.12).
+        rows, _next_cursor = self.query_store.list_activity_rows(
+            user_id=subject_id, section="timeline", limit=100, cursor=None
+        )
+        events = [event for _sequence, event in rows]  # newest first
+        meaningful = [event for event in events if is_meaningful_event(event)]
+        joined_at = _parse_timestamp(user["created_at"])
+        milestones: dict[str, datetime] = {"account_signed_up": joined_at}
+        if activity is not None and activity.activated_at is not None:
+            milestones["backtest_completed"] = activity.activated_at
+        # First occurrences in the selected range, as main computed them --
+        # never min() over the timeline page, which holds only the newest
+        # 100 events and so loses (or misdates) an older first verification.
+        milestones.update(
+            self.query_store.first_event_times(
+                user_id=subject_id,
+                event_names=("credential_verified", "agent_created"),
+                start=range_start,
+                end=range_end,
             )
-        events = self.query_store.rollups.list_events(
-            start=range_start,
-            end=range_end,
-            include_internal=True,
-            user_id=subject_id,
         )
-        ordered = sorted(events, key=lambda event: event.occurred_at, reverse=True)
-        meaningful = [event for event in ordered if is_meaningful_event(event)]
-        milestones: dict[str, datetime] = {}
-        for event_name in _ACTIVATION_EVENTS:
-            matches = [
-                event.occurred_at for event in events if event.event_name == event_name
-            ]
-            if matches:
-                milestones[event_name] = min(matches)
-        lane_counts = Counter(
-            event.billing_mode
-            for event in events
-            if event.event_name == "model_usage_recorded" and event.billing_mode
-        )
+        usage = [event for event in events if event.event_name == "model_usage_recorded"]
+        lane_counts = Counter(event.billing_mode for event in usage if event.billing_mode)
         page_counts = Counter(
             event.page_view
             for event in events
@@ -1167,7 +1410,7 @@ class AnalyticsQueryService:
         provider_event = next(
             (
                 event
-                for event in ordered
+                for event in events
                 if event.provider_id
                 and event.event_name
                 in {"credential_defaulted", "credential_verified", "model_usage_recorded"}
@@ -1177,68 +1420,141 @@ class AnalyticsQueryService:
         client_event = next(
             (
                 event
-                for event in ordered
+                for event in events
                 if event.country_code or event.device_category or event.browser_family
             ),
             None,
         )
-        recent = [
-            AnalyticsFootprintItem(
-                event_id=event.event_id,
-                event_name=event.event_name,
-                occurred_at=event.occurred_at,
-                page_view=event.page_view,
-                provider_id=event.provider_id,
-                model_id=event.model_id,
-                billing_mode=event.billing_mode,
-                outcome=event.outcome,
-                error_category=event.error_category,
-            )
-            for event in meaningful[:20]
-        ]
+        state_status = _legacy_state(operational.state, lifecycle.segment)
+        state_reason = (
+            operational if state_status in _ATTENTION_STATES else lifecycle
+        )
         return AnalyticsUserProfile(
             user_id=subject_id,
             display_name=str(user.get("display_name") or ""),
             email=str(user.get("email") or ""),
-            joined_at=_parse_timestamp(user["created_at"]),
-            last_meaningful_activity=(meaningful[0].occurred_at if meaningful else None),
-            state=_snapshot_summary(snapshot),
+            joined_at=joined_at,
+            last_meaningful_activity=(
+                activity.last_meaningful_activity_at if activity is not None else None
+            ),
+            state=AnalyticsStateSummary(
+                status=state_status,
+                reason_code=state_reason.reason_code,
+                human_readable_reason=state_reason.reason,
+                # The five-state evidence list had one source,
+                # calculate_user_state, and the profile no longer calls it.
+                evidence_event_ids=[],
+                calculated_at=current,
+            ),
             primary_billing_lane=(lane_counts.most_common(1)[0][0] if lane_counts else None),
             default_provider=(provider_event.provider_id if provider_event else None),
             country_code=(client_event.country_code if client_event else None),
             device_category=(client_event.device_category if client_event else None),
             browser_family=(client_event.browser_family if client_event else None),
             activation_milestones=milestones,
-            recent_footprint=recent,
+            recent_footprint=[
+                AnalyticsFootprintItem(
+                    event_id=event.event_id,
+                    event_name=event.event_name,
+                    occurred_at=event.occurred_at,
+                    page_view=event.page_view,
+                    provider_id=event.provider_id,
+                    model_id=event.model_id,
+                    billing_mode=event.billing_mode,
+                    outcome=event.outcome,
+                    error_category=event.error_category,
+                )
+                for event in meaningful[:20]
+            ],
             run_summary={
-                "requested": sum(event.event_name == "backtest_requested" for event in events),
-                "completed": sum(event.event_name == "backtest_completed" for event in events),
-                "failed": sum(event.event_name == "backtest_failed" for event in events),
-                "cancelled": sum(event.event_name == "backtest_cancelled" for event in events),
+                "requested": totals.runs_requested if totals else 0,
+                "completed": totals.runs_completed if totals else 0,
+                "failed": totals.runs_failed if totals else 0,
+                "cancelled": totals.runs_cancelled if totals else 0,
             },
             billing_lane_mix=dict(lane_counts),
             input_tokens=sum(
-                int(event.properties.get("input_tokens", 0))
-                for event in events
-                if event.event_name == "model_usage_recorded"
+                int(event.properties.get("input_tokens", 0)) for event in usage
             ),
             output_tokens=sum(
-                int(event.properties.get("output_tokens", 0))
-                for event in events
-                if event.event_name == "model_usage_recorded"
+                int(event.properties.get("output_tokens", 0)) for event in usage
             ),
-            platform_model_cost_usd=sum(
-                atl_cost_micro(event.billing_mode, event.properties)
-                for event in events
-                if event.event_name == "model_usage_recorded"
-            )
+            platform_model_cost_usd=(totals.operator_cost_micro if totals else 0)
             / 1_000_000,
-            credits_debited_micro=sum(
-                int(event.properties.get("amount_micro", 0))
-                for event in events
-                if event.event_name == "credits_settled"
-            ),
+            credits_debited_micro=totals.own_spend_micro if totals else 0,
             top_product_page=(page_counts.most_common(1)[0][0] if page_counts else None),
+        )
+
+    def get_user_metrics(
+        self,
+        user_id: int,
+        *,
+        audience: Literal["admin", "user"],
+        now: datetime | None = None,
+    ) -> UserMetricsShared:
+        """Build one user's metric struct for one audience (design §6.13).
+
+        ``audience="user"`` returns ``UserMetricsShared`` and never reads the
+        admin-only sources (the axes, the access log); ``audience="admin"``
+        returns ``UserMetricsAdmin``. The shared numbers come from the same
+        reads either way, so the two projections cannot disagree on them.
+        Nothing calls this yet and it is on no response model.
+        """
+        if audience not in {"admin", "user"}:
+            raise ValueError("audience must be admin or user")
+        subject_id = positive_user_id(user_id)
+        current = _utc(now or datetime.now(timezone.utc), "now")
+        user = self.user_store.get_user_admin(subject_id)
+        if user is None:
+            raise LookupError("Analytics user was not found")
+        yesterday = current.date() - timedelta(days=1)
+        week = self.value_store.sum_recent_facts(
+            [subject_id], start=yesterday - timedelta(days=6), end=yesterday
+        ).get(subject_id)
+        month = self.value_store.sum_recent_facts(
+            [subject_id], start=yesterday - timedelta(days=29), end=yesterday
+        ).get(subject_id)
+        yesterday_start = datetime.combine(yesterday, datetime.min.time(), tzinfo=timezone.utc)
+        commercial = self.value_store.list_commercial_values(
+            [subject_id],
+            start=yesterday_start,
+            end=yesterday_start + timedelta(days=1),
+        ).get(subject_id)
+        tier: CommercialTier = (
+            commercial.commercial_tier if commercial is not None else "unpaid"
+        )
+        shared = dict(
+            user_id=subject_id,
+            facts_as_of=yesterday,
+            runs_7d=_run_outcome_counts(week),
+            runs_30d=_run_outcome_counts(month),
+            own_spend_micro=month.own_spend_micro if month else 0,
+            operator_cost_micro=month.operator_cost_micro if month else 0,
+            tier=tier,
+            credit_balance_micro=(
+                commercial.total_available_micro if commercial is not None else 0
+            ),
+            data_quality=(
+                "complete" if month is not None and month.days_present >= 30 else "partial"
+            ),
+        )
+        if audience == "user":
+            return UserMetricsShared(**shared)
+        lifecycle, operational = self.get_user_axes(subject_id, now=current)
+        user_group = str(user.get("user_group") or "unknown")
+        return UserMetricsAdmin(
+            **shared,
+            active_days_30d=min(30, month.active_days) if month else 0,
+            lifecycle=lifecycle,
+            operational=operational,
+            user_group=user_group,
+            group_badge=resolve_group_badge(
+                role=str(user.get("role") or "user"), user_group=user_group, tier=tier
+            ),
+            access_log=[
+                str(row["section"])
+                for row in self.store.list_admin_access(subject_id, limit=10)
+            ],
         )
 
     def get_user_activity(
@@ -1248,15 +1564,18 @@ class AnalyticsQueryService:
         section: ActivitySection,
         limit: int,
         cursor: str | None,
+        now: datetime | None = None,
     ) -> AnalyticsActivityPage:
         if section not in {"timeline", "runs", "usage", "sessions"}:
             raise ValueError("section must be a supported Analytics activity section")
         page_size = positive_limit(limit)
         if section == "sessions":
+            current = _utc(now or datetime.now(timezone.utc), "now")
             rows, next_cursor = self.query_store.list_session_rows(
                 user_id=user_id,
                 limit=page_size,
                 cursor=cursor,
+                start=current - timedelta(days=30),
             )
             return AnalyticsActivityPage(
                 items=[
@@ -1376,6 +1695,9 @@ __all__ = [
     "AnalyticsUserProfile",
     "FailureCategoryCount",
     "PanelAvailability",
+    "RunOutcomeCounts",
+    "UserMetricsAdmin",
+    "UserMetricsShared",
     "get_analytics_query_service",
     "get_value_analytics_query_service",
 ]

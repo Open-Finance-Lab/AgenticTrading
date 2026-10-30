@@ -13,6 +13,7 @@ Usage:
 
 import json
 import logging
+import math
 import re
 from typing import Dict, Any, List, Optional, Tuple
 from enum import Enum
@@ -55,6 +56,93 @@ TOP_10_STOCKS = ["AAPL", "MSFT", "JPM", "V", "JNJ", "WMT", "PG", "AXP", "HD", "D
 _TICKER_RE = re.compile(r"^[A-Z][A-Z0-9.]{0,9}$")
 
 
+# The whitespace an agent's JSON plausibly wraps a ticker in. Deliberately not
+# str.strip()'s default set, which also eats Unicode spaces (NBSP, U+2028) and
+# the ASCII separators \x1c-\x1f.
+_SYMBOL_WHITESPACE = " \t\n\r\v\f"
+
+
+def normalize_symbol(symbol: str) -> str:
+    """Canonical ticker form: ASCII whitespace trimmed, ASCII letters uppercased.
+
+    This is the one rule every decision path applies before comparing a
+    symbol with its allow-list (v1 ``LLMTradingDecision``, v2 ``ActionItem``,
+    the protocol Run API's ``OrderIn``, the backtest portfolio manager, the AI
+    Hedge Fund adapter, the Robinhood live path). It is normalization only:
+    which symbols are tradeable is still each caller's own universe, so a
+    symbol accepted on one surface can be refused on another.
+
+    A ticker is ASCII. A value that is not ASCII once trimmed is returned
+    trimmed but *not* case-folded, so it can never equal a ticker: Unicode
+    case mapping folds look-alikes into real symbols ('ıbm'.upper() == 'IBM',
+    'cſco'.upper() == 'CSCO').
+    """
+    trimmed = symbol.strip(_SYMBOL_WHITESPACE)
+    if not trimmed.isascii():
+        return trimmed
+    return trimmed.upper()
+
+
+# What an action's confidence reads as when the model leaves it out, per
+# backtest decision path. Kept apart on purpose: the default pipeline
+# instruction asks for no confidence, so the orders it produces carry 0.75 and
+# one without a qty is sized from it. Moving it to 0.5 would shrink those buys
+# by a third and stop new runs comparing with old ones.
+LLM_ACTION_DEFAULT_CONFIDENCE = 0.5  # the gate, for an ``actions`` reply
+PIPELINE_ORDER_DEFAULT_CONFIDENCE = 0.75  # a pipeline's ``orders``
+PIPELINE_RISK_DEFAULT_CONFIDENCE = 0.8  # a pipeline's ``risk_actions``
+
+
+def model_number(value: Any, default: Optional[float] = None) -> Optional[float]:
+    """A number a model wrote into its JSON reply, as a float.
+
+    A missing value (``None``, or a string of only whitespace) is ``default``.
+    A numeric string such as ``"0.4"`` is read as its number, as ``float()``
+    always read it on these paths. Anything else that is not a number -- a
+    bool, text such as ``"high"``, a list or an object -- is ``None``:
+    ``int(True) == 1`` is not what a model meant. The result is not range
+    checked and can be NaN or infinite; an int too large for a float reads
+    as infinite rather than raising ``OverflowError``.
+    """
+    if value is None or (isinstance(value, str) and not value.strip()):
+        return default
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        try:
+            return float(value)
+        except OverflowError:
+            return math.inf if value > 0 else -math.inf
+    if isinstance(value, (float, str)):
+        try:
+            return float(value)
+        except ValueError:
+            return None
+    return None
+
+
+def _confidence_in_range(confidence: float) -> bool:
+    return math.isfinite(confidence) and 0.0 <= confidence <= 1.0
+
+
+def read_confidence(value: Any, default: float) -> Optional[float]:
+    """An action's 0-1 confidence, or ``None`` when the action must be skipped.
+
+    One rule for the backtest gate and for every pipeline envelope it reads:
+    a confidence the model left out takes ``default``, and one it gave must be
+    a number from 0 to 1. ``0`` is the model saying it is not confident, not a
+    missing value. Anything else it gave -- a bool, ``"high"``, a list, NaN,
+    infinity, or a number off the scale such as ``25`` -- is ``None``: reading
+    a scale into it (``25`` as 25%) or a default over it would trade on a
+    confidence the model never stated. The range is the one
+    ``LLMTradingDecision`` enforces for external agents.
+    """
+    number = model_number(value, default)
+    if number is None or not _confidence_in_range(number):
+        return None
+    return number
+
+
 class TradingAction(str, Enum):
     """Allowed trading actions"""
     BUY = "buy"
@@ -90,9 +178,7 @@ class LLMTradingDecision(BaseModel):
     @classmethod
     def validate_symbol(cls, v):
         """Normalize ticker and enforce shape (universe checked later)."""
-        if not isinstance(v, str):
-            raise ValueError(f"Symbol must be a string, got {type(v)}")
-        symbol = v.strip().upper()
+        symbol = normalize_symbol(v)
         if not _TICKER_RE.fullmatch(symbol):
             raise ValueError(f"Invalid symbol format: {v}")
         return symbol
@@ -103,7 +189,7 @@ class LLMTradingDecision(BaseModel):
         """Confidence must be 0.0 to 1.0"""
         if not isinstance(v, (int, float)):
             raise ValueError(f"Confidence must be numeric, got {type(v)}")
-        if not 0.0 <= v <= 1.0:
+        if not _confidence_in_range(v):
             raise ValueError(f"Confidence {v} out of range [0.0, 1.0]")
         return float(v)
     
@@ -228,7 +314,7 @@ def validate_llm_response(
         return None
 
     allow = {
-        str(s).strip().upper()
+        normalize_symbol(str(s))
         for s in (allowed_symbols if allowed_symbols is not None else DJIA_30)
         if s
     }
@@ -721,7 +807,7 @@ Return ONLY valid JSON.
 
 def _format_valid_symbols(allowed_symbols: Optional[List[str]] = None) -> str:
     symbols = allowed_symbols if allowed_symbols is not None else DJIA_30
-    return ", ".join(str(s).strip().upper() for s in symbols if s)
+    return ", ".join(normalize_symbol(str(s)) for s in symbols if s)
 
 
 def create_safe_prompt(

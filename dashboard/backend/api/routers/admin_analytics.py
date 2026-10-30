@@ -49,7 +49,6 @@ _UNAVAILABLE_DETAIL = "Analytics is temporarily unavailable."
 _PROVIDER_ID_PATTERN = re.compile(r"^[a-z0-9_]{2,64}$")
 _MODEL_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/\-:]{0,255}$")
 _POSITIVE_INTEGER_PATTERN = re.compile(r"^[0-9]+$")
-_USER_STATES = {"blocked", "needs_attention", "dormant", "onboarding", "active"}
 _ACTIVITY_SECTIONS = {"timeline", "runs", "usage", "sessions"}
 _LIFECYCLE_SEGMENTS = {"new", "onboarding", "growing", "core", "at_risk", "dormant"}
 _OPERATIONAL_STATES = {"blocked", "needs_attention", "healthy"}
@@ -209,7 +208,6 @@ def _value_user_filters(request: Request) -> tuple[UserValueFilters, int, int]:
         request,
         {
             "q",
-            "status",
             "lifecycle_segment",
             "operational_state",
             "commercial_tier",
@@ -241,9 +239,6 @@ def _value_user_filters(request: Request) -> tuple[UserValueFilters, int, int]:
             user_group = parse_user_group(user_group)
         except ValueError:
             _invalid_query()
-    legacy_status = values.get("status")
-    if legacy_status is not None and legacy_status not in _USER_STATES:
-        _invalid_query()
 
     from_date = (
         _parse_date(values["last_meaningful_activity_from"])
@@ -278,7 +273,6 @@ def _value_user_filters(request: Request) -> tuple[UserValueFilters, int, int]:
             priority=(
                 _parse_bool(values["priority"]) if "priority" in values else False
             ),
-            legacy_status=legacy_status,
             include_internal=(
                 _parse_bool(values["include_internal"])
                 if "include_internal" in values

@@ -1444,9 +1444,9 @@ EOF
 
 This PR must merge by 2026-10-31. If it has not merged by then, bump both `live_from` values in `dashboard/config/leaderboard.json` (`qwen3_7_plus` and `claude_haiku_4_5`) by hand to the 1st of the month after the merge, in a commit on this branch before it merges (merging on 2026-11-05 means `"2026-12-01"`), and update the month in the PR body's join-date and cost bullets to match (`gh pr edit --body-file`). Otherwise Qwen and Haiku are live at once and replay the month to date. No test hard-codes the month, so only the two values change. The PR body's first line carries the same guard for whoever merges; keep it as the first line.
 
-Do not merge between 22:15 and 23:30 UTC on a weekday. The merge auto-deploys prod, and the Render restart kills the 22:30 UTC live refresh thread mid-run, so that night's session is billed again on the next night.
+Merge only when no live refresh can be running: from 22:15 UTC on a weekday, wait until that night's refresh has finished, by the check in the index plan (`2026-10-14-live-board-fixes.md`, Merging and records). The merge auto-deploys prod, and the restart kills a running refresh, so the sessions it had not checkpointed are billed again on the next night.
 
-- [ ] **Step 4: After merge (no code).** On the first weekday evening of the join month, check the Render log for `live increment qwen3_7_plus` and `live increment claude_haiku_4_5`, and check that no `ERROR: live.model_deploy_failed entry=claude_haiku_4_5` line appears. The first November nightly is the first real CommonStack `/v1/messages` call for Haiku at temperature 0. File anything found as an issue, not as a PR comment.
+- [ ] **Step 4: After merge (no code).** On the first weekday evening of the join month, check the Render log for `live increment qwen3_7_plus` and `live increment claude_haiku_4_5`, and check that neither `ERROR: live.model_deploy_failed entry=claude_haiku_4_5` nor `ERROR: live.model_not_attempted entry=claude_haiku_4_5` appears. Since #668, two entries ahead of it failing with the same error skip Haiku without printing the first line. The first November nightly is the first real CommonStack `/v1/messages` call for Haiku at temperature 0. File anything found as an issue, not as a PR comment.
 
 #### Phase 4 review-focus candidates
 

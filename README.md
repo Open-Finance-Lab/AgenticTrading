@@ -72,6 +72,8 @@ UV_HTTP_TIMEOUT=180 uv pip install --python .venv/bin/python -r requirements.txt
 dashboard/scripts/run_local_safe.sh        # http://127.0.0.1:8765/app, no keys, nothing can trade or bill
 ```
 
+On Windows, run these from Git Bash with `.venv/Scripts/python.exe` in place of `.venv/bin/python`.
+
 Full guide (backtests, tests, credentials, troubleshooting): [docs/local-run.md](docs/local-run.md).
 
 ## File Structure
