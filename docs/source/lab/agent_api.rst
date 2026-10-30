@@ -90,6 +90,14 @@ execute, invalid ones are returned in ``rejected`` with a reason
 was invalid, so the step held). Replaying an ``idempotency_key`` returns the
 original ack — no double execution.
 
+A symbol is normalized before the universe check: surrounding ASCII whitespace
+is trimmed and ASCII letters are uppercased, so ``" aapl "`` trades as
+``AAPL``. A symbol containing any non-ASCII character is never case-folded, so
+it never matches a ticker (``universe_violation``). ``executed`` and
+``rejected`` both echo the normalized symbol. A ``symbol`` may be at most 32
+characters as sent; a longer one is rejected as ``validation_failed`` and its
+echo is cut to 32.
+
 Each step has a decision deadline (60 seconds by default). A decision that
 misses it is replaced by an automatic hold and the run moves on rather than
 failing. The late submission gets no ack: it is answered ``409`` with error

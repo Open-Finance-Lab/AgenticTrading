@@ -28,6 +28,7 @@ from dashboard.backend.domain.agents.runtime import (
 from dashboard.backend.infrastructure.llm.validator import (
     MAX_ORDER_SHARES,
     actions_to_executable,
+    normalize_symbol,
     parse_actions_payload,
 )
 from dashboard.backend.infrastructure.llm.providers import openrouter
@@ -661,12 +662,12 @@ class AiHedgeFundRuntime:
         decision_date = context.timestamp.date().isoformat()
         cutoff = context.latest_market_date_before_decision
         data_cutoff_date = cutoff.isoformat() if cutoff is not None else ""
-        allowed = {str(symbol).strip().upper() for symbol in context.symbols}
+        allowed = {normalize_symbol(str(symbol)) for symbol in context.symbols}
         normalized = []
         trace_by_symbol: Dict[str, Dict[str, Any]] = {}
         seen = set()
         for raw_symbol, raw_decision in decisions.items():
-            symbol = str(raw_symbol or "").strip().upper()
+            symbol = normalize_symbol(str(raw_symbol or ""))
             if symbol not in allowed or symbol in seen:
                 raise AiHedgeFundOutputError(
                     f"AI Hedge Fund returned invalid symbol {raw_symbol!r}"
