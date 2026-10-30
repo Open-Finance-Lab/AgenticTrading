@@ -996,7 +996,12 @@ def submit_decision(run_id: str, step_id: str, decision: DecisionIn) -> Dict[str
             accepted_order_reprs.append(order_repr)
 
         trades_before = session.trade_count()
-        engine_result = session.submit_decisions({"actions": accepted_actions})
+        # run.lock does not exclude the reaper's drain_expired(), which takes
+        # only the session lock: pin the step checked above so a hold landing
+        # in between refuses this decision instead of applying it to seq + 1.
+        engine_result = session.submit_decisions(
+            {"actions": accepted_actions}, expected_step=current_index
+        )
 
         if not engine_result.get("accepted"):
             err = engine_result.get("error", "")

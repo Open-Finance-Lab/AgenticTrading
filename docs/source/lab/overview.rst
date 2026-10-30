@@ -8,7 +8,7 @@ Agentic Trading Lab is a research and educational environment for studying tradi
 Goals
 -----
 
-The platform bridges alpha-seeking research and deployable trading workflows. Beyond asking whether an agent can generate profitable signals, the lab surfaces the full pipeline—data handling, agent decisions, backtesting, execution constraints, risk, and governance. Paper trading is coming in the future.
+The platform bridges alpha-seeking research and deployable trading workflows. Beyond asking whether an agent can generate profitable signals, the lab surfaces the full pipeline—data handling, agent decisions, backtesting, execution constraints, risk, and governance.
 
 See also :doc:`operating_modes`, :doc:`key_features`, :doc:`getting_started`, :doc:`accounts`, :doc:`credits_billing`, :doc:`marketplace`, :doc:`research_agents`, :doc:`external_agents`, :doc:`agent_api`, :doc:`live_trading`, and :doc:`architecture`. For the multi-agent framework, see :doc:`../orchestration/index`.
 
@@ -27,7 +27,7 @@ Repository layout
    │   └── storage/
    │       ├── data/    SQLite backtest results (backtest.db)
    │       └── backups/ Database backups
-   ├── packaging/       PyPI client (agentictrading)
+   ├── packaging/       Python SDK (agentictrading; install from source)
    ├── credentials/     Local only — not in git
    ├── docs/            This documentation
    └── orchestration/   FinAgent multi-agent framework (separate subsystem)

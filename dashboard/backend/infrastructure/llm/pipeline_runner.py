@@ -28,6 +28,7 @@ from dashboard.backend.infrastructure.llm.backtest_harness import (
 from dashboard.backend.infrastructure.llm.execution.errors import (
     ExecutionErrorCategory,
     LLMExecutionError,
+    is_empty_reply,
     is_transient_provider_failure,
 )
 from dashboard.backend.infrastructure.llm.execution.log_safe import log_safe_token
@@ -879,7 +880,9 @@ def run_pipeline_decision(
                 max_tokens=first_ceiling,
             )
         except LLMExecutionError as first_error:
-            if first_error.category is not ExecutionErrorCategory.RESPONSE_INVALID:
+            # Only a reply that came back empty is worth asking again; the
+            # rest of RESPONSE_INVALID fails identically on a retry.
+            if not is_empty_reply(first_error):
                 raise
             print(
                 "   ⚠️  Empty model response; retrying with reasoning preserved "
@@ -914,7 +917,7 @@ def run_pipeline_decision(
                 # An empty second reply is the same class of outcome as the
                 # truncated first one; anything else is an infrastructure
                 # failure the first attempt would have raised too.
-                if retry_error.category is not ExecutionErrorCategory.RESPONSE_INVALID:
+                if not is_empty_reply(retry_error):
                     raise
                 print("   ⚠️  Retry returned no usable response; keeping the first attempt")
             if retry_response is not None:

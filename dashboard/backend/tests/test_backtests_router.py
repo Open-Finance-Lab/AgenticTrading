@@ -3735,6 +3735,28 @@ def test_every_category_round_trips_through_the_child_line():
     assert rebuilt.safe_message == restricted.safe_message
 
 
+def test_an_empty_reply_keeps_its_label_across_the_child_line():
+    # The marker is not a category, so only the line's reason carries it; lost
+    # there, a run that died on empty replies reads `internal_error`.
+    from dashboard.backend.infrastructure.llm.execution.errors import (
+        ExecutionErrorCategory,
+        LLMExecutionError as _Err,
+        is_empty_reply,
+        run_failed_line,
+    )
+
+    line = run_failed_line(_Err.for_empty_reply())
+    assert line == "ERROR: llm.run_failed category=response_invalid reason=empty_reply"
+    rebuilt = bt._child_llm_failure(line)
+    assert is_empty_reply(rebuilt)
+    assert bt.analytics_error_category_for(rebuilt) == "empty_response"
+    refused = bt._child_llm_failure(
+        run_failed_line(_Err(ExecutionErrorCategory.RESPONSE_INVALID))
+    )
+    assert not is_empty_reply(refused)
+    assert bt.analytics_error_category_for(refused) == "internal_error"
+
+
 @pytest.mark.parametrize(
     ("reason", "expected"),
     [
@@ -3948,3 +3970,64 @@ def test_the_child_reports_llm_failures_at_its_cli_boundary():
     ]
     assert handlers, "__main__ must catch LLMExecutionError"
     assert "_run_failed_report" in ast.unparse(handlers[0])
+
+
+# The child flushes a partial-result snapshot into run_live_progress while it
+# runs; the boot reclaimer publishes any snapshot left behind as a run
+# "interrupted (server restart)". So the parent must delete it once it knows
+# how the run ended -- otherwise every cancelled, failed or timed-out run comes
+# back under that label after the next deploy.
+@pytest.mark.parametrize(
+    "child_kwargs, cancel",
+    [
+        (dict(returncode=0, stdout="ok\n"), False),
+        (dict(returncode=1, stderr="Traceback: boom\n"), False),
+        (dict(stdout="run header line\n", timeout_waits=1), False),
+        (dict(returncode=-15, stdout="ok\n"), True),
+        (dict(returncode=-9), False),
+    ],
+    ids=["succeeded", "failed", "timed-out", "cancelled", "killed"],
+)
+def test_parent_deletes_the_childs_snapshot_however_the_run_ended(
+    monkeypatch, child_kwargs, cancel
+):
+    run_id = f"agent_snapshot_{uuid.uuid4().hex[:8]}"
+    bt.db.upsert_live_progress(run_id, "sess", "Agent", {"run_id": run_id, "step": 1})
+    if cancel:
+        monkeypatch.setattr(bt, "_backtest_cancel_requested", lambda rid: rid == run_id)
+    try:
+        _run_parent_with_child(monkeypatch, FakeChild(**child_kwargs), run_id=run_id)
+    finally:
+        with bt._backtest_slots_lock:
+            bt._active_slots.pop(run_id, None)
+
+    assert bt.db.get_live_progress(run_id) is None
+
+
+def test_parent_deletes_the_snapshot_when_it_raised_mid_wait(monkeypatch):
+    run_id = f"agent_snapshot_{uuid.uuid4().hex[:8]}"
+    bt.db.upsert_live_progress(run_id, "sess", "Agent", {"run_id": run_id, "step": 1})
+
+    def _boom(*_a, **_k):
+        raise RuntimeError("parent died mid-wait")
+
+    monkeypatch.setattr(bt, "_run_backtest_subprocess", _boom)
+    _run_parent_with_child(monkeypatch, FakeChild(returncode=0), run_id=run_id)
+
+    assert bt.db.get_live_progress(run_id) is None
+
+
+def test_snapshot_cleanup_is_bounded_and_logged(monkeypatch, capsys):
+    """A hung database must not hold the worker thread: the delete runs under
+    a deadline, after the slot is already free, and says so when abandoned."""
+    run_id = f"agent_snapshot_{uuid.uuid4().hex[:8]}"
+    release = threading.Event()
+    monkeypatch.setattr(bt, "LIVE_PROGRESS_CLEAR_DEADLINE_SECONDS", 0.05)
+    monkeypatch.setattr(bt.db, "delete_live_progress", lambda _rid: release.wait(5))
+    try:
+        _run_parent_with_child(monkeypatch, FakeChild(returncode=0, stdout="ok\n"), run_id=run_id)
+    finally:
+        release.set()
+
+    assert run_id not in bt._active_slots
+    assert f"ERROR: live_progress.clear_timeout run={run_id}" in capsys.readouterr().out

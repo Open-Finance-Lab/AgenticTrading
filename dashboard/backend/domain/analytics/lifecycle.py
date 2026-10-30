@@ -397,6 +397,75 @@ def activation_cohort_week(activated_at: datetime) -> date:
     return activated_day - timedelta(days=activated_day.weekday())
 
 
+_OPERATIONAL_STATE_BY_REASON: dict[str, OperationalState] = {
+    "account_restricted": "blocked",
+    "billing_lane_unavailable": "blocked",
+    "provider_disabled": "blocked",
+    "invalid_default_credential": "needs_attention",
+    "three_consecutive_failed_runs": "needs_attention",
+    "run_deadline_exceeded": "needs_attention",
+    "no_supported_issue": "healthy",
+}
+_UNKNOWN_OPERATIONAL_REASON = "An operational issue was recorded."
+
+
+def resolve_group_badge(
+    *,
+    role: str,
+    user_group: str,
+    tier: CommercialTier,
+) -> str:
+    """The single group label admin views show for one user.
+
+    Three orthogonal axes, one badge, fixed precedence (design §6.2, D11): an
+    admin reads as an admin, because that is the fact that changes what they
+    can do; a named ``user_group`` beats tier because a human assigned it;
+    ``unknown`` is the column's default, not a label, so it falls through to
+    the tier. Do not recompute the precedence in JavaScript: the server owns
+    that rule.
+    """
+
+    if role == "admin":
+        return "admin"
+    if user_group and user_group != "unknown":
+        return user_group
+    return "free" if tier == "unpaid" else "paid"
+
+
+def operational_reason(reason_code: str) -> str:
+    """Display text for a stored operational reason code, never the code itself."""
+
+    return _OPERATIONAL_REASONS.get(reason_code, _UNKNOWN_OPERATIONAL_REASON)
+
+
+def operational_result_from_code(
+    reason_code: str | None,
+    *,
+    as_of: datetime,
+) -> OperationalResult:
+    """Rebuild a display-safe result from yesterday's stored reason code.
+
+    ``user_daily_facts`` stores the code, not the evidence: the one dynamic
+    evidence line (the consecutive-failure count) is not recoverable from a
+    code, so it falls back to the reason text rather than inventing a number.
+    History-copy rows carry state ``healthy`` with a NULL code, so ``None``
+    rebuilds as the healthy result rather than as an unknown issue.
+    """
+
+    calculation_time = _require_utc(as_of, "as_of")
+    code = "no_supported_issue" if reason_code is None else reason_code
+    state = _OPERATIONAL_STATE_BY_REASON.get(code, "needs_attention")
+    reason = operational_reason(code)
+    evidence = _OPERATIONAL_EVIDENCE.get(code, reason)
+    return OperationalResult(
+        state=state,
+        reason_code=code,
+        reason=reason,
+        evidence=(evidence,),
+        calculated_at=calculation_time,
+    )
+
+
 __all__ = [
     "CommercialTier",
     "LifecycleInputs",
@@ -411,4 +480,7 @@ __all__ = [
     "commercial_tier",
     "consecutive_failed_terminal_runs",
     "is_lifecycle_activity",
+    "operational_reason",
+    "operational_result_from_code",
+    "resolve_group_badge",
 ]

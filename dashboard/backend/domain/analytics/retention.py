@@ -80,33 +80,19 @@ class AnalyticsRetentionService:
 
         if self.value_store is not None:
             lifecycle_before = current.date() - timedelta(days=RAW_EVENT_RETENTION_DAYS)
-            expiring_days = self.value_store.list_expiring_daily_dates(
+            expiring_days = self.value_store.list_expiring_fact_dates(
                 before=lifecycle_before,
                 limit=min(self.batch_size, self.max_batches),
             )
-            # Aggregate every selected day before deleting any of them so
-            # adjacent-day transitions remain available throughout the batch.
+            # Aggregate every selected day before deleting any of it (design
+            # SS11: the anonymous rollups are what outlives the 180-day
+            # horizon). Facts and the transition log for one day expire
+            # together, in one transaction.
             for day in expiring_days:
                 rollup_lifecycle_day(day, store=self.value_store)
-            expiring_set = set(expiring_days)
-            for boundary_day in sorted(
-                {
-                    day + timedelta(days=1)
-                    for day in expiring_days
-                    if day + timedelta(days=1) not in expiring_set
-                }
-            ):
-                boundary_rows = self.value_store.list_daily_snapshots(
-                    start=boundary_day,
-                    end=boundary_day + timedelta(days=1),
-                )
-                if boundary_rows:
-                    rollup_lifecycle_day(boundary_day, store=self.value_store)
             for day in expiring_days:
-                lifecycle_deleted += self.value_store.delete_daily_snapshots_for_date(
-                    day
-                )
-            has_more_lifecycle = self.value_store.has_daily_before(lifecycle_before)
+                lifecycle_deleted += self.value_store.expire_facts_for_date(day)
+            has_more_lifecycle = self.value_store.has_facts_before(lifecycle_before)
 
         return RetentionResult(
             raw_events_deleted=raw_deleted,

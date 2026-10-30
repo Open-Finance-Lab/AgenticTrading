@@ -38,6 +38,7 @@ from dashboard.backend.infrastructure.llm.validator import (
     DJIA_30,
     MAX_ORDER_SHARES,
     create_prompt,
+    normalize_symbol,
 )
 from dashboard.backend.domain.trading.portfolio import (
     append_equity_record as _append_equity_record,
@@ -58,6 +59,8 @@ from dashboard.backend.infrastructure.llm.backtest_harness import (
     request_trading_decision as _request_trading_decision,
 )
 from dashboard.backend.infrastructure.llm.execution.errors import (
+    LLMExecutionError,
+    is_empty_reply,
     is_transient_provider_failure,
 )
 from dashboard.backend.infrastructure.llm.pipeline_runner import (
@@ -130,6 +133,15 @@ def _insert_before(
     return out
 
 
+def _is_legacy_empty_reply(error: BaseException) -> bool:
+    """The legacy client's empty reply: a response with no text block.
+
+    Unlike the execution layer's (``is_empty_reply``), it arrives as a response
+    whose usage was already recorded, so its retries are billed calls.
+    """
+    return isinstance(error, AttributeError) and "No text content" in str(error)
+
+
 class PortfolioManager:
     """Manages portfolio with hourly trading decisions based on indicators."""
     
@@ -188,7 +200,7 @@ class PortfolioManager:
         self.last_pipeline_step_outputs = []
         # Tradeable universe for this run (defaults to DJIA_30).
         symbols = allowed_symbols if allowed_symbols is not None else DJIA_30
-        self.allowed_symbols = [str(s).strip().upper() for s in symbols if s]
+        self.allowed_symbols = [normalize_symbol(str(s)) for s in symbols if s]
         self._allowed_set = set(self.allowed_symbols)
 
     def snapshot_state(self) -> Dict[str, Any]:
@@ -683,6 +695,8 @@ class PortfolioManager:
                 # not the kind of failure a same-ceiling retry fixes. The first
                 # request and the rescue call are byte-identical either way;
                 # only the count of same-ceiling retries between them moves.
+                # The count governs the legacy client's empty reply only; the
+                # execution layer's skips it (see the retry branch below).
                 no_text_retries = 1 if escalate_ceiling_on_retry() else 4
                 # One recovery budget (``RECOVERY_MAX_OUTPUT_TOKENS``) per
                 # step, spent by whichever unusable reply claims it first: the
@@ -691,8 +705,26 @@ class PortfolioManager:
                 # different left to ask for.
                 recovery_spent = False
                 output_delta = 0
-                for attempt in range(no_text_retries + 1):
-                    if attempt == no_text_retries:
+
+                def request_decision(*, recovery: bool):
+                    # Only a recovery attempt passes a ceiling, so every other
+                    # request keeps the call shape it had before retries.
+                    ceiling = (
+                        {"max_tokens": RECOVERY_MAX_OUTPUT_TOKENS} if recovery else {}
+                    )
+                    return _request_trading_decision(
+                        llm_client,
+                        prompt=prompt,
+                        model=model,
+                        temperature=temperature,
+                        market_context=market_context,
+                        **ceiling,
+                    )
+
+                attempt = 0
+                while True:
+                    rescue = attempt >= no_text_retries
+                    if rescue:
                         # Final rescue: preserve the provider's reasoning mode,
                         # but give the model more room for reasoning plus JSON.
                         print(
@@ -700,36 +732,35 @@ class PortfolioManager:
                             f"and max_tokens={RECOVERY_MAX_OUTPUT_TOKENS}"
                         )
                         recovery_spent = True
-                        response = _request_trading_decision(
-                            llm_client,
-                            prompt=prompt,
-                            model=model,
-                            max_tokens=RECOVERY_MAX_OUTPUT_TOKENS,
-                            temperature=temperature,
-                            market_context=market_context,
-                        )
-                    else:
-                        response = _request_trading_decision(
-                            llm_client,
-                            prompt=prompt,
-                            model=model,
-                            temperature=temperature,
-                            market_context=market_context,
-                        )
-                    output_delta = self._record_llm_usage(response)
                     try:
+                        response = request_decision(recovery=rescue)
+                        output_delta = self._record_llm_usage(response)
                         llm_response = _extract_response_text(response)
                         break
-                    except AttributeError as extract_err:
-                        if "No text content" not in str(extract_err):
+                    except (LLMExecutionError, AttributeError) as unusable:
+                        legacy_empty = _is_legacy_empty_reply(unusable)
+                        if rescue or not (legacy_empty or is_empty_reply(unusable)):
                             raise
-                        if attempt < no_text_retries:
+                        if legacy_empty:
                             print(
-                                f"   ⚠️  {extract_err}; "
+                                f"   ⚠️  {unusable}; "
                                 f"retry {attempt + 1}/{no_text_retries}"
                             )
-                            continue
-                        raise
+                            attempt += 1
+                        else:
+                            # The execution layer rejects an empty reply itself
+                            # (#600) and releases its reservation at zero
+                            # (#556), so a same-ceiling retry is a generation
+                            # the platform pays for and never bills. It goes
+                            # straight to the rescue, as pipeline_runner's
+                            # steps do. Any other execution error -- a request
+                            # or result contract break, billing, credentials,
+                            # quota -- was raised above, unretried.
+                            print(
+                                "   ⚠️  Empty model response; going straight "
+                                "to the rescue call"
+                            )
+                            attempt = no_text_retries
 
                 # ================================================================
                 # STEP 3: Parse and validate LLM response
@@ -750,16 +781,21 @@ class PortfolioManager:
                             "reasoning preserved and "
                             f"max_tokens={RECOVERY_MAX_OUTPUT_TOKENS}"
                         )
-                        retry_response = _request_trading_decision(
-                            llm_client,
-                            prompt=prompt,
-                            model=model,
-                            max_tokens=RECOVERY_MAX_OUTPUT_TOKENS,
-                            temperature=temperature,
-                            market_context=market_context,
+                        try:
+                            retry_response = request_decision(recovery=True)
+                        except LLMExecutionError as retry_err:
+                            # An empty second reply is the same outcome as the
+                            # truncated first one: keep the first attempt.
+                            if not is_empty_reply(retry_err):
+                                raise
+                            retry_response = None
+                        if retry_response is not None:
+                            self._record_llm_usage(retry_response)
+                        retry_text = (
+                            None
+                            if retry_response is None
+                            else response_text_or_none(retry_response)
                         )
-                        self._record_llm_usage(retry_response)
-                        retry_text = response_text_or_none(retry_response)
                         if retry_text is None:
                             print(
                                 "   ⚠️  Retry returned no text block; "
@@ -818,7 +854,7 @@ class PortfolioManager:
                         raise LLMDecisionError(
                             "LLM returned an invalid action batch"
                         )
-                    symbol = str(llm_action.get("symbol") or "").strip().upper()
+                    symbol = normalize_symbol(str(llm_action.get("symbol") or ""))
                     action_type = str(
                         llm_action.get("action") or ""
                     ).strip().lower()
@@ -831,7 +867,7 @@ class PortfolioManager:
                         )
 
             for llm_action in llm_actions:
-                symbol = str(llm_action.get("symbol") or "").strip().upper()
+                symbol = normalize_symbol(str(llm_action.get("symbol") or ""))
                 action_type = llm_action.get("action", "hold").lower()
                 confidence = llm_action.get("confidence", 0.5)
                 reasoning = llm_action.get("reasoning", "")

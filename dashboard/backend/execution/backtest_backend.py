@@ -220,13 +220,21 @@ class BacktestBackend(ExecutionBackend):
         Flattening them into the ack shape would report a refused submission
         as an accepted-looking decision attributed to "external_agent"."""
         err = str(result.get("error") or "invalid_status")
+        # Which step the decision was refused for, and whether that closed the
+        # run; _submit_for keys its audit row and trace on these.
+        closed = {"step_index": result.get("step_index"),
+                  "status": result.get("status")}
         if err == "step_already_closed":
+            if result.get("outcome") == "timeout_hold":
+                message = "The step closed before the decision arrived (step auto-held)"
+            else:
+                message = ("The step this decision was built for has already "
+                           "closed; fetch the current context and decide again")
             raise ApiError(
-                "step_already_closed",
-                "The step closed before the decision arrived (step auto-held)",
+                "step_already_closed", message,
                 status=409, retryable=True,
                 details={"outcome": result.get("outcome"),
-                         "next_step": result.get("next_step")},
+                         "next_step": result.get("next_step"), **closed},
             )
         if err == "backtest_already_completed":
             raise ApiError("invalid_status", "Run already completed", status=409)
@@ -241,14 +249,33 @@ class BacktestBackend(ExecutionBackend):
         # auto-held with decision_source="validation_hold" by the engine.
         raise ApiError(
             "validation_failed", err, status=422,
-            details={"outcome": result.get("outcome")},
+            details={"outcome": result.get("outcome"), **closed},
         )
 
-    def apply_decisions(self, actions: List[Dict[str, Any]]) -> Dict[str, Any]:
+    def _record_completed(self) -> None:
+        # Record the terminal state on the protocol_runs row so cap counting
+        # and restart recovery see it now, not at the next reaper archive.
+        try:
+            run_repo.run_store.update_run(
+                self.run_id,
+                status="completed",
+                result_run_id=self.session.run_id or self.run_id,
+            )
+        except Exception:
+            pass  # best-effort; the reaper sweep reconciles
+
+    def apply_decisions(self, actions: List[Dict[str, Any]],
+                        expected_step: Optional[int] = None) -> Dict[str, Any]:
         # Actions arrive pre-validated from the v2 boundary (validate_actions);
         # this backend executes them and reports execution results. Schema-level
         # rejections are merged in by the boundary.
-        result = self.session.submit_decisions({"actions": actions})
+        result = self.session.submit_decisions(
+            {"actions": actions}, expected_step=expected_step
+        )
+        if result.get("status") == "completed":
+            # The final step closed — by this decision or by holding it — so
+            # the run finalized either way.
+            self._record_completed()
         if not result.get("accepted", True):
             self._raise_rejection(result)
 
@@ -268,17 +295,6 @@ class BacktestBackend(ExecutionBackend):
             "run_id": self.run_id,
             "metrics": result.get("metrics"),
         }
-        if ack["status"] == "completed":
-            # The final submit finalized the run — record the terminal state on
-            # its protocol_runs row so cap counting and restart recovery see it.
-            try:
-                run_repo.run_store.update_run(
-                    self.run_id,
-                    status="completed",
-                    result_run_id=self.session.run_id or self.run_id,
-                )
-            except Exception:
-                pass  # best-effort; the reaper sweep reconciles
         return ack
 
     def decisions(self) -> List[Dict[str, Any]]:
@@ -422,7 +438,8 @@ class ArchivedBacktestBackend(ExecutionBackend):
             "news_overview": None,
         }
 
-    def apply_decisions(self, actions: List[Dict[str, Any]]) -> Dict[str, Any]:
+    def apply_decisions(self, actions: List[Dict[str, Any]],
+                        expected_step: Optional[int] = None) -> Dict[str, Any]:
         # Same errors the live path raises for a terminal session (via
         # _raise_rejection), so archival is invisible to error handling.
         if self.terminal_status == "completed":

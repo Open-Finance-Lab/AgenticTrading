@@ -101,9 +101,18 @@ def test_capital_note_new_text_is_present():
     # Configure field is greyed and its note says so instead of describing a
     # reservation nobody can make.
     assert (
-        "Paper trading is not available yet. "
+        "Paper trading is not available. "
         "Backtests use the simulated amount beside it."
     ) in _HTML
+
+
+def test_paper_trading_copy_makes_no_promise():
+    # The 2026-10-14 direction puts broker paper trading out of scope with no
+    # forward design, so the greyed controls say it is not available rather
+    # than that it is coming.
+    assert "Paper trading is coming soon" not in _HTML
+    assert '<span class="agent-capital-max">coming soon</span>' not in _HTML
+    assert "Paper trading is not available yet" not in _HTML
 
 
 # --- Additional register guards ---------------------------------------------

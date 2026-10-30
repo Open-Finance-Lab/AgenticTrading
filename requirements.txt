@@ -2,20 +2,15 @@ annotated-types==0.7.0
 anyio==4.14.2
 anthropic==0.95.0
 alpaca-py==0.43.2
-aiohttp==3.14.3
-aiosignal==1.4.0
 attrs==25.3.0
 bcrypt==4.3.0
-certifi==2025.8.3
+certifi==2026.10.23
 cffi==2.0.0
 charset-normalizer==3.4.7
 click==8.3.3
 cryptography==50.0.0
-distlib==0.3.9
 distro==1.9.0
-filelock==3.20.3
 fastapi==0.135.3
-frozenlist==1.8.0
 h11==0.16.0
 httpcore==1.0.9
 httpx==0.28.1
@@ -29,9 +24,11 @@ jsonschema==4.25.1
 jsonschema-specifications==2025.4.1
 llvmlite==0.44.0
 matplotlib==3.11.0
-mcp==1.28.1
-msgpack==1.2.1
-multidict==6.7.1
+mcp==1.30.0
+# A security floor, not a direct import: alpaca-py's live-data websocket
+# decoder pulls it in. 1.2.3 fixes GHSA-j586-36cw-2gc2 and 1.2.4 fixes
+# GHSA-j8c6-9vc5-hj6x, both in the C extension. Never pin below 1.2.4.
+msgpack==1.2.4
 networkx==3.5
 numpy==2.2.6
 numba==0.61.2
@@ -40,12 +37,11 @@ pandas==2.3.2
 pandas-ta==0.4.71b0
 pyarrow==23.0.1
 platformdirs==4.3.7
-propcache==0.4.1
 pycparser==3.0
 pydantic==2.11.7
 pydantic-settings==2.10.1
 pydantic_core==2.33.2
-PyJWT==2.13.0
+PyJWT==2.15.1
 python-dateutil==2.9.0.post0
 python-dotenv==1.2.2
 python-multipart==0.0.31
@@ -67,8 +63,6 @@ typing-inspection==0.4.2
 typing_extensions==4.14.1
 tzdata==2025.2
 uvicorn==0.44.0
-virtualenv==20.36.1
 websocket-client==1.9.0
 websockets>=13.0
-yarl==1.23.0
 yfinance==0.2.65

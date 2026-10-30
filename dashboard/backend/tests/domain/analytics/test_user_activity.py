@@ -12,8 +12,8 @@ from dashboard.backend.domain.analytics.service import AnalyticsService
 from dashboard.backend.domain.analytics.value_repository import (
     build_value_analytics_store,
 )
-from dashboard.backend.tests.domain.analytics.test_value_repository import (
-    _value_snapshot,
+from dashboard.backend.tests.domain.analytics.test_facts_migration import (
+    create_legacy_snapshot_tables,
 )
 
 
@@ -191,9 +191,9 @@ def test_seed_copies_the_legacy_timestamps_and_is_idempotent(tmp_path, monkeypat
     last year. Without this seed every existing user's activation date would
     be lost on the night PR B drops ``user_analytics_snapshots``.
     """
-    _service, _store, value_store = _fixture(tmp_path, monkeypatch)
-    legacy = _value_snapshot(1)  # activated NOW-20d, last activity NOW-2d
-    value_store.upsert_current_snapshot(legacy)
+    _service, store, value_store = _fixture(tmp_path, monkeypatch)
+    activated_at, last_activity_at = NOW - timedelta(days=20), NOW - timedelta(days=2)
+    create_legacy_snapshot_tables(store, [(1, activated_at, last_activity_at)])
 
     first = value_store.seed_activity_from_snapshots(now=NOW)
     seeded = value_store.get_activity(1)
@@ -201,8 +201,8 @@ def test_seed_copies_the_legacy_timestamps_and_is_idempotent(tmp_path, monkeypat
     reseeded = value_store.get_activity(1)
 
     assert first == 1
-    assert seeded.activated_at == legacy.activated_at
-    assert seeded.last_meaningful_activity_at == legacy.last_meaningful_activity_at
+    assert seeded.activated_at == activated_at
+    assert seeded.last_meaningful_activity_at == last_activity_at
     assert second == 1  # the upsert touches the row again ...
     assert reseeded.activated_at == seeded.activated_at  # ... and changes nothing
     assert reseeded.last_meaningful_activity_at == seeded.last_meaningful_activity_at
@@ -210,8 +210,10 @@ def test_seed_copies_the_legacy_timestamps_and_is_idempotent(tmp_path, monkeypat
 
 def test_seed_never_regresses_a_row_ingestion_already_advanced(tmp_path, monkeypatch):
     """MIN on activation, MAX on activity: the seed can only fill gaps."""
-    service, _store, value_store = _fixture(tmp_path, monkeypatch)
-    value_store.upsert_current_snapshot(_value_snapshot(1))  # NOW-20d / NOW-2d
+    service, store, value_store = _fixture(tmp_path, monkeypatch)
+    create_legacy_snapshot_tables(
+        store, [(1, NOW - timedelta(days=20), NOW - timedelta(days=2))]
+    )
     _emit(service, "earlier", NOW - timedelta(days=30), name="backtest_completed")
     _emit(service, "today", NOW)
 

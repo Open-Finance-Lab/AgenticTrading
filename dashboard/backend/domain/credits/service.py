@@ -421,6 +421,16 @@ class CreditsService:
         *,
         reason: str,
     ) -> list[LLMSettlementResult]:
+        """Release the run's open holds and emit their ``credits_refunded``.
+
+        Returns only the holds this call released, never the run's full
+        reservation state: a repeat call returns ``[]``. A hold that was already
+        settled or released is not re-emitted here (#525). That re-emit used to
+        double as a retry for a refund event whose first append failed. The
+        recovery for that gap is now ``dashboard/scripts/backfill_analytics.py``,
+        which rebuilds ``credits_refunded`` for every terminal hold under the
+        same ``resource:credits_refunded:<id>:<bucket>`` key.
+        """
         results = []
         for raw in self.store.release_run_llm_reservations(run_id, reason=reason):
             result = self._llm_settlement_model(raw)
