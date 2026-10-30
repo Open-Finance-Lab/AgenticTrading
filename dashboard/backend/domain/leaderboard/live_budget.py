@@ -90,6 +90,9 @@ _KIND_BY_TYPE_NAME_PART: Tuple[Tuple[str, str], ...] = (
 # Junk values already reported, so a refresh that reads the cap once per entry
 # prints the warning once rather than once per read.
 _warned_values: set = set()
+# (month, entry) ledger rows whose last_attempt was unreadable and already
+# reported: the public GET reads them on every page load.
+_warned_unreadable: set = set()
 
 
 class LiveBudgetExceeded(RuntimeError):
@@ -109,7 +112,8 @@ def monthly_budget_usd() -> float:
     default: this runs on every live deploy and must never raise. ``0`` is a
     real cap that blocks every billable live deploy, not "off": a hard stop
     that a typo could turn into "unlimited" would fail in the wrong direction.
-    To lift the cap, set a large number.
+    To lift the cap, set the maximum, 10000: anything above it falls back to
+    the default too.
     """
     raw = os.getenv(BUDGET_ENV)
     if raw is None or not raw.strip():
@@ -162,7 +166,7 @@ def _usd(value: Any) -> float:
 def _count(value: Any) -> int:
     try:
         return max(int(value or 0), 0)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return 0
 
 
@@ -258,7 +262,9 @@ def clean_last_attempt(value: Any) -> Optional[Dict[str, Any]]:
         return None
     on = value.get("on")
     outcome = value.get("outcome")
-    if not isinstance(on, str) or outcome not in OUTCOMES:
+    # Type-checked before the set lookups: an unhashable value would raise
+    # there, and this runs on the public GET.
+    if not isinstance(on, str) or not isinstance(outcome, str) or outcome not in OUTCOMES:
         return None
     try:
         date.fromisoformat(on)
@@ -267,18 +273,31 @@ def clean_last_attempt(value: Any) -> Optional[Dict[str, Any]]:
     kind = value.get("kind")
     if outcome == OUTCOME_OK:
         kind = None
-    elif kind not in KINDS:
+    elif not isinstance(kind, str) or kind not in KINDS:
         kind = KIND_ERROR
     return {"on": on, "outcome": outcome, "kind": kind}
 
 
 def last_attempts(month_start: str) -> Dict[str, Dict[str, Any]]:
-    """Each entry's last finished attempt this month, as ``clean_last_attempt``."""
+    """Each entry's last finished attempt this month, as ``clean_last_attempt``.
+
+    No ``last_attempt`` key is the normal "nothing finished yet". One that is
+    present but unreadable is dropped with an ERROR line, once per (month,
+    entry): left silent, a halt it recorded would show as a healthy board.
+    """
     out: Dict[str, Dict[str, Any]] = {}
     for entry_id, run in month_ledger_rows(month_start).items():
-        last = clean_last_attempt(_metadata(run).get("last_attempt"))
+        meta = _metadata(run)
+        last = clean_last_attempt(meta.get("last_attempt"))
         if last is not None:
             out[entry_id] = last
+        elif "last_attempt" in meta and (month_start, entry_id) not in _warned_unreadable:
+            _warned_unreadable.add((month_start, entry_id))
+            print(
+                f"ERROR: live.last_attempt_unreadable month={month_start[:7]} "
+                f"entry={entry_id}",
+                flush=True,
+            )
     return out
 
 

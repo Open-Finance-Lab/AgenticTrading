@@ -58,6 +58,7 @@ def _isolated_ledger(monkeypatch, tmp_path):
     monkeypatch.setattr(live, "_LIVE_REFRESH_STATE_PATH", tmp_path / "live_state.json")
     monkeypatch.delenv(live_budget.BUDGET_ENV, raising=False)
     monkeypatch.setattr(live_budget, "_warned_values", set())
+    monkeypatch.setattr(live_budget, "_warned_unreadable", set())
     _clear_live_rows()
     yield
     _clear_live_rows()
@@ -197,6 +198,29 @@ def test_last_attempt_is_whitelisted_to_three_fields():
     assert clean({"on": "Aug 27", "outcome": "ok"}) is None
     assert clean(["2026-08-27", "ok"]) is None
     assert clean(None) is None
+    # Unhashable junk is rejected, not raised: this runs on the public GET.
+    assert clean({"on": "2026-08-27", "outcome": ["failed"]}) is None
+    assert clean({"on": "2026-08-27", "outcome": "failed", "kind": {"x": 1}})["kind"] == "error"
+
+
+def test_a_junk_attempt_count_neither_crashes_nor_carries_over():
+    """JSON allows ``Infinity``; ``int()`` of it overflows rather than failing
+    with a ValueError, and the attempt must still open."""
+    db.insert_run(
+        run_id=live_budget.spend_run_id(_AUG, "deepseek_v4_pro"),
+        session_id=live_budget.LIVE_SPEND_SESSION_ID,
+        agent_name="deepseek_v4_pro",
+        mode=live_budget.LIVE_SPEND_MODE,
+        start_date=_AUG,
+        end_date=_AUG,
+        initial_equity=0.0,
+        llm_model="deepseek_v4_pro",
+        est_cost_usd=1.0,
+        metadata={"ledger": live_budget.LEDGER_NAME, "attempts": float("inf")},
+    )
+    attempt = _attempt()
+    attempt.finish(None)
+    assert _ledger()["metadata"]["attempts"] == 1
 
 
 # --- the ledger row ------------------------------------------------------------
@@ -608,6 +632,45 @@ def test_a_segment_h6_refuses_to_store_is_still_billed(monkeypatch):
     assert ledger["metadata"]["last_attempt"]["kind"] == "model_coverage"
 
 
+def test_the_session_is_priced_before_h6_is_consulted(monkeypatch, capsys):
+    """The final pricing would cover an H6 refusal on its own, so take it away:
+    the session-close upsert is then the only write, and it must have run
+    before H6 raised."""
+    real_insert = db.insert_run
+
+    def final_write_fails(**row):
+        if row["run_id"].startswith("live_spend_") and "last_attempt" in row["metadata"]:
+            raise OSError("ledger disk full")
+        return real_insert(**row)
+
+    monkeypatch.setattr(db, "insert_run", final_write_fails)
+    _use_agent(monkeypatch, _ScriptedAgent(
+        misses={"2026-08-03": 7}, step_tokens=(1_000_000, 0),
+    ))
+    freeze_cfg = _live_aug27()
+    with pytest.raises(lb_service.LeaderboardFallbackError):
+        live.deploy_live_model_increment(_deepseek(freeze_cfg), freeze_cfg)
+    assert "ERROR: live.spend_ledger_write_failed" in capsys.readouterr().out
+    assert _ledger()["est_cost_usd"] == pytest.approx(0.435)
+
+
+def test_an_interrupted_run_is_priced_and_still_propagates(monkeypatch):
+    """A KeyboardInterrupt is not an Exception: the deploy prices it as
+    ``interrupted`` and re-raises it, so Ctrl-C still stops a CLI refresh."""
+    _insert_checkpoint("2026-08-24", "08-24")
+    _use_agent(monkeypatch, _DiesBeforeTheClose(
+        "2026-08-26", KeyboardInterrupt(), step_tokens=(1_000_000, 0),
+    ))
+    freeze_cfg = _live_aug27()
+    with pytest.raises(KeyboardInterrupt):
+        live.deploy_live_model_increment(_deepseek(freeze_cfg), freeze_cfg)
+    ledger = _ledger()
+    assert ledger["est_cost_usd"] == pytest.approx(0.87)
+    assert ledger["metadata"]["last_attempt"] == {
+        "on": _FREEZE, "outcome": "failed", "kind": "interrupted",
+    }
+
+
 def test_a_forced_replay_adds_to_the_month_instead_of_resetting_it(monkeypatch):
     freeze_cfg = _live_aug27()
     _use_agent(monkeypatch, _ScriptedAgent(step_tokens=(1_000_000, 0)))
@@ -897,6 +960,25 @@ def test_get_live_reports_a_failed_night_without_halting_the_board(_read_only):
     deepseek = next(e for e in payload["entries"] if e["entry_id"] == "deepseek_v4_pro")
     assert deepseek["last_attempt"]["outcome"] == "failed"
     assert deepseek["last_attempt"]["kind"] == "market_data_gap"
+
+
+def test_an_unreadable_last_attempt_is_dropped_loudly_not_raised(_read_only, capsys):
+    """A corrupted row must not 500 the public board, and must not pass for
+    "nothing finished yet" in silence either: a halt it hid would look healthy."""
+    _insert_ledger("deepseek_v4_pro", 1.0, last_attempt={
+        "on": _FREEZE, "outcome": ["budget_halted"], "kind": "budget",
+    })
+    payload = _get_aug27()
+    _get_aug27()
+    deepseek = next(e for e in payload["entries"] if e["entry_id"] == "deepseek_v4_pro")
+    assert deepseek["last_attempt"] is None
+    lines = [
+        line for line in capsys.readouterr().out.splitlines()
+        if "live.last_attempt_unreadable" in line
+    ]
+    assert lines == [
+        "ERROR: live.last_attempt_unreadable month=2026-08 entry=deepseek_v4_pro"
+    ]
 
 
 def test_get_live_ignores_last_months_ledger_and_an_empty_one(_read_only):

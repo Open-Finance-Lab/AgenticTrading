@@ -1125,7 +1125,14 @@ def _trade_live_segment(
         )
         # Never None here: deploy_live_model_increment returns the cached row
         # before it opens a priced attempt when the snapshot already covers
-        # freeze_end, and this branch sees the same resume point.
+        # freeze_end, and this branch sees the same resume point. Raised, not
+        # assumed, so a broken invariant names itself instead of failing as a
+        # bare unpacking error.
+        if bounds is None:
+            raise RuntimeError(
+                f"Live '{entry_id}': nothing to trade after "
+                f"{resume_from.get('end_date')}; the cached return should have caught it"
+            )
         segment_start, segment_end = bounds
         snapshot = _snapshot_from_run(resume_from)
     resumed = resume_from is not None
