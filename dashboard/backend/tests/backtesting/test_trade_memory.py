@@ -93,7 +93,7 @@ def test_window_and_cap_constants():
     assert TRADE_MEMORY_VERSION == 1
 
 
-def test_snapshot_keeps_the_24h_tail_as_strict_json():
+def test_snapshot_keeps_the_24h_tail_as_strict_json(capsys):
     manager = PortfolioManager(initial_capital=10_000)
     manager.trades = [
         _trade("2026-08-25T14:00:00Z", side="BUY"),
@@ -114,6 +114,7 @@ def test_snapshot_keeps_the_24h_tail_as_strict_json():
         _memory("2026-08-26T18:00:00+00:00", symbol="MSFT", side="SELL", shares=5.0, price=200.5),
     ]
     assert json.loads(json.dumps(snap, allow_nan=False)) == snap
+    assert "ERROR" not in capsys.readouterr().out
 
 
 def test_snapshot_without_trades_has_empty_memory():
@@ -132,7 +133,7 @@ def test_snapshot_memory_is_capped_to_the_newest_trades():
     assert memory[-1]["shares"] == 250.0
 
 
-def test_snapshot_skips_trade_rows_it_cannot_describe():
+def test_snapshot_skips_trade_rows_it_cannot_describe(capsys):
     manager = PortfolioManager(initial_capital=10_000)
     manager.trades = [
         _trade("2026-08-26T14:00:00Z"),
@@ -144,6 +145,12 @@ def test_snapshot_skips_trade_rows_it_cannot_describe():
     assert manager.snapshot_state()["recent_trades"] == [
         _memory("2026-08-26T14:00:00+00:00"),
     ]
+    # The executor writes whole trades: a dropped one is a changed shape the
+    # next session would silently not see, so it is said out loud.
+    assert (
+        "ERROR: portfolio.trade_memory_unwritable trades=5 kept=1"
+        in capsys.readouterr().out
+    )
 
 
 def test_restore_keeps_memory_out_of_the_trade_list():
@@ -199,6 +206,7 @@ def test_restore_skips_corrupt_memory_rows():
             # stores numbers, so neither is a quantity.
             {**valid, "shares": True},
             {**valid, "price": "100.0"},
+            {**valid, "shares": 10**400},  # too large for a float
             "garbage",
             None,
             valid,

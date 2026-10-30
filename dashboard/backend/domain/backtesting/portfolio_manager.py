@@ -191,7 +191,10 @@ def _memory_trade(trade: Any) -> Optional[Dict[str, Any]]:
     numbers = (trade.get("shares"), trade.get("price"))
     if not all(isinstance(n, Real) and not isinstance(n, bool) for n in numbers):
         return None
-    shares, price = (float(n) for n in numbers)
+    try:
+        shares, price = (float(n) for n in numbers)
+    except OverflowError:  # an int too large for a float, e.g. 10**400
+        return None
     if not (math.isfinite(shares) and math.isfinite(price)):
         return None
     return {
@@ -375,11 +378,17 @@ class PortfolioManager:
         carrying its last trades in every later snapshot. Oldest first, at most
         ``SNAPSHOT_TRADE_MEMORY_LIMIT`` (the newest), timestamps as ISO text.
         """
-        rows = [
-            row
-            for row in map(_memory_trade, chain(self.restored_trades, self.trades))
-            if row is not None
-        ]
+        source = list(chain(self.restored_trades, self.trades))
+        rows = [row for row in map(_memory_trade, source) if row is not None]
+        if len(rows) < len(source):
+            # Restored rows were read through _memory_trade and the executor
+            # writes whole trades, so a row dropped here is a changed trade
+            # shape: this session's prompts saw it, the next session's won't.
+            print(
+                f"ERROR: portfolio.trade_memory_unwritable trades={len(source)} "
+                f"kept={len(rows)}",
+                flush=True,
+            )
         if not rows:
             return []
         rows.sort(key=lambda row: row["timestamp"])

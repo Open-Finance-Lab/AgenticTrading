@@ -213,9 +213,9 @@ def test_each_checkpoint_round_trips_the_memory_through_agent_runs(monkeypatch):
 
 def test_the_checkpoint_row_records_where_the_memory_started(monkeypatch, capsys):
     _prompts, (night1, _row1), (_night2, row2), stored1 = _two_nights(monkeypatch)
-    # Night 2 restored night 1's checkpoint through agent_runs whole: a stored
-    # row that came back altered would have raised the restore's alarm.
-    assert "trade_memory_unreadable" not in capsys.readouterr().out
+    # Both nights wrote every trade and night 2 restored night 1's checkpoint
+    # through agent_runs whole: a dropped or altered row would raise an alarm.
+    assert "portfolio.trade_memory" not in capsys.readouterr().out
     # Night 1 resumed from a checkpoint written before the marker existed, so
     # the memory starts at its first decision bar, 10:00 ET on Aug 26.
     first_bar = "2026-08-26T14:00:00+00:00"
