@@ -1215,7 +1215,9 @@ function getFilteredLeaderboardEntries() {
       case 'return':
         return finiteNumber(entry.cumulative_return);
       case 'sharpe':
-        return finiteNumber(entry.sharpe_ratio);
+        // Sort by what the cell shows: a "—" (below 5 days, or an old
+        // payload's hourly number) is absent, never a hidden value.
+        return formatBoardSharpe(entry, null).main === '—' ? NaN : finiteNumber(entry.sharpe_ratio);
       case 'dd': {
         const dd = finiteNumber(entry.max_drawdown);
         return Number.isNaN(dd) ? NaN : Math.abs(dd);
@@ -1284,12 +1286,15 @@ function formatBoardSharpe(entry, basis) {
   const have = Number.isFinite(days) ? days : 0;
   const need = finiteNumber(basis && basis.min_days);
   const rf = finiteNumber(basis && basis.rf_annual);
+  // -0.004 is "0.00", not "-0.00".
+  const fixed = (v) => (Math.abs(v) < 0.005 ? 0 : v).toFixed(2);
   if (status === 'ok' && Number.isFinite(value) && Number.isFinite(lo) && Number.isFinite(hi)) {
     const title = Number.isFinite(rf)
       ? 'Return above what cash would have earned, divided by how much the daily returns swung. '
-        + `Based on ${have} trading days; cash rate ${Number((rf * 100).toFixed(2))}%/yr; scaled to a yearly figure.`
+        + (Number.isFinite(days) ? `Based on ${days} trading days; ` : '')
+        + `cash rate ${Number((rf * 100).toFixed(2))}%/yr; scaled to a yearly figure.`
       : '';
-    return { main: value.toFixed(2), sub: `95% interval ${lo.toFixed(2)} to ${hi.toFixed(2)}`, title };
+    return { main: fixed(value), sub: `95% interval ${fixed(lo)} to ${fixed(hi)}`, title };
   }
   if (status === 'insufficient_days') {
     const sub = Number.isFinite(need)

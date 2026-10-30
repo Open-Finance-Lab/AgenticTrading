@@ -59,6 +59,8 @@ _CASES = [
     ({"sharpe_status": "pending", "sharpe_ratio": None, "sharpe_days": 0}, _BASIS),
     ({"sharpe_ratio": 1.5}, _BASIS),
     (None, _BASIS),
+    ({**_OK, "sharpe_ratio": -0.004, "sharpe_ci_low": -0.004, "sharpe_ci_high": 0.003}, _BASIS),
+    ({k: v for k, v in _OK.items() if k != "sharpe_days"}, _BASIS),
 ]
 
 
@@ -106,7 +108,7 @@ def test_both_boards_word_sharpe_identically():
     for board, live in pairs:
         assert board == live
     mains = [board["main"] for board, _live in pairs]
-    assert mains == ["2.61", "-0.50", "2.61", "2.61", "—", "—", "—", "—", "—", "—", "—"]
+    assert mains == ["2.61", "-0.50", "2.61", "2.61", "—", "—", "—", "—", "—", "—", "—", "0.00", "2.61"]
 
 
 @_needs_node
@@ -138,6 +140,7 @@ def test_competition_sort_puts_a_null_sharpe_last_both_ways():
         _board_row("none", sharpe_status="insufficient_days", sharpe_ratio=None, sharpe_days=2),
         _board_row("neg", sharpe_status="ok", sharpe_ratio=-0.5, sharpe_ci_low=-14.0, sharpe_ci_high=13.0, sharpe_days=5),
         _board_row("pos", **_OK),
+        _board_row("stale", sharpe_ratio=9.7),
     ]
     out = run_node(_board_script(
         f"leaderboardPayload = {{ entries: {json.dumps(rows)} }}; currentLeaderboardSort = 'sharpe';",
@@ -145,7 +148,9 @@ def test_competition_sort_puts_a_null_sharpe_last_both_ways():
         "currentLeaderboardSortDir = 'asc'; const asc = getFilteredLeaderboardEntries().map((e) => e.entry_id);",
         "console.log(JSON.stringify({ desc, asc }));",
     ))
-    assert out == {"desc": ["pos", "neg", "none"], "asc": ["neg", "pos", "none"]}
+    # "stale" is an old payload's hourly number: shown as "—", so absent too.
+    assert out["desc"][:2] == ["pos", "neg"] and set(out["desc"][2:]) == {"none", "stale"}
+    assert out["asc"][:2] == ["neg", "pos"] and set(out["asc"][2:]) == {"none", "stale"}
 
 
 @_needs_node

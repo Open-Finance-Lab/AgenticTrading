@@ -312,3 +312,35 @@ def test_live_sharpe_header_states_its_basis_in_plain_words():
     for jargon in ("T-bill", "excess", "√252", "sqrt", "sample SD"):
         assert jargon not in title
     assert "noisy until a few weeks" not in _APP_HTML
+
+
+@_needs_node
+def test_an_old_payloads_hourly_number_is_neither_shown_nor_sorted():
+    """Vercel can serve this file before Render serves the new payload: a row
+    with a stored hourly ``sharpe_ratio`` and no status must read "—" and sort
+    with the absent rows, not by the hidden value."""
+    assert _format_sharpe({"sharpe_ratio": 1.7}) == {"main": "—", "sub": "", "title": ""}
+    out = _render_live(
+        [
+            _sharpe_row("stale", sharpe_ratio=9.7),
+            _sharpe_row("up", **_SHARPE_OK),
+            _sharpe_row("young", sharpe_status="insufficient_days", sharpe_ratio=None, sharpe_days=3),
+        ],
+        selected="young",
+    )
+    assert out["order"][0] == "up"
+    assert set(out["order"][1:]) == {"stale", "young"}
+    assert "9.70" not in out["table"]
+    assert "Needs 5 trading days (have 3)" in out["detail"]
+
+
+@_needs_node
+def test_format_sharpe_never_prints_minus_zero_or_an_invented_day_count():
+    tiny = _format_sharpe({**_SHARPE_OK, "sharpe_ratio": -0.004, "sharpe_ci_low": -0.004,
+                           "sharpe_ci_high": 0.003})
+    assert tiny["main"] == "0.00"
+    assert tiny["sub"] == "95% interval 0.00 to 0.00"
+    no_days = _format_sharpe({k: v for k, v in _SHARPE_OK.items() if k != "sharpe_days"})
+    assert no_days["main"] == "2.61"
+    assert "trading days" not in no_days["title"]
+    assert "cash rate 0%/yr" in no_days["title"]

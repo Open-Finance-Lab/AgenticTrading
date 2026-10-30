@@ -322,12 +322,15 @@ function liveFormatSharpe(entry, basis) {
   const have = Number.isFinite(days) ? days : 0;
   const need = read(basis && basis.min_days);
   const rf = read(basis && basis.rf_annual);
+  // -0.004 is "0.00", not "-0.00".
+  const fixed = (v) => (Math.abs(v) < 0.005 ? 0 : v).toFixed(2);
   if (status === 'ok' && Number.isFinite(value) && Number.isFinite(lo) && Number.isFinite(hi)) {
     const title = Number.isFinite(rf)
       ? 'Return above what cash would have earned, divided by how much the daily returns swung. '
-        + `Based on ${have} trading days; cash rate ${Number((rf * 100).toFixed(2))}%/yr; scaled to a yearly figure.`
+        + (Number.isFinite(days) ? `Based on ${days} trading days; ` : '')
+        + `cash rate ${Number((rf * 100).toFixed(2))}%/yr; scaled to a yearly figure.`
       : '';
-    return { main: value.toFixed(2), sub: `95% interval ${lo.toFixed(2)} to ${hi.toFixed(2)}`, title };
+    return { main: fixed(value), sub: `95% interval ${fixed(lo)} to ${fixed(hi)}`, title };
   }
   if (status === 'insufficient_days') {
     const sub = Number.isFinite(need)
@@ -342,8 +345,9 @@ function liveFormatSharpe(entry, basis) {
 function liveSortValue(entry, key) {
   switch (key) {
     case 'return': return Number(entry.cumulative_return);
-    // null is "no figure", not 0.00: NaN sorts below every number.
-    case 'sharpe': return entry.sharpe_ratio == null ? NaN : Number(entry.sharpe_ratio);
+    // A cell showing "—" is "no figure", not 0.00 and not a hidden value (an
+    // old payload's hourly number): NaN sorts below every number.
+    case 'sharpe': return liveFormatSharpe(entry, null).main === '—' ? NaN : Number(entry.sharpe_ratio);
     case 'dd': return Math.abs(Number(entry.max_drawdown));
     case 'trades': return Number(entry.num_trades);
     case 'hold': return Number(entry.avg_hold_hours);
@@ -445,9 +449,9 @@ function renderLiveDetail(entry) {
     <div class="team-detail-row"><span class="team-detail-label">Value</span><span class="team-detail-value">${hasPrints ? `$${liveFormatMoney(entry.portfolio_value)}` : 'Awaiting freeze'}</span></div>
     <div class="team-detail-row"><span class="team-detail-label">Return</span><span class="team-detail-value" style="color:${retColor};">${hasPrints ? liveFormatPct(ret, 2) : '—'}</span></div>
     <div class="team-detail-row"><span class="team-detail-label">Sharpe ratio</span><span class="team-detail-value"${sharpe.title ? ` title="${escapeHtml(sharpe.title)}"` : ''}>${escapeHtml(sharpeText)}</span></div>
-    <div class="team-detail-row"><span class="team-detail-label">Trades</span><span class="team-detail-value">${hasPrints && entry.num_trades != null ? entry.num_trades : '—'}</span></div>
+    <div class="team-detail-row"><span class="team-detail-label">Trades</span><span class="team-detail-value">${hasPrints && entry.num_trades != null ? escapeHtml(String(entry.num_trades)) : '—'}</span></div>
     <div class="team-detail-row"><span class="team-detail-label">Avg hold</span><span class="team-detail-value">${hasPrints ? liveFormatHold(entry.avg_hold_hours) : '—'}</span></div>
-    <div class="team-detail-row"><span class="team-detail-label">Through</span><span class="team-detail-value">${entry.snapshot_end || '—'}</span></div>
+    <div class="team-detail-row"><span class="team-detail-label">Through</span><span class="team-detail-value">${escapeHtml(entry.snapshot_end || '—')}</span></div>
     ${lastRun ? `<div class="team-detail-row"><span class="team-detail-label">Last nightly run</span><span class="team-detail-value">${escapeHtml(lastRun)}</span></div>` : ''}
   `;
 }
