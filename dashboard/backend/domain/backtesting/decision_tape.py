@@ -123,8 +123,8 @@ def _intent_order(entry: Any) -> Dict[str, Any]:
 
     Not ``_pick``: the gate in ``make_trading_decision_with_llm`` reads each
     field with a default, so dropping a key changes the outcome -- a present
-    ``confidence: "high"`` skips the action (``read_confidence``) while an
-    absent one reads as 0.5 and trades. So:
+    ``confidence: "high"`` skips an unsized buy (``read_confidence``) while an
+    absent one reads as 0.5 and sizes it. So:
 
     - an absent field stays absent, and a ``null`` one stays ``null``;
     - a string ``reasoning`` is cut to ``MAX_REASONING_CHARS`` (the gate only

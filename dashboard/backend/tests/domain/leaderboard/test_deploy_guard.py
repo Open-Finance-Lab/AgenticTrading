@@ -242,6 +242,7 @@ def test_deploy_records_effective_llm_run_metadata(guard_env, monkeypatch):
         # indistinguishable from one written before the field existed.
         "strategy_prompt": None,
         "llm_max_output_tokens": 1234,
+        "llm_gate_version": canon_service.LLM_GATE_VERSION,
         "llm_sell_sizing": "requested_shares",
         "initial_capital": 10000.0,
         "start_date": "2026-04-16",
@@ -376,6 +377,7 @@ def test_ensure_leaderboard_runs_records_llm_metadata(tmp_path, monkeypatch):
         "reasoning_effort": "none",
         "strategy_prompt": None,
         "llm_max_output_tokens": 1234,
+        "llm_gate_version": canon_service.LLM_GATE_VERSION,
         "llm_sell_sizing": "requested_shares",
         "initial_capital": 10000.0,
         "start_date": "2026-04-15",
@@ -542,3 +544,66 @@ def test_the_auto_compute_path_records_the_counters_it_guarded_on(tmp_path, monk
     assert row is not None
     assert row["llm_calls"] == 100
     assert row["llm_decisions"] == 96
+
+
+def _confidence_skipping(*, steps, skipped, actions=None, skipped_buys=None):
+    """Every step the model drove, ``skipped`` of them losing an unsized buy to
+    a confidence that is not a 0-1 number (PortfolioManager's counters)."""
+    impl = FakeLLMStrategy(used_llm=True, llm_calls=steps)
+    impl.confidence_skipped_steps = skipped
+    impl.unusable_confidence_actions = skipped if actions is None else actions
+    impl.unusable_confidence_skipped = skipped if skipped_buys is None else skipped_buys
+    return impl
+
+
+def test_refuses_a_flat_curve_from_a_model_answering_0_100(guard_env, monkeypatch):
+    """No rule-based trade ran, so llm_decisions is at 100%; but the model's
+    buys never traded either. The guard takes those steps off its numerator."""
+    _use(monkeypatch, _confidence_skipping(steps=100, skipped=100))
+    with pytest.raises(canon_service.LeaderboardFallbackError, match="0 to 1"):
+        canon_service.deploy_model_run("claude_haiku_4_5", force_refresh=True)
+    run_id = canon_service._run_id("claude_haiku_4_5", "2026-04-15", "2026-05-15")
+    assert guard_env.get_run(run_id) is None
+
+
+def test_refuses_just_below_threshold_after_confidence_skips(guard_env, monkeypatch):
+    _use(monkeypatch, _confidence_skipping(steps=100, skipped=6))
+    with pytest.raises(canon_service.LeaderboardFallbackError, match="0 to 1"):
+        canon_service.deploy_model_run("claude_haiku_4_5", force_refresh=True)
+
+
+def test_publishes_at_threshold_after_confidence_skips_and_records_them(
+    guard_env, monkeypatch
+):
+    _use(
+        monkeypatch,
+        _confidence_skipping(steps=100, skipped=5, actions=9, skipped_buys=6),
+    )
+    result = canon_service.deploy_model_run("claude_haiku_4_5", force_refresh=True)
+
+    metadata = guard_env.get_run(result["run_id"])["metadata"]
+    assert metadata["unusable_confidence"] == {
+        "actions": 9,
+        "skipped_buys": 6,
+        "skipped_steps": 5,
+    }
+    assert metadata["llm_gate_version"] == canon_service.LLM_GATE_VERSION
+
+
+def test_rule_based_shortfall_keeps_its_own_message(guard_env, monkeypatch):
+    """A run short on decisions for the old reason is reported as a fallback,
+    not blamed on the one confidence skip it also had."""
+    impl = FakeLLMStrategy(used_llm=True, llm_calls=50, decision_steps=100)
+    impl.confidence_skipped_steps = 1
+    _use(monkeypatch, impl)
+    with pytest.raises(canon_service.LeaderboardFallbackError, match="partial rule-based"):
+        canon_service.deploy_model_run("claude_haiku_4_5", force_refresh=True)
+
+
+def test_unusable_confidence_counts_add_a_stored_month_and_drop_zeros():
+    impl = _confidence_skipping(steps=10, skipped=0, actions=2, skipped_buys=0)
+    assert canon_service._unusable_confidence_counts(impl) == {"actions": 2}
+    assert canon_service._unusable_confidence_counts(
+        impl, {"actions": 3, "skipped_buys": 1, "skipped_steps": True}
+    ) == {"actions": 5, "skipped_buys": 1}
+    assert canon_service._unusable_confidence_counts(FakeBaseline()) == {}

@@ -108,13 +108,17 @@ The LLM **must** respond with JSON matching this schema:
 The hourly backtest engine (`domain/backtesting/portfolio_manager.py`,
 `make_trading_decision_with_llm`) — including runs driven by a user's
 free-form `strategy_prompt` (a My Agents agent's prompt) — does **not** route parsed
-decisions through `validate_llm_response`. It predates the validator. Its
-readings of a reply are not frozen: each fix to them (`normalize_symbol`,
-`read_confidence`, `normalize_action`) can change what an earlier recorded
-bar decides. A replay through `orders_for_replay`, or a
-`diff_backtest_runs.py` comparison with a run from before the fix, can then
-diverge from that bar onward. `"buy "`, for one, placed nothing before #658
-and buys now.
+decisions through `validate_llm_response`. It predates the validator. What it
+trades is versioned rather than frozen: every LLM run records the gate that
+turned its replies into orders as `llm_gate_version` in `agent_runs.metadata`
+(`LLM_GATE_VERSION` in `portfolio_manager.py`, bumped with any change to the
+rules below), and the rule that sized its sells as `llm_sell_sizing`, so a run
+or a decision tape is compared only with output from the same gate. The gate
+includes its readings of a reply (`normalize_symbol`, `read_confidence`,
+`normalize_action`): a replay through `orders_for_replay`, or a
+`diff_backtest_runs.py` comparison with a run from before a fix to them, can
+diverge from the first bar the fix reads differently. `"buy "`, for one,
+placed nothing before #658 and buys now.
 
 It applies these constraints inline instead:
 
@@ -127,7 +131,8 @@ It applies these constraints inline instead:
 | Per-order size (BUY) | `position_size > MAX_ORDER_SHARES` (10k, same constant as the validator) skipped; unparseable/non-finite sizes skipped |
 | Per-order size (SELL) | Sized by `requested_sell_shares` (`infrastructure/llm/validator.py`, shared with `actions_to_executable`): `position_size > 0` sells that many shares (under one share is refused, not truncated to 0); a missing/null/0 size sells `size_fraction` of the holding when the action carries one (above 0, 1 or more is all of it, a part rounded down to whole lots), else the whole position. A bool, non-numeric text, NaN, infinity or a negative value in either field skips the action and records an `invalid_quantity` order rejection; it is never read as "the whole position". Not bounded by `MAX_ORDER_SHARES`: a SELL is capped at the holding (and under T+1 at the sellable quantity), so it can exceed 10k only when the holding does, as a whole-position exit always could |
 | Cash bound | Buys must fit in available cash; sells limited to held shares |
-| Confidence floor | Read by `read_confidence` (`infrastructure/llm/validator.py`): a missing confidence takes the path's default (0.5; a pipeline's `orders` 0.75, `risk_actions` 0.8), any other value that is not a number from 0 to 1 (a bool, text, NaN, `25`) skips the action, and actions below 0.3 are skipped |
+| Confidence floor | Read by `read_confidence` (`infrastructure/llm/validator.py`): a missing confidence takes the path's default (0.5; a pipeline's `orders` 0.75, `risk_actions` 0.8), and actions below 0.3 are skipped |
+| Unreadable confidence | A confidence that is not a number from 0 to 1 (a bool, text, NaN, `25`) is not read: no scale is guessed and no default replaces it, so it neither passes nor fails the floor. A sell or a buy with its own `position_size` is carried out as written; a buy that would be sized from the confidence is skipped, or the whole batch rejected on a strict run. Each run counts these in `agent_runs.metadata.unusable_confidence`, prints one `ERROR: llm.unusable_confidence` line, and the leaderboard's H6 guard takes the skipped steps off its numerator |
 
 A custom `strategy_prompt` replaces only the *strategy* section of the prompt;
 the market snapshot, symbol allowlist, and strict JSON output contract are
@@ -161,8 +166,9 @@ and the table above does **not** apply to it. It reads `response.content[0].text
 instead of calling `extract_response_text`, parses with its own `find('{')`/`rfind('}')`
 plus `fix_json_formatting` instead of `parse_llm_response`, keeps at most 8 actions on
 `DJIA_30` names with confidence ≥ 0.3, and never applies `MAX_ORDER_SHARES`: a buy is
-bounded only by available cash. Only its symbol and action are read by the shared
-`normalize_symbol` and `normalize_action`. Bring the rest onto the shared helpers before
+bounded only by available cash. Only its symbol, action and confidence are read by the
+shared `normalize_symbol`, `normalize_action` and `read_confidence` (with the unreadable
+confidence rule above but no counters). Bring the rest onto the shared helpers before
 relying on the table for it.
 
 ---

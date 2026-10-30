@@ -276,7 +276,8 @@ def pipeline_output_to_decision(parsed: Dict[str, Any]) -> Optional[Dict[str, An
                         "action": side,
                         "symbol": order.get("symbol"),
                         # An unusable confidence is handed on as written: the
-                        # gate's read_confidence skips the order and logs it.
+                        # gate's read_confidence reads none, logs it, and skips
+                        # the order only if it would size it.
                         "confidence": (
                             raw_confidence if confidence is None else confidence
                         ),

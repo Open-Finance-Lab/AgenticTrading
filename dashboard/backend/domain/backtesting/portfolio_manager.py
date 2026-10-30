@@ -98,6 +98,18 @@ STRICT_LLM_MAX_FALLBACK_RATIO = 0.02
 # above H6 (1/25 = 4% < 5%); ``test_strict_llm_budget_clears_h6`` pins that.
 STRICT_LLM_MIN_STEPS_FOR_ONE_STRIKE = 25
 
+# The version of the pre-trade gate in ``make_trading_decision_with_llm``,
+# recorded on every LLM run (``agent_runs.metadata.llm_gate_version``). Bump it
+# whenever the gate's rules change what the same reply trades: a cached
+# leaderboard row and a recorded decision tape are only comparable with output
+# from the gate that produced them. Absent on rows written before it existed.
+# 2: a confidence that is not a number from 0 to 1 is not read at all -- it
+#    neither sizes a buy nor decides the 0.3 floor (#674). The first version
+#    recorded, so it also covers what landed just before it: actions read by
+#    ``normalize_action`` (#658) and sells sized as asked (#661, recorded on
+#    its own as ``llm_sell_sizing``).
+LLM_GATE_VERSION = 2
+
 
 # The order-event reason of a SELL the gate refused because it cannot read
 # its size. The same word the conformance reference uses for it.
@@ -200,6 +212,15 @@ class PortfolioManager:
         # Real LLM token usage (server-side calls report actual counts)
         self.llm_calls = 0        # billed API calls (any response with usage)
         self.llm_decisions = 0    # steps the model actually drove (H6 coverage)
+        # Actions whose confidence was not a number from 0 to 1; of those, the
+        # buys skipped because they had no size of their own to trade at; and
+        # the steps that lost at least one such buy. A model answering on a
+        # 0-100 scale on every bar shows up here, not as a quiet flat curve:
+        # the leaderboard's H6 guard subtracts the steps from its numerator.
+        self.unusable_confidence_actions = 0
+        self.unusable_confidence_skipped = 0
+        self.confidence_skipped_steps = 0
+        self._unusable_confidence_reported = False
         self.input_tokens = 0
         self.output_tokens = 0
         # Strict-LLM tolerance. The runner sets ``strict_llm_total_steps`` once
@@ -923,7 +944,29 @@ class PortfolioManager:
                         raise LLMDecisionError(
                             "LLM returned an invalid action batch"
                         )
+                    # The one order the gate cannot carry out as written: a
+                    # buy sized from a confidence that is not a 0-1 number.
+                    # Rejected like a bad symbol rather than skipped, so a
+                    # billed run whose model answers 0-100 stops on the first
+                    # bar instead of charging for a run that never buys.
+                    if (
+                        action_type == "buy"
+                        and read_confidence(
+                            llm_action.get("confidence"),
+                            LLM_ACTION_DEFAULT_CONFIDENCE,
+                        )
+                        is None
+                        and self._coerce_position_size(
+                            llm_action.get("position_size", 0)
+                        )
+                        == 0
+                    ):
+                        raise LLMDecisionError(
+                            "LLM returned a buy with no size and a confidence "
+                            "that is not a number from 0 to 1"
+                        )
 
+            skipped_for_confidence = False
             # Whether any action named buy, sell or hold. A batch where none
             # did carried no decision the model can be credited with (#658).
             recognised_any = False
@@ -948,17 +991,27 @@ class PortfolioManager:
                     continue
                 recognised_any = True
 
+                # A confidence that is not a number from 0 to 1 (25, NaN,
+                # "high", a bool) is not read at all: no scale is guessed and
+                # no default is put over it. It therefore cannot decide the
+                # 0.3 floor either way, so an order that does not need it is
+                # carried out as the model wrote it -- a sell (sized by
+                # requested_sell_shares) or a buy with its own position_size. Only
+                # a buy that would be sized from it is skipped, below: that is
+                # where a 0-100 answer used to multiply the order by 100.
                 if confidence is None:
-                    print(f"\n   Processing: {symbol} ({action_type.upper()}, conf={raw_confidence!r})")
-                    print(f"      ⚠️  {symbol}: Skip (confidence {raw_confidence!r} is not a number from 0 to 1)")
-                    continue
-
-                print(f"\n   Processing: {symbol} ({action_type.upper()}, conf={confidence:.0%})")
+                    conf_label = "unread"
+                    self._note_unusable_confidence()
+                    print(f"\n   Processing: {symbol} ({action_type.upper()}, conf={raw_confidence!r:.40})")
+                    print(f"      ⚠️  {symbol}: confidence {raw_confidence!r:.40} is not a number from 0 to 1; not read")
+                else:
+                    conf_label = f"{confidence:.0%}"
+                    print(f"\n   Processing: {symbol} ({action_type.upper()}, conf={conf_label})")
                 print(f"      Reasoning: {reasoning[:60]}...")
 
                 # Skip low-confidence decisions
-                if confidence < 0.3:
-                    print(f"      ⏸️  Skipping (confidence {confidence:.0%} too low)")
+                if confidence is not None and confidence < 0.3:
+                    print(f"      ⏸️  Skipping (confidence {conf_label} too low)")
                     continue
                 
                 if symbol not in self._allowed_set:
@@ -969,14 +1022,20 @@ class PortfolioManager:
                 price = float(signal.get("price", 0)) if signal.get("price") else 0.0
                 
                 if action_type == "buy":
-                    # Use position_size from LLM directly. Coerce defensively:
-                    # json.loads happily yields strings, floats, Infinity and
-                    # NaN here, and an unparseable value must skip THIS action,
-                    # not throw the whole decision into the rule-based fallback.
+                    # Use position_size from LLM directly, coerced defensively
+                    # (``_coerce_position_size``).
                     raw_size = llm_action.get("position_size", 0)
                     shares = self._coerce_position_size(raw_size)
                     if shares is None:
                         print(f"      ⚠️  BUY {symbol}: Skip (unparseable position_size {raw_size!r})")
+                        continue
+
+                    if shares == 0 and confidence is None:
+                        # Nothing to size it from (see above). A strict run
+                        # rejected this order before the loop.
+                        self.unusable_confidence_skipped += 1
+                        skipped_for_confidence = True
+                        print(f"      ⚠️  BUY {symbol}: Skip (no position_size, and no 0-1 confidence to size it from)")
                         continue
 
                     # If LLM didn't provide position_size, calculate from confidence
@@ -1017,10 +1076,10 @@ class PortfolioManager:
                             "symbol": symbol,
                             "action": "buy",
                             "shares": shares,
-                            "reason": f"[LLM] {reasoning} (confidence: {confidence:.0%})",
+                            "reason": f"[LLM] {reasoning} (confidence: {conf_label})",
                             "confidence": confidence
                         })
-                        print(f"      ✅ BUY {symbol}: {shares} shares @ ${price:.2f} (conf: {confidence:.0%})")
+                        print(f"      ✅ BUY {symbol}: {shares} shares @ ${price:.2f} (conf: {conf_label})")
                     else:
                         print(f"      ⚠️  BUY {symbol}: Skip (insufficient cash: need ${shares*price:,.0f}, have ${self.cash:,.0f})")
                 
@@ -1034,7 +1093,7 @@ class PortfolioManager:
                     # risk action sends), else the whole position. A size that
                     # cannot be read skips THIS action and is recorded; it is
                     # never read as "all of it" (requested_sell_shares).
-                    reason = f"[LLM] {reasoning} (confidence: {confidence:.0%})"
+                    reason = f"[LLM] {reasoning} (confidence: {conf_label})"
                     raw_size = llm_action.get("position_size")
                     requested, refusal = requested_sell_shares(
                         raw_size,
@@ -1073,7 +1132,7 @@ class PortfolioManager:
                             # log would read as though it asked for `shares`.
                             action["requested_shares"] = requested
                         actions.append(action)
-                        print(f"      ✅ SELL {symbol}: {shares} shares @ ${price:.2f} (conf: {confidence:.0%})")
+                        print(f"      ✅ SELL {symbol}: {shares} shares @ ${price:.2f} (conf: {conf_label})")
                     else:
                         print(f"      ⚠️  SELL {symbol}: Skip (T+1 frozen, {held} shares settle next trading day)")
                 
@@ -1097,10 +1156,21 @@ class PortfolioManager:
             # step, our policy merely declined to act on it. A batch in which
             # no action was recognised returned above without counting.)
             #
+            # An unsized buy skipped for a confidence that is not a 0-1 number
+            # still counts here too -- no rule-based trade replaced it, and the
+            # decision tape reads an unchanged llm_decisions as a fallback bar
+            # (``decision_tape.driver_for``). It is the model's broken contract,
+            # not our policy, so the step is counted a second time in
+            # confidence_skipped_steps, which the leaderboard's H6 guard
+            # subtracts: a model that answers 0-100 on every bar must not
+            # publish a flat curve at 100% coverage.
+            #
             # These two sites are the ONLY writes to llm_decisions. Adding a
             # third means re-checking that the step really was model-driven with
             # no rule-based fallback — that invariant is what the leaderboard's
             # H6 guard rests on.
+            if skipped_for_confidence:
+                self.confidence_skipped_steps += 1
             self.llm_decisions += 1
             print(f"   ✅ Total actions: {len(actions)}\n")
             return {"actions": actions}
@@ -1128,6 +1198,26 @@ class PortfolioManager:
             print(f"\n❌ LLM decision error: {e}")
             print(f"   Falling back to rule-based logic\n")
             return self.make_trading_decision(portfolio_state)
+
+    def _note_unusable_confidence(self) -> None:
+        """Count one action whose confidence is not a 0-1 number.
+
+        The first one of a run also prints a flushed ``ERROR: llm.`` line,
+        which a dashboard backtest's parent relays to the service log as it
+        arrives: the per-action lines go to a subprocess's stdout, and a model
+        that answers 0-100 on every bar is a whole-run contract break that a
+        per-item line cannot report. Fixed tokens only -- the raw value is the
+        model's text, and the parent's redaction expects none in this line.
+        """
+        self.unusable_confidence_actions += 1
+        if self._unusable_confidence_reported:
+            return
+        self._unusable_confidence_reported = True
+        print(
+            "ERROR: llm.unusable_confidence "
+            "detail=not_a_number_from_0_to_1 policy=unsized_buys_skipped",
+            flush=True,
+        )
 
     def _record_llm_usage(self, response) -> int:
         """Bill one received response; returns its output-token delta.

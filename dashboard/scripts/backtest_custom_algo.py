@@ -29,7 +29,12 @@ from _bootstrap import ensure_repo_root
 ensure_repo_root()
 
 from dashboard.backend.infrastructure.llm.prompts import create_custom_algo_prompt, parse_risk_rules
-from dashboard.backend.infrastructure.llm.validator import normalize_action, normalize_symbol
+from dashboard.backend.infrastructure.llm.validator import (
+    LLM_ACTION_DEFAULT_CONFIDENCE,
+    normalize_action,
+    normalize_symbol,
+    read_confidence,
+)
 from dashboard.backend.database import db
 
 from backtest_hourly_agent import (  # noqa: E402
@@ -188,10 +193,18 @@ class CustomAlgoPortfolioManager(PortfolioManager):
             # no branch and no DJIA name, so the trade was dropped (#658).
             symbol = normalize_symbol(str(item.get("symbol") or ""))
             action_type = normalize_action(item.get("action")) or "hold"
-            confidence = float(item.get("confidence", 0.5))
+            # The backtest gate's rule (PortfolioManager): a confidence that
+            # is not a number from 0 to 1 is not read, so it neither passes
+            # nor fails the floor, and a buy it would size is skipped. float()
+            # here read 25 as 2500% and multiplied the auto-sized buy by 100.
+            confidence = read_confidence(
+                item.get("confidence"), LLM_ACTION_DEFAULT_CONFIDENCE
+            )
             reasoning = str(item.get("reasoning", ""))[:200]
 
-            if confidence < 0.3 or action_type == "hold" or symbol not in DJIA_30:
+            if action_type == "hold" or symbol not in DJIA_30:
+                continue
+            if confidence is not None and confidence < 0.3:
                 continue
 
             signal = signals.get(symbol, {})
@@ -202,6 +215,9 @@ class CustomAlgoPortfolioManager(PortfolioManager):
             if action_type == "buy":
                 shares = int(item.get("position_size") or 0)
                 if shares <= 0:
+                    if confidence is None:
+                        print(f"   Skip BUY {symbol}: no position_size, and no 0-1 confidence to size it from")
+                        continue
                     risk_amount = portfolio_state["total_equity"] * 0.02 * confidence
                     shares = int(risk_amount / price)
                 cost = shares * price

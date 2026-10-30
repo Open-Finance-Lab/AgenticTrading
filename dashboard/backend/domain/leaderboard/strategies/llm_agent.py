@@ -152,6 +152,9 @@ class LLMAgentStrategy(BaselineStrategy):
         self.llm_calls = 0
         self.llm_decisions = 0  # steps the model actually drove (H6 guard numerator)
         self.decision_steps = 0  # total steps offered to the model (guard denominator)
+        self.confidence_skipped_steps = 0  # subtracted from the numerator
+        self.unusable_confidence_actions = 0
+        self.unusable_confidence_skipped = 0
         # Steps the whole run will offer, known before the first one; lets a
         # session-close hook stop a run that can no longer clear the guard.
         self.planned_decision_steps = 0
@@ -336,6 +339,11 @@ class LLMAgentStrategy(BaselineStrategy):
         self.trades = list(manager.trades)
         self.llm_calls = manager.llm_calls
         self.llm_decisions = manager.llm_decisions  # steps the model actually drove
+        # Of those, steps that lost an unsized buy to a confidence that is not
+        # a 0-1 number; the H6 guard subtracts them (PortfolioManager).
+        self.confidence_skipped_steps = getattr(manager, "confidence_skipped_steps", 0)
+        self.unusable_confidence_actions = getattr(manager, "unusable_confidence_actions", 0)
+        self.unusable_confidence_skipped = getattr(manager, "unusable_confidence_skipped", 0)
         self.decision_steps = decision_steps  # how many steps the model was asked to decide
         self.input_tokens = manager.input_tokens
         self.output_tokens = manager.output_tokens

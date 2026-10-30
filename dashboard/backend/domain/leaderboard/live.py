@@ -656,7 +656,10 @@ def _checkpoint_passes_h6(
         if not getattr(strategy_impl, "used_llm", False) or llm_calls == 0:
             raise
         planned = int(getattr(strategy_impl, "planned_decision_steps", 0) or 0)
-        misses = max(steps - (llm_calls if decisions is None else decisions), 0)
+        # Steps whose unsized buys were lost to an unreadable confidence miss
+        # too: the guard above takes them off the same numerator.
+        skipped = lb_service._reported_int(strategy_impl, "confidence_skipped_steps") or 0
+        misses = max(steps - (llm_calls if decisions is None else decisions) + skipped, 0)
         if planned > steps and planned - misses >= (
             lb_service.MIN_LLM_DECISION_COVERAGE * planned
         ):
@@ -752,6 +755,14 @@ def _write_live_checkpoint(
         end_date=day_iso,
     ) or {}
     meta["live_increment"] = {**lineage, "segment_end": day_iso}
+    # The strategy counts the segment; the stored block counts the month so far.
+    counts = lb_service._unusable_confidence_counts(
+        strategy_impl,
+        _run_metadata_dict(base).get(lb_service.UNUSABLE_CONFIDENCE_KEY),
+    )
+    meta.pop(lb_service.UNUSABLE_CONFIDENCE_KEY, None)
+    if counts:
+        meta[lb_service.UNUSABLE_CONFIDENCE_KEY] = counts
     segment_trades = getattr(strategy_impl, "trades", None)
     if segment_trades is not None:
         meta[TRADE_STATS_KEY] = fold_trade_stats(
