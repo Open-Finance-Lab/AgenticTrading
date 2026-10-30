@@ -9,13 +9,17 @@ the hourly annualization assumptions are identical to the original methods; the
 legacy methods now delegate here.
 """
 
+import logging
 import math
 import statistics
+from collections.abc import Mapping
 from datetime import date, datetime, timezone
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 from zoneinfo import ZoneInfo
 
 import numpy as np
+
+logger = logging.getLogger(__name__)
 
 
 def calculate_sharpe(
@@ -102,7 +106,9 @@ def calculate_max_drawdown(equity_curve: List[Dict]) -> float:
 # marks, ddof 0, rf 0, undefined -> 0). The leaderboards publish this one
 # instead: one return per US trading day, ddof 1, a stated cash rate, an
 # interval, and None -- never 0, never NaN -- when it is undefined. It is read
-# at request time from a stored curve, so it must stay pure arithmetic: no I/O.
+# at request time from a stored curve, so it must stay pure arithmetic (no
+# fetch, no DB) and never raise on stored data; an unreadable curve or seed is
+# logged at ERROR rather than passed off as "pending" or "no variation".
 
 SHARPE_TRADING_DAYS_PER_YEAR = 252
 SHARPE_MIN_DAYS = 5
@@ -149,7 +155,10 @@ def _point_time(value: Any) -> Optional[datetime]:
     # Naive stamps are UTC: the convention of every stored curve in this repo
     # (live.py ``_parse_to_et``, service.py ``_curve_span``).
     if stamp.tzinfo is None:
-        stamp = stamp.replace(tzinfo=timezone.utc)
+        try:
+            stamp = stamp.replace(tzinfo=timezone.utc)
+        except (TypeError, ValueError):  # pandas NaT is a datetime that refuses
+            return None
     return stamp
 
 
@@ -158,7 +167,7 @@ def _finite_equity(value: Any) -> Optional[float]:
         return None
     try:
         number = float(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):  # an int past 1.8e308
         return None
     return number if math.isfinite(number) else None
 
@@ -171,18 +180,25 @@ def daily_session_closes(
     Points are ordered by timestamp, not by list position. A point with no
     parseable timestamp, or an equity that is None or not finite, is "no
     observation" and skipped; 0 and negatives are real observations and kept.
+    It never raises on stored data: the boards call it on their GET path.
     """
-    observed: List[Tuple[datetime, int, float]] = []
+    observed: List[Tuple[datetime, int, date, float]] = []
     for index, point in enumerate(points or []):
+        if not isinstance(point, Mapping):
+            continue
         stamp = _point_time(point.get("timestamp"))
         equity = _finite_equity(point.get("equity"))
         if stamp is None or equity is None:
             continue
-        observed.append((stamp, index, equity))
+        try:
+            day = stamp.astimezone(tz).date()
+        except (OverflowError, ValueError):  # e.g. year 1 shifted west of UTC
+            continue
+        observed.append((stamp, index, day, equity))
     observed.sort(key=lambda item: (item[0], item[1]))
     closes: Dict[date, float] = {}
-    for stamp, _index, equity in observed:
-        closes[stamp.astimezone(tz).date()] = equity
+    for _stamp, _index, day, equity in observed:
+        closes[day] = equity
     return sorted(closes.items())
 
 
@@ -237,6 +253,7 @@ def daily_sharpe_interval(
     if not math.isfinite(rf_annual):
         raise ValueError("rf_annual must be finite")
 
+    points = list(points or [])
     closes = [equity for _day, equity in daily_session_closes(points)]
     days = len(closes)
 
@@ -251,10 +268,25 @@ def daily_sharpe_interval(
         }
 
     if days == 0:
+        if points:
+            # Absent and broken must not look alike: a curve that has points but
+            # no usable close is a stored-shape break, not a board still pending.
+            logger.error(
+                "daily_sharpe: %d curve points but no usable daily close "
+                "(timestamps or equity unreadable); publishing status pending",
+                len(points),
+            )
         return _result(SHARPE_STATUS_PENDING)
     if days < min_days:
         return _result(SHARPE_STATUS_INSUFFICIENT_DAYS)
     seed = _finite_equity(initial_equity)
+    if seed is None or seed <= 0:
+        logger.error(
+            "daily_sharpe: seed %r is not a positive number; publishing status "
+            "no_variation for a %d-day curve",
+            initial_equity,
+            days,
+        )
     previous_levels = [seed] + closes[:-1]
     if any(level is None or level <= 0 for level in previous_levels):
         return _result(SHARPE_STATUS_NO_VARIATION)

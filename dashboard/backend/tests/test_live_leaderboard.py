@@ -2136,3 +2136,15 @@ def test_live_sharpe_counts_an_early_close_once(no_alpaca):
     assert deepseek["sharpe_ci_high"] == pytest.approx(9.858915, abs=1e-6)
     assert deepseek["sharpe_days"] == 20
     assert deepseek["sharpe_status"] == "ok"
+
+
+def test_a_baseline_row_publishes_the_same_daily_sharpe(no_alpaca):
+    """Baselines and models share one reader; pin the baseline side too."""
+    _insert_sharpe_run("spy_index", range(3, 8), _M03_FACTORS)
+    payload = live.get_live_leaderboard(as_of=datetime(2026, 8, 7, 17, 39, tzinfo=_ET))
+    spy = _sharpe_entry(payload, "spy_index")
+    assert spy["sharpe_status"] == "ok"
+    assert spy["sharpe_days"] == 5
+    assert spy["sharpe_ratio"] == pytest.approx(2.611715, abs=1e-6)
+    assert spy["sharpe_ci_low"] == pytest.approx(-11.396490, abs=1e-6)
+    assert spy["sharpe_ci_high"] == pytest.approx(16.619919, abs=1e-6)

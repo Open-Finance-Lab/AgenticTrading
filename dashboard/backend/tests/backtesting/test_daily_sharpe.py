@@ -216,3 +216,41 @@ def test_programmer_errors_raise_rather_than_publish():
         daily_sharpe_interval(_daily(M03_CLOSES), SEED, confidence=1.0)
     with pytest.raises(ValueError):
         daily_sharpe_interval(_daily(M03_CLOSES), SEED, rf_annual=math.inf)
+
+
+def test_malformed_stored_points_are_skipped_never_raised():
+    """The boards call this on their GET path, so bad stored data must not 500."""
+    points = _daily(M03_CLOSES) + [
+        None,
+        "junk",
+        {"timestamp": "2026-08-07T20:00:00+00:00", "equity": 10**400},
+        {"timestamp": "0001-01-01T00:00:00+00:00", "equity": 1.0},
+        {"timestamp": "2026-08-07T20:00:00+00:00", "equity": True},
+        {"timestamp": "2026-08-07T20:00:00+00:00", "equity": float("inf")},
+        {"timestamp": 1786136400, "equity": 1.0},
+    ]
+    out = daily_sharpe_interval(points, SEED)
+    assert out["status"] == "ok"
+    assert out["sharpe"] == pytest.approx(2.611715, abs=1e-6)
+
+
+def test_a_curve_with_no_usable_close_is_logged_not_silently_pending(caplog):
+    """Absent and broken must differ (CLAUDE.md, fail-closed is not fail-visible)."""
+    with caplog.at_level("ERROR"):
+        assert daily_sharpe_interval([], SEED)["status"] == "pending"
+    assert caplog.records == []
+    broken = [{"timestamp": "not a time", "equity": None}] * 3
+    with caplog.at_level("ERROR"):
+        assert daily_sharpe_interval(broken, SEED)["status"] == "pending"
+    assert any("no usable daily close" in r.getMessage() for r in caplog.records)
+
+
+def test_a_bad_seed_is_logged(caplog):
+    with caplog.at_level("ERROR"):
+        out = daily_sharpe_interval(_daily(M03_CLOSES), None)
+    assert out["status"] == "no_variation"
+    assert any("seed None" in r.getMessage() for r in caplog.records)
+    caplog.clear()
+    with caplog.at_level("ERROR"):
+        daily_sharpe_interval(_daily([SEED] * 6), SEED)
+    assert caplog.records == []
