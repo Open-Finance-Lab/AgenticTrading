@@ -178,12 +178,12 @@ def requested_sell_shares(
       to 0. In a lot market it is passed on as written, for the executor's own
       lot check.
     - With no ``position_size``, ``size_fraction`` (a pipeline risk action's
-      ``size_pct``) is a share of ``held``: a number above 0, 1 or more
-      meaning all of it, a part rounded down to whole lots. Without one, the
-      whole position.
+      ``size_pct``) is a share of ``held``: above 0 and below 1 that part,
+      rounded down to whole lots; 1, or 100 and more, all of it. Without one,
+      the whole position.
     - A bool, text that is not a number, a list, NaN, infinity or a negative
       number in either field is refused, and so is a fraction that rounds to
-      no shares.
+      no shares or one between 1 and 100.
     """
     size = model_number(position_size, 0.0)
     if size is None or not math.isfinite(size) or size < 0:
@@ -197,6 +197,19 @@ def requested_sell_shares(
     fraction = model_number(size_fraction, 1.0)  # absent: the whole position
     if fraction is None or not math.isfinite(fraction) or fraction <= 0:
         return None, f"size_fraction {size_fraction!r} is not a share of the position"
+    if 1 < fraction < 100:
+        # A fraction (all of it) and a percentage (that share) disagree here,
+        # and no prompt stated size_pct's unit, so a model writing 25 for 25%
+        # was sold out (#690). Refused, not read either way: reading it as a
+        # percentage would silently change what 1.5 did. 1, and 100 or more,
+        # mean all of it on both readings. LLM_SELL_SIZING stays: a
+        # size_fraction comes from a pipeline's risk_actions, and neither of
+        # that marker's readers (the leaderboard's pools, a Live month's
+        # resume) runs a pipeline.
+        return None, (
+            f"size_fraction {size_fraction!r} is between 1 and 100, "
+            "where a fraction and a percentage disagree"
+        )
     if fraction >= 1:
         return held, None
     # Rounded before the floor: 0.57 * 100 is 56.99999999999999 in binary

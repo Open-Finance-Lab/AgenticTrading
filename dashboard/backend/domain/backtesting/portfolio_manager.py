@@ -338,6 +338,8 @@ class PortfolioManager:
         *,
         symbol: str,
         raw_size: Any,
+        size_fraction: Any,
+        held: float,
         timestamp: Any,
         price: float,
         strategy_reason: str,
@@ -349,7 +351,15 @@ class PortfolioManager:
         reads, and a run whose model wrote ``"all"`` would publish a curve
         that never sold with nothing to say why.
         """
-        asked = model_number(raw_size)
+        asked = model_number(raw_size, 0.0)
+        if asked == 0:
+            # No share count, so it was the size_fraction that was refused:
+            # record the shares a part under 1 asked for (one too small to
+            # fill), not the 0 every fraction-sized sell carries as its
+            # position_size. Any other fraction asked for no count.
+            fraction = model_number(size_fraction)
+            if fraction is not None and 0 < fraction < 1:
+                asked = round(fraction * held, 9)
         _record_refused_order(
             rejected_orders=self.rejected_orders,
             order_events=self.order_events,
@@ -1047,6 +1057,8 @@ class PortfolioManager:
                         self._refuse_sell(
                             symbol=symbol,
                             raw_size=raw_size,
+                            size_fraction=llm_action.get("size_fraction"),
+                            held=held,
                             timestamp=timestamp,
                             price=price,
                             strategy_reason=reason,

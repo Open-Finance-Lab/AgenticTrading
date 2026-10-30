@@ -28,6 +28,7 @@ from typing import Any, Callable, Dict, Iterable, Iterator, List, Mapping, Named
 from dashboard.backend.domain.trading.execution import _trading_date
 from dashboard.backend.infrastructure.llm.pipeline_runner import (
     pipeline_output_to_decision,
+    shadowed_envelopes,
 )
 from dashboard.backend.infrastructure.llm.validator import (
     normalize_action,
@@ -39,7 +40,12 @@ from dashboard.backend.infrastructure.llm.validator import (
 # recorded under a gate that sold the whole position whatever the size, and
 # stored a pipeline risk sell's ``size_pct * 100`` as its ``position_size``:
 # replay one under that rule, never through the current gate.
-TAPE_VERSION = 2
+# 3 (#691): a ``size_fraction`` between 1 and 100 is refused, not a full exit;
+# a risk action's share count is its ``position_size``; and a reply's
+# ``orders`` and ``risk_actions`` are recorded together. A v2 tape stored a
+# risk sell's share count as 0, and the risk actions of a bar that also had
+# orders not at all.
+TAPE_VERSION = 3
 MAX_REASONING_CHARS = 500
 # The longest model-supplied value kept verbatim for replay. Longer ones are
 # recorded readably (cut to ``MAX_REASONING_CHARS``) and the order is marked
@@ -230,7 +236,15 @@ def intent_from_outputs(
     decision = pipeline_output_to_decision(last.get("output"))
     if not decision:
         return {"unparsed": True, "completed_steps": completed}
-    return {"orders": [_intent_order(action) for action in decision.get("actions") or []]}
+    intent: Dict[str, Any] = {
+        "orders": [_intent_order(action) for action in decision.get("actions") or []]
+    }
+    # Lists an ``actions`` list overrode reach neither the gate nor the
+    # ledger; named here, they are not invisible from a dashboard backtest.
+    ignored = shadowed_envelopes(last.get("output"))
+    if ignored:
+        intent["ignored_envelopes"] = ignored
+    return intent
 
 
 def build_state(*, cash: Any, equity: Any, positions: Mapping[str, Any]) -> Dict[str, Any]:

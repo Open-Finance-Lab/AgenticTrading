@@ -20,6 +20,7 @@ from dashboard.backend.infrastructure.llm.pipeline_runner import (
     pipeline_output_to_decision,
     recombine_pipeline,
     run_pipeline_decision,
+    shadowed_envelopes,
     split_pipeline,
     trading_day_key,
     _build_step_prompt,
@@ -27,6 +28,7 @@ from dashboard.backend.infrastructure.llm.pipeline_runner import (
 from dashboard.backend.infrastructure.llm.validator import (
     LLM_ACTION_DEFAULT_CONFIDENCE,
     read_confidence,
+    requested_sell_shares,
 )
 
 
@@ -270,16 +272,137 @@ def test_pipeline_risk_action_keeps_the_models_confidence():
     assert [a["confidence"] for a in decision["actions"]] == [0.0, 0.8, "high"]
 
 
-@pytest.mark.parametrize(
-    "size_pct", [0, 0.0, "0", -0.5, "50%", float("nan"), float("inf"), True, []]
-)
-def test_pipeline_risk_action_size_it_cannot_use_holds(size_pct):
-    """``float(size_pct or 1.0)`` read 0 as 1.0, the whole position, and
-    raised on "50%" and Infinity. A size the model gave must be positive."""
+@pytest.mark.parametrize("size_pct", [0, 0.0, "0"])
+def test_pipeline_risk_action_of_size_zero_holds(size_pct):
+    """``float(size_pct or 1.0)`` read 0 as 1.0, the whole position. A
+    size_pct of 0 asks to sell none of it."""
     decision = pipeline_output_to_decision(
         {"risk_actions": [{"symbol": "AAPL", "action": "trail", "size_pct": size_pct}]}
     )
     assert decision["actions"][0]["action"] == "hold"
+
+
+@pytest.mark.parametrize(
+    "size_pct",
+    [-0.5, "50%", float("nan"), float("inf"), True, [], pytest.param(10**400, id="int-past-float")],
+)
+def test_pipeline_risk_action_size_it_cannot_use_reaches_the_gate(size_pct):
+    """A malformed size_pct used to become a hold here, so the gate never saw
+    it and no ``invalid_quantity`` rejection was recorded: a model writing
+    "50%" on every stop-loss published a curve that never exited with nothing
+    to say why. It is handed on, for the gate to refuse and record."""
+    decision = pipeline_output_to_decision(
+        {"risk_actions": [{"symbol": "AAPL", "action": "trail", "size_pct": size_pct}]}
+    )
+    [order] = decision["actions"]
+    assert order["action"] == "sell"
+    shares, refusal = requested_sell_shares(
+        order["position_size"], order["size_fraction"], 500
+    )
+    assert shares is None and "is not a share of the position" in refusal
+
+
+@pytest.mark.parametrize("field", ["qty", "quantity", "position_size"])
+def test_pipeline_risk_action_sells_the_share_count_it_names(field):
+    """The risk branch hard-coded ``position_size: 0`` and defaulted size_pct
+    to the whole position, so ``{"action": "sell", "qty": 10}`` closed all of
+    it while the same order in ``orders`` sold 10 (#661). A share count is
+    read with the keys ``orders`` reads, and the gate prefers it."""
+    decision = pipeline_output_to_decision(
+        {"risk_actions": [{"symbol": "AAPL", "action": "stop_loss", field: 10}]}
+    )
+    [order] = decision["actions"]
+    assert (order["action"], order["position_size"]) == ("sell", 10)
+    assert requested_sell_shares(order["position_size"], order["size_fraction"], 500) == (10, None)
+
+
+def test_pipeline_risk_action_share_count_wins_over_a_zero_size_pct():
+    decision = pipeline_output_to_decision(
+        {"risk_actions": [{"symbol": "AAPL", "action": "sell", "qty": 10, "size_pct": 0}]}
+    )
+    [order] = decision["actions"]
+    assert (order["action"], order["position_size"]) == ("sell", 10)
+
+
+@pytest.mark.parametrize("qty", ["ten", float("nan"), -3])
+def test_pipeline_risk_action_unusable_share_count_reaches_the_gate(qty):
+    """Handed on as written, as an order's qty is, even beside a size_pct of
+    0: the gate refuses and records it rather than this branch holding."""
+    decision = pipeline_output_to_decision(
+        {"risk_actions": [{"symbol": "AAPL", "action": "sell", "qty": qty, "size_pct": 0}]}
+    )
+    [order] = decision["actions"]
+    assert order["action"] == "sell"
+    assert order["position_size"] is qty
+
+
+def test_pipeline_risk_action_buy_carries_its_share_count():
+    """A risk ``buy`` went to the gate at ``position_size: 0`` whatever qty it
+    named, so it was sized from the 0.8 default confidence instead."""
+    decision = pipeline_output_to_decision(
+        {"risk_actions": [{"symbol": "AAPL", "action": "buy", "qty": 5}]}
+    )
+    [order] = decision["actions"]
+    assert (order["action"], order["position_size"]) == ("buy", 5)
+    assert "size_fraction" not in order
+
+
+def test_orders_and_risk_actions_both_reach_the_gate():
+    """A non-empty ``orders`` list returned early and every risk action was
+    dropped with no trace: a stop-loss beside a buy never executed."""
+    decision = pipeline_output_to_decision(
+        {
+            "orders": [{"symbol": "MSFT", "side": "buy", "qty": 10}],
+            "risk_actions": [{"symbol": "AAPL", "action": "stop_loss"}],
+        }
+    )
+    assert [(a["symbol"], a["action"]) for a in decision["actions"]] == [
+        ("MSFT", "buy"),
+        ("AAPL", "sell"),
+    ]
+
+
+@pytest.mark.parametrize(
+    "parsed, symbols",
+    [
+        ({"orders": ["x"], "risk_actions": [{"symbol": "AAPL", "action": "stop_loss"}]}, ["AAPL"]),
+        ({"orders": [{"symbol": "MSFT", "side": "buy"}], "risk_actions": ["x"]}, ["MSFT"]),
+        ({"orders": [], "risk_actions": [{"symbol": "AAPL", "action": "stop_loss"}]}, ["AAPL"]),
+    ],
+)
+def test_one_unusable_or_empty_envelope_does_not_drop_the_other(parsed, symbols):
+    decision = pipeline_output_to_decision(parsed)
+    assert [a["symbol"] for a in decision["actions"]] == symbols
+
+
+def test_an_actions_list_still_overrides_orders_and_says_which_it_dropped():
+    """``actions`` is the standard contract and passes through whole; merging
+    it with ``orders`` could buy one name twice. What it overrides is named."""
+    actions = [{"symbol": "JPM", "action": "sell", "position_size": 5}]
+    parsed = {
+        "actions": actions,
+        "orders": [{"symbol": "MSFT", "side": "buy", "qty": 10}],
+        "risk_actions": [],
+    }
+    assert pipeline_output_to_decision(parsed) == {"actions": actions}
+    assert shadowed_envelopes(parsed) == ["orders"]
+    assert shadowed_envelopes({**parsed, "risk_actions": ["x"]}) == ["orders", "risk_actions"]
+    assert shadowed_envelopes({"actions": [], "orders": [{"symbol": "MSFT"}]}) == []
+    assert shadowed_envelopes({"orders": [{"symbol": "MSFT"}]}) == []
+    assert shadowed_envelopes(None) == []
+
+
+def test_run_pipeline_decision_logs_the_envelopes_an_actions_list_overrides(capsys):
+    reply = (
+        '{"actions": [{"symbol": "JPM", "action": "hold"}],'
+        ' "risk_actions": [{"symbol": "AAPL", "action": "stop_loss"}]}'
+    )
+    client = _PipelineClient([_PipelineResponse(reply)])
+    decision, _usage, _calls, _steps = run_pipeline_decision(
+        client, pipeline=_PIPELINE, market_snapshot={"top_signals": {}}
+    )
+    assert decision == {"actions": [{"symbol": "JPM", "action": "hold"}]}
+    assert "ignoring its risk_actions" in capsys.readouterr().out
 
 
 @pytest.mark.parametrize("fields", [{}, {"size_pct": None}, {"size_pct": ""}])
@@ -316,6 +439,43 @@ def test_pipeline_execution_rules_state_how_a_sell_is_sized():
     )
     rules = prompt.split("=== EXECUTION RULES ===", 1)[1]
     assert "a qty of 0 sells the whole position" in rules
+    # Only a step that asks for the risk envelope is told its unit, so every
+    # other pipeline's prompt stays byte-identical.
+    assert "size_pct" not in prompt
+
+
+@pytest.mark.parametrize(
+    "step",
+    [
+        {"prompt": "Emit risk_actions for open positions.", "outputFormat": "JSON"},
+        {"prompt": "Manage risk.", "outputFormat": '{"risk_actions": [{"size_pct": 0.5}]}'},
+        {"prompt": "Write a size_pct per exit.", "outputFormat": "JSON"},
+    ],
+)
+def test_pipeline_execution_rules_define_size_pct_where_a_step_asks_for_it(step):
+    """No prompt said which unit size_pct is in, so a model writing 25 for 25%
+    got a full exit (#690)."""
+    prompt = _build_step_prompt(
+        step_index=0,
+        step={"id": "s1", "label": "Risk", **step},
+        market_snapshot={"portfolio": {}, "top_signals": {}},
+        prior_outputs=[],
+        is_last=True,
+    )
+    rules = prompt.split("=== EXECUTION RULES ===", 1)[1]
+    assert "size_pct is the fraction of the position to sell, from 0 to 1" in rules
+    assert "between 1 and 100 is rejected" in rules
+
+
+def test_a_step_that_is_not_last_gets_no_size_pct_rule():
+    prompt = _build_step_prompt(
+        step_index=0,
+        step={"id": "s1", "label": "Risk", "prompt": "Emit risk_actions.", "outputFormat": "JSON"},
+        market_snapshot={"portfolio": {}, "top_signals": {}},
+        prior_outputs=[],
+        is_last=False,
+    )
+    assert "EXECUTION RULES" not in prompt
 
 
 @pytest.mark.parametrize(
