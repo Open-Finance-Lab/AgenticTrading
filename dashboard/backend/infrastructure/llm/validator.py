@@ -13,6 +13,7 @@ Usage:
 
 import json
 import logging
+import math
 import re
 from typing import Dict, Any, List, Optional, Tuple
 from enum import Enum
@@ -82,6 +83,66 @@ def normalize_symbol(symbol: str) -> str:
     return trimmed.upper()
 
 
+# What an action's confidence reads as when the model leaves it out, per
+# backtest decision path. Kept apart on purpose: the default pipeline
+# instruction asks for no confidence, so the orders it produces carry 0.75 and
+# one without a qty is sized from it. Moving it to 0.5 would shrink those buys
+# by a third and stop new runs comparing with old ones.
+LLM_ACTION_DEFAULT_CONFIDENCE = 0.5  # the gate, for an ``actions`` reply
+PIPELINE_ORDER_DEFAULT_CONFIDENCE = 0.75  # a pipeline's ``orders``
+PIPELINE_RISK_DEFAULT_CONFIDENCE = 0.8  # a pipeline's ``risk_actions``
+
+
+def model_number(value: Any, default: Optional[float] = None) -> Optional[float]:
+    """A number a model wrote into its JSON reply, as a float.
+
+    A missing value (``None``, or a string of only whitespace) is ``default``.
+    A numeric string such as ``"0.4"`` is read as its number, as ``float()``
+    always read it on these paths. Anything else that is not a number -- a
+    bool, text such as ``"high"``, a list or an object -- is ``None``:
+    ``int(True) == 1`` is not what a model meant. The result is not range
+    checked and can be NaN or infinite; an int too large for a float reads
+    as infinite rather than raising ``OverflowError``.
+    """
+    if value is None or (isinstance(value, str) and not value.strip()):
+        return default
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        try:
+            return float(value)
+        except OverflowError:
+            return math.inf if value > 0 else -math.inf
+    if isinstance(value, (float, str)):
+        try:
+            return float(value)
+        except ValueError:
+            return None
+    return None
+
+
+def _confidence_in_range(confidence: float) -> bool:
+    return math.isfinite(confidence) and 0.0 <= confidence <= 1.0
+
+
+def read_confidence(value: Any, default: float) -> Optional[float]:
+    """An action's 0-1 confidence, or ``None`` when the action must be skipped.
+
+    One rule for the backtest gate and for every pipeline envelope it reads:
+    a confidence the model left out takes ``default``, and one it gave must be
+    a number from 0 to 1. ``0`` is the model saying it is not confident, not a
+    missing value. Anything else it gave -- a bool, ``"high"``, a list, NaN,
+    infinity, or a number off the scale such as ``25`` -- is ``None``: reading
+    a scale into it (``25`` as 25%) or a default over it would trade on a
+    confidence the model never stated. The range is the one
+    ``LLMTradingDecision`` enforces for external agents.
+    """
+    number = model_number(value, default)
+    if number is None or not _confidence_in_range(number):
+        return None
+    return number
+
+
 class TradingAction(str, Enum):
     """Allowed trading actions"""
     BUY = "buy"
@@ -128,7 +189,7 @@ class LLMTradingDecision(BaseModel):
         """Confidence must be 0.0 to 1.0"""
         if not isinstance(v, (int, float)):
             raise ValueError(f"Confidence must be numeric, got {type(v)}")
-        if not 0.0 <= v <= 1.0:
+        if not _confidence_in_range(v):
             raise ValueError(f"Confidence {v} out of range [0.0, 1.0]")
         return float(v)
     

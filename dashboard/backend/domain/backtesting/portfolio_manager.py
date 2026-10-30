@@ -36,9 +36,11 @@ import pandas as pd
 from dashboard.backend.domain.backtesting.constants import INITIAL_CAPITAL
 from dashboard.backend.infrastructure.llm.validator import (
     DJIA_30,
+    LLM_ACTION_DEFAULT_CONFIDENCE,
     MAX_ORDER_SHARES,
     create_prompt,
     normalize_symbol,
+    read_confidence,
 )
 from dashboard.backend.domain.trading.portfolio import (
     append_equity_record as _append_equity_record,
@@ -869,12 +871,20 @@ class PortfolioManager:
             for llm_action in llm_actions:
                 symbol = normalize_symbol(str(llm_action.get("symbol") or ""))
                 action_type = llm_action.get("action", "hold").lower()
-                confidence = llm_action.get("confidence", 0.5)
+                raw_confidence = llm_action.get("confidence")
+                confidence = read_confidence(
+                    raw_confidence, LLM_ACTION_DEFAULT_CONFIDENCE
+                )
                 reasoning = llm_action.get("reasoning", "")
-                
+
+                if confidence is None:
+                    print(f"\n   Processing: {symbol} ({action_type.upper()}, conf={raw_confidence!r})")
+                    print(f"      ⚠️  {symbol}: Skip (confidence {raw_confidence!r} is not a number from 0 to 1)")
+                    continue
+
                 print(f"\n   Processing: {symbol} ({action_type.upper()}, conf={confidence:.0%})")
                 print(f"      Reasoning: {reasoning[:60]}...")
-                
+
                 # Skip low-confidence decisions
                 if confidence < 0.3:
                     print(f"      ⏸️  Skipping (confidence {confidence:.0%} too low)")

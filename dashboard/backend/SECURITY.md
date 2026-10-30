@@ -120,7 +120,7 @@ It applies these constraints inline instead:
 | Action count | Capped at one action per universe symbol (`len(allowed_symbols)`); excess entries ignored, or the whole batch rejected on a strict run |
 | Per-order size | `position_size > MAX_ORDER_SHARES` (10k, same constant as the validator) skipped; unparseable/non-finite sizes skipped |
 | Cash bound | Buys must fit in available cash; sells limited to held shares |
-| Confidence floor | Actions with confidence < 0.3 skipped |
+| Confidence floor | Read by `read_confidence` (`infrastructure/llm/validator.py`): a missing confidence takes the path's default (0.5; a pipeline's `orders` 0.75, `risk_actions` 0.8), any other value that is not a number from 0 to 1 (a bool, text, NaN, `25`) skips the action, and actions below 0.3 are skipped |
 
 A custom `strategy_prompt` replaces only the *strategy* section of the prompt;
 the market snapshot, symbol allowlist, and strict JSON output contract are
