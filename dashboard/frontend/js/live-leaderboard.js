@@ -307,10 +307,43 @@ function liveFormatHold(hours) {
   return `${h.toFixed(1)}h`;
 }
 
+// Sharpe is computed once, on the server, from the stored curve (P19); this
+// file only displays it (D20) -- never derive it from equity_curve here. The
+// interval is always shown with the number: at five daily returns it is about
+// +/-14, and showing that is the point. `basis` is `live_status.sharpe`.
+// leaderboard.js's formatBoardSharpe must answer identically.
+function liveFormatSharpe(entry, basis) {
+  const read = (v) => (v === null || v === undefined || v === '' ? NaN : Number(v));
+  const status = entry ? entry.sharpe_status : null;
+  const value = read(entry && entry.sharpe_ratio);
+  const lo = read(entry && entry.sharpe_ci_low);
+  const hi = read(entry && entry.sharpe_ci_high);
+  const days = read(entry && entry.sharpe_days);
+  const have = Number.isFinite(days) ? days : 0;
+  const need = read(basis && basis.min_days);
+  const rf = read(basis && basis.rf_annual);
+  if (status === 'ok' && Number.isFinite(value) && Number.isFinite(lo) && Number.isFinite(hi)) {
+    const title = Number.isFinite(rf)
+      ? 'Return above what cash would have earned, divided by how much the daily returns swung. '
+        + `Based on ${have} trading days; cash rate ${Number((rf * 100).toFixed(2))}%/yr; scaled to a yearly figure.`
+      : '';
+    return { main: value.toFixed(2), sub: `95% interval ${lo.toFixed(2)} to ${hi.toFixed(2)}`, title };
+  }
+  if (status === 'insufficient_days') {
+    const sub = Number.isFinite(need)
+      ? `Needs ${need} trading days (have ${have})`
+      : `Needs more trading days (have ${have})`;
+    return { main: '—', sub, title: '' };
+  }
+  if (status === 'no_variation') return { main: '—', sub: 'Returns never moved', title: '' };
+  return { main: '—', sub: '', title: '' };
+}
+
 function liveSortValue(entry, key) {
   switch (key) {
     case 'return': return Number(entry.cumulative_return);
-    case 'sharpe': return Number(entry.sharpe_ratio);
+    // null is "no figure", not 0.00: NaN sorts below every number.
+    case 'sharpe': return entry.sharpe_ratio == null ? NaN : Number(entry.sharpe_ratio);
     case 'dd': return Math.abs(Number(entry.max_drawdown));
     case 'trades': return Number(entry.num_trades);
     case 'hold': return Number(entry.avg_hold_hours);
@@ -346,6 +379,7 @@ function populateLiveTable() {
   const tbody = document.getElementById('liveLeaderboardTableBody');
   if (!tbody) return;
   const rows = liveSortedEntries();
+  const sharpeBasis = livePayload?.live_status?.sharpe || null;
   if (!rows.length) {
     tbody.innerHTML = `<tr><td colspan="9" style="text-align:center;padding:24px;color:var(--text-secondary);">No live-month entries configured.</td></tr>`;
     return;
@@ -359,6 +393,10 @@ function populateLiveTable() {
     const retClass = (v) => (v == null || !Number.isFinite(v) ? '' : (v >= 0 ? 'return-positive' : 'return-negative'));
     const selected = liveSelectedId === entry.entry_id ? ' is-selected' : '';
     const dash = (html) => (printed ? html : '—');
+    const sharpe = liveFormatSharpe(entry, sharpeBasis);
+    const sharpeSub = sharpe.sub
+      ? `<span class="leaderboard-sample-range">${escapeHtml(sharpe.sub)}</span>`
+      : '';
     const attemptBadge = liveLastAttemptBadge(entry);
     return `
       <tr class="${selected}" data-live-entry="${safeId}">
@@ -370,7 +408,7 @@ function populateLiveTable() {
           </div>
         </td>
         <td class="num-cell ${retClass(ret)}">${dash(liveFormatPct(ret, 2))}</td>
-        <td class="num-cell">${dash(entry.sharpe_ratio == null ? '—' : Number(entry.sharpe_ratio).toFixed(2))}</td>
+        <td class="num-cell"${sharpe.title ? ` title="${escapeHtml(sharpe.title)}"` : ''}>${dash(`${escapeHtml(sharpe.main)}${sharpeSub}`)}</td>
         <td class="num-cell">${dash(liveFormatPct(entry.max_drawdown == null ? null : -Math.abs(Number(entry.max_drawdown)), 2))}</td>
         <td class="num-cell">${dash(entry.num_trades == null ? '—' : String(entry.num_trades))}</td>
         <td class="num-cell">${dash(liveFormatHold(entry.avg_hold_hours))}</td>
@@ -399,11 +437,14 @@ function renderLiveDetail(entry) {
   const lastRun = liveLastAttemptCopy(entry);
   const ret = Number(entry.cumulative_return || 0);
   const retColor = ret >= 0 ? 'var(--success-color)' : 'var(--danger-color)';
+  const sharpe = liveFormatSharpe(entry, livePayload?.live_status?.sharpe);
+  const sharpeText = hasPrints ? [sharpe.main, sharpe.sub].filter(Boolean).join(' · ') : '—';
   host.innerHTML = `
     <div class="team-detail-row"><span class="team-detail-label">Entry</span><span class="team-detail-value">${escapeHtml(liveSeriesLabel(entry))}</span></div>
     <div class="team-detail-row"><span class="team-detail-label">Type</span><span class="team-detail-value">${escapeHtml(liveFormatBadge(entry.team_badge))}</span></div>
     <div class="team-detail-row"><span class="team-detail-label">Value</span><span class="team-detail-value">${hasPrints ? `$${liveFormatMoney(entry.portfolio_value)}` : 'Awaiting freeze'}</span></div>
     <div class="team-detail-row"><span class="team-detail-label">Return</span><span class="team-detail-value" style="color:${retColor};">${hasPrints ? liveFormatPct(ret, 2) : '—'}</span></div>
+    <div class="team-detail-row"><span class="team-detail-label">Sharpe ratio</span><span class="team-detail-value"${sharpe.title ? ` title="${escapeHtml(sharpe.title)}"` : ''}>${escapeHtml(sharpeText)}</span></div>
     <div class="team-detail-row"><span class="team-detail-label">Trades</span><span class="team-detail-value">${hasPrints && entry.num_trades != null ? entry.num_trades : '—'}</span></div>
     <div class="team-detail-row"><span class="team-detail-label">Avg hold</span><span class="team-detail-value">${hasPrints ? liveFormatHold(entry.avg_hold_hours) : '—'}</span></div>
     <div class="team-detail-row"><span class="team-detail-label">Through</span><span class="team-detail-value">${entry.snapshot_end || '—'}</span></div>
