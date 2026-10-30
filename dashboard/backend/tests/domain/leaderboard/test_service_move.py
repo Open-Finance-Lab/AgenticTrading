@@ -194,6 +194,8 @@ def test_get_leaderboard_schema_and_ranking(isolated_service):
     result = canon_service.get_leaderboard()
     assert set(result.keys()) == {
         "window", "updated_at", "total_entries", "leader", "entries", "display_capital",
+        # what every entry's sharpe_* fields mean (P19 daily Sharpe)
+        "sharpe_basis",
         # period + board labelling fields (contest vs daily)
         "period", "board_title", "phase_label", "standings_label",
     }
@@ -216,6 +218,7 @@ def test_get_leaderboard_schema_and_ranking(isolated_service):
         "initial_equity", "portfolio_value", "cumulative_return", "sharpe_ratio",
         "max_drawdown", "status", "run_id", "llm_calls", "input_tokens",
         "output_tokens", "est_cost_usd", "equity_curve", "rank",
+        "sharpe_ci_low", "sharpe_ci_high", "sharpe_days", "sharpe_status",
     }
     assert expected_fields.issubset(set(entry.keys()))
     assert "win_loss_ratio" not in entry
