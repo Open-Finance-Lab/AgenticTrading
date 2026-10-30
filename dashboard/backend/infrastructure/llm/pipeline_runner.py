@@ -317,10 +317,11 @@ def pipeline_output_to_decision(parsed: Dict[str, Any]) -> Optional[Dict[str, An
                 # A missing size sells the whole position. One the model gave
                 # must be a positive number: 0 asks to sell nothing, and a
                 # malformed size is not read as "all of it" (the same rule as
-                # read_confidence), so either one holds. Any positive size
-                # still sells the whole sellable position: the gate does not
-                # size a sell (see decision_tape._order_triples), so a
-                # size_pct of 0.25 is a full exit, not a partial one.
+                # read_confidence), so either one holds. A positive size is
+                # that share of the position (requested_sell_shares): 0.25
+                # sells a quarter, and 1 or more sells all of it -- so a 25
+                # meant as 25% is a full exit, since no prompt defines the
+                # unit.
                 size_pct = model_number(risk.get("size_pct"), 1.0)
                 if side == "sell" and (
                     size_pct is None
