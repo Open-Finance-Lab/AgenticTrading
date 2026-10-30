@@ -112,12 +112,45 @@ jobs:
       - name: Build landing source
         run: npm run build
 
+  dependency-audit:
+    name: Dependency audit (pip-audit)
+    # Fails when anything requirements.txt installs, transitives included, has
+    # a published advisory. Without it a bump that reverts a security pin (a
+    # merge conflict resolved the wrong way, a regenerated freeze) passes CI
+    # green, and Dependabot only reports after the merge. Not a deploy gate:
+    # an advisory published against an existing pin turns this red on every
+    # PR until someone bumps it, and that signal must not hold back an
+    # unrelated hotfix.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install requirements.txt into its own venv
+        # Kept apart from pip-audit's own dependencies, so only what the
+        # service installs is audited.
+        run: |
+          python -m venv "$RUNNER_TEMP/service"
+          "$RUNNER_TEMP/service/bin/python" -m pip install --upgrade pip
+          "$RUNNER_TEMP/service/bin/python" -m pip install -r requirements.txt
+
+      - name: Audit the installed tree
+        run: |
+          python -m pip install pip-audit==2.10.1
+          site=$("$RUNNER_TEMP/service/bin/python" -c 'import sysconfig; print(sysconfig.get_path("purelib"))')
+          pip-audit --strict --path "$site"
+
   deploy-prod:
     name: Trigger Render prod deploy
     # Deploy only from main pushes (or a manual dispatch on main), and only
     # after the backend suite is green. packaging-tests is deliberately NOT a
     # gate: it covers the PyPI SDK, which isn't part of the Render service —
-    # an SDK-only failure shouldn't block shipping a backend fix.
+    # an SDK-only failure shouldn't block shipping a backend fix. Neither is
+    # dependency-audit; its comment says why.
     needs: backend-tests
     if: >-
       github.ref == 'refs/heads/main' &&
