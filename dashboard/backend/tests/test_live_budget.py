@@ -22,6 +22,22 @@ from dashboard.backend.database import db
 from dashboard.backend.domain.leaderboard import live_budget
 import dashboard.backend.domain.leaderboard.live as live
 import dashboard.backend.domain.leaderboard.service as lb_service
+from dashboard.backend.tests.test_live_leaderboard import (  # noqa: F401
+    SEED,
+    _ET,
+    _ScriptedAgent,
+    _deepseek,
+    _insert_checkpoint,
+    _insert_live_run,
+    _live_aug27,
+    _month_rows,
+    _one_bar_frame,
+    _pt,
+    # Autouse: these cases are dated August 2026, before any entry's
+    # live_from month, so without it the roster would be DeepSeek alone.
+    _roster_without_join_dates,
+    _use_agent,
+)
 
 _AUG = "2026-08-01"
 _FREEZE = "2026-08-27"
@@ -438,3 +454,368 @@ def test_llm_agent_publishes_tokens_billed_before_a_crash(monkeypatch, manager_k
     assert (strategy.input_tokens, strategy.output_tokens) == tokens
     # The H6 counters still move only at a session close, which never came.
     assert strategy.llm_calls == 0 and strategy.decision_steps == 0
+
+
+# --- enforcement in the live deploy ---------------------------------------------
+
+
+def _no_billable_work(*_args, **_kwargs):
+    raise AssertionError("a budget halt reached the model or the market data")
+
+
+class _DiesBeforeTheClose(_ScriptedAgent):
+    """Bills a session, then dies before that session's close hook fires."""
+
+    def __init__(self, die_on, error, **kwargs):
+        super().__init__(**kwargs)
+        self.die_on = die_on
+        self.error = error
+
+    def run(self, bars, start, end, capital, starting_snapshot=None, on_session_close=None):
+        def hook(day, curve):
+            if day.isoformat() == self.die_on:
+                raise self.error
+            on_session_close(day, curve)
+
+        return super().run(
+            bars, start, end, capital,
+            starting_snapshot=starting_snapshot, on_session_close=hook,
+        )
+
+
+def test_a_zero_budget_blocks_before_any_bar_fetch_or_model_build(monkeypatch):
+    monkeypatch.setenv(live_budget.BUDGET_ENV, "0")
+    monkeypatch.setattr(lb_service, "get_strategy", _no_billable_work)
+    monkeypatch.setattr(lb_service, "fetch_hourly_bars", _no_billable_work)
+    freeze_cfg = _live_aug27()
+    with pytest.raises(live_budget.LiveBudgetExceeded, match="not started"):
+        live.deploy_live_model_increment(_deepseek(freeze_cfg), freeze_cfg)
+    assert _month_rows("deepseek_v4_pro") == []
+    ledger = _ledger()
+    assert ledger["est_cost_usd"] == 0
+    assert ledger["metadata"]["last_attempt"] == {
+        "on": _FREEZE, "outcome": "budget_halted", "kind": "budget",
+    }
+
+
+def test_an_entry_already_current_is_not_halted_and_writes_nothing(monkeypatch):
+    monkeypatch.setenv(live_budget.BUDGET_ENV, "0")
+    _insert_checkpoint(_FREEZE, "08-27")
+    freeze_cfg = _live_aug27()
+    row = live.deploy_live_model_increment(_deepseek(freeze_cfg), freeze_cfg)
+    assert row["cached"] is True
+    assert _ledger() is None
+
+
+def test_a_snapshot_that_already_covers_a_non_session_freeze_is_not_halted(monkeypatch):
+    """The second way to be current: the newest checkpoint is the last session
+    before a freeze_end that is not itself a session. live_clock never freezes
+    on such a day, but a deploy handed one must not build the model, fetch
+    bars, write a ledger row or halt either."""
+    monkeypatch.setenv(live_budget.BUDGET_ENV, "0")
+    monkeypatch.setattr(lb_service, "get_strategy", _no_billable_work)
+    monkeypatch.setattr(lb_service, "fetch_hourly_bars", _no_billable_work)
+    _insert_checkpoint("2026-08-28", "08-28")
+    freeze_cfg = {**_live_aug27(), "end_date": "2026-08-29"}  # a Saturday
+    row = live.deploy_live_model_increment(_deepseek(freeze_cfg), freeze_cfg)
+    assert row["cached"] is True and row["segment"] is None
+    assert row["run_id"] == "lb_deepseek_v4_pro_20260801_20260828"
+    assert _ledger() is None
+
+
+def test_a_catch_up_stops_before_the_session_that_would_cross_the_cap(monkeypatch):
+    monkeypatch.setenv(live_budget.BUDGET_ENV, "0.8")
+    _insert_checkpoint("2026-08-24", "08-24")
+    agent = _use_agent(monkeypatch, _ScriptedAgent(step_tokens=(1_000_000, 0)))
+    freeze_cfg = _live_aug27()
+    with pytest.raises(live_budget.LiveBudgetExceeded, match="would cross it"):
+        live.deploy_live_model_increment(_deepseek(freeze_cfg), freeze_cfg)
+    # $0.435 spent; a second $0.435 session would reach $0.87 > $0.80.
+    assert agent.traded == ["2026-08-25"]
+    # The session that was paid for is stored, not thrown away.
+    assert [r["end_date"] for r in _month_rows("deepseek_v4_pro")] == ["2026-08-25"]
+    ledger = _ledger()
+    assert ledger["est_cost_usd"] == pytest.approx(0.435)
+    assert ledger["metadata"]["last_attempt"]["outcome"] == "budget_halted"
+
+
+def test_the_last_session_of_a_segment_is_never_stopped_by_its_projection(monkeypatch):
+    """Nothing is left to stop after it, so raising would only relabel a
+    finished night as a halt. The next night's pre-check decides."""
+    monkeypatch.setenv(live_budget.BUDGET_ENV, "0.5")
+    _insert_checkpoint("2026-08-26", "08-26")
+    _use_agent(monkeypatch, _ScriptedAgent(step_tokens=(1_000_000, 0)))
+    freeze_cfg = _live_aug27()
+    row = live.deploy_live_model_increment(_deepseek(freeze_cfg), freeze_cfg)
+    assert row["window"]["end_date"] == _FREEZE
+    assert _ledger()["metadata"]["last_attempt"]["outcome"] == "ok"
+
+
+def test_a_run_that_dies_mid_session_is_priced_in_full(monkeypatch):
+    _insert_checkpoint("2026-08-24", "08-24")
+    _use_agent(monkeypatch, _DiesBeforeTheClose(
+        "2026-08-26",
+        ConnectionResetError("reset by peer, key sk-live-SECRET"),
+        step_tokens=(1_000_000, 0),
+    ))
+    freeze_cfg = _live_aug27()
+    with pytest.raises(ConnectionResetError):
+        live.deploy_live_model_increment(_deepseek(freeze_cfg), freeze_cfg)
+    assert [r["end_date"] for r in _month_rows("deepseek_v4_pro")] == ["2026-08-25"]
+    ledger = _ledger()
+    # 08-25 was priced at its close; 08-26's tokens only by the final pricing.
+    assert ledger["est_cost_usd"] == pytest.approx(0.87)
+    assert ledger["metadata"]["last_attempt"] == {
+        "on": _FREEZE, "outcome": "failed", "kind": "network",
+    }
+    assert "SECRET" not in json.dumps(ledger, default=str)
+
+
+def test_a_ledger_that_cannot_be_written_never_hides_the_deploy_error(monkeypatch, capsys):
+    _insert_checkpoint("2026-08-24", "08-24")
+    real_insert = db.insert_run
+
+    def ledger_down_at_the_end(**row):
+        if row["run_id"].startswith("live_spend_") and "last_attempt" in row["metadata"]:
+            raise OSError("ledger disk full")
+        return real_insert(**row)
+
+    monkeypatch.setattr(db, "insert_run", ledger_down_at_the_end)
+    _use_agent(monkeypatch, _ScriptedAgent(
+        crash_on={"2026-08-26"}, step_tokens=(1_000_000, 0),
+    ))
+    freeze_cfg = _live_aug27()
+    with pytest.raises(RuntimeError, match="worker killed"):
+        live.deploy_live_model_increment(_deepseek(freeze_cfg), freeze_cfg)
+    assert (
+        "ERROR: live.spend_ledger_write_failed entry=deepseek_v4_pro error=OSError"
+        in capsys.readouterr().out
+    )
+    # The session-close upsert for 08-25 landed before the final one failed.
+    assert _ledger()["est_cost_usd"] == pytest.approx(0.435)
+
+
+def test_a_segment_h6_refuses_to_store_is_still_billed(monkeypatch):
+    _use_agent(monkeypatch, _ScriptedAgent(
+        misses={"2026-08-03": 7}, step_tokens=(1_000_000, 0),
+    ))
+    freeze_cfg = _live_aug27()
+    with pytest.raises(lb_service.LeaderboardFallbackError):
+        live.deploy_live_model_increment(_deepseek(freeze_cfg), freeze_cfg)
+    assert _month_rows("deepseek_v4_pro") == []
+    ledger = _ledger()
+    assert ledger["est_cost_usd"] == pytest.approx(0.435)
+    assert ledger["metadata"]["last_attempt"]["kind"] == "model_coverage"
+
+
+def test_a_forced_replay_adds_to_the_month_instead_of_resetting_it(monkeypatch):
+    freeze_cfg = _live_aug27()
+    _use_agent(monkeypatch, _ScriptedAgent(step_tokens=(1_000_000, 0)))
+    live.deploy_live_model_increment(_deepseek(freeze_cfg), freeze_cfg)
+    _use_agent(monkeypatch, _ScriptedAgent(step_tokens=(1_000_000, 0)))
+    row = live.deploy_live_model_increment(
+        _deepseek(freeze_cfg), freeze_cfg, force_refresh=True
+    )
+    month = 19 * 0.435  # 19 sessions, Aug 3 to Aug 27
+    # The checkpoint chain starts over with the replay; the money does not.
+    assert db.get_run(row["run_id"])["est_cost_usd"] == pytest.approx(month)
+    assert _ledger()["est_cost_usd"] == pytest.approx(2 * month)
+    assert _ledger()["metadata"]["attempts"] == 2
+
+
+def test_the_first_deploy_after_rollout_counts_what_checkpoints_already_spent(monkeypatch):
+    # A row written before the ledger existed records $49.50 of the $50 cap.
+    _insert_live_run(
+        "lb_deepseek_v4_pro_20260801_20260824", "deepseek_v4_pro", "2026-08-24",
+        [_pt("2026-08-24T19:00:00+00:00", SEED)],
+        metadata={live.LIVE_SNAPSHOT_KEY: {"cash": SEED, "positions": {}, "day": "08-24"}},
+        est_cost_usd=49.5,
+    )
+    agent = _use_agent(monkeypatch, _ScriptedAgent(step_tokens=(1_000_000, 0)))
+    freeze_cfg = _live_aug27()
+    with pytest.raises(live_budget.LiveBudgetExceeded):
+        live.deploy_live_model_increment(_deepseek(freeze_cfg), freeze_cfg)
+    assert agent.traded == ["2026-08-25"]
+    assert _ledger()["est_cost_usd"] == pytest.approx(49.935)
+
+
+def test_a_new_month_starts_with_nothing_spent(monkeypatch):
+    _insert_ledger("deepseek_v4_pro", 60.0, month="2026-07-01")
+    _use_agent(monkeypatch, _ScriptedAgent())
+    freeze_cfg = _live_aug27()
+    row = live.deploy_live_model_increment(_deepseek(freeze_cfg), freeze_cfg)
+    assert row["cached"] is False
+    assert _ledger(month="2026-07-01")["est_cost_usd"] == 60.0
+    assert _ledger()["est_cost_usd"] < 1
+
+
+def test_a_spent_month_halts_the_roster_with_one_log_line(monkeypatch, capsys):
+    monkeypatch.setenv(live_budget.BUDGET_ENV, "0")
+    monkeypatch.setattr(lb_service, "ensure_leaderboard_runs", lambda **kwargs: {})
+    monkeypatch.setattr(lb_service, "get_strategy", _no_billable_work)
+    monkeypatch.setattr(lb_service, "fetch_hourly_bars", _no_billable_work)
+    as_of = datetime(2026, 8, 27, 17, 39, tzinfo=_ET)
+    roster = [entry["id"] for entry in live.live_llm_entries(_live_aug27())]
+
+    result = live.refresh_live_leaderboard(deploy_models=True, as_of=as_of)
+    assert result["models_deployed"] is False
+    assert result["model_failures"] == []
+    assert result["budget_halted"] == roster
+    assert result["budget"] == {
+        "month": "2026-08",
+        "cap_usd": 0.0,
+        "spent_usd": 0.0,
+        "remaining_usd": 0.0,
+        "halted": True,
+    }
+    out = capsys.readouterr().out
+    assert [line for line in out.splitlines() if "live.budget_exhausted" in line] == [
+        "ERROR: live.budget_exhausted month=2026-08 cap_usd=0.00 spent_usd=0.00 "
+        f"skipped={','.join(roster)}"
+    ]
+    assert "live.model_deploy_failed" not in out
+    # Saved, and not mistaken for a finished night: the next cron tries again.
+    assert live._LIVE_REFRESH_STATE_PATH.exists()
+    assert live.refresh_live_leaderboard(deploy_models=True, as_of=as_of)["skipped"] is False
+
+
+def test_halts_and_failures_are_reported_apart(monkeypatch, capsys):
+    monkeypatch.setenv(live_budget.BUDGET_ENV, "0.8")
+    monkeypatch.setattr(lb_service, "ensure_leaderboard_runs", lambda **kwargs: {})
+    monkeypatch.setattr(lb_service, "fetch_hourly_bars", lambda *args: _one_bar_frame())
+    freeze_cfg = _live_aug27()
+    deepseek = _deepseek(freeze_cfg)
+    twin = {**deepseek, "id": "deepseek_twin", "name": "DeepSeek twin"}
+    monkeypatch.setattr(live, "live_llm_entries", lambda config=None: [deepseek, twin])
+    dies = _DiesBeforeTheClose(
+        "2026-08-03", RuntimeError("provider reset"), step_tokens=(2_000_000, 0),
+    )
+    monkeypatch.setattr(
+        lb_service,
+        "get_strategy",
+        lambda entry: dies if entry["id"] == "deepseek_v4_pro" else _no_billable_work(),
+    )
+
+    result = live.refresh_live_leaderboard(
+        deploy_models=True, as_of=datetime(2026, 8, 27, 17, 39, tzinfo=_ET)
+    )
+    # DeepSeek billed $0.87 and died; that spend leaves the twin nothing.
+    assert [f["entry_id"] for f in result["model_failures"]] == ["deepseek_v4_pro"]
+    assert result["budget_halted"] == ["deepseek_twin"]
+    assert result["models_deployed"] is False
+    assert result["budget"]["spent_usd"] == pytest.approx(0.87)
+    out = capsys.readouterr().out
+    assert "ERROR: live.model_deploy_failed entry=deepseek_v4_pro" in out
+    assert (
+        "ERROR: live.budget_exhausted month=2026-08 cap_usd=0.80 spent_usd=0.87 "
+        "skipped=deepseek_twin"
+    ) in out
+
+
+def test_a_halt_after_a_success_reports_each_entry_once(monkeypatch):
+    """Since #668 the success path follows the try statement, so it must run
+    only in the statement's else clause: a halt that fell through to it would
+    append the entry before it to model_results a second time."""
+    monkeypatch.setenv(live_budget.BUDGET_ENV, "0.4")
+    monkeypatch.setattr(lb_service, "ensure_leaderboard_runs", lambda **kwargs: {})
+    monkeypatch.setattr(lb_service, "fetch_hourly_bars", lambda *args: _one_bar_frame())
+    freeze_cfg = _live_aug27()
+    deepseek = _deepseek(freeze_cfg)
+    twin = {**deepseek, "id": "deepseek_twin", "name": "DeepSeek twin"}
+    monkeypatch.setattr(live, "live_llm_entries", lambda config=None: [deepseek, twin])
+    # One session left to trade, so DeepSeek's own projection never stops it.
+    _insert_live_run(
+        "lb_deepseek_v4_pro_20260801_20260826", "deepseek_v4_pro", "2026-08-26",
+        [_pt("2026-08-26T19:00:00+00:00", SEED)],
+        metadata={live.LIVE_SNAPSHOT_KEY: {"cash": SEED, "positions": {}, "day": "08-26"}},
+    )
+    monkeypatch.setattr(
+        lb_service,
+        "get_strategy",
+        lambda entry: _ScriptedAgent(step_tokens=(1_000_000, 0))
+        if entry["id"] == "deepseek_v4_pro" else _no_billable_work(),
+    )
+
+    result = live.refresh_live_leaderboard(
+        deploy_models=True, as_of=datetime(2026, 8, 27, 17, 39, tzinfo=_ET)
+    )
+    # DeepSeek's one session ($0.435) spends the $0.40 cap; the twin's
+    # pre-check halts it before it is built.
+    assert [row["entry_id"] for row in result["model_results"]] == ["deepseek_v4_pro"]
+    assert result["budget_halted"] == ["deepseek_twin"]
+    assert result["model_failures"] == []
+
+
+def test_a_halt_between_two_shared_failures_does_not_reset_the_stop(monkeypatch, capsys):
+    """A halt is kept out of RosterFailures, even one that closed sessions
+    first: it stops before the segment's last checkpoint and its end-of-run
+    checks, so it has not shown that the shared path works. Two failures with
+    the same error either side of it still stop the roster. A wrong stop leaves
+    the rest unbilled until the next night; a wrong reset bills another entry
+    against the same fault."""
+    monkeypatch.setattr(lb_service, "ensure_leaderboard_runs", lambda **kwargs: {})
+    entries = [{"id": f"entry_{n}", "name": f"Entry {n}"} for n in range(4)]
+    monkeypatch.setattr(live, "live_llm_entries", lambda config=None: entries)
+    called = []
+
+    def deploy(entry, freeze_cfg, **kwargs):
+        called.append(entry["id"])
+        if entry["id"] == "entry_1":
+            raise live_budget.LiveBudgetExceeded("stopped between sessions")
+        raise OSError("disk full")
+
+    monkeypatch.setattr(live, "deploy_live_model_increment", deploy)
+
+    result = live.refresh_live_leaderboard(
+        deploy_models=True, as_of=datetime(2026, 8, 27, 17, 39, tzinfo=_ET)
+    )
+    assert result["budget_halted"] == ["entry_1"]
+    assert called == ["entry_0", "entry_1", "entry_2"]
+    assert [f["entry_id"] for f in result["model_failures"]] == [
+        "entry_0",
+        "entry_2",
+        "entry_3",
+    ]
+    assert (
+        "ERROR: live.model_not_attempted entry=entry_3 after=entry_0,entry_2 "
+        "error=OSError"
+    ) in capsys.readouterr().out
+
+
+def test_a_budget_read_that_fails_still_prunes_and_saves(monkeypatch, capsys):
+    """The budget read runs after every model has traded and been billed. If it
+    raised out of the refresh, the prune and the state save would be skipped,
+    which is what #668 stopped the roster loop from doing."""
+    monkeypatch.setattr(lb_service, "ensure_leaderboard_runs", lambda **kwargs: {})
+    monkeypatch.setattr(lb_service, "fetch_hourly_bars", lambda *args: _one_bar_frame())
+    monkeypatch.setattr(lb_service, "get_strategy", lambda entry: _ScriptedAgent())
+
+    def unreadable(*args, **kwargs):
+        raise OSError("pool timeout")
+
+    monkeypatch.setattr(live_budget, "budget_status", unreadable)
+
+    result = live.refresh_live_leaderboard(
+        deploy_models=True, as_of=datetime(2026, 8, 27, 17, 39, tzinfo=_ET)
+    )
+    assert result["budget"] is None
+    assert result["models_deployed"] is True
+    assert "pruned_runs" in result
+    assert live._live_refresh_state()["budget"] is None
+    assert "ERROR: live.budget_status_failed error=OSError" in capsys.readouterr().out
+
+
+def test_a_clean_night_reports_the_budget_and_no_halt(monkeypatch, capsys):
+    monkeypatch.setattr(lb_service, "ensure_leaderboard_runs", lambda **kwargs: {})
+    monkeypatch.setattr(lb_service, "fetch_hourly_bars", lambda *args: _one_bar_frame())
+    monkeypatch.setattr(lb_service, "get_strategy", lambda entry: _ScriptedAgent())
+    roster = [entry["id"] for entry in live.live_llm_entries(_live_aug27())]
+    result = live.refresh_live_leaderboard(
+        deploy_models=True, as_of=datetime(2026, 8, 27, 17, 39, tzinfo=_ET)
+    )
+    assert result["models_deployed"] is True
+    assert result["budget_halted"] == []
+    assert result["budget"]["halted"] is False
+    assert result["budget"]["cap_usd"] == 50.0
+    assert set(live_budget.month_ledger_rows(_AUG)) == set(roster)
+    assert "live.budget_exhausted" not in capsys.readouterr().out

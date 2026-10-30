@@ -30,6 +30,7 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 from zoneinfo import ZoneInfo
 
 from dashboard.backend.database import db
+from dashboard.backend.domain.leaderboard import live_budget
 from dashboard.backend.domain.leaderboard.baselines import INITIAL_CAPITAL, calc_metrics
 from dashboard.backend.domain.leaderboard.live_trade_stats import (
     TRADE_STATS_KEY,
@@ -969,7 +970,6 @@ def deploy_live_model_increment(
     entry_id = entry["id"]
     month_start = freeze_cfg["start_date"]
     freeze_end = freeze_cfg["end_date"]
-    initial_capital = float(freeze_cfg.get("initial_capital", INITIAL_CAPITAL))
 
     rows = _entry_month_runs(entry_id, month_start, freeze_end)
     resume_from, prior_curve, dropped = _resume_point(rows)
@@ -994,7 +994,97 @@ def deploy_live_model_increment(
             "llm_calls": latest.get("llm_calls"),
         }
 
+    # The other way to be current: the stored snapshot already covers
+    # freeze_end by the session calendar (only a freeze_end that is not itself
+    # a session gets past the check above). Returned here, before an attempt is
+    # opened, for the same reason: nothing would trade, so nothing is priced,
+    # written or halted. A config change on an entry this current is picked up
+    # by its next increment, exactly as for the cached return above.
+    if (
+        resume_from is not None
+        and not force_refresh
+        and live_increment_bounds(
+            str(resume_from.get("end_date") or ""),
+            month_start=month_start,
+            freeze_end=freeze_end,
+        )
+        is None
+    ):
+        return {
+            "entry_id": entry_id,
+            "run_id": resume_from.get("run_id"),
+            "cached": True,
+            "increment": False,
+            "model": entry.get("model"),
+            "window": {"start_date": month_start, "end_date": freeze_end},
+            "segment": None,
+        }
+
+    # Everything past here can bill, so the attempt is priced into the month's
+    # spend ledger whatever ends it: at every session close, and once more
+    # below on success, failure or a budget halt. The pre-check runs before
+    # the model is built or a bar is fetched.
+    attempt = live_budget.LiveAttempt(
+        entry,
+        month_start=month_start,
+        freeze_end=freeze_end,
+        checkpoint_rows=latest_live_month_runs(month_start, freeze_end),
+    )
+    try:
+        attempt.check_can_start()
+        row = _trade_live_segment(
+            entry,
+            freeze_cfg,
+            attempt,
+            resume_from=resume_from,
+            prior_curve=prior_curve,
+            latest=latest,
+            force_refresh=force_refresh,
+            allow_fallback=allow_fallback,
+            bars_memo=bars_memo,
+        )
+    except BaseException as exc:
+        try:
+            attempt.finish(exc)
+        except Exception as ledger_exc:
+            # The deploy's own error is the one worth raising; a ledger that
+            # could not be written is reported, not allowed to replace it.
+            print(
+                f"ERROR: live.spend_ledger_write_failed entry={entry_id} "
+                f"error={type(ledger_exc).__name__}",
+                flush=True,
+            )
+        raise
+    attempt.finish(None)
+    return row
+
+
+def _trade_live_segment(
+    entry: Dict[str, Any],
+    freeze_cfg: Dict[str, Any],
+    attempt: live_budget.LiveAttempt,
+    *,
+    resume_from: Optional[Dict[str, Any]],
+    prior_curve: List[Dict[str, Any]],
+    latest: Optional[Dict[str, Any]],
+    force_refresh: bool,
+    allow_fallback: bool,
+    bars_memo: Optional[Dict[Tuple[Any, ...], Any]],
+) -> Dict[str, Any]:
+    """The billable half of ``deploy_live_model_increment``.
+
+    Builds the model, fetches bars and trades the segment as one run that
+    checkpoints each session as it closes. ``attempt`` hears about every
+    session close before H6 is consulted, because a session H6 refuses to
+    store was billed all the same.
+    """
+    entry_id = entry["id"]
+    month_start = freeze_cfg["start_date"]
+    freeze_end = freeze_cfg["end_date"]
+    initial_capital = float(freeze_cfg.get("initial_capital", INITIAL_CAPITAL))
+
     strategy_impl = lb_service.get_strategy(entry)
+    attempt.strategy_impl = strategy_impl
     config_changed: List[str] = []
     if resume_from is not None and not force_refresh:
         config_changed = _config_changes(
@@ -1033,16 +1123,9 @@ def deploy_live_model_increment(
             month_start=month_start,
             freeze_end=freeze_end,
         )
-        if bounds is None:
-            return {
-                "entry_id": entry_id,
-                "run_id": resume_from.get("run_id"),
-                "cached": True,
-                "increment": False,
-                "model": entry.get("model"),
-                "window": {"start_date": month_start, "end_date": freeze_end},
-                "segment": None,
-            }
+        # Never None here: deploy_live_model_increment returns the cached row
+        # before it opens a priced attempt when the snapshot already covers
+        # freeze_end, and this branch sees the same resume point.
         segment_start, segment_end = bounds
         snapshot = _snapshot_from_run(resume_from)
     resumed = resume_from is not None
@@ -1088,6 +1171,9 @@ def deploy_live_model_increment(
     written: List[Dict[str, Any]] = []
 
     def on_session_close(day: date, segment_curve: List[Dict[str, Any]]) -> None:
+        # Priced first: a gap or an H6 refusal below can drop this session,
+        # but nothing un-bills it.
+        attempt.record_session()
         missing: List[date] = []
         while cursor["next"] < len(expected) and expected[cursor["next"]] < day:
             missing.append(expected[cursor["next"]])
@@ -1103,20 +1189,26 @@ def deploy_live_model_increment(
                 f"  live {entry_id}: {day.isoformat()} not checkpointed; the "
                 f"segment's model coverage is below the H6 threshold so far"
             )
-            return
-        written.append(
-            _write_live_checkpoint(
-                entry,
-                freeze_cfg,
-                strategy_impl,
-                day_iso=day.isoformat(),
-                curve=_stitch_equity_curves(prior_curve, segment_curve),
-                base=resume_from,
-                lineage=lineage,
-                provenance=provenance,
-                supersede_later=replace_later,
+        else:
+            written.append(
+                _write_live_checkpoint(
+                    entry,
+                    freeze_cfg,
+                    strategy_impl,
+                    day_iso=day.isoformat(),
+                    curve=_stitch_equity_curves(prior_curve, segment_curve),
+                    base=resume_from,
+                    lineage=lineage,
+                    provenance=provenance,
+                    supersede_later=replace_later,
+                )
             )
-        )
+        # Stop before a session this attempt's own average says would take the
+        # month past its cap. The session just traded is already stored, so a
+        # stop never throws away work that was paid for; after the segment's
+        # last session there is nothing left to stop.
+        if cursor["next"] < len(expected):
+            attempt.stop_if_next_session_would_cross()
 
     strategy_impl.run(
         bars,
@@ -1241,6 +1333,7 @@ def refresh_live_leaderboard(
         roster = RosterFailures("live")
         successes: List[Dict[str, Any]] = []
         bars_memo: Dict[Tuple[Any, ...], Any] = {}
+        halted: List[str] = []
         for entry in live_llm_entries(freeze_cfg):
             entry_id = entry["id"]
             if roster.stopped:
@@ -1254,6 +1347,17 @@ def refresh_live_leaderboard(
                     allow_fallback=allow_fallback,
                     bars_memo=bars_memo,
                 )
+            except live_budget.LiveBudgetExceeded:
+                # Not a failure: the month's model budget is spent, or the next
+                # session would overspend it. The entry keeps the checkpoints it
+                # stored and is tried again next night. Once the month has
+                # reached the cap, the pre-check halts it there before any bar
+                # fetch; until then it trades again and is stopped when its next
+                # session would cross the cap. Kept out of ``roster``: a halt
+                # stops before the segment's last checkpoint and its end-of-run
+                # checks, so it neither extends nor resets the shared-fault
+                # streak.
+                halted.append(entry_id)
             except Exception as exc:
                 # Any Exception, not the three types this once named: a
                 # database error or a bug after the model calls (the checkpoint
@@ -1268,12 +1372,39 @@ def refresh_live_leaderboard(
                 # ephemeral disk, and stops the roster when two entries in a row
                 # fail the same way.
                 roster.failed(entry_id, exc)
-                continue
-            roster.traded(row)
-            successes.append(row)
-        result["models_deployed"] = not roster.failures
+            else:
+                roster.traded(row)
+                successes.append(row)
+        try:
+            budget: Optional[Dict[str, Any]] = live_budget.budget_status(
+                freeze_cfg["start_date"],
+                checkpoint_rows=latest_live_month_runs(
+                    freeze_cfg["start_date"], freeze_cfg["end_date"]
+                ),
+            )
+        except Exception as exc:
+            # Two database reads after every model has traded and been billed.
+            # A failed read must not skip the prune and the state save below.
+            print(
+                f"ERROR: live.budget_status_failed error={type(exc).__name__}",
+                flush=True,
+            )
+            budget = None
+        if halted:
+            # One line for the whole roster: the state file is on an ephemeral
+            # disk, so the log is the record an operator actually reads.
+            spent = f"{budget['spent_usd']:.2f}" if budget else "unread"
+            print(
+                f"ERROR: live.budget_exhausted month={freeze_cfg['start_date'][:7]} "
+                f"cap_usd={live_budget.monthly_budget_usd():.2f} spent_usd={spent} "
+                f"skipped={','.join(halted)}",
+                flush=True,
+            )
+        result["models_deployed"] = not roster.failures and not halted
         result["model_results"] = successes
         result["model_failures"] = roster.failures
+        result["budget_halted"] = halted
+        result["budget"] = budget
 
     result["pruned_runs"] = prune_superseded_live_runs(
         freeze_cfg["start_date"], freeze_cfg["end_date"]
