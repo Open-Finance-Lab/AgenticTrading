@@ -360,3 +360,81 @@ def test_ledger_rows_are_invisible_to_every_other_reader_and_survive_clear():
     # The money was spent: clearing the board's rows must not forget it.
     live.clear_live_session_runs()
     assert db.get_run(run_id)["est_cost_usd"] == pytest.approx(0.435)
+
+
+# --- tokens a crash leaves behind ---------------------------------------------
+
+
+def _token_counting_manager(*, raise_in_decision_on=None, raise_in_execute_on=None):
+    """A PortfolioManager stand-in that bills 100 input / 50 output tokens per
+    model call and can die inside the call or just after it."""
+
+    class Manager:
+        def __init__(self, **kwargs):
+            self.equity_history = []
+            self.trades = []
+            self.llm_calls = self.llm_decisions = 0
+            self.input_tokens = self.output_tokens = 0
+
+        def restore_state(self, snapshot):
+            pass
+
+        def snapshot_state(self):
+            return {"cash": 1.0, "positions": {}}
+
+        def get_portfolio_state(self, *args):
+            return {}
+
+        def make_trading_decision_with_llm(self, state, client, **kwargs):
+            if self.llm_calls + 1 == raise_in_decision_on:
+                raise RuntimeError("provider down")
+            self.llm_calls += 1
+            self.llm_decisions += 1
+            self.input_tokens += 100
+            self.output_tokens += 50
+            return {"actions": []}
+
+        def execute_actions(self, *args):
+            if self.llm_calls == raise_in_execute_on:
+                raise RuntimeError("broker rejected")
+
+        def update_equity(self, market_data, price_cache, ts):
+            self.equity_history.append({"timestamp": ts, "equity": 100.0})
+
+        def get_equity_curve(self):
+            return self.equity_history
+
+    return Manager
+
+
+@pytest.mark.parametrize(
+    ("manager_kwargs", "tokens"),
+    [
+        # Dies inside the 4th call, before it is billed: three calls priced.
+        ({"raise_in_decision_on": 4}, (300, 150)),
+        # Dies after the 2nd call returned and was billed, before its fills.
+        ({"raise_in_execute_on": 2}, (200, 100)),
+    ],
+)
+def test_llm_agent_publishes_tokens_billed_before_a_crash(monkeypatch, manager_kwargs, tokens):
+    """The manager is local to the loop, so tokens it counted were lost with it
+    when a run died before its next session close. The Live spend ledger
+    prices a dead attempt from the strategy's own counters."""
+    import pandas as pd
+
+    from dashboard.backend.domain.leaderboard.strategies import llm_agent
+
+    monkeypatch.setattr(
+        llm_agent, "PortfolioManager", _token_counting_manager(**manager_kwargs)
+    )
+    stamps = [pd.Timestamp(f"2026-08-03T{h}:00:00Z") for h in range(13, 20)]
+    strategy = llm_agent.LLMAgentStrategy({"strategy": "llm_agent", "model_id": "m"})
+    with pytest.raises(RuntimeError):
+        strategy._run_decision_loop(
+            client=object(), timestamps=stamps, symbols=["AAPL"], data={},
+            price_cache={}, initial_capital=100.0, model_id="m",
+            on_session_close=lambda day, curve: None,
+        )
+    assert (strategy.input_tokens, strategy.output_tokens) == tokens
+    # The H6 counters still move only at a session close, which never came.
+    assert strategy.llm_calls == 0 and strategy.decision_steps == 0
