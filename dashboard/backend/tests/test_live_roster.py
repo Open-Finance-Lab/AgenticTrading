@@ -6,7 +6,7 @@ neither deployed (that bills a month-to-date replay) nor rendered (that shows a
 pending row for a model nobody is running).
 """
 
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -14,6 +14,9 @@ import pytest
 from dashboard.backend.database import db
 import dashboard.backend.domain.leaderboard.live as live
 import dashboard.backend.domain.leaderboard.service as lb_service
+from dashboard.backend.infrastructure.market_data.us_market_calendar import (
+    is_trading_day,
+)
 from dashboard.backend.tests.test_live_leaderboard import (  # noqa: F401
     SEED,
     _ScriptedAgent,
@@ -243,3 +246,112 @@ def test_a_malformed_override_warns_once_and_runs_the_shared_values(
     assert live.LIVE_OVERRIDES_KEY not in haiku
     out = capsys.readouterr().out
     assert out.count(f"WARNING: live.config_invalid entry={_HAIKU} key={key} ") == 1
+
+
+# --------------------------------------------------------------------------
+# the roster as configured
+# --------------------------------------------------------------------------
+
+_NEWCOMERS = ("qwen3_7_plus", "claude_haiku_4_5")
+
+
+def _join_month():
+    """The month Qwen and Haiku join, read from leaderboard.json."""
+    months = {
+        s.get("live_from")
+        for s in lb_service.load_leaderboard_config()["strategies"]
+        if s["id"] in _NEWCOMERS
+    }
+    assert len(months) == 1, f"the newcomers join together: {months}"
+    return date.fromisoformat(months.pop())
+
+
+def _trading_days_from(day, count):
+    days = []
+    while len(days) < count:
+        if is_trading_day(day):
+            days.append(day)
+        day += timedelta(days=1)
+    return days
+
+
+def _evening(day):
+    """After the close of ``day`` has settled, on any session length."""
+    return datetime(day.year, day.month, day.day, 17, 39, tzinfo=_ET)
+
+
+def test_the_roster_is_deepseek_qwen_haiku_in_that_order():
+    assert live.LIVE_MODEL_IDS == ("deepseek_v4_pro", "qwen3_7_plus", "claude_haiku_4_5")
+
+
+def test_before_the_join_month_only_deepseek_is_on_the_board():
+    month_before = (_join_month() - timedelta(days=1)).replace(day=1)
+    as_of = _evening(_trading_days_from(month_before, 1)[0])
+    assert _live_ids(as_of) == ["deepseek_v4_pro"]
+    payload = live.get_live_leaderboard(as_of=as_of)
+    models = {e["entry_id"] for e in payload["entries"] if e.get("is_model")}
+    assert models == {"deepseek_v4_pro"}
+    assert payload["live_status"]["roster"] == ["deepseek_v4_pro"]
+
+
+def test_from_the_join_month_the_whole_roster_is_on_the_board():
+    as_of = _evening(_trading_days_from(_join_month(), 1)[0])
+    assert _live_ids(as_of) == list(live.LIVE_MODEL_IDS)
+    payload = live.get_live_leaderboard(as_of=as_of)
+    assert payload["live_status"]["roster"] == list(live.LIVE_MODEL_IDS)
+    assert payload["live_status"]["models_pending"] == 3
+
+
+def test_newcomers_start_at_the_1st_and_deepseek_just_resumes(
+    monkeypatch, tmp_path, capsys
+):
+    """Adding entries is not a config change for the ones already trading:
+    DeepSeek appends one session, and only the newcomers trade from the 1st."""
+    join = _join_month()
+    first, second = _trading_days_from(join, 2)
+    freeze_cfg = live.live_freeze_config(_evening(second))
+    deepseek = next(
+        e for e in live.live_llm_entries(freeze_cfg) if e["id"] == "deepseek_v4_pro"
+    )
+    _insert_live_run(
+        f"lb_deepseek_v4_pro_{join:%Y%m%d}_{first:%Y%m%d}",
+        "deepseek_v4_pro",
+        first.isoformat(),
+        [_pt(f"{first.isoformat()}T19:00:00+00:00", SEED)],
+        start_date=join.isoformat(),
+        metadata={
+            "entry_id": "deepseek_v4_pro",
+            "model_id": deepseek["model_id"],
+            "integration": deepseek.get("integration"),
+            "temperature": deepseek.get("temperature"),
+            "reasoning_effort": deepseek.get("reasoning_effort"),
+            "strategy_prompt": None,
+            live.LIVE_SNAPSHOT_KEY: {
+                "cash": SEED, "positions": {}, "day": first.strftime("%m-%d"),
+            },
+        },
+    )
+    runs = {}
+    order = []
+
+    def build(entry):
+        order.append(entry["id"])
+        agent = _ScriptedAgent(runs=runs.setdefault(entry["id"], []))
+        agent.model_id = entry["model_id"]
+        return agent
+
+    monkeypatch.setattr(live, "_LIVE_REFRESH_STATE_PATH", tmp_path / "state.json")
+    monkeypatch.setattr(lb_service, "ensure_leaderboard_runs", lambda **kwargs: {})
+    monkeypatch.setattr(lb_service, "get_strategy", build)
+    monkeypatch.setattr(lb_service, "fetch_hourly_bars", lambda *args: _one_bar_frame())
+
+    result = live.refresh_live_leaderboard(deploy_models=True, as_of=_evening(second))
+
+    assert result["model_failures"] == []
+    assert order == ["deepseek_v4_pro", "qwen3_7_plus", "claude_haiku_4_5"]
+    assert runs["deepseek_v4_pro"] == [
+        (second.isoformat(), second.isoformat(), first.strftime("%m-%d"))
+    ]
+    for newcomer in _NEWCOMERS:
+        assert runs[newcomer] == [(join.isoformat(), second.isoformat(), None)]
+    assert "live.config_changed" not in capsys.readouterr().out

@@ -72,9 +72,14 @@ _FREEZE_SETTLE_MARGIN_MINUTES = 15
 
 LIVE_SESSION_ID = "leaderboard-live"
 LIVE_PHASE = 1
-# Season-0 local roster: only these LLM curves are deployed and shown on Live.
-# Contest/daily still use the full leaderboard.json list. GPT-5.5 is left out
-# because it was most of the nightly token spend.
+# Season-0 roster: only these LLM curves are deployed and shown on Live, in
+# this order, which is also the nightly deploy order. Contest/daily still use
+# the full leaderboard.json list. GPT-5.5, Gemini 3.1 Pro and Sonnet 4.6 are
+# left out on cost (spec 2026-10-14 §7 prices each). Nemotron 3 Nano is out
+# because CommonStack serves no NVIDIA model (GET /v1/models, 2026-10-14):
+# every nightly call 404'd, so it never printed. Whether it returns for
+# Season 1, and through which gateway, is the owner's call. Qwen3.7 Plus and
+# Claude Haiku 4.5 join at a month boundary (``live_from`` in leaderboard.json).
 #
 # A dropped model's rows are deliberately left in place, not pruned: GET only
 # renders roster entries, so they are inert, and if the model comes back
@@ -82,7 +87,8 @@ LIVE_PHASE = 1
 # missed. Deleting them would make a re-add replay the month from the 1st.
 LIVE_MODEL_IDS = (
     "deepseek_v4_pro",
-    "nemotron_3_nano_30b",
+    "qwen3_7_plus",
+    "claude_haiku_4_5",
 )
 # Optional per-entry "live_from": "YYYY-MM-01", the first board month an LLM
 # entry trades. An entry added to LIVE_MODEL_IDS without it replays the current

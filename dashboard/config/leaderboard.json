@@ -63,6 +63,7 @@
       "strategy": "llm_agent",
       "integration": "commonstack",
       "model_id": "claude-haiku-4-5-20251001",
+      "live_from": "2026-11-01",
       "live_overrides": {
         "model_id": "anthropic/claude-haiku-4-5",
         "temperature": 0
@@ -135,6 +136,7 @@
       "strategy": "llm_agent",
       "integration": "commonstack",
       "model_id": "qwen/qwen3.7-plus",
+      "live_from": "2026-11-01",
       "temperature": 0,
       "reasoning_effort": "none",
       "mode": "safe_trading",
