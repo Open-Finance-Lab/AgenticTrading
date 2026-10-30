@@ -74,8 +74,8 @@ def _one_order(entry):
 
 
 def test_intent_keeps_present_null_fields_and_omits_absent_ones():
-    """The gate reads each field with a default: a null confidence raises in
-    its format string, an absent one reads as 0.5. Dropping null is not exact."""
+    """The gate reads each field with a default, so the tape keeps a field's
+    presence exactly: a null stays null and an absent field stays absent."""
     intent = _one_order({"symbol": "AAPL", "action": "buy", "confidence": None, "reasoning": None})
     assert intent["orders"][0] == {"symbol": "AAPL", "action": "buy", "confidence": None, "reasoning": None}
     assert tape.orders_for_replay(intent) == [intent["orders"][0]]

@@ -377,6 +377,90 @@ def test_strict_pipeline_accepts_empty_orders_as_model_hold():
     assert pm.llm_decisions == 1
 
 
+def _paid_pipeline_decision(reply):
+    """One strict pipeline bar on a fail-closed (billed) client, which
+    re-raises any error that is not a transient provider failure."""
+    pm = CanonicalPortfolioManager(100000)
+    client = _FakeClient(_FakeResp(json.dumps(reply), _FakeUsage(3, 2)))
+    client.fail_closed = True
+    result = pm.make_trading_decision_with_llm(
+        _llm_state(),
+        client,
+        pipeline=[
+            {
+                "label": "Trading instruction",
+                "prompt": "Return the orders for this bar.",
+                "outputFormat": '{"orders": []}',
+            }
+        ],
+        strict_llm=True,
+    )
+    return pm, result
+
+
+def test_pipeline_order_with_zero_confidence_does_not_trade():
+    """A pipeline order the model gave confidence 0 stays under the 0.3 floor,
+    and the bar still counts as one the model drove."""
+    pm, result = _paid_pipeline_decision(
+        {"orders": [{"symbol": "AAPL", "side": "buy", "qty": 10, "confidence": 0}]}
+    )
+
+    assert result == {"actions": []}
+    assert pm.llm_calls == 1
+    assert pm.llm_decisions == 1
+
+
+@pytest.mark.parametrize(
+    "confidence",
+    [[], {}, float("nan"), float("inf"), 20, -0.1, True, False, "high",
+     pytest.param(10**400, id="int-past-float")],
+)
+def test_pipeline_order_with_unusable_confidence_is_skipped_not_aborted(confidence, capsys):
+    """``[]``/``{}``/``"high"`` raised out of the converter and aborted a paid
+    run after its calls were charged; NaN, Infinity and 20 cleared the 0.3
+    floor (``nan < 0.3`` is False) and bought. Each is now one skipped order
+    on a bar the model still drove."""
+    pm, result = _paid_pipeline_decision(
+        {"orders": [{"symbol": "AAPL", "side": "buy", "qty": 10, "confidence": confidence}]}
+    )
+
+    assert result == {"actions": []}
+    assert pm.llm_calls == 1
+    assert pm.llm_decisions == 1
+    assert "is not a number from 0 to 1" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    "confidence, shares",
+    [("0.9", [5]), (None, [5]), ("0.2", [])],
+)
+def test_pipeline_actions_reply_confidence_is_read_not_formatted_raw(confidence, shares):
+    """An ``actions`` reply reached the gate's ``{confidence:.0%}`` as
+    written: "0.9" raised ValueError and null TypeError, aborting a paid run.
+    A numeric string is now read as its number and null as the 0.5 default."""
+    pm, result = _paid_pipeline_decision(
+        {"actions": [{"symbol": "AAPL", "action": "buy", "position_size": 5,
+                      "confidence": confidence, "reasoning": "x"}]}
+    )
+
+    assert [a["shares"] for a in result["actions"]] == shares
+    assert pm.llm_decisions == 1
+
+
+@pytest.mark.parametrize("qty", ["10.5", float("nan"), float("inf")])
+def test_pipeline_order_with_unreadable_qty_is_skipped_not_auto_sized(qty, capsys):
+    """The converter turned "10.5" and NaN into 0, which the gate auto-sizes
+    from confidence, and raised OverflowError on Infinity (aborting a paid
+    run). The gate now sees the size the model wrote and skips it."""
+    pm, result = _paid_pipeline_decision(
+        {"orders": [{"symbol": "AAPL", "side": "buy", "qty": qty, "confidence": 0.9}]}
+    )
+
+    assert result == {"actions": []}
+    assert pm.llm_decisions == 1
+    assert "unparseable position_size" in capsys.readouterr().out
+
+
 @pytest.mark.parametrize(
     "action",
     [

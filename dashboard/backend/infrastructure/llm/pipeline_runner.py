@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import copy
 import json
+import math
 import os
 import re
 from typing import Any, Dict, List, Optional, Tuple
@@ -32,6 +33,12 @@ from dashboard.backend.infrastructure.llm.execution.errors import (
     is_transient_provider_failure,
 )
 from dashboard.backend.infrastructure.llm.execution.log_safe import log_safe_token
+from dashboard.backend.infrastructure.llm.validator import (
+    PIPELINE_ORDER_DEFAULT_CONFIDENCE,
+    PIPELINE_RISK_DEFAULT_CONFIDENCE,
+    model_number,
+    read_confidence,
+)
 
 # Owned by domain/agents/defaults.py and re-exported here, where the engine,
 # the route and the tests have always imported them from.
@@ -239,19 +246,27 @@ def pipeline_output_to_decision(parsed: Dict[str, Any]) -> Optional[Dict[str, An
                 qty = order.get(
                     "qty", order.get("quantity", order.get("position_size", 0))
                 )
-                try:
-                    position_size = int(qty)
-                except (TypeError, ValueError):
-                    position_size = 0
+                raw_confidence = order.get("confidence")
+                confidence = read_confidence(
+                    raw_confidence, PIPELINE_ORDER_DEFAULT_CONFIDENCE
+                )
                 normalized.append(
                     {
                         "action": side,
                         "symbol": order.get("symbol"),
-                        "confidence": float(order.get("confidence", 0.75) or 0.75),
+                        # An unusable confidence is handed on as written: the
+                        # gate's read_confidence skips the order and logs it.
+                        "confidence": (
+                            raw_confidence if confidence is None else confidence
+                        ),
                         "reasoning": order.get("reason")
                         or order.get("rationale")
                         or "",
-                        "position_size": position_size,
+                        # As written, too. The gate coerces the size, skips one
+                        # it cannot read and sizes a missing or zero one from
+                        # confidence; int() here turned "10.5" and NaN into 0,
+                        # a request to auto-size, and raised on Infinity.
+                        "position_size": qty,
                         "stop_loss_price": order.get("stop_loss_price"),
                         "take_profit_price": order.get("take_profit_price"),
                     }
@@ -280,12 +295,27 @@ def pipeline_output_to_decision(parsed: Dict[str, Any]) -> Optional[Dict[str, An
                         if action_type in ("buy", "sell", "hold")
                         else "hold"
                     )
-                size_pct = float(risk.get("size_pct", 1.0) or 1.0)
+                # A missing size sells the whole position. One the model gave
+                # must be a positive number: 0 asks to sell nothing, and a
+                # malformed size is not read as "all of it" (the same rule as
+                # read_confidence), so either one holds.
+                size_pct = model_number(risk.get("size_pct"), 1.0)
+                if side == "sell" and (
+                    size_pct is None
+                    or not (math.isfinite(size_pct) and size_pct > 0)
+                ):
+                    side = "hold"
+                raw_confidence = risk.get("confidence")
+                confidence = read_confidence(
+                    raw_confidence, PIPELINE_RISK_DEFAULT_CONFIDENCE
+                )
                 normalized.append(
                     {
                         "action": side,
                         "symbol": risk.get("symbol"),
-                        "confidence": 0.8,
+                        "confidence": (
+                            raw_confidence if confidence is None else confidence
+                        ),
                         "reasoning": risk.get("reason")
                         or risk.get("rationale")
                         or action_type,
