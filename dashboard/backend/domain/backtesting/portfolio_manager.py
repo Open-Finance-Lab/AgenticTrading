@@ -28,6 +28,7 @@ This module is domain-level orchestration: it must NOT import dashboard scripts,
 import json
 import math
 from datetime import date, datetime, timedelta
+from itertools import chain
 from types import MappingProxyType
 from typing import Any, Dict, List, Mapping, Optional
 
@@ -127,6 +128,74 @@ SNAPSHOT_FULL_UNIVERSE_MAX = 30
 # (``universe_note``); the single-prompt one lists every VALID SYMBOL instead.
 SNAPSHOT_SHORTLIST_SIZE = 12
 
+# How far back a decision's ``recent_trades`` block looks. The Live board
+# carries this memory across its nightly increments through ``snapshot_state``,
+# so it is also how much trade history a snapshot keeps.
+TRADE_MEMORY_WINDOW = timedelta(hours=24)
+
+# Runaway bound on the trades a snapshot carries (and a restore accepts). Six
+# decisions a session over a 30-name universe is at most 180 trades inside the
+# window, so the window, not this cap, normally decides what is kept.
+SNAPSHOT_TRADE_MEMORY_LIMIT = 200
+
+# Marks a snapshot that carries ``recent_trades``; ``trade_memory_since`` beside
+# it says from which bar the chain of snapshots has carried it (see
+# ``PortfolioManager._trade_memory_since``). The Live month the memory shipped
+# in joins nights that opened with no memory of the night before to nights
+# that opened with it, and these two keys are the record of where.
+TRADE_MEMORY_VERSION = 1
+
+
+def _memory_timestamp(value: Any) -> Optional[pd.Timestamp]:
+    """``value`` as a tz-aware Timestamp, or None when it is not a readable one.
+
+    A naive stamp is read as UTC, the zone the board's bars are stamped in, so
+    a restored trade can always be compared with a tz-aware decision clock
+    (comparing naive with aware raises, and the decision path would swallow
+    that into a rule-based fallback).
+    """
+    if not isinstance(value, (str, datetime)):
+        return None
+    try:
+        ts = pd.Timestamp(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if pd.isna(ts):
+        return None
+    if ts.tzinfo is None:
+        ts = ts.tz_localize("UTC")
+    return ts
+
+
+def _memory_trade(trade: Any) -> Optional[Dict[str, Any]]:
+    """The prompt's five fields of one trade, or None for a row it cannot use.
+
+    Snapshotting and restoring both pass through here, so a corrupt row is
+    dropped on either side instead of failing the session it was read in.
+    """
+    if not isinstance(trade, Mapping):
+        return None
+    symbol, side = trade.get("symbol"), trade.get("side")
+    if not (isinstance(symbol, str) and symbol and isinstance(side, str) and side):
+        return None
+    ts = _memory_timestamp(trade.get("timestamp"))
+    if ts is None:
+        return None
+    try:
+        shares = float(trade.get("shares"))
+        price = float(trade.get("price"))
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if not (math.isfinite(shares) and math.isfinite(price)):
+        return None
+    return {
+        "symbol": symbol,
+        "side": side,
+        "shares": shares,
+        "price": price,
+        "timestamp": ts,
+    }
+
 
 def _universe_note(*, ranked: int, held: int, universe_size: int) -> str:
     """Describe a partial snapshot by what it actually holds this bar.
@@ -183,6 +252,17 @@ class PortfolioManager:
         self.positions = {}  # {symbol: num_shares}
         self.entry_prices = {}  # {symbol: entry_price}
         self.trades = []
+        # Trades from earlier sessions, restored from a snapshot only so the
+        # prompt's 24h ``recent_trades`` block can see them. Never merged into
+        # ``trades``: LLMAgentStrategy copies ``trades`` into its trade count and
+        # the Live board folds that copy into the month's trade stats on every
+        # checkpoint (live.py ``_write_live_checkpoint``), so a restored trade
+        # there would be counted again on every later night.
+        self.restored_trades: List[Dict[str, Any]] = []
+        # The bar this chain of snapshots began carrying trade memory from,
+        # restored from a snapshot that records it. None means the chain
+        # begins with this manager (``_trade_memory_since``).
+        self.trade_memory_since: Optional[pd.Timestamp] = None
         self.order_events = []
         # {(symbol, side, reason, trading_date): record} — the same
         # bounded-by-construction shape as t1_deferrals below, pointing at the
@@ -237,7 +317,12 @@ class PortfolioManager:
         self._allowed_set = set(self.allowed_symbols)
 
     def snapshot_state(self) -> Dict[str, Any]:
-        """JSON-safe book for resuming a later session (Live daily increment)."""
+        """JSON-safe book for resuming a later session (Live daily increment).
+
+        Carries cash, positions, T+1 lots and ``recent_trades``: the trade
+        memory the next session's prompts read (see ``_trade_memory_tail``),
+        marked by ``trade_memory`` and ``trade_memory_since``.
+        """
 
         def _lot(lot: Dict) -> Dict[str, Any]:
             buy = lot.get("buy_date")
@@ -268,10 +353,62 @@ class PortfolioManager:
                 for symbol, lots in (self.frozen_lots or {}).items()
             },
             "t_plus_one_enabled": bool(self.t_plus_one_enabled),
+            "recent_trades": self._trade_memory_tail(),
+            "trade_memory": TRADE_MEMORY_VERSION,
+            "trade_memory_since": self._trade_memory_since(),
         }
 
+    def _trade_memory_tail(self) -> List[Dict[str, Any]]:
+        """Restored and own trades a later prompt can still be shown, JSON-safe.
+
+        Every later decision is at or after the newest trade, so a trade a full
+        ``TRADE_MEMORY_WINDOW`` older than that one can never pass a later
+        decision's cutoff: the tail anchored on the newest trade is a superset
+        of what any later ``recent_trades`` block reads. Oldest first, at most
+        ``SNAPSHOT_TRADE_MEMORY_LIMIT`` (the newest), timestamps as ISO text.
+        """
+        rows = [
+            row
+            for row in map(_memory_trade, chain(self.restored_trades, self.trades))
+            if row is not None
+        ]
+        if not rows:
+            return []
+        rows.sort(key=lambda row: row["timestamp"])
+        cutoff = rows[-1]["timestamp"] - TRADE_MEMORY_WINDOW
+        tail = [row for row in rows if row["timestamp"] > cutoff]
+        return [
+            {**row, "timestamp": row["timestamp"].isoformat()}
+            for row in tail[-SNAPSHOT_TRADE_MEMORY_LIMIT:]
+        ]
+
+    def _trade_memory_since(self) -> Optional[str]:
+        """The bar from which this chain of snapshots has carried trade memory,
+        as ISO text, or None before this manager has decided anything.
+
+        Restored from a snapshot that records it; otherwise this manager's
+        first bar, because a manager that restored no memory is where the
+        memory starts. A session dated after the stamp opened with the previous
+        session's trades in its prompt; the session it falls in did not, unless
+        it was the month's first and had nothing to remember. The Live board
+        deletes every superseded checkpoint, so its newest row is the only one
+        left to say whether its month joined the two, and a bare version flag
+        could not say where.
+        """
+        since = self.trade_memory_since
+        if since is None and self.equity_history:
+            since = _memory_timestamp(self.equity_history[0].get("timestamp"))
+        return since.isoformat() if since is not None else None
+
     def restore_state(self, snapshot: Optional[Dict[str, Any]]) -> None:
-        """Load cash/positions/T+1 lots from ``snapshot_state`` (no-op if empty)."""
+        """Load cash/positions/T+1 lots and the 24h trade memory from
+        ``snapshot_state`` (no-op if empty).
+
+        The memory goes to ``restored_trades``, never ``trades``. A snapshot
+        written before it existed restores none; a corrupt memory row is
+        skipped rather than allowed to fail the session. ``trade_memory_since``
+        is kept only from a snapshot marked ``trade_memory``.
+        """
         if not snapshot:
             return
         self.cash = float(snapshot.get("cash", self.cash))
@@ -314,6 +451,21 @@ class PortfolioManager:
             if restored:
                 lots_out[str(symbol)] = restored
         self.frozen_lots = lots_out
+        memory = snapshot.get("recent_trades")
+        restored_trades = [
+            row
+            for row in map(_memory_trade, memory if isinstance(memory, list) else [])
+            if row is not None
+        ]
+        self.restored_trades = restored_trades[-SNAPSHOT_TRADE_MEMORY_LIMIT:]
+        # Unmarked (written before the memory existed) or unreadable: the mark
+        # restarts at this manager's first bar, which can only record the
+        # switch later than it happened, never earlier.
+        self.trade_memory_since = (
+            _memory_timestamp(snapshot.get("trade_memory_since"))
+            if snapshot.get("trade_memory") == TRADE_MEMORY_VERSION
+            else None
+        )
 
     @property
     def sellable_positions(self) -> Optional[Mapping]:
@@ -536,8 +688,10 @@ class PortfolioManager:
             # Extract recent trade history (last 24 hours) for LLM memory
             # This prevents LLM from re-entering stocks too soon
             recent_trades = []
-            cutoff_time = timestamp - timedelta(hours=24)
-            for trade in self.trades:
+            cutoff_time = timestamp - TRADE_MEMORY_WINDOW
+            # Restored memory first: it is older than anything this manager
+            # has traded itself, so the block stays in time order.
+            for trade in chain(self.restored_trades, self.trades):
                 if trade["timestamp"] > cutoff_time:
                     recent_trades.append({
                         "symbol": trade["symbol"],
