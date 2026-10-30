@@ -1932,7 +1932,7 @@ gh pr create --base main --head feat/live-board-copy \
 - #586: catching-up rows get a "Catching up" badge and a "Status: Catching up · through <date>" detail row. The banner now reads the rows instead of `live_status.models_cached`, which counts ranked rows only, and a sorted table keeps catching-up rows below every current row. Phase 3's healthy-board test fixture now carries a printed model row to match.
 - Not in this PR: the landing `Race.tsx`/bundle and `docs/source` still say "Live Trading Leaderboard" (owner-coordinated follow-up). Cache-busters: `js/leaderboard.js` and `js/live-leaderboard.js` are bumped by 1. Merging auto-deploys prod.
 
-Do not merge between 22:15 and 23:30 UTC on a weekday. The merge auto-deploys prod, and the Render restart kills the 22:30 UTC live refresh thread mid-run, so that night's session is billed again on the next night.
+Do not merge on a weekday between 22:15 and ~02:30 UTC. The merge auto-deploys prod, and the Render restart kills the nightly live refresh thread mid-run (its cron says 22:30 UTC, but GitHub has started it as late as 01:52), so that night's session is billed again on the next night.
 
 Closes #586
 EOF

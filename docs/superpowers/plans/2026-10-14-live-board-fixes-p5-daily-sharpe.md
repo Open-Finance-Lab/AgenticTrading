@@ -2202,7 +2202,7 @@ gh pr create --draft --base main --head feat/board-daily-sharpe \
   --body "$(cat <<'EOF'
 DO NOT MERGE until the owner has approved the landing copy (`docs/superpowers/plans/2026-10-14-live-board-fixes-p7-records.md`, Task 7.3 Step 0) and the copy PR (`feat(live): Live Leaderboard copy and catching-up badge`) and the landing PR (`feat(landing): Live Leaderboard copy and Sharpe interval`) can merge the same week. From this deploy until the landing PR merges, `/` shows the new daily Sharpe under its old "annualized from hourly results" tooltip, with no interval.
 
-Do not merge between 22:15 and 23:30 UTC on a weekday. The merge auto-deploys prod, and the Render restart kills the 22:30 UTC live refresh thread mid-run, so that night's session is billed again on the next night.
+Do not merge on a weekday between 22:15 and ~02:30 UTC. The merge auto-deploys prod, and the Render restart kills the nightly live refresh thread mid-run (its cron says 22:30 UTC, but GitHub has started it as late as 01:52), so that night's session is billed again on the next night.
 
 - Live and Competition boards now publish P19 daily Sharpe (one return per US/Eastern trading day, ddof 1, cash rate 0%/yr, ×√252) with its 95% interval (iid standard error), computed at read time from the stored curve. The browser only displays it (D20); guards keep `Math.sqrt`/`stdev` out of the board JS.
 - **The published Sharpe numbers change meaning:** hourly-annualised → daily. Below 5 trading days the value is null and the UI says "Needs 5 trading days (have N)"; undefined is null, never 0 (`run.get("sharpe_ratio") or 0` is gone).

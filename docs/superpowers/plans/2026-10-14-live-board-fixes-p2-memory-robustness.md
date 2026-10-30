@@ -12,6 +12,21 @@
 
 **Merge order:** P1 → P2 → P3 → P4 → P5 → P6 → P7 PR A → P7 PR B (owner-gated). Deadlines: P3 before 2026-11-01; P4 by 2026-10-31 (else bump both live_from values); P1 merged and deployed by 2026-11-20. One executor per contiguous range; phases are not safe to run in parallel (several append to the same test files and bump the same cache-busters).
 
+> **Status (2026-10-30): Tasks 2.1–2.2 are merged; execute from Task 2.3.**
+>
+> - Tasks 2.1–2.2 shipped as #668 (`5fb1fcae`), from `fix/live-roster-isolation` on the contributor's fork rather than this plan's branch.
+> - Review fixes in #668 that this plan does not describe:
+>   - `domain/leaderboard/roster_failures.py` (`RosterFailures`) now holds the roster loop's failure bookkeeping, shared with the daily refresh loop.
+>   - It records `Type: message` on one line.
+>   - It prints a traceback for any type the old catch let escape.
+>   - It stops the roster after two entries in a row fail with the same error: the rest are logged `ERROR: live.model_not_attempted`.
+>   - Two more tests in `test_live_leaderboard.py`.
+> - Counts below predate that. On main@011d6411, `test_live_leaderboard.py` has `77 passed` (not 75), and Task 2.3's six-file neighbour run has `219 passed` (not 212). Tasks 2.3–2.4 add no test to those files.
+> - Task 2.5's PR covers trade memory only:
+>   - Title it `fix(live): nightly trade memory`.
+>   - Drop the roster-loop and characterization-test bullets from its body.
+>   - #585 ("nightly segments forget the previous session's trades") is this PR's issue, so its body may say `Closes #585`. #668 deliberately left it open.
+
 ## Phase 2: Roster-loop robustness and nightly trade memory
 
 **Why.** Spec §6 lists two legacy-engine fixes this phase owns: "Trade memory across nights" and "A failed model replays from the 1st every night". Both were checked against the code on 2026-10-14 (Decisions 3 and 4 in the index plan):
@@ -1472,7 +1487,7 @@ gh pr create --base main --head fix/live-memory-robustness \
 - Trade memory: `snapshot_state` now writes `recent_trades`, which holds the last 24h of trades (prompt fields only, at most 200, strict JSON). `restore_state` loads them into a new read-only `PortfolioManager.restored_trades`, which the prompt reads before the manager's own trades. Restored trades never enter `trades`, so `num_trades` and the month's trade stats are not double counted. This is tested end to end through `agent_runs`. No change to fees, slippage, prompt wording, `llm_agent.py` or `live_trade_stats.py`.
 - The month this merges in mixes sessions with and without trade memory; the first checkpoint carrying trade_memory=1 marks the switch. Each checkpoint deletes the month's earlier rows, so the snapshot also carries `trade_memory_since` through every restore: the first bar of the night that started the memory. A session dated after it opened with the previous night's trades.
 - Prod behaviour change: the first night after deploy restores a pre-change snapshot and has no memory. From the second night on, each night's first prompts see the previous session's trades. Stored rows are not rewritten and nothing replays. A full replay and a nightly increment now give the model the same memory.
-- Do not merge between 22:15 and 23:30 UTC on a weekday. The merge auto-deploys prod, and the Render restart kills the 22:30 UTC live refresh thread mid-run, so that night's session is billed again on the next night.
+- Do not merge on a weekday between 22:15 and ~02:30 UTC. The merge auto-deploys prod, and the Render restart kills the nightly live refresh thread mid-run (its cron says 22:30 UTC, but GitHub has started it as late as 01:52), so that night's session is billed again on the next night.
 
 Test plan: `pytest dashboard/backend/tests -q -p no:cacheprovider`
 EOF

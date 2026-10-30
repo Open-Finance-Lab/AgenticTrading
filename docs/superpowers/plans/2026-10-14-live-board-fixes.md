@@ -60,7 +60,7 @@ Every task in every per-PR file inherits these.
 - Never touch `styles.css` or `app.js` (exact `?v=159` pins in 3–4 test files). Reuse existing CSS classes.
 
 **Merging and records**
-- **Merging to `main` auto-deploys prod.** Do not merge between 22:15 and 23:30 UTC on a weekday. The deploy's restart kills the 22:30 UTC live refresh thread mid-run, and that night's session is then billed again on the next night.
+- **Merging to `main` auto-deploys prod.** Do not merge on a weekday between 22:15 and ~02:30 UTC. The deploy's restart kills the nightly live refresh thread mid-run, and that night's session is then billed again on the next night. The cron says 22:30 UTC, but GitHub starts scheduled runs late: the runs for 2026-10-23 and 2026-10-26 to 10-28 started between 00:50 and 01:52 UTC the next morning, hence the window's end.
 - **The owner approves every outward-facing action:** filing issues, landing and RST copy (P7 PR B), and the post-merge billable check for Haiku (P4).
 - A merged PR is write-only. Follow-ups go in issues, not comments.
 

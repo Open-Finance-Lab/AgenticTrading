@@ -239,6 +239,7 @@ def test_the_daily_workflow_no_longer_claims_the_live_advance():
 _BACKEND = "dashboard/backend"
 _LIVE = f"{_BACKEND}/domain/leaderboard/live.py"
 _SERVICE = f"{_BACKEND}/domain/leaderboard/service.py"
+_ROSTER = f"{_BACKEND}/domain/leaderboard/roster_failures.py"
 _BUDGET = f"{_BACKEND}/domain/leaderboard/live_budget.py"
 _TRADE_STATS = f"{_BACKEND}/domain/leaderboard/live_trade_stats.py"
 _BASELINES = f"{_BACKEND}/domain/leaderboard/baselines.py"
@@ -251,7 +252,9 @@ _LIVE_YML = ".github/workflows/live-leaderboard.yml"
 
 # (name the section cites, files of which at least one must contain it).
 # The comment after a row names the phase of the 2026-10-14 live-board plan
-# that introduces it; every other row was already on main@17c552c5.
+# that introduces it (`# #668`: P2's merged half, which moved the roster's
+# log lines into roster_failures.py); every other row was already on
+# main@17c552c5.
 _NAMED = (
     ("LIVE_SESSION_ID", (_LIVE,)),
     ('"leaderboard-live"', (_LIVE,)),
@@ -273,7 +276,8 @@ _NAMED = (
     ("live.config_changed", (_LIVE,)),
     ("_RESUME_CONFIG_KEYS", (_LIVE,)),
     ("live.session_gap", (_LIVE,)),
-    ("live.model_deploy_failed", (_LIVE,)),
+    ("model_deploy_failed", (_ROSTER,)),  # #668
+    ("model_not_attempted", (_ROSTER,)),  # #668
     ("nyse_early_closes", (_CALENDAR,)),  # Phase 1
     ("LIVE_MODEL_IDS", (_LIVE,)),
     ("live_from", (_LIVE, _SERVICE)),  # Phase 4
@@ -412,14 +416,14 @@ def test_live_py_writes_no_decision_tape_and_the_section_says_so():
 pytest dashboard/backend/tests/test_live_board_records.py -q -p no:cacheprovider
 ```
 
-Expected: `63 failed, 11 passed` (74 cases). Measured on main@17c552c5, and on main@17c552c5 with Phases 1–6 applied (Phase 3's `CLAUDE.md` bullet included). The count does not depend on Phases 1–6, because every name and path case fails first on the section text. The failures are:
+Expected: `64 failed, 11 passed` (75 cases). Measured as `63 failed, 11 passed` of 74 on main@17c552c5, and on main@17c552c5 with Phases 1–6 applied (Phase 3's `CLAUDE.md` bullet included), before #668 added the `model_not_attempted` row, which fails the same way. The count does not depend on Phases 1–6, because every name and path case fails first on the section text. The failures are:
 - the six `test_retired_live_board_claims_are_gone[...]` cases, each `AssertionError: CLAUDE.md still says '<phrase>'`;
 - `test_the_refresh_secret_bullet_names_both_workflows`: `the LEADERBOARD_DAILY_REFRESH_SECRET bullet must name .github/workflows/live-leaderboard.yml`;
 - `test_the_auto_deploy_bullet_points_at_the_live_gate`: an `AssertionError` on `'LIVE_LEADERBOARD_DEPLOY_MODELS' in bullet`;
 - `test_the_live_deploy_variable_has_its_own_bullet`: `expected exactly one CLAUDE.md bullet for LIVE_LEADERBOARD_DEPLOY_MODELS, found 0`;
 - `test_the_section_points_at_the_budget_bullet_instead_of_restating_it`: `assert 'LEADERBOARD_MONTHLY_BUDGET_USD' in '\n### Two leaderboards, and what ...'`. If it fails instead with `expected exactly one CLAUDE.md bullet for LEADERBOARD_MONTHLY_BUDGET_USD, found 0`, Phase 3 has not merged and Step 0 should have stopped you: stop;
 - `test_the_daily_workflow_no_longer_claims_the_live_advance`: `assert 'season engi...is same call' not in 'name: Daily...'` (pytest's truncation of the phrase and the workflow text);
-- 42 `test_every_name_the_live_section_cites_exists[...]` and 9 `test_every_path_the_live_section_cites_exists[...]` cases, each `_NAMED lists '<name>' but the Two leaderboards section no longer cites it` (or `_PATHS lists ...`);
+- 43 `test_every_name_the_live_section_cites_exists[...]` and 9 `test_every_path_the_live_section_cites_exists[...]` cases, each `_NAMED lists '<name>' but the Two leaderboards section no longer cites it` (or `_PATHS lists ...`);
 - `test_live_py_writes_no_decision_tape_and_the_section_says_so`: `AssertionError: the Two leaderboards section must say that live.py writes no decision tape`. Its import scan already passes: `live.py` imports neither `domain/traces` nor the decision tape, on main@17c552c5 or after Phases 1–6.
 
 The 11 that already pass are the names the old section shares with the new one: `LIVE_LEADERBOARD_DEPLOY_MODELS`, `build_season_payload`, `_preview_season_dates`, `_season_trading_days`, `isLivePreview`, `seasonHasAdvanced`, `displayedSeasonNumber`, and the paths `domain/leaderboard/live.py`, `tests/test_leaderboard_season.py`, `tests/test_frontend_live_trading_board.py`, `docs/superpowers/specs/2026-10-14-atl-direction.md`.
@@ -565,7 +569,7 @@ The dashboard serves two boards; the Daily Leaderboard tab was retired in #352. 
 - **Dispatch.** `live.py` registers `get_live_leaderboard` through `lb_service.register_period_board("live", …)`, and the router calls `get_live_leaderboard()` directly for `?period=live`, so `?refresh=true` never recomputes it. With no builder registered, `service.get_leaderboard(period="live")` raises `RuntimeError("Live leaderboard module is not loaded")` rather than building the old contest-window preview, which answered 200 with the wrong board. Do not add a fallback.
 - **GET is read-only.** `get_live_leaderboard` serves the newest stored freeze row per entry (`latest_live_month_runs`) and never fetches bars or calls a model; computing on a public GET would miss the run cache on the first request of every day. Every row is written by `refresh_live_leaderboard`, reached through `POST /api/v1/leaderboard/live/refresh` (the `live-leaderboard.yml` cron), `enqueue_live_leaderboard_refresh` and `dashboard/scripts/refresh_live_leaderboard.py`.
 - **Storage.** Session `LIVE_SESSION_ID` (`"leaderboard-live"`), mode `leaderboard`, baselines and models alike: each freeze writes one `agent_runs` row per entry with `start_date` = month-open and `end_date` = the freeze, holding the whole month-to-date curve, and `prune_superseded_live_runs` keeps only the newest. Durable only where `AGENT_RUNS_DATABASE_URL` is set (it is in prod). `_LIVE_REFRESH_STATE_PATH` (`leaderboard_live_refresh.json` under `storage/data/`) sits on the ephemeral disk and only records which window the last refresh satisfied, so a redeploy costs one redundant baseline refresh and nothing else. Never put state that must survive there; that is why the spend ledger lives in `agent_runs`.
-- **Increments and checkpoints.** A model increment restores cash, positions and its trade memory (the 24 hours up to its newest trade, at most 200) from the newest complete checkpoint, and trades only the unseen sessions. The trades ride the snapshot as `recent_trades` and reach the prompt through `PortfolioManager.restored_trades`; they are never copied into `self.trades`, because `fold_trade_stats` folds that list nightly and would count them twice. The snapshot also carries `trade_memory` (`TRADE_MEMORY_VERSION`) and `trade_memory_since`, the first bar from which the chain of snapshots has carried trade memory. A restore keeps that stamp, so the session where memory began stays identifiable after its own checkpoint is pruned. Every session close whose running coverage clears H6 writes its own checkpoint (`_checkpoint_passes_h6`, `_write_live_checkpoint`, since #582); a prefix that fails H6 is never checkpointed. Only an entry with no checkpoint this month, a `force` replay, or a config-change replay (`WARNING: live.config_changed`, keyed on `_RESUME_CONFIG_KEYS`) starts again from the 1st. A session with no bars fails the entry loudly (`ERROR: live.session_gap`) instead of being skipped, and `refresh_live_leaderboard` logs each entry's failure (`ERROR: live.model_deploy_failed`), carries on with the rest, and still prunes and saves state.
+- **Increments and checkpoints.** A model increment restores cash, positions and its trade memory (the 24 hours up to its newest trade, at most 200) from the newest complete checkpoint, and trades only the unseen sessions. The trades ride the snapshot as `recent_trades` and reach the prompt through `PortfolioManager.restored_trades`; they are never copied into `self.trades`, because `fold_trade_stats` folds that list nightly and would count them twice. The snapshot also carries `trade_memory` (`TRADE_MEMORY_VERSION`) and `trade_memory_since`, the first bar from which the chain of snapshots has carried trade memory. A restore keeps that stamp, so the session where memory began stays identifiable after its own checkpoint is pruned. Every session close whose running coverage clears H6 writes its own checkpoint (`_checkpoint_passes_h6`, `_write_live_checkpoint`, since #582); a prefix that fails H6 is never checkpointed. Only an entry with no checkpoint this month, a `force` replay, or a config-change replay (`WARNING: live.config_changed`, keyed on `_RESUME_CONFIG_KEYS`) starts again from the 1st. A session with no bars fails the entry loudly (`ERROR: live.session_gap`) instead of being skipped, and `refresh_live_leaderboard` logs each entry's failure (`ERROR: live.model_deploy_failed`) and carries on with the rest. The exception is two entries in a row failing with the same error: that fault is shared, so the rest are logged `ERROR: live.model_not_attempted` instead of being billed for it. Either way the refresh still prunes and saves state.
 - **Cadence.** Six model decisions per full NYSE session, on hourly bars stamped 10:00–15:00 ET; three on a 13:00 early close. Early closes are a rule table, `nyse_early_closes` in `infrastructure/market_data/us_market_calendar.py`, pinned by tests to the exchange's published 2025–2028 dates; `sessions.is_in_session` applies it on its open-stamped branch only, and the close-stamped path is left to the engine rewrite. A session is computed nightly once its closing bar has settled, and the board says "Nightly after the close" rather than printing a request clock.
 - **Roster.** `LIVE_MODEL_IDS` (DeepSeek V4 Pro, Qwen3.7 Plus, Claude Haiku 4.5) plus every baseline. An entry with `live_from: "YYYY-MM-01"` joins from that month on; a malformed value warns once and is ignored. An entry's `live_overrides` block (`model_id`, `integration`, `temperature`, `reasoning_effort`) applies on the Live board only: that is how Haiku trades Live as `anthropic/claude-haiku-4-5` at temperature 0 while its shared keys stay as its Competition runs recorded them. Do not move those values into the shared keys: `_entry_config_drift` would mark Haiku's Competition repeats stale, and the board would publish its single July run in place of their median. Nemotron left the roster because CommonStack serves no NVIDIA model. A dropped model's rows stay where they are (GET renders roster entries only), so a re-add resumes rather than replays.
 - **Spend.** Model calls go through `COMMONSTACK_API_KEY` and bypass ATL Credits. They happen only with `deploy_models=True`, which the cron sends only when `LIVE_LEADERBOARD_DEPLOY_MODELS` is `"true"`, and they stop at `LEADERBOARD_MONTHLY_BUDGET_USD` (both bullets above). Every attempt (successful, failed, H6-refused or replayed) is priced into the attempt ledger: `agent_runs` rows in session `leaderboard-live-spend`, mode `leaderboard_spend`, which `clear_live_session_runs` does not delete. The board, `_find_cached_run`, `GET /api/backtest/runs` and `/api/v2` never return them. The public `GET /runs?mode=leaderboard_spend` does list them, through the `RunMetadata` allow-list: run id, the entry's name and id (`agent_name`, `llm_model`), dates, `created_at`, `initial_equity` 0, the cumulative `llm_calls` and derived decision-provenance labels, with no `est_cost_usd`, no token counts and no `metadata` (so no `last_attempt`). `GET /api/backtest/{run_id}` returns one only to a caller that sends `X-Session-Id: leaderboard-live-spend`, as an empty curve with null return metrics, and `/runs/{run_id}` rejects that header because it is not a UUID. None of these routes exposes dollars or tokens from the ledger.
@@ -610,9 +614,9 @@ Replace with (the comment line that follows, the one citing #335, stays as it is
 pytest dashboard/backend/tests/test_live_board_records.py -q -p no:cacheprovider
 ```
 
-Expected: `74 passed`. Measured on main@17c552c5 with Phases 1–6 applied (Phase 3's `CLAUDE.md` bullet included); the env bullets came out in the order 3c gives.
+Expected: `75 passed`. Measured as `74 passed` on main@17c552c5 with Phases 1–6 applied (Phase 3's `CLAUDE.md` bullet included), before #668 added a row; the env bullets came out in the order 3c gives.
 
-If this step fails, read the failures against the 18 Phase-owned cases: the 16 `_NAMED` rows commented `# Phase N`, the `_PATHS` row for `tests/domain/backtesting/test_stop_prices_not_enforced.py`, and `test_the_section_points_at_the_budget_bullet_instead_of_restating_it` (`found 0`). With these edits applied to bare main@17c552c5 the result is exactly those, `18 failed, 56 passed` (measured), the name rows failing with `none of [...] contains it` and the path row with `does not exist`. Any of them here means that phase is not on this branch and Step 0 was skipped: stop, wait for the phase, then `git rebase origin/main`. A failure with `none of [...] contains it` for a name whose phase did merge is the rename case from Step 0: fix the sentence and the `_NAMED` row together. Never delete a row to get green. If `test_retired_live_board_claims_are_gone[Live Trading Leaderboard]` still fails, a Phase 1–6 PR wrote the old name into `CLAUDE.md`: change that occurrence to "Live Leaderboard".
+If this step fails, read the failures against the 18 Phase-owned cases: the 16 `_NAMED` rows commented `# Phase N`, the `_PATHS` row for `tests/domain/backtesting/test_stop_prices_not_enforced.py`, and `test_the_section_points_at_the_budget_bullet_instead_of_restating_it` (`found 0`). With these edits applied to bare main@17c552c5 the result was exactly those, `18 failed, 56 passed` (measured before #668 added a row), the name rows failing with `none of [...] contains it` and the path row with `does not exist`. The two `# #668` rows pass on any main since 2026-10-30. Any of them here means that phase is not on this branch and Step 0 was skipped: stop, wait for the phase, then `git rebase origin/main`. A failure with `none of [...] contains it` for a name whose phase did merge is the rename case from Step 0: fix the sentence and the `_NAMED` row together. Never delete a row to get green. If `test_retired_live_board_claims_are_gone[Live Trading Leaderboard]` still fails, a Phase 1–6 PR wrote the old name into `CLAUDE.md`: change that occurrence to "Live Leaderboard".
 
 Neighbouring suites (other readers of `CLAUDE.md` and of both workflow files):
 
@@ -681,7 +685,7 @@ def test_dated_live_board_records_carry_the_superseded_banner(path):
 pytest dashboard/backend/tests/test_live_board_records.py -q -p no:cacheprovider -k banner
 ```
 
-Expected: `6 failed, 74 deselected`, each `AssertionError: <path> has no superseded banner`.
+Expected: `6 failed, 75 deselected`, each `AssertionError: <path> has no superseded banner`.
 
 - [ ] **Step 3: Implement**
 
@@ -720,7 +724,7 @@ Replace with:
 pytest dashboard/backend/tests/test_live_board_records.py -q -p no:cacheprovider
 ```
 
-Expected: `80 passed` (measured on main@17c552c5 with Phases 1–6 applied). The six banner cases pass whether or not Phases 1–6 have merged (on bare main@17c552c5: `18 failed, 62 passed`, the 18 being Task 7.1 Step 4's Phase-owned cases); any other failure is one of Task 7.1 Step 4's cases.
+Expected: `81 passed` (measured as `80 passed` on main@17c552c5 with Phases 1–6 applied, before #668 added a row). The six banner cases pass whether or not Phases 1–6 have merged (on bare main@17c552c5, before #668: `18 failed, 62 passed`, the 18 being Task 7.1 Step 4's Phase-owned cases); any other failure is one of Task 7.1 Step 4's cases.
 
 - [ ] **Step 5: Commit**
 
@@ -1850,7 +1854,7 @@ gh pr create --base main --head docs/live-board-records --title "docs: correct t
 - `test_live_board_records.py` pins the retired claims as gone, every name the section cites as present (so a rename turns it red), and the section's "no decision tape" sentence against an import scan of `live.py`.
 - Docs and one text-only test; no runtime change. Merging to main auto-deploys prod.
 
-Do not merge between 22:15 and 23:30 UTC on a weekday. The merge auto-deploys prod, and the Render restart kills the 22:30 UTC live refresh thread mid-run, so that night's session is billed again on the next night.
+Do not merge on a weekday between 22:15 and ~02:30 UTC. The merge auto-deploys prod, and the Render restart kills the nightly live refresh thread mid-run (its cron says 22:30 UTC, but GitHub has started it as late as 01:52), so that night's session is billed again on the next night.
 EOF
 ```
 
@@ -1880,7 +1884,7 @@ gh pr create --draft --base main --head docs/live-board-public-copy --title "fea
 - Owner browser checklist: (1) signed out, every **Start Free** opens the modal in signup mode and the nav **Sign in** opens it in login mode (viewport wider than 1024px); (2) signed in, `/` renders and both CTAs read **Test a trading idea** and **Join our Discord community** and navigate; (3) sign out from `/app` returns to `/` with **Start Free** CTAs; (4) the Sharpe column at 640, 1024 and 1440px wide: value and interval on one line, no row taller than its rank badge, long names truncate with an ellipsis; (5) the only console error is the `/_vercel/insights/script.js` 404.
 - Merging to main auto-deploys prod (Vercel for `/`, Render for the backend).
 
-Do not merge between 22:15 and 23:30 UTC on a weekday. The merge auto-deploys prod, and the Render restart kills the 22:30 UTC live refresh thread mid-run, so that night's session is billed again on the next night.
+Do not merge on a weekday between 22:15 and ~02:30 UTC. The merge auto-deploys prod, and the Render restart kills the nightly live refresh thread mid-run (its cron says 22:30 UTC, but GitHub has started it as late as 01:52), so that night's session is billed again on the next night.
 EOF
 ```
 
@@ -1891,7 +1895,7 @@ After the owner's check, the owner (not the executor) marks it ready for review.
 1. **Phase 5 publishes the Competition basis under a key other than `sharpe_basis`.** The landing would then drop "cash rate" and the minimum-days figure from every tooltip with nothing failing. Phase 5's interface list names the key `sharpe_basis` (written in `service.py` as `"sharpe_basis": daily_sharpe_basis(),`). Covered: `test_the_basis_key_the_landing_reads_is_the_one_the_server_writes` (Task 7.3) pins the server's spelling against the landing's. Step 0 item 2 checks the live payload, and item 3 greps `service.py` for `"sharpe_basis"`. Item 2's fallback finds a renamed key by grepping for `daily_sharpe_basis()` (the `daily_returns` literal lives in `metrics.py`, so grepping `service.py` for it finds nothing).
 2. **Render still serves the pre-Phase-5 payload when Vercel ships PR B.** Rows then carry a bare `sharpe_ratio` and no `sharpe_status`. Covered: the extended `test_standings_carry_the_ending_value_and_sharpe_the_table_renders` pins that such a row prints the bare number with no interval and no basis sentence, and Step 0 refuses to start before the fields are live.
 3. **The 128px Sharpe track at 640–1023px.** Names truncate sooner, and an unusually wide interval (for example `-25.1 to -0.3` beside `-12.40`) can clip at the card edge rather than wrap. Not testable here: there is no layout engine in CI or in this WSL, and the derivation in `BoardPreview.tsx` is per measured viewport. It is item (4) of the owner's browser checklist in the PR body. The test pins only the invariant that matters for the list height: one line (`whitespace-nowrap`), so the 28px row pitch survives.
-4. **PR A started before Phases 1–6 merged, or a phase merged under a different name.** Measured on bare main@17c552c5: every edit applies cleanly and the 18 Phase-owned cases stay red (`18 failed, 56 passed`), so starting early yields a section that describes code which is not there. Covered: Task 7.1 Step 0 now checks every Phase-owned name in the file the test reads it from, plus Phase 3's bullet and the Phase 4 roster tuple, and stops on any `MISSING`. Its rename clause, and Step 4's, say to fix the check, the sentence and the `_NAMED` row together.
+4. **PR A started before Phases 1–6 merged, or a phase merged under a different name.** Measured on bare main@17c552c5, before #668 added a row: every edit applies cleanly and the 18 Phase-owned cases stay red (`18 failed, 56 passed`), so starting early yields a section that describes code which is not there. Covered: Task 7.1 Step 0 now checks every Phase-owned name in the file the test reads it from, plus Phase 3's bullet and the Phase 4 roster tuple, and stops on any `MISSING`. Its rename clause, and Step 4's, say to fix the check, the sentence and the `_NAMED` row together.
 5. **A later rename in `live.py` (say `_write_live_checkpoint`) turns `test_live_board_records.py` red in an unrelated PR.** Intended: it is the fail-visible property the 2026-10-14 review asked for. The assertion message tells that PR's author what to edit. Not a gap.
 6. **Phase 5 rewrites the docstring Task 7.3 Step 1d edits.** P5 Task 5.4 replaces the "Sharpe's em dash is NOT reachable…" paragraph of `test_standings_carry_the_ending_value_and_sharpe_the_table_renders`. Step 1d anchors on Phase 5's wording, measured to match exactly once on main@17c552c5 with Phases 1–6 applied (it does not match bare main), and Step 0 greps for it. If Phase 5 changes that wording again before it merges, 1d's find block must follow it.
 7. **The section records Phase 4's `live_overrides`, not the text of Decision 6 in the index plan.** That Decision said to set Haiku's shared `model_id`/`temperature`. Phase 4 found that `_entry_config_drift` would then demote Haiku's Competition repeats and publish the single July run, so it moved those values into a Live-only `live_overrides` block. The Roster bullet says so and warns against moving them back, and the `_NAMED` rows `live_overrides` (Phase 4) and `_entry_config_drift` (on main) keep both names honest. If Phase 4 is executed as that Decision originally read, Step 0's `need live_overrides` prints `MISSING`. That is a real disagreement to settle with the owner, not a rename.
