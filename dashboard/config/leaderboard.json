@@ -63,6 +63,10 @@
       "strategy": "llm_agent",
       "integration": "commonstack",
       "model_id": "claude-haiku-4-5-20251001",
+      "live_overrides": {
+        "model_id": "anthropic/claude-haiku-4-5",
+        "temperature": 0
+      },
       "mode": "safe_trading",
       "symbols": [],
       "auto_compute": false

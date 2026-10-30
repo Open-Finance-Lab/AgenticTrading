@@ -11,12 +11,15 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
+from dashboard.backend.database import db
 import dashboard.backend.domain.leaderboard.live as live
 import dashboard.backend.domain.leaderboard.service as lb_service
 from dashboard.backend.tests.test_live_leaderboard import (  # noqa: F401
     SEED,
+    _ScriptedAgent,
     _insert_live_run,
     _isolated_live_session,
+    _one_bar_frame,
     _pt,
 )
 
@@ -158,3 +161,85 @@ def test_the_deploy_cli_says_why_it_refuses_a_not_yet_live_entry(monkeypatch, ca
     )
     assert script._deploy_live(args) is None
     assert "its live_from month has not opened" in capsys.readouterr().out
+
+
+# --------------------------------------------------------------------------
+# live_overrides: what the Live board sends, without touching the shared entry
+# --------------------------------------------------------------------------
+
+_HAIKU = "claude_haiku_4_5"
+_AUG26 = datetime(2026, 8, 26, 17, 39, tzinfo=_ET)
+
+
+def _live_entry(entry_id, cfg=None):
+    entries = live.live_llm_entries(
+        cfg or lb_service.load_leaderboard_config(), month_start=_EVERY_JOIN_OPEN
+    )
+    return next(e for e in entries if e["id"] == entry_id)
+
+
+def test_haiku_runs_live_on_its_served_id_at_temperature_zero(monkeypatch):
+    monkeypatch.setattr(live, "LIVE_MODEL_IDS", ("deepseek_v4_pro", _HAIKU))
+    haiku = _live_entry(_HAIKU)
+    assert haiku["model_id"] == "anthropic/claude-haiku-4-5"
+    assert haiku["temperature"] == 0
+    assert haiku["integration"] == "commonstack"
+    # Claude keeps the Messages client: no thinking control, provider default.
+    assert "reasoning_effort" not in haiku
+    assert live.LIVE_OVERRIDES_KEY not in haiku
+    strategy = lb_service.get_strategy(haiku)
+    assert strategy.model_id == "anthropic/claude-haiku-4-5"
+    assert strategy.temperature == 0
+    assert strategy.reasoning_effort is None
+
+
+def test_the_override_is_recorded_and_the_next_night_resumes(monkeypatch, capsys):
+    """The checkpoint records the overridden values, and the resume check
+    compares against the same values, so night two trades one session."""
+    _use_config(monkeypatch, _config_with(_HAIKU, live_from=_DROP))
+    monkeypatch.setattr(live, "LIVE_MODEL_IDS", ("deepseek_v4_pro", _HAIKU))
+    built, runs = [], []
+
+    def build(entry):
+        built.append(entry)
+        agent = _ScriptedAgent(runs=runs)
+        agent.model_id = entry["model_id"]
+        return agent
+
+    monkeypatch.setattr(lb_service, "get_strategy", build)
+    monkeypatch.setattr(lb_service, "fetch_hourly_bars", lambda *args: _one_bar_frame())
+
+    night_one = live.live_freeze_config(_AUG26)
+    row = live.deploy_live_model_increment(_live_entry(_HAIKU, night_one), night_one)
+    recorded = db.get_run(row["run_id"])["metadata"]
+    assert recorded["model_id"] == "anthropic/claude-haiku-4-5"
+    assert recorded["temperature"] == 0
+    assert built[-1]["model_id"] == "anthropic/claude-haiku-4-5"
+
+    runs.clear()
+    night_two = live.live_freeze_config(_AUG27)
+    live.deploy_live_model_increment(_live_entry(_HAIKU, night_two), night_two)
+    assert runs == [("2026-08-27", "2026-08-27", "08-26")]
+    assert "live.config_changed" not in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    ("block", "key"),
+    [
+        ("anthropic/claude-haiku-4-5", "live_overrides"),
+        ({"temprature": 0}, "live_overrides.temprature"),
+        ({"live_from": "2026-11-01"}, "live_overrides.live_from"),
+    ],
+)
+def test_a_malformed_override_warns_once_and_runs_the_shared_values(
+    monkeypatch, capsys, block, key
+):
+    cfg = _config_with(_HAIKU, live_overrides=block, live_from=_DROP)
+    monkeypatch.setattr(live, "LIVE_MODEL_IDS", ("deepseek_v4_pro", _HAIKU))
+    for _ in range(2):
+        haiku = _live_entry(_HAIKU, cfg)
+    assert haiku["model_id"] == "claude-haiku-4-5-20251001"
+    assert "temperature" not in haiku
+    assert live.LIVE_OVERRIDES_KEY not in haiku
+    out = capsys.readouterr().out
+    assert out.count(f"WARNING: live.config_invalid entry={_HAIKU} key={key} ") == 1

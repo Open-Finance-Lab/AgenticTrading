@@ -96,6 +96,16 @@ LIVE_FROM_KEY = "live_from"
 # (entry id, key, repr(value)) already reported -- see _warn_live_config.
 _warned_live_config: set = set()
 _LIVE_FROM_SHAPE = re.compile(r"\d{4}-\d{2}-01")
+# Keys an LLM entry may set for the Live board alone, under "live_overrides".
+# leaderboard.json is shared with the Competition board, which picks the stored
+# run it publishes by comparing each run's recorded model_id / integration /
+# temperature / reasoning_effort with the entry's (service._entry_config_drift).
+# Changing a shared key for the Live board would re-judge Competition runs made
+# under the old value: Haiku's three repeat runs would stop publishing and its
+# July single run would replace their median. An override changes what the
+# Live board sends and records, and nothing else.
+LIVE_OVERRIDES_KEY = "live_overrides"
+LIVE_OVERRIDE_FIELDS = ("model_id", "integration", "temperature", "reasoning_effort")
 LIVE_SNAPSHOT_KEY = "live_portfolio_snapshot"
 # Present (True) on a checkpoint row only while it is being written. The row
 # goes in first, then its curve, then the row again with the snapshot and
@@ -354,6 +364,32 @@ def _live_from_month(entry: Dict[str, Any]) -> Optional[date]:
     return None
 
 
+def _with_live_overrides(entry: Dict[str, Any]) -> Dict[str, Any]:
+    """``entry`` as the Live board runs it: ``live_overrides`` applied, the block dropped.
+
+    A block that is not an object, or a key outside ``LIVE_OVERRIDE_FIELDS``,
+    is reported once and skipped; the entry then runs on its shared values.
+    """
+    if LIVE_OVERRIDES_KEY not in entry:
+        return entry
+    overrides = entry[LIVE_OVERRIDES_KEY]
+    effective = {k: v for k, v in entry.items() if k != LIVE_OVERRIDES_KEY}
+    if not isinstance(overrides, dict):
+        _warn_live_config(entry.get("id"), LIVE_OVERRIDES_KEY, overrides, "an object")
+        return effective
+    for key, value in overrides.items():
+        if key in LIVE_OVERRIDE_FIELDS:
+            effective[key] = value
+        else:
+            _warn_live_config(
+                entry.get("id"),
+                f"{LIVE_OVERRIDES_KEY}.{key}",
+                value,
+                "|".join(LIVE_OVERRIDE_FIELDS),
+            )
+    return effective
+
+
 def _board_month(config: Dict[str, Any], month_start: Optional[str]) -> date:
     """The first day of the month a roster is asked for.
 
@@ -376,7 +412,9 @@ def live_board_strategies(
     """Baselines plus the LLM entries live in the board month, in config order.
 
     An LLM entry is live when its id is in ``LIVE_MODEL_IDS`` and its
-    ``live_from`` month, if it sets one, has opened. ``month_start`` names the
+    ``live_from`` month, if it sets one, has opened. It is returned with its
+    ``live_overrides`` applied, so every Live path (deploy, resume check, GET)
+    sees the values the Live board actually sends. ``month_start`` names the
     board month when ``config`` is not a freeze config (see ``_board_month``).
     """
     cfg = config or lb_service.load_leaderboard_config()
@@ -389,6 +427,7 @@ def live_board_strategies(
             live_from = _live_from_month(strategy)
             if live_from is not None and live_from > board_month:
                 continue
+            strategy = _with_live_overrides(strategy)
         out.append(strategy)
     return out
 
