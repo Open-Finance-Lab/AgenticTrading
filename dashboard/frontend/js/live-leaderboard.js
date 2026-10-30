@@ -118,6 +118,49 @@ function liveModelRosterNote(entries) {
   return `${roster} One continuous book for the month, not a daily reset.`.trim();
 }
 
+// A model's last nightly attempt, as the payload's `last_attempt` gives it:
+// {on, outcome, kind} and nothing else, so no dollar figure and no error message;
+// `kind` is a coarse class and unknown ones read as an internal error.
+const LIVE_ATTEMPT_KIND_COPY = {
+  budget: 'monthly model budget used up',
+  model_coverage: 'the model did not drive enough of its decisions',
+  market_data_gap: 'market data was missing for a session',
+  // Not "the model provider": on the live path a provider timeout becomes a
+  // rule-based step (reported as model_coverage); what arrives here is a
+  // store or other client timeout.
+  timeout: 'a request timed out',
+  network: 'a connection failed',
+  interrupted: 'the run was interrupted',
+  error: 'an internal error',
+};
+
+function liveLastAttemptCopy(entry) {
+  const attempt = entry && entry.last_attempt;
+  if (!attempt || !attempt.on) return '';
+  const day = liveAxisTick(attempt.on) || String(attempt.on);
+  if (attempt.outcome === 'ok') return `${day} · completed`;
+  const why = LIVE_ATTEMPT_KIND_COPY[attempt.kind] || LIVE_ATTEMPT_KIND_COPY.error;
+  if (attempt.outcome === 'budget_halted') return `${day} · paused: ${why}`;
+  if (attempt.outcome === 'failed') return `${day} · failed: ${why}`;
+  return '';
+}
+
+function liveLastAttemptBadge(entry) {
+  const outcome = entry && entry.last_attempt && entry.last_attempt.outcome;
+  if (outcome === 'budget_halted') return 'Paused';
+  if (outcome === 'failed') return 'Last run failed';
+  return '';
+}
+
+// Only a real `true`: a missing or malformed flag shows nothing rather than
+// telling visitors the models stopped. No promise of when models resume: a cap
+// of 0 halts the new month too, and a cap raised mid-month resumes them the
+// next night.
+function liveBudgetHaltLine(status) {
+  if (!status || status.budget_halted !== true) return '';
+  return 'Model runs are paused: the monthly model budget is used up. Baselines keep updating.';
+}
+
 function isLiveBoardVisible() {
   const view = document.getElementById('liveLeaderboardView');
   if (!view || view.style.display === 'none' || view.offsetParent === null) return false;
@@ -217,6 +260,12 @@ function updateLiveHeader(payload) {
     }
   }
 
+  const haltLine = liveBudgetHaltLine(status);
+  if (banner && haltLine) {
+    banner.hidden = false;
+    banner.textContent = banner.textContent ? `${banner.textContent} ${haltLine}` : haltLine;
+  }
+
   const zone = document.getElementById('liveZoneCaption');
   if (zone) {
     const today = status.live_day
@@ -310,12 +359,14 @@ function populateLiveTable() {
     const retClass = (v) => (v == null || !Number.isFinite(v) ? '' : (v >= 0 ? 'return-positive' : 'return-negative'));
     const selected = liveSelectedId === entry.entry_id ? ' is-selected' : '';
     const dash = (html) => (printed ? html : '—');
+    const attemptBadge = liveLastAttemptBadge(entry);
     return `
       <tr class="${selected}" data-live-entry="${safeId}">
         <td>
           <div class="team-name-badge">
             <span>${label}</span>
             <span class="team-badge">${escapeHtml(liveFormatBadge(entry.team_badge))}</span>
+            ${attemptBadge ? `<span class="team-badge">${escapeHtml(attemptBadge)}</span>` : ''}
           </div>
         </td>
         <td class="num-cell ${retClass(ret)}">${dash(liveFormatPct(ret, 2))}</td>
@@ -345,6 +396,7 @@ function renderLiveDetail(entry) {
     return;
   }
   const hasPrints = !liveEntryIsPending(entry);
+  const lastRun = liveLastAttemptCopy(entry);
   const ret = Number(entry.cumulative_return || 0);
   const retColor = ret >= 0 ? 'var(--success-color)' : 'var(--danger-color)';
   host.innerHTML = `
@@ -355,6 +407,7 @@ function renderLiveDetail(entry) {
     <div class="team-detail-row"><span class="team-detail-label">Trades</span><span class="team-detail-value">${hasPrints && entry.num_trades != null ? entry.num_trades : '—'}</span></div>
     <div class="team-detail-row"><span class="team-detail-label">Avg hold</span><span class="team-detail-value">${hasPrints ? liveFormatHold(entry.avg_hold_hours) : '—'}</span></div>
     <div class="team-detail-row"><span class="team-detail-label">Through</span><span class="team-detail-value">${entry.snapshot_end || '—'}</span></div>
+    ${lastRun ? `<div class="team-detail-row"><span class="team-detail-label">Last nightly run</span><span class="team-detail-value">${escapeHtml(lastRun)}</span></div>` : ''}
   `;
 }
 

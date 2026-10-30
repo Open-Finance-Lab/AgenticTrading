@@ -26,11 +26,16 @@ def _isolated_live_session(monkeypatch, tmp_path):
     """The test DB is session-scoped: start every test with no live rows, and
     never let a refresh write the real state file under DATA_DIR."""
     monkeypatch.setattr(live, "_LIVE_REFRESH_STATE_PATH", tmp_path / "live_state.json")
-    for run in db.get_runs_by_session("leaderboard-live") or []:
-        db.delete_run(run["run_id"])
+    _clear_live_and_spend_rows()
     yield
-    for run in db.get_runs_by_session("leaderboard-live") or []:
-        db.delete_run(run["run_id"])
+    _clear_live_and_spend_rows()
+
+
+def _clear_live_and_spend_rows():
+    # Every live deploy also prices itself into the spend ledger's session.
+    for session in ("leaderboard-live", "leaderboard-live-spend"):
+        for run in db.get_runs_by_session(session) or []:
+            db.delete_run(run["run_id"])
 
 
 @pytest.fixture(autouse=True)
@@ -110,8 +115,11 @@ class _ScriptedAgent:
     used_llm = True
     model_id = "deepseek/deepseek-v4-pro"
 
-    def __init__(self, *, steps=7, misses=None, crash_on=(), no_bars=(), runs=None):
+    def __init__(self, *, steps=7, misses=None, crash_on=(), no_bars=(), runs=None,
+                 step_tokens=(10, 10)):
         self.steps = steps
+        # (input, output) tokens billed per traded session.
+        self.step_tokens = step_tokens
         self.misses = misses or {}
         self.crash_on = set(crash_on)
         self.no_bars = set(no_bars)
@@ -144,8 +152,8 @@ class _ScriptedAgent:
             self.llm_calls += self.steps
             self.decision_steps += self.steps
             self.llm_decisions += self.steps - self.misses.get(iso, 0)
-            self.input_tokens += 10
-            self.output_tokens += 10
+            self.input_tokens += self.step_tokens[0]
+            self.output_tokens += self.step_tokens[1]
             self._trades += 1
             curve.append(_pt(f"{iso}T19:00:00+00:00", SEED + day.day))
             self.last_portfolio_snapshot = {"cash": SEED, "positions": {}, "day": iso[5:]}
