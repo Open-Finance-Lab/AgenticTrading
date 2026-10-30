@@ -267,6 +267,33 @@ def test_gate_rewrote_tolerates_non_numeric_model_sizes():
     ) is True
 
 
+def test_gate_rewrote_pairs_split_sells_by_value_not_by_sort_order():
+    """Sorting put an unsized order at -1.0, so a sized SELL was lined up
+    against the wrong action and an untouched bar counted as a rewrite."""
+    split = {"orders": [
+        {"symbol": "AAPL", "action": "sell", "position_size": 10},
+        {"symbol": "AAPL", "action": "sell", "position_size": 0, "size_fraction": 0.5},
+    ]}
+    sold = [
+        {"symbol": "AAPL", "action": "sell", "shares": 10},
+        {"symbol": "AAPL", "action": "sell", "shares": 250},
+    ]
+    assert tape.gate_rewrote(split, sold) is False
+    assert tape.gate_rewrote(split, list(reversed(sold))) is False
+    # Still a rewrite when no pairing works: the sized 10 found no 10.
+    resized = [
+        {"symbol": "AAPL", "action": "sell", "shares": 9},
+        {"symbol": "AAPL", "action": "sell", "shares": 250},
+    ]
+    assert tape.gate_rewrote(split, resized) is True
+    # Two sized orders each need their own equal partner.
+    twice = {"orders": [
+        {"symbol": "AAPL", "action": "sell", "position_size": 10},
+        {"symbol": "AAPL", "action": "sell", "position_size": 10},
+    ]}
+    assert tape.gate_rewrote(twice, sold) is True
+
+
 def test_gate_rewrote_compares_symbol_side_size_triples():
     buy5 = {"orders": [{"symbol": "AAPL", "action": "buy", "position_size": 5}]}
     assert tape.gate_rewrote(buy5, [{"symbol": "AAPL", "action": "buy", "shares": 5}]) is False
@@ -308,7 +335,7 @@ def test_decision_and_execution_payload_shapes():
         bar_index=4, decision_at=pd.Timestamp("2026-03-02 11:30"), driver="llm",
         intent={"orders": []}, state={"cash": 1.0, "equity": 1.0, "positions": []}, actions=actions,
     )
-    assert decision["tape_version"] == 1 and decision["bar_index"] == 4
+    assert decision["tape_version"] == 2 and decision["bar_index"] == 4
     assert decision["actions"] == [{"symbol": "AAPL", "action": "buy", "shares": 3, "reason": "why", "confidence": 0.7}]
     assert decision["reasoning_summaries"] == ["why"] and decision["accepted"] is True
     assert decision["gate_rewrote"] is True  # the model ordered nothing; the gate produced a buy
@@ -412,7 +439,7 @@ def test_recorder_resolves_trace_once_and_writes_each_bar(monkeypatch):
     assert [w["bar_index"] for w in fake.writes] == [0, 1, 2]
     assert fake.writes[0]["trace_id"] == "trc_1" and fake.writes[0]["run_id"] == "agent_x"
     assert recorder.summary() == {
-        "tape_version": 1, "traced": True, "bars_recorded": 3, "gate_rewrites": 1,
+        "tape_version": 2, "traced": True, "bars_recorded": 3, "gate_rewrites": 1,
         "write_failures": 0, "oversize_skipped": 0, "suspended_skipped": 0,
         "bars_dropped": 0,
     }

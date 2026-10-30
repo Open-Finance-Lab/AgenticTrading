@@ -14,6 +14,7 @@ from dashboard.backend.app import app
 from dashboard.backend.database import db
 import dashboard.backend.domain.leaderboard.live as live
 import dashboard.backend.domain.leaderboard.service as lb_service
+from dashboard.backend.infrastructure.llm.validator import LLM_SELL_SIZING
 
 SEED = float(lb_service.load_leaderboard_config().get("initial_capital", 100_000))
 
@@ -50,7 +51,12 @@ def no_alpaca(monkeypatch):
 
 def _insert_live_run(run_id, llm_model, end_date, points, *, final=None,
                      total_return=0.0, sharpe=0.0, max_dd=0.0, metadata=None,
-                     start_date="2026-08-01", num_trades=0, **extra):
+                     start_date="2026-08-01", num_trades=0,
+                     sell_rule=LLM_SELL_SIZING, **extra):
+    if metadata is not None and live.LIVE_SNAPSHOT_KEY in metadata and sell_rule:
+        # A checkpoint this code writes records its sell rule, and one without
+        # it is read as pre-#661 and replayed: pass sell_rule=None for that.
+        metadata = {"llm_sell_sizing": sell_rule, **metadata}
     db.insert_run(
         run_id=run_id,
         session_id="leaderboard-live",
@@ -886,7 +892,7 @@ def test_deploy_live_increment_trades_only_the_new_session(monkeypatch):
         llm_decisions=70,
         input_tokens=1000,
         output_tokens=200,
-        metadata={live.LIVE_SNAPSHOT_KEY: snapshot},
+        metadata={"llm_sell_sizing": LLM_SELL_SIZING, live.LIVE_SNAPSHOT_KEY: snapshot},
     )
     db.insert_equity_points(
         "lb_nemotron_3_nano_30b_20260801_20260826",
@@ -1340,11 +1346,12 @@ def _recorded_config(freeze_cfg, **overrides):
         "temperature": entry.get("temperature"),
         "reasoning_effort": entry.get("reasoning_effort"),
         "strategy_prompt": None,
+        "llm_sell_sizing": LLM_SELL_SIZING,
         **overrides,
     }
 
 
-def _insert_configured_checkpoint(end_date, day, config):
+def _insert_configured_checkpoint(end_date, day, config, **kwargs):
     _insert_live_run(
         f"lb_deepseek_v4_pro_20260801_{end_date.replace('-', '')}",
         "deepseek_v4_pro",
@@ -1354,7 +1361,29 @@ def _insert_configured_checkpoint(end_date, day, config):
             **config,
             live.LIVE_SNAPSHOT_KEY: {"cash": SEED, "positions": {}, "day": day},
         },
+        **kwargs,
     )
+
+
+def test_a_checkpoint_from_before_sells_honoured_their_size_replays_the_month(
+    monkeypatch, capsys
+):
+    """A checkpoint with no ``llm_sell_sizing`` sold whole positions whatever
+    the size (#661). Its absence is that rule, not an unknown: resuming would
+    splice a month sized two ways into one curve and one set of trade stats."""
+    freeze_cfg = _live_aug27()
+    legacy = _recorded_config(freeze_cfg)
+    del legacy["llm_sell_sizing"]
+    _insert_configured_checkpoint("2026-08-24", "08-24", legacy, sell_rule=None)
+    runs = []
+    _use_agent(monkeypatch, _ScriptedAgent(runs=runs))
+    row = live.deploy_live_model_increment(_deepseek(freeze_cfg), freeze_cfg)
+
+    assert runs == [("2026-08-01", "2026-08-27", None)]
+    assert "keys=llm_sell_sizing" in capsys.readouterr().out
+    stored = db.get_run(row["run_id"])
+    assert stored["metadata"]["live_increment"]["config_changed"] == ["llm_sell_sizing"]
+    assert stored["metadata"]["llm_sell_sizing"] == LLM_SELL_SIZING
 
 
 def test_a_checkpoint_under_the_same_config_resumes(monkeypatch):
@@ -1420,7 +1449,8 @@ def test_a_config_replay_killed_part_way_never_resumes_the_old_config(monkeypatc
 
 def test_a_checkpoint_that_predates_a_config_key_is_not_a_change(monkeypatch):
     """Absent is unknown: rows written before a key existed must not each force
-    a month-open replay of every model."""
+    a month-open replay of every model. ``llm_sell_sizing`` is the one
+    exception, on purpose: its absence is a rule (``_RESUME_KEY_DEFAULTS``)."""
     freeze_cfg = _live_aug27()
     _insert_checkpoint("2026-08-24", "08-24")
     runs = []

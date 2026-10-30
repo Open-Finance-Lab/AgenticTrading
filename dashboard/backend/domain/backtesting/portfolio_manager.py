@@ -39,8 +39,10 @@ from dashboard.backend.infrastructure.llm.validator import (
     LLM_ACTION_DEFAULT_CONFIDENCE,
     MAX_ORDER_SHARES,
     create_prompt,
+    model_number,
     normalize_symbol,
     read_confidence,
+    requested_sell_shares,
 )
 from dashboard.backend.domain.trading.portfolio import (
     append_equity_record as _append_equity_record,
@@ -49,6 +51,7 @@ from dashboard.backend.domain.trading.portfolio import (
 )
 from dashboard.backend.domain.trading.execution import (
     execute_actions as _execute_actions,
+    record_refused_order as _record_refused_order,
 )
 from dashboard.backend.domain.backtesting.reference_agent import (
     make_rule_based_decision as _make_rule_based_decision,
@@ -92,6 +95,11 @@ STRICT_LLM_MAX_FALLBACK_RATIO = 0.02
 # had no tolerance at all. From this length on, one strike still leaves the run
 # above H6 (1/25 = 4% < 5%); ``test_strict_llm_budget_clears_h6`` pins that.
 STRICT_LLM_MIN_STEPS_FOR_ONE_STRIKE = 25
+
+
+# The order-event reason of a SELL the gate refused because it cannot read
+# its size. The same word the conformance reference uses for it.
+SELL_SIZE_REFUSED_REASON = "invalid_quantity"
 
 
 # Up to this many symbols a pipeline agent's market snapshot carries the whole
@@ -323,22 +331,38 @@ class PortfolioManager:
             return None
         return size
 
-    def _fraction_of_position(self, raw: Any, held: float) -> float:
-        """Shares a pipeline risk action's ``size_fraction`` asks to sell.
+    def _refuse_sell(
+        self,
+        *,
+        symbol: str,
+        raw_size: Any,
+        timestamp: Any,
+        price: float,
+        strategy_reason: str,
+    ) -> None:
+        """Record a SELL the gate skipped because it cannot read its size.
 
-        A usable fraction is a finite number above 0; 1 or more means the whole
-        position. Anything else is ignored and the whole position is sold, as
-        before sells honoured a size. A partial trim rounds down to whole lots.
+        On the order ledger, like an executor rejection: a skip that is only a
+        ``print`` is invisible from a dashboard backtest, whose stdout nobody
+        reads, and a run whose model wrote ``"all"`` would publish a curve
+        that never sold with nothing to say why.
         """
-        if isinstance(raw, bool) or not isinstance(raw, (int, float)):
-            return held
-        if not math.isfinite(raw) or raw <= 0:
-            return held
-        if raw >= 1:
-            return held
-        if self.lot_size > 1:
-            return math.floor(raw * held / self.lot_size) * self.lot_size
-        return math.floor(raw * held)
+        asked = model_number(raw_size)
+        _record_refused_order(
+            rejected_orders=self.rejected_orders,
+            order_events=self.order_events,
+            order_event_repeats=self._order_event_repeats,
+            timestamp=timestamp,
+            symbol=symbol,
+            action="sell",
+            # A finite number, as every ledger field must be: "all" or NaN
+            # asked for no count, and the reason says the size was refused.
+            requested_shares=asked if asked is not None and math.isfinite(asked) else 0,
+            price=price,
+            reason=SELL_SIZE_REFUSED_REASON,
+            strategy_reason=strategy_reason,
+            costs_enabled=self.transaction_cost_profile is not None,
+        )
 
     def record_t1_deferral(
         self,
@@ -986,31 +1010,32 @@ class PortfolioManager:
                         print(f"      ⚠️  BUY {symbol}: Skip (insufficient cash: need ${shares*price:,.0f}, have ${self.cash:,.0f})")
                 
                 elif action_type == "sell":
-                    # Sell what was asked for (#661): position_size shares, else
-                    # a pipeline risk action's size_fraction of the position,
-                    # else the whole position. Same coercion as BUY: an
-                    # unparseable or negative size skips THIS action only.
-                    raw_size = llm_action.get("position_size", 0)
-                    asked = self._coerce_position_size(raw_size)
-                    if asked is None:
-                        print(f"      ⚠️  SELL {symbol}: Skip (unparseable position_size {raw_size!r})")
-                        continue
-                    if asked < 0:
-                        print(f"      ⚠️  SELL {symbol}: Skip (negative position_size {raw_size!r})")
-                        continue
-                    if asked == 0 and isinstance(raw_size, (int, float)) and raw_size > 0:
-                        # int() truncated a fraction of a share to 0, and 0
-                        # means "the whole position": never read it that way.
-                        print(f"      ⚠️  SELL {symbol}: Skip (position_size {raw_size!r} rounds to 0 shares)")
-                        continue
                     held = self.positions.get(symbol, 0)
-                    requested = (
-                        asked
-                        if asked > 0
-                        else self._fraction_of_position(llm_action.get("size_fraction"), held)
+                    if held <= 0:
+                        print(f"      ⚠️  SELL {symbol}: Skip (not in portfolio, only owns: {list(self.positions.keys())})")
+                        continue
+                    # Sell what was asked for (#661): position_size shares,
+                    # else a size_fraction of the position (what a pipeline
+                    # risk action sends), else the whole position. A size that
+                    # cannot be read skips THIS action and is recorded; it is
+                    # never read as "all of it" (requested_sell_shares).
+                    reason = f"[LLM] {reasoning} (confidence: {confidence:.0%})"
+                    raw_size = llm_action.get("position_size")
+                    requested, refusal = requested_sell_shares(
+                        raw_size,
+                        llm_action.get("size_fraction"),
+                        held,
+                        lot_size=self.lot_size,
                     )
-                    if held > 0 and requested <= 0:
-                        print(f"      ⚠️  SELL {symbol}: Skip (size_fraction trims less than one lot of {held} shares)")
+                    if refusal is not None:
+                        print(f"      ⚠️  SELL {symbol}: Skip ({refusal})")
+                        self._refuse_sell(
+                            symbol=symbol,
+                            raw_size=raw_size,
+                            timestamp=timestamp,
+                            price=price,
+                            strategy_reason=reason,
+                        )
                         continue
                     # Size at the sellable quantity, not the held one: under T+1
                     # they differ, and the difference is unfillable.
@@ -1024,7 +1049,7 @@ class PortfolioManager:
                             "symbol": symbol,
                             "action": "sell",
                             "shares": shares,
-                            "reason": f"[LLM] {reasoning} (confidence: {confidence:.0%})",
+                            "reason": reason,
                             "confidence": confidence
                         }
                         if shares < requested:
@@ -1034,10 +1059,8 @@ class PortfolioManager:
                             action["requested_shares"] = requested
                         actions.append(action)
                         print(f"      ✅ SELL {symbol}: {shares} shares @ ${price:.2f} (conf: {confidence:.0%})")
-                    elif symbol in self.positions and self.positions[symbol] > 0:
-                        print(f"      ⚠️  SELL {symbol}: Skip (T+1 frozen, {self.positions[symbol]} shares settle next trading day)")
                     else:
-                        print(f"      ⚠️  SELL {symbol}: Skip (not in portfolio, only owns: {list(self.positions.keys())})")
+                        print(f"      ⚠️  SELL {symbol}: Skip (T+1 frozen, {held} shares settle next trading day)")
                 
                 # else: HOLD is implicit (don't add to actions)
             

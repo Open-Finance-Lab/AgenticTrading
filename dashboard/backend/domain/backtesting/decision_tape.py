@@ -21,6 +21,7 @@ from __future__ import annotations
 import copy
 import json
 import math
+from collections import Counter
 from contextlib import contextmanager
 from typing import Any, Callable, Dict, Iterable, Iterator, List, Mapping, NamedTuple, Optional, Sequence, Tuple
 
@@ -29,7 +30,12 @@ from dashboard.backend.infrastructure.llm.pipeline_runner import (
     pipeline_output_to_decision,
 )
 
-TAPE_VERSION = 1
+# 2 (#661): a SELL sells the size it names, ``size_fraction`` joined the intent
+# fields, and a sized SELL's size is compared by ``gate_rewrote``. A v1 tape was
+# recorded under a gate that sold the whole position whatever the size, and
+# stored a pipeline risk sell's ``size_pct * 100`` as its ``position_size``:
+# replay one under that rule, never through the current gate.
+TAPE_VERSION = 2
 MAX_REASONING_CHARS = 500
 # The longest model-supplied value kept verbatim for replay. Longer ones are
 # recorded readably (cut to ``MAX_REASONING_CHARS``) and the order is marked
@@ -363,6 +369,35 @@ def _size(value: Any) -> Optional[float]:
     return size if math.isfinite(size) else None
 
 
+def _order_sizes(orders: Iterable[Mapping[str, Any]], size_field: str) -> Dict[Tuple[str, str], List[Optional[float]]]:
+    """``{(symbol, side): [size, ...]}`` of the buy/sell orders, by
+    ``_order_triples``'s rule for which sizes are compared."""
+    grouped: Dict[Tuple[str, str], List[Optional[float]]] = {}
+    for symbol, side, size in _order_triples(orders, size_field):
+        grouped.setdefault((symbol, side), []).append(size)
+    return grouped
+
+
+def _sizes_match(wanted: Sequence[Optional[float]], got: Sequence[Optional[float]]) -> bool:
+    """Whether the orders of one symbol and side can be paired off so that
+    every pair agrees, a ``None`` size agreeing with any size.
+
+    A multiset match, not two sorted lists zipped together: sorting put an
+    unsized order at -1.0, so intent ``[sell 10, sell by size_fraction]``
+    against actions ``[sell 10, sell 250]`` paired 10 with 250 and called a
+    bar the gate had not changed a rewrite. The pairing exists exactly when the
+    sized orders left without an equal partner fit in the other side's
+    unsized ones -- which, both sides being the same length, is one inequality.
+    """
+    if len(wanted) != len(got):
+        return False
+    sized_wanted = Counter(size for size in wanted if size is not None)
+    sized_got = Counter(size for size in got if size is not None)
+    equal = sum((sized_wanted & sized_got).values())
+    total_sized = sum(sized_wanted.values()) + sum(sized_got.values())
+    return total_sized - equal <= len(wanted)
+
+
 def _order_triples(orders: Iterable[Mapping[str, Any]], size_field: str):
     """``(symbol, side, size)`` per buy/sell order, normalised the way the gate
     reads them (``symbol.strip().upper()``, ``action.strip().lower()``).
@@ -384,18 +419,20 @@ def _order_triples(orders: Iterable[Mapping[str, Any]], size_field: str):
         if size == 0:
             size = None
         triples.append((str(order.get("symbol") or "").strip().upper(), side, size))
-    return sorted(triples, key=lambda t: (t[0], t[1], -1.0 if t[2] is None else t[2]))
+    return triples
 
 
 def gate_rewrote(intent: Optional[Mapping[str, Any]], actions: Iterable[Mapping[str, Any]]) -> bool:
     """Whether the pre-trade gate changed what the model asked for.
 
-    Compares the sorted ``(symbol, side, size)`` triples of ``intent.orders``
-    (size = ``position_size``) with those of the post-gate ``actions`` (size =
-    ``shares``). A dropped, added or resized order is a rewrite; an order the
-    gate sized because the model left the size at 0 (a BUY from confidence, a
-    SELL to the whole position or its ``size_fraction``) is the gate's
-    documented behaviour and is not (see ``_order_triples``). ``False`` with no intent or an unparsed one: a
+    Pairs the ``(symbol, side, size)`` triples of ``intent.orders`` (size =
+    ``position_size``) with those of the post-gate ``actions`` (size =
+    ``shares``), per symbol and side (``_sizes_match``). A dropped, added or
+    resized order is a rewrite -- a SELL refused for a size the gate cannot
+    read is a dropped one; an order the gate sized because the model left the
+    size at 0 (a BUY from confidence, a SELL to the whole position or its
+    ``size_fraction``) is the gate's documented behaviour and is not (see
+    ``_order_triples``). ``False`` with no intent or an unparsed one: a
     rule-based or fallback bar had no model order to rewrite.
 
     ``build_decision_payload`` applies this only on ``driver == "llm"`` bars:
@@ -405,16 +442,11 @@ def gate_rewrote(intent: Optional[Mapping[str, Any]], actions: Iterable[Mapping[
     """
     if not isinstance(intent, Mapping) or "orders" not in intent:
         return False
-    wanted = _order_triples(intent.get("orders") or (), "position_size")
-    got = _order_triples(actions or (), "shares")
-    if len(wanted) != len(got):
+    wanted = _order_sizes(intent.get("orders") or (), "position_size")
+    got = _order_sizes(actions or (), "shares")
+    if wanted.keys() != got.keys():
         return True
-    for (ws, wside, wsize), (gs, gside, gsize) in zip(wanted, got):
-        if ws != gs or wside != gside:
-            return True
-        if wsize is not None and gsize is not None and wsize != gsize:
-            return True
-    return False
+    return not all(_sizes_match(sizes, got[key]) for key, sizes in wanted.items())
 
 
 def build_decision_payload(

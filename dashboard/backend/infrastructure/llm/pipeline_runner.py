@@ -134,6 +134,17 @@ def is_last_bar_of_trading_day(
     return trading_day_key(timestamps[index]) != trading_day_key(timestamps[index + 1])
 
 
+# The last step's EXECUTION RULES state how a SELL is sized, and not only the
+# starter instruction: that text is copied into an agent when it is created, so
+# agents made before sells honoured their size (#661) still say "a sell always
+# closes the whole position" -- and a model trusting that sentence writes any
+# qty, which now trims.
+_SELL_SIZE_RULE = (
+    "- A SELL's qty is the number of shares to sell, at most what you hold; "
+    "a qty of 0 sells the whole position."
+)
+
+
 def _market_lot_size(market_snapshot: Any) -> int:
     """The board lot the snapshot's ``market`` block declares, else 1."""
     market = market_snapshot.get("market") if isinstance(market_snapshot, dict) else None
@@ -190,6 +201,7 @@ def _build_step_prompt(
                 "=== EXECUTION RULES ===",
                 "- Trade ONLY symbols listed in the market snapshot.",
                 "- Only SELL symbols that appear in current_holdings.",
+                _SELL_SIZE_RULE,
                 "- Respect available cash for buy orders.",
                 "- Use integer share quantities.",
             ]

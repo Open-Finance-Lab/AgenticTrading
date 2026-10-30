@@ -262,6 +262,55 @@ def _zero_transaction_costs(reference_price: Any) -> Dict[str, float]:
     }
 
 
+def record_refused_order(
+    *,
+    rejected_orders: Optional[List[Dict]],
+    order_events: Optional[List[Dict]],
+    order_event_repeats: Optional[Dict] = None,
+    timestamp: Any,
+    symbol: str,
+    action: str,
+    requested_shares: float,
+    price: float,
+    reason: str,
+    strategy_reason: str,
+    costs_enabled: bool = False,
+) -> None:
+    """Record an order refused before it reached ``execute_actions``.
+
+    The same rejection record and order event an executor refusal writes, and
+    collapsed the same way when it repeats. Without it a refusal upstream of
+    the executor -- the pre-trade gate skipping a SELL whose size it cannot
+    read -- was a ``print`` in a backtest subprocess whose stdout nobody reads,
+    and the run's audit showed an order that never existed.
+    """
+    if rejected_orders is not None:
+        _append_rejection(
+            rejected_orders,
+            timestamp=timestamp,
+            symbol=symbol,
+            action=action,
+            requested_shares=requested_shares,
+            executed_shares=0,
+            unfilled_shares=requested_shares,
+            reason=reason,
+        )
+    _append_order_event(
+        order_events,
+        repeat_index=order_event_repeats,
+        timestamp=timestamp,
+        symbol=symbol,
+        side=action.upper(),
+        requested_shares=requested_shares,
+        executed_shares=0,
+        price=price,
+        status="rejected",
+        reason=reason,
+        strategy_reason=strategy_reason,
+        costs=_zero_transaction_costs(price) if costs_enabled else None,
+    )
+
+
 def calculate_transaction_costs(
     *,
     side: str,

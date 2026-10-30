@@ -28,6 +28,7 @@ from dashboard.backend.domain.leaderboard.roster_failures import RosterFailures
 from dashboard.backend.domain.leaderboard.strategies._common import reference_start_date
 from dashboard.backend.domain.leaderboard.strategies import get_strategy
 from dashboard.backend.infrastructure.llm import backtest_harness as llm_harness
+from dashboard.backend.infrastructure.llm.validator import LLM_SELL_SIZING
 from dashboard.backend.infrastructure.market_data.sessions import session_close_time
 from dashboard.backend.infrastructure.market_data.alpaca_bars import (
     MarketDataUnavailableError,
@@ -927,7 +928,10 @@ def _sample_run_id(strategy_id: str, start_date: str, end_date: str, sample: int
 # sample run under a different model, prompt, ceiling, seed or tape is a
 # different experiment, and its spread is not the spread of this one. The two
 # provenance flags belong to the tape: a clamped SIP window priced a shorter
-# series, and an IEX fallback a thinner one, under the same feed label.
+# series, and an IEX fallback a thinner one, under the same feed label. The
+# sell rule (#661) belongs to the engine: a row without it closed whole
+# positions whatever the model's size, so it groups apart from one that sold
+# the size asked for, and the larger group publishes, as for the tape.
 _SAMPLE_CONFIG_KEYS = (
     "model_id",
     "integration",
@@ -939,6 +943,7 @@ _SAMPLE_CONFIG_KEYS = (
     "market_data_feed",
     "end_clamped",
     "sip_fallback_to_iex",
+    "llm_sell_sizing",
 )
 # The part of that config an entry pins in leaderboard.json and a run records
 # verbatim (`_llm_run_metadata`); capital and prompt are `_cache_match_rank`'s.
@@ -2115,6 +2120,11 @@ def _llm_run_metadata(
             strategy_impl, "strategy_prompt", entry.get("strategy_prompt")
         ),
         "llm_max_output_tokens": llm_harness.DEFAULT_MAX_OUTPUT_TOKENS,
+        # Which rule sized the model's sells (#661). Absent on a row written
+        # before it, which closed whole positions: such a row never pools with
+        # this one (`_SAMPLE_CONFIG_KEYS`), and a Live checkpoint without it is
+        # replayed, not resumed (`live._RESUME_KEY_DEFAULTS`).
+        "llm_sell_sizing": LLM_SELL_SIZING,
         "initial_capital": initial_capital,
         "start_date": start_date,
         "end_date": end_date,
