@@ -121,12 +121,16 @@ def model_number(value: Any, default: Optional[float] = None) -> Optional[float]
     return None
 
 
-def _confidence_in_range(confidence: float) -> bool:
+def confidence_in_range(confidence: float) -> bool:
+    """Whether a confidence, as a float, is on the 0-1 scale every decision
+    path trades on. The one copy of the rule: ``read_confidence``,
+    ``LLMTradingDecision`` and the AI Hedge Fund adapter (after its 0-100
+    scale is divided out) all ask it."""
     return math.isfinite(confidence) and 0.0 <= confidence <= 1.0
 
 
 def read_confidence(value: Any, default: float) -> Optional[float]:
-    """An action's 0-1 confidence, or ``None`` when the action must be skipped.
+    """An action's 0-1 confidence, or ``None`` when it cannot be read as one.
 
     One rule for the backtest gate and for every pipeline envelope it reads:
     a confidence the model left out takes ``default``, and one it gave must be
@@ -136,9 +140,13 @@ def read_confidence(value: Any, default: float) -> Optional[float]:
     a scale into it (``25`` as 25%) or a default over it would trade on a
     confidence the model never stated. The range is the one
     ``LLMTradingDecision`` enforces for external agents.
+
+    ``None`` is not "skip": the gate then reads no confidence at all, so an
+    order that does not need one (a sell, a buy with its own size) still
+    trades, and only a buy that would be sized from it is skipped.
     """
     number = model_number(value, default)
-    if number is None or not _confidence_in_range(number):
+    if number is None or not confidence_in_range(number):
         return None
     return number
 
@@ -189,7 +197,7 @@ class LLMTradingDecision(BaseModel):
         """Confidence must be 0.0 to 1.0"""
         if not isinstance(v, (int, float)):
             raise ValueError(f"Confidence must be numeric, got {type(v)}")
-        if not _confidence_in_range(v):
+        if not confidence_in_range(v):
             raise ValueError(f"Confidence {v} out of range [0.0, 1.0]")
         return float(v)
     

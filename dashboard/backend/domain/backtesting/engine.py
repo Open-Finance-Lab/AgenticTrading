@@ -79,7 +79,10 @@ from dashboard.backend.domain.backtesting.metrics import (
 from dashboard.backend.domain.backtesting.partial_results import (
     LIVE_PROGRESS_HEARTBEAT_SECONDS,
 )
-from dashboard.backend.domain.backtesting.portfolio_manager import PortfolioManager
+from dashboard.backend.domain.backtesting.portfolio_manager import (
+    LLM_GATE_VERSION,
+    PortfolioManager,
+)
 from dashboard.backend.domain.backtesting.decision_tape import (
     DecisionTapeRecorder,
     build_decision_payload,
@@ -320,6 +323,9 @@ class HourlyBacktester:
         self.order_events: List[Dict] = []
         self.market_rule_calendar = None
         self.t1_deferrals: List[Dict] = []
+        # How often the model's confidence was not a 0-1 number (see
+        # PortfolioManager.unusable_confidence_actions); empty when never.
+        self.unusable_confidence: Dict[str, int] = {}
         # Model id; defaults to the gateway-appropriate slug (CommonStack vs native).
         self.model = model or default_model_name()
         self.execution_client = execution_client
@@ -1812,6 +1818,13 @@ class HourlyBacktester:
         if self.use_llm:
             meta["llm_max_output_tokens"] = llm_harness.DEFAULT_MAX_OUTPUT_TOKENS
             meta["llm_sampling"] = self._llm_sampling_metadata()
+            # Which gate turned the model's replies into orders. Its presence
+            # also witnesses the counters below: on a row that records it, an
+            # absent `unusable_confidence` is a real zero.
+            meta["llm_gate_version"] = LLM_GATE_VERSION
+            unusable_confidence = getattr(self, "unusable_confidence", None)
+            if unusable_confidence:
+                meta["unusable_confidence"] = dict(unusable_confidence)
         llm_execution = getattr(self, "_llm_execution_evidence", None)
         execution_client = getattr(self, "execution_client", None)
         if llm_execution is None and execution_client is not None:
@@ -2550,6 +2563,15 @@ class HourlyBacktester:
         self._llm_execution_evidence = llm_execution
 
         self.t1_deferrals = self._serialize_t1_deferrals(manager.t1_deferrals)
+        self.unusable_confidence = {
+            key: count
+            for key, count in (
+                ("actions", getattr(manager, "unusable_confidence_actions", 0)),
+                ("skipped_buys", getattr(manager, "unusable_confidence_skipped", 0)),
+                ("skipped_steps", getattr(manager, "confidence_skipped_steps", 0)),
+            )
+            if count
+        }
         self.rejected_orders = self._serialize_rejected_orders(
             manager.rejected_orders
         )

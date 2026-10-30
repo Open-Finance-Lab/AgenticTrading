@@ -24,6 +24,7 @@ from zoneinfo import ZoneInfo
 import dashboard.backend.infrastructure.llm.token_cost as token_cost
 from dashboard.backend.database import db
 import dashboard.backend.domain.leaderboard.baselines as _baselines
+from dashboard.backend.domain.backtesting.portfolio_manager import LLM_GATE_VERSION
 from dashboard.backend.domain.leaderboard.roster_failures import RosterFailures
 from dashboard.backend.domain.leaderboard.strategies._common import reference_start_date
 from dashboard.backend.domain.leaderboard.strategies import get_strategy
@@ -63,6 +64,12 @@ _daily_refresh_lock = threading.Lock()
 _daily_refresh_running = False
 # (configured_feed, stale_feeds) pairs already reported — see _warn_on_feed_drift.
 _warned_feed_drift: set[Tuple[str, Tuple[str, ...]]] = set()
+# (current gate, stale gate versions) pairs already reported -- see
+# _warn_on_gate_drift.
+_warned_gate_drift: set[Tuple[int, Tuple[int, ...]]] = set()
+# Where a run records how often its confidence was unreadable
+# (`_unusable_confidence_counts`; the engine writes the same block).
+UNUSABLE_CONFIDENCE_KEY = "unusable_confidence"
 # Two seeds are "the same seed" within this many dollars. A stored
 # ``initial_equity`` has been through a backtest and a JSON round-trip — the
 # committed board carries 100000.00000000003 for one entry — so `==` here would
@@ -935,6 +942,7 @@ _SAMPLE_CONFIG_KEYS = (
     "reasoning_effort",
     "strategy_prompt",
     "llm_max_output_tokens",
+    "llm_gate_version",
     "initial_capital",
     "market_data_feed",
     "end_clamped",
@@ -1716,6 +1724,7 @@ def ensure_leaderboard_runs(
         missing.append(strategy)
 
     _warn_on_feed_drift(cached_runs, _configured_feed_or_none())
+    _warn_on_gate_drift(cached_runs)
     _warn_on_capital_drift(cached_runs, initial_capital)
 
     # Nothing left to compute — serve cached board without touching Alpaca.
@@ -1905,6 +1914,12 @@ def _reject_if_llm_fallback(
       publishing it still misrepresents the model (this is the 1-of-161 run that
       silently topped the board).
 
+    A third shape is not a fallback but is refused for the same reason: steps
+    whose unsized buys the gate skipped because their confidence was not a
+    number from 0 to 1 (``confidence_skipped_steps``, reported by the
+    strategy). Nothing rule-based traded on them, but neither did the model's
+    strategy, so they come off the numerator.
+
     Coverage keys off ``llm_decisions`` — steps the model actually drove — not
     ``llm_calls`` (billed API calls), because a truncated / unparseable response
     is billed yet trades rule-based. A run that returns garbage every step has
@@ -1921,6 +1936,12 @@ def _reject_if_llm_fallback(
         return
     if llm_decisions is None:
         llm_decisions = llm_calls
+    # Steps the model drove but whose unsized buys the gate could not trade,
+    # because their confidence was not a 0-1 number. No rule-based trade ran,
+    # so llm_decisions counts them; but the curve is not the model's strategy
+    # either, and a model answering 0-100 on every bar would otherwise publish
+    # a flat line at full coverage.
+    confidence_skipped = _reported_int(strategy_impl, "confidence_skipped_steps") or 0
     if not used_llm or llm_calls == 0:
         raise LeaderboardFallbackError(
             f"Entry '{entry_id}' produced a rule-based fallback "
@@ -1940,6 +1961,22 @@ def _reject_if_llm_fallback(
             f"intermittently failed for the active LLM gateway (e.g. rate limits "
             f"or output truncated into invalid JSON). Pass allow_fallback=True / "
             f"--allow-fallback to publish it anyway."
+        )
+    if (
+        decision_steps > 0
+        and confidence_skipped
+        and llm_decisions - confidence_skipped
+        < MIN_LLM_DECISION_COVERAGE * decision_steps
+    ):
+        usable = max(llm_decisions - confidence_skipped, 0)
+        raise LeaderboardFallbackError(
+            f"Entry '{entry_id}' lost buys on {confidence_skipped}/"
+            f"{decision_steps} steps to a confidence that is not a number from "
+            f"0 to 1 (often a 0-100 scale), leaving {usable}/{decision_steps} "
+            f"({usable / decision_steps:.1%}) steps traded as the model asked, "
+            f"below the {MIN_LLM_DECISION_COVERAGE:.0%} threshold. Refusing to "
+            f"publish the curve under model '{model}'. Pass allow_fallback=True "
+            f"/ --allow-fallback to publish it anyway."
         )
 
 
@@ -2020,6 +2057,50 @@ def _warn_on_feed_drift(runs: List[Dict[str, Any]], configured: Optional[str]) -
     )
 
 
+def _run_gate_version(run: Dict[str, Any]) -> Optional[int]:
+    """Gate version recorded on a cached run, or ``None`` for rows written
+    before it was (and for baselines, which no gate touched)."""
+    metadata = run.get("metadata")
+    if not isinstance(metadata, dict):
+        return None
+    version = metadata.get("llm_gate_version")
+    if isinstance(version, bool) or not isinstance(version, int):
+        return None
+    return version
+
+
+def _warn_on_gate_drift(runs: List[Dict[str, Any]]) -> None:
+    """Print when cached LLM rows were produced by another pre-trade gate.
+
+    The gate decides what a reply trades (``LLM_GATE_VERSION``), so a row from
+    an older gate and a fresh one are different experiments for one window.
+    A warning and not an auto-refresh, for ``_warn_on_feed_drift``'s reason: a
+    recompute here would be a billable model deploy started by a public GET.
+    Rows that never recorded a version are left out, as unrecorded feeds are;
+    once per distinct drift per process.
+    """
+    stale = sorted(
+        {
+            version
+            for run in runs
+            if (version := _run_gate_version(run)) is not None
+            and version != LLM_GATE_VERSION
+        }
+    )
+    if not stale:
+        return
+    seen_key = (LLM_GATE_VERSION, tuple(stale))
+    if seen_key in _warned_gate_drift:
+        return
+    _warned_gate_drift.add(seen_key)
+    print(
+        "WARNING: leaderboard has cached LLM runs from pre-trade gate version "
+        f"{', '.join(str(v) for v in stale)} while this build runs version "
+        f"{LLM_GATE_VERSION}. The same replies can trade differently under "
+        "another gate — force-refresh to recompute."
+    )
+
+
 def _warn_on_capital_drift(
     runs: List[Dict[str, Any]], configured: Optional[float]
 ) -> None:
@@ -2084,10 +2165,11 @@ def _llm_run_metadata(
     start_date: str,
     end_date: str,
 ) -> Optional[Dict[str, Any]]:
-    """Snapshot effective config for a published LLM run (``None`` otherwise)."""
+    """Snapshot effective config for a published LLM run (``None`` otherwise),
+    with the gate's record of replies it could not read."""
     if entry.get("strategy") != "llm_agent":
         return None
-    return {
+    metadata = {
         "entry_id": entry_id,
         "model_id": model_id,
         "integration": getattr(
@@ -2115,10 +2197,39 @@ def _llm_run_metadata(
             strategy_impl, "strategy_prompt", entry.get("strategy_prompt")
         ),
         "llm_max_output_tokens": llm_harness.DEFAULT_MAX_OUTPUT_TOKENS,
+        # The pre-trade gate that turned replies into orders: two rows for one
+        # window are one experiment only under one gate (`_warn_on_gate_drift`).
+        "llm_gate_version": LLM_GATE_VERSION,
         "initial_capital": initial_capital,
         "start_date": start_date,
         "end_date": end_date,
     }
+    counts = _unusable_confidence_counts(strategy_impl)
+    if counts:
+        metadata[UNUSABLE_CONFIDENCE_KEY] = counts
+    return metadata
+
+
+def _unusable_confidence_counts(
+    strategy_impl: Any, prior: Optional[Dict[str, Any]] = None
+) -> Dict[str, int]:
+    """How often the run's confidence was not a 0-1 number, zeros left out.
+
+    The same three keys the engine records for a dashboard backtest. ``prior``
+    is a stored block to add to: a live checkpoint resumes a month, and its
+    strategy counts only the segment it traded.
+    """
+    counts = {
+        "actions": _reported_int(strategy_impl, "unusable_confidence_actions") or 0,
+        "skipped_buys": _reported_int(strategy_impl, "unusable_confidence_skipped") or 0,
+        "skipped_steps": _reported_int(strategy_impl, "confidence_skipped_steps") or 0,
+    }
+    if isinstance(prior, dict):
+        for key in counts:
+            value = prior.get(key)
+            if isinstance(value, int) and not isinstance(value, bool):
+                counts[key] += value
+    return {key: count for key, count in counts.items() if count}
 
 
 def deploy_model_run(
