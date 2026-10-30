@@ -154,7 +154,7 @@ def _two_nights(monkeypatch):
 
 
 def test_night_two_prompts_see_night_ones_trades_for_24_hours(monkeypatch):
-    prompts, _night1, _night2, _stored1 = _two_nights(monkeypatch)
+    prompts = _two_nights(monkeypatch)[0]
     # 10:00 ET: night 1's 14:00 ET buy is 20h old and shown; its 10:00 ET buy
     # is exactly 24h old and is not (the window is strict).
     assert _shown(prompts["2026-08-27T14:00:00+00:00"]) == [
@@ -172,7 +172,7 @@ def test_night_two_prompts_see_night_ones_trades_for_24_hours(monkeypatch):
 
 
 def test_restored_trades_are_never_counted_as_new_trades(monkeypatch):
-    _prompts, (night1, _row1), (night2, row2), _stored1 = _two_nights(monkeypatch)
+    _, (night1, _), (night2, row2), _ = _two_nights(monkeypatch)
     assert night1.num_trades() == 2
     # Night 2 traded once; the two buys it remembers are not its trades.
     assert night2.num_trades() == 1
@@ -185,7 +185,7 @@ def test_restored_trades_are_never_counted_as_new_trades(monkeypatch):
 
 
 def test_each_checkpoint_round_trips_the_memory_through_agent_runs(monkeypatch):
-    _prompts, _night1, (_night2, row2), stored1 = _two_nights(monkeypatch)
+    _, _, (_, row2), stored1 = _two_nights(monkeypatch)
     assert stored1["recent_trades"] == [
         {
             "symbol": "AAPL",
@@ -212,7 +212,7 @@ def test_each_checkpoint_round_trips_the_memory_through_agent_runs(monkeypatch):
 
 
 def test_the_checkpoint_row_records_where_the_memory_started(monkeypatch, capsys):
-    _prompts, (night1, _row1), (_night2, row2), stored1 = _two_nights(monkeypatch)
+    _, (night1, _), (_, row2), stored1 = _two_nights(monkeypatch)
     # Both nights wrote every trade and night 2 restored night 1's checkpoint
     # through agent_runs whole: a dropped or altered row would raise an alarm.
     assert "portfolio.trade_memory" not in capsys.readouterr().out
