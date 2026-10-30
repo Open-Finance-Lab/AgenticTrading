@@ -548,8 +548,8 @@ def test_daily_window_dates_on_saturday_shows_friday():
     assert start == end == "2026-07-17"  # Friday
 
 
-def test_partial_model_deploy_does_not_mark_window_complete(tmp_path, monkeypatch):
-    """A mixed success/failure run must not skip remaining models on the next cron."""
+def _stub_daily_refresh(monkeypatch, tmp_path, entry_ids):
+    """A daily refresh with baselines stubbed out and ``entry_ids`` as the roster."""
     day = "2026-07-14"
     state_path = tmp_path / "daily_refresh.json"
     monkeypatch.setattr(lb_service, "_DAILY_REFRESH_STATE_PATH", state_path)
@@ -569,8 +569,14 @@ def test_partial_model_deploy_does_not_mark_window_complete(tmp_path, monkeypatc
     monkeypatch.setattr(
         lb_service,
         "llm_leaderboard_entries",
-        lambda config=None: [{"id": "ok-model"}, {"id": "fail-model"}],
+        lambda config=None: [{"id": entry_id} for entry_id in entry_ids],
     )
+    return state_path
+
+
+def test_partial_model_deploy_does_not_mark_window_complete(tmp_path, monkeypatch):
+    """A mixed success/failure run must not skip remaining models on the next cron."""
+    _stub_daily_refresh(monkeypatch, tmp_path, ["ok-model", "fail-model"])
 
     def _deploy(entry_id, **_kwargs):
         if entry_id == "fail-model":
@@ -587,6 +593,50 @@ def test_partial_model_deploy_does_not_mark_window_complete(tmp_path, monkeypatc
     # Without force, a wrongly-true models_deployed flag would skip forever.
     second = lb_service.refresh_daily_leaderboard(deploy_models=True, force_refresh=False)
     assert second.get("skipped") is not True
+
+
+def test_daily_refresh_survives_an_unexpected_error_and_logs_it(
+    tmp_path, monkeypatch, capsys,
+):
+    """The daily loop named the same three types as the live one and logged
+    nothing: a ConnectionError from one entry left every later entry
+    undeployed and skipped the state save. It now shares the live loop's
+    bookkeeping, a shared fault included."""
+    state_path = _stub_daily_refresh(
+        monkeypatch, tmp_path, ["flaky-model", "ok-model", "bug-a", "bug-b", "bug-c"]
+    )
+    deployed = []
+
+    def _deploy(entry_id, **_kwargs):
+        deployed.append(entry_id)
+        if entry_id == "flaky-model":
+            raise ConnectionError("reset by peer")
+        if entry_id.startswith("bug-"):
+            raise TypeError("unsupported operand")
+        return {"entry_id": entry_id, "run_id": f"run-{entry_id}", "total_return": 0.01}
+
+    monkeypatch.setattr(lb_service, "deploy_model_run", _deploy)
+
+    result = lb_service.refresh_daily_leaderboard(deploy_models=True, force_refresh=True)
+
+    assert deployed == ["flaky-model", "ok-model", "bug-a", "bug-b"]
+    assert [row["entry_id"] for row in result["model_results"]] == ["ok-model"]
+    assert result["model_failures"] == [
+        {"entry_id": "flaky-model", "error": "ConnectionError: reset by peer"},
+        {"entry_id": "bug-a", "error": "TypeError: unsupported operand"},
+        {"entry_id": "bug-b", "error": "TypeError: unsupported operand"},
+        {
+            "entry_id": "bug-c",
+            "error": "not attempted: bug-a and bug-b failed in a row with the same TypeError",
+        },
+    ]
+    out = capsys.readouterr().out
+    assert (
+        "ERROR: daily.model_deploy_failed entry=flaky-model "
+        "error=ConnectionError: reset by peer"
+    ) in out
+    assert "ERROR: daily.model_not_attempted entry=bug-c after=bug-a,bug-b" in out
+    assert state_path.exists()
 
 
 # --- Review hardening: the daily refresh path spends real money -------------

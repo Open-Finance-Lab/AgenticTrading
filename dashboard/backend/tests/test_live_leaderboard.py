@@ -708,11 +708,15 @@ def test_refresh_live_leaderboard_deploys_models(monkeypatch, tmp_path):
         lambda **kwargs: {"created": 0, "cache_hit": True},
     )
 
+    windows = []
+
+    # Records rather than asserts: the roster loop catches any Exception per
+    # entry, so an assert in here would be filed as a model failure.
     def fake_deploy(entry, freeze_cfg, **kwargs):
         deployed.append(entry["id"])
-        assert freeze_cfg.get("session_id") == "leaderboard-live"
-        assert freeze_cfg.get("start_date") == "2026-08-01"
-        assert freeze_cfg.get("end_date") == "2026-08-27"
+        windows.append(
+            (freeze_cfg.get("session_id"), freeze_cfg.get("start_date"), freeze_cfg.get("end_date"))
+        )
         return {"entry_id": entry["id"], "run_id": f"lb_{entry['id']}", "cached": False}
 
     monkeypatch.setattr(live, "deploy_live_model_increment", fake_deploy)
@@ -720,6 +724,8 @@ def test_refresh_live_leaderboard_deploys_models(monkeypatch, tmp_path):
         deploy_models=True,
         as_of=datetime(2026, 8, 27, 17, 39, tzinfo=_ET),
     )
+    assert result["model_failures"] == []
+    assert set(windows) == {("leaderboard-live", "2026-08-01", "2026-08-27")}
     assert result["skipped"] is False
     assert result["models_deployed"] is True
     assert "claude_haiku_4_5" not in deployed
@@ -1454,6 +1460,84 @@ def test_a_segment_that_can_no_longer_clear_h6_stops_billing(monkeypatch):
     assert _month_rows("deepseek_v4_pro") == []
 
 
+# What a failed night leaves behind, pinned as it is (2026-10-14). The rule
+# these encode: a session is checkpointed only once the segment traded so far
+# clears H6, so billed sessions H6 has not yet accepted are lost when the run
+# dies, and the next night re-bills them. Storing that prefix anyway would
+# publish a curve the model did not drive; do not "fix" these by doing so.
+
+
+class _DeadModelAgent(_ScriptedAgent):
+    """Every call fails before generating anything (a gateway 404): each step
+    falls back to rule-based, so sessions are offered and traded while
+    ``llm_calls`` and ``llm_decisions`` never move."""
+
+    def run(self, bars, start, end, capital, starting_snapshot=None, on_session_close=None):
+        self.runs.append((start, end, (starting_snapshot or {}).get("day")))
+        days = live._trading_days_inclusive(date.fromisoformat(start), date.fromisoformat(end))
+        self.planned_decision_steps = self.steps * len(days)
+        curve = []
+        for day in days:
+            iso = day.isoformat()
+            self.traded.append(iso)
+            self.decision_steps += self.steps
+            curve.append(_pt(f"{iso}T19:00:00+00:00", SEED))
+            self.last_portfolio_snapshot = {"cash": SEED, "positions": {}, "day": iso[5:]}
+            on_session_close(day, list(curve))
+        return curve
+
+
+def test_a_dead_model_stores_nothing_and_restarts_at_the_1st_every_night(monkeypatch):
+    freeze_cfg = _live_aug27()
+    for _night in range(2):
+        runs = []
+        agent = _use_agent(monkeypatch, _DeadModelAgent(runs=runs))
+        with pytest.raises(lb_service.LeaderboardFallbackError, match="llm_calls=0"):
+            live.deploy_live_model_increment(_deepseek(freeze_cfg), freeze_cfg)
+        # Aug 1 is a Saturday: the first session is the 3rd, and it is the
+        # only one traded before the guard stops the run.
+        assert runs == [("2026-08-01", "2026-08-27", None)]
+        assert agent.traded == ["2026-08-03"]
+        assert agent.llm_calls == 0
+        assert _month_rows("deepseek_v4_pro") == []
+
+
+def test_an_early_miss_then_a_crash_loses_the_unchecked_prefix(monkeypatch):
+    freeze_cfg = _live_aug27()
+    agent = _use_agent(
+        monkeypatch,
+        _ScriptedAgent(misses={"2026-08-03": 1}, crash_on={"2026-08-05"}),
+    )
+    with pytest.raises(RuntimeError, match="worker killed"):
+        live.deploy_live_model_increment(_deepseek(freeze_cfg), freeze_cfg)
+    # 6/7 and 13/14 are under 95%, so neither close was stored, yet both
+    # sessions were billed.
+    assert agent.traded == ["2026-08-03", "2026-08-04"]
+    assert agent.llm_calls == 14
+    assert _month_rows("deepseek_v4_pro") == []
+
+    runs = []
+    _use_agent(monkeypatch, _ScriptedAgent(runs=runs))
+    live.deploy_live_model_increment(_deepseek(freeze_cfg), freeze_cfg)
+    assert runs == [("2026-08-01", "2026-08-27", None)]
+
+
+def test_a_single_miss_on_a_nightly_increment_keeps_the_prior_checkpoint(monkeypatch):
+    freeze_cfg = _live_aug27()
+    _insert_checkpoint("2026-08-26", "08-26")
+    agent = _use_agent(monkeypatch, _ScriptedAgent(misses={"2026-08-27": 1}))
+    with pytest.raises(lb_service.LeaderboardFallbackError, match="6/7"):
+        live.deploy_live_model_increment(_deepseek(freeze_cfg), freeze_cfg)
+    assert agent.llm_calls == 7
+    assert [r["end_date"] for r in _month_rows("deepseek_v4_pro")] == ["2026-08-26"]
+
+    # The retry resumes from that checkpoint, not from the 1st.
+    runs = []
+    _use_agent(monkeypatch, _ScriptedAgent(runs=runs))
+    live.deploy_live_model_increment(_deepseek(freeze_cfg), freeze_cfg)
+    assert runs == [("2026-08-27", "2026-08-27", "08-26")]
+
+
 def test_a_session_with_no_bars_stops_the_run_loudly(monkeypatch, capsys):
     """A trading day with no bars is broken data. Skipping it carried the book
     across a session it never traded, and the window was marked deployed."""
@@ -1498,6 +1582,194 @@ def test_a_missing_last_session_fails_the_refresh_instead_of_marking_it_done(
         "2026-08-26"
     }
     assert live.refresh_live_leaderboard(deploy_models=True, as_of=as_of)["skipped"] is False
+
+
+def test_an_unexpected_error_from_one_model_does_not_stop_the_roster(
+    monkeypatch, capsys,
+):
+    """The per-entry catch named three types. Anything else (a dropped database
+    connection, a market-data socket error, a bug after the model calls)
+    escaped it: every later entry went untraded, and the prune and the state
+    save never ran. LLM provider errors never got this far; the non-strict
+    decision loop turns them into rule-based steps, which H6 refuses."""
+    as_of = datetime(2026, 8, 27, 17, 39, tzinfo=_ET)
+    freeze_cfg = live.live_freeze_config(as_of)
+    deepseek = _deepseek(freeze_cfg)
+    second = {**deepseek, "id": "second_model", "name": "Second Model"}
+    monkeypatch.setattr(live, "live_llm_entries", lambda *args, **kwargs: [deepseek, second])
+    monkeypatch.setattr(lb_service, "ensure_leaderboard_runs", lambda **kwargs: {})
+    monkeypatch.setattr(lb_service, "fetch_hourly_bars", lambda *args: _one_bar_frame())
+    healthy = _ScriptedAgent()
+
+    def get_strategy(entry):
+        if entry["id"] == "deepseek_v4_pro":
+            raise ConnectionError("server closed the connection unexpectedly")
+        return healthy
+
+    monkeypatch.setattr(lb_service, "get_strategy", get_strategy)
+    # A superseded row the end-of-refresh prune must still remove.
+    for end in ("2026-08-25", "2026-08-26"):
+        _insert_live_run(
+            f"lb_spy_index_20260801_{end.replace('-', '')}", "spy_index", end,
+            [_pt(f"{end}T19:00:00+00:00", SEED)],
+        )
+
+    result = live.refresh_live_leaderboard(deploy_models=True, as_of=as_of)
+
+    assert result["models_deployed"] is False
+    assert result["model_failures"] == [
+        {
+            "entry_id": "deepseek_v4_pro",
+            "error": "ConnectionError: server closed the connection unexpectedly",
+        }
+    ]
+    assert [row["entry_id"] for row in result["model_results"]] == ["second_model"]
+    assert healthy.traded[-1] == "2026-08-27"
+    assert (
+        "ERROR: live.model_deploy_failed entry=deepseek_v4_pro "
+        "error=ConnectionError: server closed the connection unexpectedly"
+    ) in capsys.readouterr().out
+    assert result["pruned_runs"] == 1
+    assert db.get_run("lb_spy_index_20260801_20260825") is None
+    saved = live._live_refresh_state()
+    assert saved["window_key"] == result["window_key"]
+    assert saved["model_failures"] == result["model_failures"]
+
+
+def test_a_database_error_mid_checkpoint_is_isolated_and_its_pending_row_pruned(
+    monkeypatch, capsys,
+):
+    """The failure the wide catch is for lands after the model calls: the
+    checkpoint's pending row is written, then the curve write raises. The next
+    entry must still trade off the shared bar fetch, and the end-of-refresh
+    prune must take the half-written row."""
+    as_of = datetime(2026, 8, 27, 17, 39, tzinfo=_ET)
+    freeze_cfg = live.live_freeze_config(as_of)
+    deepseek = _deepseek(freeze_cfg)
+    second = {**deepseek, "id": "second_model", "name": "Second Model"}
+    monkeypatch.setattr(live, "live_llm_entries", lambda *args, **kwargs: [deepseek, second])
+    monkeypatch.setattr(lb_service, "ensure_leaderboard_runs", lambda **kwargs: {})
+    fetches = []
+    monkeypatch.setattr(
+        lb_service, "fetch_hourly_bars",
+        lambda *args: fetches.append(args) or _one_bar_frame(),
+    )
+    agents = {"deepseek_v4_pro": _ScriptedAgent(), "second_model": _ScriptedAgent()}
+    monkeypatch.setattr(lb_service, "get_strategy", lambda entry: agents[entry["id"]])
+    for entry_id in agents:
+        _insert_live_run(
+            f"lb_{entry_id}_20260801_20260826", entry_id, "2026-08-26",
+            [_pt("2026-08-26T19:00:00+00:00", SEED)],
+            metadata={live.LIVE_SNAPSHOT_KEY: {"cash": SEED, "positions": {}}},
+        )
+
+    class OperationalError(Exception):
+        pass
+
+    OperationalError.__module__ = "psycopg"
+    OperationalError.__qualname__ = "OperationalError"
+    real_insert_points = db.insert_equity_points
+
+    def insert_equity_points(run_id, points):
+        if "deepseek_v4_pro" in run_id:
+            # psycopg's real message for a dropped server, newlines and all.
+            raise OperationalError(
+                "server closed the connection unexpectedly\n"
+                "\tThis probably means the server terminated abnormally\n"
+                "\tbefore or while processing the request."
+            )
+        return real_insert_points(run_id, points)
+
+    monkeypatch.setattr(db, "insert_equity_points", insert_equity_points)
+
+    result = live.refresh_live_leaderboard(deploy_models=True, as_of=as_of)
+
+    error = (
+        "psycopg.OperationalError: server closed the connection unexpectedly "
+        "This probably means the server terminated abnormally before or while "
+        "processing the request."
+    )
+    assert result["model_failures"] == [{"entry_id": "deepseek_v4_pro", "error": error}]
+    assert agents["deepseek_v4_pro"].traded == ["2026-08-27"]  # billed, then failed
+    assert [row["entry_id"] for row in result["model_results"]] == ["second_model"]
+    assert agents["second_model"].traded == ["2026-08-27"]
+    assert len(fetches) == 1  # the failed entry's bars still served the next one
+    out = capsys.readouterr().out
+    line = next(
+        text for text in out.splitlines()
+        if text.startswith("ERROR: live.model_deploy_failed")
+    )
+    assert line == f"ERROR: live.model_deploy_failed entry=deepseek_v4_pro error={error}"
+    # Not one of the types the catch used to name, so the traceback that used to
+    # escape the loop is still printed, after the one-line summary.
+    after = out.split(line, 1)[1]
+    assert "Traceback (most recent call last)" in after
+    assert "in _write_live_checkpoint" in after
+    deepseek_rows = _month_rows("deepseek_v4_pro")
+    assert [row["end_date"] for row in deepseek_rows] == ["2026-08-26"]
+    assert not any(live._is_pending_checkpoint(row) for row in deepseek_rows)
+    assert [row["end_date"] for row in _month_rows("second_model")] == ["2026-08-27"]
+
+
+def test_a_fault_every_entry_shares_stops_the_roster_after_two(monkeypatch, capsys):
+    """A bug in the checkpoint path raises for every model after its session
+    was billed. Carrying on would bill the whole roster for nothing, every
+    night until the fix ships; two entries in a row failing the same way stop
+    the rest."""
+    as_of = datetime(2026, 8, 27, 17, 39, tzinfo=_ET)
+    freeze_cfg = live.live_freeze_config(as_of)
+    deepseek = _deepseek(freeze_cfg)
+    roster = [deepseek] + [
+        {**deepseek, "id": f"model_{n}", "name": f"Model {n}"} for n in (2, 3)
+    ]
+    monkeypatch.setattr(live, "live_llm_entries", lambda *args, **kwargs: roster)
+    monkeypatch.setattr(lb_service, "ensure_leaderboard_runs", lambda **kwargs: {})
+    monkeypatch.setattr(lb_service, "fetch_hourly_bars", lambda *args: _one_bar_frame())
+    agents = {entry["id"]: _ScriptedAgent() for entry in roster}
+    monkeypatch.setattr(lb_service, "get_strategy", lambda entry: agents[entry["id"]])
+
+    def broken_metadata(*args, **kwargs):
+        raise KeyError("cash")
+
+    monkeypatch.setattr(lb_service, "_llm_run_metadata", broken_metadata)
+
+    result = live.refresh_live_leaderboard(deploy_models=True, as_of=as_of)
+
+    assert agents["deepseek_v4_pro"].traded and agents["model_2"].traded
+    assert agents["model_3"].traded == []
+    assert result["model_failures"] == [
+        {"entry_id": "deepseek_v4_pro", "error": "KeyError: 'cash'"},
+        {"entry_id": "model_2", "error": "KeyError: 'cash'"},
+        {
+            "entry_id": "model_3",
+            "error": (
+                "not attempted: deepseek_v4_pro and model_2 failed in a row "
+                "with the same KeyError"
+            ),
+        },
+    ]
+    assert result["models_deployed"] is False
+    assert (
+        "ERROR: live.model_not_attempted entry=model_3 "
+        "after=deepseek_v4_pro,model_2 error=KeyError"
+    ) in capsys.readouterr().out
+    assert live._live_refresh_state()["model_failures"] == result["model_failures"]
+
+
+def test_a_base_exception_still_stops_the_refresh(monkeypatch):
+    """Exception, not BaseException: a shutdown must not be logged as one
+    model's failure while the loop carries on billing the rest."""
+    as_of = datetime(2026, 8, 27, 17, 39, tzinfo=_ET)
+    monkeypatch.setattr(lb_service, "ensure_leaderboard_runs", lambda **kwargs: {})
+    monkeypatch.setattr(lb_service, "fetch_hourly_bars", lambda *args: _one_bar_frame())
+
+    def get_strategy(entry):
+        raise SystemExit("worker shutting down")
+
+    monkeypatch.setattr(lb_service, "get_strategy", get_strategy)
+    with pytest.raises(SystemExit):
+        live.refresh_live_leaderboard(deploy_models=True, as_of=as_of)
+    assert live._live_refresh_state() == {}
 
 
 @pytest.mark.parametrize(

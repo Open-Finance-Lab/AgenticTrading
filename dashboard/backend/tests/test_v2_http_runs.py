@@ -132,6 +132,70 @@ def test_mixed_payload_executes_valid_and_rejects_invalid():
     assert any(rj["reason"] == "universe_violation" for rj in body["rejected"])
 
 
+def test_lowercase_symbol_executes_as_its_canonical_ticker():
+    # v1 accepts "aapl"; v2 used to hold the step as a universe_violation.
+    key, sid, _ = _agent("case-agent")
+    _register_run("run_case_http", sid)
+    r = client.post("/api/v2/runs/run_case_http/decisions",
+                    headers={"X-API-Key": key}, json={
+        "idempotency_key": "case-1",
+        "actions": [{"action": "buy", "symbol": " aapl ", "confidence": 0.7,
+                     "reasoning": "valid momentum play", "position_size": 3}],
+    })
+    assert r.status_code == 200
+    body = r.json()
+    assert body["rejected"] == []
+    assert body["decision_source"] == "external_agent"
+    assert [e["symbol"] for e in body["executed"]] == ["AAPL"]
+
+
+def test_lowercase_symbol_trades_through_the_real_backtest_engine(monkeypatch):
+    """FakeBackend echoes whatever the boundary hands it, so the test above
+    cannot see the engine. This one runs the real chain: BacktestBackend ->
+    ExternalBacktestSession.submit_decisions -> parse_actions_payload ->
+    actions_to_executable, whose price lookup is keyed by the symbol."""
+    import pandas as pd
+
+    import dashboard.backend.execution.backtest_backend as bb_mod
+
+    symbols = ["AAPL", "MSFT", "JPM"]
+    idx = pd.date_range("2026-04-15 13:30", periods=40, freq="h", tz="UTC")
+    bars = {
+        sym: pd.DataFrame({
+            "open": 100.0 + i, "high": 101.0 + i, "low": 99.0 + i,
+            "close": 100.0 + i, "volume": 1000,
+        }, index=idx)
+        for i, sym in enumerate(symbols)
+    }
+
+    class _Loader:
+        def fetch_bars(self, syms, start, end):
+            return bars
+
+    monkeypatch.setattr(bb_mod.ext, "AlpacaDataLoader", lambda: _Loader())
+    monkeypatch.setattr(bb_mod, "DJIA_30", symbols, raising=False)
+
+    key, sid, _ = _agent("real-engine-case-agent")
+    backend = bb_mod.BacktestBackend(
+        run_id="run_case_engine", session_id=sid, agent_name="a",
+        model_name="m", start_date="2026-04-15", end_date="2026-04-16",
+    )
+    backend.load_blocking()
+    runs_mod.register_run("run_case_engine", backend, sid)
+
+    r = client.post("/api/v2/runs/run_case_engine/decisions",
+                    headers={"X-API-Key": key}, json={
+        "idempotency_key": "case-engine-1",
+        "actions": [{"action": "buy", "symbol": " aapl ", "confidence": 0.7,
+                     "reasoning": "valid momentum play", "position_size": 3}],
+    })
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["rejected"] == []
+    assert [(e["symbol"], e["shares"]) for e in body["executed"]] == [("AAPL", 3)]
+    assert backend.session.manager.positions.get("AAPL") == 3
+
+
 def test_all_invalid_payload_auto_holds():
     key, sid, _ = _agent("allbad-agent")
     _register_run("run_allbad_http", sid)

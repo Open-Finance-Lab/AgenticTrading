@@ -1195,7 +1195,7 @@ def _finalize_slot_locked(
         # Still `backtest_failed`: the user asked for a backtest, got nothing,
         # and was billed. A separate event name would need nine registrations
         # and would drop timeouts out of `metrics.py`'s `_TERMINAL_FAILURE`,
-        # `states.py`'s consecutive-failure alert and `backfill.py`'s terminal
+        # `lifecycle.py`'s consecutive-failure alert and `backfill.py`'s terminal
         # map -- the three things that exist to notice runs failing. What was
         # missing is the reason, not the outcome.
         return {
@@ -1380,6 +1380,40 @@ def _label_trace(run_id: Optional[str], error_code: str) -> None:
         print(
             f"ERROR: trace.label_timeout run={run_id} label={error_code} "
             f"deadline_s={TRACE_LABEL_DEADLINE_SECONDS}; abandoned",
+            flush=True,
+        )
+
+
+# Same bound, same reason, for the partial-result snapshot below.
+LIVE_PROGRESS_CLEAR_DEADLINE_SECONDS = 10
+
+
+def _clear_live_progress_snapshot(run_id: Optional[str]) -> None:
+    """Delete the child's partial-result snapshot now that the run is over.
+
+    The boot reclaimer publishes any snapshot it finds as a run interrupted by
+    a server restart, so the row must not outlive a parent that saw the run
+    end -- however it ended. Without this, every cancelled, failed and
+    timed-out run came back under that label after the next deploy. A row left
+    here is one whose parent died, which is exactly what the label claims.
+    Bounded, and run after the slot is free, like the trace label above.
+    """
+    if not run_id:
+        return
+    result = _run_with_deadline(
+        lambda: db.delete_live_progress(run_id),
+        LIVE_PROGRESS_CLEAR_DEADLINE_SECONDS,
+    )
+    if result.error is not None:
+        print(
+            f"ERROR: live_progress.clear_failed run={run_id} "
+            f"error={type(result.error).__name__}: {result.error}",
+            flush=True,
+        )
+    elif not result.finished:
+        print(
+            f"ERROR: live_progress.clear_timeout run={run_id} "
+            f"deadline_s={LIVE_PROGRESS_CLEAR_DEADLINE_SECONDS}; abandoned",
             flush=True,
         )
 
@@ -1870,7 +1904,8 @@ def run_backtest_background(
     resolved_live_run_id = live_run_id
     # Captured separately: the except arm below clears resolved_live_run_id
     # once the slot is finalized, but the finally still needs the id to close
-    # a trace the child could not (killed by the timeout or SIGKILL).
+    # a trace the child could not (killed by the timeout or SIGKILL) and to
+    # delete the child's partial-result snapshot.
     trace_run_id: Optional[str] = None
     # Which label a still-``running`` trace gets. Each arm only RECORDS it; the
     # write happens once, last in ``finally``, so a slow trace store can never
@@ -2333,6 +2368,9 @@ def run_backtest_background(
             # that raises (``finalize_run`` with a non-LLMExecutionError,
             # ``_finalize_slot``) cannot leave the trace ``running`` forever.
             _label_trace(trace_run_id, trace_label or "run_killed")
+            # trace_run_id is the id the child flushed its snapshot under
+            # (--run-id), and unlike resolved_live_run_id no arm clears it.
+            _clear_live_progress_snapshot(trace_run_id)
             print("✋ Backtest background thread finished", flush=True)
 
 
