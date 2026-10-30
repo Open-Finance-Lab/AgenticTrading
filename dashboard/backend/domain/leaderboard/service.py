@@ -1997,8 +1997,10 @@ def _warn_on_feed_drift(runs: List[Dict[str, Any]], configured: Optional[str]) -
     runs on a public, unauthenticated GET, and treating a feed mismatch as
     "missing" would re-fetch Alpaca on every page load for as long as the
     mismatch persists (e.g. while SIP keeps falling back to IEX). Recomputing
-    is an operator action — ``POST /api/v1/leaderboard/refresh`` with
-    ``force=true``, or ``scripts/refresh_daily_leaderboard.py --remote``.
+    is an operator action — ``GET /api/v1/leaderboard?refresh=true`` (refresh
+    secret or admin session) for the Competition board, and for the daily
+    window ``POST /api/v1/leaderboard/daily/refresh?force=true&deploy_models=false``
+    or ``scripts/refresh_daily_leaderboard.py --remote --force``.
 
     Emitted once per distinct drift per process: this runs on the hot cached
     path of a public endpoint, and a line per page load would bury itself.
@@ -2035,8 +2037,8 @@ def _warn_on_capital_drift(
     module to "cached rows are not comparable". A warning, once per distinct
     drift per process, never an auto-refresh — ``ensure_leaderboard_runs`` and
     ``get_leaderboard`` both run on a public, unauthenticated GET, and
-    recomputing is an operator action (``POST /api/v1/leaderboard/refresh`` with
-    ``force=true``).
+    recomputing is an operator action (the same refresh routes as
+    ``_warn_on_feed_drift`` names).
 
     Why capital is a comparability problem and not a display one: a $10,000 run
     buys whole shares in a coarser quantum than a $100,000 one and pays

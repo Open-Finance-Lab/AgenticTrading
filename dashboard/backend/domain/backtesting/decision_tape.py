@@ -29,6 +29,10 @@ from dashboard.backend.domain.trading.execution import _trading_date
 from dashboard.backend.infrastructure.llm.pipeline_runner import (
     pipeline_output_to_decision,
 )
+from dashboard.backend.infrastructure.llm.validator import (
+    normalize_action,
+    normalize_symbol,
+)
 
 # 2 (#661): a SELL sells the size it names, ``size_fraction`` joined the intent
 # fields, and a sized SELL's size is compared by ``gate_rewrote``. A v1 tape was
@@ -400,7 +404,7 @@ def _sizes_match(wanted: Sequence[Optional[float]], got: Sequence[Optional[float
 
 def _order_triples(orders: Iterable[Mapping[str, Any]], size_field: str):
     """``(symbol, side, size)`` per buy/sell order, normalised the way the gate
-    reads them (``symbol.strip().upper()``, ``action.strip().lower()``).
+    reads them (``normalize_symbol``, ``normalize_action``).
 
     ``size`` is compared only where the gate honours it. An order with
     ``position_size`` 0 (or none) asks the gate to size it -- a BUY from
@@ -412,13 +416,15 @@ def _order_triples(orders: Iterable[Mapping[str, Any]], size_field: str):
     for order in orders or ():
         if not isinstance(order, Mapping):
             continue
-        side = str(order.get("action") or order.get("side") or "").strip().lower()
+        side = normalize_action(order.get("action")) or normalize_action(
+            order.get("side")
+        )
         if side not in _ORDER_SIDES:
             continue  # hold / unknown: not an order the gate can rewrite
         size = _size(order.get(size_field))
         if size == 0:
             size = None
-        triples.append((str(order.get("symbol") or "").strip().upper(), side, size))
+        triples.append((normalize_symbol(str(order.get("symbol") or "")), side, size))
     return triples
 
 

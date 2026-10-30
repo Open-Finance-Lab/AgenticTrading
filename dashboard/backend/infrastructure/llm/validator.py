@@ -56,10 +56,10 @@ TOP_10_STOCKS = ["AAPL", "MSFT", "JPM", "V", "JNJ", "WMT", "PG", "AXP", "HD", "D
 _TICKER_RE = re.compile(r"^[A-Z][A-Z0-9.]{0,9}$")
 
 
-# The whitespace an agent's JSON plausibly wraps a ticker in. Deliberately not
-# str.strip()'s default set, which also eats Unicode spaces (NBSP, U+2028) and
-# the ASCII separators \x1c-\x1f.
-_SYMBOL_WHITESPACE = " \t\n\r\v\f"
+# The whitespace an agent's JSON plausibly wraps a ticker or an action in.
+# Deliberately not str.strip()'s default set, which also eats Unicode spaces
+# (NBSP, U+2028) and the ASCII separators \x1c-\x1f.
+_ASCII_WHITESPACE = " \t\n\r\v\f"
 
 
 def normalize_symbol(symbol: str) -> str:
@@ -77,10 +77,34 @@ def normalize_symbol(symbol: str) -> str:
     case mapping folds look-alikes into real symbols ('ıbm'.upper() == 'IBM',
     'cſco'.upper() == 'CSCO').
     """
-    trimmed = symbol.strip(_SYMBOL_WHITESPACE)
+    trimmed = symbol.strip(_ASCII_WHITESPACE)
     if not trimmed.isascii():
         return trimmed
     return trimmed.upper()
+
+
+def normalize_action(action: Any) -> str:
+    """Canonical action form: ASCII whitespace trimmed, ASCII letters lowercased.
+
+    The one rule for reading a model's action or order side before matching
+    it against ``TRADING_ACTIONS``: the backtest gate's strict check and the
+    loop that places trades, a pipeline's ``orders`` and ``risk_actions``, the
+    decision tape, the AI Hedge Fund adapter, the Trading Algo backtest and
+    the Robinhood live path. Each used to read the field its own way, and
+    the strict check stripping ``"buy "`` while the trade loop did not let
+    the action pass validation and then match no branch (#658).
+
+    A missing action (``None``) is ``""``; the caller decides what that means.
+    Anything else is read through ``str()``, so a number or a list can never
+    equal an action. As in ``normalize_symbol``, a value that is not ASCII
+    once trimmed is not case-folded.
+    """
+    if action is None:
+        return ""
+    trimmed = str(action).strip(_ASCII_WHITESPACE)
+    if not trimmed.isascii():
+        return trimmed
+    return trimmed.lower()
 
 
 # What an action's confidence reads as when the model leaves it out, per
@@ -211,6 +235,11 @@ class TradingAction(str, Enum):
     BUY = "buy"
     SELL = "sell"
     HOLD = "hold"
+
+
+# The action vocabulary as plain strings, for paths that match a normalized
+# action without building a model.
+TRADING_ACTIONS = frozenset(action.value for action in TradingAction)
 
 
 # Hard per-order share ceiling enforced by ``LLMTradingDecision``. Exposed as a

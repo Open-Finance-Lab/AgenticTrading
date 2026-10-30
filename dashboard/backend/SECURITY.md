@@ -108,16 +108,22 @@ The LLM **must** respond with JSON matching this schema:
 The hourly backtest engine (`domain/backtesting/portfolio_manager.py`,
 `make_trading_decision_with_llm`) — including runs driven by a user's
 free-form `strategy_prompt` (a My Agents agent's prompt) — does **not** route parsed
-decisions through `validate_llm_response`. It predates the validator and its
-behavior is intentionally preserved byte-for-byte for backtest reproducibility.
+decisions through `validate_llm_response`. It predates the validator. Its
+readings of a reply are not frozen: each fix to them (`normalize_symbol`,
+`read_confidence`, `normalize_action`) can change what an earlier recorded
+bar decides. A replay through `orders_for_replay`, or a
+`diff_backtest_runs.py` comparison with a run from before the fix, can then
+diverge from that bar onward. `"buy "`, for one, placed nothing before #658
+and buys now.
 
 It applies these constraints inline instead:
 
 | Constraint | Enforcement |
 |------------|-------------|
 | JSON-only, no tools | No request sends `tools`; text blocks only (`extract_response_text`, which skips `tool_use` and thinking blocks); prompt scaffold pins the output contract; response is parsed as JSON only (`parse_llm_response`), never executed |
+| Action vocabulary | Read by `normalize_action` (ASCII whitespace trimmed, ASCII letters lowercased) and matched against `TRADING_ACTIONS` (buy/sell/hold). A missing action holds; any other action is skipped with a log line, and a batch with no recognised action holds without H6 credit; a strict run rejects the whole batch. A pipeline's `orders` and `risk_actions` hand an unrecognised side on to this check rather than reading it as hold |
 | Symbol allowlist | Symbols are normalized with `normalize_symbol` (see below), then any outside the run's universe (`_allowed_set`: `DJIA_30` unless the run names a universe) is skipped; a strict run rejects the whole batch |
-| Action count | Capped at one action per universe symbol (`len(allowed_symbols)`); excess entries ignored, or the whole batch rejected on a strict run |
+| Action count | A count cap, not one action per symbol: at most `len(allowed_symbols)` actions per step; excess entries ignored, or the whole batch rejected on a strict run. Repeats of one symbol are not merged, so one step can send that many orders for a single name, each up to `MAX_ORDER_SHARES` and bounded only by the cash and held-share limits below |
 | Per-order size (BUY) | `position_size > MAX_ORDER_SHARES` (10k, same constant as the validator) skipped; unparseable/non-finite sizes skipped |
 | Per-order size (SELL) | Sized by `requested_sell_shares` (`infrastructure/llm/validator.py`, shared with `actions_to_executable`): `position_size > 0` sells that many shares (under one share is refused, not truncated to 0); a missing/null/0 size sells `size_fraction` of the holding when the action carries one (above 0, 1 or more is all of it, a part rounded down to whole lots), else the whole position. A bool, non-numeric text, NaN, infinity or a negative value in either field skips the action and records an `invalid_quantity` order rejection; it is never read as "the whole position". Not bounded by `MAX_ORDER_SHARES`: a SELL is capped at the holding (and under T+1 at the sellable quantity), so it can exceed 10k only when the holding does, as a whole-position exit always could |
 | Cash bound | Buys must fit in available cash; sells limited to held shares |
@@ -155,8 +161,9 @@ and the table above does **not** apply to it. It reads `response.content[0].text
 instead of calling `extract_response_text`, parses with its own `find('{')`/`rfind('}')`
 plus `fix_json_formatting` instead of `parse_llm_response`, keeps at most 8 actions on
 `DJIA_30` names with confidence ≥ 0.3, and never applies `MAX_ORDER_SHARES`: a buy is
-bounded only by available cash. Bring it onto the shared helpers before relying on the
-table for it.
+bounded only by available cash. Only its symbol and action are read by the shared
+`normalize_symbol` and `normalize_action`. Bring the rest onto the shared helpers before
+relying on the table for it.
 
 ---
 

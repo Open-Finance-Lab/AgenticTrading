@@ -5,7 +5,8 @@ Selected instead of the default SQLite UserStore when USERS_DATABASE_URL is
 set (see users.py's _build_user_store). Exists because the SQLite UserStore
 shares DB_PATH with backtest data, and the deployed backend runs on a
 disk-less Render host where that file resets on every deploy --
-silently deleting every account (see CLAUDE.md gotchas).
+silently deleting every account (see CLAUDE.md, "Prod deploy reality", and
+docs/superpowers/plans/2026-07-08-user-account-persistence-fix.md).
 """
 
 from datetime import datetime

@@ -918,3 +918,11 @@ def test_floor_quantity_rounds_down():
     assert live_service._floor_quantity(-1.0) == 0.0
     assert live_service._floor_quantity("nope") == 0.0
     assert live_service._floor_quantity(math.inf) == 0.0
+
+
+def test_actions_to_orders_reads_a_padded_action_like_the_gate():
+    # "buy " used to match neither side and was dropped without a word (#658).
+    orders = live_service._actions_to_robinhood_orders(
+        [{"action": " BUY\n", "symbol": "AAPL", "position_size": 5}]
+    )
+    assert orders == [_order("AAPL", "buy", 5.0)]
