@@ -9,7 +9,11 @@ the hourly annualization assumptions are identical to the original methods; the
 legacy methods now delegate here.
 """
 
-from typing import Dict, List, Optional
+import math
+import statistics
+from datetime import date, datetime, timezone
+from typing import Any, Dict, Iterable, List, Optional, Tuple
+from zoneinfo import ZoneInfo
 
 import numpy as np
 
@@ -88,3 +92,197 @@ def calculate_max_drawdown(equity_curve: List[Dict]) -> float:
             max_dd = dd
 
     return max_dd
+
+
+# ---------------------------------------------------------------------------
+# Daily Sharpe with its 95% interval (P19 on the boards; spec 2026-10-14 §4)
+# ---------------------------------------------------------------------------
+#
+# ``calculate_sharpe`` above annualises whatever steps a curve holds (hourly
+# marks, ddof 0, rf 0, undefined -> 0). The leaderboards publish this one
+# instead: one return per US trading day, ddof 1, a stated cash rate, an
+# interval, and None -- never 0, never NaN -- when it is undefined. It is read
+# at request time from a stored curve, so it must stay pure arithmetic: no I/O.
+
+SHARPE_TRADING_DAYS_PER_YEAR = 252
+SHARPE_MIN_DAYS = 5
+SHARPE_CONFIDENCE = 0.95
+# The legacy engine has no T-bill source, so the boards state 0%/yr and say so.
+SHARPE_RF_ANNUAL = 0.0
+
+SHARPE_STATUS_OK = "ok"
+SHARPE_STATUS_INSUFFICIENT_DAYS = "insufficient_days"
+SHARPE_STATUS_NO_VARIATION = "no_variation"
+SHARPE_STATUS_PENDING = "pending"
+
+_SHARPE_TZ = ZoneInfo("America/New_York")
+# Below this a daily-return stdev is float noise, not variation. A flat curve
+# rescaled onto the board's capital (the committed contest board carries a
+# 100000.00000000003 seed) can sit one ulp off E_0 on day 1, and that alone
+# would publish a Sharpe of about 6.5 for an account that never moved.
+_SHARPE_MIN_STDEV = 1e-12
+
+
+def sharpe_standard_error_daily(sharpe_daily: float, n: int) -> float:
+    """Standard error of a per-day Sharpe estimated from ``n`` iid daily returns.
+
+    Lo (2002), iid case: ``sqrt((1 + SR_d**2 / 2) / n)``. It is Mertens'
+    formula with skew 0 and kurtosis 3; both moment estimates are noise at the
+    5-20 returns a month holds, so the iid form is the stable, hand-checkable
+    choice. Not annualised: multiply by ``sqrt(252)`` for the yearly figure.
+    """
+    if n < 1:
+        raise ValueError("n must be at least 1")
+    return math.sqrt((1.0 + sharpe_daily * sharpe_daily / 2.0) / n)
+
+
+def _point_time(value: Any) -> Optional[datetime]:
+    if isinstance(value, datetime):
+        stamp = value
+    elif value is None:
+        return None
+    else:
+        try:
+            stamp = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    # Naive stamps are UTC: the convention of every stored curve in this repo
+    # (live.py ``_parse_to_et``, service.py ``_curve_span``).
+    if stamp.tzinfo is None:
+        stamp = stamp.replace(tzinfo=timezone.utc)
+    return stamp
+
+
+def _finite_equity(value: Any) -> Optional[float]:
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if math.isfinite(number) else None
+
+
+def daily_session_closes(
+    points: Iterable[Dict[str, Any]], *, tz: ZoneInfo = _SHARPE_TZ
+) -> List[Tuple[date, float]]:
+    """The last finite equity of each ``tz`` calendar date, in date order.
+
+    Points are ordered by timestamp, not by list position. A point with no
+    parseable timestamp, or an equity that is None or not finite, is "no
+    observation" and skipped; 0 and negatives are real observations and kept.
+    """
+    observed: List[Tuple[datetime, int, float]] = []
+    for index, point in enumerate(points or []):
+        stamp = _point_time(point.get("timestamp"))
+        equity = _finite_equity(point.get("equity"))
+        if stamp is None or equity is None:
+            continue
+        observed.append((stamp, index, equity))
+    observed.sort(key=lambda item: (item[0], item[1]))
+    closes: Dict[date, float] = {}
+    for stamp, _index, equity in observed:
+        closes[stamp.astimezone(tz).date()] = equity
+    return sorted(closes.items())
+
+
+def daily_sharpe_basis(
+    *,
+    rf_annual: float = SHARPE_RF_ANNUAL,
+    confidence: float = SHARPE_CONFIDENCE,
+    min_days: int = SHARPE_MIN_DAYS,
+) -> Dict[str, Any]:
+    """What a published ``sharpe_ratio`` means: one owner for the board copy."""
+    return {
+        "basis": "daily_returns",
+        "annualization_days": SHARPE_TRADING_DAYS_PER_YEAR,
+        "confidence": confidence,
+        "min_days": min_days,
+        "rf_annual": rf_annual,
+        "stderr": "iid",
+    }
+
+
+def daily_sharpe_interval(
+    points: Iterable[Dict[str, Any]],
+    initial_equity: Any,
+    *,
+    rf_annual: float = SHARPE_RF_ANNUAL,
+    confidence: float = SHARPE_CONFIDENCE,
+    min_days: int = SHARPE_MIN_DAYS,
+) -> Dict[str, Any]:
+    """Annualised daily Sharpe and its interval, from an equity curve.
+
+    ``E_0 = initial_equity``; ``E_d`` is the last finite point of US/Eastern
+    date ``d``. ``r_d = E_d / E_{d-1} - 1``, ``x_d = r_d - rf_annual / 252``,
+    ``SR = mean(x) / stdev(x, ddof=1) * sqrt(252)`` and the interval is
+    ``SR -/+ z * sharpe_standard_error_daily(SR_d, n) * sqrt(252)``.
+
+    Returns ``{"sharpe", "ci_low", "ci_high", "days", "status", "rf_annual"}``.
+    ``days`` is the number of daily returns. The three values are floats only
+    when ``status == "ok"`` and None otherwise -- never NaN, which Postgres
+    round-trips and Starlette refuses to encode (``allow_nan=False``):
+
+    * ``pending``: no daily close at all;
+    * ``insufficient_days``: fewer than ``min_days`` returns;
+    * ``no_variation``: a return is undefined (an ``E_{d-1}`` that is 0 or
+      negative, or a seed that is not a positive number) or the returns never
+      moved (stdev 0, or float noise below ``_SHARPE_MIN_STDEV``), or the
+      arithmetic overflowed.
+    """
+    if not 0.0 < confidence < 1.0:
+        raise ValueError("confidence must be between 0 and 1")
+    if min_days < 2:
+        raise ValueError("min_days must be at least 2: a sample stdev needs two returns")
+    if not math.isfinite(rf_annual):
+        raise ValueError("rf_annual must be finite")
+
+    closes = [equity for _day, equity in daily_session_closes(points)]
+    days = len(closes)
+
+    def _result(status: str, sharpe=None, low=None, high=None) -> Dict[str, Any]:
+        return {
+            "sharpe": sharpe,
+            "ci_low": low,
+            "ci_high": high,
+            "days": days,
+            "status": status,
+            "rf_annual": rf_annual,
+        }
+
+    if days == 0:
+        return _result(SHARPE_STATUS_PENDING)
+    if days < min_days:
+        return _result(SHARPE_STATUS_INSUFFICIENT_DAYS)
+    seed = _finite_equity(initial_equity)
+    previous_levels = [seed] + closes[:-1]
+    if any(level is None or level <= 0 for level in previous_levels):
+        return _result(SHARPE_STATUS_NO_VARIATION)
+
+    rf_daily = rf_annual / SHARPE_TRADING_DAYS_PER_YEAR
+    excess = [
+        close / previous - 1.0 - rf_daily
+        for previous, close in zip(previous_levels, closes)
+    ]
+    if not all(math.isfinite(value) for value in excess):
+        return _result(SHARPE_STATUS_NO_VARIATION)
+    try:
+        mean = statistics.fmean(excess)
+        stdev = statistics.stdev(excess)
+    except (OverflowError, ValueError):
+        return _result(SHARPE_STATUS_NO_VARIATION)
+    if not math.isfinite(mean) or not math.isfinite(stdev) or stdev <= _SHARPE_MIN_STDEV:
+        return _result(SHARPE_STATUS_NO_VARIATION)
+
+    sharpe_daily = mean / stdev
+    annualise = math.sqrt(SHARPE_TRADING_DAYS_PER_YEAR)
+    sharpe = sharpe_daily * annualise
+    half_width = (
+        statistics.NormalDist().inv_cdf(0.5 + confidence / 2.0)
+        * sharpe_standard_error_daily(sharpe_daily, days)
+        * annualise
+    )
+    low, high = sharpe - half_width, sharpe + half_width
+    if not all(math.isfinite(value) for value in (sharpe, low, high)):
+        return _result(SHARPE_STATUS_NO_VARIATION)
+    return _result(SHARPE_STATUS_OK, sharpe, low, high)
