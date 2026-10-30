@@ -37,6 +37,7 @@ from dashboard.backend.infrastructure.llm.validator import (
     PIPELINE_ORDER_DEFAULT_CONFIDENCE,
     PIPELINE_RISK_DEFAULT_CONFIDENCE,
     model_number,
+    normalize_action,
     read_confidence,
 )
 
@@ -240,9 +241,17 @@ def pipeline_output_to_decision(parsed: Dict[str, Any]) -> Optional[Dict[str, An
             for order in orders:
                 if not isinstance(order, dict):
                     continue
-                side = str(order.get("side") or order.get("action") or "hold").strip().lower()
-                if side not in ("buy", "sell", "hold"):
-                    side = "hold"
+                # Each candidate is normalized before the fallback, or a blank
+                # side would hide an ``action`` alias. One that is not buy,
+                # sell or hold is handed on as written, like confidence and qty
+                # below: read as hold, it placed no trade yet counted as the
+                # model's decision (#658). The gate refuses it under
+                # strict_llm and skips it with a log line otherwise.
+                side = (
+                    normalize_action(order.get("side"))
+                    or normalize_action(order.get("action"))
+                    or "hold"
+                )
                 qty = order.get(
                     "qty", order.get("quantity", order.get("position_size", 0))
                 )
@@ -284,21 +293,22 @@ def pipeline_output_to_decision(parsed: Dict[str, Any]) -> Optional[Dict[str, An
             for risk in risk_actions:
                 if not isinstance(risk, dict):
                     continue
-                action_type = str(risk.get("action") or "hold").strip().lower()
+                action_type = normalize_action(risk.get("action")) or "hold"
+                # Anything else, buy/sell/hold included, is handed on as
+                # written for the gate to judge, as an order's side is: a
+                # "close" read as hold silently kept a position the model
+                # asked to exit (#658).
                 if action_type in ("stop_loss", "take_profit", "trail"):
                     side = "sell"
-                elif action_type == "hold":
-                    side = "hold"
                 else:
-                    side = (
-                        action_type
-                        if action_type in ("buy", "sell", "hold")
-                        else "hold"
-                    )
+                    side = action_type
                 # A missing size sells the whole position. One the model gave
                 # must be a positive number: 0 asks to sell nothing, and a
                 # malformed size is not read as "all of it" (the same rule as
-                # read_confidence), so either one holds.
+                # read_confidence), so either one holds. Any positive size
+                # still sells the whole sellable position: the gate does not
+                # size a sell (see decision_tape._order_triples), so a
+                # size_pct of 0.25 is a full exit, not a partial one.
                 size_pct = model_number(risk.get("size_pct"), 1.0)
                 if side == "sell" and (
                     size_pct is None

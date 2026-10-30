@@ -14,10 +14,12 @@ import pytest
 import json
 
 from dashboard.backend.infrastructure.llm.validator import (
+    TRADING_ACTIONS,
     validate_llm_response,
     TradingAction,
     create_safe_prompt,
     model_number,
+    normalize_action,
     read_confidence,
 )
 
@@ -487,3 +489,34 @@ class TestReadConfidence:
         assert model_number(-(10**400)) == float("-inf")
         assert model_number(True) is None
         assert model_number(None, 1.0) == 1.0
+
+
+class TestNormalizeAction:
+    """normalize_action: one reading of a model's action for every path that
+    matches it against TRADING_ACTIONS (#658)."""
+
+    @pytest.mark.parametrize(
+        "value, expected",
+        [("buy", "buy"), ("buy ", "buy"), ("  BUY\n", "buy"), ("\tSell\r", "sell"),
+         ("Hold", "hold"), (" stop_loss\n", "stop_loss")],
+    )
+    def test_ascii_whitespace_is_trimmed_and_case_folded(self, value, expected):
+        assert normalize_action(value) == expected
+
+    def test_a_missing_action_is_empty_for_the_caller_to_read(self):
+        assert normalize_action(None) == ""
+
+    @pytest.mark.parametrize(
+        "value", [1, ["buy"], {"a": "buy"}, True, "Buy.", "buy_more", "long"]
+    )
+    def test_anything_else_never_equals_an_action(self, value):
+        assert normalize_action(value) not in TRADING_ACTIONS
+
+    @pytest.mark.parametrize("value", ["buy ", " sell", "buy\x1c"])
+    def test_unicode_whitespace_is_not_trimmed(self, value):
+        # The same set normalize_symbol trims, so one order's symbol and
+        # action are never held to different rules.
+        assert normalize_action(value) not in TRADING_ACTIONS
+
+    def test_trading_actions_is_the_enum(self):
+        assert TRADING_ACTIONS == {action.value for action in TradingAction}

@@ -121,6 +121,40 @@ def test_pipeline_output_to_decision_strips_the_side():
     assert decision["actions"][0]["action"] == "sell"
 
 
+def test_a_blank_side_does_not_hide_the_action_alias():
+    # " " was truthy, so the "action" alias was never read and the buy held.
+    decision = pipeline_output_to_decision(
+        {"orders": [{"symbol": "AAPL", "side": " ", "action": "buy", "qty": 10}]}
+    )
+    assert decision["actions"][0]["action"] == "buy"
+
+
+@pytest.mark.parametrize(
+    "envelope, written, handed_on",
+    [
+        ("orders", "Buy.", "buy."),
+        ("orders", "long", "long"),
+        ("orders", "BUY_MORE", "buy_more"),
+        ("risk_actions", "close", "close"),
+        ("risk_actions", " Exit ", "exit"),
+    ],
+)
+def test_an_unrecognised_side_is_handed_on_for_the_gate(envelope, written, handed_on):
+    # Read as hold, it placed no trade yet passed the strict check and
+    # counted as the model's decision (#658). The gate judges it now.
+    field = "side" if envelope == "orders" else "action"
+    decision = pipeline_output_to_decision(
+        {envelope: [{"symbol": "AAPL", field: written, "qty": 10}]}
+    )
+    assert decision["actions"][0]["action"] == handed_on
+
+
+@pytest.mark.parametrize("envelope", ["orders", "risk_actions"])
+def test_a_missing_side_still_holds(envelope):
+    decision = pipeline_output_to_decision({envelope: [{"symbol": "AAPL"}]})
+    assert decision["actions"][0]["action"] == "hold"
+
+
 @pytest.mark.parametrize(
     "fields, expected",
     [

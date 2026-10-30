@@ -28,6 +28,10 @@ from dashboard.backend.domain.trading.execution import _trading_date
 from dashboard.backend.infrastructure.llm.pipeline_runner import (
     pipeline_output_to_decision,
 )
+from dashboard.backend.infrastructure.llm.validator import (
+    normalize_action,
+    normalize_symbol,
+)
 
 TAPE_VERSION = 1
 MAX_REASONING_CHARS = 500
@@ -365,7 +369,7 @@ def _size(value: Any) -> Optional[float]:
 
 def _order_triples(orders: Iterable[Mapping[str, Any]], size_field: str):
     """``(symbol, side, size)`` per buy/sell order, normalised the way the gate
-    reads them (``symbol.strip().upper()``, ``action.strip().lower()``).
+    reads them (``normalize_symbol``, ``normalize_action``).
 
     ``size`` is compared only where the gate honours it. A SELL is always sized
     by the gate to the whole sellable position, whatever the model sent, so a
@@ -376,7 +380,9 @@ def _order_triples(orders: Iterable[Mapping[str, Any]], size_field: str):
     for order in orders or ():
         if not isinstance(order, Mapping):
             continue
-        side = str(order.get("action") or order.get("side") or "").strip().lower()
+        side = normalize_action(order.get("action")) or normalize_action(
+            order.get("side")
+        )
         if side not in _ORDER_SIDES:
             continue  # hold / unknown: not an order the gate can rewrite
         size = None
@@ -384,7 +390,7 @@ def _order_triples(orders: Iterable[Mapping[str, Any]], size_field: str):
             size = _size(order.get(size_field))
             if size == 0:
                 size = None
-        triples.append((str(order.get("symbol") or "").strip().upper(), side, size))
+        triples.append((normalize_symbol(str(order.get("symbol") or "")), side, size))
     return sorted(triples, key=lambda t: (t[0], t[1], -1.0 if t[2] is None else t[2]))
 
 

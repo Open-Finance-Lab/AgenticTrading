@@ -38,7 +38,9 @@ from dashboard.backend.infrastructure.llm.validator import (
     DJIA_30,
     LLM_ACTION_DEFAULT_CONFIDENCE,
     MAX_ORDER_SHARES,
+    TRADING_ACTIONS,
     create_prompt,
+    normalize_action,
     normalize_symbol,
     read_confidence,
 )
@@ -850,34 +852,45 @@ class PortfolioManager:
                 llm_actions = llm_actions[:max_actions]
 
             if strict_llm:
-                valid_action_types = {"buy", "sell", "hold"}
                 for llm_action in llm_actions:
                     if not isinstance(llm_action, dict):
                         raise LLMDecisionError(
                             "LLM returned an invalid action batch"
                         )
                     symbol = normalize_symbol(str(llm_action.get("symbol") or ""))
-                    action_type = str(
-                        llm_action.get("action") or ""
-                    ).strip().lower()
+                    # A missing action is refused here, unlike the loop below.
+                    action_type = normalize_action(llm_action.get("action"))
                     if (
                         symbol not in self._allowed_set
-                        or action_type not in valid_action_types
+                        or action_type not in TRADING_ACTIONS
                     ):
                         raise LLMDecisionError(
                             "LLM returned an invalid action batch"
                         )
 
+            # Whether any action named buy, sell or hold. A batch where none
+            # did carried no decision the model can be credited with (#658).
+            recognised_any = False
             for llm_action in llm_actions:
                 symbol = normalize_symbol(str(llm_action.get("symbol") or ""))
-                # Stripped like the strict check above, or "buy " passes it and
-                # then matches no branch below (#658).
-                action_type = llm_action.get("action", "hold").strip().lower()
+                # Read by the same rule as the strict check above: two readings
+                # let "buy " pass that check and then match no branch (#658).
+                # A missing or null action holds, as an absent one always has.
+                raw_action = llm_action.get("action")
+                action_type = normalize_action(raw_action) or "hold"
                 raw_confidence = llm_action.get("confidence")
                 confidence = read_confidence(
                     raw_confidence, LLM_ACTION_DEFAULT_CONFIDENCE
                 )
-                reasoning = llm_action.get("reasoning", "")
+                raw_reasoning = llm_action.get("reasoning")
+                reasoning = "" if raw_reasoning is None else str(raw_reasoning)
+
+                if action_type not in TRADING_ACTIONS:
+                    # Only a non-strict run gets here; strict_llm refused the
+                    # batch above. Placing nothing silently read as a hold.
+                    print(f"\n   ⚠️  {symbol}: Skip (unrecognised action {raw_action!r})")
+                    continue
+                recognised_any = True
 
                 if confidence is None:
                     print(f"\n   Processing: {symbol} ({action_type.upper()}, conf={raw_confidence!r})")
@@ -991,7 +1004,15 @@ class PortfolioManager:
                         print(f"      ⚠️  SELL {symbol}: Skip (not in portfolio, only owns: {list(self.positions.keys())})")
                 
                 # else: HOLD is implicit (don't add to actions)
-            
+
+            if not recognised_any:
+                # Like an unparseable reply on this non-strict path: no actions
+                # and no H6 credit, since nothing the model sent named a trade
+                # or a hold. Counting it published a curve the model never
+                # drove under its name (#658).
+                print("   ⚠️  No action named buy, sell or hold; holding this step\n")
+                return {"actions": []}
+
             # H6 coverage increment #2 of 2 — the main success exit: the model's
             # actions were parsed AND processed without error, so the returned
             # decision is genuinely the model's. This is the H6 coverage
@@ -999,7 +1020,8 @@ class PortfolioManager:
             # the processing loop above is caught below and swapped for a
             # rule-based decision, which must NOT count. (Actions filtered for
             # low confidence / invalid symbol still count: the model drove the
-            # step, our policy merely declined to act on it.)
+            # step, our policy merely declined to act on it. A batch in which
+            # no action was recognised returned above without counting.)
             #
             # These two sites are the ONLY writes to llm_decisions. Adding a
             # third means re-checking that the step really was model-driven with
