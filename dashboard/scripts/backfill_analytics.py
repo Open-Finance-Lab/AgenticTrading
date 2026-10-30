@@ -30,6 +30,12 @@ def _before(value: str) -> datetime:
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Backfill safe server-authoritative Analytics history.",
+        epilog=(
+            "Inserted events update the raw event log and the day rollups only. "
+            "They do not update user_activity (activation dates, last meaningful "
+            "activity) or user_daily_facts; the daily job's late-arrival sweep "
+            "recomputes facts for the most recent days only."
+        ),
     )
     parser.add_argument(
         "--days",
@@ -45,7 +51,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="Validate and count without writing events, snapshots, or rollups.",
+        help="Validate and count without writing events or rollups.",
     )
     return parser
 

@@ -188,7 +188,11 @@ positions accordingly.
 Field notes:
 
 - ``action`` — ``"buy"``, ``"sell"``, or ``"hold"``.
-- ``symbol`` — must be in ``valid_symbols`` (the DJIA 30 universe).
+- ``symbol`` — must be in ``valid_symbols`` (the DJIA 30 universe). It is
+  compared after trimming surrounding ASCII whitespace and uppercasing ASCII
+  letters, so ``" aapl "`` is ``AAPL``. A symbol containing any non-ASCII
+  character fails validation, which holds the whole hour (see the failure
+  cases below).
 - ``confidence`` — float in ``[0.0, 1.0]``.
 - ``reasoning`` — 5–500 chars (stored in the decision log for inspection).
 - ``position_size`` — integer share count (``0`` for hold).

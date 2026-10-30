@@ -7,11 +7,12 @@ import hashlib
 import hmac
 import json
 import os
+import re
 import secrets
 import threading
 import time
 from collections.abc import Mapping
-from typing import Any
+from typing import Any, BinaryIO
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
@@ -26,6 +27,7 @@ from dashboard.backend.session_tokens import session_hash_secret
 _HANDOFF_VERSION = 1
 _DEFAULT_TTL_SECONDS = 300
 _MAX_HANDOFF_BYTES = 16_384
+_TOKEN_SHAPE = re.compile(r"[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+")
 
 
 class ExecutionHandoffError(ValueError):
@@ -109,7 +111,7 @@ def _b64encode(value: bytes) -> str:
 def _b64decode(value: str) -> bytes:
     try:
         return base64.urlsafe_b64decode(value + "=" * (-len(value) % 4))
-    except (ValueError, UnicodeEncodeError) as exc:
+    except ValueError as exc:
         raise ExecutionHandoffError() from exc
 
 
@@ -185,25 +187,57 @@ def create_execution_handoff(
     return f"{encoded_payload}.{_b64encode(signature)}"
 
 
+def read_execution_handoff(stream: BinaryIO) -> str:
+    """Read one handoff token from a binary stream, such as stdin's buffer.
+
+    Bytes, not text: a text stdin decodes under the locale before any handoff
+    check runs, so on a strict locale a corrupt byte raised UnicodeDecodeError
+    from the read itself, outside the error the worker catches (#659). The
+    read stops one byte past the limit, which is all it takes to refuse an
+    oversized token. Surrounding whitespace is stream framing (``echo``
+    appends a newline), never part of a token.
+    """
+
+    raw = stream.read(_MAX_HANDOFF_BYTES + 1)
+    if len(raw) > _MAX_HANDOFF_BYTES:
+        raise ExecutionHandoffError()
+    try:
+        return raw.strip().decode("ascii")
+    except UnicodeDecodeError as exc:
+        raise ExecutionHandoffError() from exc
+
+
 def consume_execution_handoff(
     payload: str,
     *,
     replay_guard: HandoffReplayGuard | None = None,
     now: int | None = None,
 ) -> ExecutionHandoff:
-    """Verify and claim exactly one short-lived worker handoff."""
+    """Verify a short-lived worker handoff and claim its nonce.
 
-    if not isinstance(payload, str) or not payload or len(payload) > _MAX_HANDOFF_BYTES:
+    The default guard is process-local, and every backtest worker is a new
+    process: it refuses a second claim inside one worker, not a token fed to
+    another worker. Across processes only the TTL bounds a replay (#680).
+    """
+
+    # Exactly the shape create_execution_handoff writes: two unpadded urlsafe
+    # base64 halves. Refusing anything else before the HMAC keeps a stray
+    # non-ASCII character a handoff error rather than a UnicodeEncodeError
+    # (#659), and makes the length check a byte count.
+    if (
+        not isinstance(payload, str)
+        or len(payload) > _MAX_HANDOFF_BYTES
+        or _TOKEN_SHAPE.fullmatch(payload) is None
+    ):
         raise ExecutionHandoffError()
-    try:
-        encoded_payload, encoded_signature = payload.split(".", 1)
-    except ValueError as exc:
-        raise ExecutionHandoffError() from exc
+    encoded_payload, encoded_signature = payload.split(".")
     expected = hmac.new(
         _signing_key(), encoded_payload.encode("ascii"), hashlib.sha256
     ).digest()
-    supplied = _b64decode(encoded_signature)
-    if not hmac.compare_digest(supplied, expected):
+    # Compared as text, not as decoded bytes: decoding maps several strings to
+    # one signature (the spare low bits of the last character), so only the
+    # encoding create_execution_handoff writes may verify.
+    if not hmac.compare_digest(encoded_signature, _b64encode(expected)):
         raise ExecutionHandoffError()
     try:
         raw = json.loads(_b64decode(encoded_payload))
@@ -227,4 +261,5 @@ __all__ = [
     "HandoffReplayGuard",
     "consume_execution_handoff",
     "create_execution_handoff",
+    "read_execution_handoff",
 ]

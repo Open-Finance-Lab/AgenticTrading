@@ -10,10 +10,14 @@ name: "ATL CodeQL config"
 # can surface a large batch of *low-severity quality* findings (unused code,
 # style-ish issues) alongside the security ones. If that signal-to-noise is too
 # low, narrow this one line to `security-extended` (security only) or the
-# default suite — no other change needed.
+# default suite — no other change needed. This suite also defines the merge
+# gate (CLAUDE.md, "Merge & branch discipline"): narrowing it stops the queries
+# it drops from blocking merges.
 queries:
   - uses: security-and-quality
 
+# Every path ignored here is also outside the merge gate: its alerts, security
+# ones included, can never block a merge.
 paths-ignore:
   # Built Vite bundle of the landing page: generated + minified, and its real
   # source already lives in dashboard/landing/src. Scanning the bundle is pure

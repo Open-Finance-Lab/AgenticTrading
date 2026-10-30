@@ -307,16 +307,14 @@ async def startup_event():
     try:
         # Partial-result reclaim: dashboard backtests only write their results
         # at completion, so a restart mid-run used to erase the user's wait.
-        # Surviving live-progress snapshots become honest interrupted runs.
+        # Surviving live-progress snapshots become honest interrupted runs. On
+        # its own thread: it waits out the previous instance's runs during a
+        # zero-downtime deploy (see partial_results.py), and it must not hold
+        # the event loop while it reaches the run database row by row.
         from dashboard.backend.domain.backtesting.partial_results import (
-            reclaim_interrupted_backtests,
+            start_interrupted_run_reclaimer,
         )
-        counts = reclaim_interrupted_backtests()
-        if counts.get("reclaimed"):
-            print(
-                f"🧹 Reclaimed {counts['reclaimed']} interrupted run(s) with partial results"
-                f" (dropped {counts.get('dropped_stale', 0)} stale, {counts.get('failed', 0)} failed)"
-            )
+        start_interrupted_run_reclaimer()
     except Exception as e:
         print(f"⚠️ Interrupted-run reclaim error: {e}")
 
@@ -356,33 +354,17 @@ async def startup_event():
         print(f"⚠️ Research sweeper start error: {e}")
 
     try:
-        from dashboard.backend.domain.analytics.maintenance import (
-            run_analytics_maintenance,
-        )
-        from dashboard.backend.domain.runs.service import register_reaper_sweep
-
-        register_reaper_sweep(run_analytics_maintenance)
-        print("🧹 Analytics maintenance sweep registered with the reaper")
-    except Exception as e:
-        print(
-            "WARNING: analytics.maintenance_registration_failed "
-            f"category={type(e).__name__}"
-        )
-
-    try:
         # Admin layer redesign PR A (design D23, SS6.9): the daily-facts job
         # runs on its own thread, not as a reaper sweep -- a whole-population
         # batch across three databases on the heartbeat thread would let a
         # slow analytics night mark live runs as orphaned. The worker also
-        # owns rollup_day and the retention coordinator now, and runs the
-        # idempotent user_activity seed + history copy once before ticking.
+        # owns rollup_day and the retention coordinator now, and PR B's
+        # startup migration (re-seed user_activity, roll up and derive the
+        # legacy history, drop the snapshot tables) runs on it before its
+        # first tick -- never here, where it would block the event loop.
         from dashboard.backend.domain.analytics.daily_job import (
             start_daily_facts_worker,
         )
-        from dashboard.backend.domain.analytics.facts_migration import (
-            run_startup_migrations,
-        )
-        run_startup_migrations()
         start_daily_facts_worker()
         print("📊 Analytics daily-facts worker started")
     except Exception as e:

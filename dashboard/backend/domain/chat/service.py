@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import os
-from collections import defaultdict
+from collections import defaultdict, deque
+from collections.abc import Iterable
 from typing import Any
 
 from anthropic import APIError, AsyncAnthropic
@@ -182,19 +183,37 @@ def _stub_reply_error(model: str, *, action: str) -> RuntimeError:
     )
 
 
+# The latest six user-assistant exchanges for the MVP.
+_MAX_HISTORY_EXCHANGES = 6
+
 # Temporary MVP memory.
 #
 # Key:
 #   (platform_user_id, agent_id)
 #
 # Value:
-#   Claude-compatible conversation messages
+#   (question, answer) exchanges, oldest first
+#
+# An exchange is stored whole, and only once answered. Stored as loose
+# messages, a cut from the front could leave an answer first (the Messages API
+# wants a user turn there), and a failed message could remove whichever
+# question was last, which with two messages in flight for one key is the
+# other message's.
 #
 # This will eventually be replaced with persistent database storage.
 conversation_history: dict[
     tuple[str, str],
-    list[dict[str, Any]],
-] = defaultdict(list)
+    deque[tuple[str, str]],
+] = defaultdict(lambda: deque(maxlen=_MAX_HISTORY_EXCHANGES))
+
+
+def _history_messages(exchanges: Iterable[tuple[str, str]]) -> list[dict[str, Any]]:
+    """Stored exchanges as Messages API turns: user first, alternating."""
+    messages: list[dict[str, Any]] = []
+    for question, answer in exchanges:
+        messages.append({"role": "user", "content": question})
+        messages.append({"role": "assistant", "content": answer})
+    return messages
 
 
 SYSTEM_PROMPT = """
@@ -244,9 +263,13 @@ async def chat_with_agent(
     not call Anthropic directly.
 
     Tries ``model`` (or ``resolve_chat_model()``) first, then CommonStack
-    fallbacks if the primary provider returns a known stub greeting or a
-    request error that survived ``_create_message``'s same-model retries
-    (never a timeout). A reply from a fallback after an error says so.
+    fallbacks if the primary provider returns a known stub greeting, an empty
+    reply, or a request error that survived ``_create_message``'s same-model
+    retries (never a timeout). A reply from a fallback after an error or an
+    empty reply says so.
+
+    Only an answered exchange is stored, so a failed or empty reply leaves
+    the history as it was.
 
     Future implementation:
     - authenticate the platform user,
@@ -262,94 +285,81 @@ async def chat_with_agent(
         raise ValueError("Message cannot be empty.")
 
     key = (user_id, agent_id)
+    # Bound before the call, so a reset while it runs drops this exchange
+    # instead of opening the new conversation with it.
     history = conversation_history[key]
-
-    history.append(
-        {
-            "role": "user",
-            "content": cleaned_message,
-        }
-    )
-
-    # Keep only the latest six user-assistant exchanges for the MVP.
-    if len(history) > 12:
-        del history[:-12]
+    # Built once and sent unchanged on every attempt: another message for the
+    # same key can store its exchange while this one awaits.
+    messages = _history_messages(history) + [
+        {"role": "user", "content": cleaned_message}
+    ]
 
     prompt_chars = len(SYSTEM_PROMPT) + sum(
-        len(str(m.get("content") or "")) for m in history
+        len(str(m.get("content") or "")) for m in messages
     )
 
-    try:
-        client = get_claude_client()
-        candidates = _chat_model_candidates(model)
-        last_stub_model: str | None = None
-        failed_over_on_error = False
-        answer = ""
-        for index, candidate in enumerate(candidates):
-            is_last = index == len(candidates) - 1
-            try:
-                response = await _create_message(
-                    client,
-                    label=f"chat model={candidate!r}",
-                    model=candidate,
-                    max_tokens=1200,
-                    system=SYSTEM_PROMPT,
-                    messages=history,
-                )
-            except APIError as exc:
-                if is_last or not _should_fail_over(exc):
-                    raise
-                failed_over_on_error = True
-                print(
-                    f"chat: model={candidate!r} request failed "
-                    f"({type(exc).__name__}); trying fallback"
-                )
-                continue
-
-            reply = extract_text(response)
-            usage = getattr(response, "usage", None)
-            input_tokens = (
-                getattr(usage, "input_tokens", None) if usage is not None else None
+    client = get_claude_client()
+    candidates = _chat_model_candidates(model)
+    last_stub_model: str | None = None
+    failed_over = False
+    for index, candidate in enumerate(candidates):
+        is_last = index == len(candidates) - 1
+        try:
+            response = await _create_message(
+                client,
+                label=f"chat model={candidate!r}",
+                model=candidate,
+                max_tokens=1200,
+                system=SYSTEM_PROMPT,
+                messages=messages,
             )
-            if reply and _is_stub_assistant_reply(
-                reply, input_tokens=input_tokens, prompt_chars=prompt_chars
-            ):
-                last_stub_model = candidate
-                print(
-                    f"chat: stub reply from model={candidate!r} "
-                    f"input_tokens={input_tokens}; trying fallback"
-                )
-                continue
+        except APIError as exc:
+            if is_last or not _should_fail_over(exc):
+                raise
+            failed_over = True
+            print(
+                f"chat: model={candidate!r} request failed "
+                f"({type(exc).__name__}); trying fallback"
+            )
+            continue
 
-            answer = reply
-            break
-        else:
-            raise _stub_reply_error(last_stub_model, action="chat")
+        reply = extract_text(response)
+        if not reply:
+            failed_over = True
+            print(f"chat: empty reply from model={candidate!r}; trying fallback")
+            continue
+
+        usage = getattr(response, "usage", None)
+        input_tokens = (
+            getattr(usage, "input_tokens", None) if usage is not None else None
+        )
+        if _is_stub_assistant_reply(
+            reply, input_tokens=input_tokens, prompt_chars=prompt_chars
+        ):
+            last_stub_model = candidate
+            print(
+                f"chat: stub reply from model={candidate!r} "
+                f"input_tokens={input_tokens}; trying fallback"
+            )
+            continue
+
+        answer = reply
         answered_model = candidate
-    except Exception:
-        # Avoid retaining a user message that never received an answer.
-        if history and history[-1]["role"] == "user":
-            history.pop()
+        break
+    else:
+        if last_stub_model:
+            raise _stub_reply_error(last_stub_model, action="chat")
+        # Shown to the reader only: stored, it would read to the model as
+        # something it had said.
+        return "Claude returned an empty response."
 
-        raise
-
-    if not answer:
-        answer = "Claude returned an empty response."
-
-    history.append(
-        {
-            "role": "assistant",
-            "content": answer,
-        }
-    )
-
-    if len(history) > 12:
-        del history[:-12]
+    history.append((cleaned_message, answer))
 
     # The note is for the reader, not the model: history keeps the bare reply.
-    # Only an error moves a reply off the requested model silently; a stub
-    # greeting is the known-broken route the fallback list exists for.
-    if failed_over_on_error and answered_model != candidates[0]:
+    # Only a failure (an error or an empty reply) moves a reply off the
+    # requested model silently; a stub greeting is the known-broken route the
+    # fallback list exists for.
+    if failed_over and answered_model != candidates[0]:
         return answer + _substitution_note(candidates[0], answered_model)
     return answer
 
@@ -404,7 +414,7 @@ async def synthesize_strategy_prompt(
     request error that survived the same-model retries (never a timeout).
     """
     key = (user_id, agent_id)
-    history = list(conversation_history[key])
+    history = _history_messages(conversation_history[key])
 
     final_instruction = (
         "Compile everything above into the final strategy prompt now. "
