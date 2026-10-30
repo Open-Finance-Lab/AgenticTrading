@@ -21,6 +21,7 @@ from __future__ import annotations
 import contextlib
 import json
 import os
+import re
 import tempfile
 import threading
 from calendar import monthrange
@@ -83,6 +84,18 @@ LIVE_MODEL_IDS = (
     "deepseek_v4_pro",
     "nemotron_3_nano_30b",
 )
+# Optional per-entry "live_from": "YYYY-MM-01", the first board month an LLM
+# entry trades. An entry added to LIVE_MODEL_IDS without it replays the current
+# month from the 1st on its first refresh (it has no checkpoint to resume
+# from), backfilling sessions it never saw forward. With it, the entry stays
+# off the board -- neither deployed nor rendered -- until that month opens.
+# Anything but the 1st of a month is reported once and ignored, so the entry
+# is live at once: this is read on the public GET, which must not raise on a
+# config typo.
+LIVE_FROM_KEY = "live_from"
+# (entry id, key, repr(value)) already reported -- see _warn_live_config.
+_warned_live_config: set = set()
+_LIVE_FROM_SHAPE = re.compile(r"\d{4}-\d{2}-01")
 LIVE_SNAPSHOT_KEY = "live_portfolio_snapshot"
 # Present (True) on a checkpoint row only while it is being written. The row
 # goes in first, then its curve, then the row again with the snapshot and
@@ -314,22 +327,87 @@ def live_freeze_config(
     }
 
 
-def live_board_strategies(config: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
-    """Baselines plus the Season-0 Live LLM roster (not the full contest list)."""
+def _warn_live_config(entry_id: Any, key: str, value: Any, expected: str) -> None:
+    """Report a malformed Live-only config value, once per process."""
+    marker = (str(entry_id), key, repr(value))
+    if marker in _warned_live_config:
+        return
+    _warned_live_config.add(marker)
+    print(
+        f"WARNING: live.config_invalid entry={entry_id} key={key} "
+        f"value={value!r} expected={expected}; ignoring it",
+        flush=True,
+    )
+
+
+def _live_from_month(entry: Dict[str, Any]) -> Optional[date]:
+    """The entry's ``live_from`` month, or None when it is unset or malformed."""
+    raw = entry.get(LIVE_FROM_KEY)
+    if raw is None:
+        return None
+    if isinstance(raw, str) and _LIVE_FROM_SHAPE.fullmatch(raw):
+        try:
+            return date.fromisoformat(raw)
+        except ValueError:
+            pass
+    _warn_live_config(entry.get("id"), LIVE_FROM_KEY, raw, "YYYY-MM-01")
+    return None
+
+
+def _board_month(config: Dict[str, Any], month_start: Optional[str]) -> date:
+    """The first day of the month a roster is asked for.
+
+    A freeze config (``live_freeze_config``) carries it as ``start_date``. The
+    base leaderboard config's ``start_date`` is the Competition window's, so a
+    caller holding that one passes ``month_start``. Neither: this month.
+    """
+    if month_start:
+        return date.fromisoformat(month_start).replace(day=1)
+    if config.get("period") == "live" and config.get("start_date"):
+        return date.fromisoformat(str(config["start_date"])).replace(day=1)
+    return date.fromisoformat(live_month_dates()[0])
+
+
+def live_board_strategies(
+    config: Optional[Dict[str, Any]] = None,
+    *,
+    month_start: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    """Baselines plus the LLM entries live in the board month, in config order.
+
+    An LLM entry is live when its id is in ``LIVE_MODEL_IDS`` and its
+    ``live_from`` month, if it sets one, has opened. ``month_start`` names the
+    board month when ``config`` is not a freeze config (see ``_board_month``).
+    """
     cfg = config or lb_service.load_leaderboard_config()
+    board_month = _board_month(cfg, month_start)
     out: List[Dict[str, Any]] = []
     for strategy in cfg.get("strategies", []):
-        if strategy.get("strategy") == "llm_agent" and strategy.get("id") not in LIVE_MODEL_IDS:
-            continue
+        if strategy.get("strategy") == "llm_agent":
+            if strategy.get("id") not in LIVE_MODEL_IDS:
+                continue
+            live_from = _live_from_month(strategy)
+            if live_from is not None and live_from > board_month:
+                continue
         out.append(strategy)
     return out
 
 
-def live_llm_entries(config: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
-    return [
-        s for s in live_board_strategies(config)
+def live_llm_entries(
+    config: Optional[Dict[str, Any]] = None,
+    *,
+    month_start: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    """The board month's live LLM entries in ``LIVE_MODEL_IDS`` order.
+
+    That is also the order ``refresh_live_leaderboard`` deploys them in, so
+    the roster's first entry is never queued behind a newcomer.
+    """
+    entries = [
+        s for s in live_board_strategies(config, month_start=month_start)
         if s.get("strategy") == "llm_agent"
     ]
+    return sorted(entries, key=lambda s: LIVE_MODEL_IDS.index(s["id"]))
 
 
 def clear_live_session_runs() -> int:
@@ -1447,7 +1525,7 @@ def get_live_leaderboard(
     )
 
     config = lb_service.load_leaderboard_config()
-    strategies = live_board_strategies(config)
+    strategies = live_board_strategies(config, month_start=start_date)
     display_capital = float(config.get("initial_capital", INITIAL_CAPITAL))
     freeze_cfg = live_freeze_config(now)
     freeze_start = freeze_cfg["start_date"] if freeze_cfg else start_date
@@ -1539,7 +1617,11 @@ def get_live_leaderboard(
         "printed_count": printed_count,
         "models_cached": models_cached,
         "models_pending": max(models_total - models_cached, 0),
-        "roster": list(LIVE_MODEL_IDS),
+        # This month's live LLM ids, in roster order (``strategies`` is gated).
+        "roster": [
+            model_id for model_id in LIVE_MODEL_IDS
+            if any(s["id"] == model_id for s in strategies)
+        ],
         "snapshot_end": snapshot_end,
         # Entries shown but not ranked: their newest row is more than one
         # session behind the board's, so their value is from another day.

@@ -250,7 +250,10 @@ def _deploy_live(args):
         return None
     entry = next((e for e in live_llm_entries(freeze) if e["id"] == args.entry), None)
     if entry is None:
-        print(f"ERROR: '{args.entry}' is not on the Live roster.")
+        print(
+            f"ERROR: '{args.entry}' is not on the Live roster this month "
+            "(not in LIVE_MODEL_IDS, or its live_from month has not opened)."
+        )
         return None
     return deploy_live_model_increment(
         entry,
