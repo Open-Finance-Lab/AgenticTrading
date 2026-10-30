@@ -4,7 +4,7 @@ anthropic==0.95.0
 alpaca-py==0.43.2
 attrs==25.3.0
 bcrypt==4.3.0
-certifi==2026.10.18
+certifi==2026.10.23
 cffi==2.0.0
 charset-normalizer==3.4.7
 click==8.3.3
@@ -25,7 +25,10 @@ jsonschema-specifications==2025.4.1
 llvmlite==0.44.0
 matplotlib==3.11.0
 mcp==1.30.0
-msgpack==1.2.1
+# A security floor, not a direct import: alpaca-py's live-data websocket
+# decoder pulls it in. 1.2.3 fixes GHSA-j586-36cw-2gc2 and 1.2.4 fixes
+# GHSA-j8c6-9vc5-hj6x, both in the C extension. Never pin below 1.2.4.
+msgpack==1.2.4
 networkx==3.5
 numpy==2.2.6
 numba==0.61.2
