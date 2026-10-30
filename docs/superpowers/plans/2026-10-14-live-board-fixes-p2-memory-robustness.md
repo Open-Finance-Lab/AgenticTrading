@@ -21,11 +21,9 @@
 >   - It prints a traceback for any type the old catch let escape.
 >   - It stops the roster after two entries in a row fail with the same error: the rest are logged `ERROR: live.model_not_attempted`.
 >   - Two more tests in `test_live_leaderboard.py`.
-> - Counts below predate that. On main@011d6411, `test_live_leaderboard.py` has `77 passed` (not 75), and Task 2.3's six-file neighbour run has `219 passed` (not 212). Tasks 2.3–2.4 add no test to those files.
-> - Task 2.5's PR covers trade memory only:
->   - Title it `fix(live): nightly trade memory`.
->   - Drop the roster-loop and characterization-test bullets from its body.
->   - #585 ("nightly segments forget the previous session's trades") is this PR's issue, so its body may say `Closes #585`. #668 deliberately left it open.
+> - Tasks 2.3–2.5 are updated for that; Tasks 2.1–2.2 keep their pre-#668 text as a record.
+>   - The counts in Tasks 2.3–2.4 are re-measured on main@011d6411, which has P1 and #668, and the find blocks in Task 2.3 were checked there and on main@653180aa.
+>   - Task 2.5's PR covers trade memory only: three files, the title `fix(live): nightly trade memory`, and `Closes #585` ("nightly segments forget the previous session's trades"), which #668 deliberately left open.
 
 ## Phase 2: Roster-loop robustness and nightly trade memory
 
@@ -37,9 +35,9 @@
 
 **Depends on:** nothing in code. Following the merge order, branch from `main` after P1 (`2026-10-14-live-board-fixes-p1-early-close.md`) has merged. This phase shares no code hunks with P1. Both phases edit `tests/test_live_leaderboard.py`, but at different anchors. P3 (`2026-10-14-live-board-fixes-p3-attempt-ledger.md`, Decision 5 in the index plan) adds its `LiveBudgetExceeded` handler above the `except Exception` introduced here, so merge this phase before that one.
 
-Pass counts below are measured on main@17c552c5 with only this phase applied, and, where it differs, on main@17c552c5 with P1 applied first. P1 takes `test_live_leaderboard.py` from 57 tests to 70. If `main` has moved further, a neighbour-suite total that is off by the tests `main` gained is not a failure; the named failing tests and their messages are the real check.
+Pass counts in Tasks 2.1–2.2 were measured on main@17c552c5 with only this phase applied, and, where it differs, with P1 applied first (P1 takes `test_live_leaderboard.py` from 57 tests to 70). Those in Tasks 2.3–2.4 are measured on main@011d6411, which has P1 and Tasks 2.1–2.2. If `main` has moved further, a neighbour-suite total that is off by the tests `main` gained is not a failure; the named failing tests and their messages are the real check.
 
-**Branch / PR title:** branch `fix/live-memory-robustness`, PR title `fix(live): roster error isolation and nightly trade memory`.
+**Branch / PR title:** branch `fix/live-memory-robustness`, PR title `fix(live): nightly trade memory` (it was `fix(live): roster error isolation and nightly trade memory` until #668 shipped the roster half).
 
 Before cutting the branch, check that the name is unused: `gh pr list --head fix/live-memory-robustness --state all` must print nothing (it printed nothing on 2026-10-14). Then cut it from the remote main:
 
@@ -797,7 +795,7 @@ E   ImportError: cannot import name 'SNAPSHOT_TRADE_MEMORY_LIMIT' from 'dashboar
 
 - [ ] **Step 3: Implement**
 
-Make all seven edits below in `dashboard/backend/domain/backtesting/portfolio_manager.py`. Each find block occurs exactly once on main@17c552c5.
+Make all seven edits below in `dashboard/backend/domain/backtesting/portfolio_manager.py`. Each find block occurs exactly once on main@17c552c5, main@011d6411 and main@653180aa.
 
 (1) Imports (≈:28):
 
@@ -1086,7 +1084,7 @@ pytest dashboard/backend/tests/backtesting/test_portfolio_manager_move.py dashbo
 
 Expected:
 - `22 passed`: 17 test functions, two of them parametrized (three and four ways).
-- The neighbour run is all green with `199 passed`. These six files hold 194 tests on main@17c552c5. Tasks 2.1 and 2.2 add 5 to `test_live_leaderboard.py`, and Task 2.3 adds none to these files. With P1 merged first: `212 passed`.
+- The neighbour run is all green with `219 passed` on main@011d6411. Task 2.3 adds no test to these six files.
 - The existing snapshot tests keep passing unmodified. `test_portfolio_snapshot_roundtrip_keeps_cash_and_lots` asserts per field. The minimal `{"cash", "positions"}` snapshots elsewhere in `test_live_leaderboard.py` are the old-snapshot cases. The `Manager`/`FakeManager` fakes define their own `snapshot_state`/`restore_state`.
 
 - [ ] **Step 5: Commit**
@@ -1428,7 +1426,7 @@ No production change. The behaviour comes from Task 2.3.
 pytest dashboard/backend/tests/test_live_trade_memory.py dashboard/backend/tests/test_live_leaderboard.py dashboard/backend/tests/backtesting/test_trade_memory.py dashboard/backend/tests/test_live_trade_stats.py -q -p no:cacheprovider
 ```
 
-Expected: all green with `91 passed`: 4 + 62 + 22 + 3. With P1 merged first: `104 passed` (4 + 75 + 22 + 3).
+Expected: all green with `106 passed` on main@011d6411: 4 + 77 + 22 + 3.
 
 - [ ] **Step 5: Commit**
 
@@ -1461,10 +1459,8 @@ git fetch origin main
 git diff --stat origin/main...HEAD
 ```
 
-Expected: exactly these five files.
-- `dashboard/backend/domain/leaderboard/live.py`
+Expected: exactly these three files. `live.py` and `test_live_leaderboard.py` are not among them, because #668 already merged Tasks 2.1–2.2.
 - `dashboard/backend/domain/backtesting/portfolio_manager.py`
-- `dashboard/backend/tests/test_live_leaderboard.py`
 - `dashboard/backend/tests/backtesting/test_trade_memory.py`
 - `dashboard/backend/tests/test_live_trade_memory.py`
 
@@ -1475,19 +1471,15 @@ If `main` moved, run `git rebase origin/main` and repeat Step 1.
 ```bash
 git push -u origin fix/live-memory-robustness
 gh pr create --base main --head fix/live-memory-robustness \
-  --title "fix(live): roster error isolation and nightly trade memory" \
+  --title "fix(live): nightly trade memory" \
   --body-file - <<'EOF'
-- Roster loop: the per-entry catch in `refresh_live_leaderboard` is now `except Exception`. It was three types, so a `ConnectionError` or a DB error from one model skipped every later model, the prune and the state save. `BaseException` still propagates. The ERROR line already names the type.
-- Characterization tests pin how a failed night behaves:
-  - A dead model stores nothing and restarts at the 1st.
-  - An early miss followed by a crash loses the prefix H6 never accepted, and that prefix is re-billed.
-  - A single nightly miss keeps the prior checkpoint.
+**Do not merge from 22:15 UTC on a weekday until that night's live refresh has finished** (the check is in `docs/superpowers/plans/2026-10-14-live-board-fixes.md`, Merging and records). GitHub starts the 22:30 UTC cron as late as 03:05 UTC, and the refresh keeps running on Render after the workflow run ends. The merge auto-deploys prod, and the restart kills a running refresh, so the sessions it had not checkpointed are billed again on the next night.
 
-  Sessions that clear H6 have been checkpointed one by one since #582, so spec §6's "never checkpoints" is wrong as written. Storing an H6-refused prefix stays forbidden.
 - Trade memory: `snapshot_state` now writes `recent_trades`, which holds the last 24h of trades (prompt fields only, at most 200, strict JSON). `restore_state` loads them into a new read-only `PortfolioManager.restored_trades`, which the prompt reads before the manager's own trades. Restored trades never enter `trades`, so `num_trades` and the month's trade stats are not double counted. This is tested end to end through `agent_runs`. No change to fees, slippage, prompt wording, `llm_agent.py` or `live_trade_stats.py`.
 - The month this merges in mixes sessions with and without trade memory; the first checkpoint carrying trade_memory=1 marks the switch. Each checkpoint deletes the month's earlier rows, so the snapshot also carries `trade_memory_since` through every restore: the first bar of the night that started the memory. A session dated after it opened with the previous night's trades.
 - Prod behaviour change: the first night after deploy restores a pre-change snapshot and has no memory. From the second night on, each night's first prompts see the previous session's trades. Stored rows are not rewritten and nothing replays. A full replay and a nightly increment now give the model the same memory.
-- Do not merge on a weekday between 22:15 and ~02:30 UTC. The merge auto-deploys prod, and the Render restart kills the nightly live refresh thread mid-run (its cron says 22:30 UTC, but GitHub has started it as late as 01:52), so that night's session is billed again on the next night.
+
+Closes #585
 
 Test plan: `pytest dashboard/backend/tests -q -p no:cacheprovider`
 EOF

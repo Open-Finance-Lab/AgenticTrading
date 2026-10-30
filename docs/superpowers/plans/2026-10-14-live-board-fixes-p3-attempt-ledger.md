@@ -16,7 +16,7 @@
 
 **Why.** Spec §7 requires "a $50/month hard stop enforced in code before Season 1"; `LEADERBOARD_MONTHLY_BUDGET_USD` was decided on 08-15 and never built, and the live board's calls go straight to `COMMONSTACK_API_KEY`, outside the Credits layer. The checkpoint rows cannot be the spend record: a session H6 refuses to store, a run that dies before its next session close, and every row a forced or config replay deletes were billed and leave no row. Spec §6 also asks for failures to be visible; today a failed nightly model exists only in a log line and an ephemeral state file. This phase prices every billable attempt into a durable ledger, enforces the cap, and publishes a coarse per-model "last nightly run" status (Decision 5 in the index plan).
 
-**Depends on.** No code from another phase. Merge order runs it after P1 (`2026-10-14-live-board-fixes-p1-early-close.md`) and P2 (`2026-10-14-live-board-fixes-p2-memory-robustness.md`, which carries the roster-loop change, Decision 4 in the index plan), and before P4 (`2026-10-14-live-board-fixes-p4-roster.md`, Decision 6 in the index plan), P6 (`2026-10-14-live-board-fixes-p6-copy.md`, Decision 8 in the index plan) and P7 (`2026-10-14-live-board-fixes-p7-records.md`, Decision 9 in the index plan); all are in `docs/superpowers/plans/`. The anchors avoid the lines P2 rewrites (checked on main@17c552c5 plus P1 and P2) and were written to avoid the ones P4 and P6 rewrite, the halt clause is inserted between the deploy call and the generic `except Exception` that P2's merged half (#668) put there, and the roster-level tests derive the roster from `live.live_llm_entries(...)` instead of naming models. Where an anchor could have moved, the step says where the same code goes.
+**Depends on.** No code from another phase. Merge order runs it after P1 (`2026-10-14-live-board-fixes-p1-early-close.md`) and P2 (`2026-10-14-live-board-fixes-p2-memory-robustness.md`, which carries the roster-loop change, Decision 4 in the index plan), and before P4 (`2026-10-14-live-board-fixes-p4-roster.md`, Decision 6 in the index plan), P6 (`2026-10-14-live-board-fixes-p6-copy.md`, Decision 8 in the index plan) and P7 (`2026-10-14-live-board-fixes-p7-records.md`, Decision 9 in the index plan); all are in `docs/superpowers/plans/`. P1 and P2's roster-loop half (#668) are on main, and P2's unmerged half edits only `portfolio_manager.py` and two trade-memory test files, none of this phase's. The anchors were written to avoid the lines P4 and P6 rewrite, the halt clause is inserted between the deploy call and the generic `except Exception` that #668 put there, and the roster-level tests derive the roster from `live.live_llm_entries(...)` instead of naming models. Where an anchor could have moved, the step says where the same code goes.
 
 > **Deviation from Decision 5 (index plan).** Decision 5 in the index plan puts the in-run check at each session close "before the H6 branch": upsert the ledger, then stop if this attempt's average session cost would cross the cap. The upsert stays exactly there: `attempt.record_session()` is the first statement of `on_session_close`, ahead of the gap check and H6, because a session H6 refuses to store was billed. The stop moved: `attempt.stop_if_next_session_would_cross()` runs **after** the session's checkpoint decision, and only while another session of the segment remains. So the session just paid for is stored instead of being thrown away and bought again on the next replay, and a finished night is never relabelled as a halt. The price is an overshoot of at most about one session's cost per entry per month above the cap: the pre-check admits an attempt while the month is still under the cap and nothing projects that attempt's first session, and once the month is over the cap every later pre-check halts the entry before any bar fetch. That is acceptable for a hard stop whose job is to catch runaway spend: one session costs cents against a $50 cap (the whole live board ran about $0.35/month when measured on 2026-10-14, spec §7), and the alternative discards work that was already billed.
 
@@ -31,14 +31,15 @@ git switch -c feat/live-attempt-ledger --no-track origin/main
 
 This does not switch to or pull the local `main`, so it also works inside a pre-made worktree while `main` is checked out elsewhere; commit on this branch, not on the worktree's own branch. Parallel sessions share one checkout: run `git branch --show-current` before every commit below; it must print `feat/live-attempt-ledger`. Commit commands below omit any `Co-Authored-By` trailer; an agent executing this plan adds its own.
 
-Every `find` block below was checked to occur exactly once on main@17c552c5 and on main@17c552c5 plus P1 and P2, and every quoted pass/fail count was measured by applying this plan's text, task by task, to a copy of main@17c552c5 (the counts on main plus P1 and P2 are given where they differ). If `origin/main` has moved on, the anchors still apply (they are verbatim blocks, not line numbers); treat a small drift in a neighbour-suite total as main having grown. The named failing tests and their messages are the real check.
+Every `find` block below was checked to occur exactly once on main@011d6411, which has P1 and P2's Tasks 2.1–2.2 (#668), and every quoted pass/fail count was measured by applying this plan's text, task by task, to a copy of main@011d6411. main@653180aa changes none of the files this phase edits. Line hints (`≈:N`) are approximate and were written against older trees; the `find` blocks are what locate an edit. If `origin/main` has moved on, the anchors still apply (they are verbatim blocks, not line numbers); treat a small drift in a neighbour-suite total as main having grown. The named failing tests and their messages are the real check.
 
-**Since #668 (2026-10-30).** P2's Tasks 2.1–2.2 merged as #668, with review fixes the anchors above never saw. Two things changed in the roster loop. The per-entry failure bookkeeping moved into `domain/leaderboard/roster_failures.py` (`RosterFailures`), which stops the roster once two entries in a row fail with the same error. And the success path (`roster.traded(row)`, `successes.append(row)`) now runs after the `try` statement, not inside it. Task 3.3's Edits 7 and 8 are re-anchored on main@011d6411, which includes #668, and their `find` blocks were checked to occur exactly once there. Counts quoted "on main@011d6411" were measured on that tree. P2's unmerged half (Tasks 2.3–2.4) adds no test to the files they count.
+**Since #668 (2026-10-30).** P2's Tasks 2.1–2.2 merged as #668, with review fixes the anchors above never saw. Two things changed in the roster loop. The per-entry failure bookkeeping moved into `domain/leaderboard/roster_failures.py` (`RosterFailures`), which stops the roster once two entries in a row fail with the same error. And the success path (`roster.traded(row)`, `successes.append(row)`) now runs after the `try` statement, not inside it. Task 3.3's Edits 7–9 are written against that loop: the halt clause sits ahead of the generic handler, the success path moves into the `try` statement's `else` (Edit 8), and the budget read after the loop is guarded (Edit 9). P2's unmerged half (Tasks 2.3–2.4) adds no test to the files this phase counts.
 
 **Behaviour this phase pins (read before Task 3.3).**
 - A deploy that is already current costs nothing, writes nothing and is never halted. `deploy_live_model_increment` has two ways to be current and both now return before the attempt is opened: the existing `latest.end_date == freeze_end` return, and the `live_increment_bounds(...) is None` return, which on main sits after `get_strategy` and which Task 3.3 moves up into the head (a dry run that left it in place built the model, could be halted by the pre-check and wrote an `ok` ledger row for an entry with nothing to trade). The move has one side effect, which is deliberate: a config change on an entry that is current this way is picked up by its next increment instead of replaying the month at once. That is already how the first cached return behaves, and the second is reachable only when `freeze_end` is not a session day, which `live_clock` never produces.
 - Pre-check: before `lb_service.get_strategy` and before any bar fetch, `month spent >= cap` raises `LiveBudgetExceeded`. `0` is a real cap that blocks every billable deploy.
 - At every session close, the ledger is upserted **first** (before the gap check and before H6). The in-run stop runs **after** the session's checkpoint decision, and only while another session of the segment remains: the session just paid for is stored, and the last session of a segment is never stopped by its own projection. So the overshoot is at most about one session per entry per month.
+- In the roster loop, a halt is neither a failure nor a success. It goes to `budget_halted`, never to `model_failures` or `model_results`, and it neither counts toward nor resets `RosterFailures`' shared-fault stop, whether it came from the pre-check or between sessions. The budget read after the loop cannot stop the prune and the state save.
 - Every attempt ends in `LiveAttempt.finish(exc)`, which writes `metadata.last_attempt = {on: <freeze_end>, outcome, kind}`. A per-session upsert keeps the previous `last_attempt`, so a process killed mid-run leaves the previous night's outcome, dated, rather than a guess.
 - `kind` is matched on the exception's class names (the exact builtin names first, then the parts `Timeout` and `Connect`, which client-library classes such as `psycopg_pool.PoolTimeout` and `httpx.ConnectError` carry) and never carries message text. The public GET gains `{on, outcome, kind}` per model, through a whitelist, and a boolean `live_status.budget_halted`. It adds no new dollar figure; the per-entry `est_cost_usd` predates this plan (`_entry_from_strategy` already publishes each entry's checkpoint-row `est_cost_usd`, `input_tokens`, `output_tokens` and `llm_calls`; that stays out of scope). The cap and the month-to-date spend stay in the refresh result and the log.
 - Ledger rows on public routes, verified at source on main@17c552c5: the board, `_find_cached_run`, `GET /api/backtest/runs` (the caller's session, mode `backtest` only) and `/api/v2` (run ids starting `run_`) never return them. `GET /runs?mode=leaderboard_spend` (public, no session) does list them, through the `RunMetadata` allow-list: run id, the entry's name and id (`agent_name`, `llm_model`), dates, `created_at`, `initial_equity` 0, the cumulative `llm_calls` and derived decision-provenance labels, with no `est_cost_usd`, no token counts and no `metadata` (so no `last_attempt`). `GET /api/backtest/{run_id}` returns one only to a caller who sends `X-Session-Id: leaderboard-live-spend`, as an empty curve with null return metrics; `/runs/{run_id}` rejects that header because it is not a UUID. None of them exposes dollars or tokens, so this phase adds no exclusion; the last test of Task 3.1 pins all three.
@@ -51,8 +52,8 @@ Every `find` block below was checked to occur exactly once on main@17c552c5 and 
   - `class LiveAttempt(entry, *, month_start: str, freeze_end: str, checkpoint_rows: Mapping[str, Mapping])` with attributes `strategy_impl`, `cap_usd`, `sessions_closed` and methods `attempt_usd()`, `entry_spent_usd()`, `month_spent_usd()`, `check_can_start()`, `record_session()`, `stop_if_next_session_would_cross()`, `finish(exc: Optional[BaseException])`.
 - `dashboard/backend/domain/leaderboard/live.py`:
   - New private `_trade_live_segment(entry, freeze_cfg, attempt, *, resume_from, prior_curve, latest, force_refresh, allow_fallback, bars_memo) -> Dict` (the billable half of `deploy_live_model_increment`; the public signature is unchanged). It never returns a cached row: both already-current returns live in `deploy_live_model_increment`'s head, ahead of the `LiveAttempt`.
-  - `refresh_live_leaderboard(deploy_models=True)` result gains `budget_halted: List[str]` and `budget: <budget_status dict>`; `models_deployed = not roster.failures and not halted`.
-  - Log lines: `ERROR: live.budget_exhausted month=YYYY-MM cap_usd=<.2f> spent_usd=<.2f> skipped=<id,id>` (once per refresh, flushed) and `ERROR: live.spend_ledger_write_failed entry=<id> error=<ExceptionType>`.
+  - `refresh_live_leaderboard(deploy_models=True)` result gains `budget_halted: List[str]` and `budget: Optional[<budget_status dict>]` (`None` when the read fails); `models_deployed = not roster.failures and not halted`.
+  - Log lines: `ERROR: live.budget_exhausted month=YYYY-MM cap_usd=<.2f> spent_usd=<.2f>|unread skipped=<id,id>` (once per refresh, flushed), `ERROR: live.budget_status_failed error=<ExceptionType>` (the budget read after the roster loop failed; the refresh still prunes and saves) and `ERROR: live.spend_ledger_write_failed entry=<id> error=<ExceptionType>`.
   - `get_live_leaderboard()` payload: `live_status["budget_halted"]: bool`; every entry gains `last_attempt: Optional[{"on": "YYYY-MM-DD", "outcome": "ok"|"failed"|"budget_halted", "kind": Optional[str]}]` (always `None` for baselines and indices).
 - `LLMAgentStrategy.input_tokens` / `.output_tokens` are current after every decision step (the H6 counters still move only at a session close).
 - `dashboard/frontend/js/live-leaderboard.js`: `LIVE_ATTEMPT_KIND_COPY`, `liveLastAttemptCopy(entry) -> string`, `liveLastAttemptBadge(entry) -> 'Paused'|'Last run failed'|''`, `liveBudgetHaltLine(status) -> string`.
@@ -886,7 +887,7 @@ Expected: `43 passed`. Then the neighbours (nothing calls the module yet, so the
 pytest dashboard/backend/tests/test_live_leaderboard.py dashboard/backend/tests/test_env_isolation.py dashboard/backend/tests/test_architecture_boundaries.py -q -p no:cacheprovider
 ```
 
-Expected: green; measured `111 passed` on main@17c552c5 and `129 passed` on main@17c552c5 plus P1 and P2.
+Expected: green; measured `136 passed`.
 
 - [ ] **Step 5: Commit.**
 
@@ -1050,7 +1051,7 @@ pytest dashboard/backend/tests/test_live_budget.py -q -p no:cacheprovider
 pytest dashboard/backend/tests/test_live_leaderboard.py dashboard/backend/tests/test_leaderboard_samples.py dashboard/backend/tests/domain/leaderboard -q -p no:cacheprovider
 ```
 
-Expected: `45 passed` for the first command; the second stays green (its fake managers all define `input_tokens`/`output_tokens`; measured `213 passed` on main@17c552c5 and `237 passed` on main@17c552c5 plus P1 and P2).
+Expected: `45 passed` for the first command; the second stays green (its fake managers all define `input_tokens`/`output_tokens`; measured `239 passed`).
 
 - [ ] **Step 5: Commit.**
 
@@ -1068,7 +1069,7 @@ git commit -m "fix(live): publish billed tokens after every decision step"
 
 **Interfaces:**
 - Consumes: `live_budget.LiveAttempt`, `live_budget.LiveBudgetExceeded`, `live_budget.budget_status` (Task 3.1); per-step tokens (Task 3.2); `latest_live_month_runs`, `live_increment_bounds`, `_checkpoint_passes_h6`, `_write_live_checkpoint` (unchanged).
-- Produces: `_trade_live_segment(...)`; both already-current returns in `deploy_live_model_increment`'s head, ahead of the `LiveAttempt`; refresh result keys `budget_halted` and `budget`; the `ERROR: live.budget_exhausted …` and `ERROR: live.spend_ledger_write_failed …` lines.
+- Produces: `_trade_live_segment(...)`; both already-current returns in `deploy_live_model_increment`'s head, ahead of the `LiveAttempt`; refresh result keys `budget_halted` and `budget`; the `ERROR: live.budget_exhausted …`, `ERROR: live.budget_status_failed …` and `ERROR: live.spend_ledger_write_failed …` lines.
 
 - [ ] **Step 1: Write the failing tests.**
 
@@ -1415,9 +1416,9 @@ def test_halts_and_failures_are_reported_apart(monkeypatch, capsys):
 
 
 def test_a_halt_after_a_success_reports_each_entry_once(monkeypatch):
-    """Since #668 the success path runs after the try statement, so the halt
-    clause must `continue`: falling through would append the entry before it
-    to model_results a second time."""
+    """Since #668 the success path follows the try statement, so it must run
+    only in the statement's else clause: a halt that fell through to it would
+    append the entry before it to model_results a second time."""
     monkeypatch.setenv(live_budget.BUDGET_ENV, "0.4")
     monkeypatch.setattr(lb_service, "ensure_leaderboard_runs", lambda **kwargs: {})
     monkeypatch.setattr(lb_service, "fetch_hourly_bars", lambda *args: _one_bar_frame())
@@ -1448,6 +1449,65 @@ def test_a_halt_after_a_success_reports_each_entry_once(monkeypatch):
     assert result["model_failures"] == []
 
 
+def test_a_halt_between_two_shared_failures_does_not_reset_the_stop(monkeypatch, capsys):
+    """A halt is kept out of RosterFailures, even one that closed sessions
+    first: it stops before the segment's last checkpoint and its end-of-run
+    checks, so it has not shown that the shared path works. Two failures with
+    the same error either side of it still stop the roster. A wrong stop leaves
+    the rest unbilled until the next night; a wrong reset bills another entry
+    against the same fault."""
+    monkeypatch.setattr(lb_service, "ensure_leaderboard_runs", lambda **kwargs: {})
+    entries = [{"id": f"entry_{n}", "name": f"Entry {n}"} for n in range(4)]
+    monkeypatch.setattr(live, "live_llm_entries", lambda config=None: entries)
+    called = []
+
+    def deploy(entry, freeze_cfg, **kwargs):
+        called.append(entry["id"])
+        if entry["id"] == "entry_1":
+            raise live_budget.LiveBudgetExceeded("stopped between sessions")
+        raise OSError("disk full")
+
+    monkeypatch.setattr(live, "deploy_live_model_increment", deploy)
+
+    result = live.refresh_live_leaderboard(
+        deploy_models=True, as_of=datetime(2026, 8, 27, 17, 39, tzinfo=_ET)
+    )
+    assert result["budget_halted"] == ["entry_1"]
+    assert called == ["entry_0", "entry_1", "entry_2"]
+    assert [f["entry_id"] for f in result["model_failures"]] == [
+        "entry_0",
+        "entry_2",
+        "entry_3",
+    ]
+    assert (
+        "ERROR: live.model_not_attempted entry=entry_3 after=entry_0,entry_2 "
+        "error=OSError"
+    ) in capsys.readouterr().out
+
+
+def test_a_budget_read_that_fails_still_prunes_and_saves(monkeypatch, capsys):
+    """The budget read runs after every model has traded and been billed. If it
+    raised out of the refresh, the prune and the state save would be skipped,
+    which is what #668 stopped the roster loop from doing."""
+    monkeypatch.setattr(lb_service, "ensure_leaderboard_runs", lambda **kwargs: {})
+    monkeypatch.setattr(lb_service, "fetch_hourly_bars", lambda *args: _one_bar_frame())
+    monkeypatch.setattr(lb_service, "get_strategy", lambda entry: _ScriptedAgent())
+
+    def unreadable(*args, **kwargs):
+        raise OSError("pool timeout")
+
+    monkeypatch.setattr(live_budget, "budget_status", unreadable)
+
+    result = live.refresh_live_leaderboard(
+        deploy_models=True, as_of=datetime(2026, 8, 27, 17, 39, tzinfo=_ET)
+    )
+    assert result["budget"] is None
+    assert result["models_deployed"] is True
+    assert "pruned_runs" in result
+    assert live._live_refresh_state()["budget"] is None
+    assert "ERROR: live.budget_status_failed error=OSError" in capsys.readouterr().out
+
+
 def test_a_clean_night_reports_the_budget_and_no_halt(monkeypatch, capsys):
     monkeypatch.setattr(lb_service, "ensure_leaderboard_runs", lambda **kwargs: {})
     monkeypatch.setattr(lb_service, "fetch_hourly_bars", lambda *args: _one_bar_frame())
@@ -1472,17 +1532,19 @@ Numbers used above: DeepSeek is $0.435 per 1M input tokens and `_ScriptedAgent` 
 pytest dashboard/backend/tests/test_live_budget.py -q -p no:cacheprovider
 ```
 
-Expected: `14 failed, 46 passed`. The failures are the fourteen new tests other than `test_an_entry_already_current_is_not_halted_and_writes_nothing` (a guard that already holds). Example messages:
+Expected: `16 failed, 46 passed`. The failures are the sixteen new tests other than `test_an_entry_already_current_is_not_halted_and_writes_nothing` (a guard that already holds). Example messages:
 - `AssertionError: a budget halt reached the model or the market data`: the zero-budget test, and `test_a_snapshot_that_already_covers_a_non_session_freeze_is_not_halted`, which on main reaches `get_strategy` before its own cached return.
-- `TypeError: 'NoneType' object is not subscriptable`: no ledger row was written.
+- `TypeError: 'NoneType' object is not subscriptable`: no ledger row was written (five tests, including `test_a_new_month_starts_with_nothing_spent`).
 - `Failed: DID NOT RAISE <class 'dashboard.backend.domain.leaderboard.live_budget.LiveBudgetExceeded'>`: the catch-up stop and first-deploy seeding.
 - `AssertionError: assert 'ERROR: live.spend_ledger_write_failed entry=deepseek_v4_pro error=OSError' in '…'`: the ledger-write test.
-- `KeyError: 'budget_halted'`: the clean-night refresh and the halt-after-a-success refresh.
+- `KeyError: 'budget_halted'`: the clean-night refresh, the halt-after-a-success refresh and `test_a_halt_between_two_shared_failures_does_not_reset_the_stop` (on main the halt is recorded as a failure with its own error, which resets the streak, so the fourth entry is deployed).
+- `KeyError: 'budget'`: `test_a_budget_read_that_fails_still_prunes_and_saves`.
+- `test_halts_and_failures_are_reported_apart` fails on `assert ['deepseek_v4...eepseek_twin'] == ['deepseek_v4_pro']`: on main the twin's `_no_billable_work` `AssertionError` is recorded as a second failure.
 - The whole-refresh halt test fails on `assert result["model_failures"] == []`, with `_no_billable_work`'s `AssertionError` text in the diff. Since #668 the roster loop catches any `Exception` per entry, so that error is recorded as a failure instead of escaping the refresh.
 
-`pytest dashboard/backend/tests/test_live_leaderboard.py -q -p no:cacheprovider` must still pass in full after Step 1's Edits 1–3, which touch only its fixture and `_ScriptedAgent`. Measured: `57 passed` on main@17c552c5, `77 passed` on main@011d6411.
+`pytest dashboard/backend/tests/test_live_leaderboard.py -q -p no:cacheprovider` must still pass in full after Step 1's Edits 1–3, which touch only its fixture and `_ScriptedAgent`. Measured: `77 passed`.
 
-- [ ] **Step 3: Implement.** Eight edits to `dashboard/backend/domain/leaderboard/live.py`, in order.
+- [ ] **Step 3: Implement.** Nine edits to `dashboard/backend/domain/leaderboard/live.py`, in order.
 
 **Edit 1 — `deploy_live_model_increment` no longer needs `initial_capital` in its head (it moves to `_trade_live_segment`; leaving it is an unused variable).** In `dashboard/backend/domain/leaderboard/live.py`, find:
 
@@ -1765,22 +1827,48 @@ Replace with:
                     bars_memo=bars_memo,
                 )
             except live_budget.LiveBudgetExceeded:
-                # Not a failure: the month's model budget is spent. The entry
-                # keeps the checkpoints it stored and is tried again next night,
-                # where the pre-check halts it before any bar fetch until the
-                # month rolls over or the cap is raised.
+                # Not a failure: the month's model budget is spent, or the next
+                # session would overspend it. The entry keeps the checkpoints it
+                # stored and is tried again next night. Once the month has
+                # reached the cap, the pre-check halts it there before any bar
+                # fetch; until then it trades again and is stopped when its next
+                # session would cross the cap. Kept out of ``roster``: a halt
+                # stops before the segment's last checkpoint and its end-of-run
+                # checks, so it neither extends nor resets the shared-fault
+                # streak.
                 halted.append(entry_id)
-                continue
             except Exception as exc:
 ```
 
-This puts the new clause directly ahead of the generic `except Exception`. `LiveBudgetExceeded` is a `RuntimeError`, so the order is what keeps a halt out of `model_failures`.
+This puts the new clause directly ahead of the generic `except Exception`. `LiveBudgetExceeded` is a `RuntimeError`, so the order is what keeps a halt out of `model_failures`. The clause has no `continue`, because Edit 8 moves the success path into the `try` statement's `else`.
 
-The `continue` is required since #668. The success path (`roster.traded(row)`, `successes.append(row)`) now runs after the `try` statement, so a halt that fell through would hit it. After a success, that appends the previous entry's row a second time. When the first entry halts, it raises `UnboundLocalError` out of the loop, skipping the prune and the state save. `test_a_halt_after_a_success_reports_each_entry_once` pins the first case; `test_halts_and_failures_are_reported_apart` errors on the second.
+A halt is not passed to `RosterFailures`, so it neither extends nor resets the shared-fault streak. That holds for both kinds of halt:
+- A pre-check halt runs none of the shared path. Once one entry halts there, every later entry halts there too, at zero cost.
+- A halt between sessions (`stop_if_next_session_would_cross`) has closed sessions. But it stops before the segment's last checkpoint and its end-of-run checks (the session-gap check, the segment's H6 check and the stored-through check), so it has not shown that the shared path works, which is what `roster.traded` assumes.
 
-A halt is not passed to `RosterFailures`, so it neither extends nor resets the shared-fault streak. A pre-check halt runs none of the shared path, and once one entry halts there, every later entry halts there too, at zero cost.
+The cost runs one way. If two failures with the same error sit on either side of a halt, the roster stops, and the entries after it go unbilled until the next night. Resetting the streak at the halt would instead bill another entry against the same fault. `test_a_halt_between_two_shared_failures_does_not_reset_the_stop` pins this.
 
-**Edit 8 — report the budget once per refresh (≈:1130 on main@011d6411).** In `dashboard/backend/domain/leaderboard/live.py`, find:
+**Edit 8 — run the success path only when the deploy returned (≈:1126 on main@011d6411).** In `dashboard/backend/domain/leaderboard/live.py`, find:
+
+```python
+                roster.failed(entry_id, exc)
+                continue
+            roster.traded(row)
+            successes.append(row)
+```
+
+Replace with:
+
+```python
+                roster.failed(entry_id, exc)
+            else:
+                roster.traded(row)
+                successes.append(row)
+```
+
+Since #668 the success path (`roster.traded(row)`, `successes.append(row)`) runs after the `try` statement, guarded only by a `continue` in each `except` clause. In the `else` clause, no handler can reach it, so a clause added later cannot fall through into it. Without this edit, the halt clause would fall through. After a success, that appends the previous entry's row a second time. Before any entry has traded, it raises `UnboundLocalError` out of the loop and skips the prune and the state save. `test_a_halt_after_a_success_reports_each_entry_once` pins the first case. The second is pinned by `test_a_spent_month_halts_the_roster_with_one_log_line` (the first entry halts) and `test_halts_and_failures_are_reported_apart` (a failure, then a halt).
+
+**Edit 9 — report the budget once per refresh, without letting its read stop the refresh (≈:1130 on main@011d6411).** In `dashboard/backend/domain/leaderboard/live.py`, find:
 
 ```python
         result["models_deployed"] = not roster.failures
@@ -1788,23 +1876,31 @@ A halt is not passed to `RosterFailures`, so it neither extends nor resets the s
         result["model_failures"] = roster.failures
 ```
 
-On main@17c552c5 these three lines read `failures` where they now read `roster.failures`; #668 changed them. Measured: the block occurs exactly once on main@011d6411.
-
 Replace with:
 
 ```python
-        budget = live_budget.budget_status(
-            freeze_cfg["start_date"],
-            checkpoint_rows=latest_live_month_runs(
-                freeze_cfg["start_date"], freeze_cfg["end_date"]
-            ),
-        )
+        try:
+            budget: Optional[Dict[str, Any]] = live_budget.budget_status(
+                freeze_cfg["start_date"],
+                checkpoint_rows=latest_live_month_runs(
+                    freeze_cfg["start_date"], freeze_cfg["end_date"]
+                ),
+            )
+        except Exception as exc:
+            # Two database reads after every model has traded and been billed.
+            # A failed read must not skip the prune and the state save below.
+            print(
+                f"ERROR: live.budget_status_failed error={type(exc).__name__}",
+                flush=True,
+            )
+            budget = None
         if halted:
             # One line for the whole roster: the state file is on an ephemeral
             # disk, so the log is the record an operator actually reads.
+            spent = f"{budget['spent_usd']:.2f}" if budget else "unread"
             print(
-                f"ERROR: live.budget_exhausted month={budget['month']} "
-                f"cap_usd={budget['cap_usd']:.2f} spent_usd={budget['spent_usd']:.2f} "
+                f"ERROR: live.budget_exhausted month={freeze_cfg['start_date'][:7]} "
+                f"cap_usd={live_budget.monthly_budget_usd():.2f} spent_usd={spent} "
                 f"skipped={','.join(halted)}",
                 flush=True,
             )
@@ -1815,6 +1911,8 @@ Replace with:
         result["budget"] = budget
 ```
 
+The budget read is guarded because it runs after the roster loop. Unguarded, a database error there (a Neon blip, a `PoolTimeout`) would raise out of `refresh_live_leaderboard` after every model was billed and checkpointed, skipping the prune and the state save and losing `model_results`. #668 removed exactly that failure from the loop above it. `test_a_budget_read_that_fails_still_prunes_and_saves` pins it. The month and the cap in the `budget_exhausted` line need no database (`monthly_budget_usd()` reads the environment), so only the spent figure can read `unread`.
+
 No unmerged phase that merges before this one changes these lines.
 
 - [ ] **Step 4: Run them and confirm they pass.**
@@ -1824,7 +1922,7 @@ pytest dashboard/backend/tests/test_live_budget.py -q -p no:cacheprovider
 pytest dashboard/backend/tests/test_live_leaderboard.py dashboard/backend/tests/test_leaderboard_season.py dashboard/backend/tests/test_live_trade_stats.py dashboard/backend/tests/test_architecture_boundaries.py -q -p no:cacheprovider
 ```
 
-Expected: `60 passed`, then the neighbours green (measured `131 passed` for the four files together on main@17c552c5, `156 passed` on main@011d6411).
+Expected: `62 passed`, then the neighbours green (measured `156 passed` for the four files together).
 
 - [ ] **Step 5: Commit.**
 
@@ -1940,7 +2038,7 @@ def test_get_live_ignores_last_months_ledger_and_an_empty_one(_read_only):
 pytest dashboard/backend/tests/test_live_budget.py -q -p no:cacheprovider
 ```
 
-Expected: `3 failed, 59 passed`, each with `KeyError: 'budget_halted'`.
+Expected: `3 failed, 62 passed`, each with `KeyError: 'budget_halted'`.
 
 - [ ] **Step 3: Implement.** Three edits to `get_live_leaderboard` in `dashboard/backend/domain/leaderboard/live.py`.
 
@@ -2015,7 +2113,7 @@ pytest dashboard/backend/tests/test_live_budget.py -q -p no:cacheprovider
 pytest dashboard/backend/tests/test_live_leaderboard.py dashboard/backend/tests/test_leaderboard_season.py -q -p no:cacheprovider
 ```
 
-Expected: `63 passed`, then the neighbours green (measured `78 passed` on main@17c552c5, `98 passed` on main@011d6411).
+Expected: `65 passed`, then the neighbours green (measured `98 passed`).
 
 - [ ] **Step 5: Commit.**
 
@@ -2377,7 +2475,7 @@ Replace with:
 function livePickerGroups(entries) {
 ```
 
-**Edit 7 — cache-buster.** In `dashboard/frontend/app.html`, find the one `<script src="js/live-leaderboard.js?v=N" defer></script>` tag and raise `N` by one from whatever main has when you execute this (on main@17c552c5 it is `?v=5`, so it becomes `?v=6`). No test pins the exact number (`test_live_script_is_cache_busted` only requires one). Do not touch `js/leaderboard.js?v=`, `styles.css?v=` or `app.js?v=`.
+**Edit 7 — cache-buster.** In `dashboard/frontend/app.html`, find the one `<script src="js/live-leaderboard.js?v=N" defer></script>` tag and raise `N` by one from whatever main has when you execute this (on main@011d6411 it is `?v=5`, so it becomes `?v=6`). No test pins the exact number (`test_live_script_is_cache_busted` only requires one). Do not touch `js/leaderboard.js?v=`, `styles.css?v=` or `app.js?v=`.
 
 - [ ] **Step 4: Run them and confirm they pass.**
 
@@ -2387,7 +2485,7 @@ pytest dashboard/backend/tests/test_frontend_live_budget.py -q -p no:cacheprovid
 pytest dashboard/backend/tests/test_frontend_live_leaderboard.py dashboard/backend/tests/test_frontend_live_trading_board.py dashboard/backend/tests/test_frontend_fast_boot.py -q -p no:cacheprovider
 ```
 
-Expected: `node --check` prints nothing and exits 0; `10 passed`; neighbours green (measured `54 passed` on main@17c552c5, `55 passed` on main@17c552c5 plus P1 and P2). The node tests are skipped (not failed) on a machine without `node`; this WSL has node v24, so a skip here means something is wrong.
+Expected: `node --check` prints nothing and exits 0; `10 passed`; neighbours green (measured `56 passed`). The node tests are skipped (not failed) on a machine without `node`; this WSL has node v24, so a skip here means something is wrong.
 
 - [ ] **Step 5: Commit.**
 
@@ -2413,7 +2511,7 @@ grep -c "LEADERBOARD_MONTHLY_BUDGET_USD" CLAUDE.md
 
 - [ ] **Step 2: Run it and confirm it fails.** Expected output: `0` (grep exits 1).
 
-- [ ] **Step 3: Implement.** In `CLAUDE.md`, find this text (the start of the `NEWS_FEED_FROZEN` bullet, which follows the `LEADERBOARD_DAILY_AUTO_DEPLOY` bullet on main@17c552c5, ≈:90):
+- [ ] **Step 3: Implement.** In `CLAUDE.md`, find this text (the start of the `NEWS_FEED_FROZEN` bullet, which follows the `LEADERBOARD_DAILY_AUTO_DEPLOY` bullet on main@011d6411, ≈:90):
 
 ```markdown
 - `NEWS_FEED_FROZEN` (optional, **unset = frozen** while FinSearch's feed timers are paused, since 2026-10-11): read per request by
@@ -2422,7 +2520,7 @@ grep -c "LEADERBOARD_MONTHLY_BUDGET_USD" CLAUDE.md
 Replace it with the new bullet, a newline, and the same text:
 
 ```markdown
-- `LEADERBOARD_MONTHLY_BUDGET_USD` (optional, default **50**, range 0–10000; **`0` blocks every billable live deploy — it is not "off"**): the Live Leaderboard's monthly model-spend hard stop (`domain/leaderboard/live_budget.py`, read per call by `monthly_budget_usd()`, never at import). Blank is the default, silently; junk, `nan`/`inf`, negative or over 10000 prints one `WARNING` per distinct value and uses 50 — it never raises, since every live deploy reads it. To lift the cap set a large number: a typo must not turn a hard stop into "unlimited". **Why a ledger rather than the checkpoint rows:** the live calls go through `COMMONSTACK_API_KEY` and bypass the Credits layer, and checkpoint rows undercount — a session H6 refuses to store, a run that dies before its next session close, and every row a forced or config replay deletes were all billed and leave nothing behind. So every billable attempt in `deploy_live_model_increment` is priced into one `agent_runs` row per (month, entry): session `leaderboard-live-spend`, mode `leaderboard_spend`, run id `live_spend_<YYYYMM>_<entry_id>`, cumulative `est_cost_usd`/tokens/`llm_calls` across successes, failures, H6 refusals and replays, plus `metadata.last_attempt = {on: <freeze_end>, outcome: ok|failed|budget_halted, kind}` (`kind` is a coarse class, never the error text). Cost is provider-reported tokens × the `infrastructure/llm/pricing.py` snapshot — an estimate, since CommonStack has no usage endpoint — and `LLMAgentStrategy` publishes its tokens after every decision step so a run that dies mid-session is still priced. Month-to-date per entry is `max(ledger, latest checkpoint row)`, so the first deploy after rollout starts from what the checkpoints already recorded. Two checks: before the model is built or a bar fetched (`spent >= cap` → `LiveBudgetExceeded`, a `RuntimeError`), and at each session close, where the ledger is upserted **before** H6 and the run stops when this attempt's average session cost would cross the cap with a session still to come — after storing the session it just paid for. The last session of a segment is never stopped by its own projection, so the overshoot is about one session per entry per month, not zero. `refresh_live_leaderboard` catches the halt ahead of the generic handler: halted entries go to `result["budget_halted"]`, not `model_failures`; `result["budget"]` carries cap/spent/remaining (operator-facing: the state file and the log, never the GET); exactly one flushed `ERROR: live.budget_exhausted month=YYYY-MM cap_usd=… spent_usd=… skipped=a,b` line is printed; and `models_deployed` stays false so the next cron retries, halting again at zero cost until the month rolls or the cap is raised. The public GET gains only `live_status.budget_halted` and per-entry `last_attempt`, which `js/live-leaderboard.js` renders as a banner line and a "Last nightly run" row; it adds no new dollar figure (the per-entry `est_cost_usd` it already published from checkpoint rows predates the ledger). The ledger is invisible to the board, `_find_cached_run`, `/api/backtest/runs`, v2 and the admin operator-cost roll-up (no owner); the public `/runs?mode=leaderboard_spend` does list its rows, but only through the `RunMetadata` allow-list, which carries the call count and no dollar, token or `metadata` field. It **survives `clear_live_session_runs` / `--clear` on purpose**: that money was spent. It is durable only because `AGENT_RUNS_DATABASE_URL` is set in prod; on ephemeral SQLite a redeploy zeroes it. It covers the live board only — contest/daily `deploy_model_run` is not budgeted. `tests/conftest.py` strips it.
+- `LEADERBOARD_MONTHLY_BUDGET_USD` (optional, default **50**, range 0–10000; **`0` blocks every billable live deploy — it is not "off"**): the Live Leaderboard's monthly model-spend hard stop (`domain/leaderboard/live_budget.py`, read per call by `monthly_budget_usd()`, never at import). Blank is the default, silently; junk, `nan`/`inf`, negative or over 10000 prints one `WARNING` per distinct value and uses 50 — it never raises, since every live deploy reads it. To lift the cap set a large number: a typo must not turn a hard stop into "unlimited". **Why a ledger rather than the checkpoint rows:** the live calls go through `COMMONSTACK_API_KEY` and bypass the Credits layer, and checkpoint rows undercount — a session H6 refuses to store, a run that dies before its next session close, and every row a forced or config replay deletes were all billed and leave nothing behind. So every billable attempt in `deploy_live_model_increment` is priced into one `agent_runs` row per (month, entry): session `leaderboard-live-spend`, mode `leaderboard_spend`, run id `live_spend_<YYYYMM>_<entry_id>`, cumulative `est_cost_usd`/tokens/`llm_calls` across successes, failures, H6 refusals and replays, plus `metadata.last_attempt = {on: <freeze_end>, outcome: ok|failed|budget_halted, kind}` (`kind` is a coarse class, never the error text). Cost is provider-reported tokens × the `infrastructure/llm/pricing.py` snapshot — an estimate, since CommonStack has no usage endpoint — and `LLMAgentStrategy` publishes its tokens after every decision step so a run that dies mid-session is still priced. Month-to-date per entry is `max(ledger, latest checkpoint row)`, so the first deploy after rollout starts from what the checkpoints already recorded. Two checks: before the model is built or a bar fetched (`spent >= cap` → `LiveBudgetExceeded`, a `RuntimeError`), and at each session close, where the ledger is upserted **before** H6 and the run stops when this attempt's average session cost would cross the cap with a session still to come — after storing the session it just paid for. The last session of a segment is never stopped by its own projection, so the overshoot is about one session per entry per month, not zero. `refresh_live_leaderboard` catches the halt ahead of the generic handler: halted entries go to `result["budget_halted"]`, not `model_failures`; `result["budget"]` carries cap/spent/remaining (operator-facing: the state file and the log, never the GET); exactly one flushed `ERROR: live.budget_exhausted month=YYYY-MM cap_usd=… spent_usd=… skipped=a,b` line is printed; a budget read that fails after the roster prints `ERROR: live.budget_status_failed error=<type>`, leaves `result["budget"]` `None` and `spent_usd=unread`, and does not stop the prune and the state save; and `models_deployed` stays false so the next cron retries, halting again at zero cost until the month rolls or the cap is raised. The public GET gains only `live_status.budget_halted` and per-entry `last_attempt`, which `js/live-leaderboard.js` renders as a banner line and a "Last nightly run" row; it adds no new dollar figure (the per-entry `est_cost_usd` it already published from checkpoint rows predates the ledger). The ledger is invisible to the board, `_find_cached_run`, `/api/backtest/runs`, v2 and the admin operator-cost roll-up (no owner); the public `/runs?mode=leaderboard_spend` does list its rows, but only through the `RunMetadata` allow-list, which carries the call count and no dollar, token or `metadata` field. It **survives `clear_live_session_runs` / `--clear` on purpose**: that money was spent. It is durable only because `AGENT_RUNS_DATABASE_URL` is set in prod; on ephemeral SQLite a redeploy zeroes it. It covers the live board only — contest/daily `deploy_model_run` is not budgeted. `tests/conftest.py` strips it.
 - `NEWS_FEED_FROZEN` (optional, **unset = frozen** while FinSearch's feed timers are paused, since 2026-10-11): read per request by
 ```
 
@@ -2458,13 +2556,13 @@ git commit -m "docs: document LEADERBOARD_MONTHLY_BUDGET_USD"
 pytest dashboard/backend/tests -q -p no:cacheprovider
 ```
 
-Expected: green apart from `test_report_pdf.py`, which fails locally only because this environment has no `reportlab` (CI installs it). To get a clean local run, deselect that file:
+Expected: green apart from two files that fail locally for environmental reasons, and only locally (CI installs the pinned requirements): `test_report_pdf.py`, because this environment has no `reportlab`, and five cases of `test_robinhood_mcp_transport.py`, because its installed `mcp` (1.28.1) is older than the `mcp==1.30.0` pin. Both fail the same way on main without this phase. To skip the first, deselect it:
 
 ```bash
 pytest dashboard/backend/tests -q -p no:cacheprovider --deselect dashboard/backend/tests/test_report_pdf.py
 ```
 
-Do not add `-x` (one failure would hide the rest) or `--timeout` (`pytest-timeout` is not installed here; pytest rejects the flag). It takes about five to seven minutes. The previous revision of this phase, replayed on a copy of main@17c552c5, measured `6751 passed, 176 skipped, 9 deselected, 25 xfailed`. This revision adds five classification cases and one roster test (`test_a_halt_after_a_success_reports_each_entry_once`, since #668) to `test_live_budget.py` and no other test, so on that base expect `6757 passed` with the same skips, deselects and xfails; on a later main, add the tests it gained. Any failure outside `test_report_pdf.py` is a regression in this branch.
+Do not add `-x` (one failure would hide the rest) or `--timeout` (`pytest-timeout` is not installed here; pytest rejects the flag). It takes about five to seven minutes. Measured on a copy of main@011d6411 with Tasks 3.1–3.6 applied: `5 failed, 7096 passed, 185 skipped, 9 deselected, 25 xfailed`, the five being the `test_robinhood_mcp_transport.py` cases above. On a later main, add the tests it gained. Any other failure is a regression in this branch.
 
 - [ ] **Step 2: Confirm the branch and that no PR already exists for it.**
 
@@ -2482,15 +2580,15 @@ git push -u origin feat/live-attempt-ledger
 gh pr create --base main --head feat/live-attempt-ledger \
   --title "feat(live): monthly budget hard stop and attempt ledger" \
   --body-file - <<'EOF'
+**Do not merge from 22:15 UTC on a weekday until that night's live refresh has finished** (the check is in `docs/superpowers/plans/2026-10-14-live-board-fixes.md`, Merging and records). GitHub starts the 22:30 UTC cron as late as 03:05 UTC, and the refresh keeps running on Render after the workflow run ends. The merge auto-deploys prod, and the restart kills a running refresh, so the sessions it had not checkpointed are billed again on the next night.
+
 Prices every billable Live Leaderboard attempt into a durable ledger and stops model deploys at `LEADERBOARD_MONTHLY_BUDGET_USD` (default $50/month; spec §7).
 
 - New `domain/leaderboard/live_budget.py`: one `agent_runs` row per (month, entry) in session `leaderboard-live-spend`, cumulative across successes, crashes, H6 refusals and forced replays; seeded from existing checkpoint rows on first use. No new DB methods.
 - `deploy_live_model_increment`: both already-current returns happen before the attempt (never priced or halted); pre-check before any model build or bar fetch; ledger upsert at every session close before H6; stop before a session that would cross the cap; a crash is priced. `LLMAgentStrategy` now publishes tokens per step.
-- `refresh_live_leaderboard`: halts are not failures; one `ERROR: live.budget_exhausted …` line; `models_deployed` stays false while halted.
+- `refresh_live_leaderboard`: halts are not failures and do not touch the shared-fault stop; one `ERROR: live.budget_exhausted …` line; `models_deployed` stays false while halted. The success path moves into the `try` statement's `else`, and a failed budget read logs `ERROR: live.budget_status_failed` without skipping the prune and the state save.
 - Public GET adds only `live_status.budget_halted` and per-model `last_attempt {on, outcome, kind}`: no new dollar figure (the per-entry `est_cost_usd` predates this PR) and no error text. The live tab shows a banner line and a "Last nightly run" row.
 - Test plan: `pytest dashboard/backend/tests/test_live_budget.py dashboard/backend/tests/test_frontend_live_budget.py dashboard/backend/tests/test_live_leaderboard.py -q`; after deploy, the next nightly log has no `live.budget_exhausted` line and `GET /api/v1/leaderboard?period=live` shows `budget_halted: false` with DeepSeek's `last_attempt.outcome` `ok`.
-
-Do not merge on a weekday between 22:15 and ~02:30 UTC. The merge auto-deploys prod, and the Render restart kills the nightly live refresh thread mid-run (its cron says 22:30 UTC, but GitHub has started it as late as 01:52), so that night's session is billed again on the next night.
 EOF
 ```
 
@@ -2510,9 +2608,10 @@ Expected: `origin/main` holds exactly this branch's value minus one. If main has
 
 1. **Old checkpoint rows with NULL or junk `est_cost_usd`** (rows written before cost tracking, or a bad migration). Added: `test_an_unreadable_spend_figure_counts_as_nothing` in Task 3.1 (`None`, text, `nan`, `inf`, negative all count as $0, never crash the pre-check or poison the total).
 2. **The ledger write itself fails** (Neon outage, disk full) while a deploy is failing for another reason. Added: `test_a_ledger_that_cannot_be_written_never_hides_the_deploy_error` in Task 3.3 (the original error still propagates, one `ERROR: live.spend_ledger_write_failed` line is printed, and the per-session upsert that did land is kept). On the success path a failed final write makes the deploy report a failure, by design; since #668 widened the per-entry catch to `Exception`, a raw driver error there (e.g. `sqlite3.OperationalError`) is recorded as that entry's failure, with its traceback, exactly as a failed checkpoint write is. If two entries in a row fail that way, `RosterFailures` lists the rest as not attempted.
-3. **Render kills the process mid-attempt** (a deploy during the 22:30 UTC refresh): no `finish` runs. Covered by `test_a_session_close_keeps_the_previous_outcome_until_the_attempt_ends` (the ledger holds spend through the last session close and the previous, dated `last_attempt`), so the board shows the last real outcome rather than a guess.
+3. **Render kills the process mid-attempt** (a deploy during the nightly refresh): no `finish` runs. Covered by `test_a_session_close_keeps_the_previous_outcome_until_the_attempt_ends` (the ledger holds spend through the last session close and the previous, dated `last_attempt`), so the board shows the last real outcome rather than a guess.
 4. **Two refreshes in different processes at once** (an operator running `scripts/refresh_live_leaderboard.py --force` with prod credentials while the cron's background thread runs). Not tested: both attempts read the same base and the later upsert wins, losing at most one attempt's spend. The in-process `_live_refresh_running` lock already prevents this inside one web process; a cross-process lock needs a DB-level claim and is a follow-up issue, not this phase.
 5. **A roster model with no price row** (a new slug on a key switch) is priced at the $1/$5 fallback, which over-estimates and so halts early: the safe direction for a hard stop. P4 (`2026-10-14-live-board-fixes-p4-roster.md`; Decision 6 in the index plan) adds the "every live model id has a listed price" test, so it is not duplicated here.
 6. **The second already-current return** (`live_increment_bounds(...) is None`, reached when `freeze_end` is not a session day). The dry run of the first draft left it inside `_trade_live_segment`, after the pre-check and `get_strategy`: under a spent budget it halted an entry with nothing to trade, and otherwise it built the model and wrote an `ok` ledger row. Fixed in Task 3.3 Edits 3–4 (the check moves into the head, ahead of the attempt) and pinned by `test_a_snapshot_that_already_covers_a_non_session_freeze_is_not_halted`. Review the one semantic change: a config change on an entry that is current this way now waits for its next increment, as it already did for the `latest.end_date == freeze_end` return. `live_clock` never produces such a `freeze_end`, so prod behaviour is unchanged.
 7. **Ledger rows leaking between test modules.** The test DB is session-scoped and every live deploy now writes a `leaderboard-live-spend` row. Covered: `test_live_leaderboard.py`'s `_isolated_live_session`, which P2's and P4's new live test modules import, now clears both sessions (Task 3.3 Step 1 Edit 1), and `test_live_budget.py` clears both in its own autouse fixture. A future module that deploys live models without either fixture would leave rows that only the GET's `last_attempt` reads.
-8. **A halt next to the roster bookkeeping #668 added.** Since #668 the success path runs after the `try` statement, so the halt clause must `continue` (Task 3.3 Edit 7). Added: `test_a_halt_after_a_success_reports_each_entry_once` in Task 3.3; the fail-then-halt order is `test_halts_and_failures_are_reported_apart`. A halt is deliberately kept out of `RosterFailures`: it neither counts toward nor resets the two-in-a-row shared-fault stop.
+8. **A halt next to the roster bookkeeping #668 added.** Since #668 the success path runs after the `try` statement, so Task 3.3 Edit 8 moves it into the statement's `else`, where no `except` clause can fall through into it. Covered: `test_a_halt_after_a_success_reports_each_entry_once` (success, then halt), `test_a_spent_month_halts_the_roster_with_one_log_line` (the first entry halts) and `test_halts_and_failures_are_reported_apart` (failure, then halt). A halt is deliberately kept out of `RosterFailures`, even one between sessions: it neither counts toward nor resets the two-in-a-row shared-fault stop (Edit 7's note gives the cost argument). Pinned by `test_a_halt_between_two_shared_failures_does_not_reset_the_stop`.
+9. **The budget read after the roster fails** (a Neon blip or `PoolTimeout` once every model has been billed). Task 3.3 Edit 9 guards it, so the refresh still prunes and saves state and keeps `model_results`. Added: `test_a_budget_read_that_fails_still_prunes_and_saves`.

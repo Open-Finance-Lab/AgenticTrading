@@ -60,7 +60,12 @@ Every task in every per-PR file inherits these.
 - Never touch `styles.css` or `app.js` (exact `?v=159` pins in 3–4 test files). Reuse existing CSS classes.
 
 **Merging and records**
-- **Merging to `main` auto-deploys prod.** Do not merge on a weekday between 22:15 and ~02:30 UTC. The deploy's restart kills the nightly live refresh thread mid-run, and that night's session is then billed again on the next night. The cron says 22:30 UTC, but GitHub starts scheduled runs late: the runs for 2026-10-23 and 2026-10-26 to 10-28 started between 00:50 and 01:52 UTC the next morning, hence the window's end.
+- **Merging to `main` auto-deploys prod, and the deploy's restart kills a live refresh that is still running.** The sessions that refresh had not yet checkpointed are then billed again on the next night. A refresh starts only from `.github/workflows/live-leaderboard.yml`. Its cron says 22:30 UTC Mon–Fri, but GitHub starts scheduled runs late: in October 2026 they started between 00:30 and 03:05 UTC the next morning, so Friday's run starts on Saturday UTC. The run gets a 202 back and exits, and the refresh keeps running on Render after the run shows `success`. No clock window bounds that, so the rule waits for the refresh itself:
+  - **From 22:15 UTC on a weekday (Mon–Fri), do not merge until that night's refresh has finished**, which can be the next morning (Tue–Sat). It has finished when both of these hold:
+    1. `gh run list --workflow live-leaderboard.yml --limit 1 --json createdAt,event,conclusion` shows that night's scheduled run with `conclusion` `success`. Before that, the refresh has not started.
+    2. In `curl -s 'https://agentictrading.onrender.com/api/v1/leaderboard?period=live' | jq '{through: .live_status.frozen_through, models: [.entries[] | select(.is_model) | {entry_id, snapshot_end}]}'`, every model's `snapshot_end` equals `through`, or the Render log has an `ERROR: live.model_deploy_failed`, `ERROR: live.model_not_attempted` or (after P3) `ERROR: live.budget_exhausted` line naming it, logged after the run started. A model on an earlier date is still trading. So is one whose `snapshot_end` is `null` with no such line: `null` means no row this month, as for Nemotron through October 2026, whose every call fails, or for a joiner on its first night (P4: Qwen and Haiku from 2026-11-01). A `Live leaderboard background refresh failed` line means the whole refresh has ended.
+  - Without access to the Render log, wait until 12:00 UTC instead, nine hours after the latest start seen in October.
+  - At any other time, a refresh runs only if someone dispatches the workflow by hand. Apply the same check after a dispatch: a `force` replay can run for hours.
 - **The owner approves every outward-facing action:** filing issues, landing and RST copy (P7 PR B), and the post-merge billable check for Haiku (P4).
 - A merged PR is write-only. Follow-ups go in issues, not comments.
 
@@ -80,7 +85,7 @@ Every task in every per-PR file inherits these.
 **Order rules**
 - **Sequence:** P1 → P2 → P3 → P4, all before 2026-10-31 if possible, then P5 → P6 → P7 A, then P7 B.
 - **P4 does not wait for P1–P3.** It has no code dependency on them, so it must not slip past 2026-10-31 if they do.
-- **P3 does not wait for P2.** Its halt clause works with or without P2, so it can go ahead if P2 slips.
+- **P3 does not wait for the rest of P2.** Its roster-loop edits are written against #668 (P2 Tasks 2.1–2.2), which is on main, and it shares no file with P2 Tasks 2.3–2.4, so it can go ahead if those slip.
 - **Phases are not safe to run in parallel.** P1, P2, P3, P5 and P6 all append to the end of `test_live_leaderboard.py` or `test_frontend_live_leaderboard.py`. P3, P5 and P6 bump the same cache-busters, and identical bumps from two branches merge with no conflict. A second executor takes a contiguous range (for example P1+P2, or P4 alone), never phases interleaved with the owner's.
 - **P5 to P7 B window.** From P5's deploy until P7 PR B merges, the landing page shows the new daily Sharpe under its old "annualized from hourly results" tooltip. The owner therefore approves P7 Task 7.3 Step 0's copy before P5 merges, and P6 and P7 B follow within the same week.
 
