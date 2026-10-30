@@ -361,10 +361,12 @@ class PortfolioManager:
     def _trade_memory_tail(self) -> List[Dict[str, Any]]:
         """Restored and own trades a later prompt can still be shown, JSON-safe.
 
-        Every later decision is at or after the newest trade, so a trade a full
-        ``TRADE_MEMORY_WINDOW`` older than that one can never pass a later
-        decision's cutoff: the tail anchored on the newest trade is a superset
-        of what any later ``recent_trades`` block reads. Oldest first, at most
+        Every later decision is at or after the newest trade and after this
+        manager's last bar, so a trade a full ``TRADE_MEMORY_WINDOW`` older than
+        the later of the two can never pass a later decision's cutoff: the tail
+        anchored there is a superset of what any later ``recent_trades`` block
+        reads, and a model that stops trading lets its memory expire instead of
+        carrying its last trades in every later snapshot. Oldest first, at most
         ``SNAPSHOT_TRADE_MEMORY_LIMIT`` (the newest), timestamps as ISO text.
         """
         rows = [
@@ -375,7 +377,12 @@ class PortfolioManager:
         if not rows:
             return []
         rows.sort(key=lambda row: row["timestamp"])
-        cutoff = rows[-1]["timestamp"] - TRADE_MEMORY_WINDOW
+        anchor = rows[-1]["timestamp"]
+        if self.equity_history:
+            last_bar = _memory_timestamp(self.equity_history[-1].get("timestamp"))
+            if last_bar is not None and last_bar > anchor:
+                anchor = last_bar
+        cutoff = anchor - TRADE_MEMORY_WINDOW
         tail = [row for row in rows if row["timestamp"] > cutoff]
         return [
             {**row, "timestamp": row["timestamp"].isoformat()}
@@ -406,8 +413,9 @@ class PortfolioManager:
 
         The memory goes to ``restored_trades``, never ``trades``. A snapshot
         written before it existed restores none; a corrupt memory row is
-        skipped rather than allowed to fail the session. ``trade_memory_since``
-        is kept only from a snapshot marked ``trade_memory``.
+        skipped rather than allowed to fail the session, and memory that reads
+        back as nothing at all logs an ERROR. ``trade_memory_since`` is kept
+        only from a snapshot marked ``trade_memory`` whose memory read back.
         """
         if not snapshot:
             return
@@ -452,18 +460,40 @@ class PortfolioManager:
                 lots_out[str(symbol)] = restored
         self.frozen_lots = lots_out
         memory = snapshot.get("recent_trades")
-        restored_trades = [
-            row
-            for row in map(_memory_trade, memory if isinstance(memory, list) else [])
-            if row is not None
-        ]
+        restored_trades = sorted(
+            (
+                row
+                for row in map(_memory_trade, memory if isinstance(memory, list) else [])
+                if row is not None
+            ),
+            key=lambda row: row["timestamp"],
+        )
         self.restored_trades = restored_trades[-SNAPSHOT_TRADE_MEMORY_LIMIT:]
-        # Unmarked (written before the memory existed) or unreadable: the mark
-        # restarts at this manager's first bar, which can only record the
+        marked = snapshot.get("trade_memory") == TRADE_MEMORY_VERSION
+        # A marked snapshot always writes a list of rows ``_memory_trade``
+        # accepted, so one whose memory reads back as nothing at all is a broken
+        # contract (a renamed key, a changed row shape), not a quiet night:
+        # nothing else would tell the two apart, since this night's prompts
+        # would just open with no memory.
+        lost = marked and (
+            not isinstance(memory, list) or (bool(memory) and not restored_trades)
+        )
+        if lost:
+            if isinstance(memory, list):
+                found = len(memory)
+            else:
+                found = "missing" if memory is None else type(memory).__name__
+            print(
+                f"ERROR: portfolio.trade_memory_unreadable recent_trades={found} "
+                "restored=0",
+                flush=True,
+            )
+        # Unmarked (written before the memory existed), lost or unreadable: the
+        # mark restarts at this manager's first bar, which can only record the
         # switch later than it happened, never earlier.
         self.trade_memory_since = (
             _memory_timestamp(snapshot.get("trade_memory_since"))
-            if snapshot.get("trade_memory") == TRADE_MEMORY_VERSION
+            if marked and not lost
             else None
         )
 

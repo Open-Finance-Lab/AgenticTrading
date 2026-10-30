@@ -202,11 +202,11 @@ def test_each_checkpoint_round_trips_the_memory_through_agent_runs(monkeypatch):
             "timestamp": "2026-08-26T18:00:00+00:00",
         },
     ]
-    # Night 2's row carries the tail anchored on its own sell: the 10:00 ET
-    # buy from night 1 is more than 24h older than that and is dropped.
+    # Night 2's row carries the tail anchored on its last bar, 15:00 ET: both
+    # of night 1's buys are over 24h older than that, so no later prompt could
+    # show them, and only night 2's own sell is kept.
     stored2 = live._snapshot_from_run(db.get_run(row2["run_id"]))
     assert [(t["side"], t["timestamp"]) for t in stored2["recent_trades"]] == [
-        ("BUY", "2026-08-26T18:00:00+00:00"),
         ("SELL", "2026-08-27T15:00:00+00:00"),
     ]
 

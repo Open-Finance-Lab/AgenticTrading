@@ -17,7 +17,6 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from dashboard.backend.domain.backtesting import portfolio_manager as pm_mod
 from dashboard.backend.domain.backtesting.portfolio_manager import (
     SNAPSHOT_TRADE_MEMORY_LIMIT,
     TRADE_MEMORY_VERSION,
@@ -72,7 +71,9 @@ def _prompt_memory(manager, monkeypatch, decision_ts):
         seen.append(snapshot)
         return "prompt"
 
-    monkeypatch.setattr(pm_mod, "create_prompt", capture)
+    monkeypatch.setattr(
+        "dashboard.backend.domain.backtesting.portfolio_manager.create_prompt", capture
+    )
     state = {
         "timestamp": pd.Timestamp(decision_ts),
         "cash": manager.cash,
@@ -227,6 +228,21 @@ def test_restore_caps_an_oversized_memory():
     assert manager.restored_trades[0]["shares"] == 51.0
 
 
+def test_restore_puts_memory_in_time_order_before_capping_it():
+    # The writer sorts, but a restore trusts no row: out-of-order memory is
+    # still capped to the newest trades and read back oldest first.
+    start = pd.Timestamp("2026-08-26T14:00:00Z")
+    rows = [
+        _memory((start + pd.Timedelta(minutes=i)).isoformat(), shares=float(i + 1))
+        for i in range(250)
+    ]
+    manager = PortfolioManager(initial_capital=10_000)
+    manager.restore_state({"cash": 100.0, "recent_trades": rows[::-1]})
+    assert [t["shares"] for t in manager.restored_trades] == [
+        float(n) for n in range(51, 251)
+    ]
+
+
 def test_prompt_shows_restored_trades_inside_24h_before_its_own(monkeypatch):
     manager = PortfolioManager(initial_capital=10_000)
     manager.restore_state({
@@ -287,6 +303,20 @@ def _decide_at(manager, ts):
     manager.update_equity({}, None, pd.Timestamp(ts))
 
 
+def test_memory_expires_while_the_model_holds():
+    manager = PortfolioManager(initial_capital=10_000)
+    manager.trades = [_trade("2026-08-26T14:00:00Z")]
+    _decide_at(manager, "2026-08-26T14:00:00Z")
+    _decide_at(manager, "2026-08-27T13:00:00Z")
+    # The next decision comes after the last bar, so a trade inside 24h of
+    # that bar may still be shown and is kept.
+    assert len(manager.snapshot_state()["recent_trades"]) == 1
+    # Once the last bar is a full window past it, no later prompt can show
+    # it, and a model that stopped trading does not carry it night after night.
+    _decide_at(manager, "2026-08-27T14:00:00Z")
+    assert manager.snapshot_state()["recent_trades"] == []
+
+
 def test_snapshot_marks_the_memory_from_the_managers_first_bar():
     manager = PortfolioManager(initial_capital=10_000)
     snap = manager.snapshot_state()
@@ -316,14 +346,63 @@ def test_restore_carries_where_the_memory_started():
     [
         {},
         {"trade_memory_since": "2026-08-03T14:00:00+00:00"},
-        {"trade_memory": TRADE_MEMORY_VERSION, "trade_memory_since": "not-a-date"},
-        {"trade_memory": TRADE_MEMORY_VERSION, "trade_memory_since": None},
+        {
+            "trade_memory": TRADE_MEMORY_VERSION,
+            "trade_memory_since": "not-a-date",
+            "recent_trades": [],
+        },
+        {
+            "trade_memory": TRADE_MEMORY_VERSION,
+            "trade_memory_since": None,
+            "recent_trades": [],
+        },
     ],
     ids=["pre-marker", "stamp-without-marker", "unreadable-stamp", "no-stamp"],
 )
-def test_a_snapshot_without_a_readable_mark_restarts_it_here(marker):
+def test_a_snapshot_without_a_readable_mark_restarts_it_here(marker, capsys):
     manager = PortfolioManager(initial_capital=10_000)
     manager.restore_state({"cash": 100.0, "positions": {}, **marker})
     assert manager.trade_memory_since is None
     _decide_at(manager, "2026-08-27T14:00:00Z")
     assert manager.snapshot_state()["trade_memory_since"] == "2026-08-27T14:00:00+00:00"
+    assert "ERROR" not in capsys.readouterr().out
+
+
+def test_an_empty_marked_memory_is_a_quiet_night_and_keeps_the_mark(capsys):
+    manager = PortfolioManager(initial_capital=10_000)
+    manager.restore_state({
+        "cash": 100.0,
+        "recent_trades": [],
+        "trade_memory": TRADE_MEMORY_VERSION,
+        "trade_memory_since": "2026-08-03T14:00:00+00:00",
+    })
+    assert manager.restored_trades == []
+    assert manager.trade_memory_since == pd.Timestamp("2026-08-03T14:00:00Z")
+    assert "ERROR" not in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    "memory, found",
+    [
+        ({}, "missing"),
+        ({"recent_trades": {"AAPL": 1}}, "dict"),
+        ({"recent_trades": [{"symbol": "AAPL"}, "garbage"]}, "2"),
+    ],
+    ids=["key-missing", "not-a-list", "every-row-unreadable"],
+)
+def test_marked_memory_that_reads_back_as_nothing_is_an_error(memory, found, capsys):
+    # Broken, not absent: the night opens with no memory, so the stamp must
+    # restart here too or the row would claim this night had it.
+    manager = PortfolioManager(initial_capital=10_000)
+    manager.restore_state({
+        "cash": 100.0,
+        "trade_memory": TRADE_MEMORY_VERSION,
+        "trade_memory_since": "2026-08-03T14:00:00+00:00",
+        **memory,
+    })
+    assert manager.restored_trades == []
+    assert manager.trade_memory_since is None
+    assert (
+        f"ERROR: portfolio.trade_memory_unreadable recent_trades={found} restored=0"
+        in capsys.readouterr().out
+    )
