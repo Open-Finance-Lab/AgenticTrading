@@ -142,6 +142,22 @@ def sharpe_standard_error_daily(sharpe_daily: float, n: int) -> float:
     return math.sqrt((1.0 + sharpe_daily * sharpe_daily / 2.0) / n)
 
 
+# Both boards run this on every GET, so one broken row would otherwise log the
+# same ERROR on every page load. Once per process per distinct break, the way
+# live.py's ``_warned_live_config`` does; bounded so junk cannot grow it.
+_logged_drift: set = set()
+_LOGGED_DRIFT_MAX = 1000
+
+
+def _log_drift_once(key: Tuple, message: str, *args: Any) -> None:
+    if key in _logged_drift:
+        return
+    if len(_logged_drift) >= _LOGGED_DRIFT_MAX:
+        _logged_drift.clear()
+    _logged_drift.add(key)
+    logger.error(message, *args)
+
+
 def _point_time(value: Any) -> Optional[datetime]:
     if isinstance(value, datetime):
         stamp = value
@@ -271,17 +287,21 @@ def daily_sharpe_interval(
         if points:
             # Absent and broken must not look alike: a curve that has points but
             # no usable close is a stored-shape break, not a board still pending.
-            logger.error(
+            _log_drift_once(
+                ("no_close", len(points), repr(points[0])[:200]),
                 "daily_sharpe: %d curve points but no usable daily close "
-                "(timestamps or equity unreadable); publishing status pending",
+                "(timestamps or equity unreadable; first point %s); publishing "
+                "status pending",
                 len(points),
+                repr(points[0])[:200],
             )
         return _result(SHARPE_STATUS_PENDING)
     if days < min_days:
         return _result(SHARPE_STATUS_INSUFFICIENT_DAYS)
     seed = _finite_equity(initial_equity)
     if seed is None or seed <= 0:
-        logger.error(
+        _log_drift_once(
+            ("seed", repr(initial_equity)[:200], days),
             "daily_sharpe: seed %r is not a positive number; publishing status "
             "no_variation for a %d-day curve",
             initial_equity,

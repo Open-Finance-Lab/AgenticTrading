@@ -28,6 +28,14 @@ M03_CLOSES = [100000.0, 102000.0, 96900.0, 101745.0, 102762.45]
 SEED = 100000.0
 
 
+@pytest.fixture(autouse=True)
+def _fresh_drift_log(monkeypatch):
+    """The drift ERROR fires once per process per break; reset it per test."""
+    from dashboard.backend.domain.backtesting import metrics
+
+    monkeypatch.setattr(metrics, "_logged_drift", set())
+
+
 def _daily(closes, *, first_day=3):
     """One 15:00 ET bar (19:00Z, open-stamped) per August 2026 session."""
     return [
@@ -254,3 +262,14 @@ def test_a_bad_seed_is_logged(caplog):
     with caplog.at_level("ERROR"):
         daily_sharpe_interval(_daily([SEED] * 6), SEED)
     assert caplog.records == []
+
+
+def test_a_broken_row_is_logged_once_not_on_every_board_get(caplog):
+    broken = [{"timestamp": "not a time", "equity": None}] * 3
+    with caplog.at_level("ERROR"):
+        for _ in range(5):
+            daily_sharpe_interval(broken, SEED)
+            daily_sharpe_interval(_daily(M03_CLOSES), 0.0)
+    messages = [r.getMessage() for r in caplog.records]
+    assert sum("no usable daily close" in m for m in messages) == 1
+    assert sum("seed 0.0" in m for m in messages) == 1
