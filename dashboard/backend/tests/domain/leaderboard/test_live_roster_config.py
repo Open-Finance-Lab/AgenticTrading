@@ -7,6 +7,9 @@ slug did exactly that until 2026-10-14. These cases pin the roster to the
 gateway's own listing instead.
 """
 
+import re
+from pathlib import Path
+
 import pytest
 
 import dashboard.backend.domain.leaderboard.live as live
@@ -73,3 +76,20 @@ def test_the_committed_live_config_raises_no_warning(capsys):
     a bug: the entry would trade at once, or on its shared values."""
     _live_entries()
     assert "WARNING: live." not in capsys.readouterr().out
+
+
+_REPO = Path(__file__).resolve().parents[5]
+_ROSTER_MENTIONS = (
+    _REPO / ".github" / "workflows" / "live-leaderboard.yml",
+    _REPO / "dashboard" / "scripts" / "refresh_live_leaderboard.py",
+)
+
+
+@pytest.mark.parametrize("path", _ROSTER_MENTIONS, ids=lambda p: p.name)
+def test_roster_mentions_name_the_constant_not_the_models(path):
+    """The workflow comment and the CLI help both listed the roster ("2 models
+    (DeepSeek V4 Pro, Nemotron 3 Nano)") and went stale on its first change."""
+    text = path.read_text(encoding="utf-8")
+    assert "LIVE_MODEL_IDS" in text
+    assert "Nemotron" not in text
+    assert not re.search(r"\b\d+ models\b", text)
