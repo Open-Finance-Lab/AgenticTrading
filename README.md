@@ -69,7 +69,7 @@ Benchmark LLM models, baseline strategies, and market indices on public leaderbo
 ```bash
 uv venv --python 3.13 .venv
 UV_HTTP_TIMEOUT=180 uv pip install --python .venv/bin/python -r requirements.txt -r requirements-vnpy.txt pytest pytest-timeout
-dashboard/scripts/run_local_safe.sh        # http://127.0.0.1:8765/app, no keys, nothing can trade or bill
+dashboard/scripts/run_local_safe.sh        # http://127.0.0.1:8765/app on a seed-DB copy; blanks broker, LLM, DB, mail, Stripe and iFinD keys
 ```
 
 On Windows, run these from Git Bash with `.venv/Scripts/python.exe` in place of `.venv/bin/python`.
