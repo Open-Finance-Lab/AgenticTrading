@@ -91,6 +91,9 @@ def test_the_get_gates_on_the_live_month_not_the_competition_window(monkeypatch)
 
 def test_a_not_yet_live_entry_is_neither_rendered_nor_deployed(monkeypatch, tmp_path):
     _use_config(monkeypatch, _config_with("deepseek_v4_pro", live_from="2026-09-01"))
+    # Qwen open in August is the positive control: a refresh that deployed
+    # nothing at all would otherwise pass the deploy half.
+    _use_config(monkeypatch, _config_with("qwen3_7_plus", live_from=_DROP))
     # A row left over from an earlier run must not put it back on the board.
     _insert_live_run(
         "lb_deepseek_v4_pro_20260801_20260826", "deepseek_v4_pro", "2026-08-26",
@@ -110,7 +113,7 @@ def test_a_not_yet_live_entry_is_neither_rendered_nor_deployed(monkeypatch, tmp_
         or {"entry_id": entry["id"]},
     )
     live.refresh_live_leaderboard(deploy_models=True, as_of=_AUG27)
-    assert "deepseek_v4_pro" not in deployed
+    assert deployed == ["qwen3_7_plus"]
 
 
 @pytest.mark.parametrize(

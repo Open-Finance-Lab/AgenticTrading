@@ -68,6 +68,10 @@ def test_every_live_model_is_priced_at_its_listed_rate():
         assert pricing.listed_price_for_model(entry["model_id"]) == pytest.approx(
             listed
         ), entry["id"]
+        # The function est_cost_usd actually prices with (substring match).
+        assert pricing.price_for_model(entry["model_id"]) == pytest.approx(
+            listed
+        ), entry["id"]
 
 
 def test_the_committed_live_config_raises_no_warning(capsys):

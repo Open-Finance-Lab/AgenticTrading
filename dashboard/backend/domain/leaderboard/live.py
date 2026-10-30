@@ -109,9 +109,10 @@ _LIVE_FROM_SHAPE = re.compile(r"\d{4}-\d{2}-01")
 # Changing a shared key for the Live board would re-judge Competition runs made
 # under the old value: Haiku's three repeat runs would stop publishing and its
 # July single run would replace their median. An override changes what the
-# Live board sends and records, and nothing else.
+# Live board sends and records, and nothing else. The overridable keys are the
+# compared keys themselves, so a key added there is overridable here too.
 LIVE_OVERRIDES_KEY = "live_overrides"
-LIVE_OVERRIDE_FIELDS = ("model_id", "integration", "temperature", "reasoning_effort")
+LIVE_OVERRIDE_FIELDS = lb_service._ENTRY_CONFIG_KEYS
 LIVE_SNAPSHOT_KEY = "live_portfolio_snapshot"
 # Present (True) on a checkpoint row only while it is being written. The row
 # goes in first, then its curve, then the row again with the snapshot and
