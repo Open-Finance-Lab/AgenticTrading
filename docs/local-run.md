@@ -77,6 +77,9 @@ The script:
   reset to seed data. Set `ATL_LOCAL_DIR` to use a different folder.
 - blanks every broker and LLM key (Alpaca, Anthropic, OpenAI, DeepSeek,
   CommonStack, OpenRouter) for the process, even if they are in your shell.
+- blanks the three `*_DATABASE_URL` variables and the mail (`BREVO_API_KEY`),
+  Stripe and iFinD keys, so a `dashboard/.env` configured like prod cannot
+  write to prod Postgres, send real mail or reach a paid gateway.
 - forces `ROBINHOOD_EXECUTE=false`, which turns off the only code path that
   can place a real-money order.
 - turns off the two background jobs that can spend money on their own:
@@ -84,8 +87,8 @@ The script:
 - enables `ENABLE_VNPY_SIMULATION=true`, which adds the simulated data source.
 
 On startup the log prints one `… backend: sqlite (…)` line per store. They
-should all say `sqlite`. A `postgres` line means a `*_DATABASE_URL` variable
-leaked in from your environment.
+should all say `sqlite`. A `postgres` line means the script was edited or
+bypassed and a `*_DATABASE_URL` variable leaked in from your environment.
 
 To run the server by hand instead, the canonical command is
 `uvicorn dashboard.backend.app:app` from the repo root. Never run

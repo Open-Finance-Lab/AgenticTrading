@@ -33,10 +33,10 @@ Integration guides outside the Sphinx site:
 - **vn.py simulated market data (Chinese)** — `docs/integrations/vnpy-simulation.md`
 - **Stripe Credits Test Mode** — `docs/integrations/stripe-credits-test-mode.md`
 
+Then commit and push.
+
 Developer reference (GitHub only; the repo `CLAUDE.md` holds the rules and points here):
 
-- **Configuration (every env var)** — `docs/architecture/configuration.md`
+- **Configuration (per-variable reference; families documented only in `.env.example` are not repeated)** — `docs/architecture/configuration.md`
 - **Backend internals (subsystem detail)** — `docs/architecture/backend-internals.md`
 - **Local setup and safe local run** — `docs/local-run.md`
-
-Then commit and push.

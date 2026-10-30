@@ -197,7 +197,9 @@ def test_a_twin_that_owns_a_schema_method_routes_it_through_the_guard():
 def test_the_guarded_list_accounts_for_every_twin():
     """Guarded + deliberately-exempt must equal the parity registry.
 
-    The sentence this plan writes into CLAUDE.md claims a scope. A claim
+    The scope sentence in docs/architecture/backend-internals.md ("Twelve of
+    the thirteen _TWINS pairs", under "Backtest-worker DDL guard") claims a
+    scope. A claim
     about "every twin" that is not checked against the list of twins is how
     the four-versus-twelve error got written down in the first place.
 
