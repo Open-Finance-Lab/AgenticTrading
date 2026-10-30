@@ -2494,51 +2494,94 @@ git add dashboard/frontend/js/live-leaderboard.js dashboard/frontend/app.html da
 git commit -m "feat(live): render budget halts and the last nightly run"
 ```
 
-### Task 3.6: Document `LEADERBOARD_MONTHLY_BUDGET_USD` in the repo CLAUDE.md
+### Task 3.6: Document `LEADERBOARD_MONTHLY_BUDGET_USD` (configuration reference, template, CLAUDE.md index)
+
+> **Amended 2026-10-30 for PR #689.** That PR condensed `CLAUDE.md` to rules plus one-line index entries and moved per-variable detail to `docs/architecture/configuration.md`. The anchor this task used (the long `NEWS_FEED_FROZEN` bullet after `LEADERBOARD_DAILY_AUTO_DEPLOY`) no longer exists, and `CLAUDE.md` must stay at or under 40,000 characters (Claude Code's large-file warning; PR #689 left it a few dozen under). Never paste the long-form text below into `CLAUDE.md`.
 
 **Files:**
-- Modify: `CLAUDE.md` (repo root; developer doc, part of this PR)
+- Modify: `docs/architecture/configuration.md` (one `###` entry at the end of "Leaderboard operations")
+- Modify: `.env.example` (one commented-out entry)
+- Modify: `CLAUDE.md` (one index bullet at the end of **Leaderboards**, plus one clause in the `LIVE_LEADERBOARD_DEPLOY_MODELS` bullet)
 
 **Interfaces:**
 - Consumes: the behaviour built in Tasks 3.1–3.5.
-- Produces: one env bullet, placed directly after the `LEADERBOARD_DAILY_AUTO_DEPLOY` bullet. P7 (`2026-10-14-live-board-fixes-p7-records.md`; Decision 9 in the index plan) rewrites the neighbouring live-board passages; it must edit this bullet, not add a second one.
+- Produces: the `CLAUDE.md` bullet beginning ``- `LEADERBOARD_MONTHLY_BUDGET_USD` ``, directly after the `LIVE_LEADERBOARD_DEPLOY_MODELS` bullet (which itself follows `LEADERBOARD_DAILY_AUTO_DEPLOY`, so the order is the one P7 expects); the `### \`LEADERBOARD_MONTHLY_BUDGET_USD\`` entry in `configuration.md`. P7 (`2026-10-14-live-board-fixes-p7-records.md`; Decision 9 in the index plan) must edit these, not add second copies; its Step 0 greps for exactly one `CLAUDE.md` line starting ``- `LEADERBOARD_MONTHLY_BUDGET_USD` ``.
 
 - [ ] **Step 1: Write the failing test.** No code test: this is prose. The check is a grep that must find nothing before the edit:
 
 ```bash
-grep -c "LEADERBOARD_MONTHLY_BUDGET_USD" CLAUDE.md
+grep -c "LEADERBOARD_MONTHLY_BUDGET_USD" CLAUDE.md docs/architecture/configuration.md .env.example
 ```
 
-- [ ] **Step 2: Run it and confirm it fails.** Expected output: `0` (grep exits 1).
+- [ ] **Step 2: Run it and confirm it fails.** Expected output: `0` for each of the three files.
 
-- [ ] **Step 3: Implement.** In `CLAUDE.md`, find this text (the start of the `NEWS_FEED_FROZEN` bullet, which follows the `LEADERBOARD_DAILY_AUTO_DEPLOY` bullet on main@011d6411, ≈:90):
+- [ ] **Step 3: Implement.**
+
+**3a.** In `docs/architecture/configuration.md`, find the line `## Capacity and runtime caps` and insert this entry directly above it (after the `LIVE_LEADERBOARD_DEPLOY_MODELS` entry), followed by one blank line:
 
 ```markdown
-- `NEWS_FEED_FROZEN` (optional, **unset = frozen** while FinSearch's feed timers are paused, since 2026-10-11): read per request by
+### `LEADERBOARD_MONTHLY_BUDGET_USD`
+Optional; default 50; range 0-10000; read per call by `domain/leaderboard/live_budget.py::monthly_budget_usd()`, never at import. **`0` blocks every billable live deploy; it is not "off".** **Rule: CLAUDE.md.** The Live Leaderboard's monthly model-spend hard stop. Set by: operator. Blank is the default, silently; junk, `nan`/`inf`, negative or over 10000 prints one `WARNING` per distinct value and uses 50, never raising (every live deploy reads it).
+- Why a ledger rather than the checkpoint rows: the live calls go through `COMMONSTACK_API_KEY` and bypass the Credits layer, and checkpoint rows undercount. A session H6 refuses to store, a run that dies before its next session close, and every row a forced or config replay deletes were all billed and leave nothing behind.
+- Ledger: every billable attempt in `deploy_live_model_increment` is priced into one `agent_runs` row per (month, entry): session `leaderboard-live-spend`, mode `leaderboard_spend`, run id `live_spend_<YYYYMM>_<entry_id>`, cumulative `est_cost_usd`/tokens/`llm_calls` across successes, failures, H6 refusals and replays, plus `metadata.last_attempt = {on: <freeze_end>, outcome: ok|failed|budget_halted, kind}` (`kind` is a coarse class, never the error text). Cost is provider-reported tokens times the `infrastructure/llm/pricing.py` snapshot, an estimate because CommonStack has no usage endpoint; `LLMAgentStrategy` publishes its tokens after every decision step, so a run that dies mid-session is still priced. Month-to-date per entry is `max(ledger, latest checkpoint row)`, so the first deploy after rollout starts from what the checkpoints already recorded.
+- Two checks: before the model is built or a bar fetched (`spent >= cap` raises `LiveBudgetExceeded`, a `RuntimeError`), and at each session close, where the ledger is upserted BEFORE H6 and the run stops when this attempt's average session cost would cross the cap with a session still to come, after storing the session it just paid for. The last session of a segment is never stopped by its own projection, so the overshoot is about one session per entry per month, not zero.
+- Halt handling: `refresh_live_leaderboard` catches the halt ahead of the generic handler. Halted entries go to `result["budget_halted"]`, not `model_failures`; `result["budget"]` carries cap/spent/remaining (operator-facing: the state file and the log, never the GET); exactly one flushed `ERROR: live.budget_exhausted month=YYYY-MM cap_usd=... spent_usd=... skipped=a,b` line is printed. A budget read that fails after the roster prints `ERROR: live.budget_status_failed error=<type>`, leaves `result["budget"]` `None` and `spent_usd=unread`, and does not stop the prune and the state save. `models_deployed` stays false, so the next cron retries, halting again at zero cost until the month rolls or the cap is raised.
+- Surfaces: the public GET gains only `live_status.budget_halted` and per-entry `last_attempt`, which `dashboard/frontend/js/live-leaderboard.js` renders as a banner line and a "Last nightly run" row; it adds no new dollar figure (the per-entry `est_cost_usd` it already published from checkpoint rows predates the ledger). The ledger is invisible to the board, `_find_cached_run`, `/api/backtest/runs`, v2 and the admin operator-cost roll-up (no owner); the public `/runs?mode=leaderboard_spend` lists its rows only through the `RunMetadata` allow-list (call count; no dollar, token or `metadata` field).
+- Durability and scope: the ledger survives `clear_live_session_runs` / `--clear` on purpose (that money was spent). It is durable only because `AGENT_RUNS_DATABASE_URL` is set in prod; on ephemeral SQLite a redeploy zeroes it. It covers the Live board only; contest/daily `deploy_model_run` is not budgeted.
+- Tests: `tests/test_live_budget.py`; conftest strips it.
 ```
 
-Replace it with the new bullet, a newline, and the same text:
+**3b.** In `.env.example`, directly after the `# LEADERBOARD_DAILY_AUTO_DEPLOY=true` line, add a blank line and:
+
+```bash
+# Live Leaderboard monthly model-spend hard stop, in USD (default 50, range
+# 0-10000). 0 blocks every billable live deploy; it is not "off". To lift the
+# cap set a large number: blank or junk falls back to 50.
+# LEADERBOARD_MONTHLY_BUDGET_USD=50
+```
+
+**3c.** In `CLAUDE.md`, inside the `LIVE_LEADERBOARD_DEPLOY_MODELS` bullet, find:
 
 ```markdown
-- `LEADERBOARD_MONTHLY_BUDGET_USD` (optional, default **50**, range 0–10000; **`0` blocks every billable live deploy — it is not "off"**): the Live Leaderboard's monthly model-spend hard stop (`domain/leaderboard/live_budget.py`, read per call by `monthly_budget_usd()`, never at import). Blank is the default, silently; junk, `nan`/`inf`, negative or over 10000 prints one `WARNING` per distinct value and uses 50 — it never raises, since every live deploy reads it. To lift the cap set a large number: a typo must not turn a hard stop into "unlimited". **Why a ledger rather than the checkpoint rows:** the live calls go through `COMMONSTACK_API_KEY` and bypass the Credits layer, and checkpoint rows undercount — a session H6 refuses to store, a run that dies before its next session close, and every row a forced or config replay deletes were all billed and leave nothing behind. So every billable attempt in `deploy_live_model_increment` is priced into one `agent_runs` row per (month, entry): session `leaderboard-live-spend`, mode `leaderboard_spend`, run id `live_spend_<YYYYMM>_<entry_id>`, cumulative `est_cost_usd`/tokens/`llm_calls` across successes, failures, H6 refusals and replays, plus `metadata.last_attempt = {on: <freeze_end>, outcome: ok|failed|budget_halted, kind}` (`kind` is a coarse class, never the error text). Cost is provider-reported tokens × the `infrastructure/llm/pricing.py` snapshot — an estimate, since CommonStack has no usage endpoint — and `LLMAgentStrategy` publishes its tokens after every decision step so a run that dies mid-session is still priced. Month-to-date per entry is `max(ledger, latest checkpoint row)`, so the first deploy after rollout starts from what the checkpoints already recorded. Two checks: before the model is built or a bar fetched (`spent >= cap` → `LiveBudgetExceeded`, a `RuntimeError`), and at each session close, where the ledger is upserted **before** H6 and the run stops when this attempt's average session cost would cross the cap with a session still to come — after storing the session it just paid for. The last session of a segment is never stopped by its own projection, so the overshoot is about one session per entry per month, not zero. `refresh_live_leaderboard` catches the halt ahead of the generic handler: halted entries go to `result["budget_halted"]`, not `model_failures`; `result["budget"]` carries cap/spent/remaining (operator-facing: the state file and the log, never the GET); exactly one flushed `ERROR: live.budget_exhausted month=YYYY-MM cap_usd=… spent_usd=… skipped=a,b` line is printed; a budget read that fails after the roster prints `ERROR: live.budget_status_failed error=<type>`, leaves `result["budget"]` `None` and `spent_usd=unread`, and does not stop the prune and the state save; and `models_deployed` stays false so the next cron retries, halting again at zero cost until the month rolls or the cap is raised. The public GET gains only `live_status.budget_halted` and per-entry `last_attempt`, which `js/live-leaderboard.js` renders as a banner line and a "Last nightly run" row; it adds no new dollar figure (the per-entry `est_cost_usd` it already published from checkpoint rows predates the ledger). The ledger is invisible to the board, `_find_cached_run`, `/api/backtest/runs`, v2 and the admin operator-cost roll-up (no owner); the public `/runs?mode=leaderboard_spend` does list its rows, but only through the `RunMetadata` allow-list, which carries the call count and no dollar, token or `metadata` field. It **survives `clear_live_session_runs` / `--clear` on purpose**: that money was spent. It is durable only because `AGENT_RUNS_DATABASE_URL` is set in prod; on ephemeral SQLite a redeploy zeroes it. It covers the live board only — contest/daily `deploy_model_run` is not budgeted. `tests/conftest.py` strips it.
-- `NEWS_FEED_FROZEN` (optional, **unset = frozen** while FinSearch's feed timers are paused, since 2026-10-11): read per request by
+billing `COMMONSTACK_API_KEY` for each `LIVE_MODEL_IDS` model every weekday;
 ```
 
-If P7 has already moved `LEADERBOARD_DAILY_AUTO_DEPLOY`, put the bullet directly after it wherever it now is; the anchor above is only the line that follows it today.
+Replace with:
+
+```markdown
+billing `COMMONSTACK_API_KEY` for each `LIVE_MODEL_IDS` model every weekday (capped by `LEADERBOARD_MONTHLY_BUDGET_USD`);
+```
+
+Then add this bullet on the line directly after the `LIVE_LEADERBOARD_DEPLOY_MODELS` bullet (the last bullet under **Leaderboards**, before **Auth and mail**):
+
+```markdown
+- `LEADERBOARD_MONTHLY_BUDGET_USD` (default 50; **`0` blocks every billable live deploy, it is not "off"**): the Live board's monthly model-spend hard stop (`domain/leaderboard/live_budget.py`); to lift it set a large number (junk falls back to 50). Its attempt ledger survives `--clear` on purpose. → `configuration.md`
+```
+
+**3d.** Keep `CLAUDE.md` under the ceiling:
+
+```bash
+LC_ALL=C.UTF-8 wc -m < CLAUDE.md   # must print 40000 or less
+```
+
+If it prints more, shorten a `CLAUDE.md` passage whose detail `configuration.md` or `backend-internals.md` already holds, never a rule. Leave intact the four strings P7's test reads from the `LEADERBOARD_DAILY_REFRESH_SECRET` bullet (`.github/workflows/daily-leaderboard.yml`, `.github/workflows/live-leaderboard.yml`, `/api/v1/leaderboard/live/refresh`, `LIVE_LEADERBOARD_DEPLOY_MODELS`) and the strings `test_docs_run_command.py` and `test_discord_wiring.py` read.
 
 - [ ] **Step 4: Run it and confirm it passes.**
 
 ```bash
-grep -c "LEADERBOARD_MONTHLY_BUDGET_USD" CLAUDE.md
-grep -n "live.budget_exhausted\|leaderboard-live-spend" CLAUDE.md
+grep -c '^- `LEADERBOARD_MONTHLY_BUDGET_USD`' CLAUDE.md
+grep -c '^### `LEADERBOARD_MONTHLY_BUDGET_USD`' docs/architecture/configuration.md
+grep -n "live.budget_exhausted\|leaderboard-live-spend" docs/architecture/configuration.md
+grep -c "LEADERBOARD_MONTHLY_BUDGET_USD" .env.example
+pytest dashboard/backend/tests/integrations/test_docs_run_command.py dashboard/backend/tests/integrations/test_discord_wiring.py -q -p no:cacheprovider
 ```
 
-Expected: `1`, then one line containing both strings. Re-read the bullet against `live_budget.py` and the `live.py` edits: every name it cites (`monthly_budget_usd`, `LiveBudgetExceeded`, `budget_halted`, `last_attempt`, `clear_live_session_runs`) must exist.
+Expected: `1`, `1`, one line containing both strings, `1`, and the two `CLAUDE.md` readers green. Re-read the entry against `live_budget.py` and the `live.py` edits: every name it cites (`monthly_budget_usd`, `LiveBudgetExceeded`, `budget_halted`, `last_attempt`, `clear_live_session_runs`, `deploy_live_model_increment`) must exist.
 
 - [ ] **Step 5: Commit.**
 
 ```bash
-git add CLAUDE.md
+git add CLAUDE.md docs/architecture/configuration.md .env.example
 git commit -m "docs: document LEADERBOARD_MONTHLY_BUDGET_USD"
 ```
 

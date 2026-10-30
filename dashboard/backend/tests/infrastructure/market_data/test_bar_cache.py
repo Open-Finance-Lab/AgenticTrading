@@ -301,8 +301,9 @@ def test_a_valid_override_is_honoured_for_max_bytes_and_ttl(monkeypatch):
 
 
 def test_the_design_doc_does_not_call_this_unimplemented():
-    """SOURCE-SHAPE GUARD. CLAUDE.md's ATL_BAR_CACHE bullet ends by pointing
-    at this spec, so its status banner is the first thing every future agent
+    """SOURCE-SHAPE GUARD. The ATL_BAR_CACHE entry in
+    docs/architecture/configuration.md ends by pointing at this spec, so its
+    status banner is the first thing every future agent
     sent there reads -- and it said "DESIGN ONLY -- nothing under dashboard/
     implements this" on the branch that implements it, inviting a reader to
     re-implement the cache or to treat the module as dead. A document is only

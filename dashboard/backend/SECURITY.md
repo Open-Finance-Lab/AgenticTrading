@@ -117,7 +117,7 @@ It applies these constraints inline instead:
 |------------|-------------|
 | JSON-only, no tools | No request sends `tools`; text blocks only (`extract_response_text`, which skips `tool_use` and thinking blocks); prompt scaffold pins the output contract; response is parsed as JSON only (`parse_llm_response`), never executed |
 | Symbol allowlist | Symbols are normalized with `normalize_symbol` (see below), then any outside the run's universe (`_allowed_set`: `DJIA_30` unless the run names a universe) is skipped; a strict run rejects the whole batch |
-| Action count | Capped at one action per universe symbol (`len(allowed_symbols)`); excess entries ignored, or the whole batch rejected on a strict run |
+| Action count | A count cap, not one action per symbol: at most `len(allowed_symbols)` actions per step; excess entries ignored, or the whole batch rejected on a strict run. Repeats of one symbol are not merged, so one step can send that many orders for a single name, each up to `MAX_ORDER_SHARES` and bounded only by the cash and held-share limits below |
 | Per-order size | `position_size > MAX_ORDER_SHARES` (10k, same constant as the validator) skipped; unparseable/non-finite sizes skipped |
 | Cash bound | Buys must fit in available cash; sells limited to held shares |
 | Confidence floor | Read by `read_confidence` (`infrastructure/llm/validator.py`): a missing confidence takes the path's default (0.5; a pipeline's `orders` 0.75, `risk_actions` 0.8), any other value that is not a number from 0 to 1 (a bool, text, NaN, `25`) skips the action, and actions below 0.3 are skipped |

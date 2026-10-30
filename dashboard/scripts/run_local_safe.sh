@@ -2,6 +2,10 @@
 # Start Agentic Trading Lab locally in a no-money-at-risk configuration.
 #   - runs against a COPY of the seed DB (the committed backtest.db is never touched)
 #   - blanks every broker/LLM key, so nothing can trade or bill
+#   - blanks the three *_DATABASE_URL, mail, Stripe and iFinD keys, so a
+#     dashboard/.env configured like prod cannot write prod Postgres, send real
+#     mail or reach a paid gateway (app.py's load_dotenv never overrides a set
+#     variable, and an empty URL selects SQLite)
 #   - Robinhood live execution forced off
 #   - offline simulated market data (vn.py) enabled
 # Usage: dashboard/scripts/run_local_safe.sh [port]   (default 8765)
@@ -40,4 +44,8 @@ exec env \
   ALPACA_API_KEY= ALPACA_SECRET_KEY= \
   ANTHROPIC_API_KEY= OPENAI_API_KEY= DEEPSEEK_API_KEY= \
   COMMONSTACK_API_KEY= OPENROUTER_API_KEY= \
+  USERS_DATABASE_URL= CONTENT_DATABASE_URL= AGENT_RUNS_DATABASE_URL= \
+  BREVO_API_KEY= \
+  ATL_STRIPE_TEST_BILLING_ENABLED= STRIPE_SECRET_KEY= STRIPE_WEBHOOK_SECRET= \
+  IFIND_REFRESH_TOKEN= IFIND_ACCESS_TOKEN= \
   "$PY" -m uvicorn dashboard.backend.app:app --host 127.0.0.1 --port "$PORT"
