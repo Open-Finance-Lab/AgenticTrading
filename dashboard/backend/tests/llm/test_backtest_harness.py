@@ -656,7 +656,9 @@ def test_filtered_actions_still_count_as_a_decision():
 
 def test_post_parse_exception_is_billed_but_not_a_decision():
     # Valid JSON with a non-empty actions list, but a field has the wrong type
-    # (confidence as a string "0.9"), so the per-action processing loop raises.
+    # (action as a number, which has no .lower()), so the per-action processing
+    # loop raises. (This used confidence "0.9" until the gate learned to read
+    # numeric strings, which made that a usable confidence.)
     # The blanket except converts the whole step to a pure rule-based fallback —
     # the returned actions are the rule-based engine's, not the model's — so it
     # must NOT count toward model coverage even though parsing "succeeded".
@@ -664,7 +666,7 @@ def test_post_parse_exception_is_billed_but_not_a_decision():
     # 100% coverage while trading fully rule-based, defeating the H6 guard.)
     pm = bha.PortfolioManager(100000)
     resp_text = json.dumps({"actions": [
-        {"symbol": "AAPL", "action": "buy", "confidence": "0.9",
+        {"symbol": "AAPL", "action": 7, "confidence": 0.9,
          "reasoning": "strong", "position_size": 10},
     ]})
     client = _FakeClient(_FakeResponse(resp_text, usage=_FakeUsage(10, 5)))
