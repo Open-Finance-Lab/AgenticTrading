@@ -1730,6 +1730,10 @@ def get_live_leaderboard(
     runs_by_entry = (
         latest_live_month_runs(freeze_start, freeze_end) if freeze_cfg else {}
     )
+    # Each model's last billable attempt this month, from the spend ledger:
+    # its date, outcome and a coarse kind only. It adds no dollar figure and no
+    # error message: this GET is public and the owner pays for the calls.
+    attempts = live_budget.last_attempts(freeze_start) if freeze_cfg else {}
 
     ranked: List[Dict[str, Any]] = []
     pending: List[Dict[str, Any]] = []
@@ -1781,6 +1785,9 @@ def get_live_leaderboard(
         )
         if entry["status"] == "catching_up":
             catching_up.append(entry["entry_id"])
+        entry["last_attempt"] = (
+            attempts.get(entry["entry_id"]) if entry.get("is_model") else None
+        )
         (ranked if entry["status"] == "frozen" else pending).append(entry)
 
     entries = lb_service._rank_entries(ranked) + pending
@@ -1831,6 +1838,13 @@ def get_live_leaderboard(
         "has_prints": bool(ranked),
         "freeze_start": freeze_start,
         "freeze_end": freeze_end,
+        # Some model's last attempt stopped at the monthly budget. A flag
+        # only: how much was spent stays in the refresh result and the log.
+        "budget_halted": any(
+            (entry.get("last_attempt") or {}).get("outcome")
+            == live_budget.OUTCOME_BUDGET_HALTED
+            for entry in entries
+        ),
     }
 
     return {

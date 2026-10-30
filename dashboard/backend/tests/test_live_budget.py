@@ -819,3 +819,91 @@ def test_a_clean_night_reports_the_budget_and_no_halt(monkeypatch, capsys):
     assert result["budget"]["cap_usd"] == 50.0
     assert set(live_budget.month_ledger_rows(_AUG)) == set(roster)
     assert "live.budget_exhausted" not in capsys.readouterr().out
+
+
+# --- what the public GET shows -----------------------------------------------------
+
+
+def _get_aug27():
+    return live.get_live_leaderboard(as_of=datetime(2026, 8, 27, 17, 39, tzinfo=_ET))
+
+
+@pytest.fixture
+def _read_only(monkeypatch):
+    def _must_not_run(*_args, **_kwargs):
+        raise AssertionError("the live GET path reached the compute path")
+
+    monkeypatch.setattr(lb_service, "ensure_leaderboard_runs", _must_not_run)
+    monkeypatch.setattr(lb_service, "fetch_hourly_bars", _must_not_run)
+
+
+def test_get_live_gains_only_a_halt_flag_and_last_attempts(monkeypatch, _read_only):
+    """The ledger's whole public footprint is ``live_status.budget_halted`` and
+    each model's ``last_attempt``. The per-entry ``est_cost_usd`` the GET
+    already published from the checkpoint row predates the ledger and is left
+    as it was; the cap and the month-to-date spend never reach the payload."""
+    monkeypatch.setenv(live_budget.BUDGET_ENV, "48.7654")
+    _insert_live_run(
+        "lb_deepseek_v4_pro_20260801_20260827", "deepseek_v4_pro", _FREEZE,
+        [_pt(f"{_FREEZE}T19:00:00+00:00", SEED)],
+        metadata={live.LIVE_SNAPSHOT_KEY: {"cash": SEED, "positions": {}, "day": "08-27"}},
+        est_cost_usd=12.3456,
+    )
+    before = _get_aug27()
+    _insert_ledger("deepseek_v4_pro", 48.7654, last_attempt={
+        "on": _FREEZE, "outcome": "budget_halted", "kind": "budget",
+        "error": "sk-live-SECRET", "spent_usd": 48.7654,
+    })
+    after = _get_aug27()
+
+    # live_status gains one boolean, and the ledger moves nothing else in it.
+    assert before["live_status"]["budget_halted"] is False
+    assert after["live_status"]["budget_halted"] is True
+    assert set(after["live_status"]) == set(before["live_status"])
+    assert {
+        key for key, value in after["live_status"].items()
+        if value != before["live_status"][key]
+    } == {"budget_halted"}
+
+    # Each entry gains last_attempt, exactly {on, outcome, kind}; nothing else moves.
+    before_by_id = {entry["entry_id"]: entry for entry in before["entries"]}
+    assert {entry["entry_id"] for entry in after["entries"]} == set(before_by_id)
+    for entry in after["entries"]:
+        old = before_by_id[entry["entry_id"]]
+        assert set(entry) == set(old)
+        assert {key for key in entry if entry[key] != old[key]} <= {"last_attempt"}
+    deepseek = next(e for e in after["entries"] if e["entry_id"] == "deepseek_v4_pro")
+    assert deepseek["last_attempt"] == {
+        "on": _FREEZE, "outcome": "budget_halted", "kind": "budget",
+    }
+    assert all(e["last_attempt"] is None for e in after["entries"] if not e["is_model"])
+
+    # The pre-existing per-entry figure is the checkpoint row's, untouched...
+    assert deepseek["est_cost_usd"] == pytest.approx(12.3456)
+    # ...and neither the cap nor the month-to-date spend reaches the payload.
+    text = json.dumps(after)
+    assert "48.7654" not in text
+    assert "SECRET" not in text
+    for key in ("cap_usd", "spent_usd", "remaining_usd"):
+        assert key not in text
+
+
+def test_get_live_reports_a_failed_night_without_halting_the_board(_read_only):
+    _insert_ledger("deepseek_v4_pro", 0.5, last_attempt={
+        "on": _FREEZE, "outcome": "failed", "kind": "market_data_gap",
+    })
+    payload = _get_aug27()
+    assert payload["live_status"]["budget_halted"] is False
+    deepseek = next(e for e in payload["entries"] if e["entry_id"] == "deepseek_v4_pro")
+    assert deepseek["last_attempt"]["outcome"] == "failed"
+    assert deepseek["last_attempt"]["kind"] == "market_data_gap"
+
+
+def test_get_live_ignores_last_months_ledger_and_an_empty_one(_read_only):
+    payload = _get_aug27()
+    assert payload["live_status"]["budget_halted"] is False
+    assert all(entry["last_attempt"] is None for entry in payload["entries"])
+    _insert_ledger("deepseek_v4_pro", 60.0, month="2026-07-01", last_attempt={
+        "on": "2026-07-31", "outcome": "budget_halted", "kind": "budget",
+    })
+    assert _get_aug27()["live_status"]["budget_halted"] is False
