@@ -685,10 +685,12 @@ def test_concurrent_failure_keeps_the_other_messages_exchange(monkeypatch):
         await _until(lambda: len(fake.sent) == 2)
 
         release_a.set()
+        await asyncio.wait([task_a])
         with pytest.raises(RuntimeError, match="provider down"):
-            await task_a
+            task_a.result()
         release_b.set()
-        await task_b
+        answer_b = await task_b
+        assert answer_b == "aB"
         await _chat("qC")
         return fake
 
@@ -727,7 +729,8 @@ def test_retry_resends_the_request_it_first_sent(monkeypatch):
         await in_backoff.wait()
         await _chat("qB")
         end_backoff.set()
-        await task_a
+        answer_a = await task_a
+        assert answer_a == "aA"
         return fake
 
     fake = asyncio.run(scenario())
@@ -755,7 +758,9 @@ def test_reset_during_a_call_discards_that_exchange(monkeypatch):
         await _until(lambda: len(fake.sent) == 1)
         reset_agent_conversation(user_id="u1", agent_id="a1")
         release.set()
-        await task
+        # The reader still gets the answer; only the stored history drops it.
+        answer = await task
+        assert answer == "a1"
         await _chat("q2")
         return fake
 
