@@ -2665,7 +2665,7 @@ def _enforce_ai_hedge_fund_window(start_date: str, end_date: str) -> None:
 # issues one model call per pipeline decision step per hourly bar, each with up
 # to one retry, and the only wall-clock bound is per provider attempt:
 # LLM_PROVIDER_READ_TIMEOUT_SECONDS (180s by default,
-# infrastructure/llm/execution/adapters/base.py), with one more attempt when a
+# infrastructure/llm/http_policy.py), with one more attempt when a
 # Platform Credits call fails over to the next candidate. (Until 2026-09-28 this
 # said "the 60s httpx read timeout"; the SDKs' silent retries made that ~185s
 # and three billed generations.) A refusal built on that worst case --
@@ -2753,14 +2753,17 @@ def _estimated_pipeline_llm_calls(
 # (DeepSeek V4 on CommonStack has taken 10s to over a minute per call), which is
 # why this is an operator dial rather than a literal.
 #
-# Consequence worth knowing before changing it: at 15s the shipped modal default
-# window (7 weekdays, 49 US bars) is comfortable at the modal's own default of
-# ONE pipeline step, but the same window with four decision steps costs 196 of
-# the 200 available calls -- it passes by four.
+# Consequence worth knowing before changing it: at 15s the modal's default
+# window (the latest settled US trading week from
+# provider.default_backtest_window: at most 5 trading days, 35 US bars) spends
+# 140 of the 200 available calls with four decision steps. The fixed 7-weekday
+# window (49 bars) it replaced cost 196 of 200 at four steps -- it passed by
+# four -- and a user who widens the modal toward MAX_BACKTEST_DAYS reaches the
+# bound sooner still.
 #
 # Four is not the modal's number; it is this repo's own illustration of a
-# realistic step count, taken from the "four-module pipeline" copy at
-# app.html:1462. That panel is the separate *Trading Algo* surface, which posts
+# realistic step count, taken from the "Four-module pipeline" subtitle of the
+# Trading Algo panel in app.html. That panel is the separate *Trading Algo* surface, which posts
 # to /api/algo/execute and never reaches this guard, so read it as evidence
 # about pipeline shapes users are invited to build, not as a window this bound
 # governs.

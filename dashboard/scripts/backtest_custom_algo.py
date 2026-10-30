@@ -31,6 +31,8 @@ ensure_repo_root()
 from dashboard.backend.infrastructure.llm.prompts import create_custom_algo_prompt, parse_risk_rules
 from dashboard.backend.infrastructure.llm.validator import (
     LLM_ACTION_DEFAULT_CONFIDENCE,
+    normalize_action,
+    normalize_symbol,
     read_confidence,
 )
 from dashboard.backend.database import db
@@ -187,8 +189,10 @@ class CustomAlgoPortfolioManager(PortfolioManager):
         signals = portfolio_state["market_signals"]
 
         for item in parsed.get("actions", [])[:8]:
-            symbol = item.get("symbol")
-            action_type = str(item.get("action", "hold")).lower()
+            # The gate's own readings: an unstripped "buy " or "AAPL " matched
+            # no branch and no DJIA name, so the trade was dropped (#658).
+            symbol = normalize_symbol(str(item.get("symbol") or ""))
+            action_type = normalize_action(item.get("action")) or "hold"
             # The backtest gate's rule (PortfolioManager): a confidence that
             # is not a number from 0 to 1 is not read, so it neither passes
             # nor fails the floor, and a buy it would size is skipped. float()

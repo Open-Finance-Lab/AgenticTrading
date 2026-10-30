@@ -275,11 +275,10 @@ def test_llm_pipeline_bars_record_intent_and_fallback(monkeypatch, store):
     assert tape[1]["decision"]["gate_rewrote"] is False  # nothing parsed, nothing to rewrite
 
 
-def test_llm_sell_widened_by_the_gate_is_not_a_rewrite(monkeypatch, store):
-    """Every model SELL becomes 'sell all sellable' -- the gate's documented
-    sizing, not a rewrite, or ``gate_rewrites`` would count prompt habits. A
-    BUY the gate drops (confidence under 0.3) is a rewrite, per bar and per
-    run."""
+def test_llm_sell_trim_is_sold_as_asked_and_is_not_a_rewrite(monkeypatch, store):
+    """A model SELL of 1 share out of 4 sells 1 (#661): the gate honoured the
+    size, so it is not a rewrite. A BUY the gate drops (confidence under 0.3)
+    is a rewrite, per bar and per run."""
     stub = _PipelineStub([
         json.dumps({"actions": [{"symbol": "AAPL", "action": "buy", "position_size": 4, "confidence": 0.9, "reasoning": "open"}]}),
         json.dumps({"actions": [{"symbol": "AAPL", "action": "sell", "position_size": 1, "confidence": 0.9, "reasoning": "trim one"}]}),
@@ -289,7 +288,7 @@ def test_llm_sell_widened_by_the_gate_is_not_a_rewrite(monkeypatch, store):
     tape = trace_service.load_decision_tape("agent_tape_engine")
     assert tape[0]["decision"]["gate_rewrote"] is False
     assert tape[1]["decision"]["intent"]["orders"][0]["position_size"] == 1
-    assert tape[1]["decision"]["actions"][0]["shares"] == 4  # the whole position
+    assert tape[1]["decision"]["actions"][0]["shares"] == 1  # the trim, not the whole position
     assert tape[1]["decision"]["gate_rewrote"] is False
     assert tape[2]["decision"]["actions"] == []  # dropped for low confidence
     assert tape[2]["decision"]["gate_rewrote"] is True
@@ -327,11 +326,12 @@ def test_intent_replay_through_the_gate_reproduces_an_llm_run(monkeypatch, store
 
 
 def test_intent_replay_keeps_null_and_non_finite_fields(monkeypatch, store):
-    """Finding 3: a ``null`` reasoning makes the gate raise (the bar falls back
-    to rule-based) while an absent one trades; an ``Infinity`` position_size
-    is skipped while ``null`` becomes a confidence-sized buy. ``confidence:
-    null`` reads as the 0.5 default, as an absent one does. The tape must hand
-    the replay the same values."""
+    """Finding 3: a ``null`` reasoning trades as an absent one does (it made
+    the gate raise, and the bar fall back to rule-based, until the #658
+    follow-up); an ``Infinity`` position_size is skipped while ``null``
+    becomes a confidence-sized buy. ``confidence: null`` reads as the 0.5
+    default, as an absent one does. The tape must hand the replay the same
+    values."""
     script = [
         json.dumps({"actions": [{"symbol": "AAPL", "action": "buy", "position_size": 3, "confidence": None, "reasoning": "null conf"}]}),
         json.dumps({"actions": [{"symbol": "MSFT", "action": "buy", "position_size": float("inf"), "confidence": 0.9, "reasoning": "inf size"}]}),
@@ -348,7 +348,9 @@ def test_intent_replay_keeps_null_and_non_finite_fields(monkeypatch, store):
     assert tape[0]["decision"]["gate_rewrote"] is False
     assert tape[1]["decision"]["intent"]["orders"][0]["position_size"] is None
     assert tape[1]["decision"]["intent"]["orders"][0]["raw"] == {"position_size": "Infinity"}
-    assert tape[2]["decision"]["driver"] == "llm_fallback"  # reasoning[:60] on None
+    assert tape[2]["decision"]["driver"] == "llm"
+    assert tape[2]["decision"]["intent"]["orders"][0]["reasoning"] is None
+    assert tape[2]["decision"]["gate_rewrote"] is False
     assert tape[3]["decision"]["driver"] == "llm"
 
     replies = [json.dumps({"actions": decision_tape_mod.orders_for_replay(bar["decision"]["intent"])}) for bar in tape]

@@ -37,6 +37,7 @@ from dashboard.backend.infrastructure.llm.validator import (
     PIPELINE_ORDER_DEFAULT_CONFIDENCE,
     PIPELINE_RISK_DEFAULT_CONFIDENCE,
     model_number,
+    normalize_action,
     read_confidence,
 )
 
@@ -134,6 +135,17 @@ def is_last_bar_of_trading_day(
     return trading_day_key(timestamps[index]) != trading_day_key(timestamps[index + 1])
 
 
+# The last step's EXECUTION RULES state how a SELL is sized, and not only the
+# starter instruction: that text is copied into an agent when it is created, so
+# agents made before sells honoured their size (#661) still say "a sell always
+# closes the whole position" -- and a model trusting that sentence writes any
+# qty, which now trims.
+_SELL_SIZE_RULE = (
+    "- A SELL's qty is the number of shares to sell, at most what you hold; "
+    "a qty of 0 sells the whole position."
+)
+
+
 def _market_lot_size(market_snapshot: Any) -> int:
     """The board lot the snapshot's ``market`` block declares, else 1."""
     market = market_snapshot.get("market") if isinstance(market_snapshot, dict) else None
@@ -190,6 +202,7 @@ def _build_step_prompt(
                 "=== EXECUTION RULES ===",
                 "- Trade ONLY symbols listed in the market snapshot.",
                 "- Only SELL symbols that appear in current_holdings.",
+                _SELL_SIZE_RULE,
                 "- Respect available cash for buy orders.",
                 "- Use integer share quantities.",
             ]
@@ -240,9 +253,17 @@ def pipeline_output_to_decision(parsed: Dict[str, Any]) -> Optional[Dict[str, An
             for order in orders:
                 if not isinstance(order, dict):
                     continue
-                side = str(order.get("side") or order.get("action") or "hold").lower()
-                if side not in ("buy", "sell", "hold"):
-                    side = "hold"
+                # Each candidate is normalized before the fallback, or a blank
+                # side would hide an ``action`` alias. One that is not buy,
+                # sell or hold is handed on as written, like confidence and qty
+                # below: read as hold, it placed no trade yet counted as the
+                # model's decision (#658). The gate refuses it under
+                # strict_llm and skips it with a log line otherwise.
+                side = (
+                    normalize_action(order.get("side"))
+                    or normalize_action(order.get("action"))
+                    or "hold"
+                )
                 qty = order.get(
                     "qty", order.get("quantity", order.get("position_size", 0))
                 )
@@ -285,21 +306,22 @@ def pipeline_output_to_decision(parsed: Dict[str, Any]) -> Optional[Dict[str, An
             for risk in risk_actions:
                 if not isinstance(risk, dict):
                     continue
-                action_type = str(risk.get("action") or "hold").lower()
+                action_type = normalize_action(risk.get("action")) or "hold"
+                # Anything else, buy/sell/hold included, is handed on as
+                # written for the gate to judge, as an order's side is: a
+                # "close" read as hold silently kept a position the model
+                # asked to exit (#658).
                 if action_type in ("stop_loss", "take_profit", "trail"):
                     side = "sell"
-                elif action_type == "hold":
-                    side = "hold"
                 else:
-                    side = (
-                        action_type
-                        if action_type in ("buy", "sell", "hold")
-                        else "hold"
-                    )
+                    side = action_type
                 # A missing size sells the whole position. One the model gave
                 # must be a positive number: 0 asks to sell nothing, and a
                 # malformed size is not read as "all of it" (the same rule as
-                # read_confidence), so either one holds.
+                # read_confidence), so either one holds. Any positive size
+                # still sells the whole sellable position: the gate does not
+                # size a sell (see decision_tape._order_triples), so a
+                # size_pct of 0.25 is a full exit, not a partial one.
                 size_pct = model_number(risk.get("size_pct"), 1.0)
                 if side == "sell" and (
                     size_pct is None
@@ -310,23 +332,25 @@ def pipeline_output_to_decision(parsed: Dict[str, Any]) -> Optional[Dict[str, An
                 confidence = read_confidence(
                     raw_confidence, PIPELINE_RISK_DEFAULT_CONFIDENCE
                 )
-                normalized.append(
-                    {
-                        "action": side,
-                        "symbol": risk.get("symbol"),
-                        "confidence": (
-                            raw_confidence if confidence is None else confidence
-                        ),
-                        "reasoning": risk.get("reason")
-                        or risk.get("rationale")
-                        or action_type,
-                        "position_size": (
-                            max(1, int(round(size_pct * 100)))
-                            if side == "sell"
-                            else 0
-                        ),
-                    }
-                )
+                order = {
+                    "action": side,
+                    "symbol": risk.get("symbol"),
+                    "confidence": (
+                        raw_confidence if confidence is None else confidence
+                    ),
+                    "reasoning": risk.get("reason")
+                    or risk.get("rationale")
+                    or action_type,
+                    "position_size": 0,
+                }
+                if side == "sell":
+                    # A share of the position, not a share count: the sell
+                    # gate turns it into shares against what is held (#661),
+                    # which this function never sees. It used to send
+                    # round(size_pct * 100) as a share count, which also
+                    # raised OverflowError on a size_pct near the float limit.
+                    order["size_fraction"] = size_pct
+                normalized.append(order)
             if normalized:
                 return {"actions": normalized}
             saw_unusable_nonempty_envelope = True

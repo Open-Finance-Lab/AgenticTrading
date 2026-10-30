@@ -23,8 +23,10 @@ model) never can.
 **What the engine-independent part of a bar is.** The only thing a bar carries
 that no engine decided is what the model asked for (`intent`) and what the
 world looked like when it asked (`state`). The post-gate `actions` are the
-*current* engine's answer: a SELL's size is its sellable position
-(`portfolio_manager.py:922-929`), a BUY was admitted against its cash. Replaying
+*current* engine's answer: a SELL's size is what it asked for capped at its
+sellable position (`requested_sell_shares`, since #661 — tape v1 was recorded
+when every SELL was the whole sellable position), a BUY was admitted against
+its cash. Replaying
 `actions` through a second engine therefore isolates that engine only until the
 first fill that differs — one share less on bar *k* turns bar *k+1*'s recorded
 SELL into an oversell the candidate clips, and bar *k+2*'s BUY into one it
@@ -171,19 +173,29 @@ import here would re-arm the "ad-hoc imports mutate the seed DB" gotcha
 through every process that imports the engine (`diff_backtest_runs.py`, the
 leaderboard refresh, a `python -c` probe).
 
-- `TAPE_VERSION = 1`, carried in every payload.
+- `TAPE_VERSION`, carried in every payload. **2 since #661**: a SELL sells the
+  size it names, `size_fraction` (a pipeline risk action's share of the
+  position) joined the intent fields, and a sized SELL's size is compared. A
+  v1 tape was recorded under a gate that sold the whole position whatever the
+  size, and stored a risk sell's `size_pct * 100` as its `position_size`, so a
+  v1 tape replays only under that rule.
 - `driver_for(...)` → `"llm"` | `"llm_fallback"` | `"rule_based"`.
-- `gate_rewrote(intent, actions)` → `True` when `intent` holds orders and the
-  sorted `(symbol, side, size)` triples of intent and actions differ (a
-  dropped order, an added one, a resized one, a SELL widened to the whole
-  position). `False` when intent is `null` or unparsed — a rule-based bar has
+- `gate_rewrote(intent, actions)` → `True` when `intent` holds orders and its
+  `(symbol, side, size)` triples cannot be paired with the actions' (a dropped
+  order — a SELL refused for an unreadable size included — an added one, a
+  resized one: a SELL capped at the holding or by T+1, a BUY cut for cash).
+  An order whose size the gate fills in — a BUY or SELL left at 0, sized from
+  confidence, to the whole position or by `size_fraction` — matches any size,
+  and the pairing is a multiset match per symbol and side, not a zip of two
+  sorted lists. `False` when intent is `null` or unparsed — a rule-based bar has
   no gate to rewrite — and on every `llm_fallback` bar, whose actions are
   rule-based substitutes rather than a rewrite. Carried per bar as
   `gate_rewrote`; counted per run as `gate_rewrites` (LLM-driven bars only;
   fallbacks are counted by `driver`) in the recorder summary.
 - `normalize_intent(raw_output)` → the raw model orders through a fixed
   allow-list of fields (`symbol`, `action`/`side`, `position_size`/`qty`,
-  `size_pct`, `confidence`, `reasoning` ≤500 chars, `stop_loss_price`,
+  `size_pct` (recorded as `size_fraction` since tape v2), `confidence`,
+  `reasoning` ≤500 chars, `stop_loss_price`,
   `take_profit_price`), read from `actions`, `orders` and `risk_actions`. The
   allow-list is what keeps arbitrary model keys away from the sensitive-key
   check. Output that is not a parseable order object is recorded as

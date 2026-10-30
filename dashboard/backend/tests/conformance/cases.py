@@ -1160,10 +1160,12 @@ PREDICTIONS_D: Dict[str, Prediction] = {
 #: (``PortfolioManager.make_trading_decision_with_llm``) fed scripted JSON.
 #: Non-strict, the path the doc's C04 prediction describes.
 PREDICTIONS_DL: Dict[str, Prediction] = {
-    "C01": _p(FAIL, ("fills", "orders", "cash", "positions", "invariants"), ("D5", "D18"),
-              "the buy is pre-checked on pre-batch cash and dropped; the SELL liquidates all 10"),
+    # Since #661 a SELL sells the size it names, so C01's sell of 5 fills 5 and
+    # D18 is left with the size-0 SELL and the batch cut.
+    "C01": _p(FAIL, ("fills", "orders", "cash", "positions", "invariants"), ("D5",),
+              "the buy is pre-checked on pre-batch cash and dropped"),
     "C04": _p(FAIL, ("fills", "orders", "invariants"), ("D18",),
-              "SELL size is ignored and the batch is cut to one action per symbol"),
+              "a size-0 SELL is the whole position and the batch is cut to one action per symbol"),
     "S01": _p(FAIL, ("fills", "cash", "positions", "avg_cost", "realized_pnl", "equity", "invariants"),
               ("D9",), "int(position_size) truncates the fractional size to 0"),
 }
@@ -1173,9 +1175,11 @@ PREDICTIONS_DL: Dict[str, Prediction] = {
 #: marker on the test follows the run, not the doc.
 PREDICTION_DELTAS: Dict[str, str] = {
     "C04/DL": (
-        "also fails `fills`, not only `orders`: the translator sizes o2's -5 SELL at the "
-        "full holding (portfolio_manager.py:918-931), so the 10-share liquidation is o2's "
-        "fill and §1's (order_id, bar) matching finds no o4 fill -- the doc's mechanism, "
-        "one more failing check than its prose names"
+        "also fails `fills`, not only `orders`: the translator reads o3's size-0 SELL as the "
+        "whole holding (validator.py `requested_sell_shares`, the convention it shares with "
+        "`actions_to_executable`), so the 10-share liquidation is o3's fill, and the cut to one "
+        "action per symbol leaves o4 no fill -- the doc's mechanism, one more failing check "
+        "than its prose names. o2's -5 SELL is refused as `invalid_quantity`, as the "
+        "reference has it, since #661"
     ),
 }

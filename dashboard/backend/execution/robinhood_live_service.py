@@ -40,6 +40,7 @@ from dashboard.backend.infrastructure.llm.backtest_harness import (
 from dashboard.backend.infrastructure.llm.validator import (
     DJIA_30,
     MAX_ORDER_SHARES,
+    normalize_action,
     normalize_symbol,
 )
 from dashboard.backend.paths import REPO_ROOT
@@ -360,7 +361,7 @@ async def _fetch_market_snapshot(client: Any, symbols: List[str]) -> Dict[str, A
 def _actions_to_robinhood_orders(actions: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     orders: List[Dict[str, Any]] = []
     for action in actions:
-        act = str(action.get("action") or "").lower()
+        act = normalize_action(action.get("action"))
         symbol = normalize_symbol(str(action.get("symbol") or ""))
         shares = action.get("shares")
         if shares is None:
@@ -455,7 +456,7 @@ def _risk_gate_orders(
     seen: set = set()
     for order in orders or []:
         symbol = normalize_symbol(str(order.get("symbol") or ""))
-        side = str(order.get("side") or "").lower()
+        side = normalize_action(order.get("side"))
         # The cap is per order, so N copies of one action were N capped orders
         # (and N sells each clamped to the full holding). One per symbol+side.
         if (symbol, side) in seen:

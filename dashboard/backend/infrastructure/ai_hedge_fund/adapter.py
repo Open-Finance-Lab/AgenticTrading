@@ -30,6 +30,7 @@ from dashboard.backend.infrastructure.llm.validator import (
     actions_to_executable,
     confidence_in_range,
     model_number,
+    normalize_action,
     normalize_symbol,
     parse_actions_payload,
 )
@@ -402,7 +403,7 @@ class AiHedgeFundRuntime:
     ) -> tuple[str, Optional[int], float, str]:
         if not isinstance(decision, dict):
             raise AiHedgeFundOutputError(f"Decision for {symbol} must be an object")
-        action = str(decision.get("action") or "").strip().lower()
+        action = normalize_action(decision.get("action"))
         if action not in {"buy", "sell", "hold", "short", "cover"}:
             raise AiHedgeFundOutputError(
                 f"Decision for {symbol} has unsupported action {action!r}"

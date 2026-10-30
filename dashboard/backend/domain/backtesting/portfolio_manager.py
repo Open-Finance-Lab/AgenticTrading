@@ -38,9 +38,13 @@ from dashboard.backend.infrastructure.llm.validator import (
     DJIA_30,
     LLM_ACTION_DEFAULT_CONFIDENCE,
     MAX_ORDER_SHARES,
+    TRADING_ACTIONS,
     create_prompt,
+    model_number,
+    normalize_action,
     normalize_symbol,
     read_confidence,
+    requested_sell_shares,
 )
 from dashboard.backend.domain.trading.portfolio import (
     append_equity_record as _append_equity_record,
@@ -49,6 +53,7 @@ from dashboard.backend.domain.trading.portfolio import (
 )
 from dashboard.backend.domain.trading.execution import (
     execute_actions as _execute_actions,
+    record_refused_order as _record_refused_order,
 )
 from dashboard.backend.domain.backtesting.reference_agent import (
     make_rule_based_decision as _make_rule_based_decision,
@@ -99,8 +104,16 @@ STRICT_LLM_MIN_STEPS_FOR_ONE_STRIKE = 25
 # leaderboard row and a recorded decision tape are only comparable with output
 # from the gate that produced them. Absent on rows written before it existed.
 # 2: a confidence that is not a number from 0 to 1 is not read at all -- it
-#    neither sizes a buy nor decides the 0.3 floor (#674).
+#    neither sizes a buy nor decides the 0.3 floor (#674). The first version
+#    recorded, so it also covers what landed just before it: actions read by
+#    ``normalize_action`` (#658) and sells sized as asked (#661, recorded on
+#    its own as ``llm_sell_sizing``).
 LLM_GATE_VERSION = 2
+
+
+# The order-event reason of a SELL the gate refused because it cannot read
+# its size. The same word the conformance reference uses for it.
+SELL_SIZE_REFUSED_REASON = "invalid_quantity"
 
 
 # Up to this many symbols a pipeline agent's market snapshot carries the whole
@@ -325,6 +338,54 @@ class PortfolioManager:
         if not self.t_plus_one_enabled:
             return held
         return min(self.available_positions.get(symbol, 0), held)
+
+    def _coerce_position_size(self, raw: Any) -> Optional[float]:
+        """A model's ``position_size`` as a number, or None when unparseable.
+
+        json.loads happily yields strings, floats, Infinity and NaN here; a
+        missing or null size reads as 0. Whole shares unless the market trades
+        in lots, where the executor validates the quantity itself.
+        """
+        try:
+            size = float(raw or 0) if self.lot_size > 1 else int(raw or 0)
+        except (TypeError, ValueError, OverflowError):
+            return None
+        if isinstance(size, float) and not math.isfinite(size):
+            return None
+        return size
+
+    def _refuse_sell(
+        self,
+        *,
+        symbol: str,
+        raw_size: Any,
+        timestamp: Any,
+        price: float,
+        strategy_reason: str,
+    ) -> None:
+        """Record a SELL the gate skipped because it cannot read its size.
+
+        On the order ledger, like an executor rejection: a skip that is only a
+        ``print`` is invisible from a dashboard backtest, whose stdout nobody
+        reads, and a run whose model wrote ``"all"`` would publish a curve
+        that never sold with nothing to say why.
+        """
+        asked = model_number(raw_size)
+        _record_refused_order(
+            rejected_orders=self.rejected_orders,
+            order_events=self.order_events,
+            order_event_repeats=self._order_event_repeats,
+            timestamp=timestamp,
+            symbol=symbol,
+            action="sell",
+            # A finite number, as every ledger field must be: "all" or NaN
+            # asked for no count, and the reason says the size was refused.
+            requested_shares=asked if asked is not None and math.isfinite(asked) else 0,
+            price=price,
+            reason=SELL_SIZE_REFUSED_REASON,
+            strategy_reason=strategy_reason,
+            costs_enabled=self.transaction_cost_profile is not None,
+        )
 
     def record_t1_deferral(
         self,
@@ -868,19 +929,17 @@ class PortfolioManager:
                 llm_actions = llm_actions[:max_actions]
 
             if strict_llm:
-                valid_action_types = {"buy", "sell", "hold"}
                 for llm_action in llm_actions:
                     if not isinstance(llm_action, dict):
                         raise LLMDecisionError(
                             "LLM returned an invalid action batch"
                         )
                     symbol = normalize_symbol(str(llm_action.get("symbol") or ""))
-                    action_type = str(
-                        llm_action.get("action") or ""
-                    ).strip().lower()
+                    # A missing action is refused here, unlike the loop below.
+                    action_type = normalize_action(llm_action.get("action"))
                     if (
                         symbol not in self._allowed_set
-                        or action_type not in valid_action_types
+                        or action_type not in TRADING_ACTIONS
                     ):
                         raise LLMDecisionError(
                             "LLM returned an invalid action batch"
@@ -897,7 +956,7 @@ class PortfolioManager:
                             LLM_ACTION_DEFAULT_CONFIDENCE,
                         )
                         is None
-                        and self._requested_buy_shares(
+                        and self._coerce_position_size(
                             llm_action.get("position_size", 0)
                         )
                         == 0
@@ -908,21 +967,36 @@ class PortfolioManager:
                         )
 
             skipped_for_confidence = False
+            # Whether any action named buy, sell or hold. A batch where none
+            # did carried no decision the model can be credited with (#658).
+            recognised_any = False
             for llm_action in llm_actions:
                 symbol = normalize_symbol(str(llm_action.get("symbol") or ""))
-                action_type = llm_action.get("action", "hold").lower()
+                # Read by the same rule as the strict check above: two readings
+                # let "buy " pass that check and then match no branch (#658).
+                # A missing or null action holds, as an absent one always has.
+                raw_action = llm_action.get("action")
+                action_type = normalize_action(raw_action) or "hold"
                 raw_confidence = llm_action.get("confidence")
                 confidence = read_confidence(
                     raw_confidence, LLM_ACTION_DEFAULT_CONFIDENCE
                 )
-                reasoning = llm_action.get("reasoning", "")
+                raw_reasoning = llm_action.get("reasoning")
+                reasoning = "" if raw_reasoning is None else str(raw_reasoning)
+
+                if action_type not in TRADING_ACTIONS:
+                    # Only a non-strict run gets here; strict_llm refused the
+                    # batch above. Placing nothing silently read as a hold.
+                    print(f"\n   ⚠️  {symbol}: Skip (unrecognised action {raw_action!r})")
+                    continue
+                recognised_any = True
 
                 # A confidence that is not a number from 0 to 1 (25, NaN,
                 # "high", a bool) is not read at all: no scale is guessed and
                 # no default is put over it. It therefore cannot decide the
                 # 0.3 floor either way, so an order that does not need it is
-                # carried out as the model wrote it -- a sell (always the
-                # sellable position) or a buy with its own position_size. Only
+                # carried out as the model wrote it -- a sell (sized by
+                # requested_sell_shares) or a buy with its own position_size. Only
                 # a buy that would be sized from it is skipped, below: that is
                 # where a 0-100 answer used to multiply the order by 100.
                 if confidence is None:
@@ -949,9 +1023,9 @@ class PortfolioManager:
                 
                 if action_type == "buy":
                     # Use position_size from LLM directly, coerced defensively
-                    # (``_requested_buy_shares``).
+                    # (``_coerce_position_size``).
                     raw_size = llm_action.get("position_size", 0)
-                    shares = self._requested_buy_shares(raw_size)
+                    shares = self._coerce_position_size(raw_size)
                     if shares is None:
                         print(f"      ⚠️  BUY {symbol}: Skip (unparseable position_size {raw_size!r})")
                         continue
@@ -1010,34 +1084,68 @@ class PortfolioManager:
                         print(f"      ⚠️  BUY {symbol}: Skip (insufficient cash: need ${shares*price:,.0f}, have ${self.cash:,.0f})")
                 
                 elif action_type == "sell":
+                    held = self.positions.get(symbol, 0)
+                    if held <= 0:
+                        print(f"      ⚠️  SELL {symbol}: Skip (not in portfolio, only owns: {list(self.positions.keys())})")
+                        continue
+                    # Sell what was asked for (#661): position_size shares,
+                    # else a size_fraction of the position (what a pipeline
+                    # risk action sends), else the whole position. A size that
+                    # cannot be read skips THIS action and is recorded; it is
+                    # never read as "all of it" (requested_sell_shares).
+                    reason = f"[LLM] {reasoning} (confidence: {conf_label})"
+                    raw_size = llm_action.get("position_size")
+                    requested, refusal = requested_sell_shares(
+                        raw_size,
+                        llm_action.get("size_fraction"),
+                        held,
+                        lot_size=self.lot_size,
+                    )
+                    if refusal is not None:
+                        print(f"      ⚠️  SELL {symbol}: Skip ({refusal})")
+                        self._refuse_sell(
+                            symbol=symbol,
+                            raw_size=raw_size,
+                            timestamp=timestamp,
+                            price=price,
+                            strategy_reason=reason,
+                        )
+                        continue
                     # Size at the sellable quantity, not the held one: under T+1
                     # they differ, and the difference is unfillable.
-                    held = self.positions.get(symbol, 0)
                     sellable = self.sellable_shares(symbol)
-                    if sellable < held:
-                        self.record_t1_deferral(symbol, held, sellable)
-                    if sellable > 0:
+                    wanted = min(requested, held)
+                    if sellable < wanted:
+                        self.record_t1_deferral(symbol, wanted, sellable)
+                    shares = min(wanted, sellable)
+                    if shares > 0:
                         action = {
                             "symbol": symbol,
                             "action": "sell",
-                            "shares": sellable,
-                            "reason": f"[LLM] {reasoning} (confidence: {conf_label})",
+                            "shares": shares,
+                            "reason": reason,
                             "confidence": confidence
                         }
-                        if sellable < held:
+                        if shares < requested:
                             # The reason string still carries the model's own
                             # words ("exit the full position"); without this the
-                            # log would read as though it asked for `sellable`.
-                            action["requested_shares"] = held
+                            # log would read as though it asked for `shares`.
+                            action["requested_shares"] = requested
                         actions.append(action)
-                        print(f"      ✅ SELL {symbol}: {sellable} shares @ ${price:.2f} (conf: {conf_label})")
-                    elif symbol in self.positions and self.positions[symbol] > 0:
-                        print(f"      ⚠️  SELL {symbol}: Skip (T+1 frozen, {self.positions[symbol]} shares settle next trading day)")
+                        print(f"      ✅ SELL {symbol}: {shares} shares @ ${price:.2f} (conf: {conf_label})")
                     else:
-                        print(f"      ⚠️  SELL {symbol}: Skip (not in portfolio, only owns: {list(self.positions.keys())})")
+                        print(f"      ⚠️  SELL {symbol}: Skip (T+1 frozen, {held} shares settle next trading day)")
                 
                 # else: HOLD is implicit (don't add to actions)
-            
+
+            if not recognised_any:
+                # Like an unparseable reply on this non-strict path: no actions
+                # and no H6 credit, since nothing the model sent named a trade
+                # or a hold. Counting it published a curve the model never
+                # drove under its name (#658).
+                print("   ⚠️  No action named buy, sell or hold; holding this step\n")
+                return {"actions": []}
+
             # H6 coverage increment #2 of 2 — the main success exit: the model's
             # actions were parsed AND processed without error, so the returned
             # decision is genuinely the model's. This is the H6 coverage
@@ -1045,7 +1153,8 @@ class PortfolioManager:
             # the processing loop above is caught below and swapped for a
             # rule-based decision, which must NOT count. (Actions filtered for
             # low confidence / invalid symbol still count: the model drove the
-            # step, our policy merely declined to act on it.)
+            # step, our policy merely declined to act on it. A batch in which
+            # no action was recognised returned above without counting.)
             #
             # An unsized buy skipped for a confidence that is not a 0-1 number
             # still counts here too -- no rule-based trade replaced it, and the
@@ -1089,26 +1198,6 @@ class PortfolioManager:
             print(f"\n❌ LLM decision error: {e}")
             print(f"   Falling back to rule-based logic\n")
             return self.make_trading_decision(portfolio_state)
-
-    def _requested_buy_shares(self, raw_size: Any) -> Optional[float]:
-        """A buy's ``position_size`` as the gate trades it; ``None`` when it
-        cannot be read, and ``0`` when the model left the sizing to us.
-
-        Coerced defensively: json.loads happily yields strings, floats,
-        Infinity and NaN here, and an unparseable value must skip THIS action,
-        not throw the whole decision into the rule-based fallback.
-        """
-        try:
-            shares = (
-                float(raw_size or 0)
-                if self.lot_size > 1
-                else int(raw_size or 0)
-            )
-        except (TypeError, ValueError, OverflowError):
-            return None
-        if isinstance(shares, float) and not math.isfinite(shares):
-            return None
-        return shares
 
     def _note_unusable_confidence(self) -> None:
         """Count one action whose confidence is not a 0-1 number.

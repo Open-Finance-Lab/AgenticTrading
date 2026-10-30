@@ -29,6 +29,7 @@ from dashboard.backend.domain.leaderboard.roster_failures import RosterFailures
 from dashboard.backend.domain.leaderboard.strategies._common import reference_start_date
 from dashboard.backend.domain.leaderboard.strategies import get_strategy
 from dashboard.backend.infrastructure.llm import backtest_harness as llm_harness
+from dashboard.backend.infrastructure.llm.validator import LLM_SELL_SIZING
 from dashboard.backend.infrastructure.market_data.sessions import session_close_time
 from dashboard.backend.infrastructure.market_data.alpaca_bars import (
     MarketDataUnavailableError,
@@ -934,7 +935,10 @@ def _sample_run_id(strategy_id: str, start_date: str, end_date: str, sample: int
 # sample run under a different model, prompt, ceiling, seed or tape is a
 # different experiment, and its spread is not the spread of this one. The two
 # provenance flags belong to the tape: a clamped SIP window priced a shorter
-# series, and an IEX fallback a thinner one, under the same feed label.
+# series, and an IEX fallback a thinner one, under the same feed label. The
+# sell rule (#661) belongs to the engine: a row without it closed whole
+# positions whatever the model's size, so it groups apart from one that sold
+# the size asked for, and the larger group publishes, as for the tape.
 _SAMPLE_CONFIG_KEYS = (
     "model_id",
     "integration",
@@ -947,6 +951,7 @@ _SAMPLE_CONFIG_KEYS = (
     "market_data_feed",
     "end_clamped",
     "sip_fallback_to_iex",
+    "llm_sell_sizing",
 )
 # The part of that config an entry pins in leaderboard.json and a run records
 # verbatim (`_llm_run_metadata`); capital and prompt are `_cache_match_rank`'s.
@@ -2029,8 +2034,10 @@ def _warn_on_feed_drift(runs: List[Dict[str, Any]], configured: Optional[str]) -
     runs on a public, unauthenticated GET, and treating a feed mismatch as
     "missing" would re-fetch Alpaca on every page load for as long as the
     mismatch persists (e.g. while SIP keeps falling back to IEX). Recomputing
-    is an operator action — ``POST /api/v1/leaderboard/refresh`` with
-    ``force=true``, or ``scripts/refresh_daily_leaderboard.py --remote``.
+    is an operator action — ``GET /api/v1/leaderboard?refresh=true`` (refresh
+    secret or admin session) for the Competition board, and for the daily
+    window ``POST /api/v1/leaderboard/daily/refresh?force=true&deploy_models=false``
+    or ``scripts/refresh_daily_leaderboard.py --remote --force``.
 
     Emitted once per distinct drift per process: this runs on the hot cached
     path of a public endpoint, and a line per page load would bury itself.
@@ -2111,8 +2118,8 @@ def _warn_on_capital_drift(
     module to "cached rows are not comparable". A warning, once per distinct
     drift per process, never an auto-refresh — ``ensure_leaderboard_runs`` and
     ``get_leaderboard`` both run on a public, unauthenticated GET, and
-    recomputing is an operator action (``POST /api/v1/leaderboard/refresh`` with
-    ``force=true``).
+    recomputing is an operator action (the same refresh routes as
+    ``_warn_on_feed_drift`` names).
 
     Why capital is a comparability problem and not a display one: a $10,000 run
     buys whole shares in a coarser quantum than a $100,000 one and pays
@@ -2200,6 +2207,11 @@ def _llm_run_metadata(
         # The pre-trade gate that turned replies into orders: two rows for one
         # window are one experiment only under one gate (`_warn_on_gate_drift`).
         "llm_gate_version": LLM_GATE_VERSION,
+        # Which rule sized the model's sells (#661). Absent on a row written
+        # before it, which closed whole positions: such a row never pools with
+        # this one (`_SAMPLE_CONFIG_KEYS`), and a Live checkpoint without it is
+        # replayed, not resumed (`live._RESUME_KEY_DEFAULTS`).
+        "llm_sell_sizing": LLM_SELL_SIZING,
         "initial_capital": initial_capital,
         "start_date": start_date,
         "end_date": end_date,

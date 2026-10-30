@@ -105,6 +105,56 @@ def test_pipeline_output_to_decision_orders():
     assert decision["actions"][0]["position_size"] == 10
 
 
+def test_pipeline_output_to_decision_strips_the_side():
+    # "buy " used to miss the buy/sell/hold set and become "hold" (#658).
+    decision = pipeline_output_to_decision(
+        {
+            "orders": [{"symbol": "AAPL", "side": "buy ", "qty": 10}],
+            "risk_actions": [],
+        }
+    )
+    assert decision["actions"][0]["action"] == "buy"
+
+    decision = pipeline_output_to_decision(
+        {"risk_actions": [{"symbol": "AAPL", "action": " stop_loss\n", "size_pct": 1.0}]}
+    )
+    assert decision["actions"][0]["action"] == "sell"
+
+
+def test_a_blank_side_does_not_hide_the_action_alias():
+    # " " was truthy, so the "action" alias was never read and the buy held.
+    decision = pipeline_output_to_decision(
+        {"orders": [{"symbol": "AAPL", "side": " ", "action": "buy", "qty": 10}]}
+    )
+    assert decision["actions"][0]["action"] == "buy"
+
+
+@pytest.mark.parametrize(
+    "envelope, written, handed_on",
+    [
+        ("orders", "Buy.", "buy."),
+        ("orders", "long", "long"),
+        ("orders", "BUY_MORE", "buy_more"),
+        ("risk_actions", "close", "close"),
+        ("risk_actions", " Exit ", "exit"),
+    ],
+)
+def test_an_unrecognised_side_is_handed_on_for_the_gate(envelope, written, handed_on):
+    # Read as hold, it placed no trade yet passed the strict check and
+    # counted as the model's decision (#658). The gate judges it now.
+    field = "side" if envelope == "orders" else "action"
+    decision = pipeline_output_to_decision(
+        {envelope: [{"symbol": "AAPL", field: written, "qty": 10}]}
+    )
+    assert decision["actions"][0]["action"] == handed_on
+
+
+@pytest.mark.parametrize("envelope", ["orders", "risk_actions"])
+def test_a_missing_side_still_holds(envelope):
+    decision = pipeline_output_to_decision({envelope: [{"symbol": "AAPL"}]})
+    assert decision["actions"][0]["action"] == "hold"
+
+
 @pytest.mark.parametrize(
     "fields, expected",
     [
@@ -198,7 +248,9 @@ def test_pipeline_output_to_decision_risk_actions():
             "symbol": "AAPL",
             "confidence": 0.8,
             "reasoning": "risk limit",
-            "position_size": 50,
+            # A share of the position, not a share count: the gate sizes it.
+            "position_size": 0,
+            "size_fraction": 0.5,
         }
     ]
 
@@ -236,7 +288,34 @@ def test_pipeline_risk_action_without_a_size_sells_the_position(fields):
         {"risk_actions": [{"symbol": "AAPL", "action": "trail", **fields}]}
     )
     assert decision["actions"][0]["action"] == "sell"
-    assert decision["actions"][0]["position_size"] == 100
+    # The whole position: the gate reads a fraction of 1 as all of it (#661).
+    assert decision["actions"][0]["position_size"] == 0
+    assert decision["actions"][0]["size_fraction"] == 1.0
+
+
+def test_pipeline_risk_action_size_near_the_float_limit_does_not_raise():
+    """``int(round(size_pct * 100))`` raised OverflowError on 1e307, throwing
+    the whole bar away; a fraction above 1 is the whole position."""
+    decision = pipeline_output_to_decision(
+        {"risk_actions": [{"symbol": "AAPL", "action": "trail", "size_pct": 1e307}]}
+    )
+    assert decision["actions"][0]["size_fraction"] == 1e307
+
+
+def test_pipeline_execution_rules_state_how_a_sell_is_sized():
+    """Agents seeded before #661 carry an instruction saying a sell closes the
+    whole position, so the harness states the rule on every last step."""
+    from dashboard.backend.infrastructure.llm.pipeline_runner import _build_step_prompt
+
+    prompt = _build_step_prompt(
+        step_index=0,
+        step={"id": "s1", "label": "Trade", "prompt": "Trade.", "outputFormat": "JSON"},
+        market_snapshot={"portfolio": {}, "top_signals": {}},
+        prior_outputs=[],
+        is_last=True,
+    )
+    rules = prompt.split("=== EXECUTION RULES ===", 1)[1]
+    assert "a qty of 0 sells the whole position" in rules
 
 
 @pytest.mark.parametrize(
