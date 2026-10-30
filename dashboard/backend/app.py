@@ -307,16 +307,14 @@ async def startup_event():
     try:
         # Partial-result reclaim: dashboard backtests only write their results
         # at completion, so a restart mid-run used to erase the user's wait.
-        # Surviving live-progress snapshots become honest interrupted runs.
+        # Surviving live-progress snapshots become honest interrupted runs. On
+        # its own thread: it waits out the previous instance's runs during a
+        # zero-downtime deploy (see partial_results.py), and it must not hold
+        # the event loop while it reaches the run database row by row.
         from dashboard.backend.domain.backtesting.partial_results import (
-            reclaim_interrupted_backtests,
+            start_interrupted_run_reclaimer,
         )
-        counts = reclaim_interrupted_backtests()
-        if counts.get("reclaimed"):
-            print(
-                f"🧹 Reclaimed {counts['reclaimed']} interrupted run(s) with partial results"
-                f" (dropped {counts.get('dropped_stale', 0)} stale, {counts.get('failed', 0)} failed)"
-            )
+        start_interrupted_run_reclaimer()
     except Exception as e:
         print(f"⚠️ Interrupted-run reclaim error: {e}")
 

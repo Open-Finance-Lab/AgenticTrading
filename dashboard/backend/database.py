@@ -263,7 +263,8 @@ class BacktestDatabase:
 
         # run_live_progress: durable partial-result snapshots (design:
         # backtest partial results). Written throttled by the engine while a
-        # run is in flight; consumed and deleted by the startup reclaimer.
+        # run is in flight; deleted by the parent when the run ends, or turned
+        # into an interrupted run by the boot reclaimer if the parent died.
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS run_live_progress (
                 run_id TEXT PRIMARY KEY,
@@ -650,10 +651,15 @@ class BacktestDatabase:
     
     # --- live-progress snapshots (partial-result recovery, design: backtest
     # partial results). The engine flushes its progress payload here while a
-    # run is in flight; the startup reclaimer moves surviving snapshots into
-    # the regular tables as interrupted runs and deletes the rows. A snapshot
-    # whose run COMPLETED is simply stale and is dropped by the same reclaimer
-    # (its full result already lives in agent_runs/equity_timeseries).
+    # run is in flight and a heartbeat in the child keeps ``updated_at`` fresh;
+    # the parent deletes the row once it knows how the run ended. A row that
+    # outlives its parent is what the boot reclaimer
+    # (domain/backtesting/partial_results.py) turns into an interrupted run, once
+    # its age says nothing is stamping it any more. Ages are read on the
+    # database's own clock, so instances with skewed clocks agree on them.
+    # Read errors propagate: the reclaimer must tell "no snapshots" from "could
+    # not list them", and "no such row" from "could not read it" -- it deletes
+    # on the latter answer of each pair.
     def upsert_live_progress(self, run_id: str, session_id: str, agent_name: str,
                              payload: Dict[str, Any]) -> None:
         """One full-snapshot overwrite per flush; the payload is idempotent."""
@@ -670,37 +676,74 @@ class BacktestDatabase:
         finally:
             conn.close()
 
+    def touch_live_progress(self, run_id: str) -> None:
+        """Heartbeat: mark a live run's snapshot as still owned. Never inserts."""
+        conn = self._get_connection()
+        try:
+            conn.execute(
+                "UPDATE run_live_progress SET updated_at = CURRENT_TIMESTAMP"
+                " WHERE run_id = ?",
+                (run_id,),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def claim_live_progress(self, run_id: str, stale_after_seconds: float) -> bool:
+        """Re-stamp a snapshot only if it is still stale; True if this call did.
+
+        The reclaimer's claim: of two callers, the second finds the row fresh."""
+        conn = self._get_connection()
+        try:
+            cursor = conn.execute(
+                "UPDATE run_live_progress SET updated_at = CURRENT_TIMESTAMP"
+                " WHERE run_id = ?"
+                " AND (julianday('now') - julianday(updated_at)) * 86400.0 >= ?",
+                (run_id, stale_after_seconds),
+            )
+            conn.commit()
+            return cursor.rowcount == 1
+        finally:
+            conn.close()
+
     def get_live_progress(self, run_id: str) -> Optional[Dict[str, Any]]:
+        """The snapshot's payload; None when there is no row or it is unreadable."""
         conn = self._get_connection()
         try:
             row = conn.execute(
                 "SELECT payload FROM run_live_progress WHERE run_id = ?", (run_id,)
             ).fetchone()
-            return json.loads(row["payload"]) if row else None
-        except (sqlite3.OperationalError, TypeError):
-            return None
         finally:
             conn.close()
+        if not row:
+            return None
+        try:
+            return json.loads(row["payload"])
+        except (TypeError, ValueError):
+            return None
 
     def list_live_progress(self) -> List[Dict[str, Any]]:
+        """Every snapshot's identity and age in seconds. Payloads stay unread:
+        a full curve and trade list per row is the reclaimer's to load, one
+        row at a time, and only for the rows it decides to reclaim."""
         conn = self._get_connection()
         try:
             rows = conn.execute(
-                "SELECT run_id, session_id, agent_name, payload FROM run_live_progress"
+                "SELECT run_id, session_id, agent_name,"
+                " (julianday('now') - julianday(updated_at)) * 86400.0 AS age_seconds"
+                " FROM run_live_progress"
             ).fetchall()
-            return [
-                {
-                    "run_id": r["run_id"],
-                    "session_id": r["session_id"],
-                    "agent_name": r["agent_name"],
-                    "payload": json.loads(r["payload"]),
-                }
-                for r in rows
-            ]
-        except sqlite3.OperationalError:
-            return []
         finally:
             conn.close()
+        return [
+            {
+                "run_id": r["run_id"],
+                "session_id": r["session_id"],
+                "agent_name": r["agent_name"],
+                "age_seconds": r["age_seconds"],
+            }
+            for r in rows
+        ]
 
     def delete_live_progress(self, run_id: str) -> None:
         conn = self._get_connection()
@@ -1255,6 +1298,8 @@ class BacktestDatabase:
         cursor.execute("DELETE FROM trades WHERE run_id = ?", (run_id,))
         cursor.execute("DELETE FROM backtest_decisions WHERE run_id = ?", (run_id,))
         cursor.execute("DELETE FROM run_manifest WHERE run_id = ?", (run_id,))
+        # Or the boot reclaimer would republish the deleted run from it.
+        cursor.execute("DELETE FROM run_live_progress WHERE run_id = ?", (run_id,))
         cursor.execute("DELETE FROM agent_runs WHERE run_id = ?", (run_id,))
 
         conn.commit()
@@ -1269,6 +1314,7 @@ class BacktestDatabase:
         cursor.execute("DELETE FROM trades")
         cursor.execute("DELETE FROM backtest_decisions")
         cursor.execute("DELETE FROM run_manifest")
+        cursor.execute("DELETE FROM run_live_progress")
         cursor.execute("DELETE FROM agent_runs")
 
         conn.commit()

@@ -189,6 +189,7 @@ PortfolioManager = _portfolio_manager.PortfolioManager
 # subclasses (e.g. backtest_custom_algo) keep working unchanged.
 from dashboard.backend.domain.backtesting.engine import HourlyBacktester
 from dashboard.backend.domain.backtesting.decision_tape import trace_lifecycle
+from dashboard.backend.domain.backtesting.partial_results import LiveProgressHeartbeat
 from dashboard.backend.infrastructure.llm.execution.handoff import (
     ExecutionHandoffError,
     consume_execution_handoff,
@@ -610,9 +611,15 @@ def main():
         # Step 3: Run backtests
         print("\n3️⃣ Running backtests...\n")
     
+        # Stamps the run's partial-result snapshot as alive between the bar
+        # loop's flushes, so the boot reclaimer of another instance (a deploy's
+        # new one) cannot mistake this run for one that died.
+        heartbeat = LiveProgressHeartbeat(args.run_id).start() if args.run_id else None
         try:
             agent_id, agent_eq = backtester.run_agent_backtest()
         finally:
+            if heartbeat is not None:
+                heartbeat.stop()
             if execution_service is not None and execution_handoff is not None:
                 try:
                     execution_service.finalize_run(
