@@ -132,13 +132,13 @@ class HostedDecisionBilling:
     ) -> int:
         """Settle or release one decision's hold; returns the micro charged.
 
-        ``outcome`` is ``completed``, ``timed_out`` or ``failed``. Reported
-        usage is billed whatever the outcome. Without it the charge depends on
-        what the missing report means: a completed decision whose usage went
-        unreported is a broken meter, and a timed-out one ran its model calls
-        until it was killed, so both settle at the ceiling; any other failure
-        exited before the bridge's usage scope opened (an import or start-up
-        crash), so it made no model call and is released.
+        ``outcome`` is ``completed``, ``killed`` or ``failed``. Reported usage
+        is billed whatever the outcome. Without it the charge fails closed: a
+        completed decision whose usage went unreported is a broken meter, and a
+        killed one (a timeout, a signal, any failure past the bridge's started
+        marker) could have called the model, so both settle at the ceiling.
+        Only ``failed`` is released, which the adapter reports solely when the
+        bridge left no file at all, i.e. died before any model call.
         """
         if usage is not None:
             input_tokens, output_tokens = usage
@@ -157,7 +157,11 @@ class HostedDecisionBilling:
                     "reported no model tokens",
                     flush=True,
                 )
-        elif outcome in {"completed", "timed_out"}:
+        elif outcome == "failed":
+            input_tokens = output_tokens = None
+            uncapped = 0
+            basis = "no_model_call"
+        else:
             input_tokens = output_tokens = None
             uncapped = int(ceiling_micro)
             basis = "ceiling"
@@ -167,10 +171,6 @@ class HostedDecisionBilling:
                     "billing at the decision ceiling",
                     flush=True,
                 )
-        else:
-            input_tokens = output_tokens = None
-            uncapped = 0
-            basis = "no_model_call"
         charged = min(uncapped, int(ceiling_micro))
         if uncapped > charged:
             print(

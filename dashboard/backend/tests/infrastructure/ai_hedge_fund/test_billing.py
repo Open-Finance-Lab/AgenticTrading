@@ -26,6 +26,7 @@ from dashboard.backend.infrastructure.ai_hedge_fund import bridge
 from dashboard.backend.infrastructure.ai_hedge_fund.adapter import (
     DEFAULT_MODEL_NAME,
     DEFAULT_MODEL_PROVIDER,
+    AiHedgeFundOutputError,
     AiHedgeFundRuntime,
     AiHedgeFundRuntimeError,
     AiHedgeFundSubprocessRunner,
@@ -226,8 +227,9 @@ def test_usage_above_the_ceiling_is_capped_rather_than_recorded_as_overage(
 @pytest.mark.parametrize(
     "error, status, settled",
     [
-        # Killed mid-run: its model calls ran until the kill.
-        (AiHedgeFundRuntimeError("timed out", timed_out=True), "settled", CEILING),
+        # Killed mid-run (timeout, signal, crash past the started marker): its
+        # model calls may have run, so it fails closed at the ceiling.
+        (AiHedgeFundRuntimeError("timed out", killed=True), "settled", CEILING),
         # Failed after reporting what it had spent.
         (
             AiHedgeFundRuntimeError("exit 1", usage=(10_000, 2_000)),
@@ -266,25 +268,62 @@ def test_an_empty_balance_stops_the_run_before_upstream_is_called(tmp_path):
     assert _rows(tmp_path) == []
 
 
-def test_runner_carries_the_bridges_usage_out_of_a_failed_exit(monkeypatch, tmp_path):
+def _runner_exiting(monkeypatch, tmp_path, returncode, written):
+    """A runner whose bridge leaves ``written`` (text, or None for no file)."""
     python = tmp_path / "python"
     python.write_text("")
     python.chmod(0o755)
 
     def fake_run(command, **kwargs):
-        output = command[command.index("--output") + 1]
-        with open(output, "w", encoding="utf-8") as handle:
-            json.dump({"usage": {"input_tokens": 7, "output_tokens": 3}}, handle)
-        return subprocess.CompletedProcess(command, 1, stdout="", stderr="boom")
+        if written is not None:
+            output = command[command.index("--output") + 1]
+            with open(output, "w", encoding="utf-8") as handle:
+                handle.write(written)
+        return subprocess.CompletedProcess(command, returncode, stdout="", stderr="boom")
 
     monkeypatch.setattr(subprocess, "run", fake_run)
-    runner = AiHedgeFundSubprocessRunner({"AI_HEDGE_FUND_PYTHON": str(python)})
+    return AiHedgeFundSubprocessRunner({"AI_HEDGE_FUND_PYTHON": str(python)})
+
+
+@pytest.mark.parametrize(
+    "returncode, written, usage, killed",
+    [
+        # The bridge's handler reported what it spent before exiting.
+        (
+            1,
+            json.dumps({"started": True, "usage": {"input_tokens": 7, "output_tokens": 3}}),
+            (7, 3),
+            False,
+        ),
+        # An OOM SIGKILL after the marker: no report, spend unknown.
+        (-9, json.dumps({"started": True}), None, True),
+        # Killed mid-write: a truncated file is still proof it started.
+        (-9, '{"started": tr', None, True),
+        # No file: died before upstream could call the model.
+        (1, None, None, False),
+    ],
+)
+def test_a_failed_exit_fails_closed_once_the_bridge_has_started(
+    monkeypatch, tmp_path, returncode, written, usage, killed
+):
+    runner = _runner_exiting(monkeypatch, tmp_path, returncode, written)
 
     with pytest.raises(AiHedgeFundRuntimeError) as excinfo:
         runner.run({"tickers": ["AAPL"]}, timeout_seconds=5)
 
-    assert excinfo.value.usage == (7, 3)
-    assert excinfo.value.timed_out is False
+    assert (excinfo.value.usage, excinfo.value.killed) == (usage, killed)
+
+
+@pytest.mark.parametrize("written", ["not json", "[]"])
+def test_an_unreadable_clean_exit_bills_the_ceiling(monkeypatch, tmp_path, written):
+    # A clean exit ran upstream to the end; refusing its output must not make
+    # the decision free.
+    runner = _runner_exiting(monkeypatch, tmp_path, 0, written)
+
+    with pytest.raises(AiHedgeFundOutputError) as excinfo:
+        runner.run({"tickers": ["AAPL"]}, timeout_seconds=5)
+
+    assert excinfo.value.killed is True
 
 
 def _bridge_args(monkeypatch, tmp_path):
@@ -381,8 +420,26 @@ def test_bridge_reports_usage_spent_before_a_failure(monkeypatch, tmp_path):
         bridge.main()
 
     assert json.loads(output_path.read_text(encoding="utf-8")) == {
-        "usage": {"input_tokens": 50, "output_tokens": 5}
+        "started": True,
+        "usage": {"input_tokens": 50, "output_tokens": 5},
     }
+
+
+def test_bridge_marks_itself_started_before_upstream_can_call_the_model(
+    monkeypatch, tmp_path
+):
+    output_path = _bridge_args(monkeypatch, tmp_path)
+    seen = {}
+
+    def run_hedge_fund(**_kwargs):
+        seen["at_call"] = json.loads(output_path.read_text(encoding="utf-8"))
+        return {"decisions": {}}
+
+    _fake_upstream(monkeypatch, run_hedge_fund)
+
+    bridge.main()
+
+    assert seen["at_call"] == {"started": True}
 
 
 def test_bridge_without_a_usage_counter_reports_none(monkeypatch, tmp_path):

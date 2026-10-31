@@ -95,6 +95,11 @@ def main() -> None:
     model_name, model_provider = _managed_model_from_payload(payload)
     counter = _usage_counter()
     output_path = Path(args.output)
+    # Written before upstream can make a model call. A failed exit that leaves
+    # only this marker (an OOM SIGKILL, a crash the handler below never saw)
+    # spent an unknown amount, and ATL bills it the ceiling; no file at all
+    # means the bridge died before any call was possible.
+    output_path.write_text(json.dumps({"started": True}), encoding="utf-8")
     handler = None
     try:
         with counter if counter is not None else contextlib.nullcontext() as handler:
@@ -108,25 +113,27 @@ def main() -> None:
                 model_name=model_name,
                 model_provider=model_provider,
             )
+        # Inside the try, so an output that fails to serialize still leaves
+        # the usage report below rather than only the marker.
+        output_path.write_text(
+            json.dumps(
+                {
+                    "decisions": result.get("decisions"),
+                    "analyst_signals": result.get("analyst_signals"),
+                    "usage": _usage_totals(handler),
+                }
+            ),
+            encoding="utf-8",
+        )
     except BaseException:
         # A failed decision may still have spent model calls; ATL bills what
         # was used, so report it before the non-zero exit. Usage only: there
         # is no decision to read.
         output_path.write_text(
-            json.dumps({"usage": _usage_totals(handler)}),
+            json.dumps({"started": True, "usage": _usage_totals(handler)}),
             encoding="utf-8",
         )
         raise
-    output_path.write_text(
-        json.dumps(
-            {
-                "decisions": result.get("decisions"),
-                "analyst_signals": result.get("analyst_signals"),
-                "usage": _usage_totals(handler),
-            }
-        ),
-        encoding="utf-8",
-    )
 
 
 if __name__ == "__main__":

@@ -91,7 +91,9 @@ class AiHedgeFundRuntimeError(AgentRuntimeError):
     on one day says nothing about the next.
 
     ``usage`` is what the bridge reported spending before it failed (None when
-    it reported nothing) and ``timed_out`` marks a decision killed mid-run;
+    it reported nothing) and ``killed`` marks a decision that stopped after it
+    could call the model but left no usage report (a timeout, a signal, a
+    crash past the bridge's started marker);
     together they decide what the failed decision is billed (``billing.py``).
     """
 
@@ -100,11 +102,11 @@ class AiHedgeFundRuntimeError(AgentRuntimeError):
         message: str = "",
         *,
         usage: Optional[tuple[int, int]] = None,
-        timed_out: bool = False,
+        killed: bool = False,
     ):
         super().__init__(message)
         self.usage = usage
-        self.timed_out = timed_out
+        self.killed = killed
 
 
 class AiHedgeFundConfigurationError(
@@ -281,7 +283,7 @@ class AiHedgeFundSubprocessRunner:
             except subprocess.TimeoutExpired as exc:
                 raise AiHedgeFundRuntimeError(
                     f"AI Hedge Fund runtime timed out after {timeout_seconds} seconds",
-                    timed_out=True,
+                    killed=True,
                 ) from exc
             except OSError as exc:
                 raise AiHedgeFundRuntimeError(
@@ -292,27 +294,37 @@ class AiHedgeFundSubprocessRunner:
                 detail = _redact_runtime_error(
                     result.stderr or result.stdout or "unknown error", environment
                 )
-                # The bridge writes its usage before a failing exit; absent,
-                # it died before opening its usage scope.
+                # Fail closed. The bridge writes a started marker before
+                # upstream can call the model and its usage before a failing
+                # exit, so: no file = died before any call (released); a file
+                # without a readable usage report = an OOM SIGKILL, a crash
+                # mid-write, a missing meter (billed the ceiling).
+                started = output_path.exists()
                 try:
                     reported = json.loads(output_path.read_text(encoding="utf-8"))
                 except (OSError, ValueError):
                     reported = None
+                usage = parse_usage(
+                    reported.get("usage") if isinstance(reported, dict) else None
+                )
                 raise AiHedgeFundRuntimeError(
                     f"AI Hedge Fund runtime failed with code {result.returncode}: {detail}",
-                    usage=parse_usage(
-                        reported.get("usage") if isinstance(reported, dict) else None
-                    ),
+                    usage=usage,
+                    killed=started and usage is None,
                 )
+            # A clean exit ran upstream to the end, so an unreadable output
+            # spent an unknown amount: billed the ceiling, never released.
             try:
                 output = json.loads(output_path.read_text(encoding="utf-8"))
             except (OSError, json.JSONDecodeError) as exc:
                 raise AiHedgeFundOutputError(
-                    "AI Hedge Fund runtime did not produce valid JSON output"
+                    "AI Hedge Fund runtime did not produce valid JSON output",
+                    killed=True,
                 ) from exc
             if not isinstance(output, dict):
                 raise AiHedgeFundOutputError(
-                    "AI Hedge Fund runtime output must be a JSON object"
+                    "AI Hedge Fund runtime output must be a JSON object",
+                    killed=True,
                 )
             return output
 
@@ -830,7 +842,7 @@ class AiHedgeFundRuntime:
                 reservation_id,
                 ceiling_micro=ceiling,
                 usage=exc.usage,
-                outcome="timed_out" if exc.timed_out else "failed",
+                outcome="killed" if exc.killed else "failed",
             )
             raise
         self.billing.close(
