@@ -1215,7 +1215,9 @@ function getFilteredLeaderboardEntries() {
       case 'return':
         return finiteNumber(entry.cumulative_return);
       case 'sharpe':
-        return finiteNumber(entry.sharpe_ratio);
+        // Sort by what the cell shows: a "—" (below 5 days, or an old
+        // payload's hourly number) is absent, never a hidden value.
+        return boardSharpeValue(entry);
       case 'dd': {
         const dd = finiteNumber(entry.max_drawdown);
         return Number.isNaN(dd) ? NaN : Math.abs(dd);
@@ -1261,6 +1263,63 @@ function formatLeaderboardSamples(entry, long) {
     : `${kind} of ${count}${range}`;
 }
 
+// The board's Sharpe definition (`sharpe_basis` on the payload), or null for a
+// payload that predates it. `typeof` because the node harnesses lift single
+// functions without this module's `let` state.
+function boardSharpeBasis() {
+  if (typeof leaderboardPayload === 'undefined' || !leaderboardPayload) return null;
+  return leaderboardPayload.sharpe_basis || null;
+}
+
+// The Sharpe number a cell shows, or NaN where it shows "—": an `ok` status
+// with both interval bounds, since a number is never shown without its
+// interval. The cell and every sort read this one predicate, so a sort cannot
+// rank a number its cell hides.
+function boardSharpeValue(entry) {
+  if (!entry || entry.sharpe_status !== 'ok') return NaN;
+  const lo = finiteNumber(entry.sharpe_ci_low);
+  const hi = finiteNumber(entry.sharpe_ci_high);
+  return Number.isFinite(lo) && Number.isFinite(hi) ? finiteNumber(entry.sharpe_ratio) : NaN;
+}
+
+// Sharpe is computed once, on the server, from the stored curve (P19); this
+// file only displays it (D20) and never derives it from `equity_curve`. A
+// number is never shown without its 95% interval. Returns `{ main, sub, title }`:
+// the cell text, the muted second line (the interval, or why there is no
+// number), and the plain-language tooltip. The ONE wording of a Sharpe cell:
+// the Live board (`liveFormatSharpe`) and the home rank row delegate here.
+function formatBoardSharpe(entry, basis) {
+  const status = entry ? entry.sharpe_status : null;
+  const value = boardSharpeValue(entry);
+  const lo = finiteNumber(entry && entry.sharpe_ci_low);
+  const hi = finiteNumber(entry && entry.sharpe_ci_high);
+  const days = finiteNumber(entry && entry.sharpe_days);
+  const have = Number.isFinite(days) ? days : 0;
+  const need = finiteNumber(basis && basis.min_days);
+  const rf = finiteNumber(basis && basis.rf_annual);
+  // -0.004 is "0.00", not "-0.00".
+  const fixed = (v) => (Math.abs(v) < 0.005 ? 0 : v).toFixed(2);
+  if (Number.isFinite(value)) {
+    const title = Number.isFinite(rf)
+      ? 'Return above what cash would have earned, divided by how much the daily returns swung. '
+        + (Number.isFinite(days) ? `Based on ${days} trading days; ` : '')
+        + `cash rate ${Number((rf * 100).toFixed(2))}%/yr; scaled to a yearly figure.`
+      : '';
+    return { main: fixed(value), sub: `95% interval ${fixed(lo)} to ${fixed(hi)}`, title };
+  }
+  if (status === 'insufficient_days') {
+    const sub = Number.isFinite(need)
+      ? `Needs ${need} trading days (have ${have})`
+      : `Needs more trading days (have ${have})`;
+    return { main: '—', sub, title: '' };
+  }
+  if (status === 'no_variation') return { main: '—', sub: 'Returns never moved', title: '' };
+  // A return that cannot be computed (the account at or below 0, or a stored
+  // seed that is not a positive number) is not "never moved".
+  if (status === 'undefined') return { main: '—', sub: 'Cannot be computed', title: '' };
+  return { main: '—', sub: '', title: '' };
+}
+
 // `entry.model` / `entry.team_name` are user-registered agent names, so every
 // string field must go through `escapeHtml` (a global from app.js, loaded
 // first). The onclick id additionally needs JS-string escaping — backslash
@@ -1276,6 +1335,7 @@ function renderLeaderboardRowHtml(entry) {
   const ddRaw = Number(entry.max_drawdown || 0);
   const dd = (Math.abs(ddRaw) * 100).toFixed(2);
   const sampleLabel = formatLeaderboardSamples(entry);
+  const sharpe = formatBoardSharpe(entry, boardSharpeBasis());
 
   return `
       <tr onclick="selectLeaderboardTeam('${safeId}')">
@@ -1291,7 +1351,10 @@ function renderLeaderboardRowHtml(entry) {
           <span class="metric-value-text">${(ret * 100).toFixed(2)}%</span>
           ${sampleLabel ? `<span class="leaderboard-sample-range">${escapeHtml(sampleLabel)}</span>` : ''}
         </td>
-        <td style="text-align: right; font-family: var(--font-mono);">${Number(entry.sharpe_ratio || 0).toFixed(2)}</td>
+        <td style="text-align: right; font-family: var(--font-mono);"${sharpe.title ? ` title="${escapeHtml(sharpe.title)}"` : ''}>
+          <span class="metric-value-text">${escapeHtml(sharpe.main)}</span>
+          ${sharpe.sub ? `<span class="leaderboard-sample-range">${escapeHtml(sharpe.sub)}</span>` : ''}
+        </td>
         <td style="text-align: right; font-family: var(--font-mono);">${dd}%</td>
       </tr>
     `;
@@ -1323,6 +1386,7 @@ function renderLeaderboardDetailHtml(entry, totalEntries) {
   const retColor = ret >= 0 ? 'var(--success-color)' : 'var(--danger-color)';
   const entryLabel = escapeHtml(entry.model || entry.team_name || '—');
   const runsLabel = formatLeaderboardSamples(entry, true);
+  const sharpe = formatBoardSharpe(entry, boardSharpeBasis());
   return `
       <div class="team-detail-row">
         <span class="team-detail-label">Entry</span>
@@ -1345,8 +1409,8 @@ function renderLeaderboardDetailHtml(entry, totalEntries) {
         <span class="team-detail-value">${escapeHtml(runsLabel)}</span>
       </div>` : ''}
       <div class="team-detail-row">
-        <span class="team-detail-label">Sharpe</span>
-        <span class="team-detail-value">${Number(entry.sharpe_ratio || 0).toFixed(2)}</span>
+        <span class="team-detail-label">Sharpe ratio</span>
+        <span class="team-detail-value"${sharpe.title ? ` title="${escapeHtml(sharpe.title)}"` : ''}>${escapeHtml([sharpe.main, sharpe.sub].filter(Boolean).join(' · '))}</span>
       </div>
       <div class="team-detail-row">
         <span class="team-detail-label">Max Drawdown</span>
@@ -2442,5 +2506,7 @@ window.formatChartTooltipLabel = formatChartTooltipLabel;
 // beneath it render the same number, and two independent expressions producing
 // it is how they drift.
 window.boardSignedPercent = boardSignedPercent;
+window.formatBoardSharpe = formatBoardSharpe;
+window.boardSharpeValue = boardSharpeValue;
 window.createEndpointLabelPlugin = createEndpointLabelPlugin;
 window.createAxisArrowPlugin = createAxisArrowPlugin;

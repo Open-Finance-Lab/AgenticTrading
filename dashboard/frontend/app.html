@@ -567,7 +567,7 @@
                                     <span>AI models only &middot; ranked by return</span>
                                 </div>
                                 <div class="hm-rank-table-head" aria-hidden="true">
-                                    <span>#</span><span>AI Model</span><span>Ending value</span><span>Return</span><span title="Risk-adjusted return, annualized from hourly results.">Sharpe</span>
+                                    <span>#</span><span>AI Model</span><span>Ending value</span><span>Return</span><span title="Sharpe ratio. Return above what cash would have earned, divided by how much the daily returns swung, scaled to a yearly figure. Hover a value for its 95% interval.">Sharpe</span>
                                 </div>
                                 <ol class="home-module-rank-list" id="homeModuleRankList">
                                     <li class="home-module-rank-empty">Loading the standings&hellip;</li>
@@ -1723,7 +1723,7 @@
                                 <tr>
                                     <th class="name-col">Entry</th>
                                     <th class="num-col sortable" data-sort="return" title="Return since the 1st of the month">Return <span class="sort-arrow" aria-hidden="true"></span></th>
-                                    <th class="num-col sortable" data-sort="sharpe" title="Annualized; noisy until a few weeks of sessions">Sharpe <span class="sort-arrow" aria-hidden="true"></span></th>
+                                    <th class="num-col sortable" data-sort="sharpe" title="Sharpe ratio. Return above what cash would have earned, divided by how much the daily returns swung, scaled to a yearly figure. Shown from 5 trading days, always with its 95% interval.">Sharpe <span class="sort-arrow" aria-hidden="true"></span></th>
                                     <th class="num-col sortable" data-sort="dd" title="Largest peak-to-trough drop this month">Max DD <span class="sort-arrow" aria-hidden="true"></span></th>
                                     <th class="num-col sortable" data-sort="trades" title="Orders filled this month">Trades <span class="sort-arrow" aria-hidden="true"></span></th>
                                     <th class="num-col sortable" data-sort="hold" title="Average time a share was held before it was sold. Closed positions only; calendar time.">Avg hold <span class="sort-arrow" aria-hidden="true"></span></th>
@@ -1866,7 +1866,7 @@
                                     <th class="name-col">Entry</th>
                                     <th class="portfolio-col sortable" data-sort="value">Value <span class="sort-arrow" aria-hidden="true"></span></th>
                                     <th class="return-col sortable" data-sort="return">Return <span class="sort-arrow" aria-hidden="true"></span></th>
-                                    <th class="sharpe-col sortable" data-sort="sharpe">Sharpe <span class="sort-arrow" aria-hidden="true"></span></th>
+                                    <th class="sharpe-col sortable" data-sort="sharpe" title="Sharpe ratio. Return above what cash would have earned, divided by how much the daily returns swung, scaled to a yearly figure. Shown from 5 trading days, always with its 95% interval.">Sharpe <span class="sort-arrow" aria-hidden="true"></span></th>
                                     <th class="dd-col sortable" data-sort="dd">Max DD <span class="sort-arrow" aria-hidden="true"></span></th>
                                 </tr>
                             </thead>
@@ -2523,9 +2523,9 @@
     <script src="js/credits.js?v=8" defer></script>
     <script src="js/admin-credits.js?v=9" defer></script>
     <script src="js/admin-tabs.js?v=12" defer></script>
-    <script src="js/leaderboard.js?v=38" defer></script>
-    <script src="js/live-leaderboard.js?v=6" defer></script>
-    <script src="home-page.js?v=55" defer></script>
+    <script src="js/leaderboard.js?v=39" defer></script>
+    <script src="js/live-leaderboard.js?v=7" defer></script>
+    <script src="home-page.js?v=56" defer></script>
     <!-- Load order: must come after app.js (API/API_BASE/escapeHtml) and
          market-events/marketEventRelativeTime.js (formatMarketEventRelativeTime),
          both loaded above — not beside the market-events/* block, which loads

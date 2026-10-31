@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import logging
 import os
 import re
 import tempfile
@@ -30,6 +31,10 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 from zoneinfo import ZoneInfo
 
 from dashboard.backend.database import db
+from dashboard.backend.domain.backtesting.metrics import (
+    daily_sharpe_basis,
+    daily_sharpe_interval,
+)
 from dashboard.backend.domain.leaderboard import live_budget
 from dashboard.backend.domain.leaderboard.baselines import INITIAL_CAPITAL, calc_metrics
 from dashboard.backend.domain.leaderboard.live_trade_stats import (
@@ -51,6 +56,8 @@ from dashboard.backend.infrastructure.market_data.sessions import (
 from dashboard.backend.infrastructure.market_data.us_market_calendar import is_trading_day
 from dashboard.backend.paths import DATA_DIR
 import dashboard.backend.domain.leaderboard.service as lb_service
+
+logger = logging.getLogger(__name__)
 
 _US_EASTERN = ZoneInfo("America/New_York")
 # The US cash session has one owner (market_data/sessions.py); restating it here
@@ -1568,6 +1575,21 @@ def reindex_frozen_curve(
     print so the line is continuous across sparse bars, not into the future.
     A stored NULL equity is "no observation", never $0 (issue #390).
     """
+    return _fill_axis(
+        _axis_prints(hourly_points, freeze_end, scale), axis, freeze_end, initial_capital
+    )
+
+
+def _axis_prints(
+    hourly_points: List[Dict[str, Any]], freeze_end: str, scale: float = 1.0
+) -> Dict[str, float]:
+    """The stored prints that land on an axis node, through the freeze close.
+
+    Empty for a non-empty stored curve means none of it can be plotted
+    (unreadable stamps, NULL equity, after-hours bars only): the caller must
+    not paint that as a flat line at the seed.
+    """
+    freeze_dt = _cash_close(date.fromisoformat(freeze_end))
     by_hour: Dict[str, float] = {}
     for pt in hourly_points:
         dt = _parse_to_et(pt.get("timestamp"))
@@ -1575,9 +1597,17 @@ def reindex_frozen_curve(
         if dt is None or equity is None:
             continue
         key = _axis_node_key(dt)
-        if key is not None:
+        if key is not None and datetime.fromisoformat(key).replace(tzinfo=_US_EASTERN) <= freeze_dt:
             by_hour[key] = float(equity) * scale
+    return by_hour
 
+
+def _fill_axis(
+    by_hour: Dict[str, float],
+    axis: List[str],
+    freeze_end: str,
+    initial_capital: float,
+) -> List[Dict[str, Any]]:
     freeze_dt = _cash_close(date.fromisoformat(freeze_end))
     last: Optional[float] = None
     out: List[Dict[str, Any]] = []
@@ -1592,6 +1622,31 @@ def reindex_frozen_curve(
             last = float(initial_capital)
         out.append({"timestamp": ts, "equity": last})
     return out
+
+
+# (run id, stored point count) already reported by _report_unplottable_curve.
+_reported_unplottable: set = set()
+
+
+def _report_unplottable_curve(run: Dict[str, Any], points: int, curve_end: str) -> None:
+    """ERROR, once per process: a stored curve none of whose points plot.
+
+    Filling the axis from the seed would draw a flat line, rank it, and
+    publish Sharpe as "Returns never moved": broken passed off as healthy. The
+    row stays pending (no curve) and this is the line that says why.
+    """
+    marker = (str(run.get("run_id")), points)
+    if marker in _reported_unplottable:
+        return
+    if len(_reported_unplottable) >= 1000:
+        _reported_unplottable.clear()
+    _reported_unplottable.add(marker)
+    logger.error(
+        "live.curve_unplottable run_id=%s points=%d through=%s: no stored point "
+        "lands on the month axis (unreadable timestamp, NULL equity or "
+        "after-hours only); publishing the row as pending",
+        run.get("run_id"), points, curve_end,
+    )
 
 
 def _recorded_seed(run: Dict[str, Any]) -> Optional[float]:
@@ -1634,14 +1689,24 @@ def _entry_from_strategy(
     display_capital: float,
     curve: List[Dict[str, Any]],
     run: Optional[Dict[str, Any]],
+    opening_equity: Optional[float] = None,
     scale: float = 1.0,
     catching_up: bool = False,
 ) -> Dict[str, Any]:
-    """One board row. Returns and risk come off the stored run untouched.
+    """One board row. Return and drawdown come off the stored run untouched.
 
     The stored run's metrics were computed against the capital it was seeded
     with, over exactly the curve this row plots, so only the dollar axis is
-    scaled (the contest board's rule). A row with no run is *pending*: it has
+    scaled (the contest board's rule). Sharpe is the exception: the stored
+    column is hourly marks with ddof 0 and 0 for "undefined", so the row
+    publishes P19's daily figure and its 95% interval instead, read off
+    ``curve`` (``daily_sharpe_interval``) with ``E_0 = opening_equity``, the
+    level ``curve`` opens at before its first print. For a row that recorded
+    its seed that is ``display_capital`` (the curve is rescaled onto it), so day
+    1 keeps the first hour's P&L; otherwise it is the run's first mark in its
+    own dollars, the Competition board's approximation.
+
+    A row with no run is *pending*: it has
     no value, return or rank — publishing the seed and 0% would rank an entry
     that never traded against ones that did. A row *catching up* is several
     sessions behind the rest of the board (a replay checkpointing its way
@@ -1660,13 +1725,12 @@ def _entry_from_strategy(
         final = run.get("final_equity")
         portfolio_value = float(final) * scale if final is not None else None
         total_return = run.get("total_return")
-        sharpe = run.get("sharpe_ratio")
         max_dd = run.get("max_drawdown")
     else:
         portfolio_value = None
         total_return = None
-        sharpe = None
         max_dd = None
+    sharpe = daily_sharpe_interval(curve if printed else [], opening_equity)
     trade_figures = summarize_trade_stats(
         _run_metadata_dict(run).get(TRADE_STATS_KEY) if printed else None
     )
@@ -1680,7 +1744,11 @@ def _entry_from_strategy(
         "initial_equity": display_capital,
         "portfolio_value": portfolio_value,
         "cumulative_return": total_return,
-        "sharpe_ratio": sharpe,
+        "sharpe_ratio": sharpe["sharpe"],
+        "sharpe_ci_low": sharpe["ci_low"],
+        "sharpe_ci_high": sharpe["ci_high"],
+        "sharpe_days": sharpe["days"],
+        "sharpe_status": sharpe["status"],
         "max_drawdown": max_dd,
         "status": status,
         "rank": None,
@@ -1767,6 +1835,7 @@ def get_live_leaderboard(
         run = runs_by_entry.get(strategy["id"])
         curve: List[Dict[str, Any]] = []
         scale = 1.0
+        opening: Optional[float] = display_capital
         behind = False
         if run:
             behind = bool(
@@ -1777,16 +1846,28 @@ def get_live_leaderboard(
             seed = _recorded_seed(run)
             if seed is not None:
                 scale = display_capital / seed
+                opening = display_capital
+            else:
+                # Unscaled, so the curve stays in the run's own dollars and
+                # must open there too: an E_0 of display_capital under a $10k
+                # run would publish day 1 as about -90%. The first mark carries
+                # the first hour's P&L (the Competition board's approximation).
+                opening = lb_service._finite_positive(run.get("initial_equity"))
             hourly = db.get_equity_curve(run["run_id"]) or []
-            if hourly:
-                curve = reindex_frozen_curve(
-                    hourly, axis, curve_end, display_capital, scale=scale
+            prints = _axis_prints(hourly, curve_end, scale)
+            if prints:
+                curve = _fill_axis(
+                    prints, axis, curve_end,
+                    display_capital if opening is None else opening,
                 )
+            elif hourly:
+                _report_unplottable_curve(run, len(hourly), curve_end)
         entry = _entry_from_strategy(
             strategy,
             display_capital=display_capital,
             curve=curve,
             run=run,
+            opening_equity=opening,
             scale=scale,
             catching_up=behind,
         )
@@ -1813,6 +1894,8 @@ def get_live_leaderboard(
     month_label = now.strftime("%B %Y")
     live_status = {
         "phase": LIVE_PHASE,
+        # What every entry's sharpe_* fields mean; the table quotes these.
+        "sharpe": daily_sharpe_basis(),
         "month": f"{now.year:04d}-{now.month:02d}",
         "session_id": LIVE_SESSION_ID,
         "as_of": clock["as_of"],

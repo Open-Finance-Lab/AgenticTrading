@@ -477,11 +477,12 @@ def test_standings_carry_the_ending_value_and_sharpe_the_table_renders():
     sees and the string is what a "tidy-up" to `Number(value).toFixed()` would
     change.
 
-    Sharpe's em dash is NOT reachable through the live API today -- the payload
-    builder sends `run.get("sharpe_ratio") or 0`, which collapses absent onto a
-    real 0.00 before it leaves the server. It is pinned anyway: the client rule
-    is the one that survives that being fixed, and an untested branch is how the
-    fix would arrive with the display still reading "0.00"."""
+    Sharpe's em dash IS reachable through the API now: the payload sends
+    `sharpe_ratio: null` below five trading days or when the returns never
+    moved (`sharpe_status` says which). It used to send
+    `run.get("sharpe_ratio") or 0`, publishing absent as a real 0.00. The
+    landing does not render the 95% interval (`sharpe_ci_low`/`sharpe_ci_high`)
+    yet; that is the landing's own change."""
     result = _run_ts(
         """
 const entries = [

@@ -23,6 +23,10 @@ from zoneinfo import ZoneInfo
 
 import dashboard.backend.infrastructure.llm.token_cost as token_cost
 from dashboard.backend.database import db
+from dashboard.backend.domain.backtesting.metrics import (
+    daily_sharpe_basis,
+    daily_sharpe_interval,
+)
 import dashboard.backend.domain.leaderboard.baselines as _baselines
 from dashboard.backend.domain.backtesting.portfolio_manager import LLM_GATE_VERSION
 from dashboard.backend.domain.leaderboard.roster_failures import RosterFailures
@@ -3003,8 +3007,9 @@ def get_leaderboard(
         # per-trade costs make a $10k run a genuinely *different* run from a
         # $100k one rather than a scaled copy of it — a $10k account cannot buy
         # the same basket in the same proportions, so its returns differ, not
-        # just its dollar levels. Returns / Sharpe below come off the stored run
-        # untouched, so the shim moves the dollar axis only. Re-running each
+        # just its dollar levels. Returns below come off the stored run
+        # untouched and Sharpe is a ratio of the scaled curve's own returns, so
+        # the shim moves the dollar axis only. Re-running each
         # entry at the published seed is the real fix (issue #194).
         scale = display_capital / stored_initial
         if (
@@ -3024,6 +3029,20 @@ def get_leaderboard(
             )
         scaled_hourly = _scaled_hourly(equity_hourly, scale)
         _report_curve_integrity(strategy["id"], run["run_id"], scaled_hourly)
+        # P19 daily Sharpe with its 95% interval, computed here at read time
+        # rather than read from `agent_runs.sharpe_ratio` (hourly marks, ddof 0,
+        # 0 for "undefined"). Fed the scaled hourly curve, NOT `equity_curve`
+        # below: `chart_equity_curve` prepends a synthetic
+        # `{start_date}T00:00:00+00:00` tick, which is the previous US/Eastern
+        # day and would add a session that never traded.
+        #
+        # ⚠ E_0 is an approximation on this board. The stored seed
+        # (`initial_equity`) is the curve's first mark -- seed plus one hour of
+        # P&L -- so the scaled curve opens AT display_capital and day 1's return
+        # leaves out the first hour. Live keeps that hour (its rows record the
+        # true seed in metadata). One hour of a multi-week window; the
+        # Competition board is never re-run (spec 2026-10-14 §6).
+        sharpe = daily_sharpe_interval(scaled_hourly, display_capital)
         span = _curve_span(equity_hourly)
         if span is not None:
             published_spans[strategy["id"]] = span
@@ -3054,7 +3073,11 @@ def get_leaderboard(
                 "initial_equity": display_capital,
                 "portfolio_value": portfolio_value,
                 "cumulative_return": run.get("total_return") or 0,
-                "sharpe_ratio": run.get("sharpe_ratio") or 0,
+                "sharpe_ratio": sharpe["sharpe"],
+                "sharpe_ci_low": sharpe["ci_low"],
+                "sharpe_ci_high": sharpe["ci_high"],
+                "sharpe_days": sharpe["days"],
+                "sharpe_status": sharpe["status"],
                 "max_drawdown": run.get("max_drawdown") or 0,
                 "status": "Model" if is_model else "Baseline",
                 "run_id": run["run_id"],
@@ -3135,6 +3158,8 @@ def get_leaderboard(
         "updated_at": meta.get("refreshed_at"),
         "total_entries": len(entries),
         "display_capital": display_capital,
+        # What every entry's sharpe_* fields mean; the table quotes these.
+        "sharpe_basis": daily_sharpe_basis(),
         "leader": leader,
         "entries": entries,
     }
