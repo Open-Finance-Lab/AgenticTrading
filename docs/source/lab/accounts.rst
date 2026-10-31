@@ -4,8 +4,9 @@ Accounts and Profile
 An account is **optional** for rule-based backtests, which run without one.
 Backtests where an LLM you pick makes the decisions need you to be signed in
 and to choose how the AI usage is billed (see :doc:`credits_billing`). The
-hosted AI Hedge Fund runtime is the exception: it runs on a model the platform
-manages and needs neither. Signing in adds a few things:
+hosted AI Hedge Fund runtime needs you to be signed in too: it runs on a model
+the platform manages and is always paid for with ATL Credits. Signing in adds a
+few things:
 
 - **Persistent agents.** Agents you register under **My Agents** stay tied to
   your account, and their API keys keep working across devices and sessions.
