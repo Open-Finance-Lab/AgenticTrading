@@ -1217,7 +1217,7 @@ function getFilteredLeaderboardEntries() {
       case 'sharpe':
         // Sort by what the cell shows: a "—" (below 5 days, or an old
         // payload's hourly number) is absent, never a hidden value.
-        return formatBoardSharpe(entry, null).main === '—' ? NaN : finiteNumber(entry.sharpe_ratio);
+        return boardSharpeValue(entry);
       case 'dd': {
         const dd = finiteNumber(entry.max_drawdown);
         return Number.isNaN(dd) ? NaN : Math.abs(dd);
@@ -1271,15 +1271,26 @@ function boardSharpeBasis() {
   return leaderboardPayload.sharpe_basis || null;
 }
 
+// The Sharpe number a cell shows, or NaN where it shows "—": an `ok` status
+// with both interval bounds, since a number is never shown without its
+// interval. The cell and every sort read this one predicate, so a sort cannot
+// rank a number its cell hides.
+function boardSharpeValue(entry) {
+  if (!entry || entry.sharpe_status !== 'ok') return NaN;
+  const lo = finiteNumber(entry.sharpe_ci_low);
+  const hi = finiteNumber(entry.sharpe_ci_high);
+  return Number.isFinite(lo) && Number.isFinite(hi) ? finiteNumber(entry.sharpe_ratio) : NaN;
+}
+
 // Sharpe is computed once, on the server, from the stored curve (P19); this
 // file only displays it (D20) and never derives it from `equity_curve`. A
 // number is never shown without its 95% interval. Returns `{ main, sub, title }`:
 // the cell text, the muted second line (the interval, or why there is no
-// number), and the plain-language tooltip. The Live board's `liveFormatSharpe`
-// must answer identically -- test_frontend_board_sharpe.py pins the two.
+// number), and the plain-language tooltip. The ONE wording of a Sharpe cell:
+// the Live board (`liveFormatSharpe`) and the home rank row delegate here.
 function formatBoardSharpe(entry, basis) {
   const status = entry ? entry.sharpe_status : null;
-  const value = finiteNumber(entry && entry.sharpe_ratio);
+  const value = boardSharpeValue(entry);
   const lo = finiteNumber(entry && entry.sharpe_ci_low);
   const hi = finiteNumber(entry && entry.sharpe_ci_high);
   const days = finiteNumber(entry && entry.sharpe_days);
@@ -1288,7 +1299,7 @@ function formatBoardSharpe(entry, basis) {
   const rf = finiteNumber(basis && basis.rf_annual);
   // -0.004 is "0.00", not "-0.00".
   const fixed = (v) => (Math.abs(v) < 0.005 ? 0 : v).toFixed(2);
-  if (status === 'ok' && Number.isFinite(value) && Number.isFinite(lo) && Number.isFinite(hi)) {
+  if (Number.isFinite(value)) {
     const title = Number.isFinite(rf)
       ? 'Return above what cash would have earned, divided by how much the daily returns swung. '
         + (Number.isFinite(days) ? `Based on ${days} trading days; ` : '')
@@ -1303,6 +1314,9 @@ function formatBoardSharpe(entry, basis) {
     return { main: '—', sub, title: '' };
   }
   if (status === 'no_variation') return { main: '—', sub: 'Returns never moved', title: '' };
+  // A return that cannot be computed (the account at or below 0, or a stored
+  // seed that is not a positive number) is not "never moved".
+  if (status === 'undefined') return { main: '—', sub: 'Cannot be computed', title: '' };
   return { main: '—', sub: '', title: '' };
 }
 
@@ -2493,5 +2507,6 @@ window.formatChartTooltipLabel = formatChartTooltipLabel;
 // it is how they drift.
 window.boardSignedPercent = boardSignedPercent;
 window.formatBoardSharpe = formatBoardSharpe;
+window.boardSharpeValue = boardSharpeValue;
 window.createEndpointLabelPlugin = createEndpointLabelPlugin;
 window.createAxisArrowPlugin = createAxisArrowPlugin;

@@ -963,19 +963,25 @@ function homeFormatReturnPct(value) {
     return `${sign}${pct.toFixed(2)}%`;
 }
 
-/** A rank row's Sharpe cell, `{ text, title }`.
+/** A rank row's Sharpe cell, `{ text, sub, title }`.
  *
  *  DELEGATES to leaderboard.js's `formatBoardSharpe`, so the rank row and the
  *  Competition table word one number the same way -- the reason
  *  `homeFormatReturnPct` delegates too. The server computes the number and its
  *  interval (P19); nothing here does (D20). The 48px column holds the number
- *  only, so the 95% interval -- or the reason there is no number -- is the
- *  cell's tooltip. Without leaderboard.js, a dash: there is no wording to
- *  borrow, and inventing one is the drift the delegation prevents. */
+ *  only: the 95% interval -- or the reason there is no number -- is `sub`,
+ *  rendered as visually hidden text inside the cell so a screen reader and the
+ *  reading order carry it, and the tooltip (`title`) for a pointer. Without
+ *  leaderboard.js, a dash: there is no wording to borrow, and inventing one is
+ *  the drift the delegation prevents. */
 function homeFormatSharpe(entry, basis) {
-    if (typeof window.formatBoardSharpe !== 'function') return { text: '—', title: '' };
+    if (typeof window.formatBoardSharpe !== 'function') return { text: '—', sub: '', title: '' };
     const fmt = window.formatBoardSharpe(entry, basis);
-    return { text: fmt.main, title: [fmt.sub, fmt.title].filter(Boolean).join(' · ') };
+    return {
+        text: fmt.main,
+        sub: fmt.sub,
+        title: [fmt.sub, fmt.title].filter(Boolean).join(' · '),
+    };
 }
 
 function homeSparkPolyline(values, width = 52, height = 18) {
@@ -2117,7 +2123,7 @@ async function loadHomeLeaderboardModule() {
                 </span>
                 <span class="hm-rank-value tabular-nums">${homeEscape(value)}</span>
                 <span class="hm-rank-ret ${retClass} tabular-nums">${homeEscape(homeFormatReturnPct(ret))}</span>
-                <span class="hm-rank-sharpe tabular-nums"${sharpe.title ? ` title="${homeEscape(sharpe.title)}"` : ''}>${homeEscape(sharpe.text)}</span>
+                <span class="hm-rank-sharpe tabular-nums"${sharpe.title ? ` title="${homeEscape(sharpe.title)}"` : ''}>${homeEscape(sharpe.text)}${sharpe.sub ? `<span class="sr-only">, ${homeEscape(sharpe.sub)}</span>` : ''}</span>
             </li>`;
         }).join('');
     }

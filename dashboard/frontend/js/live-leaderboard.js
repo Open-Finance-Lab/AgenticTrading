@@ -311,35 +311,12 @@ function liveFormatHold(hours) {
 // file only displays it (D20) -- never derive it from equity_curve here. The
 // interval is always shown with the number: at five daily returns it is about
 // +/-14, and showing that is the point. `basis` is `live_status.sharpe`.
-// leaderboard.js's formatBoardSharpe must answer identically.
+// DELEGATES to leaderboard.js's `formatBoardSharpe` (loaded first), so the two
+// boards cannot word one number two ways. Without it, a dash: there is no
+// wording to borrow, and inventing one is the drift the delegation prevents.
 function liveFormatSharpe(entry, basis) {
-  const read = (v) => (v === null || v === undefined || v === '' ? NaN : Number(v));
-  const status = entry ? entry.sharpe_status : null;
-  const value = read(entry && entry.sharpe_ratio);
-  const lo = read(entry && entry.sharpe_ci_low);
-  const hi = read(entry && entry.sharpe_ci_high);
-  const days = read(entry && entry.sharpe_days);
-  const have = Number.isFinite(days) ? days : 0;
-  const need = read(basis && basis.min_days);
-  const rf = read(basis && basis.rf_annual);
-  // -0.004 is "0.00", not "-0.00".
-  const fixed = (v) => (Math.abs(v) < 0.005 ? 0 : v).toFixed(2);
-  if (status === 'ok' && Number.isFinite(value) && Number.isFinite(lo) && Number.isFinite(hi)) {
-    const title = Number.isFinite(rf)
-      ? 'Return above what cash would have earned, divided by how much the daily returns swung. '
-        + (Number.isFinite(days) ? `Based on ${days} trading days; ` : '')
-        + `cash rate ${Number((rf * 100).toFixed(2))}%/yr; scaled to a yearly figure.`
-      : '';
-    return { main: fixed(value), sub: `95% interval ${fixed(lo)} to ${fixed(hi)}`, title };
-  }
-  if (status === 'insufficient_days') {
-    const sub = Number.isFinite(need)
-      ? `Needs ${need} trading days (have ${have})`
-      : `Needs more trading days (have ${have})`;
-    return { main: '—', sub, title: '' };
-  }
-  if (status === 'no_variation') return { main: '—', sub: 'Returns never moved', title: '' };
-  return { main: '—', sub: '', title: '' };
+  if (typeof window.formatBoardSharpe !== 'function') return { main: '—', sub: '', title: '' };
+  return window.formatBoardSharpe(entry, basis);
 }
 
 function liveSortValue(entry, key) {
@@ -347,7 +324,7 @@ function liveSortValue(entry, key) {
     case 'return': return Number(entry.cumulative_return);
     // A cell showing "—" is "no figure", not 0.00 and not a hidden value (an
     // old payload's hourly number): NaN sorts below every number.
-    case 'sharpe': return liveEntryIsPending(entry) || liveFormatSharpe(entry, null).main === '—' ? NaN : Number(entry.sharpe_ratio);
+    case 'sharpe': return typeof window.boardSharpeValue === 'function' ? window.boardSharpeValue(entry) : NaN;
     case 'dd': return Math.abs(Number(entry.max_drawdown));
     case 'trades': return Number(entry.num_trades);
     case 'hold': return Number(entry.avg_hold_hours);

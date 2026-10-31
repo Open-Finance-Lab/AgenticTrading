@@ -56,6 +56,7 @@ _CASES = [
     ({"sharpe_status": "insufficient_days", "sharpe_ratio": None, "sharpe_days": 3}, _BASIS),
     ({"sharpe_status": "insufficient_days", "sharpe_days": 2}, None),
     ({"sharpe_status": "no_variation", "sharpe_ratio": None, "sharpe_days": 6}, _BASIS),
+    ({"sharpe_status": "undefined", "sharpe_ratio": None, "sharpe_days": 6}, _BASIS),
     ({"sharpe_status": "pending", "sharpe_ratio": None, "sharpe_days": 0}, _BASIS),
     ({"sharpe_ratio": 1.5}, _BASIS),
     (None, _BASIS),
@@ -101,8 +102,8 @@ def test_competition_formatter_shows_the_value_with_its_interval():
 
 @_needs_node
 def test_both_boards_word_sharpe_identically():
-    """Two copies of one mapping (leaderboard.js, live-leaderboard.js) is how
-    they drift; this holds them to one answer for every payload shape."""
+    """liveFormatSharpe delegates to formatBoardSharpe (one mapping, not two
+    copies); this holds the delegation to one answer for every payload shape."""
     script = "\n".join([
         "const window = {};",
         _LEADERBOARD_JS,
@@ -114,7 +115,10 @@ def test_both_boards_word_sharpe_identically():
     for board, live in pairs:
         assert board == live
     mains = [board["main"] for board, _live in pairs]
-    assert mains == ["2.61", "-0.50", "2.61", "2.61", "—", "—", "—", "—", "—", "—", "—", "0.00", "2.61", "2.60", "—", "—", "—"]
+    assert mains == ["2.61", "-0.50", "2.61", "2.61", "—", "—", "—", "—", "—", "—", "—", "—", "0.00", "2.61", "2.60", "—", "—", "—"]
+    subs = {json.dumps(e, sort_keys=True): board["sub"] for (e, _b), (board, _l) in zip(_CASES, pairs)}
+    assert subs[json.dumps(_CASES[7][0], sort_keys=True)] == "Returns never moved"
+    assert subs[json.dumps(_CASES[8][0], sort_keys=True)] == "Cannot be computed"
 
 
 @_needs_node
@@ -170,13 +174,21 @@ def test_home_rank_row_borrows_the_boards_wording():
         f"  young: homeFormatSharpe({json.dumps(young)}, {json.dumps(_BASIS)}),",
         "}));",
     ))
-    assert out["ok"] == {"text": "2.61", "title": f"95% interval -11.40 to 16.62 · {_TITLE}"}
-    assert out["young"] == {"text": "—", "title": "Needs 5 trading days (have 2)"}
+    assert out["ok"] == {
+        "text": "2.61",
+        "sub": "95% interval -11.40 to 16.62",
+        "title": f"95% interval -11.40 to 16.62 · {_TITLE}",
+    }
+    assert out["young"] == {
+        "text": "—",
+        "sub": "Needs 5 trading days (have 2)",
+        "title": "Needs 5 trading days (have 2)",
+    }
     alone = run_node("\n".join([
         "const window = {};", lifted,
         f"console.log(JSON.stringify(homeFormatSharpe({json.dumps(_OK)}, null)));",
     ]))
-    assert alone == {"text": "—", "title": ""}
+    assert alone == {"text": "—", "sub": "", "title": ""}
 
 
 def test_home_rank_list_passes_the_basis_and_renders_the_cell():
@@ -184,6 +196,9 @@ def test_home_rank_list_passes_the_basis_and_renders_the_cell():
     body = fn_body("function renderEntries(", code)
     assert "homeFormatSharpe(entry, sharpeBasis)" in body
     assert "sharpe.title" in body and "homeEscape(sharpe.text)" in body
+    # The interval is in the cell's text for a screen reader and the reading
+    # order, not only in a title a touch or keyboard user cannot reach.
+    assert '<span class="sr-only">, ${homeEscape(sharpe.sub)}</span>' in body
     assert "renderEntries(models, { sharpeBasis: payload.sharpe_basis || null })" in code
 
 
@@ -219,3 +234,4 @@ def test_every_sharpe_sink_is_escaped():
     assert _LEADERBOARD_JS.count("escapeHtml(sharpe.title)") == 2
     assert _LIVE_JS.count("escapeHtml(sharpe.title)") == 2
     assert "homeEscape(sharpe.text)" in _HOME_JS and "homeEscape(sharpe.title)" in _HOME_JS
+    assert "homeEscape(sharpe.sub)" in _HOME_JS

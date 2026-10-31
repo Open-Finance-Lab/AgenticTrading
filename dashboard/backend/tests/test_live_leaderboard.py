@@ -90,7 +90,7 @@ def _insert_live_run(run_id, llm_model, end_date, points, *, final=None,
         mode="leaderboard",
         start_date=start_date,
         end_date=end_date,
-        initial_equity=points[0]["equity"],
+        initial_equity=extra.pop("initial_equity", points[0]["equity"]),
         final_equity=points[-1]["equity"] if final is None else final,
         total_return=total_return,
         sharpe_ratio=sharpe,
@@ -2148,3 +2148,76 @@ def test_a_baseline_row_publishes_the_same_daily_sharpe(no_alpaca):
     assert spy["sharpe_ratio"] == pytest.approx(2.611715, abs=1e-6)
     assert spy["sharpe_ci_low"] == pytest.approx(-11.396490, abs=1e-6)
     assert spy["sharpe_ci_high"] == pytest.approx(16.619919, abs=1e-6)
+
+
+def test_a_stored_curve_with_nothing_to_plot_is_pending_and_logged(no_alpaca, monkeypatch, caplog):
+    """Absent and broken must differ (CLAUDE.md, fail-closed is not fail-visible).
+
+    Every stored point is after the bell, so none lands on an axis node. Filling
+    the axis from the seed drew a flat line, ranked it, and published Sharpe as
+    "Returns never moved" with nothing logged."""
+    monkeypatch.setattr(live, "_reported_unplottable", set())
+    _insert_live_run(
+        "lb_deepseek_v4_pro_20260801_20260807", "deepseek_v4_pro", "2026-08-07",
+        [_pt(f"2026-08-{d:02d}T21:00:00+00:00", SEED * f) for d, f in zip(range(3, 8), _M03_FACTORS)],
+        total_return=_M03_FACTORS[-1] - 1, sharpe=9.99,
+        metadata={"initial_capital": SEED},
+    )
+    with caplog.at_level("ERROR"):
+        for _ in range(2):
+            payload = live.get_live_leaderboard(as_of=datetime(2026, 8, 7, 17, 39, tzinfo=_ET))
+    deepseek = _sharpe_entry(payload, "deepseek_v4_pro")
+    assert deepseek["status"] == "pending"
+    assert deepseek["rank"] is None
+    assert deepseek["equity_curve"] == []
+    assert deepseek["sharpe_status"] == "pending"
+    assert deepseek["sharpe_ratio"] is None
+    logged = [r.getMessage() for r in caplog.records if "live.curve_unplottable" in r.getMessage()]
+    assert len(logged) == 1, "once per process, not on every public GET"
+    assert "lb_deepseek_v4_pro_20260801_20260807" in logged[0]
+
+
+def test_a_healthy_curve_logs_no_unplottable_error(no_alpaca, monkeypatch, caplog):
+    monkeypatch.setattr(live, "_reported_unplottable", set())
+    _insert_sharpe_run("deepseek_v4_pro", range(3, 8), _M03_FACTORS)
+    with caplog.at_level("ERROR"):
+        live.get_live_leaderboard(as_of=datetime(2026, 8, 7, 17, 39, tzinfo=_ET))
+    assert not [r for r in caplog.records if "curve_unplottable" in r.getMessage()]
+
+
+def test_a_row_with_no_recorded_seed_measures_day_one_in_its_own_dollars(no_alpaca):
+    """A $10k run on the $100k board that did not record its seed is not
+    rescaled, so its E_0 must be in its own dollars too: the first mark, as on
+    the Competition board. Against display_capital, day 1 read about -90% and
+    published a large negative Sharpe with status ok."""
+    seed = 10_000.0
+    _insert_live_run(
+        "lb_deepseek_v4_pro_20260801_20260807", "deepseek_v4_pro", "2026-08-07",
+        [_pt(f"2026-08-{d:02d}T19:00:00+00:00", seed * f) for d, f in zip(range(3, 8), _M03_FACTORS)],
+        total_return=_M03_FACTORS[-1] - 1, sharpe=9.99, metadata=None,
+    )
+    payload = live.get_live_leaderboard(as_of=datetime(2026, 8, 7, 17, 39, tzinfo=_ET))
+    deepseek = _sharpe_entry(payload, "deepseek_v4_pro")
+    # M03's first return is 0, so E_0 = the first mark changes nothing else.
+    assert deepseek["sharpe_status"] == "ok"
+    assert deepseek["sharpe_ratio"] == pytest.approx(2.611715, abs=1e-6)
+    assert deepseek["sharpe_days"] == 5
+    # The axis before the first print opens there as well, not at $100k.
+    assert deepseek["equity_curve"][0]["equity"] == pytest.approx(seed)
+
+
+def test_a_row_with_no_seed_at_all_is_undefined_and_logged(no_alpaca, monkeypatch, caplog):
+    from dashboard.backend.domain.backtesting import metrics
+
+    monkeypatch.setattr(metrics, "_logged_drift", set())
+    _insert_live_run(
+        "lb_deepseek_v4_pro_20260801_20260807", "deepseek_v4_pro", "2026-08-07",
+        [_pt(f"2026-08-{d:02d}T19:00:00+00:00", SEED * f) for d, f in zip(range(3, 8), _M03_FACTORS)],
+        total_return=_M03_FACTORS[-1] - 1, metadata=None, initial_equity=0.0,
+    )
+    with caplog.at_level("ERROR"):
+        payload = live.get_live_leaderboard(as_of=datetime(2026, 8, 7, 17, 39, tzinfo=_ET))
+    deepseek = _sharpe_entry(payload, "deepseek_v4_pro")
+    assert deepseek["sharpe_status"] == "undefined"
+    assert deepseek["sharpe_ratio"] is None
+    assert any("not a positive number" in r.getMessage() for r in caplog.records)

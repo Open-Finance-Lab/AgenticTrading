@@ -175,13 +175,14 @@ def test_zero_or_nan_equity_never_yields_nan():
     skipped = daily_sharpe_interval(gappy, SEED)
     assert skipped["sharpe"] == pytest.approx(2.611715, abs=1e-6)
 
+    # A return off a $0 account is undefined, not "never moved".
     wiped = daily_sharpe_interval(_daily([100000.0, 0.0, 0.0, 0.0, 0.0, 0.0]), SEED)
-    assert wiped["status"] == "no_variation"
+    assert wiped["status"] == "undefined"
     assert wiped["sharpe"] is None
 
     for seed in (0.0, -1.0, float("nan"), None, "junk"):
         out = daily_sharpe_interval(_daily(M03_CLOSES), seed)
-        assert out["status"] == "no_variation", seed
+        assert out["status"] == "undefined", seed
 
     for out in (skipped, wiped):
         json.dumps(out, allow_nan=False)
@@ -256,7 +257,7 @@ def test_a_curve_with_no_usable_close_is_logged_not_silently_pending(caplog):
 def test_a_bad_seed_is_logged(caplog):
     with caplog.at_level("ERROR"):
         out = daily_sharpe_interval(_daily(M03_CLOSES), None)
-    assert out["status"] == "no_variation"
+    assert out["status"] == "undefined"
     assert any("seed None" in r.getMessage() for r in caplog.records)
     caplog.clear()
     with caplog.at_level("ERROR"):
@@ -273,3 +274,25 @@ def test_a_broken_row_is_logged_once_not_on_every_board_get(caplog):
     messages = [r.getMessage() for r in caplog.records]
     assert sum("no usable daily close" in m for m in messages) == 1
     assert sum("seed 0.0" in m for m in messages) == 1
+
+
+def test_a_bad_seed_is_reported_from_the_first_close_not_from_day_five(caplog):
+    """Below min_days a broken seed used to read "needs more days" with nothing
+    logged, then "never moved" from day 5: two healthy-looking stand-ins for a
+    break. It is its own status, and logged, on day 1."""
+    with caplog.at_level("ERROR"):
+        out = daily_sharpe_interval(_daily(M03_CLOSES[:1]), 0.0)
+    assert out["status"] == "undefined"
+    assert out["days"] == 1
+    assert out["sharpe"] is None and out["ci_low"] is None and out["ci_high"] is None
+    assert any("seed 0.0" in r.getMessage() for r in caplog.records)
+    # A healthy seed below min_days is still only "not enough days yet".
+    assert daily_sharpe_interval(_daily(M03_CLOSES[:3]), SEED)["status"] == "insufficient_days"
+    # And no closes at all stays pending, whatever the seed.
+    assert daily_sharpe_interval([], None)["status"] == "pending"
+
+
+def test_overflow_is_undefined_not_no_variation():
+    out = daily_sharpe_interval(_daily([1e-300, 1e300, 1e-300, 1e300, 1e-300]), 1e-300)
+    assert out["status"] == "undefined"
+    json.dumps(out, allow_nan=False)

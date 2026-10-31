@@ -199,6 +199,7 @@ def _run_leaderboard_driver(js_body: str) -> dict:
             _extract_function(src, "formatLeaderboardSamples"),
             # The Sharpe cell and detail row (P19 daily Sharpe + interval).
             _extract_function(src, "boardSharpeBasis"),
+            _extract_function(src, "boardSharpeValue"),
             _extract_function(src, "formatBoardSharpe"),
             _extract_function(src, "renderLeaderboardRowHtml"),
             _extract_function(src, "renderLeaderboardDetailHtml"),

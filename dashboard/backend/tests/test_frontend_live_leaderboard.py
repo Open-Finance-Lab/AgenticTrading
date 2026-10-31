@@ -14,6 +14,9 @@ import pytest
 _FRONTEND = Path(__file__).resolve().parents[2] / "frontend"
 _APP_HTML = (_FRONTEND / "app.html").read_text(encoding="utf-8")
 _LIVE_JS = (_FRONTEND / "js" / "live-leaderboard.js").read_text(encoding="utf-8")
+# Loaded before live-leaderboard.js in app.html; the Live Sharpe cell borrows
+# its formatter (formatBoardSharpe) and sort predicate (boardSharpeValue).
+_LEADERBOARD_JS = (_FRONTEND / "js" / "leaderboard.js").read_text(encoding="utf-8")
 _APP_JS = (_FRONTEND / "app.js").read_text(encoding="utf-8")
 
 
@@ -180,10 +183,25 @@ _DECISION_5_TITLE = (
 )
 
 
+def _board_sharpe_js():
+    """leaderboard.js's Sharpe helpers and their exports, lifted: the whole file
+    plus live-leaderboard.js overruns `node -e`'s 128 KB argument limit."""
+    return "\n".join([
+        fn_body("function finiteNumber(", _LEADERBOARD_JS),
+        fn_body("function boardSharpeValue(", _LEADERBOARD_JS),
+        fn_body("function formatBoardSharpe(", _LEADERBOARD_JS),
+        "window.formatBoardSharpe = formatBoardSharpe;",
+        "window.boardSharpeValue = boardSharpeValue;",
+    ])
+
+
 def _format_sharpe(entry, basis=_SHARPE_BASIS):
-    script = fn_body("function liveFormatSharpe(", _LIVE_JS) + (
-        f"\nconsole.log(JSON.stringify(liveFormatSharpe({json.dumps(entry)}, {json.dumps(basis)})));"
-    )
+    script = "\n".join([
+        "const window = {};",
+        _board_sharpe_js(),
+        fn_body("function liveFormatSharpe(", _LIVE_JS),
+        f"console.log(JSON.stringify(liveFormatSharpe({json.dumps(entry)}, {json.dumps(basis)})));",
+    ])
     return run_node(script)
 
 
@@ -205,6 +223,7 @@ def _render_live(entries, *, selected=None):
     script = "\n".join([
         "const window = {};",
         fn_body("function escapeHtml("),
+        _board_sharpe_js(),
         _LIVE_JS,
         "const tbody = { innerHTML: '' }; const detail = { innerHTML: '' };",
         "const document = {",
@@ -250,6 +269,8 @@ def test_format_sharpe_explains_every_dash():
     assert short == {"main": "—", "sub": f"Needs {SHARPE_MIN_DAYS} trading days (have 3)", "title": ""}
     flat = _format_sharpe({"sharpe_status": "no_variation", "sharpe_ratio": None, "sharpe_days": 6})
     assert flat == {"main": "—", "sub": "Returns never moved", "title": ""}
+    undefined = _format_sharpe({"sharpe_status": "undefined", "sharpe_ratio": None, "sharpe_days": 6})
+    assert undefined == {"main": "—", "sub": "Cannot be computed", "title": ""}
     pending = _format_sharpe({"sharpe_status": "pending", "sharpe_ratio": None, "sharpe_days": 0})
     assert pending == {"main": "—", "sub": "", "title": ""}
     # An ok status with a missing bound is malformed: no number without its interval.
@@ -289,6 +310,7 @@ def test_null_sharpe_sorts_last_in_both_directions():
     ]
     script = "\n".join([
         "const window = {};",
+        _board_sharpe_js(),
         _LIVE_JS,
         f"livePayload = {{ entries: {json.dumps(rows)} }}; liveSortKey = 'sharpe';",
         "liveSortDir = 'desc'; const desc = liveSortedEntries().map((e) => e.entry_id);",
@@ -361,3 +383,21 @@ def test_an_unprinted_row_carries_no_sharpe_tooltip_or_rank():
     assert out["table"].count("Based on 5 trading days") == 1  # "down" only
     assert "Based on 5 trading days" not in out["detail"]
     assert out["order"] == ["down", "unprinted"]
+
+
+@_needs_node
+def test_live_sharpe_is_the_competition_formatter_not_a_copy():
+    """One wording for both boards: liveFormatSharpe delegates rather than
+    re-implementing (a parity test over two copies misses any case it does not
+    enumerate). Without leaderboard.js it shows a dash, never its own words."""
+    code = _strip_js_comments(fn_body("function liveFormatSharpe(", _LIVE_JS))
+    assert "window.formatBoardSharpe(entry, basis)" in code
+    assert "toFixed" not in code and "interval" not in code
+    alone = run_node("\n".join([
+        "const window = {};",
+        fn_body("function liveFormatSharpe(", _LIVE_JS),
+        fn_body("function liveSortValue(", _LIVE_JS),
+        f"console.log(JSON.stringify([liveFormatSharpe({json.dumps(_SHARPE_OK)}, null), "
+        f"liveSortValue({json.dumps(_SHARPE_OK)}, 'sharpe')]));",
+    ]))
+    assert alone == [{"main": "—", "sub": "", "title": ""}, None]

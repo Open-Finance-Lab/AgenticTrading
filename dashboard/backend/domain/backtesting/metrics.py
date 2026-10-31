@@ -103,12 +103,17 @@ def calculate_max_drawdown(equity_curve: List[Dict]) -> float:
 # ---------------------------------------------------------------------------
 #
 # ``calculate_sharpe`` above annualises whatever steps a curve holds (hourly
-# marks, ddof 0, rf 0, undefined -> 0). The leaderboards publish this one
-# instead: one return per US trading day, ddof 1, a stated cash rate, an
-# interval, and None -- never 0, never NaN -- when it is undefined. It is read
-# at request time from a stored curve, so it must stay pure arithmetic (no
-# fetch, no DB) and never raise on stored data; an unreadable curve or seed is
-# logged at ERROR rather than passed off as "pending" or "no variation".
+# marks, ddof 0, rf 0, undefined -> 0) and still fills
+# ``agent_runs.sharpe_ratio`` -- so the run APIs, ``/api/v2/leaderboard``,
+# Discord and the SDK show that figure -- until the engine rewrite moves the
+# stored column (changing it here would silently re-define every stored and
+# user-visible run metric at once). The leaderboards publish this one
+# instead, and a new surface that ranks or compares runs should too: one
+# return per US trading day, ddof 1, a stated cash rate, an interval, and
+# None -- never 0, never NaN -- when it is undefined. It is read at request
+# time from a stored curve, so it must stay pure arithmetic (no fetch, no DB)
+# and never raise on stored data; an unreadable curve or seed is logged at
+# ERROR rather than passed off as "pending" or "no variation".
 
 SHARPE_TRADING_DAYS_PER_YEAR = 252
 SHARPE_MIN_DAYS = 5
@@ -119,6 +124,7 @@ SHARPE_RF_ANNUAL = 0.0
 SHARPE_STATUS_OK = "ok"
 SHARPE_STATUS_INSUFFICIENT_DAYS = "insufficient_days"
 SHARPE_STATUS_NO_VARIATION = "no_variation"
+SHARPE_STATUS_UNDEFINED = "undefined"
 SHARPE_STATUS_PENDING = "pending"
 
 _SHARPE_TZ = ZoneInfo("America/New_York")
@@ -256,11 +262,13 @@ def daily_sharpe_interval(
     round-trips and Starlette refuses to encode (``allow_nan=False``):
 
     * ``pending``: no daily close at all;
+    * ``undefined``: the seed is not a positive number (a stored-data break,
+      logged at ERROR and reported from the first close, whatever ``days``
+      is), a return is undefined (an ``E_{d-1}`` that is 0 or negative), or
+      the arithmetic overflowed;
     * ``insufficient_days``: fewer than ``min_days`` returns;
-    * ``no_variation``: a return is undefined (an ``E_{d-1}`` that is 0 or
-      negative, or a seed that is not a positive number) or the returns never
-      moved (stdev 0, or float noise below ``_SHARPE_MIN_STDEV``), or the
-      arithmetic overflowed.
+    * ``no_variation``: the returns never moved (stdev 0, or float noise below
+      ``_SHARPE_MIN_STDEV``).
     """
     if not 0.0 < confidence < 1.0:
         raise ValueError("confidence must be between 0 and 1")
@@ -296,20 +304,23 @@ def daily_sharpe_interval(
                 repr(points[0])[:200],
             )
         return _result(SHARPE_STATUS_PENDING)
-    if days < min_days:
-        return _result(SHARPE_STATUS_INSUFFICIENT_DAYS)
+    # Before the day gate: a broken seed is broken on day 1, not from day 5, and
+    # neither "needs more days" nor "never moved" may stand in for it.
     seed = _finite_equity(initial_equity)
     if seed is None or seed <= 0:
         _log_drift_once(
-            ("seed", repr(initial_equity)[:200], days),
+            ("seed", repr(initial_equity)[:200]),
             "daily_sharpe: seed %r is not a positive number; publishing status "
-            "no_variation for a %d-day curve",
+            "undefined for a %d-day curve",
             initial_equity,
             days,
         )
+        return _result(SHARPE_STATUS_UNDEFINED)
+    if days < min_days:
+        return _result(SHARPE_STATUS_INSUFFICIENT_DAYS)
     previous_levels = [seed] + closes[:-1]
-    if any(level is None or level <= 0 for level in previous_levels):
-        return _result(SHARPE_STATUS_NO_VARIATION)
+    if any(level <= 0 for level in previous_levels):
+        return _result(SHARPE_STATUS_UNDEFINED)
 
     rf_daily = rf_annual / SHARPE_TRADING_DAYS_PER_YEAR
     excess = [
@@ -317,13 +328,15 @@ def daily_sharpe_interval(
         for previous, close in zip(previous_levels, closes)
     ]
     if not all(math.isfinite(value) for value in excess):
-        return _result(SHARPE_STATUS_NO_VARIATION)
+        return _result(SHARPE_STATUS_UNDEFINED)
     try:
         mean = statistics.fmean(excess)
         stdev = statistics.stdev(excess)
     except (OverflowError, ValueError):
-        return _result(SHARPE_STATUS_NO_VARIATION)
-    if not math.isfinite(mean) or not math.isfinite(stdev) or stdev <= _SHARPE_MIN_STDEV:
+        return _result(SHARPE_STATUS_UNDEFINED)
+    if not math.isfinite(mean) or not math.isfinite(stdev):
+        return _result(SHARPE_STATUS_UNDEFINED)
+    if stdev <= _SHARPE_MIN_STDEV:
         return _result(SHARPE_STATUS_NO_VARIATION)
 
     sharpe_daily = mean / stdev
@@ -336,5 +349,5 @@ def daily_sharpe_interval(
     )
     low, high = sharpe - half_width, sharpe + half_width
     if not all(math.isfinite(value) for value in (sharpe, low, high)):
-        return _result(SHARPE_STATUS_NO_VARIATION)
+        return _result(SHARPE_STATUS_UNDEFINED)
     return _result(SHARPE_STATUS_OK, sharpe, low, high)
