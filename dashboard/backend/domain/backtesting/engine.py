@@ -291,6 +291,7 @@ class HourlyBacktester:
         runtime_type: str = DEFAULT_RUNTIME_TYPE,
         runtime_config: Optional[Dict] = None,
         execution_client: Any = None,
+        hosted_billing: Any = None,
         stock_pool: Optional[str] = None,
         pool_mode: Optional[str] = None,
         universe_selection: Optional[Dict] = None,
@@ -333,6 +334,7 @@ class HourlyBacktester:
         # Model id; defaults to the gateway-appropriate slug (CommonStack vs native).
         self.model = model or default_model_name()
         self.execution_client = execution_client
+        self.hosted_billing = hosted_billing
         self.live_run_id = (live_run_id or "").strip() or None
         self.owner_user_id = int(owner_user_id) if owner_user_id is not None else None
         self.progress_file = (progress_file or "").strip() or None
@@ -350,7 +352,11 @@ class HourlyBacktester:
             RuntimeDispatcher(
                 self.runtime_type,
                 self.runtime_config,
-                runtime=AiHedgeFundRuntime(self.runtime_config),
+                # The hosted runtime's Credits metering, built by the child
+                # from the signed handoff; None off the API path.
+                runtime=AiHedgeFundRuntime(
+                    self.runtime_config, billing=hosted_billing
+                ),
             )
             if self.runtime_type == AI_HEDGE_FUND_RUNTIME_TYPE
             else None
@@ -1840,6 +1846,12 @@ class HourlyBacktester:
                 llm_execution = summary()
         if llm_execution is not None:
             meta["llm_execution"] = llm_execution.model_dump(mode="json")
+        hosted_billing = getattr(self, "hosted_billing", None)
+        if hosted_billing is not None:
+            # A hosted run bills Credits without an execution client, so no
+            # `llm_execution` names its lane; the results panel reads these.
+            meta["billing_mode"] = hosted_billing.billing_mode
+            meta["provider_id"] = hosted_billing.provider_id
         if self.prompt_adaptations:
             meta["prompt_adaptations"] = self.prompt_adaptations
         if self.initial_pipeline is not None:

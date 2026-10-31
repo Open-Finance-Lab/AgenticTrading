@@ -556,6 +556,6 @@ def test_attempt_failure_line_is_relay_safe(capsys):
     # A run id that is not a plain identifier is dropped, never echoed.
     assert " run=- " in second
     for line in (first, second):
-        assert line.startswith(backtests._RELAYED_CHILD_LINE_PREFIX)
+        assert line.startswith(backtests._RELAYED_CHILD_LINE_PREFIXES)
         assert backtests._redact_credentials(line) == line
         assert SECRET not in line

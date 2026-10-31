@@ -183,9 +183,10 @@ workbench. See :doc:`research_agents`.
    Adding a template does not mean you can run it. Backtests driven by a model
    you pick need you to be signed in and to choose how the AI is paid for —
    your own key or ATL Credits (see :doc:`credits_billing`). Rule-based
-   backtests run signed out, and so does the hosted AI Hedge Fund template: it
-   runs on a model the platform manages, so there is no billing choice, but it
-   needs a Financial Datasets API key saved on the agent before it will run.
+   backtests run signed out. The hosted AI Hedge Fund template needs you to be
+   signed in: it runs on a model the platform manages and is always paid for
+   with ATL Credits, so there is no billing choice, and it also needs a
+   Financial Datasets API key saved on the agent before it will run.
    Neither leaderboard takes submissions, so your own copy is never ranked on
    either one.
 

@@ -28,6 +28,8 @@ from dashboard.backend.domain.model_providers.execution_catalog import (
     UnsupportedExecutionModel,
 )
 import dashboard.backend.api.routers.backtests as bt
+from dashboard.backend.infrastructure.llm.execution.models import BillingMode
+from dashboard.backend.infrastructure.llm.providers import openrouter
 from dashboard.backend.tests._fake_child import FakeChild
 
 
@@ -1004,9 +1006,239 @@ def _stub_hosted_runtime_installed(monkeypatch):
     monkeypatch.setattr(bt, "runtime_unavailable_reason", lambda: None)
 
 
+def _sign_in(monkeypatch, user_id=7):
+    """Sign the caller in from here on; an agent cloned earlier stays guest-owned.
+
+    Clone-as-guest-then-sign-in is a real user order, and the browser session
+    still matches the agent's owner, so access holds.
+    """
+    monkeypatch.setattr(
+        "dashboard.backend.api.dependencies._optional_user",
+        lambda *_args, **_kwargs: {"id": user_id},
+    )
+
+
+def test_guest_cannot_start_a_hosted_backtest(client, monkeypatch):
+    """A hosted run bills ATL Credits, which a guest does not have.
+
+    The refusal comes before the readiness checks: with OPENROUTER_API_KEY
+    unset and the runtime missing, a guest still gets 401, never the 503 that
+    would tell it how this deployment is configured.
+    """
+    spy = _Spy()
+    monkeypatch.setattr(bt, "run_backtest_background", spy)
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.setattr(
+        bt.agent_credential_store,
+        "get_secret",
+        lambda agent_id, credential_name: "user-financial-datasets-test-key",
+    )
+    headers = {"X-Session-Id": str(uuid.uuid4())}
+    cloned = client.post(
+        "/api/v1/agents/marketplace/ai-hedge-fund/clone",
+        json={},
+        headers=headers,
+    )
+    assert cloned.status_code == 200, cloned.text
+
+    response = client.post(
+        "/backtest/run",
+        json={
+            "start_date": "2026-05-01",
+            "end_date": "2026-05-02",
+            "decision_source": "llm",
+            "agent_id": cloned.json()["agent"]["agent_id"],
+        },
+        headers=headers,
+    )
+
+    assert response.status_code == 401, response.text
+    assert "Sign in" in response.text
+    assert "OpenRouter" not in response.text
+    assert spy.calls == 0
+
+
+def test_guest_cannot_learn_that_a_strangers_agent_is_hosted(client, monkeypatch):
+    """The ownership answer comes before the guest 401.
+
+    The runtime type is read off any agent id, so a 401 for a stranger's
+    agent would tell a guest the agent is a hosted one; it gets the same 403
+    a stranger's agent of any runtime gets.
+    """
+    spy = _Spy()
+    monkeypatch.setattr(bt, "run_backtest_background", spy)
+    cloned = client.post(
+        "/api/v1/agents/marketplace/ai-hedge-fund/clone",
+        json={},
+        headers={"X-Session-Id": str(uuid.uuid4())},
+    )
+    assert cloned.status_code == 200, cloned.text
+
+    response = client.post(
+        "/backtest/run",
+        json={
+            "start_date": "2026-05-01",
+            "end_date": "2026-05-02",
+            "decision_source": "llm",
+            "agent_id": cloned.json()["agent"]["agent_id"],
+        },
+        headers={"X-Session-Id": str(uuid.uuid4())},
+    )
+
+    assert response.status_code == 403, response.text
+    assert response.json()["detail"] == "Not your agent"
+    assert spy.calls == 0
+
+
+def _post_ai_hedge_fund_run(client, monkeypatch, credits, **body):
+    """Launch the cloned AI Hedge Fund agent as a signed-in caller.
+
+    Returns the response, the worker spy and the handoffs the route signed.
+    """
+    spy = _Spy()
+    handoffs = []
+    monkeypatch.setattr(bt, "run_backtest_background", spy)
+    monkeypatch.setattr(bt, "credits_service", credits)
+    monkeypatch.setattr(
+        bt, "create_execution_handoff", lambda **kw: handoffs.append(kw) or "h"
+    )
+    monkeypatch.setenv("OPENROUTER_API_KEY", "platform-openrouter-test-key")
+    _stub_hosted_runtime_installed(monkeypatch)
+    monkeypatch.setattr(
+        bt.agent_credential_store,
+        "get_secret",
+        lambda agent_id, credential_name: "user-financial-datasets-test-key",
+    )
+    headers = {"X-Session-Id": str(uuid.uuid4())}
+    agent = client.post(
+        "/api/v1/agents/marketplace/ai-hedge-fund/clone",
+        json={},
+        headers=headers,
+    ).json()["agent"]
+    _sign_in(monkeypatch)
+    response = client.post(
+        "/backtest/run",
+        json={
+            "start_date": "2026-05-01",
+            "end_date": "2026-05-02",
+            "decision_source": "llm",
+            "agent_id": agent["agent_id"],
+            **body,
+        },
+        headers=headers,
+    )
+    return response, spy, handoffs
+
+
+def test_ai_hedge_fund_run_bills_credits_through_a_signed_handoff(
+    client, monkeypatch
+):
+    """The hosted run is a platform-credits run in everything but its client.
+
+    The handoff names the managed model, so the child's `--model` check holds,
+    and the lane reaches the worker, so the parent's `finalize_run` and the
+    timeout card's spend lookup both see a Credits run.
+    """
+    response, spy, handoffs = _post_ai_hedge_fund_run(
+        client, monkeypatch, _FakeBalanceCredits(8_000_000)
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["billing_mode"] == "platform_credits"
+    assert response.json()["provider_id"] == "openrouter"
+    assert len(handoffs) == 1
+    handoff = handoffs[0]
+    assert handoff["user_id"] == 7
+    assert handoff["run_id"] == response.json()["run_id"]
+    assert handoff["billing_mode"] is BillingMode.PLATFORM_CREDITS
+    assert handoff["provider_ids"] == ("openrouter",)
+    assert handoff["model_id"] == openrouter.DEFAULT_MODEL
+    assert spy.last_kwargs["execution_handoff_payload"] == "h"
+    assert spy.last_kwargs["billing_mode"] == "platform_credits"
+    assert spy.last_kwargs["model"] == handoff["model_id"]
+
+
+def test_ai_hedge_fund_run_its_balance_cannot_hold_is_refused_with_402(
+    client, monkeypatch
+):
+    credits = _FakeBalanceCredits(1_000)
+
+    response, spy, handoffs = _post_ai_hedge_fund_run(client, monkeypatch, credits)
+
+    assert response.status_code == 402, response.text
+    detail = response.json()["detail"]
+    assert "your balance is 0.00 Credits" in detail
+    # The model is platform-managed: no "use your own API key" remedy.
+    assert "select fewer analysts or tickers" in detail
+    assert "API key" not in detail
+    assert credits.balance_reads == [7]
+    assert handoffs == []
+    assert spy.calls == 0
+
+
+def test_ai_hedge_fund_run_enters_the_in_flight_credits_ledger(client, monkeypatch):
+    """Admitted at its window ceiling, so the owner's next launch counts it."""
+    response, _spy, _handoffs = _post_ai_hedge_fund_run(
+        client, monkeypatch, _FakeBalanceCredits(8_000_000)
+    )
+
+    assert response.status_code == 200, response.text
+    run_id = response.json()["run_id"]
+    [(admitted_run, estimate)] = bt._owner_platform_credit_slots(7)
+    assert admitted_run == run_id
+    assert estimate > 0
+
+
+def test_ai_hedge_fund_launch_counts_the_owners_running_credits_runs(
+    client, monkeypatch
+):
+    # Alone it fits in 8 Credits; beside a sibling still expected to spend
+    # almost all of them, both would start and then starve together.
+    _admit_running_platform_slot("agent_sibling", user_id=7, estimate=7_999_000)
+
+    class _Credits(_FakeBalanceCredits):
+        def sum_run_llm_spend(self, user_id, run_id):
+            return (0, 0)
+
+    response, spy, handoffs = _post_ai_hedge_fund_run(
+        client, monkeypatch, _Credits(8_000_000)
+    )
+
+    assert response.status_code == 402, response.text
+    assert "1 running backtest is expected to use" in response.json()["detail"]
+    assert handoffs == [] and spy.calls == 0
+
+
+def test_ai_hedge_fund_restricted_account_is_refused_with_403(client, monkeypatch):
+    credits = _FakeBalanceCredits(
+        50_000_000, status="restricted", reason="refund_reconciliation"
+    )
+
+    response, spy, handoffs = _post_ai_hedge_fund_run(client, monkeypatch, credits)
+
+    assert response.status_code == 403
+    assert "paused for payment refund review" in response.json()["detail"]
+    assert handoffs == []
+    assert spy.calls == 0
+
+
+def test_ai_hedge_fund_refuses_byok_instead_of_switching_lanes(client, monkeypatch):
+    credits = _FakeBalanceCredits(8_000_000)
+
+    response, spy, handoffs = _post_ai_hedge_fund_run(
+        client, monkeypatch, credits, billing_mode="byok"
+    )
+
+    assert response.status_code == 422
+    assert "ATL Credits only" in response.json()["detail"]
+    assert credits.balance_reads == []
+    assert spy.calls == 0
+
+
 def test_backtest_run_dispatches_ai_hedge_fund_runtime(client, monkeypatch):
     spy = _Spy()
     monkeypatch.setattr(bt, "run_backtest_background", spy)
+    monkeypatch.setattr(bt, "credits_service", _FakeBalanceCredits(8_000_000))
     monkeypatch.setenv("OPENROUTER_API_KEY", "platform-openrouter-test-key")
     _stub_hosted_runtime_installed(monkeypatch)
     monkeypatch.setattr(
@@ -1023,6 +1255,7 @@ def test_backtest_run_dispatches_ai_hedge_fund_runtime(client, monkeypatch):
     )
     assert cloned.status_code == 200
     agent = cloned.json()["agent"]
+    _sign_in(monkeypatch)
 
     response = client.post(
         "/backtest/run",
@@ -1047,7 +1280,8 @@ def test_backtest_run_dispatches_ai_hedge_fund_runtime(client, monkeypatch):
         spy.last_kwargs["financial_datasets_api_key"]
         == "user-financial-datasets-test-key"
     )
-    assert spy.last_kwargs["model"] is None
+    # The caller's model is ignored; the platform-managed one runs and bills.
+    assert spy.last_kwargs["model"] == openrouter.DEFAULT_MODEL
     assert spy.last_kwargs["pipeline"] is None
 
 
@@ -1061,6 +1295,7 @@ def test_ai_hedge_fund_backtest_requires_owned_agent_credential(client, monkeypa
         json={},
         headers=headers,
     ).json()["agent"]
+    _sign_in(monkeypatch)
     monkeypatch.setattr(
         bt.agent_credential_store,
         "get_secret",
@@ -1119,6 +1354,7 @@ def test_ai_hedge_fund_backtest_rejects_run_when_runtime_not_installed(
         json={},
         headers=headers,
     ).json()["agent"]
+    _sign_in(monkeypatch)
 
     response = client.post(
         "/backtest/run",
@@ -1373,6 +1609,7 @@ def test_ai_hedge_fund_requires_openrouter_not_direct_openai(client, monkeypatch
         json={},
         headers=headers,
     ).json()["agent"]
+    _sign_in(monkeypatch)
 
     response = client.post(
         "/backtest/run",

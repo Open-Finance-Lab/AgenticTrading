@@ -194,7 +194,7 @@ def test_cache_busters_bumped():
     # the next bump, so the exact one looks like the broken guard and gets
     # "fixed" by loosening it. That collision has already cost this repo one
     # round of follow-ups (#347/#348).
-    assert "app.js?v=163" in APP_HTML
+    assert "app.js?v=164" in APP_HTML
     assert "js/agent-editor.js?v=33" in APP_HTML
     assert "styles.css?v=160" in APP_HTML
     assert "js/leaderboard.js?v=39" in APP_HTML

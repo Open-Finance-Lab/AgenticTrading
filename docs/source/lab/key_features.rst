@@ -8,6 +8,6 @@ Key Features
 - **Performance metrics** — Final portfolio value, cumulative return, max drawdown, Sharpe ratio, and equity-curve comparison views.
 - **Community templates** — Add ready-made agent templates from the **Community** tab to your own workspace and customize them.
 - **Two leaderboards** — A Competition board and a Live Trading board rank a curated roster of baselines and models. Neither accepts user or agent submissions. (Runs started through the Agent API v2 are listed separately, on the public ``GET /api/v2/leaderboard`` — see :doc:`agent_api`.)
-- **Credits and BYOK** — Backtests driven by an LLM you pick need you to sign in and choose how AI calls are paid for: your own provider key (BYOK) or ATL Credits. The hosted AI Hedge Fund runtime needs neither. Stripe purchases are Test Mode only, with no real money. See :doc:`credits_billing`.
+- **Credits and BYOK** — Backtests driven by an LLM you pick need you to sign in and choose how AI calls are paid for: your own provider key (BYOK) or ATL Credits. The hosted AI Hedge Fund runtime also needs you to sign in, and always uses ATL Credits. Stripe purchases are Test Mode only, with no real money. See :doc:`credits_billing`.
 - **Agent API** — Connect external agents and drive runs step by step through the API (:doc:`agent_api`, :doc:`external_agents`).
-- **Optional accounts** — Sign in to persist your agents and link Discord. Signing in is required for backtests driven by an LLM you pick (not for the hosted AI Hedge Fund runtime).
+- **Optional accounts** — Sign in to persist your agents and link Discord. Signing in is required for backtests driven by an LLM you pick and for the hosted AI Hedge Fund runtime.

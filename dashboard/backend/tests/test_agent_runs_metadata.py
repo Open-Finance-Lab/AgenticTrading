@@ -287,3 +287,33 @@ def test_engine_records_unreadable_confidence_counts():
 
     backtester.unusable_confidence = {}
     assert "unusable_confidence" not in backtester._agent_run_metadata()
+
+
+def test_engine_names_a_hosted_runs_credits_lane():
+    """A hosted run bills Credits with no execution client to report it.
+
+    Without these the results panel read Billing "—" for a run that charged
+    the user, so the engine names the lane off the hosted meter itself.
+    """
+    import dashboard.backend.domain.backtesting.engine as engine_mod
+    from dashboard.backend.infrastructure.ai_hedge_fund.billing import (
+        HostedDecisionBilling,
+    )
+
+    backtester = engine_mod.HourlyBacktester.__new__(engine_mod.HourlyBacktester)
+    backtester.prompt_adaptations = []
+    backtester.initial_pipeline = None
+    backtester.pipeline = None
+    backtester.symbols = ["AAPL"]
+    backtester.data_source = "alpaca"
+    backtester.use_llm = False
+    backtester.hosted_billing = HostedDecisionBilling(
+        credits=None, user_id=7, run_id="agent_x", model_id="m"
+    )
+
+    meta = backtester._agent_run_metadata()
+
+    assert (meta["billing_mode"], meta["provider_id"]) == (
+        "platform_credits",
+        "openrouter",
+    )

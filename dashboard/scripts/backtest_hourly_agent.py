@@ -190,6 +190,9 @@ PortfolioManager = _portfolio_manager.PortfolioManager
 from dashboard.backend.domain.backtesting.engine import HourlyBacktester
 from dashboard.backend.domain.backtesting.decision_tape import trace_lifecycle
 from dashboard.backend.domain.backtesting.partial_results import LiveProgressHeartbeat
+from dashboard.backend.infrastructure.ai_hedge_fund.billing import (
+    HostedDecisionBilling,
+)
 from dashboard.backend.infrastructure.llm.execution.handoff import (
     ExecutionHandoffError,
     consume_execution_handoff,
@@ -402,15 +405,25 @@ def main():
 
     execution_service = None
     execution_client = None
+    hosted_billing = None
     if execution_handoff is not None:
+        # Built for either runtime: its `finalize_run` below releases whatever
+        # hold the run leaves open, a hosted decision's included.
         execution_service = LLMExecutionService(
             providers=get_model_provider_service(),
             credits=credits_service,
         )
-        execution_client = AnthropicCompatibleExecutionClient(
-            execution_service=execution_service,
-            handoff=execution_handoff,
-        )
+        if args.runtime_type == AI_HEDGE_FUND_RUNTIME_TYPE:
+            # Upstream calls its model in its own interpreter, so the handoff
+            # meters whole decisions rather than driving a model client.
+            hosted_billing = HostedDecisionBilling.from_handoff(
+                credits=credits_service, handoff=execution_handoff
+            )
+        else:
+            execution_client = AnthropicCompatibleExecutionClient(
+                execution_service=execution_service,
+                handoff=execution_handoff,
+            )
     
     session_id = args.session_id
 
@@ -555,6 +568,7 @@ def main():
             runtime_type=args.runtime_type,
             runtime_config=runtime_config,
             execution_client=execution_client,
+            hosted_billing=hosted_billing,
             launched_at=args.launched_at,
             # All three are module-scope constants rather than reads taken here,
             # on purpose. They describe an interval that ended before the engine
