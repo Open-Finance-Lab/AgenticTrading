@@ -1004,6 +1004,58 @@ def _stub_hosted_runtime_installed(monkeypatch):
     monkeypatch.setattr(bt, "runtime_unavailable_reason", lambda: None)
 
 
+def _sign_in(monkeypatch, user_id=7):
+    """Sign the caller in from here on; an agent cloned earlier stays guest-owned.
+
+    Clone-as-guest-then-sign-in is a real user order, and the browser session
+    still matches the agent's owner, so access holds.
+    """
+    monkeypatch.setattr(
+        "dashboard.backend.api.dependencies._optional_user",
+        lambda *_args, **_kwargs: {"id": user_id},
+    )
+
+
+def test_guest_cannot_start_a_hosted_backtest(client, monkeypatch):
+    """A hosted run bills the operator's OpenRouter key with no reservation.
+
+    The refusal comes before the readiness checks: with OPENROUTER_API_KEY
+    unset and the runtime missing, a guest still gets 401, never the 503 that
+    would tell it how this deployment is configured.
+    """
+    spy = _Spy()
+    monkeypatch.setattr(bt, "run_backtest_background", spy)
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.setattr(
+        bt.agent_credential_store,
+        "get_secret",
+        lambda agent_id, credential_name: "user-financial-datasets-test-key",
+    )
+    headers = {"X-Session-Id": str(uuid.uuid4())}
+    cloned = client.post(
+        "/api/v1/agents/marketplace/ai-hedge-fund/clone",
+        json={},
+        headers=headers,
+    )
+    assert cloned.status_code == 200, cloned.text
+
+    response = client.post(
+        "/backtest/run",
+        json={
+            "start_date": "2026-05-01",
+            "end_date": "2026-05-02",
+            "decision_source": "llm",
+            "agent_id": cloned.json()["agent"]["agent_id"],
+        },
+        headers=headers,
+    )
+
+    assert response.status_code == 401, response.text
+    assert "Sign in" in response.text
+    assert "OpenRouter" not in response.text
+    assert spy.calls == 0
+
+
 def test_backtest_run_dispatches_ai_hedge_fund_runtime(client, monkeypatch):
     spy = _Spy()
     monkeypatch.setattr(bt, "run_backtest_background", spy)
@@ -1023,6 +1075,7 @@ def test_backtest_run_dispatches_ai_hedge_fund_runtime(client, monkeypatch):
     )
     assert cloned.status_code == 200
     agent = cloned.json()["agent"]
+    _sign_in(monkeypatch)
 
     response = client.post(
         "/backtest/run",
@@ -1061,6 +1114,7 @@ def test_ai_hedge_fund_backtest_requires_owned_agent_credential(client, monkeypa
         json={},
         headers=headers,
     ).json()["agent"]
+    _sign_in(monkeypatch)
     monkeypatch.setattr(
         bt.agent_credential_store,
         "get_secret",
@@ -1119,6 +1173,7 @@ def test_ai_hedge_fund_backtest_rejects_run_when_runtime_not_installed(
         json={},
         headers=headers,
     ).json()["agent"]
+    _sign_in(monkeypatch)
 
     response = client.post(
         "/backtest/run",
@@ -1373,6 +1428,7 @@ def test_ai_hedge_fund_requires_openrouter_not_direct_openai(client, monkeypatch
         json={},
         headers=headers,
     ).json()["agent"]
+    _sign_in(monkeypatch)
 
     response = client.post(
         "/backtest/run",

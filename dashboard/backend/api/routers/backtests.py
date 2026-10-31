@@ -4121,6 +4121,26 @@ def run_backtest_endpoint(
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
+    from dashboard.backend.api.dependencies import _optional_user
+
+    optional_user = _optional_user(
+        request,
+        request.headers.get("authorization") or request.headers.get("Authorization"),
+    )
+    user_id = optional_user["id"] if optional_user else None
+
+    # A hosted runtime bills the operator's own provider key with no Credits
+    # reservation, and a guest's per-owner slot and rate-limit key are a
+    # session id the guest mints itself, so neither bounds a guest. Refused
+    # first, before the window bound and the readiness checks, so a guest
+    # learns nothing about whether the runtime is armed here. Keyed on
+    # ``!= PIPELINE`` so a runtime added later is gated by default.
+    if runtime_type != PIPELINE_RUNTIME_TYPE and user_id is None:
+        raise HTTPException(
+            status_code=401,
+            detail="Sign in before running a hosted agent backtest.",
+        )
+
     decision_source_was_explicit = decision_source is not None
     profile, resolved_decision_source = _resolve_market_profile_request(
         data_source,
@@ -4309,14 +4329,6 @@ def run_backtest_endpoint(
         print(f"   Assets ({len(selected_assets)}): {', '.join(selected_assets)}", flush=True)
     else:
         print(f"   Assets: default DJIA ({len(DJIA_30)})", flush=True)
-
-    from dashboard.backend.api.dependencies import _optional_user
-
-    optional_user = _optional_user(
-        request,
-        request.headers.get("authorization") or request.headers.get("Authorization"),
-    )
-    user_id = optional_user["id"] if optional_user else None
 
     # Mint the id before constructing the signed worker handoff. It is both the
     # client-visible run identity and part of the handoff's tamper boundary.
