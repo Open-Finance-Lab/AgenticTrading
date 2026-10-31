@@ -3,6 +3,8 @@
 from datetime import datetime
 from types import SimpleNamespace
 
+import json
+
 import pytest
 
 from dashboard.backend.infrastructure.llm.execution.errors import (
@@ -19,8 +21,8 @@ from dashboard.backend.infrastructure.llm.pipeline_runner import (
     is_last_bar_of_trading_day,
     pipeline_output_to_decision,
     recombine_pipeline,
+    read_pipeline_output,
     run_pipeline_decision,
-    shadowed_envelopes,
     split_pipeline,
     trading_day_key,
     _build_step_prompt,
@@ -384,12 +386,116 @@ def test_an_actions_list_still_overrides_orders_and_says_which_it_dropped():
         "orders": [{"symbol": "MSFT", "side": "buy", "qty": 10}],
         "risk_actions": [],
     }
+    assert read_pipeline_output(parsed) == ({"actions": actions}, ["orders"], [])
     assert pipeline_output_to_decision(parsed) == {"actions": actions}
-    assert shadowed_envelopes(parsed) == ["orders"]
-    assert shadowed_envelopes({**parsed, "risk_actions": ["x"]}) == ["orders", "risk_actions"]
-    assert shadowed_envelopes({"actions": [], "orders": [{"symbol": "MSFT"}]}) == []
-    assert shadowed_envelopes({"orders": [{"symbol": "MSFT"}]}) == []
-    assert shadowed_envelopes(None) == []
+
+    def ignored(reply):
+        return read_pipeline_output(reply).ignored_envelopes
+
+    assert ignored({**parsed, "risk_actions": ["x"]}) == ["orders", "risk_actions"]
+    assert ignored({"actions": [], "orders": [{"symbol": "MSFT"}]}) == []
+    assert ignored({"orders": [{"symbol": "MSFT"}]}) == []
+    assert read_pipeline_output(None) == (None, [], [])
+
+
+@pytest.mark.parametrize(
+    "order",
+    [
+        {"symbol": "AAPL", "side": "sell", "qty": 0},
+        {"symbol": "AAPL", "side": "buy", "qty": 10},
+        {"symbol": "AAPL", "side": "hold"},
+        {"symbol": " aapl", "side": "sell", "qty": 5},
+    ],
+)
+def test_an_order_wins_its_symbol_over_a_risk_action(order):
+    """The gate sizes every sell against the holding before the bar, so an
+    order sell and a stop-loss on one name both sold it (the second as a
+    spurious rejection), and a stop beside a buy, a level for the new
+    position, market-sold the old one. The risk action is dropped and named;
+    one on another name still goes through."""
+    reading = read_pipeline_output(
+        {
+            "orders": [order],
+            "risk_actions": [
+                {"symbol": "AAPL", "action": "stop_loss", "stop_loss_price": 180},
+                {"symbol": "AAPL", "action": "take_profit"},
+                {"symbol": "MSFT", "action": "stop_loss"},
+            ],
+        }
+    )
+    assert [(a["symbol"], a["action"]) for a in reading.decision["actions"]] == [
+        (order["symbol"], order["side"]),
+        ("MSFT", "sell"),
+    ]
+    assert reading.ignored_risk_symbols == ["AAPL"]
+    assert reading.ignored_envelopes == []
+
+
+def test_a_reply_naming_each_symbol_once_fits_a_one_symbol_cap():
+    """A one-symbol universe caps a step at one action: merged without the
+    per-symbol rule, an order and a stop on that symbol made two, and a strict
+    run failed the whole bar."""
+    decision = pipeline_output_to_decision(
+        {
+            "orders": [{"symbol": "AAPL", "side": "buy", "qty": 5}],
+            "risk_actions": [{"symbol": "AAPL", "action": "stop_loss"}],
+        }
+    )
+    assert len(decision["actions"]) == 1
+
+
+def test_risk_actions_all_overridden_by_orders_are_not_an_unusable_list():
+    decision = pipeline_output_to_decision(
+        {
+            "orders": [{"symbol": "AAPL", "side": "hold"}],
+            "risk_actions": [{"symbol": "AAPL", "action": "stop_loss"}],
+        }
+    )
+    assert decision == {"actions": [
+        {"action": "hold", "symbol": "AAPL", "confidence": 0.75, "reasoning": "",
+         "position_size": 0, "stop_loss_price": None, "take_profit_price": None},
+    ]}
+
+
+@pytest.mark.parametrize(
+    "fields, size",
+    [
+        ({"qty": None, "quantity": 10}, 10),
+        ({"qty": "", "position_size": 7}, 7),
+        ({"qty": None, "quantity": None}, 0),
+        ({"qty": 0, "quantity": 10}, 0),
+    ],
+)
+@pytest.mark.parametrize("envelope", ["orders", "risk_actions"])
+def test_a_null_share_count_key_does_not_hide_the_next_one(envelope, fields, size):
+    """Chained ``get`` defaults read ``{"qty": null, "quantity": 10}`` as
+    null, which a sell takes as the whole position: "sell 10" sold out
+    (#700, in another shape). The first key the model filled in is the
+    count; an explicit 0 is filled in."""
+    entry = {"symbol": "AAPL", "side": "sell", "action": "sell", **fields}
+    [order] = pipeline_output_to_decision({envelope: [entry]})["actions"]
+    assert order["position_size"] == size
+
+
+@pytest.mark.parametrize("size_pct", [0.5, "0.5"])
+def test_a_risk_position_size_beside_a_size_pct_is_not_a_share_count(size_pct):
+    """In this envelope ``position_size`` is as often a fraction: read as
+    shares beside ``size_pct: 0.5`` it overrode the half the model asked for,
+    and 0.5 shares was refused, so the stop never ran."""
+    [order] = pipeline_output_to_decision(
+        {"risk_actions": [
+            {"symbol": "AAPL", "action": "stop_loss", "size_pct": size_pct, "position_size": 0.5}
+        ]}
+    )["actions"]
+    assert order["position_size"] == 0
+    assert requested_sell_shares(order["position_size"], order["size_fraction"], 500) == (250, None)
+
+
+def test_a_risk_qty_beside_a_size_pct_is_still_the_share_count():
+    [order] = pipeline_output_to_decision(
+        {"risk_actions": [{"symbol": "AAPL", "action": "sell", "size_pct": 0.5, "quantity": 10}]}
+    )["actions"]
+    assert order["position_size"] == 10
 
 
 def test_run_pipeline_decision_logs_the_envelopes_an_actions_list_overrides(capsys):
@@ -403,6 +509,19 @@ def test_run_pipeline_decision_logs_the_envelopes_an_actions_list_overrides(caps
     )
     assert decision == {"actions": [{"symbol": "JPM", "action": "hold"}]}
     assert "ignoring its risk_actions" in capsys.readouterr().out
+
+
+def test_run_pipeline_decision_logs_the_risk_actions_an_order_overrides(capsys):
+    reply = (
+        '{"orders": [{"symbol": "AAPL", "side": "sell"}],'
+        ' "risk_actions": [{"symbol": "AAPL", "action": "stop_loss"}]}'
+    )
+    client = _PipelineClient([_PipelineResponse(reply)])
+    decision, _usage, _calls, _steps = run_pipeline_decision(
+        client, pipeline=_PIPELINE, market_snapshot={"top_signals": {}}
+    )
+    assert [a["symbol"] for a in decision["actions"]] == ["AAPL"]
+    assert "orders for AAPL; ignoring their risk_actions" in capsys.readouterr().out
 
 
 @pytest.mark.parametrize("fields", [{}, {"size_pct": None}, {"size_pct": ""}])
@@ -465,6 +584,51 @@ def test_pipeline_execution_rules_define_size_pct_where_a_step_asks_for_it(step)
     rules = prompt.split("=== EXECUTION RULES ===", 1)[1]
     assert "size_pct is the fraction of the position to sell, from 0 to 1" in rules
     assert "between 1 and 100 is rejected" in rules
+
+
+def _last_step_rules(**kwargs):
+    prompt = _build_step_prompt(
+        step_index=1,
+        step={"id": "s2", "label": "Final", "prompt": "Finalize upstream decisions.", "outputFormat": "JSON"},
+        market_snapshot={"portfolio": {}, "top_signals": {}},
+        is_last=True,
+        **kwargs,
+    )
+    return prompt.split("=== EXECUTION RULES ===", 1)[1]
+
+
+def test_size_pct_rule_reaches_a_last_step_whose_upstream_emitted_risk_actions():
+    """A last step that only finalizes risk_actions an earlier step wrote was
+    never told the unit, wrote 25 for 25%, and had every exit refused."""
+    upstream = [{"step": 1, "output": {"risk_actions": [{"symbol": "AAPL", "size_pct": 0.25}]}}]
+    assert "size_pct is the fraction" in _last_step_rules(prior_outputs=upstream)
+    assert "size_pct" not in _last_step_rules(prior_outputs=[{"step": 1, "output": {"facts": []}}])
+
+
+def test_size_pct_rule_reaches_a_last_step_when_an_earlier_step_names_the_envelope():
+    rules = _last_step_rules(prior_outputs=[], pipeline_names_risk_envelope=True)
+    assert "size_pct is the fraction" in rules
+
+
+def test_run_pipeline_decision_states_size_pct_where_an_earlier_step_defines_it():
+    """Step 1 defines the envelope; step 2's own text never names it, and its
+    upstream output (facts only) does not either."""
+    pipeline = [
+        {"id": "s1", "label": "Risk", "prompt": "Assess risk.",
+         "outputFormat": '{"facts": [], "risk_actions": [{"size_pct": 0.5}]}'},
+        {"id": "s2", "label": "Final", "prompt": "Finalize.", "outputFormat": "JSON"},
+    ]
+    client = _PipelineClient([
+        _PipelineResponse('{"facts": []}'),
+        _PipelineResponse('{"orders": []}'),
+    ])
+    run_pipeline_decision(client, pipeline=pipeline, market_snapshot={"top_signals": {}})
+    last_prompt = json.dumps(client.messages.calls[-1]["messages"])
+    assert "size_pct is the fraction of the position to sell" in last_prompt
+    # The default pipeline's prompt is untouched.
+    client = _PipelineClient([_PipelineResponse('{"orders": []}')])
+    run_pipeline_decision(client, pipeline=_PIPELINE, market_snapshot={"top_signals": {}})
+    assert "size_pct" not in json.dumps(client.messages.calls[-1]["messages"])
 
 
 def test_a_step_that_is_not_last_gets_no_size_pct_rule():

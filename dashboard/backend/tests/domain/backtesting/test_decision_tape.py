@@ -70,6 +70,20 @@ def test_intent_names_the_envelopes_an_actions_list_overrode():
     assert intent["ignored_envelopes"] == ["orders"]
 
 
+def test_intent_names_the_risk_actions_an_order_overrode():
+    out = [{"step": 1, "output": {
+        "orders": [{"symbol": "AAPL", "side": "buy", "qty": 7}],
+        "risk_actions": [
+            {"symbol": "AAPL", "action": "stop_loss"},
+            {"symbol": "MSFT", "action": "stop_loss"},
+        ],
+    }}]
+    intent = tape.intent_from_outputs(out, outputs_before=[], decision_step_count=1)
+    assert [(o["symbol"], o["action"]) for o in intent["orders"]] == [("AAPL", "buy"), ("MSFT", "sell")]
+    assert intent["ignored_risk_symbols"] == ["AAPL"]
+    assert "ignored_envelopes" not in intent
+
+
 def test_intent_is_unparsed_when_final_step_is_missing():
     # Step 2 of 2 failed to parse, so only step 1's output came back.
     partial = [{"step": 1, "output": {"facts": []}}]

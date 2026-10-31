@@ -20,6 +20,7 @@ from dashboard.backend.infrastructure.llm.validator import (
     LLMTradingDecision,
     actions_to_executable,
     requested_sell_shares,
+    sell_request,
 )
 from dashboard.backend.tests.backtesting.test_portfolio_manager_move import (
     _FakeClient,
@@ -95,10 +96,12 @@ def test_a_sell_larger_than_the_position_is_capped_and_says_so():
         ("all", 0),
         (float("inf"), 0),
         (float("nan"), 0),
-        (-5, -5),
+        # Recorded as 0, not as written: a negative count on the ledger reads
+        # as nonsense in a "requested" column and pulls any sum of it down.
+        (-5, 0),
         # int(-0.5) is 0, and 0 means the whole position: the sign must be
         # read before anything truncates it.
-        (-0.5, -0.5),
+        (-0.5, 0),
         (False, 0),
         (True, 0),
         ([], 0),
@@ -201,6 +204,58 @@ def test_a_trim_below_one_share_records_the_part_it_asked_for(capsys):
     assert "is less than one share" in capsys.readouterr().out
     [event] = pm.order_events
     assert event["requested_shares"] == 0.75
+
+
+@pytest.mark.parametrize(
+    ("position_size", "fraction", "held", "asked"),
+    [
+        (10, None, 500, 10),
+        (0, 0.25, 500, 125),
+        (0, None, 500, 500),
+        (0.5, None, 500, 0.5),  # refused: under one share
+        (0, 0.25, 3, 0.75),  # refused: rounds to no shares
+        (0, 25, 500, 0),  # refused: between 1 and 100
+        (-3, None, 500, 0),
+        ("all", None, 500, 0),
+        (float("nan"), None, 500, 0),
+    ],
+)
+def test_sell_request_counts_what_a_sell_asked_for(position_size, fraction, held, asked):
+    """One rule sizes a SELL and counts it for the ledger: the gate used to
+    redo the fraction arithmetic on its own to record a refusal."""
+    request = sell_request(position_size, fraction, held)
+    assert request.asked == asked
+    assert (request.shares, request.refusal) == requested_sell_shares(position_size, fraction, held)
+
+
+def _pipeline_decide(pm, reply, **kwargs):
+    """The gate's actions for a pipeline whose one step replies ``reply``."""
+    client = _FakeClient(_FakeResp(json.dumps(reply), _FakeUsage(1, 1)))
+    pipeline = [{"id": "s1", "label": "Decide", "prompt": "Trade.", "outputFormat": "JSON"}]
+    return pm.make_trading_decision_with_llm(_llm_state(), client, pipeline=pipeline, **kwargs)["actions"]
+
+
+def test_an_order_sell_and_a_stop_loss_on_one_name_sell_it_once():
+    """Both were sized against the holding before the bar: the second queued
+    sell of 500 left a spurious insufficient_position rejection."""
+    pm = _holding(500, allowed_symbols=["AAPL"])
+    actions = _pipeline_decide(pm, {
+        "orders": [{"symbol": "AAPL", "side": "sell", "qty": 0}],
+        "risk_actions": [{"symbol": "AAPL", "action": "stop_loss"}],
+    }, strict_llm=True)
+    assert [(a["action"], a["shares"]) for a in actions] == [("sell", 500)]
+
+
+def test_a_stop_beside_a_buy_does_not_sell_the_holding():
+    """A stop priced for the new position was a market sell of the old one,
+    and on a one-symbol universe the pair broke the cap and failed a strict
+    bar."""
+    pm = _holding(500, allowed_symbols=["AAPL"])
+    actions = _pipeline_decide(pm, {
+        "orders": [{"symbol": "AAPL", "side": "buy", "qty": 10}],
+        "risk_actions": [{"symbol": "AAPL", "action": "stop_loss", "stop_loss_price": 90}],
+    }, strict_llm=True)
+    assert [(a["action"], a["shares"]) for a in actions] == [("buy", 10)]
 
 
 def test_a_refusal_that_repeats_on_one_day_collapses_like_an_executor_one():

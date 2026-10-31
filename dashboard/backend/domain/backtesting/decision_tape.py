@@ -27,8 +27,7 @@ from typing import Any, Callable, Dict, Iterable, Iterator, List, Mapping, Named
 
 from dashboard.backend.domain.trading.execution import _trading_date
 from dashboard.backend.infrastructure.llm.pipeline_runner import (
-    pipeline_output_to_decision,
-    shadowed_envelopes,
+    read_pipeline_output,
 )
 from dashboard.backend.infrastructure.llm.validator import (
     normalize_action,
@@ -42,9 +41,9 @@ from dashboard.backend.infrastructure.llm.validator import (
 # replay one under that rule, never through the current gate.
 # 3 (#691): a ``size_fraction`` between 1 and 100 is refused, not a full exit;
 # a risk action's share count is its ``position_size``; and a reply's
-# ``orders`` and ``risk_actions`` are recorded together. A v2 tape stored a
-# risk sell's share count as 0, and the risk actions of a bar that also had
-# orders not at all.
+# ``orders`` and ``risk_actions`` are recorded together, an order winning its
+# symbol. A v2 tape stored a risk sell's share count as 0, and the risk actions
+# of a bar that also had orders not at all.
 TAPE_VERSION = 3
 MAX_REASONING_CHARS = 500
 # The longest model-supplied value kept verbatim for replay. Longer ones are
@@ -233,17 +232,19 @@ def intent_from_outputs(
     last = outputs[-1]
     if not isinstance(last, Mapping) or last.get("step") != decision_step_count:
         return {"unparsed": True, "completed_steps": completed}
-    decision = pipeline_output_to_decision(last.get("output"))
+    reading = read_pipeline_output(last.get("output"))
+    decision = reading.decision
     if not decision:
         return {"unparsed": True, "completed_steps": completed}
     intent: Dict[str, Any] = {
         "orders": [_intent_order(action) for action in decision.get("actions") or []]
     }
-    # Lists an ``actions`` list overrode reach neither the gate nor the
-    # ledger; named here, they are not invisible from a dashboard backtest.
-    ignored = shadowed_envelopes(last.get("output"))
-    if ignored:
-        intent["ignored_envelopes"] = ignored
+    # What the reading overrode reaches neither the gate nor the ledger;
+    # named here, it is not invisible from a dashboard backtest.
+    if reading.ignored_envelopes:
+        intent["ignored_envelopes"] = reading.ignored_envelopes
+    if reading.ignored_risk_symbols:
+        intent["ignored_risk_symbols"] = reading.ignored_risk_symbols
     return intent
 
 
