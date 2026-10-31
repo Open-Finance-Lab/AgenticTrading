@@ -10,16 +10,15 @@ share the run id of the signed execution handoff, so the existing
 
 from __future__ import annotations
 
-from typing import Any, Mapping, Optional, Sequence
+from typing import Any, Mapping, NamedTuple, Optional, Sequence
 
 from dashboard.backend.domain.agents.runtime import AI_HEDGE_FUND_ANALYSTS
-from dashboard.backend.domain.credits.repository_common import (
-    CreditAccountRestrictedStoreError,
-    InsufficientCreditsError,
-)
 from dashboard.backend.infrastructure.llm.execution.errors import (
     ExecutionErrorCategory,
     LLMExecutionError,
+)
+from dashboard.backend.infrastructure.llm.execution.service import (
+    reserve_platform_credits,
 )
 from dashboard.backend.infrastructure.llm.token_cost import (
     credits_micro_for_usd,
@@ -37,17 +36,24 @@ CEILING_INPUT_TOKENS_PER_CALL = 8_000
 CEILING_OUTPUT_TOKENS_PER_CALL = 2_000
 
 
+def decision_calls(analysts: Optional[Sequence[str]], ticker_count: int) -> int:
+    """The model calls one decision's ceiling budgets for.
+
+    No analysts configured means upstream runs all of them.
+    """
+    analyst_count = len(analysts or AI_HEDGE_FUND_ANALYSTS)
+    return (analyst_count + 1) * max(int(ticker_count), 1)
+
+
 def decision_ceiling_micro(
     model: str, analysts: Optional[Sequence[str]], ticker_count: int
 ) -> int:
     """The most one decision is held for, in Credit micro-units.
 
     One formula for the launch preflight and the per-decision hold, so the
-    route cannot admit a run whose first decision the child then refuses.
-    No analysts configured means upstream runs all of them.
+    route cannot admit a run whose decisions the child then refuses.
     """
-    analyst_count = len(analysts or AI_HEDGE_FUND_ANALYSTS)
-    calls = (analyst_count + 1) * max(int(ticker_count), 1)
+    calls = decision_calls(analysts, ticker_count)
     return credits_micro_for_usd(
         estimate_cost_usd(
             model,
@@ -57,21 +63,37 @@ def decision_ceiling_micro(
     )
 
 
-def parse_usage(value: Any) -> Optional[tuple[int, int]]:
-    """``(input_tokens, output_tokens)`` from the bridge's report, else None."""
+class DecisionUsage(NamedTuple):
+    """What the bridge's meter counted over one decision."""
+
+    input_tokens: int
+    output_tokens: int
+    # Model calls that ended, and those of them that reported no usage.
+    calls: int
+    unmetered_calls: int
+
+
+def parse_usage(value: Any) -> Optional[DecisionUsage]:
+    """The bridge's usage report, else None (absent, malformed, inconsistent)."""
     if not isinstance(value, Mapping):
         return None
     counts = []
-    for key in ("input_tokens", "output_tokens"):
+    for key in DecisionUsage._fields:
         count = value.get(key)
         if isinstance(count, bool) or not isinstance(count, int) or count < 0:
             return None
         counts.append(count)
-    return counts[0], counts[1]
+    usage = DecisionUsage(*counts)
+    if usage.unmetered_calls > usage.calls:
+        return None
+    return usage
 
 
 class HostedDecisionBilling:
     """Reserve, settle and release one run's per-decision Credit holds."""
+
+    billing_mode = "platform_credits"
+    provider_id = PROVIDER_ID
 
     def __init__(self, *, credits: Any, user_id: int, run_id: str, model_id: str):
         self.credits = credits
@@ -93,31 +115,14 @@ class HostedDecisionBilling:
         """Hold one decision's ceiling; the run stops when it cannot."""
         call_index = self._next_call_index
         self._next_call_index += 1
-        try:
-            reservation = self.credits.reserve_llm_credits(
-                user_id=self.user_id,
-                run_id=self.run_id,
-                call_index=call_index,
-                amount_micro=int(amount_micro),
-                provider_id=PROVIDER_ID,
-            )
-        except CreditAccountRestrictedStoreError as exc:
-            try:
-                balance = self.credits.get_balance(self.user_id)
-                reason = balance.restriction_reason
-                outstanding_micro = balance.outstanding_credits_micro
-            except Exception:  # noqa: BLE001 - keep the safe fallback
-                reason = None
-                outstanding_micro = 0
-            raise LLMExecutionError.account_restricted(
-                reason, outstanding_micro
-            ) from exc
-        except InsufficientCreditsError as exc:
-            raise LLMExecutionError(
-                ExecutionErrorCategory.INSUFFICIENT_CREDITS
-            ) from exc
-        except Exception as exc:  # noqa: BLE001 - store errors stay internal
-            raise LLMExecutionError(ExecutionErrorCategory.BILLING_FAILED) from exc
+        reservation = reserve_platform_credits(
+            self.credits,
+            user_id=self.user_id,
+            run_id=self.run_id,
+            call_index=call_index,
+            amount_micro=int(amount_micro),
+            provider_id=PROVIDER_ID,
+        )
         if reservation.status != "open":
             raise LLMExecutionError(ExecutionErrorCategory.BILLING_FAILED)
         return reservation.reservation_id
@@ -127,42 +132,30 @@ class HostedDecisionBilling:
         reservation_id: str,
         *,
         ceiling_micro: int,
-        usage: Optional[tuple[int, int]],
+        usage: Optional[DecisionUsage],
         outcome: str,
     ) -> int:
         """Settle or release one decision's hold; returns the micro charged.
 
-        ``outcome`` is ``completed``, ``killed`` or ``failed``. Reported usage
-        is billed whatever the outcome. Without it the charge fails closed: a
-        completed decision whose usage went unreported is a broken meter, and a
-        killed one (a timeout, a signal, any failure past the bridge's started
-        marker) could have called the model, so both settle at the ceiling.
-        Only ``failed`` is released, which the adapter reports solely when the
-        bridge left no file at all, i.e. died before any model call.
+        ``outcome`` is ``completed``, ``killed`` or ``failed``. The charge
+        fails closed whenever the spend is unknown, settling at the ceiling:
+
+        - no usage report on a ``completed`` or ``killed`` decision (an
+          unreadable output, a timeout, a signal, a crash past the bridge's
+          started marker): its model calls may have run;
+        - a report with unmetered calls: those calls ran and their provider
+          (or a langchain change) dropped the usage, which is a broken meter.
+
+        Released only when nothing was spent: a report of zero calls (every
+        analyst rule-based, every ticker pre-filled), or ``failed`` with no
+        report, which the adapter says solely when the bridge left no file at
+        all, i.e. died before any model call. Otherwise the metered tokens.
         """
-        if usage is not None:
-            input_tokens, output_tokens = usage
-            uncapped = credits_micro_for_usd(
-                estimate_cost_usd(self.model_id, input_tokens, output_tokens)
-            )
-            basis = "usage"
-            if outcome == "completed" and input_tokens + output_tokens == 0:
-                # Legitimate only when every selected analyst is rule-based and
-                # upstream's portfolio manager pre-filled every ticker as a
-                # hold (it skips its model call then). Anything else is a meter
-                # that stopped counting (a provider omitting usage, a
-                # langchain-core change), so it is released but never silently.
-                print(
-                    "WARNING: ai_hedge_fund.usage_zero completed decision "
-                    "reported no model tokens",
-                    flush=True,
-                )
-        elif outcome == "failed":
-            input_tokens = output_tokens = None
+        input_tokens = output_tokens = None
+        if usage is None and outcome == "failed":
             uncapped = 0
             basis = "no_model_call"
-        else:
-            input_tokens = output_tokens = None
+        elif usage is None:
             uncapped = int(ceiling_micro)
             basis = "ceiling"
             if outcome == "completed":
@@ -171,6 +164,24 @@ class HostedDecisionBilling:
                     "billing at the decision ceiling",
                     flush=True,
                 )
+        elif usage.unmetered_calls:
+            uncapped = int(ceiling_micro)
+            basis = "ceiling"
+            print(
+                "ERROR: ai_hedge_fund.usage_unmetered "
+                f"calls={usage.calls} unmetered_calls={usage.unmetered_calls} "
+                "billing at the decision ceiling",
+                flush=True,
+            )
+        elif usage.calls == 0:
+            uncapped = 0
+            basis = "no_model_call"
+        else:
+            input_tokens, output_tokens = usage.input_tokens, usage.output_tokens
+            uncapped = credits_micro_for_usd(
+                estimate_cost_usd(self.model_id, input_tokens, output_tokens)
+            )
+            basis = "usage"
         charged = min(uncapped, int(ceiling_micro))
         if uncapped > charged:
             print(
@@ -193,6 +204,10 @@ class HostedDecisionBilling:
                     "basis": basis,
                     "input_tokens": input_tokens,
                     "output_tokens": output_tokens,
+                    "calls": usage.calls if usage is not None else None,
+                    "unmetered_calls": (
+                        usage.unmetered_calls if usage is not None else None
+                    ),
                     "ceiling_micro": int(ceiling_micro),
                     "uncapped_micro": uncapped,
                 },

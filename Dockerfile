@@ -22,7 +22,7 @@ RUN pip install --no-cache-dir --no-deps -r requirements.txt \
 # a managed 3.12 under /opt/uv-python; the venv keeps an absolute reference
 # to it, so uninstalling the uv build tool afterwards is safe.
 #
-# The second import is the bridge's Credits meter (bridge.py:_usage_counter).
+# The second import is the bridge's Credits meter (bridge.py:_usage_meter).
 # Missing, every decision still runs but bills its reservation ceiling, so an
 # upstream dependency drift fails the build instead of overcharging quietly.
 ENV UV_PYTHON_INSTALL_DIR=/opt/uv-python
@@ -32,7 +32,7 @@ RUN pip install --no-cache-dir uv \
     && uv pip install --python /opt/ai-hedge-fund-venv \
        -r requirements-ai-hedge-fund.txt \
     && /opt/ai-hedge-fund-venv/bin/python -c "from src.main import run_hedge_fund" \
-    && /opt/ai-hedge-fund-venv/bin/python -c "from langchain_core.callbacks import get_usage_metadata_callback" \
+    && /opt/ai-hedge-fund-venv/bin/python -c "from langchain_core.callbacks import BaseCallbackHandler; from langchain_core.tracers.context import register_configure_hook" \
     && pip uninstall -y uv
 
 # Copy dashboard application

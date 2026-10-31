@@ -334,6 +334,7 @@ class HourlyBacktester:
         # Model id; defaults to the gateway-appropriate slug (CommonStack vs native).
         self.model = model or default_model_name()
         self.execution_client = execution_client
+        self.hosted_billing = hosted_billing
         self.live_run_id = (live_run_id or "").strip() or None
         self.owner_user_id = int(owner_user_id) if owner_user_id is not None else None
         self.progress_file = (progress_file or "").strip() or None
@@ -1845,6 +1846,12 @@ class HourlyBacktester:
                 llm_execution = summary()
         if llm_execution is not None:
             meta["llm_execution"] = llm_execution.model_dump(mode="json")
+        hosted_billing = getattr(self, "hosted_billing", None)
+        if hosted_billing is not None:
+            # A hosted run bills Credits without an execution client, so no
+            # `llm_execution` names its lane; the results panel reads these.
+            meta["billing_mode"] = hosted_billing.billing_mode
+            meta["provider_id"] = hosted_billing.provider_id
         if self.prompt_adaptations:
             meta["prompt_adaptations"] = self.prompt_adaptations
         if self.initial_pipeline is not None:

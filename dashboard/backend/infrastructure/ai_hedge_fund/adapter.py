@@ -26,6 +26,7 @@ from dashboard.backend.domain.agents.runtime import (
     normalize_runtime_config,
 )
 from dashboard.backend.infrastructure.ai_hedge_fund.billing import (
+    DecisionUsage,
     HostedDecisionBilling,
     decision_ceiling_micro,
     parse_usage,
@@ -101,7 +102,7 @@ class AiHedgeFundRuntimeError(AgentRuntimeError):
         self,
         message: str = "",
         *,
-        usage: Optional[tuple[int, int]] = None,
+        usage: Optional[DecisionUsage] = None,
         killed: bool = False,
     ):
         super().__init__(message)
@@ -828,6 +829,14 @@ class AiHedgeFundRuntime:
         Settled before the output is mapped: an output ATL then refuses still
         spent its model calls. A configuration error raised before the bridge
         starts is released like any no-call failure.
+
+        Every other escape is billed the ceiling, ``BaseException`` included:
+        a cancel or the parent's run timeout reaches this child as SIGTERM,
+        which ``_exit_on_sigterm`` turns into ``SystemExit`` inside
+        ``subprocess.run`` (that kills the bridge, which shares the child's
+        process group and gets the same signal anyway, before it can report),
+        so the decision's calls may have run. Left open, the hold would reach
+        ``finalize_run`` and be released for free.
         """
         if self.billing is None:
             return self.runner.run(payload, timeout_seconds=self.timeout_seconds)
@@ -843,6 +852,11 @@ class AiHedgeFundRuntime:
                 ceiling_micro=ceiling,
                 usage=exc.usage,
                 outcome="killed" if exc.killed else "failed",
+            )
+            raise
+        except BaseException:
+            self.billing.close(
+                reservation_id, ceiling_micro=ceiling, usage=None, outcome="killed"
             )
             raise
         self.billing.close(

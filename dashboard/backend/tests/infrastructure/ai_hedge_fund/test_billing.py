@@ -32,8 +32,10 @@ from dashboard.backend.infrastructure.ai_hedge_fund.adapter import (
     AiHedgeFundSubprocessRunner,
 )
 from dashboard.backend.infrastructure.ai_hedge_fund.billing import (
+    DecisionUsage,
     HostedDecisionBilling,
     decision_ceiling_micro,
+    parse_usage,
 )
 from dashboard.backend.infrastructure.llm.execution.errors import (
     ExecutionErrorCategory,
@@ -146,6 +148,16 @@ def _rows(tmp_path):
     ]
 
 
+def _usage(input_tokens, output_tokens, *, calls=1, unmetered_calls=0):
+    """The bridge's usage report, as it lands in its output file."""
+    return {
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "calls": calls,
+        "unmetered_calls": unmetered_calls,
+    }
+
+
 def _usage_micro(input_tokens, output_tokens):
     return credits_micro_for_usd(
         estimate_cost_usd(DEFAULT_MODEL_NAME, input_tokens, output_tokens)
@@ -163,8 +175,8 @@ def test_ceiling_counts_every_analyst_when_none_are_configured():
 def test_each_decision_settles_at_its_reported_usage(tmp_path):
     credits = _credits(tmp_path)
     runner = _Runner(
-        {"decisions": {}, "usage": {"input_tokens": 12_000, "output_tokens": 3_000}},
-        {"decisions": {}, "usage": {"input_tokens": 4_000, "output_tokens": 1_000}},
+        {"decisions": {}, "usage": _usage(12_000, 3_000, calls=6)},
+        {"decisions": {}, "usage": _usage(4_000, 1_000, calls=2)},
     )
     runtime = _runtime(credits, runner)
 
@@ -200,6 +212,81 @@ def test_unreported_usage_on_a_completed_decision_bills_the_ceiling_loudly(
     assert "ERROR: ai_hedge_fund.usage_unreported" in capsys.readouterr().out
 
 
+def test_calls_that_reported_no_usage_bill_the_ceiling_loudly(tmp_path, capsys):
+    """A meter that counts calls but no tokens is broken, never free.
+
+    Zero tokens alone cannot say whether the model was called; the call count
+    can, so a provider (or a langchain change) that drops usage is billed the
+    ceiling and named in an ERROR the parent relays to the service log.
+    """
+    credits = _credits(tmp_path)
+    runtime = _runtime(
+        credits,
+        _Runner({"decisions": {}, "usage": _usage(0, 0, calls=3, unmetered_calls=3)}),
+    )
+
+    runtime.decide(_context())
+
+    [(_, status, _, settled, evidence)] = _rows(tmp_path)
+    assert (status, settled, evidence["basis"]) == ("settled", CEILING, "ceiling")
+    assert (evidence["calls"], evidence["unmetered_calls"]) == (3, 3)
+    assert "ERROR: ai_hedge_fund.usage_unmetered calls=3 unmetered_calls=3" in (
+        capsys.readouterr().out
+    )
+
+
+def test_a_decision_that_made_no_model_call_is_released_quietly(tmp_path, capsys):
+    # Every analyst rule-based and every ticker pre-filled: nothing was spent.
+    credits = _credits(tmp_path)
+    runtime = _runtime(credits, _Runner({"decisions": {}, "usage": _usage(0, 0, calls=0)}))
+
+    runtime.decide(_context())
+
+    [(_, status, _, settled, _)] = _rows(tmp_path)
+    assert (status, settled) == ("released", 0)
+    assert "ai_hedge_fund." not in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        None,
+        {"input_tokens": 1, "output_tokens": 1},  # no call counts: an old bridge
+        _usage(1, 1, calls=1, unmetered_calls=2),  # more unmetered than calls
+        _usage(1, -1),
+        _usage(True, 1),
+    ],
+)
+def test_a_malformed_usage_report_is_no_report(value):
+    assert parse_usage(value) is None
+
+
+@pytest.mark.parametrize(
+    "interrupt",
+    [
+        # A cancel or the parent's run timeout: SIGTERM, which the child's
+        # handler turns into SystemExit inside subprocess.run.
+        SystemExit(143),
+        KeyboardInterrupt(),
+        # Anything else past the runner's own errors, e.g. decoding output.
+        UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte"),
+    ],
+)
+def test_an_interrupted_decision_bills_the_ceiling_instead_of_leaving_the_hold(
+    tmp_path, interrupt
+):
+    """Left open, the hold would reach `finalize_run` and be released free."""
+    credits = _credits(tmp_path)
+    runtime = _runtime(credits, _Runner(interrupt))
+
+    with pytest.raises(type(interrupt)):
+        runtime.decide(_context())
+
+    [(_, status, _, settled, evidence)] = _rows(tmp_path)
+    assert (status, settled) == ("settled", CEILING)
+    assert (evidence["outcome"], evidence["basis"]) == ("killed", "ceiling")
+
+
 def test_usage_above_the_ceiling_is_capped_rather_than_recorded_as_overage(
     tmp_path, capsys
 ):
@@ -209,7 +296,7 @@ def test_usage_above_the_ceiling_is_capped_rather_than_recorded_as_overage(
         _Runner(
             {
                 "decisions": {},
-                "usage": {"input_tokens": 50_000_000, "output_tokens": 0},
+                "usage": _usage(50_000_000, 0),
             }
         ),
     )
@@ -232,9 +319,17 @@ def test_usage_above_the_ceiling_is_capped_rather_than_recorded_as_overage(
         (AiHedgeFundRuntimeError("timed out", killed=True), "settled", CEILING),
         # Failed after reporting what it had spent.
         (
-            AiHedgeFundRuntimeError("exit 1", usage=(10_000, 2_000)),
+            AiHedgeFundRuntimeError(
+                "exit 1", usage=DecisionUsage(10_000, 2_000, 4, 0)
+            ),
             "settled",
             _usage_micro(10_000, 2_000),
+        ),
+        # Failed after calls whose usage went unreported: still the ceiling.
+        (
+            AiHedgeFundRuntimeError("exit 1", usage=DecisionUsage(0, 0, 2, 2)),
+            "settled",
+            CEILING,
         ),
         # Failed before its usage scope opened: no model call was made.
         (AiHedgeFundRuntimeError("exit 1"), "released", 0),
@@ -291,8 +386,8 @@ def _runner_exiting(monkeypatch, tmp_path, returncode, written):
         # The bridge's handler reported what it spent before exiting.
         (
             1,
-            json.dumps({"started": True, "usage": {"input_tokens": 7, "output_tokens": 3}}),
-            (7, 3),
+            json.dumps({"started": True, "usage": _usage(7, 3)}),
+            DecisionUsage(7, 3, 1, 0),
             False,
         ),
         # An OOM SIGKILL after the marker: no report, spend unknown.
@@ -352,11 +447,14 @@ def _bridge_args(monkeypatch, tmp_path):
 
 
 def _fake_upstream(monkeypatch, run_hedge_fund):
-    """Install a fake upstream and a fake langchain-core usage counter.
+    """Install a fake upstream and fake langchain-core callback hooks.
 
-    The counter mirrors ``get_usage_metadata_callback``: a context manager
-    whose handler accumulates ``usage_metadata`` per model name. The real one
-    was exercised against upstream's pinned langchain stack while writing this.
+    The fakes stand in for the two langchain-core names the meter uses: a
+    ``BaseCallbackHandler`` base, and ``register_configure_hook``, which here
+    records the meter's context var. The returned function reads that var, so
+    a fake model call reaches the active meter the way a real call's callback
+    manager does. The real pair, worker threads included, was exercised
+    against upstream's pinned langchain stack while writing this.
     """
     fake_main = types.ModuleType("src.main")
     fake_main.run_hedge_fund = run_hedge_fund
@@ -365,63 +463,111 @@ def _fake_upstream(monkeypatch, run_hedge_fund):
     monkeypatch.setitem(sys.modules, "src", fake_src)
     monkeypatch.setitem(sys.modules, "src.main", fake_main)
 
-    handler = types.SimpleNamespace(usage_metadata={})
-
-    class _Counter:
-        def __enter__(self):
-            return handler
-
-        def __exit__(self, *exc):
-            return False
-
+    hooks = []
     callbacks = types.ModuleType("langchain_core.callbacks")
-    callbacks.get_usage_metadata_callback = _Counter
+    callbacks.BaseCallbackHandler = type("BaseCallbackHandler", (), {})
+    context = types.ModuleType("langchain_core.tracers.context")
+    context.register_configure_hook = (
+        lambda var, inheritable: hooks.append((var, inheritable))
+    )
+    tracers = types.ModuleType("langchain_core.tracers")
+    tracers.context = context
     core = types.ModuleType("langchain_core")
     core.callbacks = callbacks
-    monkeypatch.setitem(sys.modules, "langchain_core", core)
-    monkeypatch.setitem(sys.modules, "langchain_core.callbacks", callbacks)
-    return handler
+    core.tracers = tracers
+    for name, module in (
+        ("langchain_core", core),
+        ("langchain_core.callbacks", callbacks),
+        ("langchain_core.tracers", tracers),
+        ("langchain_core.tracers.context", context),
+    ):
+        monkeypatch.setitem(sys.modules, name, module)
+
+    def active_meter():
+        var, inheritable = hooks[-1]
+        # Inheritable, or the analysts' worker-thread calls go unseen.
+        assert inheritable is True
+        return var.get()
+
+    return active_meter
+
+
+def _model_call(meter, usage_metadata):
+    """One finished chat-model call as langchain hands it to ``on_llm_end``."""
+    message = types.SimpleNamespace(usage_metadata=usage_metadata)
+    meter.on_llm_end(
+        types.SimpleNamespace(generations=[[types.SimpleNamespace(message=message)]])
+    )
 
 
 def test_bridge_reports_summed_usage_with_the_decisions(monkeypatch, tmp_path):
     output_path = _bridge_args(monkeypatch, tmp_path)
 
     def run_hedge_fund(**_kwargs):
-        handler.usage_metadata.update(
-            {
-                DEFAULT_MODEL_NAME: {"input_tokens": 900, "output_tokens": 90},
-                "other-model": {"input_tokens": 100, "output_tokens": 10},
-            }
-        )
+        meter = active_meter()
+        _model_call(meter, {"input_tokens": 900, "output_tokens": 90})
+        _model_call(meter, {"input_tokens": 100, "output_tokens": 10})
         return {"decisions": {}, "analyst_signals": {}}
 
-    handler = _fake_upstream(monkeypatch, run_hedge_fund)
+    active_meter = _fake_upstream(monkeypatch, run_hedge_fund)
 
     bridge.main()
 
     output = json.loads(output_path.read_text(encoding="utf-8"))
-    assert output["usage"] == {"input_tokens": 1000, "output_tokens": 100}
+    assert output["usage"] == _usage(1000, 100, calls=2)
     assert output["decisions"] == {}
+
+
+@pytest.mark.parametrize(
+    "usage_metadata",
+    [None, {}, {"input_tokens": 5}, {"input_tokens": 5, "output_tokens": "1"}],
+)
+def test_bridge_counts_a_call_without_usage_as_unmetered(
+    monkeypatch, tmp_path, usage_metadata
+):
+    output_path = _bridge_args(monkeypatch, tmp_path)
+
+    def run_hedge_fund(**_kwargs):
+        meter = active_meter()
+        _model_call(meter, {"input_tokens": 900, "output_tokens": 90})
+        _model_call(meter, usage_metadata)
+        return {"decisions": {}}
+
+    active_meter = _fake_upstream(monkeypatch, run_hedge_fund)
+
+    bridge.main()
+
+    assert json.loads(output_path.read_text(encoding="utf-8"))["usage"] == _usage(
+        900, 90, calls=2, unmetered_calls=1
+    )
+
+
+def test_bridge_reports_zero_calls_when_upstream_made_none(monkeypatch, tmp_path):
+    output_path = _bridge_args(monkeypatch, tmp_path)
+    _fake_upstream(monkeypatch, lambda **_kwargs: {"decisions": {}})
+
+    bridge.main()
+
+    assert json.loads(output_path.read_text(encoding="utf-8"))["usage"] == _usage(
+        0, 0, calls=0
+    )
 
 
 def test_bridge_reports_usage_spent_before_a_failure(monkeypatch, tmp_path):
     output_path = _bridge_args(monkeypatch, tmp_path)
 
     def run_hedge_fund(**_kwargs):
-        handler.usage_metadata[DEFAULT_MODEL_NAME] = {
-            "input_tokens": 50,
-            "output_tokens": 5,
-        }
+        _model_call(active_meter(), {"input_tokens": 50, "output_tokens": 5})
         raise RuntimeError("upstream exploded")
 
-    handler = _fake_upstream(monkeypatch, run_hedge_fund)
+    active_meter = _fake_upstream(monkeypatch, run_hedge_fund)
 
     with pytest.raises(RuntimeError):
         bridge.main()
 
     assert json.loads(output_path.read_text(encoding="utf-8")) == {
         "started": True,
-        "usage": {"input_tokens": 50, "output_tokens": 5},
+        "usage": _usage(50, 5),
     }
 
 
@@ -442,11 +588,11 @@ def test_bridge_marks_itself_started_before_upstream_can_call_the_model(
     assert seen["at_call"] == {"started": True}
 
 
-def test_bridge_without_a_usage_counter_reports_none(monkeypatch, tmp_path):
+def test_bridge_without_the_callback_hook_api_reports_none(monkeypatch, tmp_path):
     output_path = _bridge_args(monkeypatch, tmp_path)
     _fake_upstream(monkeypatch, lambda **_kwargs: {"decisions": {}})
     # An older langchain-core: the import fails, so ATL bills the ceiling.
-    monkeypatch.setitem(sys.modules, "langchain_core.callbacks", None)
+    monkeypatch.setitem(sys.modules, "langchain_core.tracers.context", None)
 
     bridge.main()
 

@@ -268,3 +268,33 @@ def test_editor_asset_cache_bust_advances_with_its_source():
 
     assert editor_version >= 27
     assert styles_version >= 87
+
+
+def _run_backtest_body() -> str:
+    from dashboard.backend.tests._frontend_source import fn_body, strip_comments
+
+    return strip_comments(fn_body("async function runBacktest("))
+
+
+def test_a_guest_is_asked_to_sign_in_before_a_hosted_run_starts():
+    """The route answers a guest's hosted run 401 (it bills ATL Credits).
+
+    Checked before `activateAgent`, so the agent is never marked running and
+    the progress panel never starts for a launch the server always refuses.
+    """
+    body = _run_backtest_body()
+    guard = body.index("!== 'pipeline' && !isSignedIn()")
+    assert guard < body.index("await activateAgent(activeAgent)")
+    assert "Sign in to run a hosted agent backtest" in body[guard:]
+
+
+def test_a_hosted_run_records_its_credits_lane_for_the_results_panel():
+    """The modal sends no billing_mode for a hosted run, which bills Credits.
+
+    Left to `selectedBillingMode` (set for pipeline runs only), the results
+    panel read Billing "—" for a run that charged the user.
+    """
+    body = _run_backtest_body()
+    launch = body[body.index("const launchConfigBase") :]
+    billing = launch[launch.index("billingMode:") : launch.index("providerId:")]
+    assert "isHostedRuntime ? 'platform_credits'" in billing

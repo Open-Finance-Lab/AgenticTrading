@@ -10943,6 +10943,12 @@ async function runBacktest() {
         alert('Please create or select an agent first.');
         return;
     }
+    if ((activeAgent.runtime_type || 'pipeline') !== 'pipeline' && !isSignedIn()) {
+        // The route refuses a guest's hosted run with 401 (it bills ATL
+        // Credits); say so before the agent and progress panel start.
+        showModalError('Sign in to run a hosted agent backtest: it is billed to your ATL Credits.');
+        return;
+    }
 
     await activateAgent(activeAgent);
     const isHostedRuntime = (activeAgent.runtime_type || 'pipeline') !== 'pipeline';
@@ -11047,8 +11053,13 @@ async function runBacktest() {
                 fill_policy: 'next_source_bar_open',
             },
         decisionSource,
-        billingMode: isRuleBasedDecision ? null : selectedBillingMode,
-        providerId: isRuleBasedDecision || selectedBillingMode === 'platform_credits'
+        // A hosted runtime bills ATL Credits server-side (the route refuses
+        // BYOK), though the modal sends no billing_mode for it.
+        billingMode: isRuleBasedDecision
+            ? null
+            : (isHostedRuntime ? 'platform_credits' : selectedBillingMode),
+        providerId: isRuleBasedDecision || isHostedRuntime
+            || selectedBillingMode === 'platform_credits'
             ? null
             : selectedProviderId,
         marketDataLabel: isIFind

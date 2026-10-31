@@ -43,7 +43,7 @@ from threading import Thread as _CancelWatchdogThread
 # ...and the bounded observational store calls (`_run_with_deadline`): the
 # timeout arm's spend lookup and the trace label.
 from threading import Thread as _DeadlineThread
-from typing import Any, Dict, List, Literal, NamedTuple, Optional, Tuple
+from typing import Any, Dict, List, Literal, NamedTuple, Optional, Sequence, Tuple
 
 import pytz
 from datetime import datetime, timedelta
@@ -164,6 +164,7 @@ from dashboard.backend.infrastructure.ai_hedge_fund.adapter import (
 )
 from dashboard.backend.infrastructure.ai_hedge_fund.billing import (
     PROVIDER_ID as AI_HEDGE_FUND_PROVIDER_ID,
+    decision_calls as ai_hedge_fund_decision_calls,
     decision_ceiling_micro as ai_hedge_fund_decision_ceiling_micro,
 )
 from dashboard.backend.domain.backtesting.constants import (
@@ -3052,6 +3053,9 @@ class _CreditsClaim(NamedTuple):
     # outside the lock (it is a store call). A run missing here started after
     # the read and is counted as having spent nothing yet.
     spent_by_run: Dict[str, int]
+    # False for a runtime whose model is platform-managed (AI Hedge Fund):
+    # the refusal then cannot suggest the caller's own API key.
+    byok_available: bool = True
 
 
 def _owner_platform_credit_slots(user_id: int) -> List[Tuple[str, int]]:
@@ -3103,6 +3107,11 @@ def _credits_shortfall(
             f"{running} running backtest{'s' if running != 1 else ''} "
             f"{'are' if running != 1 else 'is'} expected to use"
         )
+    if not claim.byok_available:
+        return message + (
+            ". Add Credits on the Credits page, shorten the date range, or "
+            "select fewer analysts or tickers."
+        )
     return message + (
         ". Add Credits on the Credits page, shorten the date range, choose a "
         "lower-cost model, or use your own API key."
@@ -3148,6 +3157,24 @@ def _enforce_platform_credits_balance(
     )
     if estimate is None:
         return None
+    return _admit_platform_credits(
+        user_id=user_id, model_id=model_id, estimate=estimate
+    )
+
+
+def _admit_platform_credits(
+    *,
+    user_id: int,
+    model_id: str,
+    estimate: _PlatformCreditsEstimate,
+    byok_available: bool = True,
+) -> Optional[_CreditsClaim]:
+    """The balance half of every ATL Credits preflight, whatever priced the run.
+
+    403 for a restricted account, 402 when the balance less the owner's other
+    in-flight Credits runs cannot cover ``estimate``; else the claim the slot
+    ledger re-checks and records. None (let through) on a failed balance read.
+    """
     with _backtest_slots_lock:
         in_flight = _owner_platform_credit_slots(user_id)
     try:
@@ -3177,6 +3204,7 @@ def _enforce_platform_credits_balance(
         calls=estimate.calls,
         model_id=model_id,
         spent_by_run=spent_by_run,
+        byok_available=byok_available,
     )
     shortfall = _credits_shortfall(claim, in_flight)
     if shortfall is not None:
@@ -3184,45 +3212,39 @@ def _enforce_platform_credits_balance(
     return claim
 
 
-def _enforce_ai_hedge_fund_credits(user_id: int, decision_ceiling_micro: int) -> None:
-    """Refuse an AI Hedge Fund run that cannot hold even its first decision.
+def _enforce_ai_hedge_fund_credits(
+    *,
+    user_id: int,
+    model_id: str,
+    analysts: Optional[Sequence[str]],
+    ticker_count: int,
+    start_date: str,
+    end_date: str,
+    market: object = None,
+) -> Optional[_CreditsClaim]:
+    """Refuse an AI Hedge Fund run its owner's Credits cannot hold to the end.
 
-    One decision, not the window: the per-decision hold in the child is the
-    gate (a run that drains mid-way stops with ``INSUFFICIENT_CREDITS`` like a
-    pipeline run), and the ceiling is deliberately generous, so a whole-window
-    multiple of it would refuse accounts that can afford the run. 403 for a
-    restricted account. Fail-open on a failed read, for the reason
-    ``_enforce_platform_credits_balance`` gives: the hold still refuses.
+    Priced at its ceiling: one decision per trading session, each held at the
+    child's own per-decision ceiling (``billing.decision_ceiling_micro``), so
+    the claim recorded on the slot is the most the run can draw while it is in
+    flight. The window bound (``MAX_AI_HEDGE_FUND_TRADING_DAYS``) keeps that
+    a few Credits at most. Through the shared admission, so pipeline and
+    AI Hedge Fund launches on one balance count each other and cannot each
+    pass alone and then starve together.
     """
-    try:
-        balance = credits_service.get_balance(int(user_id))
-    except Exception as exc:  # noqa: BLE001 - the reservation remains the gate
-        print(
-            "WARNING: credits.preflight_balance_unavailable "
-            f"category={type(exc).__name__}",
-            flush=True,
-        )
-        return
-    if balance.account_status == "restricted":
-        raise HTTPException(
-            status_code=403,
-            detail=LLMExecutionError.account_restricted(
-                balance.restriction_reason,
-                int(balance.outstanding_credits_micro or 0),
-            ).safe_message,
-        )
-    available = int(balance.total_available_micro)
-    if available < decision_ceiling_micro:
-        raise HTTPException(
-            status_code=402,
-            detail=(
-                "AI Hedge Fund holds up to "
-                f"{_format_credits(decision_ceiling_micro, round_up=True)} ATL "
-                "Credits per trading day while it decides, and your balance is "
-                f"{_format_credits(available)} Credits. Add Credits on the "
-                "Credits page, or select fewer analysts or tickers."
-            ),
-        )
+    sessions = _estimated_trading_sessions(start_date, end_date, market=market)
+    if sessions <= 0:
+        return None
+    return _admit_platform_credits(
+        user_id=user_id,
+        model_id=model_id,
+        estimate=_PlatformCreditsEstimate(
+            calls=sessions * ai_hedge_fund_decision_calls(analysts, ticker_count),
+            needed_micro=sessions
+            * ai_hedge_fund_decision_ceiling_micro(model_id, analysts, ticker_count),
+        ),
+        byok_available=False,
+    )
 
 
 def _enforce_pipeline_llm_window(
@@ -3371,7 +3393,11 @@ class _BoundedStreamCapture:
         )
 
 
-_RELAYED_CHILD_LINE_PREFIX = "ERROR: llm."
+# Child lines echoed to the service log live (``_drain_stream``): model
+# execution failures, and the hosted AI Hedge Fund meter's alarms
+# (``infrastructure/ai_hedge_fund/billing.py``), whose fail-closed charge must
+# reach the log, not only an end-of-run dump that can elide it.
+_RELAYED_CHILD_LINE_PREFIXES = ("ERROR: llm.", "ERROR: ai_hedge_fund.")
 # What a non-owner reads for a run a model-execution failure stopped: its
 # safe message names account facts (an empty balance, a refund review).
 _LLM_FAILURE_PUBLIC_ERROR = "Backtest stopped: the model run could not continue."
@@ -3425,7 +3451,7 @@ def _without_relayed_lines(text: str) -> str:
     return "".join(
         line
         for line in text.splitlines(keepends=True)
-        if not line.startswith(_RELAYED_CHILD_LINE_PREFIX)
+        if not line.startswith(_RELAYED_CHILD_LINE_PREFIXES)
     )
 
 
@@ -3444,7 +3470,7 @@ def _drain_stream(
     try:
         for line in iter(stream.readline, ""):
             capture.feed(line)
-            if line.startswith(_RELAYED_CHILD_LINE_PREFIX):
+            if line.startswith(_RELAYED_CHILD_LINE_PREFIXES):
                 # Echoed live, not left to the capture: the timeout path never
                 # dumps it, a normal exit dumps it only when the run ends, and
                 # a long run's middle is elided. Redacted like the dump, since
@@ -4183,6 +4209,11 @@ def run_backtest_endpoint(
     # here. Keyed on ``!= PIPELINE`` so a runtime added later is gated by
     # default.
     if runtime_type != PIPELINE_RUNTIME_TYPE and user_id is None:
+        # Ownership first: the runtime type above is read off any agent id, so
+        # a 401 here for a stranger's agent would tell a guest that agent is a
+        # hosted one. A guest's own agent passes, and a stranger's gets the
+        # same 404/403 the session resolver gives any agent id it cannot run.
+        _resolve_backtest_session(request, agent_id)
         raise HTTPException(
             status_code=401,
             detail="Sign in before running a hosted agent backtest.",
@@ -4514,13 +4545,14 @@ def run_backtest_endpoint(
         provider_id = AI_HEDGE_FUND_PROVIDER_ID
         provider_ids = (provider_id,)
         model = AI_HEDGE_FUND_MODEL_NAME
-        _enforce_ai_hedge_fund_credits(
-            int(user_id),
-            ai_hedge_fund_decision_ceiling_micro(
-                model,
-                (runtime_config or {}).get("analysts"),
-                len(selected_assets or ()) or len(profile.symbols),
-            ),
+        credits_claim = _enforce_ai_hedge_fund_credits(
+            user_id=int(user_id),
+            model_id=model,
+            analysts=(runtime_config or {}).get("analysts"),
+            ticker_count=len(selected_assets or ()) or len(profile.symbols),
+            start_date=start_date,
+            end_date=end_date,
+            market=profile.market,
         )
         execution_handoff_payload = create_execution_handoff(
             user_id=int(user_id),

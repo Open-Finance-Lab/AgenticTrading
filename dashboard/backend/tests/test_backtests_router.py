@@ -1058,6 +1058,38 @@ def test_guest_cannot_start_a_hosted_backtest(client, monkeypatch):
     assert spy.calls == 0
 
 
+def test_guest_cannot_learn_that_a_strangers_agent_is_hosted(client, monkeypatch):
+    """The ownership answer comes before the guest 401.
+
+    The runtime type is read off any agent id, so a 401 for a stranger's
+    agent would tell a guest the agent is a hosted one; it gets the same 403
+    a stranger's agent of any runtime gets.
+    """
+    spy = _Spy()
+    monkeypatch.setattr(bt, "run_backtest_background", spy)
+    cloned = client.post(
+        "/api/v1/agents/marketplace/ai-hedge-fund/clone",
+        json={},
+        headers={"X-Session-Id": str(uuid.uuid4())},
+    )
+    assert cloned.status_code == 200, cloned.text
+
+    response = client.post(
+        "/backtest/run",
+        json={
+            "start_date": "2026-05-01",
+            "end_date": "2026-05-02",
+            "decision_source": "llm",
+            "agent_id": cloned.json()["agent"]["agent_id"],
+        },
+        headers={"X-Session-Id": str(uuid.uuid4())},
+    )
+
+    assert response.status_code == 403, response.text
+    assert response.json()["detail"] == "Not your agent"
+    assert spy.calls == 0
+
+
 def _post_ai_hedge_fund_run(client, monkeypatch, credits, **body):
     """Launch the cloned AI Hedge Fund agent as a signed-in caller.
 
@@ -1126,7 +1158,7 @@ def test_ai_hedge_fund_run_bills_credits_through_a_signed_handoff(
     assert spy.last_kwargs["model"] == handoff["model_id"]
 
 
-def test_ai_hedge_fund_run_that_cannot_hold_one_decision_is_refused_with_402(
+def test_ai_hedge_fund_run_its_balance_cannot_hold_is_refused_with_402(
     client, monkeypatch
 ):
     credits = _FakeBalanceCredits(1_000)
@@ -1135,11 +1167,46 @@ def test_ai_hedge_fund_run_that_cannot_hold_one_decision_is_refused_with_402(
 
     assert response.status_code == 402, response.text
     detail = response.json()["detail"]
-    assert "per trading day" in detail
     assert "your balance is 0.00 Credits" in detail
+    # The model is platform-managed: no "use your own API key" remedy.
+    assert "select fewer analysts or tickers" in detail
+    assert "API key" not in detail
     assert credits.balance_reads == [7]
     assert handoffs == []
     assert spy.calls == 0
+
+
+def test_ai_hedge_fund_run_enters_the_in_flight_credits_ledger(client, monkeypatch):
+    """Admitted at its window ceiling, so the owner's next launch counts it."""
+    response, _spy, _handoffs = _post_ai_hedge_fund_run(
+        client, monkeypatch, _FakeBalanceCredits(8_000_000)
+    )
+
+    assert response.status_code == 200, response.text
+    run_id = response.json()["run_id"]
+    [(admitted_run, estimate)] = bt._owner_platform_credit_slots(7)
+    assert admitted_run == run_id
+    assert estimate > 0
+
+
+def test_ai_hedge_fund_launch_counts_the_owners_running_credits_runs(
+    client, monkeypatch
+):
+    # Alone it fits in 8 Credits; beside a sibling still expected to spend
+    # almost all of them, both would start and then starve together.
+    _admit_running_platform_slot("agent_sibling", user_id=7, estimate=7_999_000)
+
+    class _Credits(_FakeBalanceCredits):
+        def sum_run_llm_spend(self, user_id, run_id):
+            return (0, 0)
+
+    response, spy, handoffs = _post_ai_hedge_fund_run(
+        client, monkeypatch, _Credits(8_000_000)
+    )
+
+    assert response.status_code == 402, response.text
+    assert "1 running backtest is expected to use" in response.json()["detail"]
+    assert handoffs == [] and spy.calls == 0
 
 
 def test_ai_hedge_fund_restricted_account_is_refused_with_403(client, monkeypatch):
