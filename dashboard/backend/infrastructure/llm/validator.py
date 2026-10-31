@@ -15,7 +15,7 @@ import json
 import logging
 import math
 import re
-from typing import Dict, Any, List, Optional, Tuple
+from typing import Dict, Any, List, NamedTuple, Optional, Tuple
 from enum import Enum
 from datetime import datetime
 from pydantic import BaseModel, field_validator, ValidationError, ConfigDict
@@ -157,6 +157,17 @@ LLM_SELL_SIZING = "requested_shares"
 LEGACY_LLM_SELL_SIZING = "whole_position"
 
 
+class SellRequest(NamedTuple):
+    """What a model's SELL asks for (``sell_request``)."""
+
+    shares: Optional[float]  # None when the SELL must be skipped
+    refusal: Optional[str]  # why it was skipped
+    # The shares it asked for, for the order ledger: a finite count of 0 or
+    # more, so a refused trim records the part it wanted and a size with no
+    # count ("all", NaN, -3) records 0.
+    asked: float
+
+
 def requested_sell_shares(
     position_size: Any,
     size_fraction: Any,
@@ -164,10 +175,22 @@ def requested_sell_shares(
     *,
     lot_size: int = 1,
 ) -> Tuple[Optional[float], Optional[str]]:
+    """``(shares, None)``, or ``(None, why)`` when the SELL must be skipped:
+    ``sell_request`` without the ledger's count."""
+    request = sell_request(position_size, size_fraction, held, lot_size=lot_size)
+    return request.shares, request.refusal
+
+
+def sell_request(
+    position_size: Any,
+    size_fraction: Any,
+    held: float,
+    *,
+    lot_size: int = 1,
+) -> SellRequest:
     """Shares a model's SELL asks for, before the holding and T+1 cap it (#661).
 
-    ``(shares, None)``, or ``(None, why)`` when the SELL must be skipped. One
-    rule for both readers of a SELL: the backtest gate and
+    One rule for both readers of a SELL: the backtest gate and
     ``actions_to_executable``. Only a size the model left out, null or 0 means
     the whole position (the convention both have always shared; blank text is
     left out, as everywhere ``model_number`` reads a number); a size this
@@ -178,34 +201,62 @@ def requested_sell_shares(
       to 0. In a lot market it is passed on as written, for the executor's own
       lot check.
     - With no ``position_size``, ``size_fraction`` (a pipeline risk action's
-      ``size_pct``) is a share of ``held``: a number above 0, 1 or more
-      meaning all of it, a part rounded down to whole lots. Without one, the
-      whole position.
+      ``size_pct``) is a share of ``held``: above 0 and below 1 that part,
+      rounded down to whole lots; 1, or 100 and more, all of it. Without one,
+      the whole position.
     - A bool, text that is not a number, a list, NaN, infinity or a negative
       number in either field is refused, and so is a fraction that rounds to
-      no shares.
+      no shares or one between 1 and 100.
     """
     size = model_number(position_size, 0.0)
     if size is None or not math.isfinite(size) or size < 0:
-        return None, f"position_size {position_size!r} is not a share count"
+        return SellRequest(None, f"position_size {position_size!r} is not a share count", 0.0)
     if size > 0:
         if lot_size > 1:
-            return size, None
+            return SellRequest(size, None, size)
         if size < 1:
-            return None, f"position_size {position_size!r} is less than one share"
-        return int(size), None
+            return SellRequest(
+                None, f"position_size {position_size!r} is less than one share", size
+            )
+        return SellRequest(int(size), None, int(size))
     fraction = model_number(size_fraction, 1.0)  # absent: the whole position
     if fraction is None or not math.isfinite(fraction) or fraction <= 0:
-        return None, f"size_fraction {size_fraction!r} is not a share of the position"
+        return SellRequest(
+            None, f"size_fraction {size_fraction!r} is not a share of the position", 0.0
+        )
+    if 1 < fraction < 100:
+        # A fraction (all of it) and a percentage (that share) disagree here,
+        # and no prompt stated size_pct's unit, so a model writing 25 for 25%
+        # was sold out (#690). Refused, not read either way: reading it as a
+        # percentage would silently change what 1.5 did. 100 or more is all
+        # of it on both readings. 1 is not: as a percentage it is a 1% trim.
+        # It is read as a fraction, all of it, because that is the unit the
+        # pipeline prompt states (_RISK_SIZE_RULE), and 1.0 is how a model
+        # writing fractions says "the whole position"; refusing it would
+        # break every such full exit to guard a trim that small.
+        # LLM_SELL_SIZING stays: a size_fraction comes from a pipeline's
+        # risk_actions, and neither of that marker's readers (the
+        # leaderboard's pools, a Live month's resume) runs a pipeline.
+        return SellRequest(
+            None,
+            f"size_fraction {size_fraction!r} is between 1 and 100, "
+            "where a fraction and a percentage disagree",
+            0.0,
+        )
     if fraction >= 1:
-        return held, None
+        return SellRequest(held, None, held)
     # Rounded before the floor: 0.57 * 100 is 56.99999999999999 in binary
     # floating point, and a bare floor sold 56 of the 57 shares asked for.
-    lots = math.floor(round(fraction * held / lot_size, 9))
+    part = round(fraction * held, 9)
+    lots = math.floor(round(part / lot_size, 9))
     if lots <= 0:
         unit = "one share" if lot_size == 1 else f"one lot of {lot_size}"
-        return None, f"size_fraction {size_fraction!r} of {held:g} shares is less than {unit}"
-    return lots * lot_size, None
+        return SellRequest(
+            None,
+            f"size_fraction {size_fraction!r} of {held:g} shares is less than {unit}",
+            part,
+        )
+    return SellRequest(lots * lot_size, None, lots * lot_size)
 
 
 def confidence_in_range(confidence: float) -> bool:

@@ -42,11 +42,10 @@ from dashboard.backend.infrastructure.llm.validator import (
     MAX_ORDER_SHARES,
     TRADING_ACTIONS,
     create_prompt,
-    model_number,
     normalize_action,
     normalize_symbol,
     read_confidence,
-    requested_sell_shares,
+    sell_request,
 )
 from dashboard.backend.domain.trading.portfolio import (
     append_equity_record as _append_equity_record,
@@ -575,7 +574,7 @@ class PortfolioManager:
         self,
         *,
         symbol: str,
-        raw_size: Any,
+        requested_shares: float,
         timestamp: Any,
         price: float,
         strategy_reason: str,
@@ -587,7 +586,6 @@ class PortfolioManager:
         reads, and a run whose model wrote ``"all"`` would publish a curve
         that never sold with nothing to say why.
         """
-        asked = model_number(raw_size)
         _record_refused_order(
             rejected_orders=self.rejected_orders,
             order_events=self.order_events,
@@ -595,9 +593,11 @@ class PortfolioManager:
             timestamp=timestamp,
             symbol=symbol,
             action="sell",
-            # A finite number, as every ledger field must be: "all" or NaN
-            # asked for no count, and the reason says the size was refused.
-            requested_shares=asked if asked is not None and math.isfinite(asked) else 0,
+            # sell_request's count: finite and never negative, as every
+            # ledger field must be ("all", NaN or -3 asked for no count, and
+            # the reason says the size was refused), and for a refused trim
+            # the part it asked for, not the 0 its position_size carries.
+            requested_shares=requested_shares,
             price=price,
             reason=SELL_SIZE_REFUSED_REASON,
             strategy_reason=strategy_reason,
@@ -1215,7 +1215,7 @@ class PortfolioManager:
                 # no default is put over it. It therefore cannot decide the
                 # 0.3 floor either way, so an order that does not need it is
                 # carried out as the model wrote it -- a sell (sized by
-                # requested_sell_shares) or a buy with its own position_size. Only
+                # sell_request) or a buy with its own position_size. Only
                 # a buy that would be sized from it is skipped, below: that is
                 # where a 0-100 answer used to multiply the order by 100.
                 if confidence is None:
@@ -1311,11 +1311,10 @@ class PortfolioManager:
                     # else a size_fraction of the position (what a pipeline
                     # risk action sends), else the whole position. A size that
                     # cannot be read skips THIS action and is recorded; it is
-                    # never read as "all of it" (requested_sell_shares).
+                    # never read as "all of it" (sell_request).
                     reason = f"[LLM] {reasoning} (confidence: {conf_label})"
-                    raw_size = llm_action.get("position_size")
-                    requested, refusal = requested_sell_shares(
-                        raw_size,
+                    requested, refusal, asked = sell_request(
+                        llm_action.get("position_size"),
                         llm_action.get("size_fraction"),
                         held,
                         lot_size=self.lot_size,
@@ -1324,7 +1323,7 @@ class PortfolioManager:
                         print(f"      ⚠️  SELL {symbol}: Skip ({refusal})")
                         self._refuse_sell(
                             symbol=symbol,
-                            raw_size=raw_size,
+                            requested_shares=asked,
                             timestamp=timestamp,
                             price=price,
                             strategy_reason=reason,

@@ -46,6 +46,44 @@ def test_intent_reads_final_step_orders_and_risk_actions():
     }
 
 
+def test_intent_records_orders_and_risk_actions_together_and_a_risk_share_count():
+    both = [{"step": 1, "output": {
+        "orders": [{"symbol": "AAPL", "side": "buy", "qty": 7}],
+        "risk_actions": [{"symbol": "MSFT", "action": "stop_loss", "qty": 3}],
+    }}]
+    intent = tape.intent_from_outputs(both, outputs_before=[], decision_step_count=1)
+    assert [(o["symbol"], o["action"], o["position_size"]) for o in intent["orders"]] == [
+        ("AAPL", "buy", 7), ("MSFT", "sell", 3),
+    ]
+    assert "ignored_envelopes" not in intent
+
+
+def test_intent_names_the_envelopes_an_actions_list_overrode():
+    """A bar whose ``orders`` were dropped for its ``actions`` must say so on
+    the tape: stdout from a dashboard backtest reaches nobody."""
+    out = [{"step": 1, "output": {
+        "actions": [{"symbol": "AAPL", "action": "hold"}],
+        "orders": [{"symbol": "MSFT", "side": "buy", "qty": 1}],
+    }}]
+    intent = tape.intent_from_outputs(out, outputs_before=[], decision_step_count=1)
+    assert [o["symbol"] for o in intent["orders"]] == ["AAPL"]
+    assert intent["ignored_envelopes"] == ["orders"]
+
+
+def test_intent_names_the_risk_actions_an_order_overrode():
+    out = [{"step": 1, "output": {
+        "orders": [{"symbol": "AAPL", "side": "buy", "qty": 7}],
+        "risk_actions": [
+            {"symbol": "AAPL", "action": "stop_loss"},
+            {"symbol": "MSFT", "action": "stop_loss"},
+        ],
+    }}]
+    intent = tape.intent_from_outputs(out, outputs_before=[], decision_step_count=1)
+    assert [(o["symbol"], o["action"]) for o in intent["orders"]] == [("AAPL", "buy"), ("MSFT", "sell")]
+    assert intent["ignored_risk_symbols"] == ["AAPL"]
+    assert "ignored_envelopes" not in intent
+
+
 def test_intent_is_unparsed_when_final_step_is_missing():
     # Step 2 of 2 failed to parse, so only step 1's output came back.
     partial = [{"step": 1, "output": {"facts": []}}]
@@ -335,7 +373,7 @@ def test_decision_and_execution_payload_shapes():
         bar_index=4, decision_at=pd.Timestamp("2026-03-02 11:30"), driver="llm",
         intent={"orders": []}, state={"cash": 1.0, "equity": 1.0, "positions": []}, actions=actions,
     )
-    assert decision["tape_version"] == 2 and decision["bar_index"] == 4
+    assert decision["tape_version"] == 3 and decision["bar_index"] == 4
     assert decision["actions"] == [{"symbol": "AAPL", "action": "buy", "shares": 3, "reason": "why", "confidence": 0.7}]
     assert decision["reasoning_summaries"] == ["why"] and decision["accepted"] is True
     assert decision["gate_rewrote"] is True  # the model ordered nothing; the gate produced a buy
@@ -439,7 +477,7 @@ def test_recorder_resolves_trace_once_and_writes_each_bar(monkeypatch):
     assert [w["bar_index"] for w in fake.writes] == [0, 1, 2]
     assert fake.writes[0]["trace_id"] == "trc_1" and fake.writes[0]["run_id"] == "agent_x"
     assert recorder.summary() == {
-        "tape_version": 2, "traced": True, "bars_recorded": 3, "gate_rewrites": 1,
+        "tape_version": 3, "traced": True, "bars_recorded": 3, "gate_rewrites": 1,
         "write_failures": 0, "oversize_skipped": 0, "suspended_skipped": 0,
         "bars_dropped": 0,
     }

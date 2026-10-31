@@ -2,9 +2,9 @@
 
 Each decision-pipeline step is one LLM call. Step 1 receives the market
 snapshot; later steps receive upstream JSON outputs. The final decision step
-should emit either ``actions`` (standard trading contract) or ``orders`` /
-``risk_actions`` which are normalized into ``actions`` for the existing
-portfolio executor.
+should emit either ``actions`` (standard trading contract) or ``orders`` and/or
+``risk_actions``, which are normalized together into ``actions`` for the
+existing portfolio executor.
 
 Steps with ``presetKey == "post_trade_analysis"`` are stripped from the hourly
 decision path and executed once per trading day after trades settle.
@@ -14,10 +14,9 @@ from __future__ import annotations
 
 import copy
 import json
-import math
 import os
 import re
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, NamedTuple, Optional, Tuple
 
 from dashboard.backend.infrastructure.llm.backtest_harness import (
     DEFAULT_MAX_OUTPUT_TOKENS,
@@ -38,6 +37,7 @@ from dashboard.backend.infrastructure.llm.validator import (
     PIPELINE_RISK_DEFAULT_CONFIDENCE,
     model_number,
     normalize_action,
+    normalize_symbol,
     read_confidence,
 )
 
@@ -145,6 +145,18 @@ _SELL_SIZE_RULE = (
     "a qty of 0 sells the whole position."
 )
 
+# Nothing stated size_pct's unit, so a model writing 25 for 25% was sold out
+# (#690). Stated only to a last step whose pipeline names the risk envelope:
+# in any decision step's prompt or output format, or in an upstream output the
+# last step reads. Every other pipeline's prompt stays byte-identical, and none
+# is pointed at an envelope it never asked for.
+_RISK_SIZE_RULE = (
+    "- A risk action's size_pct is the fraction of the position to sell, from "
+    "0 to 1: 0.25 sells a quarter and 1 sells all of it. It is not a "
+    "percentage: a size_pct between 1 and 100 is rejected."
+)
+_RISK_ENVELOPE_MARKERS = ("risk_actions", "size_pct")
+
 
 def _market_lot_size(market_snapshot: Any) -> int:
     """The board lot the snapshot's ``market`` block declares, else 1."""
@@ -155,6 +167,15 @@ def _market_lot_size(market_snapshot: Any) -> int:
     return raw
 
 
+def _names_risk_envelope(*texts: Any) -> bool:
+    """Whether any of ``texts`` names the risk envelope (_RISK_SIZE_RULE)."""
+    return any(
+        isinstance(text, str) and marker in text
+        for marker in _RISK_ENVELOPE_MARKERS
+        for text in texts
+    )
+
+
 def _build_step_prompt(
     *,
     step_index: int,
@@ -162,7 +183,12 @@ def _build_step_prompt(
     market_snapshot: Dict[str, Any],
     prior_outputs: List[Dict[str, Any]],
     is_last: bool,
+    pipeline_names_risk_envelope: bool = False,
 ) -> str:
+    """One step's prompt. ``pipeline_names_risk_envelope``: some decision step
+    of this pipeline names ``risk_actions`` or ``size_pct``
+    (``_names_risk_envelope``), so the last step may emit one even when its
+    own text does not say so."""
     label = (step.get("label") or f"Step {step_index + 1}").strip()
     task = (step.get("prompt") or "").strip()
     output_format = (step.get("outputFormat") or "").strip()
@@ -186,14 +212,9 @@ def _build_step_prompt(
             ]
         )
 
+    upstream = json.dumps(prior_outputs, indent=2) if prior_outputs else ""
     if prior_outputs:
-        parts.extend(
-            [
-                "",
-                "=== UPSTREAM PIPELINE OUTPUTS ===",
-                json.dumps(prior_outputs, indent=2),
-            ]
-        )
+        parts.extend(["", "=== UPSTREAM PIPELINE OUTPUTS ===", upstream])
 
     if is_last:
         parts.extend(
@@ -203,6 +224,14 @@ def _build_step_prompt(
                 "- Trade ONLY symbols listed in the market snapshot.",
                 "- Only SELL symbols that appear in current_holdings.",
                 _SELL_SIZE_RULE,
+            ]
+        )
+        if pipeline_names_risk_envelope or _names_risk_envelope(
+            task, output_format, upstream
+        ):
+            parts.append(_RISK_SIZE_RULE)
+        parts.extend(
+            [
                 "- Respect available cash for buy orders.",
                 "- Use integer share quantities.",
             ]
@@ -230,10 +259,72 @@ def _build_step_prompt(
     return "\n".join(parts)
 
 
+_SHARE_COUNT_KEYS = ("qty", "quantity", "position_size")
+
+
+def _model_qty(entry: Dict[str, Any], keys: Tuple[str, ...] = _SHARE_COUNT_KEYS) -> Any:
+    """A share count as the model wrote it, under the first of ``keys`` it
+    filled in; 0, which asks the gate to size the order, when it gave none.
+
+    A null or blank key is not filled in: chained ``get`` defaults let
+    ``{"qty": null, "quantity": 10}`` read as null, a whole-position sell.
+    """
+    for key in keys:
+        value = entry.get(key)
+        if _filled_in(value):
+            return value
+    return 0
+
+
+def _filled_in(value: Any) -> bool:
+    """Whether the model gave a value: null and blank text are left out, as
+    ``model_number`` reads them."""
+    return value is not None and not (isinstance(value, str) and not value.strip())
+
+
+def _entry_symbol(entry: Dict[str, Any]) -> str:
+    """An entry's symbol as the gate reads it."""
+    return normalize_symbol(str(entry.get("symbol") or ""))
+
+
+class PipelineReading(NamedTuple):
+    """A pipeline reply read once (``read_pipeline_output``)."""
+
+    # The standard ``actions`` decision, or None when none can be made.
+    decision: Optional[Dict[str, Any]]
+    # The non-empty ``orders`` / ``risk_actions`` lists a non-empty
+    # ``actions`` list overrode, by name.
+    ignored_envelopes: List[str]
+    # Symbols whose risk actions an order on the same symbol overrode.
+    ignored_risk_symbols: List[str]
+
+
 def pipeline_output_to_decision(parsed: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    """Normalize a pipeline step's JSON into the standard ``actions`` decision."""
+    """Normalize a pipeline step's JSON into the standard ``actions`` decision
+    (``read_pipeline_output``, without what it ignored)."""
+    return read_pipeline_output(parsed).decision
+
+
+def read_pipeline_output(parsed: Any) -> PipelineReading:
+    """Normalize a pipeline step's JSON into the standard ``actions`` decision,
+    and name what it ignored, in one pass: ``run_pipeline_decision`` logs and
+    the decision tape records the same reading the gate gets.
+
+    A non-empty ``actions`` list is the standard contract and passes through
+    whole; merging either other list into it could place one order twice,
+    once per shape, so the lists it overrides are named instead. Otherwise
+    ``orders`` and ``risk_actions`` are read together, orders first: a step
+    that emits both means both, and returning the first non-empty one dropped
+    every stop-loss beside a buy on another name unseen. An order wins its
+    symbol, so a risk action on a name an order already trades is dropped and
+    named: the gate sizes every sell against the holding before the bar, so
+    an order sell and a stop-loss on one name would both sell it, and a stop
+    beside a buy is a level for the new position (the gate has no resting
+    orders), not a market sell of the old one. A reply that names each symbol
+    once therefore stays within the gate's per-step action cap.
+    """
     if not isinstance(parsed, dict):
-        return None
+        return PipelineReading(None, [], [])
 
     saw_empty_envelope = False
     saw_unusable_nonempty_envelope = False
@@ -241,15 +332,25 @@ def pipeline_output_to_decision(parsed: Dict[str, Any]) -> Optional[Dict[str, An
     actions = parsed.get("actions")
     if isinstance(actions, list):
         if actions:
-            return {"actions": actions}
+            return PipelineReading(
+                {"actions": actions},
+                [
+                    key
+                    for key in ("orders", "risk_actions")
+                    if isinstance(parsed.get(key), list) and parsed[key]
+                ],
+                [],
+            )
         saw_empty_envelope = True
 
+    normalized: List[Dict[str, Any]] = []
+    ignored_risk_symbols: List[str] = []
     orders = parsed.get("orders")
     if isinstance(orders, list):
         if not orders:
             saw_empty_envelope = True
         else:
-            normalized = []
+            before = len(normalized)
             for order in orders:
                 if not isinstance(order, dict):
                     continue
@@ -264,9 +365,7 @@ def pipeline_output_to_decision(parsed: Dict[str, Any]) -> Optional[Dict[str, An
                     or normalize_action(order.get("action"))
                     or "hold"
                 )
-                qty = order.get(
-                    "qty", order.get("quantity", order.get("position_size", 0))
-                )
+                qty = _model_qty(order)
                 raw_confidence = order.get("confidence")
                 confidence = read_confidence(
                     raw_confidence, PIPELINE_ORDER_DEFAULT_CONFIDENCE
@@ -293,18 +392,24 @@ def pipeline_output_to_decision(parsed: Dict[str, Any]) -> Optional[Dict[str, An
                         "take_profit_price": order.get("take_profit_price"),
                     }
                 )
-            if normalized:
-                return {"actions": normalized}
-            saw_unusable_nonempty_envelope = True
+            if len(normalized) == before:
+                saw_unusable_nonempty_envelope = True
+    ordered_symbols = {_entry_symbol(order) for order in normalized}
 
     risk_actions = parsed.get("risk_actions")
     if isinstance(risk_actions, list):
         if not risk_actions:
             saw_empty_envelope = True
         else:
-            normalized = []
+            read_any = False
             for risk in risk_actions:
                 if not isinstance(risk, dict):
+                    continue
+                symbol = _entry_symbol(risk)
+                if symbol in ordered_symbols:
+                    if symbol not in ignored_risk_symbols:
+                        ignored_risk_symbols.append(symbol)
+                    read_any = True  # overridden, not unusable
                     continue
                 action_type = normalize_action(risk.get("action")) or "hold"
                 # Anything else, buy/sell/hold included, is handed on as
@@ -315,18 +420,35 @@ def pipeline_output_to_decision(parsed: Dict[str, Any]) -> Optional[Dict[str, An
                     side = "sell"
                 else:
                     side = action_type
-                # A missing size sells the whole position. One the model gave
-                # must be a positive number: 0 asks to sell nothing, and a
-                # malformed size is not read as "all of it" (the same rule as
-                # read_confidence), so either one holds. Any positive size
-                # still sells the whole sellable position: the gate does not
-                # size a sell (see decision_tape._order_triples), so a
-                # size_pct of 0.25 is a full exit, not a partial one.
-                size_pct = model_number(risk.get("size_pct"), 1.0)
-                if side == "sell" and (
-                    size_pct is None
-                    or not (math.isfinite(size_pct) and size_pct > 0)
-                ):
+                # Sized like an order where the model gave a share count
+                # (``_model_qty``), which the gate prefers; it was dropped
+                # here, so "sell 10" closed the whole position. A risk
+                # action's ``position_size`` is read as one only beside no
+                # size_pct: in this envelope it is as often a fraction of the
+                # position, and read as shares it would override the size_pct
+                # that says so (0.5 refused as under one share). Otherwise a
+                # sell is sized by size_pct, a fraction of the position
+                # (_RISK_SIZE_RULE): 0.25 sells a quarter, rounded down to
+                # whole shares or lots and refused if that is none; 1 (the
+                # fraction, not 1%), and any finite size of 100 or more, all
+                # of it; between 1 and 100,
+                # where it reads as a percentage too, it is refused (#690);
+                # infinity is refused like NaN. A missing size_pct is
+                # the whole position, and one of 0 with no share count asks
+                # to sell nothing, so it holds. Any other size goes on as
+                # written for requested_sell_shares to refuse and record: held
+                # here, it never reached the gate and nothing was recorded. A
+                # buy has no position to take a fraction of; the gate sizes it
+                # by its share count, else from confidence.
+                raw_size_pct = risk.get("size_pct")
+                qty = _model_qty(
+                    risk,
+                    ("qty", "quantity")
+                    if _filled_in(raw_size_pct)
+                    else _SHARE_COUNT_KEYS,
+                )
+                size_pct = model_number(raw_size_pct, 1.0)
+                if side == "sell" and size_pct == 0 and model_number(qty, 0.0) == 0:
                     side = "hold"
                 raw_confidence = risk.get("confidence")
                 confidence = read_confidence(
@@ -341,7 +463,7 @@ def pipeline_output_to_decision(parsed: Dict[str, Any]) -> Optional[Dict[str, An
                     "reasoning": risk.get("reason")
                     or risk.get("rationale")
                     or action_type,
-                    "position_size": 0,
+                    "position_size": qty,
                 }
                 if side == "sell":
                     # A share of the position, not a share count: the sell
@@ -349,17 +471,27 @@ def pipeline_output_to_decision(parsed: Dict[str, Any]) -> Optional[Dict[str, An
                     # which this function never sees. It used to send
                     # round(size_pct * 100) as a share count, which also
                     # raised OverflowError on a size_pct near the float limit.
-                    order["size_fraction"] = size_pct
+                    # On the decision tape a sell sized this way has no size
+                    # (decision_tape._order_triples): selling the share asked
+                    # for is not a gate rewrite, and a refusal, a dropped
+                    # order, is.
+                    order["size_fraction"] = (
+                        raw_size_pct if size_pct is None else size_pct
+                    )
                 normalized.append(order)
-            if normalized:
-                return {"actions": normalized}
-            saw_unusable_nonempty_envelope = True
+                read_any = True
+            if not read_any:
+                saw_unusable_nonempty_envelope = True
 
-    if saw_unusable_nonempty_envelope:
-        return None
-    if saw_empty_envelope:
-        return {"actions": []}
-    return None
+    if normalized:
+        decision: Optional[Dict[str, Any]] = {"actions": normalized}
+    elif saw_unusable_nonempty_envelope:
+        decision = None
+    elif saw_empty_envelope:
+        decision = {"actions": []}
+    else:
+        decision = None
+    return PipelineReading(decision, [], ignored_risk_symbols)
 
 
 def apply_prompt_patches(
@@ -910,6 +1042,11 @@ def run_pipeline_decision(
     # with the same request. (When the configured ceiling is itself at least
     # the recovery one, nothing is raised and the retry stays as it was.)
     truncation_retry_allowed = first_ceiling <= DEFAULT_MAX_OUTPUT_TOKENS
+    names_risk_envelope = any(
+        isinstance(step, dict)
+        and _names_risk_envelope(step.get("prompt"), step.get("outputFormat"))
+        for step in decision_steps
+    )
 
     for index, step in enumerate(decision_steps):
         if not isinstance(step, dict):
@@ -922,6 +1059,7 @@ def run_pipeline_decision(
             market_snapshot=market_snapshot,
             prior_outputs=prior_outputs,
             is_last=(index == len(decision_steps) - 1),
+            pipeline_names_risk_envelope=names_risk_envelope,
         )
         label = step.get("label") or f"Step {index + 1}"
         print(f"\n🔗 Pipeline step {index + 1}/{len(decision_steps)}: {label}")
@@ -997,7 +1135,19 @@ def run_pipeline_decision(
         )
         last_parsed = parsed
 
-    decision = pipeline_output_to_decision(last_parsed or {})
+    reading = read_pipeline_output(last_parsed or {})
+    if reading.ignored_envelopes:
+        print(
+            "   ⚠️  Final pipeline output has an actions list; ignoring its "
+            + " and ".join(reading.ignored_envelopes)
+        )
+    if reading.ignored_risk_symbols:
+        print(
+            "   ⚠️  Final pipeline output has orders for "
+            + ", ".join(reading.ignored_risk_symbols)
+            + "; ignoring their risk_actions"
+        )
+    decision = reading.decision
     if decision is None:
         print("   ❌ Final pipeline output could not be converted to trading actions")
         return None, usage.totals, usage.calls, prior_outputs

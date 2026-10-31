@@ -178,7 +178,15 @@ leaderboard refresh, a `python -c` probe).
   position) joined the intent fields, and a sized SELL's size is compared. A
   v1 tape was recorded under a gate that sold the whole position whatever the
   size, and stored a risk sell's `size_pct * 100` as its `position_size`, so a
-  v1 tape replays only under that rule.
+  v1 tape replays only under that rule. **3 since #691**: a `size_fraction`
+  between 1 and 100 is refused rather than read as a full exit (#690), a risk
+  action's share count is recorded as its `position_size` (#700), and a
+  reply's `orders` and `risk_actions` are recorded together, an order winning
+  its symbol (#701). A v2 tape
+  stored a risk sell's share count as 0 and dropped the risk actions of a bar
+  that also had orders. An intent may also carry `ignored_envelopes`, naming
+  the lists a non-empty `actions` overrode, and `ignored_risk_symbols`, the
+  symbols whose risk actions an order on the same symbol overrode.
 - `driver_for(...)` → `"llm"` | `"llm_fallback"` | `"rule_based"`.
 - `gate_rewrote(intent, actions)` → `True` when `intent` holds orders and its
   `(symbol, side, size)` triples cannot be paired with the actions' (a dropped
