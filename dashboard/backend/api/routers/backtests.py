@@ -157,9 +157,14 @@ from dashboard.backend.domain.agents.runtime import (
     normalize_runtime_type,
 )
 from dashboard.backend.infrastructure.ai_hedge_fund.adapter import (
+    DEFAULT_MODEL_NAME as AI_HEDGE_FUND_MODEL_NAME,
     AiHedgeFundConfigurationError,
     resolve_step_timeout_seconds,
     runtime_unavailable_reason,
+)
+from dashboard.backend.infrastructure.ai_hedge_fund.billing import (
+    PROVIDER_ID as AI_HEDGE_FUND_PROVIDER_ID,
+    decision_ceiling_micro as ai_hedge_fund_decision_ceiling_micro,
 )
 from dashboard.backend.domain.backtesting.constants import (
     INITIAL_CAPITAL,
@@ -3179,6 +3184,47 @@ def _enforce_platform_credits_balance(
     return claim
 
 
+def _enforce_ai_hedge_fund_credits(user_id: int, decision_ceiling_micro: int) -> None:
+    """Refuse an AI Hedge Fund run that cannot hold even its first decision.
+
+    One decision, not the window: the per-decision hold in the child is the
+    gate (a run that drains mid-way stops with ``INSUFFICIENT_CREDITS`` like a
+    pipeline run), and the ceiling is deliberately generous, so a whole-window
+    multiple of it would refuse accounts that can afford the run. 403 for a
+    restricted account. Fail-open on a failed read, for the reason
+    ``_enforce_platform_credits_balance`` gives: the hold still refuses.
+    """
+    try:
+        balance = credits_service.get_balance(int(user_id))
+    except Exception as exc:  # noqa: BLE001 - the reservation remains the gate
+        print(
+            "WARNING: credits.preflight_balance_unavailable "
+            f"category={type(exc).__name__}",
+            flush=True,
+        )
+        return
+    if balance.account_status == "restricted":
+        raise HTTPException(
+            status_code=403,
+            detail=LLMExecutionError.account_restricted(
+                balance.restriction_reason,
+                int(balance.outstanding_credits_micro or 0),
+            ).safe_message,
+        )
+    available = int(balance.total_available_micro)
+    if available < decision_ceiling_micro:
+        raise HTTPException(
+            status_code=402,
+            detail=(
+                "AI Hedge Fund holds up to "
+                f"{_format_credits(decision_ceiling_micro, round_up=True)} ATL "
+                "Credits per trading day while it decides, and your balance is "
+                f"{_format_credits(available)} Credits. Add Credits on the "
+                "Credits page, or select fewer analysts or tickers."
+            ),
+        )
+
+
 def _enforce_pipeline_llm_window(
     runtime_type: str,
     decision_source: str,
@@ -4129,12 +4175,13 @@ def run_backtest_endpoint(
     )
     user_id = optional_user["id"] if optional_user else None
 
-    # A hosted runtime bills the operator's own provider key with no Credits
-    # reservation, and a guest's per-owner slot and rate-limit key are a
-    # session id the guest mints itself, so neither bounds a guest. Refused
-    # first, before the window bound and the readiness checks, so a guest
-    # learns nothing about whether the runtime is armed here. Keyed on
-    # ``!= PIPELINE`` so a runtime added later is gated by default.
+    # A hosted runtime calls a platform-managed model, billed to the caller's
+    # ATL Credits, which a guest does not have; and a guest's per-owner slot
+    # and rate-limit key are a session id the guest mints itself, so neither
+    # bounds a guest. Refused first, before the window bound and the readiness
+    # checks, so a guest learns nothing about whether the runtime is armed
+    # here. Keyed on ``!= PIPELINE`` so a runtime added later is gated by
+    # default.
     if runtime_type != PIPELINE_RUNTIME_TYPE and user_id is None:
         raise HTTPException(
             status_code=401,
@@ -4161,6 +4208,13 @@ def run_backtest_endpoint(
             raise HTTPException(
                 status_code=422,
                 detail="AI Hedge Fund requires decision_source='llm'.",
+            )
+        if billing_mode is BillingMode.BYOK:
+            # The model is platform-managed, so there is no key of the
+            # caller's to bill; refused rather than silently switched lanes.
+            raise HTTPException(
+                status_code=422,
+                detail="AI Hedge Fund runs on ATL Credits only; it has no BYOK option.",
             )
         # Before the credential lookup, which decrypts agent-owner material: a
         # window this deployment refuses is refused whether or not the agent is
@@ -4446,6 +4500,41 @@ def run_backtest_endpoint(
                 "pipeline": pipeline,
                 "data_source": data_source,
                 "universe": profile.universe,
+                "assets": selected_assets,
+                "universe_selection": universe_selection,
+            },
+        )
+    elif runtime_type == AI_HEDGE_FUND_RUNTIME_TYPE:
+        # Signed in (the 401 above) and on Credits only (the 422 above). The
+        # handoff carries no model client here: the child turns it into
+        # per-decision holds (`infrastructure/ai_hedge_fund/billing.py`), and
+        # it is what threads the lane into the parent's `finalize_run` and the
+        # timeout card's spend lookup, exactly as for a pipeline run.
+        billing_mode = BillingMode.PLATFORM_CREDITS
+        provider_id = AI_HEDGE_FUND_PROVIDER_ID
+        provider_ids = (provider_id,)
+        model = AI_HEDGE_FUND_MODEL_NAME
+        _enforce_ai_hedge_fund_credits(
+            int(user_id),
+            ai_hedge_fund_decision_ceiling_micro(
+                model,
+                (runtime_config or {}).get("analysts"),
+                len(selected_assets or ()) or len(profile.symbols),
+            ),
+        )
+        execution_handoff_payload = create_execution_handoff(
+            user_id=int(user_id),
+            run_id=live_run_id,
+            billing_mode=billing_mode,
+            provider_id=provider_id,
+            provider_ids=provider_ids,
+            model_id=model,
+            prompt_metadata={
+                "start_date": start_date,
+                "end_date": end_date,
+                "runtime_type": runtime_type,
+                "runtime_config": runtime_config,
+                "data_source": data_source,
                 "assets": selected_assets,
                 "universe_selection": universe_selection,
             },

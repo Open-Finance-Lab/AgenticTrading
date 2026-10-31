@@ -291,6 +291,7 @@ class HourlyBacktester:
         runtime_type: str = DEFAULT_RUNTIME_TYPE,
         runtime_config: Optional[Dict] = None,
         execution_client: Any = None,
+        hosted_billing: Any = None,
         stock_pool: Optional[str] = None,
         pool_mode: Optional[str] = None,
         universe_selection: Optional[Dict] = None,
@@ -350,7 +351,11 @@ class HourlyBacktester:
             RuntimeDispatcher(
                 self.runtime_type,
                 self.runtime_config,
-                runtime=AiHedgeFundRuntime(self.runtime_config),
+                # The hosted runtime's Credits metering, built by the child
+                # from the signed handoff; None off the API path.
+                runtime=AiHedgeFundRuntime(
+                    self.runtime_config, billing=hosted_billing
+                ),
             )
             if self.runtime_type == AI_HEDGE_FUND_RUNTIME_TYPE
             else None

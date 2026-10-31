@@ -21,6 +21,10 @@ RUN pip install --no-cache-dir --no-deps -r requirements.txt \
 # venv must run on 3.12 even though ATL itself stays on 3.13. uv installs
 # a managed 3.12 under /opt/uv-python; the venv keeps an absolute reference
 # to it, so uninstalling the uv build tool afterwards is safe.
+#
+# The second import is the bridge's Credits meter (bridge.py:_usage_counter).
+# Missing, every decision still runs but bills its reservation ceiling, so an
+# upstream dependency drift fails the build instead of overcharging quietly.
 ENV UV_PYTHON_INSTALL_DIR=/opt/uv-python
 RUN pip install --no-cache-dir uv \
     && uv python install 3.12 \
@@ -28,6 +32,7 @@ RUN pip install --no-cache-dir uv \
     && uv pip install --python /opt/ai-hedge-fund-venv \
        -r requirements-ai-hedge-fund.txt \
     && /opt/ai-hedge-fund-venv/bin/python -c "from src.main import run_hedge_fund" \
+    && /opt/ai-hedge-fund-venv/bin/python -c "from langchain_core.callbacks import get_usage_metadata_callback" \
     && pip uninstall -y uv
 
 # Copy dashboard application

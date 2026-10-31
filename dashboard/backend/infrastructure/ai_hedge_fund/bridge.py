@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 from pathlib import Path
 
@@ -49,6 +50,35 @@ def _disable_dotenv_loading() -> None:
     setattr(dotenv_main, "load_dotenv", disabled_load_dotenv)
 
 
+def _usage_counter():
+    """A context manager that totals every model call's tokens, or ``None``.
+
+    LangChain's ``get_usage_metadata_callback`` registers an inheritable
+    context-var handler, so it sees the calls LangGraph runs on its worker
+    threads too (the analysts fan out in parallel). Absent in an older
+    langchain-core; the caller then reports no usage and ATL bills the
+    decision's reservation ceiling instead.
+    """
+    try:
+        from langchain_core.callbacks import get_usage_metadata_callback
+    except ImportError:
+        return None
+    return get_usage_metadata_callback()
+
+
+def _usage_totals(counter) -> dict | None:
+    by_model = getattr(counter, "usage_metadata", None)
+    if not isinstance(by_model, dict):
+        return None
+    totals = {"input_tokens": 0, "output_tokens": 0}
+    for usage in by_model.values():
+        for key in totals:
+            value = usage.get(key) if isinstance(usage, dict) else None
+            if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+                totals[key] += value
+    return totals
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--input", required=True)
@@ -63,21 +93,36 @@ def main() -> None:
 
     payload = json.loads(Path(args.input).read_text(encoding="utf-8"))
     model_name, model_provider = _managed_model_from_payload(payload)
-    result = run_hedge_fund(
-        tickers=payload["tickers"],
-        start_date=payload["start_date"],
-        end_date=payload["end_date"],
-        portfolio=payload["portfolio"],
-        show_reasoning=bool(payload.get("show_reasoning", False)),
-        selected_analysts=list(payload.get("selected_analysts") or []),
-        model_name=model_name,
-        model_provider=model_provider,
-    )
-    Path(args.output).write_text(
+    counter = _usage_counter()
+    output_path = Path(args.output)
+    handler = None
+    try:
+        with counter if counter is not None else contextlib.nullcontext() as handler:
+            result = run_hedge_fund(
+                tickers=payload["tickers"],
+                start_date=payload["start_date"],
+                end_date=payload["end_date"],
+                portfolio=payload["portfolio"],
+                show_reasoning=bool(payload.get("show_reasoning", False)),
+                selected_analysts=list(payload.get("selected_analysts") or []),
+                model_name=model_name,
+                model_provider=model_provider,
+            )
+    except BaseException:
+        # A failed decision may still have spent model calls; ATL bills what
+        # was used, so report it before the non-zero exit. Usage only: there
+        # is no decision to read.
+        output_path.write_text(
+            json.dumps({"usage": _usage_totals(handler)}),
+            encoding="utf-8",
+        )
+        raise
+    output_path.write_text(
         json.dumps(
             {
                 "decisions": result.get("decisions"),
                 "analyst_signals": result.get("analyst_signals"),
+                "usage": _usage_totals(handler),
             }
         ),
         encoding="utf-8",

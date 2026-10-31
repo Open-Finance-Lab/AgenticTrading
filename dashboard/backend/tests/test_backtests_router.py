@@ -28,6 +28,8 @@ from dashboard.backend.domain.model_providers.execution_catalog import (
     UnsupportedExecutionModel,
 )
 import dashboard.backend.api.routers.backtests as bt
+from dashboard.backend.infrastructure.llm.execution.models import BillingMode
+from dashboard.backend.infrastructure.llm.providers import openrouter
 from dashboard.backend.tests._fake_child import FakeChild
 
 
@@ -1017,7 +1019,7 @@ def _sign_in(monkeypatch, user_id=7):
 
 
 def test_guest_cannot_start_a_hosted_backtest(client, monkeypatch):
-    """A hosted run bills the operator's OpenRouter key with no reservation.
+    """A hosted run bills ATL Credits, which a guest does not have.
 
     The refusal comes before the readiness checks: with OPENROUTER_API_KEY
     unset and the runtime missing, a guest still gets 401, never the 503 that
@@ -1056,9 +1058,120 @@ def test_guest_cannot_start_a_hosted_backtest(client, monkeypatch):
     assert spy.calls == 0
 
 
+def _post_ai_hedge_fund_run(client, monkeypatch, credits, **body):
+    """Launch the cloned AI Hedge Fund agent as a signed-in caller.
+
+    Returns the response, the worker spy and the handoffs the route signed.
+    """
+    spy = _Spy()
+    handoffs = []
+    monkeypatch.setattr(bt, "run_backtest_background", spy)
+    monkeypatch.setattr(bt, "credits_service", credits)
+    monkeypatch.setattr(
+        bt, "create_execution_handoff", lambda **kw: handoffs.append(kw) or "h"
+    )
+    monkeypatch.setenv("OPENROUTER_API_KEY", "platform-openrouter-test-key")
+    _stub_hosted_runtime_installed(monkeypatch)
+    monkeypatch.setattr(
+        bt.agent_credential_store,
+        "get_secret",
+        lambda agent_id, credential_name: "user-financial-datasets-test-key",
+    )
+    headers = {"X-Session-Id": str(uuid.uuid4())}
+    agent = client.post(
+        "/api/v1/agents/marketplace/ai-hedge-fund/clone",
+        json={},
+        headers=headers,
+    ).json()["agent"]
+    _sign_in(monkeypatch)
+    response = client.post(
+        "/backtest/run",
+        json={
+            "start_date": "2026-05-01",
+            "end_date": "2026-05-02",
+            "decision_source": "llm",
+            "agent_id": agent["agent_id"],
+            **body,
+        },
+        headers=headers,
+    )
+    return response, spy, handoffs
+
+
+def test_ai_hedge_fund_run_bills_credits_through_a_signed_handoff(
+    client, monkeypatch
+):
+    """The hosted run is a platform-credits run in everything but its client.
+
+    The handoff names the managed model, so the child's `--model` check holds,
+    and the lane reaches the worker, so the parent's `finalize_run` and the
+    timeout card's spend lookup both see a Credits run.
+    """
+    response, spy, handoffs = _post_ai_hedge_fund_run(
+        client, monkeypatch, _FakeBalanceCredits(8_000_000)
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["billing_mode"] == "platform_credits"
+    assert response.json()["provider_id"] == "openrouter"
+    assert len(handoffs) == 1
+    handoff = handoffs[0]
+    assert handoff["user_id"] == 7
+    assert handoff["run_id"] == response.json()["run_id"]
+    assert handoff["billing_mode"] is BillingMode.PLATFORM_CREDITS
+    assert handoff["provider_ids"] == ("openrouter",)
+    assert handoff["model_id"] == openrouter.DEFAULT_MODEL
+    assert spy.last_kwargs["execution_handoff_payload"] == "h"
+    assert spy.last_kwargs["billing_mode"] == "platform_credits"
+    assert spy.last_kwargs["model"] == handoff["model_id"]
+
+
+def test_ai_hedge_fund_run_that_cannot_hold_one_decision_is_refused_with_402(
+    client, monkeypatch
+):
+    credits = _FakeBalanceCredits(1_000)
+
+    response, spy, handoffs = _post_ai_hedge_fund_run(client, monkeypatch, credits)
+
+    assert response.status_code == 402, response.text
+    detail = response.json()["detail"]
+    assert "per trading day" in detail
+    assert "your balance is 0.00 Credits" in detail
+    assert credits.balance_reads == [7]
+    assert handoffs == []
+    assert spy.calls == 0
+
+
+def test_ai_hedge_fund_restricted_account_is_refused_with_403(client, monkeypatch):
+    credits = _FakeBalanceCredits(
+        50_000_000, status="restricted", reason="refund_reconciliation"
+    )
+
+    response, spy, handoffs = _post_ai_hedge_fund_run(client, monkeypatch, credits)
+
+    assert response.status_code == 403
+    assert "paused for payment refund review" in response.json()["detail"]
+    assert handoffs == []
+    assert spy.calls == 0
+
+
+def test_ai_hedge_fund_refuses_byok_instead_of_switching_lanes(client, monkeypatch):
+    credits = _FakeBalanceCredits(8_000_000)
+
+    response, spy, handoffs = _post_ai_hedge_fund_run(
+        client, monkeypatch, credits, billing_mode="byok"
+    )
+
+    assert response.status_code == 422
+    assert "ATL Credits only" in response.json()["detail"]
+    assert credits.balance_reads == []
+    assert spy.calls == 0
+
+
 def test_backtest_run_dispatches_ai_hedge_fund_runtime(client, monkeypatch):
     spy = _Spy()
     monkeypatch.setattr(bt, "run_backtest_background", spy)
+    monkeypatch.setattr(bt, "credits_service", _FakeBalanceCredits(8_000_000))
     monkeypatch.setenv("OPENROUTER_API_KEY", "platform-openrouter-test-key")
     _stub_hosted_runtime_installed(monkeypatch)
     monkeypatch.setattr(
@@ -1100,7 +1213,8 @@ def test_backtest_run_dispatches_ai_hedge_fund_runtime(client, monkeypatch):
         spy.last_kwargs["financial_datasets_api_key"]
         == "user-financial-datasets-test-key"
     )
-    assert spy.last_kwargs["model"] is None
+    # The caller's model is ignored; the platform-managed one runs and bills.
+    assert spy.last_kwargs["model"] == openrouter.DEFAULT_MODEL
     assert spy.last_kwargs["pipeline"] is None
 
 

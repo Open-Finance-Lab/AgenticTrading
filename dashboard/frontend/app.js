@@ -742,7 +742,7 @@ window.AGENT_SHELF_LABELS = MARKET_LABELS;
  *
  * The AI Hedge Fund runtime's Nemotron is deliberately absent: it is a property
  * of a hosted runtime, not a user choice, and syncBacktestModelFieldMode
- * already renders that case as "AI Hedge Fund — hosted runtime". */
+ * already renders that case as "AI Hedge Fund — hosted runtime, ...". */
 const SUPPORTED_MODELS = [
   { slug: 'anthropic/claude-haiku-4-5', label: 'Claude Haiku 4.5', vendor: 'anthropic' },
   { slug: 'anthropic/claude-sonnet-4-6', label: 'Claude Sonnet 4.6', vendor: 'anthropic' },
@@ -2578,7 +2578,7 @@ function syncBacktestModelFieldMode() {
   if (readonly) {
     readonly.hidden = modelIsEditable;
     readonly.textContent = isHostedRuntime
-      ? 'AI Hedge Fund — hosted runtime'
+      ? 'AI Hedge Fund — hosted runtime, billed to your ATL Credits'
       : 'Rule-based — simulated practice data, no AI involved';
   }
   if (billingGroup) billingGroup.hidden = isHostedRuntime || isRuleBased;
