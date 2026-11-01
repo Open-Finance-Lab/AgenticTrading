@@ -805,7 +805,7 @@ def _app_html_live_surfaces() -> dict[str, str]:
     visible = re.sub(r"<!--.*?-->", "", app_html, flags=re.DOTALL)
     blurb_at = visible.index('id="homeModuleLiveBtn"')
     blurb = visible[blurb_at : visible.index("</p>", blurb_at)]
-    about_at = visible.index("Live Trading Leaderboard</h3>")
+    about_at = visible.index("Live Leaderboard</h3>")
     about = visible[about_at : visible.index("</div>", about_at)]
     return {"app.html Home blurb": blurb, "app.html About card": about}
 

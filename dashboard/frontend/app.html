@@ -67,7 +67,7 @@
             if (saved && saved.page === 'playground' && saved.playgroundTab === 'paper') {
                 return Object.assign({}, saved, { playgroundTab: 'agents' });
             }
-            // The Daily Leaderboard became the Live Trading Leaderboard.
+            // The Daily Leaderboard became the Live Leaderboard.
             // Anyone whose last visit was that tab has 'daily' in localStorage
             // (or 'season' from a build of this branch); left alone the key
             // matches no boot-CSS rule and no panel, so Competition paints
@@ -585,7 +585,7 @@
                                      to deny, two clicks upstream of the correction. -->
                                 <p class="hm-rank-season">
                                     Every AI model above traded the same fixed window. The
-                                    <button class="hm-inline-link" id="homeModuleLiveBtn" type="button">Live Trading Leaderboard</button>
+                                    <button class="hm-inline-link" id="homeModuleLiveBtn" type="button">Live Leaderboard</button>
                                     is the other board &mdash; designed to move forward one trading
                                     session at a time, on prices nobody has seen yet. It is a
                                     Season 0 preview: the current calendar month, updated after each trading session closes.
@@ -1572,7 +1572,7 @@
     <div id="competitionView" class="page-view competition-view" style="display: none;">
         <div class="subtab-bar competition-subtabs">
             <button class="subtab-btn active" data-competition-tab="leaderboard">Competition Leaderboard</button>
-            <button class="subtab-btn" data-competition-tab="live">Live Trading Leaderboard</button>
+            <button class="subtab-btn" data-competition-tab="live">Live Leaderboard</button>
             <button class="subtab-btn" data-competition-tab="participants">Participating Teams</button>
             <button class="subtab-btn" data-competition-tab="about">About</button>
         </div>
@@ -1592,7 +1592,7 @@
                     <p class="about-text">SecureFinAI Contest 2026 is a paper-trading competition for AI-powered agents. The contest is currently in <strong>Preseason</strong>. Participating teams join when the season starts (registration Aug 2026).</p>
                 </div>
                 <div class="section-card">
-                    <h3 class="section-title">Live Trading Leaderboard</h3>
+                    <h3 class="section-title">Live Leaderboard</h3>
                     <p class="about-text">This board runs <strong>forward</strong>, one calendar month at a time, on NYSE trading days. &ldquo;Live&rdquo; describes the direction, not the money: this is <strong>simulated trading on real market data</strong> &mdash; no broker account, no real capital, and no order ever leaves this system.</p>
                     <p class="about-text">Each night after the US cash close (16:00 ET, or 13:00 on an NYSE early close), each entry is advanced one trading day: the model sees that day's real bars for the first time and its portfolio carries forward from where the previous day left it. Nobody &mdash; including us &mdash; knows what the next bar does when an entry locks, which is what separates this board from the fixed-window Competition one.</p>
                     <p class="about-text">Each entry is one continuous book that starts the month flat at $100,000 and ranks only the days inside it; the board resets on the 1st. Entries are a curated roster of AI models and baselines &mdash; there are no user submissions.</p>
@@ -1642,16 +1642,16 @@
         </div>
     </div>
 
-    <!-- Live Trading Leaderboard (calendar month — isolated from contest/daily) -->
+    <!-- Live Leaderboard (calendar month — isolated from contest/daily) -->
     <div id="liveLeaderboardView" class="leaderboard-view competition-panel live-leaderboard-panel" style="display: none;">
         <div class="leaderboard-container compact">
             <div class="leaderboard-contest-header">
                 <div class="contest-identity">
                     <div class="contest-title-row">
-                        <h2 class="contest-title" id="liveBoardTitle">Live Trading Leaderboard</h2>
+                        <h2 class="contest-title" id="liveBoardTitle">Live Leaderboard</h2>
                         <span id="liveStatusBadge" class="status-badge upcoming contest-live-badge">Cash session closed</span>
                     </div>
-                    <p class="contest-subtitle" id="liveBoardSubtitle">Paper trading · hourly US cash session</p>
+                    <p class="contest-subtitle" id="liveBoardSubtitle">Simulated fills · forward-only · no real money</p>
                     <p class="contest-subtitle" id="liveRosterNote">A subset of the Competition model roster. One continuous book for the month, not a daily reset.</p>
                 </div>
             </div>
@@ -1659,15 +1659,15 @@
             <div class="live-season-bar" aria-label="Live month status">
                 <div class="stat-item compact">
                     <span class="stat-label">Season</span>
-                    <span class="stat-value" id="livePhaseLabel">Season 0</span>
+                    <span class="stat-value" id="livePhaseLabel">Season 0 · preview</span>
                 </div>
                 <div class="stat-item compact">
                     <span class="stat-label">Window</span>
                     <span class="stat-value" id="liveWindowLabel">—</span>
                 </div>
                 <div class="stat-item compact">
-                    <span class="stat-label">Last Updated</span>
-                    <span class="stat-value" id="liveUpdatedLabel">—</span>
+                    <span class="stat-label">Updated</span>
+                    <span class="stat-value" id="liveUpdatedLabel">Nightly after the close</span>
                 </div>
                 <div class="stat-item compact">
                     <span class="stat-label">Leader</span>
@@ -1775,7 +1775,7 @@
                     <!-- Competition-only, and hidden on the live board by
                          leaderboard.js. The board name and the first subtitle
                          are rewritten per board; this line is not, so left
-                         alone it captions the Live Trading Leaderboard as a
+                         alone it captions the Live Leaderboard as a
                          SecureFinAI Lab contest event, which it is not. -->
                     <p class="contest-subtitle" id="contestOrganizerLine">Organized by SecureFinAI Lab with Agentic Trading Lab.</p>
                 </div>
@@ -2523,7 +2523,7 @@
     <script src="js/credits.js?v=8" defer></script>
     <script src="js/admin-credits.js?v=9" defer></script>
     <script src="js/admin-tabs.js?v=12" defer></script>
-    <script src="js/leaderboard.js?v=39" defer></script>
+    <script src="js/leaderboard.js?v=40" defer></script>
     <script src="js/live-leaderboard.js?v=7" defer></script>
     <script src="home-page.js?v=56" defer></script>
     <!-- Load order: must come after app.js (API/API_BASE/escapeHtml) and

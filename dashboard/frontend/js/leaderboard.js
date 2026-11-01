@@ -614,7 +614,7 @@ function seasonHasAdvanced(payload) {
   return Number(season.trading_days_elapsed) > 0;
 }
 
-/** True when the Live Trading tab is rendering something that is not a season.
+/** True when the Live tab is rendering something that is not a season.
  *
  * The server now answers `?period=live` with `period: 'live'` and a season
  * block, so the old reason — an unknown period silently coerced to 'contest',
@@ -696,7 +696,7 @@ function updateLeaderboardHeader(payload, board = renderedBoardPeriod) {
     // the season number in here instead would leave the board unnamed on screen
     // the moment a season is running.
     titleEl.textContent = liveBoard
-      ? 'Live Trading Leaderboard'
+      ? 'Live Leaderboard'
       : 'SecureFinAI Contest 2026';
   }
   if (badgeEl) {

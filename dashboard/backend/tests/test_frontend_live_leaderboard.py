@@ -1,4 +1,4 @@
-"""Source guards for the Live Trading Leaderboard tab.
+"""Source guards for the Live Leaderboard tab.
 
 /app has no JS test toolchain, so these assert against shipped HTML/JS as text.
 """
@@ -27,7 +27,7 @@ def _strip_js_comments(source: str) -> str:
 
 def test_live_subtab_is_visible_and_daily_stays_parked():
     assert re.search(
-        r'data-competition-tab="live"[^>]*>\s*Live Trading Leaderboard',
+        r'data-competition-tab="live"[^>]*>\s*Live Leaderboard<',
         _APP_HTML,
     )
     assert 'data-competition-tab="live"' in _APP_HTML
@@ -401,3 +401,65 @@ def test_live_sharpe_is_the_competition_formatter_not_a_copy():
         f"liveSortValue({json.dumps(_SHARPE_OK)}, 'sharpe')]));",
     ]))
     assert alone == [{"main": "—", "sub": "", "title": ""}, None]
+
+
+# ── Naming and header copy (direction spec §6) ──────────────────────────────
+
+
+def _live_view_markup() -> str:
+    """The #liveLeaderboardView markup, up to the Competition view."""
+    return _APP_HTML.split('id="liveLeaderboardView"')[1].split('id="leaderboardView"')[0]
+
+
+def _static_text(html: str, element_id: str) -> str:
+    """The text inside the element carrying `id="<element_id>"` (no child tags)."""
+    match = re.search(rf'id="{element_id}"[^>]*>([^<]*)<', html)
+    assert match, f"#{element_id} is missing from app.html"
+    return match.group(1)
+
+
+def test_the_board_is_named_live_leaderboard_on_every_surface():
+    """'Trading' read as real orders and collided with the Robinhood
+    live-trading docs. The static title, the JS fallback and the payload all
+    resolve to service.LIVE_BOARD_TITLE."""
+    from dashboard.backend.domain.leaderboard import service
+
+    assert _static_text(_APP_HTML, "liveBoardTitle") == service.LIVE_BOARD_TITLE
+    assert f"payload.board_title || '{service.LIVE_BOARD_TITLE}'" in _LIVE_JS
+    visible = _strip_js_comments(re.sub(r"<!--.*?-->", "", _APP_HTML, flags=re.DOTALL))
+    assert "Live Trading Leaderboard" not in visible
+    assert "Live Trading Leaderboard" not in _strip_js_comments(_LIVE_JS)
+
+
+def test_the_subtitle_is_static_simulated_forward_only_copy():
+    assert (
+        _static_text(_APP_HTML, "liveBoardSubtitle")
+        == "Simulated fills · forward-only · no real money"
+    )
+    source = _strip_js_comments(_LIVE_JS)
+    assert "liveBoardSubtitle" not in source, (
+        "the subtitle is static copy in app.html; rewriting it from JS put "
+        "'paper trading' back on screen"
+    )
+    assert "paper trading" not in source.lower()
+
+
+def test_the_updated_stat_states_the_cadence_not_the_request_clock():
+    """payload.updated_at is the wall clock of the GET, so rendering it always
+    read 'just now' on a board that last advanced days ago."""
+    assert re.search(
+        r'<span class="stat-label">Updated</span>\s*'
+        r'<span class="stat-value" id="liveUpdatedLabel">Nightly after the close</span>',
+        _live_view_markup(),
+    )
+    source = _strip_js_comments(_LIVE_JS)
+    assert "liveUpdatedLabel" not in source
+    assert "updated_at" not in source
+
+
+def test_the_season_stat_reads_season_0_preview_from_one_owner():
+    from dashboard.backend.domain.leaderboard import service
+
+    assert service.LIVE_PHASE_LABEL == "Season 0 · preview"
+    assert _static_text(_APP_HTML, "livePhaseLabel") == service.LIVE_PHASE_LABEL
+    assert f"payload.phase_label || '{service.LIVE_PHASE_LABEL}'" in _LIVE_JS

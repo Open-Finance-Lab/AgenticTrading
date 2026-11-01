@@ -1,4 +1,4 @@
-"""Source guards for the Live Trading Leaderboard (frontend/js/leaderboard.js).
+"""Source guards for the Live Leaderboard (frontend/js/leaderboard.js).
 
 /app has no build step and no JS test toolchain, so these assert against the
 shipped source as text -- the convention set by test_ai_hedge_fund_frontend.py.
@@ -404,22 +404,26 @@ def test_the_season_constants_are_the_same_number_in_all_three_places():
 
 def test_the_board_names_itself_on_screen():
     header = _fn_body("updateLeaderboardHeader")
-    assert "'Live Trading Leaderboard'" in header, (
+    assert "'Live Leaderboard'" in header, (
         "the board title must name the board; folding the season number in "
         "here instead leaves it unnamed whenever a season is running"
     )
-    assert 'data-competition-tab="live">Live Trading Leaderboard<' in _APP_HTML
+    assert 'data-competition-tab="live">Live Leaderboard<' in _APP_HTML
+    assert "Live Trading Leaderboard" not in _SOURCE, (
+        "'Trading' was dropped from the board name (direction spec §6)"
+    )
 
 
 def test_the_live_name_is_disclaimed_as_simulated():
-    """"Live Trading" is a claim. The About card is where it gets qualified.
+    """"Live" is a claim about direction, not money. The About card is where
+    it gets qualified.
 
     PR #328's spec puts brokered execution in non-goals and
     execution/paper_backend.py is still a stub, so a board named for live
     trading that never says "simulated" is the UI making a promise the system
     does not keep.
     """
-    about = _APP_HTML_VISIBLE[_APP_HTML_VISIBLE.index("Live Trading Leaderboard</h3>") :]
+    about = _APP_HTML_VISIBLE[_APP_HTML_VISIBLE.index("Live Leaderboard</h3>") :]
     about = about[: about.index("</div>")]
     lowered = about.lower()
     assert "simulated" in lowered, "the About card must say the trading is simulated"
@@ -427,7 +431,7 @@ def test_the_live_name_is_disclaimed_as_simulated():
 
 
 def test_about_card_names_the_current_season():
-    about = _APP_HTML_VISIBLE[_APP_HTML_VISIBLE.index("Live Trading Leaderboard</h3>") :]
+    about = _APP_HTML_VISIBLE[_APP_HTML_VISIBLE.index("Live Leaderboard</h3>") :]
     about = about[: about.index("</div>")]
     assert "Season 0" in about, (
         "the board is in Season 0; the About card is where that is established"

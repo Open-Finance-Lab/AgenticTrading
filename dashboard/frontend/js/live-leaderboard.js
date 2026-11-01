@@ -1,5 +1,5 @@
 // ============================================================================
-// LIVE TRADING LEADERBOARD (calendar-month board — Phase 0)
+// LIVE LEADERBOARD (calendar-month board — Season 0 preview)
 // Isolated from contest/daily: own panel, own chart, own payload.
 // ============================================================================
 
@@ -202,12 +202,12 @@ function updateLiveHeader(payload) {
     if (el) el.textContent = value;
   };
 
-  setText('liveBoardTitle', payload.board_title || 'Live Trading Leaderboard');
-  setText('livePhaseLabel', payload.phase_label || 'Season 0');
+  setText('liveBoardTitle', payload.board_title || 'Live Leaderboard');
+  setText('livePhaseLabel', payload.phase_label || 'Season 0 · preview');
   setText('liveWindowLabel', window.label || '—');
-  setText('liveUpdatedLabel', payload.updated_at
-    ? new Date(payload.updated_at).toLocaleString()
-    : '—');
+  // The Updated stat is static copy in app.html ("Nightly after the close").
+  // payload.updated_at is the request clock, not the last refresh, so showing
+  // it read "just now" on a board that last advanced days ago.
   setText('liveLeaderLabel', payload.leader || '—');
   const elapsed = Number(status.trading_days_elapsed) || 0;
   const total = Number(status.trading_days_total) || 0;
@@ -216,13 +216,8 @@ function updateLiveHeader(payload) {
   // standings_label until this backend ships; do not let that flip the title.
   setText('liveStandingsTitle', 'Performance');
 
-  const subtitle = document.getElementById('liveBoardSubtitle');
-  if (subtitle) {
-    const month = status.month || '';
-    subtitle.textContent = month
-      ? `${month} · paper trading · hourly US cash session`
-      : 'Paper trading · hourly US cash session';
-  }
+  // #liveBoardSubtitle is static copy in app.html and is not rewritten here:
+  // the Window stat already names the month.
 
   const badge = document.getElementById('liveStatusBadge');
   if (badge) {
