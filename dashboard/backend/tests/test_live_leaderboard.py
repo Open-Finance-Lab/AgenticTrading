@@ -1,4 +1,4 @@
-"""Tests for the calendar-month Live Trading Leaderboard.
+"""Tests for the calendar-month Live Leaderboard.
 
 Isolated from contest/daily: live freeze uses ``leaderboard-live`` and must
 not rewrite the contest window.
@@ -2221,3 +2221,40 @@ def test_a_row_with_no_seed_at_all_is_undefined_and_logged(no_alpaca, monkeypatc
     assert deepseek["sharpe_status"] == "undefined"
     assert deepseek["sharpe_ratio"] is None
     assert any("not a positive number" in r.getMessage() for r in caplog.records)
+
+
+# ── The board's name and season label have one owner (service.py) ───────────
+
+
+def test_every_live_surface_reads_the_shared_title_and_phase_label(no_alpaca):
+    """Three dicts carry the Live board's name and season label: the payload the
+    public GET serves, the freeze config the refresh writes under, and the
+    service-side live config. Each used to spell both out, so a rename had three
+    places to miss and the season number had three owners."""
+    as_of = datetime(2026, 8, 27, 17, 39, tzinfo=_ET)
+    assert lb_service.LIVE_BOARD_TITLE == "Live Leaderboard"
+    assert lb_service.LIVE_PHASE_LABEL == "Season 0 · preview"
+    for source in (
+        live.get_live_leaderboard(as_of=as_of),
+        live.live_freeze_config(as_of),
+        lb_service.resolve_leaderboard_config("live"),
+    ):
+        assert source["board_title"] == lb_service.LIVE_BOARD_TITLE
+        assert source["phase_label"] == lb_service.LIVE_PHASE_LABEL
+
+
+def test_no_backend_text_still_says_live_trading_leaderboard():
+    """'Trading' was dropped from the name (direction spec §6): it read as real
+    orders and collided with the Robinhood live-trading docs. Docstrings, the
+    OpenAPI text and the refresh CLI's --help are read by people too."""
+    from pathlib import Path
+
+    backend = Path(live.__file__).resolve().parents[2]
+    scripts = backend.parent / "scripts"
+    offenders = sorted(
+        str(path.relative_to(backend.parent))
+        for path in [*backend.rglob("*.py"), *scripts.rglob("*.py")]
+        if "tests" not in path.relative_to(backend.parent).parts
+        and "Live Trading Leaderboard" in path.read_text(encoding="utf-8")
+    )
+    assert offenders == [], f"rename these to 'Live Leaderboard': {offenders}"

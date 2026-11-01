@@ -3798,8 +3798,8 @@ class BacktestRunRequest(BaseModel):
 # params or a JSON body, so validation runs on the merged effective values in the
 # handler rather than only on the Pydantic body.
 MAX_STRATEGY_PROMPT_CHARS = 4000
-# Two weeks, matching the fortnight the Live Trading Leaderboard's seasons use
-# so the product has one window vocabulary. It was 31, set when the fixed
+# Two weeks, chosen to match the two-week seasons the Live Leaderboard had
+# then (seasons are calendar months now). It was 31, set when the fixed
 # parent budget was the only bound: a 31-day window is ~22 weekdays x ~7 hourly
 # bars = ~154 decision bars, and a pipeline multiplies that by its step count,
 # so the UI permitted a window roughly 3x the modal default against a constant

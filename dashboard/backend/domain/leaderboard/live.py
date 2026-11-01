@@ -1,4 +1,4 @@
-"""Calendar-month Live Trading Leaderboard.
+"""Calendar-month Live Leaderboard.
 
 This board is not Daily stretched to 30 days and not the fixed contest window.
 One continuous paper-trading month per entry: the chart axis is the current
@@ -347,8 +347,8 @@ def live_freeze_config(
         "end_date": freeze_end,
         "reference_start_date": reference_start_date(month_start, None),
         "period": "live",
-        "board_title": "Live Trading Leaderboard",
-        "phase_label": "Season 0",
+        "board_title": lb_service.LIVE_BOARD_TITLE,
+        "phase_label": lb_service.LIVE_PHASE_LABEL,
         "standings_label": "Performance",
     }
 
@@ -1939,8 +1939,8 @@ def get_live_leaderboard(
 
     return {
         "period": "live",
-        "board_title": "Live Trading Leaderboard",
-        "phase_label": "Season 0",
+        "board_title": lb_service.LIVE_BOARD_TITLE,
+        "phase_label": lb_service.LIVE_PHASE_LABEL,
         "standings_label": "Performance",
         "window": {
             "start_date": start_date,

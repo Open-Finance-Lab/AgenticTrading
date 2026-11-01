@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Persist the Live Trading Leaderboard freeze snapshot for the current month.
+"""Persist the Live Leaderboard freeze snapshot for the current month.
 
 1. Recomputes cheap baselines (indices + rule-based strategies) for
    month-open → last settled US cash session under ``leaderboard-live``.
@@ -50,7 +50,7 @@ from dashboard.backend.domain.leaderboard.live import (  # noqa: E402
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Refresh the Live Trading Leaderboard freeze snapshot"
+        description="Refresh the Live Leaderboard freeze snapshot"
     )
     parser.add_argument(
         "--models",
