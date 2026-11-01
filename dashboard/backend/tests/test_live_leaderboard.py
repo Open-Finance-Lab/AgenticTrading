@@ -2289,7 +2289,6 @@ def test_only_the_service_constants_spell_out_the_live_title_and_season_label():
     owners = {"LIVE_BOARD_TITLE", "LIVE_PHASE_LABEL"}
     backend = Path(live.__file__).resolve().parents[2]
     service_path = Path(lb_service.__file__).resolve()
-    owner_nodes = set()
     owners_seen = set()
     offenders = []
     for path in sorted([*backend.rglob("*.py"), *(backend.parent / "scripts").rglob("*.py")]):
@@ -2297,13 +2296,16 @@ def test_only_the_service_constants_spell_out_the_live_title_and_season_label():
         if "tests" in rel.parts:
             continue
         tree = ast.parse(path.read_text(encoding="utf-8"))
+        # Built from this tree alone: an id() is only an identity while its
+        # node is alive. Carried into the next file, service.py's freed ids
+        # get reused by that file's nodes and silently exempt them.
+        skip = _docstring_nodes(tree)
         if path.resolve() == service_path:
             for node in tree.body:
                 names = {t.id for t in getattr(node, "targets", []) if isinstance(t, ast.Name)}
                 if isinstance(node, ast.Assign) and names & owners:
                     owners_seen.update(names & owners)
-                    owner_nodes.update(id(n) for n in ast.walk(node.value))
-        skip = owner_nodes | _docstring_nodes(tree)
+                    skip.update(id(n) for n in ast.walk(node.value))
         offenders.extend(
             f"{rel}:{node.lineno}"
             for node in ast.walk(tree)

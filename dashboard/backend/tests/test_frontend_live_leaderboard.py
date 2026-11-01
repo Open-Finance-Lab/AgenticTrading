@@ -609,6 +609,25 @@ def test_a_catching_up_model_is_printed_and_flagged_with_its_own_date():
 
 
 @_needs_node
+def test_the_catching_up_date_is_escaped_in_the_badge_title_and_the_status_row():
+    """A plain date escapes to itself, so the case above passes with either
+    escapeHtml call removed. A date carrying markup does not."""
+    out = _render_catching_up_board(
+        _catching_up_payload(_SPY_ROW, _deepseek("catching_up", snapshot_end='2026-08-20"><b>')),
+        "deepseek_v4_pro",
+    )
+    row = out["table"].split('data-live-entry="deepseek_v4_pro"')[1].split("</tr>")[0]
+    escaped = "Catching up · through 2026-08-20&quot;&gt;&lt;b&gt;"
+    assert f'<span class="team-badge" title="{escaped}">Catching up</span>' in row
+    assert (
+        '<span class="team-detail-label">Status</span>'
+        f'<span class="team-detail-value">{escaped}</span>'
+    ) in out["detail"]
+    assert "<b>" not in row
+    assert "<b>" not in out["detail"]
+
+
+@_needs_node
 def test_the_banner_names_the_catching_up_model_instead_of_calling_it_missing():
     out = _render_catching_up_board(
         _catching_up_payload(_SPY_ROW, _deepseek("catching_up")), "deepseek_v4_pro"
