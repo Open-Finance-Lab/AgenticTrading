@@ -682,8 +682,8 @@ function updateLeaderboardHeader(payload, board = renderedBoardPeriod) {
   const updatedEl = document.getElementById('lastUpdate');
   const leaderEl = document.getElementById('leaderTeam');
   const standingsEl = document.getElementById('leaderboardStandingsTitle');
-  // By id, not `querySelector('.contest-subtitle')`: there are two, and the
-  // positional selector silently retargets if either is ever reordered.
+  // By id, not `querySelector('.contest-subtitle')`: there are several, and the
+  // positional selector silently retargets if any is ever reordered.
   const subtitleEl = document.getElementById('boardSubtitle');
   const titleEl = document.querySelector('#leaderboardView .contest-title');
   const badgeEl = document.querySelector('#leaderboardView .contest-live-badge');
