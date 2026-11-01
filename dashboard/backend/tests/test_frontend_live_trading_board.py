@@ -580,3 +580,22 @@ def test_manual_refresh_does_not_default_to_billable_deploys():
     assert re.search(r"default:\s*false", block.group(1)), (
         "deploy_models must default to false while no board can show the result"
     )
+
+
+# ── The Competition board is labelled as legacy (direction spec §6) ─────────
+
+
+def test_the_competition_header_names_the_legacy_engine_and_window():
+    """The Competition board stays on the legacy engine and is retired, not
+    re-run, once Season 1 has data; its fixed historical window may sit inside
+    a model's training data. The header says both. Static copy: leaderboard.js
+    rewrites #boardSubtitle on every render and must leave this line alone."""
+    competition = _APP_HTML_VISIBLE.split('id="leaderboardView"')[1]
+    identity = competition[: competition.index('class="leaderboard-header-bar compact"')]
+    assert (
+        '<p class="contest-subtitle" id="boardEngineNote">'
+        "legacy engine · historical window · may overlap model training data</p>"
+    ) in identity
+    live = _APP_HTML_VISIBLE.split('id="liveLeaderboardView"')[1].split('id="leaderboardView"')[0]
+    assert "legacy engine" not in live, "the Live board is not labelled legacy"
+    assert "boardEngineNote" not in _SOURCE, "leaderboard.js must not rewrite the note"

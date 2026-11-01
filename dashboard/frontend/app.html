@@ -1772,6 +1772,12 @@
                         <span class="status-badge upcoming contest-live-badge">Upcoming</span>
                     </div>
                     <p class="contest-subtitle" id="boardSubtitle">Sep 1 – Oct 30, 2026</p>
+                    <!-- Static, and Competition-only: leaderboard.js rewrites
+                         #boardSubtitle on every render but never this line.
+                         Direction spec 2026-10-14 §6: this board stays on the
+                         legacy engine and is retired, not re-run, once Season 1
+                         has data. -->
+                    <p class="contest-subtitle" id="boardEngineNote">legacy engine · historical window · may overlap model training data</p>
                     <!-- Competition-only, and hidden on the live board by
                          leaderboard.js. The board name and the first subtitle
                          are rewritten per board; this line is not, so left
