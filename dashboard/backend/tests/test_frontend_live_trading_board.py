@@ -599,3 +599,41 @@ def test_the_competition_header_names_the_legacy_engine_and_window():
     live = _APP_HTML_VISIBLE.split('id="liveLeaderboardView"')[1].split('id="leaderboardView"')[0]
     assert "legacy engine" not in live, "the Live board is not labelled legacy"
     assert "boardEngineNote" not in _SOURCE, "leaderboard.js must not rewrite the note"
+
+
+# ── Stop-loss / take-profit are not executed on the legacy engine (D12) ─────
+#
+# The other half of these is tests/domain/backtesting/test_stop_prices_not_enforced.py,
+# which fails the day the legacy order path starts reading the two fields.
+
+_STOP_RULE = "<li>Stop-loss and take-profit prices a model writes are not executed</li>"
+
+
+def _rules_items(view: str, formula: str) -> str:
+    rules = view[view.index(formula) :]
+    return rules[: rules.index("</ul>")]
+
+
+def test_both_boards_rules_say_stop_prices_are_not_executed():
+    live = _APP_HTML_VISIBLE.split('id="liveLeaderboardView"')[1].split('id="leaderboardView"')[0]
+    competition = _APP_HTML_VISIBLE.split('id="leaderboardView"')[1]
+    assert _STOP_RULE in _rules_items(live, "Official rank = latest frozen portfolio value")
+    assert _STOP_RULE in _rules_items(competition, "Official rank = final portfolio value")
+
+
+def test_both_about_cards_say_stop_prices_are_not_executed():
+    live = _APP_HTML_VISIBLE[_APP_HTML_VISIBLE.index("Live Leaderboard</h3>") :]
+    live = live[: live.index("</div>")]
+    assert (
+        "A model may write a stop-loss or take-profit price into its decision. "
+        "The simulator does not act on either: orders are placed only at decision "
+        "times, and a position is never sold because the price reached the stop "
+        "or target the model wrote."
+    ) in live
+    marker = '<h3 class="section-title">Competition Leaderboard</h3>'
+    competition = _APP_HTML_VISIBLE[_APP_HTML_VISIBLE.index(marker) :]
+    competition = competition[: competition.index("</div>")]
+    assert (
+        "Official rank is by final portfolio value. "
+        "Stop-loss and take-profit prices a model writes are not executed."
+    ) in competition

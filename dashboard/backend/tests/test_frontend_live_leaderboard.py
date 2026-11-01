@@ -463,3 +463,18 @@ def test_the_season_stat_reads_season_0_preview_from_one_owner():
     assert service.LIVE_PHASE_LABEL == "Season 0 · preview"
     assert _static_text(_APP_HTML, "livePhaseLabel") == service.LIVE_PHASE_LABEL
     assert f"payload.phase_label || '{service.LIVE_PHASE_LABEL}'" in _LIVE_JS
+
+
+def test_neither_board_renders_a_stop_or_take_profit_price():
+    """Both boards disclaim stops as not executed. A future trade-log or
+    reasoning view is the first place a model's stop_loss_price could appear
+    next to its decisions; it must label the value 'not executed' before this
+    guard is lifted, or the page contradicts its own Rules card."""
+    leaderboard_js = (_FRONTEND / "js" / "leaderboard.js").read_text(encoding="utf-8")
+    for name, source in (
+        ("js/live-leaderboard.js", _LIVE_JS),
+        ("js/leaderboard.js", leaderboard_js),
+    ):
+        stripped = _strip_js_comments(source)
+        assert "stop_loss" not in stripped, name
+        assert "take_profit" not in stripped, name
