@@ -2258,3 +2258,61 @@ def test_no_backend_text_still_says_live_trading_leaderboard():
         and "Live Trading Leaderboard" in path.read_text(encoding="utf-8")
     )
     assert offenders == [], f"rename these to 'Live Leaderboard': {offenders}"
+
+
+def _docstring_nodes(tree):
+    """The Constant nodes that are module, class or function docstrings."""
+    import ast
+
+    found = set()
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
+            first = node.body[0] if node.body else None
+            if (
+                isinstance(first, ast.Expr)
+                and isinstance(first.value, ast.Constant)
+                and isinstance(first.value.value, str)
+            ):
+                found.add(id(first.value))
+    return found
+
+
+def test_only_the_service_constants_spell_out_the_live_title_and_season_label():
+    """The value test above passes if live.py goes back to its own "Live
+    Leaderboard" or "Season 0 · preview" literal, which makes a second owner
+    again. Outside the two service.py assignments, no backend or script string
+    (docstrings aside) is the board's name or carries the label's " · preview"
+    part, so neither can be spelled out, or the label rebuilt, anywhere else."""
+    import ast
+    from pathlib import Path
+
+    owners = {"LIVE_BOARD_TITLE", "LIVE_PHASE_LABEL"}
+    backend = Path(live.__file__).resolve().parents[2]
+    service_path = Path(lb_service.__file__).resolve()
+    owner_nodes = set()
+    owners_seen = set()
+    offenders = []
+    for path in sorted([*backend.rglob("*.py"), *(backend.parent / "scripts").rglob("*.py")]):
+        rel = path.relative_to(backend.parent)
+        if "tests" in rel.parts:
+            continue
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        if path.resolve() == service_path:
+            for node in tree.body:
+                names = {t.id for t in getattr(node, "targets", []) if isinstance(t, ast.Name)}
+                if isinstance(node, ast.Assign) and names & owners:
+                    owners_seen.update(names & owners)
+                    owner_nodes.update(id(n) for n in ast.walk(node.value))
+        skip = owner_nodes | _docstring_nodes(tree)
+        offenders.extend(
+            f"{rel}:{node.lineno}"
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Constant)
+            and isinstance(node.value, str)
+            and id(node) not in skip
+            and (node.value == lb_service.LIVE_BOARD_TITLE or "· preview" in node.value)
+        )
+    assert owners_seen == owners, "service.py no longer assigns both constants"
+    assert offenders == [], (
+        f"read lb_service.LIVE_BOARD_TITLE / LIVE_PHASE_LABEL instead: {offenders}"
+    )

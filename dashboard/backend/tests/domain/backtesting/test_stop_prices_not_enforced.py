@@ -111,16 +111,21 @@ def test_a_held_position_is_not_sold_when_the_price_crosses_its_stop_or_target(m
     opened = datetime(2026, 4, 1, 14, 30)
     entry = _decide(manager, 250.0, opened)
     manager.execute_actions(entry["actions"], {"AAPL": {"close": 250.0}}, opened)
+    # Each bar is decide, execute, then value the book, as llm_agent.py runs it.
+    manager.update_equity({"AAPL": {"close": 250.0}}, None, opened)
     assert manager.positions == {"AAPL": 2}
 
-    # 200 is below the 240 stop; 320 is above the 300 target. Neither sells.
+    # 200 is below the 240 stop; 320 is above the 300 target. Neither sells,
+    # and valuing the book at either price does not close the position either.
     for hour, price in ((15, 200.0), (16, 320.0)):
         timestamp = datetime(2026, 4, 1, hour, 30)
         decision = _decide(manager, price, timestamp)
         manager.execute_actions(decision["actions"], {"AAPL": {"close": price}}, timestamp)
+        manager.update_equity({"AAPL": {"close": price}}, None, timestamp)
         assert decision["actions"] == []
         assert manager.positions == {"AAPL": 2}
 
+    assert [row["positions_value"] for row in manager.get_equity_curve()] == [500.0, 400.0, 640.0]
     assert remaining == []
     assert [trade["side"] for trade in manager.trades] == ["BUY"]
     assert manager.llm_decisions == 3
@@ -134,6 +139,8 @@ def test_the_legacy_order_path_has_no_stop_handling():
     for rel in (
         "domain/backtesting/portfolio_manager.py",
         "domain/trading/execution.py",
+        # update_equity's valuation step, run after every bar's orders.
+        "domain/trading/portfolio.py",
         "domain/leaderboard/strategies/llm_agent.py",
     ):
         text = (_BACKEND / rel).read_text(encoding="utf-8")
