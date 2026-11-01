@@ -606,7 +606,7 @@ Every line is a policy the suite asserts, with one sentence of why.
     - `E(b1) = 10 + 9×110 = 1,000.00`;
     - `initial_equity = equity_curve[0] = 990.00` (`engine.py:2360`);
     - MDD `= (1,000 − 1,040)/1,040 = −0.0384615`, measured from the 10:30 mark of 1,040;
-    - `entry_prices = 120`, the last buy (`execution.py:631`).
+    - `entry_prices = 120`, the last buy (`execution.py:631`). *(2026-10-28: now the average cost; see D14.)*
   - TR (0.099), `E(b2)` and `E(b3)` pass.
   - S **FAIL**, identically (`external_run_service.py:797, 817, 852`). An existing test already pins 13 post-trade marks (`tests/test_external_minute_source.py:117`).
 
@@ -621,7 +621,7 @@ Every line is a policy the suite asserts, with one sentence of why.
   - b4: 2 @ 90 for `−180`, leaving cash 200. Avg `(6×110 + 2×90)/8 = 840/8 = 105.00`.
   - `E(b4) = 200 + 8×90 = 920.00`. Unrealized `8×(90−105) = −120`. Realized plus unrealized `= −80 = 920 − 1,000`.
 - **Current:**
-  - D **FAIL** on avg cost and realized P&L. `entry_prices` is overwritten by each buy, ending at 90 instead of 105 (`execution.py:631`), and no realized P&L field exists (`domain/trading/portfolio.py:63-87`). Final equity 920 passes.
+  - D **FAIL** on avg cost and realized P&L. `entry_prices` is overwritten by each buy, ending at 90 instead of 105 (`execution.py:631`), and no realized P&L field exists (`domain/trading/portfolio.py:63-87`). Final equity 920 passes. *(2026-10-28: avg cost now passes; see D14.)*
   - S **FAIL**, same.
 
 **M03: daily metrics (TR, MDD, and Sharpe with rf and ddof=1), plus an undefined-Sharpe sub-case.**
@@ -730,7 +730,7 @@ F01–F05 and CA01–CA03 count as FAIL rather than N/E under the §1 rule: cost
 | D11 | No volume or participation limit | `execution.py` (never reads volume) | D, S |
 | D12 | No limit, stop, OCO or TIF orders; `stop_loss_price`/`take_profit_price` are accepted and ignored, while the prompt claims they are enforced | `validator.py:86-87`; `domain/runs/protocol.py:133-134`; `prompts.py:42-46` | D, S |
 | D13 | No splits or dividends; bars are raw | `alpaca_bars.py:732` | D, S |
-| D14 | `entry_prices` is overwritten by the last buy; no realized P&L | `execution.py:631`; `portfolio.py:63-87` | D, S |
+| D14 | `entry_prices` is overwritten by the last buy; no realized P&L. *(2026-10-28: the overwrite half is fixed; a BUY now keeps the average cost, so M01 and M02 no longer fail on avg cost. No realized P&L remains.)* | `execution.py:631`; `portfolio.py:63-87` | D, S |
 | D15 | Sharpe uses per-5m returns × √19,656, ddof 0, rf 0, and returns 0 when undefined; baselines use √1,638 | `metrics.py:17-64`; `engine.py:2031-2036, 2452-2453, 2571, 2654` | D, S |
 | D16 | No daily decision timeframe | `profiles.py:198-218`; `external_run_service.py:297-299` | D, S |
 | D17 | S caps capital at ≤ 3,000 and order size at ≤ 10,000; v1 resolves weights at the decision close with floor division and applies a 25% cap | `constants.py:96-115`; `validator.py:69`; `domain/runs/protocol.py:112-114`; `domain/runs/service.py:916-985` | S |
