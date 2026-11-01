@@ -166,12 +166,14 @@ class OpenAIExecutionAdapter:
                 wire.append(f"reasoning_effort={request.reasoning_effort}")
             response = client.chat.completions.create(**kwargs)
             text = response_text(response)
-            if not text:
-                raise ProviderExecutionError.for_empty_reply()
             usage = _response_usage(response)
             provider_cost_usd = optional_nonnegative_float(
                 value_at(response, "cost", value_at(value_at(response, "usage"), "cost"))
             )
+            if not text:
+                raise ProviderExecutionError.for_empty_reply(
+                    usage=usage, provider_cost_usd=provider_cost_usd
+                )
             adapter_response = AdapterResponse(
                 text=text,
                 model_id=request.model_id,

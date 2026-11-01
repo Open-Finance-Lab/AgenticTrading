@@ -562,22 +562,24 @@ def test_execution_failure_emits_only_safe_error_category(
 
 
 @pytest.mark.parametrize(
-    ("reply", "empty", "analytics"),
+    ("reply", "empty", "analytics", "hold"),
     [
-        # Whitespace is no answer: the provider's empty reply, released.
+        # Whitespace is no answer: the provider's empty reply, settled at the
+        # usage it was billed for (#556).
         (
             AdapterResponse(
                 text=" \n", model_id=MODEL_ID, usage=LLMUsage(input_tokens=4, output_tokens=9)
             ),
             True,
             "empty_response",
+            "settled",
         ),
         # Not a reply at all: an adapter contract break, never worth asking again.
-        (SimpleNamespace(text="BUY"), False, "internal_error"),
+        (SimpleNamespace(text="BUY"), False, "internal_error", "released"),
     ],
 )
 def test_only_an_empty_reply_is_marked_retryable(
-    tmp_path, monkeypatch, reply, empty, analytics
+    tmp_path, monkeypatch, reply, empty, analytics, hold
 ):
     adapter = ScriptedExecutionAdapter([reply])
     service, credits_store = _execution_service(tmp_path, monkeypatch, adapter)
@@ -599,7 +601,176 @@ def test_only_an_empty_reply_is_marked_retryable(
             "SELECT status FROM credit_llm_reservations WHERE run_id = ?",
             ("empty-reply-run",),
         ).fetchone()[0]
-    assert status == "released"
+    assert status == hold
+
+
+def _reservations(credits_store, run_id):
+    with sqlite3.connect(credits_store.db_path) as conn:
+        return conn.execute(
+            "SELECT call_index, status, settled_micro FROM credit_llm_reservations "
+            "WHERE run_id = ? ORDER BY call_index",
+            (run_id,),
+        ).fetchall()
+
+
+def test_a_billed_empty_reply_is_settled_and_still_retryable(tmp_path, monkeypatch):
+    """#556: reasoning that spent the ceiling is billed upstream, so the
+    hold settles at that usage instead of being released at zero. The
+    caller still gets the marked error and asks again."""
+    adapter = ScriptedExecutionAdapter(
+        [
+            ProviderExecutionError.for_empty_reply(
+                usage=LLMUsage(input_tokens=100, output_tokens=100)
+            )
+        ]
+    )
+    service, credits_store = _execution_service(tmp_path, monkeypatch, adapter)
+
+    with pytest.raises(LLMExecutionError) as exc_info:
+        service.execute(_request("billed-empty-run"))
+
+    assert exc_info.value.category is ExecutionErrorCategory.RESPONSE_INVALID
+    assert exc_info.value.empty_reply is True
+    assert _reservations(credits_store, "billed-empty-run") == [(0, "settled", 200_000)]
+    # The same 200_000 micro a 100/100 answer costs.
+    assert credits_store.get_balance_projection(USER_ID)["total_available_micro"] == 900_000
+
+
+def test_a_settled_empty_reply_reraises_the_adapter_s_own_error(tmp_path, monkeypatch):
+    error = ProviderExecutionError.for_empty_reply(
+        usage=LLMUsage(input_tokens=100, output_tokens=100)
+    )
+    service, _ = _execution_service(
+        tmp_path, monkeypatch, ScriptedExecutionAdapter([error])
+    )
+
+    with pytest.raises(LLMExecutionError) as exc_info:
+        service.execute(_request("same-error-run"))
+
+    assert exc_info.value is error
+    assert exc_info.value.provider_elapsed_seconds is not None
+
+
+def test_a_zero_output_empty_reply_settles_at_the_provider_s_reported_cost(
+    tmp_path, monkeypatch
+):
+    """OpenRouter reports what it waived under zero-completion insurance as
+    $0, so a reported cost settles exactly that, prompt included."""
+    adapter = ScriptedExecutionAdapter(
+        [
+            ProviderExecutionError.for_empty_reply(
+                usage=LLMUsage(input_tokens=100, output_tokens=0),
+                provider_cost_usd=0.0,
+            )
+        ]
+    )
+    service, credits_store = _execution_service(tmp_path, monkeypatch, adapter)
+
+    with pytest.raises(LLMExecutionError):
+        service.execute(_request("waived-empty-run"))
+
+    assert _reservations(credits_store, "waived-empty-run") == [(0, "settled", 0)]
+
+
+def test_an_unpriced_empty_reply_is_released_and_stays_retryable(
+    tmp_path, monkeypatch
+):
+    adapter = ScriptedExecutionAdapter(
+        [
+            ProviderExecutionError.for_empty_reply(
+                usage=LLMUsage(input_tokens=100, output_tokens=100)
+            )
+        ]
+    )
+    service, credits_store = _execution_service(tmp_path, monkeypatch, adapter)
+    build_evidence = service._build_evidence
+
+    def unpriced(**kwargs):
+        return build_evidence(**kwargs).model_copy(update={"usage_authority": "unavailable"})
+
+    monkeypatch.setattr(service, "_build_evidence", unpriced)
+
+    with pytest.raises(LLMExecutionError) as exc_info:
+        service.execute(_request("unpriced-empty-run"))
+
+    assert exc_info.value.empty_reply is True
+    assert _reservations(credits_store, "unpriced-empty-run") == [(0, "released", 0)]
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        ProviderExecutionError.for_empty_reply(),
+        # No output and no reported cost: nothing shows a charge, so nothing
+        # is settled -- never more than the provider can be shown to bill.
+        ProviderExecutionError.for_empty_reply(
+            usage=LLMUsage(input_tokens=100, output_tokens=0)
+        ),
+    ],
+    ids=["no-usage", "zero-output"],
+)
+def test_an_unbilled_empty_reply_is_still_released_at_zero(
+    tmp_path, monkeypatch, error
+):
+    adapter = ScriptedExecutionAdapter([error])
+    service, credits_store = _execution_service(tmp_path, monkeypatch, adapter)
+
+    with pytest.raises(LLMExecutionError) as exc_info:
+        service.execute(_request("unbilled-empty-run"))
+
+    assert exc_info.value.empty_reply is True
+    assert _reservations(credits_store, "unbilled-empty-run") == [(0, "released", 0)]
+    assert credits_store.get_balance_projection(USER_ID)["total_available_micro"] == 1_100_000
+
+
+def test_the_rescue_call_after_a_billed_empty_reply_settles_on_its_own_hold(
+    tmp_path, monkeypatch
+):
+    adapter = ScriptedExecutionAdapter(
+        [
+            ProviderExecutionError.for_empty_reply(
+                usage=LLMUsage(input_tokens=100, output_tokens=100)
+            ),
+            AdapterResponse(
+                text="BUY", model_id=MODEL_ID, usage=LLMUsage(input_tokens=100, output_tokens=100)
+            ),
+        ]
+    )
+    service, credits_store = _execution_service(tmp_path, monkeypatch, adapter)
+
+    with pytest.raises(LLMExecutionError):
+        service.execute(_request("rescue-run"))
+    result = service.execute(
+        _request("rescue-run").model_copy(update={"call_index": 1})
+    )
+
+    assert result.text == "BUY"
+    assert _reservations(credits_store, "rescue-run") == [
+        (0, "settled", 200_000),
+        (1, "settled", 200_000),
+    ]
+
+
+def test_a_failed_settlement_of_an_empty_reply_fails_closed(tmp_path, monkeypatch):
+    adapter = ScriptedExecutionAdapter(
+        [
+            ProviderExecutionError.for_empty_reply(
+                usage=LLMUsage(input_tokens=100, output_tokens=100)
+            )
+        ]
+    )
+    service, credits_store = _execution_service(tmp_path, monkeypatch, adapter)
+
+    def fail_settle(*_args, **_kwargs):
+        raise RuntimeError("synthetic settle failure")
+
+    monkeypatch.setattr(service.credits, "settle_llm_credits", fail_settle)
+
+    with pytest.raises(LLMExecutionError) as exc_info:
+        service.execute(_request("settle-failure-run"))
+
+    assert exc_info.value.category is ExecutionErrorCategory.BILLING_FAILED
+    assert exc_info.value.empty_reply is False
 
 
 def test_platform_execution_releases_reservation_when_usage_is_missing(
