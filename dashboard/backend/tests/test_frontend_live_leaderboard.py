@@ -512,11 +512,9 @@ globalThis.API_BASE = '';
 def _render_catching_up_board(payload, select_id):
     """Render `payload` the way loadLiveLeaderboardData does; return the banner,
     the table body and the detail panel for the row `select_id`."""
-    from dashboard.backend.tests._frontend_source import APP_JS, fn_body, run_node
-
     script = (
         _LIVE_FAKE_DOM
-        + fn_body("function escapeHtml(", APP_JS)
+        + fn_body("function escapeHtml(", _APP_JS)
         + "\n"
         + _LIVE_JS
         + f"\nconst payload = {json.dumps(payload)};\n"
@@ -707,8 +705,6 @@ def test_catching_up_rows_sort_after_current_rows_and_before_pending_ones():
     earlier session than the rows beside it. Sorting a column must not slot it
     in among the current rows, in either direction: DeepSeek's Sharpe would
     sort first descending and Qwen's first ascending."""
-    from dashboard.backend.tests._frontend_source import run_node
-
     rows = [
         _catching_up_entry(
             "claude_haiku_4_5", "Claude Haiku 4.5", "pending", value=None, snapshot_end=None
@@ -758,3 +754,101 @@ def test_catching_up_rows_sort_after_current_rows_and_before_pending_ones():
 
 def test_the_banner_no_longer_reads_models_cached():
     assert "models_cached" not in _strip_js_comments(_LIVE_JS)
+
+
+def _num_cells(table, entry_id):
+    """The figure cells of one table row, in column order: Return, Sharpe,
+    Max DD, Trades, Avg hold, Win rate, vs SPY, Invested."""
+    row = table.split(f'data-live-entry="{entry_id}"')[1].split("</tr>")[0]
+    return re.findall(r'<td class="num-cell[^"]*"[^>]*>(.*?)</td>', row, flags=re.DOTALL)
+
+
+def _with_return(entry, cumulative_return):
+    return {**entry, "cumulative_return": cumulative_return}
+
+
+@_needs_node
+def test_vs_spy_is_a_dash_wherever_the_two_returns_end_on_different_sessions():
+    """The column is "Return minus SPY over the same frozen sessions". A
+    catching-up row's return ends sessions before SPY's, and a catching-up SPY's
+    ends before every current row's, so either subtraction mixes two windows: a
+    +5% row through 08-20 against SPY +1% through 08-27 printed +4.00%. Those
+    cells show the no-figure dash and sort as no figure; a current row against a
+    current SPY keeps its number."""
+    qwen = _catching_up_entry(
+        "qwen3_7_plus", "Qwen3.7 Plus", "frozen", value=103000.0, snapshot_end="2026-08-27"
+    )
+    rows = (_with_return(_SPY_ROW, 0.01), _deepseek("catching_up"), _with_return(qwen, 0.03))
+    out = _render_catching_up_board(_catching_up_payload(*rows), "deepseek_v4_pro")
+    behind = _num_cells(out["table"], "deepseek_v4_pro")
+    assert (behind[0], behind[6]) == ("5.00%", "—"), "its own return stays; vs SPY does not"
+    assert _num_cells(out["table"], "qwen3_7_plus")[6] == "2.00%"
+
+    lagging_spy = {**_with_return(_SPY_ROW, 0.01), "status": "catching_up", "snapshot_end": "2026-08-20"}
+    out = _render_catching_up_board(
+        _catching_up_payload(lagging_spy, _with_return(qwen, 0.03)), "qwen3_7_plus"
+    )
+    assert _num_cells(out["table"], "qwen3_7_plus")[6] == "—"
+
+    script = (
+        _LIVE_FAKE_DOM
+        + "\n"
+        + _LIVE_JS
+        + f"\nlivePayload = {{ entries: {json.dumps(list(rows))} }};\n"
+        + "const [, behind, current] = livePayload.entries;\n"
+        + "process.stdout.write(JSON.stringify({\n"
+        + "  behindIsNaN: Number.isNaN(liveSortValue(behind, 'vs_spy')),\n"
+        + "  current: liveSortValue(current, 'vs_spy'),\n"
+        + "}));\n"
+    )
+    out = run_node(script)
+    assert out["behindIsNaN"] is True, "a dash sorts as no figure, not as 0.00%"
+    assert out["current"] == pytest.approx(0.02)
+
+
+@_needs_node
+def test_a_catching_up_baseline_is_named_when_no_model_has_printed_yet():
+    """With no model printed the banner opens "Baselines frozen through <date>",
+    which a lagging baseline is not; the catching-up line follows it, so that row
+    is named with its own date instead of being folded into the frozen ones."""
+    equal_weight = _catching_up_entry(
+        "equal_weight_djia", "Equal Weight DJIA", "catching_up",
+        value=100500.0, snapshot_end="2026-08-15", is_model=False,
+    )
+    out = _render_catching_up_board(
+        _catching_up_payload(
+            _SPY_ROW, equal_weight, _deepseek("pending", value=None, snapshot_end=None)
+        ),
+        "equal_weight_djia",
+    )
+    assert out["banner"] == (
+        "Baselines frozen through 2026-08-27. Model curves appear once the nightly "
+        "refresh deploys them; they are never computed on page load. "
+        "Equal Weight DJIA is catching up (through 2026-08-15): it is shown but "
+        "not ranked until it reaches the latest session."
+    )
+
+
+@_needs_node
+def test_a_board_whose_only_prints_are_catching_up_is_not_called_empty():
+    """live_status.has_prints counts ranked (frozen) rows only, as models_cached
+    did, so a board whose newest run could not plot and whose other rows are
+    catching up read "No freeze snapshot ... yet" over curves on screen. The
+    banner reads the rows; a board with no printed row keeps that line."""
+    spy_pending = _catching_up_entry(
+        "spy_index", "SPY", "pending", value=None, snapshot_end=None, is_model=False
+    )
+    payload = _catching_up_payload(spy_pending, _deepseek("catching_up"))
+    payload["live_status"]["has_prints"] = False
+    out = _render_catching_up_board(payload, "deepseek_v4_pro")
+    assert out["banner"] == (
+        "DeepSeek V4 Pro is catching up (through 2026-08-20): it is shown but "
+        "not ranked until it reaches the latest session."
+    )
+
+    empty = _catching_up_payload(
+        spy_pending, _deepseek("pending", value=None, snapshot_end=None)
+    )
+    empty["live_status"]["has_prints"] = False
+    out = _render_catching_up_board(empty, "deepseek_v4_pro")
+    assert out["banner"].startswith("No freeze snapshot for 2026-08-01 — 2026-08-31 yet. ")

@@ -133,6 +133,12 @@ function liveHasPrintedModel(entries) {
   return (entries || []).some((e) => liveIsModel(e) && !liveEntryIsPending(e));
 }
 
+// The same for any row: live_status.has_prints counts ranked rows only too, so
+// a board whose only curves are catching up is not one with no snapshot yet.
+function liveHasPrintedRow(entries) {
+  return (entries || []).some((e) => !liveEntryIsPending(e));
+}
+
 // The banner line for rows shown but not ranked; '' when there are none.
 function liveCatchingUpBanner(entries) {
   const behind = (entries || []).filter(liveEntryIsCatchingUp);
@@ -269,7 +275,7 @@ function updateLiveHeader(payload) {
 
   const banner = document.getElementById('livePhaseBanner');
   if (banner) {
-    if (!status.has_prints) {
+    if (!status.has_prints && !liveHasPrintedRow(payload.entries)) {
       banner.hidden = false;
       banner.textContent = (
         `No freeze snapshot for ${window.label || 'this month'} yet. ` +
@@ -282,10 +288,14 @@ function updateLiveHeader(payload) {
         `The session through ${status.frozen_through || '—'} appears after the next nightly refresh.`
       );
     } else if (!liveHasPrintedModel(payload.entries)) {
+      // A lagging baseline is not frozen through that date: the catching-up
+      // line names it, with its own date, after the frozen one.
+      const behind = liveCatchingUpBanner(payload.entries);
       banner.hidden = false;
       banner.textContent = (
         `Baselines frozen through ${status.frozen_through}. ` +
-        'Model curves appear once the nightly refresh deploys them; they are never computed on page load.'
+        'Model curves appear once the nightly refresh deploys them; they are never computed on page load.' +
+        (behind ? ` ${behind}` : '')
       );
     } else if (liveCatchingUpBanner(payload.entries)) {
       banner.hidden = false;
@@ -317,16 +327,20 @@ function updateLiveHeader(payload) {
   }
 }
 
+// The vs SPY column is "Return minus SPY over the same frozen sessions". A
+// catching-up row's return ends sessions before SPY's, and a catching-up SPY's
+// ends before every current row's, so either subtraction would mix two windows:
+// no figure for those cells (#586).
 function liveSpyReturn() {
   const spy = (livePayload?.entries || []).find((e) => e.entry_id === 'spy_index');
-  if (!spy || liveEntryIsPending(spy) || spy.cumulative_return == null) return null;
+  if (!spy || liveEntryIsPending(spy) || liveEntryIsCatchingUp(spy) || spy.cumulative_return == null) return null;
   const n = Number(spy.cumulative_return);
   return Number.isFinite(n) ? n : null;
 }
 
 function liveVsSpy(entry) {
   const bench = liveSpyReturn();
-  if (bench == null || entry == null || entry.cumulative_return == null) return null;
+  if (bench == null || entry == null || liveEntryIsCatchingUp(entry) || entry.cumulative_return == null) return null;
   const n = Number(entry.cumulative_return);
   return Number.isFinite(n) ? n - bench : null;
 }
@@ -365,7 +379,7 @@ function liveSortValue(entry, key) {
     case 'trades': return Number(entry.num_trades);
     case 'hold': return Number(entry.avg_hold_hours);
     case 'win_rate': return Number(entry.win_rate);
-    case 'vs_spy': return Number(liveVsSpy(entry));
+    case 'vs_spy': return liveVsSpy(entry) ?? NaN;
     case 'invested': return Number(entry.invested_pct);
     default: return Number(entry.cumulative_return);
   }
