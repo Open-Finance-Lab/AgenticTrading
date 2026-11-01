@@ -478,3 +478,283 @@ def test_neither_board_renders_a_stop_or_take_profit_price():
         stripped = _strip_js_comments(source)
         assert "stop_loss" not in stripped, name
         assert "take_profit" not in stripped, name
+
+
+# ── #586: catching-up rows are printed, flagged, and not reported missing ───
+#
+# These evaluate the whole of js/live-leaderboard.js under node against a fake
+# DOM instead of lifting single functions, so a helper another change adds to
+# the render path is exercised too rather than raising a ReferenceError here.
+
+_LIVE_FAKE_DOM = """
+const els = {};
+function el(id) {
+  if (!els[id]) {
+    els[id] = {
+      id, textContent: '', innerHTML: '', hidden: false, dataset: {}, style: {},
+      classList: { toggle() {}, add() {}, remove() {}, contains() { return false; } },
+      setAttribute() {}, querySelector() { return null; },
+    };
+  }
+  return els[id];
+}
+globalThis.window = globalThis;
+globalThis.document = {
+  getElementById: el,
+  querySelector: () => null,
+  querySelectorAll: () => [],
+  addEventListener() {},
+};
+globalThis.API_BASE = '';
+"""
+
+
+def _render_catching_up_board(payload, select_id):
+    """Render `payload` the way loadLiveLeaderboardData does; return the banner,
+    the table body and the detail panel for the row `select_id`."""
+    from dashboard.backend.tests._frontend_source import APP_JS, fn_body, run_node
+
+    script = (
+        _LIVE_FAKE_DOM
+        + fn_body("function escapeHtml(", APP_JS)
+        + "\n"
+        + _LIVE_JS
+        + f"\nconst payload = {json.dumps(payload)};\n"
+        + "livePayload = payload;\n"
+        + "updateLiveHeader(payload);\n"
+        + "populateLiveTable();\n"
+        + f"renderLiveDetail(payload.entries.find((e) => e.entry_id === {json.dumps(select_id)}));\n"
+        + "process.stdout.write(JSON.stringify({\n"
+        + "  banner: els.livePhaseBanner.textContent,\n"
+        + "  bannerHidden: els.livePhaseBanner.hidden,\n"
+        + "  table: els.liveLeaderboardTableBody.innerHTML,\n"
+        + "  detail: els.liveSelectedDetail.innerHTML,\n"
+        + "}));\n"
+    )
+    return run_node(script)
+
+
+def _catching_up_entry(entry_id, name, status, *, value, snapshot_end, is_model=True):
+    """One board row in the shape live._entry_from_strategy serves."""
+    printed = value is not None
+    return {
+        "entry_id": entry_id,
+        "model": name,
+        "team_name": name,
+        "team_badge": "Model" if is_model else "Index",
+        "is_model": is_model,
+        "status": status,
+        "rank": None,
+        "portfolio_value": value,
+        "cumulative_return": 0.05 if printed else None,
+        "sharpe_ratio": None,
+        "max_drawdown": None,
+        "num_trades": 3 if printed else None,
+        "snapshot_end": snapshot_end,
+        "equity_curve": (
+            [{"timestamp": "2026-08-03T10:00:00-04:00", "equity": 100000}] if printed else []
+        ),
+    }
+
+
+def _catching_up_payload(*entries):
+    return {
+        "period": "live",
+        "board_title": "Live Leaderboard",
+        "phase_label": "Season 0 · preview",
+        "window": {"label": "2026-08-01 — 2026-08-31"},
+        "entries": list(entries),
+        "live_status": {
+            "has_prints": True,
+            "snapshot_stale": False,
+            "frozen_through": "2026-08-27",
+            "snapshot_end": "2026-08-27",
+            "session_state": "closed",
+            # The server counts only ranked (frozen) rows here, so a model
+            # mid-replay reads 0. Held at 0 in every case: the banner must not
+            # depend on it.
+            "models_cached": 0,
+            "catching_up": [e["entry_id"] for e in entries if e["status"] == "catching_up"],
+            "trading_days_elapsed": 19,
+            "trading_days_total": 21,
+        },
+    }
+
+
+_SPY_ROW = _catching_up_entry(
+    "spy_index", "SPY", "frozen", value=101000.0, snapshot_end="2026-08-27", is_model=False
+)
+
+
+def _deepseek(status, *, value=105000.0, snapshot_end="2026-08-20"):
+    return _catching_up_entry(
+        "deepseek_v4_pro", "DeepSeek V4 Pro", status, value=value, snapshot_end=snapshot_end
+    )
+
+
+@_needs_node
+def test_a_catching_up_model_is_printed_and_flagged_with_its_own_date():
+    out = _render_catching_up_board(
+        _catching_up_payload(_SPY_ROW, _deepseek("catching_up")), "deepseek_v4_pro"
+    )
+    row = out["table"].split('data-live-entry="deepseek_v4_pro"')[1].split("</tr>")[0]
+    assert (
+        '<span class="team-badge" title="Catching up · through 2026-08-20">Catching up</span>'
+    ) in row
+    assert "5.00%" in row, "a catching-up row prints its figures"
+    assert (
+        '<span class="team-detail-label">Status</span>'
+        '<span class="team-detail-value">Catching up · through 2026-08-20</span>'
+    ) in out["detail"]
+    assert "$105,000.00" in out["detail"]
+    assert "Awaiting freeze" not in out["detail"]
+
+
+@_needs_node
+def test_the_banner_names_the_catching_up_model_instead_of_calling_it_missing():
+    out = _render_catching_up_board(
+        _catching_up_payload(_SPY_ROW, _deepseek("catching_up")), "deepseek_v4_pro"
+    )
+    assert out["bannerHidden"] is False
+    assert "Model curves appear" not in out["banner"]
+    assert out["banner"] == (
+        "DeepSeek V4 Pro is catching up (through 2026-08-20): it is shown but "
+        "not ranked until it reaches the latest session."
+    )
+
+
+@_needs_node
+def test_the_banner_lists_every_catching_up_entry():
+    qwen = _catching_up_entry(
+        "qwen3_7_plus", "Qwen3.7 Plus", "catching_up", value=99000.0, snapshot_end="2026-08-22"
+    )
+    out = _render_catching_up_board(
+        _catching_up_payload(_SPY_ROW, _deepseek("catching_up"), qwen), "qwen3_7_plus"
+    )
+    assert out["banner"] == (
+        "2 entries are catching up (DeepSeek V4 Pro through 2026-08-20, "
+        "Qwen3.7 Plus through 2026-08-22): they are shown but not ranked "
+        "until they reach the latest session."
+    )
+
+
+@_needs_node
+def test_a_model_with_no_curve_still_gets_the_models_pending_banner():
+    out = _render_catching_up_board(
+        _catching_up_payload(_SPY_ROW, _deepseek("pending", value=None, snapshot_end=None)),
+        "deepseek_v4_pro",
+    )
+    assert out["banner"] == (
+        "Baselines frozen through 2026-08-27. Model curves appear once the nightly "
+        "refresh deploys them; they are never computed on page load."
+    )
+    assert "Catching up" not in out["table"]
+    assert "Awaiting freeze" in out["detail"]
+    assert "Status</span>" not in out["detail"]
+
+
+@_needs_node
+def test_a_catching_up_row_with_no_value_reads_as_pending_not_catching_up():
+    """A row the server marks catching_up but sends no value for cannot print:
+    it is pending, and a 'Catching up' badge beside 'Awaiting freeze' would say
+    both at once."""
+    out = _render_catching_up_board(
+        _catching_up_payload(_SPY_ROW, _deepseek("catching_up", value=None)),
+        "deepseek_v4_pro",
+    )
+    assert "Catching up" not in out["table"]
+    assert "Status</span>" not in out["detail"]
+    assert "Awaiting freeze" in out["detail"]
+    assert out["banner"].startswith("Baselines frozen through 2026-08-27.")
+
+
+@_needs_node
+def test_a_stale_snapshot_banner_outranks_the_catching_up_line_and_the_badge_stays():
+    payload = _catching_up_payload(_SPY_ROW, _deepseek("catching_up"))
+    payload["live_status"]["snapshot_stale"] = True
+    payload["live_status"]["frozen_through"] = "2026-08-28"
+    out = _render_catching_up_board(payload, "deepseek_v4_pro")
+    assert out["banner"].startswith("Showing the snapshot through 2026-08-27.")
+    assert ">Catching up</span>" in out["table"]
+
+
+@_needs_node
+def test_a_current_board_shows_no_banner_and_no_badge():
+    out = _render_catching_up_board(
+        _catching_up_payload(_SPY_ROW, _deepseek("frozen", snapshot_end="2026-08-27")),
+        "deepseek_v4_pro",
+    )
+    assert out["bannerHidden"] is True
+    assert out["banner"] == ""
+    assert "Catching up" not in out["table"]
+    assert "Catching up" not in out["detail"]
+
+
+def _ok_sharpe(value):
+    """The Sharpe fields boardSharpeValue accepts: status 'ok' plus a finite interval."""
+    return {
+        "sharpe_status": "ok",
+        "sharpe_ratio": value,
+        "sharpe_ci_low": value - 1,
+        "sharpe_ci_high": value + 1,
+        "sharpe_days": 5,
+    }
+
+
+@_needs_node
+def test_catching_up_rows_sort_after_current_rows_and_before_pending_ones():
+    """A catching-up row is shown but not ranked, and its figures are from an
+    earlier session than the rows beside it. Sorting a column must not slot it
+    in among the current rows, in either direction: DeepSeek's Sharpe would
+    sort first descending and Qwen's first ascending."""
+    from dashboard.backend.tests._frontend_source import run_node
+
+    rows = [
+        _catching_up_entry(
+            "claude_haiku_4_5", "Claude Haiku 4.5", "pending", value=None, snapshot_end=None
+        ),
+        {**_deepseek("catching_up"), **_ok_sharpe(9.0)},
+        {**_SPY_ROW, **_ok_sharpe(1.0)},
+        {
+            **_catching_up_entry(
+                "qwen3_7_plus", "Qwen3.7 Plus", "catching_up",
+                value=99000.0, snapshot_end="2026-08-22",
+            ),
+            **_ok_sharpe(-5.0),
+        },
+        {
+            **_catching_up_entry(
+                "equal_weight_djia", "Equal Weight DJIA", "frozen",
+                value=100800.0, snapshot_end="2026-08-27", is_model=False,
+            ),
+            **_ok_sharpe(0.5),
+        },
+    ]
+    script = (
+        _LIVE_FAKE_DOM
+        + "\n"
+        + _board_sharpe_js()
+        + "\n"
+        + _LIVE_JS
+        + f"\nlivePayload = {{ entries: {json.dumps(rows)} }};\n"
+        + "liveSortKey = 'sharpe';\n"
+        + "liveSortDir = 'desc'; const desc = liveSortedEntries().map((e) => e.entry_id);\n"
+        + "liveSortDir = 'asc'; const asc = liveSortedEntries().map((e) => e.entry_id);\n"
+        + "process.stdout.write(JSON.stringify({ desc, asc }));\n"
+    )
+    assert run_node(script) == {
+        "desc": [
+            "spy_index", "equal_weight_djia",
+            "deepseek_v4_pro", "qwen3_7_plus",
+            "claude_haiku_4_5",
+        ],
+        "asc": [
+            "equal_weight_djia", "spy_index",
+            "qwen3_7_plus", "deepseek_v4_pro",
+            "claude_haiku_4_5",
+        ],
+    }
+
+
+def test_the_banner_no_longer_reads_models_cached():
+    assert "models_cached" not in _strip_js_comments(_LIVE_JS)

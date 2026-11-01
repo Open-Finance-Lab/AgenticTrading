@@ -637,3 +637,12 @@ def test_both_about_cards_say_stop_prices_are_not_executed():
         "Official rank is by final portfolio value. "
         "Stop-loss and take-profit prices a model writes are not executed."
     ) in competition
+
+
+def test_the_about_card_explains_the_catching_up_label():
+    about = _APP_HTML_VISIBLE[_APP_HTML_VISIBLE.index("Live Leaderboard</h3>") :]
+    about = about[: about.index("</div>")]
+    assert (
+        "An entry more than one trading session behind is marked Catching up: "
+        "shown, but not ranked."
+    ) in about
