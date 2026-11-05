@@ -11288,6 +11288,7 @@ function viewParamForNavState(state) {
     if (state.page === 'playground') {
         if (state.playgroundTab === 'backtest') return 'backtest';
         if (state.playgroundTab === 'paper') return 'paper';
+        if (state.playgroundTab === 'portfolio-management') return 'portfolio-management';
         return 'agents';
     }
     if (state.page === 'competition') {
@@ -11579,10 +11580,16 @@ function showPlaygroundPanel(tab) {
     const backtest = document.querySelector('.playground-backtest-panel')
       || document.querySelector('.main-container');
     const paper = document.getElementById('paperTradingView');
+    const portfolioManagement = document.getElementById('playgroundPortfolioManagementPanel');
 
     if (agents) agents.style.display = tab === 'agents' ? 'block' : 'none';
     if (backtest) backtest.style.display = tab === 'backtest' ? 'grid' : 'none';
     if (paper) paper.style.display = tab === 'paper' ? 'block' : 'none';
+    if (portfolioManagement) portfolioManagement.style.display = tab === 'portfolio-management' ? 'block' : 'none';
+
+    // The recorded demo owns document keys and timers while it shows; any other
+    // tab must release them (js/portfolio-management.js).
+    if (tab !== 'portfolio-management') window.PortfolioManagementDemo?.hide();
 
     if (tab === 'backtest') {
         currentMode = 'backtest';
@@ -11592,6 +11599,9 @@ function showPlaygroundPanel(tab) {
     } else if (tab === 'paper') {
         currentMode = 'paper';
         loadPaperTradingData();
+    } else if (tab === 'portfolio-management') {
+        currentMode = 'portfolio-management';
+        showPortfolioManagementDemo(portfolioManagement);
     } else {
         currentMode = 'agents';
         // Cache-only repaint so the panel is not blank while agents load;
@@ -11609,6 +11619,24 @@ function showPlaygroundPanel(tab) {
     }
 
     persistNavigation();
+}
+
+// The Portfolio Management tab plays a fixed recording (js/portfolio-management.js).
+// A script that failed to load or a throw on first show must leave a visible
+// message, not an empty panel that looks like a slow load.
+function showPortfolioManagementDemo(panel) {
+    if (!panel) return;
+    const failure = 'Portfolio Management did not load. Reload the page to try again.';
+    if (!window.PortfolioManagementDemo) {
+        panel.textContent = failure;
+        return;
+    }
+    try {
+        window.PortfolioManagementDemo.show(panel);
+    } catch (err) {
+        console.error('Portfolio Management demo failed to show', err);
+        panel.textContent = failure;
+    }
 }
 
 function showCompetitionPanel(tab) {
@@ -11765,9 +11793,11 @@ function navigateToPage(page, options = {}) {
     hide(leaderboardView);
     hide(document.getElementById('liveLeaderboardView'));
     hide(document.getElementById('playgroundAgentsPanel'));
+    hide(document.getElementById('playgroundPortfolioManagementPanel'));
     hide(document.getElementById('researchWorkbenchView'));
     hide(document.getElementById('competitionParticipantsPanel'));
     hide(document.getElementById('competitionAboutPanel'));
+    if (page !== 'playground') window.PortfolioManagementDemo?.hide();
 
     if (page === 'home') {
         currentMode = 'home';
