@@ -41,9 +41,9 @@ def _function_body(source: str, signature: str) -> str:
 
 
 def test_analytics_script_loads_between_app_and_page_scripts():
-    app_at = APP_HTML.index('<script src="app.js?v=164" defer></script>')
+    app_at = APP_HTML.index('<script src="app.js?v=165" defer></script>')
     analytics_at = APP_HTML.index(
-        '<script src="js/analytics.js?v=1" defer></script>'
+        '<script src="js/analytics.js?v=2" defer></script>'
     )
     editor_at = APP_HTML.index(
         '<script src="js/agent-editor.js?v=33" defer></script>'
@@ -67,6 +67,7 @@ def test_page_view_map_contains_only_approved_identifiers():
     values = set(re.findall(r":\s*'([a-z_]+)'", match.group("body")))
     assert values == {
         "home",
+        "portfolio_management",
         "agents",
         "agent_editor",
         "backtest",
@@ -76,6 +77,24 @@ def test_page_view_map_contains_only_approved_identifiers():
         "credits",
         "account",
     }
+
+
+def test_portfolio_management_tab_is_a_known_page_view_on_both_sides():
+    # The browser sends the identifier and the server rejects any it does not list, so the
+    # two lists move together: a tab missing from either logs no view and no dwell time.
+    from dashboard.backend.domain.analytics.models import ALLOWED_PAGE_VIEWS
+
+    assert "'playground_portfolio-management': 'portfolio_management'," in _ANALYTICS_JS
+    assert "portfolio_management" in ALLOWED_PAGE_VIEWS
+
+
+def test_every_browser_page_view_is_accepted_by_the_server():
+    from dashboard.backend.domain.analytics.models import ALLOWED_PAGE_VIEWS
+
+    match = re.search(r"const PAGE_VIEW_MAP = Object\.freeze\(\{(?P<body>.*?)\}\);", _ANALYTICS_JS, re.DOTALL)
+    assert match
+    sent = set(re.findall(r":\s*'([a-z_]+)'", match.group("body")))
+    assert sent <= ALLOWED_PAGE_VIEWS
 
 
 def test_event_payload_has_only_the_seven_approved_fields():

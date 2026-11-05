@@ -68,6 +68,7 @@ def test_allowlists_are_closed_and_versioned():
     }
     assert ALLOWED_PAGE_VIEWS == {
         "home",
+        "portfolio_management",
         "agents",
         "agent_editor",
         "backtest",

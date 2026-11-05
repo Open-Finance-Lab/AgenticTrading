@@ -35,6 +35,7 @@
             // old ?view=paper links land on My Agents instead of a dead panel.
             paper: { page: 'playground', playgroundTab: 'agents' },
             agents: { page: 'playground', playgroundTab: 'agents' },
+            'portfolio-management': { page: 'playground', playgroundTab: 'portfolio-management' },
             marketplace: { page: 'community' },
             playground: { page: 'playground', playgroundTab: 'agents' },
             'my-algo': { page: 'playground', playgroundTab: 'agents' },
@@ -155,13 +156,16 @@
     html[data-nav-boot][data-nav-page="competition"] .primary-nav [data-mode="competition"] { background-color: var(--info-color); color: white; }
     html[data-nav-boot][data-nav-page="community"] .primary-nav [data-mode="community"] { background-color: var(--info-color); color: white; }
     html[data-nav-boot][data-nav-page="playground"] .playground-subtabs .subtab-btn.active { background: transparent; color: var(--text-secondary); }
+    html[data-nav-boot][data-nav-page="playground"][data-nav-playground-tab="portfolio-management"] .playground-subtabs [data-playground-tab="portfolio-management"],
     html[data-nav-boot][data-nav-page="playground"][data-nav-playground-tab="agents"] .playground-subtabs [data-playground-tab="agents"],
     html[data-nav-boot][data-nav-page="playground"][data-nav-playground-tab="backtest"] .playground-subtabs [data-playground-tab="backtest"],
     html[data-nav-boot][data-nav-page="playground"][data-nav-playground-tab="paper"] .playground-subtabs [data-playground-tab="paper"] { background: var(--info-color); color: white; }
+    html[data-nav-boot][data-nav-page="playground"][data-nav-playground-tab="portfolio-management"] #playgroundAgentsPanel,
     html[data-nav-boot][data-nav-page="playground"][data-nav-playground-tab="backtest"] #playgroundAgentsPanel,
     html[data-nav-boot][data-nav-page="playground"][data-nav-playground-tab="paper"] #playgroundAgentsPanel { display: none !important; }
     html[data-nav-boot][data-nav-page="playground"][data-nav-playground-tab="backtest"] .main-container.playground-backtest-panel { display: grid !important; }
     html[data-nav-boot][data-nav-page="playground"][data-nav-playground-tab="paper"] #paperTradingView { display: block !important; }
+    html[data-nav-boot][data-nav-page="playground"][data-nav-playground-tab="portfolio-management"] #playgroundPortfolioManagementPanel { display: block !important; }
     html[data-nav-boot][data-nav-page="competition"] .competition-subtabs .subtab-btn.active { background: transparent; color: var(--text-secondary); }
     html[data-nav-boot][data-nav-page="competition"][data-nav-competition-tab="live"] .competition-subtabs [data-competition-tab="live"],
     html[data-nav-boot][data-nav-page="competition"][data-nav-competition-tab="leaderboard"] .competition-subtabs [data-competition-tab="leaderboard"],
@@ -951,10 +955,12 @@
     <!-- Playground -->
     <div id="playgroundView" class="page-view playground-view" style="display: none;">
         <div class="subtab-bar playground-subtabs">
+            <button class="subtab-btn" data-playground-tab="portfolio-management">Portfolio Management</button>
             <button class="subtab-btn active" data-playground-tab="agents">My Agents</button>
             <button class="subtab-btn" data-playground-tab="backtest">Backtest</button>
             <button class="subtab-btn subtab-btn--disabled" data-playground-tab="paper" disabled aria-disabled="true" title="Paper trading is not available">Paper Trading</button>
         </div>
+        <div id="playgroundPortfolioManagementPanel" class="playground-panel" style="display: none;"><p>Loading Portfolio Management…</p></div>
         <div id="playgroundAgentsPanel" class="playground-panel">
             <!-- My Portfolio: Overview + Capital Allocation (live ledger when signed in, sample data for guests).
                  Hidden while paper trading is switched off (PAPER_TRADING_ENABLED in app.js): the
@@ -2516,8 +2522,8 @@
     <script src="market-events/MarketEventFeed.js" defer></script>
     <script src="js/portfolio.js?v=18" defer></script>
     <script src="js/backtest-comparison.js?v=1" defer></script>
-    <script src="app.js?v=164" defer></script>
-    <script src="js/analytics.js?v=1" defer></script>
+    <script src="app.js?v=165" defer></script>
+    <script src="js/analytics.js?v=2" defer></script>
     <script src="js/agent-editor.js?v=33" defer></script>
     <script src="js/credit-format.js?v=1" defer></script>
     <script src="js/credits.js?v=8" defer></script>
@@ -2531,6 +2537,9 @@
          both loaded above — not beside the market-events/* block, which loads
          before app.js. -->
     <script src="home-news-signals.js" defer></script>
+    <!-- The Portfolio Management subtab: the recording first, then the page that plays it. -->
+    <script src="js/portfolio-management-data.js?v=1" defer></script>
+    <script src="js/portfolio-management.js?v=1" defer></script>
     <!-- Never `hidden`: a live region has to stay rendered to be monitored. It
          hides itself visually via .app-toast's opacity + pointer-events. -->
     <div id="appToast" class="app-toast" role="status" aria-live="polite"></div>
