@@ -651,7 +651,7 @@ button { cursor: pointer; }
         </div>
         <div class="ab">
           <h3>What the critic added here</h3>
-          <p>Code found the split, stopped the round and built the adjusted prices. In five runs with the critic switched off, code’s own objection led the proposer to the same fix and the same eight orders. The critic explained the fault, tied it to the plan and the return floor, and reviewed the two HON spin-offs code could not verify. Its clearest value showed in the client message, not in the data.</p>
+          <p>Code found the split, stopped the round and built the adjusted prices. In <span data-fill="code-only-n">five</span> runs with the critic switched off, code’s own objection led the proposer to the same fix and the same <span data-fill="orders-n">eight</span> orders. The critic explained the fault, tied it to the plan and the return floor, and reviewed the <span data-fill="hon-n">two</span> HON spin-offs code could not verify. Its clearest value showed in the client message, not in the data.</p>
         </div>
         <div class="ab">
           <h3>Point in time</h3>
@@ -706,10 +706,19 @@ button { cursor: pointer; }
   var FLOOR1 = pc(W1.floor_monthly), FLOOR2 = pc(W2.floor_monthly);
   var N1 = R.checks.n1, N2 = R.checks.n2;
   var HON_MAX = Math.max.apply(null, R.hon.map(function (h) { return h.max_pp; }));
+  // Counts the prose states are read from the recording, so a re-recorded run cannot leave a
+  // sentence contradicting the table beside it (tests pin the facts the prose asserts about them).
+  var NUMW = ['no', 'one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine', 'ten', 'eleven', 'twelve'];
+  function words(n) { return n < NUMW.length ? NUMW[n] : String(n); }
+  function cap(t) { return t.charAt(0).toUpperCase() + t.slice(1); }
+  var N_STOCKS = R.ticker.length, N_D1 = R.d1.length, N_HON = R.hon.length, N_CODE_ONLY = R.runs.code_only.length;
+  var N_FILL = R.checks.fill.length, N_FILL_OK = R.checks.fill.filter(function (c) { return c[1] === 'ok'; }).length;
+  // Words filled into the About text (MARKUP is static): each span's own text is the fallback.
+  var FILL = { 'code-only-n': words(N_CODE_ONLY), 'orders-n': words(R.fills.n_orders), 'hon-n': words(N_HON) };
 
   var STEPS = [
     { title: 'Your portfolio, your mandate, your list',
-      line: 'A simulated $100,000 account bought the 31 stocks of your list in equal amounts on Mon Aug 31. The list is the Dow 30 plus Amphenol (APH), added for this case because APH split 2-for-1 on Thu Sep 3. The first weekly rebalance runs after the close on Fri Sep 4.',
+      line: 'A simulated $100,000 account bought the ' + N_STOCKS + ' stocks of your list in equal amounts on Mon Aug 31. The list is the Dow 30 plus Amphenol (APH), added for this case because APH split 2-for-1 on Thu Sep 3. The first weekly rebalance runs after the close on Fri Sep 4.',
       next: 'your message' },
     { title: 'Your message: personal details stay out',
       line: 'You ask for low risk with a target return, sector limits and a turnover cap, and you mention your age, family, savings and email. Code removes those four details before any model reads the message.',
@@ -724,16 +733,16 @@ button { cursor: pointer; }
       line: 'The proposer binds the risk and return estimates built from the feed. To the solver APH now looks like a stock that just halved, so the plan sells ' + CF.aph_sold + ' of your ' + CF.aph_shares_held + ' APH shares. The same prices lower your return floor from ' + FLOOR2 + ' to ' + FLOOR1 + ' a month.',
       next: 'the code checks' },
     { title: 'Caught by code: nothing trades',
-      line: 'Code compares every daily price move with reference prices. Three days disagree, and each matches a corporate action on record: APH’s split and two HON spin-offs. The gate stops the round, and code builds prices adjusted for those three events.',
+      line: 'Code compares every daily price move with reference prices. ' + cap(words(N_D1)) + ' days disagree, and each matches a corporate action on record: APH’s split and ' + words(N_HON) + ' HON spin-offs. The gate stops the round, and code builds prices adjusted for those ' + words(N_D1) + ' events.',
       next: 'the critic’s review' },
     { title: 'The critic’s evidence and feedback',
-      line: 'The critic, Claude Sonnet 4.6, reads code’s results and writes the objection: firm policy bars prices that fail the check, so use the adjusted estimates, with a return floor of ' + (100 * W2.floor_monthly).toFixed(3) + '% a month. In five runs with the critic switched off, code’s own objection led to the same fix.',
+      line: 'The critic, Claude Sonnet 4.6, reads code’s results and writes the objection: firm policy bars prices that fail the check, so use the adjusted estimates, with a return floor of ' + (100 * W2.floor_monthly).toFixed(3) + '% a month. In ' + words(N_CODE_ONLY) + ' runs with the critic switched off, code’s own objection led to the same fix.',
       next: 'the proposer revises' },
     { title: 'The revision: same words, same limits, adjusted prices',
       line: 'Only the data changes. APH stays at ' + APH_HELD.toFixed(2) + '%, risk falls from ' + pc(R.held_risk) + ' to ' + pc(W2.risk_monthly) + ' a month, and the floor is ' + FLOOR2 + ' again. Had round 1 traded, the risk would have been about the same; the cost was ' + CF.aph_sold + ' APH shares sold for no reason.',
       next: 'final checks and trade' },
     { title: 'Final checks, then trade',
-      line: 'All ' + N2.n + ' checks pass. Two HON adjustments use the vendor’s factors, which code cannot verify; leaving either out moves no weight by more than ' + HON_MAX.toFixed(2) + ' points, and the critic passes. The gate trades ' + R.fills.n_orders + ' simulated orders at Tuesday’s open (Monday is Labor Day).',
+      line: 'All ' + N2.n + ' checks pass. ' + cap(words(N_HON)) + ' HON adjustments use the vendor’s factors, which code cannot verify; leaving either out moves no weight by more than ' + HON_MAX.toFixed(2) + ' points, and the critic passes. The gate trades ' + R.fills.n_orders + ' simulated orders at Tuesday’s open (Monday is Labor Day).',
       next: 'end of the case' }
   ];
 
@@ -1008,7 +1017,7 @@ button { cursor: pointer; }
     }
     if (st === 4) { L.ev = 'chart'; L.under = 'A split is not a loss: each share became two. The feed has no adjustment step, so its history now shows a one-day crash.'; L.rebuilt = true; }
     if (st === 6 || st === 7) {
-      L.rows.checks = [row('red', 'D1', '✕ 3 days disagree with reference prices'), row('green', 'D2', '✓ each matches a corporate action on record'), row(null, null, N1.pass + ' of ' + N1.n + ' pass')];
+      L.rows.checks = [row('red', 'D1', '✕ ' + N_D1 + ' days disagree with reference prices'), row('green', 'D2', '✓ each matches a corporate action on record'), row(null, null, N1.pass + ' of ' + N1.n + ' pass')];
       L.tone.checks = 'red'; L.hash = R.cert.r1 + '…';
       L.rows.gate = [row('amber', null, 'Back to the proposer · round 2')]; L.tone.gate = 'amber'; L.nothing = true;
     }
@@ -1025,7 +1034,7 @@ button { cursor: pointer; }
       L.rows.critic = [row('green', 'LLM', 'HON exceptions immaterial; every clause matches the mandate.', 'k--model')];
       L.tone.critic = 'green'; L.verdict = 'pass';
       L.rows.gate = [row('green', null, 'Trade · ' + R.fills.n_orders + ' orders at Tuesday’s open (simulated)')];
-      if (st === 9 && ph === 'b') L.rows.gate.push(row('green', null, 'After-fill checks: 4 of 4 pass · cash left ' + R.fills.cash_after_pct.toFixed(2) + '%'));
+      if (st === 9 && ph === 'b') L.rows.gate.push(row('green', null, 'After-fill checks: ' + N_FILL_OK + ' of ' + N_FILL + ' pass · cash left ' + R.fills.cash_after_pct.toFixed(2) + '%'));
       L.tone.gate = 'green'; L.active = st === 8 ? 'critic' : 'gate';
       L.ev = 'compare';
     }
@@ -1150,7 +1159,8 @@ button { cursor: pointer; }
     $('ex-line').textContent = E.line;
     $('ex-next').textContent = 'next → ' + E.next;
     each('[data-count]', function (c) { c.textContent = 'step ' + st + ' / ' + LAST; });
-    $('live').textContent = 'Step ' + st + ': ' + E.title + '. ' + E.line;
+    var say = 'Step ' + st + ': ' + E.title + '. ' + E.line;
+    if ($('live').textContent !== say) $('live').textContent = say; // a re-announce on every render would read the step out again
     each('[data-act="prev"]', function (b) { b.disabled = st === 1; });
     each('[data-act="next"]', function (b) { b.disabled = st === LAST && S.phase === 'b'; });
   }
@@ -1262,8 +1272,8 @@ button { cursor: pointer; }
         ex.addEventListener('click', function () { var all = tree.querySelectorAll('details'), open = ex.textContent === 'expand all'; all.forEach(function (d) { d.open = open; }); ex.textContent = open ? 'collapse' : 'expand all'; });
         host.appendChild(tree);
         host.appendChild(el('p', 'dt-foot', (cr === 1
-          ? 'Marked: the prices this round binds (the feed as delivered), the return floor computed from them (1.39% a month) and APH’s planned weight. '
-          : 'Marked: the adjusted prices round 2 binds, the return floor on them (1.53% a month) and APH’s weight, unchanged. ') +
+          ? 'Marked: the prices this round binds (the feed as delivered), the return floor computed from them (' + FLOOR1 + ' a month) and APH’s planned weight. '
+          : 'Marked: the adjusted prices round 2 binds, the return floor on them (' + FLOOR2 + ' a month) and APH’s weight, unchanged. ') +
           'The file is named by its SHA-256 hash, which code computes over the whole certificate; building this page recomputed both hashes and they match. “parent” is null: this decision does not follow from an earlier certificate.'));
       }
     }
@@ -1310,9 +1320,9 @@ button { cursor: pointer; }
         .forEach(function (c, j) { tr.appendChild(el('td', j > 1 ? 'n' : null, c)); });
       tb.appendChild(tr);
     }
-    agg(R.runs.final, '5 recorded runs (this page: run 1)', 'code + critic');
-    agg(R.runs.code_only, '5 runs, critic switched off', 'code only');
-    agg(R.runs.control, '1 control: APH split removed from the record', 'code + critic');
+    agg(R.runs.final, R.runs.final.length + ' recorded runs (this page: run 1)', 'code + critic');
+    agg(R.runs.code_only, N_CODE_ONLY + ' runs, critic switched off', 'code only');
+    agg(R.runs.control, R.runs.control.length + ' control' + (R.runs.control.length === 1 ? '' : 's') + ': APH split removed from the record', 'code + critic');
     t.appendChild(tb); host.appendChild(t);
   }
 
@@ -1321,12 +1331,19 @@ button { cursor: pointer; }
     opts = opts || {};
     renderPortfolio(); renderTranslate(); renderLoop(); renderExplain(); renderDetails();
     renderChat(!!opts.animate);
+    syncAbout();
+  }
+  // Opening or closing About touches only the overlay: a full render() would rebuild the chat
+  // (losing its scroll), collapse an opened "show all" block and replay step 3's row reveal.
+  function syncAbout() {
     $('about').hidden = !S.about;
     if (S.about) renderAbout();
   }
   function goto(step, phase, opts) {
     opts = opts || {};
-    clearTimeout(S.phaseTimer); S.phaseTimer = null; clearInterval(S.typeTimer); S.typeTimer = null; $('composer').value = '';
+    clearTimeout(S.phaseTimer); S.phaseTimer = null; clearInterval(S.typeTimer); S.typeTimer = null;
+    clearTimeout(S.sendTimer); S.sendTimer = null; // a send already queued would blank the composer and replay the chat on the new step
+    $('composer').value = '';
     var forward = step > S.step;
     S.step = step; S.phase = phase || 'a';
     var clientMsg = CHAT.filter(function (m) { return m.step === step && m.kind === 'client'; })[0];
@@ -1347,10 +1364,11 @@ button { cursor: pointer; }
   /* ------------------------------------------------------------------ wiring */
   function each(sel, fn) { Array.prototype.forEach.call(shadow.querySelectorAll(sel), fn); }
   function openTab(t) {
-    S.tab = t; S.tabPinned = true; render();
+    S.tab = t; S.tabPinned = true; renderDetails();
     $('details').scrollIntoView({ behavior: 'smooth', block: 'start' });
   }
   function bindElements() {
+    each('[data-fill]', function (n) { var w = FILL[n.getAttribute('data-fill')]; if (w != null) n.textContent = w; });
     each('[data-act="next"]', function (b) { b.addEventListener('click', function () { setPlaying(false); next(); }); });
     each('[data-act="prev"]', function (b) { b.addEventListener('click', function () { setPlaying(false); prev(); }); });
     each('[data-act="play"]', function (b) { b.addEventListener('click', function () { if (!S.playing && S.step >= LAST) goto(1, 'a'); setPlaying(!S.playing); }); });
@@ -1361,10 +1379,10 @@ button { cursor: pointer; }
       box.addEventListener('click', function () { openTab(p[1]); });
       box.addEventListener('keydown', function (e) { if (e.key === 'Enter') { e.preventDefault(); openTab(p[1]); } });
     });
-    $('aboutBtn').addEventListener('click', function () { S.about = true; render(); });
-    $('aboutClose').addEventListener('click', function () { S.about = false; render(); });
-    $('about').addEventListener('click', function (e) { if (e.target === $('about')) { S.about = false; render(); } });
-    $('details').querySelectorAll('.tabs button').forEach(function (b) { b.addEventListener('click', function () { S.tab = b.getAttribute('data-tab'); S.tabPinned = true; render(); }); });
+    $('aboutBtn').addEventListener('click', function () { S.about = true; syncAbout(); });
+    $('aboutClose').addEventListener('click', function () { S.about = false; syncAbout(); });
+    $('about').addEventListener('click', function (e) { if (e.target === $('about')) { S.about = false; syncAbout(); } });
+    $('details').querySelectorAll('.tabs button').forEach(function (b) { b.addEventListener('click', function () { S.tab = b.getAttribute('data-tab'); S.tabPinned = true; renderDetails(); }); });
   }
 
   /* ------------------------------------------------------------------ mount (ATL's Portfolio Management subtab) */
@@ -1381,6 +1399,10 @@ button { cursor: pointer; }
     if (activeEl && activeEl !== document.body && activeEl !== document.documentElement && activeEl !== host
       && !(host.contains && host.contains(activeEl))
       && !(activeEl.closest && activeEl.closest('.subtab-btn, .mode-btn, [data-playground-tab]'))) return null;
+    // An ATL dialog (sign-in, Run Backtest, Add Agent) owns the keyboard while it is open.
+    if (document.querySelector && document.querySelector('.auth-modal:not([hidden])')) return null;
+    // With About open the page behind it must not move or scroll: only Esc (to close it) is ours.
+    if (S.about) return e.key === 'Escape' ? 'escape' : null;
     if (e.key === ' ') return tag === 'BUTTON' || tag === 'SUMMARY' || tag === 'A' ? null : 'toggle';
     if (e.key === 'ArrowRight' || e.key === 'PageDown') return 'next';
     if (e.key === 'ArrowLeft' || e.key === 'PageUp') return 'prev';
@@ -1394,40 +1416,57 @@ button { cursor: pointer; }
     if (action === 'next') { e.preventDefault(); setPlaying(false); next(); }
     else if (action === 'prev') { e.preventDefault(); setPlaying(false); prev(); }
     else if (action === 'toggle') { e.preventDefault(); setPlaying(!S.playing); }
-    else if (S.about) { S.about = false; render(); } // a render with About closed would collapse what is open
+    else if (S.about) { S.about = false; syncAbout(); }
   }
-  function redraw() { if (active) { scrollBottom(false); drawLanes(loopState().lane); } }
-  function onResize() { drawLanes(loopState().lane); }
+  // Everything sized from what the browser has laid out: the evidence chart takes its width from
+  // its box, the lanes from the boxes they join. Both are redrawn together or they disagree.
+  function relayout() { var L = loopState(); renderEvidence(L.ev); drawLanes(L.lane); }
+  function redraw() { if (active) { scrollBottom(false); relayout(); } }
+  var resizeFrame = 0;
+  function onResize() {
+    if (resizeFrame) return;
+    resizeFrame = requestAnimationFrame(function () { resizeFrame = 0; if (active) relayout(); });
+  }
   function onWindowLoad() { redraw(); }
 
   // First call builds the page in a shadow root on the panel; every call while hidden takes the
   // document keys and window events back and redraws once laid out.
+  var built = false, stale = false;
+  function build(target) {
+    panel = target;
+    // A root can be attached once per element. A build that threw part-way leaves its root
+    // behind, so the retry empties and reuses it instead of attaching a second one (which throws).
+    shadow = panel.shadowRoot || panel.attachShadow({ mode: 'open' });
+    clear(shadow);
+    var style = document.createElement('style');
+    style.textContent = CSS;
+    shadow.appendChild(style);
+    var tpl = document.createElement('template');
+    tpl.innerHTML = MARKUP;
+    shadow.appendChild(tpl.content);
+    bindElements();
+    // Optional rehearsal link, read once and never written: #pm-step-5, #pm-step-9a, #pm-step-9b.
+    var m = /^#pm-step-([1-9])([ab])?$/.exec(location.hash || '');
+    if (m) goto(+m[1], m[2] || 'a', { hold: !!m[2] }); else goto(1, 'a');
+    if (document.fonts && document.fonts.ready) document.fonts.ready.then(redraw);
+  }
   function show(target) {
     if (!target) return;
-    if (!shadow) {
-      panel = target;
-      shadow = panel.attachShadow({ mode: 'open' });
-      var style = document.createElement('style');
-      style.textContent = CSS;
-      shadow.appendChild(style);
-      var tpl = document.createElement('template');
-      tpl.innerHTML = MARKUP;
-      shadow.appendChild(tpl.content);
-      bindElements();
-      // Optional rehearsal link, read once and never written: #pm-step-5, #pm-step-9a, #pm-step-9b.
-      var m = /^#pm-step-([1-9])([ab])?$/.exec(location.hash || '');
-      if (m) goto(+m[1], m[2] || 'a', { hold: !!m[2] }); else goto(1, 'a');
-      if (document.fonts && document.fonts.ready) document.fonts.ready.then(redraw);
+    if (!built) {
+      build(target); // may throw: `built` stays false, no listener is added, and the next show() rebuilds
+      built = true;
     }
     if (active) return;
     active = true;
     document.addEventListener('keydown', onKeydown);
     window.addEventListener('resize', onResize);
     if (document.readyState !== 'complete') window.addEventListener('load', onWindowLoad);
+    if (stale) { stale = false; render(); } // hide() settled the state while the panel was display:none
     requestAnimationFrame(redraw);
   }
   // Leaving the tab pauses the page: autoplay stops, a half-typed message or the step-9 pause
-  // settles, and the document keys and window events go back to ATL.
+  // settles, and the document keys and window events go back to ATL. The panel is display:none
+  // by now, so nothing is drawn here (every box would measure 0): show() redraws once it is laid out.
   function hide() {
     if (!active) return;
     active = false;
@@ -1436,9 +1475,9 @@ button { cursor: pointer; }
       clearInterval(S.typeTimer); clearTimeout(S.sendTimer);
       S.typeTimer = null; S.sendTimer = null;
       $('composer').value = '';
-      render();
+      stale = true;
     }
-    if (S.phaseTimer) { clearTimeout(S.phaseTimer); S.phaseTimer = null; S.phase = 'b'; render(); }
+    if (S.phaseTimer) { clearTimeout(S.phaseTimer); S.phaseTimer = null; S.phase = 'b'; stale = true; }
     document.removeEventListener('keydown', onKeydown);
     window.removeEventListener('resize', onResize);
     window.removeEventListener('load', onWindowLoad);

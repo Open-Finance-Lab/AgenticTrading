@@ -45,6 +45,7 @@ ALLOWED_SERVER_EVENT_NAMES = {
 ALLOWED_EVENT_NAMES = ALLOWED_FRONTEND_EVENT_NAMES | ALLOWED_SERVER_EVENT_NAMES
 ALLOWED_PAGE_VIEWS = {
     "home",
+    "portfolio_management",
     "agents",
     "agent_editor",
     "backtest",

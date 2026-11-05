@@ -9,6 +9,7 @@
   const CANONICAL_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
   const PAGE_VIEW_MAP = Object.freeze({
     home: 'home',
+    'playground_portfolio-management': 'portfolio_management',
     playground_agents: 'agents',
     agent_editor: 'agent_editor',
     playground_backtest: 'backtest',
