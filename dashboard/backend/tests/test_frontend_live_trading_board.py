@@ -1,4 +1,4 @@
-"""Source guards for the Live Trading Leaderboard (frontend/js/leaderboard.js).
+"""Source guards for the Live Leaderboard (frontend/js/leaderboard.js).
 
 /app has no build step and no JS test toolchain, so these assert against the
 shipped source as text -- the convention set by test_ai_hedge_fund_frontend.py.
@@ -404,22 +404,26 @@ def test_the_season_constants_are_the_same_number_in_all_three_places():
 
 def test_the_board_names_itself_on_screen():
     header = _fn_body("updateLeaderboardHeader")
-    assert "'Live Trading Leaderboard'" in header, (
+    assert "'Live Leaderboard'" in header, (
         "the board title must name the board; folding the season number in "
         "here instead leaves it unnamed whenever a season is running"
     )
-    assert 'data-competition-tab="live">Live Trading Leaderboard<' in _APP_HTML
+    assert 'data-competition-tab="live">Live Leaderboard<' in _APP_HTML
+    assert "Live Trading Leaderboard" not in _SOURCE, (
+        "'Trading' was dropped from the board name (direction spec §6)"
+    )
 
 
 def test_the_live_name_is_disclaimed_as_simulated():
-    """"Live Trading" is a claim. The About card is where it gets qualified.
+    """"Live" is a claim about direction, not money. The About card is where
+    it gets qualified.
 
     PR #328's spec puts brokered execution in non-goals and
     execution/paper_backend.py is still a stub, so a board named for live
     trading that never says "simulated" is the UI making a promise the system
     does not keep.
     """
-    about = _APP_HTML_VISIBLE[_APP_HTML_VISIBLE.index("Live Trading Leaderboard</h3>") :]
+    about = _APP_HTML_VISIBLE[_APP_HTML_VISIBLE.index("Live Leaderboard</h3>") :]
     about = about[: about.index("</div>")]
     lowered = about.lower()
     assert "simulated" in lowered, "the About card must say the trading is simulated"
@@ -427,7 +431,7 @@ def test_the_live_name_is_disclaimed_as_simulated():
 
 
 def test_about_card_names_the_current_season():
-    about = _APP_HTML_VISIBLE[_APP_HTML_VISIBLE.index("Live Trading Leaderboard</h3>") :]
+    about = _APP_HTML_VISIBLE[_APP_HTML_VISIBLE.index("Live Leaderboard</h3>") :]
     about = about[: about.index("</div>")]
     assert "Season 0" in about, (
         "the board is in Season 0; the About card is where that is established"
@@ -576,3 +580,69 @@ def test_manual_refresh_does_not_default_to_billable_deploys():
     assert re.search(r"default:\s*false", block.group(1)), (
         "deploy_models must default to false while no board can show the result"
     )
+
+
+# ── The Competition board is labelled as legacy (direction spec §6) ─────────
+
+
+def test_the_competition_header_names_the_legacy_engine_and_window():
+    """The Competition board stays on the legacy engine and is retired, not
+    re-run, once Season 1 has data; its fixed historical window may sit inside
+    a model's training data. The header says both. Static copy: leaderboard.js
+    rewrites #boardSubtitle on every render and must leave this line alone."""
+    competition = _APP_HTML_VISIBLE.split('id="leaderboardView"')[1]
+    identity = competition[: competition.index('class="leaderboard-header-bar compact"')]
+    assert (
+        '<p class="contest-subtitle" id="boardEngineNote">'
+        "legacy engine · historical window · may overlap model training data</p>"
+    ) in identity
+    live = _APP_HTML_VISIBLE.split('id="liveLeaderboardView"')[1].split('id="leaderboardView"')[0]
+    assert "legacy engine" not in live, "the Live board is not labelled legacy"
+    assert "boardEngineNote" not in _SOURCE, "leaderboard.js must not rewrite the note"
+
+
+# ── Stop-loss / take-profit are not executed on the legacy engine (D12) ─────
+#
+# The other half of these is tests/domain/backtesting/test_stop_prices_not_enforced.py,
+# which fails the day the legacy order path starts reading the two fields.
+
+_STOP_RULE = "<li>Stop-loss and take-profit prices a model writes are not executed</li>"
+
+
+def _rules_items(view: str, formula: str) -> str:
+    rules = view[view.index(formula) :]
+    return rules[: rules.index("</ul>")]
+
+
+def test_both_boards_rules_say_stop_prices_are_not_executed():
+    live = _APP_HTML_VISIBLE.split('id="liveLeaderboardView"')[1].split('id="leaderboardView"')[0]
+    competition = _APP_HTML_VISIBLE.split('id="leaderboardView"')[1]
+    assert _STOP_RULE in _rules_items(live, "Official rank = latest frozen portfolio value")
+    assert _STOP_RULE in _rules_items(competition, "Official rank = final portfolio value")
+
+
+def test_both_about_cards_say_stop_prices_are_not_executed():
+    live = _APP_HTML_VISIBLE[_APP_HTML_VISIBLE.index("Live Leaderboard</h3>") :]
+    live = live[: live.index("</div>")]
+    assert (
+        "A model may write a stop-loss or take-profit price into its decision. "
+        "The simulator does not act on either: orders are placed only at decision "
+        "times, and a position is never sold because the price reached the stop "
+        "or target the model wrote."
+    ) in live
+    marker = '<h3 class="section-title">Competition Leaderboard</h3>'
+    competition = _APP_HTML_VISIBLE[_APP_HTML_VISIBLE.index(marker) :]
+    competition = competition[: competition.index("</div>")]
+    assert (
+        "Official rank is by final portfolio value. "
+        "Stop-loss and take-profit prices a model writes are not executed."
+    ) in competition
+
+
+def test_the_about_card_explains_the_catching_up_label():
+    about = _APP_HTML_VISIBLE[_APP_HTML_VISIBLE.index("Live Leaderboard</h3>") :]
+    about = about[: about.index("</div>")]
+    assert (
+        "An entry more than one trading session behind is marked Catching up: "
+        "shown, but not ranked."
+    ) in about

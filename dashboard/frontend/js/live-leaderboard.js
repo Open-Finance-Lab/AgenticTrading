@@ -1,5 +1,5 @@
 // ============================================================================
-// LIVE TRADING LEADERBOARD (calendar-month board — Phase 0)
+// LIVE LEADERBOARD (calendar-month board — Season 0 preview)
 // Isolated from contest/daily: own panel, own chart, own payload.
 // ============================================================================
 
@@ -105,11 +105,55 @@ function liveSessionCopy(state) {
   return 'Cash session closed';
 }
 
-// A row with no stored run has no value or return. Official rank still exists
-// on the payload for the header/rules, but this table does not render it —
-// catching-up rows are unranked and still have prints.
+// A row with no stored run has no value or return. The table renders no rank,
+// so a catching-up row (status 'catching_up': it has a curve, but its newest
+// stored session is more than one behind the board's) is NOT pending: it
+// shows its figures, flagged by liveEntryIsCatchingUp, because they are from
+// an earlier day than the rows beside it (#586).
 function liveEntryIsPending(entry) {
   return !entry || entry.status === 'pending' || entry.portfolio_value == null;
+}
+
+// Printed rows only: a catching_up row with no value is pending, and a
+// 'Catching up' badge beside 'Awaiting freeze' would say both at once.
+function liveEntryIsCatchingUp(entry) {
+  return !!entry && entry.status === 'catching_up' && !liveEntryIsPending(entry);
+}
+
+// The date is the entry's own newest stored session, not the board's.
+function liveCatchingUpLabel(entry) {
+  const through = entry && entry.snapshot_end ? String(entry.snapshot_end) : '';
+  return through ? `Catching up · through ${through}` : 'Catching up';
+}
+
+// Read off the rows, not live_status.models_cached: the server counts only
+// ranked (frozen) rows there, so a model mid-replay with a curve on screen
+// counted as missing and the banner said its curve had not appeared yet.
+function liveHasPrintedModel(entries) {
+  return (entries || []).some((e) => liveIsModel(e) && !liveEntryIsPending(e));
+}
+
+// The same for any row: live_status.has_prints counts ranked rows only too, so
+// a board whose only curves are catching up is not one with no snapshot yet.
+function liveHasPrintedRow(entries) {
+  return (entries || []).some((e) => !liveEntryIsPending(e));
+}
+
+// The banner line for rows shown but not ranked; '' when there are none.
+function liveCatchingUpBanner(entries) {
+  const behind = (entries || []).filter(liveEntryIsCatchingUp);
+  if (!behind.length) return '';
+  if (behind.length === 1) {
+    const e = behind[0];
+    const through = e.snapshot_end ? ` (through ${e.snapshot_end})` : '';
+    return `${liveSeriesLabel(e)} is catching up${through}: `
+      + 'it is shown but not ranked until it reaches the latest session.';
+  }
+  const names = behind
+    .map((e) => (e.snapshot_end ? `${liveSeriesLabel(e)} through ${e.snapshot_end}` : liveSeriesLabel(e)))
+    .join(', ');
+  return `${behind.length} entries are catching up (${names}): `
+    + 'they are shown but not ranked until they reach the latest session.';
 }
 
 function liveModelRosterNote(entries) {
@@ -202,12 +246,12 @@ function updateLiveHeader(payload) {
     if (el) el.textContent = value;
   };
 
-  setText('liveBoardTitle', payload.board_title || 'Live Trading Leaderboard');
-  setText('livePhaseLabel', payload.phase_label || 'Season 0');
+  setText('liveBoardTitle', payload.board_title || 'Live Leaderboard');
+  setText('livePhaseLabel', payload.phase_label || 'Season 0 · preview');
   setText('liveWindowLabel', window.label || '—');
-  setText('liveUpdatedLabel', payload.updated_at
-    ? new Date(payload.updated_at).toLocaleString()
-    : '—');
+  // The Updated stat is static copy in app.html ("Nightly after the close").
+  // payload.updated_at is the request clock, not the last refresh, so showing
+  // it read "just now" on a board that last advanced days ago.
   setText('liveLeaderLabel', payload.leader || '—');
   const elapsed = Number(status.trading_days_elapsed) || 0;
   const total = Number(status.trading_days_total) || 0;
@@ -216,13 +260,8 @@ function updateLiveHeader(payload) {
   // standings_label until this backend ships; do not let that flip the title.
   setText('liveStandingsTitle', 'Performance');
 
-  const subtitle = document.getElementById('liveBoardSubtitle');
-  if (subtitle) {
-    const month = status.month || '';
-    subtitle.textContent = month
-      ? `${month} · paper trading · hourly US cash session`
-      : 'Paper trading · hourly US cash session';
-  }
+  // #liveBoardSubtitle is static copy in app.html and is not rewritten here:
+  // the Window stat already names the month.
 
   const badge = document.getElementById('liveStatusBadge');
   if (badge) {
@@ -236,7 +275,7 @@ function updateLiveHeader(payload) {
 
   const banner = document.getElementById('livePhaseBanner');
   if (banner) {
-    if (!status.has_prints) {
+    if (!status.has_prints && !liveHasPrintedRow(payload.entries)) {
       banner.hidden = false;
       banner.textContent = (
         `No freeze snapshot for ${window.label || 'this month'} yet. ` +
@@ -248,12 +287,19 @@ function updateLiveHeader(payload) {
         `Showing the snapshot through ${status.snapshot_end || '—'}. ` +
         `The session through ${status.frozen_through || '—'} appears after the next nightly refresh.`
       );
-    } else if ((Number(status.models_cached) || 0) === 0) {
+    } else if (!liveHasPrintedModel(payload.entries)) {
+      // A lagging baseline is not frozen through that date: the catching-up
+      // line names it, with its own date, after the frozen one.
+      const behind = liveCatchingUpBanner(payload.entries);
       banner.hidden = false;
       banner.textContent = (
         `Baselines frozen through ${status.frozen_through}. ` +
-        'Model curves appear once the nightly refresh deploys them; they are never computed on page load.'
+        'Model curves appear once the nightly refresh deploys them; they are never computed on page load.' +
+        (behind ? ` ${behind}` : '')
       );
+    } else if (liveCatchingUpBanner(payload.entries)) {
+      banner.hidden = false;
+      banner.textContent = liveCatchingUpBanner(payload.entries);
     } else {
       banner.hidden = true;
       banner.textContent = '';
@@ -281,16 +327,20 @@ function updateLiveHeader(payload) {
   }
 }
 
+// The vs SPY column is "Return minus SPY over the same frozen sessions". A
+// catching-up row's return ends sessions before SPY's, and a catching-up SPY's
+// ends before every current row's, so either subtraction would mix two windows:
+// no figure for those cells (#586).
 function liveSpyReturn() {
   const spy = (livePayload?.entries || []).find((e) => e.entry_id === 'spy_index');
-  if (!spy || liveEntryIsPending(spy) || spy.cumulative_return == null) return null;
+  if (!spy || liveEntryIsPending(spy) || liveEntryIsCatchingUp(spy) || spy.cumulative_return == null) return null;
   const n = Number(spy.cumulative_return);
   return Number.isFinite(n) ? n : null;
 }
 
 function liveVsSpy(entry) {
   const bench = liveSpyReturn();
-  if (bench == null || entry == null || entry.cumulative_return == null) return null;
+  if (bench == null || entry == null || liveEntryIsCatchingUp(entry) || entry.cumulative_return == null) return null;
   const n = Number(entry.cumulative_return);
   return Number.isFinite(n) ? n - bench : null;
 }
@@ -329,7 +379,7 @@ function liveSortValue(entry, key) {
     case 'trades': return Number(entry.num_trades);
     case 'hold': return Number(entry.avg_hold_hours);
     case 'win_rate': return Number(entry.win_rate);
-    case 'vs_spy': return Number(liveVsSpy(entry));
+    case 'vs_spy': return liveVsSpy(entry) ?? NaN;
     case 'invested': return Number(entry.invested_pct);
     default: return Number(entry.cumulative_return);
   }
@@ -338,13 +388,16 @@ function liveSortValue(entry, key) {
 function liveSortedEntries() {
   const entries = (livePayload?.entries || []).slice();
   const dir = liveSortDir === 'asc' ? 1 : -1;
+  // Three tiers, in this order in either direction: current rows; then
+  // catching-up rows, which are shown but not ranked and whose figures are from
+  // an earlier session, so no sort may slot one in among the current rows
+  // (#586); then pending rows, which have nothing to sort on.
+  const tier = (e) => (liveEntryIsPending(e) ? 2 : (liveEntryIsCatchingUp(e) ? 1 : 0));
   entries.sort((a, b) => {
-    // Pending rows have nothing to sort on; keep them below every printed row
-    // in either direction.
-    const pa = liveEntryIsPending(a);
-    const pb = liveEntryIsPending(b);
-    if (pa !== pb) return pa ? 1 : -1;
-    if (pa) return 0;
+    const ta = tier(a);
+    const tb = tier(b);
+    if (ta !== tb) return ta - tb;
+    if (ta === 2) return 0;
     const av = liveSortValue(a, liveSortKey);
     const bv = liveSortValue(b, liveSortKey);
     const aOk = Number.isFinite(av);
@@ -385,6 +438,7 @@ function populateLiveTable() {
           <div class="team-name-badge">
             <span>${label}</span>
             <span class="team-badge">${escapeHtml(liveFormatBadge(entry.team_badge))}</span>
+            ${liveEntryIsCatchingUp(entry) ? `<span class="team-badge" title="${escapeHtml(liveCatchingUpLabel(entry))}">Catching up</span>` : ''}
             ${attemptBadge ? `<span class="team-badge">${escapeHtml(attemptBadge)}</span>` : ''}
           </div>
         </td>
@@ -428,6 +482,7 @@ function renderLiveDetail(entry) {
     <div class="team-detail-row"><span class="team-detail-label">Sharpe ratio</span><span class="team-detail-value"${hasPrints && sharpe.title ? ` title="${escapeHtml(sharpe.title)}"` : ''}>${escapeHtml(sharpeText)}</span></div>
     <div class="team-detail-row"><span class="team-detail-label">Trades</span><span class="team-detail-value">${hasPrints && entry.num_trades != null ? escapeHtml(String(entry.num_trades)) : '—'}</span></div>
     <div class="team-detail-row"><span class="team-detail-label">Avg hold</span><span class="team-detail-value">${hasPrints ? liveFormatHold(entry.avg_hold_hours) : '—'}</span></div>
+    ${liveEntryIsCatchingUp(entry) ? `<div class="team-detail-row"><span class="team-detail-label">Status</span><span class="team-detail-value">${escapeHtml(liveCatchingUpLabel(entry))}</span></div>` : ''}
     <div class="team-detail-row"><span class="team-detail-label">Through</span><span class="team-detail-value">${escapeHtml(entry.snapshot_end || '—')}</span></div>
     ${lastRun ? `<div class="team-detail-row"><span class="team-detail-label">Last nightly run</span><span class="team-detail-value">${escapeHtml(lastRun)}</span></div>` : ''}
   `;

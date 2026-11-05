@@ -255,7 +255,9 @@ def test_the_live_phase_label_is_derived_from_the_season_number():
     """A literal "Season 0" here is a second owner of the season number, and
     bumping PREVIEW_SEASON_NUMBER is the first act of the advance engine."""
     live = service.resolve_leaderboard_config("live")
-    assert live["phase_label"] == f"Season {service.PREVIEW_SEASON_NUMBER}"
+    assert service.LIVE_PHASE_LABEL == f"Season {service.PREVIEW_SEASON_NUMBER} · preview"
+    assert live["phase_label"] == service.LIVE_PHASE_LABEL
+    assert live["board_title"] == service.LIVE_BOARD_TITLE == "Live Leaderboard"
 
 
 def test_the_route_documents_the_third_period():

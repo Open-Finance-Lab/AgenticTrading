@@ -1,4 +1,4 @@
-"""Source guards for the Live Trading Leaderboard tab.
+"""Source guards for the Live Leaderboard tab.
 
 /app has no JS test toolchain, so these assert against shipped HTML/JS as text.
 """
@@ -27,7 +27,7 @@ def _strip_js_comments(source: str) -> str:
 
 def test_live_subtab_is_visible_and_daily_stays_parked():
     assert re.search(
-        r'data-competition-tab="live"[^>]*>\s*Live Trading Leaderboard',
+        r'data-competition-tab="live"[^>]*>\s*Live Leaderboard<',
         _APP_HTML,
     )
     assert 'data-competition-tab="live"' in _APP_HTML
@@ -401,3 +401,473 @@ def test_live_sharpe_is_the_competition_formatter_not_a_copy():
         f"liveSortValue({json.dumps(_SHARPE_OK)}, 'sharpe')]));",
     ]))
     assert alone == [{"main": "—", "sub": "", "title": ""}, None]
+
+
+# ── Naming and header copy (direction spec §6) ──────────────────────────────
+
+
+def _live_view_markup() -> str:
+    """The #liveLeaderboardView markup, up to the Competition view."""
+    return _APP_HTML.split('id="liveLeaderboardView"')[1].split('id="leaderboardView"')[0]
+
+
+def _static_text(html: str, element_id: str) -> str:
+    """The text inside the element carrying `id="<element_id>"` (no child tags)."""
+    match = re.search(rf'id="{element_id}"[^>]*>([^<]*)<', html)
+    assert match, f"#{element_id} is missing from app.html"
+    return match.group(1)
+
+
+def test_the_board_is_named_live_leaderboard_on_every_surface():
+    """'Trading' read as real orders and collided with the Robinhood
+    live-trading docs. The static title, the JS fallback and the payload all
+    resolve to service.LIVE_BOARD_TITLE."""
+    from dashboard.backend.domain.leaderboard import service
+
+    assert _static_text(_APP_HTML, "liveBoardTitle") == service.LIVE_BOARD_TITLE
+    assert f"payload.board_title || '{service.LIVE_BOARD_TITLE}'" in _LIVE_JS
+    visible = _strip_js_comments(re.sub(r"<!--.*?-->", "", _APP_HTML, flags=re.DOTALL))
+    assert "Live Trading Leaderboard" not in visible
+    assert "Live Trading Leaderboard" not in _strip_js_comments(_LIVE_JS)
+
+
+def test_the_subtitle_is_static_simulated_forward_only_copy():
+    assert (
+        _static_text(_APP_HTML, "liveBoardSubtitle")
+        == "Simulated fills · forward-only · no real money"
+    )
+    source = _strip_js_comments(_LIVE_JS)
+    assert "liveBoardSubtitle" not in source, (
+        "the subtitle is static copy in app.html; rewriting it from JS put "
+        "'paper trading' back on screen"
+    )
+    assert "paper trading" not in source.lower()
+
+
+def test_the_updated_stat_states_the_cadence_not_the_request_clock():
+    """payload.updated_at is the wall clock of the GET, so rendering it always
+    read 'just now' on a board that last advanced days ago."""
+    assert re.search(
+        r'<span class="stat-label">Updated</span>\s*'
+        r'<span class="stat-value" id="liveUpdatedLabel">Nightly after the close</span>',
+        _live_view_markup(),
+    )
+    source = _strip_js_comments(_LIVE_JS)
+    assert "liveUpdatedLabel" not in source
+    assert "updated_at" not in source
+
+
+def test_the_season_stat_reads_season_0_preview_from_one_owner():
+    from dashboard.backend.domain.leaderboard import service
+
+    assert service.LIVE_PHASE_LABEL == "Season 0 · preview"
+    assert _static_text(_APP_HTML, "livePhaseLabel") == service.LIVE_PHASE_LABEL
+    assert f"payload.phase_label || '{service.LIVE_PHASE_LABEL}'" in _LIVE_JS
+
+
+def test_neither_board_renders_a_stop_or_take_profit_price():
+    """Both boards disclaim stops as not executed. A future trade-log or
+    reasoning view is the first place a model's stop_loss_price could appear
+    next to its decisions; it must label the value 'not executed' before this
+    guard is lifted, or the page contradicts its own Rules card."""
+    leaderboard_js = (_FRONTEND / "js" / "leaderboard.js").read_text(encoding="utf-8")
+    for name, source in (
+        ("js/live-leaderboard.js", _LIVE_JS),
+        ("js/leaderboard.js", leaderboard_js),
+    ):
+        stripped = _strip_js_comments(source)
+        assert "stop_loss" not in stripped, name
+        assert "take_profit" not in stripped, name
+
+
+# ── #586: catching-up rows are printed, flagged, and not reported missing ───
+#
+# These evaluate the whole of js/live-leaderboard.js under node against a fake
+# DOM instead of lifting single functions, so a helper another change adds to
+# the render path is exercised too rather than raising a ReferenceError here.
+
+_LIVE_FAKE_DOM = """
+const els = {};
+function el(id) {
+  if (!els[id]) {
+    els[id] = {
+      id, textContent: '', innerHTML: '', hidden: false, dataset: {}, style: {},
+      classList: { toggle() {}, add() {}, remove() {}, contains() { return false; } },
+      setAttribute() {}, querySelector() { return null; },
+    };
+  }
+  return els[id];
+}
+globalThis.window = globalThis;
+globalThis.document = {
+  getElementById: el,
+  querySelector: () => null,
+  querySelectorAll: () => [],
+  addEventListener() {},
+};
+globalThis.API_BASE = '';
+"""
+
+
+def _render_catching_up_board(payload, select_id):
+    """Render `payload` the way loadLiveLeaderboardData does; return the banner,
+    the table body and the detail panel for the row `select_id`."""
+    script = (
+        _LIVE_FAKE_DOM
+        + fn_body("function escapeHtml(", _APP_JS)
+        + "\n"
+        + _LIVE_JS
+        + f"\nconst payload = {json.dumps(payload)};\n"
+        + "livePayload = payload;\n"
+        + "updateLiveHeader(payload);\n"
+        + "populateLiveTable();\n"
+        + f"renderLiveDetail(payload.entries.find((e) => e.entry_id === {json.dumps(select_id)}));\n"
+        + "process.stdout.write(JSON.stringify({\n"
+        + "  banner: els.livePhaseBanner.textContent,\n"
+        + "  bannerHidden: els.livePhaseBanner.hidden,\n"
+        + "  table: els.liveLeaderboardTableBody.innerHTML,\n"
+        + "  detail: els.liveSelectedDetail.innerHTML,\n"
+        + "}));\n"
+    )
+    return run_node(script)
+
+
+def _catching_up_entry(entry_id, name, status, *, value, snapshot_end, is_model=True):
+    """One board row in the shape live._entry_from_strategy serves."""
+    printed = value is not None
+    return {
+        "entry_id": entry_id,
+        "model": name,
+        "team_name": name,
+        "team_badge": "Model" if is_model else "Index",
+        "is_model": is_model,
+        "status": status,
+        "rank": None,
+        "portfolio_value": value,
+        "cumulative_return": 0.05 if printed else None,
+        "sharpe_ratio": None,
+        "max_drawdown": None,
+        "num_trades": 3 if printed else None,
+        "snapshot_end": snapshot_end,
+        "equity_curve": (
+            [{"timestamp": "2026-08-03T10:00:00-04:00", "equity": 100000}] if printed else []
+        ),
+    }
+
+
+def _catching_up_payload(*entries):
+    return {
+        "period": "live",
+        "board_title": "Live Leaderboard",
+        "phase_label": "Season 0 · preview",
+        "window": {"label": "2026-08-01 — 2026-08-31"},
+        "entries": list(entries),
+        "live_status": {
+            "has_prints": True,
+            "snapshot_stale": False,
+            "frozen_through": "2026-08-27",
+            "snapshot_end": "2026-08-27",
+            "session_state": "closed",
+            # The server counts only ranked (frozen) rows here, so a model
+            # mid-replay reads 0. Held at 0 in every case: the banner must not
+            # depend on it.
+            "models_cached": 0,
+            "catching_up": [e["entry_id"] for e in entries if e["status"] == "catching_up"],
+            "trading_days_elapsed": 19,
+            "trading_days_total": 21,
+        },
+    }
+
+
+_SPY_ROW = _catching_up_entry(
+    "spy_index", "SPY", "frozen", value=101000.0, snapshot_end="2026-08-27", is_model=False
+)
+
+
+def _deepseek(status, *, value=105000.0, snapshot_end="2026-08-20"):
+    return _catching_up_entry(
+        "deepseek_v4_pro", "DeepSeek V4 Pro", status, value=value, snapshot_end=snapshot_end
+    )
+
+
+@_needs_node
+def test_a_catching_up_model_is_printed_and_flagged_with_its_own_date():
+    out = _render_catching_up_board(
+        _catching_up_payload(_SPY_ROW, _deepseek("catching_up")), "deepseek_v4_pro"
+    )
+    row = out["table"].split('data-live-entry="deepseek_v4_pro"')[1].split("</tr>")[0]
+    assert (
+        '<span class="team-badge" title="Catching up · through 2026-08-20">Catching up</span>'
+    ) in row
+    assert "5.00%" in row, "a catching-up row prints its figures"
+    assert (
+        '<span class="team-detail-label">Status</span>'
+        '<span class="team-detail-value">Catching up · through 2026-08-20</span>'
+    ) in out["detail"]
+    assert "$105,000.00" in out["detail"]
+    assert "Awaiting freeze" not in out["detail"]
+
+
+@_needs_node
+def test_the_catching_up_date_is_escaped_in_the_badge_title_and_the_status_row():
+    """A plain date escapes to itself, so the case above passes with either
+    escapeHtml call removed. A date carrying markup does not."""
+    out = _render_catching_up_board(
+        _catching_up_payload(_SPY_ROW, _deepseek("catching_up", snapshot_end='2026-08-20"><b>')),
+        "deepseek_v4_pro",
+    )
+    row = out["table"].split('data-live-entry="deepseek_v4_pro"')[1].split("</tr>")[0]
+    escaped = "Catching up · through 2026-08-20&quot;&gt;&lt;b&gt;"
+    assert f'<span class="team-badge" title="{escaped}">Catching up</span>' in row
+    assert (
+        '<span class="team-detail-label">Status</span>'
+        f'<span class="team-detail-value">{escaped}</span>'
+    ) in out["detail"]
+    assert "<b>" not in row
+    assert "<b>" not in out["detail"]
+
+
+@_needs_node
+def test_the_banner_names_the_catching_up_model_instead_of_calling_it_missing():
+    out = _render_catching_up_board(
+        _catching_up_payload(_SPY_ROW, _deepseek("catching_up")), "deepseek_v4_pro"
+    )
+    assert out["bannerHidden"] is False
+    assert "Model curves appear" not in out["banner"]
+    assert out["banner"] == (
+        "DeepSeek V4 Pro is catching up (through 2026-08-20): it is shown but "
+        "not ranked until it reaches the latest session."
+    )
+
+
+@_needs_node
+def test_the_banner_lists_every_catching_up_entry():
+    qwen = _catching_up_entry(
+        "qwen3_7_plus", "Qwen3.7 Plus", "catching_up", value=99000.0, snapshot_end="2026-08-22"
+    )
+    out = _render_catching_up_board(
+        _catching_up_payload(_SPY_ROW, _deepseek("catching_up"), qwen), "qwen3_7_plus"
+    )
+    assert out["banner"] == (
+        "2 entries are catching up (DeepSeek V4 Pro through 2026-08-20, "
+        "Qwen3.7 Plus through 2026-08-22): they are shown but not ranked "
+        "until they reach the latest session."
+    )
+
+
+@_needs_node
+def test_a_model_with_no_curve_still_gets_the_models_pending_banner():
+    out = _render_catching_up_board(
+        _catching_up_payload(_SPY_ROW, _deepseek("pending", value=None, snapshot_end=None)),
+        "deepseek_v4_pro",
+    )
+    assert out["banner"] == (
+        "Baselines frozen through 2026-08-27. Model curves appear once the nightly "
+        "refresh deploys them; they are never computed on page load."
+    )
+    assert "Catching up" not in out["table"]
+    assert "Awaiting freeze" in out["detail"]
+    assert "Status</span>" not in out["detail"]
+
+
+@_needs_node
+def test_a_catching_up_row_with_no_value_reads_as_pending_not_catching_up():
+    """A row the server marks catching_up but sends no value for cannot print:
+    it is pending, and a 'Catching up' badge beside 'Awaiting freeze' would say
+    both at once."""
+    out = _render_catching_up_board(
+        _catching_up_payload(_SPY_ROW, _deepseek("catching_up", value=None)),
+        "deepseek_v4_pro",
+    )
+    assert "Catching up" not in out["table"]
+    assert "Status</span>" not in out["detail"]
+    assert "Awaiting freeze" in out["detail"]
+    assert out["banner"].startswith("Baselines frozen through 2026-08-27.")
+
+
+@_needs_node
+def test_a_stale_snapshot_banner_outranks_the_catching_up_line_and_the_badge_stays():
+    payload = _catching_up_payload(_SPY_ROW, _deepseek("catching_up"))
+    payload["live_status"]["snapshot_stale"] = True
+    payload["live_status"]["frozen_through"] = "2026-08-28"
+    out = _render_catching_up_board(payload, "deepseek_v4_pro")
+    assert out["banner"].startswith("Showing the snapshot through 2026-08-27.")
+    assert ">Catching up</span>" in out["table"]
+
+
+@_needs_node
+def test_a_current_board_shows_no_banner_and_no_badge():
+    out = _render_catching_up_board(
+        _catching_up_payload(_SPY_ROW, _deepseek("frozen", snapshot_end="2026-08-27")),
+        "deepseek_v4_pro",
+    )
+    assert out["bannerHidden"] is True
+    assert out["banner"] == ""
+    assert "Catching up" not in out["table"]
+    assert "Catching up" not in out["detail"]
+
+
+def _ok_sharpe(value):
+    """The Sharpe fields boardSharpeValue accepts: status 'ok' plus a finite interval."""
+    return {
+        "sharpe_status": "ok",
+        "sharpe_ratio": value,
+        "sharpe_ci_low": value - 1,
+        "sharpe_ci_high": value + 1,
+        "sharpe_days": 5,
+    }
+
+
+@_needs_node
+def test_catching_up_rows_sort_after_current_rows_and_before_pending_ones():
+    """A catching-up row is shown but not ranked, and its figures are from an
+    earlier session than the rows beside it. Sorting a column must not slot it
+    in among the current rows, in either direction: DeepSeek's Sharpe would
+    sort first descending and Qwen's first ascending."""
+    rows = [
+        _catching_up_entry(
+            "claude_haiku_4_5", "Claude Haiku 4.5", "pending", value=None, snapshot_end=None
+        ),
+        {**_deepseek("catching_up"), **_ok_sharpe(9.0)},
+        {**_SPY_ROW, **_ok_sharpe(1.0)},
+        {
+            **_catching_up_entry(
+                "qwen3_7_plus", "Qwen3.7 Plus", "catching_up",
+                value=99000.0, snapshot_end="2026-08-22",
+            ),
+            **_ok_sharpe(-5.0),
+        },
+        {
+            **_catching_up_entry(
+                "equal_weight_djia", "Equal Weight DJIA", "frozen",
+                value=100800.0, snapshot_end="2026-08-27", is_model=False,
+            ),
+            **_ok_sharpe(0.5),
+        },
+    ]
+    script = (
+        _LIVE_FAKE_DOM
+        + "\n"
+        + _board_sharpe_js()
+        + "\n"
+        + _LIVE_JS
+        + f"\nlivePayload = {{ entries: {json.dumps(rows)} }};\n"
+        + "liveSortKey = 'sharpe';\n"
+        + "liveSortDir = 'desc'; const desc = liveSortedEntries().map((e) => e.entry_id);\n"
+        + "liveSortDir = 'asc'; const asc = liveSortedEntries().map((e) => e.entry_id);\n"
+        + "process.stdout.write(JSON.stringify({ desc, asc }));\n"
+    )
+    assert run_node(script) == {
+        "desc": [
+            "spy_index", "equal_weight_djia",
+            "deepseek_v4_pro", "qwen3_7_plus",
+            "claude_haiku_4_5",
+        ],
+        "asc": [
+            "equal_weight_djia", "spy_index",
+            "qwen3_7_plus", "deepseek_v4_pro",
+            "claude_haiku_4_5",
+        ],
+    }
+
+
+def test_the_banner_no_longer_reads_models_cached():
+    assert "models_cached" not in _strip_js_comments(_LIVE_JS)
+
+
+def _num_cells(table, entry_id):
+    """The figure cells of one table row, in column order: Return, Sharpe,
+    Max DD, Trades, Avg hold, Win rate, vs SPY, Invested."""
+    row = table.split(f'data-live-entry="{entry_id}"')[1].split("</tr>")[0]
+    return re.findall(r'<td class="num-cell[^"]*"[^>]*>(.*?)</td>', row, flags=re.DOTALL)
+
+
+def _with_return(entry, cumulative_return):
+    return {**entry, "cumulative_return": cumulative_return}
+
+
+@_needs_node
+def test_vs_spy_is_a_dash_wherever_the_two_returns_end_on_different_sessions():
+    """The column is "Return minus SPY over the same frozen sessions". A
+    catching-up row's return ends sessions before SPY's, and a catching-up SPY's
+    ends before every current row's, so either subtraction mixes two windows: a
+    +5% row through 08-20 against SPY +1% through 08-27 printed +4.00%. Those
+    cells show the no-figure dash and sort as no figure; a current row against a
+    current SPY keeps its number."""
+    qwen = _catching_up_entry(
+        "qwen3_7_plus", "Qwen3.7 Plus", "frozen", value=103000.0, snapshot_end="2026-08-27"
+    )
+    rows = (_with_return(_SPY_ROW, 0.01), _deepseek("catching_up"), _with_return(qwen, 0.03))
+    out = _render_catching_up_board(_catching_up_payload(*rows), "deepseek_v4_pro")
+    behind = _num_cells(out["table"], "deepseek_v4_pro")
+    assert (behind[0], behind[6]) == ("5.00%", "—"), "its own return stays; vs SPY does not"
+    assert _num_cells(out["table"], "qwen3_7_plus")[6] == "2.00%"
+
+    lagging_spy = {**_with_return(_SPY_ROW, 0.01), "status": "catching_up", "snapshot_end": "2026-08-20"}
+    out = _render_catching_up_board(
+        _catching_up_payload(lagging_spy, _with_return(qwen, 0.03)), "qwen3_7_plus"
+    )
+    assert _num_cells(out["table"], "qwen3_7_plus")[6] == "—"
+
+    script = (
+        _LIVE_FAKE_DOM
+        + "\n"
+        + _LIVE_JS
+        + f"\nlivePayload = {{ entries: {json.dumps(list(rows))} }};\n"
+        + "const [, behind, current] = livePayload.entries;\n"
+        + "process.stdout.write(JSON.stringify({\n"
+        + "  behindIsNaN: Number.isNaN(liveSortValue(behind, 'vs_spy')),\n"
+        + "  current: liveSortValue(current, 'vs_spy'),\n"
+        + "}));\n"
+    )
+    out = run_node(script)
+    assert out["behindIsNaN"] is True, "a dash sorts as no figure, not as 0.00%"
+    assert out["current"] == pytest.approx(0.02)
+
+
+@_needs_node
+def test_a_catching_up_baseline_is_named_when_no_model_has_printed_yet():
+    """With no model printed the banner opens "Baselines frozen through <date>",
+    which a lagging baseline is not; the catching-up line follows it, so that row
+    is named with its own date instead of being folded into the frozen ones."""
+    equal_weight = _catching_up_entry(
+        "equal_weight_djia", "Equal Weight DJIA", "catching_up",
+        value=100500.0, snapshot_end="2026-08-15", is_model=False,
+    )
+    out = _render_catching_up_board(
+        _catching_up_payload(
+            _SPY_ROW, equal_weight, _deepseek("pending", value=None, snapshot_end=None)
+        ),
+        "equal_weight_djia",
+    )
+    assert out["banner"] == (
+        "Baselines frozen through 2026-08-27. Model curves appear once the nightly "
+        "refresh deploys them; they are never computed on page load. "
+        "Equal Weight DJIA is catching up (through 2026-08-15): it is shown but "
+        "not ranked until it reaches the latest session."
+    )
+
+
+@_needs_node
+def test_a_board_whose_only_prints_are_catching_up_is_not_called_empty():
+    """live_status.has_prints counts ranked (frozen) rows only, as models_cached
+    did, so a board whose newest run could not plot and whose other rows are
+    catching up read "No freeze snapshot ... yet" over curves on screen. The
+    banner reads the rows; a board with no printed row keeps that line."""
+    spy_pending = _catching_up_entry(
+        "spy_index", "SPY", "pending", value=None, snapshot_end=None, is_model=False
+    )
+    payload = _catching_up_payload(spy_pending, _deepseek("catching_up"))
+    payload["live_status"]["has_prints"] = False
+    out = _render_catching_up_board(payload, "deepseek_v4_pro")
+    assert out["banner"] == (
+        "DeepSeek V4 Pro is catching up (through 2026-08-20): it is shown but "
+        "not ranked until it reaches the latest session."
+    )
+
+    empty = _catching_up_payload(
+        spy_pending, _deepseek("pending", value=None, snapshot_end=None)
+    )
+    empty["live_status"]["has_prints"] = False
+    out = _render_catching_up_board(empty, "deepseek_v4_pro")
+    assert out["banner"].startswith("No freeze snapshot for 2026-08-01 — 2026-08-31 yet. ")

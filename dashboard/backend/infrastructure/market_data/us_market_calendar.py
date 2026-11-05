@@ -1,7 +1,7 @@
 """NYSE full-day holidays and early closes, computed by rule (no data file,
 no dependency).
 
-Shared US market-data infrastructure: the Live Trading Leaderboard walks it
+Shared US market-data infrastructure: the Live Leaderboard walks it
 forward day by day, and the Run Backtest modal's default period
 (``provider.default_backtest_window``) walks it back week by week. It lived
 under ``domain/leaderboard/`` while the board was its only reader; a calendar

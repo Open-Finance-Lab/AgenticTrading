@@ -866,7 +866,8 @@ def test_live_leaderboard_api_serves_the_calendar_month_freeze(client, monkeypat
     assert resp.status_code == 200
     body = resp.json()
     assert body["period"] == "live"
-    assert body["board_title"] == "Live Trading Leaderboard"
+    assert body["board_title"] == "Live Leaderboard"
+    assert body["phase_label"] == "Season 0 · preview"
     assert body["standings_label"] == "Performance"
     assert "live_status" in body
     status = body["live_status"]
