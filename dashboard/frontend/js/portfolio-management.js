@@ -1394,7 +1394,7 @@ button { cursor: pointer; }
     if (action === 'next') { e.preventDefault(); setPlaying(false); next(); }
     else if (action === 'prev') { e.preventDefault(); setPlaying(false); prev(); }
     else if (action === 'toggle') { e.preventDefault(); setPlaying(!S.playing); }
-    else { S.about = false; render(); }
+    else if (S.about) { S.about = false; render(); } // a render with About closed would collapse what is open
   }
   function redraw() { if (active) { scrollBottom(false); drawLanes(loopState().lane); } }
   function onResize() { drawLanes(loopState().lane); }

@@ -76,6 +76,25 @@ def test_show_playground_panel_shows_the_demo_and_hides_it_elsewhere():
     assert "Portfolio Management did not load. Reload the page to try again." in helper  # fail-visible
 
 
+@requires_node
+def test_failure_text_shows_even_after_the_shadow_root_exists():
+    # A shadow root with no <slot> hides the panel's light DOM, so a first show() that throws
+    # after attachShadow must write the message into the root, or the tab is just blank.
+    js = """
+var window = {};
+%s
+var msg = 'Portfolio Management did not load. Reload the page to try again.';
+var missing = {shadowRoot: null, textContent: ''};
+showPortfolioManagementDemo(missing);
+var broken = {shadowRoot: null, textContent: ''};
+window.PortfolioManagementDemo = {show: function (p) { p.shadowRoot = {textContent: ''}; throw new Error('bind'); }};
+console.error = function () {};
+showPortfolioManagementDemo(broken);
+console.log(JSON.stringify({missing: missing.textContent === msg, broken: broken.shadowRoot.textContent === msg}));
+""" % fn_body("function showPortfolioManagementDemo(")
+    assert run_node(js) == {"missing": True, "broken": True}
+
+
 def test_navigate_to_page_hides_the_panel_and_stops_the_demo_off_playground():
     body = strip_comments(fn_body("function navigateToPage("))
     assert "hide(document.getElementById('playgroundPortfolioManagementPanel'));" in body
@@ -211,6 +230,25 @@ def test_keydown_handler_prevents_default_only_for_an_action():
     body = strip_comments(fn_body("function onKeydown(", _page_src()))
     assert "keyAction(e, panel, document.activeElement)" in body
     assert body.index("if (!action) return;") < body.index("preventDefault")
+
+
+@requires_node
+def test_escape_renders_only_to_close_about():
+    # render() rebuilds the page: an opened "show all" block or certificate tree collapses and
+    # step 3's row reveal replays, so a habitual Esc with About closed must do nothing.
+    js = """
+var renders = 0, S = {about: false, playing: false};
+function render() { renders++; }
+function keyAction() { return 'escape'; }
+function setPlaying() {} function next() {} function prev() {}
+var panel = {offsetParent: {}}, document = {activeElement: null};
+%s
+var ev = {preventDefault: function () {}};
+onKeydown(ev); var closed = renders;
+S.about = true; onKeydown(ev);
+console.log(JSON.stringify({closed: closed, open: renders, about: S.about}));
+""" % fn_body("function onKeydown(", _page_src())
+    assert run_node(js) == {"closed": 0, "open": 1, "about": False}
 
 
 def test_document_and_window_listeners_come_off_on_hide():

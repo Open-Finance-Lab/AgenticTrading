@@ -11626,16 +11626,20 @@ function showPlaygroundPanel(tab) {
 // message, not an empty panel that looks like a slow load.
 function showPortfolioManagementDemo(panel) {
     if (!panel) return;
-    const failure = 'Portfolio Management did not load. Reload the page to try again.';
+    // A first show() that throws after attachShadow leaves a root with no <slot>, which
+    // hides the panel's own text, so the message goes wherever the panel renders.
+    const showFailure = () => {
+        (panel.shadowRoot || panel).textContent = 'Portfolio Management did not load. Reload the page to try again.';
+    };
     if (!window.PortfolioManagementDemo) {
-        panel.textContent = failure;
+        showFailure();
         return;
     }
     try {
         window.PortfolioManagementDemo.show(panel);
     } catch (err) {
         console.error('Portfolio Management demo failed to show', err);
-        panel.textContent = failure;
+        showFailure();
     }
 }
 
