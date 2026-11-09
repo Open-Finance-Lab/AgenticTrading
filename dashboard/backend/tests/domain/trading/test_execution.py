@@ -374,10 +374,66 @@ def test_multiple_buys_accumulate_position():
         {"symbol": "AAPL", "action": "buy", "shares": 5},
     ], md)
     assert st["positions"] == {"AAPL": 15}
-    # entry price overwritten with last buy price
+    # both buys at 200: the average cost is 200
     assert st["entry_prices"] == {"AAPL": 200.0}
     assert st["cash"] == 100000 - 3000.0
     assert len(st["trades"]) == 2
+
+
+def test_adding_to_a_position_keeps_the_average_cost():
+    """Hold 100 @ 100, add 10 @ 80: the entry price is the share-weighted
+    average (98.18), not the last fill. Overwriting it with 80 told the model
+    a -18.5% position was flat (pnl_pct 0.0) in every later prompt."""
+    st = _run([{"symbol": "AAPL", "action": "buy", "shares": 10}], {"AAPL": _row(80.0)},
+              positions={"AAPL": 100}, entry_prices={"AAPL": 100.0})
+    assert st["positions"] == {"AAPL": 110}
+    assert st["entry_prices"]["AAPL"] == pytest.approx((100 * 100.0 + 10 * 80.0) / 110)
+    assert st["cash"] == 100000 - 800.0
+
+
+def test_a_partial_sell_keeps_the_average_cost():
+    md = {"AAPL": _row(80.0)}
+    st = _run([
+        {"symbol": "AAPL", "action": "buy", "shares": 10},
+        {"symbol": "AAPL", "action": "sell", "shares": 50},
+    ], md, positions={"AAPL": 100}, entry_prices={"AAPL": 100.0})
+    assert st["positions"] == {"AAPL": 60}
+    assert st["entry_prices"]["AAPL"] == pytest.approx(10800.0 / 110)
+
+
+def test_a_full_sell_then_rebuy_starts_a_new_average():
+    md = {"AAPL": _row(80.0)}
+    st = _run([
+        {"symbol": "AAPL", "action": "sell", "shares": 100},
+        {"symbol": "AAPL", "action": "buy", "shares": 10},
+    ], md, positions={"AAPL": 100}, entry_prices={"AAPL": 100.0})
+    assert st["positions"] == {"AAPL": 10}
+    assert st["entry_prices"] == {"AAPL": 80.0}
+
+
+def test_ashare_t1_add_and_partial_sell_keep_the_average_cost():
+    pm = bha.PortfolioManager(100000, t_plus_one_enabled=True, lot_size=100)
+    pm.positions = {"600519.SH": 200}
+    pm.available_positions = {"600519.SH": 200}
+    pm.entry_prices = {"600519.SH": 100.0}
+
+    pm.execute_actions(
+        [{"symbol": "600519.SH", "action": "buy", "shares": 100}],
+        {"600519.SH": _row(80.0)},
+        datetime(2026, 4, 2, 10),
+    )
+    fill = pm.trades[-1]["price"]
+    average = (200 * 100.0 + 100 * fill) / 300
+    assert pm.entry_prices["600519.SH"] == pytest.approx(average)
+
+    # The new lot is frozen until tomorrow; sell 100 of the 200 settled shares.
+    pm.execute_actions(
+        [{"symbol": "600519.SH", "action": "sell", "shares": 100}],
+        {"600519.SH": _row(80.0)},
+        datetime(2026, 4, 2, 11),
+    )
+    assert pm.positions == {"600519.SH": 200}
+    assert pm.entry_prices["600519.SH"] == pytest.approx(average)
 
 
 def test_buy_exact_available_cash():
