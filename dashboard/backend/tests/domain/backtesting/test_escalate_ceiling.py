@@ -317,9 +317,9 @@ def test_billing_counts_every_attempt_either_way(spy, monkeypatch):
 # The stand-in above raises the "No text content" AttributeError, which only
 # the legacy client produces. The execution layer rejects an empty reply
 # itself, before any message exists, as RESPONSE_INVALID marked
-# ``empty_reply``, and releases its reservation at zero (#556) -- so a
-# same-ceiling retry would be a generation the platform pays for and never
-# bills. It goes straight to the rescue call, as pipeline_runner's steps do,
+# ``empty_reply``, and settles what it was billed (#556) -- so a same-ceiling
+# retry would be another billed generation likely to spend the same ceiling.
+# It goes straight to the rescue call, as pipeline_runner's steps do,
 # whatever the flag says; the rest of RESPONSE_INVALID is never retried.
 
 
@@ -436,14 +436,14 @@ def _deepseek_completion(content, *, completion_tokens, finish="stop"):
     }
 
 
-def test_a_real_empty_reply_is_rescued_and_only_the_rescue_is_billed(
+def test_a_real_empty_reply_is_rescued_and_both_calls_are_billed(
         tmp_path, monkeypatch):
     """#600 end to end, on the lane prod failed on: DeepSeek V4 Pro through
     CommonStack on ATL Credits, in a strict, fail-closed run. Everything is
     real but the socket -- the OpenAI SDK, the CommonStack adapter that
-    rejects the empty answer, the service that releases its reservation, the
-    client and this loop. The rescue call is the one settled, and the model,
-    not a hold, drove the step."""
+    rejects the empty answer, the service that settles the 2000 tokens it
+    was billed for (#556), the client and this loop. The model, not a hold,
+    drove the step."""
     monkeypatch.delenv("LLM_ESCALATE_CEILING_ON_RETRY", raising=False)
     monkeypatch.delenv("BROKER_CREDENTIAL_VERIFICATION_PROXY", raising=False)
     monkeypatch.setenv("COMMONSTACK_API_KEY", "cs-fake-empty-reply-abcd")
@@ -513,9 +513,10 @@ def test_a_real_empty_reply_is_rescued_and_only_the_rescue_is_billed(
             ("run-600",),
         ).fetchall()
     assert [(index, status) for index, status, _ in rows] == [
-        (0, "released"),
+        (0, "settled"),
         (1, "settled"),
     ]
-    assert rows[0][2] == 0, "the empty reply is never debited"
-    assert rows[1][2] > 0
+    # The empty reply is billed upstream for the reasoning that spent its
+    # ceiling, so it is debited too: 2000 output tokens against the rescue's 20.
+    assert rows[0][2] > rows[1][2] > 0
     assert [error["error_category"] for error in errors] == ["empty_response"]
