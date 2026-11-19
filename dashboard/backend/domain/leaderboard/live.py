@@ -639,6 +639,15 @@ class LiveSessionGapError(RuntimeError):
     """A trading day inside the segment came back from the tape with no bars."""
 
 
+class LiveNoBarsError(LiveSessionGapError):
+    """The tape returned nothing at all for a live segment.
+
+    A subclass so the attempt ledger files it as ``market_data_gap`` (its
+    classifier walks the MRO); a bare ``RuntimeError`` read on the board as
+    "an internal error" (#698).
+    """
+
+
 def _session_gap(
     entry_id: str,
     missing: List[date],
@@ -1158,7 +1167,7 @@ def _trade_live_segment(
         if bars_memo is not None and bars:
             bars_memo[memo_key] = bars
     if not bars:
-        raise RuntimeError(
+        raise LiveNoBarsError(
             f"No market data returned for live increment {bars_start} → {segment_end}"
         )
     print(
