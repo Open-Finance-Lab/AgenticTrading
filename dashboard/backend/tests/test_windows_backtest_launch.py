@@ -21,6 +21,7 @@ import signal
 import subprocess
 import sys
 import uuid
+import weakref
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -187,6 +188,49 @@ def test_algo_backtest_launches_on_child_python(tmp_path, monkeypatch):
     assert algo_service.algo_status["running"] is False
 
 
+def test_algo_backtest_has_utf8_pipes(tmp_path, monkeypatch):
+    """#688: the engine prints emoji, so under a cp1252 locale the child raised
+    UnicodeEncodeError and the parent decoded with the locale codec."""
+    seen = {}
+
+    def fake_run(argv, **kwargs):
+        seen.update(kwargs)
+        return subprocess.CompletedProcess(argv, 1, stdout="", stderr="boom")
+
+    monkeypatch.setattr(algo_service, "child_python", lambda: "/opt/server/python")
+    monkeypatch.setattr(algo_service.subprocess, "run", fake_run)
+    monkeypatch.setattr(algo_service, "algo_status", {"running": True, "error": None})
+    monkeypatch.setenv("PYTHONIOENCODING", "cp1252")
+
+    algo_service._run_backtest_background(
+        tmp_path / "algo.json", "sess", "team", "sub", "2026-01-01", "2026-01-02"
+    )
+
+    assert (seen["encoding"], seen["errors"]) == ("utf-8", "replace")
+    # Overrides whatever the operator's environment said.
+    assert seen["env"]["PYTHONIOENCODING"] == "utf-8:backslashreplace"
+
+
+def test_ai_hedge_fund_bridge_has_utf8_pipes(tmp_path, monkeypatch):
+    """#688: same as the Trading Algo child. The bridge's environment is an
+    allowlist, so the encoding is set there, not inherited."""
+    runner = ahf_adapter.AiHedgeFundSubprocessRunner({"PYTHONIOENCODING": "cp1252"})
+    monkeypatch.setattr(runner, "_python_executable", lambda: Path("/opt/ahf/python"))
+    seen = {}
+
+    def fake_run(command, **kwargs):
+        seen.update(kwargs)
+        raise OSError("stop here")
+
+    monkeypatch.setattr(ahf_adapter.subprocess, "run", fake_run)
+
+    with pytest.raises(ahf_adapter.AiHedgeFundRuntimeError):
+        runner.run({}, timeout_seconds=5)
+
+    assert (seen["encoding"], seen["errors"]) == ("utf-8", "replace")
+    assert seen["env"]["PYTHONIOENCODING"] == "utf-8:backslashreplace"
+
+
 def test_algo_resolver_failure_still_releases_the_single_flight(tmp_path, monkeypatch):
     """Resolved inside the try: a raise outside it skipped the ``finally``
     and left the global ``algo_status`` claiming "running" until a restart."""
@@ -305,6 +349,154 @@ def test_a_prelaunch_cancel_without_sigkill_raises_cancelled(monkeypatch):
             live_run_id=run_id,
         )
     assert child.terminated == 1
+
+
+# ===========================================================================
+# Windows' group sweep: the child's Job Object
+# ===========================================================================
+
+
+@pytest.fixture
+def recorded_jobs(monkeypatch):
+    """``process_jobs`` with every Win32 call recorded instead of made."""
+    calls = {"assigned": [], "terminated": [], "closed": []}
+
+    def assign(process):
+        # A weak reference: holding the process would keep its finalizer,
+        # which closes the job, from ever running.
+        calls["assigned"].append(weakref.ref(process))
+        return 7001
+
+    monkeypatch.setattr(bt.process_jobs, "assign_kill_job", assign)
+    monkeypatch.setattr(
+        bt.process_jobs, "terminate_job", lambda job: calls["terminated"].append(job) or True
+    )
+    monkeypatch.setattr(bt.process_jobs, "close_job", lambda job: calls["closed"].append(job))
+    return calls
+
+
+def test_the_sweep_ends_the_job_even_after_the_child_exited(recorded_jobs, monkeypatch):
+    """#688: the case that matters. The child obeyed CTRL_BREAK and exited in
+    the grace; a grandchild that ignored it is reachable only through the job,
+    just as POSIX reaches it through the process group after the reap."""
+    monkeypatch.setattr(bt, "_resolve_child_pgid", lambda process: None)
+    child = FakeChild()  # exits within the grace
+    bt._KILL_JOBS[child] = 7001
+
+    bt._kill_backtest_process_after_grace(child, grace_seconds=0)
+
+    assert child.killed == 0
+    assert recorded_jobs["terminated"] == [7001]
+
+
+def test_the_sweep_ends_the_job_after_a_stubborn_child_is_killed(recorded_jobs, monkeypatch):
+    monkeypatch.setattr(bt, "_resolve_child_pgid", lambda process: None)
+    stubborn = FakeChild(timeout_waits=1)
+    bt._KILL_JOBS[stubborn] = 7001
+
+    bt._kill_backtest_process_after_grace(stubborn, grace_seconds=0)
+
+    assert stubborn.killed == 1
+    assert recorded_jobs["terminated"] == [7001]
+
+
+def test_a_child_with_no_job_sweeps_nothing_new(recorded_jobs, monkeypatch):
+    """POSIX, a test stub, or a refused assignment: the old escalation alone."""
+    monkeypatch.setattr(bt, "_resolve_child_pgid", lambda process: None)
+    child = FakeChild()
+
+    bt._kill_backtest_process_after_grace(child, grace_seconds=0)
+
+    assert recorded_jobs["terminated"] == [None]
+
+
+def test_the_launch_puts_the_child_in_a_job_closed_with_the_process(recorded_jobs, monkeypatch):
+    """The handle outlives the run's return, because the cancel route's sweep
+    runs on another thread and may arrive after the worker saw the child exit.
+    It is released once the Popen object itself is gone."""
+    import gc
+
+    child = FakeChild()
+    monkeypatch.setattr(subprocess, "Popen", lambda cmd, **kwargs: child)
+
+    bt._run_backtest_subprocess(
+        ["python", "-c", "pass"], cwd=".", env={}, stdin_payload="", timeout=60,
+        live_run_id=None,
+    )
+
+    assert [ref() for ref in recorded_jobs["assigned"]] == [child]
+    assert bt._KILL_JOBS[child] == 7001
+    assert recorded_jobs["closed"] == []
+    monkeypatch.undo()  # drop the Popen stub's reference to the child
+    del child
+    gc.collect()
+    assert recorded_jobs["closed"] == [7001]
+
+
+def test_process_jobs_is_a_no_op_off_windows(monkeypatch):
+    from dashboard.backend.infrastructure import process_jobs
+
+    monkeypatch.setattr(process_jobs, "_IS_WINDOWS", False)
+
+    assert process_jobs.assign_kill_job(SimpleNamespace(_handle=1234)) is None
+    assert process_jobs.terminate_job(7001) is False
+    process_jobs.close_job(7001)  # no raise
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="real Job Objects need Windows")
+def test_a_real_job_kills_a_grandchild_after_its_parent_exited():
+    """End to end on Windows: the child starts a grandchild and exits, as one
+    that obeyed CTRL_BREAK would; the real sweep must still end the grandchild."""
+    import ctypes
+    import time
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    kernel32.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+    kernel32.GetExitCodeProcess.argtypes = (wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD))
+    kernel32.TerminateProcess.argtypes = (wintypes.HANDLE, wintypes.UINT)
+    kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
+
+    def alive(pid):
+        handle = kernel32.OpenProcess(0x1000, False, pid)  # QUERY_LIMITED_INFORMATION
+        if not handle:
+            return False
+        code = wintypes.DWORD()
+        kernel32.GetExitCodeProcess(handle, ctypes.byref(code))
+        kernel32.CloseHandle(handle)
+        return code.value == 259  # STILL_ACTIVE
+
+    child_code = (
+        "import subprocess, sys, time; time.sleep(1.0); "
+        "g = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)']); "
+        "print(g.pid, flush=True)"
+    )
+    child = subprocess.Popen(
+        [sys.executable, "-c", child_code], stdout=subprocess.PIPE, text=True,
+        creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,
+    )
+    grandchild = None
+    try:
+        job = bt.process_jobs.assign_kill_job(child)
+        assert job is not None
+        bt._KILL_JOBS[child] = job
+        grandchild = int(child.stdout.readline())
+        child.wait(timeout=30)
+        assert alive(grandchild)
+
+        bt._kill_backtest_process_after_grace(child, grace_seconds=0.5)
+
+        deadline = time.monotonic() + 5
+        while alive(grandchild) and time.monotonic() < deadline:
+            time.sleep(0.1)
+        assert not alive(grandchild)
+    finally:
+        if grandchild is not None and alive(grandchild):
+            handle = kernel32.OpenProcess(0x0001, False, grandchild)  # TERMINATE
+            kernel32.TerminateProcess(handle, 1)
+            kernel32.CloseHandle(handle)
+        child.stdout.close()
 
 
 # ===========================================================================
