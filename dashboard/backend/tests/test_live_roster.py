@@ -6,6 +6,8 @@ neither deployed (that bills a month-to-date replay) nor rendered (that shows a
 pending row for a model nobody is running).
 """
 
+import copy
+from argparse import Namespace
 from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
@@ -40,20 +42,28 @@ def _fresh_warnings(monkeypatch):
     monkeypatch.setattr(live, "_warned_live_config", set())
 
 
-def _config_with(entry_id, **keys):
-    """leaderboard.json with ``keys`` set on one entry (``_DROP`` removes one)."""
+def _config_editing(edits):
+    """leaderboard.json with ``edits`` ({entry id: {key: value}}) applied.
+
+    ``_DROP`` as a value removes that key. Every edit lands on one copy of the
+    file, so a test that changes two entries says so in one place.
+    """
     cfg = lb_service.load_leaderboard_config()
     strategies = []
     for strategy in cfg["strategies"]:
         strategy = dict(strategy)
-        if strategy["id"] == entry_id:
-            for key, value in keys.items():
-                if value is _DROP:
-                    strategy.pop(key, None)
-                else:
-                    strategy[key] = value
+        for key, value in edits.get(strategy["id"], {}).items():
+            if value is _DROP:
+                strategy.pop(key, None)
+            else:
+                strategy[key] = value
         strategies.append(strategy)
     return {**cfg, "strategies": strategies}
+
+
+def _config_with(entry_id, **keys):
+    """leaderboard.json with ``keys`` set on one entry (``_DROP`` removes one)."""
+    return _config_editing({entry_id: keys})
 
 
 def _use_config(monkeypatch, cfg):
@@ -90,10 +100,17 @@ def test_the_get_gates_on_the_live_month_not_the_competition_window(monkeypatch)
 
 
 def test_a_not_yet_live_entry_is_neither_rendered_nor_deployed(monkeypatch, tmp_path):
-    _use_config(monkeypatch, _config_with("deepseek_v4_pro", live_from="2026-09-01"))
     # Qwen open in August is the positive control: a refresh that deployed
     # nothing at all would otherwise pass the deploy half.
-    _use_config(monkeypatch, _config_with("qwen3_7_plus", live_from=_DROP))
+    _use_config(
+        monkeypatch,
+        _config_editing(
+            {
+                "deepseek_v4_pro": {"live_from": "2026-09-01"},
+                "qwen3_7_plus": {"live_from": _DROP},
+            }
+        ),
+    )
     # A row left over from an earlier run must not put it back on the board.
     _insert_live_run(
         "lb_deepseek_v4_pro_20260801_20260826", "deepseek_v4_pro", "2026-08-26",
@@ -148,25 +165,95 @@ def test_live_llm_entries_follow_live_model_ids_order(monkeypatch):
     assert [e["id"] for e in entries] == list(roster)
 
 
-def test_the_deploy_cli_says_why_it_refuses_a_not_yet_live_entry(monkeypatch, capsys):
-    from argparse import Namespace
-
+def _refused_by_the_deploy_cli(monkeypatch, capsys, cfg, entry_id):
+    """Run ``--period live`` for ``entry_id`` on 2026-08-27; return its output."""
     from dashboard.backend.tests.test_leaderboard_samples import _load_deploy_script
 
-    _use_config(monkeypatch, _config_with("deepseek_v4_pro", live_from="2026-09-01"))
+    _use_config(monkeypatch, cfg)
     freeze_cfg = live.live_freeze_config(_AUG27)
     monkeypatch.setattr(live, "live_freeze_config", lambda *args, **kwargs: freeze_cfg)
     monkeypatch.setattr(
         live,
         "deploy_live_model_increment",
-        lambda *args, **kwargs: pytest.fail("the CLI deployed a not-yet-live entry"),
+        lambda *args, **kwargs: pytest.fail("the CLI deployed an entry off the roster"),
     )
     script = _load_deploy_script(monkeypatch)
     args = Namespace(
-        entry="deepseek_v4_pro", start=None, end=None, force=False, allow_fallback=False
+        entry=entry_id, start=None, end=None, force=False, allow_fallback=False
     )
     assert script._deploy_live(args) is None
-    assert "its live_from month has not opened" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert out.count("ERROR: ") == 1
+    return out
+
+
+def test_the_deploy_cli_says_why_it_refuses_a_not_yet_live_entry(monkeypatch, capsys):
+    cfg = _config_with("deepseek_v4_pro", live_from="2026-09-01")
+    out = _refused_by_the_deploy_cli(monkeypatch, capsys, cfg, "deepseek_v4_pro")
+    assert "its live_from month has not opened" in out
+    assert "live_from 2026-09-01, board month 2026-08-01" in out
+    assert "LIVE_MODEL_IDS" not in out
+
+
+def test_the_deploy_cli_names_a_typo_as_a_missing_entry(monkeypatch, capsys):
+    cfg = lb_service.load_leaderboard_config()
+    out = _refused_by_the_deploy_cli(monkeypatch, capsys, cfg, "deepseek_v4_pr0")
+    assert "'deepseek_v4_pr0' is not an entry in leaderboard.json" in out
+    assert "LIVE_MODEL_IDS" not in out
+    assert "live_from" not in out
+
+
+def test_the_deploy_cli_names_an_llm_entry_off_the_roster(monkeypatch, capsys):
+    cfg = lb_service.load_leaderboard_config()
+    off_roster = next(
+        s["id"]
+        for s in cfg["strategies"]
+        if s.get("strategy") == "llm_agent" and s["id"] not in live.LIVE_MODEL_IDS
+    )
+    out = _refused_by_the_deploy_cli(monkeypatch, capsys, cfg, off_roster)
+    assert f"'{off_roster}' is not in LIVE_MODEL_IDS" in out
+    assert "live_from" not in out
+
+
+def test_the_deploy_cli_names_a_baseline_as_not_deployable(monkeypatch, capsys):
+    cfg = lb_service.load_leaderboard_config()
+    out = _refused_by_the_deploy_cli(monkeypatch, capsys, cfg, "spy_index")
+    assert "'spy_index' is a baseline" in out
+    assert "not an llm_agent entry" in out
+
+
+def test_the_roster_refusal_is_none_for_a_live_entry():
+    cfg = lb_service.load_leaderboard_config()
+    refusal = live.live_roster_refusal(
+        "deepseek_v4_pro", cfg, month_start=_EVERY_JOIN_OPEN
+    )
+    assert refusal is None
+
+
+@pytest.mark.parametrize("key", ["live_from", "live_overrides"])
+def test_a_baseline_with_a_live_only_key_warns_once(monkeypatch, capsys, key):
+    """Only llm_agent entries read these keys; on a baseline they did nothing
+    and said nothing."""
+    value = "2026-09-01" if key == "live_from" else {"temperature": 0}
+    cfg = _config_with("spy_index", **{key: value})
+    for _ in range(2):
+        strategies = live.live_board_strategies(cfg, month_start="2026-08-01")
+    # Still on the board in August: the key is ignored, not obeyed.
+    assert "spy_index" in {s["id"] for s in strategies}
+    out = capsys.readouterr().out
+    line = f"WARNING: live.config_invalid entry=spy_index key={key} "
+    assert out.count(line) == 1
+    assert "expected=an llm_agent entry" in out
+
+
+def test_building_the_live_roster_leaves_the_config_unchanged():
+    """``_with_live_overrides`` copies the entry; Competition reads the same
+    dict, so an in-place edit would re-judge its published runs."""
+    cfg = lb_service.load_leaderboard_config()
+    assert any(live.LIVE_OVERRIDES_KEY in s for s in cfg["strategies"])
+    before = copy.deepcopy(cfg)
+    live.live_board_strategies(cfg, month_start=_EVERY_JOIN_OPEN)
+    assert cfg == before
 
 
 # --------------------------------------------------------------------------
@@ -242,8 +329,10 @@ def test_a_malformed_override_warns_once_and_runs_the_shared_values(
 ):
     cfg = _config_with(_HAIKU, live_overrides=block, live_from=_DROP)
     monkeypatch.setattr(live, "LIVE_MODEL_IDS", ("deepseek_v4_pro", _HAIKU))
+    before = copy.deepcopy(cfg)
     for _ in range(2):
         haiku = _live_entry(_HAIKU, cfg)
+    assert cfg == before
     assert haiku["model_id"] == "claude-haiku-4-5-20251001"
     assert "temperature" not in haiku
     assert live.LIVE_OVERRIDES_KEY not in haiku
