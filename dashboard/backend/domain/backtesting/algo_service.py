@@ -289,6 +289,11 @@ def _run_backtest_background(
     project_dir = _PROJECT_DIR
     script = project_dir / "scripts" / "backtest_custom_algo.py"
     env = os.environ.copy()
+    # The engine prints emoji (``✅ LLM initialized``); under a Windows ANSI
+    # code page the child's print raises UnicodeEncodeError. Same pair as the
+    # dashboard backtest child (#653): the child writes UTF-8 and the parent
+    # reads it as such (#688).
+    env["PYTHONIOENCODING"] = "utf-8:backslashreplace"
 
     algo_status["progress"] = "Fetching hourly bars from Alpaca…"
 
@@ -310,6 +315,10 @@ def _run_backtest_background(
             cwd=str(project_dir),
             capture_output=True,
             text=True,
+            # Named, not the locale's: on Windows that is the ANSI code page,
+            # which cannot decode the child's UTF-8.
+            encoding="utf-8",
+            errors="replace",
             timeout=3600,
             env=env,
         )
