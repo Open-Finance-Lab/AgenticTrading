@@ -100,10 +100,12 @@ LIVE_MODEL_IDS = (
     "claude_haiku_4_5",
 )
 # Optional per-entry "live_from": "YYYY-MM-01", the first board month an LLM
-# entry trades. An entry added to LIVE_MODEL_IDS without it replays the current
-# month from the 1st on its first refresh (it has no checkpoint to resume
-# from), backfilling sessions it never saw forward. With it, the entry stays
-# off the board -- neither deployed nor rendered -- until that month opens.
+# entry trades. An entry added to LIVE_MODEL_IDS without it has no checkpoint
+# to resume from, so its first refresh trades every session since the 1st of
+# the current month, including the ones from before it joined the roster. With
+# it, the entry stays off the board -- neither deployed nor rendered -- until
+# that month opens. Only llm_agent entries read it (and "live_overrides"): on
+# a baseline either key is reported once and ignored.
 # Anything but the 1st of a month is reported once and ignored, so the entry
 # is live at once: this is read on the public GET, which must not raise on a
 # config typo.
@@ -444,8 +446,51 @@ def live_board_strategies(
             if live_from is not None and live_from > board_month:
                 continue
             strategy = _with_live_overrides(strategy)
+        else:
+            for key in (LIVE_FROM_KEY, LIVE_OVERRIDES_KEY):
+                if key in strategy:
+                    _warn_live_config(
+                        strategy.get("id"), key, strategy[key], "an llm_agent entry"
+                    )
         out.append(strategy)
     return out
+
+
+def live_roster_refusal(
+    entry_id: str,
+    config: Optional[Dict[str, Any]] = None,
+    *,
+    month_start: Optional[str] = None,
+) -> Optional[str]:
+    """Why ``entry_id`` is not on the board month's Live roster, or None if it is.
+
+    Names the one cause that applies, checked in this order: no ``llm_agent``
+    entry with that id in leaderboard.json (a typo, or a baseline); the id is
+    not in ``LIVE_MODEL_IDS``; its ``live_from`` month is after the board
+    month. ``config`` and ``month_start`` are read as in ``live_board_strategies``.
+    """
+    cfg = config or lb_service.load_leaderboard_config()
+    entry = next(
+        (s for s in cfg.get("strategies", []) if s.get("id") == entry_id), None
+    )
+    if entry is None:
+        return f"'{entry_id}' is not an entry in leaderboard.json."
+    if entry.get("strategy") != "llm_agent":
+        return (
+            f"'{entry_id}' is a baseline (strategy={entry.get('strategy')}), "
+            "not an llm_agent entry; only LLM entries are deployed."
+        )
+    if entry_id not in LIVE_MODEL_IDS:
+        return f"'{entry_id}' is not in LIVE_MODEL_IDS, so it is not on the Live roster."
+    board_month = _board_month(cfg, month_start)
+    live_from = _live_from_month(entry)
+    if live_from is not None and live_from > board_month:
+        return (
+            f"'{entry_id}' is not on the Live roster yet: its live_from month has "
+            f"not opened (live_from {live_from.isoformat()}, board month "
+            f"{board_month.isoformat()})."
+        )
+    return None
 
 
 def live_llm_entries(
