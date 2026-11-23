@@ -231,6 +231,29 @@ def test_ai_hedge_fund_bridge_has_utf8_pipes(tmp_path, monkeypatch):
     assert seen["env"]["PYTHONIOENCODING"] == "utf-8:backslashreplace"
 
 
+def test_algo_child_output_cannot_fail_the_run_on_a_cp1252_stdout(tmp_path, monkeypatch):
+    """#688: the child's output is now real UTF-8; echoing it to a redirected
+    cp1252 server stdout (strict errors) must not turn into the run's error."""
+    import io
+
+    def fake_run(argv, **kwargs):
+        return subprocess.CompletedProcess(argv, 1, stdout="\u2705 LLM initialized", stderr="")
+
+    monkeypatch.setattr(algo_service, "child_python", lambda: "/opt/server/python")
+    monkeypatch.setattr(algo_service.subprocess, "run", fake_run)
+    monkeypatch.setattr(algo_service, "algo_status", {"running": True, "error": None})
+    server_log = io.TextIOWrapper(io.BytesIO(), encoding="cp1252", errors="strict")
+    monkeypatch.setattr(sys, "stdout", server_log)
+
+    algo_service._run_backtest_background(
+        tmp_path / "algo.json", "sess", "team", "sub", "2026-01-01", "2026-01-02"
+    )
+
+    assert algo_service.algo_status["error"].startswith("Backtest failed (code 1)")
+    server_log.flush()
+    assert b"\\u2705 LLM initialized" in server_log.buffer.getvalue()
+
+
 def test_algo_resolver_failure_still_releases_the_single_flight(tmp_path, monkeypatch):
     """Resolved inside the try: a raise outside it skipped the ``finally``
     and left the global ``algo_status`` claiming "running" until a restart."""
@@ -447,10 +470,10 @@ def test_process_jobs_is_a_no_op_off_windows(monkeypatch):
 def test_a_real_job_kills_a_grandchild_after_its_parent_exited():
     """End to end on Windows: the child starts a grandchild and exits, as one
     that obeyed CTRL_BREAK would; the real sweep must still end the grandchild."""
-    import ctypes
+    import ctypes.wintypes
     import time
-    from ctypes import wintypes
 
+    wintypes = ctypes.wintypes
     kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
     kernel32.OpenProcess.restype = wintypes.HANDLE
     kernel32.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
@@ -477,6 +500,7 @@ def test_a_real_job_kills_a_grandchild_after_its_parent_exited():
         creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,
     )
     grandchild = None
+    job = None
     try:
         job = bt.process_jobs.assign_kill_job(child)
         assert job is not None
@@ -496,6 +520,8 @@ def test_a_real_job_kills_a_grandchild_after_its_parent_exited():
             handle = kernel32.OpenProcess(0x0001, False, grandchild)  # TERMINATE
             kernel32.TerminateProcess(handle, 1)
             kernel32.CloseHandle(handle)
+        bt._KILL_JOBS.pop(child, None)
+        bt.process_jobs.close_job(job)
         child.stdout.close()
 
 

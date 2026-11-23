@@ -33,16 +33,18 @@ _IS_WINDOWS = sys.platform == "win32"
 _TERMINATED_EXIT_CODE = 1
 
 _kernel32: Any = None
-_warned = False
+# One warning per failure kind, so a harmless first refusal cannot hide a
+# later, different failure for the life of the server.
+_warned: set = set()
 
 
 def _api() -> Any:
     """kernel32 with typed signatures, loaded on first use (Windows only)."""
     global _kernel32
     if _kernel32 is None:
-        import ctypes
-        from ctypes import wintypes
+        import ctypes.wintypes
 
+        wintypes = ctypes.wintypes
         kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
         kernel32.CreateJobObjectW.argtypes = (wintypes.LPVOID, wintypes.LPCWSTR)
         kernel32.CreateJobObjectW.restype = wintypes.HANDLE
@@ -56,10 +58,9 @@ def _api() -> Any:
     return _kernel32
 
 
-def _warn_once(message: str) -> None:
-    global _warned
-    if not _warned:
-        _warned = True
+def _warn_once(kind: str, message: str) -> None:
+    if kind not in _warned:
+        _warned.add(kind)
         print(f"WARNING: process_jobs: {message}", flush=True)
 
 
@@ -72,7 +73,13 @@ def assign_kill_job(process: Any) -> Optional[int]:
     ``Popen.kill``, which reaches the child alone.
 
     Only processes the child creates after this call join the job. The window
-    is the child interpreter's start-up, which spawns nothing.
+    is the child's start-up. A plain interpreter spawns nothing there, but a
+    Windows venv's ``Scripts\\python.exe`` is a launcher that starts the base
+    interpreter at once; if it does so before this call, that interpreter and
+    its children stay outside the job and the sweep cannot reach them.
+
+    Never raises: any failure falls back to None, so a launched child is
+    always handed back to the caller that owns it.
     """
     if not _IS_WINDOWS:
         return None
@@ -83,18 +90,27 @@ def assign_kill_job(process: Any) -> Optional[int]:
         api = _api()
         job = api.CreateJobObjectW(None, None)
         if not job:
-            _warn_once("CreateJobObjectW failed; a stopped run's grandchildren may survive")
+            _warn_once(
+                "create", "CreateJobObjectW failed; a stopped run's grandchildren may survive"
+            )
             return None
         if not api.AssignProcessToJobObject(job, int(handle)):
             api.CloseHandle(job)
-            _warn_once(
-                "AssignProcessToJobObject was refused; a stopped run's "
-                "grandchildren may survive"
-            )
+            # A child that already exited (a bad argument, an import error)
+            # is refused too, and has no tree left to lose: not a warning.
+            if process.poll() is None:
+                _warn_once(
+                    "assign",
+                    "AssignProcessToJobObject was refused; a stopped run's "
+                    "grandchildren may survive",
+                )
             return None
         return int(job)
-    except (OSError, AttributeError, ValueError, TypeError) as exc:
-        _warn_once(f"job objects unavailable ({exc}); a stopped run's grandchildren may survive")
+    except Exception as exc:  # incl. ctypes.ArgumentError: never strand the child
+        _warn_once(
+            "unavailable",
+            f"job objects unavailable ({exc}); a stopped run's grandchildren may survive",
+        )
         return None
 
 
@@ -104,7 +120,7 @@ def terminate_job(job: Optional[int]) -> bool:
         return False
     try:
         return bool(_api().TerminateJobObject(job, _TERMINATED_EXIT_CODE))
-    except (OSError, AttributeError, ValueError, TypeError):
+    except Exception:  # the sweep is best effort; the stop path must finish
         return False
 
 
@@ -114,7 +130,7 @@ def close_job(job: Optional[int]) -> None:
         return
     try:
         _api().CloseHandle(job)
-    except (OSError, AttributeError, ValueError, TypeError):
+    except Exception:  # runs from a finalizer: nothing left to report to
         pass
 
 

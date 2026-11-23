@@ -20,6 +20,7 @@ import json
 import os
 import re
 import subprocess
+import sys
 import threading
 import time
 import uuid
@@ -277,6 +278,18 @@ def get_algo_status(session_id: str) -> dict[str, Any]:
     return out
 
 
+def _echo_child_output(text: str) -> None:
+    """Print the child's output without letting it fail the run.
+
+    It now arrives as real UTF-8 (``✅``). A redirected server stdout on Windows
+    is the ANSI code page with strict errors, so a plain ``print`` raised
+    UnicodeEncodeError and the ``except`` below reported a finished run as
+    failed (#688).
+    """
+    encoding = getattr(sys.stdout, "encoding", None) or "utf-8"
+    print(text.encode(encoding, "backslashreplace").decode(encoding, "replace"))
+
+
 def _run_backtest_background(
     config_path: Path,
     session_id: str,
@@ -325,9 +338,9 @@ def _run_backtest_background(
 
         print("=== CUSTOM ALGO BACKTEST ===")
         if proc.stdout:
-            print(proc.stdout)
+            _echo_child_output(proc.stdout)
         if proc.stderr:
-            print(proc.stderr)
+            _echo_child_output(proc.stderr)
 
         result_path = config_path.with_suffix(".result.json")
         if proc.returncode != 0:
