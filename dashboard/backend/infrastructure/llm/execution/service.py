@@ -42,6 +42,7 @@ from dashboard.backend.infrastructure.llm.execution.log_safe import log_safe_tok
 from dashboard.backend.infrastructure.llm.execution.models import (
     BillingEvidence,
     BillingMode,
+    LLMEmptyReplyResult,
     LLMExecutionRequest,
     LLMExecutionResult,
     LLMUsage,
@@ -228,6 +229,24 @@ def _ceiling_micro(
     return credits_micro_for_usd(ceiling_cost)
 
 
+# Google bills Gemini thinking as output (#657), and ``maxOutputTokens`` does
+# not reliably bound it: thinking has been reported overshooting the limit
+# (about 2x at 512), and with no ``thinkingConfig`` -- the adapter sends none
+# -- the model picks its own budget, up to 8,192 tokens. The hold on the
+# direct Gemini lane covers that budget too, so a settled reply stays inside
+# it instead of running into an outstanding balance.
+GEMINI_THINKING_ALLOWANCE_TOKENS = 8192
+_THINKING_OUTSIDE_CEILING_PROVIDERS = frozenset({"gemini"})
+
+
+def output_token_ceiling_for(max_output_tokens: int, provider_id: str) -> int:
+    """The output tokens one call may be billed for at ``provider_id``."""
+    ceiling = max(0, int(max_output_tokens))
+    if provider_id in _THINKING_OUTSIDE_CEILING_PROVIDERS:
+        ceiling += GEMINI_THINKING_ALLOWANCE_TOKENS
+    return ceiling
+
+
 def reservation_ceiling_micro_for(
     *,
     prompt_bytes: int,
@@ -242,7 +261,7 @@ def reservation_ceiling_micro_for(
     """
     return _ceiling_micro(
         prompt_token_ceiling_for_bytes(prompt_bytes),
-        max_output_tokens,
+        output_token_ceiling_for(max_output_tokens, pricing_snapshot.provider_id),
         pricing_snapshot,
     )
 
@@ -255,7 +274,9 @@ def _reservation_ceiling_micro(
 
     ceiling = _ceiling_micro(
         _prompt_token_ceiling(request),
-        request.usage_policy.max_output_tokens,
+        output_token_ceiling_for(
+            request.usage_policy.max_output_tokens, pricing_snapshot.provider_id
+        ),
         pricing_snapshot,
     )
     if ceiling is None:
@@ -335,6 +356,21 @@ class LLMExecutionService:
             self._emit_model_usage(request, result)
             return result
         except LLMExecutionError as exc:
+            billed = getattr(exc, "billed_result", None)
+            if isinstance(billed, LLMExecutionResult):
+                # A billed empty reply: the generation was paid for, so its
+                # usage and cost reach analytics like any call's (outcome
+                # ``failed``: no answer came back), and the analytics cost
+                # stays equal to the ledger's debit. Never allowed to replace
+                # the empty-reply error the caller's rescue keys on.
+                try:
+                    self._emit_model_usage(request, billed, outcome="failed")
+                except Exception as emit_error:  # noqa: BLE001 - analytics only
+                    print(
+                        "WARNING: llm.empty_reply_usage_not_recorded "
+                        f"error={type(emit_error).__name__}",
+                        flush=True,
+                    )
             analytics_instrumentation.emit_safe_error_event(
                 user_id=request.user_id,
                 source_record_type="run",
@@ -359,6 +395,8 @@ class LLMExecutionService:
     def _emit_model_usage(
         request: LLMExecutionRequest,
         result: LLMExecutionResult,
+        *,
+        outcome: str = "succeeded",
     ) -> None:
         # BYOK debits no Credits, so its cost_micro_usd is 0; its list-price
         # estimate travels in a separate property (analytics.usage_cost). The
@@ -373,7 +411,7 @@ class LLMExecutionService:
             provider_id=result.provider_id,
             model_id=request.model_id,
             billing_mode=request.billing_mode.value,
-            outcome="succeeded",
+            outcome=outcome,
             properties=model_usage_properties(
                 billing_mode=request.billing_mode.value,
                 model_id=request.model_id,
@@ -443,35 +481,34 @@ class LLMExecutionService:
                 if reservation.status != "open":
                     raise LLMExecutionError(ExecutionErrorCategory.BILLING_FAILED)
 
-            response = self._complete(adapter, request, credential, provider)
+            try:
+                response = self._complete(adapter, request, credential, provider)
+            except LLMExecutionError as exc:
+                billing = self._settle_empty_reply(
+                    exc,
+                    request=request,
+                    reservation_id=reservation_id,
+                    pricing_snapshot=pricing_snapshot,
+                )
+                if billing is not None:
+                    # Settled: there is no hold left to release.
+                    reservation_id = None
+                    exc.billed_result = self._empty_reply_result(
+                        request=request,
+                        credential=credential,
+                        error=exc,
+                        billing=billing,
+                        requested_provider_id=requested_provider_id,
+                    )
+                raise
             usage = self._result_usage(response)
-            if not usage.usage_available:
-                raise LLMExecutionError(ExecutionErrorCategory.USAGE_UNAVAILABLE)
-            billing = self._build_evidence(
+            billing = self._bill(
                 request=request,
+                reservation_id=reservation_id,
                 usage=usage,
                 provider_cost_usd=response.provider_cost_usd,
                 pricing_snapshot=pricing_snapshot,
             )
-            if billing.usage_authority == "unavailable":
-                raise LLMExecutionError(ExecutionErrorCategory.USAGE_UNAVAILABLE)
-
-            if reservation_id is not None:
-                actual_micro = billing.provider_cost_credits_micro
-                settlement = self._settle(
-                    reservation_id, billing, actual_micro=actual_micro
-                )
-                billing = billing.model_copy(
-                    update={
-                        "debited_credits_micro": settlement.settled_micro,
-                        "outstanding_credits_micro": settlement.outstanding_micro,
-                    }
-                )
-            elif billing.provider_cost_credits_micro > 0:
-                # A zero-priced snapshot must not become a paid call after the
-                # fact; there is no held balance from which to settle it.
-                raise LLMExecutionError(ExecutionErrorCategory.BILLING_FAILED)
-
             return self._result(
                 request=request,
                 credential=credential,
@@ -509,7 +546,23 @@ class LLMExecutionService:
         adapter = self._resolve_adapter(provider)
 
         if request.billing_mode is BillingMode.BYOK:
-            response = self._complete(adapter, request, credential, provider)
+            try:
+                response = self._complete(adapter, request, credential, provider)
+            except LLMExecutionError as exc:
+                # The user's own key paid for it; nothing touches the ledger,
+                # but the run's evidence still counts the generation.
+                billing = self._empty_reply_evidence(
+                    exc, request=request, pricing_snapshot=pricing_snapshot
+                )
+                if billing is not None:
+                    exc.billed_result = self._empty_reply_result(
+                        request=request,
+                        credential=credential,
+                        error=exc,
+                        billing=billing,
+                        requested_provider_id=requested_provider_id,
+                    )
+                raise
             usage = self._result_usage(response)
             billing = self._build_evidence(
                 request=request,
@@ -714,12 +767,164 @@ class LLMExecutionService:
         if not response.text.strip():
             # The adapters reject an empty reply themselves, marked the same
             # way; this is the backstop for one that hands it back instead.
-            # Either way it is before settlement, so the reservation is
-            # released and a caller may ask again.
-            raise LLMExecutionError.for_empty_reply()
+            raise LLMExecutionError.for_empty_reply(
+                usage=response.usage if isinstance(response.usage, LLMUsage) else None,
+                provider_cost_usd=response.provider_cost_usd,
+            )
         if not isinstance(response.model_id, str) or not response.model_id.strip():
             raise LLMExecutionError(ExecutionErrorCategory.RESPONSE_INVALID)
         return response
+
+    def _bill(
+        self,
+        *,
+        request: LLMExecutionRequest,
+        reservation_id: str | None,
+        usage: LLMUsage,
+        provider_cost_usd: float | None,
+        pricing_snapshot: PricingSnapshot,
+    ) -> BillingEvidence:
+        """Price ``usage`` and settle it against the hold, if there is one."""
+        if not usage.usage_available:
+            raise LLMExecutionError(ExecutionErrorCategory.USAGE_UNAVAILABLE)
+        billing = self._build_evidence(
+            request=request,
+            usage=usage,
+            provider_cost_usd=provider_cost_usd,
+            pricing_snapshot=pricing_snapshot,
+        )
+        if billing.usage_authority == "unavailable":
+            raise LLMExecutionError(ExecutionErrorCategory.USAGE_UNAVAILABLE)
+
+        if reservation_id is not None:
+            actual_micro = billing.provider_cost_credits_micro
+            settlement = self._settle(
+                reservation_id, billing, actual_micro=actual_micro
+            )
+            return billing.model_copy(
+                update={
+                    "debited_credits_micro": settlement.settled_micro,
+                    "outstanding_credits_micro": settlement.outstanding_micro,
+                }
+            )
+        if billing.provider_cost_credits_micro > 0:
+            # A zero-priced snapshot must not become a paid call after the
+            # fact; there is no held balance from which to settle it.
+            raise LLMExecutionError(ExecutionErrorCategory.BILLING_FAILED)
+        return billing
+
+    @staticmethod
+    def _billable_empty_reply_usage(error: LLMExecutionError) -> LLMUsage | None:
+        """The usage an empty reply shows a charge for, or None.
+
+        A charge is any token the provider reported -- the prompt is billed
+        even when no completion token came back -- or a cost it reported
+        (OpenRouter reports $0 for what its zero-completion insurance waives,
+        which then settles at $0). No usage at all is released at zero, as
+        before, and stays retryable.
+        """
+        usage = error.billed_usage
+        if (
+            not is_empty_reply(error)
+            or not isinstance(usage, LLMUsage)
+            or not usage.usage_available
+            or (
+                usage.input_tokens <= 0
+                and usage.output_tokens <= 0
+                and error.billed_cost_usd is None
+            )
+        ):
+            return None
+        return usage
+
+    def _settle_empty_reply(
+        self,
+        error: LLMExecutionError,
+        *,
+        request: LLMExecutionRequest,
+        reservation_id: str | None,
+        pricing_snapshot: PricingSnapshot,
+    ) -> BillingEvidence | None:
+        """Settle what the provider billed for an empty reply; its evidence once settled.
+
+        Reasoning that spent the output ceiling is billed output, so it is
+        settled like any reply before the empty-reply error goes on to the
+        caller, who may ask again (#556). Returns None, settling nothing, when
+        the reply shows no charge (``_billable_empty_reply_usage``), when it
+        cannot be priced, and when there is no hold: a zero-priced route
+        reserved nothing to settle from, and a paid call made after the fact
+        would turn the retryable empty reply into BILLING_FAILED.
+        """
+        usage = self._billable_empty_reply_usage(error)
+        if usage is None or reservation_id is None:
+            return None
+        try:
+            return self._bill(
+                request=request,
+                reservation_id=reservation_id,
+                usage=usage,
+                provider_cost_usd=error.billed_cost_usd,
+                pricing_snapshot=pricing_snapshot,
+            )
+        except LLMExecutionError as billing_error:
+            if billing_error.category is ExecutionErrorCategory.USAGE_UNAVAILABLE:
+                return None
+            raise
+
+    def _empty_reply_evidence(
+        self,
+        error: LLMExecutionError,
+        *,
+        request: LLMExecutionRequest,
+        pricing_snapshot: PricingSnapshot,
+    ) -> BillingEvidence | None:
+        """BYOK: price an empty reply for the run's evidence, ledger untouched.
+
+        Best effort: an unpriceable reply returns None rather than replacing
+        the empty-reply error the caller's rescue keys on.
+        """
+        usage = self._billable_empty_reply_usage(error)
+        if usage is None:
+            return None
+        try:
+            billing = self._build_evidence(
+                request=request,
+                usage=usage,
+                provider_cost_usd=error.billed_cost_usd,
+                pricing_snapshot=pricing_snapshot,
+            )
+        except LLMExecutionError:
+            return None
+        if billing.usage_authority == "unavailable":
+            return None
+        return billing
+
+    @classmethod
+    def _empty_reply_result(
+        cls,
+        *,
+        request: LLMExecutionRequest,
+        credential: ResolvedCredential,
+        error: LLMExecutionError,
+        billing: BillingEvidence,
+        requested_provider_id: str,
+    ) -> LLMEmptyReplyResult | None:
+        """The billed evidence an empty-reply error carries (``billed_result``)."""
+        usage = error.billed_usage
+        if not isinstance(usage, LLMUsage):
+            return None
+        try:
+            return LLMEmptyReplyResult(
+                provider_id=request.provider_id,
+                requested_provider_id=requested_provider_id,
+                model_id=request.model_id,
+                credential_id=credential.credential_id,
+                credential_key_last_four=credential.key_last_four,
+                usage=usage,
+                billing=billing,
+            )
+        except Exception:  # noqa: BLE001 - evidence must not replace the error
+            return None
 
     @staticmethod
     def _result_usage(response: AdapterResponse) -> LLMUsage:

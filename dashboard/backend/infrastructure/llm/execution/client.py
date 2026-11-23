@@ -17,6 +17,7 @@ from dashboard.backend.infrastructure.llm.execution.errors import (
 from dashboard.backend.infrastructure.llm.execution.handoff import ExecutionHandoff
 from dashboard.backend.infrastructure.llm.execution.models import (
     BillingMode,
+    LLMEmptyReplyResult,
     LLMExecutionRequest,
     LLMExecutionResult,
     LLMMessage,
@@ -145,7 +146,16 @@ class AnthropicCompatibleExecutionClient:
 
         # Reserve a unique id for every attempt, including a failed provider call.
         self._next_call_index += 1
-        result = self.execution_service.execute(request)
+        try:
+            result = self.execution_service.execute(request)
+        except LLMExecutionError as exc:
+            # A billed empty reply raises (the caller's rescue keys on it), but
+            # it was paid for: count its evidence in the run summary, or the
+            # summary reports less than the ledger debited (#556).
+            billed = getattr(exc, "billed_result", None)
+            if isinstance(billed, LLMExecutionResult):
+                self._completed_results.append(billed)
+            raise
         # Production services return the complete typed result. Older test and
         # extension doubles return only the SDK-compatible attributes; keep
         # those callers working, but do not invent billing evidence for them.
@@ -179,6 +189,10 @@ class AnthropicCompatibleExecutionClient:
         policy = self.sampling
         wire: dict[str, str | None] = {}
         for result in self._completed_results:
+            if isinstance(result, LLMEmptyReplyResult):
+                # Billed, but no reply reached the adapter's wire record; a
+                # ``None`` here would claim the lane sent no controls.
+                continue
             wire.setdefault(result.provider_id, result.sampling_wire)
         if policy is None:
             label = "unresolved"
@@ -195,7 +209,11 @@ class AnthropicCompatibleExecutionClient:
         }
 
     def execution_summary(self) -> LLMRunEvidence | None:
-        """Return safe, backend-authoritative evidence for completed calls."""
+        """Return safe, backend-authoritative evidence for every billed call.
+
+        Billed empty replies count too (``LLMEmptyReplyResult``): no answer
+        came back, but the ledger debited them.
+        """
 
         if not self._completed_results:
             return None

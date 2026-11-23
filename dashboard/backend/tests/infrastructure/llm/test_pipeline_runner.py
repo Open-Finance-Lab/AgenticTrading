@@ -11,6 +11,7 @@ from dashboard.backend.infrastructure.llm.execution.errors import (
     ExecutionErrorCategory,
     LLMExecutionError,
 )
+from dashboard.backend.infrastructure.llm.execution.models import LLMUsage
 from dashboard.backend.infrastructure.llm.pipeline_runner import (
     DEFAULT_CEILING_SNAPSHOT_SYMBOLS,
     DEFAULT_MAX_OUTPUT_TOKENS,
@@ -813,6 +814,30 @@ def test_run_pipeline_decision_retries_an_empty_reply_with_reasoning_preserved()
         client.messages.calls[0]["messages"]
         == client.messages.calls[1]["messages"]
     )
+
+
+def test_run_pipeline_decision_counts_a_billed_empty_reply():
+    """#556: the empty reply was billed, so the step's calls and tokens
+    include it, not only the rescue that came back."""
+    client = _PipelineClient(
+        [
+            LLMExecutionError.for_empty_reply(
+                usage=LLMUsage(input_tokens=30, output_tokens=2000)
+            ),
+            _PipelineResponse('{"orders": []}', input_tokens=11, output_tokens=4),
+        ]
+    )
+
+    decision, usage, calls, _steps = run_pipeline_decision(
+        client,
+        pipeline=_PIPELINE,
+        market_snapshot={"top_signals": {}},
+        model="qwen/qwen3.7-plus",
+    )
+
+    assert decision == {"actions": []}
+    assert usage == (41, 2004)
+    assert calls == 2
 
 
 def test_run_pipeline_decision_reraises_after_one_failed_retry():
