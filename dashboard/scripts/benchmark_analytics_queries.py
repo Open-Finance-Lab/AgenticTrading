@@ -135,25 +135,19 @@ def _seed(path: Path, *, users: int, events_per_user: int, days: int) -> None:
         )
         conn.executemany(
             """
-            INSERT INTO user_analytics_snapshots (
-                user_id, status, reason_code, human_readable_reason,
-                evidence_event_ids_json, calculated_at
-            ) VALUES (?, ?, ?, ?, '[]', ?)
+            INSERT INTO user_daily_facts (
+                snapshot_date, user_id, lifecycle_segment, lifecycle_reason_code,
+                operational_state, operational_reason_code, tier, active,
+                data_quality, calculated_at
+            ) VALUES (?, ?, 'core', 'core_repeated_value', ?, ?, 'unpaid', 1,
+                      'complete', ?)
             """,
             (
                 (
+                    (BENCHMARK_NOW.date() - timedelta(days=1)).isoformat(),
                     user_id,
-                    "needs_attention" if user_id % 20 == 0 else "active",
-                    (
-                        "invalid_default_credential"
-                        if user_id % 20 == 0
-                        else "recent_successful_run_and_activity"
-                    ),
-                    (
-                        "The default model credential is invalid."
-                        if user_id % 20 == 0
-                        else "A successful run and recent meaningful activity are present."
-                    ),
+                    "needs_attention" if user_id % 20 == 0 else "healthy",
+                    "invalid_default_credential" if user_id % 20 == 0 else None,
                     now_iso,
                 )
                 for user_id in range(1, users + 1)

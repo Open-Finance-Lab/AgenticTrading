@@ -16,6 +16,9 @@ from dashboard.backend.domain.analytics.lifecycle import (
     calculate_operational_state,
     commercial_tier,
     is_lifecycle_activity,
+    operational_reason,
+    operational_result_from_code,
+    resolve_group_badge,
 )
 from dashboard.backend.domain.analytics.models import (
     EVENT_GROUP_BY_NAME,
@@ -330,3 +333,67 @@ def test_rule_calculations_reject_naive_calculation_times():
         )
     with pytest.raises(ValueError, match="activated_at must include a timezone"):
         activation_cohort_week(datetime(2026, 9, 3, 12, 0))
+
+
+@pytest.mark.parametrize(
+    "role,user_group,tier,expected",
+    [
+        ("admin", "internal", "high_value", "admin"),
+        ("admin", "unknown", "unpaid", "admin"),
+        ("user", "partner", "unpaid", "partner"),
+        ("user", "competition", "invested", "competition"),
+        ("user", "unknown", "starter", "paid"),
+        ("user", "unknown", "high_value", "paid"),
+        ("user", "unknown", "unpaid", "free"),
+    ],
+)
+def test_group_badge_precedence(role, user_group, tier, expected):
+    assert resolve_group_badge(role=role, user_group=user_group, tier=tier) == expected
+
+
+def test_operational_reason_text_is_the_rule_table_copy():
+    assert operational_reason("account_restricted") == (
+        "The Credits account is restricted from model spending."
+    )
+    assert operational_reason("no_supported_issue") == (
+        "No supported current operational issue was detected."
+    )
+
+
+def test_unknown_operational_reason_code_is_display_safe():
+    """A code the rule table does not know must not raise on a read path."""
+
+    text = operational_reason("synthetic_unknown_code")
+    assert text == "An operational issue was recorded."
+    assert "synthetic" not in text
+
+
+def test_operational_result_from_code_carries_static_evidence():
+    as_of = datetime(2026, 9, 14, 0, 0, tzinfo=timezone.utc)
+    blocked = operational_result_from_code("billing_lane_unavailable", as_of=as_of)
+    attention = operational_result_from_code(
+        "three_consecutive_failed_runs", as_of=as_of
+    )
+    healthy = operational_result_from_code("no_supported_issue", as_of=as_of)
+
+    assert blocked.state == "blocked"
+    assert blocked.evidence == ("Usable billing lanes: 0.",)
+    assert attention.state == "needs_attention"
+    # No static evidence line exists for this code; the reason text stands in.
+    assert attention.evidence == (
+        "At least three consecutive terminal runs failed within 24 hours.",
+    )
+    assert healthy.state == "healthy"
+    assert healthy.calculated_at == as_of
+
+
+def test_history_copy_rows_with_no_code_rebuild_as_healthy():
+    """History-copy rows store state 'healthy' with a NULL code (plan amendment, Task 1)."""
+
+    as_of = datetime(2026, 9, 14, 0, 0, tzinfo=timezone.utc)
+    result = operational_result_from_code(None, as_of=as_of)
+
+    assert result.state == "healthy"
+    assert result.reason_code == "no_supported_issue"
+    assert result.reason == "No supported current operational issue was detected."
+    assert result.evidence == ("All supported operational checks passed.",)

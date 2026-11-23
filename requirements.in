@@ -1,0 +1,53 @@
+# The dashboard's direct dependencies: what its code imports, plus the
+# security floors below. requirements.txt is generated from this file and
+# pins the whole tree; never edit it by hand. After changing this file, run
+#
+#     uv pip compile requirements.in -o requirements.txt --python-platform linux --python-version 3.13
+#
+# uv keeps every pin already in requirements.txt that still fits, so only
+# what you changed moves; add `--upgrade-package <name>` to move one
+# transitive. The tree is resolved for Linux on Python 3.13, which is what CI
+# and the Docker image run. On Windows, pip also installs a few platform-only
+# packages (colorama, pywin32) that are not pinned here. CI's
+# "Dependency pins" job fails when requirements.txt is not exactly what this
+# command produces, and the Docker build installs it with --no-deps.
+alpaca-py==0.43.2
+anthropic==0.95.0
+bcrypt==4.3.0
+cryptography==50.0.0
+fastapi==0.135.3
+# Imported directly by infrastructure/llm/adapters/safe_http.py.
+httpcore==1.0.9
+httpx==0.28.1
+# Imported by dashboard/backend/tests/test_news_sentiment_fixture.py to
+# validate the vendored producer schema.
+jsonschema==4.25.1
+matplotlib==3.11.0
+mcp==1.30.0
+numpy==2.2.6
+openai==1.101.0
+pandas==2.3.2
+pandas-ta==0.4.71b0
+psycopg[binary,pool]==3.3.4
+# pandas' parquet engine for the bar cache (infrastructure/market_data/
+# bar_cache.py). pandas does not declare it, so nothing else pulls it in.
+pyarrow==23.0.1
+pydantic==2.11.7
+python-dotenv==1.2.2
+pytz==2025.2
+reportlab==5.0.1
+requests==2.33.1
+starlette==1.3.1
+stripe==15.4.0
+uvicorn==0.44.0
+yfinance==0.2.65
+
+# Security floors on transitives. Each package arrives through another one,
+# so these lines are here only to keep a vulnerable version out.
+# certifi: OSV marks releases before 2026.10.19 as affected.
+certifi>=2026.10.19
+# msgpack: alpaca-py's live-data websocket decoder pulls it in, and
+# dashboard/backend/tests/test_alpaca_stream_msgpack.py drives that path.
+# 1.2.3 fixes GHSA-j586-36cw-2gc2 and 1.2.4 fixes GHSA-j8c6-9vc5-hj6x, both
+# in the C extension.
+msgpack>=1.2.4

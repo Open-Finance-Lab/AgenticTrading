@@ -695,8 +695,8 @@
     // Rollups are anonymous (design D13, §8.2): the failure table carries only
     // a category and its count, with no per-user breakdown column.
     section(root, 'Failure categories', 'Display-safe categories from the daily rollups', table(
-      ['Failure category', 'Count'],
-      (operational?.top_failure_categories || []).map((failure) => [s.humanize(failure.error_category), s.formatNumber(failure.affected_users)]),
+      ['Failure category', 'Events'],
+      (operational?.top_failure_categories || []).map((failure) => [s.humanize(failure.error_category), s.formatNumber(failure.event_count)]),
       'No failure categories in this range.'
     ));
     section(root, 'What is blocking users?', 'Operational reasons as of yesterday UTC', table(

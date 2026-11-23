@@ -189,9 +189,14 @@ PortfolioManager = _portfolio_manager.PortfolioManager
 # subclasses (e.g. backtest_custom_algo) keep working unchanged.
 from dashboard.backend.domain.backtesting.engine import HourlyBacktester
 from dashboard.backend.domain.backtesting.decision_tape import trace_lifecycle
+from dashboard.backend.domain.backtesting.partial_results import LiveProgressHeartbeat
+from dashboard.backend.infrastructure.ai_hedge_fund.billing import (
+    HostedDecisionBilling,
+)
 from dashboard.backend.infrastructure.llm.execution.handoff import (
     ExecutionHandoffError,
     consume_execution_handoff,
+    read_execution_handoff,
 )
 from dashboard.backend.infrastructure.llm.execution.client import (
     AnthropicCompatibleExecutionClient,
@@ -340,7 +345,9 @@ def main():
     execution_handoff = None
     if args.execution_handoff_stdin:
         try:
-            execution_handoff = consume_execution_handoff(sys.stdin.read())
+            execution_handoff = consume_execution_handoff(
+                read_execution_handoff(sys.stdin.buffer)
+            )
         except ExecutionHandoffError:
             parser.error("invalid execution handoff")
         if args.run_id != execution_handoff.run_id:
@@ -398,15 +405,25 @@ def main():
 
     execution_service = None
     execution_client = None
+    hosted_billing = None
     if execution_handoff is not None:
+        # Built for either runtime: its `finalize_run` below releases whatever
+        # hold the run leaves open, a hosted decision's included.
         execution_service = LLMExecutionService(
             providers=get_model_provider_service(),
             credits=credits_service,
         )
-        execution_client = AnthropicCompatibleExecutionClient(
-            execution_service=execution_service,
-            handoff=execution_handoff,
-        )
+        if args.runtime_type == AI_HEDGE_FUND_RUNTIME_TYPE:
+            # Upstream calls its model in its own interpreter, so the handoff
+            # meters whole decisions rather than driving a model client.
+            hosted_billing = HostedDecisionBilling.from_handoff(
+                credits=credits_service, handoff=execution_handoff
+            )
+        else:
+            execution_client = AnthropicCompatibleExecutionClient(
+                execution_service=execution_service,
+                handoff=execution_handoff,
+            )
     
     session_id = args.session_id
 
@@ -551,6 +568,7 @@ def main():
             runtime_type=args.runtime_type,
             runtime_config=runtime_config,
             execution_client=execution_client,
+            hosted_billing=hosted_billing,
             launched_at=args.launched_at,
             # All three are module-scope constants rather than reads taken here,
             # on purpose. They describe an interval that ended before the engine
@@ -610,9 +628,15 @@ def main():
         # Step 3: Run backtests
         print("\n3️⃣ Running backtests...\n")
     
+        # Stamps the run's partial-result snapshot as alive between the bar
+        # loop's flushes, so the boot reclaimer of another instance (a deploy's
+        # new one) cannot mistake this run for one that died.
+        heartbeat = LiveProgressHeartbeat(args.run_id).start() if args.run_id else None
         try:
             agent_id, agent_eq = backtester.run_agent_backtest()
         finally:
+            if heartbeat is not None:
+                heartbeat.stop()
             if execution_service is not None and execution_handoff is not None:
                 try:
                     execution_service.finalize_run(
@@ -707,6 +731,11 @@ def _run_failed_report(exc: LLMExecutionError) -> str:
 
 if __name__ == "__main__":
     signal.signal(signal.SIGTERM, _exit_on_sigterm)
+    # Windows' cancel signal. The parent sends CTRL_BREAK_EVENT to this
+    # process's console group (``_break_console_group``) because
+    # ``terminate()`` there is TerminateProcess, which skips this unwind.
+    if hasattr(signal, "SIGBREAK"):
+        signal.signal(signal.SIGBREAK, _exit_on_sigterm)
     # Reached through the module alias bound at the top rather than a second
     # `from` import of the same module: importing one module both ways in one
     # file is its own CodeQL finding (py/import-and-import-from), and the alias

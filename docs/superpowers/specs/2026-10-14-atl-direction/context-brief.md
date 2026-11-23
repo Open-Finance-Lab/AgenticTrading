@@ -235,7 +235,7 @@ ATL can beat nof1 on what critics attacked it for: replicas and bands, a minimum
 - For: one document can retire the stale claims in §E.
 - Against:
   - EP and LB live in a session scratchpad. Scratchpads are wiped within days [gatherer-reported], and HEAD `2dc8203a` is itself a "recover engine rewrite phase 1 records" commit [source-verified].
-  - `main` is unprotected, so #626 needs a draft or `blocked` gate now.
+  - `main` is unprotected, so #626 needs a draft or `blocked` gate now. *(Superseded 2026-10-29: `main` is now gated by ruleset 26155796; see CLAUDE.md "Merge & branch discipline". A draft or `blocked` gate is still how to hold a PR, because one approval or an admin bypass still merges it.)*
 - **Supported only if** the reports are copied into the repo this session.
 
 ## G. Decision tree for rounds 2+

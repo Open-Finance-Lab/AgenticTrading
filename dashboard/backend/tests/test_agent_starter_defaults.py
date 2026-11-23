@@ -474,6 +474,24 @@ def test_unedited_starter_agent_counts_as_the_default_instruction():
     assert is_default_instruction_pipeline(default_starter_pipeline())
 
 
+def test_a_starter_seeded_before_a_rewording_still_reads_as_the_default():
+    """Seeding is write-once, so an unedited starter made before #661 still
+    runs "A sell always closes the whole position." -- and every run it
+    recorded names it. Both are the platform default, not a user's own text."""
+    from dashboard.backend.domain.agents.defaults import (
+        PRIOR_STARTER_INSTRUCTIONS,
+        is_default_instruction_pipeline,
+    )
+
+    [before_661] = PRIOR_STARTER_INSTRUCTIONS
+    assert "A sell always closes the whole position." in before_661
+    assert before_661 != DEFAULT_STARTER_INSTRUCTION
+    step = {**default_starter_pipeline()[0], "prompt": before_661}
+    assert is_default_instruction_pipeline([step])
+    edited = {**step, "prompt": before_661 + " Prefer tech."}
+    assert not is_default_instruction_pipeline([edited])
+
+
 def _last_step_prompt(market):
     from dashboard.backend.infrastructure.llm.pipeline_runner import _build_step_prompt
 
@@ -499,13 +517,17 @@ def test_a_share_execution_rules_state_the_board_lot():
 
 @pytest.mark.parametrize("market", [None, {"market": "US"}, {"lot_size": 1}, {"lot_size": True}])
 def test_single_share_markets_keep_the_execution_rules_byte_identical(market):
-    """US prompts must not move: cached leaderboard and A/B rows compare on them."""
+    """US prompts move only with a rule change rows record: cached leaderboard
+    and A/B rows compare on them. The SELL line came with #661, which records
+    itself as ``llm_sell_sizing``; the board-lot rules must never reach them."""
     prompt = _last_step_prompt(market)
     rules = prompt.split("=== EXECUTION RULES ===", 1)[1]
 
     assert rules.startswith(
         "\n- Trade ONLY symbols listed in the market snapshot.\n"
         "- Only SELL symbols that appear in current_holdings.\n"
+        "- A SELL's qty is the number of shares to sell, at most what you hold; "
+        "a qty of 0 sells the whole position.\n"
         "- Respect available cash for buy orders.\n"
         "- Use integer share quantities.\n\n"
     )

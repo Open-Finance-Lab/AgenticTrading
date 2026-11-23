@@ -25,13 +25,23 @@ from dashboard.backend.domain.agents.runtime import (
     AgentRuntimeError,
     normalize_runtime_config,
 )
+from dashboard.backend.infrastructure.ai_hedge_fund.billing import (
+    DecisionUsage,
+    HostedDecisionBilling,
+    decision_ceiling_micro,
+    parse_usage,
+)
 from dashboard.backend.infrastructure.llm.validator import (
     MAX_ORDER_SHARES,
     actions_to_executable,
+    confidence_in_range,
+    model_number,
+    normalize_action,
+    normalize_symbol,
     parse_actions_payload,
 )
 from dashboard.backend.infrastructure.llm.providers import openrouter
-from dashboard.backend.paths import REPO_ROOT
+from dashboard.backend.paths import REPO_ROOT, venv_python
 
 DEFAULT_MODEL_NAME = openrouter.DEFAULT_MODEL
 DEFAULT_MODEL_PROVIDER = "OpenRouter"
@@ -80,7 +90,24 @@ class AiHedgeFundRuntimeError(AgentRuntimeError):
     Deliberately *transient* by default: the backtest engine holds the step and
     keeps the run alive for these, because a timeout or a bad upstream response
     on one day says nothing about the next.
+
+    ``usage`` is what the bridge reported spending before it failed (None when
+    it reported nothing) and ``killed`` marks a decision that stopped after it
+    could call the model but left no usage report (a timeout, a signal, a
+    crash past the bridge's started marker);
+    together they decide what the failed decision is billed (``billing.py``).
     """
+
+    def __init__(
+        self,
+        message: str = "",
+        *,
+        usage: Optional[DecisionUsage] = None,
+        killed: bool = False,
+    ):
+        super().__init__(message)
+        self.usage = usage
+        self.killed = killed
 
 
 class AiHedgeFundConfigurationError(
@@ -183,12 +210,18 @@ class AiHedgeFundSubprocessRunner:
 
     def _python_executable(self) -> Path:
         configured = self.environment.get("AI_HEDGE_FUND_PYTHON", "").strip()
+        # venv_python, not a literal bin/python: a Windows runtime venv keeps
+        # its interpreter at Scripts\python.exe.
         candidate = (
             _resolve_path(configured)
             if configured
-            else _LOCAL_RUNTIME_DIR / "bin" / "python"
+            else venv_python(_LOCAL_RUNTIME_DIR)
         )
-        if not candidate.is_file() or not os.access(candidate, os.X_OK):
+        if (
+            candidate is None
+            or not candidate.is_file()
+            or not os.access(candidate, os.X_OK)
+        ):
             raise AiHedgeFundConfigurationError(
                 "AI Hedge Fund runtime is not installed; configure "
                 "AI_HEDGE_FUND_PYTHON with its isolated interpreter"
@@ -250,7 +283,8 @@ class AiHedgeFundSubprocessRunner:
                 )
             except subprocess.TimeoutExpired as exc:
                 raise AiHedgeFundRuntimeError(
-                    f"AI Hedge Fund runtime timed out after {timeout_seconds} seconds"
+                    f"AI Hedge Fund runtime timed out after {timeout_seconds} seconds",
+                    killed=True,
                 ) from exc
             except OSError as exc:
                 raise AiHedgeFundRuntimeError(
@@ -261,18 +295,37 @@ class AiHedgeFundSubprocessRunner:
                 detail = _redact_runtime_error(
                     result.stderr or result.stdout or "unknown error", environment
                 )
-                raise AiHedgeFundRuntimeError(
-                    f"AI Hedge Fund runtime failed with code {result.returncode}: {detail}"
+                # Fail closed. The bridge writes a started marker before
+                # upstream can call the model and its usage before a failing
+                # exit, so: no file = died before any call (released); a file
+                # without a readable usage report = an OOM SIGKILL, a crash
+                # mid-write, a missing meter (billed the ceiling).
+                started = output_path.exists()
+                try:
+                    reported = json.loads(output_path.read_text(encoding="utf-8"))
+                except (OSError, ValueError):
+                    reported = None
+                usage = parse_usage(
+                    reported.get("usage") if isinstance(reported, dict) else None
                 )
+                raise AiHedgeFundRuntimeError(
+                    f"AI Hedge Fund runtime failed with code {result.returncode}: {detail}",
+                    usage=usage,
+                    killed=started and usage is None,
+                )
+            # A clean exit ran upstream to the end, so an unreadable output
+            # spent an unknown amount: billed the ceiling, never released.
             try:
                 output = json.loads(output_path.read_text(encoding="utf-8"))
             except (OSError, json.JSONDecodeError) as exc:
                 raise AiHedgeFundOutputError(
-                    "AI Hedge Fund runtime did not produce valid JSON output"
+                    "AI Hedge Fund runtime did not produce valid JSON output",
+                    killed=True,
                 ) from exc
             if not isinstance(output, dict):
                 raise AiHedgeFundOutputError(
-                    "AI Hedge Fund runtime output must be a JSON object"
+                    "AI Hedge Fund runtime output must be a JSON object",
+                    killed=True,
                 )
             return output
 
@@ -286,11 +339,15 @@ class AiHedgeFundRuntime:
         *,
         runner: Optional[AiHedgeFundSubprocessRunner] = None,
         environment: Optional[Mapping[str, str]] = None,
+        billing: Optional[HostedDecisionBilling] = None,
     ):
         self.config = normalize_runtime_config(
             AI_HEDGE_FUND_RUNTIME_TYPE, config or {}
         )
         self.runner = runner or AiHedgeFundSubprocessRunner()
+        # None only off the API path (the operator's own CLI run, tests): every
+        # `POST /backtest/run` launch signs a handoff the child turns into this.
+        self.billing = billing
         self.environment = dict(os.environ if environment is None else environment)
         # Hosted model/provider selection is platform-owned. Reuse ATL's
         # registered OpenRouter model instead of accepting agent config or an
@@ -393,7 +450,7 @@ class AiHedgeFundRuntime:
     ) -> tuple[str, Optional[int], float, str]:
         if not isinstance(decision, dict):
             raise AiHedgeFundOutputError(f"Decision for {symbol} must be an object")
-        action = str(decision.get("action") or "").strip().lower()
+        action = normalize_action(decision.get("action"))
         if action not in {"buy", "sell", "hold", "short", "cover"}:
             raise AiHedgeFundOutputError(
                 f"Decision for {symbol} has unsupported action {action!r}"
@@ -412,8 +469,11 @@ class AiHedgeFundRuntime:
             raise AiHedgeFundOutputError(
                 f"Decision for {symbol} has invalid confidence"
             )
-        confidence_pct = float(confidence_raw)
-        if not 0 <= confidence_pct <= 100:
+        # Upstream answers on 0-100. Divided out, the range is the shared 0-1
+        # rule; model_number reads an int too large for float() as infinite
+        # (out of range) instead of raising OverflowError past this check.
+        confidence = model_number(confidence_raw) / 100.0
+        if not confidence_in_range(confidence):
             raise AiHedgeFundOutputError(
                 f"Decision for {symbol} has invalid confidence"
             )
@@ -425,7 +485,7 @@ class AiHedgeFundRuntime:
         reasoning = reasoning_raw.strip() or "AI Hedge Fund decision"
         if len(reasoning) < 5:
             reasoning = f"AI Hedge Fund: {reasoning}"
-        return action, quantity, confidence_pct / 100.0, reasoning[:500]
+        return action, quantity, confidence, reasoning[:500]
 
     @staticmethod
     def _trace(
@@ -661,12 +721,12 @@ class AiHedgeFundRuntime:
         decision_date = context.timestamp.date().isoformat()
         cutoff = context.latest_market_date_before_decision
         data_cutoff_date = cutoff.isoformat() if cutoff is not None else ""
-        allowed = {str(symbol).strip().upper() for symbol in context.symbols}
+        allowed = {normalize_symbol(str(symbol)) for symbol in context.symbols}
         normalized = []
         trace_by_symbol: Dict[str, Dict[str, Any]] = {}
         seen = set()
         for raw_symbol, raw_decision in decisions.items():
-            symbol = str(raw_symbol or "").strip().upper()
+            symbol = normalize_symbol(str(raw_symbol or ""))
             if symbol not in allowed or symbol in seen:
                 raise AiHedgeFundOutputError(
                     f"AI Hedge Fund returned invalid symbol {raw_symbol!r}"
@@ -763,6 +823,50 @@ class AiHedgeFundRuntime:
         actions, _traces = cls.output_to_atl_actions_with_trace(output, context)
         return actions
 
+    def _run_billed(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """Run one upstream decision, held and settled on the caller's Credits.
+
+        Settled before the output is mapped: an output ATL then refuses still
+        spent its model calls. A configuration error raised before the bridge
+        starts is released like any no-call failure.
+
+        Every other escape is billed the ceiling, ``BaseException`` included:
+        a cancel or the parent's run timeout reaches this child as SIGTERM,
+        which ``_exit_on_sigterm`` turns into ``SystemExit`` inside
+        ``subprocess.run`` (that kills the bridge, which shares the child's
+        process group and gets the same signal anyway, before it can report),
+        so the decision's calls may have run. Left open, the hold would reach
+        ``finalize_run`` and be released for free.
+        """
+        if self.billing is None:
+            return self.runner.run(payload, timeout_seconds=self.timeout_seconds)
+        ceiling = decision_ceiling_micro(
+            self.model_name, self.config.get("analysts"), len(payload["tickers"])
+        )
+        reservation_id = self.billing.reserve(ceiling)
+        try:
+            output = self.runner.run(payload, timeout_seconds=self.timeout_seconds)
+        except AiHedgeFundRuntimeError as exc:
+            self.billing.close(
+                reservation_id,
+                ceiling_micro=ceiling,
+                usage=exc.usage,
+                outcome="killed" if exc.killed else "failed",
+            )
+            raise
+        except BaseException:
+            self.billing.close(
+                reservation_id, ceiling_micro=ceiling, usage=None, outcome="killed"
+            )
+            raise
+        self.billing.close(
+            reservation_id,
+            ceiling_micro=ceiling,
+            usage=parse_usage(output.get("usage")),
+            outcome="completed",
+        )
+        return output
+
     def decide(self, context: AgentRuntimeContext) -> Dict[str, list[Dict[str, Any]]]:
         decision_day = context.timestamp.date().isoformat()
         if DEFAULT_DECISION_INTERVAL == "daily" and decision_day == self._last_decision_day:
@@ -779,7 +883,7 @@ class AiHedgeFundRuntime:
         # hourly bar retries upstream -- so one bad day costs bars-per-day full
         # timeouts and API spend for no new information.
         self._last_decision_day = decision_day
-        output = self.runner.run(payload, timeout_seconds=self.timeout_seconds)
+        output = self._run_billed(payload)
         self.calls += 1
         actions, traces = self.output_to_atl_actions_with_trace(output, context)
         cutoff = context.latest_market_date_before_decision

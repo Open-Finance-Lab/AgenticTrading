@@ -24,12 +24,10 @@ from dashboard.backend.domain.analytics.service import (
     AnalyticsService,
     get_analytics_service,
 )
-from dashboard.backend.domain.analytics.states import (
-    AnalyticsStateStore,
-    recalculate_user_snapshot,
-    recalculate_user_snapshots,
+from dashboard.backend.domain.analytics.value_repository import (
+    UserDailyFact,
+    ValueAnalyticsStore,
 )
-from dashboard.backend.domain.analytics.value_repository import ValueAnalyticsStore
 from dashboard.backend.domain.analytics.value_queries import ValueAnalyticsQueryService
 from dashboard.backend.domain.credits.repository import CreditsStore
 from dashboard.backend.domain.runs import service as run_service
@@ -210,11 +208,14 @@ def test_synthetic_acceptance_scenario_has_no_real_credentials(monkeypatch):
         )
         store = AnalyticsStore(path)
         event_service = AnalyticsService(store)
-        query_service = AnalyticsQueryService(store=store, user_store=users)
-        state_store = AnalyticsStateStore(store)
         value_store = ValueAnalyticsStore(
             analytics_base=store,
             credits_base=CreditsStore(path),
+        )
+        # Both services read the same value store: the profile's live axes and
+        # fact sums go through the legacy service's.
+        query_service = AnalyticsQueryService(
+            store=store, user_store=users, value_store=value_store
         )
         value_query_service = ValueAnalyticsQueryService(
             store=store,
@@ -229,16 +230,6 @@ def test_synthetic_acceptance_scenario_has_no_real_credentials(monkeypatch):
             instrumentation,
             "get_analytics_service",
             lambda: event_service,
-        )
-        monkeypatch.setattr(
-            instrumentation,
-            "_snapshot_recalculator",
-            lambda user_id: recalculate_user_snapshots(
-                user_id,
-                now=now,
-                state_store=state_store,
-                value_store=value_store,
-            ),
         )
         app.dependency_overrides[get_analytics_query_service] = lambda: query_service
         app.dependency_overrides[get_value_analytics_query_service] = (
@@ -339,6 +330,33 @@ def test_synthetic_acceptance_scenario_has_no_real_credentials(monkeypatch):
             occurred_at=now,
         )
 
+        # The profile's run and spend figures are "as of yesterday" (design
+        # §6.3): today's settle above reaches them once the daily job writes
+        # today's facts, so the scenario carries yesterday's row the job wrote.
+        value_store.upsert_daily_facts(
+            [
+                UserDailyFact(
+                    snapshot_date=now.date() - timedelta(days=1),
+                    user_id=subject["id"],
+                    lifecycle_segment="growing",
+                    lifecycle_reason_code="growing_activated_below_core_threshold",
+                    operational_state="healthy",
+                    operational_reason_code="no_supported_issue",
+                    tier="unpaid",
+                    user_group="unknown",
+                    active=True,
+                    runs_requested=2,
+                    runs_completed=1,
+                    runs_failed=1,
+                    runs_cancelled=0,
+                    operator_cost_micro=420_000,
+                    own_spend_micro=420,
+                    data_quality="complete",
+                    calculated_at=now,
+                )
+            ]
+        )
+
         token = users.create_session(admin["id"])
         headers = {"Authorization": f"Bearer {token}"}
         try:
@@ -375,6 +393,17 @@ def test_synthetic_acceptance_scenario_has_no_real_credentials(monkeypatch):
             "platform_credits": 1,
         }
         assert profile["credits_debited_micro"] == 420
-        assert profile["state"]["status"] == "active"
-        assert profile["state"]["evidence_event_ids"]
+        assert profile["run_summary"] == {
+            "requested": 2,
+            "completed": 1,
+            "failed": 1,
+            "cancelled": 0,
+        }
+        # The state summary follows the live axes: the synthetic subject has
+        # no Credits balance and no stored credential (the credential events
+        # above are instrumentation only), so no billing lane is usable.
+        assert profile["operational"]["reason_code"] == "billing_lane_unavailable"
+        assert profile["state"]["status"] == "blocked"
+        assert profile["state"]["reason_code"] == "billing_lane_unavailable"
+        assert profile["state"]["evidence_event_ids"] == []
         assert "api_key" not in str(profile)

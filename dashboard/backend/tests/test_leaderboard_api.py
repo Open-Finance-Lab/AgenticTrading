@@ -34,18 +34,25 @@ def _seed_leaderboard_runs(db, session_id="leaderboard-contest"):
         start_date=start,
         end_date=end,
         initial_equity=100000,
-        final_equity=105000,
-        total_return=0.05,
+        final_equity=102762.45,
+        total_return=0.0276245,
         sharpe_ratio=1.2,
         max_drawdown=-0.02,
         num_trades=1,
         llm_model="djia_index",
     )
+    # Five sessions closing on conformance case M03's equities (r = 0, 0.02,
+    # -0.05, 0.05, 0.01), so the board's daily Sharpe is a hand-checked number.
+    # Naive stamps are UTC: 20:00Z is the 16:00 ET close in April.
     db.insert_equity_points(
         "lb_djia_index_20260415_20260515",
         [
             {"timestamp": "2026-04-15T14:00:00", "equity": 100000, "cash": 0, "positions_value": 100000},
-            {"timestamp": "2026-05-15T20:00:00", "equity": 105000, "cash": 0, "positions_value": 105000},
+            {"timestamp": "2026-04-15T20:00:00", "equity": 100000, "cash": 0, "positions_value": 100000},
+            {"timestamp": "2026-04-16T20:00:00", "equity": 102000, "cash": 0, "positions_value": 102000},
+            {"timestamp": "2026-04-17T20:00:00", "equity": 96900, "cash": 0, "positions_value": 96900},
+            {"timestamp": "2026-04-20T20:00:00", "equity": 101745, "cash": 0, "positions_value": 101745},
+            {"timestamp": "2026-04-21T20:00:00", "equity": 102762.45, "cash": 0, "positions_value": 102762.45},
         ],
     )
 
@@ -548,8 +555,8 @@ def test_daily_window_dates_on_saturday_shows_friday():
     assert start == end == "2026-07-17"  # Friday
 
 
-def test_partial_model_deploy_does_not_mark_window_complete(tmp_path, monkeypatch):
-    """A mixed success/failure run must not skip remaining models on the next cron."""
+def _stub_daily_refresh(monkeypatch, tmp_path, entry_ids):
+    """A daily refresh with baselines stubbed out and ``entry_ids`` as the roster."""
     day = "2026-07-14"
     state_path = tmp_path / "daily_refresh.json"
     monkeypatch.setattr(lb_service, "_DAILY_REFRESH_STATE_PATH", state_path)
@@ -569,8 +576,14 @@ def test_partial_model_deploy_does_not_mark_window_complete(tmp_path, monkeypatc
     monkeypatch.setattr(
         lb_service,
         "llm_leaderboard_entries",
-        lambda config=None: [{"id": "ok-model"}, {"id": "fail-model"}],
+        lambda config=None: [{"id": entry_id} for entry_id in entry_ids],
     )
+    return state_path
+
+
+def test_partial_model_deploy_does_not_mark_window_complete(tmp_path, monkeypatch):
+    """A mixed success/failure run must not skip remaining models on the next cron."""
+    _stub_daily_refresh(monkeypatch, tmp_path, ["ok-model", "fail-model"])
 
     def _deploy(entry_id, **_kwargs):
         if entry_id == "fail-model":
@@ -587,6 +600,50 @@ def test_partial_model_deploy_does_not_mark_window_complete(tmp_path, monkeypatc
     # Without force, a wrongly-true models_deployed flag would skip forever.
     second = lb_service.refresh_daily_leaderboard(deploy_models=True, force_refresh=False)
     assert second.get("skipped") is not True
+
+
+def test_daily_refresh_survives_an_unexpected_error_and_logs_it(
+    tmp_path, monkeypatch, capsys,
+):
+    """The daily loop named the same three types as the live one and logged
+    nothing: a ConnectionError from one entry left every later entry
+    undeployed and skipped the state save. It now shares the live loop's
+    bookkeeping, a shared fault included."""
+    state_path = _stub_daily_refresh(
+        monkeypatch, tmp_path, ["flaky-model", "ok-model", "bug-a", "bug-b", "bug-c"]
+    )
+    deployed = []
+
+    def _deploy(entry_id, **_kwargs):
+        deployed.append(entry_id)
+        if entry_id == "flaky-model":
+            raise ConnectionError("reset by peer")
+        if entry_id.startswith("bug-"):
+            raise TypeError("unsupported operand")
+        return {"entry_id": entry_id, "run_id": f"run-{entry_id}", "total_return": 0.01}
+
+    monkeypatch.setattr(lb_service, "deploy_model_run", _deploy)
+
+    result = lb_service.refresh_daily_leaderboard(deploy_models=True, force_refresh=True)
+
+    assert deployed == ["flaky-model", "ok-model", "bug-a", "bug-b"]
+    assert [row["entry_id"] for row in result["model_results"]] == ["ok-model"]
+    assert result["model_failures"] == [
+        {"entry_id": "flaky-model", "error": "ConnectionError: reset by peer"},
+        {"entry_id": "bug-a", "error": "TypeError: unsupported operand"},
+        {"entry_id": "bug-b", "error": "TypeError: unsupported operand"},
+        {
+            "entry_id": "bug-c",
+            "error": "not attempted: bug-a and bug-b failed in a row with the same TypeError",
+        },
+    ]
+    out = capsys.readouterr().out
+    assert (
+        "ERROR: daily.model_deploy_failed entry=flaky-model "
+        "error=ConnectionError: reset by peer"
+    ) in out
+    assert "ERROR: daily.model_not_attempted entry=bug-c after=bug-a,bug-b" in out
+    assert state_path.exists()
 
 
 # --- Review hardening: the daily refresh path spends real money -------------
@@ -832,3 +889,117 @@ def test_contest_leaderboard_api_carries_no_season(client, monkeypatch):
         },
     )
     assert "season" not in client.get("/api/v1/leaderboard").json()
+
+
+def _contest_board_payload(client, monkeypatch):
+    _seed_leaderboard_runs(lb_service.db)
+    monkeypatch.setattr(
+        lb_service,
+        "ensure_leaderboard_runs",
+        lambda force_refresh=False, period="contest", config=None: {
+            "session_id": "leaderboard-contest",
+            "created": 0,
+            "refreshed_at": "2026-06-18T00:00:00+00:00",
+        },
+    )
+    resp = client.get("/api/v1/leaderboard")
+    assert resp.status_code == 200
+    return resp.json()
+
+
+def test_competition_sharpe_is_daily_with_its_interval(client, monkeypatch):
+    """Read off the stored curve, not the stored column (1.2 here)."""
+    body = _contest_board_payload(client, monkeypatch)
+    djia = next(e for e in body["entries"] if e["entry_id"] == "djia_index")
+    assert djia["sharpe_ratio"] == pytest.approx(2.611715, abs=1e-6)
+    assert djia["sharpe_ci_low"] == pytest.approx(-11.396490, abs=1e-6)
+    assert djia["sharpe_ci_high"] == pytest.approx(16.619919, abs=1e-6)
+    assert djia["sharpe_days"] == 5
+    assert djia["sharpe_status"] == "ok"
+
+
+def test_competition_sharpe_is_null_below_five_days_not_zero(client, monkeypatch):
+    """SPY's fixture curve spans two sessions. `or 0` used to publish the
+    stored 0.9 -- and an absent value as a real 0.00."""
+    body = _contest_board_payload(client, monkeypatch)
+    spy = next(e for e in body["entries"] if e["entry_id"] == "spy_index")
+    assert spy["sharpe_ratio"] is None
+    assert spy["sharpe_ci_low"] is None and spy["sharpe_ci_high"] is None
+    assert spy["sharpe_days"] == 2
+    assert spy["sharpe_status"] == "insufficient_days"
+
+
+def test_competition_payload_states_its_sharpe_basis(client, monkeypatch):
+    from dashboard.backend.domain.backtesting.metrics import daily_sharpe_basis
+
+    body = _contest_board_payload(client, monkeypatch)
+    assert body["sharpe_basis"] == {
+        "basis": "daily_returns",
+        "annualization_days": 252,
+        "confidence": 0.95,
+        "min_days": 5,
+        "rf_annual": 0.0,
+        "stderr": "iid",
+    }
+    assert body["sharpe_basis"] == daily_sharpe_basis()
+
+
+def test_competition_sharpe_never_reads_the_stored_column():
+    from pathlib import Path
+
+    source = Path(lb_service.__file__).read_text(encoding="utf-8")
+    assert 'run.get("sharpe_ratio") or 0' not in source
+    assert "daily_sharpe_interval(scaled_hourly, display_capital)" in source
+    assert "daily_sharpe_interval(equity_curve" not in source
+
+
+@pytest.mark.parametrize("seed", [10_000.0, 250_000.0])
+def test_competition_sharpe_is_the_same_at_any_stored_seed(client, monkeypatch, seed):
+    """A board run off the published capital is rescaled onto it (#365/#194);
+    Sharpe must read the rescaled curve against the board's E_0, or day 1
+    carries the seed ratio as a return."""
+    factor = seed / 100000.0
+    runs = {
+        "djia_index": [
+            ("2026-04-15T14:00:00", 100000), ("2026-04-15T20:00:00", 100000),
+            ("2026-04-16T20:00:00", 102000), ("2026-04-17T20:00:00", 96900),
+            ("2026-04-20T20:00:00", 101745), ("2026-04-21T20:00:00", 102762.45),
+        ],
+        "spy_index": [("2026-04-15T14:00:00", 100000), ("2026-05-15T20:00:00", 103000)],
+    }
+    for entry_id, points in runs.items():
+        run_id = f"lb_{entry_id}_20260415_20260515"
+        lb_service.db.insert_run(
+            run_id=run_id,
+            session_id="leaderboard-contest",
+            agent_name="Agentic Trading Lab",
+            mode="leaderboard",
+            start_date="2026-04-15",
+            end_date="2026-05-15",
+            initial_equity=seed,
+            final_equity=points[-1][1] * factor,
+            total_return=points[-1][1] / 100000 - 1,
+            sharpe_ratio=1.2,
+            max_drawdown=-0.02,
+            num_trades=1,
+            llm_model=entry_id,
+        )
+        lb_service.db.insert_equity_points(run_id, [
+            {"timestamp": t, "equity": e * factor, "cash": 0, "positions_value": e * factor}
+            for t, e in points
+        ])
+    monkeypatch.setattr(
+        lb_service,
+        "ensure_leaderboard_runs",
+        lambda force_refresh=False, period="contest", config=None: {
+            "session_id": "leaderboard-contest",
+            "created": 0,
+            "refreshed_at": "2026-06-18T00:00:00+00:00",
+        },
+    )
+    body = client.get("/api/v1/leaderboard").json()
+    djia = next(e for e in body["entries"] if e["entry_id"] == "djia_index")
+    assert djia["portfolio_value"] == pytest.approx(102762.45)  # rescaled onto the board
+    assert djia["sharpe_status"] == "ok"
+    assert djia["sharpe_days"] == 5
+    assert djia["sharpe_ratio"] == pytest.approx(2.611715, abs=1e-6)

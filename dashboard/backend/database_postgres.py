@@ -506,47 +506,64 @@ class PostgresBacktestDatabase:
                     (run_id, session_id, agent_name, json.dumps(payload, default=str)),
                 )
 
+    # Rows below are read by name, never by position: the pool's dict_row
+    # factory makes ``row[0]`` a KeyError, which is how the reclaimer failed on
+    # every boot until #601 (pinned by test_postgres_rows_read_by_name.py).
+    def touch_live_progress(self, run_id: str) -> None:
+        with self._get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE run_live_progress SET updated_at = now()"
+                    " WHERE run_id = %s",
+                    (run_id,),
+                )
+
+    def claim_live_progress(self, run_id: str, stale_after_seconds: float) -> bool:
+        # Atomic across instances: a concurrent UPDATE waits on the row lock,
+        # then re-evaluates the WHERE against the winner's fresh stamp.
+        with self._get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE run_live_progress SET updated_at = now()"
+                    " WHERE run_id = %s"
+                    " AND updated_at <= now() - make_interval(secs => %s)",
+                    (run_id, stale_after_seconds),
+                )
+                return cur.rowcount == 1
+
     def get_live_progress(self, run_id: str) -> Optional[Dict[str, Any]]:
-        try:
-            with self._get_connection() as conn:
-                with conn.cursor() as cur:
-                    cur.execute(
-                        "SELECT payload FROM run_live_progress WHERE run_id = %s",
-                        (run_id,),
-                    )
-                    row = cur.fetchone()
-        except Exception:
-            return None
+        with self._get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT payload FROM run_live_progress WHERE run_id = %s",
+                    (run_id,),
+                )
+                row = cur.fetchone()
         if not row:
             return None
         try:
-            return json.loads(row[0])
+            return json.loads(row["payload"])
         except (TypeError, ValueError):
             return None
 
     def list_live_progress(self) -> List[Dict[str, Any]]:
-        try:
-            with self._get_connection() as conn:
-                with conn.cursor() as cur:
-                    cur.execute(
-                        "SELECT run_id, session_id, agent_name, payload"
-                        " FROM run_live_progress"
-                    )
-                    rows = cur.fetchall()
-        except Exception:
-            return []
-        out = []
-        for r in rows:
-            try:
-                out.append({
-                    "run_id": r[0],
-                    "session_id": r[1],
-                    "agent_name": r[2],
-                    "payload": json.loads(r[3]),
-                })
-            except (TypeError, ValueError):
-                continue
-        return out
+        with self._get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT run_id, session_id, agent_name,"
+                    " EXTRACT(EPOCH FROM (now() - updated_at))::float8 AS age_seconds"
+                    " FROM run_live_progress"
+                )
+                rows = cur.fetchall()
+        return [
+            {
+                "run_id": r["run_id"],
+                "session_id": r["session_id"],
+                "agent_name": r["agent_name"],
+                "age_seconds": r["age_seconds"],
+            }
+            for r in rows
+        ]
 
     def delete_live_progress(self, run_id: str) -> None:
         with self._get_connection() as conn:
@@ -908,8 +925,10 @@ class PostgresBacktestDatabase:
 
         ``equity_timeseries``, ``trades`` and ``backtest_decisions`` carry
         ``ON DELETE CASCADE`` back to ``agent_runs`` (see ``_init_schema``),
-        so only ``run_manifest`` -- which has no FK -- needs an explicit
-        delete alongside the ``agent_runs`` row itself.
+        so only ``run_manifest`` and ``run_live_progress`` -- which have no
+        FK -- need an explicit delete alongside the ``agent_runs`` row itself.
+        The snapshot one is not optional: left behind, the boot reclaimer would
+        republish the deleted run from it.
 
         Deliberately does NOT touch ``idempotency_keys``: SQLite's
         ``delete_run`` leaves those rows orphaned too, and the mirror suite
@@ -919,12 +938,13 @@ class PostgresBacktestDatabase:
         with self._get_connection() as conn:
             with conn.cursor() as cur:
                 cur.execute("DELETE FROM run_manifest WHERE run_id = %s", (run_id,))
+                cur.execute("DELETE FROM run_live_progress WHERE run_id = %s", (run_id,))
                 cur.execute("DELETE FROM agent_runs WHERE run_id = %s", (run_id,))
 
     def clear_all(self) -> None:
         """Clear all data (useful for testing).
 
-        Truncates all five Postgres tables and nothing else. In particular it
+        Truncates all six Postgres tables and nothing else. In particular it
         does **not** delegate to ``self._sqlite.clear_all()``, which an earlier
         cut of this file did: that call could only ever do harm. The embedded
         ``BacktestDatabase`` exists for exactly one purpose -- the
@@ -950,6 +970,7 @@ class PostgresBacktestDatabase:
                 cur.execute("DELETE FROM trades")
                 cur.execute("DELETE FROM backtest_decisions")
                 cur.execute("DELETE FROM run_manifest")
+                cur.execute("DELETE FROM run_live_progress")
                 cur.execute("DELETE FROM agent_runs")
 
     # ------------------------------------------------------------------
@@ -1105,7 +1126,9 @@ class PostgresBacktestDatabase:
         return [BacktestDatabase._parse_run_row(row) for row in rows]
 
     def aggregate_operator_cost_for_day(self, day: date) -> Dict[int, int]:
-        """See the SQLite twin."""
+        """See the SQLite twin. ``metadata`` is TEXT here as well; ``IS JSON
+        OBJECT`` (PostgreSQL 16+, prod and CI run 18) guards the cast so one
+        malformed row cannot fail the whole day's statement."""
         start = f"{day.isoformat()} 00:00:00"
         end = f"{(day + timedelta(days=1)).isoformat()} 00:00:00"
         with self._get_connection() as conn:
@@ -1116,6 +1139,12 @@ class PostgresBacktestDatabase:
                     FROM agent_runs
                     WHERE owner_user_id IS NOT NULL
                       AND updated_at >= %s AND updated_at < %s
+                      AND COALESCE(
+                            CASE WHEN metadata IS JSON OBJECT
+                                 THEN metadata::jsonb -> 'llm_execution' ->> 'billing_mode'
+                            END,
+                            ''
+                          ) <> 'byok'
                     GROUP BY owner_user_id
                     """,
                     (start, end),

@@ -447,3 +447,159 @@ def test_the_retention_coordinator_runs_on_every_tick(daily_fixture):
     daily_fixture.run(now=NOW + timedelta(minutes=5))  # idle tick
 
     assert daily_fixture.retention.calls == 2
+
+
+def test_a_recompute_that_undoes_a_move_removes_its_transition(daily_fixture):
+    """Review #2: the writer replaces the day's log. Upserting only the users
+    who moved kept the first run's transition for a user the recompute put
+    back on the previous day's segment -- and rollup_lifecycle_day bakes the
+    log into the permanent rollups at expiry."""
+    daily_fixture.seed_previous_segment("growing")
+    daily_fixture.run()
+    assert [row["to_segment"] for row in daily_fixture.transitions_for(daily_fixture.at_risk_id)] == [
+        "at_risk"
+    ]
+
+    # The previous day turns out to have been at_risk too (its own recompute),
+    # and a late event makes D due for one.
+    daily_fixture.seed_previous_segment("at_risk")
+    daily_fixture.append_event(
+        daily_fixture.active_id,
+        event_name="backtest_completed",
+        occurred_at=datetime(2026, 9, 11, 23, 59, tzinfo=timezone.utc),
+        received_at=NOW + timedelta(minutes=5),
+        index="late-undo",
+    )
+    report = daily_fixture.run(now=NOW + timedelta(days=1))
+
+    assert D in report.recomputed_dates
+    assert [
+        row for row in daily_fixture.transitions_for(daily_fixture.at_risk_id)
+        if row["snapshot_date"] == D.isoformat()
+    ] == []
+
+
+def _fact_row(user_id, day, segment, **overrides):
+    values = dict(
+        snapshot_date=day,
+        user_id=user_id,
+        lifecycle_segment=segment,
+        lifecycle_reason_code="growing_activated_below_core_threshold",
+        operational_state="healthy",
+        operational_reason_code=None,
+        tier="unpaid",
+        user_group="unknown",
+        active=False,
+        data_quality="complete",
+        calculated_at=NOW,
+    )
+    values.update(overrides)
+    return UserDailyFact(**values)
+
+
+def test_recomputing_a_day_rederives_the_next_days_log(daily_fixture):
+    """A transition's from_segment is the previous day's segment, so a
+    recomputed day must rebuild its successor's log even though the
+    successor's facts did not change."""
+    from dashboard.backend.domain.analytics.daily_facts import (
+        _rederive_next_day_transitions,
+    )
+    from dashboard.backend.domain.analytics.value_repository import LifecycleTransitionRow
+
+    store = daily_fixture.store
+    user_id = daily_fixture.at_risk_id
+    next_day = D + timedelta(days=1)
+    store.upsert_daily_facts([_fact_row(user_id, next_day, "at_risk")])
+    store.append_lifecycle_transitions(
+        [
+            LifecycleTransitionRow(
+                user_id=user_id,
+                snapshot_date=next_day,
+                from_segment="growing",
+                to_segment="at_risk",
+                inactive_days=8,
+                created_at=NOW,
+            )
+        ]
+    )
+
+    # D now reads at_risk as well: the move on D+1 never happened.
+    assert _rederive_next_day_transitions(
+        D, [_fact_row(user_id, D, "at_risk")], store=store, now=NOW
+    ) == 0
+    assert store.list_transitions_for_date(next_day) == []
+
+    # D reads new: D+1's move is new -> at_risk.
+    assert _rederive_next_day_transitions(
+        D, [_fact_row(user_id, D, "new")], store=store, now=NOW
+    ) == 1
+    [row] = store.list_transitions_for_date(next_day)
+    assert (row.from_segment, row.to_segment) == ("new", "at_risk")
+
+
+def test_rederive_keeps_inactive_days_from_the_later_days_own_evaluation(daily_fixture):
+    from dashboard.backend.domain.analytics.daily_facts import (
+        _rederive_next_day_transitions,
+    )
+    from dashboard.backend.domain.analytics.value_repository import LifecycleTransitionRow
+
+    store = daily_fixture.store
+    user_id = daily_fixture.at_risk_id
+    next_day = D + timedelta(days=1)
+    store.upsert_daily_facts([_fact_row(user_id, next_day, "at_risk")])
+    store.append_lifecycle_transitions(
+        [
+            LifecycleTransitionRow(
+                user_id=user_id,
+                snapshot_date=next_day,
+                from_segment="growing",
+                to_segment="at_risk",
+                inactive_days=8,
+                created_at=NOW,
+            )
+        ]
+    )
+
+    _rederive_next_day_transitions(D, [_fact_row(user_id, D, "core")], store=store, now=NOW)
+
+    [row] = store.list_transitions_for_date(next_day)
+    assert (row.from_segment, row.inactive_days) == ("core", 8)
+
+
+def test_rederive_is_a_no_op_when_the_next_day_has_no_facts(daily_fixture):
+    from dashboard.backend.domain.analytics.daily_facts import (
+        _rederive_next_day_transitions,
+    )
+
+    assert _rederive_next_day_transitions(
+        D, [_fact_row(daily_fixture.at_risk_id, D, "new")], store=daily_fixture.store, now=NOW
+    ) == 0
+
+
+def test_a_failed_recompute_stays_due_until_it_succeeds(daily_fixture):
+    """The facts upsert refreshes calculated_at before later steps run, and a
+    day whose facts are newer than its newest event leaves the recompute list.
+    A failed late-arrival recompute is therefore re-queued explicitly, or its
+    partial rows would stand for good."""
+    daily_fixture.run()
+    daily_fixture.append_event(
+        daily_fixture.active_id,
+        event_name="backtest_completed",
+        occurred_at=datetime(2026, 9, 11, 23, 59, tzinfo=timezone.utc),
+        received_at=NOW + timedelta(minutes=5),
+        index="late-failing",
+    )
+    daily_fixture.break_step("ledger")
+
+    failed = daily_fixture.run(now=NOW + timedelta(days=1))
+
+    assert D not in failed.recomputed_dates
+    assert daily_fixture.fact_for(daily_fixture.active_id).data_quality == "partial"
+    assert daily_fixture.store.list_days_needing_recompute(since=D, until=D) == [D]
+
+    daily_fixture.repair_step("ledger")
+    retried = daily_fixture.run(now=NOW + timedelta(days=1, minutes=5))
+
+    assert D in retried.recomputed_dates
+    assert daily_fixture.fact_for(daily_fixture.active_id).data_quality == "complete"
+    assert daily_fixture.store.list_days_needing_recompute(since=D, until=D) == []

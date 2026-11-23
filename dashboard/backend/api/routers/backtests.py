@@ -21,6 +21,7 @@ import statistics
 import subprocess
 import time
 import uuid
+import weakref
 from collections import deque
 from functools import lru_cache
 from pathlib import Path
@@ -42,7 +43,7 @@ from threading import Thread as _CancelWatchdogThread
 # ...and the bounded observational store calls (`_run_with_deadline`): the
 # timeout arm's spend lookup and the trace label.
 from threading import Thread as _DeadlineThread
-from typing import Any, Dict, List, Literal, NamedTuple, Optional, Tuple
+from typing import Any, Dict, List, Literal, NamedTuple, Optional, Sequence, Tuple
 
 import pytz
 from datetime import datetime, timedelta
@@ -58,7 +59,7 @@ import matplotlib
 matplotlib.use("Agg")
 
 from dashboard.backend.database import db, DB_PATH
-from dashboard.backend.paths import DASHBOARD_DIR, REPO_ROOT, SCRIPTS_DIR
+from dashboard.backend.paths import DASHBOARD_DIR, SCRIPTS_DIR, child_python
 from dashboard.backend.middleware import get_session_id_from_request
 from dashboard.backend.infrastructure.market_data.provider import (
     ALPACA,
@@ -156,9 +157,15 @@ from dashboard.backend.domain.agents.runtime import (
     normalize_runtime_type,
 )
 from dashboard.backend.infrastructure.ai_hedge_fund.adapter import (
+    DEFAULT_MODEL_NAME as AI_HEDGE_FUND_MODEL_NAME,
     AiHedgeFundConfigurationError,
     resolve_step_timeout_seconds,
     runtime_unavailable_reason,
+)
+from dashboard.backend.infrastructure.ai_hedge_fund.billing import (
+    PROVIDER_ID as AI_HEDGE_FUND_PROVIDER_ID,
+    decision_calls as ai_hedge_fund_decision_calls,
+    decision_ceiling_micro as ai_hedge_fund_decision_ceiling_micro,
 )
 from dashboard.backend.domain.backtesting.constants import (
     INITIAL_CAPITAL,
@@ -1195,7 +1202,7 @@ def _finalize_slot_locked(
         # Still `backtest_failed`: the user asked for a backtest, got nothing,
         # and was billed. A separate event name would need nine registrations
         # and would drop timeouts out of `metrics.py`'s `_TERMINAL_FAILURE`,
-        # `states.py`'s consecutive-failure alert and `backfill.py`'s terminal
+        # `lifecycle.py`'s consecutive-failure alert and `backfill.py`'s terminal
         # map -- the three things that exist to notice runs failing. What was
         # missing is the reason, not the outcome.
         return {
@@ -1384,6 +1391,73 @@ def _label_trace(run_id: Optional[str], error_code: str) -> None:
         )
 
 
+# Same bound, same reason, for the partial-result snapshot below.
+LIVE_PROGRESS_CLEAR_DEADLINE_SECONDS = 10
+
+
+def _clear_live_progress_snapshot(run_id: Optional[str]) -> None:
+    """Delete the child's partial-result snapshot now that the run is over.
+
+    The boot reclaimer publishes any snapshot it finds as a run interrupted by
+    a server restart, so the row must not outlive a parent that saw the run
+    end -- however it ended. Without this, every cancelled, failed and
+    timed-out run came back under that label after the next deploy. A row left
+    here is one whose parent died, which is exactly what the label claims.
+    Bounded, and run after the slot is free, like the trace label above.
+    """
+    if not run_id:
+        return
+    result = _run_with_deadline(
+        lambda: db.delete_live_progress(run_id),
+        LIVE_PROGRESS_CLEAR_DEADLINE_SECONDS,
+    )
+    if result.error is not None:
+        print(
+            f"ERROR: live_progress.clear_failed run={run_id} "
+            f"error={type(result.error).__name__}: {result.error}",
+            flush=True,
+        )
+    elif not result.finished:
+        print(
+            f"ERROR: live_progress.clear_timeout run={run_id} "
+            f"deadline_s={LIVE_PROGRESS_CLEAR_DEADLINE_SECONDS}; abandoned",
+            flush=True,
+        )
+
+
+# Children ``_run_backtest_subprocess`` launched with CREATE_NEW_PROCESS_GROUP
+# (Windows only). Nothing else may be sent CTRL_BREAK_EVENT: the event is
+# addressed to a console process group, and an id that leads no group is not
+# reliably refused -- conhost has been seen to broadcast it to every process on
+# the console, the web server included. Weak, so a finished run's handle is not
+# kept alive by membership.
+_CONSOLE_GROUP_LEADERS: "weakref.WeakSet[Any]" = weakref.WeakSet()
+
+
+def _break_console_group(process: Any) -> bool:
+    """Windows' SIGTERM-to-the-group: CTRL_BREAK_EVENT to the child's console group.
+
+    The child leads a console process group and everything it starts joins it
+    -- the interpreter behind a venv launcher, an AI Hedge Fund grandchild --
+    so one event reaches the tree, the child's SIGBREAK handler unwinds like
+    SIGTERM does on POSIX, and a grandchild with the default disposition exits.
+    False, so the caller falls back to ``terminate()``: off Windows, for a
+    process not launched that way, for one that has already exited (its id may
+    no longer lead a group), or when the parent has no console to send through,
+    which GenerateConsoleCtrlEvent requires.
+    """
+    ctrl_break = getattr(signal, "CTRL_BREAK_EVENT", None)
+    if ctrl_break is None or process not in _CONSOLE_GROUP_LEADERS:
+        return False
+    try:
+        if process.poll() is not None:
+            return False
+        os.kill(int(process.pid), ctrl_break)
+    except (OSError, AttributeError, TypeError, ValueError):
+        return False
+    return True
+
+
 def _signal_backtest_process(process: Any) -> bool:
     """SIGTERM the child and everything it started. True when a signal landed.
 
@@ -1395,10 +1469,18 @@ def _signal_backtest_process(process: Any) -> bool:
     Swallows every failure mode of the handle call because all of them mean the
     same thing here: the child is already gone, or was never started. Neither is
     a reason to fail the cancel the user just asked for.
+
+    Windows has no group to SIGTERM, and ``terminate()`` there is
+    TerminateProcess: a hard kill that skips the child's ``finally`` exactly as
+    SIGKILL would, and makes ``_CANCEL_GRACE_SECONDS`` buy nothing. So the
+    console-group break (``_break_console_group``) goes first and the handle
+    call is only its fallback.
     """
     if process is None:
         return False
     group_signalled = _killpg(_resolve_child_pgid(process), signal.SIGTERM)
+    if _break_console_group(process):
+        return True
     try:
         process.terminate()
     except Exception:  # noqa: BLE001 - see docstring
@@ -1439,7 +1521,32 @@ def _kill_backtest_process_after_grace(
             pass
     except Exception:  # noqa: BLE001 - same
         pass
-    _killpg(pgid, signal.SIGKILL)
+    # Looked up, not named: Windows has no ``signal.SIGKILL``, and the argument
+    # is evaluated before ``_killpg``'s own guard can see it -- the
+    # AttributeError escaped every caller, turning a timeout into a generic
+    # failure and a pre-launch cancel into an error over a closed slot. There
+    # is no group to sweep there (``_resolve_child_pgid`` is None); the
+    # ``kill()`` above is that platform's whole escalation.
+    sigkill = getattr(signal, "SIGKILL", None)
+    if sigkill is not None:
+        _killpg(pgid, sigkill)
+
+
+def _stopped_by_signal(returncode: int) -> bool:
+    """Whether the child's exit code says a signal stopped it, not a failure.
+
+    Negative is POSIX's signal death (SIGKILL, say). ``128 + N`` is the child's
+    own ``_exit_on_sigterm`` turning a stop signal into SystemExit: SIGTERM, or
+    SIGBREAK on Windows, where a sign check alone could never fire. Windows has
+    no code for a hard kill at all: TerminateProcess (Task Manager,
+    ``Popen.kill``) exits with whatever code the killer picks -- 1 for
+    ``kill()`` -- which is indistinguishable from a crash, so an external hard
+    kill there still reads as a failure.
+    """
+    if returncode < 0:
+        return True
+    stop_signals = (getattr(signal, name, None) for name in ("SIGTERM", "SIGBREAK"))
+    return returncode in {128 + int(sig) for sig in stop_signals if sig is not None}
 
 
 def _attach_backtest_process(live_run_id: str, process: Any) -> bool:
@@ -1870,7 +1977,8 @@ def run_backtest_background(
     resolved_live_run_id = live_run_id
     # Captured separately: the except arm below clears resolved_live_run_id
     # once the slot is finalized, but the finally still needs the id to close
-    # a trace the child could not (killed by the timeout or SIGKILL).
+    # a trace the child could not (killed by the timeout or SIGKILL) and to
+    # delete the child's partial-result snapshot.
     trace_run_id: Optional[str] = None
     # Which label a still-``running`` trace gets. Each arm only RECORDS it; the
     # write happens once, last in ``finally``, so a slow trace store can never
@@ -1883,7 +1991,6 @@ def run_backtest_background(
     # it mid-run" (Configure stays open, and sibling runs adapt too).
     baseline_pipeline = _writeback_start_pipeline(pipeline, writeback_baseline, agent_id)
     try:
-        import sys
         import tempfile
 
         profile = get_market_profile(data_source, universe)
@@ -1937,16 +2044,9 @@ def run_backtest_background(
         
         script_path = SCRIPTS_DIR / "backtest_hourly_agent.py"
         db_path = DB_PATH
-        venv_dir = REPO_ROOT / ".venv"
-        
-        # Determine the Python executable to use (from venv if available)
-        if venv_dir.exists():
-            python_exe = str(venv_dir / "bin" / "python3")
-            print(f"🐍 Using venv Python: {python_exe}", flush=True)
-        else:
-            python_exe = sys.executable
-            print(f"🐍 Using system Python: {python_exe}", flush=True)
-        
+        python_exe = child_python()
+        print(f"🐍 Using Python: {python_exe}", flush=True)
+
         # Check database directory
         print(f"📁 Database path: {db_path}", flush=True)
         print(f"📁 Database dir exists: {db_path.parent.exists()}", flush=True)
@@ -1958,6 +2058,13 @@ def run_backtest_background(
         # worker, and a value that leaked into os.environ would make the next
         # uvicorn reload skip DDL it actually needs.
         env[BACKTEST_WORKER_ENV] = "1"
+        # The other half of ``_run_backtest_subprocess``'s UTF-8 decode. Left
+        # alone, Windows encodes a child's piped stdout in the ANSI code page
+        # and the script's first emoji print raises UnicodeEncodeError: every
+        # backtest dead at launch on a default-locale machine. Forced rather
+        # than defaulted, since a different value here would break the
+        # parent's decode, not tune it.
+        env["PYTHONIOENCODING"] = "utf-8:backslashreplace"
         if runtime_type == AI_HEDGE_FUND_RUNTIME_TYPE:
             # A Financial Datasets key is agent-owner material, never a platform
             # fallback. Isolate it only for the hosted runtime; pipeline
@@ -2112,11 +2219,13 @@ def run_backtest_background(
                 slot_public_error = _LLM_FAILURE_PUBLIC_ERROR
                 slot_error_category = analytics_error_category_for(llm_failure)
             print(f"❌ Backtest failed (returncode={result.returncode})", flush=True)
-            # A negative return code is a signal death, and the parent's own
-            # signals were claimed above (cancel) or raise TimeoutExpired
-            # (timeout): this one came from elsewhere -- a cgroup OOM SIGKILL
-            # is the likely sender -- so the child was killed, not failed.
-            trace_label = "run_killed" if result.returncode < 0 else "run_failed"
+            # A signal stopped it, and the parent's own signals were claimed
+            # above (cancel) or raise TimeoutExpired (timeout): this one came
+            # from elsewhere -- a cgroup OOM SIGKILL is the likely sender -- so
+            # the child was killed, not failed.
+            trace_label = (
+                "run_killed" if _stopped_by_signal(result.returncode) else "run_failed"
+            )
         else:
             runs = db.get_runs_by_mode("backtest")
             slot_runs_count = len(runs)
@@ -2333,6 +2442,9 @@ def run_backtest_background(
             # that raises (``finalize_run`` with a non-LLMExecutionError,
             # ``_finalize_slot``) cannot leave the trace ``running`` forever.
             _label_trace(trace_run_id, trace_label or "run_killed")
+            # trace_run_id is the id the child flushed its snapshot under
+            # (--run-id), and unlike resolved_live_run_id no arm clears it.
+            _clear_live_progress_snapshot(trace_run_id)
             print("✋ Backtest background thread finished", flush=True)
 
 
@@ -2559,7 +2671,7 @@ def _enforce_ai_hedge_fund_window(start_date: str, end_date: str) -> None:
 # issues one model call per pipeline decision step per hourly bar, each with up
 # to one retry, and the only wall-clock bound is per provider attempt:
 # LLM_PROVIDER_READ_TIMEOUT_SECONDS (180s by default,
-# infrastructure/llm/execution/adapters/base.py), with one more attempt when a
+# infrastructure/llm/http_policy.py), with one more attempt when a
 # Platform Credits call fails over to the next candidate. (Until 2026-09-28 this
 # said "the 60s httpx read timeout"; the SDKs' silent retries made that ~185s
 # and three billed generations.) A refusal built on that worst case --
@@ -2647,14 +2759,17 @@ def _estimated_pipeline_llm_calls(
 # (DeepSeek V4 on CommonStack has taken 10s to over a minute per call), which is
 # why this is an operator dial rather than a literal.
 #
-# Consequence worth knowing before changing it: at 15s the shipped modal default
-# window (7 weekdays, 49 US bars) is comfortable at the modal's own default of
-# ONE pipeline step, but the same window with four decision steps costs 196 of
-# the 200 available calls -- it passes by four.
+# Consequence worth knowing before changing it: at 15s the modal's default
+# window (the latest settled US trading week from
+# provider.default_backtest_window: at most 5 trading days, 35 US bars) spends
+# 140 of the 200 available calls with four decision steps. The fixed 7-weekday
+# window (49 bars) it replaced cost 196 of 200 at four steps -- it passed by
+# four -- and a user who widens the modal toward MAX_BACKTEST_DAYS reaches the
+# bound sooner still.
 #
 # Four is not the modal's number; it is this repo's own illustration of a
-# realistic step count, taken from the "four-module pipeline" copy at
-# app.html:1462. That panel is the separate *Trading Algo* surface, which posts
+# realistic step count, taken from the "Four-module pipeline" subtitle of the
+# Trading Algo panel in app.html. That panel is the separate *Trading Algo* surface, which posts
 # to /api/algo/execute and never reaches this guard, so read it as evidence
 # about pipeline shapes users are invited to build, not as a window this bound
 # governs.
@@ -2938,6 +3053,9 @@ class _CreditsClaim(NamedTuple):
     # outside the lock (it is a store call). A run missing here started after
     # the read and is counted as having spent nothing yet.
     spent_by_run: Dict[str, int]
+    # False for a runtime whose model is platform-managed (AI Hedge Fund):
+    # the refusal then cannot suggest the caller's own API key.
+    byok_available: bool = True
 
 
 def _owner_platform_credit_slots(user_id: int) -> List[Tuple[str, int]]:
@@ -2989,6 +3107,11 @@ def _credits_shortfall(
             f"{running} running backtest{'s' if running != 1 else ''} "
             f"{'are' if running != 1 else 'is'} expected to use"
         )
+    if not claim.byok_available:
+        return message + (
+            ". Add Credits on the Credits page, shorten the date range, or "
+            "select fewer analysts or tickers."
+        )
     return message + (
         ". Add Credits on the Credits page, shorten the date range, choose a "
         "lower-cost model, or use your own API key."
@@ -3034,6 +3157,24 @@ def _enforce_platform_credits_balance(
     )
     if estimate is None:
         return None
+    return _admit_platform_credits(
+        user_id=user_id, model_id=model_id, estimate=estimate
+    )
+
+
+def _admit_platform_credits(
+    *,
+    user_id: int,
+    model_id: str,
+    estimate: _PlatformCreditsEstimate,
+    byok_available: bool = True,
+) -> Optional[_CreditsClaim]:
+    """The balance half of every ATL Credits preflight, whatever priced the run.
+
+    403 for a restricted account, 402 when the balance less the owner's other
+    in-flight Credits runs cannot cover ``estimate``; else the claim the slot
+    ledger re-checks and records. None (let through) on a failed balance read.
+    """
     with _backtest_slots_lock:
         in_flight = _owner_platform_credit_slots(user_id)
     try:
@@ -3063,11 +3204,47 @@ def _enforce_platform_credits_balance(
         calls=estimate.calls,
         model_id=model_id,
         spent_by_run=spent_by_run,
+        byok_available=byok_available,
     )
     shortfall = _credits_shortfall(claim, in_flight)
     if shortfall is not None:
         raise HTTPException(status_code=402, detail=shortfall)
     return claim
+
+
+def _enforce_ai_hedge_fund_credits(
+    *,
+    user_id: int,
+    model_id: str,
+    analysts: Optional[Sequence[str]],
+    ticker_count: int,
+    start_date: str,
+    end_date: str,
+    market: object = None,
+) -> Optional[_CreditsClaim]:
+    """Refuse an AI Hedge Fund run its owner's Credits cannot hold to the end.
+
+    Priced at its ceiling: one decision per trading session, each held at the
+    child's own per-decision ceiling (``billing.decision_ceiling_micro``), so
+    the claim recorded on the slot is the most the run can draw while it is in
+    flight. The window bound (``MAX_AI_HEDGE_FUND_TRADING_DAYS``) keeps that
+    a few Credits at most. Through the shared admission, so pipeline and
+    AI Hedge Fund launches on one balance count each other and cannot each
+    pass alone and then starve together.
+    """
+    sessions = _estimated_trading_sessions(start_date, end_date, market=market)
+    if sessions <= 0:
+        return None
+    return _admit_platform_credits(
+        user_id=user_id,
+        model_id=model_id,
+        estimate=_PlatformCreditsEstimate(
+            calls=sessions * ai_hedge_fund_decision_calls(analysts, ticker_count),
+            needed_micro=sessions
+            * ai_hedge_fund_decision_ceiling_micro(model_id, analysts, ticker_count),
+        ),
+        byok_available=False,
+    )
 
 
 def _enforce_pipeline_llm_window(
@@ -3216,7 +3393,11 @@ class _BoundedStreamCapture:
         )
 
 
-_RELAYED_CHILD_LINE_PREFIX = "ERROR: llm."
+# Child lines echoed to the service log live (``_drain_stream``): model
+# execution failures, and the hosted AI Hedge Fund meter's alarms
+# (``infrastructure/ai_hedge_fund/billing.py``), whose fail-closed charge must
+# reach the log, not only an end-of-run dump that can elide it.
+_RELAYED_CHILD_LINE_PREFIXES = ("ERROR: llm.", "ERROR: ai_hedge_fund.")
 # What a non-owner reads for a run a model-execution failure stopped: its
 # safe message names account facts (an empty balance, a refund review).
 _LLM_FAILURE_PUBLIC_ERROR = "Backtest stopped: the model run could not continue."
@@ -3270,7 +3451,7 @@ def _without_relayed_lines(text: str) -> str:
     return "".join(
         line
         for line in text.splitlines(keepends=True)
-        if not line.startswith(_RELAYED_CHILD_LINE_PREFIX)
+        if not line.startswith(_RELAYED_CHILD_LINE_PREFIXES)
     )
 
 
@@ -3289,7 +3470,7 @@ def _drain_stream(
     try:
         for line in iter(stream.readline, ""):
             capture.feed(line)
-            if line.startswith(_RELAYED_CHILD_LINE_PREFIX):
+            if line.startswith(_RELAYED_CHILD_LINE_PREFIXES):
                 # Echoed live, not left to the capture: the timeout path never
                 # dumps it, a normal exit dumps it only when the run ends, and
                 # a long run's middle is elided. Redacted like the dump, since
@@ -3348,21 +3529,36 @@ def _run_backtest_subprocess(
     established timeout cleanup is untouched — except that the exception now
     carries the retained output, which the old path threw away.
     """
+    console_group_flag = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
     process = subprocess.Popen(
         cmd,
         cwd=cwd,
         env=env,
         text=True,
+        # Named, not the locale's: on Windows that is the ANSI code page, which
+        # cannot decode the child's UTF-8 (``⏱`` carries 0x8F, a byte cp1252
+        # leaves undefined). A decode error is a ValueError, which
+        # ``_drain_stream`` reads as a closed pipe: the reader stops, the child
+        # blocks on a full pipe, and the run hangs to its timeout. ``replace``
+        # so no byte can do that. The child is told to match
+        # (PYTHONIOENCODING, set in ``run_backtest_background``).
+        encoding="utf-8",
+        errors="replace",
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         # The child leads its own process group, so a cancel or a timeout can
         # signal the whole tree instead of one pid. Without it the AI Hedge Fund
         # grandchild outlived every stop path — see ``_resolve_child_pgid``.
-        # Ignored on non-POSIX platforms, where the helpers fall back to the
-        # handle.
+        # Ignored on non-POSIX platforms.
         start_new_session=True,
+        # Windows' counterpart: a console process group of its own, which is
+        # what ``_break_console_group`` signals. 0 everywhere else, where a
+        # non-zero value would be refused.
+        creationflags=console_group_flag,
     )
+    if console_group_flag:
+        _CONSOLE_GROUP_LEADERS.add(process)
     if live_run_id and not _attach_backtest_process(live_run_id, process):
         # A cancel landed between slot acquisition and launch. The slot is
         # already released, so nothing is watching this child — kill it here
@@ -3997,6 +4193,32 @@ def run_backtest_endpoint(
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
+    from dashboard.backend.api.dependencies import _optional_user
+
+    optional_user = _optional_user(
+        request,
+        request.headers.get("authorization") or request.headers.get("Authorization"),
+    )
+    user_id = optional_user["id"] if optional_user else None
+
+    # A hosted runtime calls a platform-managed model, billed to the caller's
+    # ATL Credits, which a guest does not have; and a guest's per-owner slot
+    # and rate-limit key are a session id the guest mints itself, so neither
+    # bounds a guest. Refused first, before the window bound and the readiness
+    # checks, so a guest learns nothing about whether the runtime is armed
+    # here. Keyed on ``!= PIPELINE`` so a runtime added later is gated by
+    # default.
+    if runtime_type != PIPELINE_RUNTIME_TYPE and user_id is None:
+        # Ownership first: the runtime type above is read off any agent id, so
+        # a 401 here for a stranger's agent would tell a guest that agent is a
+        # hosted one. A guest's own agent passes, and a stranger's gets the
+        # same 404/403 the session resolver gives any agent id it cannot run.
+        _resolve_backtest_session(request, agent_id)
+        raise HTTPException(
+            status_code=401,
+            detail="Sign in before running a hosted agent backtest.",
+        )
+
     decision_source_was_explicit = decision_source is not None
     profile, resolved_decision_source = _resolve_market_profile_request(
         data_source,
@@ -4017,6 +4239,13 @@ def run_backtest_endpoint(
             raise HTTPException(
                 status_code=422,
                 detail="AI Hedge Fund requires decision_source='llm'.",
+            )
+        if billing_mode is BillingMode.BYOK:
+            # The model is platform-managed, so there is no key of the
+            # caller's to bill; refused rather than silently switched lanes.
+            raise HTTPException(
+                status_code=422,
+                detail="AI Hedge Fund runs on ATL Credits only; it has no BYOK option.",
             )
         # Before the credential lookup, which decrypts agent-owner material: a
         # window this deployment refuses is refused whether or not the agent is
@@ -4186,14 +4415,6 @@ def run_backtest_endpoint(
     else:
         print(f"   Assets: default DJIA ({len(DJIA_30)})", flush=True)
 
-    from dashboard.backend.api.dependencies import _optional_user
-
-    optional_user = _optional_user(
-        request,
-        request.headers.get("authorization") or request.headers.get("Authorization"),
-    )
-    user_id = optional_user["id"] if optional_user else None
-
     # Mint the id before constructing the signed worker handoff. It is both the
     # client-visible run identity and part of the handoff's tamper boundary.
     live_run_id = f"agent_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}"
@@ -4310,6 +4531,42 @@ def run_backtest_endpoint(
                 "pipeline": pipeline,
                 "data_source": data_source,
                 "universe": profile.universe,
+                "assets": selected_assets,
+                "universe_selection": universe_selection,
+            },
+        )
+    elif runtime_type == AI_HEDGE_FUND_RUNTIME_TYPE:
+        # Signed in (the 401 above) and on Credits only (the 422 above). The
+        # handoff carries no model client here: the child turns it into
+        # per-decision holds (`infrastructure/ai_hedge_fund/billing.py`), and
+        # it is what threads the lane into the parent's `finalize_run` and the
+        # timeout card's spend lookup, exactly as for a pipeline run.
+        billing_mode = BillingMode.PLATFORM_CREDITS
+        provider_id = AI_HEDGE_FUND_PROVIDER_ID
+        provider_ids = (provider_id,)
+        model = AI_HEDGE_FUND_MODEL_NAME
+        credits_claim = _enforce_ai_hedge_fund_credits(
+            user_id=int(user_id),
+            model_id=model,
+            analysts=(runtime_config or {}).get("analysts"),
+            ticker_count=len(selected_assets or ()) or len(profile.symbols),
+            start_date=start_date,
+            end_date=end_date,
+            market=profile.market,
+        )
+        execution_handoff_payload = create_execution_handoff(
+            user_id=int(user_id),
+            run_id=live_run_id,
+            billing_mode=billing_mode,
+            provider_id=provider_id,
+            provider_ids=provider_ids,
+            model_id=model,
+            prompt_metadata={
+                "start_date": start_date,
+                "end_date": end_date,
+                "runtime_type": runtime_type,
+                "runtime_config": runtime_config,
+                "data_source": data_source,
                 "assets": selected_assets,
                 "universe_selection": universe_selection,
             },

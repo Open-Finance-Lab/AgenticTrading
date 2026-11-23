@@ -280,16 +280,170 @@ def test_llm_requested_size_is_still_passed_through_unrounded():
     assert [action["shares"] for action in out["actions"]] == [150]
 
 
+def _llm_decide(actions, *, pm=None, strict_llm=False, fail_closed=False):
+    """One single-prompt bar; returns the manager and the gate's decision."""
+    pm = pm or CanonicalPortfolioManager(100000)
+    client = _FakeClient(_FakeResp(json.dumps({"actions": actions}), _FakeUsage(1, 1)))
+    if fail_closed:
+        client.fail_closed = True
+    return pm, pm.make_trading_decision_with_llm(
+        _llm_state(), client, strict_llm=strict_llm
+    )
+
+
+def _llm_buy(confidence, **fields):
+    action = {"symbol": "AAPL", "action": "buy", "confidence": confidence, "reasoning": "x"}
+    action.update(fields)
+    return _llm_decide([action])[1]["actions"]
+
+
+# Not a number from 0 to 1, each for its own reason: off the 0-100 scale,
+# above one, negative, not finite, a bool, text.
+_UNREADABLE_CONFIDENCES = [25, 80, 1.5, -0.5, float("nan"), float("inf"), True, "high"]
+
+
+@pytest.mark.parametrize("confidence", _UNREADABLE_CONFIDENCES)
+def test_llm_unreadable_confidence_skips_an_unsized_buy_not_scaled(confidence, capsys):
+    """Confidence is 0-1. A model answering on a 0-100 scale (25 meaning 25%)
+    used to pass the 0.3 floor and multiply the auto-sized buy by 100, and
+    ``true`` sized it at 100%. Nothing is clamped, divided by 100 or
+    defaulted: with no 0-1 confidence there is nothing to size the buy from."""
+    assert _llm_buy(confidence) == []
+    assert "no 0-1 confidence to size it from" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("confidence", _UNREADABLE_CONFIDENCES)
+def test_llm_unreadable_confidence_does_not_block_a_sized_buy(confidence):
+    """A buy with its own size never needed the confidence, and an unread one
+    cannot decide the 0.3 floor either way, so the order trades as written."""
+    actions = _llm_buy(confidence, position_size=5)
+
+    assert [a["shares"] for a in actions] == [5]
+    assert actions[0]["confidence"] is None
+    assert actions[0]["reason"].endswith("(confidence: unread)")
+
+
+@pytest.mark.parametrize("confidence", _UNREADABLE_CONFIDENCES)
+def test_llm_unreadable_confidence_does_not_block_a_sell(confidence):
+    """A sell is always the sellable position, so a model on a 0-100 scale can
+    still exit; skipping it held the position for the rest of the run."""
+    pm = CanonicalPortfolioManager(100000)
+    pm.positions["AAPL"] = 7
+    _, result = _llm_decide(
+        [{"symbol": "AAPL", "action": "sell", "confidence": confidence, "reasoning": "x"}],
+        pm=pm,
+    )
+
+    assert [(a["action"], a["shares"]) for a in result["actions"]] == [("sell", 7)]
+
+
+def test_llm_readable_low_confidence_still_skips_a_sell():
+    pm = CanonicalPortfolioManager(100000)
+    pm.positions["AAPL"] = 7
+    _, result = _llm_decide(
+        [{"symbol": "AAPL", "action": "sell", "confidence": 0.1, "reasoning": "x"}],
+        pm=pm,
+    )
+
+    assert result["actions"] == []
+
+
+@pytest.mark.parametrize("confidence", [0.3, 1.0, 1])
+def test_llm_confidence_at_the_bounds_still_trades(confidence):
+    assert [a["shares"] for a in _llm_buy(confidence, position_size=5)] == [5]
+
+
+def test_unreadable_confidence_is_counted_and_reported_once(capsys):
+    """A whole-run 0-100 habit is one ERROR line the parent relays, plus counts
+    for the run's metadata. The bar still counts as model-driven (the decision
+    tape reads an unchanged llm_decisions as a fallback), and the lost buy is
+    counted again in confidence_skipped_steps, which H6 subtracts."""
+    pm, _ = _llm_decide([{"symbol": "AAPL", "action": "buy", "confidence": 25}])
+    _llm_decide(
+        [{"symbol": "AAPL", "action": "buy", "confidence": 80, "position_size": 5}],
+        pm=pm,
+    )
+
+    assert pm.unusable_confidence_actions == 2
+    assert pm.unusable_confidence_skipped == 1
+    assert pm.confidence_skipped_steps == 1
+    assert pm.llm_decisions == 2
+    out = capsys.readouterr().out
+    assert out.count("ERROR: llm.unusable_confidence") == 1
+
+
+def test_readable_confidence_counts_nothing(capsys):
+    pm, _ = _llm_decide([{"symbol": "AAPL", "action": "buy", "confidence": 0.9}])
+
+    assert (
+        pm.unusable_confidence_actions,
+        pm.unusable_confidence_skipped,
+        pm.confidence_skipped_steps,
+    ) == (0, 0, 0)
+    assert "ERROR: llm." not in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("fail_closed", [False, True], ids=["cli", "billed"])
+def test_strict_llm_rejects_an_unsized_buy_with_unreadable_confidence(fail_closed):
+    """Strict runs reject what the gate cannot carry out, as they do a bad
+    symbol: a billed run whose model answers 0-100 stops on the first bar
+    instead of charging for a run that never buys."""
+    pm = CanonicalPortfolioManager(100000)
+    with pytest.raises(LLMDecisionError, match="confidence"):
+        _llm_decide(
+            [{"symbol": "AAPL", "action": "buy", "confidence": 25}],
+            pm=pm,
+            strict_llm=True,
+            fail_closed=fail_closed,
+        )
+
+    assert pm.llm_decisions == 0
+
+
+def test_strict_llm_carries_out_sized_orders_with_unreadable_confidence():
+    pm = CanonicalPortfolioManager(100000)
+    pm.positions["MSFT"] = 3
+    _, result = _llm_decide(
+        [
+            {"symbol": "AAPL", "action": "buy", "confidence": 25, "position_size": 5},
+            {"symbol": "MSFT", "action": "sell", "confidence": "high"},
+        ],
+        pm=pm,
+        strict_llm=True,
+        fail_closed=True,
+    )
+
+    assert [(a["symbol"], a["shares"]) for a in result["actions"]] == [
+        ("AAPL", 5),
+        ("MSFT", 3),
+    ]
+    assert pm.llm_decisions == 1
+    assert pm.confidence_skipped_steps == 0
+
+
 _NO_SIZE = object()
 
 
-def _llm_buy_shares(size):
-    pm = CanonicalPortfolioManager(100000)
-    action = {"symbol": "AAPL", "action": "buy", "confidence": 0.9, "reasoning": "x"}
+def _llm_buy_pm(size, *, confidence=0.9, strict_llm=False):
+    action = {"symbol": "AAPL", "action": "buy", "confidence": confidence, "reasoning": "x"}
     if size is not _NO_SIZE:
         action["position_size"] = size
-    client = _FakeClient(_FakeResp(json.dumps({"actions": [action]}), _FakeUsage(1, 1)))
-    return [a["shares"] for a in pm.make_trading_decision_with_llm(_llm_state(), client)["actions"]]
+    return _llm_decide([action], strict_llm=strict_llm)
+
+
+def _llm_buy_shares(size):
+    return [a["shares"] for a in _llm_buy_pm(size)[1]["actions"]]
+
+
+def _assert_buy_refused(pm, requested=0):
+    """The skipped BUY left an ``invalid_quantity`` rejection on the ledger,
+    as a refused SELL does: a print alone is invisible from a dashboard run."""
+    [event] = pm.order_events
+    assert (event["symbol"], event["side"], event["status"]) == ("AAPL", "BUY", "rejected")
+    assert event["reason"] == portfolio_manager.ORDER_SIZE_REFUSED_REASON
+    assert (event["executed_shares"], event["requested_shares"]) == (0, requested)
+    [rejection] = pm.rejected_orders
+    assert (rejection["action"], rejection["reason"]) == ("buy", "invalid_quantity")
 
 
 @pytest.mark.parametrize("size", [0.6, 0.99])
@@ -297,33 +451,72 @@ def test_llm_buy_size_under_one_share_is_skipped_not_auto_sized(size, capsys):
     """int() truncated a size under one share to 0, and 0 means "size it from
     confidence": the model asked for 0.6 of a share and got an engine-chosen
     buy. It asked for an amount, so nothing is bought in its name instead."""
-    assert _llm_buy_shares(size) == []
+    pm, result = _llm_buy_pm(size)
+    assert result["actions"] == []
     assert "rounds to 0 shares" in capsys.readouterr().out
+    _assert_buy_refused(pm, requested=size)
+    assert pm.llm_decisions == 1
 
 
 @pytest.mark.parametrize("size", [-0.5, -3])
 def test_llm_buy_size_not_positive_is_skipped_not_auto_sized(size, capsys):
     """-0.5 truncated to 0 and was auto-sized like a missing size; -3 was
     skipped but logged as "insufficient cash: need $-300"."""
-    assert _llm_buy_shares(size) == []
+    pm, result = _llm_buy_pm(size)
+    assert result["actions"] == []
     assert "not positive" in capsys.readouterr().out
+    _assert_buy_refused(pm)
 
 
-@pytest.mark.parametrize("size", [True, False])
-def test_llm_buy_boolean_size_is_skipped(size, capsys):
-    """int(True) is 1 and int(False) is 0: neither is a share count."""
-    assert _llm_buy_shares(size) == []
+@pytest.mark.parametrize(
+    "size", [True, False, [], {}, [5], "abc", float("nan"), float("inf")]
+)
+def test_llm_buy_unparseable_size_skips_only_that_action(size, capsys):
+    """int(True) is 1 and int(False) is 0: neither is a share count. An empty
+    list or dict read as "given" but then reached float() outside any guard,
+    and the TypeError threw the whole decision into the rule-based fallback."""
+    pm, result = _llm_buy_pm(size)
+    assert result["actions"] == []
     assert "unparseable position_size" in capsys.readouterr().out
+    _assert_buy_refused(pm)
+    # The step is still the model's, not a rule-based fallback.
+    assert pm.llm_decisions == 1
 
 
-@pytest.mark.parametrize("size", [_NO_SIZE, 0, None, ""])
+@pytest.mark.parametrize("size", [_NO_SIZE, 0, 0.0, "0", None, ""])
 def test_llm_buy_without_size_is_still_confidence_sized(size):
-    shares = _llm_buy_shares(size)
+    pm, result = _llm_buy_pm(size)
+    shares = [a["shares"] for a in result["actions"]]
     assert len(shares) == 1 and shares[0] > 0
+    assert pm.rejected_orders == []
 
 
 def test_llm_buy_fractional_size_above_one_truncates():
     assert _llm_buy_shares(10.7) == [10]
+
+
+def test_lot_market_keeps_a_fractional_buy_for_the_executor():
+    """A-share runs keep the float, so 0.6 reaches the executor's lot check
+    instead of being refused or confidence-sized by the gate."""
+    pm = CanonicalPortfolioManager(100000, lot_size=100)
+    fraction, negative, missing = (pm._read_buy_size(v) for v in (0.6, -0.5, None))
+
+    assert fraction == (0.6, None, 0.6)
+    assert negative[1] == "invalid position_size -0.5, not positive"
+    assert missing == (0, None, 0.0)
+
+
+@pytest.mark.parametrize("size", [0.6, -0.5, False])
+def test_strict_llm_does_not_read_a_given_size_as_no_size(size, capsys):
+    """The strict pre-check and the loop share one size reading: a buy whose
+    given size cannot be carried out is skipped and recorded for its size,
+    not rejected as "a buy with no size", even beside an unreadable confidence."""
+    pm, result = _llm_buy_pm(size, confidence=25, strict_llm=True)
+    assert result["actions"] == []
+    out = capsys.readouterr().out
+    assert "no 0-1 confidence" not in out
+    _assert_buy_refused(pm, requested=0.6 if size == 0.6 else 0)
+    assert pm.unusable_confidence_skipped == 0
 
 
 def test_strict_llm_rejects_missing_client_without_rule_fallback(monkeypatch):
@@ -421,6 +614,128 @@ def test_strict_pipeline_accepts_empty_orders_as_model_hold():
     assert result == {"actions": []}
     assert pm.llm_calls == 1
     assert pm.llm_decisions == 1
+
+
+def _paid_pipeline_decision(reply):
+    """One strict pipeline bar on a fail-closed (billed) client, which
+    re-raises any error that is not a transient provider failure."""
+    pm = CanonicalPortfolioManager(100000)
+    client = _FakeClient(_FakeResp(json.dumps(reply), _FakeUsage(3, 2)))
+    client.fail_closed = True
+    result = pm.make_trading_decision_with_llm(
+        _llm_state(),
+        client,
+        pipeline=[
+            {
+                "label": "Trading instruction",
+                "prompt": "Return the orders for this bar.",
+                "outputFormat": '{"orders": []}',
+            }
+        ],
+        strict_llm=True,
+    )
+    return pm, result
+
+
+def test_pipeline_order_with_zero_confidence_does_not_trade():
+    """A pipeline order the model gave confidence 0 stays under the 0.3 floor,
+    and the bar still counts as one the model drove."""
+    pm, result = _paid_pipeline_decision(
+        {"orders": [{"symbol": "AAPL", "side": "buy", "qty": 10, "confidence": 0}]}
+    )
+
+    assert result == {"actions": []}
+    assert pm.llm_calls == 1
+    assert pm.llm_decisions == 1
+
+
+@pytest.mark.parametrize(
+    "confidence",
+    [[], {}, float("nan"), float("inf"), 20, -0.1, True, False, "high",
+     pytest.param(10**400, id="int-past-float")],
+)
+def test_pipeline_order_with_unusable_confidence_trades_its_stated_qty(confidence, capsys):
+    """``[]``/``{}``/``"high"`` raised out of the converter and aborted a paid
+    run after its calls were charged; NaN, Infinity and 20 cleared the 0.3
+    floor (``nan < 0.3`` is False). None of them is read now. The pipeline
+    prompt names no confidence scale, so a value off 0-1 is not the model
+    breaking a contract, and the order it sized itself trades as written."""
+    pm, result = _paid_pipeline_decision(
+        {"orders": [{"symbol": "AAPL", "side": "buy", "qty": 10, "confidence": confidence}]}
+    )
+
+    assert [(a["action"], a["shares"], a["confidence"]) for a in result["actions"]] == [
+        ("buy", 10, None)
+    ]
+    assert pm.llm_calls == 1
+    assert pm.llm_decisions == 1
+    assert pm.unusable_confidence_actions == 1
+    assert "is not a number from 0 to 1; not read" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("confidence", [20, "high", True])
+def test_paid_pipeline_rejects_an_unsized_order_with_unusable_confidence(confidence):
+    """With no qty the gate would size the order from its confidence, which is
+    the case a 0-100 answer multiplied by 100. A billed run stops instead of
+    skipping every buy it pays for."""
+    with pytest.raises(LLMDecisionError, match="confidence"):
+        _paid_pipeline_decision(
+            {"orders": [{"symbol": "AAPL", "side": "buy", "confidence": confidence}]}
+        )
+
+
+def test_paid_pipeline_risk_sell_with_unusable_confidence_still_exits():
+    pm = CanonicalPortfolioManager(100000)
+    pm.positions["AAPL"] = 4
+    client = _FakeClient(_FakeResp(json.dumps(
+        {"risk_actions": [{"symbol": "AAPL", "action": "stop_loss", "confidence": 90}]}
+    ), _FakeUsage(3, 2)))
+    client.fail_closed = True
+    result = pm.make_trading_decision_with_llm(
+        _llm_state(),
+        client,
+        pipeline=[
+            {
+                "label": "Risk",
+                "prompt": "Return the risk actions for this bar.",
+                "outputFormat": '{"risk_actions": []}',
+            }
+        ],
+        strict_llm=True,
+    )
+
+    assert [(a["action"], a["shares"]) for a in result["actions"]] == [("sell", 4)]
+
+
+@pytest.mark.parametrize(
+    "confidence, shares",
+    [("0.9", [5]), (None, [5]), ("0.2", [])],
+)
+def test_pipeline_actions_reply_confidence_is_read_not_formatted_raw(confidence, shares):
+    """An ``actions`` reply reached the gate's ``{confidence:.0%}`` as
+    written: "0.9" raised ValueError and null TypeError, aborting a paid run.
+    A numeric string is now read as its number and null as the 0.5 default."""
+    pm, result = _paid_pipeline_decision(
+        {"actions": [{"symbol": "AAPL", "action": "buy", "position_size": 5,
+                      "confidence": confidence, "reasoning": "x"}]}
+    )
+
+    assert [a["shares"] for a in result["actions"]] == shares
+    assert pm.llm_decisions == 1
+
+
+@pytest.mark.parametrize("qty", ["10.5", float("nan"), float("inf")])
+def test_pipeline_order_with_unreadable_qty_is_skipped_not_auto_sized(qty, capsys):
+    """The converter turned "10.5" and NaN into 0, which the gate auto-sizes
+    from confidence, and raised OverflowError on Infinity (aborting a paid
+    run). The gate now sees the size the model wrote and skips it."""
+    pm, result = _paid_pipeline_decision(
+        {"orders": [{"symbol": "AAPL", "side": "buy", "qty": qty, "confidence": 0.9}]}
+    )
+
+    assert result == {"actions": []}
+    assert pm.llm_decisions == 1
+    assert "unparseable position_size" in capsys.readouterr().out
 
 
 @pytest.mark.parametrize(

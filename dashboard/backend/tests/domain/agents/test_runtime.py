@@ -949,3 +949,27 @@ def test_domain_runtime_module_does_not_import_any_adapter():
     with pytest.raises(Exception) as excinfo:
         RuntimeDispatcher(AI_HEDGE_FUND_RUNTIME_TYPE, {"analysts": ["ben_graham"]})
     assert "requires its runtime instance" in str(excinfo.value)
+
+
+def _decision_fields(confidence):
+    return AiHedgeFundRuntime._common_decision_fields(
+        "AAPL",
+        {"action": "buy", "quantity": 1, "confidence": confidence, "reasoning": "a reason"},
+    )
+
+
+@pytest.mark.parametrize("confidence, expected", [(0, 0.0), (55, 0.55), (100, 1.0)])
+def test_ai_hedge_fund_confidence_is_divided_onto_the_shared_scale(confidence, expected):
+    assert _decision_fields(confidence)[2] == pytest.approx(expected)
+
+
+@pytest.mark.parametrize(
+    "confidence",
+    [-1, 100.5, float("nan"), float("inf"), True, "80",
+     pytest.param(10**400, id="int-past-float")],
+)
+def test_ai_hedge_fund_confidence_off_its_0_100_scale_is_refused(confidence):
+    """An int too large for float() raised OverflowError past the check; it is
+    now out of range like any other, through the shared 0-1 predicate."""
+    with pytest.raises(AiHedgeFundOutputError, match="invalid confidence"):
+        _decision_fields(confidence)

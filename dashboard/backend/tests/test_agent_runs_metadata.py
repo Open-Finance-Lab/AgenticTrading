@@ -158,6 +158,8 @@ def test_engine_llm_run_metadata_snapshot(monkeypatch):
             "model": None,
             "wire": {},
         },
+        "llm_gate_version": engine_mod.LLM_GATE_VERSION,
+        "llm_sell_sizing": "requested_shares",
     }
     backtester.use_llm = False
     assert backtester._agent_run_metadata() == {
@@ -258,4 +260,60 @@ def test_engine_agent_run_wires_the_metadata():
         r"metadata=self\._run_metadata\(\s*baseline_cost_totals,"
         r"[^)]*baseline_allocation=baseline_allocation,",
         engine_src,
+    )
+
+
+def test_engine_records_unreadable_confidence_counts():
+    """A run whose model answered off the 0-1 scale says so in its row. On a
+    row that records the gate version, a missing block is a real zero."""
+    import dashboard.backend.domain.backtesting.engine as engine_mod
+
+    backtester = engine_mod.HourlyBacktester.__new__(engine_mod.HourlyBacktester)
+    backtester.prompt_adaptations = []
+    backtester.initial_pipeline = None
+    backtester.pipeline = None
+    backtester.symbols = ["AAPL"]
+    backtester.data_source = "alpaca"
+    backtester.use_llm = True
+    backtester.unusable_confidence = {"actions": 4, "skipped_buys": 3, "skipped_steps": 2}
+
+    meta = backtester._agent_run_metadata()
+    assert meta["llm_gate_version"] == engine_mod.LLM_GATE_VERSION
+    assert meta["unusable_confidence"] == {
+        "actions": 4,
+        "skipped_buys": 3,
+        "skipped_steps": 2,
+    }
+
+    backtester.unusable_confidence = {}
+    assert "unusable_confidence" not in backtester._agent_run_metadata()
+
+
+def test_engine_names_a_hosted_runs_credits_lane():
+    """A hosted run bills Credits with no execution client to report it.
+
+    Without these the results panel read Billing "—" for a run that charged
+    the user, so the engine names the lane off the hosted meter itself.
+    """
+    import dashboard.backend.domain.backtesting.engine as engine_mod
+    from dashboard.backend.infrastructure.ai_hedge_fund.billing import (
+        HostedDecisionBilling,
+    )
+
+    backtester = engine_mod.HourlyBacktester.__new__(engine_mod.HourlyBacktester)
+    backtester.prompt_adaptations = []
+    backtester.initial_pipeline = None
+    backtester.pipeline = None
+    backtester.symbols = ["AAPL"]
+    backtester.data_source = "alpaca"
+    backtester.use_llm = False
+    backtester.hosted_billing = HostedDecisionBilling(
+        credits=None, user_id=7, run_id="agent_x", model_id="m"
+    )
+
+    meta = backtester._agent_run_metadata()
+
+    assert (meta["billing_mode"], meta["provider_id"]) == (
+        "platform_credits",
+        "openrouter",
     )

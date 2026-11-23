@@ -19,9 +19,10 @@ signed in and to choose how the model calls are paid for, in the same dialog:
 **Provider** where offered, and choose the **Model for this run**; if no key is
 saved and Credits are unavailable, **Go to API Keys** takes you to where keys
 are stored. See :doc:`credits_billing` for how each option is charged. Runs where
-no AI model is involved (rule-based decisions) work without signing in. So does
-the hosted AI Hedge Fund runtime: its model is managed by the platform, so it
-shows no billing choice and spends no Credits.
+no AI model is involved (rule-based decisions) work without signing in. The
+hosted AI Hedge Fund runtime needs you to sign in too, but shows no billing
+choice: its model is managed by the platform and is always paid for with ATL
+Credits.
 
 A run does not start pricing hours the moment you click. The card names the
 stage it is in while it gets there — ``Loading market data``, then
@@ -131,8 +132,8 @@ Accounts (optional)
 
 You can try rule-based backtests without signing in. Creating an account
 persists the agents you register, is required for any backtest driven by an AI
-model you pick (together with an AI billing choice, above — the hosted AI Hedge
-Fund runtime is the exception), and lets you link Discord. Neither dashboard
+model you pick (together with an AI billing choice, above) and for the hosted AI
+Hedge Fund runtime, and lets you link Discord. Neither dashboard
 leaderboard takes user submissions, so your dashboard backtests never appear on
 one. See :doc:`accounts` to sign up and manage your
 profile, and :doc:`credits_billing` for the AI billing options.

@@ -14,11 +14,11 @@
   "top_failure_categories": [
     {
       "error_category": "credential_invalid",
-      "affected_users": 4
+      "event_count": 4
     },
     {
       "error_category": "provider_timeout",
-      "affected_users": 2
+      "event_count": 2
     }
   ],
   "availability": {

@@ -54,7 +54,11 @@ from typing import Any, Dict, List, Optional, Tuple
 from dashboard.backend.database import db
 import dashboard.backend.infrastructure.llm.token_cost as token_cost
 from dashboard.backend.baseline_generator import generate_baselines
-from dashboard.backend.infrastructure.llm.validator import DJIA_30, TOP_10_STOCKS as TOP_10
+from dashboard.backend.infrastructure.llm.validator import (
+    DJIA_30,
+    LLM_SELL_SIZING,
+    TOP_10_STOCKS as TOP_10,
+)
 from dashboard.backend.infrastructure.market_data.strategy_universe import (
     resolve_strategy_universe, validate_selection,
 )
@@ -76,7 +80,13 @@ from dashboard.backend.domain.backtesting.metrics import (
     calculate_sharpe,
     calculate_max_drawdown,
 )
-from dashboard.backend.domain.backtesting.portfolio_manager import PortfolioManager
+from dashboard.backend.domain.backtesting.partial_results import (
+    LIVE_PROGRESS_HEARTBEAT_SECONDS,
+)
+from dashboard.backend.domain.backtesting.portfolio_manager import (
+    LLM_GATE_VERSION,
+    PortfolioManager,
+)
 from dashboard.backend.domain.backtesting.decision_tape import (
     DecisionTapeRecorder,
     build_decision_payload,
@@ -281,6 +291,7 @@ class HourlyBacktester:
         runtime_type: str = DEFAULT_RUNTIME_TYPE,
         runtime_config: Optional[Dict] = None,
         execution_client: Any = None,
+        hosted_billing: Any = None,
         stock_pool: Optional[str] = None,
         pool_mode: Optional[str] = None,
         universe_selection: Optional[Dict] = None,
@@ -317,9 +328,13 @@ class HourlyBacktester:
         self.order_events: List[Dict] = []
         self.market_rule_calendar = None
         self.t1_deferrals: List[Dict] = []
+        # How often the model's confidence was not a 0-1 number (see
+        # PortfolioManager.unusable_confidence_actions); empty when never.
+        self.unusable_confidence: Dict[str, int] = {}
         # Model id; defaults to the gateway-appropriate slug (CommonStack vs native).
         self.model = model or default_model_name()
         self.execution_client = execution_client
+        self.hosted_billing = hosted_billing
         self.live_run_id = (live_run_id or "").strip() or None
         self.owner_user_id = int(owner_user_id) if owner_user_id is not None else None
         self.progress_file = (progress_file or "").strip() or None
@@ -337,7 +352,11 @@ class HourlyBacktester:
             RuntimeDispatcher(
                 self.runtime_type,
                 self.runtime_config,
-                runtime=AiHedgeFundRuntime(self.runtime_config),
+                # The hosted runtime's Credits metering, built by the child
+                # from the signed handoff; None off the API path.
+                runtime=AiHedgeFundRuntime(
+                    self.runtime_config, billing=hosted_billing
+                ),
             )
             if self.runtime_type == AI_HEDGE_FUND_RUNTIME_TYPE
             else None
@@ -1102,8 +1121,14 @@ class HourlyBacktester:
         if tape is not None:
             tape.flush()
 
-    def _publish_live_progress(self, step: int, total_steps: int, manager) -> None:
-        """Write incremental equity curve snapshots for live dashboard charting."""
+    def _publish_live_progress(
+        self, step: int, total_steps: int, manager, *, llm_used: bool = False
+    ) -> None:
+        """Write incremental equity curve snapshots for live dashboard charting.
+
+        ``llm_used`` says whether the model has driven a step yet, which
+        decides the model the durable snapshot is labelled with.
+        """
         # Above the early return, not below it. The phase clock is state, not a
         # side effect of writing, and the progress file is only one of its
         # readers. Below the return an engine with no progress file -- every
@@ -1167,14 +1192,16 @@ class HourlyBacktester:
             **self._progress_phase_fields(),
         }
         self._write_progress_payload(payload)
-        self._flush_live_progress_durable(step, payload)
+        self._flush_live_progress_durable(step, payload, llm_used=llm_used)
 
     #: Flush cadence for the durable partial-result snapshot. Ten bars is
     #: under a second of wall time on the cheapest Neon tier yet bounds a
     #: server crash to losing at most nine bars of curve.
     LIVE_PROGRESS_FLUSH_EVERY_STEPS = 10
 
-    def _flush_live_progress_durable(self, step: int, payload: Dict) -> None:
+    def _flush_live_progress_durable(
+        self, step: int, payload: Dict, *, llm_used: bool = False
+    ) -> None:
         """Mirror the progress payload into the run database, throttled.
 
         The progress FILE lives on the instance's ephemeral disk and dies with
@@ -1183,10 +1210,12 @@ class HourlyBacktester:
         earned. Failures are swallowed: persistence here is a courtesy on top
         of a run whose real write comes at completion, and a flaky DB must not
         stall the bar loop. First step always flushes so a run that dies young
-        still leaves a tombstone; the terminal caller (``_save`` paths) relies
-        on the reclaimer treating snapshots WITHOUT a matching agent_runs row
-        as interrupted, which is why completion also clears via delete in the
-        reclaim path rather than here.
+        still leaves a tombstone. Nothing here deletes the row: the parent does
+        once it knows how the run ended, and a row it never got to is what the
+        reclaimer publishes (``partial_results.py``). Between flushes the
+        child's ``LiveProgressHeartbeat`` keeps the row stamped as alive, and
+        ``heartbeat_seconds`` tells the reclaimer so: a snapshot without it
+        was written before runs heartbeated, and its age proves nothing.
         """
         try:
             if step % self.LIVE_PROGRESS_FLUSH_EVERY_STEPS != 0 and step != 1:
@@ -1196,19 +1225,41 @@ class HourlyBacktester:
             db.upsert_live_progress(
                 str(self.live_run_id),
                 str(self.session_id),
-                str(getattr(self, "agent_name", "") or "agent"),
+                # The name run_agent_backtest's completed row carries.
+                "Agent",
                 {
                     **payload,
+                    # What the reclaimer needs to shape the row like the
+                    # completed one: its owner, and the capital total_return
+                    # is measured against.
                     "run_metadata": {
                         "start_date": getattr(self, "start_date", None),
                         "end_date": getattr(self, "end_date", None),
-                        "mode": getattr(self, "mode", None),
-                        "llm_model": getattr(self, "model", None),
+                        "llm_model": self._recorded_llm_model(llm_used),
+                        "owner_user_id": getattr(self, "owner_user_id", None),
+                        "initial_capital": getattr(self, "initial_capital", None),
+                        "heartbeat_seconds": LIVE_PROGRESS_HEARTBEAT_SECONDS,
                     },
                 },
             )
         except Exception as exc:  # noqa: BLE001 - see docstring
             print(f"   ⚠️  live-progress durable flush skipped: {exc}")
+
+    def _recorded_llm_model(self, llm_used: bool) -> str:
+        """The ``llm_model`` a run's row records: a model only once it drove
+        a step. A hosted runtime is attributed from its own calls; a pipeline
+        run from ``llm_used``. The completed row and the reclaimer's snapshot
+        both read it, so an interrupted run is labelled as it would have been.
+        """
+        if getattr(self, "runtime_type", PIPELINE_RUNTIME_TYPE) != PIPELINE_RUNTIME_TYPE:
+            dispatcher = self.runtime_dispatcher
+            return (
+                str(dispatcher.model_name or "unknown")
+                if dispatcher.calls
+                else "rule-based"
+            )
+        model = getattr(self, "model", None)
+        return str(model) if llm_used and model else "rule-based"
 
     def load_data(self):
         """Fetch source bars and build the strategy's decision-bar dataset."""
@@ -1777,6 +1828,16 @@ class HourlyBacktester:
         if self.use_llm:
             meta["llm_max_output_tokens"] = llm_harness.DEFAULT_MAX_OUTPUT_TOKENS
             meta["llm_sampling"] = self._llm_sampling_metadata()
+            # Which gate turned the model's replies into orders. Its presence
+            # also witnesses the counters below: on a row that records it, an
+            # absent `unusable_confidence` is a real zero.
+            meta["llm_gate_version"] = LLM_GATE_VERSION
+            unusable_confidence = getattr(self, "unusable_confidence", None)
+            if unusable_confidence:
+                meta["unusable_confidence"] = dict(unusable_confidence)
+            # Which rule sized the model's sells: a row without it predates
+            # sells honouring their size (#661) and closed whole positions.
+            meta["llm_sell_sizing"] = LLM_SELL_SIZING
         llm_execution = getattr(self, "_llm_execution_evidence", None)
         execution_client = getattr(self, "execution_client", None)
         if llm_execution is None and execution_client is not None:
@@ -1785,6 +1846,12 @@ class HourlyBacktester:
                 llm_execution = summary()
         if llm_execution is not None:
             meta["llm_execution"] = llm_execution.model_dump(mode="json")
+        hosted_billing = getattr(self, "hosted_billing", None)
+        if hosted_billing is not None:
+            # A hosted run bills Credits without an execution client, so no
+            # `llm_execution` names its lane; the results panel reads these.
+            meta["billing_mode"] = hosted_billing.billing_mode
+            meta["provider_id"] = hosted_billing.provider_id
         if self.prompt_adaptations:
             meta["prompt_adaptations"] = self.prompt_adaptations
         if self.initial_pipeline is not None:
@@ -2069,8 +2136,6 @@ class HourlyBacktester:
         
         # Track LLM usage for results metadata
         llm_calls_count = 0
-        llm_model = "rule-based"  # Default; hosted runs are attributed below,
-        # after the loop, from the calls that actually succeeded.
 
         manager = PortfolioManager(
             initial_capital=self.native_initial_capital,
@@ -2236,8 +2301,6 @@ class HourlyBacktester:
                         strict_llm=self.strict_llm,
                     )
                     llm_calls_count += 1  # Track that LLM was used
-                    if llm_calls_count == 1:  # Set on first call
-                        llm_model = self.model
                     if manager.last_pipeline_step_outputs:
                         day_episode["latest_step_outputs"] = manager.last_pipeline_step_outputs
                 else:
@@ -2399,7 +2462,9 @@ class HourlyBacktester:
                         manager.equity_history[-1]
                     )
                 )
-            self._publish_live_progress(i + 1, total_steps, manager)
+            self._publish_live_progress(
+                i + 1, total_steps, manager, llm_used=llm_calls_count > 0
+            )
 
             if post_trade_steps and is_last_bar_of_trading_day(all_timestamps, i):
                 self._run_daily_post_trade(
@@ -2461,12 +2526,7 @@ class HourlyBacktester:
             if self.runtime_type != PIPELINE_RUNTIME_TYPE
             else 0
         )
-        if self.runtime_type != PIPELINE_RUNTIME_TYPE:
-            llm_model = (
-                str(self.runtime_dispatcher.model_name or "unknown")
-                if runtime_calls
-                else "rule-based"
-            )
+        llm_model = self._recorded_llm_model(llm_calls_count > 0)
         # Upstream does not report token usage back across the bridge, so a
         # hosted run's tokens and cost stay 0. The call count is what makes the
         # row self-consistent rather than silently understating the run.
@@ -2522,6 +2582,15 @@ class HourlyBacktester:
         self._llm_execution_evidence = llm_execution
 
         self.t1_deferrals = self._serialize_t1_deferrals(manager.t1_deferrals)
+        self.unusable_confidence = {
+            key: count
+            for key, count in (
+                ("actions", getattr(manager, "unusable_confidence_actions", 0)),
+                ("skipped_buys", getattr(manager, "unusable_confidence_skipped", 0)),
+                ("skipped_steps", getattr(manager, "confidence_skipped_steps", 0)),
+            )
+            if count
+        }
         self.rejected_orders = self._serialize_rejected_orders(
             manager.rejected_orders
         )
