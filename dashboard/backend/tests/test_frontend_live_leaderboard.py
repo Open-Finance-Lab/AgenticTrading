@@ -14,6 +14,9 @@ import pytest
 _FRONTEND = Path(__file__).resolve().parents[2] / "frontend"
 _APP_HTML = (_FRONTEND / "app.html").read_text(encoding="utf-8")
 _LIVE_JS = (_FRONTEND / "js" / "live-leaderboard.js").read_text(encoding="utf-8")
+# Loaded before live-leaderboard.js in app.html; the Live Sharpe cell borrows
+# its formatter (formatBoardSharpe) and sort predicate (boardSharpeValue).
+_LEADERBOARD_JS = (_FRONTEND / "js" / "leaderboard.js").read_text(encoding="utf-8")
 _APP_JS = (_FRONTEND / "app.js").read_text(encoding="utf-8")
 
 
@@ -156,3 +159,245 @@ def test_live_nav_round_trips():
     body = _APP_JS[body_start : _APP_JS.index("function buildNavigationUrl")]
     assert "return 'live'" in body
     assert "competitionTab === 'live'" in body or 'competitionTab === "live"' in body
+
+
+# --- Sharpe: displayed, never recomputed (D20), always with its interval -----
+
+from dashboard.backend.domain.backtesting.metrics import (  # noqa: E402
+    SHARPE_MIN_DAYS,
+    daily_sharpe_basis,
+)
+from dashboard.backend.tests._frontend_source import fn_body, run_node  # noqa: E402
+
+_SHARPE_BASIS = daily_sharpe_basis()
+_SHARPE_OK = {
+    "sharpe_status": "ok",
+    "sharpe_ratio": 2.611715,
+    "sharpe_ci_low": -11.39649,
+    "sharpe_ci_high": 16.619919,
+    "sharpe_days": 5,
+}
+_DECISION_5_TITLE = (
+    "Return above what cash would have earned, divided by how much the daily "
+    "returns swung. Based on 5 trading days; cash rate 0%/yr; scaled to a yearly figure."
+)
+
+
+def _board_sharpe_js():
+    """leaderboard.js's Sharpe helpers and their exports, lifted: the whole file
+    plus live-leaderboard.js overruns `node -e`'s 128 KB argument limit."""
+    return "\n".join([
+        fn_body("function finiteNumber(", _LEADERBOARD_JS),
+        fn_body("function boardSharpeValue(", _LEADERBOARD_JS),
+        fn_body("function formatBoardSharpe(", _LEADERBOARD_JS),
+        "window.formatBoardSharpe = formatBoardSharpe;",
+        "window.boardSharpeValue = boardSharpeValue;",
+    ])
+
+
+def _format_sharpe(entry, basis=_SHARPE_BASIS):
+    script = "\n".join([
+        "const window = {};",
+        _board_sharpe_js(),
+        fn_body("function liveFormatSharpe(", _LIVE_JS),
+        f"console.log(JSON.stringify(liveFormatSharpe({json.dumps(entry)}, {json.dumps(basis)})));",
+    ])
+    return run_node(script)
+
+
+def _sharpe_row(entry_id, **fields):
+    return {
+        "entry_id": entry_id, "model": entry_id, "team_badge": "Model", "is_model": True,
+        "status": "frozen", "portfolio_value": 100000, "cumulative_return": 0.01,
+        "max_drawdown": -0.01, "num_trades": 1, "equity_curve": [], **fields,
+    }
+
+
+def _render_live(entries, *, selected=None):
+    """Load the whole shipped file under node, then paint the table and detail.
+
+    Whole-file rather than lifted functions, so a helper another change adds
+    to populateLiveTable cannot turn this into a ReferenceError. If node
+    reports one for a helper defined in app.js, add its `fn_body(...)` here.
+    """
+    script = "\n".join([
+        "const window = {};",
+        fn_body("function escapeHtml("),
+        _board_sharpe_js(),
+        _LIVE_JS,
+        "const tbody = { innerHTML: '' }; const detail = { innerHTML: '' };",
+        "const document = {",
+        "  getElementById: (id) => (id === 'liveSelectedDetail' ? detail : tbody),",
+        "  querySelectorAll: () => [],",
+        "};",
+        f"livePayload = {{ entries: {json.dumps(entries)}, live_status: {{ sharpe: {json.dumps(_SHARPE_BASIS)} }} }};",
+        "liveSortKey = 'sharpe'; liveSortDir = 'desc';",
+        "populateLiveTable();",
+        f"renderLiveDetail(livePayload.entries.find((e) => e.entry_id === {json.dumps(selected)}) || null);",
+        "console.log(JSON.stringify({ table: tbody.innerHTML, detail: detail.innerHTML, "
+        + "order: liveSortedEntries().map((e) => e.entry_id) }));",
+    ])
+    return run_node(script)
+
+
+def test_live_js_never_recomputes_sharpe():
+    source = _strip_js_comments(_LIVE_JS)
+    assert "Math.sqrt" not in source
+    assert "stdev" not in source.lower()
+    assert "Number(entry.sharpe_ratio).toFixed" not in source
+
+
+@_needs_node
+def test_format_sharpe_shows_the_value_with_its_interval():
+    out = _format_sharpe(_SHARPE_OK)
+    assert out == {
+        "main": "2.61",
+        "sub": "95% interval -11.40 to 16.62",
+        "title": _DECISION_5_TITLE,
+    }
+
+
+@_needs_node
+def test_format_sharpe_tooltip_reads_the_payloads_cash_rate():
+    out = _format_sharpe(_SHARPE_OK, {**_SHARPE_BASIS, "rf_annual": 0.0252})
+    assert "cash rate 2.52%/yr" in out["title"]
+
+
+@_needs_node
+def test_format_sharpe_explains_every_dash():
+    short = _format_sharpe({"sharpe_status": "insufficient_days", "sharpe_ratio": None, "sharpe_days": 3})
+    assert short == {"main": "—", "sub": f"Needs {SHARPE_MIN_DAYS} trading days (have 3)", "title": ""}
+    flat = _format_sharpe({"sharpe_status": "no_variation", "sharpe_ratio": None, "sharpe_days": 6})
+    assert flat == {"main": "—", "sub": "Returns never moved", "title": ""}
+    undefined = _format_sharpe({"sharpe_status": "undefined", "sharpe_ratio": None, "sharpe_days": 6})
+    assert undefined == {"main": "—", "sub": "Cannot be computed", "title": ""}
+    pending = _format_sharpe({"sharpe_status": "pending", "sharpe_ratio": None, "sharpe_days": 0})
+    assert pending == {"main": "—", "sub": "", "title": ""}
+    # An ok status with a missing bound is malformed: no number without its interval.
+    torn = _format_sharpe({**_SHARPE_OK, "sharpe_ci_high": None})
+    assert torn["main"] == "—"
+    # A payload from before the basis existed still says what is missing.
+    no_basis = _format_sharpe({"sharpe_status": "insufficient_days", "sharpe_days": 2}, None)
+    assert no_basis["sub"] == "Needs more trading days (have 2)"
+
+
+@_needs_node
+def test_live_table_and_detail_render_the_interval_and_sort_null_last():
+    out = _render_live(
+        [
+            _sharpe_row("up", **_SHARPE_OK),
+            _sharpe_row("young", sharpe_status="insufficient_days", sharpe_ratio=None, sharpe_days=3),
+            _sharpe_row("down", sharpe_status="ok", sharpe_ratio=-0.5, sharpe_ci_low=-14.2,
+                        sharpe_ci_high=13.2, sharpe_days=5),
+        ],
+        selected="up",
+    )
+    assert out["order"] == ["up", "down", "young"]
+    assert "95% interval -11.40 to 16.62" in out["table"]
+    assert f'title="{_DECISION_5_TITLE}"' in out["table"]
+    assert "Needs 5 trading days (have 3)" in out["table"]
+    assert "Sharpe ratio" in out["detail"]
+    assert "2.61 · 95% interval -11.40 to 16.62" in out["detail"]
+
+
+@_needs_node
+def test_null_sharpe_sorts_last_in_both_directions():
+    rows = [
+        _sharpe_row("none", sharpe_status="insufficient_days", sharpe_ratio=None, sharpe_days=3),
+        _sharpe_row("neg", sharpe_status="ok", sharpe_ratio=-0.5, sharpe_ci_low=-14.0,
+                    sharpe_ci_high=13.0, sharpe_days=5),
+        _sharpe_row("pos", **_SHARPE_OK),
+    ]
+    script = "\n".join([
+        "const window = {};",
+        _board_sharpe_js(),
+        _LIVE_JS,
+        f"livePayload = {{ entries: {json.dumps(rows)} }}; liveSortKey = 'sharpe';",
+        "liveSortDir = 'desc'; const desc = liveSortedEntries().map((e) => e.entry_id);",
+        "liveSortDir = 'asc'; const asc = liveSortedEntries().map((e) => e.entry_id);",
+        "console.log(JSON.stringify({ desc, asc }));",
+    ])
+    out = run_node(script)
+    assert out == {"desc": ["pos", "neg", "none"], "asc": ["neg", "pos", "none"]}
+
+
+def test_live_sharpe_header_states_its_basis_in_plain_words():
+    live_html = _APP_HTML.split('id="liveLeaderboardView"')[1].split('id="leaderboardView"')[0]
+    match = re.search(r'<th[^>]*data-sort="sharpe"[^>]*title="([^"]*)"', live_html)
+    assert match, "the Live Sharpe header lost its tooltip"
+    title = match.group(1)
+    assert "Return above what cash would have earned" in title
+    assert "divided by how much the daily returns swung" in title
+    assert "scaled to a yearly figure" in title
+    assert f"Shown from {SHARPE_MIN_DAYS} trading days" in title
+    assert "95% interval" in title
+    for jargon in ("T-bill", "excess", "√252", "sqrt", "sample SD"):
+        assert jargon not in title
+    assert "noisy until a few weeks" not in _APP_HTML
+
+
+@_needs_node
+def test_an_old_payloads_hourly_number_is_neither_shown_nor_sorted():
+    """Vercel can serve this file before Render serves the new payload: a row
+    with a stored hourly ``sharpe_ratio`` and no status must read "—" and sort
+    with the absent rows, not by the hidden value."""
+    assert _format_sharpe({"sharpe_ratio": 1.7}) == {"main": "—", "sub": "", "title": ""}
+    out = _render_live(
+        [
+            _sharpe_row("stale", sharpe_ratio=9.7),
+            _sharpe_row("up", **_SHARPE_OK),
+            _sharpe_row("young", sharpe_status="insufficient_days", sharpe_ratio=None, sharpe_days=3),
+        ],
+        selected="young",
+    )
+    assert out["order"][0] == "up"
+    assert set(out["order"][1:]) == {"stale", "young"}
+    assert "9.70" not in out["table"]
+    assert "Needs 5 trading days (have 3)" in out["detail"]
+
+
+@_needs_node
+def test_format_sharpe_never_prints_minus_zero_or_an_invented_day_count():
+    tiny = _format_sharpe({**_SHARPE_OK, "sharpe_ratio": -0.004, "sharpe_ci_low": -0.004,
+                           "sharpe_ci_high": 0.003})
+    assert tiny["main"] == "0.00"
+    assert tiny["sub"] == "95% interval 0.00 to 0.00"
+    no_days = _format_sharpe({k: v for k, v in _SHARPE_OK.items() if k != "sharpe_days"})
+    assert no_days["main"] == "2.61"
+    assert "trading days" not in no_days["title"]
+    assert "cash rate 0%/yr" in no_days["title"]
+
+
+@_needs_node
+def test_an_unprinted_row_carries_no_sharpe_tooltip_or_rank():
+    """A row with no stored final value renders "—" everywhere; its Sharpe
+    tooltip must not describe a number the cell does not show."""
+    out = _render_live(
+        [
+            _sharpe_row("unprinted", portfolio_value=None, **_SHARPE_OK),
+            _sharpe_row("down", sharpe_status="ok", sharpe_ratio=-0.5, sharpe_ci_low=-14.2,
+                        sharpe_ci_high=13.2, sharpe_days=5),
+        ],
+        selected="unprinted",
+    )
+    assert out["table"].count("Based on 5 trading days") == 1  # "down" only
+    assert "Based on 5 trading days" not in out["detail"]
+    assert out["order"] == ["down", "unprinted"]
+
+
+@_needs_node
+def test_live_sharpe_is_the_competition_formatter_not_a_copy():
+    """One wording for both boards: liveFormatSharpe delegates rather than
+    re-implementing (a parity test over two copies misses any case it does not
+    enumerate). Without leaderboard.js it shows a dash, never its own words."""
+    code = _strip_js_comments(fn_body("function liveFormatSharpe(", _LIVE_JS))
+    assert "window.formatBoardSharpe(entry, basis)" in code
+    assert "toFixed" not in code and "interval" not in code
+    alone = run_node("\n".join([
+        "const window = {};",
+        fn_body("function liveFormatSharpe(", _LIVE_JS),
+        fn_body("function liveSortValue(", _LIVE_JS),
+        f"console.log(JSON.stringify([liveFormatSharpe({json.dumps(_SHARPE_OK)}, null), "
+        f"liveSortValue({json.dumps(_SHARPE_OK)}, 'sharpe')]));",
+    ]))
+    assert alone == [{"main": "—", "sub": "", "title": ""}, None]

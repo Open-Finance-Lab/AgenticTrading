@@ -10222,6 +10222,14 @@ body.agent-editor-open {
     gap: 10px;
 }
 
+/* The display: flex rules here are author styles, so they beat the browser's
+   own [hidden] { display: none }. agent-editor.js hides the whole panel, and the
+   live toggle inside it, while the Robinhood path is switched off. */
+.agent-editor-broker[hidden],
+.agent-editor-live-toggle[hidden] {
+    display: none;
+}
+
 .agent-editor-broker-head {
     display: flex;
     align-items: center;

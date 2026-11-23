@@ -366,6 +366,39 @@ def test_deleted_shims_absent_from_production_and_scripts():
     assert offenders == [], f"deleted shim paths still imported: {offenders}"
 
 
+_DELETED_ANALYTICS_MODULES = (
+    "dashboard.backend.domain.analytics.states",
+    "dashboard.backend.domain.analytics.lifecycle_backfill",
+    "dashboard.backend.domain.analytics.maintenance",
+)
+
+
+@pytest.mark.parametrize("module_name", _DELETED_ANALYTICS_MODULES)
+def test_deleted_five_state_module_is_not_importable(module_name):
+    """Design §13 row B: the five-state model left in PR B. These are plain
+    modules, not package directories, so a leftover __pycache__ cannot make
+    the import succeed -- unlike the deleted shim *packages* in _DELETED_SHIMS,
+    whose stale .pyc dirs resolve as PEP-420 namespace packages. Python never
+    imports a sourceless .pyc from __pycache__."""
+    with pytest.raises(ModuleNotFoundError):
+        importlib.import_module(module_name)
+
+
+def test_app_no_longer_registers_analytics_maintenance_with_the_reaper():
+    source = (Path(__file__).resolve().parents[1] / "app.py").read_text(encoding="utf-8")
+    assert "run_analytics_maintenance" not in source
+    assert "analytics.maintenance_registration_failed" not in source
+
+
+def test_rollup_day_writes_no_five_state_rows():
+    import inspect
+
+    from dashboard.backend.domain.analytics import rollups
+
+    assert "user_state_count" not in inspect.getsource(rollups.rollup_day)
+    assert "state_counts" not in inspect.signature(rollups.rollup_day).parameters
+
+
 # ---------------------------------------------------------------------------
 # Chat / Discord import safety: no secrets, no network at import time
 # ---------------------------------------------------------------------------
@@ -557,34 +590,30 @@ def test_portfolio_manager_construction_always_declares_settlement():
 # ---------------------------------------------------------------------------
 
 _ANALYTICS = _BACKEND / "domain" / "analytics"
-_EVENT_READ_NAMES = {"list_events", "list_user_events", "list_metric_events"}
+_EVENT_READ_NAMES = {
+    "list_events",
+    "list_user_events",
+    "list_metric_events",
+    "first_event_times",
+}
 # Files that may call a raw-event reader, each with the reason. Rules 3-5: the
 # paginated timeline and the overview's one-day scan are the only permitted raw
 # reads; everything else reads rollups or user_daily_facts. Every entry must
-# still contain a hit (the stale check below), so PR B removes the last two as
-# it deletes the files and narrows the others as it moves the reads.
+# still contain a hit (the stale check below); PR B removed the five-state
+# calculator's and the lifecycle backfill's entries with their files.
 _EVENT_READ_ALLOWLIST = {
     "dashboard/backend/domain/analytics/rollups.py": (
-        "defines AnalyticsRollupStore.list_events; rollup_day / rollup_current_day "
-        "are the day rollups and the overview's current-day scan (rule 5), "
-        "narrowed to one UTC day in PR B"
+        "defines AnalyticsRollupStore.list_events; rollup_day is the day "
+        "rollup (rule 5), its read bounded to the day plus its 30-day trailing "
+        "context. (The startup migration's activation_users backfill is one "
+        "grouped SQL read here too, outside this name-based check.)"
     ),
     "dashboard/backend/domain/analytics/query_service.py": (
         "the paginated timeline (rule 3) and the overview's current-day read "
-        "(rule 5); PR B narrows the overview read and gives sessions a 30-day window"
-    ),
-    "dashboard/backend/domain/analytics/value_queries.py": (
-        "the retention grid's per-activation-week scan and the one-user profile "
-        "scan; PR B moves both onto user_daily_facts / user_activity"
-    ),
-    "dashboard/backend/domain/analytics/states.py": (
-        "legacy five-state calculator: full-history per-user reads. DELETED IN "
-        "PR B (design SS13 row B); allowlisted, not fixed, because PR A creates "
-        "and PR B drops"
-    ),
-    "dashboard/backend/domain/analytics/lifecycle_backfill.py": (
-        "historical eight-week reconstruction, per-user history reads. DELETED "
-        "IN PR B; the copy in facts_migration.py carries the history now"
+        "(rule 5), bounded to one UTC day; the sessions read has a 30-day "
+        "window; first_event_times is the profile's grouped MIN() for its two "
+        "activation milestones, at most two rows (design SS6.12, amended "
+        "2026-10-16)"
     ),
 }
 _OWN_CONNECTION_RECEIVERS = {"self", "self.analytics_base", "self.base_store"}

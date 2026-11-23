@@ -24,6 +24,7 @@ from dashboard.backend.domain.backtesting.constants import (
     MAX_BACKTEST_INITIAL_CAPITAL,
     MIN_BACKTEST_INITIAL_CAPITAL,
     new_agent_cash_allocation,
+    robinhood_live_enabled,
 )
 from dashboard.backend.domain.agents.repository import _UNSET
 from dashboard.backend.domain.agents.taxonomy import AgentCategory, coerce_category
@@ -453,6 +454,17 @@ def update_agent(
         and not category_provided
     ):
         raise HTTPException(status_code=400, detail="No fields to update")
+
+    # This route is the only writer of live_trading_enabled, so refusing here keeps
+    # the switch closed at the API and not only in the editor: a tab still running
+    # a pre-switch agent-editor.js, or any API client, could otherwise re-arm an
+    # agent after an operator cleared the column, and a restore would bring it
+    # back armed. ``false`` stays accepted, so disarming is always possible.
+    if live_trading_provided and body.live_trading_enabled and not robinhood_live_enabled():
+        raise HTTPException(
+            status_code=409,
+            detail="Robinhood live trading is switched off, so live trading cannot be enabled.",
+        )
 
     # ``category_provided`` (not ``body.category is not None``) is what separates
     # "clear the shelf" from "leave it alone" -- ``{"category": null}`` and

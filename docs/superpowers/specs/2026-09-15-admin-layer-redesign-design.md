@@ -224,7 +224,7 @@ The 09-12 document ranked cost control **first**. *Why it moved:* that ranking w
 
 ### Metrics
 
-**D13 — `top_failure_categories` is kept and served from `analytics_daily_rollups` on the `error_category` dimension.** *Why:* the 09-12 rewrite silently deleted it (zero mentions across its 4,930 lines of spec and plan), while both frontends render it. The rollups already key on `error_category`, so keeping it costs no schema change and no raw-event read.
+**D13 — `top_failure_categories` is kept and served from `analytics_daily_rollups` on the `error_category` dimension.** *Why:* the 09-12 rewrite silently deleted it (zero mentions across its 4,930 lines of spec and plan), while both frontends render it. The rollups already key on `error_category`, so keeping it costs no schema change and no raw-event read. (**Amended 2026-10-16**, #647.) Each category counts **events**, from `event_count` rows plus today's raw slice, with or without a billing/provider/model filter. The rollups are anonymous, so a distinct-user count over a range would need a raw read or a rollup keyed by user. Summing the per-day distinct-user rows counts user-days, and those rows had no dimensions, so a filtered view counted events anyway. The field is `event_count`, renamed from `affected_users`, and `rollup_day` no longer writes the `affected_users` family. PR B makes this one contract and frontend change, to `admin-overview.js` (one field and the column header), in the same commit as its only reader.
 
 **D14 — Billing-lane mix (BYOK vs platform credits) is kept, from the rollups' `billing_mode` dimension.** Same reasoning as D13.
 
@@ -474,7 +474,7 @@ Pinned by a test that wraps **every store the job touches** — analytics, credi
 | daily job, per UTC day | a constant number of queries, independent of user count, none parameterised by a single user id |
 | daily job, per UTC day (**Amended**, new) | wall-clock under a fixed bound at 200 users, and the 400-user run no more than 2.5× the 200-user run, so a constant-count step that scans an unindexed table or hides a quadratic fold is caught |
 | admin overview page load | at most 1 raw-event query, windowed to the current UTC day |
-| admin user profile load | at most 1 raw-event query (timeline page) |
+| admin user profile load | at most 1 raw-event query (timeline page), plus (**Amended 2026-10-16**) one grouped `MIN(occurred_at)` returning at most 2 rows for the `credential_verified` / `agent_created` milestones — first occurrences the newest-100 page cannot answer (PR B review #8). Moving them onto `user_activity` would drop it; not done in PR B because it touches the ingestion hot path |
 
 The PR A plan fixes the daily-job constant from the final step list and the test pins that exact number. The test fails on the first user-id-parameterised query inside the daily job regardless of count, and it fails if doubling the synthetic user count changes the query count at all.
 

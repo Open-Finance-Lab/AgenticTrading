@@ -15,21 +15,18 @@
   },
   "C01/DL": {
     "cash": [
-      "cash: expected 0, actual 1000"
+      "cash: expected 0, actual 500"
     ],
     "fills": [
-      "fills[o3@2026-03-02T11:30:00-05:00].qty: expected 5, actual 10",
       "fills[o2@2026-03-02T11:30:00-05:00]: expected price 50 qty 10, actual no fill on that bar"
     ],
     "invariants": [
       "invariant 7: o2 has 0 terminal OrderFinal(s), expected 1"
     ],
     "orders": [
-      "orders[o2]: expected filled/- filled 10, actual no terminal OrderFinal",
-      "orders[o3]: expected filled/- filled 5, actual filled/- filled 10"
+      "orders[o2]: expected filled/- filled 10, actual no terminal OrderFinal"
     ],
     "positions": [
-      "positions[AAPL]: expected 5, actual not held",
       "positions[MSFT]: expected 10, actual not held"
     ]
   },
@@ -86,15 +83,14 @@
   "C04/DL": {
     "fills": [
       "fills[o4@2026-03-02T11:30:00-05:00]: expected price 100 qty 10, actual no fill on that bar",
-      "fills[o2@2026-03-02T11:30:00-05:00]: expected no fill, actual price 100 qty 10"
+      "fills[o3@2026-03-02T11:30:00-05:00]: expected no fill, actual price 100 qty 10"
     ],
     "invariants": [
       "invariant 7: o4 has 0 terminal OrderFinal(s), expected 1",
       "invariant 7: o5 has 0 terminal OrderFinal(s), expected 1"
     ],
     "orders": [
-      "orders[o2]: expected rejected/invalid_quantity filled 0, actual filled/- filled 10",
-      "orders[o3]: expected rejected/invalid_quantity filled 0, actual rejected/no_position filled 0",
+      "orders[o3]: expected rejected/invalid_quantity filled 0, actual filled/- filled 10",
       "orders[o4]: expected partially_filled/clipped_to_position filled 10, actual no terminal OrderFinal",
       "orders[o5]: expected rejected/no_position filled 0, actual no terminal OrderFinal"
     ]

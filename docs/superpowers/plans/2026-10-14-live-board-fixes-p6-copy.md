@@ -1925,14 +1925,14 @@ git push -u origin feat/live-board-copy
 gh pr create --base main --head feat/live-board-copy \
   --title "feat(live): Live Leaderboard copy and catching-up badge" \
   --body-file - <<'EOF'
+**Do not merge from 22:15 UTC on a weekday until that night's live refresh has finished** (the check is in `docs/superpowers/plans/2026-10-14-live-board-fixes.md`, Merging and records). GitHub starts the 22:30 UTC cron as late as 03:05 UTC, and the refresh keeps running on Render after the workflow run ends. The merge auto-deploys prod, and the restart kills a running refresh, so the sessions it had not checkpointed are billed again on the next night.
+
 - Renames the Live board "Live Leaderboard" in-app and in the payload. `board_title` and `phase_label` ("Season 0 · preview") now come from `service.LIVE_BOARD_TITLE` and `service.LIVE_PHASE_LABEL`. This is the only API-visible change.
 - Live header: the subtitle is now "Simulated fills · forward-only · no real money", and the Updated stat is now static ("Nightly after the close") instead of the request clock.
 - The Competition header now reads "legacy engine · historical window · may overlap model training data".
 - Both boards' Rules and About cards now say stop-loss and take-profit prices are not executed (D12). `test_stop_prices_not_enforced.py` pins that the legacy single-prompt path drops them. The prompt is unchanged.
 - #586: catching-up rows get a "Catching up" badge and a "Status: Catching up · through <date>" detail row. The banner now reads the rows instead of `live_status.models_cached`, which counts ranked rows only, and a sorted table keeps catching-up rows below every current row. Phase 3's healthy-board test fixture now carries a printed model row to match.
 - Not in this PR: the landing `Race.tsx`/bundle and `docs/source` still say "Live Trading Leaderboard" (owner-coordinated follow-up). Cache-busters: `js/leaderboard.js` and `js/live-leaderboard.js` are bumped by 1. Merging auto-deploys prod.
-
-Do not merge between 22:15 and 23:30 UTC on a weekday. The merge auto-deploys prod, and the Render restart kills the 22:30 UTC live refresh thread mid-run, so that night's session is billed again on the next night.
 
 Closes #586
 EOF
@@ -1956,7 +1956,7 @@ done
 
 - [ ] **Step 4: Merge**
 
-  Merge only once Step 3 holds and CI is green, and never inside the weekday window the PR body names (22:15–23:30 UTC). Once merged, the PR is write-only: file follow-ups as issues, not comments.
+  Merge only once Step 3 holds and CI is green, and never while a live refresh may be running (the PR body's first line). Once merged, the PR is write-only: file follow-ups as issues, not comments.
 
 #### Phase 6 review-focus candidates
 

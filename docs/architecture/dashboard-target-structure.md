@@ -87,7 +87,8 @@ dashboard/
   code never imports `dashboard.scripts`.
 - **Imports:** first-party imports use the canonical `dashboard.backend.*` path.
 - **Backend tests:** `python -m pytest dashboard/backend/tests -q` (use
-  `.venv/bin/python` so optional deps like `discord.py` are present).
+  `.venv/bin/python`, or `.venv/Scripts/python.exe` on Windows, so optional
+  deps like `discord.py` are present).
 
 ```python
 # canonical import examples

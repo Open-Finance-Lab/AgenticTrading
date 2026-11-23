@@ -11,6 +11,10 @@ import { defineConfig } from 'vite';
 //   * The Replit-only vite plugins (cartographer, dev-banner,
 //     runtime-error-modal) were dropped; they only ran inside Replit and their
 //     versions came from the (now-absent) workspace catalog.
+// The dev and preview servers bind to localhost with Vite's default Host-header
+// check. Replit needed 0.0.0.0 + `allowedHosts: true`; off Replit that exposes
+// the dev server, and every file-access advisory Vite ships against it, to the
+// LAN and to DNS-rebinding pages. Pass `--host` to share it on a trusted network.
 const port = Number(process.env.PORT ?? '5173');
 const basePath = process.env.BASE_PATH ?? '/';
 
@@ -32,15 +36,11 @@ export default defineConfig({
   server: {
     port,
     strictPort: true,
-    host: '0.0.0.0',
-    allowedHosts: true,
     fs: {
       strict: true,
     },
   },
   preview: {
     port,
-    host: '0.0.0.0',
-    allowedHosts: true,
   },
 });

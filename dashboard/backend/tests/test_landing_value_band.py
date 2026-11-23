@@ -7,7 +7,8 @@ but never state the problem being solved or who it is for.
 Also pins the two claims that must never appear here. Corrected 2026-08-15: the
 old rationale said "no order-submission route exists on any surface", which is
 stale — `execution/robinhood_live_service.py` is the live-money path and
-`api/routers/robinhood_live.py` mounts it. It is armed only by ROBINHOOD_EXECUTE,
+`api/routers/robinhood_live.py` mounts it (switched off since 2026-10-22 by
+`robinhood_live_enabled()`). It is armed only by ROBINHOOD_EXECUTE,
 which defaults false, and it is a separate opt-in per-user path, not something
 this band's subject (the Lab's simulated Talk/Test/Race flow) reaches. So the ban
 is on implying *these* flows trade real money, not on the platform having a

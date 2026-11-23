@@ -31,6 +31,7 @@ from dashboard.backend.api.rate_limit import (
 from dashboard.backend.domain.brokers.repository import broker_store
 from dashboard.backend.domain.analytics import instrumentation as analytics_instrumentation
 from dashboard.backend.domain.agents.service import agent_service
+from dashboard.backend.domain.backtesting.constants import robinhood_live_enabled
 from dashboard.backend.domain.credits.service import credits_service
 from dashboard.backend.infrastructure.brokers import pending_links, robinhood_oauth
 from dashboard.backend.infrastructure.email import sender as email_sender
@@ -1531,11 +1532,31 @@ def delete_avatar(current_user: dict = Depends(get_current_user)):
     return {"user": _store_avatar(current_user["id"], None)}
 
 
+# The Robinhood real-money path is switched off (``robinhood_live_enabled()``,
+# domain/backtesting/constants.py). Off, ``start`` and ``complete`` answer 404
+# through ``require_robinhood_live``, and the callback returns the browser to
+# /app with ``robinhood=disabled`` without exchanging its code, so a link that
+# was in flight when the switch went off never obtains tokens.
+ROBINHOOD_LIVE_SWITCHED_OFF_DETAIL = "Robinhood live trading is switched off."
+
+
+def require_robinhood_live() -> None:
+    """Refuse a route that would start or use a real-money link while the path is off.
+
+    404 rather than 403/503: off, these routes behave as if they were not
+    mounted, which is what switching the path off means. Shared with
+    ``api/routers/robinhood_live.py``, which imports it from here because that
+    module already depends on this one.
+    """
+    if not robinhood_live_enabled():
+        raise HTTPException(status_code=404, detail=ROBINHOOD_LIVE_SWITCHED_OFF_DETAIL)
+
+
 class RobinhoodStartBody(BaseModel):
     agent_id: Optional[str] = Field(default=None, max_length=64)
 
 
-@router.post("/robinhood/start")
+@router.post("/robinhood/start", dependencies=[Depends(require_robinhood_live)])
 async def robinhood_oauth_start(
     body: RobinhoodStartBody | None = None,
     current_user: dict = Depends(get_current_user),
@@ -1608,7 +1629,14 @@ async def robinhood_oauth_callback(code: Optional[str] = None, state: Optional[s
     tokens in a single-use, short-lived slot and returns only the opaque code
     for it; ``POST /auth/robinhood/complete`` redeems that code against a real
     session and refuses to bind the tokens to a different account.
+
+    Stays mounted while the path is switched off, because a browser that left
+    for Robinhood before the switch went off still comes back here: it gets
+    /app with ``robinhood=disabled`` instead of a bare 404 page, and its code
+    is never exchanged.
     """
+    if not robinhood_live_enabled():
+        return _app_redirect({"robinhood": "disabled"})
     if not code or not state:
         return _app_redirect({"robinhood": "error", "reason": "missing_params"})
     try:
@@ -1652,7 +1680,7 @@ async def robinhood_oauth_callback(code: Optional[str] = None, state: Optional[s
     return _app_redirect(query)
 
 
-@router.post("/robinhood/complete")
+@router.post("/robinhood/complete", dependencies=[Depends(require_robinhood_live)])
 async def robinhood_oauth_complete(
     body: RobinhoodCompleteBody,
     current_user: dict = Depends(get_current_user),

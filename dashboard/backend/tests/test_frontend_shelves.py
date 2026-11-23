@@ -68,8 +68,7 @@ _RETIRED_SECTION_HEADERS = (
 )
 
 _CANONICAL_NO_REAL_MONEY_SENTENCE = (
-    "Every test here uses simulated money. Real money is involved only if "
-    "you explicitly connect a brokerage account and turn on live trading."
+    "Every test here uses simulated money."
 )
 
 # Live shelf id suffix -> the AGENT_SHELVES key it corresponds to. Locked rows
@@ -478,8 +477,7 @@ def test_community_page_carries_the_no_real_money_sentence_once():
     """
     community_html = _community_view_html()
     shortened = (
-        "Performance is based on simulated tests and may vary between runs. "
-        "Live trading requires an explicitly connected brokerage account."
+        "Performance is based on simulated tests and may vary between runs."
     )
     assert community_html.count(shortened) == 1
     assert _CANONICAL_NO_REAL_MONEY_SENTENCE not in community_html

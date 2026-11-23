@@ -195,7 +195,6 @@ def test_backfill_uses_only_authoritative_candidates(tmp_path):
         now=NOW,
         source=source,
         store=store,
-        recalculate_snapshot=lambda *_args, **_kwargs: None,
         rebuild_rollup=lambda *_args, **_kwargs: None,
     )
     events = store.list_user_events(1, limit=50)["items"]
@@ -222,7 +221,6 @@ def test_backfill_ids_are_deterministic_and_idempotent(tmp_path):
         now=NOW,
         source=source,
         store=store,
-        recalculate_snapshot=lambda *_args, **_kwargs: None,
         rebuild_rollup=lambda *_args, **_kwargs: None,
     )
     first_event_id = store.list_user_events(1, limit=10)["items"][0].event_id
@@ -230,7 +228,6 @@ def test_backfill_ids_are_deterministic_and_idempotent(tmp_path):
         now=NOW,
         source=source,
         store=store,
-        recalculate_snapshot=lambda *_args, **_kwargs: None,
         rebuild_rollup=lambda *_args, **_kwargs: None,
     )
     second_event_id = store.list_user_events(1, limit=10)["items"][0].event_id
@@ -271,7 +268,6 @@ def test_backfill_treats_existing_live_source_event_as_duplicate(tmp_path):
             ]
         ),
         store=store,
-        recalculate_snapshot=lambda *_args, **_kwargs: None,
         rebuild_rollup=lambda *_args, **_kwargs: None,
     )
 
@@ -282,7 +278,6 @@ def test_backfill_treats_existing_live_source_event_as_duplicate(tmp_path):
 
 def test_backfill_enforces_window_dry_run_and_bulk_repairs(tmp_path):
     store = _analytics_store(tmp_path)
-    snapshots = []
     rollup_days = []
     source = StaticSource(
         [
@@ -317,14 +312,12 @@ def test_backfill_enforces_window_dry_run_and_bulk_repairs(tmp_path):
         source=source,
         store=store,
         dry_run=True,
-        recalculate_snapshot=lambda user_id, **_kwargs: snapshots.append(user_id),
         rebuild_rollup=lambda day, **_kwargs: rollup_days.append(day),
     )
     written = backfill_analytics(
         now=NOW,
         source=source,
         store=store,
-        recalculate_snapshot=lambda user_id, **_kwargs: snapshots.append(user_id),
         rebuild_rollup=lambda day, **_kwargs: rollup_days.append(day),
     )
 
@@ -333,7 +326,7 @@ def test_backfill_enforces_window_dry_run_and_bulk_repairs(tmp_path):
     assert written.inserted == 2
     assert written.skipped_outside_window == 1
     assert written.skipped_unmapped_owner == 2
-    assert snapshots == [1, 2]
+    assert written.affected_users == 2
     assert rollup_days == [(NOW - timedelta(days=1)).date()]
 
 

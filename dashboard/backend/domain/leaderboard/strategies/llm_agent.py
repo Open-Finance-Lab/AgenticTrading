@@ -152,9 +152,15 @@ class LLMAgentStrategy(BaselineStrategy):
         self.llm_calls = 0
         self.llm_decisions = 0  # steps the model actually drove (H6 guard numerator)
         self.decision_steps = 0  # total steps offered to the model (guard denominator)
+        self.confidence_skipped_steps = 0  # subtracted from the numerator
+        self.unusable_confidence_actions = 0
+        self.unusable_confidence_skipped = 0
         # Steps the whole run will offer, known before the first one; lets a
         # session-close hook stop a run that can no longer clear the guard.
         self.planned_decision_steps = 0
+        # Billed tokens are current after every decision step, not only at a
+        # session close like the counters above: the Live board's spend ledger
+        # prices a run that dies mid-session from these two.
         self.input_tokens = 0
         self.output_tokens = 0
         self._num_trades = 0
@@ -245,6 +251,12 @@ class LLMAgentStrategy(BaselineStrategy):
                 )
             else:
                 decision = manager.make_trading_decision(state)
+            # Published per step because the manager is local to this loop: a
+            # run that dies before its next session close would otherwise take
+            # the tokens it already billed with it. At a close these equal what
+            # _record_progress sets, so a checkpoint reads the same numbers.
+            self.input_tokens = manager.input_tokens
+            self.output_tokens = manager.output_tokens
 
             manager.execute_actions(decision.get("actions", []), market_data, ts)
             manager.update_equity(market_data, price_cache, ts)
@@ -336,6 +348,11 @@ class LLMAgentStrategy(BaselineStrategy):
         self.trades = list(manager.trades)
         self.llm_calls = manager.llm_calls
         self.llm_decisions = manager.llm_decisions  # steps the model actually drove
+        # Of those, steps that lost an unsized buy to a confidence that is not
+        # a 0-1 number; the H6 guard subtracts them (PortfolioManager).
+        self.confidence_skipped_steps = getattr(manager, "confidence_skipped_steps", 0)
+        self.unusable_confidence_actions = getattr(manager, "unusable_confidence_actions", 0)
+        self.unusable_confidence_skipped = getattr(manager, "unusable_confidence_skipped", 0)
         self.decision_steps = decision_steps  # how many steps the model was asked to decide
         self.input_tokens = manager.input_tokens
         self.output_tokens = manager.output_tokens

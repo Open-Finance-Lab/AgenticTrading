@@ -14,6 +14,7 @@ from dashboard.backend.app import app
 from dashboard.backend.database import db
 import dashboard.backend.domain.leaderboard.live as live
 import dashboard.backend.domain.leaderboard.service as lb_service
+from dashboard.backend.infrastructure.llm.validator import LLM_SELL_SIZING
 
 SEED = float(lb_service.load_leaderboard_config().get("initial_capital", 100_000))
 
@@ -25,11 +26,37 @@ def _isolated_live_session(monkeypatch, tmp_path):
     """The test DB is session-scoped: start every test with no live rows, and
     never let a refresh write the real state file under DATA_DIR."""
     monkeypatch.setattr(live, "_LIVE_REFRESH_STATE_PATH", tmp_path / "live_state.json")
-    for run in db.get_runs_by_session("leaderboard-live") or []:
-        db.delete_run(run["run_id"])
+    _clear_live_and_spend_rows()
     yield
-    for run in db.get_runs_by_session("leaderboard-live") or []:
-        db.delete_run(run["run_id"])
+    _clear_live_and_spend_rows()
+
+
+def _clear_live_and_spend_rows():
+    # Every live deploy also prices itself into the spend ledger's session.
+    for session in ("leaderboard-live", "leaderboard-live-spend"):
+        for run in db.get_runs_by_session(session) or []:
+            db.delete_run(run["run_id"])
+
+
+@pytest.fixture(autouse=True)
+def _roster_without_join_dates(monkeypatch):
+    """These cases are dated August 2026, before any entry's ``live_from``
+    month, and are about the board, not about who joins when: read without
+    that key, the whole roster is live. The join gate has its own cases in
+    test_live_roster.py, against the real config."""
+    real = lb_service.load_leaderboard_config
+
+    def without_join_dates():
+        cfg = real()
+        return {
+            **cfg,
+            "strategies": [
+                {k: v for k, v in s.items() if k != live.LIVE_FROM_KEY}
+                for s in cfg["strategies"]
+            ],
+        }
+
+    monkeypatch.setattr(lb_service, "load_leaderboard_config", without_join_dates)
 
 
 @pytest.fixture
@@ -50,7 +77,12 @@ def no_alpaca(monkeypatch):
 
 def _insert_live_run(run_id, llm_model, end_date, points, *, final=None,
                      total_return=0.0, sharpe=0.0, max_dd=0.0, metadata=None,
-                     start_date="2026-08-01", num_trades=0, **extra):
+                     start_date="2026-08-01", num_trades=0,
+                     sell_rule=LLM_SELL_SIZING, **extra):
+    if metadata is not None and live.LIVE_SNAPSHOT_KEY in metadata and sell_rule:
+        # A checkpoint this code writes records its sell rule, and one without
+        # it is read as pre-#661 and replayed: pass sell_rule=None for that.
+        metadata = {"llm_sell_sizing": sell_rule, **metadata}
     db.insert_run(
         run_id=run_id,
         session_id="leaderboard-live",
@@ -58,7 +90,7 @@ def _insert_live_run(run_id, llm_model, end_date, points, *, final=None,
         mode="leaderboard",
         start_date=start_date,
         end_date=end_date,
-        initial_equity=points[0]["equity"],
+        initial_equity=extra.pop("initial_equity", points[0]["equity"]),
         final_equity=points[-1]["equity"] if final is None else final,
         total_return=total_return,
         sharpe_ratio=sharpe,
@@ -83,8 +115,11 @@ class _ScriptedAgent:
     used_llm = True
     model_id = "deepseek/deepseek-v4-pro"
 
-    def __init__(self, *, steps=7, misses=None, crash_on=(), no_bars=(), runs=None):
+    def __init__(self, *, steps=7, misses=None, crash_on=(), no_bars=(), runs=None,
+                 step_tokens=(10, 10)):
         self.steps = steps
+        # (input, output) tokens billed per traded session.
+        self.step_tokens = step_tokens
         self.misses = misses or {}
         self.crash_on = set(crash_on)
         self.no_bars = set(no_bars)
@@ -117,8 +152,8 @@ class _ScriptedAgent:
             self.llm_calls += self.steps
             self.decision_steps += self.steps
             self.llm_decisions += self.steps - self.misses.get(iso, 0)
-            self.input_tokens += 10
-            self.output_tokens += 10
+            self.input_tokens += self.step_tokens[0]
+            self.output_tokens += self.step_tokens[1]
             self._trades += 1
             curve.append(_pt(f"{iso}T19:00:00+00:00", SEED + day.day))
             self.last_portfolio_snapshot = {"cash": SEED, "positions": {}, "day": iso[5:]}
@@ -633,7 +668,7 @@ def test_stale_freeze_snapshot_still_prints_and_does_not_invent_next_day(no_alpa
 
 def test_live_month_run_shows_llm_snapshot(no_alpaca):
     db.insert_run(
-        run_id="lb_nemotron_3_nano_30b_20260801_20260827",
+        run_id="lb_qwen3_7_plus_20260801_20260827",
         session_id="leaderboard-live",
         agent_name="Agentic Trading Lab",
         mode="leaderboard",
@@ -645,11 +680,11 @@ def test_live_month_run_shows_llm_snapshot(no_alpaca):
         sharpe_ratio=0.2,
         max_drawdown=-0.01,
         num_trades=2,
-        llm_model="nemotron_3_nano_30b",
+        llm_model="qwen3_7_plus",
         llm_calls=10,
     )
     db.insert_equity_points(
-        "lb_nemotron_3_nano_30b_20260801_20260827",
+        "lb_qwen3_7_plus_20260801_20260827",
         [
             {
                 "timestamp": "2026-08-03T13:00:00+00:00",
@@ -668,21 +703,22 @@ def test_live_month_run_shows_llm_snapshot(no_alpaca):
     payload = live.get_live_leaderboard(
         as_of=datetime(2026, 8, 27, 17, 39, tzinfo=_ET)
     )
-    model = next(e for e in payload["entries"] if e["entry_id"] == "nemotron_3_nano_30b")
+    model = next(e for e in payload["entries"] if e["entry_id"] == "qwen3_7_plus")
     assert model["is_model"] is True
     assert model["equity_curve"]
     assert model["equity_curve"][-1]["timestamp"].startswith("2026-08-27T16:00")
     assert model["equity_curve"][-1]["equity"] == pytest.approx(SEED * 1.005)
     assert payload["live_status"]["models_cached"] >= 1
-    assert payload["live_status"]["models_pending"] == 1
+    assert payload["live_status"]["models_pending"] == 2
     pending = [e for e in payload["entries"] if e["status"] == "pending"]
     assert pending and all(e["rank"] is None for e in pending)
     assert payload["live_status"]["roster"] == [
         "deepseek_v4_pro",
-        "nemotron_3_nano_30b",
+        "qwen3_7_plus",
+        "claude_haiku_4_5",
     ]
     model_ids = {e["entry_id"] for e in payload["entries"] if e.get("is_model")}
-    assert model_ids == {"deepseek_v4_pro", "nemotron_3_nano_30b"}
+    assert model_ids == {"deepseek_v4_pro", "qwen3_7_plus", "claude_haiku_4_5"}
 
 
 def test_get_live_never_deploys_models(no_alpaca, monkeypatch):
@@ -708,11 +744,15 @@ def test_refresh_live_leaderboard_deploys_models(monkeypatch, tmp_path):
         lambda **kwargs: {"created": 0, "cache_hit": True},
     )
 
+    windows = []
+
+    # Records rather than asserts: the roster loop catches any Exception per
+    # entry, so an assert in here would be filed as a model failure.
     def fake_deploy(entry, freeze_cfg, **kwargs):
         deployed.append(entry["id"])
-        assert freeze_cfg.get("session_id") == "leaderboard-live"
-        assert freeze_cfg.get("start_date") == "2026-08-01"
-        assert freeze_cfg.get("end_date") == "2026-08-27"
+        windows.append(
+            (freeze_cfg.get("session_id"), freeze_cfg.get("start_date"), freeze_cfg.get("end_date"))
+        )
         return {"entry_id": entry["id"], "run_id": f"lb_{entry['id']}", "cached": False}
 
     monkeypatch.setattr(live, "deploy_live_model_increment", fake_deploy)
@@ -720,11 +760,14 @@ def test_refresh_live_leaderboard_deploys_models(monkeypatch, tmp_path):
         deploy_models=True,
         as_of=datetime(2026, 8, 27, 17, 39, tzinfo=_ET),
     )
+    assert result["model_failures"] == []
+    assert set(windows) == {("leaderboard-live", "2026-08-01", "2026-08-27")}
     assert result["skipped"] is False
     assert result["models_deployed"] is True
-    assert "claude_haiku_4_5" not in deployed
     assert "gpt_5_5" not in deployed
-    assert set(deployed) == {"deepseek_v4_pro", "nemotron_3_nano_30b"}
+    assert "nemotron_3_nano_30b" not in deployed
+    # Roster order, not file order: the file lists Haiku first.
+    assert deployed == ["deepseek_v4_pro", "qwen3_7_plus", "claude_haiku_4_5"]
 
 
 def test_model_deploys_default_off_everywhere(client, monkeypatch):
@@ -863,9 +906,9 @@ def test_deploy_live_increment_trades_only_the_new_session(monkeypatch):
     assert freeze_cfg is not None
     snapshot = {"cash": SEED * 0.2, "positions": {"AAPL": 3}, "entry_prices": {"AAPL": 50}}
     db.insert_run(
-        run_id="lb_nemotron_3_nano_30b_20260801_20260826",
+        run_id="lb_qwen3_7_plus_20260801_20260826",
         session_id="leaderboard-live",
-        agent_name="Nemotron 3 Nano 30B",
+        agent_name="Qwen3.7 Plus",
         mode="leaderboard",
         start_date="2026-08-01",
         end_date="2026-08-26",
@@ -875,15 +918,15 @@ def test_deploy_live_increment_trades_only_the_new_session(monkeypatch):
         sharpe_ratio=0.5,
         max_drawdown=-0.01,
         num_trades=2,
-        llm_model="nemotron_3_nano_30b",
+        llm_model="qwen3_7_plus",
         llm_calls=70,
         llm_decisions=70,
         input_tokens=1000,
         output_tokens=200,
-        metadata={live.LIVE_SNAPSHOT_KEY: snapshot},
+        metadata={"llm_sell_sizing": LLM_SELL_SIZING, live.LIVE_SNAPSHOT_KEY: snapshot},
     )
     db.insert_equity_points(
-        "lb_nemotron_3_nano_30b_20260801_20260826",
+        "lb_qwen3_7_plus_20260801_20260826",
         [
             {
                 "timestamp": "2026-08-03T13:00:00+00:00",
@@ -909,7 +952,7 @@ def test_deploy_live_increment_trades_only_the_new_session(monkeypatch):
             self.llm_decisions = 7
             self.decision_steps = 7
             self.used_llm = True
-            self.model_id = "nvidia/nemotron-3-nano-30b-a3b"
+            self.model_id = "qwen/qwen3.7-plus"
             self.last_portfolio_snapshot = {
                 "cash": 500.0,
                 "positions": {"AAPL": 4},
@@ -943,7 +986,7 @@ def test_deploy_live_increment_trades_only_the_new_session(monkeypatch):
         lambda symbols, start, end: {"AAPL": type("Frame", (), {"attrs": {}})()},
     )
 
-    entry = next(e for e in live.live_llm_entries(freeze_cfg) if e["id"] == "nemotron_3_nano_30b")
+    entry = next(e for e in live.live_llm_entries(freeze_cfg) if e["id"] == "qwen3_7_plus")
     row = live.deploy_live_model_increment(entry, freeze_cfg)
     assert fake.windows == [("2026-08-27", "2026-08-27", snapshot)]
     assert row["increment"] is True
@@ -1019,7 +1062,7 @@ def test_null_equity_is_not_read_as_zero():
 def test_a_model_with_no_run_is_never_ranked(no_alpaca):
     """In a down month every printed entry is below the seed; a pending model
     published at the seed and 0% used to rank #1 without ever trading."""
-    for entry_id in ("spy_index", "nemotron_3_nano_30b"):
+    for entry_id in ("spy_index", "qwen3_7_plus"):
         _insert_live_run(
             f"lb_{entry_id}_20260801_20260826", entry_id, "2026-08-26",
             [_pt("2026-08-03T13:00:00+00:00", SEED),
@@ -1028,14 +1071,14 @@ def test_a_model_with_no_run_is_never_ranked(no_alpaca):
         )
     payload = live.get_live_leaderboard(as_of=datetime(2026, 8, 27, 17, 39, tzinfo=_ET))
     ranked = [e for e in payload["entries"] if e["rank"] is not None]
-    assert {e["entry_id"] for e in ranked} == {"spy_index", "nemotron_3_nano_30b"}
+    assert {e["entry_id"] for e in ranked} == {"spy_index", "qwen3_7_plus"}
     assert [e["rank"] for e in ranked] == [1, 2]
     assert payload["entries"][: len(ranked)] == ranked
     deepseek = next(e for e in payload["entries"] if e["entry_id"] == "deepseek_v4_pro")
     assert deepseek["status"] == "pending"
     assert deepseek["portfolio_value"] is None
-    nemotron = next(e for e in ranked if e["entry_id"] == "nemotron_3_nano_30b")
-    assert payload["leader"] == nemotron["model"]
+    qwen = next(e for e in ranked if e["entry_id"] == "qwen3_7_plus")
+    assert payload["leader"] == qwen["model"]
 
 
 def test_returns_come_off_the_stored_run_and_keep_the_first_hour(no_alpaca):
@@ -1043,19 +1086,27 @@ def test_returns_come_off_the_stored_run_and_keep_the_first_hour(no_alpaca):
     (``initial_equity``) inflated every point and erased that hour."""
     first_mark = SEED * 0.995
     _insert_live_run(
-        "lb_nemotron_3_nano_30b_20260801_20260826", "nemotron_3_nano_30b", "2026-08-26",
+        "lb_qwen3_7_plus_20260801_20260826", "qwen3_7_plus", "2026-08-26",
         [_pt("2026-08-03T13:00:00+00:00", first_mark),
          _pt("2026-08-26T19:00:00+00:00", SEED * 1.02)],
         total_return=0.02, sharpe=1.1, max_dd=-0.03,
         metadata={"initial_capital": SEED},
     )
     payload = live.get_live_leaderboard(as_of=datetime(2026, 8, 27, 17, 39, tzinfo=_ET))
-    nemotron = next(e for e in payload["entries"] if e["entry_id"] == "nemotron_3_nano_30b")
-    assert nemotron["cumulative_return"] == pytest.approx(0.02)
-    assert nemotron["sharpe_ratio"] == pytest.approx(1.1)
-    assert nemotron["max_drawdown"] == pytest.approx(-0.03)
-    assert nemotron["portfolio_value"] == pytest.approx(SEED * 1.02)
-    assert nemotron["equity_curve"][0]["equity"] == pytest.approx(first_mark)
+    qwen = next(e for e in payload["entries"] if e["entry_id"] == "qwen3_7_plus")
+    assert qwen["cumulative_return"] == pytest.approx(0.02)
+    # Sharpe is not the stored 1.1: it is the daily figure off the plotted
+    # curve. Aug 3-26 is 18 sessions; the as-of fill holds 0.995 x seed from
+    # Aug 3 to Aug 25, so r = [-0.005, 0 x 16, 1.02/0.995 - 1]. Measured from the
+    # first mark instead of the seed, r_1 would be 0 and this would read 3.74.
+    assert qwen["sharpe_ratio"] == pytest.approx(2.906881, abs=1e-6)
+    assert qwen["sharpe_ci_low"] == pytest.approx(-4.487853, abs=1e-6)
+    assert qwen["sharpe_ci_high"] == pytest.approx(10.301616, abs=1e-6)
+    assert qwen["sharpe_days"] == 18
+    assert qwen["sharpe_status"] == "ok"
+    assert qwen["max_drawdown"] == pytest.approx(-0.03)
+    assert qwen["portfolio_value"] == pytest.approx(SEED * 1.02)
+    assert qwen["equity_curve"][0]["equity"] == pytest.approx(first_mark)
 
 
 def test_live_entry_publishes_trade_stats_and_invested(no_alpaca):
@@ -1063,7 +1114,7 @@ def test_live_entry_publishes_trade_stats_and_invested(no_alpaca):
     from dashboard.backend.domain.leaderboard.live_trade_stats import TRADE_STATS_KEY
 
     _insert_live_run(
-        "lb_nemotron_3_nano_30b_20260801_20260826", "nemotron_3_nano_30b", "2026-08-26",
+        "lb_qwen3_7_plus_20260801_20260826", "qwen3_7_plus", "2026-08-26",
         [_pt("2026-08-03T13:00:00+00:00", SEED),
          _pt("2026-08-26T19:00:00+00:00", SEED * 1.02)],
         total_return=0.02, sharpe=1.1, max_dd=-0.03,
@@ -1086,12 +1137,12 @@ def test_live_entry_publishes_trade_stats_and_invested(no_alpaca):
     )
     payload = live.get_live_leaderboard(as_of=datetime(2026, 8, 27, 17, 39, tzinfo=_ET))
     assert payload["standings_label"] == "Performance"
-    nemotron = next(e for e in payload["entries"] if e["entry_id"] == "nemotron_3_nano_30b")
-    assert nemotron["num_trades"] == 3
-    assert nemotron["win_rate"] == pytest.approx(1.0)
-    assert nemotron["avg_hold_hours"] == pytest.approx(3.0)
-    assert nemotron["closed_trades"] == 1
-    assert nemotron["invested_pct"] == pytest.approx(0.6)
+    qwen = next(e for e in payload["entries"] if e["entry_id"] == "qwen3_7_plus")
+    assert qwen["num_trades"] == 3
+    assert qwen["win_rate"] == pytest.approx(1.0)
+    assert qwen["avg_hold_hours"] == pytest.approx(3.0)
+    assert qwen["closed_trades"] == 1
+    assert qwen["invested_pct"] == pytest.approx(0.6)
     spy = next(e for e in payload["entries"] if e["entry_id"] == "spy_index")
     assert spy["status"] == "pending"
     assert spy["num_trades"] is None
@@ -1102,16 +1153,16 @@ def test_live_entry_publishes_trade_stats_and_invested(no_alpaca):
 def test_dollar_axis_scales_by_the_recorded_seed_only(no_alpaca):
     seed = SEED / 10
     _insert_live_run(
-        "lb_nemotron_3_nano_30b_20260801_20260826", "nemotron_3_nano_30b", "2026-08-26",
+        "lb_qwen3_7_plus_20260801_20260826", "qwen3_7_plus", "2026-08-26",
         [_pt("2026-08-03T13:00:00+00:00", seed * 0.99),
          _pt("2026-08-26T19:00:00+00:00", seed * 1.05)],
         total_return=0.05, metadata={"initial_capital": seed},
     )
     payload = live.get_live_leaderboard(as_of=datetime(2026, 8, 27, 17, 39, tzinfo=_ET))
-    nemotron = next(e for e in payload["entries"] if e["entry_id"] == "nemotron_3_nano_30b")
-    assert nemotron["portfolio_value"] == pytest.approx(SEED * 1.05)
-    assert nemotron["cumulative_return"] == pytest.approx(0.05)
-    assert nemotron["equity_curve"][0]["equity"] == pytest.approx(SEED * 0.99)
+    qwen = next(e for e in payload["entries"] if e["entry_id"] == "qwen3_7_plus")
+    assert qwen["portfolio_value"] == pytest.approx(SEED * 1.05)
+    assert qwen["cumulative_return"] == pytest.approx(0.05)
+    assert qwen["equity_curve"][0]["equity"] == pytest.approx(SEED * 0.99)
 
 
 def test_increment_lookback_is_relative_to_the_segment_and_shared(monkeypatch):
@@ -1144,7 +1195,7 @@ def test_increment_lookback_is_relative_to_the_segment_and_shared(monkeypatch):
         return {"AAPL": type("Frame", (), {"attrs": {}})()}
 
     monkeypatch.setattr(lb_service, "fetch_hourly_bars", fake_fetch)
-    for entry_id in ("nemotron_3_nano_30b", "deepseek_v4_pro"):
+    for entry_id in ("qwen3_7_plus", "deepseek_v4_pro"):
         _insert_live_run(
             f"lb_{entry_id}_20260801_20260826", entry_id, "2026-08-26",
             [_pt("2026-08-26T19:00:00+00:00", SEED)],
@@ -1152,7 +1203,7 @@ def test_increment_lookback_is_relative_to_the_segment_and_shared(monkeypatch):
         )
     memo = {}
     for entry in live.live_llm_entries(freeze_cfg):
-        if entry["id"] in ("nemotron_3_nano_30b", "deepseek_v4_pro"):
+        if entry["id"] in ("qwen3_7_plus", "deepseek_v4_pro"):
             live.deploy_live_model_increment(entry, freeze_cfg, bars_memo=memo)
     assert fetches == [(("AAPL", "MSFT"), "2026-07-27", "2026-08-27")]
 
@@ -1334,11 +1385,12 @@ def _recorded_config(freeze_cfg, **overrides):
         "temperature": entry.get("temperature"),
         "reasoning_effort": entry.get("reasoning_effort"),
         "strategy_prompt": None,
+        "llm_sell_sizing": LLM_SELL_SIZING,
         **overrides,
     }
 
 
-def _insert_configured_checkpoint(end_date, day, config):
+def _insert_configured_checkpoint(end_date, day, config, **kwargs):
     _insert_live_run(
         f"lb_deepseek_v4_pro_20260801_{end_date.replace('-', '')}",
         "deepseek_v4_pro",
@@ -1348,7 +1400,29 @@ def _insert_configured_checkpoint(end_date, day, config):
             **config,
             live.LIVE_SNAPSHOT_KEY: {"cash": SEED, "positions": {}, "day": day},
         },
+        **kwargs,
     )
+
+
+def test_a_checkpoint_from_before_sells_honoured_their_size_replays_the_month(
+    monkeypatch, capsys
+):
+    """A checkpoint with no ``llm_sell_sizing`` sold whole positions whatever
+    the size (#661). Its absence is that rule, not an unknown: resuming would
+    splice a month sized two ways into one curve and one set of trade stats."""
+    freeze_cfg = _live_aug27()
+    legacy = _recorded_config(freeze_cfg)
+    del legacy["llm_sell_sizing"]
+    _insert_configured_checkpoint("2026-08-24", "08-24", legacy, sell_rule=None)
+    runs = []
+    _use_agent(monkeypatch, _ScriptedAgent(runs=runs))
+    row = live.deploy_live_model_increment(_deepseek(freeze_cfg), freeze_cfg)
+
+    assert runs == [("2026-08-01", "2026-08-27", None)]
+    assert "keys=llm_sell_sizing" in capsys.readouterr().out
+    stored = db.get_run(row["run_id"])
+    assert stored["metadata"]["live_increment"]["config_changed"] == ["llm_sell_sizing"]
+    assert stored["metadata"]["llm_sell_sizing"] == LLM_SELL_SIZING
 
 
 def test_a_checkpoint_under_the_same_config_resumes(monkeypatch):
@@ -1414,7 +1488,8 @@ def test_a_config_replay_killed_part_way_never_resumes_the_old_config(monkeypatc
 
 def test_a_checkpoint_that_predates_a_config_key_is_not_a_change(monkeypatch):
     """Absent is unknown: rows written before a key existed must not each force
-    a month-open replay of every model."""
+    a month-open replay of every model. ``llm_sell_sizing`` is the one
+    exception, on purpose: its absence is a rule (``_RESUME_KEY_DEFAULTS``)."""
     freeze_cfg = _live_aug27()
     _insert_checkpoint("2026-08-24", "08-24")
     runs = []
@@ -1452,6 +1527,84 @@ def test_a_segment_that_can_no_longer_clear_h6_stops_billing(monkeypatch):
     # 7 misses of 133 steps already caps the segment at 94.7%.
     assert agent.traded == ["2026-08-03"]
     assert _month_rows("deepseek_v4_pro") == []
+
+
+# What a failed night leaves behind, pinned as it is (2026-10-14). The rule
+# these encode: a session is checkpointed only once the segment traded so far
+# clears H6, so billed sessions H6 has not yet accepted are lost when the run
+# dies, and the next night re-bills them. Storing that prefix anyway would
+# publish a curve the model did not drive; do not "fix" these by doing so.
+
+
+class _DeadModelAgent(_ScriptedAgent):
+    """Every call fails before generating anything (a gateway 404): each step
+    falls back to rule-based, so sessions are offered and traded while
+    ``llm_calls`` and ``llm_decisions`` never move."""
+
+    def run(self, bars, start, end, capital, starting_snapshot=None, on_session_close=None):
+        self.runs.append((start, end, (starting_snapshot or {}).get("day")))
+        days = live._trading_days_inclusive(date.fromisoformat(start), date.fromisoformat(end))
+        self.planned_decision_steps = self.steps * len(days)
+        curve = []
+        for day in days:
+            iso = day.isoformat()
+            self.traded.append(iso)
+            self.decision_steps += self.steps
+            curve.append(_pt(f"{iso}T19:00:00+00:00", SEED))
+            self.last_portfolio_snapshot = {"cash": SEED, "positions": {}, "day": iso[5:]}
+            on_session_close(day, list(curve))
+        return curve
+
+
+def test_a_dead_model_stores_nothing_and_restarts_at_the_1st_every_night(monkeypatch):
+    freeze_cfg = _live_aug27()
+    for _night in range(2):
+        runs = []
+        agent = _use_agent(monkeypatch, _DeadModelAgent(runs=runs))
+        with pytest.raises(lb_service.LeaderboardFallbackError, match="llm_calls=0"):
+            live.deploy_live_model_increment(_deepseek(freeze_cfg), freeze_cfg)
+        # Aug 1 is a Saturday: the first session is the 3rd, and it is the
+        # only one traded before the guard stops the run.
+        assert runs == [("2026-08-01", "2026-08-27", None)]
+        assert agent.traded == ["2026-08-03"]
+        assert agent.llm_calls == 0
+        assert _month_rows("deepseek_v4_pro") == []
+
+
+def test_an_early_miss_then_a_crash_loses_the_unchecked_prefix(monkeypatch):
+    freeze_cfg = _live_aug27()
+    agent = _use_agent(
+        monkeypatch,
+        _ScriptedAgent(misses={"2026-08-03": 1}, crash_on={"2026-08-05"}),
+    )
+    with pytest.raises(RuntimeError, match="worker killed"):
+        live.deploy_live_model_increment(_deepseek(freeze_cfg), freeze_cfg)
+    # 6/7 and 13/14 are under 95%, so neither close was stored, yet both
+    # sessions were billed.
+    assert agent.traded == ["2026-08-03", "2026-08-04"]
+    assert agent.llm_calls == 14
+    assert _month_rows("deepseek_v4_pro") == []
+
+    runs = []
+    _use_agent(monkeypatch, _ScriptedAgent(runs=runs))
+    live.deploy_live_model_increment(_deepseek(freeze_cfg), freeze_cfg)
+    assert runs == [("2026-08-01", "2026-08-27", None)]
+
+
+def test_a_single_miss_on_a_nightly_increment_keeps_the_prior_checkpoint(monkeypatch):
+    freeze_cfg = _live_aug27()
+    _insert_checkpoint("2026-08-26", "08-26")
+    agent = _use_agent(monkeypatch, _ScriptedAgent(misses={"2026-08-27": 1}))
+    with pytest.raises(lb_service.LeaderboardFallbackError, match="6/7"):
+        live.deploy_live_model_increment(_deepseek(freeze_cfg), freeze_cfg)
+    assert agent.llm_calls == 7
+    assert [r["end_date"] for r in _month_rows("deepseek_v4_pro")] == ["2026-08-26"]
+
+    # The retry resumes from that checkpoint, not from the 1st.
+    runs = []
+    _use_agent(monkeypatch, _ScriptedAgent(runs=runs))
+    live.deploy_live_model_increment(_deepseek(freeze_cfg), freeze_cfg)
+    assert runs == [("2026-08-27", "2026-08-27", "08-26")]
 
 
 def test_a_session_with_no_bars_stops_the_run_loudly(monkeypatch, capsys):
@@ -1492,12 +1645,208 @@ def test_a_missing_last_session_fails_the_refresh_instead_of_marking_it_done(
     assert result["model_results"] == []
     out = capsys.readouterr().out
     assert "ERROR: live.model_deploy_failed entry=deepseek_v4_pro" in out
-    # The session that did land is stored; the window is retried next time.
+    # The session that did land is stored; the window is retried next time. The
+    # first two entries fail alike, so the roster stops and the third is never
+    # attempted: it stays at its checkpoint.
     shown = live.latest_live_month_runs("2026-08-01", "2026-08-27")
-    assert {row["end_date"] for row in shown.values() if row["llm_model"] in live.LIVE_MODEL_IDS} == {
-        "2026-08-26"
+    assert {
+        row["llm_model"]: row["end_date"]
+        for row in shown.values()
+        if row["llm_model"] in live.LIVE_MODEL_IDS
+    } == {
+        "deepseek_v4_pro": "2026-08-26",
+        "qwen3_7_plus": "2026-08-26",
+        "claude_haiku_4_5": "2026-08-25",
     }
     assert live.refresh_live_leaderboard(deploy_models=True, as_of=as_of)["skipped"] is False
+
+
+def test_an_unexpected_error_from_one_model_does_not_stop_the_roster(
+    monkeypatch, capsys,
+):
+    """The per-entry catch named three types. Anything else (a dropped database
+    connection, a market-data socket error, a bug after the model calls)
+    escaped it: every later entry went untraded, and the prune and the state
+    save never ran. LLM provider errors never got this far; the non-strict
+    decision loop turns them into rule-based steps, which H6 refuses."""
+    as_of = datetime(2026, 8, 27, 17, 39, tzinfo=_ET)
+    freeze_cfg = live.live_freeze_config(as_of)
+    deepseek = _deepseek(freeze_cfg)
+    second = {**deepseek, "id": "second_model", "name": "Second Model"}
+    monkeypatch.setattr(live, "live_llm_entries", lambda *args, **kwargs: [deepseek, second])
+    monkeypatch.setattr(lb_service, "ensure_leaderboard_runs", lambda **kwargs: {})
+    monkeypatch.setattr(lb_service, "fetch_hourly_bars", lambda *args: _one_bar_frame())
+    healthy = _ScriptedAgent()
+
+    def get_strategy(entry):
+        if entry["id"] == "deepseek_v4_pro":
+            raise ConnectionError("server closed the connection unexpectedly")
+        return healthy
+
+    monkeypatch.setattr(lb_service, "get_strategy", get_strategy)
+    # A superseded row the end-of-refresh prune must still remove.
+    for end in ("2026-08-25", "2026-08-26"):
+        _insert_live_run(
+            f"lb_spy_index_20260801_{end.replace('-', '')}", "spy_index", end,
+            [_pt(f"{end}T19:00:00+00:00", SEED)],
+        )
+
+    result = live.refresh_live_leaderboard(deploy_models=True, as_of=as_of)
+
+    assert result["models_deployed"] is False
+    assert result["model_failures"] == [
+        {
+            "entry_id": "deepseek_v4_pro",
+            "error": "ConnectionError: server closed the connection unexpectedly",
+        }
+    ]
+    assert [row["entry_id"] for row in result["model_results"]] == ["second_model"]
+    assert healthy.traded[-1] == "2026-08-27"
+    assert (
+        "ERROR: live.model_deploy_failed entry=deepseek_v4_pro "
+        "error=ConnectionError: server closed the connection unexpectedly"
+    ) in capsys.readouterr().out
+    assert result["pruned_runs"] == 1
+    assert db.get_run("lb_spy_index_20260801_20260825") is None
+    saved = live._live_refresh_state()
+    assert saved["window_key"] == result["window_key"]
+    assert saved["model_failures"] == result["model_failures"]
+
+
+def test_a_database_error_mid_checkpoint_is_isolated_and_its_pending_row_pruned(
+    monkeypatch, capsys,
+):
+    """The failure the wide catch is for lands after the model calls: the
+    checkpoint's pending row is written, then the curve write raises. The next
+    entry must still trade off the shared bar fetch, and the end-of-refresh
+    prune must take the half-written row."""
+    as_of = datetime(2026, 8, 27, 17, 39, tzinfo=_ET)
+    freeze_cfg = live.live_freeze_config(as_of)
+    deepseek = _deepseek(freeze_cfg)
+    second = {**deepseek, "id": "second_model", "name": "Second Model"}
+    monkeypatch.setattr(live, "live_llm_entries", lambda *args, **kwargs: [deepseek, second])
+    monkeypatch.setattr(lb_service, "ensure_leaderboard_runs", lambda **kwargs: {})
+    fetches = []
+    monkeypatch.setattr(
+        lb_service, "fetch_hourly_bars",
+        lambda *args: fetches.append(args) or _one_bar_frame(),
+    )
+    agents = {"deepseek_v4_pro": _ScriptedAgent(), "second_model": _ScriptedAgent()}
+    monkeypatch.setattr(lb_service, "get_strategy", lambda entry: agents[entry["id"]])
+    for entry_id in agents:
+        _insert_live_run(
+            f"lb_{entry_id}_20260801_20260826", entry_id, "2026-08-26",
+            [_pt("2026-08-26T19:00:00+00:00", SEED)],
+            metadata={live.LIVE_SNAPSHOT_KEY: {"cash": SEED, "positions": {}}},
+        )
+
+    class OperationalError(Exception):
+        pass
+
+    OperationalError.__module__ = "psycopg"
+    OperationalError.__qualname__ = "OperationalError"
+    real_insert_points = db.insert_equity_points
+
+    def insert_equity_points(run_id, points):
+        if "deepseek_v4_pro" in run_id:
+            # psycopg's real message for a dropped server, newlines and all.
+            raise OperationalError(
+                "server closed the connection unexpectedly\n"
+                "\tThis probably means the server terminated abnormally\n"
+                "\tbefore or while processing the request."
+            )
+        return real_insert_points(run_id, points)
+
+    monkeypatch.setattr(db, "insert_equity_points", insert_equity_points)
+
+    result = live.refresh_live_leaderboard(deploy_models=True, as_of=as_of)
+
+    error = (
+        "psycopg.OperationalError: server closed the connection unexpectedly "
+        "This probably means the server terminated abnormally before or while "
+        "processing the request."
+    )
+    assert result["model_failures"] == [{"entry_id": "deepseek_v4_pro", "error": error}]
+    assert agents["deepseek_v4_pro"].traded == ["2026-08-27"]  # billed, then failed
+    assert [row["entry_id"] for row in result["model_results"]] == ["second_model"]
+    assert agents["second_model"].traded == ["2026-08-27"]
+    assert len(fetches) == 1  # the failed entry's bars still served the next one
+    out = capsys.readouterr().out
+    line = next(
+        text for text in out.splitlines()
+        if text.startswith("ERROR: live.model_deploy_failed")
+    )
+    assert line == f"ERROR: live.model_deploy_failed entry=deepseek_v4_pro error={error}"
+    # Not one of the types the catch used to name, so the traceback that used to
+    # escape the loop is still printed, after the one-line summary.
+    after = out.split(line, 1)[1]
+    assert "Traceback (most recent call last)" in after
+    assert "in _write_live_checkpoint" in after
+    deepseek_rows = _month_rows("deepseek_v4_pro")
+    assert [row["end_date"] for row in deepseek_rows] == ["2026-08-26"]
+    assert not any(live._is_pending_checkpoint(row) for row in deepseek_rows)
+    assert [row["end_date"] for row in _month_rows("second_model")] == ["2026-08-27"]
+
+
+def test_a_fault_every_entry_shares_stops_the_roster_after_two(monkeypatch, capsys):
+    """A bug in the checkpoint path raises for every model after its session
+    was billed. Carrying on would bill the whole roster for nothing, every
+    night until the fix ships; two entries in a row failing the same way stop
+    the rest."""
+    as_of = datetime(2026, 8, 27, 17, 39, tzinfo=_ET)
+    freeze_cfg = live.live_freeze_config(as_of)
+    deepseek = _deepseek(freeze_cfg)
+    roster = [deepseek] + [
+        {**deepseek, "id": f"model_{n}", "name": f"Model {n}"} for n in (2, 3)
+    ]
+    monkeypatch.setattr(live, "live_llm_entries", lambda *args, **kwargs: roster)
+    monkeypatch.setattr(lb_service, "ensure_leaderboard_runs", lambda **kwargs: {})
+    monkeypatch.setattr(lb_service, "fetch_hourly_bars", lambda *args: _one_bar_frame())
+    agents = {entry["id"]: _ScriptedAgent() for entry in roster}
+    monkeypatch.setattr(lb_service, "get_strategy", lambda entry: agents[entry["id"]])
+
+    def broken_metadata(*args, **kwargs):
+        raise KeyError("cash")
+
+    monkeypatch.setattr(lb_service, "_llm_run_metadata", broken_metadata)
+
+    result = live.refresh_live_leaderboard(deploy_models=True, as_of=as_of)
+
+    assert agents["deepseek_v4_pro"].traded and agents["model_2"].traded
+    assert agents["model_3"].traded == []
+    assert result["model_failures"] == [
+        {"entry_id": "deepseek_v4_pro", "error": "KeyError: 'cash'"},
+        {"entry_id": "model_2", "error": "KeyError: 'cash'"},
+        {
+            "entry_id": "model_3",
+            "error": (
+                "not attempted: deepseek_v4_pro and model_2 failed in a row "
+                "with the same KeyError"
+            ),
+        },
+    ]
+    assert result["models_deployed"] is False
+    assert (
+        "ERROR: live.model_not_attempted entry=model_3 "
+        "after=deepseek_v4_pro,model_2 error=KeyError"
+    ) in capsys.readouterr().out
+    assert live._live_refresh_state()["model_failures"] == result["model_failures"]
+
+
+def test_a_base_exception_still_stops_the_refresh(monkeypatch):
+    """Exception, not BaseException: a shutdown must not be logged as one
+    model's failure while the loop carries on billing the rest."""
+    as_of = datetime(2026, 8, 27, 17, 39, tzinfo=_ET)
+    monkeypatch.setattr(lb_service, "ensure_leaderboard_runs", lambda **kwargs: {})
+    monkeypatch.setattr(lb_service, "fetch_hourly_bars", lambda *args: _one_bar_frame())
+
+    def get_strategy(entry):
+        raise SystemExit("worker shutting down")
+
+    monkeypatch.setattr(lb_service, "get_strategy", get_strategy)
+    with pytest.raises(SystemExit):
+        live.refresh_live_leaderboard(deploy_models=True, as_of=as_of)
+    assert live._live_refresh_state() == {}
 
 
 @pytest.mark.parametrize(
@@ -1525,7 +1874,7 @@ def test_an_entry_several_sessions_behind_is_shown_but_not_ranked(no_alpaca):
     for entry_id, end in (
         ("spy_index", "2026-08-27"),
         ("deepseek_v4_pro", "2026-08-20"),
-        ("nemotron_3_nano_30b", "2026-08-26"),
+        ("qwen3_7_plus", "2026-08-26"),
     ):
         _insert_live_run(
             f"lb_{entry_id}_20260801_{end.replace('-', '')}", entry_id, end,
@@ -1541,10 +1890,10 @@ def test_an_entry_several_sessions_behind_is_shown_but_not_ranked(no_alpaca):
     assert deepseek["snapshot_end"] == "2026-08-20"
     assert deepseek["equity_curve"]
     # One session behind is the nightly append in flight, ranked as before.
-    assert by_id["nemotron_3_nano_30b"]["status"] == "frozen"
-    assert by_id["nemotron_3_nano_30b"]["rank"] is not None
+    assert by_id["qwen3_7_plus"]["status"] == "frozen"
+    assert by_id["qwen3_7_plus"]["rank"] is not None
     assert payload["live_status"]["catching_up"] == ["deepseek_v4_pro"]
-    assert payload["leader"] == by_id["nemotron_3_nano_30b"]["model"]
+    assert payload["leader"] == by_id["qwen3_7_plus"]["model"]
 
 
 def test_llm_agent_fires_the_hook_per_session_from_one_book(monkeypatch):
@@ -1625,3 +1974,250 @@ def test_restored_lot_with_an_unreadable_date_is_released_not_kept():
     })
     assert manager.available_positions["AAPL"] == 10.0
     assert "AAPL" not in manager.frozen_lots
+
+
+# --- Daily Sharpe with its 95% interval (P19; spec 2026-10-14 §4) -------------
+
+# Conformance case M03 as session closes: r = [0, 0.02, -0.05, 0.05, 0.01].
+_M03_FACTORS = (1.0, 1.02, 0.969, 1.01745, 1.0276245)
+
+
+def _insert_sharpe_run(entry_id, days, factors, *, seed=SEED, sharpe=9.99):
+    """One 15:00 ET bar per August session (19:00Z, open-stamped -> the 16:00
+    node). ``sharpe`` is the stored column, which the board must ignore."""
+    end = f"2026-08-{days[-1]:02d}"
+    _insert_live_run(
+        f"lb_{entry_id}_20260801_{end.replace('-', '')}", entry_id, end,
+        [_pt(f"2026-08-{d:02d}T19:00:00+00:00", seed * f) for d, f in zip(days, factors)],
+        total_return=factors[-1] - 1, sharpe=sharpe,
+        metadata={"initial_capital": seed},
+    )
+
+
+def _sharpe_entry(payload, entry_id):
+    return next(e for e in payload["entries"] if e["entry_id"] == entry_id)
+
+
+def test_live_sharpe_is_daily_with_its_interval(no_alpaca):
+    _insert_sharpe_run("deepseek_v4_pro", range(3, 8), _M03_FACTORS)
+    payload = live.get_live_leaderboard(as_of=datetime(2026, 8, 7, 17, 39, tzinfo=_ET))
+    deepseek = _sharpe_entry(payload, "deepseek_v4_pro")
+    assert deepseek["sharpe_ratio"] == pytest.approx(2.611715, abs=1e-6)
+    assert deepseek["sharpe_ci_low"] == pytest.approx(-11.396490, abs=1e-6)
+    assert deepseek["sharpe_ci_high"] == pytest.approx(16.619919, abs=1e-6)
+    assert deepseek["sharpe_days"] == 5
+    assert deepseek["sharpe_status"] == "ok"
+
+
+def test_live_sharpe_is_hidden_below_five_days(no_alpaca):
+    _insert_sharpe_run("deepseek_v4_pro", range(3, 7), _M03_FACTORS[:4])
+    payload = live.get_live_leaderboard(as_of=datetime(2026, 8, 6, 17, 39, tzinfo=_ET))
+    deepseek = _sharpe_entry(payload, "deepseek_v4_pro")
+    assert deepseek["status"] == "frozen"
+    assert deepseek["sharpe_ratio"] is None
+    assert deepseek["sharpe_ci_low"] is None and deepseek["sharpe_ci_high"] is None
+    assert deepseek["sharpe_days"] == 4
+    assert deepseek["sharpe_status"] == "insufficient_days"
+
+
+def test_live_sessions_before_the_first_print_count_as_idle_days(no_alpaca):
+    """P19 counts every session in the window. Printing first on Aug 5 leaves
+    Aug 3-4 at the seed: two zero returns, so five days, not three."""
+    _insert_sharpe_run("deepseek_v4_pro", (5, 6, 7), (1.01, 1.0, 1.02))
+    payload = live.get_live_leaderboard(as_of=datetime(2026, 8, 7, 17, 39, tzinfo=_ET))
+    deepseek = _sharpe_entry(payload, "deepseek_v4_pro")
+    assert deepseek["sharpe_days"] == 5
+    assert deepseek["sharpe_status"] == "ok"
+    assert deepseek["sharpe_ratio"] == pytest.approx(5.611652, abs=1e-6)
+
+
+def test_live_sharpe_is_the_same_at_any_seed(no_alpaca):
+    _insert_sharpe_run("deepseek_v4_pro", range(3, 8), _M03_FACTORS, seed=10_000.0)
+    payload = live.get_live_leaderboard(as_of=datetime(2026, 8, 7, 17, 39, tzinfo=_ET))
+    deepseek = _sharpe_entry(payload, "deepseek_v4_pro")
+    assert deepseek["sharpe_ratio"] == pytest.approx(2.611715, abs=1e-6)
+
+
+def test_a_pending_entry_has_no_sharpe(no_alpaca):
+    _insert_sharpe_run("spy_index", range(3, 8), _M03_FACTORS)
+    payload = live.get_live_leaderboard(as_of=datetime(2026, 8, 7, 17, 39, tzinfo=_ET))
+    deepseek = _sharpe_entry(payload, "deepseek_v4_pro")
+    assert deepseek["status"] == "pending"
+    assert deepseek["sharpe_ratio"] is None
+    assert deepseek["sharpe_ci_low"] is None and deepseek["sharpe_ci_high"] is None
+    assert deepseek["sharpe_days"] == 0
+    assert deepseek["sharpe_status"] == "pending"
+
+
+def test_live_payload_states_its_sharpe_basis(no_alpaca):
+    from dashboard.backend.domain.backtesting.metrics import daily_sharpe_basis
+
+    payload = live.get_live_leaderboard(as_of=datetime(2026, 8, 7, 17, 39, tzinfo=_ET))
+    assert payload["live_status"]["sharpe"] == {
+        "basis": "daily_returns",
+        "annualization_days": 252,
+        "confidence": 0.95,
+        "min_days": 5,
+        "rf_annual": 0.0,
+        "stderr": "iid",
+    }
+    assert payload["live_status"]["sharpe"] == daily_sharpe_basis()
+
+
+def test_live_payload_survives_strict_json(no_alpaca):
+    """A flat curve is no_variation, and nothing on the wire is NaN."""
+    import json
+
+    _insert_sharpe_run("deepseek_v4_pro", range(3, 8), (1.0,) * 5)
+    payload = live.get_live_leaderboard(as_of=datetime(2026, 8, 7, 17, 39, tzinfo=_ET))
+    deepseek = _sharpe_entry(payload, "deepseek_v4_pro")
+    assert deepseek["sharpe_status"] == "no_variation"
+    assert deepseek["sharpe_ratio"] is None
+    json.dumps(payload, allow_nan=False)
+
+
+# November 2026's NYSE sessions: Thanksgiving (the 26th) shut, the 27th an
+# early close at 13:00.
+_NOV_2026_SESSIONS = (2, 3, 4, 5, 6, 9, 10, 11, 12, 13, 16, 17, 18, 19, 20, 23, 24, 25, 27, 30)
+
+
+def test_live_sharpe_counts_an_early_close_once(no_alpaca):
+    """November 2026 through the 30th: 20 sessions, Thanksgiving (11-26) shut,
+    11-27 closing at 13:00. Each session returns the next of conformance case
+    M03's five returns, four times over, so the figure is hand-checkable:
+    mean 0.006, stdev 0.0334664 (ddof 1), SR = 0.006 / 0.0334664 x sqrt(252)
+    = 2.846050, and E_0 = the seed gives 20 returns, not 19.
+
+    One 15:00 ET bar per full session (20:00Z in EST, open-stamped -> the 16:00
+    node). On 11-27 the last bar is the 12:00 one (17:00Z), which closes at
+    13:00, so the 13:00 node is that day's close. An axis with a fixed 16:00
+    close draws 14:00-16:00 nodes after it carrying the same equity, so the
+    Sharpe figure alone cannot tell the two axes apart; the curve assertions can.
+    """
+    from dashboard.backend.domain.backtesting.metrics import daily_session_closes
+
+    closes, level = [], SEED
+    for r in (0.0, 0.02, -0.05, 0.05, 0.01) * 4:
+        level *= 1 + r
+        closes.append(level)
+    close_by_day = dict(zip(_NOV_2026_SESSIONS, closes))
+    points = []
+    for day, equity in close_by_day.items():
+        if day == 27:
+            # The 11:00 bar lands on the 12:00 node, the 12:00 bar on 13:00.
+            points.append(_pt("2026-11-27T16:00:00+00:00", equity * 0.99))
+            points.append(_pt("2026-11-27T17:00:00+00:00", equity))
+        else:
+            points.append(_pt(f"2026-11-{day:02d}T20:00:00+00:00", equity))
+    _insert_live_run(
+        "lb_deepseek_v4_pro_20261101_20261130", "deepseek_v4_pro", "2026-11-30", points,
+        total_return=closes[-1] / SEED - 1, sharpe=9.99,
+        metadata={"initial_capital": SEED}, start_date="2026-11-01",
+    )
+    payload = live.get_live_leaderboard(as_of=datetime(2026, 11, 30, 17, 39, tzinfo=_ET))
+    deepseek = _sharpe_entry(payload, "deepseek_v4_pro")
+
+    half_day = [
+        (p["timestamp"][11:16], p["equity"])
+        for p in deepseek["equity_curve"] if p["timestamp"].startswith("2026-11-27")
+    ]
+    assert half_day == [
+        ("10:00", close_by_day[25]),
+        ("11:00", close_by_day[25]),
+        ("12:00", close_by_day[27] * 0.99),
+        ("13:00", close_by_day[27]),
+    ]
+    daily = dict(daily_session_closes(deepseek["equity_curve"]))
+    assert [day.day for day in daily] == list(_NOV_2026_SESSIONS)
+    assert daily[date(2026, 11, 27)] == close_by_day[27]
+
+    assert deepseek["sharpe_ratio"] == pytest.approx(2.846050, abs=1e-6)
+    assert deepseek["sharpe_ci_low"] == pytest.approx(-4.166815, abs=1e-6)
+    assert deepseek["sharpe_ci_high"] == pytest.approx(9.858915, abs=1e-6)
+    assert deepseek["sharpe_days"] == 20
+    assert deepseek["sharpe_status"] == "ok"
+
+
+def test_a_baseline_row_publishes_the_same_daily_sharpe(no_alpaca):
+    """Baselines and models share one reader; pin the baseline side too."""
+    _insert_sharpe_run("spy_index", range(3, 8), _M03_FACTORS)
+    payload = live.get_live_leaderboard(as_of=datetime(2026, 8, 7, 17, 39, tzinfo=_ET))
+    spy = _sharpe_entry(payload, "spy_index")
+    assert spy["sharpe_status"] == "ok"
+    assert spy["sharpe_days"] == 5
+    assert spy["sharpe_ratio"] == pytest.approx(2.611715, abs=1e-6)
+    assert spy["sharpe_ci_low"] == pytest.approx(-11.396490, abs=1e-6)
+    assert spy["sharpe_ci_high"] == pytest.approx(16.619919, abs=1e-6)
+
+
+def test_a_stored_curve_with_nothing_to_plot_is_pending_and_logged(no_alpaca, monkeypatch, caplog):
+    """Absent and broken must differ (CLAUDE.md, fail-closed is not fail-visible).
+
+    Every stored point is after the bell, so none lands on an axis node. Filling
+    the axis from the seed drew a flat line, ranked it, and published Sharpe as
+    "Returns never moved" with nothing logged."""
+    monkeypatch.setattr(live, "_reported_unplottable", set())
+    _insert_live_run(
+        "lb_deepseek_v4_pro_20260801_20260807", "deepseek_v4_pro", "2026-08-07",
+        [_pt(f"2026-08-{d:02d}T21:00:00+00:00", SEED * f) for d, f in zip(range(3, 8), _M03_FACTORS)],
+        total_return=_M03_FACTORS[-1] - 1, sharpe=9.99,
+        metadata={"initial_capital": SEED},
+    )
+    with caplog.at_level("ERROR"):
+        for _ in range(2):
+            payload = live.get_live_leaderboard(as_of=datetime(2026, 8, 7, 17, 39, tzinfo=_ET))
+    deepseek = _sharpe_entry(payload, "deepseek_v4_pro")
+    assert deepseek["status"] == "pending"
+    assert deepseek["rank"] is None
+    assert deepseek["equity_curve"] == []
+    assert deepseek["sharpe_status"] == "pending"
+    assert deepseek["sharpe_ratio"] is None
+    logged = [r.getMessage() for r in caplog.records if "live.curve_unplottable" in r.getMessage()]
+    assert len(logged) == 1, "once per process, not on every public GET"
+    assert "lb_deepseek_v4_pro_20260801_20260807" in logged[0]
+
+
+def test_a_healthy_curve_logs_no_unplottable_error(no_alpaca, monkeypatch, caplog):
+    monkeypatch.setattr(live, "_reported_unplottable", set())
+    _insert_sharpe_run("deepseek_v4_pro", range(3, 8), _M03_FACTORS)
+    with caplog.at_level("ERROR"):
+        live.get_live_leaderboard(as_of=datetime(2026, 8, 7, 17, 39, tzinfo=_ET))
+    assert not [r for r in caplog.records if "curve_unplottable" in r.getMessage()]
+
+
+def test_a_row_with_no_recorded_seed_measures_day_one_in_its_own_dollars(no_alpaca):
+    """A $10k run on the $100k board that did not record its seed is not
+    rescaled, so its E_0 must be in its own dollars too: the first mark, as on
+    the Competition board. Against display_capital, day 1 read about -90% and
+    published a large negative Sharpe with status ok."""
+    seed = 10_000.0
+    _insert_live_run(
+        "lb_deepseek_v4_pro_20260801_20260807", "deepseek_v4_pro", "2026-08-07",
+        [_pt(f"2026-08-{d:02d}T19:00:00+00:00", seed * f) for d, f in zip(range(3, 8), _M03_FACTORS)],
+        total_return=_M03_FACTORS[-1] - 1, sharpe=9.99, metadata=None,
+    )
+    payload = live.get_live_leaderboard(as_of=datetime(2026, 8, 7, 17, 39, tzinfo=_ET))
+    deepseek = _sharpe_entry(payload, "deepseek_v4_pro")
+    # M03's first return is 0, so E_0 = the first mark changes nothing else.
+    assert deepseek["sharpe_status"] == "ok"
+    assert deepseek["sharpe_ratio"] == pytest.approx(2.611715, abs=1e-6)
+    assert deepseek["sharpe_days"] == 5
+    # The axis before the first print opens there as well, not at $100k.
+    assert deepseek["equity_curve"][0]["equity"] == pytest.approx(seed)
+
+
+def test_a_row_with_no_seed_at_all_is_undefined_and_logged(no_alpaca, monkeypatch, caplog):
+    from dashboard.backend.domain.backtesting import metrics
+
+    monkeypatch.setattr(metrics, "_logged_drift", set())
+    _insert_live_run(
+        "lb_deepseek_v4_pro_20260801_20260807", "deepseek_v4_pro", "2026-08-07",
+        [_pt(f"2026-08-{d:02d}T19:00:00+00:00", SEED * f) for d, f in zip(range(3, 8), _M03_FACTORS)],
+        total_return=_M03_FACTORS[-1] - 1, metadata=None, initial_equity=0.0,
+    )
+    with caplog.at_level("ERROR"):
+        payload = live.get_live_leaderboard(as_of=datetime(2026, 8, 7, 17, 39, tzinfo=_ET))
+    deepseek = _sharpe_entry(payload, "deepseek_v4_pro")
+    assert deepseek["sharpe_status"] == "undefined"
+    assert deepseek["sharpe_ratio"] is None
+    assert any("not a positive number" in r.getMessage() for r in caplog.records)

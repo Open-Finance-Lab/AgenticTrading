@@ -519,6 +519,22 @@ def test_a_clamped_or_fallback_tape_is_a_different_experiment(board):
     assert entry["samples"]["max_return"] == pytest.approx(0.01)
 
 
+def test_repeats_sized_by_different_sell_rules_never_pool(board):
+    """A row without ``llm_sell_sizing`` closed whole positions whatever the
+    model's size (#661); a median across it and a row that sold the size asked
+    for describes neither. The larger group publishes, as for the tape, so a
+    board whose repeats all predate the rule is unchanged by the merge."""
+    _seed_primary(board)
+    _seed_sample(board, 1, -0.01)
+    _seed_sample(board, 2, 0.01)
+    _seed_sample(board, 3, 0.40, metadata=_config(llm_sell_sizing="requested_shares"))
+
+    entry = _entry(lb_service.get_leaderboard(), _ENTRY)
+
+    assert entry["samples"]["count"] == 2
+    assert entry["samples"]["max_return"] == pytest.approx(0.01)
+
+
 def test_newest_means_last_written_on_either_backend():
     """Postgres keeps the first-seen ``created_at`` on a re-insert, so a
     ``--force`` rerun is newer only by ``updated_at``, which both backends set."""
@@ -1087,3 +1103,44 @@ def test_a_pool_is_read_in_one_batch_and_never_twice(board, monkeypatch):
     assert entry["run_id"] == median and entry["run_id"] != primary
     assert [sorted(c) for c in batches] == [sorted([first, median, last])]
     assert not {first, median, last} & set(singles)
+
+
+# --------------------------------------------------------------------------
+# the Live board's Haiku pin must not re-judge Haiku's Competition repeats
+# --------------------------------------------------------------------------
+
+_HAIKU = "claude_haiku_4_5"
+# What Haiku's three Competition repeat runs recorded when they were deployed
+# (2026-10-03). Stated, not read from leaderboard.json: the case is that the
+# shared entry still agrees with them.
+_HAIKU_REPEATS_RECORDED = {
+    "entry_id": _HAIKU,
+    "model_id": "claude-haiku-4-5-20251001",
+    "integration": "commonstack",
+    "temperature": None,
+    "reasoning_effort": None,
+}
+
+
+def test_the_live_haiku_pin_leaves_its_competition_median_alone(board, capsys):
+    """Haiku's Live-board id and temperature sit under ``live_overrides``. Set
+    on the shared entry, they make its repeats a different config than the one
+    configured, and the July single run replaces their median on the board."""
+    july = board.seed_run(
+        _HAIKU,
+        initial_equity=_DISPLAY_CAPITAL,
+        equities=[_DISPLAY_CAPITAL, _DISPLAY_CAPITAL * 1.03],
+        total_return=0.03,
+    )
+    for n, total_return in ((1, -0.0252), (2, 0.0019), (3, 0.0108)):
+        _seed_sample(
+            board, n, total_return, entry=_HAIKU,
+            metadata=_config(**_HAIKU_REPEATS_RECORDED),
+        )
+
+    entry = _entry(lb_service.get_leaderboard(), _HAIKU)
+
+    assert entry["run_id"] == lb_service._sample_run_id(_HAIKU, _START, _END, 2)
+    assert entry["run_id"] != july
+    assert entry["samples"]["count"] == 3
+    assert "repeat run(s) recorded under a different" not in capsys.readouterr().out

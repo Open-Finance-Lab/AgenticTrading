@@ -8,7 +8,10 @@ import threading
 import time
 from collections.abc import Callable, Iterator
 
-from dashboard.backend.domain.credits.models import LLMSettlementResult
+from dashboard.backend.domain.credits.models import (
+    LLMReservation,
+    LLMSettlementResult,
+)
 from dashboard.backend.domain.credits.service import CreditsService
 from dashboard.backend.domain.credits.repository_common import (
     CreditAccountRestrictedStoreError,
@@ -83,6 +86,50 @@ _CALL_SPECIFIC_FAILURES = frozenset(
         ExecutionErrorCategory.PROVIDER_UNAVAILABLE,
     }
 )
+
+
+def reserve_platform_credits(
+    credits: CreditsService,
+    *,
+    user_id: int,
+    run_id: str,
+    call_index: int,
+    amount_micro: int,
+    provider_id: str,
+    attempt_index: int = 0,
+) -> LLMReservation:
+    """Hold one call's ceiling, mapping a refused hold to the run's error.
+
+    The one reserve-error contract for every Credits path (this service and the
+    hosted AI Hedge Fund meter): a restricted account names its reason and the
+    amount owed, an empty balance is INSUFFICIENT_CREDITS, and any other store
+    failure stays internal as BILLING_FAILED. The ``status`` of the returned
+    hold is the caller's to check, since only the caller can release it.
+    """
+    try:
+        return credits.reserve_llm_credits(
+            user_id=user_id,
+            run_id=run_id,
+            call_index=call_index,
+            attempt_index=attempt_index,
+            provider_id=provider_id,
+            amount_micro=amount_micro,
+        )
+    except CreditAccountRestrictedStoreError as exc:
+        try:
+            balance = credits.get_balance(user_id)
+            reason = balance.restriction_reason
+            outstanding_micro = balance.outstanding_credits_micro
+        except Exception:  # noqa: BLE001 - keep the safe fallback
+            reason = None
+            outstanding_micro = 0
+        raise LLMExecutionError.account_restricted(
+            reason, outstanding_micro
+        ) from exc
+    except InsufficientCreditsError as exc:
+        raise LLMExecutionError(ExecutionErrorCategory.INSUFFICIENT_CREDITS) from exc
+    except Exception as exc:  # noqa: BLE001 - store errors stay internal
+        raise LLMExecutionError(ExecutionErrorCategory.BILLING_FAILED) from exc
 
 
 def _report_provider_attempt_failed(
@@ -382,30 +429,15 @@ class LLMExecutionService:
         try:
             reserved_micro = _reservation_ceiling_micro(request, pricing_snapshot)
             if reserved_micro > 0:
-                try:
-                    reservation = self.credits.reserve_llm_credits(
-                        user_id=request.user_id,
-                        run_id=request.run_id,
-                        call_index=request.call_index,
-                        attempt_index=attempt_index,
-                        provider_id=request.provider_id,
-                        amount_micro=reserved_micro,
-                    )
-                except CreditAccountRestrictedStoreError as exc:
-                    try:
-                        balance = self.credits.get_balance(request.user_id)
-                        reason = balance.restriction_reason
-                        outstanding_micro = balance.outstanding_credits_micro
-                    except Exception:  # noqa: BLE001 - keep the safe fallback
-                        reason = None
-                        outstanding_micro = 0
-                    raise LLMExecutionError.account_restricted(
-                        reason, outstanding_micro
-                    ) from exc
-                except InsufficientCreditsError as exc:
-                    raise LLMExecutionError(
-                        ExecutionErrorCategory.INSUFFICIENT_CREDITS
-                    ) from exc
+                reservation = reserve_platform_credits(
+                    self.credits,
+                    user_id=request.user_id,
+                    run_id=request.run_id,
+                    call_index=request.call_index,
+                    attempt_index=attempt_index,
+                    provider_id=request.provider_id,
+                    amount_micro=reserved_micro,
+                )
                 reservation_id = reservation.reservation_id
                 self._platform_runs.add(request.run_id)
                 if reservation.status != "open":

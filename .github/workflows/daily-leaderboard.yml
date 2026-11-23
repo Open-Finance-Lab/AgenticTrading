@@ -9,12 +9,13 @@ name: Daily Leaderboard refresh
 # Requires repository secret LEADERBOARD_DAILY_REFRESH_SECRET matching
 # the value configured on the Render service.
 #
-# SCHEDULE PAUSED. The Daily Leaderboard tab was replaced by the Live Trading
-# Leaderboard, so this job's output has no surface — left on schedule it would keep
-# deploying every competition LLM nightly, billable, for a board nobody can
-# open. The endpoint, the secret and workflow_dispatch all stay, because the
-# season engine's nightly advance is this same call.
-# To re-enable: uncomment the `schedule:` block below.
+# SCHEDULE PAUSED. The Daily Leaderboard tab is retired, so this job's output
+# has no surface — left on schedule it would keep deploying every competition
+# LLM nightly, billable, for a board nobody can open. The Live Leaderboard's
+# nightly advance is a different call: live-leaderboard.yml POSTs
+# /api/v1/leaderboard/live/refresh with the same secret, so re-enabling this
+# schedule feeds nothing on screen. The endpoint and workflow_dispatch stay for
+# manual daily-board runs. To re-enable: uncomment the `schedule:` block below.
 # (Same pause Jinbo proposed in #335, adopted here so this PR supersedes it.)
 
 on:

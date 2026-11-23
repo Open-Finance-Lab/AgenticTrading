@@ -504,7 +504,7 @@ def test_health_detail_has_no_affected_users_column():
     )
     assert result["h1"] == "System health"
     assert result["metrics"] == ["10", "80%", "40", "2"]
-    assert result["headers"] == [["Failure category", "Count"], ["Reason", "State", "Users"]]
+    assert result["headers"] == [["Failure category", "Events"], ["Reason", "State", "Users"]]
     assert result["rows"] == [
         [["Credential Invalid", "4"], ["Provider Timeout", "2"]],
         [["No Usable Billing Lane", "Blocked", "2"], ["Credential Invalid", "Needs attention", "4"]],

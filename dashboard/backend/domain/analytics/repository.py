@@ -123,48 +123,6 @@ CREATE TABLE IF NOT EXISTS analytics_daily_rollups (
     )
 );
 
-CREATE TABLE IF NOT EXISTS user_analytics_snapshots (
-    user_id INTEGER PRIMARY KEY,
-    status TEXT NOT NULL CHECK (
-        status IN ('blocked', 'needs_attention', 'dormant', 'onboarding', 'active')
-    ),
-    reason_code TEXT NOT NULL CHECK (length(reason_code) BETWEEN 1 AND 100),
-    human_readable_reason TEXT NOT NULL
-        CHECK (length(human_readable_reason) BETWEEN 1 AND 500),
-    evidence_event_ids_json TEXT NOT NULL DEFAULT '[]'
-        CHECK (length(evidence_event_ids_json) <= 4096),
-    calculated_at TEXT NOT NULL,
-    lifecycle_segment TEXT,
-    lifecycle_reason_code TEXT,
-    lifecycle_reason TEXT,
-    lifecycle_evidence_json TEXT NOT NULL DEFAULT '[]',
-    operational_state TEXT,
-    operational_reason_code TEXT,
-    operational_reason TEXT,
-    operational_evidence_json TEXT NOT NULL DEFAULT '[]',
-    activated_at TEXT,
-    last_meaningful_activity_at TEXT,
-    inactive_days INTEGER NOT NULL DEFAULT 0,
-    active_days_30d INTEGER NOT NULL DEFAULT 0,
-    successful_backtests_30d INTEGER NOT NULL DEFAULT 0,
-    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
-);
-
-CREATE TABLE IF NOT EXISTS user_lifecycle_daily_snapshots (
-    snapshot_date TEXT NOT NULL CHECK (length(snapshot_date) = 10),
-    user_id INTEGER NOT NULL,
-    lifecycle_segment TEXT NOT NULL,
-    lifecycle_reason_code TEXT NOT NULL,
-    data_quality TEXT NOT NULL CHECK (data_quality IN ('complete', 'partial')),
-    calculated_at TEXT NOT NULL,
-    PRIMARY KEY (snapshot_date, user_id),
-    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
-);
-CREATE INDEX IF NOT EXISTS idx_lifecycle_daily_segment
-    ON user_lifecycle_daily_snapshots(snapshot_date, lifecycle_segment);
-CREATE INDEX IF NOT EXISTS idx_lifecycle_daily_user
-    ON user_lifecycle_daily_snapshots(user_id, snapshot_date DESC);
-
 CREATE TABLE IF NOT EXISTS analytics_projection_jobs (
     job_name TEXT PRIMARY KEY,
     window_start TEXT NOT NULL,
@@ -266,6 +224,11 @@ CREATE INDEX IF NOT EXISTS idx_admin_analytics_access_admin_time
     ON admin_analytics_access_log(admin_user_id, accessed_at DESC, sequence DESC);
 """
 
+# The five-state snapshot tables PR B retires. Neither DDL declares them any
+# more; ``drop_legacy_snapshot_tables`` removes them from a database that
+# still has them. Child first, though neither references the other.
+LEGACY_SNAPSHOT_TABLES = ("user_lifecycle_daily_snapshots", "user_analytics_snapshots")
+
 
 _EVENT_COLUMNS = (
     "event_id",
@@ -343,38 +306,19 @@ class AnalyticsStore:
     def _init_schema(self) -> None:
         with self._get_connection() as conn:
             conn.executescript(ANALYTICS_SQLITE_DDL)
-            self._migrate_value_columns(conn)
             self._migrate_error_category_constraint(conn)
 
-    @staticmethod
-    def _migrate_value_columns(conn: sqlite3.Connection) -> None:
-        """Add value-analytics columns to installations created by PR 1."""
-        columns = {
-            str(row[1])
-            for row in conn.execute(
-                "PRAGMA table_info(user_analytics_snapshots)"
-            ).fetchall()
-        }
-        additions = {
-            "lifecycle_segment": "TEXT",
-            "lifecycle_reason_code": "TEXT",
-            "lifecycle_reason": "TEXT",
-            "lifecycle_evidence_json": "TEXT NOT NULL DEFAULT '[]'",
-            "operational_state": "TEXT",
-            "operational_reason_code": "TEXT",
-            "operational_reason": "TEXT",
-            "operational_evidence_json": "TEXT NOT NULL DEFAULT '[]'",
-            "activated_at": "TEXT",
-            "last_meaningful_activity_at": "TEXT",
-            "inactive_days": "INTEGER NOT NULL DEFAULT 0",
-            "active_days_30d": "INTEGER NOT NULL DEFAULT 0",
-            "successful_backtests_30d": "INTEGER NOT NULL DEFAULT 0",
-        }
-        for name, definition in additions.items():
-            if name not in columns:
-                conn.execute(
-                    f"ALTER TABLE user_analytics_snapshots ADD COLUMN {name} {definition}"
-                )
+    def drop_legacy_snapshot_tables(self) -> None:
+        """Drop the five-state snapshot tables (design SS11, SS13 row B).
+
+        ``IF EXISTS`` on both, so the second boot after the deploy that drops
+        them, and a fresh install whose DDL never created them, are no-ops.
+        ``facts_migration.run_startup_migrations`` calls it only after
+        ``seed_activity_from_snapshots`` has read the final legacy row.
+        """
+        with self._get_connection() as conn:
+            for table in LEGACY_SNAPSHOT_TABLES:
+                conn.execute(f"DROP TABLE IF EXISTS {table}")
 
     @staticmethod
     def _migrate_error_category_constraint(conn: sqlite3.Connection) -> None:

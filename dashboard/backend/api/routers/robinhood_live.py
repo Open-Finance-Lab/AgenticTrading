@@ -1,4 +1,11 @@
-"""Robinhood live trading + connection status API."""
+"""Robinhood live trading + connection status API.
+
+The real-money path is switched off (``robinhood_live_enabled()`` in
+``domain/backtesting/constants.py``). Off, ``live-run`` answers 404 through
+``require_robinhood_live`` (``api/auth.py``, which gates the OAuth routes the
+same way); ``status`` and ``disconnect`` stay up so a linked account can see
+that it is linked and delete its stored tokens.
+"""
 
 from __future__ import annotations
 
@@ -8,8 +15,9 @@ from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
-from dashboard.backend.api.auth import get_current_user
+from dashboard.backend.api.auth import get_current_user, require_robinhood_live
 from dashboard.backend.domain.agents.service import agent_service
+from dashboard.backend.domain.backtesting.constants import robinhood_live_enabled
 from dashboard.backend.execution import robinhood_live_service as live_service
 from dashboard.backend.domain.brokers.repository import broker_store
 
@@ -28,15 +36,18 @@ async def robinhood_status(
     portfolio: bool = False,
     current_user: dict = Depends(get_current_user),
 ):
+    enabled = robinhood_live_enabled()
     try:
         status = await live_service.get_connection_status(
             int(current_user["id"]),
-            include_portfolio=portfolio,
+            # Off, the answer is read from the local store only: the panel needs
+            # to know whether there is a link to delete, not the account's balance.
+            include_portfolio=portfolio and enabled,
         )
     except Exception as exc:
         logger.exception("robinhood_status_failed")
         raise HTTPException(status_code=502, detail="Failed to fetch Robinhood status") from exc
-    return status
+    return {**status, "enabled": enabled}
 
 
 @router.delete("/disconnect")
@@ -46,15 +57,18 @@ async def robinhood_disconnect(current_user: dict = Depends(get_current_user)):
     revoke = getattr(live_service, "revoke_connection", None)
     if callable(revoke):
         try:
-            await revoke(user_id)
-            revoked_upstream = True
+            # revoke_connection never raises; False is its failure answer.
+            revoked_upstream = bool(await revoke(user_id))
         except Exception:
             logger.warning("robinhood_revoke_failed for user_id=%s", user_id, exc_info=True)
     broker_store.delete(user_id)
     return {"status": "ok", "connected": False, "revoked_upstream": revoked_upstream}
 
 
-@router.post("/agents/{agent_id}/live-run")
+@router.post(
+    "/agents/{agent_id}/live-run",
+    dependencies=[Depends(require_robinhood_live)],
+)
 async def robinhood_live_run(
     agent_id: str,
     body: LiveRunBody,

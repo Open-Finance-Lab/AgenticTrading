@@ -6,12 +6,21 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
-from dashboard.backend.infrastructure.llm.validator import DJIA_30
+from dashboard.backend.infrastructure.llm.validator import DJIA_30, normalize_symbol
 
 SCHEMA_VERSION = "2.0"
 UNIVERSE_KEY = "djia_30"
 UNIVERSE: List[str] = list(DJIA_30)
 _UNIVERSE_SET = set(UNIVERSE)
+# Every DJIA-30 ticker is at most 5 characters; this leaves room for padding.
+# It bounds what a rejection echoes into the ack, its idempotency row and the
+# trace, which an agent could otherwise fill with an arbitrarily long string
+# on every submission.
+SYMBOL_MAX_LENGTH = 32
+_SYMBOL_RULE = (
+    "Surrounding ASCII whitespace is trimmed and ASCII letters are uppercased "
+    "(normalize_symbol), so ' aapl ' is AAPL. A non-ASCII value is never "
+    "case-folded and so never matches a ticker.")
 
 
 # --- Context envelope ------------------------------------------------------
@@ -80,7 +89,9 @@ class ActionItem(BaseModel):
     model_config = ConfigDict(use_enum_values=True)
 
     action: str = Field(pattern="^(buy|sell|hold)$")
-    symbol: str
+    symbol: str = Field(
+        max_length=SYMBOL_MAX_LENGTH,
+        description=f"DJIA-30 ticker, checked after normalizing. {_SYMBOL_RULE}")
     confidence: float = Field(ge=0.0, le=1.0)
     reasoning: str = Field(min_length=5, max_length=500)
     position_size: int = Field(ge=0, le=10000)
@@ -90,9 +101,13 @@ class ActionItem(BaseModel):
     @field_validator("symbol")
     @classmethod
     def _symbol_in_universe(cls, v: str) -> str:
-        if v not in _UNIVERSE_SET:
+        # Normalize before the membership check, with the helper every
+        # decision path shares: "aapl" or "AAPL " is AAPL, not a universe
+        # violation.
+        symbol = normalize_symbol(v)
+        if symbol not in _UNIVERSE_SET:
             raise ValueError(f"universe_violation: {v} not in DJIA-30")
-        return v
+        return symbol
 
 
 class DecisionRequest(BaseModel):
@@ -121,21 +136,32 @@ def validate_actions(
         except ValidationError as exc:
             msg = exc.errors()[0].get("msg", "validation_failed")
             reason = "universe_violation" if "universe_violation" in msg else "validation_failed"
-            rejected.append({"symbol": str(raw.get("symbol", "?")), "reason": reason})
+            rejected.append({"symbol": _rejected_symbol(raw.get("symbol", "?")),
+                             "reason": reason})
     return valid, rejected
+
+
+def _rejected_symbol(raw_symbol: Any) -> str:
+    """The symbol a rejection echoes: normalized exactly like an executed one,
+    so an agent matches every ack entry to what it sent with one rule, and
+    bounded to SYMBOL_MAX_LENGTH."""
+    text = raw_symbol if isinstance(raw_symbol, str) else str(raw_symbol)
+    return normalize_symbol(text)[:SYMBOL_MAX_LENGTH]
 
 
 # --- Submit ack ------------------------------------------------------------
 
 class ExecutedItem(BaseModel):
     action: str
-    symbol: str
+    symbol: str = Field(description=f"The submitted symbol, normalized. {_SYMBOL_RULE}")
     shares: float
     price: Optional[float] = None
 
 
 class RejectedItem(BaseModel):
-    symbol: str
+    symbol: str = Field(description=(
+        f"The submitted symbol, normalized like an executed one and cut to "
+        f"{SYMBOL_MAX_LENGTH} characters. {_SYMBOL_RULE}"))
     reason: str
 
 
