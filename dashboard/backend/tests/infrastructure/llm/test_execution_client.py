@@ -1,10 +1,14 @@
+import pytest
+
 from dashboard.backend.infrastructure.llm.execution.client import (
     AnthropicCompatibleExecutionClient,
 )
+from dashboard.backend.infrastructure.llm.execution.errors import LLMExecutionError
 from dashboard.backend.infrastructure.llm.execution.handoff import ExecutionHandoff
 from dashboard.backend.infrastructure.llm.execution.models import (
     BillingEvidence,
     BillingMode,
+    LLMEmptyReplyResult,
     LLMExecutionResult,
     LLMRunEvidence,
     LLMUsage,
@@ -232,3 +236,94 @@ def test_client_exposes_provider_stop_reason_like_the_sdk():
     response = _create(client)
 
     assert response.stop_reason == "max_tokens"
+
+
+def _billed_empty_reply(**overrides):
+    """An empty-reply error carrying the evidence the service settled (#556)."""
+    settled = _result(**overrides)
+    error = LLMExecutionError.for_empty_reply(usage=settled.usage)
+    error.billed_result = LLMEmptyReplyResult(
+        **settled.model_dump(exclude={"text", "finish_reason", "sampling_wire"})
+    )
+    return error
+
+
+class _RaisingThenAnsweringService(_FakeExecutionService):
+    def execute(self, request):
+        self.requests.append(request)
+        outcome = self.results.pop(0)
+        if isinstance(outcome, BaseException):
+            raise outcome
+        return outcome
+
+
+def test_execution_summary_counts_a_billed_empty_reply():
+    """The empty reply raised, but the ledger debited it: the summary must
+    report the same debit, tokens and calls, not just the rescue's."""
+    service = _RaisingThenAnsweringService(
+        [
+            _billed_empty_reply(
+                input_tokens=10, output_tokens=2000, debited_micro=60_000,
+                outstanding_micro=1_000,
+            ),
+            _result(),
+        ]
+    )
+    client = AnthropicCompatibleExecutionClient(
+        execution_service=service, handoff=_handoff()
+    )
+
+    with pytest.raises(LLMExecutionError) as exc_info:
+        _create(client)
+    assert exc_info.value.empty_reply is True
+    _create(client)
+    summary = client.execution_summary()
+
+    assert summary.call_count == 2
+    assert summary.output_tokens == 2005
+    assert summary.debited_credits_micro == 69_000
+    assert summary.outstanding_credits_micro == 1_000
+    assert summary.outcome == "settled_overage"
+
+
+def test_execution_summary_exists_when_only_empty_replies_were_billed():
+    service = _RaisingThenAnsweringService([_billed_empty_reply()])
+    client = AnthropicCompatibleExecutionClient(
+        execution_service=service, handoff=_handoff()
+    )
+
+    with pytest.raises(LLMExecutionError):
+        _create(client)
+    summary = client.execution_summary()
+
+    assert summary is not None
+    assert summary.call_count == 1
+    assert summary.debited_credits_micro == 9_000
+
+
+def test_an_unbilled_empty_reply_is_not_counted():
+    service = _RaisingThenAnsweringService([LLMExecutionError.for_empty_reply()])
+    client = AnthropicCompatibleExecutionClient(
+        execution_service=service, handoff=_handoff()
+    )
+
+    with pytest.raises(LLMExecutionError):
+        _create(client)
+
+    assert client.execution_summary() is None
+
+
+def test_sampling_record_ignores_a_billed_empty_reply_s_missing_wire():
+    """An empty reply never reached the adapter's wire record; letting its
+    ``None`` win would claim the lane sent no controls."""
+    answered = _result().model_copy(update={"sampling_wire": "temperature=0.0"})
+    service = _RaisingThenAnsweringService([_billed_empty_reply(), answered])
+    client = AnthropicCompatibleExecutionClient(
+        execution_service=service, handoff=_handoff()
+    )
+
+    with pytest.raises(LLMExecutionError):
+        _create(client)
+    _create(client)
+
+    assert client.sampling_record()["wire"] == {"openrouter": "temperature=0.0"}

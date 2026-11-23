@@ -68,6 +68,7 @@ from dashboard.backend.infrastructure.llm.backtest_harness import (
 )
 from dashboard.backend.infrastructure.llm.execution.errors import (
     LLMExecutionError,
+    empty_reply_usage,
     is_empty_reply,
     is_transient_provider_failure,
 )
@@ -1038,6 +1039,7 @@ class PortfolioManager:
                         llm_response = _extract_response_text(response)
                         break
                     except (LLMExecutionError, AttributeError) as unusable:
+                        self._record_empty_reply_usage(unusable)
                         legacy_empty = _is_legacy_empty_reply(unusable)
                         if rescue or not (legacy_empty or is_empty_reply(unusable)):
                             raise
@@ -1088,6 +1090,7 @@ class PortfolioManager:
                             # truncated first one: keep the first attempt.
                             if not is_empty_reply(retry_err):
                                 raise
+                            self._record_empty_reply_usage(retry_err)
                             retry_response = None
                         if retry_response is not None:
                             self._record_llm_usage(retry_response)
@@ -1452,6 +1455,19 @@ class PortfolioManager:
         self.output_tokens += output_delta
         self.llm_calls += 1
         return output_delta
+
+    def _record_empty_reply_usage(self, error: BaseException) -> None:
+        """Bill an empty reply the provider charged for (#556); else a no-op.
+
+        It raised instead of coming back, but it is a billed call with usage,
+        so it counts in ``llm_calls`` and the token totals like any response.
+        """
+        billed = empty_reply_usage(error)
+        if billed is None:
+            return
+        self.input_tokens += billed.input_tokens
+        self.output_tokens += billed.output_tokens
+        self.llm_calls += 1
 
     def strict_llm_fallback_budget(self) -> int:
         """How many unusable model responses this strict run may absorb."""

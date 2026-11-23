@@ -24,10 +24,12 @@ from dashboard.backend.infrastructure.llm.execution.errors import (
 from dashboard.backend.infrastructure.llm.execution.models import (
     BillingEvidence,
     BillingMode,
+    LLMEmptyReplyResult,
     LLMExecutionRequest,
     LLMExecutionResult,
     LLMMessage,
     LLMUsage,
+    PricingSnapshot,
     UsagePolicy,
 )
 from dashboard.backend.infrastructure.llm.execution.service import LLMExecutionService
@@ -701,13 +703,13 @@ def test_an_unpriced_empty_reply_is_released_and_stays_retryable(
     "error",
     [
         ProviderExecutionError.for_empty_reply(),
-        # No output and no reported cost: nothing shows a charge, so nothing
+        # No tokens and no reported cost: nothing shows a charge, so nothing
         # is settled -- never more than the provider can be shown to bill.
         ProviderExecutionError.for_empty_reply(
-            usage=LLMUsage(input_tokens=100, output_tokens=0)
+            usage=LLMUsage(input_tokens=0, output_tokens=0)
         ),
     ],
-    ids=["no-usage", "zero-output"],
+    ids=["no-usage", "zero-tokens"],
 )
 def test_an_unbilled_empty_reply_is_still_released_at_zero(
     tmp_path, monkeypatch, error
@@ -720,6 +722,146 @@ def test_an_unbilled_empty_reply_is_still_released_at_zero(
 
     assert exc_info.value.empty_reply is True
     assert _reservations(credits_store, "unbilled-empty-run") == [(0, "released", 0)]
+    assert credits_store.get_balance_projection(USER_ID)["total_available_micro"] == 1_100_000
+
+
+def test_a_prompt_only_empty_reply_settles_its_prompt_tokens(tmp_path, monkeypatch):
+    """No completion token and no reported cost still bills the prompt: the
+    provider charges for the tokens it read whether or not it wrote any. A
+    provider that waives the call reports $0, which settles at $0."""
+    adapter = ScriptedExecutionAdapter(
+        [
+            ProviderExecutionError.for_empty_reply(
+                usage=LLMUsage(input_tokens=100, output_tokens=0)
+            )
+        ]
+    )
+    service, credits_store = _execution_service(tmp_path, monkeypatch, adapter)
+
+    with pytest.raises(LLMExecutionError) as exc_info:
+        service.execute(_request("prompt-only-empty-run"))
+
+    assert exc_info.value.empty_reply is True
+    assert _reservations(credits_store, "prompt-only-empty-run") == [
+        (0, "settled", 100_000)
+    ]
+
+
+def test_an_empty_reply_on_a_zero_priced_route_stays_retryable(tmp_path, monkeypatch):
+    """A zero-priced route holds nothing, so there is nothing to settle from.
+    A reported cost must not turn the retryable empty reply into
+    BILLING_FAILED, which would skip the caller's rescue call."""
+    adapter = ScriptedExecutionAdapter(
+        [
+            ProviderExecutionError.for_empty_reply(
+                usage=LLMUsage(input_tokens=100, output_tokens=100),
+                provider_cost_usd=0.25,
+            )
+        ]
+    )
+    service, credits_store = _execution_service(
+        tmp_path, monkeypatch, adapter, usd_per_million_tokens=0.0
+    )
+
+    with pytest.raises(LLMExecutionError) as exc_info:
+        service.execute(_request("zero-priced-empty-run"))
+
+    assert exc_info.value.category is ExecutionErrorCategory.RESPONSE_INVALID
+    assert exc_info.value.empty_reply is True
+    assert exc_info.value.billed_result is None
+    assert _reservations(credits_store, "zero-priced-empty-run") == []
+    assert credits_store.get_balance_projection(USER_ID)["total_available_micro"] == 1_100_000
+
+
+def test_a_billed_empty_reply_carries_its_evidence_and_reaches_analytics(
+    tmp_path, monkeypatch
+):
+    """The run summary and the admin cost both read what a call billed; an
+    empty reply raises instead of returning, so the error carries it."""
+    adapter = ScriptedExecutionAdapter(
+        [
+            ProviderExecutionError.for_empty_reply(
+                usage=LLMUsage(input_tokens=100, output_tokens=100)
+            )
+        ]
+    )
+    service, _credits_store = _execution_service(tmp_path, monkeypatch, adapter)
+    events = []
+    monkeypatch.setattr(
+        execution_service_module.analytics_instrumentation,
+        "emit_resource_event",
+        lambda **kwargs: events.append(kwargs),
+    )
+
+    with pytest.raises(LLMExecutionError) as exc_info:
+        service.execute(_request("evidence-empty-run"))
+
+    billed = exc_info.value.billed_result
+    assert isinstance(billed, LLMEmptyReplyResult)
+    assert billed.text == ""
+    assert billed.usage == LLMUsage(input_tokens=100, output_tokens=100)
+    assert billed.billing.debited_credits_micro == 200_000
+    assert billed.provider_id == "openrouter"
+    usage_events = [e for e in events if e["event_name"] == "model_usage_recorded"]
+    assert len(usage_events) == 1
+    assert usage_events[0]["outcome"] == "failed"
+    assert usage_events[0]["properties"] == {
+        "input_tokens": 100,
+        "output_tokens": 100,
+        "cost_micro_usd": 200_000,
+    }
+
+
+def test_an_unbilled_empty_reply_carries_no_evidence(tmp_path, monkeypatch):
+    adapter = ScriptedExecutionAdapter([ProviderExecutionError.for_empty_reply()])
+    service, _credits_store = _execution_service(tmp_path, monkeypatch, adapter)
+    events = []
+    monkeypatch.setattr(
+        execution_service_module.analytics_instrumentation,
+        "emit_resource_event",
+        lambda **kwargs: events.append(kwargs),
+    )
+
+    with pytest.raises(LLMExecutionError) as exc_info:
+        service.execute(_request("no-evidence-empty-run"))
+
+    assert exc_info.value.billed_result is None
+    assert "model_usage_recorded" not in [e["event_name"] for e in events]
+
+
+def test_a_byok_empty_reply_carries_evidence_without_touching_the_ledger(
+    tmp_path, monkeypatch
+):
+    adapter = ScriptedExecutionAdapter(
+        [
+            ProviderExecutionError.for_empty_reply(
+                usage=LLMUsage(input_tokens=100, output_tokens=100)
+            )
+        ]
+    )
+    service, credits_store = _execution_service(tmp_path, monkeypatch, adapter)
+    monkeypatch.setattr(
+        service,
+        "_resolve_credential",
+        lambda request: service.providers.resolve_platform_credential(
+            request.provider_id
+        ),
+    )
+
+    with pytest.raises(LLMExecutionError) as exc_info:
+        service.execute(
+            _request("byok-empty-run").model_copy(
+                update={"billing_mode": BillingMode.BYOK}
+            )
+        )
+
+    billed = exc_info.value.billed_result
+    assert exc_info.value.empty_reply is True
+    assert isinstance(billed, LLMEmptyReplyResult)
+    assert billed.billing.billing_source is BillingMode.BYOK
+    assert billed.billing.debited_credits_micro == 0
+    assert billed.usage.output_tokens == 100
+    assert _reservations(credits_store, "byok-empty-run") == []
     assert credits_store.get_balance_projection(USER_ID)["total_available_micro"] == 1_100_000
 
 
@@ -1596,3 +1738,26 @@ def test_the_adapters_sampling_wire_reaches_the_result(
 
     assert result.provider_id == "commonstack"
     assert result.sampling_wire == expected
+
+
+def test_the_gemini_hold_covers_thinking_past_the_output_ceiling():
+    """Gemini bills thinking as output (#657) and ``maxOutputTokens`` does not
+    reliably bound it, so its hold (and the launch preflight, which shares
+    the function) adds the thinking allowance; other lanes are unchanged."""
+    def ceiling(provider_id):
+        return execution_service_module.reservation_ceiling_micro_for(
+            prompt_bytes=1000,
+            max_output_tokens=2000,
+            pricing_snapshot=PricingSnapshot(
+                provider_id=provider_id,
+                model_id="google/gemini-3.1-pro-preview",
+                input_usd_per_million_tokens=0.0,
+                output_usd_per_million_tokens=1000.0,
+                source_version="test",
+            ),
+        )
+
+    assert ceiling("openrouter") == 2000 * 1000
+    assert ceiling("gemini") == (
+        2000 + execution_service_module.GEMINI_THINKING_ALLOWANCE_TOKENS
+    ) * 1000

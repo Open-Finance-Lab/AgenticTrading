@@ -499,7 +499,13 @@ def test_a_real_empty_reply_is_rescued_and_both_calls_are_billed(
 
     assert decision == {"actions": []}
     assert manager.llm_decisions == 1, "a hold would return the same dict"
-    assert manager.llm_calls == 1, "only the reply that came back is a call"
+    # Both calls were billed (#556), so both count, tokens included.
+    assert manager.llm_calls == 2
+    assert manager.output_tokens == 2000 + 20
+    summary = client.execution_summary()
+    assert summary is not None
+    assert summary.call_count == 2
+    assert summary.output_tokens == 2000 + 20
     assert [body["max_tokens"] for body in sent] == [
         HARNESS_DEFAULT_MAX_OUTPUT_TOKENS,
         RECOVERY_MAX_OUTPUT_TOKENS,
@@ -519,4 +525,6 @@ def test_a_real_empty_reply_is_rescued_and_both_calls_are_billed(
     # The empty reply is billed upstream for the reasoning that spent its
     # ceiling, so it is debited too: 2000 output tokens against the rescue's 20.
     assert rows[0][2] > rows[1][2] > 0
+    # The run summary reports what the ledger debited, empty reply included.
+    assert summary.debited_credits_micro == rows[0][2] + rows[1][2]
     assert [error["error_category"] for error in errors] == ["empty_response"]

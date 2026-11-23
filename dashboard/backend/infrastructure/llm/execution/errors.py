@@ -9,7 +9,10 @@ from typing import TYPE_CHECKING
 from dashboard.backend.infrastructure.llm.http_policy import RetryHint
 
 if TYPE_CHECKING:
-    from dashboard.backend.infrastructure.llm.execution.models import LLMUsage
+    from dashboard.backend.infrastructure.llm.execution.models import (
+        LLMExecutionResult,
+        LLMUsage,
+    )
 
 
 class ExecutionErrorCategory(StrEnum):
@@ -98,6 +101,10 @@ class LLMExecutionError(RuntimeError):
         # the hold at zero (#556). ``None`` when no usage came back.
         self.billed_usage: LLMUsage | None = None
         self.billed_cost_usd: float | None = None
+        # Set by the service once it has billed an empty reply: the call's
+        # evidence (usage, cost, debit), so the run summary and analytics
+        # count it like any billed call although no answer came back.
+        self.billed_result: LLMExecutionResult | None = None
         super().__init__(self.safe_message)
 
     @classmethod
@@ -180,6 +187,26 @@ def is_empty_reply(error: BaseException) -> bool:
     )
 
 
+def empty_reply_usage(error: BaseException) -> "LLMUsage | None":
+    """The tokens the provider reported for an empty reply, or None.
+
+    For the run's own counters (calls, tokens): an empty reply is still a
+    generation the provider billed (#556), so a caller that counts received
+    responses counts this one too. None for any other error, and for an empty
+    reply that reported no usage or no tokens.
+    """
+    if not is_empty_reply(error):
+        return None
+    usage = getattr(error, "billed_usage", None)
+    if (
+        usage is None
+        or not getattr(usage, "usage_available", False)
+        or (usage.input_tokens <= 0 and usage.output_tokens <= 0)
+    ):
+        return None
+    return usage
+
+
 # The ``reason`` token ``run_failed_line`` writes for an empty reply.
 EMPTY_REPLY_REASON = "empty_reply"
 
@@ -205,6 +232,7 @@ __all__ = [
     "ExecutionErrorCategory",
     "LLMExecutionError",
     "RetryHint",
+    "empty_reply_usage",
     "is_empty_reply",
     "is_transient_provider_failure",
     "run_failed_line",
