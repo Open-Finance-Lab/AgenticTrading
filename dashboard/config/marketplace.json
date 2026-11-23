@@ -465,6 +465,60 @@
    },
    "repo_url": "https://github.com/Lin-Feihan/due-diligence-agent",
    "card_subtitle": "DD · Deep Research"
+  },
+  {
+   "template_id": "acquisition-analysis-acquirer",
+   "shelf": "research",
+   "name": "Acquisition Analysis Agent (Acquirer Side)",
+   "description": "Deep Research agent that analyzes a potential acquisition from the acquirer's side: target valuation, synergies, deal structure, financing, acquisition returns, risks, and offer strategy.",
+   "tags": [
+    "M&A",
+    "deep research",
+    "acquisition"
+   ],
+   "author": "Lin-Feihan",
+   "research": {
+    "agent_id": "acquisition-analysis-acquirer",
+    "service_base_url_env": "RESEARCH_SHELL_SERVICE_URL",
+    "service_base_url_default": "http://127.0.0.1:9100",
+    "estimated_runtime_seconds": 600,
+    "max_runtime_seconds": 1800,
+    "output_formats": [
+     "markdown",
+     "docx",
+     "pdf",
+     "evidence_json"
+    ]
+   },
+   "repo_url": "https://github.com/Lin-Feihan/acquisition-analysis-agent",
+   "card_subtitle": "M&A · Acquirer · Deep Research"
+  },
+  {
+   "template_id": "acquisition-analysis-target-company",
+   "shelf": "research",
+   "name": "Acquisition Analysis Agent (Target Company Side)",
+   "description": "Deep Research agent that evaluates an acquisition offer from the target company's side: offer assessment, standalone value, strategic alternatives, payment terms, and negotiation strategy.",
+   "tags": [
+    "M&A",
+    "deep research",
+    "acquisition"
+   ],
+   "author": "Lin-Feihan",
+   "research": {
+    "agent_id": "acquisition-analysis-target-company",
+    "service_base_url_env": "RESEARCH_SHELL_SERVICE_URL",
+    "service_base_url_default": "http://127.0.0.1:9100",
+    "estimated_runtime_seconds": 600,
+    "max_runtime_seconds": 1800,
+    "output_formats": [
+     "markdown",
+     "docx",
+     "pdf",
+     "evidence_json"
+    ]
+   },
+   "repo_url": "https://github.com/Lin-Feihan/acquisition-analysis-agent",
+   "card_subtitle": "M&A · Target · Deep Research"
   }
  ]
 }
