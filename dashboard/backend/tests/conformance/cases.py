@@ -1167,7 +1167,8 @@ PREDICTIONS_DL: Dict[str, Prediction] = {
     "C04": _p(FAIL, ("fills", "orders", "invariants"), ("D18",),
               "a size-0 SELL is the whole position and the batch is cut to one action per symbol"),
     "S01": _p(FAIL, ("fills", "cash", "positions", "avg_cost", "realized_pnl", "equity", "invariants"),
-              ("D9",), "int(position_size) truncates the fractional size to 0"),
+              ("D9",), "int(position_size) truncates the fractional size to 0, so the buy is "
+              "skipped and recorded as an invalid_quantity rejection (o2's repeat folds into o1's)"),
 }
 
 #: Where a run disagreed with the design doc's prediction. Keyed

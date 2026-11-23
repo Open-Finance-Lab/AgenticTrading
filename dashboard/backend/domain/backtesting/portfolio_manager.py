@@ -31,7 +31,7 @@ from datetime import date, datetime, timedelta
 from itertools import chain
 from numbers import Real
 from types import MappingProxyType
-from typing import Any, Dict, List, Mapping, Optional
+from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 import pandas as pd
 
@@ -110,12 +110,18 @@ STRICT_LLM_MIN_STEPS_FOR_ONE_STRIKE = 25
 #    recorded, so it also covers what landed just before it: actions read by
 #    ``normalize_action`` (#658) and sells sized as asked (#661, recorded on
 #    its own as ``llm_sell_sizing``).
-LLM_GATE_VERSION = 2
+# 3: a buy size the model gave but that cannot be carried out (0.6 rounding to
+#    0 shares, -0.5, a bool, an empty list) is skipped and recorded as an
+#    ``invalid_quantity`` rejection; only a missing/null/empty/0 size is sized
+#    from confidence (#675).
+LLM_GATE_VERSION = 3
 
 
-# The order-event reason of a SELL the gate refused because it cannot read
-# its size. The same word the conformance reference uses for it.
-SELL_SIZE_REFUSED_REASON = "invalid_quantity"
+# The order-event reason of an order the gate refused because it cannot read
+# its size (a SELL since #661, a BUY since #675). The same word the
+# conformance reference uses for it.
+ORDER_SIZE_REFUSED_REASON = "invalid_quantity"
+SELL_SIZE_REFUSED_REASON = ORDER_SIZE_REFUSED_REASON
 
 
 # Up to this many symbols a pipeline agent's market snapshot carries the whole
@@ -556,36 +562,63 @@ class PortfolioManager:
             return held
         return min(self.available_positions.get(symbol, 0), held)
 
-    def _coerce_position_size(self, raw: Any) -> Optional[float]:
-        """A model's ``position_size`` as a number, or None when unparseable.
+    def _read_buy_size(
+        self, raw: Any
+    ) -> Tuple[float, Optional[str], float]:
+        """A model's buy ``position_size`` as ``(shares, refusal, asked)``.
 
-        json.loads happily yields strings, floats, Infinity and NaN here; a
-        missing or null size reads as 0. Whole shares unless the market trades
-        in lots, where the executor validates the quantity itself.
+        The one reading of a buy's size, shared by the strict pre-check, the
+        unreadable-confidence skip and the buy branch, so they cannot disagree
+        about what "no size" means. ``(0, None, 0.0)`` is "no size": a missing,
+        null, empty or zero size, which the gate sizes from confidence. A
+        refusal names why a size given cannot be carried out, and ``asked`` is
+        the ledger's requested count (finite, never negative):
+
+        - unparseable: a bool (``int(True)`` is 1, not a share count), an
+          empty list or dict, text ``int()`` cannot read (#663), NaN or
+          infinity;
+        - rounds to 0 shares: 0.6 truncates to 0 on whole-share markets;
+        - not positive: -0.5, -3.
+
+        Whether a size was given is read off the raw value, never the
+        coerced one: ``int()`` also turns 0.6 and -0.5 into 0, and those
+        must not be sized from confidence as though the model left the size
+        out. Whole shares unless the market trades in lots, where the
+        executor validates the quantity itself (so 0.6 reaches its lot check).
         """
+        if isinstance(raw, bool):
+            return 0, f"unparseable position_size {raw!r}", 0.0
         try:
-            size = float(raw or 0) if self.lot_size > 1 else int(raw or 0)
+            asked = float(raw) if raw is not None and raw != "" else 0.0
+            shares = asked if self.lot_size > 1 else int(raw or 0)
         except (TypeError, ValueError, OverflowError):
-            return None
-        if isinstance(size, float) and not math.isfinite(size):
-            return None
-        return size
+            return 0, f"unparseable position_size {raw!r}", 0.0
+        if not math.isfinite(asked):
+            return 0, f"unparseable position_size {raw!r}", 0.0
+        if asked == 0:
+            return 0, None, 0.0
+        if shares <= 0:
+            if asked > 0:
+                return 0, f"position_size {raw!r} rounds to 0 shares", asked
+            return 0, f"invalid position_size {raw!r}, not positive", 0.0
+        return shares, None, asked
 
-    def _refuse_sell(
+    def _refuse_order(
         self,
         *,
+        action: str,
         symbol: str,
         requested_shares: float,
         timestamp: Any,
         price: float,
         strategy_reason: str,
     ) -> None:
-        """Record a SELL the gate skipped because it cannot read its size.
+        """Record an order the gate skipped because it cannot read its size.
 
         On the order ledger, like an executor rejection: a skip that is only a
         ``print`` is invisible from a dashboard backtest, whose stdout nobody
-        reads, and a run whose model wrote ``"all"`` would publish a curve
-        that never sold with nothing to say why.
+        reads. A run whose model wrote ``"all"`` for a sell, or 0.6 for every
+        buy, would publish a curve that never traded with nothing to say why.
         """
         _record_refused_order(
             rejected_orders=self.rejected_orders,
@@ -593,14 +626,14 @@ class PortfolioManager:
             order_event_repeats=self._order_event_repeats,
             timestamp=timestamp,
             symbol=symbol,
-            action="sell",
-            # sell_request's count: finite and never negative, as every
-            # ledger field must be ("all", NaN or -3 asked for no count, and
-            # the reason says the size was refused), and for a refused trim
-            # the part it asked for, not the 0 its position_size carries.
+            action=action,
+            # Finite and never negative, as every ledger field must be ("all",
+            # NaN or -3 asked for no count, and the reason says the size was
+            # refused); for a refused sell trim the part it asked for, and
+            # for a buy under one share the fraction asked for.
             requested_shares=requested_shares,
             price=price,
-            reason=SELL_SIZE_REFUSED_REASON,
+            reason=ORDER_SIZE_REFUSED_REASON,
             strategy_reason=strategy_reason,
             costs_enabled=self.transaction_cost_profile is not None,
         )
@@ -1178,10 +1211,11 @@ class PortfolioManager:
                             LLM_ACTION_DEFAULT_CONFIDENCE,
                         )
                         is None
-                        and self._coerce_position_size(
+                        # (0 shares, no refusal) is "no size" (_read_buy_size).
+                        and self._read_buy_size(
                             llm_action.get("position_size", 0)
-                        )
-                        == 0
+                        )[:2]
+                        == (0, None)
                     ):
                         raise LLMDecisionError(
                             "LLM returned a buy with no size and a confidence "
@@ -1244,12 +1278,21 @@ class PortfolioManager:
                 price = float(signal.get("price", 0)) if signal.get("price") else 0.0
                 
                 if action_type == "buy":
-                    # Use position_size from LLM directly, coerced defensively
-                    # (``_coerce_position_size``).
+                    # Use position_size from LLM directly, read defensively
+                    # (``_read_buy_size``): a size it cannot carry out skips
+                    # THIS action and is recorded, never confidence-sized.
                     raw_size = llm_action.get("position_size", 0)
-                    shares = self._coerce_position_size(raw_size)
-                    if shares is None:
-                        print(f"      ⚠️  BUY {symbol}: Skip (unparseable position_size {raw_size!r})")
+                    shares, refusal, asked = self._read_buy_size(raw_size)
+                    if refusal is not None:
+                        print(f"      ⚠️  BUY {symbol}: Skip ({refusal})")
+                        self._refuse_order(
+                            action="buy",
+                            symbol=symbol,
+                            requested_shares=asked,
+                            timestamp=timestamp,
+                            price=price,
+                            strategy_reason=f"[LLM] {reasoning} (confidence: {conf_label})",
+                        )
                         continue
 
                     if shares == 0 and confidence is None:
@@ -1324,7 +1367,8 @@ class PortfolioManager:
                     )
                     if refusal is not None:
                         print(f"      ⚠️  SELL {symbol}: Skip ({refusal})")
-                        self._refuse_sell(
+                        self._refuse_order(
+                            action="sell",
                             symbol=symbol,
                             requested_shares=asked,
                             timestamp=timestamp,
