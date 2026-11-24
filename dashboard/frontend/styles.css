@@ -11551,6 +11551,27 @@ body.agent-editor-open {
     background: rgba(0, 191, 255, 0.08);
 }
 
+/* Withdrawn analysts stay visible rather than disappearing: the panel should
+   explain why an option the user may remember is gone, not quietly shrink. */
+.agent-editor-analyst-option.is-unavailable {
+    cursor: not-allowed;
+    opacity: 0.55;
+    border-style: dashed;
+}
+
+.agent-editor-analyst-unavailable {
+    margin-left: 6px;
+    font-size: 11px;
+    font-style: normal;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--text-secondary);
+}
+
+.agent-editor-withdrawn-note {
+    color: var(--warning-color, #f59e0b);
+}
+
 .agent-editor-analyst-tooltip {
     position: fixed;
     left: var(--analyst-tooltip-left, 16px);
