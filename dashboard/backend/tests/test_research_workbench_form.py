@@ -42,8 +42,8 @@ const make = (id) => (nodes[id] = {id, textContent: '', innerHTML: '', hidden: f
 ['researchAgentName', 'researchAgentDesc', 'researchAgentMeta', 'researchFormFields',
  'researchResultArea', 'researchRunsList', 'researchFormError', 'researchRunForm'].forEach(make);
 const document = {getElementById: (id) => nodes[id] || make(id), querySelectorAll: () => []};
-const MANIFEST = MANIFEST_JSON;
-const AGENTS = AGENTS_JSON;
+const MANIFEST = /*__MANIFEST_JSON__*/;
+const AGENTS = /*__AGENTS_JSON__*/;
 const API = {get: async (url) => url.endsWith('/agents') ? {agents: AGENTS} : MANIFEST};
 const RESEARCH_API = '/api/v1/research';
 const escapeHtml = (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/"/g, '&quot;');
@@ -51,17 +51,19 @@ const loadResearchRuns = async () => {};
 const stopResearchPolling = () => {};
 const showResearchWorkbench = () => {};
 let researchWorkbenchTemplateId = null;
-FETCH
-WORKBENCH
+/*__FETCH__*/
+/*__WORKBENCH__*/
 (async () => {
   await fetchResearchAgents();
   await openResearchWorkbench('acquisition-analysis-acquirer');
   console.log(JSON.stringify({fields: nodes.researchFormFields.innerHTML, meta: nodes.researchAgentMeta.innerHTML}));
 })().catch((e) => { console.error(e); process.exit(1); });
 '''
-    script = (script.replace('MANIFEST_JSON', json.dumps(manifest))
-              .replace('AGENTS_JSON', json.dumps(catalog_agents))
-              .replace('FETCH', FETCH).replace('WORKBENCH', WORKBENCH))
+    # Splice code first and JSON last, on sentinels, so fixture text can
+    # never be mistaken for an insertion point.
+    script = (script.replace('/*__FETCH__*/', FETCH).replace('/*__WORKBENCH__*/', WORKBENCH)
+              .replace('/*__MANIFEST_JSON__*/', json.dumps(manifest))
+              .replace('/*__AGENTS_JSON__*/', json.dumps(catalog_agents)))
     return json.loads(subprocess.check_output(['node', '-e', script], text=True))
 
 
@@ -86,12 +88,23 @@ def test_questions_show_open_and_settings_fold():
 def test_placeholder_default_is_hint_text_not_a_value():
     html = _render(ACQUIRER_MANIFEST, [])['fields']
     # The agent's own placeholder wins; with none, the blank default is named.
-    assert '<textarea id="rf_deal_background" rows="3" placeholder="Describe the opportunity."></textarea>' in html
-    assert '<textarea id="rf_acquisition_objectives" rows="3" placeholder="Optional. Left blank: Not specified"></textarea>' in html
+    # A blank answer still submits the service's default.
+    assert ('<textarea id="rf_deal_background" rows="3" placeholder="Describe the opportunity."'
+            ' data-blank-default="Not specified"></textarea>') in html
+    assert ('<textarea id="rf_acquisition_objectives" rows="3" placeholder="Optional. Left blank: Not specified"'
+            ' data-blank-default="Not specified"></textarea>') in html
     # Guidance already shown as the placeholder is not repeated underneath.
     assert html.count('Describe the opportunity.') == 1
     # A real default on a short setting is still pre-filled.
     assert 'id="rf_report_language" type="text" value="English"' in html
+
+
+def test_required_longtext_keeps_its_placeholder_default_as_a_value():
+    fields = [{'id': 'brief', 'label': 'Brief', 'type': 'longtext', 'required': True, 'default': 'Not specified'}]
+    html = _render({**ACQUIRER_MANIFEST, 'settings_schema': {'fields': fields}}, [])['fields']
+    # Blank would fail the backend's required check, so it stays pre-filled.
+    assert '<textarea id="rf_brief" rows="3" placeholder="">Not specified</textarea>' in html
+    assert 'Optional' not in html.split('research-questions')[0]
 
 
 def test_runtime_falls_back_to_the_catalog_estimate():
@@ -99,6 +112,9 @@ def test_runtime_falls_back_to_the_catalog_estimate():
     assert '~10 min per run' in _render(ACQUIRER_MANIFEST, agents)['meta']
     own = {**ACQUIRER_MANIFEST, 'estimated_runtime_seconds': 1200}
     assert '~20 min per run' in _render(own, agents)['meta']
+    # A malformed manifest estimate does not beat the catalog's.
+    bad = {**ACQUIRER_MANIFEST, 'estimated_runtime_seconds': '10m'}
+    assert '~10 min per run' in _render(bad, agents)['meta']
 
 
 @pytest.mark.parametrize('template_id', ['acquisition-analysis-acquirer', 'acquisition-analysis-target-company'])
@@ -106,6 +122,6 @@ def test_acquisition_agents_are_listed_on_the_research_shelf(template_id):
     row = next(t for t in CATALOG if t['template_id'] == template_id)
     assert row['shelf'] == 'research'
     assert row['research']['agent_id'] == template_id
-    # Same Render service as the shell and diligence agents.
+    # Hosted by the same research service as the shell-screening agent.
     assert row['research']['service_base_url_env'] == 'RESEARCH_SHELL_SERVICE_URL'
     assert row['repo_url'] == 'https://github.com/Lin-Feihan/acquisition-analysis-agent'

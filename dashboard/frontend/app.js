@@ -13423,6 +13423,7 @@ const researchCatalogRuntime = new Map();
 async function fetchResearchAgents() {
   const data = await API.get(`${RESEARCH_API}/agents`);
   const agents = Array.isArray(data?.agents) ? data.agents : [];
+  researchCatalogRuntime.clear();
   agents.forEach((agent) => {
     const seconds = Number(agent?.research?.estimated_runtime_seconds);
     if (agent?.template_id && Number.isFinite(seconds) && seconds > 0) {
@@ -13635,7 +13636,8 @@ async function openResearchWorkbench(templateId) {
 
   nameEl.textContent = manifest.name || templateId;
   descEl.textContent = manifest.description || '';
-  const runtimeSeconds = manifest.estimated_runtime_seconds
+  const manifestRuntime = Number(manifest.estimated_runtime_seconds);
+  const runtimeSeconds = (Number.isFinite(manifestRuntime) && manifestRuntime > 0 ? manifestRuntime : 0)
     || researchCatalogRuntime.get(templateId)
     || 300;
   const runtimeMin = Math.max(1, Math.round(runtimeSeconds / 60));
@@ -13658,11 +13660,13 @@ async function openResearchWorkbench(templateId) {
 
   // A placeholder default such as "Not specified" is what the service
   // substitutes for a blank answer, not an answer to pre-type: shown as hint
-  // text, never as a value the user has to delete first. A blank field is
-  // not sent (submitResearchRun drops empty values), so the service still
-  // applies that default.
+  // text, never as a value the user has to delete first. A blank answer
+  // still submits that default (data-blank-default, read by
+  // submitResearchRun), so the service receives what it did before. Required
+  // fields keep it as a value: blank would fail the required check.
   const PLACEHOLDER_DEFAULTS = new Set(['not specified', 'none', 'n/a', 'unknown']);
   const isPlaceholderDefault = (field) => field.type === 'longtext'
+    && !field.required
     && typeof field.default === 'string'
     && PLACEHOLDER_DEFAULTS.has(field.default.trim().toLowerCase());
 
@@ -13673,7 +13677,8 @@ async function openResearchWorkbench(templateId) {
     const requiredMark = field.required ? ' <span class="research-required">*</span>' : '';
     let control;
     if (field.type === 'longtext') {
-      control = `<textarea id="rf_${escapeHtml(field.id)}" rows="3" placeholder="${escapeHtml(hint)}">${escapeHtml(value)}</textarea>`;
+      const blankDefault = placeholderDefault ? ` data-blank-default="${escapeHtml(field.default)}"` : '';
+      control = `<textarea id="rf_${escapeHtml(field.id)}" rows="3" placeholder="${escapeHtml(hint)}"${blankDefault}>${escapeHtml(value)}</textarea>`;
     } else if (field.type === 'select') {
       control = `<select id="rf_${escapeHtml(field.id)}">${(field.options || []).map((option) => `<option value="${escapeHtml(option)}"${option === value ? ' selected' : ''}>${escapeHtml(option)}</option>`).join('')}</select>`;
     } else {
@@ -13762,7 +13767,7 @@ async function submitResearchRun() {
   const settings = {};
   document.querySelectorAll('#researchFormFields [id^="rf_"]').forEach((input) => {
     const key = input.id.slice(3);
-    const value = String(input.value || '').trim();
+    const value = String(input.value || '').trim() || String(input.dataset?.blankDefault || '');
     if (value) settings[key] = value;
   });
   const emailMe = document.getElementById('researchEmailMe')?.checked || false;
