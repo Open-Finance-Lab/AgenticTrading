@@ -124,7 +124,7 @@ function liveModelRosterNote(entries) {
 const LIVE_ATTEMPT_KIND_COPY = {
   budget: 'monthly model budget used up',
   model_coverage: 'the model did not drive enough of its decisions',
-  market_data_gap: 'market data was missing for a session',
+  market_data_gap: 'market data was missing',
   // Not "the model provider": on the live path a provider timeout becomes a
   // rule-based step (reported as model_coverage); what arrives here is a
   // store or other client timeout.

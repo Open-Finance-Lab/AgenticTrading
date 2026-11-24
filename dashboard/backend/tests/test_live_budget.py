@@ -167,6 +167,7 @@ def test_the_conftest_strips_the_budget_for_the_suite():
         (live_budget.LiveBudgetExceeded("spent"), ("budget_halted", "budget")),
         (lb_service.LeaderboardFallbackError("h6"), ("failed", "model_coverage")),
         (live.LiveSessionGapError("gap"), ("failed", "market_data_gap")),
+        (live.LiveNoBarsError("no bars"), ("failed", "market_data_gap")),
         (TimeoutError("slow"), ("failed", "timeout")),
         (ConnectionResetError("reset"), ("failed", "network")),
         # Client-library classes that subclass neither builtin, matched on the
@@ -617,6 +618,23 @@ def test_a_ledger_that_cannot_be_written_never_hides_the_deploy_error(monkeypatc
     )
     # The session-close upsert for 08-25 landed before the final one failed.
     assert _ledger()["est_cost_usd"] == pytest.approx(0.435)
+
+
+def test_a_segment_with_no_bars_is_a_market_data_gap_not_an_internal_error(monkeypatch):
+    """#698: the board read "failed: an internal error" for a night the tape
+    returned nothing. It fails before the model is called, so nothing is spent."""
+    _insert_checkpoint("2026-08-24", "08-24")
+    agent = _use_agent(monkeypatch, _ScriptedAgent(step_tokens=(1_000_000, 0)))
+    monkeypatch.setattr(lb_service, "fetch_hourly_bars", lambda *args: {})
+    freeze_cfg = _live_aug27()
+    with pytest.raises(live.LiveNoBarsError, match="No market data returned"):
+        live.deploy_live_model_increment(_deepseek(freeze_cfg), freeze_cfg)
+    assert agent.traded == []
+    ledger = _ledger()
+    assert ledger["est_cost_usd"] == 0
+    assert ledger["metadata"]["last_attempt"] == {
+        "on": _FREEZE, "outcome": "failed", "kind": "market_data_gap",
+    }
 
 
 def test_a_segment_h6_refuses_to_store_is_still_billed(monkeypatch):
