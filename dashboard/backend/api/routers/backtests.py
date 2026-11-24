@@ -3564,13 +3564,20 @@ def _run_backtest_subprocess(
         # Ignored on non-POSIX platforms.
         start_new_session=True,
         # Windows' counterpart: a console process group of its own, which is
-        # what ``_break_console_group`` signals. 0 everywhere else, where a
-        # non-zero value would be refused.
-        creationflags=console_group_flag,
+        # what ``_break_console_group`` signals. Started suspended, so it can be
+        # put in its kill job before it runs (``start_in_kill_job`` below). Both
+        # are 0 everywhere else, where a non-zero value would be refused.
+        creationflags=console_group_flag | process_jobs.SUSPENDED_START_FLAG,
     )
+    # First, before anything else can raise: until this returns, the child is
+    # suspended, and a raise before the wait below leaves no timeout to end it.
+    try:
+        kill_job = process_jobs.start_in_kill_job(process)
+    except OSError:  # it could not be resumed; already killed
+        _close_child_streams(process)
+        raise
     if console_group_flag:
         _CONSOLE_GROUP_LEADERS.add(process)
-    kill_job = process_jobs.assign_kill_job(process)
     if kill_job is not None:
         _KILL_JOBS[process] = kill_job
         weakref.finalize(process, process_jobs.close_job, kill_job)

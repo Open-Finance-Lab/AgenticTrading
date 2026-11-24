@@ -19,7 +19,15 @@ run, and when the web server restarts (``uvicorn --reload``). POSIX does
 neither, so the tree is ended only by an explicit ``terminate_job``, on the
 same stop path where POSIX runs ``killpg``.
 
-Off Windows every function is a no-op: ``assign_kill_job`` returns None.
+The child must be in the job before it runs any code: only processes created
+after the assignment join, and a child assigned after ``Popen`` returns may
+already have started its own children (a Windows venv's ``Scripts\\python.exe``
+is a launcher that starts the base interpreter at once). So the caller starts
+the child with ``SUSPENDED_START_FLAG`` and hands it to ``start_in_kill_job``,
+which assigns it and only then lets it run (#717).
+
+Off Windows every function is a no-op: ``SUSPENDED_START_FLAG`` is 0 and
+``start_in_kill_job`` returns None.
 """
 
 from __future__ import annotations
@@ -31,8 +39,12 @@ _IS_WINDOWS = sys.platform == "win32"
 # Exit code given to members still alive at the sweep. 1 matches
 # ``Popen.kill()`` on Windows, so the run's outcome is labelled as before.
 _TERMINATED_EXIT_CODE = 1
+# CREATE_SUSPENDED: the child's first thread waits until ``start_in_kill_job``
+# resumes it. 0 off Windows, where ``Popen`` refuses any creation flag.
+SUSPENDED_START_FLAG = 0x00000004 if _IS_WINDOWS else 0
 
 _kernel32: Any = None
+_ntdll: Any = None
 # One warning per failure kind, so a harmless first refusal cannot hide a
 # later, different failure for the life of the server.
 _warned: set = set()
@@ -58,6 +70,24 @@ def _api() -> Any:
     return _kernel32
 
 
+def _nt() -> Any:
+    """ntdll with ``NtResumeProcess`` typed, loaded on first use (Windows only).
+
+    ``Popen`` closes the child's thread handle, so ``ResumeThread`` has nothing
+    to act on; ``NtResumeProcess`` resumes through the process handle it keeps.
+    Undocumented but stable since XP, and what ``psutil.Process.resume`` uses.
+    """
+    global _ntdll
+    if _ntdll is None:
+        import ctypes.wintypes
+
+        ntdll = ctypes.WinDLL("ntdll")
+        ntdll.NtResumeProcess.argtypes = (ctypes.wintypes.HANDLE,)
+        ntdll.NtResumeProcess.restype = ctypes.c_long  # NTSTATUS; 0 is success
+        _ntdll = ntdll
+    return _ntdll
+
+
 def _warn_once(kind: str, message: str) -> None:
     if kind not in _warned:
         _warned.add(kind)
@@ -72,11 +102,9 @@ def assign_kill_job(process: Any) -> Optional[int]:
     before Windows 8). The caller then keeps its old escalation,
     ``Popen.kill``, which reaches the child alone.
 
-    Only processes the child creates after this call join the job. The window
-    is the child's start-up. A plain interpreter spawns nothing there, but a
-    Windows venv's ``Scripts\\python.exe`` is a launcher that starts the base
-    interpreter at once; if it does so before this call, that interpreter and
-    its children stay outside the job and the sweep cannot reach them.
+    Only processes the child creates after this call join the job, so on its
+    own this races the child's start-up. Launch callers go through
+    ``start_in_kill_job`` with a suspended child, which closes that window.
 
     Never raises: any failure falls back to None, so a launched child is
     always handed back to the caller that owns it.
@@ -114,6 +142,56 @@ def assign_kill_job(process: Any) -> Optional[int]:
         return None
 
 
+def start_in_kill_job(process: Any) -> Optional[int]:
+    """Assign a child started with ``SUSPENDED_START_FLAG`` to a job, then resume it.
+
+    Returns the job handle, or None when there is no job (as ``assign_kill_job``);
+    the child is resumed either way, since a refused assignment only costs the
+    sweep, not the run. Assigning first means everything the child ever starts
+    is in the job, however fast it starts it (#717).
+
+    Raises OSError if a live child cannot be resumed, after killing it (or its
+    job, if the kill is refused): the caller never reaches its timeout, so
+    nothing else would end a child left suspended. If neither kill works the
+    message says the child may still be suspended.
+    """
+    job = assign_kill_job(process)
+    if not _IS_WINDOWS:
+        return job
+    handle = getattr(process, "_handle", None)
+    if handle is None:
+        return job
+    try:
+        status = _nt().NtResumeProcess(int(handle))
+        failure = None if status == 0 else f"NTSTATUS 0x{status & 0xFFFFFFFF:08X}"
+    except Exception as exc:  # a missing export or bad handle: same outcome
+        failure = str(exc)
+    if failure is None:
+        return job
+    try:
+        exited = process.poll() is not None
+    except Exception:  # cannot tell: treat it as alive and end it below
+        exited = False
+    if exited:
+        # Already gone (killed from outside while suspended): nothing to hang.
+        # Its exit code tells the run what happened, better than this would.
+        return job
+    try:
+        process.kill()  # TerminateProcess works on a suspended process
+        killed = True
+    except OSError:
+        # The job may still be allowed to end what the process handle cannot.
+        killed = terminate_job(job)
+    close_job(job)
+    if killed:
+        raise OSError(f"could not resume the child process ({failure}); it was killed")
+    pid = getattr(process, "pid", None)
+    raise OSError(
+        f"could not resume the child process ({failure}) or kill it; "
+        f"pid {pid} may still be suspended"
+    )
+
+
 def terminate_job(job: Optional[int]) -> bool:
     """End every process still in ``job``. True when Windows accepted the call."""
     if job is None or not _IS_WINDOWS:
@@ -134,4 +212,10 @@ def close_job(job: Optional[int]) -> None:
         pass
 
 
-__all__ = ["assign_kill_job", "close_job", "terminate_job"]
+__all__ = [
+    "SUSPENDED_START_FLAG",
+    "assign_kill_job",
+    "close_job",
+    "start_in_kill_job",
+    "terminate_job",
+]
